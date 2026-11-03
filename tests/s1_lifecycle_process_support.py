@@ -296,9 +296,11 @@ def archive_evidence(server, evidence):
 @contextmanager
 def scenario(root, *, tree=False, managed=False):
     root = Path(root)
-    evidence, workspace, injection = (root / name for name in ("evidence", "work", "inject"))
+    from ouroboros.test_evidence import diagnostic_directory
+    evidence = diagnostic_directory(root / "evidence", "s1-" + root.name)
+    workspace, injection = (root / name for name in ("work", "inject"))
     for path in (evidence, workspace, injection):
-        path.mkdir()
+        path.mkdir(exist_ok=True)
     shutil.copyfile(SOURCE / "tests/s1_lifecycle_exit_injector.py", injection / "sitecustomize.py")
     write_json(evidence / "source.json", {
         "source": str(SOURCE), "head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=SOURCE, text=True).strip(),

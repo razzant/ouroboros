@@ -142,21 +142,21 @@ def test_the_gateway_reads_created_by_field_presence(answer, created):
 def _start(tmp_path, monkeypatch, *, version, register_root=False, folderless=False):
     """One read-only ``_delegate_start`` against a recording engine double."""
     from ouroboros import delegate_readonly_inputs
-    from ouroboros.subagent_worktrees import _registry_path
+    from ouroboros.subagent_worktrees import _put_record
     from ouroboros.tools import delegate
 
     data = tmp_path / "data"
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(data))
     ctx = _delegating_ctx(tmp_path, acting=False, task_id="t-ephemeral")
     _select_transport_access(monkeypatch, "readonly")  # technical access decides the shape
-    if register_root:  # the host's own registry names the root: a child's copy
-        _registry_path().parent.mkdir(parents=True, exist_ok=True)
-        _registry_path().write_text(json.dumps({"worktrees": [{"path": str(ctx.repo_dir)}]}), encoding="utf-8")
+    if register_root:  # the host's own copy record names the root: a child's copy
+        _put_record({"path": str(ctx.repo_dir)}, data)
     scratch = tmp_path / "scratch" / "inv"
     if folderless:
         scratch.mkdir(parents=True)
-        monkeypatch.setattr(delegate_readonly_inputs, "prepare_folderless_inputs",
-                            lambda _ctx, _invocation: (str(scratch), "\nREADONLY INPUTS\n"))
+        monkeypatch.setattr(delegate_readonly_inputs, "prepare_readonly_inputs",
+                            lambda _ctx, _invocation, *_selection, thread_turn=False: delegate_readonly_inputs.ReadonlyInputs(
+                                str(scratch), "\nREADONLY INPUTS\n", [], ""))
     engine, seen = _Engine(version, known={str(ctx.repo_dir): "prj-user"}), {}
 
     class _Daemon:

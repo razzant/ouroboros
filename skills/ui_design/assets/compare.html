@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compare</title>
+<!-- One self-contained page for a visual choice. Copy this file, fill the JSON block, keep it ONE file:
+     it must render when opened alone from an empty folder, and it fetches nothing.
+     frames{"variant/scene"} are whole HTML documents (real product code, frozen), shown as srcdoc.
+     Variants of one scene swap in place, instantly, at the viewer's real width, so only the change moves.
+     Data: title (the question the viewer answers), lang, viewport {width, height}, start, variants
+     [{id, label, note, recommended}], scenes [{id, label, note}], frames, optional subject (CSS selector of
+     the smallest element that holds the change) and scrollers (selectors whose scroll is kept), questions [{text, context, number,
+     options [{key, text, recommended}]}] (the page adds "none of these" itself), source (one line on how
+     the frames were made), strings (the page's own words in the viewer's language).
+     Clean view (C, or #…&clean=1): variants become neutral numbers (frame names and the link too) and every author's
+     word (title, names, notes, recommendation, questions) is hidden, so a critic says what it sees before it reads what
+     you meant.
+     Inside the JSON block write every "</" as "<\/" (json.dumps(...).replace("</", "<\\/")): a frame that contains
+     "</script>" would otherwise end this block early and the page would open blank. -->
+<style>
+:root { --room:#f5f6f8; --surface:#fff; --ink:#1c2230; --meta:#566070; --line:rgb(28 34 48/.14);
+  --mark:#b4232f; --mark-tint:rgb(180 35 47/.08); color-scheme:light; }
+@media (prefers-color-scheme: dark) { :root { --room:#121317; --surface:#1b1d23; --ink:#eceef3; --meta:#a8afbd;
+  --line:rgb(255 255 255/.14); --mark:#ff8d96; --mark-tint:rgb(255 141 150/.12); color-scheme:dark; } }
+* { box-sizing:border-box; }
+[hidden] { display:none !important; }
+body { margin:0; background:var(--room); color:var(--ink); font:14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+button { font:inherit; color:inherit; cursor:pointer; }
+:focus-visible { outline:2px solid var(--ink); outline-offset:2px; }
+.bar { position:sticky; top:0; z-index:2; display:grid; gap:6px; background:var(--room); border-bottom:1px solid var(--line);
+  padding:8px max(12px, env(safe-area-inset-right)) 8px max(12px, env(safe-area-inset-left)); }
+.row { display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px; }
+h1 { flex:1 1 240px; min-width:0; margin:0; font-size:15px; font-weight:650; }
+.tabs { display:flex; flex-wrap:wrap; gap:4px; }
+.tabs button { border:0; background:none; padding:5px 8px; color:var(--meta); }
+.tabs button[aria-pressed="true"] { color:var(--ink); box-shadow:inset 0 -2px 0 var(--ink); }
+.seg { display:inline-flex; flex-wrap:wrap; gap:2px; padding:2px; border:1px solid var(--line); border-radius:999px; background:var(--surface); }
+.seg button, .tool { min-height:28px; padding:5px 12px; border:0; border-radius:999px; background:none; }
+.tool { border:1px solid var(--line); background:var(--surface); }
+.seg button[aria-pressed="true"], .tool[aria-pressed="true"] { background:var(--ink); color:var(--room); }
+.rec { margin-left:4px; color:var(--mark); }
+.seg button[aria-pressed="true"] .rec { color:inherit; }
+.notes { display:grid; }
+.notes p { grid-area:1/1; margin:0; color:var(--meta); visibility:hidden; }
+.notes p.on { visibility:visible; }
+.notes b, .cap b { color:var(--ink); }
+.meta { display:flex; flex-wrap:wrap; gap:2px 16px; color:var(--meta); font-size:12px; }
+.meta span:empty { display:none; }
+.stage-wrap { display:flex; justify-content:center; padding:12px 0; }
+.stage { position:relative; overflow:hidden; box-sizing:content-box; background:var(--surface); border:1px solid var(--line); border-radius:10px; }
+body.tight .stage-wrap { padding:0; }
+body.tight .stage { border:0; border-radius:0; }
+.stage.side { overflow:visible; background:none; border:0; }
+.stage iframe { position:absolute; left:0; top:0; border:0; transform-origin:0 0; background:#fff; }
+.stage iframe[data-off] { visibility:hidden; }
+@media (max-width: 640px) { .bar { position:static; } }
+@media (pointer: coarse) { #keys { display:none; } }
+.cap { position:absolute; margin:0; font-size:13px; color:var(--meta); }
+.more { display:grid; gap:28px; max-width:760px; margin:12px auto 64px; padding:0 16px; }
+.q h2 { margin:0 0 8px; font-size:16px; }
+.q p { margin:0 0 10px; color:var(--meta); }
+.opts { display:grid; gap:8px; }
+.opt { text-align:left; padding:10px 14px; border:1px solid var(--line); border-radius:12px; background:var(--surface); color:var(--meta); }
+.opt b { margin-right:6px; color:var(--ink); }
+.opt.recommended { background:var(--mark-tint); }
+.opt[aria-pressed="true"] { outline:2px solid var(--ink); }
+.answer { display:flex; flex-wrap:wrap; align-items:center; gap:12px; color:var(--meta); }
+.source { margin:0; color:var(--meta); font-size:12px; }
+.num { display:none; }
+body.clean :is(.lab, .rec, #notes, #scene-note, #more) { display:none; }
+body.clean .num { display:inline; }
+</style>
+</head>
+<body>
+<header class="bar">
+  <div class="row">
+    <h1 id="title"></h1>
+    <nav class="tabs" id="scenes" aria-label="Scenes"></nav>
+    <div class="seg" id="variants" role="group" aria-label="Variants"></div>
+    <button type="button" class="tool" id="side" aria-pressed="false"></button>
+    <button type="button" class="tool" id="clean" aria-pressed="false"></button>
+  </div>
+  <div class="notes" id="notes" aria-live="polite"></div>
+  <div class="meta"><span id="scene-note"></span><span id="scale"></span><span id="keys"></span></div>
+</header>
+<div class="stage-wrap"><div class="stage" id="stage"></div></div>
+<main class="more" id="more"></main>
+<script type="application/json" id="compare-data">{"title": "Which header reads more calmly?", "lang": "en", "viewport": {"width": 1280, "height": 800},
+ "variants": [{"id": "now", "label": "Now", "note": "Today's screen, unchanged."}, {"id": "a", "label": "A", "recommended": true, "note": "Replace with one plain line: what changes and what it costs."}],
+ "scenes": [{"id": "main", "label": "Main", "note": ""}],
+ "frames": {"now/main": "<!doctype html><title>Now</title><p style='font:16px system-ui;padding:24px'>Put the frozen page of today's screen here.</p>", "a/main": "<!doctype html><title>A</title><p style='font:16px system-ui;padding:24px'>Put the frozen page of variant A here.</p>"},
+ "questions": [{"text": "Which variant should ship?", "context": "", "options": [{"key": "A", "text": "A, as shown.", "recommended": true}, {"key": "B", "text": "Keep today's screen."}]}],
+ "source": ""}</script>
+<script>
+(() => {
+  const D = JSON.parse(document.getElementById('compare-data').textContent);
+  const T = Object.assign({ side: 'Side by side', rec: 'recommended', scale: 'Shown at', none: 'None of these: say what bothers you',
+    noneKey: 'none', copy: 'Copy answer', copied: 'Copied', chat: 'or write it in the chat',
+    keys: 'Keys: 1–9 or ←/→ switch variants, S shows them side by side, C hides every author\'s word',
+    clean: 'Clean view', cleanTitle: 'Clean view: say what you see before reading what was meant' }, D.strings || {});
+  const $ = (id) => document.getElementById(id), W = D.viewport.width, H = D.viewport.height;
+  const number = (id) => `${D.variants.findIndex((v) => v.id === id) + 1}`;
+  const scenes = D.scenes && D.scenes.length ? D.scenes : [{ id: 'main', label: '' }];
+  const state = { scene: scenes[0].id, variant: D.start || D.variants[0].id, side: false, clean: false };
+  const frames = {}, scroll = {}, anchors = {};
+  document.documentElement.lang = D.lang || 'en';
+  document.title = $('title').textContent = D.title || '';
+  $('keys').textContent = T.keys;
+  $('side').textContent = T.side;
+  $('clean').textContent = T.clean;
+
+  const button = (text, onclick, kind, id) => { const b = document.createElement('button'); b.type = 'button';
+    b.textContent = text; b.onclick = onclick; b.dataset[kind] = id; b.setAttribute('aria-pressed', 'false'); return b; };
+  if (scenes.length > 1) for (const s of scenes) $('scenes').append(button(s.label, () => show({ scene: s.id }), 'scene', s.id));
+  D.variants.forEach((v, i) => {
+    const b = button('', () => show({ variant: v.id, side: false }), 'variant', v.id);
+    const lab = document.createElement('span'), no = document.createElement('span');
+    lab.className = 'lab'; lab.textContent = v.label; no.className = 'num'; no.textContent = `${i + 1}`;
+    b.append(lab, no); b.title = `${i + 1}`;
+    if (v.recommended) { const m = document.createElement('span'); m.className = 'rec'; m.textContent = '★'; m.title = T.rec; b.append(m); }
+    $('variants').append(b);
+    const p = document.createElement('p'), k = document.createElement('b');   // every caption shares one cell: no jump on a swap
+    k.textContent = `${v.label}${v.recommended ? ` (${T.rec})` : ''}: `;
+    p.dataset.note = v.id; p.append(k, document.createTextNode(v.note || '')); $('notes').append(p);
+  });
+  $('side').onclick = () => show({ side: !state.side });
+  $('clean').onclick = () => show({ clean: !state.clean });
+
+  const ready = (f) => new Promise((ok) => { try { const w = f.contentWindow; w.requestAnimationFrame(() => w.requestAnimationFrame(ok)); } catch (e) { ok(); } setTimeout(ok, 300); });
+  const editable = (t) => t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+  function frame(scene, variant) {
+    const key = `${variant}/${scene}`;
+    if (frames[key]) return frames[key];
+    const f = document.createElement('iframe');
+    f.title = key; f.dataset.key = key; f.setAttribute('data-off', '');
+    f.srcdoc = D.frames[key] || `<p style="font:14px system-ui;padding:24px">No frame for ${key}.</p>`;
+    f.ready = new Promise((ok) => f.addEventListener('load', () => {
+      try {
+        const doc = f.contentDocument;
+        for (const e of [doc.documentElement, ...doc.querySelectorAll('[data-freeze-scroll]')]) {
+          const v = e.getAttribute('data-freeze-scroll'); if (!v) continue;
+          const [top, left] = v.split(',').map(Number), target = e === doc.documentElement ? doc.scrollingElement : e;
+          target.scrollTop = top; target.scrollLeft = left;
+        }
+        doc.addEventListener('keydown', onKey);
+        f.contentWindow.addEventListener('scroll', () => remember(f), true);
+      } catch (e) { /* a cross-origin frame keeps its own scroll */ }
+      ok();
+    }, { once: true }));
+    $('stage').append(f); frames[key] = f; return f;
+  }
+  const scrollers = (doc) => [doc.scrollingElement, ...(D.scrollers || []).map((s) => doc.querySelector(s))].filter(Boolean);
+  function remember(f) { if (state.side || f.hasAttribute('data-off')) return;
+    try { scroll[f.dataset.key.split('/')[1]] = scrollers(f.contentDocument).map((e) => [e.scrollTop, e.scrollLeft]); } catch (e) {} }
+  function subjectIn(doc) {
+    if (!D.subject || !doc) return null;
+    const all = [...doc.querySelectorAll(D.subject)], seen = (e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.bottom > 0 && r.top < doc.defaultView.innerHeight; };
+    return all.find(seen) || all.find((e) => e.getBoundingClientRect().width > 0) || null;
+  }
+  function scrollerOf(el) {
+    let s = el.parentElement;
+    while (s && !(s.scrollHeight > s.clientHeight + 1 && /auto|scroll/.test(getComputedStyle(s).overflowY))) s = s.parentElement;
+    return s || el.ownerDocument.scrollingElement;
+  }
+  const subjectTop = (f) => { try { const el = f && subjectIn(f.contentDocument); return el ? el.getBoundingClientRect().top : null; } catch (e) { return null; } };
+  function restore(f, scene, anchorTop) {
+    try {
+      const saved = scroll[scene];
+      if (saved) scrollers(f.contentDocument).forEach((e, i) => { if (saved[i]) { e.scrollTop = saved[i][0]; e.scrollLeft = saved[i][1]; } });
+      const el = anchorTop == null ? null : subjectIn(f.contentDocument);   // the compared element lands where it was
+      if (el) scrollerOf(el).scrollTop += el.getBoundingClientRect().top - anchorTop;
+    } catch (e) {}
+  }
+
+  function layout() {
+    const tight = innerWidth < W + 48, s = Math.min(1, (tight ? innerWidth : innerWidth - 48) / W);
+    document.body.classList.toggle('tight', tight);
+    $('stage').classList.toggle('side', state.side);
+    $('stage').querySelectorAll('.cap').forEach((c) => c.remove());
+    $('stage').style.width = `${Math.round(W * s)}px`; $('stage').style.height = `${Math.round(H * s)}px`;
+    for (const f of Object.values(frames)) { f.style.width = `${W}px`; f.style.height = `${H}px`; f.style.clipPath = ''; f.style.transform = s < 1 ? `scale(${s})` : ''; }
+    $('scale').textContent = s < 1 ? `${T.scale} ${Math.round(s * 100)}%` : '';
+    if (state.side) sideBySide(s);
+  }
+  function sideBySide(s) {    // what each variant shows of the compared element, at 1:1, placed where the single view had it
+    let y = 4;
+    for (const v of D.variants) {
+      const f = frames[`${v.id}/${state.scene}`]; let q = null;
+      try {
+        restore(f, state.scene, anchors[state.scene]);
+        const el = subjectIn(f.contentDocument);
+        q = el ? el.getBoundingClientRect() : { left: 0, top: 0, right: W, bottom: H, width: W, height: H };
+      } catch (e) {}
+      if (!q || !q.width) continue;
+      const pad = 6, w = (W - q.left + pad) * s, x0 = Math.max(0, (W * s - w) / 2);
+      const cap = document.createElement('p'), b = document.createElement('b');
+      const plain = state.clean ? `${D.variants.indexOf(v) + 1}` : v.label + (v.recommended ? ' ★' : '');
+      b.textContent = plain; cap.className = 'cap';
+      cap.append(b, document.createTextNode(v.note && !state.clean ? ` ${v.note}` : ''));
+      cap.style.left = `${x0}px`; cap.style.width = `${w}px`; cap.style.top = `${y}px`; $('stage').append(cap);
+      y += cap.offsetHeight + 4;
+      f.style.clipPath = `inset(${Math.max(0, q.top - pad)}px 0px ${Math.max(0, H - q.bottom - pad)}px ${Math.max(0, q.left - pad)}px round 8px)`;
+      f.style.transform = `translate(${x0 - Math.max(0, q.left - pad) * s}px, ${y - Math.max(0, q.top - pad) * s}px) scale(${s})`;
+      f.removeAttribute('data-off');
+      y += (Math.min(H, q.bottom + pad) - Math.max(0, q.top - pad)) * s + 18;
+    }
+    $('stage').style.height = `${Math.round(y)}px`;
+  }
+
+  async function show(next) {
+    const prev = frames[`${state.variant}/${state.scene}`];
+    if (prev) remember(prev);
+    const sameScene = !next.scene || next.scene === state.scene;
+    const anchorTop = prev && sameScene && !state.side ? subjectTop(prev) : anchors[next.scene || state.scene];
+    Object.assign(state, next);
+    const f = frame(state.scene, state.variant);
+    const shown = state.side ? D.variants.map((v) => frame(state.scene, v.id)) : [f];
+    D.variants.forEach((v) => frame(state.scene, v.id));          // preload the scene: later swaps are instant
+    await Promise.all(shown.map((g) => g.ready));
+    await ready(f);                // some engines settle layout only on a paint: measure after it
+    if (!state.side) restore(f, state.scene, anchorTop);
+    for (const g of Object.values(frames)) g.toggleAttribute('data-off', !shown.includes(g));
+    layout();
+    if (state.side) { await Promise.all(shown.map(ready)); layout(); }
+    else anchors[state.scene] = subjectTop(f);
+    document.querySelectorAll('[data-variant]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.variant === state.variant && !state.side)));
+    document.querySelectorAll('[data-scene]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.scene === state.scene)));
+    document.querySelectorAll('[data-note]').forEach((p) => p.classList.toggle('on', p.dataset.note === state.variant && !state.side));
+    $('side').setAttribute('aria-pressed', String(state.side));
+    $('clean').setAttribute('aria-pressed', String(state.clean));
+    document.body.classList.toggle('clean', state.clean);
+    for (const g of Object.values(frames)) g.title = state.clean ? number(g.dataset.key.split('/')[0]) : g.dataset.key;
+    document.title = $('title').textContent = state.clean ? T.cleanTitle : (D.title || '');
+    $('scene-note').textContent = (scenes.find((s) => s.id === state.scene) || {}).note || '';
+    history.replaceState(null, '', `#scene=${encodeURIComponent(state.scene)}&v=${encodeURIComponent(state.clean ? number(state.variant) : state.variant)}${state.side ? '&side=1' : ''}${state.clean ? '&clean=1' : ''}`);
+  }
+  function onKey(e) {
+    if (editable(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
+    const i = D.variants.findIndex((v) => v.id === state.variant), n = D.variants.length;
+    if (/^[1-9]$/.test(e.key) && D.variants[+e.key - 1]) show({ variant: D.variants[+e.key - 1].id, side: false });
+    else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') show({ variant: D.variants[(i + (e.key === 'ArrowRight' ? 1 : n - 1)) % n].id, side: false });
+    else if (e.code === 'KeyS') show({ side: !state.side });
+    else if (e.code === 'KeyC') show({ clean: !state.clean });
+    else return;
+    e.preventDefault();
+  }
+  addEventListener('keydown', onKey);
+  addEventListener('resize', layout);
+
+  // Questions. The page sends nothing; the answer goes back through the chat.
+  const picks = {}, answer = document.createElement('span');
+  const num = (q, i) => q.number || i + 1;   // numbers may continue across rounds
+  const text = () => (D.questions || []).map((q, i) => picks[i] ? `${num(q, i)}${picks[i] === T.noneKey ? ' ' : ''}${picks[i]}` : '').filter(Boolean).join(' ');
+  (D.questions || []).forEach((q, qi) => {
+    const sec = document.createElement('section'), h = document.createElement('h2'), list = document.createElement('div');
+    sec.className = 'q'; list.className = 'opts'; h.textContent = `${num(q, qi)}. ${q.text}`; sec.append(h);
+    if (q.context) { const p = document.createElement('p'); p.textContent = q.context; sec.append(p); }
+    const own = q.options || [], none = own.some((o) => o.key === T.noneKey || o.key === '—') ? [] : [{ key: T.noneKey, text: T.none }];
+    for (const o of [...own, ...none]) {
+      const b = button('', () => { picks[qi] = o.key; list.querySelectorAll('.opt').forEach((x) => x.setAttribute('aria-pressed', String(x === b))); answer.textContent = `«${text()}» ${T.chat}`; copy.textContent = T.copy; }, 'option', o.key);
+      const k = document.createElement('b'); k.textContent = o.key === T.noneKey ? '—' : `${o.key}${o.recommended ? ` (${T.rec})` : ''}`;
+      b.className = 'opt' + (o.recommended ? ' recommended' : ''); b.append(k, document.createTextNode(o.text || ''));
+      list.append(b);
+    }
+    sec.append(list); $('more').append(sec);
+  });
+  const copy = button(T.copy, async () => { try { await navigator.clipboard.writeText(text()); copy.textContent = T.copied; } catch (e) { /* the answer stays readable on the page */ } }, 'copy', '');
+  copy.className = 'tool';
+  if ((D.questions || []).length) { const row = document.createElement('div'); row.className = 'answer'; answer.textContent = T.chat; row.append(copy, answer); $('more').append(row); }
+  if (D.source) { const p = document.createElement('p'); p.className = 'source'; p.textContent = D.source; $('more').append(p); }
+
+  // Deep link (#scene=…&v=…&side=1; v is the variant's id, or its number in a clean link) and a small API for scripted looks.
+  const h = new URLSearchParams(location.hash.slice(1)), cleanLink = h.get('clean') === '1';
+  const pick = (v) => (cleanLink ? D.variants[Number(v) - 1] : D.variants.find((x) => x.id === v)) || {};
+  window.compare = { subject: D.subject || null, show: (s) => show({ scene: s.scene || state.scene, variant: s.variant || state.variant, side: !!s.side, clean: !!s.clean }),
+    states: () => scenes.flatMap((s) => [...D.variants.map((v) => ({ scene: s.id, variant: v.id })), { scene: s.id, variant: D.variants[0].id, side: true }]) };
+  show({ scene: h.get('scene') || state.scene, variant: pick(h.get('v')).id || state.variant, side: h.get('side') === '1', clean: cleanLink });
+})();
+</script>
+</body>
+</html>

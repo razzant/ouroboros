@@ -151,7 +151,6 @@ CONSUMERS = {
     "provider-test": lambda client, url: client.probe_provider_readiness(
         MODEL, settings={"OPENAI_COMPATIBLE_BASE_URL": url}, timeout=20)["ok"],
     # The context-window probe: the cached client and ``with_options``.
-    "capability-probe": lambda client, url: client.probe_oversized_context(MODEL, "Reply OK", timeout=20)["ok"],
 }
 
 
@@ -213,10 +212,6 @@ def test_a_key_on_the_route_is_always_sent(endpoint, monkeypatch):
         MODEL, settings={"OPENAI_COMPATIBLE_BASE_URL": endpoint.base_url,
                          "OPENAI_COMPATIBLE_API_KEY": "compat-key"}, timeout=20)["ok"] is True
     assert [r["authorization"] for r in endpoint.completions()] == ["Bearer compat-key"] * 3
-    # An explicit key given to a keyless route wins over the route's no-auth declaration.
-    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY")
-    assert LLMClient().probe_oversized_context(MODEL, "Reply OK", timeout=20, api_key="probe-key")["ok"] is True
-    assert endpoint.completions()[-1]["authorization"] == "Bearer probe-key"
 
 
 def test_a_route_that_needs_its_key_still_refuses_before_any_http(endpoint, monkeypatch):

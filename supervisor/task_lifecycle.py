@@ -14,7 +14,6 @@ import pathlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight
 from ouroboros.review_owner_custody import reconcile_confirmed_dead_review_owner as _reconcile_dead_review_owner
 from ouroboros.utils import utc_now_iso
 
@@ -45,6 +44,7 @@ from supervisor.cancel_publication import (  # noqa: F401 -- intentional public 
     _register_owed_terminal_delivery,
     _salvage_cancelled_output,
     _settle_or_reopen_intent,
+    _stop_open_tree_runs,
     shutdown_cancel_text,
 )
 
@@ -151,13 +151,10 @@ def root_cancellation_fenced(task: Dict[str, Any], root_task_id: str = "") -> bo
     return False
 
 
-def apply_budget_root_admission_fence(task: Dict[str, Any], root_task_id: str, *,
-                                      timeout_retry: bool = False) -> bool:
+def apply_budget_root_admission_fence(task: Dict[str, Any], root_task_id: str) -> bool:
     """Latch new work under Pause or cancellation; money stays in the attempt ledger.
     Budget increases cannot resume refused roots. Cascade needs this gate because
-    schedule_subagent can drain after its last sweep. A reaper-only timeout_retry
-    stays admitted under owner Pause but undispatchable at assignment/launch (#1729/1730).
-    Root Resume selects no children. Cancellation/money never grant the retry exception.
+    schedule_subagent can drain after its last sweep. Root Resume selects no children.
     """
     if root_cancellation_fenced(task, root_task_id):
         task["_admission_blocked"] = "root_cancelled"
@@ -165,14 +162,6 @@ def apply_budget_root_admission_fence(task: Dict[str, Any], root_task_id: str, *
     fence = BUDGET_ROOT_FENCES.get(str(root_task_id or ""))
     if not isinstance(fence, dict) or str(fence.get("status") or "") not in {"active", "paused"}:
         return False
-    if timeout_retry and fence.get("cause") == "owner_pause":
-        from ouroboros.task_results import resolve_task_lineage
-
-        lineage = resolve_task_lineage(task.get("id"), **{key: task.get(key) for key in (
-            "metadata", "root_task_id", "parent_task_id", "delegation_role", "original_task_id",
-            "timeout_retry_from")})
-        if lineage["root_task_id"] == str(root_task_id):
-            return False
     # One latch, typed by its cause: an owner Pause is not a monetary stop.
     task["_admission_blocked"] = ("root_owner_paused" if fence.get("cause") == "owner_pause"
                                   else "root_budget_fence")
@@ -333,6 +322,8 @@ def cancel_task_by_id(task_id: str) -> bool:
                 tid for tid, state in outcomes.items() if state in q._CANCEL_TERMINALIZED
             )
             failed = {tid for tid, state in outcomes.items() if state == q.CANCEL_FAILED}
+        # Delegated runs a settled member's end spared wait for this Stop (its verdict); the check below sees the rest.
+        _stop_open_tree_runs(q, task_id)
         # UNCONDITIONAL postcondition. For a CASCADE the answer is a property of the
         # TREE, not a tally of who did the killing: success means nothing of the
         # subtree is live and nothing refused custody. (A concurrent cascade over
@@ -588,6 +579,8 @@ def cancel_task_custody(
     # landing meanwhile is re-read after the kill (completion wins) or on miss.
     prepared = reads.prepared(task_id)
     settled = settled_status_of(prepared)
+    from supervisor.cancel_publication import runner_takes_stop  # a witnessed Presence author's Stop is its runner's
+    runner_owned = not settled and runner_takes_stop(q, task_id, prepared)
 
     # Read the durable intent BEFORE claiming it. The pre-claim row is what the
     # reaping-takeover gate below judges: a slot already marked ``reaping`` is
@@ -629,6 +622,7 @@ def cancel_task_custody(
     # ---- phase 1: capture under the lock -----------------------------------
     captured_was_reaping = False
     captured_pending = None
+    captured_awaiting = None  # a conversation-lane turn no carrier holds yet: no process, held like PENDING
     captured_worker = None
     captured_meta = None
     captured_running = None
@@ -652,9 +646,13 @@ def cancel_task_custody(
                 if str(item.get("id")) == task_id:
                     captured_pending = q.PENDING.pop(index)
                     break
+            if captured_pending is None:
+                from supervisor.conversation_lane import take_awaiting_turn
+                captured_awaiting = take_awaiting_turn(task_id)
+                captured_pending = captured_awaiting["task"] if captured_awaiting else None
         if captured_pending is None:
             for worker in workers.WORKERS.values():
-                if worker.busy_task_id == task_id:
+                if worker.busy_task_id == task_id and not runner_owned:
                     from ouroboros.headless import terminal_task_files_ready
                     bound_task = (q.RUNNING.get(task_id) or {}).get("task") or {"id": task_id}
                     if (settled and not _worker_possibly_alive(worker)
@@ -708,14 +706,11 @@ def cancel_task_custody(
         # ownership wins over the settled fast path; the stored terminal
         # stays the answer either way.
         turn = workers.direct_chat_turn(task_id)
-        if turn is not None or post_task_synthesis_in_flight(q.DRIVE_ROOT, task_id):
-            from supervisor.cancel_publication import _finish_captured_chat_turn
-
-            return _finish_captured_chat_turn(q, task_id, turn, intent=intent, deliver=deliver)
-        from supervisor.cancel_publication import stop_paused_late_phase_custody
-
-        if stop_paused_late_phase_custody(q, task_id, intent=intent):
-            return CANCEL_CANCELLED  # the answered root's saved remainder (D10), its answer kept
+        from supervisor.cancel_publication import finish_in_process_turn  # a live inline Presence turn too
+        in_process = finish_in_process_turn(q, task_id, turn, prepared, intent=intent, deliver=deliver,
+                                            runner_owned=runner_owned)
+        if in_process is not None:
+            return in_process
     if settled and captured_worker is None and not captured_was_reaping:
         # A slot stranded at ``reaping`` by a custody attempt that crashed is
         # recovered HERE too: the task settled on its own afterwards, so nothing
@@ -766,7 +761,7 @@ def cancel_task_custody(
         return CANCEL_FAILED
     try:
         if captured_pending is not None:
-            return _finish_captured_pending(task_id, captured_pending, intent=intent)
+            return _finish_captured_pending(task_id, captured_pending, intent=intent, awaiting=captured_awaiting)
         if captured_worker is not None:
             # ``settled_status`` (GR6-1b): a settled RESULT with a live WORKER
             # goes through the SAME kill/join path — the stored terminal truth
@@ -783,7 +778,8 @@ def cancel_task_custody(
         # shape). Give the custody back and reopen the intent so the watchdog
         # retries instead of skipping the slot for the rest of the process life.
         log.error("Cancellation custody for %s raised; releasing custody", task_id, exc_info=True)
-        _restore_custody(task_id, pending=captured_pending, worker=captured_worker)
+        _restore_custody(task_id, pending=None if captured_awaiting else captured_pending, worker=captured_worker,
+                         awaiting=captured_awaiting)
         _release_intent_claim(
             q, task_id, error="custody raised mid-teardown",
             expected_generation=generation, request_id=request_id,
@@ -1073,7 +1069,7 @@ def _release_intent_claim(
 
 def _restore_custody(
     task_id: str, *, pending: Any = None, worker: Any = None,
-    worker_reaping: bool = False,
+    worker_reaping: bool = False, awaiting: Any = None,
 ) -> None:
     """Release custody after a failed cancellation.
 
@@ -1092,14 +1088,16 @@ def _restore_custody(
     with q._queue_lock:
         if pending is not None and all(str(t.get("id")) != task_id for t in q.PENDING):
             q.PENDING.append(pending)
+        if awaiting is not None:  # a captured awaiting lane row returns to RUNNING, never PENDING
+            q.RUNNING.setdefault(task_id, awaiting)
         if worker is not None:
             worker.reaping = worker_reaping
 
 
 def _finish_captured_pending(
-    task_id: str, task: Dict[str, Any], *, intent: Optional[Dict[str, Any]] = None,
+    task_id: str, task: Dict[str, Any], *, intent: Optional[Dict[str, Any]] = None, awaiting: Any = None,
 ) -> str:
-    """A queued task has no process: persist first, publish second."""
+    """A queued task (or a lane turn ``awaiting`` its carrier) has no process: persist first, publish second."""
     q = _queue_module()
     from ouroboros.task_results import STATUS_CANCELLED, load_task_result, write_task_result
 
@@ -1115,7 +1113,7 @@ def _finish_captured_pending(
         )
     except Exception:
         log.warning("Cancel persistence failed for pending task %s", task_id, exc_info=True)
-        _restore_custody(task_id, pending=task)
+        _restore_custody(task_id, pending=None if awaiting else task, awaiting=awaiting)
         _release_intent_claim(q, task_id, error="pending cancel persistence failed", intent=intent)
         return CANCEL_FAILED
     if str((stored or {}).get("status") or "") != STATUS_CANCELLED:
@@ -1147,7 +1145,6 @@ def _finish_captured_running(
     """
     q = _queue_module()
     from supervisor.worker_pool_lifecycle import kill_worker_tree
-    from ouroboros.mcp_task_sessions import settle_dead_task
     from ouroboros.task_results import STATUS_CANCELLED, load_task_result, write_task_result
 
     task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
@@ -1181,8 +1178,6 @@ def _finish_captured_running(
         _release_intent_claim(q, task_id, error="worker survived kill escalation", intent=intent)
         return CANCEL_FAILED
 
-    # Its death revoked every bridge call; close what the bridges left behind.
-    settle_dead_task(q.DRIVE_ROOT, task_id)
     _reconcile_dead_review_owner(q.DRIVE_ROOT, int(getattr(worker.proc, "pid", 0) or 0))
     with q._queue_lock:
         from supervisor.worker_health import retire_confirmed_worker_consumers
@@ -1309,7 +1304,7 @@ def _finish_captured_running(
     # id keeps the publish below idempotent and a crash between settle and send replays it.
     # Completion wins: cancel_publication withdraws this salvage and owes the kept result.
     owed_ok = _register_owed_terminal_delivery(
-        q, task, task_id, {"status": STATUS_CANCELLED}, deliver=deliver,
+        q, task, task_id, {"status": STATUS_CANCELLED, **_intent_outcome_fields(intent or {})}, deliver=deliver,
         salvage_text=salvage_text, salvage_path=salvage_path,
         unreconciled_runs=unreconciled,
     )
@@ -1567,13 +1562,18 @@ def _append_cascade_snapshot_log(
     teardown, leaving a cancel-requested tree still running. Losing a log line is
     the strictly smaller loss.
     """
-    descendants = [tid for tid in cancel_order if tid != task_id]
     try:
-        q.append_jsonl(pathlib.Path(q.DRIVE_ROOT) / "logs" / "supervisor.jsonl", {
-            "ts": utc_now_iso(), "type": "task_cancel_subtree_snapshot",
-            "root_task_id": task_id, "descendant_task_ids": descendants,
-            "descendant_count": len(descendants), "resweep": bool(already),
-        })
+        q.append_jsonl(
+            pathlib.Path(q.DRIVE_ROOT) / "logs" / "supervisor.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "task_cancel_subtree_snapshot",
+                "root_task_id": task_id,
+                "descendant_task_ids": [tid for tid in cancel_order if tid != task_id],
+                "descendant_count": len([tid for tid in cancel_order if tid != task_id]),
+                "resweep": bool(already),
+            },
+        )
     except Exception:
         log.warning("Failed to log the cascade snapshot for %s", task_id, exc_info=True)
 

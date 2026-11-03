@@ -200,6 +200,9 @@ def test_handler_settlement_producer_reaches_memory(tmp_path, status, code, prev
     ({"is_error": True}, "done", "·"),
     ({"is_error": False}, "⚠️ quoted warning", "✓"),
     ({"status": "error", "is_error": False}, "⚠️ stale text", "✓"),
+    # A typed ok answer that names another outcome keeps its bucket, never a success mark.
+    ({"status": "inspection_required", "is_error": False}, "⚠️ INTEGRATE_DELEGATED_INSPECT_CAPTURE: …", "inspection_required"),
+    ({"status": "git_error", "is_error": False}, "⚠️ GIT_ERROR: …", "git_error"),
     ({"status": "ok", "is_error": True}, "done", "·"),
     ({"status": "future_status"}, "done", "?"),
     ({}, "legacy success", "✓"),

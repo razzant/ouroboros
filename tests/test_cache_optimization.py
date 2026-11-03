@@ -74,8 +74,10 @@ def test_build_llm_messages_repartitions_stable_vs_dynamic_sections():
     assert "## Identity" in stable_text
     assert "## My story" in stable_text
     assert "## Last Deep Self-Review" in stable_text
-    for knowledge in ("## Shared understanding", "## Knowledge base", "## Known error patterns (Pattern Register)"):
+    for knowledge in ("## Shared understanding", "## Knowledge base"):
         assert knowledge in dynamic_text and knowledge not in stable_text, knowledge
+    # The former register is an ordinary note: its body rides in neither block.
+    assert "Pattern Register" not in dynamic_text and "Pattern Register" not in stable_text
     assert "## Scratchpad" not in stable_text
     assert "## Memory Registry" not in stable_text
 
@@ -218,7 +220,7 @@ def test_build_memory_sections_partition_modes():
     stable = build_memory_sections(memory, partition="stable")
     volatile = build_memory_sections(memory, partition="volatile")
     all_sections = build_memory_sections(memory, partition="all")
-    registry_digest = __import__("ouroboros.context", fromlist=["_build_registry_digest"])._build_registry_digest(env)
+    registry = __import__("ouroboros.context", fromlist=["_build_registry_section"])._build_registry_section(env)
 
     assert any(section.startswith("## Identity") for section in stable)
     assert not any(section.startswith("## Scratchpad") for section in stable)
@@ -227,7 +229,7 @@ def test_build_memory_sections_partition_modes():
     assert not any(section.startswith(("## Dialogue Summary", "## Dialogue History", "## Legacy Dialogue"))
                    for section in [*stable, *volatile, *all_sections])
     assert not any(section.startswith("## Memory Registry") for section in volatile)
-    assert registry_digest.startswith("## Memory Registry (what I know / don't know)")
+    assert registry.startswith("## Memory Registry (what I know / don't know)")
     assert any(section.startswith("## Identity") for section in all_sections)
     assert any(section.startswith("## Scratchpad") for section in all_sections)
 

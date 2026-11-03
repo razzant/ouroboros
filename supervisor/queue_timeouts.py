@@ -1,30 +1,34 @@
-"""Activity-based liveness: which running task has stopped being alive.
+"""Activity observations and explicit time bounds of running work.
 
 A task is judged on its own progress AND on its subtree's - a coordinator whose
 children are working is not idle - then against the idle window, its explicit
 deadline and the execution ceiling (the narrower of the global ceiling and the task's
-``execution_timeout_sec``). The decision is taken under the queue lock; the teardown
-it decides on is handed to the off-loop reaper.
+``execution_timeout_sec``). Unknown silence requests attention, never teardown.
+Only explicit hard bounds enter the off-loop reaper under the queue lock.
 
 An explicit calendar deadline also expires a never-started PENDING row (owner choice,
 #939): the row is marked under Q and settled by the same reaper without a model start;
 ordinary resource holds do not erase it. Stop, saved terminals, owner Pause and
 unconfirmed continuations keep their custody. Queue age and the execution duration never create one.
+
+The supervisor tick enters through ``enforce_due_task_timeouts``: a pass runs when a hard clock (a
+deadline, a ceiling, a grace) falls due or the live membership changed, else on the body's own cadence,
+which bounds how late silence attention and a changed setting are seen. Neither of those ends any work. One
+pass indexes every tree's live members once (``_tree_activity``), never a scan per running row.
 """
 
 from __future__ import annotations
 
 import datetime
-from supervisor.state import control_is
 
 import logging
 import pathlib
 import time
-import uuid
-from typing import Any, Dict
+from typing import Any, Dict, NamedTuple
 
+from ouroboros.config import BODY_MAINTENANCE_INTERVAL_SEC
 from supervisor.cognitive_operations import _active_operation_progressing
-from ouroboros.model_wait import execution_elapsed_seconds
+from ouroboros.model_wait import execution_elapsed_seconds, record_execution_close
 from ouroboros.runtime_limits import resolve_task_execution_timeout_sec
 from supervisor.task_model_wait import model_waiting
 from supervisor.task_reaper import (
@@ -81,20 +85,55 @@ def _task_deadline_ts(task: Dict[str, Any]) -> float:
         return 0.0
 
 
-def _task_drive_for_task(task: Dict[str, Any], task_id: str) -> pathlib.Path:
+def _task_drive_for_task(task: Dict[str, Any], task_id: str, *, canonical: Any = None) -> pathlib.Path:
     """Active drive of a running task (child drive for forked/workspace tasks,
     canonical otherwise) — where its mailbox and observability actually live.
-    Resolution mirrors forward_to_worker: task fields, then the result record."""
+    Resolution mirrors forward_to_worker: task fields, then the result's typed
+    drive columns (no body is decoded for one field). ``canonical``: the data root,
+    for a reader in a process without the queue (a worker's focus)."""
     task = task if isinstance(task, dict) else {}
+    root = pathlib.Path(canonical if canonical is not None else _queue().DRIVE_ROOT)
     child = str(task.get("child_drive_root") or task.get("drive_root") or "").strip()
     if not child:
         try:
-            from ouroboros.task_results import load_task_result
-            record = load_task_result(pathlib.Path(_queue().DRIVE_ROOT), str(task_id)) or {}
-            child = str(record.get("child_drive_root") or record.get("headless_child_drive_root") or record.get("drive_root") or "").strip()
+            from ouroboros.task_store import task_drive_status
+            child = task_drive_status(root, [str(task_id)]).get(str(task_id), ("", ""))[1]
         except Exception:
             child = ""
-    return pathlib.Path(child) if child else pathlib.Path(_queue().DRIVE_ROOT)
+    return pathlib.Path(child) if child else root
+
+
+# Memory only, read for one skip: the live membership the last pass finished over and the next
+# instant any hard clock of it can fall due (never later than the body's cadence from that pass).
+_clocks: Dict[str, Any] = {"due": 0.0, "members": None}
+
+
+def _live_members() -> tuple:
+    """Whether the live rows can have changed, without visiting one: no clock of a row nobody has judged yet
+    is known. Every change of either queue marks it (``queue_publication.queue_revision``: one bump under Q),
+    and the sizes also catch a row added or removed before its caller marked; a quiet tick reads four values."""
+    from supervisor.queue_publication import queue_revision
+
+    q = _queue()
+    return (q.DRIVE_ROOT, queue_revision(), len(q.RUNNING), len(q.PENDING))
+
+
+def enforce_due_task_timeouts(read_pending_events: Any) -> None:
+    """The supervisor tick's entry: the full pass only when one of its decisions can have changed.
+
+    Hard clocks are exact (``due``). Progress only postpones them, so an event needs no pass of its
+    own; what an event can bring forward (a lease cut short, a call that ended) can only request
+    attention, within the cadence. A clock set back is not trusted to mean "not yet".
+    ``read_pending_events`` runs only when a pass does.
+    """
+    q = _queue()
+    if not q.RUNNING and not q.PENDING:
+        return
+    now = time.time()
+    if (_clocks["members"] == _live_members()
+            and now < _clocks["due"] <= now + BODY_MAINTENANCE_INTERVAL_SEC):
+        return
+    enforce_task_timeouts(pending_events=read_pending_events())
 
 
 def enforce_task_timeouts(*, pending_events: set[str] | None = frozenset()) -> None:
@@ -117,10 +156,11 @@ def enforce_task_timeouts(*, pending_events: set[str] | None = frozenset()) -> N
     owner_chat_id = int(st.get("owner_chat_id") or 0)
 
     with _queue()._queue_lock:
-        _queue()._expire_pending_deadlines_locked(workers, now)
+        due = _queue()._expire_pending_deadlines_locked(workers, now)
         if _queue().RUNNING:
-            _queue()._enforce_task_timeouts_locked(workers, now, owner_chat_id, st,
-                                                 pending_events=pending_events)
+            due = min(due, _queue()._enforce_task_timeouts_locked(workers, now, owner_chat_id, st,
+                                                                  pending_events=pending_events))
+        _clocks.update(due=due, members=_live_members())
 
 
 def _pending_continuation(task: Dict[str, Any]) -> str:
@@ -190,28 +230,28 @@ def pending_deadline_expirable(task: Dict[str, Any]) -> bool:
     from types import SimpleNamespace
     from ouroboros.owner_pause import member_fence
     from ouroboros.task_results import load_task_result, _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED
-    from supervisor.events_budget import (
-        HOLD_ROOT_FENCE_LIFTED, HOLD_ROOT_FENCE_MEMBER_SELECTION, HOLD_SAVED_WORK,
-        HOLD_OWNER_RESTART, budget_hold_fact, budget_resume_dispatch_allowed,
-    )
+    from supervisor.events_budget import budget_hold_fact, budget_resume_dispatch_allowed
+    from ouroboros.work_stop import continuation_refusal, current_stop
 
     if any(task.get(key) for key in (
         "_owner_hold", "_continuation_prepared", "_cancel_intent_authority_hold",
     )) or task.get("_owner_wait_resume") and not isinstance(task["_owner_wait_resume"], dict):
         return False
     pause, hold = task.get("_budget_pause"), budget_hold_fact(task)
+    stop = current_stop(task, {"budget": _queue().BUDGET_ROOT_FENCES})
+    if continuation_refusal(task) or stop.get("release") == "owner" or stop.get("cause") == "pause":
+        return False
     project = task.get("_project_admission_restore_hold")
     if task.get("_budget_pause_hold") and not isinstance(task["_budget_pause_hold"], dict):
         return False
     if pause and (not isinstance(pause, dict) or pause.get("exact_continuation")
-                  or pause.get("reason") == "owner" or pause.get("cause") == "owner_pause"
                   or pause.get("status") != "paused_before_dispatch"
                   or pause.get("replay_safe") is not True
                   or type(pause.get("physical_calls")) is not int or pause["physical_calls"] != 0):
         return False
-    if hold is not None and (hold.get("reason") not in (
-            HOLD_ROOT_FENCE_LIFTED, HOLD_ROOT_FENCE_MEMBER_SELECTION,
-            HOLD_SAVED_WORK, HOLD_OWNER_RESTART) or hold.get("cause") == "owner_pause"):
+    member_stop = current_stop(task)
+    if hold is not None and (member_stop.get("cause") not in {"app_stop", "awaiting_selection"}
+                             or member_stop.get("door_replaceable") or member_stop.get("release") != "resume"):
         return False
     if project and (not isinstance(project, dict)
                     or project.get("reason") not in ("project_routing_fence_lookup_failed", "deadline")):
@@ -226,11 +266,6 @@ def pending_deadline_expirable(task: Dict[str, Any]) -> bool:
         # The durable Pause precedes its queue latch; an unavailable root is not open.
         if member_fence(SimpleNamespace(task_id=task_id, root_task_id=root_id, budget_drive_root=result_root)):
             return False
-        try:
-            if (result_root / "state" / "panic_stop.flag").read_text(encoding="utf-8").strip() == "panic":
-                return False
-        except FileNotFoundError:
-            pass
         selected = _pending_continuation(task)
         marker = task.get("_terminalization_retry") or {}
         unsubmitted = marker.get("unsubmitted_launch")
@@ -292,7 +327,7 @@ def pending_deadline_expirable(task: Dict[str, Any]) -> bool:
         return False
 
 
-def _expire_pending_deadlines_locked(workers: Any, now: float) -> None:
+def _expire_pending_deadlines_locked(workers: Any, now: float) -> float:
     """Hand rows whose explicit calendar deadline passed to non-dispatch custody (#939, owner A).
 
     Called under Q. Only an explicit ``deadline_at`` (or legacy submit-relative
@@ -300,8 +335,11 @@ def _expire_pending_deadlines_locked(workers: Any, now: float) -> None:
     never create one, and a row without a deadline waits as before. The existing
     ``_terminalization_retry`` marker carries the outcome; an earlier marker keeps
     its own outcome and owner. Settlement and publication run on the reaper.
+    Returns the next instant a queued row's deadline falls due, never later than
+    the body's cadence from ``now``.
     """
     changed, expired = False, []
+    next_due = now + BODY_MAINTENANCE_INTERVAL_SEC
     for task in _queue().PENDING:
         if not isinstance(task, dict):
             continue
@@ -311,6 +349,8 @@ def _expire_pending_deadlines_locked(workers: Any, now: float) -> None:
                 expired.append(task)
             continue
         deadline = _task_deadline_ts(task)
+        if deadline > now:
+            next_due = min(next_due, deadline)
         if not deadline or now < deadline or not pending_deadline_expirable(task):
             continue
         task.update(workers._make_terminalization_retry_task(
@@ -323,6 +363,7 @@ def _expire_pending_deadlines_locked(workers: Any, now: float) -> None:
         _queue().persist_queue_snapshot(reason="pending_deadline_expired")
     for task in expired:
         _queue_pending_deadline(task, listed=True)
+    return next_due
 
 
 def _queue_pending_deadline(task: Dict[str, Any], *, listed: bool = False) -> None:
@@ -478,118 +519,111 @@ def _settle_pending_deadline(task: Dict[str, Any], *, event_already_published: b
         return False
 
 
-def _is_descendant_of(task: Dict[str, Any], ancestor_id: str) -> bool:
-    """True if `task` is in the subtree rooted at ancestor_id. Cheap in-memory (no I/O):
-    root_task_id == ancestor_id (covers the common root-orchestrator case even when an
-    INTERMEDIATE parent has already left RUNNING — a grandchild whose parent finished is
-    still a descendant of the root), OR the parent_task_id chain (via RUNNING metas)
-    reaches ancestor_id (covers a mid-tree ancestor while the chain is intact).
+def _ancestors(task: Any) -> set:
+    """Every id ``task`` is a descendant of. Cheap in-memory (no I/O): its root (covers the common
+    root-orchestrator case even when an INTERMEDIATE parent has already left RUNNING — a grandchild
+    whose parent finished is still a descendant of the root) and its parent_task_id chain through
+    RUNNING metas (covers a mid-tree ancestor while the chain is intact).
     """
-    if not isinstance(task, dict) or not ancestor_id:
-        return False
-    if str(task.get("root_task_id") or "") == ancestor_id:
-        return True
+    found: set = set()
+    if not isinstance(task, dict):
+        return found
+    root = str(task.get("root_task_id") or "")
+    if root:
+        found.add(root)
     cur = task
     hops = 0
     while isinstance(cur, dict) and hops < 25:
         pid = str(cur.get("parent_task_id") or "")
         if not pid:
-            return False
-        if pid == ancestor_id:
-            return True
+            break
+        found.add(pid)
         nxt = _queue().RUNNING.get(pid)
         cur = nxt.get("task") if isinstance(nxt, dict) and isinstance(nxt.get("task"), dict) else None
         hops += 1
-    return False
+    return found
 
 
-def _subtree_progressing(task_id: str, now: float, idle_timeout: float) -> bool:
-    """True if any RUNNING descendant of task_id made real progress within idle_timeout.
+def _is_descendant_of(task: Dict[str, Any], ancestor_id: str) -> bool:
+    """True if `task` is in the subtree rooted at ancestor_id (``_ancestors``)."""
+    return bool(ancestor_id) and ancestor_id in _ancestors(task)
 
-    In-memory walk over RUNNING only (NO I/O — this runs under the queue lock): keeps a
-    productively-waiting orchestrator alive while its children work, instead of a flat
-    wall-clock kill. Descendant freshness uses last_progress_at (real progress), not the
-    bare liveness heartbeat.
-    """
-    if not task_id:
-        return False
-    for tid, m in list(_queue().RUNNING.items()):
-        if tid == task_id or not isinstance(m, dict):
+
+class TreeActivity(NamedTuple):
+    """One pass's facts about each id's live descendants; built once, read per running row."""
+    progress: Dict[str, float]  # the newest real progress among its RUNNING descendants
+    queued: set  # ids with a PENDING descendant
+    observing: set  # ids with a RUNNING descendant whose observation is still in the event queue
+
+
+def _tree_activity(pending_events: Any = frozenset()) -> TreeActivity:
+    """Walk RUNNING and PENDING once (NO I/O: a timeout pass runs under the queue lock). A queued
+    or running diagnostic is attention to its source, never that source's subtree at work."""
+    from ouroboros.work_diagnostics import diagnostic_ref
+
+    activity = TreeActivity({}, set(), set())
+    for tid, meta in list(_queue().RUNNING.items()):
+        if not isinstance(meta, dict):
             continue
-        if not _queue()._is_descendant_of(m.get("task") if isinstance(m.get("task"), dict) else {}, task_id):
+        task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
+        if diagnostic_ref(task):
             continue
         # Real progress only (NOT the bare 30s liveness heartbeat): a child that merely
         # pings but makes no progress must not keep its ancestor alive.
-        lp = float(m.get("last_progress_at") or m.get("started_at") or 0.0)
-        if lp and (now - lp) < idle_timeout:
-            return True
-    return False
+        newest = float(meta.get("last_progress_at") or meta.get("started_at") or 0.0)
+        observing = bool(pending_events) and tid in pending_events
+        for ancestor in _ancestors(task) - {str(tid)}:
+            if newest > activity.progress.get(ancestor, 0.0):
+                activity.progress[ancestor] = newest
+            if observing:
+                activity.observing.add(ancestor)
+    for task in list(_queue().PENDING):
+        if isinstance(task, dict) and not diagnostic_ref(task):
+            activity.queued.update(_ancestors(task) - {str(task.get("id") or "")})
+    return activity
 
 
-def _has_live_descendant(task_id: str) -> bool:
-    """True if any LIVE (RUNNING or PENDING) task is a descendant of task_id (in-memory, no
-    I/O). Used to recognise an orchestrator at kill time so it is NOT blind-retried — a
-    blind retry would replay the plan and re-spawn the whole subtree (the timeout storm).
-    PENDING is included: a parent can time out while its children are merely QUEUED (worker
-    saturation / project lease), and those queued children are still its live subtree.
-    """
-    if not task_id:
-        return False
-    for tid, m in list(_queue().RUNNING.items()):
-        if tid == task_id or not isinstance(m, dict):
-            continue
-        if _queue()._is_descendant_of(m.get("task") if isinstance(m.get("task"), dict) else {}, task_id):
-            return True
-    for t in list(_queue().PENDING):
-        if not isinstance(t, dict) or str(t.get("id") or "") == task_id:
-            continue
-        if _queue()._is_descendant_of(t, task_id):
-            return True
-    return False
+def _subtree_progressing(task_id: str, now: float, idle_timeout: float) -> bool:
+    """True if any RUNNING descendant of task_id made real progress within idle_timeout: keeps a
+    productively-waiting orchestrator alive while its children work, instead of a flat wall-clock kill."""
+    newest = _tree_activity().progress.get(task_id, 0.0) if task_id else 0.0
+    return bool(newest) and (now - newest) < idle_timeout
 
 
 def _has_pending_descendant(task_id: str) -> bool:
     """True if any PENDING (queued, not yet assigned) task is a descendant of task_id. A
     parent whose children are merely WAITING for worker capacity (saturation / project lease)
-    is not idle/stuck — keep it alive (bounded by Stop, deadline, budget and any absolute ceiling) so it can integrate
-    them once they run, instead of killing it and orphaning the queued subtree."""
-    if not task_id:
-        return False
-    for t in list(_queue().PENDING):
-        if not isinstance(t, dict) or str(t.get("id") or "") == task_id:
-            continue
-        if _queue()._is_descendant_of(t, task_id):
-            return True
-    return False
-
-
-def _idle_observation_pending(task_id: str, pending_events: set[str] | None) -> bool:
-    if pending_events is None or task_id in pending_events:
-        return True
-    # A descendant's progress is already an input to its parent's idle policy.
-    # Its producer need not stamp lineage: the current RUNNING owner has it.
-    return any(tid in pending_events and isinstance(meta, dict)
-               and _queue()._is_descendant_of(meta.get("task") or {}, task_id)
-               for tid, meta in _queue().RUNNING.items())
+    is not idle/stuck — spare it (bounded by Stop, deadline, budget and any absolute ceiling) so it can integrate
+    them once they run."""
+    return bool(task_id) and task_id in _tree_activity().queued
 
 
 def _enforce_task_timeouts_locked(
     workers: Any, now: float, owner_chat_id: int, st: Dict[str, Any], *,
     pending_events: set[str] | None = frozenset(),
-) -> None:
+) -> float:
+    """One pass over RUNNING. Returns the next instant any hard clock of it can fall due: ``now``
+    while a grace episode is open (its decisions stay per tick), else the nearest future deadline
+    or ceiling, never later than the body's cadence from now."""
     # ONE typed owner-stop predicate before the generic idle/grace consumers (S3
     # §12.2 item 8): an OPEN owner-requested finalization intent suppresses the
-    # ordinary spare-withdraw/second-grace/retry path only while the task remains
-    # inside its independent explicit deadline and absolute safety ceiling. The
+    # ordinary spare-withdraw/second-grace path and silence attention only while
+    # the task remains inside its independent explicit deadline and absolute safety ceiling. The
     # intent stays the one owner will and cancellation custody stays the killer;
     # a later graceful request can never extend either hard axis.
     from supervisor.owner_stop import running_owner_stop_tasks
     from supervisor.restart_retention import RETAINED_FOR_BOOT
-    from supervisor.worker_owner_wait import has_owner_wait_checkpoint
+    from supervisor.worker_owner_wait import waiting_on_owner
 
     owner_stop_held = running_owner_stop_tasks(
         _queue().DRIVE_ROOT, grace_sec=_queue().FINALIZATION_GRACE_SEC,
     )
+    # The configured silence window itself (owner 30 Oct, A), deep review's included; in-flight model
+    # calls, commands and waits hold their own typed leases below, so length alone is not silence.
+    idle_timeout = float(_queue().get_task_idle_timeout_sec())
+    global_ceiling = _queue().get_task_abs_ceiling_sec()
+    activity = _tree_activity(pending_events)
+    next_due = now + BODY_MAINTENANCE_INTERVAL_SEC
     for task_id, meta in list(_queue().RUNNING.items()):
         if not isinstance(meta, dict) or meta.get(RETAINED_FOR_BOOT):
             continue  # a stop already ended this attempt; its saved work belongs to the next boot
@@ -597,6 +631,8 @@ def _enforce_task_timeouts_locked(
         started_at = float(meta.get("started_at") or 0.0)
         if started_at <= 0:
             continue
+        if meta.get("finalization_requested_at"):
+            next_due = now  # an open grace: progress may withdraw it, its end submits the reap
         last_hb = float(meta.get("last_heartbeat_at") or started_at)
         # Execution time = wall clock minus quota waits minus the SEPARATE
         # budget-paused interval (#1196); started_at itself is never moved.
@@ -614,20 +650,16 @@ def _enforce_task_timeouts_locked(
         deadline_ts = _queue()._task_deadline_ts(task)
         deadline_reached = bool(deadline_ts and now >= deadline_ts)
 
-        idle_timeout = max(
-            float(_queue().get_task_idle_timeout_sec()),
-            float(_queue().get_per_call_timeout_ceiling_sec()) + 120.0,
-        )
-        # Deep review can spend a long interval reasoning between tool calls.
-        # Preserve its one-hour idle tolerance; episode deadlines and absolute
-        # ceilings still apply independently.
-        if task_type == "deep_self_review":
-            idle_timeout = max(idle_timeout, 3600.0)
         abs_ceiling = resolve_task_execution_timeout_sec(  # None = no execution bound (#939)
-            task, global_ceiling=_queue().get_task_abs_ceiling_sec())
+            task, global_ceiling=global_ceiling)
+        if deadline_ts > now:
+            next_due = min(next_due, deadline_ts)
+        if abs_ceiling is not None and runtime_sec < float(abs_ceiling):
+            next_due = min(next_due, now + float(abs_ceiling) - runtime_sec)
         last_progress_at = float(meta.get("last_progress_at") or started_at)
         idle_sec = max(0.0, now - last_progress_at)
-        subtree_progressing = _queue()._subtree_progressing(task_id, now, idle_timeout)
+        newest_descendant = activity.progress.get(str(task_id), 0.0)
+        subtree_progressing = bool(newest_descendant) and (now - newest_descendant) < idle_timeout
         own_progress = idle_sec < idle_timeout
         # B3 external-wait lease: a held delegate_wait window over a live delegated run
         # is legitimate silence (hard-bounded by events._handle_external_wait_lease);
@@ -635,20 +667,18 @@ def _enforce_task_timeouts_locked(
         lease_ts = meta.get("external_wait_lease_until")
         active_llm_call = meta.get("active_llm_call")
         llm_call_in_flight = isinstance(active_llm_call, dict) and active_llm_call.get("task_attempt") == attempt
-        owner_wait = meta.get("owner_wait")
-        waiting_on_owner = (isinstance(owner_wait, dict) and owner_wait.get("state") == "waiting"
-                            and owner_wait.get("task_attempt") == attempt)
-        progressing = (own_progress or subtree_progressing or _queue()._has_pending_descendant(task_id)
+        progressing = (own_progress or subtree_progressing or str(task_id) in activity.queued
                        or (isinstance(lease_ts, (int, float)) and float(lease_ts) > now)
                        or llm_call_in_flight
-                       or model_waiting(meta) or waiting_on_owner
+                       or model_waiting(meta) or waiting_on_owner(meta, attempt)
                        or _active_operation_progressing(meta, now))
         ceiling_reached = abs_ceiling is not None and runtime_sec >= float(abs_ceiling)
         if (ceiling_reached and not task.get("parent_task_id")
                 and task_id == str(task.get("root_task_id") or task_id)):
             # A settled answer may still own post-task memory work in this
             # RUNNING worker. The solve ceiling cannot turn that work into a
-            # failed answer; idle, per-call, deadline and cancellation remain.
+            # failed answer; per-call, deadline and cancellation remain, and
+            # silence only brings attention.
             from ouroboros.task_results import load_task_result
             from ouroboros.task_status import SETTLED_STATUSES
 
@@ -677,9 +707,12 @@ def _enforce_task_timeouts_locked(
             # by a later graceful-stop request.
             continue
 
-        if not ceiling_reached and not deadline_reached and _idle_observation_pending(str(task_id), pending_events):
-            # Missing observation is neither progress nor permission to stop.
-            # Do not create/withdraw an idle control or reap on a stale mirror.
+        if not ceiling_reached and not deadline_reached and (
+                pending_events is None or str(task_id) in pending_events or str(task_id) in activity.observing):
+            # Missing observation is neither progress nor permission to stop. A descendant's
+            # progress is already an input to its parent's idle policy; its producer need not
+            # stamp lineage: the current RUNNING owner has it.
+            # Do not date silence or withdraw a grace control on a stale mirror.
             continue
 
         # Hard axes (deadline_at, abs ceiling) stop the task regardless of activity; the
@@ -687,6 +720,9 @@ def _enforce_task_timeouts_locked(
         # an explicit/caller deadline is honored promptly, while no blanket wall-clock kills
         # a productively-waiting orchestrator.
         if not ceiling_reached and not deadline_reached and progressing:
+            from supervisor.silence_attention import recovered
+
+            recovered(_queue(), str(task_id), meta, now)
             # An outstanding episode outlives this reprieve or is withdrawn by it; the rule
             # (own progress answers the request, sparing only suspends its clock) lives with
             # the rest of the episode mechanics in task_reaper. The latch is checked here so
@@ -699,14 +735,29 @@ def _enforce_task_timeouts_locked(
                 _queue().RUNNING[task_id] = meta
             continue
 
-        if ceiling_reached:
-            terminal_reason = REASON_ABSOLUTE_CEILING
-        elif deadline_reached:
-            terminal_reason = REASON_DEADLINE
-        else:
-            terminal_reason = REASON_IDLE_TIMEOUT
+        if not ceiling_reached and not deadline_reached:
+            from supervisor.silence_attention import observe
+
+            if meta.get("finalization_reason") in (REASON_ABSOLUTE_CEILING, REASON_DEADLINE):
+                # The hard bound that opened this grace episode stopped holding (a lifted
+                # lifetime, the root post-work exemption). Quiet is no stop condition, so its
+                # finalize_now must not stay readable: the episode's owner withdraws it whole
+                # or keeps the latch for the next tick. An owner-stop latch keeps its own
+                # reason and owner; a spared task keeps the suspended clock above.
+                from supervisor.task_reaper import withdraw_finalization_grace
+
+                if withdraw_finalization_grace(
+                    _queue()._task_drive_for_task(task, str(task_id)), str(task_id), meta,
+                    chat_id=_queue().coerce_chat_identity(task.get("chat_id"), int(owner_chat_id or 0)),
+                ):
+                    _queue().RUNNING[task_id] = meta
+            observe(_queue(), str(task_id), meta, now, idle_timeout)
+            continue
+
+        terminal_reason = REASON_ABSOLUTE_CEILING if ceiling_reached else REASON_DEADLINE
         finalization_requested_at = float(meta.get("finalization_requested_at") or 0.0)
         if finalization_requested_at <= 0 and _queue().FINALIZATION_GRACE_SEC > 0:
+            next_due = now
             meta["finalization_requested_at"] = now
             meta["finalization_reason"] = terminal_reason
             # The control's msg_id IS the episode's identity: it is what the
@@ -722,21 +773,19 @@ def _enforce_task_timeouts_locked(
         if finalization_requested_at > 0 and now - finalization_requested_at < _queue().FINALIZATION_GRACE_SEC:
             continue
 
-        # NOTE: "worker self-finalized at the idle boundary" is handled by the reaper's
+        # NOTE: "worker self-finalized at the timeout boundary" is handled by the reaper's
         # POST-KILL terminal re-check (kill+join FIRST, then honor an on-disk terminal
         # result, idempotent task_done). No short-circuit here: freeing the slot inline
         # would let assign_tasks reuse it mid-flight and could drop the terminal event.
 
         # Variant A: hand the ENTIRE teardown to the background reaper so the loop tick
-        # stays fast and the terminal write + retry enqueue happen only AFTER kill/join
-        # (no race with a concurrently-assigned retry; a subagent retry reuses id/drive).
-        # Live-RUNNING decisions (orchestrator -> no blind retry; retry id) freeze HERE.
+        # stays fast and the terminal write happens only AFTER kill/join. Live-RUNNING
+        # facts freeze HERE; neither hard bound requests a retry.
         # Linearize the timeout decision against cancellation before withdrawing
         # RUNNING.  When an intent already owns either this physical attempt or
         # its proven logical retry root, yield the whole rail: cancellation
         # custody remains the sole killer and preserves the owner's outcome and
         # reason instead of racing a generic timeout FAILED write.
-        cancel_authority_unreadable = False
         try:
             from ouroboros.cancel_intents import (
                 _validated_retry_root_cancel_key,
@@ -761,9 +810,7 @@ def _enforce_task_timeouts_locked(
                     continue
         except Exception:
             # Preserve the prior absolute/deadline timeout behavior when
-            # cancellation authority itself is damaged, but never let that
-            # uncertainty mint a fresh retry authority below.
-            cancel_authority_unreadable = True
+            # cancellation authority itself is damaged. Neither hard bound retries.
             log.error(
                 "Task timeout could not prove cancel-intent authority for %s",
                 task_id,
@@ -777,6 +824,8 @@ def _enforce_task_timeouts_locked(
         current_worker = workers.WORKERS.get(worker_id)
         if current_worker is not None and current_worker.busy_task_id != task_id:
             continue  # A stale queue row cannot hand a newer worker to teardown.
+        # The hard bound ends this attempt here: its #939 clock closes before the reaper's terminal.
+        record_execution_close(_queue().DRIVE_ROOT, str(task_id), task, meta)
         _queue().RUNNING.pop(task_id, None)
         proc_handle = None
         captured_worker = None
@@ -790,33 +839,8 @@ def _enforce_task_timeouts_locked(
             w.reaping = True
             proc_handle = w.proc
 
-        # NOTE: the "no blind retry of an orchestrator with live descendants" guarantee is
-        # TIMEOUT-REAPING-specific (this path). The worker-CRASH path
-        # (workers._ensure_workers_healthy_locked) has its own signal-vs-attempt retry
-        # semantics and is intentionally not gated here; a crashed-orchestrator storm is a
-        # separate, rarer concern than the flat-wall-clock timeout storm this batch targets.
-        orchestrator = _queue()._has_live_descendant(task_id)
-        will_retry = (
-            attempt <= _queue().QUEUE_MAX_RETRIES
-            and isinstance(task, dict)
-            and not deadline_reached
-            and not ceiling_reached
-            and not orchestrator
-            and not has_owner_wait_checkpoint(meta, attempt)
-        )
-        # A stopped evolution campaign breaks the auto-retry chain. `st` is the live state
-        # loaded this tick, so this reflects the current owner decision.
-        if will_retry and task_type == "evolution" and not control_is(st, "evolution_mode_enabled", True):
-            will_retry = False
-        # An unreadable projection/lineage cannot authorize a new dispatch.
-        # Readable active intents already yielded the timeout rail above.
-        if will_retry and cancel_authority_unreadable:
-            will_retry = False
-        retry_task_id = ""
-        if will_retry:
-            same_id = task_type == "evolution" or str(task.get("delegation_role") or "") == "subagent"
-            retry_task_id = task_id if same_id else uuid.uuid4().hex[:8]
-
+        # Only independent hard bounds reach this memory-only reaper queue.
+        # Confirmed-dead worker recovery retains its separate crash retry policy.
         _queue()._ensure_reaper_started()
         _queue()._reap_queue.put({
             "worker_id": worker_id,
@@ -835,9 +859,7 @@ def _enforce_task_timeouts_locked(
             "hb_stale": hb_stale,
             "deadline_reached": deadline_reached,
             "ceiling_reached": ceiling_reached,
-            "orchestrator": orchestrator,
-            "will_retry": will_retry,
-            "retry_task_id": retry_task_id,
             "incident_toast_once": f"{task_id}:{terminal_reason}:{int(finalization_requested_at or now)}",
         })
         _queue().persist_queue_snapshot(reason="task_timeout_reap_queued")
+    return next_due

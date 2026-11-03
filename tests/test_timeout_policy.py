@@ -39,17 +39,14 @@ def test_transport_timeout_is_narrowed_by_numeric_owner_deadline(monkeypatch):
     assert deadlines.transport_timeout_with_deadline(90, deadline_ts=999.0) == 0.001
 
 
-def test_update_letter_timeout_is_a_clamped_config_getter(monkeypatch):
-    from ouroboros.config import SETTINGS_DEFAULTS, get_update_letter_timeout_sec
+def test_the_retired_update_letter_ceiling_has_no_getter_and_is_purged(monkeypatch):
+    """The description is ordinary work (Ouroboros#2389): its old one-shot ceiling bounds nothing."""
+    import ouroboros.config as config
+    from ouroboros.settings_defaults import RETIRED_SETTING_KEYS
 
-    monkeypatch.delenv("OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC", raising=False)
-    assert get_update_letter_timeout_sec() == float(SETTINGS_DEFAULTS["OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC"])
-    monkeypatch.setenv("OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC", "not-a-number")
-    assert get_update_letter_timeout_sec() == 120.0
-    monkeypatch.setenv("OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC", "0")
-    assert get_update_letter_timeout_sec() == 10.0
-    monkeypatch.setenv("OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC", "99999")
-    assert get_update_letter_timeout_sec() == 600.0
+    assert "OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC" in RETIRED_SETTING_KEYS
+    assert "OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC" not in config.SETTINGS_DEFAULTS
+    assert not hasattr(config, "get_update_letter_timeout_sec")
 
 
 def test_dispatch_window_distinguishes_no_deadline_from_spent_deadline(monkeypatch):
@@ -59,6 +56,20 @@ def test_dispatch_window_distinguishes_no_deadline_from_spent_deadline(monkeypat
     assert deadlines.dispatch_window_remaining_sec() is None
     assert deadlines.dispatch_window_remaining_sec(deadline_ts=1010.0, reserve_sec=3) == 7.0
     assert deadlines.dispatch_window_remaining_sec(deadline_ts=999.0) == 0.0
+
+
+def test_dispatch_window_end_is_that_window_as_an_instant_read_from_no_clock(monkeypatch):
+    from types import SimpleNamespace
+
+    import ouroboros.deadline_utils as deadlines
+
+    monkeypatch.setattr(deadlines, "time", SimpleNamespace(time=lambda: pytest.fail("no clock is read")))
+    monkeypatch.setattr(deadlines, "utc_now", lambda: pytest.fail("no clock is read"))
+    iso = "1970-01-01T00:16:50+00:00"  # 1010
+    assert deadlines.dispatch_window_end_ts() is None
+    assert deadlines.dispatch_window_end_ts(deadline_ts=1010.0, reserve_sec=3) == 1007.0
+    assert deadlines.dispatch_window_end_ts(deadline_at=iso, reserve_sec=3) == 1007.0
+    assert deadlines.dispatch_window_end_ts(deadline_ts=999.0, deadline_at=iso) == 999.0  # the epoch wins, unclamped
 
 
 def test_owner_deadline_admission_can_reserve_settlement_window(monkeypatch):
@@ -211,7 +222,9 @@ def test_review_timeout_override_rejects_non_finite_and_invalid_values(monkeypat
         }
 
 
-def test_review_route_owns_unset_logical_fallback(monkeypatch):
+def test_review_delivery_owns_unset_logical_fallback(monkeypatch):
+    """A packet row's one request settles at its socket bound; a retrieving row's many
+    requests never borrow it: a finite lifetime bounds them, else nothing does."""
     import ouroboros.config as config
     import ouroboros.deadline_utils as deadlines
 
@@ -219,12 +232,15 @@ def test_review_route_owns_unset_logical_fallback(monkeypatch):
     monkeypatch.setattr(config, "get_task_abs_ceiling_sec", lambda: 21_600)
     monkeypatch.setattr(deadlines, "llm_transport_timeout_sec", lambda *_args: 2_700.0)
 
-    assert deadlines.review_operation_timeout_sec(route="api_chat") == 2_700.0
-    assert deadlines.review_operation_timeout_sec(route="agent_session") == 21_600.0
-    assert deadlines.review_operation_timeout_sec(600, route="agent_session") == 600.0
+    assert deadlines.review_operation_timeout_sec() == 2_700.0
+    assert deadlines.review_operation_timeout_sec(retrieves=True) == 21_600.0
+    assert deadlines.review_operation_timeout_sec(600, retrieves=True) == 600.0
+    monkeypatch.setattr(config, "get_task_abs_ceiling_sec", lambda: None)
+    assert deadlines.review_operation_timeout_sec(retrieves=True) is None
+    assert deadlines.review_operation_timeout_sec() == 2_700.0
     monkeypatch.setenv("OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC", "900")
-    assert deadlines.review_operation_timeout_sec(route="api_chat") == 900.0
-    assert deadlines.review_operation_timeout_sec(route="agent_session") == 900.0
+    assert deadlines.review_operation_timeout_sec() == 900.0
+    assert deadlines.review_operation_timeout_sec(retrieves=True) == 900.0
 
 
 def test_plan_task_outer_envelope_covers_agent_session_lifetime(monkeypatch):
@@ -565,8 +581,11 @@ def test_exact_pending_commit_retry_reconciles_before_cycle_cap(tmp_path, monkey
     from types import SimpleNamespace
     from ouroboros.tools import git as git_tools
 
+    drive = tmp_path / "data"  # no recorded round choice to project
+    drive.mkdir()
     ctx = SimpleNamespace(
         repo_dir=tmp_path,
+        drive_root=drive,
         task_id="task-1",
         task_metadata={},
         _review_resume_pending=True,
@@ -667,6 +686,7 @@ def test_commit_pending_retry_reconciles_same_paid_attempt(tmp_path, monkeypatch
             operation_id = run_ctx._review_reserved_operations[
                 "multi_model_review"
             ]["slot_1"]
+            run_ctx._review_paid_stamp()  # the seat's physical dispatch, before it went pending
             run_ctx._last_triad_raw_results = [{
                 "slot_id": "slot_1", "model_id": "m1", "status": "error",
                 "operation_id": operation_id, "operation_state": "in_flight",

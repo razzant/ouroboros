@@ -12,17 +12,50 @@ def _heartbeat_ctx(tmp_path, task):
     pushed = []
     return types.SimpleNamespace(
         DRIVE_ROOT=tmp_path,
-        RUNNING={task["id"]: {"task": task, "started_at": time.time()}},
+        RUNNING={task["id"]: {"task": task, "started_at": time.time() - 1}},
         bridge=types.SimpleNamespace(push_log=pushed.append),
     ), pushed
 
 
-def test_routine_heartbeat_is_not_rendered_as_chat_message() -> None:
-    from supervisor import queue
+def _beat_flush_beat(handler, task_id, ctx, calls=None):
+    """A root's first heartbeat carries no figure and reads nothing; the turn's usage flush
+    reads it once (``LIVE_ROOT_COSTS``); the next heartbeat carries it, reading nothing."""
+    from ouroboros.server_liveness import flush_budget_projection
 
-    source = inspect.getsource(queue._enforce_task_timeouts_locked)
-    assert "running for" not in source
-    assert "heartbeat_lag=" not in source
+    handler({"task_id": task_id, "phase": "running", "ts": _now_iso()}, ctx)
+    assert calls is None or calls == [], "the heartbeat itself read the ledger"
+    flush_budget_projection(ctx)
+    handler({"task_id": task_id, "phase": "running", "ts": _now_iso()}, ctx)
+
+
+def _now_iso():
+    import datetime as dt
+
+    return dt.datetime.now(tz=dt.timezone.utc).isoformat()
+
+
+def _ledger(monkeypatch, answer):
+    """Replace the one ledger read of the live root heartbeat (``usage_breakdown`` with
+    custody coverage) and record each call; ``answer`` is the bucket or the error it raises."""
+    from ouroboros import usage_accounting
+
+    calls = []
+
+    def read(drive_root, **kwargs):
+        calls.append(kwargs)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(usage_accounting, "usage_breakdown", read)
+    return calls
+
+
+def _live_read(calls, root_task_id):
+    """The root heartbeat read its own subtree once, stale-allowed and with custody coverage."""
+    [call] = calls
+    assert call["root_task_id"] == root_task_id
+    assert call["allow_stale"] is True and call["include_custody"] is True
 
 
 def test_liveness_and_incident_controls_remain_active() -> None:
@@ -47,10 +80,9 @@ def test_liveness_and_incident_controls_remain_active() -> None:
 
 
 def test_root_heartbeat_carries_one_live_subtree_projection(tmp_path, monkeypatch):
-    from ouroboros import usage_accounting
     from supervisor.events import _handle_task_heartbeat
 
-    monkeypatch.setattr(usage_accounting, "usage_projection", lambda *_a, **_kw: {
+    calls = _ledger(monkeypatch, {
         "accounted_usd": 76.82, "reserved_usd": 1.25,
         "unresolved_upper_bound_usd": 0.5, "unknown_unmetered": 2,
         "non_final_rows": 3, "integrity_degraded": False, "cost_final": True,
@@ -58,9 +90,10 @@ def test_root_heartbeat_carries_one_live_subtree_projection(tmp_path, monkeypatc
     ctx, pushed = _heartbeat_ctx(tmp_path, {
         "id": "root-hb", "type": "task", "root_task_id": "root-hb",
     })
-    _handle_task_heartbeat({"task_id": "root-hb", "phase": "running"}, ctx)
+    _beat_flush_beat(_handle_task_heartbeat, "root-hb", ctx, calls)
 
-    frame = pushed[0]
+    _live_read(calls, "root-hb")
+    frame = pushed[-1]
     assert frame["accounted_upper_bound_usd_with_children"] == 76.82
     assert frame["cost_final"] is False
     assert frame["cost_with_children_partial"] is True
@@ -69,45 +102,42 @@ def test_root_heartbeat_carries_one_live_subtree_projection(tmp_path, monkeypatc
 
 
 def test_child_heartbeat_does_not_read_or_publish_live_cost(tmp_path, monkeypatch):
-    from ouroboros import usage_accounting
     from supervisor.events import _handle_task_heartbeat
 
-    monkeypatch.setattr(usage_accounting, "usage_projection", lambda *_a, **_kw: (
-        _ for _ in ()
-    ).throw(AssertionError("child heartbeat must not read the ledger")))
+    calls = _ledger(monkeypatch, AssertionError("child heartbeat must not read the ledger"))
     ctx, pushed = _heartbeat_ctx(tmp_path, {
         "id": "child-hb", "type": "task", "root_task_id": "root-hb",
         "parent_task_id": "root-hb", "delegation_role": "subagent",
     })
-    _handle_task_heartbeat({"task_id": "child-hb", "phase": "running"}, ctx)
+    _handle_task_heartbeat({"task_id": "child-hb", "phase": "running", "ts": _now_iso()}, ctx)
+    from ouroboros.server_liveness import flush_budget_projection
 
+    flush_budget_projection(ctx)  # a child marks no root: the flush reads nothing either
+    assert calls == []
     assert "cost_accounting_status" not in pushed[0]
     assert "accounted_upper_bound_usd_with_children" not in pushed[0]
 
 
 def test_root_heartbeat_keeps_ledger_failure_honest(tmp_path, monkeypatch):
-    from ouroboros import usage_accounting
     from supervisor.events import _handle_task_heartbeat
 
-    monkeypatch.setattr(usage_accounting, "usage_projection", lambda *_a, **_kw: (
-        _ for _ in ()
-    ).throw(OSError("ledger unavailable")))
+    calls = _ledger(monkeypatch, OSError("ledger unavailable"))
     ctx, pushed = _heartbeat_ctx(tmp_path, {
         "id": "root-hb", "type": "task", "root_task_id": "root-hb",
     })
-    _handle_task_heartbeat({"task_id": "root-hb", "phase": "running"}, ctx)
+    _beat_flush_beat(_handle_task_heartbeat, "root-hb", ctx, calls)
 
-    frame = pushed[0]
+    _live_read(calls, "root-hb")
+    frame = pushed[-1]
     assert frame["cost_accounting_status"] == "unavailable"
     assert frame["accounted_upper_bound_usd_with_children"] is None
     assert frame["cost_final"] is False
 
 
 def test_root_heartbeat_omits_empty_or_legacy_only_cost(tmp_path, monkeypatch):
-    from ouroboros import usage_accounting
     from supervisor.events import _handle_task_heartbeat
 
-    monkeypatch.setattr(usage_accounting, "usage_projection", lambda *_a, **_kw: {
+    calls = _ledger(monkeypatch, {
         "accounted_usd": 0.0, "attempt_counts": {"metadata_only": 4},
         "subscription_sessions": 0, "unknown_unmetered": 0,
         "non_final_rows": 0, "integrity_degraded": False,
@@ -115,16 +145,16 @@ def test_root_heartbeat_omits_empty_or_legacy_only_cost(tmp_path, monkeypatch):
     ctx, pushed = _heartbeat_ctx(tmp_path, {
         "id": "root-empty", "type": "task", "root_task_id": "root-empty",
     })
-    _handle_task_heartbeat({"task_id": "root-empty", "phase": "running"}, ctx)
+    _beat_flush_beat(_handle_task_heartbeat, "root-empty", ctx, calls)
 
-    assert "cost_accounting_status" not in pushed[0]
-    assert "accounted_upper_bound_usd_with_children" not in pushed[0]
+    _live_read(calls, "root-empty")
+    assert "cost_accounting_status" not in pushed[-1]
+    assert "accounted_upper_bound_usd_with_children" not in pushed[-1]
 
 
 def test_root_heartbeat_keeps_unknown_zero_cost_nullable_and_measured_zero_numeric(
     tmp_path, monkeypatch,
 ):
-    from ouroboros import usage_accounting
     from supervisor.events import _handle_task_heartbeat
 
     usage = {
@@ -132,22 +162,45 @@ def test_root_heartbeat_keeps_unknown_zero_cost_nullable_and_measured_zero_numer
         "subscription_sessions": 0, "unknown_unmetered": 1,
         "non_final_rows": 1, "integrity_degraded": False,
     }
-    monkeypatch.setattr(usage_accounting, "usage_projection", lambda *_a, **_kw: usage)
+    calls = _ledger(monkeypatch, usage)
     ctx, pushed = _heartbeat_ctx(tmp_path, {
         "id": "root-unknown", "type": "task", "root_task_id": "root-unknown",
     })
-    _handle_task_heartbeat({"task_id": "root-unknown", "phase": "running"}, ctx)
-    unknown = pushed[0]
+    _beat_flush_beat(_handle_task_heartbeat, "root-unknown", ctx, calls)
+    _live_read(calls, "root-unknown")
+    unknown = pushed[-1]
     assert unknown["cost_accounting_status"] == "available"
     assert unknown["accounted_upper_bound_usd_with_children"] is None
     assert unknown["unknown_unmetered"] == 1
 
-    usage = {**usage, "unknown_unmetered": 0, "non_final_rows": 0}
+    calls = _ledger(monkeypatch, {**usage, "unknown_unmetered": 0, "non_final_rows": 0})
     ctx, pushed = _heartbeat_ctx(tmp_path, {
         "id": "root-free", "type": "task", "root_task_id": "root-free",
     })
-    _handle_task_heartbeat({"task_id": "root-free", "phase": "running"}, ctx)
-    assert pushed[0]["accounted_upper_bound_usd_with_children"] == 0.0
+    _beat_flush_beat(_handle_task_heartbeat, "root-free", ctx, calls)
+    _live_read(calls, "root-free")
+    assert pushed[-1]["accounted_upper_bound_usd_with_children"] == 0.0
+
+
+def test_root_heartbeat_with_an_empty_ledger_and_an_open_run_is_unknown_not_absent(tmp_path):
+    """No ledger row yet, but a delegated run of this root is still open: the real read
+    publishes an unknown amount with its custody, never ``$0`` and never nothing."""
+    from ouroboros import delegate_custody as custody, usage_store
+    from supervisor.events import _handle_task_heartbeat
+
+    usage_store.migrate_from_journal(tmp_path)  # the server's startup phase; a stale display read never migrates
+    entry = custody.RunCustody(run_id="open-run", task_id="root-open", root_task_id="root-open", route_id="test")
+    assert custody.record_started(tmp_path, entry)
+    ctx, pushed = _heartbeat_ctx(tmp_path, {
+        "id": "root-open", "type": "task", "root_task_id": "root-open",
+    })
+    _beat_flush_beat(_handle_task_heartbeat, "root-open", ctx)
+
+    frame = pushed[-1]
+    assert frame["cost_accounting_status"] == "available"
+    assert frame["accounted_upper_bound_usd_with_children"] is None
+    assert frame["cost_custody"]["open_run_ids"] == ["open-run"]
+    assert frame["cost_final"] is False and frame["cost_with_children_partial"] is True
 
 
 def test_a_retired_liveness_knob_leaves_no_deprecation_chatter(tmp_path, monkeypatch) -> None:
@@ -302,7 +355,5 @@ def test_routine_cancel_outcomes_publish_nothing_to_the_owner_chat(monkeypatch) 
 
     _handle_cancel_task({"task_id": ""}, _Ctx2())
     assert sent == []
-    # The handler no longer carries the prose that leaked, nor a send at all: source pin.
-    src = inspect.getsource(_handle_cancel_task)
-    for leaked in ("teardown confirmed", "had already finished", "no such live task", "send_with_budget("):
-        assert leaked not in src
+    # Custody owns presentation; this event handler must not send its own row.
+    assert "send_with_budget(" not in inspect.getsource(_handle_cancel_task)

@@ -1,9 +1,9 @@
-"""A timed-out image call stays findable: real blocked reads, the real executor, recover_image().
+"""A timed-out image call stays findable through the executor and recover_image().
 
-The executor that abandons a timed-out tool reports a bare TOOL_TIMEOUT; its worker keeps the
-paid attempt and may still adopt the response. A wire mock cannot block a socket read, so each
-peer is a real 127.0.0.1 HTTP server whose chosen reply waits for the test. The deadline clamp
-is the real one.
+Recovery-state permutations pause an in-process HTTP exchange and inject only the caller's
+expired wait. The real worker, gateway, ledger and late adoption still run. Four socket cases
+keep the physical deadline proof: an engine result, late headers, a trickling body and a URL
+image download. Every call checks the real near-deadline clamp.
 """
 from __future__ import annotations
 
@@ -65,6 +65,33 @@ class _Peer(ThreadingHTTPServer):
         self.loop.join()
 
 
+class _Exchange:
+    """Pause a transport exchange without waiting out another physical deadline."""
+
+    url, loop = "http://127.0.0.1:1", None  # intercepted before any socket can be opened
+
+    def __init__(self, app, hold=lambda _request: False):
+        self.app, self.hold, self.requests = app, hold, []
+        self.release, self.entered = threading.Event(), threading.Event()
+
+    def send(self, request):
+        assert request.url.host == "127.0.0.1", request.url
+        self.requests.append((request.method, request.url.path))
+        if self.hold(request):
+            self.entered.set()
+            assert self.release.wait(60), "test did not release its paused image exchange"
+        return self.app(request)
+
+    def expired_wait(self, future, _timeout):
+        # This bounds a broken test's rendezvous, not a product timeout or outcome.
+        assert self.entered.wait(10), "the image worker did not reach the selected exchange"
+        assert not future.done(), "the exchange must still be held when the caller leaves"
+        raise TimeoutError("injected expiry after the image exchange entered")
+
+    def close(self):
+        self.release.set()
+
+
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -113,7 +140,11 @@ class _Handler(BaseHTTPRequestHandler):
 @pytest.fixture
 def peers():
     opened, before = [], set(threading.enumerate())
-    yield lambda *args: opened.append(_Peer(*args)) or opened[-1]
+    def open_peer(*args, real_socket=True):
+        opened.append((_Peer if real_socket else _Exchange)(*args))
+        return opened[-1]
+
+    yield open_peer
     for peer in opened:
         peer.release.set()
     for thread in set(threading.enumerate()) - before - {peer.loop for peer in opened}:
@@ -133,8 +164,8 @@ def _nth(method, path, nth=1):
     return hold
 
 
-def _engine(monkeypatch, peers, wire, hold=lambda _request: False):
-    peer = peers(wire, hold)
+def _engine(monkeypatch, peers, wire, hold=lambda _request: False, *, real_socket=True):
+    peer = peers(wire, hold, real_socket=real_socket)
     port = int(peer.url.rsplit(":", 1)[1])
     gateway = lambda: cx.ClaudexorGateway(cx.DaemonEndpoint("127.0.0.1", port, "test-control-token"))  # noqa: E731
     monkeypatch.setattr("ouroboros.claudexor_daemon.read_owned_gateway", gateway)
@@ -143,8 +174,9 @@ def _engine(monkeypatch, peers, wire, hold=lambda _request: False):
     return peer
 
 
-def _direct(monkeypatch, peers, app, hold=lambda _request: False, shape=lambda _request: None):
-    peer = peers(app, hold, shape)
+def _direct(monkeypatch, peers, app, hold=lambda _request: False, shape=lambda _request: None,
+            *, real_socket=True):
+    peer = peers(app, hold, shape) if real_socket else peers(app, hold, real_socket=False)
     monkeypatch.setattr(image_api, "resolve_image_target", lambda _model: {
         "provider": "openai", "model": "gpt-image-2", "base_url": peer.url + "/v1",
         "api_key": "fixture-secret", "headers": {}})
@@ -154,12 +186,17 @@ def _direct(monkeypatch, peers, app, hold=lambda _request: False, shape=lambda _
     return peer
 
 
-def _run(ctx, monkeypatch, peer, arguments, *, name="generate_image", during=None, keep_blocked=False):
+def _run(ctx, monkeypatch, peer, arguments, *, name="generate_image", during=None,
+         keep_blocked=False, expire_after_entry=False):
     """One call through the real clamp, executor, registry and wait owner. ``during`` runs
     after the executor answered and before the blocked peer is released."""
     if peer.release.is_set():
         peer.release = threading.Event()  # a spent release must not pre-release this call's hold
-    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", _loopback_only)
+    if isinstance(peer, _Exchange):
+        peer.entered.clear()
+        monkeypatch.setattr(httpx.HTTPTransport, "handle_request", lambda _transport, request: peer.send(request))
+    else:
+        monkeypatch.setattr(httpx.HTTPTransport, "handle_request", _loopback_only)
     registry, task = _setup(ctx, monkeypatch)
     # Stay inside the integer clamp bucket even when both reads share a Windows clock tick.
     deadline = datetime.now(timezone.utc) + timedelta(seconds=effective_finalization_reserve_sec(ctx) + _CLAMP_SEC + 0.5)
@@ -170,7 +207,11 @@ def _run(ctx, monkeypatch, peer, arguments, *, name="generate_image", during=Non
     before, started = set(threading.enumerate()), time.monotonic()
     with model_wait.task_model_wait_scope(task=task, drive_root=ctx.drive_root,
                                          event_queue=None, worker_slot_held=False) as owner:
-        result = execution._execute_with_timeout(registry, call, ctx.drive_root / "logs", timeout, ctx.task_id)
+        with monkeypatch.context() as wait:
+            if expire_after_entry:
+                assert isinstance(peer, _Exchange)
+                wait.setattr(execution, "future_result", peer.expired_wait)
+            result = execution._execute_with_timeout(registry, call, ctx.drive_root / "logs", timeout, ctx.task_id)
         elapsed = time.monotonic() - started
         assert owner.control_reason() is None, "the tool's own bound must not end the task"
         seen = during(registry) if during else None
@@ -220,7 +261,9 @@ def test_timed_out_engine_attempt_is_listed_then_recovered_by_its_original_id(ct
     hold = {"create-lost": _nth("POST", "/v2/model-operations"), "poll": _nth("GET", "/v2/model-operations/op-one"),
             "result": _nth("GET", _RESULT), "ack": _nth("POST", "/v2/model-operations/op-one/ack"),
             "recovery": _nth("GET", _RESULT, 2)}.get(stage, lambda _request: False)
-    peer = _engine(monkeypatch, peers, wire, hold)
+    # The result case retains the real blocked socket / 15-second executor boundary.
+    # Other stages preserve all recovery assertions without repeating that wall wait.
+    peer = _engine(monkeypatch, peers, wire, hold, real_socket=stage == "result")
     acks = lambda: [call for call in wire.calls if call.url.path.endswith("/ack")]  # noqa: E731
     arguments, name = {"prompt": "fixture", "model": _MODEL}, "generate_image"
     if stage == "recovery":
@@ -230,7 +273,8 @@ def test_timed_out_engine_attempt_is_listed_then_recovered_by_its_original_id(ct
         arguments, name = {"request_id": _summary(first["result"])["request_id"]}, "recover_image"
     found = {}
     registry, result, elapsed, _ = _run(ctx, monkeypatch, peer, arguments, name=name,
-                                        during=lambda registry: found.update(_discover(registry, ctx, peer)))
+                                        during=lambda registry: found.update(_discover(registry, ctx, peer)),
+                                        expire_after_entry=stage not in {"none", "result"})
     [listed] = found["attempts"]
     request_id = listed["request_id"]
     assert found["has_more"] is False and (listed["model"], listed["provider"]) == (_MODEL, "claudexor")
@@ -305,18 +349,20 @@ def test_timed_out_direct_attempt_is_listed_then_recovered_by_its_original_id(ct
 def test_concurrent_same_task_attempts_are_listed_separately_and_never_across_tasks(ctx, monkeypatch, peers):
     def app(_request):
         return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(PNG).decode()}], "padding": "." * 600})
-    peer = _direct(monkeypatch, peers, app, shape=lambda request: "trickle" if request.method == "POST" else None)
+    peer = _direct(monkeypatch, peers, app, hold=lambda request: request.method == "POST", real_socket=False)
     other = ToolContext(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root, task_id="other-image-task",
                         workspace_root=ctx.workspace_root, workspace_mode="external")
     usage_accounting.reserve_attempt(usage_accounting.AttemptRequest(
         model="openai::gpt-image-2", provider="openai", force_unknown_reservation=True, drive_root=ctx.drive_root,
         task_id=other.task_id, category="image_generation", source="imagegen"))
     arguments = {"prompt": "fixture", "model": "openai::gpt-image-2"}
-    _registry, first, elapsed, _ = _run(ctx, monkeypatch, peer, arguments, keep_blocked=True)
+    _registry, first, elapsed, _ = _run(ctx, monkeypatch, peer, arguments, keep_blocked=True,
+                                       expire_after_entry=True)
     _honest_timeout(first, elapsed)
     found = {}
     _registry, second, elapsed, _ = _run(ctx, monkeypatch, peer, arguments,
-                                         during=lambda registry: found.update(_discover(registry, ctx, peer)))
+                                         during=lambda registry: found.update(_discover(registry, ctx, peer)),
+                                         expire_after_entry=True)
     _honest_timeout(second, elapsed)
     ids = [row["request_id"] for row in found["attempts"]]
     # Both in-flight attempts, newest first; neither is chosen, the other task's is absent.

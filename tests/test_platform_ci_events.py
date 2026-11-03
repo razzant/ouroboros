@@ -1,9 +1,10 @@
-"""Ordinary desktop PR coverage at the existing CI matrix/event seam."""
+"""Manual/release CI admission and the retained job/secret boundaries."""
 
 from __future__ import annotations
 
 import json
 import re
+from fnmatch import fnmatchcase
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,41 +38,97 @@ def _value(expression, *, event, ref, base="", schedule="", cancelled=False, att
     })
 
 
+def _triggered(workflow, event, ref):
+    """Positive push filters used here, per GitHub workflow-syntax on.push docs.
+
+    Tags-only excludes the undefined branch ref type; check this BEFORE jobs.
+    This is not a general GitHub event/path/expression emulator.
+    """
+    triggers = workflow.get("on", workflow.get(True))
+    if event not in triggers:
+        return False
+    if event != "push":
+        return True
+    filters = triggers[event] or {}
+    for prefix, kind, other in (("refs/heads/", "branches", "tags"),
+                                 ("refs/tags/", "tags", "branches")):
+        if ref.startswith(prefix):
+            if kind not in filters:
+                return other not in filters
+            return any(fnmatchcase(ref[len(prefix):], pattern) for pattern in filters[kind])
+    return False
+
+
+@pytest.mark.parametrize("name", ["ci.yml", "ui-browser-push.yml", "provider-canary-push.yml"])
+@pytest.mark.parametrize("event,ref", [
+    ("push", "refs/heads/main"), ("push", "refs/heads/ouroboros"),
+    ("push", "refs/heads/ouroboros-stable"), ("push", "refs/heads/v7.7.0"),
+    ("pull_request", "refs/pull/42/merge"), ("pull_request_target", "refs/heads/ouroboros"),
+    ("schedule", "refs/heads/main"), ("push", "refs/tags/other"),
+    ("push", "refs/tags/v7.7.0"), ("push", "refs/tags/v8.0.0-rc.1"),
+    ("workflow_dispatch", "refs/heads/candidate"), ("workflow_dispatch", "refs/tags/v7.7.0"),
+])
+def test_ordinary_ci_triggers_only_on_request_or_release(name, event, ref):
+    workflow = yaml.safe_load((ROOT / ".github/workflows" / name).read_text(encoding="utf-8"))
+    expected = event == "workflow_dispatch" or (
+        name == "ci.yml" and event == "push" and ref.startswith("refs/tags/v"))
+    assert _triggered(workflow, event, ref) is expected
+
+
 @pytest.mark.parametrize("event,ref,base,quick,platforms", [
-    ("pull_request", "refs/pull/42/merge", "ouroboros", True, ["windows-latest", "macos-latest"]),
+    ("pull_request", "refs/pull/42/merge", "ouroboros", False, []),
     ("pull_request", "refs/pull/42/merge", "main", False, []),
-    # A landed commit gets the same two desktop systems a pull request gets; Ubuntu is quick-test.
-    ("push", "refs/heads/ouroboros", "", True, ["windows-latest", "macos-latest"]),
+    # Retained job predicates cannot bypass the removed workflow triggers.
+    ("push", "refs/heads/ouroboros", "", False, []),
     ("push", "refs/heads/main", "", False, []),
-    ("push", "refs/heads/ouroboros-stable", "", False, ["ubuntu-latest", "windows-latest", "macos-latest"]),
+    ("push", "refs/heads/ouroboros-stable", "", False, []),
     ("push", "refs/tags/v7.0.0", "", False, ["ubuntu-latest", "windows-latest", "macos-latest"]),
     ("workflow_dispatch", "refs/heads/candidate", "", True, ["ubuntu-latest", "windows-latest", "macos-latest"]),
     ("schedule", "refs/heads/main", "", False, []),
 ])
-def test_ordinary_matrix_covers_prs_and_landed_pushes_and_keeps_other_events(event, ref, base, quick, platforms):
+def test_ordinary_matrix_requires_admitted_manual_or_tag_event(event, ref, base, quick, platforms):
     facts = {"event": event, "ref": ref, "base": base}
-    assert bool(_value(WORKFLOW["jobs"]["quick-test"]["if"], **facts)) is quick
+    triggered = _triggered(WORKFLOW, event, ref)
+    assert (triggered and bool(_value(WORKFLOW["jobs"]["quick-test"]["if"], **facts))) is quick
     job = WORKFLOW["jobs"]["full-test-runs"]
-    admitted = _value(job["if"], **facts)
-    actual = _value(job["strategy"]["matrix"]["os"], **facts) if admitted else []
-    if admitted:
-        actual += [row["os"] for row in job["strategy"]["matrix"]["include"]]
+    admitted = triggered and _value(job["if"], **facts)
+    rows = job["strategy"]["matrix"]["include"]
+    actual = [row["os"] for row in rows] if admitted else []
     assert sorted(set(actual)) == sorted(platforms)
-    assert actual.count("windows-latest") == (4 if "windows-latest" in platforms else 0)
-    assert all(actual.count(os) == 1 for os in platforms if os != "windows-latest")
+    # Every OS runs whole-file duration shards 1..N; macOS stays within the free plan's five slots.
+    shards = {"ubuntu-latest": 4, "macos-latest": 4, "windows-latest": 8}
+    for os, count in shards.items():
+        assert actual.count(os) == (count if os in platforms else 0)
+        mine = [row for row in rows if row["os"] == os]
+        assert sorted(row["shard"] for row in mine) == list(range(1, count + 1))
+        assert {row["shards"] for row in mine} == {count}
     assert job["strategy"]["fail-fast"] is False
     assert job["runs-on"] == "$" + "{{ matrix.os }}"
 
 
-def test_desktop_pr_matrix_keeps_merge_checkout_and_pr_base_evidence_secret_free():
+@pytest.mark.parametrize("name", ["quick-test", "sqlite-floor", "betterleaks-platform-smoke"])
+@pytest.mark.parametrize("event,ref,expected", [
+    ("workflow_dispatch", "refs/heads/candidate", True),
+    ("push", "refs/tags/v7.7.0", False),
+    ("push", "refs/heads/ouroboros", False),
+    ("pull_request", "refs/pull/42/merge", False),
+])
+def test_additional_pre_tag_checks_require_manual_dispatch(name, event, ref, expected):
+    admitted = _triggered(WORKFLOW, event, ref) and bool(_value(
+        WORKFLOW["jobs"][name]["if"], event=event, ref=ref, base="ouroboros"))
+    assert admitted is expected
+
+
+def test_dormant_pr_predicates_keep_checkout_and_base_evidence_secret_free():
     triggers = WORKFLOW.get("on") or WORKFLOW[True]  # PyYAML's YAML 1.1 spelling of "on".
-    assert triggers["pull_request"]["branches"] == ["ouroboros"]
+    assert "pull_request" not in triggers
     assert "pull_request_target" not in triggers
     assert WORKFLOW["permissions"] == {"contents": "read"}
-    job = WORKFLOW["jobs"]["full-test-runs"]
+    job = WORKFLOW["jobs"]["quick-test"]
     assert "secrets." not in json.dumps(job)
-    # The book-growth exception reads PR label events, without any write grant.
-    assert job["permissions"] == {"contents": "read", "pull-requests": "read"}
+    # The book-growth exception reads PR label events and the accepted-failure check reads
+    # issue label events, without any write grant.
+    assert job["permissions"] == {"contents": "read", "pull-requests": "read", "issues": "read"}
     checkout = job["steps"][0]
     assert checkout["uses"] == "actions/checkout@v4"
     assert checkout["with"] == {"fetch-depth": 0}  # Default PR checkout tests the merge ref.
@@ -130,8 +187,7 @@ def test_desktop_pr_coverage_does_not_admit_provider_or_release_jobs(name):
     ("schedule", "refs/heads/main", "17 3 * * *", False),
 ])
 def test_provider_canaries_join_this_workflow_only_for_manual_runs_and_tags(event, ref, schedule, called):
-    """Branch pushes reach the canaries through provider-canary-push.yml, so a
-    provider outage on a landed commit leaves this workflow's result to the code."""
+    """Provider jobs retain their required/optional manual/tag qualification split."""
     for name, scope in (("integration-test", "required"), ("integration-optional", "optional")):
         job = WORKFLOW["jobs"][name]
         assert job["uses"] == "./.github/workflows/provider-canary.yml"
@@ -152,33 +208,26 @@ def test_status_checks_and_inequality_keep_independent_meanings(event, cancelled
     ) is expected
 
 
-@pytest.mark.parametrize("event,attempt,group,cancels", [
-    ("pull_request", 1, "ci-pr-42", True),
-    # GitHub keeps one pending run per group: a re-run of an old head must not share the new head's.
-    ("pull_request", 2, "ci-run-77-2", False),
-    ("push", 1, "ci-run-77-1", False),
-    ("schedule", 1, "ci-run-77-1", False),
-    ("workflow_dispatch", 1, "ci-run-77-1", False),
+@pytest.mark.parametrize("event,attempt,group", [
+    ("push", 1, "ci-run-77-1"),
+    # GitHub keeps one pending run per group: every attempt owns its group, so none displaces another.
+    ("push", 2, "ci-run-77-2"),
+    ("workflow_dispatch", 1, "ci-run-77-1"),
 ])
-def test_only_a_new_pull_request_head_cancels_a_run(event, attempt, group, cancels):
+def test_every_run_attempt_has_its_own_group_and_cancels_nothing(event, attempt, group):
     concurrency = WORKFLOW["concurrency"]
     facts = {"event": event, "ref": "refs/heads/candidate", "attempt": attempt}
     assert _value(concurrency["group"], **facts) == group
-    assert bool(_value(concurrency["cancel-in-progress"], **facts)) is cancels
+    assert concurrency["cancel-in-progress"] is False
 
 
-def test_landed_push_desktop_matrix_runs_in_this_repository_only():
-    """A private copy that pushes its own commits keeps the Ubuntu quick job and pays no desktop minutes."""
+def test_manual_and_tag_desktop_matrix_remains_available_to_forks():
+    """No automatic branch tests; explicit qualification still covers three OSes."""
     job = WORKFLOW["jobs"]["full-test-runs"]
-    push = {"event": "push", "ref": "refs/heads/ouroboros"}
-    assert _value(job["if"], **push)
-    assert not _value(job["if"], **push, repository="someone/private-copy")
-    assert _value(WORKFLOW["jobs"]["quick-test"]["if"], **push, repository="someone/private-copy")
-    # Pull requests, stable pushes, manual runs and tags keep their matrix in every repository.
-    for event, ref, base in (("pull_request", "refs/pull/42/merge", "ouroboros"),
-                             ("push", "refs/heads/ouroboros-stable", ""),
-                             ("workflow_dispatch", "refs/heads/candidate", ""), ("push", "refs/tags/v7.0.0", "")):
-        assert _value(job["if"], event=event, ref=ref, base=base, repository="someone/private-copy")
+    assert not _triggered(WORKFLOW, "push", "refs/heads/ouroboros")
+    for event, ref in (("workflow_dispatch", "refs/heads/candidate"), ("push", "refs/tags/v7.7.0")):
+        assert _triggered(WORKFLOW, event, ref)
+        assert _value(job["if"], event=event, ref=ref, repository="someone/private-copy")
 
 
 @pytest.mark.parametrize("run_id,module", [
@@ -223,8 +272,8 @@ def test_the_windows_leg_runs_its_browser_modules_and_refuses_a_skip(tmp_path, r
                               + module)
     assert " -m ui_browser -k chromium " in command and "--require-ui-browser" not in command
     assert "matrix" not in run["run"]
-    assert "matrix.shard <= 1" in install["if"] and "matrix.shard <= 1" in run["if"]
-    assert job["strategy"]["matrix"].keys() == {"os", "shard", "include"}
+    assert "matrix.shard == 1" in install["if"] and "matrix.shard == 1" in run["if"]
+    assert job["strategy"]["matrix"].keys() == {"include"}
     # The skip guard, run as written against a junit report of each shape.
     for tests, skipped, ok in ((3, 0, True), (3, 1, False), (0, 0, False)):
         report = tmp_path / "attachment-browser.xml"
@@ -237,8 +286,24 @@ def test_the_windows_leg_runs_its_browser_modules_and_refuses_a_skip(tmp_path, r
         return
     # The sizing evidence reaches the artifact: safe_test keeps the evidence root, the step fails
     # without the geometry it wrote, and the upload takes that root whatever the test's outcome.
-    safe_test = (ROOT / "scripts/safe_test.py").read_text(encoding="utf-8")
-    assert '"OUROBOROS_UI_EVIDENCE_DIR"' in safe_test.split("keep=(", 1)[1].split("))", 1)[0]
+    # Exercise the launcher rather than pinning a duplicated keep-list literal:
+    # the shared diagnostic-key vocabulary may supply it through a splat.
+    import os
+    destination = tmp_path / "selected-composer-evidence"
+    probe = ("import os,pathlib; p=pathlib.Path(os.environ['OUROBOROS_UI_EVIDENCE_DIR']); "
+             "p.mkdir(parents=True); (p/'geometry.json').write_text('[]'); "
+             "assert 'OPENAI_API_KEY' not in os.environ; print(p)")
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", str(ROOT / "scripts/safe_test.py"),
+         "--temp-parent", str(tmp_path), "--evidence-dir", str(tmp_path / "launcher-evidence"),
+         "--", sys.executable, "-c", probe], cwd=ROOT,
+        env={**os.environ, "OUROBOROS_UI_EVIDENCE_DIR": str(destination),
+             "OPENAI_API_KEY": "synthetic-must-be-scrubbed"},
+        capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert str(destination) in result.stdout
+    assert (destination / "geometry.json").read_text() == "[]"
+    assert "SAFE_TEST_RELEASED " in result.stderr
     root = run["env"]["OUROBOROS_UI_EVIDENCE_DIR"]
     assert root == "${{ runner.temp }}/ci-evidence/composer"
     [written] = evidence

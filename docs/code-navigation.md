@@ -122,9 +122,11 @@ requests can move, add or remove rows; an offset is not an immutable snapshot.
 Inventory operations enumerate visible files, including nested Git repositories
 under their own ignore rules. References/callers start from admitted paths, parse
 token-matched current sources, and extract only matched-file facts for selector
-ordering after collecting rows, on the same deadline. Other outline/impact
-operations retain their eager preparation and cold cost. `structural` has its own
-bounded walk; architecture reads pinned carriers; their universes can differ.
+ordering after collecting rows, on the same deadline. Definition parses only admitted
+files whose current bytes can hold the name (Python identifiers after NFKC); others
+stay `name_absent`. Other outline/impact operations keep their eager preparation and
+cold cost. `structural` has its own bounded walk; architecture reads pinned carriers;
+their universes can differ.
 `search_code` has separate enumeration: long matches show a first-match window
 per matched reader line, with an exact `read_file(start_line, start_char)` range
 or a named translation gap. Translatable window rows use the reader's
@@ -195,8 +197,8 @@ or time limits, skipped or excluded files, syntax errors) are named as a coverag
 empty or short owner list is not reported as absence. Module-path and dotted
 lookups read only the manifest. The existing import-text and
 relative-import helpers remain available to their architecture/review consumers.
-Restricted/scoped and path-only views never overwrite the shared inventory cache.
-A bounded full-source refresh keeps unvisited prior facts only in that disposable
-cache, never in current returned rows. Reuse checks current path/hash; a complete
-refresh removes deleted files. This avoids needless reparsing, not a new freshness
-guarantee. Retention/reset: [PERSISTENCE](PERSISTENCE.md).
+Restricted/scoped, path-only and name-prepared views never overwrite the shared
+inventory cache. A bounded full-source refresh keeps unvisited prior facts only in
+that disposable cache, never in current returned rows. Reuse checks current
+path/hash; a complete refresh removes deleted files. This avoids needless
+reparsing, not a new freshness guarantee. Retention/reset: [PERSISTENCE](PERSISTENCE.md).

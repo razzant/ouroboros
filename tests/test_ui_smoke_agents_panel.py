@@ -379,3 +379,73 @@ def test_ui_smoke_agents_panel_wizard_finish_judges_the_roster(direct_server_wit
         if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
             pytest.skip(str(exc))
         raise
+
+
+_LIST_EDITOR_ENTRIES = {
+    "OUROBOROS_MODEL_FALLBACKS": "openai/gpt-5.6-luna, openai/gpt-5.6-sol, openai/gpt-5.6-terra",
+    "MCP_ENABLED": False,
+    "MCP_SERVERS": [{"id": sid, "name": sid, "transport": "streamable_http", "enabled": False,
+                     "url": f"https://{sid}.invalid/mcp",
+                     **({"headers": {"X-A": "synthetic-a", "X-B": "synthetic-b"}} if sid == "alpha" else {})}
+                    for sid in ("alpha", "beta", "gamma")],
+    "REMOVE_FOCUS_ONE": "synthetic-one", "REMOVE_FOCUS_TWO": "synthetic-two",
+}
+
+
+@pytest.mark.ui_browser
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_ui_smoke_list_editor_remove_hands_the_caret_on(direct_server_with_data, engine):
+    """A keyboard Remove in every Settings list editor hands the caret to the entry now in
+    that place (the next, else the previous) and, once the list is empty, to the group's Add:
+    never to the page (docs/DESIGN.md "List editors")."""
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import expect, sync_playwright
+    from tests.test_subscription_setup_browser import capture
+
+    settings_path = direct_server_with_data["data_dir"] / "settings.json"
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+    saved.update(_LIST_EDITOR_ENTRIES, OUROBOROS_SUBAGENTS=json.dumps(_AGENTS_PANEL_ROSTER))
+    settings_path.write_text(json.dumps(saved), encoding="utf-8")
+    direct_server_with_data["restart_server"]()
+
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch()
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 900})
+            _open_agents_tab(page, direct_server_with_data["url"])
+
+            def remove(buttons, index, target, value=None):
+                buttons.nth(index).focus()
+                page.keyboard.press("Enter")
+                expect(page.locator(f"{target}:focus")).to_have_count(1)
+                if value is not None:
+                    expect(page.locator(":focus")).to_have_value(value)
+
+            subagents = page.locator("[data-subagent-remove]")
+            description = '[data-subagent-field="recommended_use"]'
+            remove(subagents, 1, description, "Fast independent research.")
+            remove(subagents, 1, description, "Main workhorse for code and design.")
+            remove(subagents, 0, "[data-subagent-add]")
+
+            page.click('[data-settings-tab="models"]')
+            fallbacks = page.locator("[data-model-remove]")
+            remove(fallbacks, 0, "[data-model-role-model]")
+            remove(fallbacks, 1, "[data-model-role-model]")
+            remove(fallbacks, 0, "[data-model-add]")
+
+            page.click('[data-settings-tab="advanced"]')
+            headers = page.locator("[data-mcp-header-remove]")
+            remove(headers, 0, '[data-mcp-header-field="name"]', "X-B")
+            remove(headers, 0, "[data-mcp-header-add]")
+            servers = page.locator("[data-mcp-remove]")
+            remove(servers, 2, '[data-mcp-field="id"]', "beta")
+            remove(servers, 0, '[data-mcp-field="id"]', "beta")
+            remove(servers, 0, "#btn-mcp-add-server")
+
+            page.click('[data-settings-tab="secrets"]')
+            keys = page.locator("[data-custom-secret-row]:not([hidden]) [data-custom-secret-remove]")
+            remove(keys, 0, "[data-custom-secret-key]", "REMOVE_FOCUS_TWO")
+            remove(keys, 0, "#btn-add-custom-secret")
+            capture(page, f"list-editor-remove-focus-{engine}")
+        finally:
+            browser.close()

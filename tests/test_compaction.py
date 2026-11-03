@@ -1,9 +1,10 @@
-"""Focused contract tests for complete-input context reclaim."""
+"""Focused contract tests for the unit reader and the mind's authored fold."""
 
 from __future__ import annotations
 
 import copy
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -53,34 +54,16 @@ def _request(messages: list[dict], *, goal: int = 1_000_000) -> ContextReclaimRe
     )
 
 
-def _install_successful_materializer(monkeypatch, events: list[str] | None = None) -> None:
-    monkeypatch.setattr(cc, "_summarizer_spec", lambda: {
-        "model": "light-model",
-        "resolved_model": "light-model",
-        "provider": "test",
-        "route_fp": "summary-route",
-        "effort": "low",
-        "output_budget": 32_768,
-        "use_local": False,
-    })
+def _authored(messages: list[dict], *, note: str = "I read the evidence; the conclusion holds.", keep=()) -> ContextReclaimRequest:
+    """The mind's own fold of the observed view: a note, the units it keeps raw."""
+    return replace(_request(messages), working_note=note,
+                   expected_view_revision=cc.context_reclaim_transcript_sha256(messages), keep_unit_ids=keep)
 
-    def checkpoint(*_args, **_kwargs):
-        if events is not None:
-            events.append("checkpoint")
-        return {"path": "calls/checkpoint.json", "sha256": "c" * 64}
 
-    def summarize(parts, *, usage_total, **_kwargs):
-        if events is not None:
-            events.append("summary")
-        cc._record_usage(usage_total, {
-            "prompt_tokens": len(parts) * 11,
-            "completion_tokens": len(parts) * 3,
-            "provider": "test",
-        })
-        return {part.source_id: f"covered {part.sha256}" for part in parts}
-
-    monkeypatch.setattr(cc, "_persist_reclaim_checkpoint", checkpoint)
-    monkeypatch.setattr(cc, "_call_summarizer", summarize)
+def _fold(messages: list[dict], request: ContextReclaimRequest, tmp_path):
+    return cc.compact_tool_history_llm(
+        messages, request=request, observed_messages=messages, tool_schemas=[],
+        fit_candidate=lambda *_: {"accepted": True}, drive_root=tmp_path, task_id="compaction")
 
 
 def test_atomic_units_require_all_and_only_contiguous_matching_results():
@@ -141,166 +124,65 @@ def test_atomic_source_keeps_complete_arguments_results_and_trace_ref():
     assert unit.source_refs == (trace_ref,)
 
 
-@pytest.mark.parametrize(
-    ("messages", "status"),
-    [
-        ([{"role": "user", "content": "only a user turn"}], "no_eligible"),
-        (_unit("tiny", argument="{}", result="ok"), "no_positive_reclaim"),
-    ],
-)
-def test_zero_eligible_or_useful_does_no_checkpoint_or_summary(
-    monkeypatch, messages, status,
-):
-    events: list[str] = []
-    _install_successful_materializer(monkeypatch, events)
+def test_a_request_without_a_note_is_refused_before_any_checkpoint(monkeypatch, tmp_path):
+    """Both directions: no helper writes the note, so a note-less request changes nothing and
+    writes no checkpoint; the same selection with the mind's note is materialized."""
+    messages = _large_unit("note-less")
     before = copy.deepcopy(messages)
+    monkeypatch.setattr(cc, "_persist_reclaim_checkpoint",
+                        lambda *_a, **_k: pytest.fail("a refused request must not checkpoint"))
 
-    rebuilt, receipt, usage = cc.compact_tool_history_llm(
-        messages, request=_request(messages, goal=100), negative_memo=set(),
-    )
+    rebuilt, receipt = _fold(messages, _request(messages), tmp_path)
 
-    assert rebuilt is messages
-    assert messages == before
-    assert receipt.status == status
+    assert rebuilt is messages and messages == before
+    assert receipt.status == "authored_note_required"
     assert receipt.before_transcript_sha256 == receipt.after_transcript_sha256
-    assert events == []
-    assert usage is None
+    monkeypatch.setattr(cc, "_persist_reclaim_checkpoint",
+                        lambda *_a, **_k: {"path": "calls/checkpoint.json", "sha256": "c" * 64})
+    folded, applied = _fold(messages, _authored(messages), tmp_path)
+    assert applied.status == "applied" and len(folded) == 1 and messages == before
 
 
-def test_checkpoint_is_after_selection_and_before_summarizer(monkeypatch, tmp_path):
+def test_an_authored_fold_checkpoints_the_exact_source_before_its_capsule(monkeypatch, tmp_path):
     events: list[str] = []
-    _install_successful_materializer(monkeypatch, events)
     messages = _large_unit("ordered")
     _stamp_trace(messages, {"path": "calls/ordered.json", "sha256": "d" * 64})
 
-    rebuilt, receipt, usage = cc.compact_tool_history_llm(
-        messages,
-        request=_request(messages, goal=100),
-        drive_root=tmp_path,
-        trace_refs_by_tool_call_id={
-            "ordered": {"path": "calls/ordered.json", "sha256": "d" * 64},
-        },
-        negative_memo=set(),
-    )
+    def checkpoint(*_args, **_kwargs):
+        events.append("checkpoint")
+        return {"path": "calls/checkpoint.json", "sha256": "c" * 64}
 
-    assert events == ["checkpoint", "summary"]
+    monkeypatch.setattr(cc, "_persist_reclaim_checkpoint", checkpoint)
+    rebuilt, receipt = _fold(messages, _authored(messages), tmp_path)
+
+    assert events == ["checkpoint"]
     assert receipt.status == "applied"
-    assert len(rebuilt) == 1
+    assert len(rebuilt) == 1 and rebuilt[0]["role"] == "assistant"
     capsule = rebuilt[0]["content"][0]["_context_capsule"]
-    assert capsule["generation"] == 1
+    assert rebuilt[0]["content"][0]["text"].startswith("[Actor-authored working view; exact source retained by checkpoint]\n")
+    assert capsule["authorship"] == "actor" and capsule["generation"] == 1
     assert capsule["retention"] == "summarized"
     assert capsule["checkpoint_ref"]["sha256"] == "c" * 64
-    assert capsule["source_refs"][0]["sha256"] == "d" * 64
+    assert {"path": "calls/ordered.json", "sha256": "d" * 64} in capsule["source_refs"]
     assert capsule["parts"][0]["start_char"] == 0
     assert capsule["parts"][-1]["end_char"] == capsule["source_length_chars"]
     assert receipt.capsule_refs[0]["generation"] == 1
-    assert usage["prompt_tokens"] == 11
-    assert usage["completion_tokens"] == 3
 
 
-def test_checkpoint_failure_keeps_raw_and_makes_no_summarizer_call(monkeypatch):
+def test_checkpoint_failure_keeps_the_source_raw(monkeypatch, tmp_path):
     messages = _large_unit("checkpoint-fail")
-    _install_successful_materializer(monkeypatch)
     monkeypatch.setattr(cc, "_persist_reclaim_checkpoint", lambda *_a, **_k: None)
-    monkeypatch.setattr(
-        cc, "_call_summarizer",
-        lambda *_a, **_k: pytest.fail("summarizer must not run without checkpoint"),
-    )
 
-    rebuilt, receipt, usage = cc.compact_tool_history_llm(
-        messages, request=_request(messages, goal=100), negative_memo=set(),
-    )
+    rebuilt, receipt = _fold(messages, _authored(messages), tmp_path)
 
     assert rebuilt is messages
     assert receipt.status == "checkpoint_failed"
-    assert usage is None
 
 
-def test_complete_summarizer_payload_has_no_head_or_structural_omission(
-    monkeypatch, tmp_path,
-):
-    from ouroboros import llm, llm_observability
-
-    tail = "TAIL-IS-PRESENT"
-    part = cc._part("unit:1:2:abcdef", "head\n" + "middle" * 2_000 + tail)
-    seen: dict = {}
-
-    def fake_chat_observed(_client, **kwargs):
-        seen.update(kwargs)
-        arguments = json.dumps({
-            "summaries": [{"source_id": part.source_id, "summary": "complete"}],
-        })
-        return ({
-            "content": "",
-            "tool_calls": [{
-                "function": {"name": "emit_context_summaries", "arguments": arguments},
-            }],
-        }, {"prompt_tokens": 17, "completion_tokens": 2, "provider": "test"})
-
-    monkeypatch.setattr(llm, "LLMClient", lambda: object())
-    monkeypatch.setattr(llm_observability, "chat_observed", fake_chat_observed)
-    usage: dict = {}
-    summaries = cc._call_summarizer(
-        [part],
-        drive_root=tmp_path,
-        task_id="task",
-        phase="map",
-        spec={"model": "m", "effort": "low", "use_local": False},
-        summary_budgets={part.root_id: 700},
-        usage_total=usage,
-    )
-
-    prompt = seen["messages"][0]["content"]
-    payload = json.loads(prompt[prompt.index('[{"source_id"'):])
-    assert payload[0]["content"] == part.text
-    assert payload[0]["summary_budget_tokens"] == 700
-    assert tail in prompt
-    assert "CONTENT_OMITTED" not in prompt
-    assert "LONG_STRING" not in prompt
-    assert summaries == {part.source_id: "complete"}
-    assert seen["max_tokens"] == 32_768
-    assert seen["model"] == "m"
-    assert seen["reasoning_effort"] == "low"
-    assert usage["prompt_tokens"] == 17
-
-
-def test_structured_summary_requires_exactly_one_tool_call():
-    payload = json.dumps({
-        "summaries": [{"source_id": "source", "summary": "complete"}],
-    })
-    call = {
-        "function": {
-            "name": "emit_context_summaries",
-            "arguments": payload,
-        },
-    }
-
-    assert cc._parse_structured_summaries({"tool_calls": [call]}) == {
-        "source": "complete",
-    }
-    assert cc._parse_structured_summaries({"tool_calls": [call, call]}) == {}
-
-
-def test_valid_capsule_recompacts_and_corrupt_capsule_stays_raw(monkeypatch, tmp_path):
-    _install_successful_materializer(monkeypatch)
+def test_a_second_fold_over_an_actor_note_keeps_its_lineage_and_a_corrupt_capsule_stays_raw(tmp_path):
     messages = _large_unit("generation", "g")
-    calls = 0
-
-    def summaries(parts, *, usage_total, **_kwargs):
-        nonlocal calls
-        calls += 1
-        text = "S" * 3_000 if calls == 1 else "small second-generation summary"
-        return {part.source_id: text for part in parts}
-
-    monkeypatch.setattr(cc, "_call_summarizer", summaries)
-    first, first_receipt, _ = cc.compact_tool_history_llm(
-        messages, request=_request(messages, goal=100), drive_root=tmp_path,
-        negative_memo=set(),
-    )
-    second, second_receipt, _ = cc.compact_tool_history_llm(
-        first, request=_request(first, goal=100), drive_root=tmp_path,
-        negative_memo=set(),
-    )
+    first, first_receipt = _fold(messages, _authored(messages, note="First account. " * 200), tmp_path)
+    second, second_receipt = _fold(first, _authored(first, note="Merged account."), tmp_path)
 
     first_meta = first[0]["content"][0]["_context_capsule"]
     second_meta = second[0]["content"][0]["_context_capsule"]
@@ -318,26 +200,23 @@ def test_valid_capsule_recompacts_and_corrupt_capsule_stays_raw(monkeypatch, tmp
     assert cc._atomic_units(corrupt_hash) == ()
 
 
-def test_legacy_omission_api_is_deleted():
-    source = cc.pathlib.Path(cc.__file__).read_text(encoding="utf-8")
-    for forbidden in (
-        "_SUMMARY_INPUT_LIMIT", "_excerpt_for_summary", "_compact_argument_value",
-        "LONG_STRING", "CONTENT_OMITTED", "def compact_tool_history(",
-        "_round_has_protected_content", "_tool_round_spans",
-    ):
-        assert forbidden not in source
+def test_count_only_compact_context_answers_authored_note_required_and_advertises_no_helper():
+    """Both directions: a count without a note queues nothing and names what is missing; the
+    same count beside the mind's note queues the authored view."""
+    from ouroboros.tools.compact_context import _compact_context, get_tools, record_context_view
 
-
-def test_manual_compact_context_copy_is_truthful_about_summary_and_provenance():
-    from ouroboros.tools.compact_context import _compact_context, get_tools
-
-    ctx = SimpleNamespace()
+    ctx = SimpleNamespace(active_context_mode="max", _active_builtin_tool_result=None)
+    record_context_view(ctx, _unit("seen"), [])
     result = _compact_context(ctx, keep_last_n=4)
     description = get_tools()[0].schema["description"]
 
-    assert ctx._pending_compaction == 4
-    assert "active-context" in result
-    assert "summaries" in result
-    assert "checkpoint/CAS provenance" in result
+    assert getattr(ctx, "_pending_compaction", None) is None
+    assert "authored_note_required" in result and "working_note" in result
+    assert ctx._active_builtin_tool_result.status == "error"
+    assert ctx._active_builtin_tool_result.code == "TOOL_ARG_ERROR"
+    assert "no helper summarizes for you" in description.lower()
+    assert "summaries without a note" not in description.lower()
     assert "raw evidence remains retrievable" in description.lower()
     assert "no information is lost" not in description.lower()
+    assert "requested" in _compact_context(ctx, keep_last_n=4, working_note="Four units stay raw.")
+    assert isinstance(ctx._pending_compaction, dict) and ctx._pending_compaction["working_note"] == "Four units stay raw."

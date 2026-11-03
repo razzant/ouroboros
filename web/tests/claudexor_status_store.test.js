@@ -35,7 +35,6 @@ import {
     readsFor,
     statusPayloadValid,
     statusUnavailableNote,
-    unifiedAccounts,
 } from '../modules/claudexor_status_store.js';
 
 // A payload shaped like the producer's own: `_status_payload` sets
@@ -218,25 +217,28 @@ test('a GLOBAL refusal is one coarse indeterminate — never three per-facet ver
 });
 
 test("GOLDEN: today's producer payload, with two reads that SUCCEEDED and one that refused", () => {
-    // Captured from the REAL producer (`gateway/claudexor_accounts.py::
-    // _status_payload`) with the catalog and credential-profile reads landing
-    // and only the quota probe raising ClaudexorUnavailable. Regenerate with
-    // the same stub if the producer's shape moves; the point of a golden is
-    // that this file, not a hand-written double, is what the client is judged
-    // against.
+    // Produced by the REAL producer (`gateway/claudexor_accounts.py::
+    // _status_payload`) over faked engine HTTP: the catalog and a unified
+    // roster land, and only the quota read is refused with a typed problem.
+    // tests/test_claudexor_status_passive.py holds this file to that producer
+    // and says how to regenerate it; the point of a golden is that this file,
+    // not a hand-written double, is what the client is judged against.
     const golden = JSON.parse(readFileSync(
         new URL('./fixtures/status_quota_refused.json', import.meta.url), 'utf8'));
 
-    // Today's wire: a full per-facet stamp beside the survivors' data, and the
-    // aggregate still says `unreachable` — which is exactly why no consumer may
-    // read the aggregate as a per-facet verdict.
+    // Today's wire: a full per-facet stamp beside the survivors' data. The
+    // refusal is the quota facet's own typed error; the daemon that answered
+    // the other two reads stays `running`.
     assert.deepEqual(golden.reads,
         { catalog: 'ok', accounts: 'ok', quota: 'failed' },
         'the producer stamps every facet');
-    assert.equal(golden.daemon.state, 'unreachable');
-    assert.match(golden.daemon.last_error, /quota_probe_failed/);
+    assert.equal(golden.daemon.state, 'running');
+    assert.deepEqual([golden.facets.catalog.error, golden.facets.accounts.error, golden.facets.quota.error],
+        [null, null, 'quota_probe_failed']);
     assert.equal(golden.harnesses.length, 1, 'the CATALOG read succeeded and is in the payload');
     assert.equal(golden.profiles.profiles.length, 1, 'the ACCOUNTS read succeeded too');
+    assert.equal(golden.unified_accounts, true, 'as the unified account model');
+    assert.deepEqual(accountRows(golden).map((row) => [row.harness, row.profile_id]), [['codex', 'koshak']]);
     assert.deepEqual(golden.quota, [], 'only the quota read refused');
     assert.equal(statusPayloadValid(golden), true, 'and it is a valid status answer');
 
@@ -245,10 +247,11 @@ test("GOLDEN: today's producer payload, with two reads that SUCCEEDED and one th
     assert.deepEqual(readsFor(golden), {
         catalog: READ_OK, accounts: READ_OK, quota: READ_FAILED,
     });
-    // The refusal's note never lands on the account subject, and never claims
-    // the daemon is not running (it answered two of three reads).
+    // The refusal's note carries the quota read's own error, never lands on
+    // the account subject, and never claims the daemon is not running.
     const note = statusUnavailableNote(READ_FAILED,
-        { facet: FACET_QUOTA, error: golden.daemon.last_error });
+        { facet: FACET_QUOTA, error: golden.facets.quota.error });
+    assert.match(note.text, /quota_probe_failed/);
     assert.doesNotMatch(note.text, /Your agent accounts could not be read/);
     assert.doesNotMatch(note.text, /not running/);
 });
@@ -764,74 +767,57 @@ test('subscribers are notified with the settled view, and one broken listener ca
 // ---------------------------------------------------------------------------
 
 test('accountRows and accountLoginConfirmed read the wire shape from ONE place', () => {
+    // Every account is a named registry row (#244): an old client's
+    // `harnessAccounts` carrier beside them is never projected, so no row
+    // with an empty id exists to confirm a login.
     const payload = { profiles: {
         harnessAccounts: [{ harness_id: 'codex', native_login_detected: true }],
         profiles: [{ profile: { harness_id: 'claude', profile_id: 'work' }, status: { verification: 'passed', verification_source: 'vendor' } }],
     } };
     const rows = accountRows(payload);
-    assert.deepEqual(rows.map((r) => [r.harness, r.profile_id, r.kind]),
-        [['codex', '', 'native'], ['claude', 'work', 'profile']]);
-    assert.equal(accountLoginConfirmed(payload, 'codex', ''), true);
+    assert.deepEqual(rows.map((r) => [r.harness, r.profile_id, r.kind]), [['claude', 'work', 'profile']]);
+    assert.equal(accountLoginConfirmed(payload, 'codex', ''), false);
     assert.equal(accountLoginConfirmed(payload, 'claude', 'work'), true);
     assert.equal(accountLoginConfirmed(payload, 'claude', 'other'), false);
     assert.equal(accountLoginConfirmed({}, 'codex', ''), false);
 });
 
 test('a unified payload gets every row from profiles — no synthetic natives', () => {
-    // The unified engine (server-stamped `unified_accounts`) serves migrated
-    // default logins as ordinary registry rows and emits `harnessAccounts: []`.
-    // Even a compatibility row that slipped into that list must not
-    // double-render the account the profiles already carry.
-    const payload = {
-        unified_accounts: true,
-        profiles: {
-            harnessAccounts: [{ harness_id: 'codex', native_login_detected: true }],
-            accountPools: [{ harness_id: 'codex', next_up: { kind: 'profile', profileId: 'codex-default' } }],
-            profiles: [
-                { profile: { harness_id: 'codex', profile_id: 'codex-default', enabled: true },
-                    status: { verification: 'passed', verification_source: 'local_store' } },
-                { profile: { harness_id: 'codex', profile_id: 'work', enabled: false },
-                    status: { verification: 'passed', verification_source: 'vendor' } },
-            ],
-        },
+    // Migrated default logins are ordinary registry rows; a compatibility row
+    // that slipped into `harnessAccounts` never double-renders the account,
+    // with or without the server's `unified_accounts` stamp.
+    const profiles = {
+        harnessAccounts: [{ harness_id: 'codex', native_login_detected: true }],
+        accountPools: [{ harness_id: 'codex', next_up: { kind: 'profile', profileId: 'codex-default' } }],
+        profiles: [
+            { profile: { harness_id: 'codex', profile_id: 'codex-default', enabled: true },
+                status: { verification: 'passed', verification_source: 'local_store' } },
+            { profile: { harness_id: 'codex', profile_id: 'work', enabled: false },
+                status: { verification: 'passed', verification_source: 'vendor' } },
+        ],
     };
-    const rows = accountRows(payload);
-    assert.deepEqual(rows.map((r) => [r.harness, r.profile_id, r.kind, r.enabled]),
-        [['codex', 'codex-default', 'profile', true], ['codex', 'work', 'profile', false]]);
-    // The verify-race addresses the migrated row by its REAL id there; the
-    // legacy empty-string address resolves nothing on a unified payload.
-    assert.equal(accountLoginConfirmed(payload, 'codex', 'codex-default'), true);
-    assert.equal(accountLoginConfirmed(payload, 'codex', ''), false);
-    assert.equal(unifiedAccounts(payload), true);
-    // Fail-closed: absence of the stamp (old backend, unreadable catalog) is
-    // the LEGACY rendering, with the native synthesis intact.
-    const legacy = { profiles: payload.profiles };
-    assert.equal(unifiedAccounts(legacy), false);
-    assert.deepEqual(accountRows(legacy).map((r) => [r.profile_id, r.kind, r.enabled]),
-        [['', 'native', true], ['codex-default', 'profile', true], ['work', 'profile', false]]);
+    for (const payload of [{ unified_accounts: true, profiles }, { profiles }]) {
+        assert.deepEqual(accountRows(payload).map((r) => [r.harness, r.profile_id, r.kind, r.enabled]),
+            [['codex', 'codex-default', 'profile', true], ['codex', 'work', 'profile', false]]);
+        // The verify-race addresses the migrated row by its REAL id; the empty
+        // address resolves nothing.
+        assert.equal(accountLoginConfirmed(payload, 'codex', 'codex-default'), true);
+        assert.equal(accountLoginConfirmed(payload, 'codex', ''), false);
+    }
 });
 
 test('the enabled projection fails open on payloads that predate the field', () => {
     const payload = { profiles: {
-        harnessAccounts: [{ harness_id: 'codex', native_login_detected: true }],
         profiles: [{ profile: { harness_id: 'claude', profile_id: 'work' },
             status: {} }],
     } };
     // No `enabled` anywhere: nothing may claim an exclusion from rotation.
-    assert.deepEqual(accountRows(payload).map((r) => r.enabled), [true, true]);
-    // The legacy native row's ladder participation rides the same key.
-    const disabledNative = { profiles: { harnessAccounts: [
-        { harness_id: 'codex', native_login_detected: true, native_credentials_enabled: false },
-    ], profiles: [] } };
-    assert.deepEqual(accountRows(disabledNative).map((r) => r.enabled), [false]);
+    assert.deepEqual(accountRows(payload).map((r) => r.enabled), [true]);
 });
 
-test('nextUpAccount reads accountPools first and the legacy next_up second', () => {
-    // DUAL-WIRE routing verdict, one reader. The unified pool wins when both
-    // are present (a unified engine keeps harnessAccounts as an empty
-    // compatibility key, but a transitional payload must still have one
-    // authority), the legacy row answers alone on an old engine, and a
-    // harness neither speaks for is an honest null.
+test('nextUpAccount reads the accountPools verdict alone', () => {
+    // One routing authority. An old client's `harnessAccounts[].next_up` is
+    // never read, so a harness only it speaks for is an honest null.
     const both = { profiles: {
         accountPools: [{ harness_id: 'codex', next_up: { kind: 'api_key_route' } }],
         harnessAccounts: [{ harness_id: 'codex', next_up: { kind: 'native', route: 'local_session' } }],
@@ -840,10 +826,9 @@ test('nextUpAccount reads accountPools first and the legacy next_up second', () 
     const legacy = { profiles: {
         harnessAccounts: [{ harness_id: 'codex', next_up: { kind: 'native', route: 'local_session' } }],
     } };
-    assert.deepEqual(nextUpAccount(legacy, 'codex'), { kind: 'native', route: 'local_session' });
-    assert.equal(nextUpAccount(legacy, 'claude'), null);
+    assert.equal(nextUpAccount(legacy, 'codex'), null);
     assert.equal(nextUpAccount({}, 'codex'), null);
-    assert.equal(nextUpAccount(legacy, ''), null);
+    assert.equal(nextUpAccount(both, ''), null);
     // An unknown future kind rides through verbatim — the consumer renders it
     // fail-safe; the reader never filters or rewrites it.
     const future = { profiles: {

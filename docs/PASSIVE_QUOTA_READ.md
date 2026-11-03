@@ -1,123 +1,160 @@
-# Passive quota and account roster
+# Passive quota, resources and actor inspection
 
-`GET /api/claudexor/status?view=quota` is an opt-in projection for quota
-consumers. The default status response and `?include=models` are unchanged.
-The exact `view=quota` selector takes precedence over `include=models`.
-Other `view` values retain the existing full-status behavior.
+`GET /api/claudexor/status?view=quota` selects the passive projection before
+`api_claudexor_status` calls the full Accounts builder. It takes precedence over
+`include=models`; other status selectors keep their existing behavior.
 
-The implementation is `ouroboros/gateway/claudexor_passive.py`, selected by
-`api_claudexor_status` before the full status builder is called. The
-`ClaudexorQuotaResponse` and `ClaudexorPassiveReadError` TypedDicts live in
-`claudexor_contracts.py`, re-exported by `contracts.py`; their JSDoc twins are in
-`web/modules/api_types.js`. It discovers only the owned daemon descriptor,
-then concurrently issues exactly two reads:
+`gateway/claudexor_passive.py` discovers the owned loopback descriptor and issues
+exactly two concurrent reads, with bearer/protocol headers kept server-side:
 
-- `GET /v2/credential-profiles` for the necessary account roster.
-- `GET /v2/quota?view=constraint_freshness` for snapshots and absences from
-  one evidence envelope, opting in to the engine's per-constraint freshness.
+- `GET /v2/credential-profiles` for the account roster.
+- `GET /v2/quota?view=resources_freshness&requestKind=text` for one quota/resource
+  envelope with per-constraint freshness and an explicit availability scope.
 
-There is no `status_dict()`, handshake, capability/operations/model catalog,
-harness-manifest or doctor request, provider refresh, runtime preparation,
-daemon startup, settings write, or account mutation. The existing gateway
-enforces loopback discovery and sends its bearer and protocol-major headers;
-the bearer remains server-side. This view makes no runtime-health or engine
-version claim and does not negotiate execution features. The quota selector is
-sent without a capability read. Some older engines ignore it and return legacy
-metadata; released 3.25 engines reject it with HTTP 400. Only that explicit
-HTTP status permits one plain `GET /v2/quota` fallback. Another refusal fails
-the facet; transport failures, 5xx and malformed success never cause a second
-request. Both responses use the same metadata checks. The fallback is passive,
-not a provider refresh. Other quota readers never send this selector: full
-Accounts status keeps its catalog-negotiated `view=resources` read or plain GET.
+No handshake, catalog, doctor, status builder, provider refresh, runtime
+preparation, daemon startup, settings write or account mutation is requested.
+`claudexor_observations.read_quota` also serves full Accounts, delegated route
+health and the primary-route observation: the readers share engine facts, not
+separate resource/quota interpretations.
+Full Accounts retains its existing operations read and diagnostics. If that catalog
+advertises resources, an HTTP 400 or an ignored rich selector (neither resources nor scope)
+uses one `GET /v2/quota?view=resources`; the complete fallback replaces the first
+epoch. Missing advertised resources fails the facet, never authoritative empty.
+
+Passive/inspection reads require no catalog discovery. An explicit HTTP 400 permits
+view-only `constraint_freshness` (older engines reject model/kind keys); only its
+explicit 400 permits plain `GET /v2/quota`. Transport failure, 5xx or malformed
+success never repeats. Return one whole epoch, preserving each window's freshness.
+Legacy facts do not prove honored model/kind filters: missing or mismatched
+`availability_scope` never becomes exact availability, regardless of engine version.
 
 ## Response contract
 
-```json
-{
-  "view": "quota",
-  "profiles": {"profiles": [], "harnessAccounts": [], "accountPools": []},
-  "quota": [],
-  "quota_absences": [],
-  "unified_accounts": true,
-  "reads": {"catalog": "not_read", "accounts": "ok", "quota": "ok"},
-  "read_errors": {},
-  "timings_ms": {"discovery": 1, "accounts": 2, "quota": 1, "total": 3}
-}
-```
-
-Read failures, including missing discovery, return HTTP 200 with independent
-facet verdicts. Do not interpret HTTP success or an empty collection alone as
-evidence that an account or quota is absent.
+`ClaudexorQuotaResponse` / `ClaudexorPassiveReadError` live in
+`gateway/claudexor_contracts.py`, are re-exported by `contracts.py`, and have
+JSDoc twins in `web/modules/api_types.js`.
 
 | Field | Meaning |
 | --- | --- |
-| `view` | Always `"quota"`. Check this marker: an older core can ignore the query and return full status. |
-| `profiles` | The complete, unfiltered credential-profile response on success; `{}` otherwise. Named/native identities, authentication facts, enablement and extensions are preserved. |
-| `quota` | The quota response's `snapshots` list, or `[]` on failure. Snapshot fields, including reset credits, are unchanged. When the engine honored the selector, every `constraints[]` entry carries its own `freshness` (`fresh`, `stale` or `unknown`); otherwise none does. |
-| `quota_absences` | The same response's `absences` list. Legacy omission means `[]`; a malformed present list fails the quota facet. |
-| `unified_accounts` | True only if the successful roster carries the additive `accountPools` list, including an empty list. This envelope member shipped with the unified account model; no separate discovery is needed. False when absent, unread or failed, so inspect `reads.accounts` for roster authority. |
-| `reads.catalog` | Always `"not_read"`; this view contains no `harnesses` catalog or manifest filter. |
-| `reads.accounts`, `reads.quota` | `"ok"` = successfully read and structurally usable, including empty; `"failed"` = attempted without a usable response; `"not_read"` = discovery/client creation prevented the read. |
-| `read_errors` | Only failed phases, keyed by `discovery`, `accounts` or `quota`; values contain a safe `code` and, when received, an HTTP `status_code` in 400–599. |
-| `timings_ms` | Nonnegative integer elapsed milliseconds for `discovery` (including client creation), attempted `accounts`/`quota`, and `total`. Concurrent phase times are not additive. Values saturate at 2,147,483,647. |
+| `view` | Always `quota`; an older core may ignore the selector and return full status. |
+| `profiles` | Complete unchanged credential-profile envelope on success; `{}` otherwise. |
+| `quota` | That quota response's `snapshots`, unchanged, or `[]` on failure. |
+| `quota_absences` | Same response's `absences`; legacy omission means `[]`. |
+| `resources` | Optional unchanged resource observations, never an admission balance. |
+| `availability_scope` | Optional engine echo `{model: string\|null, requestKind: 'text'\|'image', basis: 'quota_block'}` of the exact requested binding, not a literal model-name matching policy. A sent selector alone proves nothing. Full status carries the same optional field. |
+| `unified_accounts` | `reads.accounts` is `ok`: the roster is the unified model. False also covers unread/failed roster. |
+| `reads.catalog` | Always `not_read`; no harness catalog or manifest filtering. |
+| `reads.accounts`, `reads.quota` | `ok`: structurally usable (including empty); `failed`: attempted but unusable; `not_read`: discovery/client creation prevented it. |
+| `read_errors` | Failed discovery/accounts/quota phases only; safe code and optional HTTP 400–599 status, never upstream text or credentials. |
+| `timings_ms` | Nonnegative discovery, attempted facet and total milliseconds, saturated at 2,147,483,647. Concurrent times do not add. |
 
-Both roster lists (`profiles`, `harnessAccounts`) must be present and contain
-objects. Named rows must have an identifiable `profile` with nonempty string
-`harness_id`/`profile_id`, and boolean `enabled` if present; native rows need
-`harness_id`. Optional `accountPools` must be an object list. Malformed
-membership is a failed read, never an authoritative empty roster. The quota
-envelope requires an object-list `snapshots` and accepts an optional
-object-list `absences`. Per-constraint `freshness` is all or nothing: absent
-from every constraint is the legacy envelope; present on any constraint
-requires every snapshot's `constraints` to be a list of objects that each
-carry `fresh`, `stale` or `unknown`. Anything else fails the quota facet
-with `malformed_response`; partial freshness is never passed through.
+Read failures still return HTTP 200 with independent facet verdicts. HTTP success,
+empty lists and missing fields are not proof that accounts or quota are absent.
+`claudexor_passive.roster_error` decides the roster for this read and full Accounts:
+object-list `profiles` (rows need `profile.harness_id` / `profile.profile_id`, any
+`enabled` boolean) and object-list `accountPools` (3.6.0+); `harnessAccounts` is
+unread. Its rows without `accountPools`: `account_model_unsupported`, not malformed.
+An unread roster is never authoritative removal or an empty account set.
 
-Safe error codes are `daemon_not_discovered`, `daemon_descriptor_unreadable`,
+Quota requires object-list `snapshots`; present `absences` and `resources` must
+also be object lists. Constraint freshness is all-or-none: if any constraint has
+`freshness`, every snapshot has an object-list `constraints` and every constraint
+has `fresh`, `stale` or `unknown`. Malformed membership or partial freshness fails
+the facet. Resources preserve scope, usage kind, period, fee inclusion, units and
+source fields without reinterpreting team resources as personal reserves.
+Resources bind `target.{harness,profile_id}` (AccountTarget), unlike quota's
+nullable `subject.{harness,subject_id}`.
+
+Safe errors: `daemon_not_discovered`, `daemon_descriptor_unreadable`,
 `daemon_descriptor_incomplete`, `daemon_token_unreadable`,
 `daemon_endpoint_not_loopback`, `daemon_unreachable`, `malformed_response`,
-`protocol_incompatible`, `daemon_recovery_only`, `observation_read_timeout`,
-`read_refused` (other typed refusals), and `read_failed` (unexpected exceptions).
-No exception messages, paths, bearer tokens, arbitrary upstream codes, or
-response bodies enter these diagnostics. One INFO record named
-`claudexor_passive_quota_read` records only the verdicts, safe errors and timings.
+`account_model_unsupported`, `protocol_incompatible`, `daemon_recovery_only`,
+`observation_read_timeout`, `read_refused`, `read_failed`. One `claudexor_passive_quota_read` INFO record logs
+only verdicts, safe errors and timings, not exception text, paths or bodies.
 
-## Consumer behavior and limits
+## Exact configured actor
 
-Use `reads.accounts == "ok"` before applying roster additions/removals or
-declaring it empty. On failed/unread roster, retain any prior roster as prior
-evidence; do not interpret `{}` as removal. Pass `unified_accounts` alongside
-the unchanged profile/quota fields when normalizing unified null aliases.
-The flag does not make an unread roster authoritative. Account enablement is
-the engine's roster fact; no harness-catalog enablement/status is synthesized.
+`inspect_subagent(subagent_id, request_kind='text'|'image')` resolves the CURRENT
+TASK settings snapshot, not today's edited Settings. It returns configured
+route/model/account/access/enablement separately from independently dated cached
+observations. Disabled configuration is not unknown live health; positive quota
+availability is not permission, authentication, capability or execution success.
+Direct API routes without a managed engine have unknown provider availability.
+The tool works without any quota skill and never selects or starts an actor.
+Resolution uses the offered catalog's reachable Main fallback, retaining disabled
+saved rows; model-named effort is reported by the same owner as dispatch.
 
-Display each constraint by its own `freshness` when present. Without it, only
-the conservative snapshot `freshness` applies; its absence is not evidence of
-independent freshness. Freshness does not imply a refill, remaining quota,
-authorization or provider acceptance.
+Managed routes send the literal model/kind to the same passive reader and filter
+subjects locally. A strict account pin, `<harness>-default` included, matches only
+its exact subject: never a healthy sibling or an unprofiled null window, which
+Auto still sees. The engine owns applicability,
+constraint freshness and `quota_block`; the host neither matches model names
+fuzzily nor derives availability from ratios or money. Missing scope, stale or
+incomplete facts stay unknown.
+Rows and absences group by full subject (harness, credential route, subject id).
+One subject's simultaneous rows are constraints, never alternatives: an engine
+exhausted/cooldown verdict whose `resets_at` is a valid, still-future instant wins
+beside stale, free or absent rows (a stale row too: the engine keeps such caps in
+its admission ledger); a malformed, out-of-range (Feb 30, 24:00, +05:60) or passed
+reset is no live block, read alike by both readers. A subject is
+available only when every row is fresh and engine-available, it has no absence,
+and one window is measured (finite `used_ratio`) for every model (no model ids or
+prefixes) and the requested kind; model-scoped-only or other-kind evidence stays
+unknown. Observed subjects (absence-only included) are alternatives: one available
+suffices, one unknown prevents all-blocked, else the earliest reset is a recheck,
+not readiness. The read roster is not the engine's enabled, ready pool.
+`tests/fixtures/quota_subject_matrix` (engine-computed rows) binds the Python and
+card readers. Migration: legacy engines without scope no longer
+certify host-side quota exhaustion from raw ratios; the guard proceeds as unknown
+to engine start admission. The engine POST still owns monetary admission. Neither
+inspection nor this compatibility behavior guarantees a later start will succeed.
+Available-subagent cards likewise use only exact echoed text scope and engine
+verdicts. A generic full Accounts echo cannot certify a particular actor; account
+and catalog facts (including a base-only `[1m]` qualifier) stay visible with
+`Not checked`. Resource merges bind scope to quota: retained rows keep their scope;
+unproven or mixed-scope replacement clears it. No new request is made.
 
-Quota and roster reads succeed or fail independently. They are concurrent
-responses, not an atomic combined engine snapshot. Snapshot freshness and
-timestamps retain their existing meanings; gateway read success does not
-make old quota data fresh. This route still waits for its two necessary reads
-and uses the existing transport timeouts. It removes unrelated diagnostics
-from the dependency path, not engine-side latency or quota-staleness defects.
-The engine's roster producer (`buildPollResponse` in
-`packages/cli/src/accounts-services.ts`) always supplies `accountPools` (even
-empty) and the legacy `harnessAccounts: []`. This is the producer evidence for
-the unified marker. That producer still calls
-`readHarnesses`: its config-versioned, infinite-TTL cache avoids repeated
-doctor work, but a cold/config-changed cache can run `statusAllForAccounts`.
-The new gateway does not claim to remove that internal roster latency. It
-must not synthesize a daemon-down warning from the deliberately absent
-`daemon` field (and with it the full status's `last_exit` and `memory`
-observations); the facet outcomes are the observation it supplies.
+## Primary-route observation
 
-`tests/test_claudexor_quota_passive.py` exercises the real HTTP handler and
-gateway transport against synthetic engine responses. Its catalog barrier
-holds a full-status consumer pending while the passive consumer returns,
-before the catalog is released. Other tests cover concurrent required reads,
-empty/unreadable rosters, partial failures, unified identity evidence, safe
-diagnostics, no lifecycle work, unchanged default dispatch, the engine's
-recorded opt-in and legacy quota responses, and incomplete constraint
-freshness.
+While a fallback acts, `primary_route_observation.observe_primary_route` asks
+`claudexor_observations.quota_observation` about a Claudexor primary's exact
+model, `requestKind=text` and pin or Auto, before its catalog check. One deadline,
+the observation's shared 3 s budget less caller bounds, covers
+`read_owned_gateway` and every legacy view (`read_quota(timeout_sec=)`;
+`quota_state(timeout_sec=)`); no roster is read.
+The catalog gets the remainder, and a spent budget reads nothing more. The row
+carries the unchanged `quota_availability` verdict (`scope: quota_only`) beside
+every scoped snapshot and absence row, none dropped: subject, source, `observed_at`,
+freshness, fresh/total windows and the engine's own state and reset, never plan
+labels, ratios, money, roster contents or absence prose. `read: failed` (safe code), `not_read`
+(`observation_deadline_elapsed`) and an empty `ok` stay distinct. Auto rows cover
+every engine subject of the harness, enabled or not. A stale same-subject source
+keeps the aggregate unknown unless a live dated block remains. A newer `observed_at`
+alone is not a changed fact; ageing into unknown is. Nothing refreshes, starts,
+selects or generates; `tests/test_primary_quota_observation.py` drives the loop.
+
+For an unchanged primary binding, checks are at least 120 s apart. A changed
+fact re-emits the whole set into context, including unchanged rows. The
+recorded 43-row sample was about 9.4 kB per emission. The interval bounds
+cadence, not cumulative context cost. Actual emission frequency is unknown;
+token price was not measured.
+
+## Limits and checks
+
+Accounts and quota reads are independent, not one atomic engine snapshot.
+Successful transport does not refresh observations. Display each constraint's
+freshness; legacy aggregate freshness does not prove independent freshness.
+Preserve the last dated roster/value on read failure, not an invented zero.
+
+The roster producer still calls `readHarnesses` through a config-versioned cache;
+a cold/config-changed cache may run `statusAllForAccounts`. This core path removes
+unrelated diagnostics, not that engine-internal latency. The absent `daemon`
+field is not a daemon-down observation. Engines without `resources_freshness`
+(including 4.2.0) refuse it with 400, so each quota read pays one extra
+GET, older engines up to two; the negotiated view is deliberately not cached.
+
+`test_claudexor_quota_passive.py` drives the real handler and synthetic gateway,
+including exact selectors, no lifecycle work, concurrent facets, catalog barrier,
+malformed/legacy/freshness cases, safe diagnostics and the shared roster decision.
+`test_subagent_inspection.py` covers configured snapshots, strict subjects and the public registry;
+route/review tests preserve dispatch and account-pin behavior.

@@ -12,7 +12,8 @@ import json
 
 import pytest
 
-from ouroboros.gateway._helpers import _TAIL_WINDOW_START_BYTES, read_rotated_jsonl_entries
+from ouroboros.gateway._helpers import read_rotated_jsonl_entries
+from ouroboros.jsonl_tail import TAIL_WINDOW_START_BYTES as _TAIL_WINDOW_START_BYTES
 
 
 def _write_rows(path, count, *, prefix="row", pad=0, start=0):

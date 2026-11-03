@@ -112,8 +112,8 @@ def test_candidate_is_saved_before_a_later_finalization_failure(
     def finalization_failure(*args, **kwargs):
         raise RuntimeError("finalization interrupted")
 
-    real_gate = loop._enforce_swarm_actions
-    monkeypatch.setattr(loop, "_enforce_swarm_actions", finalization_failure)
+    real_gate = loop._enforce_plan_gate
+    monkeypatch.setattr(loop, "_enforce_plan_gate", finalization_failure)
     monkeypatch.setattr("ouroboros.llm.LLMClient.chat", lambda *a, **k: pytest.fail("no provider call"))
     with pytest.raises(RuntimeError, match="finalization interrupted"):
         loop.run_llm_loop(**_loop_kwargs(tmp_path, registry, []))
@@ -139,7 +139,7 @@ def test_candidate_is_saved_before_a_later_finalization_failure(
         handoff = wc.prepare_recovery(tmp_path, task_id, from_attempt=2, cause="worker_crash")
         registry = _registry(tmp_path, monkeypatch, task_id, 3)
         registry._ctx.working_recovery = handoff
-    monkeypatch.setattr(loop, "_enforce_swarm_actions", real_gate)
+    monkeypatch.setattr(loop, "_enforce_plan_gate", real_gate)
     calls = []
     def resumed_generation(call, *args, **kwargs):
         assert owner_changed, "saved complete candidate must finalize before any replacement author generation"
@@ -261,28 +261,24 @@ def test_ready_checkpoint_holds_actual_compacted_transcript_and_inline_attachmen
     image_base64 = base64.b64encode(pixels()).decode()
 
     write_task_result(tmp_path, "t-wait", "running")
+    from ouroboros.tools.compact_context import _compact_context, record_context_view
+
     registry = _registry(tmp_path, monkeypatch, "t-wait", 1)
-    registry._ctx._pending_compaction = 1
     kwargs = _loop_kwargs(tmp_path, registry, [])
     kwargs["messages"] = _plan().messages_for("max") + [
         {"role": "assistant", "content": "", "tool_calls": [
             {"id": "old", "type": "function", "function": {"name": "read", "arguments": "{}"}}]},
         {"role": "tool", "tool_call_id": "old", "content": "prior detailed observation"}]
+    # The mind's own view of that observed transcript: the real materializer folds the
+    # old unit into its note; the loop consumer must save the returned list, image included.
+    record_context_view(registry._ctx, kwargs["messages"], [])
+    assert "requested" in _compact_context(registry._ctx, working_note="retained observation summary", keep_unit_ids=[])
     kwargs["incoming_messages"].put({"text": "keep this diagram", "image_base64": image_base64,
                                       "image_mime": "image/png", "msg_id": "diagram"})
-
-    def compact(messages, **_kwargs):
-        # The compactor's provider is a test double; its real loop consumer must
-        # save the returned list, including the image and source-bearing rows.
-        transformed = [dict(row, content="retained observation summary")
-                       if row.get("tool_call_id") == "old" else dict(row) for row in messages]
-        return transformed, SimpleNamespace(status="applied", reclaimed_tokens=1,
-            goal_reached=True, checkpoint_ref={"source": "test-compactor"}), None
 
     def crash_after_ready(*args, **kwargs):
         raise RuntimeError("interrupted after ready")
 
-    monkeypatch.setattr(loop, "compact_tool_history_llm", compact)
     monkeypatch.setattr(loop, "_dispatch_round_model", crash_after_ready)
     monkeypatch.setattr("ouroboros.llm.LLMClient.chat", lambda *a, **k: pytest.fail("no provider call"))
     with pytest.raises(RuntimeError, match="interrupted after ready"):
@@ -291,8 +287,8 @@ def test_ready_checkpoint_holds_actual_compacted_transcript_and_inline_attachmen
     handoff = wc.prepare_recovery(tmp_path, "t-wait", from_attempt=1, cause="worker_crash")
     saved = wc.load_recovery(registry._ctx, handoff)
     assert saved["working"]["boundary"] == "ready"
-    assert next(row for row in saved["messages"] if row.get("tool_call_id") == "old")["content"] == \
-        "retained observation summary"
+    assert not any(row.get("tool_call_id") == "old" for row in saved["messages"])
+    assert any("retained observation summary" in str(row.get("content")) for row in saved["messages"])
     images = [block for row in saved["messages"] if isinstance(row.get("content"), list)
               for block in row["content"] if block.get("type") == "image_url"]
     assert images and images[-1]["image_url"]["url"] == f"data:image/png;base64,{image_base64}"
@@ -311,7 +307,8 @@ def test_late_owner_mail_at_delivery_close_survives_failure_of_the_next_round(tm
     monkeypatch.setattr(loop, "_dispatch_round_model", lambda *a, **k: (
         {"role": "assistant", "content": "candidate before new instruction", "tool_calls": []}, 0.0))
 
-    def late_mail(**kwargs):
+    def late_mail(*_args, **_kwargs):
+        # Mail written at the delivery's result-review step, right before the admission close.
         assert write_owner_message(tmp_path, "late instruction", "t-wait", msg_id="late-mail")
         return False
 
@@ -322,7 +319,7 @@ def test_late_owner_mail_at_delivery_close_survives_failure_of_the_next_round(tm
             raise RuntimeError("next round interrupted")
         return real_compaction(messages, ctx)
 
-    monkeypatch.setattr(loop, "_run_task_acceptance_review_once", late_mail)
+    monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", late_mail)
     monkeypatch.setattr(loop, "_run_round_compaction", next_round_failure)
     monkeypatch.setattr("ouroboros.llm.LLMClient.chat", lambda *a, **k: pytest.fail("no provider call"))
     with pytest.raises(RuntimeError, match="next round interrupted"):

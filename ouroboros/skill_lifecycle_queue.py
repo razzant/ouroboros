@@ -1,4 +1,11 @@
-"""Single FIFO lane for mutating skill install/review/dependency/enable work."""
+"""Single FIFO lane for mutating skill install/review/dependency/enable work.
+
+A job holds the lane (an in-process lock plus the cross-process
+``state/skill_lifecycle.lock``) while it mutates. A long read-only step inside a
+job (a review panel reading frozen candidates of a payload) lends the lane out
+with ``lend_lifecycle_lane`` and takes it back before persisting, so installs,
+grants and toggles do not wait for a review's model calls.
+"""
 
 from __future__ import annotations
 
@@ -24,6 +31,8 @@ from ouroboros.settings_integrity import copy_task_settings_context
 log = logging.getLogger(__name__)
 
 _MAX_EVENTS = 80
+_BACKGROUND: set = set()  # strong references to answered-pending owner actions still running
+JOB_ANSWER_WAIT_SEC = 10.0  # the transport bound install/update already use; a slow action answers its job
 _STALE_RUNNING_JOB_SEC = int(os.environ.get("OUROBOROS_SKILL_LIFECYCLE_STALE_SEC", "1800"))
 
 
@@ -117,6 +126,69 @@ _state_lock = threading.Lock()
 _dedupe_jobs: Dict[str, LifecycleJob] = {}
 _events: Deque[LifecycleJob] = deque(maxlen=_MAX_EVENTS)
 _active: Optional[LifecycleJob] = None
+
+
+@dataclass
+class _LaneHandle:
+    """The lane held by the lifecycle job running in this context."""
+
+    job: LifecycleJob
+    lock: threading.Lock
+    lock_file: Any = None  # open cross-process lock file, or None
+
+
+# Copied into the runner's worker thread with the context, so the job's own code
+# can lend the lane; any other caller sees None and lending is a no-op.
+_LANE_HANDLE: "contextvars.ContextVar[Optional[_LaneHandle]]" = contextvars.ContextVar(
+    "skill_lifecycle_lane", default=None,
+)
+
+
+@contextlib.contextmanager
+def lend_lifecycle_lane():
+    """Let other lifecycle jobs run during a long read-only step of this job.
+
+    The caller must not mutate skill state inside the block. The lane is taken back
+    (waiting as long as the current holder needs) before the block's caller goes on,
+    so whatever follows runs under the lane exactly as before. Outside a lane job
+    this is a no-op.
+    """
+    global _active
+    handle = _LANE_HANDLE.get()
+    if handle is None:
+        yield
+        return
+    from ouroboros.platform_layer import file_lock_exclusive_nb, file_unlock
+
+    _LANE_HANDLE.set(None)  # a nested lend inside the block is a no-op
+    if handle.lock_file is not None:
+        file_unlock(handle.lock_file.fileno())
+    with _state_lock:
+        if _active is handle.job:
+            _active = None
+    handle.lock.release()
+    try:
+        yield
+    finally:
+        # In-process: wait for the holder (the job owns this lock again before its own
+        # release runs). Cross-process: the lane's deadline, as when it was first taken.
+        handle.lock.acquire()
+        if handle.lock_file is not None:
+            deadline = time.monotonic() + _lifecycle_deadline_sec()
+            while True:
+                try:
+                    file_lock_exclusive_nb(handle.lock_file.fileno())
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            "skill_lifecycle.lock is held beyond the deadline — a "
+                            "previous job appears wedged. Restarting Ouroboros recovers it."
+                        )
+                    time.sleep(0.05)
+        with _state_lock:
+            _active = handle.job
+        _LANE_HANDLE.set(handle)
 
 
 class DuplicateLifecycleJobError(RuntimeError):
@@ -282,6 +354,7 @@ def _release_dedupe(job: LifecycleJob) -> None:
 
 @contextlib.asynccontextmanager
 async def async_skill_lifecycle_file_lock(drive_root: pathlib.Path):
+    """Hold ``state/skill_lifecycle.lock``; yields the open lock file."""
     from ouroboros.platform_layer import file_lock_exclusive_nb, file_unlock
 
     lock_dir = pathlib.Path(drive_root) / "state"
@@ -302,7 +375,7 @@ async def async_skill_lifecycle_file_lock(drive_root: pathlib.Path):
                     )
                 await asyncio.sleep(0.05)
         try:
-            yield
+            yield fh
         finally:
             if acquired:
                 file_unlock(fh.fileno())
@@ -389,10 +462,14 @@ async def run_lifecycle_job(
             else:
                 lock_root = pathlib.Path(opts.drive_root)
             try:
-                async with async_skill_lifecycle_file_lock(lock_root):
-                    if opts.on_started is not None:
-                        opts.on_started(job)
-                    result = await runner()
+                async with async_skill_lifecycle_file_lock(lock_root) as lock_file:
+                    lane = _LANE_HANDLE.set(_LaneHandle(job=job, lock=_get_lock(), lock_file=lock_file))
+                    try:
+                        if opts.on_started is not None:
+                            opts.on_started(job)
+                        result = await runner()
+                    finally:
+                        _LANE_HANDLE.reset(lane)
                 error = opts.result_error(result) if opts.result_error else ""
                 job.error = str(error or "")
                 job.status = "failed" if job.error else "succeeded"
@@ -571,6 +648,84 @@ class JobProgressTarget:
             return
         self._job.message = str(message or "")
         _notify_chat_progress(self._job, "running")
+
+
+class JobHandle(JobProgressTarget):
+    """Progress relay that also tells the request which lifecycle job it started.
+
+    A blocking job binds from its own thread's loop; the ``bound`` event is set on the
+    creating loop either way, so a request can await it.
+    """
+
+    __slots__ = ("job_id", "bound", "_loop")
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.job_id = ""
+        self.bound = asyncio.Event()
+        try:
+            self._loop: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
+
+    def bind(self, job: LifecycleJob) -> None:
+        super().bind(job)
+        self.job_id = str(job.id)
+        loop = self._loop
+        try:
+            same_loop = loop is None or asyncio.get_running_loop() is loop
+        except RuntimeError:
+            same_loop = loop is None
+        if same_loop:
+            self.bound.set()
+        else:
+            loop.call_soon_threadsafe(self.bound.set)
+
+    @property
+    def message(self) -> str:
+        return str(getattr(self._job, "message", "") or "")
+
+
+def _log_background_failure(task: "asyncio.Task") -> None:
+    if not task.cancelled() and task.exception() is not None:
+        log.warning("answered-pending skill action failed", exc_info=task.exception())
+
+
+async def answer_or_job(work: Callable[[JobHandle], Any], *, after: Callable[[Any], None] | None = None,
+                        log_label: str = "skill lifecycle operation", allow_pending: bool = False) -> Any:
+    """Run ``work(handle)``, a blocking owner action that binds one lifecycle job to ``handle``, off
+    the loop. Legacy callers await the terminal payload. An explicitly pending-aware caller gets
+    that payload within ``JOB_ANSWER_WAIT_SEC``, else ``{ok, pending, job_id, message}`` while work
+    finishes. ``after(payload)`` still runs on completion (the lifecycle broadcast).
+    """
+    handle = JobHandle()
+
+    async def _run() -> Any:
+        payload = await run_blocking_preserving_cancellation(work, handle, log_label=log_label)
+        if after is not None:
+            try:
+                after(payload)
+            except Exception:
+                log.debug("after-hook of %s failed", log_label, exc_info=True)
+        return payload
+
+    if not allow_pending:
+        return await _run()
+    task = asyncio.ensure_future(_run())
+    _BACKGROUND.add(task)
+    task.add_done_callback(_BACKGROUND.discard)
+    done, _ = await asyncio.wait({task}, timeout=JOB_ANSWER_WAIT_SEC)
+    if task not in done and not handle.job_id:
+        # Validation can finish without ever creating a job. Never advertise an empty job id.
+        bound = asyncio.create_task(handle.bound.wait())
+        try:
+            done, _ = await asyncio.wait({task, bound}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            bound.cancel()
+    if task in done:
+        return task.result()
+    task.add_done_callback(_log_background_failure)
+    return {"ok": True, "pending": True, "job_id": handle.job_id, "message": handle.message}
 
 
 def queue_snapshot() -> Dict[str, Any]:

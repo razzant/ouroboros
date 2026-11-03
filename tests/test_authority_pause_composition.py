@@ -31,7 +31,8 @@ def test_child_pause_keeps_sibling_independent_and_resume_rechecks_original_mone
     write_task_result(tmp_path, "R", "running", billing_group=binding)
     if authority == "group_exhausted":
         _spend(tmp_path, _scope(tmp_path, "P", "P", group="P", group_limit=2.0, root_limit=2.0), 2.0)
-    patch_document(tmp_path, "R", lambda row: {**row, "acceptance_root_cap_amendments": [{"new_cap_usd": "broken"}]})
+    # The root's whole-work binding turns corrupt: every scope that rereads it meets an unreadable authority.
+    patch_document(tmp_path, "R", lambda row: {**row, "billing_group": {"billing_group_id": "P"}})
     task = {"id": "child", "root_task_id": "R", "parent_task_id": "R", "type": "task",
             "chat_id": 0, "_attempt": 1, "budget_drive_root": str(tmp_path)}
     sibling = {**task, "id": "sibling"}
@@ -57,7 +58,7 @@ def test_child_pause_keeps_sibling_independent_and_resume_rechecks_original_mone
     with ua.usage_scope(_task_scope(tmp_path, "sibling", "R")), pytest.raises(ua.BillingAuthorityUnavailable):
         ua.reserve_attempt(_request())
     if authority != "unreadable":
-        patch_document(tmp_path, "R", lambda row: {**row, "acceptance_root_cap_amendments": []})
+        patch_document(tmp_path, "R", lambda row: {**row, "billing_group": binding})
     if authority == "global_exhausted":
         monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 0.0)
     result = q.resume_budget_paused_task("child")

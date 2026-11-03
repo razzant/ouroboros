@@ -1,0 +1,44 @@
+[
+  {
+    "name": "inherited local coordinator",
+    "task": {"id": "child", "delegation_role": "subagent", "model": "local-model", "executor_route": "codex", "metadata": {"parent_cognitive_route": {"model": "local-model", "use_local_model": true, "chosen_by": "inherited"}}},
+    "facts": {"model": "local-model", "executor_route": "codex", "parent_cognitive_route": {"model": "local-model", "use_local_model": true, "chosen_by": "inherited"}, "use_local_model": true, "coordinator_route": "local-model (local)", "coordinator_billing": "unknown"},
+    "provenance": "inherited",
+    "clause": "this subagent itself runs on local-model (local) (bills as unknown)"
+  },
+  {
+    "name": "child fallback without parent snapshot",
+    "task": {"id": "child", "delegation_role": "subagent", "model": "openai/gpt-5", "executor_route": "codex", "effective_model_lane": "fallback"},
+    "facts": {"model": "openai/gpt-5", "executor_route": "codex", "effective_model_lane": "fallback", "use_local_model": false, "coordinator_route": "openai/gpt-5", "coordinator_billing": "unknown"},
+    "provenance": "",
+    "clause": "this subagent itself runs on openai/gpt-5 (bills as unknown)"
+  },
+  {
+    "name": "recorded parent fallback",
+    "task": {"id": "child", "delegation_role": "subagent", "model": "claudexor::codex=gpt-5", "executor_route": "codex", "parent_cognitive_route": {"model": "claudexor::codex=gpt-5", "source_role": "fallback", "chosen_by": "parent_fallback"}},
+    "facts": {"model": "claudexor::codex=gpt-5", "executor_route": "codex", "parent_cognitive_route": {"model": "claudexor::codex=gpt-5", "source_role": "fallback", "chosen_by": "parent_fallback"}, "use_local_model": false, "coordinator_route": "claudexor::codex=gpt-5", "coordinator_billing": "subscription"},
+    "provenance": "parent's fallback",
+    "clause": "this subagent itself runs on claudexor::codex=gpt-5 (bills as subscription)"
+  },
+  {
+    "name": "chosen coordinator with observed zero",
+    "task": {"id": "child", "delegation_role": "subagent", "model": "future-provider/reviewer", "cost_usd": 0, "executor_route": "codex", "parent_cognitive_route": {"model": "future-provider/reviewer", "chosen_by": "delegator", "selected_supervisor_snapshot": {"selected_subagent_id": "chosen-row"}}},
+    "facts": {"model": "future-provider/reviewer", "executor_route": "codex", "parent_cognitive_route": {"model": "future-provider/reviewer", "chosen_by": "delegator", "selected_supervisor_snapshot": {"selected_subagent_id": "chosen-row"}}, "use_local_model": false, "coordinator_route": "future-provider/reviewer", "coordinator_billing": "measured"},
+    "provenance": "chosen by the delegator (chosen-row)",
+    "clause": "this subagent itself runs on future-provider/reviewer (bills as measured)"
+  },
+  {
+    "name": "current remote route after local inheritance",
+    "task": {"id": "child", "delegation_role": "subagent", "model": "openai/gpt-5", "use_local_model": false, "executor_route": "codex", "parent_cognitive_route": {"model": "local-model", "use_local_model": true, "chosen_by": "inherited"}},
+    "facts": {"model": "openai/gpt-5", "executor_route": "codex", "parent_cognitive_route": {"model": "local-model", "use_local_model": true, "chosen_by": "inherited"}, "use_local_model": false, "coordinator_route": "openai/gpt-5", "coordinator_billing": "unknown"},
+    "provenance": "inherited",
+    "clause": "this subagent itself runs on openai/gpt-5 (bills as unknown)"
+  },
+  {
+    "name": "explicit recorded coordinator facts",
+    "task": {"id": "child", "delegation_role": "subagent", "model": "old-model", "executor_route": "codex", "metadata": {"coordinator_route": "recorded-model", "coordinator_provenance": "inherited", "coordinator_billing": "measured", "use_local_model": true}},
+    "facts": {"model": "old-model", "executor_route": "codex", "coordinator_route": "recorded-model (local)", "coordinator_provenance": "inherited", "coordinator_billing": "measured", "use_local_model": true},
+    "provenance": "inherited",
+    "clause": "this subagent itself runs on recorded-model (local) (bills as measured)"
+  }
+]

@@ -6,9 +6,11 @@ import pytest
 from tests.test_doc_context import _make_env_and_memory
 
 
+@pytest.mark.parametrize("words", [False, True], ids=["scheduled-before", "words-fact"])
 @pytest.mark.parametrize("selection", [None, "shared", "declared"])
-def test_capture_selects_channels_without_removing_governance_or_own_process(tmp_path, monkeypatch, selection):
+def test_capture_selects_channels_without_removing_governance_or_own_process(tmp_path, monkeypatch, selection, words):
     from ouroboros import context
+    from ouroboros.subagent_work_order import DECLARED_WORDS_FACT
 
     env, memory = _make_env_and_memory(tmp_path)
     child = {
@@ -16,6 +18,8 @@ def test_capture_selects_channels_without_removing_governance_or_own_process(tmp
         "text": "DECLARED_QUESTION", "context": "DECLARED_COMMON_FACTS",
         "configured_subagent": {"route": {"kind": "api_model"}},
         "task_contract": {"constraints": "DECLARED_CONSTRAINT"},
+        "metadata": {"governing_owner_words": [{"text": "OWNER_ASKED", "source": "initial_user", "task_id": "root"}],
+                     **({DECLARED_WORDS_FACT: True} if words else {})},
     }
     if selection is not None:
         child["task_contract"]["input_sources"] = selection
@@ -31,7 +35,7 @@ def test_capture_selects_channels_without_removing_governance_or_own_process(tmp
                "MEMORY_REGISTRY", "INSTALLED_SKILLS", "DRIVE_STATE", "SHARED_REVIEW"]
     monkeypatch.setattr(context, "build_memory_sections", source(omitted[0], [omitted[0]]))
     monkeypatch.setattr(context, "build_knowledge_sections", source(omitted[1], [omitted[1]]))
-    for name, marker in zip(("build_health_invariants", "_build_registry_digest",
+    for name, marker in zip(("build_health_invariants", "_build_registry_section",
                              "_build_installed_skills_section", "_drive_state_section"), omitted[2:6]):
         monkeypatch.setattr(context, name, source(marker, marker))
     monkeypatch.setattr(memory, "recent_activity_sections", source("OWN_PROCESS", ["OWN_PROCESS"]))
@@ -50,6 +54,10 @@ def test_capture_selects_channels_without_removing_governance_or_own_process(tmp
             assert (marker in calls) == (selection != "declared")
     assert bool(core.memory_view_json) == (selection != "declared")  # a declared child carries no view
     assert ("Input source selection" in text) == (selection == "declared")
+    # The owner's words: a shared child's view holds them; a declared child its own block, once its schedule
+    # recorded that its selection carries them. Every memory channel above stays shut either way.
+    assert ("OWNER_ASKED" in core.memory_view_json) == (selection != "declared")
+    assert ("OWNER_ASKED" in core.dynamic_text) == (selection == "declared" and words)
 
 
 @pytest.mark.parametrize("explicit", [None, {"knowledge": True}])

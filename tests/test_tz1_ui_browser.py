@@ -33,11 +33,12 @@ def test_saved_input_and_starting_survive_reload(subscription_ui):
     assert saved.inner_text() == "Input saved"
     assert page.get_by_text("Starting…", exact=True).count() >= 1
     capture(page, "tz1-saved-and-starting")
+    ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     saved.wait_for()
     assert saved.count() == 1
     assert page.get_by_text("Starting…", exact=True).count() >= 1
-    assert not ui["errors"], ui["errors"]
+    assert not ui["errors"].unexpected(), ui["errors"].report()
 
 
 def test_failed_supervisor_init_never_paints_online(subscription_ui):
@@ -107,7 +108,7 @@ def test_recorded_folder_download_from_real_gateway_in_chat(subscription_ui, tmp
     card = page.locator(f'#chat-messages .chat-live-card[data-task-id="{TASK}"]')
     card.wait_for()
     assert card.locator('[data-live-phase]').inner_text() == "Done"
-    card.locator('[data-live-summary-button]').click()
+    card.locator('[data-live-disclosure]').click()
     page.wait_for_selector(f'#chat-messages .chat-live-card[data-task-id="{TASK}"] [data-result-files]')
     folder = card.locator('[data-result-files] a[href*="?archive=reports"]')
     assert folder.count() == 1 and "reports/" in folder.inner_text()

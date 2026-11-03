@@ -1,44 +1,29 @@
-"""Regression tests for ibl-2b09abdadd25: scratchpad content cap + degradation.
+"""No count, size or age cap removes working memory (#918; replaces the ibl-2b09abdadd25 caps).
 
-Two layers covered:
+The owner chose blocks that stay until the integrating mind accepts a fold (29 Oct 2026:
+«А — блоки, свёртку принимаю я»). Two former layers are gone, each pinned by its inverse here:
 
-1. **Source-side content cap** (ouroboros/memory.py::Memory.append_scratchpad_block).
-   SCRATCHPAD_MAX_CONTENT_CHARS (60_000, declared in ouroboros/context_budget.py
-   alongside the existing scratchpad thresholds) bounds total block content.
-   The cap is AND'd with the count cap (_SCRATCHPAD_MAX_BLOCKS=10) in a single
-   pass: while EITHER cap is violated, evict the oldest block. The block just
-   appended is never an eviction target; there is no other exemption (the
-   scratchpad has no pinning concept). Each eviction is journaled as
-   ``block_evicted`` and FAILS HARD on journal-write failure (existing
-   ibl-3d7b7b7d5dc9 contract preserved).
-
-2. **Consumer-side degradation**
-   (ouroboros/context.py::_render_scratchpad_for_context).
-   When the raw scratchpad exceeds SCRATCHPAD_SECTION_BUDGET_CHARS
-   (90_000) AND scratchpad_blocks.json has blocks: render the newest WHOLE
-   blocks that fit, drop oldest-first, ALWAYS retain the single newest
-   (even if it alone exceeds), and append an in-band gap marker (BIBLE P1
-   — omission is never silent). When scratchpad_blocks.json is absent /
-   empty (legacy flat scratchpad), return raw unmodified (legacy fallback
-   so the source switch introduces no silent amnesia). The kept slice is
-   rendered by the writer's own ouroboros.memory.render_scratchpad_markdown,
-   so the degraded body keeps the file's newest-first block order.
+1. **Source-side caps** (``Memory.append_scratchpad_block``). The 10-block count cap and the
+   60 000-character content cap evicted oldest blocks (``block_evicted``). Now every append
+   stays; ``memory.scratchpad_block_sha256`` names a block for ``fold_scratchpad_blocks``.
+2. **Consumer-side degradation** (``context._render_scratchpad_for_context``). Above
+   ``SCRATCHPAD_SECTION_BUDGET_CHARS`` it dropped the oldest whole blocks with a gap marker.
+   Now ``context._scratchpad_for_context`` renders every canonical block through the writer's
+   own ``render_scratchpad_markdown`` (tier-0 core); the budget only logs. A window too small
+   for the core is ``memory_floor``'s measured fact, not a section cut. A flat pre-block
+   scratchpad (no ``scratchpad_blocks.json``) is still returned raw.
 """
 from __future__ import annotations
 
 import json
+import logging
+import re
 
-from ouroboros.context import _render_scratchpad_for_context, build_memory_sections
-from ouroboros.context_budget import (
-    SCRATCHPAD_MAX_CONTENT_CHARS,
-    SCRATCHPAD_SECTION_BUDGET_CHARS,
-)
-from ouroboros.memory import (
-    Memory,
-    _SCRATCHPAD_MAX_BLOCKS,
-    render_scratchpad_markdown,
-)
+import pytest
 
+from ouroboros.context import _scratchpad_for_context, build_memory_sections
+from ouroboros.context_budget import SCRATCHPAD_SECTION_BUDGET_CHARS
+from ouroboros.memory import Memory, render_scratchpad_markdown, scratchpad_block_sha256
 
 # ---------- helpers ----------------------------------------------------------
 
@@ -61,219 +46,115 @@ def _journal_types(mem):
     jp = mem.journal_path()
     if not jp.exists():
         return []
-    out = []
-    for line in jp.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            out.append(json.loads(line).get("type"))
-    return out
+    return [json.loads(line).get("type") for line in jp.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def _force_oversized_via_json(tmp_path, n_blocks=4, each_chars=20_000):
-    """Write scratchpad_blocks.json with n blocks each containing `each_chars`
-    of content, bypassing the source-side cap. Lets the test exercise the
-    consumer-side degradation path with a scratchpad that exceeded the cap
-    by some other route (legacy import, corruption recovery, future
-    regressions that bypass the source cap)."""
+def _oversized_labelled(tmp_path, n_blocks=4, each_chars=25_000):
+    """Blocks whose rendered section exceeds the section budget; a unique leading label
+    per block makes the render order observable by offset."""
     mem = _mem(tmp_path)
-    bp = mem.scratchpad_blocks_path()
     blocks = [
-        {
-            "ts": f"2026-09-01T12:0{i}:00+00:00",
-            "source": "forced",
-            "content": "x" * each_chars,
-        }
+        {"ts": f"2026-09-01T12:0{i}:00+00:00", "source": "forced", "content": f"BLOCK{i}-" + "x" * (each_chars - 8)}
         for i in range(n_blocks)
     ]
-    bp.write_text(json.dumps(blocks), encoding="utf-8")
-    # Regenerate the scratchpad.md so load_scratchpad returns the oversized file.
-    mem._write_scratchpad_markdown(blocks)
-    return mem
-
-
-def _force_oversized_labelled(tmp_path, n_blocks=4, each_chars=25_000):
-    """Like _force_oversized_via_json, but each block carries a unique leading
-    label so the RENDER ORDER is observable by offset in the output."""
-    mem = _mem(tmp_path)
-    bp = mem.scratchpad_blocks_path()
-    blocks = [
-        {
-            "ts": f"2026-09-01T12:0{i}:00+00:00",
-            "source": "forced",
-            "content": f"BLOCK{i}-" + "x" * (each_chars - 8),
-        }
-        for i in range(n_blocks)
-    ]
-    bp.write_text(json.dumps(blocks), encoding="utf-8")
-    mem._write_scratchpad_markdown(blocks)
+    mem.mutate_scratchpad_blocks(lambda _rows: blocks)
     return mem, blocks
 
 
-# ---------- source-side content cap ------------------------------------------
+def _body(mem):
+    return _scratchpad_for_context(mem)[1]
 
 
-def test_content_cap_evicts_oldest_when_under_count_cap(tmp_path):
-    """2 blocks of 40_000 chars each = 80_000 total > 60_000 cap. Count cap
-    not violated (2 < 10), so eviction is content-driven only."""
+# ---------- 1. no source-side cap ----------------------------------------------
+
+
+def test_two_large_blocks_above_the_former_content_cap_both_stay(tmp_path):
+    """2 x 40_000 = 80_000 characters: the former 60_000 cap evicted the older block."""
     mem = _mem(tmp_path)
     mem.append_scratchpad_block("a" * 40_000, source="task")
     mem.append_scratchpad_block("b" * 40_000, source="task")
-    kept = _blocks(mem)
-    # Oldest (40_000 a's) evicted to satisfy content cap.
-    assert len(kept) == 1
-    assert kept[0]["content"].startswith("b")
-    assert "block_evicted" in _journal_types(mem)
+    assert [block["content"][0] for block in _blocks(mem)] == ["a", "b"]
+    assert "block_evicted" not in _journal_types(mem)
 
 
-def test_content_cap_evicts_until_under_both_caps(tmp_path):
-    """5 blocks of 20_000 = 100_000 > 60_000; count cap not violated (5 < 10).
-    Eviction should leave enough blocks to satisfy BOTH caps."""
+def test_five_blocks_above_the_former_content_cap_all_stay(tmp_path):
     mem = _mem(tmp_path)
     for i in range(5):
         mem.append_scratchpad_block(("c" * 20_000) + f"-{i}", source="task")
     kept = _blocks(mem)
-    total = sum(len(b["content"]) for b in kept)
-    assert total <= SCRATCHPAD_MAX_CONTENT_CHARS
-    assert len(kept) <= _SCRATCHPAD_MAX_BLOCKS
-    # The newest block is always retained.
-    assert kept[-1]["content"].endswith("-4")
+    assert [block["content"][-2:] for block in kept] == [f"-{i}" for i in range(5)]
+    assert sum(len(block["content"]) for block in kept) > 100_000
 
 
-def test_content_cap_with_count_cap_active_evicts_in_single_pass(tmp_path):
-    """12 blocks of 10_000 = 120_000; both caps violated simultaneously.
-    Single-pass eviction should leave us under BOTH caps."""
+def test_twelve_blocks_above_both_former_caps_all_stay(tmp_path):
+    """12 x 10_000: the former single pass evicted down to both caps; now nothing leaves."""
     mem = _mem(tmp_path)
     for i in range(12):
         mem.append_scratchpad_block(("d" * 10_000) + f"-{i}", source="task")
     kept = _blocks(mem)
-    assert len(kept) <= _SCRATCHPAD_MAX_BLOCKS
-    total = sum(len(b["content"]) for b in kept)
-    assert total <= SCRATCHPAD_MAX_CONTENT_CHARS
-    # Newest three must be the last three we wrote.
-    assert kept[-1]["content"].endswith("-11")
-    assert kept[-2]["content"].endswith("-10")
-    assert kept[-3]["content"].endswith("-9")
+    assert len(kept) == 12 and kept[0]["content"].endswith("-0") and kept[-1]["content"].endswith("-11")
+    assert _journal_types(mem) == ["block_appended"] * 12
 
 
-def test_content_cap_does_not_evict_when_already_under(tmp_path):
-    """Sanity: small blocks don't trigger content-cap eviction."""
+def test_small_blocks_append_plainly(tmp_path):
     mem = _mem(tmp_path)
     for i in range(3):
         mem.append_scratchpad_block(f"small block {i}", source="task")
-    kept = _blocks(mem)
-    assert len(kept) == 3
+    assert len(_blocks(mem)) == 3
     assert "block_evicted" not in _journal_types(mem)
 
 
-# ---------- consumer-side degradation ----------------------------------------
+# ---------- 2. the context section is always whole ----------------------------------------
 
 
-def test_render_scratchpad_passes_through_when_under_budget(tmp_path):
-    """If the raw scratchpad fits, the helper returns the raw markdown
-    unchanged (the trim path is a no-op)."""
+def test_a_fitting_scratchpad_is_the_writers_file(tmp_path):
     mem = _mem(tmp_path)
     mem.append_scratchpad_block("a normal block", source="task")
-    raw = mem.load_scratchpad()
-    # Use a budget larger than raw — nothing to trim.
-    body = _render_scratchpad_for_context(mem, budget=SCRATCHPAD_SECTION_BUDGET_CHARS)
-    assert body == raw
+    assert _scratchpad_for_context(mem) == ("memory/scratchpad_blocks.json", mem.load_scratchpad())
 
 
-def test_render_scratchpad_trims_with_gap_marker(tmp_path):
-    """When the raw exceeds budget AND blocks.json has blocks, return the
-    newest whole blocks that fit, drop oldest, and append the in-band gap
-    marker (BIBLE P1)."""
-    # 4 * 25_000 = 100_000 content chars (+ per-block framing overhead)
-    # comfortably exceeds the 90_000 section budget; dropping just the
-    # oldest block brings 3 * 25_000 = 75_000 (+overhead) back under it.
-    mem = _force_oversized_via_json(tmp_path, n_blocks=4, each_chars=25_000)
+def test_a_section_above_the_budget_renders_every_block_whole(tmp_path):
+    mem, blocks = _oversized_labelled(tmp_path, n_blocks=4, each_chars=25_000)
     raw = mem.load_scratchpad()
     assert len(raw) > SCRATCHPAD_SECTION_BUDGET_CHARS
-    # Tight budget forces the helper to drop oldest blocks.
-    body = _render_scratchpad_for_context(mem, budget=SCRATCHPAD_SECTION_BUDGET_CHARS)
-    assert len(body) < len(raw)
-    assert "budget gap" in body
-    assert "omitted" in body
-    # The marker points at the LIVE store: a context build retires nothing,
-    # so the dropped blocks are still in scratchpad.md, not in the journal
-    # (which only holds blocks the writer actually retired/replaced). The
-    # writer's own journal-pointer line above the blocks is a different
-    # pointer for a different population and is deliberately untouched.
-    marker = body[body.index("\n⚠️ [budget gap:"):]
-    assert "path='memory/scratchpad.md'" in marker
-    assert "scratchpad_journal.jsonl" not in marker
-    assert "retired" not in marker
-    # The omitted range is named by timestamp (oldest..last omitted).
-    assert "(2026-09-01T12:00..2026-09-01T12:00)" in marker
-    # Newest block is retained (its content shows up in the rendered body).
-    # _render_block truncates ts to [:16] (drops seconds/offset), matching
-    # _write_scratchpad_markdown's own rendering convention.
-    assert "2026-09-01T12:03" in body
-
-
-def test_render_scratchpad_legacy_fallback_returns_raw(tmp_path):
-    """Legacy flat scratchpad.md with no scratchpad_blocks.json: the helper
-    returns the raw markdown unchanged. This is the source-switch fallback
-    (no silent amnesia)."""
-    mem = _mem(tmp_path)
-    # Force a legacy state: scratchpad.md exists, blocks.json absent.
-    mem.scratchpad_path().write_text(
-        "## Scratchpad (legacy flat)\n\nSome legacy note here.\n",
-        encoding="utf-8",
-    )
-    raw = mem.load_scratchpad()
-    body = _render_scratchpad_for_context(mem, budget=len(raw) - 100)
-    # raw is bigger than budget, but no blocks to trim by — must return raw.
+    body = _body(mem)
     assert body == raw
+    assert all(block["content"] in body for block in blocks)
+    assert "budget gap" not in body and "omitted" not in body
 
 
-def test_render_scratchpad_always_retains_newest_even_if_over_budget(tmp_path):
-    """When the single newest block alone exceeds the budget, retain it
-    anyway and append the gap marker (BIBLE P1 — never silent)."""
+def test_a_flat_pre_block_scratchpad_is_returned_raw(tmp_path):
     mem = _mem(tmp_path)
-    # Single huge block: content alone is bigger than the budget.
+    mem.scratchpad_path().write_text("## Scratchpad (legacy flat)\n\nSome legacy note here.\n", encoding="utf-8")
+    assert _scratchpad_for_context(mem) == ("memory/scratchpad.md", mem.load_scratchpad())
+
+
+def test_a_single_block_above_the_budget_renders_whole(tmp_path):
+    mem = _mem(tmp_path)
     mem.append_scratchpad_block("z" * 200_000, source="task")
-    body = _render_scratchpad_for_context(mem, budget=1_000)
-    # The newest block IS retained even though it exceeds.
-    assert "z" in body
-    # And the gap marker fires.
-    assert "budget gap" in body
+    body = _body(mem)
+    assert "z" * 200_000 in body and "budget gap" not in body
 
 
-def test_render_scratchpad_block_boundary_invariant(tmp_path):
-    """Block-boundary cuts only — no mid-block, no mid-string truncation.
-    Verify that no rendered block's content is split across the budget."""
-    mem = _force_oversized_via_json(tmp_path, n_blocks=3, each_chars=30_000)
-    body = _render_scratchpad_for_context(mem, budget=SCRATCHPAD_SECTION_BUDGET_CHARS)
-    # Find each block marker in the body and confirm its content begins with
-    # the canned "xxxx" content (full block, not a truncated slice).
-    import re
-    # The renderer prints the timestamp to the minute (``ts[:16]``); a pattern
-    # that expected seconds matched nothing, so this loop never asserted.
-    matches = list(re.finditer(r"### \[\d{4}-\d{2}-\d{2}T\d{2}:\d{2} — forced\]\n(x+)", body))
-    assert matches, "no rendered block matched — the invariant was not exercised"
-    for m in matches:
-        # Each retained block has at least one 'x' before the trailing \n.
-        block_xs = m.group(1)
-        assert len(block_xs) > 0
-        # And the block boundary ends with our separator.
-        assert "---" in body[m.end():m.end() + 10]
+def test_every_rendered_block_is_whole_and_ends_at_its_separator(tmp_path):
+    mem, blocks = _oversized_labelled(tmp_path, n_blocks=3, each_chars=30_000)
+    body = _body(mem)
+    matches = list(re.finditer(r"### \[\d{4}-\d{2}-\d{2}T\d{2}:\d{2} — forced\] sha256 [0-9a-f]{64}\n(BLOCK\d-x+)", body))
+    assert len(matches) == 3, "every block renders, none is cut"
+    for match in matches:
+        assert match.group(1) in [block["content"] for block in blocks]
+        assert "---" in body[match.end():match.end() + 10]
 
 
-def test_render_scratchpad_no_mid_string_truncation(tmp_path):
-    """No block is sliced mid-content. Each retained block must contain its
-    FULL canned payload (all-x's)."""
-    mem = _force_oversized_via_json(tmp_path, n_blocks=4, each_chars=25_000)
-    body = _render_scratchpad_for_context(mem, budget=SCRATCHPAD_SECTION_BUDGET_CHARS)
-    # Each rendered block should contain a long run of 'x's (not a slice).
-    import re
-    long_x = re.search(r"x{1000,}", body)
-    assert long_x is not None
-    # The gap marker should be present (some blocks omitted).
-    assert "budget gap" in body
+def test_the_section_budget_only_logs(tmp_path, caplog):
+    mem, blocks = _oversized_labelled(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="ouroboros.context"):
+        [section] = [sec for sec in build_memory_sections(mem, partition="volatile") if sec.startswith("## Scratchpad")]
+    assert "Context section 'scratchpad' exceeds budget" in caplog.text
+    assert all(block["content"] in section for block in blocks)
 
 
-# ---------- section header on the degraded path ------------------------------
+# ---------- section header -----------------------------------------------------------------
 
 
 def _scratchpad_header(mem):
@@ -283,81 +164,78 @@ def _scratchpad_header(mem):
     return scratchpad[0].split("\n", 1)[0]
 
 
-def test_degraded_section_header_allows_reread(tmp_path):
-    """A trimmed scratchpad section must not forbid re-reading the file: the
-    omitted blocks are reachable ONLY by re-reading memory/scratchpad.md, so
-    the header discloses the partial build and points at the live source."""
-    mem = _force_oversized_via_json(tmp_path, n_blocks=4, each_chars=25_000)
+def test_an_oversized_section_header_still_says_already_loaded(tmp_path):
+    """Nothing is omitted, so nothing needs a re-read: the former PARTIAL header is gone."""
+    mem, _blocks_written = _oversized_labelled(tmp_path)
     header = _scratchpad_header(mem)
-    assert "PARTIAL" in header
-    assert "read_file(root='runtime_data', path='memory/scratchpad.md')" in header
-    assert "do not re-read" not in header
+    assert "PARTIAL" not in header and "already loaded" in header
 
 
-def test_non_degraded_section_header_unchanged(tmp_path):
-    """When the scratchpad fits, the header keeps its existing wording so the
-    agent does not re-read what is already loaded."""
+def test_the_header_names_the_canonical_blocks(tmp_path):
     mem = _mem(tmp_path)
     mem.append_scratchpad_block("a normal block", source="task")
-    header = _scratchpad_header(mem)
-    assert header == (
-        "## Scratchpad (from `memory/scratchpad.md` — already loaded; do not "
+    assert _scratchpad_header(mem) == (
+        "## Scratchpad (from `memory/scratchpad_blocks.json` — already loaded; do not "
         "re-read via read_file(root='runtime_data', path='memory/scratchpad.md'))"
     )
 
 
-# ---------- degraded render order --------------------------------------------
+# ---------- render order -------------------------------------------------------------------
 
 
-def test_degraded_body_renders_newest_first_like_the_file(tmp_path):
-    """A degraded build must read in the SAME order as scratchpad.md itself.
-
-    Measurement: take the offset of every block's label in the persisted file
-    and in the degraded body, and compare the two orderings. scratchpad.md is
-    written newest-first; a consumer-side renderer that emitted the kept slice
-    in storage (oldest-first) order would make the model read its own working
-    memory backwards, silently, only when the section is trimmed.
-    """
-    mem, _ = _force_oversized_labelled(tmp_path, n_blocks=4, each_chars=25_000)
-    raw = mem.load_scratchpad()
-    assert len(raw) > SCRATCHPAD_SECTION_BUDGET_CHARS
-
-    body = _render_scratchpad_for_context(mem, budget=SCRATCHPAD_SECTION_BUDGET_CHARS)
+def test_the_section_renders_newest_first_like_the_file(tmp_path):
+    mem, _ = _oversized_labelled(tmp_path, n_blocks=4, each_chars=25_000)
+    body = _body(mem)
     labels = [f"BLOCK{i}-" for i in range(4)]
-    file_order = sorted([lbl for lbl in labels if lbl in raw], key=raw.index)
-    body_order = sorted([lbl for lbl in labels if lbl in body], key=body.index)
-
-    # The file holds all four, newest-first.
-    assert file_order == ["BLOCK3-", "BLOCK2-", "BLOCK1-", "BLOCK0-"]
-    # The degraded body dropped the oldest and kept the file's relative order.
-    assert body_order == ["BLOCK3-", "BLOCK2-", "BLOCK1-"]
-    assert body_order == [lbl for lbl in file_order if lbl in body_order]
-    # The first rendered block is the NEWEST one, not the oldest.
+    assert sorted(labels, key=body.index) == ["BLOCK3-", "BLOCK2-", "BLOCK1-", "BLOCK0-"]
     first_heading = body.index("### [")
     assert body[first_heading:].startswith("### [2026-09-01T12:03 — forced]")
 
 
-def test_degraded_body_is_the_writers_rendering_of_the_kept_slice(tmp_path):
-    """The degraded body, minus the in-band gap marker, is byte-identical to
-    what the writer would persist for that slice — one renderer, one order."""
-    mem, blocks = _force_oversized_labelled(tmp_path, n_blocks=4, each_chars=25_000)
-    body = _render_scratchpad_for_context(mem, budget=SCRATCHPAD_SECTION_BUDGET_CHARS)
-    marker_at = body.index("\n⚠️ [budget gap:")
-    expected = render_scratchpad_markdown(
-        blocks[-3:], journal_pointer=mem.journal_path().exists(),
-    )
-    assert body[:marker_at] == expected
+def test_the_section_is_the_writers_rendering_of_every_block(tmp_path):
+    mem, blocks = _oversized_labelled(tmp_path, n_blocks=4, each_chars=25_000)
+    assert _body(mem) == render_scratchpad_markdown(blocks, journal_pointer=mem.journal_path().exists(),
+                                                    journal_reader=mem.scratchpad_journal_reader())
+    assert [scratchpad_block_sha256(block) for block in reversed(blocks)] == re.findall(
+        r"sha256 ([0-9a-f]{64})", _body(mem))
 
 
-# ---------- ordering invariant -----------------------------------------------
+# ---------- 3. the physical window: whole, or a typed refusal — never a cut -----------------
 
 
-def test_constant_ordering_holds():
-    """The invariant asserted in ouroboros/context_budget.py must hold at
-    runtime: SCRATCHPAD_CONSOLIDATION_THRESHOLD_CHARS < SCRATCHPAD_MAX_CONTENT_CHARS
-    <= SCRATCHPAD_SECTION_BUDGET_CHARS - rendering headroom."""
-    from ouroboros.context_budget import (
-        SCRATCHPAD_CONSOLIDATION_THRESHOLD_CHARS,
-    )
-    assert SCRATCHPAD_CONSOLIDATION_THRESHOLD_CHARS < SCRATCHPAD_MAX_CONTENT_CHARS
-    assert SCRATCHPAD_MAX_CONTENT_CHARS <= SCRATCHPAD_SECTION_BUDGET_CHARS - 1_000
+@pytest.mark.parametrize("window, outcome", [(400_000, "whole"), (40_000, "refused")])
+def test_the_route_window_holds_the_whole_scratchpad_or_refuses_typed_never_cuts(tmp_path, monkeypatch, window, outcome):
+    """No section cut stands between a large scratchpad and the window. The scratchpad is tier-0 core
+    measured in the floor need: a route that holds it gets every block whole; a route whose window
+    cannot hold the core refuses the start with the typed ``MinimumViewUnfit`` (measured numbers,
+    no request built) rather than dropping a block. Folding is the mind's (``update_scratchpad``
+    ``replaces``); this physical limit is the owner-accepted remainder, not a hidden cap."""
+    from ouroboros import capability_evidence as ce
+    from ouroboros import context_fit as cf
+    from ouroboros import memory_view as mv
+    from tests import _memory_view_synthetic as syn
+
+    mem = _mem(tmp_path)
+    blocks = [{"ts": f"2026-09-01T12:0{i}:00+00:00", "source": "forced", "content": f"BLOCK{i}-" + "s" * 60_000}
+              for i in range(5)]
+    mem.mutate_scratchpad_blocks(lambda _rows: blocks)
+    [section] = [sec for sec in build_memory_sections(mem, partition="volatile") if sec.startswith("## Scratchpad")]
+    snapshot = syn.snapshot(role="consciousness", story=syn.pages(1, 100), room_facts=syn.room(lane2=3))
+    core = cf.ContextCore("Required core", "Constitution", "b" * 1_000, "", "Identity", section, '"Assignment"',
+                          False, memory_view_json=mv.snapshot_json(snapshot))
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+
+    def start():
+        return cf.build_context_fit_plan(
+            None, core, {"id": "room01", "usage_category": "consciousness"}, preferred_mode="max",
+            route_resolver=lambda *_a, **_kw: ({"provider": "test", "model": "test"},
+                                               ce.CapabilityEvidence(window, "confirmed", "metadata", "room-route")))
+
+    if outcome == "refused":
+        with pytest.raises(cf.MinimumViewUnfit, match="cannot fit"):
+            start()
+        return
+    plan = start()
+    shown = plan.projection(plan.initial_mode).system_content_json
+    assert plan.initial_mode == "max"
+    assert all(block["content"] in shown for block in blocks) and "budget gap" not in shown

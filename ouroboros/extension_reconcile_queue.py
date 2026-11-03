@@ -211,8 +211,10 @@ def request_extension_reconcile(
     """Ask the server process to reconcile one extension skill.
 
     Each write creates a unique marker. The server reads desired state from
-    durable skill state at processing time, so duplicate requests are harmless
-    and an older marker can never unlink a newer one.
+    durable skill state at processing time, so the requests for one skill are
+    equivalent: a pass reconciles the skill once for all of them
+    (``process_extension_reconcile_requests``), and an older marker can never
+    unlink a newer one.
     """
     root = _queue_root(pathlib.Path(drive_root))
     root.mkdir(parents=True, exist_ok=True)
@@ -286,6 +288,8 @@ def _mark_failed(
         })
         failed_path = path.parent / "failed" / path.name
         atomic_write_json(failed_path, payload)
+        from ouroboros.maintenance_retirement import artifact_changed
+        artifact_changed(drive_root)
         try:
             path.unlink()
         except FileNotFoundError:
@@ -308,7 +312,7 @@ def prune_failed_reconcile_markers(
     fact that survives it. Age by file mtime (written at the final failure); a
     refused unlink keeps the file and reports.
     """
-    from ouroboros.retention import age_cutoff, get_gc_retention_days
+    from ouroboros.retention import age_cutoff, get_gc_retention_days, keep_until
 
     if retention_days is None:
         retention_days = get_gc_retention_days()
@@ -321,7 +325,9 @@ def prune_failed_reconcile_markers(
         return report
     for path in entries:
         try:
-            if path.stat().st_mtime >= cutoff:
+            stamp = path.stat().st_mtime
+            if stamp >= cutoff:
+                keep_until(report, stamp, retention_days)
                 report["kept"] += 1
                 continue
             path.unlink()
@@ -331,21 +337,40 @@ def prune_failed_reconcile_markers(
     return report
 
 
+def _remove_markers(items: List[Dict[str, Any]]) -> None:
+    for item in items:
+        pathlib.Path(str(item.get("_path") or "")).unlink(missing_ok=True)
+
+
 def process_extension_reconcile_requests(
     drive_root: pathlib.Path,
     settings_reader: Callable[[], Dict[str, Any]],
     *,
     repo_path: str | None = None,
 ) -> List[Dict[str, Any]]:
-    """Process all pending server-side extension reconcile markers once."""
+    """One pass over the pending markers: ONE reconcile per skill, however many requests name it.
+
+    Every request stays its own marker, so a request written while its skill is being
+    reconciled is a file this pass never read and stays pending for the next one. The pass
+    groups the markers it read by skill and reconciles each skill once — its requests are
+    equivalent, since the reconcile reads the skill's desired state from durable state when it
+    runs — then removes every marker of the group (``requests`` counts them). It used to run
+    one reconcile per marker, so a backlog only grew (2,252 markers, +7/min on 01.11, every one
+    re-read each pass); the same grouping drains such a legacy backlog in one pass. A deferred
+    skill (``live_call_active``) and a failing one keep only their newest marker, a failure
+    counted on it from the group's highest attempt toward ``MAX_ATTEMPTS`` (``_mark_failed``
+    keeps the terminal fact durable), so neither multiplies markers while it waits.
+    """
     from ouroboros.extension_loader import ensure_companions_running, reconcile_extension
 
-    processed: List[Dict[str, Any]] = []
+    groups: Dict[str, List[Dict[str, Any]]] = {}
     for item in list_extension_reconcile_requests(drive_root):
-        path = pathlib.Path(str(item.get("_path") or ""))
-        if item.get("status") == "failed":
-            continue
-        skill = str(item.get("skill") or "").strip()
+        if item.get("status") != "failed":
+            groups.setdefault(str(item.get("skill") or "").strip(), []).append(item)
+    processed: List[Dict[str, Any]] = []
+    for skill, items in groups.items():
+        items.sort(key=lambda row: (str(row.get("requested_at") or ""), str(row.get("_path") or "")))
+        newest, older = items[-1], items[:-1]
         try:
             state = reconcile_extension(
                 skill,
@@ -354,28 +379,33 @@ def process_extension_reconcile_requests(
                 repo_path=repo_path,
                 retry_load_error=True,
             )
+            if state.get("reason") == "live_call_active":
+                _remove_markers(older)
+                processed.append({"skill": skill, "action": state["action"], "reason": state["reason"],
+                                  "marker_removed": False, "requests": len(items)})
+                continue
             companion_state = ensure_companions_running(
                 skill,
                 pathlib.Path(drive_root),
                 settings_reader,
                 repo_path=repo_path,
             )
-            try:
-                path.unlink()
-                removed = True
-            except FileNotFoundError:
-                removed = True
+            _remove_markers(items)
             processed.append({
                 "skill": skill,
                 "action": state.get("action"),
                 "reason": state.get("reason"),
-                "marker_removed": removed,
+                "marker_removed": True,
                 "companions": companion_state,
+                "requests": len(items),
             })
         except Exception as exc:
             log.warning("server extension reconcile request failed for %s", skill, exc_info=True)
+            _remove_markers(older)
             _mark_failed(
-                path, item, f"{type(exc).__name__}: {exc}",
+                pathlib.Path(str(newest.get("_path") or "")),
+                {**newest, "attempts": max(int(row.get("attempts") or 0) for row in items)},
+                f"{type(exc).__name__}: {exc}",
                 drive_root=pathlib.Path(drive_root),
             )
     return processed

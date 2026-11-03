@@ -16,6 +16,8 @@ Playwright, not the native PyWebView shell.
 """
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+
 import base64
 import json
 import os
@@ -200,8 +202,7 @@ def test_owner_attachments_render_once_everywhere(direct_server_with_data, engin
             _capture(page, own, evidence / f"attachments-own-{engine}.png")
 
             # The canonical row: one inbound message, server-measured refs, no paths or bytes.
-            rows = [json.loads(line) for line in (data / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()
-                    if line.strip()]
+            rows = dialogue_test.log_rows(data / "logs" / "chat.jsonl")
             inbound = [row for row in rows if row.get("direction") == "in" and row.get("attachments")]
             assert len(inbound) == 1, "one owner message, not one per file"
             refs = inbound[0]["attachments"]
@@ -543,8 +544,7 @@ def test_composer_consumer_path_and_real_media_past_the_text_tail(direct_server_
             _assert_lazy_images_load(page, bubble, f"{engine} own bubble")
             _assert_many(_many_shape(bubble), f"{engine} own bubble")
             assert badges.count() == 0 and page.evaluate(_BLOB_ALIVE, thumbs) == [False] * 28
-            rows = [json.loads(line) for line in (data / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()
-                    if line.strip()]
+            rows = dialogue_test.log_rows(data / "logs" / "chat.jsonl")
             (inbound,) = [row for row in rows if row.get("direction") == "in" and row.get("attachments")]
             assert len(inbound["attachments"]) == 30 and inbound["text"].endswith("[5 more attached files]")
             assert {ref["kind"] for ref in inbound["attachments"][:2]} == {"video", "audio"}
@@ -588,7 +588,7 @@ def test_an_attachment_frame_lost_after_send_is_recoverable_exactly_once(direct_
     resends the same frame and id, landing ONE row. A frame the host did save, whose echo the
     drop cut off, is settled by history after the reconnect. One saved just before a host
     restart, which the page learns of only from the new process, says its delivery is not
-    confirmed and offers nothing to resend."""
+    confirmed and offers only Send as new, which puts his words back in the composer and sends nothing."""
     from playwright.sync_api import sync_playwright
 
     url, data = direct_server_with_data["url"], direct_server_with_data["data_dir"]
@@ -626,7 +626,7 @@ def test_an_attachment_frame_lost_after_send_is_recoverable_exactly_once(direct_
 
     def inbound(cmid: str) -> list[dict]:
         chat = data / "logs" / "chat.jsonl"
-        rows = [json.loads(line) for line in chat.read_text(encoding="utf-8").splitlines() if line.strip()] if chat.exists() else []
+        rows = dialogue_test.log_rows(chat)
         return [row for row in rows if row.get("direction") == "in" and row.get("client_message_id") == cmid]
 
     settled = """cmid => {
@@ -669,7 +669,6 @@ def test_an_attachment_frame_lost_after_send_is_recoverable_exactly_once(direct_
             # no row, the same message is back in doubt with its two manual actions; nothing resends.
             page.reload(wait_until="domcontentloaded")
             page.wait_for_function(open_socket, timeout=30_000)
-            page.wait_for_function("() => !document.querySelector('#reconnect-overlay.visible')", timeout=30_000)
             doubt.wait_for(timeout=30_000)
             assert doubt.locator("[data-unconfirmed-action]").all_inner_texts() == ["Send again", "Discard"]
             assert page.locator(_BUBBLE).count() == 1 and len(seen) == 1 and inbound(seen[0]) == []
@@ -712,10 +711,16 @@ def test_an_attachment_frame_lost_after_send_is_recoverable_exactly_once(direct_
                 held.close()
             delivery = page.locator(f"{_BUBBLE} [data-ingress-saved='unconfirmed']")
             delivery.wait_for(timeout=60_000)
-            assert delivery.inner_text() == "Saved; delivery not confirmed."
-            assert page.locator(f"{_BUBBLE} [data-unconfirmed-action]").count() == 0, "no Send again: it could only rejoin"
+            assert delivery.inner_text().startswith("Saved; delivery not confirmed.")
+            actions = page.locator(f"{_BUBBLE} [data-unconfirmed-action]")
+            assert actions.all_inner_texts() == ["Send as new"], "no Send again: it could only rejoin"
             assert page.evaluate("() => Object.keys(sessionStorage).filter(k => k.startsWith('ouro_chat_unconfirmed'))") == []
             assert len(seen) == 4 and len(inbound(seen[-1])) == 1, "nothing was resent"
+            # Send as new only puts his words back in the composer, as a new message he may edit or send.
+            actions.first.click()
+            assert "third" in page.locator("#chat-input").input_value()
+            page.wait_for_timeout(500)
+            assert len(seen) == 4 and len(inbound(seen[-1])) == 1, "Send as new sent nothing by itself"
             _capture(page, page.locator(_BUBBLE).last, evidence / f"attachments-delivery-unconfirmed-{engine}.png")
         finally:
             browser.close()

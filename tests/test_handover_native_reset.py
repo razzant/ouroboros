@@ -6,7 +6,8 @@ from copy import deepcopy
 import pytest
 
 from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY
-from ouroboros.send_clock import CLOCK_NOTE_PREFIX
+from ouroboros.context_budget import bound_host_row
+from ouroboros.send_clock import CLOCK_NOTE_PREFIX, CLOCK_ROW_NAME
 from ouroboros import loop, usage_accounting as ua
 from ouroboros.llm_claudexor import ModelTurnState
 from ouroboros.loop_model_call import _reprepare_waiting_main
@@ -63,7 +64,9 @@ def test_main_dual_token_reset_survives_wait_reprepare_and_adopts_new_envelope(
     sent = _without_context_facts(gateway.uploads[-1][0]["messages"], physical=True)
     clock = [] if asynchronous else [sent[-1]]
     assert not clock or clock[0]["content"].startswith(CLOCK_NOTE_PREFIX)
-    assert _without_context_facts(ctx.messages) == expected + clock
+    # The canonical line is typed host state bound to its text; the wire carries the text alone.
+    kept = [bound_host_row(CLOCK_ROW_NAME, row["content"]) for row in clock]
+    assert _without_context_facts(ctx.messages) == expected + kept
     # The canonical system message carries the builder's host-only stable-prefix
     # declaration; the Codex send copy pops it (llm_claudexor._request).
     wire_expected = deepcopy(expected)

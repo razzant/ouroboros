@@ -42,7 +42,7 @@
    "owner_wait_state": "resumed",
    "wait_for_answer": true
   },
-  "status": "Unanswered · the task continued; an answer is still accepted"
+  "status": "Unanswered · task continued"
  },
  {
   "case": "resumed on its own bound",
@@ -60,7 +60,7 @@
    "owner_wait_resume_reason": "timeout",
    "wait_ended_at": "2026-09-16T00:01:00Z"
   },
-  "status": "Unanswered · the task continued; an answer is still accepted"
+  "status": "Unanswered · task continued"
  },
  {
   "case": "the task moved on to a newer wait",
@@ -77,7 +77,7 @@
    "owner_wait_state": "resumed",
    "wait_for_answer": true
   },
-  "status": "Unanswered · the task continued; an answer is still accepted"
+  "status": "Unanswered · task continued"
  },
  {
   "case": "open without any wait evidence",
@@ -88,7 +88,7 @@
   "row": {
    "quiz_state": "open"
   },
-  "status": "Unanswered · an answer is still accepted"
+  "status": "Unanswered"
  },
  {
   "case": "answered while the record still says waiting",
@@ -117,7 +117,7 @@
   "row": {
    "quiz_state": "expired_terminal"
   },
-  "status": "Unanswered · the task finished; a late answer is accepted as your message"
+  "status": "Unanswered · task finished"
  },
  {
   "case": "replaced",
@@ -159,6 +159,27 @@
    }
   },
   "status": "Answer recorded · delivery pending"
+ },
+ {
+  "case": "answered, waiting in its paused task's mailbox until it reads",
+  "block": {
+   "state": "answered",
+   "delivery": {
+    "kind": "answer",
+    "state": "owed",
+    "reason_code": "awaiting_recipient_read"
+   }
+  },
+  "owner_wait": null,
+  "row": {
+   "quiz_state": "answered",
+   "question_delivery": {
+    "kind": "answer",
+    "state": "owed",
+    "reason_code": "awaiting_recipient_read"
+   }
+  },
+  "status": "Answer saved · the task reads it when it continues"
  },
  {
   "case": "late answer accepted, its dispatch witness lost to a restart",

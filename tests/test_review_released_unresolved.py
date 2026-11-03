@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from ouroboros import delegate_custody as custody
 from ouroboros.deadline_utils import utc_now
-from ouroboros.review_custody import RELEASED_UNRESOLVED, _rejoin_window, released_slot_unresolved
+from ouroboros.review_custody import _rejoin_window, released_slot_unresolved
 
 
 def _iso(moment):
@@ -26,12 +26,8 @@ def test_an_unbound_start_rejoins_for_what_remains_of_its_requested_window(tmp_p
     assert 2900 < window < 3100  # ~3000s of the original hour remain, not the 30s margin
 
 
-def test_released_frames_count_unknown_outcomes_as_unresolved():
-    from ouroboros.acceptance_settlement import acceptance_settlement_message
-
+def test_released_seats_count_unknown_outcomes_as_unresolved():
+    # (The acceptance settlement frame that also counted them left with the acceptance machine.)
     assert released_slot_unresolved(SimpleNamespace(operation_state="in_flight"))
     assert released_slot_unresolved({"operation_state": "custody_lost"})
     assert not released_slot_unresolved({"operation_state": "settled"})
-    wave = {"slots": {"a": "ok", "b": RELEASED_UNRESOLVED, "c": "error"}, "total": 3, "verdicts": {}}
-    head = acceptance_settlement_message(SimpleNamespace(retry_key="rk"), wave).splitlines()[0]
-    assert "2 of 3 reviewer slot(s) have answered" in head

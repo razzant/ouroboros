@@ -14,6 +14,7 @@ binding this module saw at import time.
 from __future__ import annotations
 
 import logging
+import subprocess
 from typing import List, Optional, Tuple
 
 
@@ -118,31 +119,54 @@ def _configure_credential_helper(repo_slug: str, token: str) -> None:
         log.warning("Failed to write repo credentials file: %s", e)
 
 
-def push_to_remote(branch: Optional[str] = None, push_tags: bool = True) -> Tuple[bool, str]:
-    """Push current branch (and optionally its release tags) to origin.
+def push_to_remote(branch: Optional[str] = None, push_tags: bool = True, *,
+                   created_tag: str = "", expected_commit_sha: str = "") -> Tuple[bool, str]:
+    """Push the branch and at most its explicitly operation-created annotated tag.
 
-    Network pushes ride the shared bounded git runner: a hung remote surfaces
-    as the ordinary ``(False, "git push failed: ...")`` result instead of
-    pinning the worker forever on an unbounded subprocess wait.
-
-    Tags are the annotated tags REACHABLE from the pushed branch
-    (``--follow-tags``), never ``--tags``: linked worktrees share one tag
-    namespace, so a release tag on an unadopted body candidate or a contained
-    orphan must not be published with the serving line. Nothing is forced.
+    Missing creation evidence means branch-only, even with push_tags=True. The
+    compatibility boolean reports branch success, not complete tag publication;
+    the message names partial outcomes. Both pushes are bounded, never forced or
+    automatically retried. Existing tags are neither discovered nor backfilled.
     """
     if not _go()._has_remote("origin"):
         return False, "No remote configured"
 
     target = branch or _go().BRANCH_DEV
-    rc, out, err = _go()._git_network_bounded(["push", "-u", "origin", target])
+    branch_ref = target if target.startswith("refs/heads/") else f"refs/heads/{target}"
+    rc, out, err = _go()._git_network_bounded(
+        ["push", "--no-follow-tags", "-u", "origin", f"{branch_ref}:{branch_ref}"])
     if rc != 0:
-        return False, f"git push failed: {err}"
+        log.warning("Personal-origin branch push failed or unconfirmed: %s", err)
+        return False, "Branch publication failed or is unconfirmed; see Logs. No automatic retry"
 
     result = f"Pushed {target} to origin"
-    if push_tags:
-        rc_t, _, err_t = _go()._git_network_bounded(["push", "--follow-tags", "origin", target])
-        if rc_t != 0:
-            result += f" (tags push failed: {err_t})"
+    if push_tags and created_tag:
+        tag_ref = f"refs/tags/{created_tag}"
+        try:
+            # Validate in the same repository the network runner publishes.
+            rc_t, out_t, err_t = _go().git_capture(
+                ["git", "-C", str(_go().REPO_DIR), "for-each-ref",
+                 "--format=%(refname) %(objecttype) %(objectname) %(*objecttype) %(*objectname)", tag_ref],
+                repair_index=False)
+            tag = next((line.split() for line in out_t.splitlines()
+                        if line.split()[:1] == [tag_ref]), [])
+            if (rc_t != 0 or len(tag) != 5 or tag[1] != "tag"
+                    or tag[3:] != ["commit", expected_commit_sha]):
+                raise ValueError(err_t or "missing or mismatched annotated operation tag")
+            rc_t, _, err_t = _go().git_capture(
+                ["git", "-C", str(_go().REPO_DIR), "merge-base", "--is-ancestor",
+                 expected_commit_sha, branch_ref], repair_index=False)
+            if rc_t != 0:
+                raise ValueError(err_t or "release commit is not on the selected branch")
+            # Pin the validated object: later ref movement cannot substitute it.
+            rc_t, _, err_t = _go()._git_network_bounded(
+                ["push", "--no-follow-tags", "origin", f"{tag[2]}:{tag_ref}"])
+            if rc_t != 0:
+                raise RuntimeError(err_t or "git tag push failed")
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+            log.warning("Personal-origin tag %s failed or unconfirmed: %s", created_tag, exc)
+            result += (f" (partial publication: tag {created_tag} failed or unconfirmed; "
+                       "see Logs; no automatic retry)")
         else:
-            result += " + tags"
+            result += f" + tag {created_tag}"
     return True, result

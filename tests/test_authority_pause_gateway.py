@@ -26,6 +26,24 @@ def test_resume_authority_refusal_is_conflict_not_missing_task(monkeypatch, kind
     assert "increase" not in body["error"].lower()
 
 
+@pytest.mark.parametrize("refusal", [
+    {"ok": False, "error": "pause_source_unreadable"},
+    {"ok": False, "error": "external_runs_unsettled", "runs": [{"run_id": "r1", "state": "running"}]},
+])
+def test_resume_preserves_the_same_ordinary_refusal_as_the_mind(monkeypatch, refusal):
+    from ouroboros.work_stop import resume_outcome
+
+    outcome = resume_outcome(refusal)
+    monkeypatch.setattr("supervisor.queue.resume_budget_paused_task", lambda _id: outcome)
+    with TestClient(Starlette(routes=[Route("/api/tasks/{task_id}/resume", api_task_resume, methods=["POST"])])) as client:
+        response = client.post("/api/tasks/saved/resume")
+    assert response.status_code == 409
+    assert response.json()["error"] == outcome["error"]
+    assert response.json()["message"] == outcome["message"]
+    if "blockers" in outcome:
+        assert response.json()["blockers"] == outcome["blockers"]
+
+
 @pytest.mark.serial
 def test_actual_authority_resume_success_matches_python_and_browser_contract(tmp_path, monkeypatch):
     import pathlib

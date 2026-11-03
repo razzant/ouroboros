@@ -2,14 +2,16 @@
 
 The served page is the real ``web/`` tree behind the real ``server.py`` with the
 isolated stub model; only the socket frames are authored by the test, through
-the same decoder every live row uses. What a person can see is asserted: the
-late-review row reads in words with no slot id, verdict token or omission
-marker, its link downloads the exact applied review record the host published
-(bytes that hash to the recorded digest), a forged pointer buys no bytes, a
-running card's status chip says Working while its title carries no copy of the
-word, a reload replays the durable row with the same link, and a settled
-acceptance panel without a verdict heads its Reviews group in words while the
-attempt detail keeps the stored DEGRADED and the raw provider error.
+the same decoder every live row uses. The retired task acceptance wrote the
+late-review rows, their applied review records and its panels; nothing writes
+one now, so the records are stored here as it left them, and what a person can
+see of them is asserted: the late-review row reads in words with no slot id,
+verdict token or omission marker, its link downloads the exact applied review
+record (bytes that hash to the recorded digest), a forged pointer buys no
+bytes, a running card's status chip says Working while its title carries no
+copy of the word, a reload replays the durable row with the same link, and a
+settled acceptance panel without a verdict heads its Reviews group in words
+while the attempt detail keeps the stored DEGRADED and the raw provider error.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -32,6 +35,50 @@ LATE_TS = "2026-09-28T00:06:00+00:00"
 _LINK_INK = """(link) => { const ink = document.createElement('span'); ink.style.color = 'var(--accent-light)';
     link.parentElement.appendChild(ink); const want = getComputedStyle(ink).color; ink.remove();
     return [getComputedStyle(link).color, want]; }"""
+
+
+def _context(root, task_id="applied", chat_id=1):
+    return SimpleNamespace(root=root, task_id=task_id, chat_id=chat_id)
+
+
+def _run(task_id="applied"):
+    """An old host task-acceptance run, as the retired machine stored it."""
+    return {"request": {"surface": "task_acceptance", "task_id": task_id},
+            "panel_id": "panel_exact", "authority": "host_root", "task_attempt": 1, "aggregate_signal": "PASS",
+            "actors": [{"slot_id": "s1", "signal": "PASS", "status": "ok",
+                        "parsed": {"verdict": "PASS", "outcome_tier": "solved", "findings": []}}],
+            "parsed_findings": [], "enforcement_impact": "allows_completion"}
+
+
+def _store_old_acceptance(ctx, run, *, decision=None, result="The delivered answer."):
+    """Store one panel as the retired publisher left it: the applied record in the task's
+    artifact store, its compact panel on the task result. Returns the stored panel."""
+    from ouroboros import artifacts, review_projection
+    from ouroboros.task_results import write_task_result
+
+    record = {**run, **({"applied_decision": decision} if decision else {})}
+    ref = artifacts.store_actor_source_bytes(
+        ctx.root, ctx.task_id, category="context_checkpoints", source_id="acceptance",
+        data=json.dumps(record, ensure_ascii=False, sort_keys=True).encode("utf-8"), extension="json")
+    stored = {**record, "panel_index": 0, "publication_revision": 1,
+              "applied_source_ref": ref, "applied_source_status": "available"}
+    projection = review_projection.compact_review_projection([stored])
+    projection.update(publication_revision=1, task_attempt=1)
+    write_task_result(ctx.root, ctx.task_id, "completed", chat_id=ctx.chat_id, result=result,
+                      review_projection=projection)
+    return projection["panels"][0]
+
+
+def _store_old_late_row(root, task_id, note, evidence, row_id):
+    """A late-review chat row as the retired writer stored it, evidence pointer included."""
+    from ouroboros import dialogue_store
+    from supervisor.message_ingress import _chat_record
+
+    _root, row = _chat_record("system", 1, 0, note, ts=LATE_TS, record_type="acceptance_late_settlement",
+                              task_id=task_id, drive_root=root,
+                              message_meta={"card_row": "reviews", "card_row_id": row_id})
+    row["late_evidence"] = dict(evidence)
+    dialogue_store.append(root, "chat", row)
 
 
 def _late_row(task_id, note, evidence, *, row_id="acceptance-late:rk"):
@@ -52,46 +99,33 @@ def _progress(task_id, text, *, narration=None):
 def test_late_review_row_reads_in_words_and_downloads_its_record(direct_server_with_data, engine):
     playwright_api = pytest.importorskip("playwright.sync_api")
 
-    from ouroboros import loop, review_projection
-    from ouroboros.acceptance_settlement import _late_settlement_text, late_evidence_fact
-    from ouroboros.task_results import load_task_result, write_task_result
-    from supervisor import message_bus
-    from supervisor.message_bus import append_jsonl
-    from tests.test_acceptance_publication import _context, _run
+    from ouroboros import dialogue_store
     from tests.ui_chat_viewport_smoke import (
         _CAPTURE_TEST_SOCKET, _OBSERVE_STATE_READS, _emit_ws_frame, _wait_socket_open_quiescent,
     )
+    from tests.ui_console_errors import PageErrors
 
     root = direct_server_with_data["data_dir"]
     url = direct_server_with_data["url"]
     evidence_dir = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(root.parent)))
     evidence_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- the real producers: a published acceptance panel and the owner row -----------
+    # --- an old published acceptance panel and the owner row its late settlement wrote ---
     ctx = _context(root)
-    run = {**_run(), "task_attempt": ctx.task_attempt,
-           "slot_roster": [{"slot_id": "s1", "model": "fixture/reviewer", "route": "agent_session"}]}
+    run = {**_run(), "slot_roster": [{"slot_id": "s1", "model": "fixture/reviewer", "route": "agent_session"}]}
     # The engine's final-attempt report is what names the model that answered.
     run["actors"][0].update(model="fixture/reviewer", operation_state="settled",
                             usage={"resolved_model": "fixture/reviewer-2026-09",
                                    "observed_attempt": {"harness_id": "codex", "model": "fixture/reviewer-2026-09"}})
     run["actors"][0]["parsed"]["summary"] = "Every claim is backed by the ledger. " * 16
-    trace = {"review_runs": [run]}
-    write_task_result(root, ctx.task_id, "completed", chat_id=1, result="The delivered answer.")
-    loop._set_acceptance_decision(trace, {"status": "accepted", "reason": "clean_pass"})
-    review_projection.publish_acceptance_checkpoint(ctx, trace)
-    panel = load_task_result(root, ctx.task_id)["review_projection"]["panels"][0]
+    panel = _store_old_acceptance(ctx, run, decision={"status": "accepted", "reason": "clean_pass"})
     ref = panel["applied_source_ref"]
-    wave = {"slots": {"s1": "ok"}, "verdicts": {"s1": {"verdict": "PASS", "note": "x"}}, "total": 1}
-    fact = late_evidence_fact(run, {"source": "terminal_delivery_registry", "state": "unknown", "delivered": []},
-                              settled_at=LATE_TS)
-    note = _late_settlement_text(run, wave, fact)
-    assert note.startswith("On the reviewed version of this answer")
-    assert "fixture/reviewer-2026-09: passed it" in note and note.endswith("… (shortened)")
-    assert "review record" not in note, "a reviewer's cut promises no record; the row's link is the pointer"
+    # The words the retired composer stored: a reviewer's cut promises no record; the row's link is the pointer.
+    note = ("On the reviewed version of this answer (whether it was the delivered one is unknown), "
+            "reviewers later passed it.\n- fixture/reviewer-2026-09: passed it — "
+            + ("Every claim is backed by the ledger. " * 16)[:400].rstrip() + "… (shortened)")
     evidence = {"task_id": ctx.task_id, "panel_id": panel["panel_id"], "settled_at": LATE_TS,
-                "reviewed_revision": fact["reviewed_revision"], "reviewed_is_emitted": fact["reviewed_is_emitted"],
-                "source_ref": ref}
+                "reviewed_revision": "reviewed", "reviewed_is_emitted": False, "source_ref": ref}
     # A well-formed pointer at a source this task never published: the client can
     # only judge the shape, the server judges the identity and serves nothing.
     forged = {**evidence, "source_ref": {**ref, "sha256": "f" * 64,
@@ -101,45 +135,26 @@ def test_late_review_row_reads_in_words_and_downloads_its_record(direct_server_w
     # A late-review row can outlive its task card. Keep the source task outside
     # Main's result-card lens while placing its test-authored notice in Main,
     # so this exercises the card-less fallback rather than the card-row path.
-    cardless_ctx = _context(root)
-    cardless_ctx.task_id = "cardless-review"
-    cardless_ctx.current_chat_id = 0
-    cardless_run = _run()
-    cardless_run["request"]["task_id"] = cardless_ctx.task_id
-    cardless_run["panel_id"] = "panel_cardless"
-    cardless_trace = {"review_runs": [cardless_run]}
-    write_task_result(root, cardless_ctx.task_id, "completed", chat_id=0, result="The delivered card-less answer.")
-    loop._set_acceptance_decision(cardless_trace, {"status": "accepted", "reason": "clean_pass"})
-    review_projection.publish_acceptance_checkpoint(cardless_ctx, cardless_trace)
-    cardless_panel = load_task_result(root, cardless_ctx.task_id)["review_projection"]["panels"][0]
+    cardless_ctx = _context(root, "cardless-review", 0)
+    cardless_run = {**_run(cardless_ctx.task_id), "panel_id": "panel_cardless"}
+    cardless_panel = _store_old_acceptance(cardless_ctx, cardless_run, decision={"status": "accepted", "reason": "clean_pass"},
+                                           result="The delivered card-less answer.")
     cardless_ref = cardless_panel["applied_source_ref"]
-    cardless_fact = late_evidence_fact(
-        cardless_run, {"source": "terminal_delivery_registry", "state": "unknown", "delivered": []},
-        settled_at=LATE_TS,
-    )
-    cardless_note = _late_settlement_text(cardless_run, wave, cardless_fact)
+    cardless_note = ("On the reviewed version of this answer (whether it was the delivered one is unknown), "
+                     "reviewers later passed it.\n- unknown reviewer: passed it")
     cardless_evidence = {
         "task_id": cardless_ctx.task_id, "panel_id": cardless_panel["panel_id"], "settled_at": LATE_TS,
-        "reviewed_revision": cardless_fact["reviewed_revision"],
-        "reviewed_is_emitted": cardless_fact["reviewed_is_emitted"], "source_ref": cardless_ref,
+        "reviewed_revision": "reviewed", "reviewed_is_emitted": False, "source_ref": cardless_ref,
     }
 
     def write_durable_rows():
-        """The rows a reload replays: the worker's progress row and the host's late row."""
-        append_jsonl(root / "logs" / "progress.jsonl", {
+        """The rows a reload replays: the worker's progress row and the stored late rows."""
+        dialogue_store.append(root, "progress", {
             "ts": "2026-09-28T00:00:00+00:00", "type": "send_message", "task_id": ctx.task_id, "is_progress": True,
             "direction": "out", "chat_id": 1, "user_id": 0, "text": "💬 Checking the ledger",
             "content": "Checking the ledger", "format": "", "role": "assistant", "system_type": "", "narration": True})
-        message_bus.log_chat("system", 1, 0, note, ts=LATE_TS, record_type="acceptance_late_settlement",
-                             task_id=ctx.task_id, drive_root=root,
-                             message_meta={"card_row": "reviews", "card_row_id": "acceptance-late:rk",
-                                           "late_evidence": evidence})
-        message_bus.log_chat(
-            "system", 1, 0, cardless_note, ts=LATE_TS, record_type="acceptance_late_settlement",
-            task_id=cardless_ctx.task_id, drive_root=root,
-            message_meta={"card_row": "reviews", "card_row_id": "acceptance-late:cardless",
-                          "late_evidence": cardless_evidence},
-        )
+        _store_old_late_row(root, ctx.task_id, note, evidence, "acceptance-late:rk")
+        _store_old_late_row(root, cardless_ctx.task_id, cardless_note, cardless_evidence, "acceptance-late:cardless")
 
     def open_page(target):
         # The initial history read must land before any test-authored frame, and
@@ -158,8 +173,7 @@ def test_late_review_row_reads_in_words_and_downloads_its_record(direct_server_w
             raise
         try:
             page = browser.new_page(viewport={"width": 1280, "height": 900}, accept_downloads=True)
-            errors: list[str] = []
-            page.on("pageerror", lambda error: errors.append(str(error)))
+            errors = PageErrors(page, engine)
             page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
             page.add_init_script(f"({_OBSERVE_STATE_READS})()")
             open_page(page)
@@ -206,7 +220,7 @@ def test_late_review_row_reads_in_words_and_downloads_its_record(direct_server_w
             card = page.locator(f'.chat-live-card[data-task-id="{ctx.task_id}"]')
             card.wait_for(state="visible")
             _emit_ws_frame(page, _late_row(ctx.task_id, note, evidence))
-            card.locator("[data-live-summary-button]").click()
+            card.locator("[data-live-disclosure]").click()
             row = card.locator(".chat-live-line", has_text="reviewers later passed it.")
             row.wait_for(state="visible")
             text = row.inner_text()
@@ -259,7 +273,7 @@ def test_late_review_row_reads_in_words_and_downloads_its_record(direct_server_w
             replayed_card = page.locator(f'.chat-live-card[data-task-id="{ctx.task_id}"]')
             replayed_card.wait_for(state="visible")
             if replayed_card.get_attribute("data-expanded") != "1":
-                replayed_card.locator("[data-live-summary-button]").click()
+                replayed_card.locator("[data-live-disclosure]").click()
             replayed = replayed_card.locator(".chat-live-line", has_text="reviewers later passed it.")
             replayed.wait_for(state="visible")
             replayed_link = replayed.get_by_role("link", name="Download the review record")
@@ -281,7 +295,7 @@ def test_late_review_row_reads_in_words_and_downloads_its_record(direct_server_w
             cardless_replayed.screenshot(
                 path=str(evidence_dir / f"host-notice-cardless-replayed-{engine}.png"),
             )
-            assert not errors, errors
+            assert not errors.unexpected(), errors
         finally:
             browser.close()
 
@@ -290,9 +304,7 @@ def test_late_review_row_reads_in_words_and_downloads_its_record(direct_server_w
 def test_settled_no_verdict_panel_heads_in_words_and_keeps_degraded_in_detail(direct_server_with_data, engine):
     playwright_api = pytest.importorskip("playwright.sync_api")
 
-    from ouroboros import review_projection
-    from ouroboros.task_results import load_task_result, write_task_result
-    from tests.test_acceptance_publication import _context, _run
+    from ouroboros.task_results import load_task_result
     from tests.ui_chat_viewport_smoke import (
         _CAPTURE_TEST_SOCKET, _OBSERVE_STATE_READS, _emit_ws_frame, _wait_socket_open_quiescent,
     )
@@ -302,10 +314,10 @@ def test_settled_no_verdict_panel_heads_in_words_and_keeps_degraded_in_detail(di
     evidence_dir = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(root.parent)))
     evidence_dir.mkdir(parents=True, exist_ok=True)
 
-    # The real producer settles a panel with no quorum: one reviewer's own DEGRADED
-    # answer, one PASS and one provider failure, on a task that has already ended.
+    # A stored panel that settled with no quorum: one reviewer's own DEGRADED answer,
+    # one PASS and one provider failure, on a task that has already ended.
     ctx = _context(root)
-    run = {**_run(), "task_attempt": ctx.task_attempt, "aggregate_signal": "DEGRADED", "parsed_findings": [],
+    run = {**_run(), "aggregate_signal": "DEGRADED", "parsed_findings": [],
            "enforcement_impact": "degrades_completion",
            "slot_roster": [{"slot_id": slot, "model": f"fixture/reviewer-{slot}", "route": "api_chat"}
                            for slot in ("s1", "s2", "s3")],
@@ -318,8 +330,7 @@ def test_settled_no_verdict_panel_heads_in_words_and_keeps_degraded_in_detail(di
                 "parsed": {"verdict": "PASS", "summary": "Every claim is backed.", "findings": []}},
                {"slot_id": "s3", "model": "fixture/reviewer-s3", "status": "error", "operation_state": "settled",
                 "error": "ClaudexorModelError: engine_busy (HTTP 429)"}]}
-    write_task_result(root, ctx.task_id, "completed", chat_id=1, result="The delivered answer.")
-    assert review_projection.publish_acceptance_checkpoint(ctx, {"review_runs": [run]})["status"] == "published"
+    _store_old_acceptance(ctx, run)
     stored = load_task_result(root, ctx.task_id)
     panel = stored["review_projection"]["panels"][0]
     assert stored["status"] == "completed" and panel["aggregate_signal"] == "DEGRADED"
@@ -348,21 +359,23 @@ def test_settled_no_verdict_panel_heads_in_words_and_keeps_degraded_in_detail(di
             card = page.locator(f'.chat-live-card[data-task-id="{ctx.task_id}"]')
             card.wait_for(state="visible")
             if card.get_attribute("data-expanded") != "1":
-                card.locator("[data-live-summary-button]").click()
-            card.locator("[data-review-section-toggle]").click()
-            meta = card.locator(".chat-review-group-meta")
-            meta.wait_for(state="visible")
-            # The group head: the outcome in words, then its attempt count.
-            assert meta.inner_text().strip() == "no verdict · 2 of 3 answered · 1 unavailable · 1"
-            assert "warn" in (card.locator("[data-review-group]").get_attribute("class") or "")
-            card.locator("[data-review-group-toggle]").click()
-            attempt_meta = card.locator(".chat-review-attempt-meta")
-            attempt_meta.wait_for(state="visible")
-            assert "no verdict · 2 of 3 answered · 1 unavailable" in attempt_meta.inner_text()
-            for header in (meta, attempt_meta):
-                assert "DEGRADED" not in header.inner_text()
-            card.locator("[data-review-attempt-toggle]").click()
-            detail = card.locator("[data-review-attempt-detail]")
+                card.locator("[data-live-disclosure]").click()
+            card.locator("[data-live-review-summary]").click()
+            group = card.locator("[data-review-group]")
+            state = group.locator(".review-check-head .review-state")
+            state.wait_for(state="visible")
+            # A's subject row keeps the state/counts readable without raw verdict tokens.
+            assert state.inner_text().strip() == "no verdict · 2 of 3 answered · 1 unavailable"
+            assert state.get_attribute("data-tone") == "warn"
+            assert group.locator(".review-check-meta").inner_text().strip() == "1 attempt"
+            assert "DEGRADED" not in group.locator(".review-check-head").inner_text()
+            group.locator("[data-review-group-toggle]").click()
+            opinion_state = group.locator("[data-review-opinion] .review-state")
+            assert opinion_state.inner_text().strip() == "no verdict · 2 of 3 answered · 1 unavailable"
+            assert opinion_state.get_attribute("data-tone") == "warn"
+            assert "DEGRADED" not in group.locator("[data-review-opinion]").inner_text()
+            group.locator("[data-review-facts] > summary").click()
+            detail = group.locator("[data-review-attempt-detail]")
             detail.wait_for(state="visible")
             detail_text = detail.inner_text()
             # The stored verdict and the provider's raw error stay in the detail.

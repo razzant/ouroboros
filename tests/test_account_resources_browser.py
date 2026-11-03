@@ -83,7 +83,7 @@ def open_accounts(ui, width=390, theme="dark"):
     page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)})")
     page.goto(ui["url"] + "/#settings")
     page.locator('[data-settings-tab="providers"]').click()
-    expect(page.locator(".harness-account-row")).to_have_count(20)
+    expect(page.locator(".harness-account-row[data-harness]")).to_have_count(20)
     return page, page.locator(ROW)
 
 
@@ -222,6 +222,7 @@ def test_timeout_before_receipt_survives_session_storage_loss_and_recovers_same_
     original = ui["reset_calls"][0]
     # Closing an embedded client loses session storage; durable references must survive.
     page.evaluate("sessionStorage.clear()")
+    ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.locator('[data-settings-tab="providers"]').click()
     row.locator("[data-resources]").click()
@@ -273,6 +274,7 @@ def test_non_loopback_reset_keeps_original_request_after_reload(resources_ui, sc
     assert len(ui["reset_calls"]) == 1
     original = ui["reset_calls"][0]
     assert original[0] and original[1]["offer_id"] == offer_id and original[1]["target"] == TARGET
+    ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.locator('[data-settings-tab="providers"]').click()
     row.locator("[data-resources]").click()
@@ -410,7 +412,7 @@ def test_catalog_gap_retains_last_known_resources_and_valid_account_quota_siblin
     expect(row.locator(".resource-window").first).not_to_contain_text("Last known")
     expect(row).not_to_contain_text("does not expose account resources")
     expect(row.locator('[data-resource-reset="opaque-grant"]')).to_be_enabled()
-    expect(page.locator(".harness-account-row")).to_have_count(20)
+    expect(page.locator(".harness-account-row[data-harness]")).to_have_count(20)
     status["resource_capabilities_read"] = "ok"
     passive_read(page)
     expect(row).to_contain_text("This engine does not expose account resources")
@@ -513,7 +515,7 @@ def test_maintenance_and_resources_share_refresh_without_losing_pending_reset(re
     expect(row).to_contain_text("Reset outcome is unconfirmed")
     ui["pending_refresh"][0].fulfill(json=ui["wire"]["quota"])
     expect(page.locator("#btn-harness-refresh")).to_be_enabled()
-    expect(page.locator(".harness-account-row")).to_have_count(20)
+    expect(page.locator(".harness-account-row[data-harness]")).to_have_count(20)
     expect(row).to_contain_text("Reset outcome is unconfirmed")
     expect(details).to_have_attribute("open", "")
     expect(family).to_contain_text("Update cancelled")

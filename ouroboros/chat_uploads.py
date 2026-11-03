@@ -114,6 +114,11 @@ _MP4_BRANDS = frozenset({b"isom", b"iso2", b"iso3", b"iso4", b"iso5", b"iso6", b
                          b"avc1", b"dash", b"M4V ", b"mp71", b"MSNV"})
 _3GP_BRANDS = frozenset({b"3gp4", b"3gp5", b"3gp6", b"3g2a"})
 _HEIF_BRANDS = frozenset({b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1"})
+# Labels the platform table may lack (Python 3.10 knows no .md, and its built-in table no .docx,
+# which only some system tables add): the same file gets one label on every interpreter.
+# Only new measurements use it; recorded refs and manifests keep theirs.
+_DOCUMENT_LABELS = {".md": "text/markdown", ".markdown": "text/markdown",
+                    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
 
 
 def _iso_bmff(head: bytes, ext: str) -> Optional[Tuple[str, str]]:
@@ -176,7 +181,7 @@ def detect_media(head: bytes, name: str) -> Tuple[str, str]:
         detected = "audio/aac", "audio"
     if detected:
         return detected
-    label = (mimetypes.guess_type("x" + ext)[0] if ext else None) or "application/octet-stream"
+    label = _DOCUMENT_LABELS.get(ext) or (mimetypes.guess_type("x" + ext)[0] if ext else None) or "application/octet-stream"
     # Bytes that did not prove a media type never keep a media label (an HTML ``.png``).
     media_label = label.split("/", 1)[0] in {"image", "video", "audio"} and label != "image/svg+xml"
     return ("application/octet-stream" if media_label else label), "file"

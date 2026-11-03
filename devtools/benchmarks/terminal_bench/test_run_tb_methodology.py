@@ -66,11 +66,13 @@ def test_setup_build_multiplier_allowed_with_flag():
 
 # --- harbor_command output ------------------------------------------------------
 
-def _cfg(**over):
+def _cfg(*, jobs_dir: pathlib.Path, **over):
+    """`harbor_command` writes `<jobs_dir>/agent_job_config.json`: every caller passes its
+    own `tmp_path`, and the settings path the config names sits under it too."""
     base = dict(
         dataset="terminal-bench/terminal-bench-2-1", model="google/gemini-3.5-flash", k=5,
-        jobs_dir=pathlib.Path("/tmp/jd"), harbor_bin="harbor", n_concurrent=1, task_filters=[],
-        settings_path=pathlib.Path("/tmp/s.json"), execute=False, light_model="google/gemini-3.5-flash",
+        jobs_dir=jobs_dir, harbor_bin="harbor", n_concurrent=1, task_filters=[],
+        settings_path=jobs_dir / "s.json", execute=False, light_model="google/gemini-3.5-flash",
     )
     base.update(over)
     return run_tb.HarborCommandConfig(**base)
@@ -84,8 +86,8 @@ def test_faithful_command_omits_multiplier_flags_and_gates_web(tmp_path):
     assert config["agents"][0]["kwargs"]["disable_agent_web"] is True
 
 
-def test_local_override_emits_multiplier_flags():
-    cmd = run_tb.harbor_command(_cfg(setup_timeout_multiplier=4.0, build_timeout_multiplier=2.0))
+def test_local_override_emits_multiplier_flags(tmp_path):
+    cmd = run_tb.harbor_command(_cfg(jobs_dir=tmp_path, setup_timeout_multiplier=4.0, build_timeout_multiplier=2.0))
     assert "--agent-setup-timeout-multiplier" in cmd and "4.0" in cmd
     assert "--environment-build-timeout-multiplier" in cmd and "2.0" in cmd
 
@@ -98,22 +100,22 @@ def test_allow_agent_web_flips_kwarg(tmp_path):
 
 def test_pip_cache_mount_is_env_opt_in(monkeypatch, tmp_path):
     monkeypatch.delenv("OBO_TB_PIP_CACHE", raising=False)
-    assert "--mounts" not in run_tb.harbor_command(_cfg())
+    assert "--mounts" not in run_tb.harbor_command(_cfg(jobs_dir=tmp_path))
 
     cache = tmp_path / "pip-cache"
     monkeypatch.setenv("OBO_TB_PIP_CACHE", str(cache))
-    cmd = run_tb.harbor_command(_cfg())
+    cmd = run_tb.harbor_command(_cfg(jobs_dir=tmp_path))
     idx = cmd.index("--mounts")
     mounts = json.loads(cmd[idx + 1])
     assert mounts == [{"type": "bind", "source": str(cache), "target": "/opt/ouro-pip-cache"}]
     assert cache.is_dir()
 
 
-def test_pip_cache_mount_rejects_repo_path(monkeypatch):
+def test_pip_cache_mount_rejects_repo_path(monkeypatch, tmp_path):
     repo = pathlib.Path(run_tb.__file__).resolve().parents[3]
     monkeypatch.setenv("OBO_TB_PIP_CACHE", str(repo / ".bad-pip-cache"))
     with pytest.raises(ValueError, match="must not be under repo"):
-        run_tb.harbor_command(_cfg())
+        run_tb.harbor_command(_cfg(jobs_dir=tmp_path))
 
 
 # --- apply_all_model + metadata -------------------------------------------------
@@ -375,6 +377,44 @@ def test_metadata_omits_web_search_when_web_disabled(monkeypatch):
     roles_off = dict(run_tb._effective_helper_models("google/gemini-3.5-flash", "google/gemini-3.5-flash", disable_agent_web=True))
     assert any("web_search" in r for r in roles_on.values())
     assert not any("web_search" in r for r in roles_off.values())
+
+
+@pytest.mark.parametrize("env,host,forwarded", [
+    # Nothing forwarded: the container's own blank Model plans the recommended models of its Auto Source.
+    (None, {}, None),
+    ("", {"OUROBOROS_WEBSEARCH_MODEL": "anthropic::host-search"}, None),  # a blank operator variable wins
+    # The adapter forwards the operator variable, else the host settings file: that value is declared verbatim.
+    (None, {"OUROBOROS_WEBSEARCH_MODEL": "anthropic::host-search"}, "anthropic::host-search"),
+    ("openai/gpt-5.2", {"OUROBOROS_WEBSEARCH_MODEL": "anthropic::host-search"}, "openai/gpt-5.2"),
+])
+def test_metadata_declares_the_web_search_models_the_real_adapter_leaves_the_container(
+        tmp_path, monkeypatch, env, host, forwarded):
+    """Traced through the adapter that builds the container's environment: the metadata names what that
+    environment makes the container's own resolver send, and no host Source travels into either."""
+    import devtools.benchmarks.terminal_bench.harbor_installed_agent as tb_agent
+    from ouroboros.search_routes import SEARCH_MODELS, resolve_web_search_route
+
+    if env is None:
+        monkeypatch.delenv("OUROBOROS_WEBSEARCH_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("OUROBOROS_WEBSEARCH_MODEL", env)
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
+    monkeypatch.setenv("OUROBOROS_WEBSEARCH_BACKEND", "anthropic")  # this process's current Source
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({**host, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}), encoding="utf-8")  # the host's saved one
+    container = tb_agent.OuroborosTerminalBenchAgent(logs_dir=tmp_path, host_settings_path=str(settings_path))._container_env()
+    assert container.get("OUROBOROS_WEBSEARCH_MODEL") == forwarded and "OUROBOROS_WEBSEARCH_BACKEND" not in container
+    route = resolve_web_search_route(settings=container)  # how the container itself reads that environment
+    assert route["source"] == "auto"
+    roles = run_tb._effective_helper_models("google/gemini-3.5-flash", "", disable_agent_web=False,
+                                            settings=run_tb._host_settings(settings_path))
+    declared = [model for model, role in roles if "web_search" in role]
+    if forwarded:
+        assert declared == [forwarded] and route["model"] == forwarded
+    else:  # planned, as org/model ids; which leg answers depends on the container's keys
+        assert {leg["source"]: leg["model"] for leg in route["legs"] + route["unavailable"]} == SEARCH_MODELS
+        assert declared == list(dict.fromkeys([f"openai/{SEARCH_MODELS['openai']}", SEARCH_MODELS["openrouter"],
+                                               f"anthropic/{SEARCH_MODELS['anthropic']}"]))
 
 
 _HOST_ROSTER = _roster(

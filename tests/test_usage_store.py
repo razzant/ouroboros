@@ -4,10 +4,12 @@ tiers and the bulk-reader allowlist."""
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
 import os
 import pathlib
 import random
+import sqlite3
 import subprocess
 import sys
 from decimal import Decimal
@@ -64,23 +66,27 @@ def _min_known(values):
 
 def _assert_summaries_equal_oracle(root):
     with usage_store.read(root) as txn:
-        rows = txn.attempts()
-        stored = {(record["scope"], record["key"]) for record in txn.conn.execute(
-            "SELECT scope, key FROM summaries WHERE rows > 0")}
-        expected: dict = {}
-        for row in rows:
-            for address in _addresses(row):
-                expected.setdefault(address, []).append(row)
-        assert stored == set(expected), sorted(stored ^ set(expected))[:10]
-        for (scope, key), addressed in expected.items():
-            bucket = txn.bucket(scope, key)
-            assert bucket.render_breakdown() == oracle._breakdown_bucket(addressed), (scope, key)
-            assert bucket.render_summary() == oracle._summary(addressed), (scope, key)
-            if scope == "root":
-                assert bucket.min_cap() == _min_known(row.get("root_limit_usd") for row in addressed), key
-            if scope == "group":
-                assert bucket.min_cap() == _min_known(
-                    row.get("billing_group_limit_usd", row.get("root_limit_usd")) for row in addressed), key
+        _assert_txn_summaries_equal_oracle(txn)
+
+
+def _assert_txn_summaries_equal_oracle(txn):
+    rows = txn.attempts()
+    stored = {(record["scope"], record["key"]) for record in txn.conn.execute(
+        "SELECT scope, key FROM summaries WHERE rows > 0")}
+    expected: dict = {}
+    for row in rows:
+        for address in _addresses(row):
+            expected.setdefault(address, []).append(row)
+    assert stored == set(expected), sorted(stored ^ set(expected))[:10]
+    for (scope, key), addressed in expected.items():
+        bucket = txn.bucket(scope, key)
+        assert bucket.render_breakdown() == oracle._breakdown_bucket(addressed), (scope, key)
+        assert bucket.render_summary() == oracle._summary(addressed), (scope, key)
+        if scope == "root":
+            assert bucket.min_cap() == _min_known(row.get("root_limit_usd") for row in addressed), key
+        if scope == "group":
+            assert bucket.min_cap() == _min_known(
+                row.get("billing_group_limit_usd", row.get("root_limit_usd")) for row in addressed), key
 
 
 def _money(rng):
@@ -179,17 +185,44 @@ def _random_history(rng, attempts):
         yield step
 
 
-@pytest.mark.parametrize("seed", range(12))
-def test_every_summary_equals_the_frozen_fold_over_its_addressed_attempts(root, seed):
+def _summary_history(seed):
     rng = random.Random(seed)
     # Imported aggregates first: weight multiplies counts, never cash or tokens.
-    write_compacted_journal(root, [
+    groups = [
         {"attempt_id": f"fold-{index}", "task_id": rng.choice(["t1", "t2"]), "root_task_id": rng.choice(["r1", "r2"]),
          "model": "m1", "provider": "openai", "category": "task", "source": "old", "pricing_known": True,
          "folded_attempt_count": rng.randrange(1, 40), "cost_usd": str(_money(rng)), "cost_final": True,
          "reservation_upper_bound_usd": "1.5", "prompt_tokens": rng.randrange(0, 900),
-         **({"root_limit_usd": "9"} if index % 2 else {})} for index in range(3)])
-    for step in _random_history(rng, 70):
+         **({"root_limit_usd": "9"} if index % 2 else {})} for index in range(3)]
+    return groups, tuple(_random_history(rng, 70))
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_every_summary_equals_the_frozen_fold_over_its_addressed_attempts(root, seed):
+    groups, history = _summary_history(seed)
+    write_compacted_journal(root, groups)
+    # Import the actual compacted journal, then keep every transition and SQL
+    # round trip without fsyncing a disk transaction for each generated step.
+    with contextlib.closing(sqlite3.connect(":memory:", isolation_level=None)) as conn:
+        conn.row_factory = sqlite3.Row
+        with usage_store.read(root) as imported:
+            imported.conn.backup(conn)
+        for step in history:
+            conn.execute("BEGIN IMMEDIATE")
+            txn = usage_store.Txn(conn, root, write=True)
+            txn.write(step, txn.attempt(step["attempt_id"]))
+            txn.commit()
+        # A fresh transaction reads persisted SQL values, not the writer's buckets.
+        _assert_txn_summaries_equal_oracle(usage_store.Txn(conn, root, write=False))
+
+
+@pytest.mark.parametrize("seed", [0, 5, 11])
+def test_generated_summary_histories_survive_durable_commits_and_reopen(root, seed):
+    # All transition endings and one-shot kinds occur in these histories;
+    # the complete 12-seed fold above retains the larger arithmetic population.
+    groups, history = _summary_history(seed)
+    write_compacted_journal(root, groups)
+    for step in history:
         with usage_store.hold(root) as txn:
             txn.write(step, txn.attempt(step["attempt_id"]))
     _assert_summaries_equal_oracle(root)
@@ -378,10 +411,11 @@ def test_a_display_read_on_a_fresh_install_creates_the_empty_store(root):
     assert (root / usage_store.STORE_REL).exists()
 
 
-def test_the_server_imports_the_journal_at_lifespan_start_on_every_door():
-    """The import runs where the other lifecycle jobs run (before any request, worker or supervisor), so a
-    providerless install that never starts the supervisor imports too. The lifecycle import owner is the
-    boot door (`store_switch.start` runs `prepare_startup_state` under the import window)."""
+def test_the_server_imports_the_journal_as_a_boot_step_on_every_door():
+    """The import is a named step of the boot coordinator (before any worker or supervisor, while the
+    socket already serves), so a providerless install that never starts the supervisor imports too. The
+    lifecycle import owner is the boot door (`store_switch.start` runs `prepare_startup_state` under the
+    import window)."""
     import inspect
 
     import server
@@ -389,7 +423,8 @@ def test_the_server_imports_the_journal_at_lifespan_start_on_every_door():
     source = inspect.getsource(server.lifespan)
     assert "prepare_startup_state(" not in source
     assert source.index("store_switch.start(") < source.index("usage_store.migrate_from_journal(") \
-        < source.index("yield")
+        < source.index('("usage_store", _usage_store)') < source.index("\n        yield\n")
+    assert "if startup_provider_ready" not in source[source.index("def _usage_store"):source.index("def _extensions")]
 
 
 def test_an_import_interrupted_before_publication_is_redone_from_scratch(root, monkeypatch):
@@ -645,9 +680,9 @@ def test_bulk_readers_are_called_only_by_the_audit_and_the_export():
             if not isinstance(node, ast.Call):
                 continue
             name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
-            # ``Txn.attempts()`` without a predicate is the same scan of every attempt.
-            if name == "read_usage_records" or (name == "attempts" and not node.args and not node.keywords
-                                                 and isinstance(node.func, ast.Attribute)):
+            # ``Txn.attempts()`` / ``Txn.attempt_rows()`` without a predicate is the same scan of every attempt.
+            if name == "read_usage_records" or (name in {"attempts", "attempt_rows"} and not node.args
+                                                 and not node.keywords and isinstance(node.func, ast.Attribute)):
                 callers.add(path.relative_to(REPO).as_posix())
     assert callers <= _BULK_ALLOWED, callers - _BULK_ALLOWED
     assert "ouroboros/model_send_seal.py" in callers  # the explicit audit still reads history
@@ -659,14 +694,19 @@ def test_ordinary_money_paths_never_read_every_attempt(root, monkeypatch):
 
     held = ua.reserve_attempt(request(root))
     ua.release_attempt(held)
-    scan = usage_store.Txn.attempts
+    scan, captured_scan = usage_store.Txn.attempts, usage_store.Txn.attempt_rows
 
     def forbidden_scan(txn, where="1", params=()):
         assert str(where).strip() != "1", "an ordinary path scanned every attempt"
         return scan(txn, where, params)
 
+    def forbidden_captured_scan(txn, where="1", params=()):
+        assert str(where).strip() != "1", "an ordinary path captured every attempt"
+        return captured_scan(txn, where, params)
+
     monkeypatch.setattr(usage_store, "read_usage_records", lambda *_a, **_k: pytest.fail("bulk read"))
     monkeypatch.setattr(usage_store.Txn, "attempts", forbidden_scan)
+    monkeypatch.setattr(usage_store.Txn, "attempt_rows", forbidden_captured_scan)
     monkeypatch.setattr(queue, "task_has_live_ownership", lambda _task_id, **_kw: False)
     sent = ua.execute_physical_attempt(request(root, reservation_usd=.1), lambda: {"usage": {}},
                                        extractor=lambda _r: ({}, .1, True))
@@ -716,6 +756,7 @@ class _Steps:
 
     def __init__(self, monkeypatch):
         self.count = 0
+        usage_store._core.close_connections()  # install the counter before lazy connections open
         connect = usage_store._connect
 
         def counted(*args, **kwargs):
@@ -809,6 +850,9 @@ def test_ordinary_readers_do_not_grow_with_unrelated_history(tmp_path, monkeypat
             for name, call in readers.items():
                 call()  # warm the process (imports, first open)
             measured[size] = {name: steps.measure(call) for name, call in readers.items()}
+            # Some readers use only a file or fewer than 50 VM instructions. Admission
+            # always uses SQL and proves that cached connections carry the counter.
+            assert measured[size]["admission"] > 0
         usage_store.forget(root)
     (tmp_path / "history_steps.json").write_text(json.dumps(measured, indent=1), encoding="utf-8")  # evidence
     for name, small in measured[100].items():

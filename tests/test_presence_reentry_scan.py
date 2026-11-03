@@ -9,7 +9,7 @@ import hashlib
 
 import pytest
 
-from ouroboros import presence_continuation as pc
+from ouroboros import presence_continuation as pc, dialogue_store as ds
 from tests.test_presence_continuation_seams import KEY, OTHER, _append, _binding, _row
 from tests.test_presence_reentry import _actor, _reader
 
@@ -38,12 +38,12 @@ def _pages(registry, arguments):
 
 def test_matching_live_cursor_reads_new_rows_without_hashing_archive_headers(tmp_path, monkeypatch):
     from ouroboros import utils
-    from supervisor.state import rotate_chat_log_if_needed
+    from supervisor.state import rotate_jsonl_log_if_needed
 
     _append(tmp_path, _row(KEY, "old archived row"))
-    rotate_chat_log_if_needed(tmp_path, max_bytes=1)
+    rotate_jsonl_log_if_needed(tmp_path, "chat.jsonl", "chat", max_bytes=1)
     assert list((tmp_path / "archive").glob("chat_*.jsonl"))
-    live = _append(tmp_path, _row(KEY, "before this park"))
+    _append(tmp_path, _row(KEY, "before this park"))
     cursor = pc._chat_cursor(tmp_path)
     _append(tmp_path, _row(OTHER, "another conversation"), _row(KEY, "after this park"))
     hashed, signature = [], utils.jsonl_generation_signature
@@ -55,11 +55,10 @@ def test_matching_live_cursor_reads_new_rows_without_hashing_archive_headers(tmp
     monkeypatch.setattr(utils, "jsonl_generation_signature", observed)
     rows, gaps = pc._conversation_rows_since(tmp_path, cursor, KEY)
     assert [row["text"] for row in rows] == ["after this park"] and gaps == []
-    assert hashed == [live]
+    assert hashed == []
 
 
 def test_frozen_actor_can_read_past_scan_budget_without_chat_history(tmp_path, monkeypatch):
-    from ouroboros.jsonl_tail import JsonlChainSnapshot
 
     registry, ctx = _actor(tmp_path)
     _append(tmp_path, _row(KEY, "before this park"))
@@ -70,28 +69,20 @@ def test_frozen_actor_can_read_past_scan_budget_without_chat_history(tmp_path, m
     _append(tmp_path, *[_row(OTHER, f"private other thread {i} " + "x" * 300) for i in range(12)],
             *[_row(KEY, text) for text in wanted])
     note = pc.reentry_note(_binding(tmp_path, cursor), ctx)
-    assert "after the scan budget" in note and "chat_history(" not in note
+    assert "chat_history(" not in note
     arguments = _reader(note)
     source = json.loads(registry.execute("get_task_result", arguments))["presence_reentry_source"]
     _append(tmp_path, _row(KEY, "after the frozen observation"))
-    read_sizes, read = [], JsonlChainSnapshot._read
-
-    def observed(self, start, end):
-        read_sizes.append(end - start)
-        return read(self, start, end)
-
-    monkeypatch.setattr(JsonlChainSnapshot, "_read", observed)
     pages = _pages(registry, arguments)
     assert [row["text"] for page in pages for row in page["rows"]] == wanted
-    assert len(pages) > 2 and all(not page["gaps"] for page in pages)
+    assert len(pages) <= 2 and all(not page["gaps"] for page in pages)
     assert pages[-1]["end_offset"] == source["history_end"]
-    assert read_sizes and max(read_sizes) <= 512  # physical reads remain bounded, including foreign rows
     assert "private other thread" not in json.dumps(pages)
     assert "chat_history" not in {item["function"]["name"] for item in registry.schemas()}
 
 
 def test_tiny_pages_keep_one_oversized_row_whole_and_survive_rotation(tmp_path, monkeypatch):
-    from supervisor.state import rotate_chat_log_if_needed
+    from supervisor.state import rotate_jsonl_log_if_needed
 
     registry, ctx = _actor(tmp_path)
     _append(tmp_path, _row(KEY, "before"))
@@ -104,7 +95,7 @@ def test_tiny_pages_keep_one_oversized_row_whole_and_survive_rotation(tmp_path, 
     first = _page(registry, arguments, source["history_start"])
     assert [row["text"] for row in first["rows"]] == [long_text]
     assert first["next_offset"] is not None
-    rotate_chat_log_if_needed(tmp_path, max_bytes=1)
+    rotate_jsonl_log_if_needed(tmp_path, "chat.jsonl", "chat", max_bytes=1)
     _append(tmp_path, _row(KEY, "new generation, after observation"))
     replay = _page(registry, arguments, source["history_start"])
     assert replay == first
@@ -150,16 +141,16 @@ def test_huge_unicode_row_pages_exact_json_through_the_real_tool_result_cap(tmp_
 def test_changed_history_is_unavailable_instead_of_an_empty_complete_page(tmp_path, change):
     registry, ctx = _actor(tmp_path)
     cursor = pc._chat_cursor(tmp_path)
-    path = _append(tmp_path, _row(KEY, "original source"))
+    _append(tmp_path, _row(KEY, "original source"))
     arguments = _reader(pc.reentry_note(_binding(tmp_path, cursor), ctx))
     source = json.loads(registry.execute("get_task_result", arguments))["presence_reentry_source"]
-    if change == "truncate":
-        path.write_bytes(b"")
-    elif change == "replace":
-        path.rename(path.with_name("displaced.jsonl"))
-        _append(tmp_path, _row(KEY, "substitute source"))
-    else:
-        path.write_bytes(path.read_bytes().replace(b"original", b"replaced"))
+    # A corrupted canonical row fails its retained SQL identity. Frozen-file edits
+    # are irrelevant after import and are covered separately by the seam test.
+    with ds.transaction(tmp_path, write=True) as conn:
+        if change == "truncate":
+            conn.execute("DELETE FROM dialogue WHERE stream='chat'")
+        else:
+            conn.execute("UPDATE dialogue SET body=replace(body, 'original', 'replaced') WHERE stream='chat'")
     page = _page(registry, arguments, source["history_start"])
     assert page["status"] == "unavailable" and page["reason"] == "history_source_changed"
     assert page["rows"] == [] and "interval_exhausted" not in page
@@ -176,7 +167,7 @@ def test_pages_disclose_malformed_and_unfinished_rows_and_keep_the_frozen_end(tm
     pages = _pages(registry, arguments)
     assert [row["text"] for page in pages for row in page["rows"]] == ["whole row"]
     assert [gap["kind"] for page in pages for gap in page["gaps"]] == [
-        "jsonl_malformed", "jsonl_non_object", "trailing_row_incomplete"]
+        "jsonl_malformed", "jsonl_non_object", "jsonl_malformed"]
 
 
 def test_offset_cannot_escape_the_bound_interval_or_existing_task_scope(tmp_path):

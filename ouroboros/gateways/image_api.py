@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import base64
 import json
-import math
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
@@ -19,6 +18,7 @@ import httpx
 from ouroboros.net_transport import env_proxies_configured, extra_ca_bundle, remote_httpx_transport, verify_kwargs
 from ouroboros.provider_models import ZAI_PLAN_ENDPOINTS
 from ouroboros.deadline_utils import llm_transport_timeout_sec, physical_dispatch_timeout
+from ouroboros._usage_response import provider_cost_value
 
 MAX_IMAGE_BYTES = 32 * 1024 * 1024
 MAX_RESULT_BYTES = 64 * 1024 * 1024
@@ -242,10 +242,9 @@ def image_usage(result: dict) -> tuple[dict, float | None, bool]:
     """Keep image usage evidence; never price image tokens with text-model rates."""
     usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
     raw = usage.get("cost")
-    cost = float(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) else None
-    if cost is not None and (not math.isfinite(cost) or cost < 0):
-        cost = None
+    cost = provider_cost_value(raw)
     # The general ledger estimates text-token costs when scalar token fields are
     # present. Image billing has different units, so retain its exact usage as
     # evidence rather than feed that estimator misleading token quantities.
-    return {"cost_basis": "image_generation", "cost_evidence": {"usage": usage}}, cost, cost is not None
+    return {"cost_basis": "image_generation", "cost_evidence": {"usage": usage},
+            **({"cost_invalid": True} if raw is not None and cost is None else {})}, cost, cost is not None

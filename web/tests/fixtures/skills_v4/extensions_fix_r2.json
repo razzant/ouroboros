@@ -1,0 +1,388 @@
+{
+  "skills": [
+    {
+      "name": "rejected_newer",
+      "type": "extension",
+      "version": "0.3.1",
+      "description": "A previous release restored after an unsuccessful update.",
+      "enabled": true,
+      "source": "ouroboroshub",
+      "permissions": [
+        "net",
+        "widget",
+        "route"
+      ],
+      "installed_at": "2026-09-20T10:00:00Z",
+      "content_hash": "0305fd55a4c7786753043df9b26c2dbadcc35285daffe623e3dc72e5afc7dfea",
+      "removal": "uninstall",
+      "payload_root": "skills/ouroboroshub/rejected_newer",
+      "review_status": "pending",
+      "review_stale": false,
+      "review_gate": {
+        "status": "pending",
+        "stale": false,
+        "executable_review": true,
+        "blocking_reason": "trusted_source",
+        "review_enforcement": "blocking",
+        "summary": "Installed unchanged from a source the owner trusts; no review is required for these exact bytes.",
+        "preflight_failed": false,
+        "preflight_failed_stale": false
+      },
+      "executable_review": true,
+      "live_loaded": true,
+      "dispatch_live": true,
+      "grants": {
+        "all_granted": true
+      },
+      "category": [
+        "city"
+      ],
+      "install": {
+        "source": {
+          "id": "ouroboros",
+          "kind": "hub",
+          "name": "Ouroboros",
+          "part": "official"
+        },
+        "official": true,
+        "release": {
+          "version": "0.3.1",
+          "digest": "0305fd55a4c7786753043df9b26c2dbadcc35285daffe623e3dc72e5afc7dfea"
+        },
+        "basis": "trusted",
+        "base_known": true,
+        "modified": false,
+        "turn_on_when_ready": true,
+        "installed_by": "ouroboros",
+        "installed_at": "2026-09-20T10:00:00Z",
+        "reason": "the owner asked for the forecast",
+        "task_id": "t-weather",
+        "update_available": {
+          "version": "0.3.3",
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "withdrawn": null,
+        "left_source": false,
+        "update_rejected": {
+          "version": "0.3.2",
+          "digest": "18a28b775e3f493d5323080c50523e2bec1356e37e76aa918f1fb298d9fd5d94",
+          "reason": "review_blockers",
+          "at": "2026-10-18T00:10:00Z"
+        }
+      },
+      "skill_review": {
+        "current": {},
+        "history": [
+          {
+            "job_id": "review-rejected-update",
+            "content_hash": "18a28b775e3f493d5323080c50523e2bec1356e37e76aa918f1fb298d9fd5d94",
+            "review_round": 1,
+            "snapshot_attempt": 1,
+            "lifecycle_status": "completed",
+            "review_status": "blockers",
+            "terminal_reason": "The update sends location to an undocumented endpoint."
+          }
+        ],
+        "history_omitted": 0
+      }
+    },
+    {
+      "name": "review_unfinished",
+      "type": "extension",
+      "version": "0.3.1",
+      "description": "A previous release restored after an unsuccessful update.",
+      "enabled": true,
+      "source": "ouroboroshub",
+      "permissions": [
+        "net",
+        "widget",
+        "route"
+      ],
+      "installed_at": "2026-09-20T10:00:00Z",
+      "content_hash": "0305fd55a4c7786753043df9b26c2dbadcc35285daffe623e3dc72e5afc7dfea",
+      "removal": "uninstall",
+      "payload_root": "skills/ouroboroshub/review_unfinished",
+      "review_status": "pending",
+      "review_stale": false,
+      "review_gate": {
+        "status": "pending",
+        "stale": false,
+        "executable_review": true,
+        "blocking_reason": "trusted_source",
+        "review_enforcement": "blocking",
+        "summary": "Installed unchanged from a source the owner trusts; no review is required for these exact bytes.",
+        "preflight_failed": false,
+        "preflight_failed_stale": false
+      },
+      "executable_review": true,
+      "live_loaded": true,
+      "dispatch_live": true,
+      "grants": {
+        "all_granted": true
+      },
+      "category": [
+        "city"
+      ],
+      "install": {
+        "source": {
+          "id": "ouroboros",
+          "kind": "hub",
+          "name": "Ouroboros",
+          "part": "official"
+        },
+        "official": true,
+        "release": {
+          "version": "0.3.1",
+          "digest": "0305fd55a4c7786753043df9b26c2dbadcc35285daffe623e3dc72e5afc7dfea"
+        },
+        "basis": "trusted",
+        "base_known": true,
+        "modified": false,
+        "turn_on_when_ready": true,
+        "installed_by": "ouroboros",
+        "installed_at": "2026-09-20T10:00:00Z",
+        "reason": "the owner asked for the forecast",
+        "task_id": "t-weather",
+        "update_available": {
+          "version": "0.3.2",
+          "digest": "18a28b775e3f493d5323080c50523e2bec1356e37e76aa918f1fb298d9fd5d94"
+        },
+        "withdrawn": null,
+        "left_source": false,
+        "update_rejected": {
+          "version": "0.3.2",
+          "digest": "18a28b775e3f493d5323080c50523e2bec1356e37e76aa918f1fb298d9fd5d94",
+          "reason": "review_unfinished",
+          "at": "2026-10-18T00:10:00Z"
+        }
+      },
+      "skill_review": {
+        "current": {},
+        "history": [],
+        "history_omitted": 0
+      }
+    },
+    {
+      "name": "landing_failed",
+      "type": "extension",
+      "version": "0.3.1",
+      "description": "A previous release restored after an unsuccessful update.",
+      "enabled": true,
+      "source": "ouroboroshub",
+      "permissions": [
+        "net",
+        "widget",
+        "route"
+      ],
+      "installed_at": "2026-09-20T10:00:00Z",
+      "content_hash": "0305fd55a4c7786753043df9b26c2dbadcc35285daffe623e3dc72e5afc7dfea",
+      "removal": "uninstall",
+      "payload_root": "skills/ouroboroshub/landing_failed",
+      "review_status": "pending",
+      "review_stale": false,
+      "review_gate": {
+        "status": "pending",
+        "stale": false,
+        "executable_review": true,
+        "blocking_reason": "trusted_source",
+        "review_enforcement": "blocking",
+        "summary": "Installed unchanged from a source the owner trusts; no review is required for these exact bytes.",
+        "preflight_failed": false,
+        "preflight_failed_stale": false
+      },
+      "executable_review": true,
+      "live_loaded": true,
+      "dispatch_live": true,
+      "grants": {
+        "all_granted": true
+      },
+      "category": [
+        "city"
+      ],
+      "install": {
+        "source": {
+          "id": "ouroboros",
+          "kind": "hub",
+          "name": "Ouroboros",
+          "part": "official"
+        },
+        "official": true,
+        "release": {
+          "version": "0.3.1",
+          "digest": "0305fd55a4c7786753043df9b26c2dbadcc35285daffe623e3dc72e5afc7dfea"
+        },
+        "basis": "trusted",
+        "base_known": true,
+        "modified": false,
+        "turn_on_when_ready": true,
+        "installed_by": "ouroboros",
+        "installed_at": "2026-09-20T10:00:00Z",
+        "reason": "the owner asked for the forecast",
+        "task_id": "t-weather",
+        "update_available": {
+          "version": "0.3.2",
+          "digest": "18a28b775e3f493d5323080c50523e2bec1356e37e76aa918f1fb298d9fd5d94"
+        },
+        "withdrawn": null,
+        "left_source": false,
+        "update_rejected": {
+          "version": "0.3.2",
+          "digest": "18a28b775e3f493d5323080c50523e2bec1356e37e76aa918f1fb298d9fd5d94",
+          "reason": "landing_failed",
+          "at": "2026-10-18T00:10:00Z"
+        }
+      },
+      "skill_review": {
+        "current": {},
+        "history": [],
+        "history_omitted": 0
+      }
+    },
+    {
+      "name": "preflight_failed",
+      "type": "extension",
+      "version": "0.3.1",
+      "description": "A previous release restored after an unsuccessful update.",
+      "enabled": true,
+      "source": "ouroboroshub",
+      "permissions": [
+        "net",
+        "widget",
+        "route"
+      ],
+      "installed_at": "2026-09-20T10:00:00Z",
+      "content_hash": "0305fd55a4c7786753043df9b26c2dbadcc35285daffe623e3dc72e5afc7dfea",
+      "removal": "uninstall",
+      "payload_root": "skills/ouroboroshub/preflight_failed",
+      "review_status": "pending",
+      "review_stale": false,
+      "review_gate": {
+        "status": "pending",
+        "stale": false,
+        "executable_review": true,
+        "blocking_reason": "trusted_source",
+        "review_enforcement": "blocking",
+        "summary": "Installed unchanged from a source the owner trusts; no review is required for these exact bytes.",
+        "preflight_failed": false,
+        "preflight_failed_stale": false
+      },
+      "executable_review": true,
+      "live_loaded": true,
+      "dispatch_live": true,
+      "grants": {
+        "all_granted": true
+      },
+      "category": [
+        "city"
+      ],
+      "install": {
+        "source": {
+          "id": "ouroboros",
+          "kind": "hub",
+          "name": "Ouroboros",
+          "part": "official"
+        },
+        "official": true,
+        "release": {
+          "version": "0.3.1",
+          "digest": "0305fd55a4c7786753043df9b26c2dbadcc35285daffe623e3dc72e5afc7dfea"
+        },
+        "basis": "trusted",
+        "base_known": true,
+        "modified": false,
+        "turn_on_when_ready": true,
+        "installed_by": "ouroboros",
+        "installed_at": "2026-09-20T10:00:00Z",
+        "reason": "the owner asked for the forecast",
+        "task_id": "t-weather",
+        "update_available": {
+          "version": "0.3.2",
+          "digest": "18a28b775e3f493d5323080c50523e2bec1356e37e76aa918f1fb298d9fd5d94"
+        },
+        "withdrawn": null,
+        "left_source": false,
+        "update_rejected": {
+          "version": "0.3.2",
+          "digest": "18a28b775e3f493d5323080c50523e2bec1356e37e76aa918f1fb298d9fd5d94",
+          "reason": "preflight_failed",
+          "at": "2026-10-18T00:10:00Z"
+        }
+      },
+      "skill_review": {
+        "current": {},
+        "history": [],
+        "history_omitted": 0
+      }
+    },
+    {
+      "name": "registry_rejected",
+      "type": "extension",
+      "version": "0.3.1",
+      "description": "A previous release restored after an unsuccessful update.",
+      "enabled": true,
+      "source": "clawhub",
+      "permissions": [
+        "net",
+        "widget",
+        "route"
+      ],
+      "installed_at": "2026-09-20T10:00:00Z",
+      "content_hash": "0305fd55a4c7786753043df9b26c2dbadcc35285daffe623e3dc72e5afc7dfea",
+      "removal": "uninstall",
+      "payload_root": "skills/clawhub/registry_rejected",
+      "review_status": "pending",
+      "review_stale": false,
+      "review_gate": {
+        "status": "pending",
+        "stale": false,
+        "executable_review": true,
+        "blocking_reason": "trusted_source",
+        "review_enforcement": "blocking",
+        "summary": "Installed unchanged from a source the owner trusts; no review is required for these exact bytes.",
+        "preflight_failed": false,
+        "preflight_failed_stale": false
+      },
+      "executable_review": true,
+      "live_loaded": true,
+      "dispatch_live": true,
+      "grants": {
+        "all_granted": true
+      },
+      "category": [],
+      "install": {
+        "source": {
+          "id": "clawhub",
+          "name": "ClawHub",
+          "kind": "registry"
+        },
+        "official": false,
+        "release": {
+          "version": "0.3.1",
+          "digest": "0305fd55a4c7786753043df9b26c2dbadcc35285daffe623e3dc72e5afc7dfea"
+        },
+        "basis": "trusted",
+        "base_known": true,
+        "modified": false,
+        "turn_on_when_ready": true,
+        "installed_by": "ouroboros",
+        "installed_at": "2026-09-20T10:00:00Z",
+        "reason": "the owner asked for the forecast",
+        "task_id": "t-weather",
+        "update_available": null,
+        "withdrawn": null,
+        "left_source": false,
+        "update_rejected": {
+          "version": "0.3.2",
+          "digest": "18a28b775e3f493d5323080c50523e2bec1356e37e76aa918f1fb298d9fd5d94",
+          "reason": "review_unfinished",
+          "at": "2026-10-18T00:10:00Z"
+        }
+      },
+      "skill_review": {
+        "current": {},
+        "history": [],
+        "history_omitted": 0
+      }
+    }
+  ]
+}

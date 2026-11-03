@@ -23,7 +23,7 @@ pytestmark = pytest.mark.serial
 
 
 def directory_result(tmp_path, monkeypatch, *, chain=("retry-a", "retry-b"),
-                     owner="retry-a", strategy="copy", lost_apply=False):
+                     owner="retry-a", strategy="copy", lost_apply=False, captured=True):
     ctx = retry_context(tmp_path, monkeypatch, chain=chain)
     # The authority a real writable folder start records for this root's external
     # workspace. #1609: the first-wins authority source is what separates a writable
@@ -42,6 +42,11 @@ def directory_result(tmp_path, monkeypatch, *, chain=("retry-a", "retry-b"),
         yield engine
 
     monkeypatch.setattr(claudexor_daemon, "read_owned_gateway", owned)
+    if captured:  # the body's capture, before decisions (#1969); False keeps capture-at-disposition
+        from ouroboros.delegate_directory import capture_directory_result
+
+        capture_directory_result(custody.custody_root(ctx), entry, engine)
+        custody._CUSTODY.clear()
     return ctx, entry, engine
 
 
@@ -153,7 +158,8 @@ def captured_result(tmp_path, monkeypatch, kind):
     from tests.test_delegated_run_isolation import _seed_target
     from tests.test_delegated_skill_payload import _seed_skill
 
-    ctx = retry_context(tmp_path, monkeypatch, chain=("retry-a", "retry-b", "retry-c"), split=True)
+    ctx = retry_context(tmp_path, monkeypatch, chain=("retry-a", "retry-b", "retry-c"), split=True,
+                        fixed_ownership_clock=True)
     data = custody.custody_root(ctx)
     if kind == "git":
         seed = tmp_path / "git-project"
@@ -287,7 +293,7 @@ def supersede(ctx):
 
 @pytest.mark.parametrize("decision", ["apply", "reject"])
 def test_directory_superseded_during_capture_never_submits_effect(tmp_path, monkeypatch, decision):
-    ctx, entry, engine = directory_result(tmp_path, monkeypatch)
+    ctx, entry, engine = directory_result(tmp_path, monkeypatch, captured=False)
     get_run = engine.get_run
 
     def superseding_capture(run_id):
@@ -440,3 +446,29 @@ def test_stale_directory_replay_preserves_previous_unknown_intent(tmp_path, monk
     current = custody.replay(drive)[entry.run_id]
     assert current.patch_apply_pending and current.patch_apply_key == original_key
     assert not current.patch_disposed and len(engine.applies) == 1
+
+
+@pytest.mark.parametrize("strategy,decision", [("copy", "apply"), ("copy", "reject"), ("direct", "apply")])
+def test_uncaptured_directory_retry_keeps_inspection_and_readable_manifest(tmp_path, monkeypatch, strategy, decision):
+    """The successor can follow the advertised reader, not merely the absolute fallback."""
+    from ouroboros.delegate_collection import capture_projection
+    from ouroboros.delegate_custody_current import run
+
+    ctx, entry, engine = directory_result(tmp_path, monkeypatch, captured=False, strategy=strategy)
+    drive = custody.custody_root(ctx)
+    first = call(ctx, "integrate_delegated_patch", run_id=entry.run_id, decision=decision)
+    if (strategy, decision) == ("copy", "apply"):
+        assert "INTEGRATE_DELEGATED_INSPECT_CAPTURE" in first.text
+        assert not engine.applies and not run(drive, entry.run_id).patch_disposed
+        block = json.loads(first.text.split("\n", 1)[1])
+        reread = capture_projection(drive, run(drive, entry.run_id), reader_task_id=ctx.task_id)
+        for capture in (block, reread):
+            read = call(ctx, "read_file", **capture["manifest_read"])
+            assert read.status == "ok", read.text
+            assert "file_outputs" in read.text
+        second = call(ctx, "integrate_delegated_patch", run_id=entry.run_id, decision="apply")
+        assert json.loads(second.text)["status"] == "applied", second.text
+        assert len(engine.applies) == 1
+    else:
+        assert "INTEGRATE_DELEGATED_INSPECT_CAPTURE" not in first.text, first.text
+        assert run(drive, entry.run_id).patch_disposed == ("rejected" if decision == "reject" else "applied")

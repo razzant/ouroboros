@@ -22,7 +22,7 @@ from ouroboros.gateway.host_service import create_host_service_app
 from ouroboros.presence_authority import presence_ceiling_payload
 from ouroboros.presence_runner import _cached_result
 from ouroboros.task_results import load_task_result
-from ouroboros.tools.registry import ToolRegistry
+from tests.presence_legacy_helpers import legacy_registry as ToolRegistry
 from ouroboros.utils import append_jsonl
 from tests.test_host_service_api import _seed_presence_behavior, _seed_token
 from tests.test_presence_completion import _call
@@ -111,6 +111,8 @@ def test_forced_final_speaks_only_what_it_declares(tmp_path, monkeypatch, forced
     assert len(calls) == 2  # the one forced call; no repair or polishing round
     assert "[PRESENCE_DELIVERY]" in str(calls[-1][-1]["content"])
     assert "You decide what, if anything, to say" in str(calls[-1][-1]["content"])
+    # The armed contract is the call's whole completion request: no generic prose/finish_task offer contradicts it.
+    assert "No tool runs at this boundary" not in str(calls[-1][-1]["content"])
     assert (result["outcome"], result["text"]) == (outcome, spoken)
     assert stored["reason_code"] == "round_limit"
     assert stored["outcome_axes"]["execution"]["status"] != "ok"  # speech is declared, not read off status
@@ -167,6 +169,7 @@ def test_ordinary_forced_final_is_unchanged(tmp_path, monkeypatch):
     task = {"id": "owner-task", "type": "task", "chat_id": 1, "text": "Please help"}
     _result, stored, calls, text = _run(tmp_path, monkeypatch, RECORD, task=task, presence=False)
     assert "[PRESENCE_DELIVERY]" not in str(calls[-1][-1]["content"])
+    assert "No tool runs at this boundary" in str(calls[-1][-1]["content"])
     assert text == RECORD and stored["result"].startswith(RECORD)
     assert "presence_declaration" not in (stored.get("metadata") or {})
 
@@ -200,17 +203,18 @@ def test_invalidated_finish_is_named_void_with_this_tasks_confirmed_sends(tmp_pa
     })
     reviews, calls = [], []
 
-    def review(**kwargs):
-        reviews.append(kwargs["content"])
-        if feedback and len(reviews) == 1:  # the panel's feedback is new transcript content
-            kwargs["messages"].append({"role": "user", "content": "[REVIEW] Also confirm the Q2 figures."})
+    def review(_ctx, content, _trace, hold):
+        # The host's delivery step (``review_result.result_review_at_delivery``) holds the first finish.
+        reviews.append(content)
+        if feedback and len(reviews) == 1:  # the outcome it shows is new transcript content
+            hold("[Result review] Also confirm the Q2 figures.")
         return len(reviews) == 1  # the first finish is held for another pass
 
     def respond(_llm, messages, *_a, **_k):
         calls.append([dict(row) for row in messages])
         return ([_call("tool_delivered", ""), _call("tool_delivered", "")][len(calls) - 1]), 0.0
 
-    monkeypatch.setattr(loop, "_run_task_acceptance_review_once", review)
+    monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", review)
     monkeypatch.setattr(loop, "call_llm_with_retry", respond)
     _text, usage, _trace = loop.run_llm_loop(
         [{"role": "user", "content": "Please help"}], registry,

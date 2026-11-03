@@ -814,20 +814,6 @@ def _custody_ledger_rewrite(drive: pathlib.Path):
     return path, jsonl_append_lock_path(path), lambda: process_custody._rewrite_ledger(drive, [])
 
 
-def _skill_review_history_append(drive: pathlib.Path):
-    """skill_review_history.append_history_once -- same sidecar as its own
-    append_jsonl writer of the very same history file."""
-    from ouroboros import skill_review_history
-    from ouroboros.utils import jsonl_append_lock_path
-
-    path = skill_review_history.review_history_path(drive, "demo")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"")
-    return path, jsonl_append_lock_path(path), lambda: skill_review_history.append_history_once(
-        drive, "demo", {"job_id": "job-1", "ts": "2026-01-01T00:00:00Z"},
-    )
-
-
 def _supervisor_log_rotation(drive: pathlib.Path):
     """supervisor.state.rotate_jsonl_log_if_needed -- renames a log whose rows
     append_jsonl writes under this same lock."""
@@ -857,10 +843,9 @@ def _durable_json_update(drive: pathlib.Path):
 
 @pytest.mark.parametrize("build", [
     _custody_ledger_rewrite,
-    _skill_review_history_append,
     _supervisor_log_rotation,
     _durable_json_update,
-], ids=["process_custody", "skill_review_history", "supervisor_rotation", "update_json_locked"])
+], ids=["process_custody", "supervisor_rotation", "update_json_locked"])
 def test_a_shared_sidecar_taker_never_evicts_a_live_holders_lock(tmp_path, monkeypatch, build):
     """Every writer of one lock file must judge staleness the same way.
 

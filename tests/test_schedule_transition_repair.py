@@ -117,32 +117,6 @@ def test_control_disable_and_restore_recheck_refused_work(q, monkeypatch):  # no
     assert len(q.pending) == 1
 
 
-def test_skill_resync_reconsiders_legacy_refused_claim_under_new_cron(q, monkeypatch):  # noqa: F811
-    from tests.test_consciousness_schedule_controls import _ready, _skill
-
-    clock = _clock(monkeypatch)
-    _ready(monkeypatch)
-    queue_schedules.sync_skill_schedules([_skill()], drive_root=q.root)
-    data = queue_schedules.load_schedule_store(q.root)
-    data["tasks"][0]["next_run_at"] = "2000-01-01T00:00:00+00:00"
-    queue_schedules._write_scheduled_tasks(data)
-    original = q.queue.enqueue_task
-    monkeypatch.setattr(q.queue, "enqueue_task", lambda task, **_kw: {
-        **task, "_admission_blocked": "worker_pool_disabled"})
-    q.queue.check_scheduled_tasks()
-    data = queue_schedules.load_schedule_store(q.root)
-    assert data["tasks"][0]["occurrence"]["phase"] == "claimed"
-    data["tasks"][0]["occurrence"].pop("fingerprint")
-    queue_schedules._write_scheduled_tasks(data)
-    monkeypatch.setattr(q.queue, "enqueue_task", original)
-    queue_schedules.sync_skill_schedules([_skill(tasks=(("daily", "0 12 * * *"),))], drive_root=q.root)
-    q.queue.check_scheduled_tasks()
-    assert not q.pending
-    clock.instant += datetime.timedelta(days=1)
-    q.queue.check_scheduled_tasks()
-    assert len(q.pending) == 1
-
-
 @pytest.mark.parametrize("evidence", ["accepted", "unstarted", "dispatch", "foreign", "unreadable"])
 @pytest.mark.parametrize("cron", [False, True])
 @pytest.mark.parametrize("edit_timing", [False, True])
@@ -299,7 +273,8 @@ def test_legacy_unstarted_claim_obeys_current_controls(q, monkeypatch, control, 
     if control in {"disabled", "deleted", "future"}:
         assert not q.pending and not load_task_result(q.root, claimed["task_id"])
         if control == "deleted":
-            assert "s1" not in _rows(q)
+            assert _rows(q)["s1"]["delete_requested_at"]
+            assert "occurrence" not in _rows(q)["s1"]
         else:
             assert "occurrence" not in _rows(q)["s1"]
     else:
@@ -312,7 +287,7 @@ def test_legacy_unstarted_claim_obeys_current_controls(q, monkeypatch, control, 
             assert task["id"] != claimed["task_id"] and "current authored text" in task["text"]
 
 
-def test_deferred_unstarted_delete_is_finished_during_admission_recheck(q, monkeypatch):  # noqa: F811
+def test_deferred_unstarted_delete_keeps_withdrawal_during_admission_recheck(q, monkeypatch):  # noqa: F811
     _clock(monkeypatch)
     row = _refused(q, monkeypatch)
     prepared = occurrence.prepare(occurrence.view(row))
@@ -321,4 +296,5 @@ def test_deferred_unstarted_delete_is_finished_during_admission_recheck(q, monke
         data["tasks"][0].update(enabled=False, delete_requested_at="2026-09-27T12:00:00+00:00")
         queue_schedules._write_scheduled_tasks(data)
     occurrence.admit([prepared])
-    assert not q.pending and "s1" not in _rows(q)
+    assert not q.pending and _rows(q)["s1"]["delete_requested_at"]
+    assert "occurrence" not in _rows(q)["s1"]

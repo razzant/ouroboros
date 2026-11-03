@@ -1,4 +1,6 @@
 """Dialogue phase timestamps are durable observations, independent of scheduling."""
+
+from tests import _dialogue as dialogue_test
 import json
 import queue
 from datetime import datetime
@@ -12,7 +14,7 @@ from supervisor import message_bus
 def test_acceptance_stamp_is_the_durable_append_not_a_relabelled_input_time(tmp_path):
     row = message_bus.log_chat('in', 0, 1, 'Hello', ts='2000-01-01T00:00:00+00:00',
                                source='web', client_message_id='message', drive_root=tmp_path, require_write=True)
-    stored = json.loads((tmp_path / 'logs/chat.jsonl').read_text(encoding='utf-8'))
+    stored = json.loads(dialogue_test.log_text(tmp_path / 'logs/chat.jsonl'))
     assert stored['message_accepted_at'] == row['message_accepted_at']
     assert stored['message_accepted_at'] > stored['ts']
 

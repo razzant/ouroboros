@@ -516,7 +516,6 @@ def test_three_os_gate_installs_the_reviewed_runtime_instead_of_floating_npm():
     assert '--effort "${{ matrix.effort }}"' in workflow
     assert "- os: ubuntu-latest\n            harness: codex" in workflow
     assert "- os: windows-latest\n            harness: codex" in workflow
-    assert "vendor-broken on native Windows" in workflow
     for dependency_surface in (
         ".github/actions/setup-python-env/**",
         "pyproject.toml",

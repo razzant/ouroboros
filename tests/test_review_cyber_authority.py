@@ -71,7 +71,7 @@ def test_review_status_readiness_matches_the_actual_gate(candidate, access):  # 
     projection = json.loads(_handle_review_status(candidate))
     assert "repo_commit_ready" not in projection, "no readiness axis is projected under either authority"
     assert not projection["open_obligations"] and not projection["commit_readiness_debts"]
-    assert not projection["advisory_runs"]
+    assert "advisory_runs" not in projection and "advisory_run_archive" not in projection
     assert not load_state(candidate.drive_root).advisory_runs
 
 
@@ -216,9 +216,8 @@ def test_skill_author_can_finish_without_fabricating_first_feedback(tmp_path, ac
 
 def test_skill_review_texts_state_the_gate_skill_exec_obeys(tmp_path, access, monkeypatch):
     """#1735: no skill_review text promises a lock Cyber Pro does not apply."""
-    from ouroboros import skill_review_passes
     from ouroboros.skill_loader import save_enabled
-    from ouroboros.tools import skill_exec
+    from ouroboros.tools import review_change, skill_exec
     from tests.test_skill_exec import _build_skill, _make_ctx, _valid_script_manifest
 
     ctx = _make_ctx(tmp_path)
@@ -228,7 +227,7 @@ def test_skill_review_texts_state_the_gate_skill_exec_obeys(tmp_path, access, mo
     manifest = _valid_script_manifest("demo").replace(
         "---\n# body", "  - name: absent.py\n    description: Missing.\n---\n# body")
     _build_skill(skills_root, "demo", manifest=manifest)
-    monkeypatch.setattr(skill_review_passes, "run_skill_review_passes", lambda *a, **k: pytest.fail("no panel"))
+    monkeypatch.setattr(review_change, "run_review_change", lambda *a, **k: pytest.fail("no panel"))
     reviewed = skill_exec._handle_review_skill(ctx, skill="demo")
     assert "status=pending" in reviewed and "skill_preflight failed" in reviewed
     assert "not executable" not in reviewed
@@ -244,14 +243,8 @@ def test_skill_review_texts_state_the_gate_skill_exec_obeys(tmp_path, access, mo
         assert ran.startswith("⚠️ SKILL_EXEC_BLOCKED") and "review_pending" in ran
 
 
-def test_real_force_plan_decision_uses_cyber_authority(harness, access):  # noqa: F811
-    from ouroboros.owner_hurry import force_plan_decision
+def test_real_plan_gate_ignores_legacy_force_plan_in_every_access_mode(harness, access):  # noqa: F811
+    from ouroboros.owner_hurry import plan_gate_decision
 
-    ctx = harness.make_ctx(force_plan=True)
-    result = force_plan_decision(ctx, {}, enforcement="blocking")
-    assert result["allow"] == (access == "cyber_pro")
-    # An unmet Swarm planning obligation holds outside Cyber Pro; Cyber Pro's authority
-    # releases it and is named as the deciding authority.
-    assert result["enforcement"] == "blocking" and result["force_plan_met"] is False
-    assert result["status"] == ("clear" if access == "cyber_pro" else "force_plan_unmet")
-    assert result.get("decision_authority") == ("cyber_pro" if access == "cyber_pro" else None)
+    result = plan_gate_decision(harness.make_ctx(force_plan=True), {}, enforcement="blocking")
+    assert result["allow"] is True and result["status"] == "not_required"

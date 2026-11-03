@@ -1,9 +1,11 @@
 """The durable queue snapshot: what a restart finds and what it may restore.
 
-The snapshot is written under the queue lock from the live PENDING/RUNNING rows and
-the acceptance fences beside them, and restored only while PENDING is empty.
-Accepted work survives at any age; only a fresh acknowledged Restart transaction
-returns it to ordinary admission. Other application stops require explicit Resume.
+The snapshot is published from the live PENDING/RUNNING rows and the acceptance fences
+beside them (``supervisor/queue_publication.py``: captured under the queue lock, written
+outside it), and restored only while PENDING is empty. Accepted work survives at any
+age; only a fresh acknowledged Restart transaction returns it to ordinary admission.
+Other application stops require explicit Resume. ``_PENDING_FIELDS`` names what a saved
+PENDING row carries; the custody of the saved queue (``_keeps_saved_queue``) is decided here.
 """
 
 from __future__ import annotations
@@ -12,14 +14,16 @@ import copy
 import datetime
 import json
 import logging
+import math
 import pathlib
+import threading
 import time
-import uuid
 from typing import Any, Optional
 
-from ouroboros.contracts.schema_versions import SCHEMA_VERSION_KEY
+from ouroboros.project_admission import carried_basis
 from ouroboros.utils import utc_now_iso
-from ouroboros.subagents import subagent_intent_fields
+from supervisor.work_stop_migration import normalize_for_restore
+from supervisor.restart_retention import exact_pause_row as _exact_pause_row
 from supervisor.task_admission import (
     restore_terminalization_retry,
     restore_terminalization_retry_rows,
@@ -47,10 +51,56 @@ def _queue():
 
 log = logging.getLogger(__name__)
 
+# Snapshot paths whose saved queue this process took into custody: a ``restore_pending_from_snapshot``
+# that read it and decided every row. Until then, or until it published one itself, its maps prove
+# nothing about the saved queue on disk (#1952), whichever door publishes. ``_RESTORING`` names the
+# thread reading one right now.
+_RESTORED: set = set()
+_RESTORING: dict = {}
+
+
+def _keeps_saved_queue(path: Any, *held: Any) -> bool:
+    """Whether a publication from this process must leave the snapshot on disk as it is: another
+    thread is restoring it now, or the process holds no work at all and neither restored nor
+    published that snapshot, which still names pending or running rows. That is the previous
+    generation's saved queue (any publication during the boot: a stop, Update or Rollback, a boot
+    without a provider); an empty or partial write would erase saved Pauses it carries, and Resume
+    would then find nothing to resume."""
+    key, publication = str(pathlib.Path(path).absolute()), _queue().QUEUE_PUBLICATION
+    if key in _RESTORED or (publication is not None and str(pathlib.Path(publication[0]).absolute()) == key):
+        return False
+    if _RESTORING.get(key, threading.get_ident()) != threading.get_ident():
+        return True
+    if any(held):
+        return False
+    try:
+        saved = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False  # nothing readable to keep
+    return isinstance(saved, dict) and bool(saved.get("pending") or saved.get("running"))
+
+def saved_queue_unowned() -> bool:
+    """Whether the saved queue snapshot still names work this process has not taken into custody (no
+    finished restore of it, no publication of its own): work admitted now would be published over it."""
+    return _keeps_saved_queue(_queue().QUEUE_SNAPSHOT_PATH)
+
+
+def __getattr__(name: str):
+    """The publication moved to its own owner (``supervisor/queue_publication.py``); callers that
+    still address it through this module reach the same function, resolved at call time."""
+    if name in {"persist_queue_snapshot", "publish_queue_snapshot"}:
+        from supervisor import queue_publication
+
+        return getattr(queue_publication, name)
+    raise AttributeError(name)
+
+
 # ABI 7.0 (Q8=B): the durable queue snapshot names its schema on every write.
 # Stamp-on-write ONLY — the restore path does not require the stamp (no
-# compat branching), so an N−1 snapshot restores unchanged.
-QUEUE_SNAPSHOT_SCHEMA_VERSION = 1
+# compat branching), so an N−1 snapshot restores unchanged. Schema 2: rows may
+# reference the document's own ``$shared`` table (``queue_publication``), which
+# the reader expands before anything here runs.
+QUEUE_SNAPSHOT_SCHEMA_VERSION = 2
 
 
 def _kept_service_pids() -> "set[int]":
@@ -84,7 +134,7 @@ _PENDING_FIELDS = (
     'title', 'expected_output', 'constraints', 'role',
     'context', 'parent_task_id', 'root_task_id', 'session_id',
     'actor_id', 'delegation_role', 'workspace_root', 'workspace_mode',
-    'project_id', '_project_admission_restore_hold', 'focus', 'allowed_resources',
+    'project_id', 'placement_applied_at', '_project_admission_restore_hold', 'focus', 'allowed_resources',
     'deadline_at', 'task_contract', '_owner_hold', '_consciousness_continuation',
     'model_lane', 'effective_model_lane', 'model',
     'use_local_model', 'effective_executor', 'tool_profile', 'executor_route',
@@ -93,138 +143,28 @@ _PENDING_FIELDS = (
     'configured_subagent', 'memory_mode', 'drive_root', 'parent_cognitive_route',
     'subagent_availability', 'child_drive_root', 'budget_drive_root', 'task_constraint',
     'predecessor_authority_source', 'metadata', 'origin_message_ref', 'origin_message_text',
+    'image_source_ref', 'image_mime', 'image_caption',
+    'attachment_manifest', 'attachment_images', 'attachments',
     '_attempt', 'review_reason', 'review_source_task_id', '_budget_pause',
     'budget_resumed_at', '_terminalization_retry', '_cancel_intent_authority_hold', '_owner_wait_resume',
-    '_budget_pause_resume', '_budget_pause_hold', '_continuation_prepared', '_admission_owner_token',
-    '_is_direct_chat',
+    '_budget_pause_resume', '_budget_pause_hold', '_resume_selection', '_continuation_prepared', '_admission_owner_token',
+    '_is_direct_chat', '_presence_turn', 'source', 'detached_at', 'detached_by',
+    '_conversation_prepare',  # a turn saved across Restart still owes its first step in the worker that runs it
 )
 
-def persist_queue_snapshot(reason: str = "") -> bool:
-    """Persist queue snapshot for restart/recovery diagnostics.
+def _saved_pending_task(row: dict) -> dict:
+    """A saved PENDING row's task with the queue time its outer row keeps (#1805).
 
-    Snapshots PENDING/RUNNING under the queue lock: iterating the live dicts
-    while HTTP handlers mutate them raised "dictionary changed size during
-    iteration" in the supervisor loop (counted toward its crash limit).
+    The outer value decides, an explicit null included; only a row without one
+    falls back to a nested copy. Text and a finite epoch (``direct_pause.retain_direct_hold``
+    stamps one) are known; a time no row kept stays unknown (``None``), never this restore's clock.
     """
-    from supervisor.direct_roots import collect_direct_roots
-
-    direct = collect_direct_roots()  # Never wait for an actor while holding Q.
-    with _queue()._queue_lock:
-        pending_items = [dict(t) for t in _queue().PENDING]
-        running_items = [
-            (task_id, dict(meta) if isinstance(meta, dict) else {})
-            for task_id, meta in _queue().RUNNING.items()
-        ]
-        acceptance_fences = [dict(row) for row in _queue().ACCEPTANCE_FENCES.values()]
-        budget_root_fences = [dict(row) for row in _queue().BUDGET_ROOT_FENCES.values()]
-        # Honest worker-pool counts from the ACTUAL pool (not the configured max): the live
-        # pool can be smaller (a crash-storm/direct-chat fallback clears WORKERS) and a slot
-        # mid-reap is popped from RUNNING but NOT assignable. Surface the real assignable-idle
-        # count so the context queue digest never falsely advertises a free worker slot.
-        try:
-            from supervisor import workers as _workers_mod
-            from supervisor.worker_pool_lifecycle import worker_ready
-
-            _ws = list(_workers_mod.WORKERS.values())
-            worker_total = len(_ws)
-            active_worker_count = sum(1 for w in _ws if getattr(w, "active_capacity", True))
-            parked_worker_count = worker_total - active_worker_count
-            worker_pool_disabled_reason = _workers_mod._worker_pool_execution_state()["disabled_reason"]
-            if worker_pool_disabled_reason == "no_workers":
-                worker_pool_disabled_reason = ""  # Absence is counted above, not an explicit disablement.
-            reaping_count = sum(1 for _w in _ws if getattr(_w, "reaping", False))
-            assignable_idle_workers = sum(
-                1 for _w in _ws
-                if (getattr(_w, "busy_task_id", None) is None and worker_ready(_w)
-                    and getattr(_w, "active_capacity", True) and not getattr(_w, "resume_hold", ""))
-            )
-        except Exception:
-            worker_total = 0
-            active_worker_count = parked_worker_count = 0
-            worker_pool_disabled_reason = "unknown"
-            reaping_count = 0
-            assignable_idle_workers = 0
-        pending_rows = []
-        for t in pending_items:
-            pending_rows.append({
-                "id": t.get("id"), "type": t.get("type"), "priority": t.get("priority"),
-                "attempt": t.get("_attempt"), "queued_at": t.get("queued_at"),
-                "queue_seq": t.get("_queue_seq"),
-                "task": {**{key: t.get(key) for key in _PENDING_FIELDS}, **subagent_intent_fields(t),
-                         **{key: t[key] for key in ('_project_admission', 'admitted_dispatch', '_project_scope_none', '_working_recovery',
-                                                    # #939: the execution budget and its carried clock offset travel with the row.
-                                                    'execution_timeout_sec', '_execution_consumed_sec', '_execution_handoff_sec') if key in t}},
-            })
-        running_rows = []
-        for task_id, meta in running_items:
-            task = meta.get("task") if isinstance(meta, dict) else {}
-            started = float(meta.get("started_at") or 0.0) if isinstance(meta, dict) else 0.0
-            paused_sec = float(meta.get("budget_paused_sec") or 0.0) if isinstance(meta, dict) else 0.0
-            running_rows.append({
-                "id": task_id, "type": task.get("type"), "priority": task.get("priority"),
-                "attempt": meta.get("attempt"), "worker_id": meta.get("worker_id"),
-                "owner_wait": meta.get("owner_wait"), "started_at": started,
-                "model_wait_quota_clock": meta.get("model_wait_quota_clock"),
-                "sleep_parked_at": meta.get("sleep_parked_at"),
-                "budget_paused_sec": paused_sec,
-                "soft_sent": bool(meta.get("soft_sent")), "task": task,
-            })
-        payload = {
-            SCHEMA_VERSION_KEY: QUEUE_SNAPSHOT_SCHEMA_VERSION,
-            "pending_count": len(pending_items), "running_count": len(running_items),
-            "reaping_count": reaping_count,
-            "worker_total": worker_total,
-            "active_worker_count": active_worker_count, "parked_worker_count": parked_worker_count,
-            "worker_pool_disabled_reason": worker_pool_disabled_reason,
-            "assignable_idle_workers": assignable_idle_workers,
-            "acceptance_fences": acceptance_fences,
-            "budget_root_fences": budget_root_fences,
-            "pending": pending_rows, "running": running_rows,
-        }
-        from ouroboros.budget_pause import BUDGET_HOLD_KEY
-
-        fenced = {str(row.get("root_task_id") or "") for row in budget_root_fences}
-        members = {}
-        for task in [*pending_items, *(meta.get("task") or {} for _, meta in running_items)]:
-            if str(task.get("root_task_id") or task.get("id") or "") in fenced:
-                member = {key: task[key] for key in ("id", "_budget_pause", "_budget_pause_consumed", "_continuation_prepared") if key in task}
-                for key, fields in ((BUDGET_HOLD_KEY, ("selected", "fence_id")),
-                                    ("_budget_pause_resume", ("pause_id", "grant_id", "authority", "root_fence_id", "selected_by", "root_grant_id", "root_resume_generation"))):
-                    if key in task:
-                        value = task[key]
-                        member[key] = {k: value[k] for k in fields if k in value} if isinstance(value, dict) else value
-                members[str(task.get("id") or "")] = member
-        dispatch = {"budget_root_fences": budget_root_fences, "members": members}
-        documents = {"queue_snapshot.json": payload, "queue_dispatch.json": dispatch, "direct_roots.json": direct}
-        previous = _queue().QUEUE_PUBLICATION
-        changed = previous is None or previous[:2] != (_queue().QUEUE_SNAPSHOT_PATH, documents) or reason in {"startup", "pre_restart_exit"}
-        generation = uuid.uuid4().hex if changed else previous[2]
-        state = _queue().QUEUE_SNAPSHOT_PATH.parent
-        try:
-            if changed:
-                # A partial publish must not certify the old no-fence document.
-                for attempt in range(3):
-                    try:
-                        (state / "queue.alive").unlink(missing_ok=True)
-                        break
-                    except PermissionError:
-                        if attempt == 2:
-                            raise
-                        time.sleep(0.01)  # Windows readers briefly deny delete sharing.
-                for name, document in documents.items():
-                    published = {**document, "generation": generation, "ts": utc_now_iso(), "reason": reason}
-                    if _queue().atomic_write_text(state / name, json.dumps(published, ensure_ascii=False, separators=(",", ":"))) is False:
-                        raise OSError(f"queue publication failed: {name}")
-            alive = {"generation": generation, "ts": utc_now_iso(),
-                     "heartbeats": {tid: meta.get("last_heartbeat_at") for tid, meta in running_items}}
-            if _queue().atomic_write_text(state / "queue.alive", json.dumps(alive, separators=(",", ":"))) is False:
-                raise OSError("queue liveness publication failed")
-            if changed:
-                _queue().QUEUE_PUBLICATION = (_queue().QUEUE_SNAPSHOT_PATH, copy.deepcopy(documents), generation)
-            return True
-        except Exception:
-            log.warning("Failed to persist queue snapshot (reason=%s)", reason, exc_info=True)
-            return False
+    task = dict(row["task"])
+    value = row["queued_at"] if "queued_at" in row else task.get("queued_at")
+    known = (isinstance(value, str) and value.strip()) or (
+        isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0)
+    task["queued_at"] = value if known else None
+    return task
 
 
 def parse_iso_to_ts(iso_ts: str) -> Optional[float]:
@@ -261,12 +201,16 @@ def _fence_snapshot_running_rows(rows: Any, *, restored_ids: "set[str]") -> "lis
     fenced: list[str] = []
     unreadable: list[str] = []
     unrecorded: list[str] = []
+    from supervisor.restart_retention import presence_turn
+
     for row in rows if isinstance(rows, list) else []:
         task_id = str(row.get("id") or "") if isinstance(row, dict) else ""
         if not task_id or task_id in restored_ids:
             continue
         try:
             stored = load_task_result(_queue().DRIVE_ROOT, task_id, strict=True) or {}
+            if presence_turn(row.get("task"), _queue().DRIVE_ROOT) or presence_turn(stored, _queue().DRIVE_ROOT):
+                continue  # a correspondent's turn: its place's recovery settles it (the Presence sweep), not a fence
             if not stored:
                 # Admission writes the durable scheduled row (task_admission.py
                 # :536-543), so even a failed RUNNING mirror leaves a readable
@@ -301,15 +245,6 @@ def _fence_snapshot_running_rows(rows: Any, *, restored_ids: "set[str]") -> "lis
     return fenced
 
 
-def _exact_pause_row(task: Any) -> bool:
-    """Whether this snapshot row is an EXACT mid-run budget pause locator (#1196)."""
-    pause = task.get("_budget_pause") if isinstance(task, dict) else None
-    # Typed: the marker writers stamp a boolean; a truthy string or an
-    # otherwise malformed marker is NOT a saved pause and keeps ordinary
-    # drain/parent-interrupted settlement (Astra run-e0bb1ca3487c A1).
-    return isinstance(pause, dict) and pause.get("exact_continuation") is True
-
-
 def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stale: bool,
                              direct_caught: "list[str]" = (), handoffs: Optional[dict] = None) -> tuple:
     """Which snapshot rows survive the restore, and the RUNNING rows parked beside them.
@@ -321,9 +256,9 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
     carrier of work that ran on, so it is not retained at all and is fenced as
     the running work it names (its id is returned third). A RUNNING row whose
     durable pause was already complete is parked, never fenced; so is a direct
-    root the stop caught (``direct_caught``) in that state: a direct turn is
-    never a RUNNING row, so the roster is the only place the stop names it, and
-    handing such an id to the shutdown cancel fence would cancel a saved pause
+    root the stop caught (``direct_caught``) in that state: queue init's direct
+    handover names these non-pooled turns, and handing such an id to the
+    shutdown cancel fence would cancel a saved pause
     (#1196). Its queue record is rebuilt from the durable result the pause
     wrote (chat, lane fact, origin, metadata, attempt) and parked through the
     same path a RUNNING row takes; a turn with no complete pause (no row, no
@@ -351,23 +286,25 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
     from ouroboros.owner_wait import restore_owner_wait_allowed, saved_sleep_checkpoint
     from ouroboros.project_admission import host_unscoped
     from ouroboros.task_results import load_task_result
-    from supervisor.budget_resume import revoke_exact_budget_resume
-    from supervisor.events_budget import (BUDGET_HOLD_KEY, HOLD_OWNER_RESTART, HOLD_PANIC, HOLD_RESTORE_REFUSED_PREFIX,
+    from supervisor.budget_resume import resume_hold_requires_fence, revoke_exact_budget_resume
+    from supervisor.events_budget import (HOLD_OWNER_RESTART, HOLD_PANIC, HOLD_RESTORE_REFUSED_PREFIX,
                                           budget_hold_fact, hold_budget_row, hold_restored_budget_pause)
     from supervisor.restart_retention import (fresh_return_transaction, hold_after_stop, hold_for_owner_restart,
-                                              hold_stopped_queue, never_started, panic_recorded, pause_ids,
+                                              hold_stopped_queue, never_started, park_saved_pause, pause_ids,
                                               recover_saved_running,
-                                              retained_pending, saved_sleep_hold_reason, unseen_pause)
+                                              retained_pending, HOLD_SAVED_SLEEP_RECOVERY, unseen_pause)
     from supervisor.schedule_occurrence import first_attempt, first_dispatch_unsent, restore_verdict
 
-    sleep_hold_reason = saved_sleep_hold_reason(_queue().DRIVE_ROOT)
-    owner_restart, panic = sleep_hold_reason == HOLD_OWNER_RESTART, sleep_hold_reason == HOLD_PANIC
-    # A returning stop (fresh acknowledged Restart/update) names what it returns;
-    # any other stop holds the same saved work for an explicit Resume. Panic never returns.
-    panicked = panic or panic_recorded(_queue().DRIVE_ROOT)  # it wins over an owner Restart's flag
+    from ouroboros.work_stop import clear_refusal, continuation_refusal, current_stop
+
+    from ouroboros.delegate_recovery import boot_door
+    door = boot_door(_queue().DRIVE_ROOT)
+    owner_restart, panicked = door == "owner_restart", door == "panic"
+    panic = panicked
+    sleep_hold_reason = HOLD_PANIC if panicked else HOLD_OWNER_RESTART if owner_restart else HOLD_SAVED_SLEEP_RECOVERY
     transaction = {} if panicked else fresh_return_transaction(_queue().DRIVE_ROOT)
     returning_queue = set(transaction.get("queue_ids") or []) | set(transaction.get("return_ids") or [])
-    stop_cause = "panic" if panicked else "restart_unacknowledged" if owner_restart else "app_stop"
+    stop_door = door or "app_stop"
     prior_roots = {str(task["id"]): copy.deepcopy(task) for task in
                    snapshot_pending + [row.get("task") for row in running_rows if isinstance(row, dict)]
                    if isinstance(task, dict) and task.get("id")
@@ -381,6 +318,9 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
                 unseen.add(str(task.get("id") or ""))
     direct_rows: list = []
     direct_saved: list = []
+    direct_wait_handoffs: list = []
+    tx_id = str(transaction.get("transaction_id") or "")
+    tx_task_ids = {str(tid) for tid in (transaction.get("task_ids") or [])}
     for task_id in direct_caught:
         task_id = str(task_id or "")
         if not task_id:
@@ -388,38 +328,53 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
         try:
             stored = load_task_result(_queue().DRIVE_ROOT, task_id, strict=True) or {}
             pause = budget_pause_row(_queue().DRIVE_ROOT, task_id)
+            wait = stored.get("owner_wait") if isinstance(stored.get("owner_wait"), dict) else {}
             if not pause:
-                wait, _ = saved_sleep_checkpoint(_queue().DRIVE_ROOT, task_id)
-                if wait:
-                    # The prior direct roster plus exact source is the locator;
-                    # park_saved_pause performs the same conversion as a worker.
+                if (wait.get("state") == "waiting" and wait.get("reason") == "owner_pause"
+                        and wait.get("source_ref")):
                     pause = {**wait, "is_direct_chat": True}
+                elif not (wait.get("state") == "waiting" and wait.get("reason") in {"owner", "review", "sleep"}
+                          and wait.get("source_ref") and tx_id and task_id in tx_task_ids
+                          and not (owner_restart and wait.get("reason") == "sleep")):
+                    sleep_wait, _ = saved_sleep_checkpoint(_queue().DRIVE_ROOT, task_id)
+                    if sleep_wait:
+                        # The prior direct roster plus exact source is the locator;
+                        # park_saved_pause performs the same conversion as a worker.
+                        pause = {**sleep_wait, "is_direct_chat": True}
         except Exception:
             continue
         saved_pause = bool(stored and pause and pause.get("source_ref") and pause.get("is_direct_chat"))
-        if not stored or not (saved_pause or stored.get("_is_direct_chat")):
+        saved_wait = bool(stored and not pause and wait.get("state") == "waiting"
+                          and wait.get("reason") in {"owner", "review", "sleep"} and wait.get("source_ref"))
+        if not stored or not (saved_pause or saved_wait or stored.get("_is_direct_chat")):
             continue
-        attempt = int((pause or {}).get("task_attempt") or 1) if saved_pause else int(stored.get("task_attempt") or 1)
+        attempt = int(stored.get("task_attempt") or (pause or {}).get("task_attempt")
+                      or wait.get("task_attempt") or 1)
         record: dict = {
             "id": task_id, "type": "task", "chat_id": stored.get("chat_id"), "_is_direct_chat": True,
-            "_attempt": attempt, "root_task_id": task_id, "depth": 0,
+            "_attempt": attempt, "root_task_id": task_id, "depth": 0, **carried_basis(stored),
         }
-        for key in ("origin_message_ref", "origin_message_text", "metadata", "project_id",
-                    "task_contract", "title", "text", "budget_drive_root"):
+        for key in ("origin_message_ref", "origin_message_text", "metadata", "project_id", "tool_profile", "detached_at",
+                    "detached_by", "task_contract", "title", "text", "budget_drive_root"):
             if stored.get(key) not in (None, ""):
                 record[key] = stored[key]
-        (direct_rows if saved_pause else direct_saved).append({"task": record, "attempt": attempt})
+        if (saved_wait and int(wait.get("task_attempt") or 0) == attempt and tx_id
+                and task_id in tx_task_ids and not (owner_restart and wait.get("reason") == "sleep")):
+            record["_owner_wait_resume"] = {**wait, "restart_transaction_id": tx_id}
+            direct_wait_handoffs.append(record)
+        else:
+            (direct_rows if saved_pause else direct_saved).append({"task": record, "attempt": attempt})
     before_park = {str(row["task"].get("id") or ""): pause_ids(row["task"]) for row in running_rows
                    if isinstance(row, dict) and isinstance(row.get("task"), dict)}
-    parked = _park_pausing_running_rows(list(running_rows) + direct_rows, snapshot_pending,
+    parked = _park_pausing_running_rows(list(running_rows) + direct_rows + direct_saved, snapshot_pending,
         sleep_hold_reason=sleep_hold_reason)
-    taken = {str(task.get("id") or "") for task in list(snapshot_pending) + parked}
+    taken = {str(task.get("id") or "") for task in list(snapshot_pending) + direct_wait_handoffs + parked}
     # Interrupted work whose state was saved returns (or waits) under its own id
     # instead of the shutdown fence's cancellation (#1563).
     recovered = recover_saved_running(
         [row for row in list(running_rows) + direct_saved if isinstance(row, dict)
          and str((row.get("task") or {}).get("id") or "") not in taken],
-        _queue().DRIVE_ROOT, transaction=transaction, cause=stop_cause)
+        _queue().DRIVE_ROOT, transaction=transaction, cause=stop_door)
     if handoffs is not None:
         handoffs.update({str(task["id"]): source["from_attempt"] for task in recovered
                          if isinstance(source := task.get("_working_recovery"), dict)
@@ -429,7 +384,34 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
                   if unseen_pause(task, before_park.get(str(task.get("id") or ""), ("", ""))))
     retained = []
     consumed: list = []
-    for task in list(snapshot_pending) + parked:
+    for task in list(snapshot_pending) + direct_wait_handoffs + parked:
+        try:
+            if resume_hold_requires_fence(task, _queue().DRIVE_ROOT):
+                consumed.append(str(task.get("id") or ""))
+                continue
+        except (OSError, ValueError, TypeError, RuntimeError):
+            retained.append(task)  # unreadable continuation authority is not interrupted work
+            continue
+        wait_allowed = False
+        if task.get("_owner_wait_resume"):
+            try:
+                wait_allowed = not panicked and restore_owner_wait_allowed(_queue().DRIVE_ROOT, task)
+            except (OSError, ValueError, TypeError, RuntimeError) as exc:
+                retained.append(hold_restored_budget_pause(task, _queue().DRIVE_ROOT,
+                    reason=HOLD_RESTORE_REFUSED_PREFIX + "owner_wait_source_unavailable", detail=str(exc)))
+                continue  # unknown authority holds this row, not unrelated accepted work
+        if task.get("_owner_wait_resume") and (
+                task["_owner_wait_resume"].get("reason") == "owner_pause" or not wait_allowed):
+            # Older stop doors stamped warm pauses as question handoffs. Their
+            # own pause custody wins even if that transaction was acknowledged.
+            before = pause_ids(task)
+            paused = park_saved_pause(task, int(task.get("_attempt") or 1),
+                pathlib.Path(task.get("budget_drive_root") or _queue().DRIVE_ROOT),
+                pause_source="restart_owner_wait_handoff", sleep_hold_reason=sleep_hold_reason)
+            if paused is not None:
+                task = paused
+                if unseen_pause(task, before):
+                    unseen.add(str(task.get("id") or ""))
         retry = task.get("_terminalization_retry")
         if (isinstance(retry, dict) and retry.get("trigger") == "deadline"
                 and isinstance(retry.get("unsubmitted_launch"), dict)):
@@ -444,15 +426,12 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
         if schedule_replay and task.get("admitted_dispatch") == "possible" and first_dispatch_unsent(task):
             # Its receipt proves no first handoff: never started, under this stop's own rule.
             task["admitted_dispatch"] = "none"
-            if (budget_hold_fact(task) or {}).get("reason") == "dispatch_outcome_unknown":
-                task.pop(BUDGET_HOLD_KEY, None)
+            if continuation_refusal(task).get("dispatch_unknown"):
+                clear_refusal(task)
         # Busy at boot proves neither way: this stop's rule for an unsent row, under Project
         # custody that re-reads the receipt each tick (``revalidate_project_holds``).
         recheck = (verdict == "busy" and task.get("admitted_dispatch") == "possible" and first_attempt(task)
                    and budget_hold_fact(task) is None)
-        if isinstance(task.get("_budget_pause_consumed"), dict):
-            consumed.append(str(task.get("id") or ""))
-            continue
         if _exact_pause_row(task):
             refusal = budget_pause_restore_refusal(_queue().DRIVE_ROOT, task)
             retained.append(task if not refusal else hold_restored_budget_pause(
@@ -462,14 +441,27 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
                 hold_after_stop(retained[-1], _queue().DRIVE_ROOT, HOLD_OWNER_RESTART if owner_restart else HOLD_PANIC)
         elif task.get("_owner_wait_resume"):
             # An existing Project hold is custody; its revalidation reads the owner-wait authority.
-            if task.get("_project_admission_restore_hold") or restore_owner_wait_allowed(_queue().DRIVE_ROOT, task):
+            if budget_hold_fact(task) or continuation_refusal(task) or wait_allowed:
                 retained.append(task)
             else:  # a refused cold handoff keeps its exact wait source, held for Resume
                 handoff = dict(task)
                 handoff.pop("_owner_wait_resume", None)
-                retained.extend(recover_saved_running(
+                recovered_wait = recover_saved_running(
                     [{"task": handoff, "attempt": int(task.get("_attempt") or 1)}], _queue().DRIVE_ROOT,
-                    transaction={}, cause=stop_cause))
+                    transaction={}, cause=stop_door)
+                if recovered_wait:
+                    retained.extend(recovered_wait)
+                else:
+                    try:
+                        current = (load_task_result(_queue().DRIVE_ROOT, str(task.get("id") or ""),
+                                                    strict=True) or {}).get("owner_wait") or {}
+                    except (OSError, ValueError, TypeError, RuntimeError):
+                        current = None  # unreadable is not a closed or missing wait
+                    if current is None or (current.get("state") == "waiting"
+                            and current.get("wait_id") == task["_owner_wait_resume"].get("wait_id")):
+                        retained.append(hold_restored_budget_pause(
+                            task, _queue().DRIVE_ROOT, reason=HOLD_RESTORE_REFUSED_PREFIX + "owner_wait_source_unavailable",
+                            detail="the saved wait could not be restored; its original handoff is retained, not replayed"))
         else:
             # Age or an unavailable receipt cannot erase accepted Project work;
             # assignment still requires positive original no-dispatch authority.
@@ -487,7 +479,12 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
                 project_hold = {"reason": "project_routing_fence_lookup_failed", "detail": (
                     "The schedule receipt was busy at restore; recovery is checked automatically when it is readable.")}
             saved_or_accepted = never_started(task) or isinstance(task.get("_working_recovery"), dict)
-            if retained_pending(task, sleep_hold_reason=sleep_hold_reason):
+            kept = retained_pending(task, sleep_hold_reason=sleep_hold_reason)
+            if panicked and not current_stop(task):
+                # This also covers a planned delegate return under Project custody:
+                # its current stop must survive consumption of the installation input.
+                row = hold_stopped_queue(dict(task), _queue().DRIVE_ROOT, stop_door)
+            elif kept:
                 row = task
             elif str(task.get("id") or "") in returning_queue and (saved_or_accepted and schedule_replay or recheck):
                 row = task  # the fresh Restart returns it: ordinary admission, at any age
@@ -505,7 +502,7 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
                 # Quit/crash retain ALL accepted work for explicit Resume (#1563).
                 # Project verification is independent: healing it cannot release
                 # the owner's application-stop hold, even for a fresh snapshot.
-                row = hold_stopped_queue(dict(task), _queue().DRIVE_ROOT, stop_cause)
+                row = hold_stopped_queue(dict(task), _queue().DRIVE_ROOT, stop_door)
             elif not project_hold and stale:
                 continue  # no provable never-started fact: the old snapshot-age rule still decides
             else:
@@ -517,6 +514,15 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
             {"ts": utc_now_iso(), "type": "queue_restore_stale_consumed_grant_rows",
              "task_ids": consumed, "action": "fenced_as_running_work"},
         )
+    from supervisor.restart_retention import _record_refused_returns
+
+    kept_ids = {str(task.get("id") or "") for task in retained}
+    _record_refused_returns(_queue().DRIVE_ROOT, {
+        str(task["id"]): "planned_handoff_not_retained" for task in snapshot_pending
+        if task.get("id") in set(transaction.get("task_ids") or []) and task["id"] not in kept_ids}, stop_door)
+    from ouroboros.presence_carrier import adopt_saved_records
+
+    adopt_saved_records(retained, _queue().DRIVE_ROOT)  # a returned moved Presence turn: its record, never its seed (#2566)
     return retained, unseen, consumed, prior_roots
 
 
@@ -589,8 +595,9 @@ def _refuse_restore_invalid_fences(snapshot_pending: list, *, budget: bool = Fal
     )
     from supervisor.events_budget import (
         HOLD_INVALID_ACCEPTANCE_FENCE_SNAPSHOT, HOLD_INVALID_BUDGET_FENCE_SNAPSHOT,
-        budget_hold_fact, hold_restored_budget_pause,
+        hold_restored_budget_pause,
     )
+    from ouroboros.work_stop import continuation_refusal
     from supervisor.restart_retention import retained_pending
 
     cancelled: list[str] = []
@@ -601,13 +608,12 @@ def _refuse_restore_invalid_fences(snapshot_pending: list, *, budget: bool = Fal
         if not task_id:
             continue
         if task.get("_project_admission_restore_hold") or task.get("project_id"):
-            # Malformed independent fence evidence is not cleared by Project
-            # revalidation. Keep the row under the existing owner hold as well.
-            held = {**task, "_owner_hold": task.get("_owner_hold") or {
-                "reason": "The saved budget or acceptance fence is invalid; dispatch is held.",
-            }, "_project_admission_restore_hold": task.get("_project_admission_restore_hold") or {
+            # Broken restore evidence belongs to the continuation, not to the owner.
+            held = {**task, "_project_admission_restore_hold": task.get("_project_admission_restore_hold") or {
                 "reason": "project_routing_fence_lookup_failed", "detail": "Independent restore authority is invalid.",
             }}
+            hold_restored_budget_pause(held, _queue().DRIVE_ROOT,
+                reason=HOLD_INVALID_BUDGET_FENCE_SNAPSHOT if budget else HOLD_INVALID_ACCEPTANCE_FENCE_SNAPSHOT)
             with _queue()._queue_lock:
                 _append_held_pending_row(held)
             retained.append(task_id)
@@ -623,7 +629,7 @@ def _refuse_restore_invalid_fences(snapshot_pending: list, *, budget: bool = Fal
         except Exception:
             log.debug("Result authority unreadable for paused row %s; retained held", task_id, exc_info=True)
         held = dict(task)
-        if budget_hold_fact(held) is None:
+        if not continuation_refusal(held):
             held = hold_restored_budget_pause(
                 held, _queue().DRIVE_ROOT, reason=(HOLD_INVALID_BUDGET_FENCE_SNAPSHOT if budget
                                                   else HOLD_INVALID_ACCEPTANCE_FENCE_SNAPSHOT),
@@ -656,11 +662,12 @@ def _refuse_restore_invalid_fences(snapshot_pending: list, *, budget: bool = Fal
 
 
 def _append_held_pending_row(task: dict) -> None:
-    """Append one proven-revivable held row to PENDING with queue-order facts (lock held)."""
+    """Append one proven-revivable held row to PENDING with queue-order facts (lock held).
+    Its queue time is the saved one; a row that kept none stays unknown (#1805)."""
     if "_queue_seq" not in task:
         _queue().QUEUE_SEQ_COUNTER_REF["value"] += 1
         task["_queue_seq"] = _queue().QUEUE_SEQ_COUNTER_REF["value"]
-    task.setdefault("queued_at", utc_now_iso())
+    task.setdefault("queued_at", None)
     _queue().PENDING.append(task)
     _queue().sort_pending()
 
@@ -682,7 +689,7 @@ def _park_pausing_running_rows(running_rows: list, snapshot_pending: list, *,
     pause authority proves nothing and keeps it too; so does an explicit Stop.
     Rows already in the pending snapshot are never duplicated.
     """
-    from supervisor.restart_retention import park_saved_pause
+    from supervisor.restart_retention import PAUSE_REQUEST_ONLY, park_saved_pause, pause_retention
 
     pending_ids = {str(row.get("id") or "") for row in snapshot_pending if isinstance(row, dict)}
     parked: list = []
@@ -695,6 +702,19 @@ def _park_pausing_running_rows(running_rows: list, snapshot_pending: list, *,
             continue
         attempt = int(row.get("attempt") or task.get("_attempt") or 1)
         result_root = pathlib.Path(task.get("budget_drive_root") or _queue().DRIVE_ROOT)
+        try:
+            if pause_retention(result_root, task_id, attempt) == PAUSE_REQUEST_ONLY:
+                from ouroboros.budget_pause import budget_pause_row
+                from ouroboros.cancel_intents import has_active_intent
+                from ouroboros.working_checkpoint import complete_pause_from_working
+
+                # This process is dead. Preserve its saved cognition under the same
+                # pause; a working retry alone would leave the sleep launch fence shut.
+                if not has_active_intent(result_root, task_id, strict=True):
+                    complete_pause_from_working(result_root, task_id,
+                                                budget_pause_row(result_root, task_id), attempt)
+        except Exception:
+            log.warning("Could not complete interrupted pause of %s from saved work", task_id, exc_info=True)
         parked_task = park_saved_pause(task, attempt, result_root, pause_source="restart_during_pausing",
                                        sleep_hold_reason=sleep_hold_reason)
         if parked_task is not None:
@@ -840,29 +860,59 @@ def restore_pending_from_snapshot(
 
     Returns the PENDING count revived; ``terminalized`` separately collects
     surviving RUNNING ids fenced with cancel intents for the caller to name.
+    While it reads, another thread's publication keeps the saved queue; an
+    unreadable snapshot or an interrupted restore never grants the process
+    custody of it (``_keeps_saved_queue``).
     """
     if _queue().PENDING:
         return 0
+    key = str(pathlib.Path(_queue().QUEUE_SNAPSHOT_PATH).absolute())
+    _RESTORING[key] = threading.get_ident()
+    try:
+        return _restore_pending(key, max_age_sec, terminalized)
+    finally:
+        _RESTORING.pop(key, None)
+
+
+def _direct_roots_caught(direct_roots: dict, snapshot_pending: list, running_rows: list) -> list:
+    """Direct-chat roots the stop caught: not live here, not restored as pending, not a RUNNING row.
+
+    An in-process supervisor revival re-runs queue init while direct turns of THIS process are
+    alive: the roster then names live work, not what a stop caught. A conversation-lane turn owns a
+    RUNNING row (#2654): the stop that caught it published that row and recovery takes it from there.
+    Queue init's orphan sweep can name the same id again (its durable result still says running once
+    the published row is older than the observation window), and a second successor of one id closes
+    recovery for both ("Another queue owner holds this task id").
+    """
+    from supervisor.active_activity import get_direct_activity_registry
+    live_direct = {str(row.get("activity_id") or "") for row in get_direct_activity_registry().snapshot()}
+    pending_ids = {str(task.get("id") or "") for task in snapshot_pending}
+    running_ids = {str(row.get("id") or "") for row in running_rows if isinstance(row, dict)}
+    return [task_id for task_id in direct_roots.get("task_ids") or []
+            if task_id not in live_direct and task_id not in pending_ids and task_id not in running_ids]
+
+
+def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -> int:
     try:
         from ouroboros.queue_observation import load_queue_document, queue_stamp
-        snap = load_queue_document(_queue().DRIVE_ROOT)
-        if snap.get("_snapshot_invalid") or snap.get("_snapshot_missing"):
-            return 0
+        snap = load_queue_document(_queue().DRIVE_ROOT, fresh=True)  # restore mutates what it reads
+        normalized = normalize_for_restore(snap, _queue().DRIVE_ROOT)
+        # An unreadable snapshot (its marker reads as empty) names no queue row; a direct root queue init's
+        # handover names as caught still restores, over an empty, stale queue (the gate below).
+        unread = bool(snap.get("_snapshot_invalid") or snap.get("_snapshot_missing"))
         ts = str(queue_stamp(snap, boot=True).get("ts") or "")
         ts_unix = _queue().parse_iso_to_ts(ts)
-        # Timestamp validity and freshness gate ORDINARY rows only (#1196): a
-        # readable snapshot whose stamp is missing or malformed is treated as
-        # stale, so an identifiable exact pause or an acknowledged owner-wait
-        # handoff is still retained under its own durable authority instead of
-        # vanishing (a Resume would then answer task_not_pending over an intact checkpoint).
-        if ts_unix is None:
+        # Timestamp validity and freshness gate ORDINARY rows only (#1196): a readable snapshot whose stamp is
+        # missing or malformed is stale, so an exact pause or an acknowledged owner-wait handoff is still
+        # retained under its own authority, never vanishing for Resume to answer task_not_pending.
+        if ts_unix is None and not unread:
             _queue().append_jsonl(
                 _queue().DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {"ts": utc_now_iso(), "type": "queue_restore_snapshot_timestamp_invalid",
                  "snapshot_ts": ts[:64], "action": "treated_as_stale"},
             )
         stale = ts_unix is None or (time.time() - ts_unix) > max_age_sec
-        from ouroboros.project_admission import hold_unreadable_result
+        from supervisor.restart_retention import conserve_unreadable_pending
         from ouroboros.task_results import (
             _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED, STATUS_CANCELLED,
             load_task_result, write_task_result,
@@ -870,7 +920,7 @@ def restore_pending_from_snapshot(
         raw_fences = snap.get("acceptance_fences", [])
         raw_budget_fences = snap.get("budget_root_fences", [])
         snapshot_pending = [
-            row.get("task")
+            _saved_pending_task(row)
             for row in (snap.get("pending") or [])
             if isinstance(row, dict) and isinstance(row.get("task"), dict)
         ]
@@ -878,20 +928,14 @@ def restore_pending_from_snapshot(
         running_rows = running_rows if isinstance(running_rows, list) else []
         # The pre-restart RUNNING rows are read HERE, before the stale gate: this
         # is the last moment the list exists, and a stale snapshot is exactly the
-        # case where nothing else will ever settle them. Direct-chat roots never
-        # reach the queue, so the roster `queue.init` took over is the only place
-        # they are named; both lists describe work the stop caught, and one fence
-        # call gives them the one cancel-intent path custody settles — except a
-        # direct root whose exact budget pause was complete on disk, which is
-        # parked under its own id like a paused RUNNING row (#1196).
+        # case where nothing else will ever settle them. Direct-chat roots never reach the queue: only
+        # the handover `queue.init` took over names them; both lists describe work the stop caught, and
+        # one fence call gives them the one cancel-intent path custody settles — except a direct root
+        # whose exact budget pause was complete on disk, parked under its own id like a paused RUNNING row (#1196).
         direct_roots = dict(_queue().PRIOR_DIRECT_ROOTS)
-        # An in-process supervisor revival re-runs queue init while direct turns of THIS process are
-        # alive: the roster then names live work, not what a stop caught.
-        from supervisor.active_activity import get_direct_activity_registry
-        live_direct = {str(row.get("activity_id") or "") for row in get_direct_activity_registry().snapshot()}
-        pending_ids = {str(task.get("id") or "") for task in snapshot_pending}
-        direct_caught = [task_id for task_id in direct_roots.get("task_ids") or []
-                         if task_id not in live_direct and task_id not in pending_ids]
+        direct_caught = _direct_roots_caught(direct_roots, snapshot_pending, running_rows)
+        if unread and not direct_caught:
+            return 0
         snapshot_pending, unseen_pauses, consumed_rows, prior_roots = _retain_snapshot_pending(  # #1183 handoffs
             snapshot_pending, running_rows, stale=stale, direct_caught=direct_caught, handoffs=(handoffs := {}))
         from supervisor.restart_retention import consume_return_transaction, fresh_return_transaction
@@ -920,12 +964,18 @@ def restore_pending_from_snapshot(
             restored += _refuse_restore_invalid_fences(snapshot_pending, budget=malformed_budget_fences)
             _record_queue_restore(restored=restored, terminalized_running=fenced_running,
                                   direct_roots_incomplete=direct_roots.get("incomplete", False))
-            if restored > 0:
+            if not unread:  # every row of a READ snapshot decided: this process's publications may replace it
+                _RESTORED.add(key)
+            if restored > 0 or normalized:
                 _queue().persist_queue_snapshot(reason="queue_restored")
             return restored
         if stale and not snapshot_pending and not restored:
             _record_queue_restore(terminalized_running=fenced_running,
                                   direct_roots_incomplete=direct_roots.get("incomplete", False))
+            if not unread:  # settling caught direct roots grants no custody of an unread snapshot
+                _RESTORED.add(key)
+                if normalized:
+                    _queue().persist_queue_snapshot(reason="work_stop_format_normalized")
             return 0
 
         skipped_terminal, invalid_depth_restore = 0, []
@@ -980,24 +1030,25 @@ def restore_pending_from_snapshot(
                     existing = load_task_result(_queue().DRIVE_ROOT, str(task.get("id")), strict=True)
                     existing_status = str(existing.get("status") or "") if existing else ""
                 except Exception:
-                    if _exact_pause_row(task):
-                        # #1196: an unreadable result authority never terminalizes a
-                        # saved pause. The row stays PENDING under its ORIGINAL
+                    if _exact_pause_row(task) or task.get("_owner_wait_resume"):
+                        # Unreadable authority never terminalizes a saved pause or wait.
+                        # The row stays PENDING under its ORIGINAL
                         # locator and a typed hold (the earlier restore hold, if
                         # any, is kept); the next Resume re-reads the authority.
                         from ouroboros.budget_pause import RESTORE_REFUSAL_RECORD_UNREADABLE
                         from supervisor.events_budget import (
-                            HOLD_RESTORE_REFUSED_PREFIX, budget_hold_fact, hold_restored_budget_pause,
+                            HOLD_RESTORE_REFUSED_PREFIX, hold_restored_budget_pause,
                         )
+                        from ouroboros.work_stop import continuation_refusal
 
-                        if budget_hold_fact(task) is None:
+                        if not continuation_refusal(task):
                             task = hold_restored_budget_pause(
                                 dict(task), _queue().DRIVE_ROOT,
                                 reason=HOLD_RESTORE_REFUSED_PREFIX + RESTORE_REFUSAL_RECORD_UNREADABLE)
                         acceptance_held.append(str(task.get("id") or ""))
                         log.warning("Snapshot restore retained paused row %s under a hold: its "
                                     "result authority is unreadable", task.get("id"), exc_info=True)
-                    if hold_unreadable_result(task) or _exact_pause_row(task):
+                    if conserve_unreadable_pending(task):
                         # A receipt read failure cannot select a terminal policy for conserved
                         # work: its pause, its Project hold, or accepted Project work held here.
                         _append_held_pending_row(task)
@@ -1126,7 +1177,9 @@ def restore_pending_from_snapshot(
         sweep_orphaned_budget_fences(
             _queue().PENDING, _queue().BUDGET_ROOT_FENCES, _queue().DRIVE_ROOT,
         )
-        if restored > 0 or skipped_terminal > 0 or invalid_depth_restore or blocked_restore:
+        if not unread:
+            _RESTORED.add(key)
+        if restored > 0 or skipped_terminal > 0 or invalid_depth_restore or blocked_restore or normalized:
             _queue().persist_queue_snapshot(reason="queue_restored")
         return restored
     except Exception:

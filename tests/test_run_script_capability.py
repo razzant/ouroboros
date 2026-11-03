@@ -37,6 +37,7 @@ def test_installed_script_runs_once_and_delivers_its_output(tmp_path, monkeypatc
     ctx = ToolContext(repo_dir=repo, drive_root=drive, task_id="script-capability")
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     monkeypatch.setattr(
         "ouroboros.safety._run_llm_check",
         lambda *_args, **_kwargs: pytest.fail("Safety Off must not call a model"),

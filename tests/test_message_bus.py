@@ -1,6 +1,7 @@
 import pytest
 
 import supervisor.message_bus as message_bus
+from tests._dialogue import chat_rows
 import ouroboros.event_bus as event_bus
 from ouroboros import usage_store
 
@@ -17,6 +18,15 @@ def test_configure_from_settings_without_legacy_field(monkeypatch):
         "TELEGRAM_CHAT_ID": "999",
     })
     assert bridge.get_updates(offset=0, timeout=0) == []
+
+
+def _readable_by_the_chain_reader(root):
+    """Transition (unit Q1b migrates the history reader onto the dialogue store): the reader still
+    reads the chain files, so the rows the store holds are exported to them first -- the exact
+    bytes an older body reads. Drop this call when the reader reads the store."""
+    from ouroboros.dialogue_import import export_for_older_body
+
+    export_for_older_body(root)
 
 
 def test_ui_send_enqueues_structured_message_and_broadcasts(monkeypatch, tmp_path):
@@ -40,14 +50,14 @@ def test_ui_send_enqueues_structured_message_and_broadcasts(monkeypatch, tmp_pat
     assert updates[0]["message"]["accepted_source_ref"]["client_message_id"] == "c-1"
     assert updates[0]["message"]["accepted_source_row"]["text"] == "hello"
     assert updates[0]["message"]["accepted_source_row"]["ingress_accepted"] is True
-    assert (tmp_path / "logs" / "chat.jsonl").exists()
+    assert chat_rows(tmp_path)
     from supervisor.message_bus import record_inbound_message
     ref = record_inbound_message(
         bridge, updates[0]["message"], chat_id=1, user_id=1,
         client_message_id="c-1", text="hello", ts="ignored",
     )
     assert ref == updates[0]["message"]["accepted_source_ref"]
-    assert len((tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()) == 1
+    assert len(chat_rows(tmp_path)) == 1
 
 
 def test_web_ingress_write_failure_never_echoes_or_enqueues(monkeypatch, tmp_path):
@@ -55,9 +65,10 @@ def test_web_ingress_write_failure_never_echoes_or_enqueues(monkeypatch, tmp_pat
     broadcasts = []
     bridge._broadcast_fn = broadcasts.append
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(message_bus, "log_chat", lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk refused")))
+    monkeypatch.setattr(message_bus, "accept_chat", lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk refused")))
     with pytest.raises(OSError, match="disk refused"):
         bridge.ui_send("not accepted", client_message_id="c-2")
+    assert chat_rows(tmp_path) == []
     assert broadcasts == []
     assert bridge.get_updates(offset=0, timeout=0) == []
 
@@ -73,6 +84,7 @@ def test_saved_web_ingress_replays_from_canonical_history(monkeypatch, tmp_path)
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
     monkeypatch.setattr(message_bus, "load_state", lambda: {})
     bridge.ui_send("queued text", sender_session_id="session-1", client_message_id="saved-1")
+    _readable_by_the_chain_reader(tmp_path)
     response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"limit": "10"})))
     rows = json.loads(response.body)["messages"]
     saved = next(row for row in rows if row.get("client_message_id") == "saved-1")
@@ -81,6 +93,7 @@ def test_saved_web_ingress_replays_from_canonical_history(monkeypatch, tmp_path)
     assert saved["sender_session_id"] == "session-1"
     # A legacy row lacking the typed proof must not acquire it by being readable.
     message_bus.log_chat("in", 1, 1, "legacy", source="web", client_message_id="legacy-1")
+    _readable_by_the_chain_reader(tmp_path)
     rows = json.loads(asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(
         query_params={"limit": "10"}))).body)["messages"]
     assert "ingress_accepted" not in next(row for row in rows if row.get("client_message_id") == "legacy-1")
@@ -198,9 +211,6 @@ def test_project_completion_summary_keeps_event_time_label_live_and_on_reload(
         message_bus, "load_state",
         lambda: {"session_id": "session-1", "owner_id": 7},
     )
-    monkeypatch.setattr(
-        message_bus, "_advance_project_visible_revision", lambda _chat_id: None,
-    )
     monkeypatch.setattr(message_bus, "publish_event", lambda *_a, **_k: None)
 
     message_bus.send_with_budget(
@@ -224,6 +234,7 @@ def test_project_completion_summary_keeps_event_time_label_live_and_on_reload(
 
     from ouroboros.gateway.history import make_chat_history_endpoint
 
+    _readable_by_the_chain_reader(tmp_path)
     endpoint = make_chat_history_endpoint(tmp_path)
     response = asyncio.run(endpoint(SimpleNamespace(
         query_params={"chat_id": "1", "limit": "20"},
@@ -262,7 +273,6 @@ def test_terminal_incident_persists_and_replays_as_system_without_raw_salvage(
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
     monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
     monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 7})
-    monkeypatch.setattr(message_bus, "_advance_project_visible_revision", lambda _chat_id: None)
     monkeypatch.setattr(message_bus, "publish_event", lambda *_a, **_k: None)
 
     message_bus.send_with_budget(
@@ -274,13 +284,12 @@ def test_terminal_incident_persists_and_replays_as_system_without_raw_salvage(
     assert live["role"] == "system"
     assert live["system_type"] == "terminal_incident"
     assert raw not in live["content"]
-    durable = json.loads(
-        (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()[-1]
-    )
+    durable = chat_rows(tmp_path)[-1]
     assert durable["direction"] == "system"
     assert durable["type"] == "terminal_incident"
     assert raw not in durable["text"]
 
+    _readable_by_the_chain_reader(tmp_path)
     response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(
         query_params={"chat_id": "1", "limit": "20"},
     )))
@@ -344,7 +353,6 @@ def test_send_document_publishes_transport_event_with_payload(monkeypatch):
 
 
 def test_send_links_broadcasts_publishes_and_persists_compact_row(monkeypatch, tmp_path):
-    import json
 
     bridge = _make_bridge(monkeypatch)
     frames = []
@@ -352,7 +360,6 @@ def test_send_links_broadcasts_publishes_and_persists_compact_row(monkeypatch, t
     bridge._broadcast_fn = frames.append
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
     monkeypatch.setattr(message_bus, "load_state", lambda: {"session_id": "s", "owner_id": 7})
-    monkeypatch.setattr(message_bus, "_advance_project_visible_revision", lambda _chat_id: None)
     monkeypatch.setattr(
         message_bus, "publish_event", lambda topic, data: events.append((topic, data)),
     )
@@ -371,7 +378,7 @@ def test_send_links_broadcasts_publishes_and_persists_compact_row(monkeypatch, t
     assert topic == event_bus.CHAT_LINKS
     assert set(payload) == {"chat_id", "transport", "title", "actions", "ts"}
     assert payload["actions"] == actions
-    row = json.loads((tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    row = chat_rows(tmp_path)[-1]
     assert row["type"] == "links"
     assert row["actions"] == actions
     assert row["title"] == "Results"
@@ -380,7 +387,6 @@ def test_send_links_broadcasts_publishes_and_persists_compact_row(monkeypatch, t
 
 
 def test_send_links_caps_title_across_broadcast_event_and_persistence(monkeypatch, tmp_path):
-    import json
 
     bridge = _make_bridge(monkeypatch)
     frames = []
@@ -388,7 +394,6 @@ def test_send_links_caps_title_across_broadcast_event_and_persistence(monkeypatc
     bridge._broadcast_fn = frames.append
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
     monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 7})
-    monkeypatch.setattr(message_bus, "_advance_project_visible_revision", lambda _chat_id: None)
     monkeypatch.setattr(
         message_bus, "publish_event", lambda topic, data: events.append((topic, data)),
     )
@@ -405,7 +410,7 @@ def test_send_links_caps_title_across_broadcast_event_and_persistence(monkeypatc
     topic, payload = events[-1]
     assert topic == event_bus.CHAT_LINKS
     assert len(payload["title"]) == 240
-    row = json.loads((tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    row = chat_rows(tmp_path)[-1]
     assert len(row["title"]) == 240
 
 
@@ -426,7 +431,6 @@ def test_send_links_caps_title_across_broadcast_event_and_persistence(monkeypatc
     ],
 )
 def test_send_links_accepts_valid_link_actions(monkeypatch, tmp_path, label, url):
-    import json
 
     bridge = _make_bridge(monkeypatch)
     frames = []
@@ -434,7 +438,6 @@ def test_send_links_accepts_valid_link_actions(monkeypatch, tmp_path, label, url
     bridge._broadcast_fn = frames.append
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
     monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 7})
-    monkeypatch.setattr(message_bus, "_advance_project_visible_revision", lambda _chat_id: None)
     monkeypatch.setattr(
         message_bus, "publish_event", lambda topic, data: events.append((topic, data)),
     )
@@ -445,7 +448,7 @@ def test_send_links_accepts_valid_link_actions(monkeypatch, tmp_path, label, url
     assert (ok, error) == (True, "ok")
     assert frames[-1]["actions"] == actions
     assert events[-1][1]["actions"] == actions
-    row = json.loads((tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    row = chat_rows(tmp_path)[-1]
     assert row["actions"] == actions
 
 
@@ -487,7 +490,6 @@ def test_send_links_refuses_dirty_action_without_side_effects(
     events = []
     bridge._broadcast_fn = frames.append
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(message_bus, "_advance_project_visible_revision", lambda _chat_id: None)
     monkeypatch.setattr(
         message_bus, "publish_event", lambda topic, data: events.append((topic, data)),
     )
@@ -497,13 +499,12 @@ def test_send_links_refuses_dirty_action_without_side_effects(
     assert ok is False
     assert frames == []
     assert events == []
-    assert not (tmp_path / "logs" / "chat.jsonl").exists()
+    assert not chat_rows(tmp_path)
 
 
 def test_send_document_persists_compact_chat_row(monkeypatch, tmp_path):
     """A delivered document persists a base64-free chat.jsonl row so it can be
     rebuilt on reload (the durable download_url carries the bytes)."""
-    import json
 
     bridge = _make_bridge(monkeypatch)
     frames = []
@@ -522,7 +523,7 @@ def test_send_document_persists_compact_chat_row(monkeypatch, tmp_path):
     assert live["task_id"] == "t-1"
     assert live["size_bytes"] == len(b"filebytes")
 
-    rows = [json.loads(line) for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = chat_rows(tmp_path)
     doc_rows = [r for r in rows if r.get("type") == "document"]
     assert len(doc_rows) == 1
     row = doc_rows[0]
@@ -540,7 +541,6 @@ def test_send_document_persists_compact_chat_row(monkeypatch, tmp_path):
 
 def test_send_photo_and_video_persist_compact_rows_before_unread_revision(monkeypatch, tmp_path):
     """Durable Project unread never advances for media absent from history."""
-    import json
 
     bridge = _make_bridge(monkeypatch)
     frames = []
@@ -549,8 +549,6 @@ def test_send_photo_and_video_persist_compact_rows_before_unread_revision(monkey
     monkeypatch.setattr(message_bus, "publish_event", lambda *_a, **_k: None)
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
     monkeypatch.setattr(message_bus, "load_state", lambda: {"session_id": "s", "owner_id": 7})
-    revisions = []
-    monkeypatch.setattr(message_bus, "_advance_project_visible_revision", revisions.append)
 
     bridge.send_photo(123, b"image", caption="shot", mime="image/png", task_id="media-task")
     bridge.send_video(123, b"video", caption="clip", mime="video/mp4", task_id="media-task")
@@ -568,11 +566,7 @@ def test_send_photo_and_video_persist_compact_rows_before_unread_revision(monkey
         compat = frame.get("download_url_compat")
         assert compat is None or compat.startswith("/api/files/download?path=")
 
-    rows = [
-        json.loads(line)
-        for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    rows = chat_rows(tmp_path)
     assert [(row["type"], row["text"], row["mime"]) for row in rows] == [
         ("photo", "shot", "image/png"),
         ("video", "clip", "video/mp4"),
@@ -582,7 +576,8 @@ def test_send_photo_and_video_persist_compact_rows_before_unread_revision(monkey
     assert all(row["download_url"].startswith("/api/tasks/media-task/artifacts/chat-media-") for row in rows)
     stored = list((tmp_path / "task_results" / "artifacts" / "media-task" / "chat_media").iterdir())
     assert {path.read_bytes() for path in stored} == {b"image", b"video"}
-    assert revisions == [123, 123]
+    from ouroboros import dialogue_store
+    assert dialogue_store.room(tmp_path, 123)["revision"] == 2
 
 
 def test_send_photo_keeps_live_delivery_when_media_persistence_fails(monkeypatch, tmp_path):
@@ -600,8 +595,7 @@ def test_send_photo_keeps_live_delivery_when_media_persistence_fails(monkeypatch
 
     assert ok is True
     assert next(frame for frame in frames if frame.get("type") == "photo")["image_base64"]
-    import json
-    row = json.loads((tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    row = chat_rows(tmp_path)[-1]
     assert row.get("download_url", "") == ""
 
 
@@ -891,7 +885,7 @@ def test_named_ingress_hands_its_accepted_row_to_the_queue_as_the_web_witness(mo
         bridge, msg, chat_id=1, user_id=1, client_message_id="late-1", text="late answer", ts="ignored",
     )
     assert ref == msg["accepted_source_ref"] and ref["ts"] == row["ts"]
-    assert len((tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()) == 1
+    assert len(chat_rows(tmp_path)) == 1
 
 
 def test_dequeue_reads_the_retained_row_when_a_web_item_carries_no_witness(monkeypatch, tmp_path):
@@ -925,14 +919,12 @@ def test_dequeue_reads_the_retained_row_when_a_web_item_carries_no_witness(monke
         )
 
 
-def test_owner_acceptance_rows_start_a_clean_record_after_a_torn_tail(monkeypatch, tmp_path):
-    """A crashed append can leave ``chat.jsonl`` without its final newline. Both
-    acceptance writers (socket ingress and the named ingress) start a clean record
-    there, so the accepted row stays parseable: history replays its
-    ``ingress_accepted`` fact, the dequeue re-read finds a skill row, and a retry of
+def test_owner_acceptance_rows_land_whole_beside_a_torn_legacy_tail(monkeypatch, tmp_path):
+    """A crashed chain append left ``chat.jsonl`` without its final newline. Both acceptance
+    writers (socket ingress and the named ingress) land whole rows in the store; the torn
+    fragment stays preserved in the frozen archive, unparsed: history replays the accepted
+    row's ``ingress_accepted`` fact, the dequeue re-read finds the skill row, and a retry of
     the same id rejoins instead of enqueueing a second owner turn."""
-    import json
-
     bridge = _make_bridge(monkeypatch)
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
     monkeypatch.setattr(message_bus, "load_state", lambda: {})
@@ -940,18 +932,14 @@ def test_owner_acceptance_rows_start_a_clean_record_after_a_torn_tail(monkeypatc
     chat.parent.mkdir(parents=True)
     chat.write_bytes(b'{"direction": "out", "text": "torn')
     bridge.ui_send("typed", client_message_id="web-torn")
-    chat.write_bytes(chat.read_bytes() + b'{"direction": "out", "text": "torn again')
     row, rejoined = message_bus.accept_local_message(
         bridge, tmp_path, "relayed", chat_id=7, user_id=7, source="skill:telegram", client_message_id="skill-torn",
     )
     assert rejoined is False
-    parsed = {}
-    for line in chat.read_text(encoding="utf-8").splitlines():
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            continue  # the torn fragments stay preserved, unparsed
-        parsed[entry["client_message_id"]] = entry
+    parsed = {entry["client_message_id"]: entry for entry in chat_rows(tmp_path)}
+    assert set(parsed) == {"web-torn", "skill-torn"}, "the torn fragment is not a row"
+    (archived,) = (tmp_path / "archive").glob("chat_*.jsonl")
+    assert archived.read_bytes() == b'{"direction": "out", "text": "torn' and chat.stat().st_size == 0, "preserved, frozen"
     assert parsed["web-torn"]["ingress_accepted"] is True and parsed["skill-torn"] == row
     assert message_bus.accept_local_message(
         bridge, tmp_path, "relayed", chat_id=7, user_id=7, source="skill:telegram", client_message_id="skill-torn",

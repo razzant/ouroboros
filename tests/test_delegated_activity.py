@@ -9,6 +9,8 @@ serving it). Nothing here reads the frame's text to decide what is speech.
 
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+
 import asyncio
 import json
 import queue
@@ -543,7 +545,7 @@ def test_wait_streams_exact_ranges_drains_the_terminal_tail_and_replays_the_same
                                append_jsonl=lambda *_: pytest.fail("delivery raised"))
     for frame in frames:
         events_chat_delivery._handle_send_message(frame, delivery)
-    stored = [json.loads(line) for line in (tmp_path / "logs" / "progress.jsonl").read_text().splitlines()]
+    stored = dialogue_test.log_rows(tmp_path / "logs" / "progress.jsonl")
     response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"limit": "10"})))
     replay = [row for row in json.loads(response.body)["messages"] if row.get("is_progress")]
     for rows in (live, outbound, stored, replay):
@@ -703,7 +705,8 @@ def test_a_terminal_drain_yields_to_the_owners_stop_between_reads(tmp_path, monk
     assert records[0]["source"]["ref"], "bytes read before Stop remain retained"
     assert len([r for r in daemon.requests if r[1].endswith("/events")]) == 1
     (tmp_path / "state").mkdir(exist_ok=True)
-    (tmp_path / "state" / "panic_stop.flag").write_text("panic")
+    from tests._work_stop_helpers import live_restart
+    live_restart(tmp_path, monkeypatch)
     flaky = _gateway(Daemon([[_harness(1, "message", text="hi")]]))
     flaky._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(
         lambda request: httpx.Response(503, json={"code": "busy"}) if request.url.path.endswith("/events")
@@ -713,5 +716,5 @@ def test_a_terminal_drain_yields_to_the_owners_stop_between_reads(tmp_path, monk
     before = len(daemon.requests)
     other = SimpleNamespace(task_id="other", task_attempt=0, drive_root=tmp_path, task_metadata={})
     record, = _records(other, flaky, 1, drain=30)
-    assert len(daemon.requests) == before, "Panic admits no catalog or stream request"
-    assert record["gaps"][0]["reason"] == "owner_panic"
+    assert len(daemon.requests) == before, "Restart admits no catalog or stream request"
+    assert record["gaps"][0]["reason"] == "owner_owner_restart"

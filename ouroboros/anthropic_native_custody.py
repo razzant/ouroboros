@@ -166,6 +166,25 @@ def _validated_receipt(
     return dict(raw), content, ids
 
 
+def native_reasoning_blocks(message: Mapping[str, Any], *, retire: bool = False) -> int:
+    """Count bound blocks; optionally rewrite their receipt, preserving all other custody.
+
+    The new digest is unconsumed until the next answered request, so its tool
+    unit becomes active again. Server blocks and their original order survive.
+    """
+    validated = _validated_receipt(message)
+    if validated is None:
+        return 0
+    receipt, content, _ids = validated
+    kept = [block for block in content if block.get("type") not in {"thinking", "redacted_thinking"}]
+    count = len(content) - len(kept)
+    if retire and count:
+        encoded = _content_json(kept)
+        receipt.update(content_json=encoded, content_sha256=_sha256_bytes(encoded))
+        message[ANTHROPIC_NATIVE_RECEIPT_KEY] = receipt
+    return count
+
+
 @contextlib.contextmanager
 def anthropic_replay_scope() -> Iterator[None]:
     token = _REPLAYED_RECEIPTS.set(())

@@ -22,17 +22,17 @@ import { appendProjectRow } from '../modules/project_answer.js';
 const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
 
 test('Project row delegation preserves the actual producer metadata and terminal options', () => {
-    const delegation = chat.match(/if \(!projectEntry && PROJECT_ROW_TYPES.has\(systemType\)\) decorateProjectRow\(bubble, (\{[\s\S]*?\})\);/);
+    const delegation = chat.match(/\) decorateProjectRow\(bubble, (\{ \.\.\.meta[\s\S]*?\})\);/);
     assert.ok(delegation, 'the chat renderer delegates Project decoration');
     const forward = new Function('meta', 'opts', 'role', 'ts', 'fetchTaskDetailStrict', 'chatMedia', 'withStableViewport',
-        `return (${delegation[1]});`);
+        'projectRow', `return (${delegation[1]});`);
     const frame = { system_type: 'project_completion_summary', project_id: 'p', project_name: 'Project',
         task_id: 't', completion_answer: 'Result', completion_reason: 'Windows verification remains',
         terminal_time: '2026-10-09T10:00:00Z', ts: '2026-10-09T10:01:00Z', delivery_id: 'delivery' };
     appendProjectRow((_text, role, _markdown, ts, _progress, opts) => {
         const fetchDetail = () => {}, renderFile = () => {}, stableWrite = () => {};
         const forwarded = forward({ systemType: opts.systemType, projectName: 'stale' }, opts, role, ts,
-            fetchDetail, { buildDocumentBubble: renderFile }, stableWrite);
+            fetchDetail, { buildDocumentBubble: renderFile }, stableWrite, true);
         assert.equal(forwarded.systemType, frame.system_type);
         assert.equal(forwarded.projectId, frame.project_id);
         assert.equal(forwarded.projectName, frame.project_name);
@@ -42,9 +42,10 @@ test('Project row delegation preserves the actual producer metadata and terminal
         assert.equal(forwarded.terminalTime, frame.terminal_time);
         assert.equal(forwarded.addedAt, frame.ts);
         assert.equal(forwarded.role, 'assistant');
-        assert.equal(forwarded.fetchDetail, fetchDetail);
-        assert.equal(forwarded.renderFile, renderFile);
-        assert.equal(forwarded.onDomWrite, stableWrite, 'the fold toggles through the stable-viewport writer');
+        assert.equal(forwarded.fetchDetail, undefined, 'the Main mirror does not fetch a Files inventory');
+        assert.equal(forwarded.renderFile, undefined);
+        assert.equal(forwarded.onDomWrite, undefined, 'the fold has no in-place expansion');
+        assert.equal(forwarded.fold, true, 'a completion mirror in Ouroboros\'s voice folds');
     }, frame, '', {});
 });
 
@@ -87,12 +88,12 @@ test('logs surface shows the same factual headline and marker instead of the raw
     assert.ok(!view.meta.includes('owner_requested_finalization'));
 });
 
-test('an expiry kill still reads Cancelled — honesty outranks the soft-stop label', () => {
+test('an expiry kill still reads Stopped — honesty outranks the soft-stop label', () => {
     // When the grace ran out and custody hard-killed, lifecycle=cancelled must
     // win over the soft-stop presentation (the summary was NOT delivered).
     const expired = { ...softStop, status: 'cancelled' };
     assert.equal(taskOutcomeSeverity(expired), 'cancelled');
-    assert.equal(summarizeChatLiveEvent(expired).headline, 'Cancelled');
+    assert.equal(summarizeChatLiveEvent(expired).headline, 'Stopped');
 });
 
 test('the chat terminal seam shares one note with the owner marker in its body', () => {

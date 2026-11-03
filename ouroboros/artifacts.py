@@ -10,13 +10,12 @@ import stat
 import pathlib
 import re
 import shutil
-import uuid
-import zipfile
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, Dict, Iterable, List, Optional, Union
 
+from ouroboros.artifact_storage import clone_file, temporary_sibling
 from ouroboros.utils import atomic_write_json, read_json_dict, update_json_locked, write_bytes_atomic
 from ouroboros.headless import ARTIFACT_STATUS_FAILED, ARTIFACT_STATUS_READY, SCRATCH_MANIFEST_NAME, task_artifacts_dir
 from ouroboros.outcome_receipt_store import is_verification_receipts_path
@@ -337,6 +336,55 @@ def attachment_manifest_projection(drive_root: Any, task_id: str, manifest: Any)
     return projection
 
 
+def render_attachment_lines(attachments: Any) -> str:
+    """Render the complete staged/rejected attachment report.
+
+    v6.52.0 (P1): each line is a ready-to-use read_file call against the canonical
+    artifact_store root — NEVER a bare absolute host path. ``attachments`` is the
+    manifest returned by ``stage_task_attachments``.  Legacy staged-only rows
+    remain readable; new rows carry ordinal/status/reason and rejected rows are
+    rendered without source paths or secret contents."""
+    ref = attachments.get("attachment_manifest_ref") if isinstance(attachments, dict) else None
+    if isinstance(attachments, dict):
+        attachments = attachments.get("attachment_manifest")
+    if not isinstance(attachments, list):
+        return ""
+    lines: List[str] = []
+    if ref:
+        lines.append(f"Complete input manifest ({ref.get('count')} declarations): read_file(root='artifact_store', path='{ref.get('path')}'). Inline rows below are a preview.")
+    for item in attachments:
+        if not isinstance(item, dict):
+            continue
+        try:
+            ordinal = int(item.get("ordinal"))
+        except (TypeError, ValueError):
+            ordinal = len(lines)
+        status = str(item.get("status") or "staged")
+        label = str(item.get("label") or f"attachment {ordinal + 1}").strip()
+        if status == "rejected":
+            reason = str(item.get("reason") or "staging_failed").strip()
+            lines.append(f"- {label}: rejected (reason={reason}, ordinal={ordinal})" + (f" rule: {rule}" if (rule := str(item.get("rule") or "").strip()) else ""))
+            continue
+        relpath = str(item.get("relpath") or "").strip()
+        root = str(item.get("root") or "artifact_store").strip() or "artifact_store"
+        label = label or pathlib.Path(relpath).name
+        if not relpath:
+            continue
+        kind = "image" if item.get("is_image") else (str(item.get("mime") or "").strip() or "file")
+        # v6.54.3: also surface the REAL staged path for process tools — scripts
+        # (openpyxl, audio, ffmpeg) open files by OS path, and omitting it made
+        # models GUESS wrong absolute paths that tripped light-mode path guards.
+        # The staged path lives inside this task's own artifact_store, so both
+        # forms address the same file.
+        abs_path = str(item.get("abs_path") or "").strip()
+        script_hint = f" | script/process path: {abs_path}" if abs_path else ""
+        lines.append(
+            f"- {label} ({kind}): read_file(root='{root}', path='{relpath}')"
+            f"{script_hint} [status=staged, ordinal={ordinal}]"
+        )
+    return "\n".join(lines)
+
+
 def resolve_attachment_manifest(drive_root: Any, task_id: str, authority: Any) -> List[Dict[str, Any]]:
     """Resolve complete captured inputs under the actual owner, never preview fallback.
 
@@ -566,71 +614,44 @@ def materialize_inherited_attachment_manifest(
         return [], f"{type(exc).__name__}: {exc}"
 
 
-def handoff_task_attachments_for_retry(
-    drive_root: Union[pathlib.Path, str],
-    task_id: str,
-    retry_task_id: str,
-    task: Dict[str, Any],
-) -> tuple[Dict[str, str], str]:
-    """Copy the complete attachment store and rebase generated task paths."""
-
-    old_dir = task_artifact_dir_path(drive_root, task_id) / _ATTACHMENTS_SUBDIR
-    new_dir = task_artifact_dir_path(drive_root, retry_task_id) / _ATTACHMENTS_SUBDIR
-    old_text, new_text = str(old_dir), str(new_dir)
-    contract = task.get("task_contract") or (task.get("metadata") or {}).get("task_contract") or {}
-    if not old_dir.is_dir():
-        serialized = json.dumps(task, ensure_ascii=False, default=str)
-        return ({}, "attachment store missing") if old_text in serialized or "attachment_manifest_ref" in contract else ({}, "")
-    created: list[pathlib.Path] = []
-    try:
-        from ouroboros.owner_mailbox import owner_attachment_manifest
-        initial = resolve_attachment_manifest(drive_root, task_id, contract)
-        declared = [*initial, *owner_attachment_manifest(pathlib.Path(drive_root), task_id)]
-        sources = {pathlib.Path(row["abs_path"]): row for row in declared
-                   if row.get("status") == "staged" and row.get("abs_path")}
-        for source in old_dir.rglob("*"):
-            if source.is_file():
-                sources.setdefault(source, {})  # Legacy staged files remain transferable.
-        for source, expected in sorted(sources.items()):
-            target = new_dir / source.relative_to(old_dir)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if target.exists():
-                measured = stream_artifact_file(source, expected=expected)
-                stream_artifact_file(target, expected=measured)
-                continue
-            copy_artifact_file(source, target, expected=expected)
-            created.append(target)
-
-        def _rebase(value: Any) -> Any:
-            if isinstance(value, str):
-                return value.replace(old_text, new_text)
-            if isinstance(value, list):
-                return [_rebase(item) for item in value]
-            if isinstance(value, dict):
-                return {key: _rebase(item) for key, item in value.items()}
-            return value
-
-        rebased = _rebase(task)
-        if initial or contract.get("attachment_manifest_ref"):
-            authority = attachment_manifest_projection(drive_root, retry_task_id, _rebase(initial))
-            rebased.update(authority)
-            rebased["attachments"] = authority["attachment_manifest"]
-            for owner in (rebased.get("task_contract"), (rebased.get("metadata") or {}).get("task_contract")):
-                if isinstance(owner, dict):
-                    owner.pop("attachment_manifest_ref", None)
-                    owner.update(authority)
-        task.clear()
-        task.update(rebased)
-        return {old_text: new_text}, ""
-    except Exception as exc:
-        for path in reversed(created):
-            path.unlink(missing_ok=True)
+def held_attachment_manifest(drives: Iterable[Any], task_id: str, authority: Any) -> List[Dict[str, Any]]:
+    """TASK's complete declared inputs as its own stores hold them now, ready for another task's own copy
+    (``materialize_inherited_attachment_manifest``). ``drives`` are TASK's drive roots in reading order: the
+    manifest resolves from the first one that reads it (``resolve_attachment_manifest``; none raises
+    ``ValueError``), and each staged row names the first ``attachments/`` file there that verifies against its
+    captured identity. A staged row that no store holds becomes ``rejected``/``source_missing`` with its label
+    and recorded identity: a gap, never other bytes."""
+    roots = [pathlib.Path(drive) for drive in drives]
+    for drive in roots:
         try:
-            new_dir.rmdir()
-            new_dir.parent.rmdir()
-        except OSError:
-            pass
-        return {}, f"{type(exc).__name__}: {exc}"
+            rows = resolve_attachment_manifest(drive, task_id, authority)
+            break
+        except (OSError, ValueError, TypeError):
+            continue
+    else:
+        raise ValueError(f"no store of {task_id} reads its attachment manifest")
+    held: List[Dict[str, Any]] = []
+    for row in rows:
+        rel, source = pathlib.PurePosixPath(str(row.get("relpath") or "")), None
+        if (row["status"] == "staged" and len(rel.parts) == 2 and rel.parts[0] == _ATTACHMENTS_SUBDIR
+                and ".." not in rel.parts):
+            for drive in roots:
+                store = task_artifact_dir_path(drive, task_id)
+                path = store.joinpath(*rel.parts)
+                try:
+                    if not path.is_symlink() and path.resolve(strict=True).is_relative_to(store.resolve(strict=False)):
+                        stream_artifact_file(path, expected=row)
+                        source = path
+                        break
+                except OSError:
+                    continue
+        if source is not None:
+            row = {**row, "abs_path": str(source)}
+        elif row["status"] == "staged":
+            row = {**{key: row[key] for key in ("ordinal", "label", "mime", "size", "sha256") if key in row},
+                   "status": "rejected", "reason": "source_missing"}
+        held.append(row)
+    return held
 
 
 def artifact_store_path_block_reason(
@@ -674,6 +695,75 @@ def task_artifact_dir_path(drive_root: Union[pathlib.Path, str], task_id: str, *
     return task_artifacts_dir(pathlib.Path(drive_root), validate_task_id(task_id), create=create)
 
 
+def actor_source_reference(*, category: str, source_id: str, data: bytes, extension: str,
+                           measured: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Price an exact actor-source address without creating a directory or writing bytes
+    (``measured``: the ``size``/``sha256`` of streamed bytes, which are then not passed)."""
+    normalized_category = str(category or "").strip()
+    if normalized_category not in _SOURCE_HANDLE_CATEGORIES:
+        raise ValueError(f"unsupported source-handle category: {normalized_category}")
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(source_id or "source")).strip("._")
+    safe_id = safe_id[:160] or "source"
+    safe_extension = re.sub(r"[^A-Za-z0-9]+", "", str(extension or "bin"))[:12] or "bin"
+    digest, size = (str(measured["sha256"]), int(measured["size"])) if measured else (sha256(data).hexdigest(), len(data))
+    relative = pathlib.PurePosixPath(
+        _SOURCE_HANDLES_SUBDIR,
+        normalized_category,
+        f"{safe_id}-{digest}.{safe_extension}",
+    )
+    read = {"root": "artifact_store", "path": relative.as_posix(), "start_line": 1, "max_lines": 2000, "start_char": 0}
+    return {"kind": "task_source", "root": "artifact_store", "path": relative.as_posix(), "size": size,
+            "sha256": digest, "read": {"tool": "read_file", "arguments": read}}
+
+
+class _HashingSink:
+    """What a producer streams, hashed and counted as it is written."""
+
+    def __init__(self, handle: Any) -> None:
+        self._handle, self.digest, self.size = handle, sha256(), 0
+
+    def write(self, chunk: bytes) -> int:
+        self._handle.write(chunk)
+        self.digest.update(chunk)
+        self.size += len(chunk)
+        return len(chunk)
+
+
+def stream_actor_source(drive_root: Union[pathlib.Path, str], task_id: str, *, category: str, source_id: str,
+                        extension: str, fill: Any, expected: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """``store_actor_source_bytes`` for bytes too large to hold: ``fill(sink)`` streams them into a temporary
+    sibling, hashed here, and the file is published write-once under its digest name only when the measured
+    bytes match ``expected`` (``size``/``sha256`` where given); a mismatch or a failed ``fill`` publishes nothing."""
+    folder = task_artifact_dir_path(drive_root, task_id, create=True) / _SOURCE_HANDLES_SUBDIR / str(category)
+    folder.mkdir(parents=True, exist_ok=True)
+    temporary = temporary_sibling(folder / f"{validate_task_id(task_id)}.stream")
+    try:
+        with temporary.open("xb") as handle:
+            sink = _HashingSink(handle)
+            fill(sink)
+            handle.flush()
+            os.fsync(handle.fileno())
+        measured = {"size": sink.size, "sha256": sink.digest.hexdigest()}
+        for key in ("size", "sha256"):
+            if (expected or {}).get(key) not in (None, "") and (expected or {})[key] != measured[key]:
+                raise ArtifactIdentityError(f"streamed source failed {key} verification: {source_id}",
+                                            source_path=None, source_stamp=())
+        ref = actor_source_reference(category=category, source_id=source_id, data=b"", extension=extension,
+                                     measured=measured)
+        target = task_artifact_dir_path(drive_root, task_id).joinpath(*pathlib.PurePosixPath(ref["path"]).parts)
+        try:  # write-once by digest: an intact file of these bytes IS this handle; a damaged one is repaired
+            present = target.is_file() and not target.is_symlink() and bool(stream_artifact_file(target, expected=measured))
+        except OSError:
+            present = False
+        if not present:
+            fence_publication()  # a closed publication generation writes no new source
+            temporary.replace(target)  # a new name over the old, never a write into a published inode
+        return ref
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+
 def store_actor_source_bytes(
     drive_root: Union[pathlib.Path, str],
     task_id: str,
@@ -682,22 +772,14 @@ def store_actor_source_bytes(
     source_id: str,
     data: bytes,
     extension: str,
+    fsync: bool = False,
 ) -> Dict[str, Any]:
-    """Persist exact bytes inside this task's existing actor-readable artifact root."""
+    """Persist exact bytes inside this task's existing actor-readable artifact root (``fsync``: flushed to disk
+    before publication, for a caller about to let its only other copy go)."""
 
-    normalized_category = str(category or "").strip()
-    if normalized_category not in _SOURCE_HANDLE_CATEGORIES:
-        raise ValueError(f"unsupported source-handle category: {normalized_category}")
-    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(source_id or "source")).strip("._")
-    safe_id = safe_id[:160] or "source"
-    safe_extension = re.sub(r"[^A-Za-z0-9]+", "", str(extension or "bin"))[:12] or "bin"
-    digest = sha256(data).hexdigest()
+    ref = actor_source_reference(category=category, source_id=source_id, data=data, extension=extension)
+    relative = pathlib.PurePosixPath(ref["path"])
     artifact_dir = task_artifact_dir_path(drive_root, task_id, create=True)
-    relative = pathlib.PurePosixPath(
-        _SOURCE_HANDLES_SUBDIR,
-        normalized_category,
-        f"{safe_id}-{digest}.{safe_extension}",
-    )
     target = artifact_dir.joinpath(*relative.parts)
     # WRITE-ONCE. The name carries the digest, so an existing file (loose or a pack member) with
     # these bytes IS this handle: rewriting would republish identical content while racing another
@@ -709,43 +791,53 @@ def store_actor_source_bytes(
         already_stored = handle_info(drive_root, task_id, relative.as_posix()) is not None
     if not already_stored:
         fence_publication()  # a closed publication generation writes no new source
-        write_bytes_atomic(target, bytes(data))
-    read = {"root": "artifact_store", "path": relative.as_posix(), "start_line": 1, "max_lines": 2000, "start_char": 0}
-    return {"kind": "task_source", "root": "artifact_store", "path": relative.as_posix(), "size": len(data),
-            "sha256": digest, "read": {"tool": "read_file", "arguments": read}}
+        write_bytes_atomic(target, bytes(data), fsync=fsync)
+    return ref
 
 
 def read_actor_source_bytes(
-    drive_root: Union[pathlib.Path, str], task_id: str, ref: Any, *, retained: bool = True,
+    drive_root: Union[pathlib.Path, str], task_id: str, ref: Any, *, retained: bool = True, anchor: Any = None,
 ) -> bytes:
-    """Resolve and verify one task-local actor source ref (loose, else this root's evidence pack,
-    else the retained placements unless ``retained`` is off) or raise explicitly."""
+    """Verify a task source: loose, packed, then (unless disabled) retained; errors stay explicit."""
 
     if not isinstance(ref, dict) or ref.get("kind") != "task_source":
         raise ValueError("actor source ref has an unexpected kind")
     if ref.get("root") != "artifact_store":
         raise ValueError("actor source ref has an unexpected root")
-    rel = pathlib.PurePosixPath(str(ref.get("path") or ""))
-    if not rel.parts or rel.parts[0] != _SOURCE_HANDLES_SUBDIR or rel.is_absolute():
+    from ouroboros.confined_files import open_confined_file, physical_path, relative_parts, root_spellings
+
+    parts = relative_parts(ref.get("path"))
+    rel = pathlib.PurePosixPath(*parts)
+    if not parts or parts[0] != _SOURCE_HANDLES_SUBDIR:
         raise ValueError("actor source ref has an invalid path")
-    base = task_artifact_dir_path(drive_root, task_id, create=False).resolve(strict=False)
-    target = base.joinpath(*rel.parts)
-    if target.is_symlink():
-        raise ValueError("actor source ref may not be a symlink")
-    try:
+    placement, root = pathlib.Path(drive_root), None
+    if anchor is not None:  # placement readers below receive the configured anchor
+        spellings = root_spellings(anchor)
+        root, placement = spellings[0], physical_path(spellings, placement.absolute())
+        target = task_artifact_dir_path(placement, task_id, create=False).joinpath(*rel.parts)
+    else:  # Existing internal callers retain their placement-cache and scope/error contracts.
+        base = task_artifact_dir_path(placement, task_id, create=False).resolve(strict=False)
+        target = base.joinpath(*rel.parts)
+        if target.is_symlink():
+            raise ValueError("actor source ref may not be a symlink")
         target = target.resolve(strict=False)
-        target.relative_to(base)
-    except ValueError as exc:
-        raise ValueError("actor source ref escapes its task artifact root") from exc
+        if not target.is_relative_to(base):
+            raise ValueError("actor source ref escapes its task artifact root")
     from ouroboros.evidence_packs import handle_bytes
     try:
-        raw = (handle_bytes(drive_root, task_id, rel.as_posix())
-               if rel.parts[:2] == ("source_handles", "context_checkpoints") else target.read_bytes())
+        if rel.parts[:2] == ("source_handles", "context_checkpoints"):
+            raw = handle_bytes(placement, task_id, rel.as_posix(), anchor=anchor)
+        elif root is not None:
+            handle, _ = open_confined_file(root, target.relative_to(root).parts)
+            with handle:
+                raw = handle.read()
+        else:
+            raw = target.read_bytes()
     except FileNotFoundError:
         if not retained:
             raise
         from ouroboros.source_retention import read_retained_task_source
-        return read_retained_task_source(drive_root, task_id, ref)
+        return read_retained_task_source(placement, task_id, ref, anchor=anchor)
     try:
         expected_size = int(ref["size"])
     except (KeyError, TypeError, ValueError) as exc:
@@ -764,12 +856,13 @@ def read_task_result_source_bytes(
     review = result.get("review_projection")
     panels = review.get("panels") if isinstance(review, dict) else []
     refs = [row.get("applied_source_ref") for row in (panels if isinstance(panels, list) else []) if isinstance(row, dict)]
+    # completion observations, and the historical source an older record's acceptance debt pinned (read-only)
     for key in ("completion_observations", "acceptance_debt"):
         if isinstance(value := result.get(key), dict):
             refs.append(value.get("source_ref"))
     for ref in refs:
         if isinstance(ref, dict) and ref.get("path") == source_path and pathlib.PurePosixPath(source_path).name == name:
-            return read_actor_source_bytes(drive_root, validate_task_id(result.get("task_id")), ref)
+            return read_actor_source_bytes(drive_root, validate_task_id(result.get("task_id")), ref, anchor=drive_root)
     raise ValueError("the requested source is not published by this task result")
 
 
@@ -791,134 +884,6 @@ def persist_exact_text_source(
             "status": "source_unavailable",
             "reason": f"{type(exc).__name__}: {exc}",
         }
-
-
-def persist_tool_trajectory_source(
-    drive_root: Union[pathlib.Path, str], task_id: str, tool_calls: Any,
-) -> Dict[str, Any]:
-    """Persist the complete redacted tool-call corpus behind acceptance views."""
-    try:
-        from ouroboros.observability import redact_projection
-
-        calls = [dict(call) for call in (tool_calls or []) if isinstance(call, dict)]
-        projected = redact_projection(calls).value
-        data = json.dumps(projected, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
-        stored_ref = store_actor_source_bytes(
-            drive_root, task_id, category="tool_results",
-            source_id="acceptance_tool_trajectory", data=data, extension="json",
-        )
-        path = str(stored_ref["path"])
-        return {
-            **stored_ref,
-            "reader": "read_file",
-            "artifact_ref": f"artifact_store:{path}#chars=0-{len(data.decode('utf-8'))}",
-        }
-    except Exception:
-        log.warning("acceptance tool trajectory source persistence failed", exc_info=True)
-        return {}
-
-
-def collect_exact_repo_diff(repo: Any, *, include_recent_commit: bool = False) -> str:
-    """Project the unbounded, hook-disabled repository diff of ONE bytes capture.
-
-    The text is the decoded, REDACTED projection of `repo_diff_capture`, not a
-    second read of the tree, and it carries the capture's own gap disclosure: an
-    unreadable or partially captured repository reads as a stated gap, never as
-    a clean (empty) diff. The EXACT bytes stay with the capture, which this
-    legacy text-only path releases once projected.
-    """
-    from ouroboros.repo_diff_capture import capture_repo_diff, repo_diff_projection_text
-
-    if not repo:
-        return ""
-    capture = capture_repo_diff(repo, include_recent_commit=include_recent_commit)
-    try:
-        return repo_diff_projection_text(capture)
-    finally:
-        capture.release()
-
-
-def materialize_repo_diff_evidence(
-    repo: Any, drive_root: Any, task_id: str, *, limit: int = 20000,
-    include_recent_commit: bool = False, capture: Any = None,
-) -> tuple[str, Dict[str, Any]]:
-    """Return a redacted exact diff or a typed cannot-verify projection.
-
-    ``capture`` is the ALREADY-TAKEN bytes capture of this acceptance round: the
-    packet preview and this exact source must describe the same tree, so the
-    second independent `git` read is gone. A caller without one (a direct/legacy
-    call) still gets its own single capture.
-
-    Two identities leave here, and they are not interchangeable: the EXACT bytes
-    are retained privately (`retain_private_capture`, never returned to a
-    reviewer, a log, an export or a download), and the redacted TEXT projection
-    is what the packet and the actor-readable source handle carry.
-    """
-    from ouroboros.repo_diff_capture import (
-        capture_disclosure, capture_repo_diff, repo_diff_projection, retain_private_capture,
-    )
-    from ouroboros.utils import truncate_review_artifact
-
-    if capture is None:
-        capture = capture_repo_diff(repo, include_recent_commit=include_recent_commit)
-    # Decoded and redacted WHOLE by the projection, before any bound below.
-    try:
-        redacted, decode_gaps = repo_diff_projection(capture)
-        disclosure = capture_disclosure(capture, decode_gaps)
-    except BaseException:
-        capture.release()
-        raise
-    meta: Dict[str, Any] = {"capture_disclosure": disclosure}
-    # Host-private forensics; deliberately NOT part of the evidence packet. Every
-    # exact-source materialization streams the bytes it projected into the
-    # private CAS (spooled sections included, so a source past the memory
-    # ceiling is kept whole), and the packet SAYS whether that happened rather
-    # than letting a digest imply a retention that never took place.
-    private_ref = retain_private_capture(drive_root, capture)
-    if private_ref.get("blob_ref"):
-        meta["private_source_ref"] = private_ref
-    disclosure["raw_retained"] = bool(private_ref.get("blob_ref"))
-    if private_ref.get("status") == "unavailable":
-        disclosure["raw_retention"] = {"status": "unavailable", "reason": "private capture retention failed"}
-    if not capture.available:
-        # An unreadable repository is unknown, never a clean tree.
-        meta.update(complete=False, issue={
-            "tool": "repo_diff", "status": "source_unavailable",
-            "reason": "repo_diff_capture_unavailable", "source_ref": {},
-            "gaps": disclosure["gaps"],
-        })
-        return redacted, meta
-    if not redacted:
-        meta.update(complete=False, issue={
-            "tool": "repo_diff", "status": "source_unavailable",
-            "reason": "partial_repo_diff_without_exact_source", "source_ref": {},
-        })
-        return "", meta
-    if len(redacted) <= limit and disclosure["complete"]:
-        meta["complete"] = True
-        return redacted, meta
-    if drive_root is not None and str(task_id or ""):
-        # The generic exact-text source writer is unchanged: it persists the
-        # REDACTED projection for the actor/reviewer, never the raw bytes.
-        exact, source_ref, issue = persist_exact_text_source(
-            drive_root, str(task_id), source_id="acceptance_repo_diff", text=redacted,
-        )
-        if exact:
-            meta.update(complete=disclosure["complete"], source_ref=source_ref)
-            if not disclosure["complete"]:
-                meta["issue"] = {"tool": "repo_diff", "status": "partial_source_gaps",
-                                 "reason": "repo_diff_capture_gaps", "source_ref": source_ref,
-                                 "gaps": disclosure["gaps"]}
-            return exact, meta
-        meta.update(complete=False, source_ref=source_ref, issue={
-            "tool": "repo_diff", **issue, "source_ref": source_ref,
-        })
-        return truncate_review_artifact(redacted, limit=limit), meta
-    meta.update(complete=False, issue={
-        "tool": "repo_diff", "status": "source_unavailable",
-        "reason": "partial_repo_diff_without_task_source_ref", "source_ref": {},
-    })
-    return truncate_review_artifact(redacted, limit=limit), meta
 
 
 def _matching_projection(drive_root: Any, call: Dict[str, Any]) -> Dict[str, Any]:
@@ -1052,19 +1017,14 @@ def resolve_chat_media_path(
     match = _CHAT_MEDIA_NAME_RE.fullmatch(str(name or ""))
     if not match:
         return None
+    from ouroboros.confined_files import open_confined_file
+
     try:
-        artifact_root = task_artifact_dir_path(drive_root, task_id, create=False).resolve(strict=False)
-        media_dir = artifact_root / _CHAT_MEDIA_SUBDIR
-        if media_dir.is_symlink():
-            return None
-        candidate = media_dir / name
-        if candidate.is_symlink():
-            return None
-        path = candidate.resolve(strict=False)
-        path.relative_to(artifact_root)
+        root = pathlib.Path(drive_root).resolve()
+        path = task_artifact_dir_path(root, task_id, create=False) / _CHAT_MEDIA_SUBDIR / name
+        handle, _ = open_confined_file(root, path.relative_to(root).parts)
+        handle.close()
     except (OSError, ValueError):
-        return None
-    if not path.is_file():
         return None
     return path
 
@@ -1227,17 +1187,28 @@ def stream_artifact_file(path: Any, sink: Any = None, *, expected: Any = None) -
 
 def copy_artifact_file(source: Any, destination: pathlib.Path, *, expected: Any = None) -> Dict[str, Any]:
     """Publish a verified file copy atomically; preserve any prior bytes on failure. Inside a
-    ``task_custody.publication_fence`` a closed generation starts no copy."""
-    source_path = pathlib.Path(source) if isinstance(source, (str, os.PathLike)) else None
-    destination = pathlib.Path(destination)
+    ``task_custody.publication_fence`` a closed generation starts no copy. A block-sharing clone
+    (``artifact_storage``) is taken where the filesystem gives one, its own bytes verified; else streamed."""
+    source_path, destination = (pathlib.Path(source) if isinstance(source, (str, os.PathLike)) else None), pathlib.Path(destination)
     if source_path is not None and not destination.is_symlink() and source_path.resolve(strict=False) == destination.resolve(strict=False):
         return stream_artifact_file(source, expected=expected)
     fence_publication()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{uuid.uuid4().hex}.tmp")
+    temporary = temporary_sibling(destination)  # the atomic signature the temp sweep reaps after a hard kill
+    from ouroboros.store import is_sqlite_file, is_wal_index  # a store file streams: a clone opens and closes it
+
     try:
-        with temporary.open("xb") as sink:
-            measured = stream_artifact_file(source, sink, expected=expected)
+        if (source_path is not None and not is_sqlite_file(source_path) and not is_wal_index(source_path)
+                and clone_file(source_path, temporary)):
+            try:
+                measured = stream_artifact_file(temporary, expected=expected)
+            except ArtifactIdentityError:
+                # Retention watches the source's stable failure, never a disposable clone's inode.
+                stream_artifact_file(source_path, expected=expected)
+                raise
+        else:
+            with temporary.open("xb") as sink:
+                measured = stream_artifact_file(source, sink, expected=expected)
         if source_path is not None:
             shutil.copystat(source_path, temporary)
         temporary.replace(destination)
@@ -1247,13 +1218,9 @@ def copy_artifact_file(source: Any, destination: pathlib.Path, *, expected: Any 
 
 
 def artifact_record(path: pathlib.Path, *, kind: str = "task_artifact", source_path: str = "") -> Dict[str, Any]:
-    record: Dict[str, Any] = {
-        "kind": kind, "name": pathlib.Path(path).name, "path": str(path),
-        **stream_artifact_file(path), "status": ARTIFACT_STATUS_READY, "errors": [],
-    }
-    if source_path:
-        record["source_path"] = source_path
-    return record
+    return {"kind": kind, "name": pathlib.Path(path).name, "path": str(path),
+            **stream_artifact_file(path), "status": ARTIFACT_STATUS_READY, "errors": [],
+            **({"source_path": source_path} if source_path else {})}
 
 
 def store_task_artifact_bytes(
@@ -1269,7 +1236,7 @@ def store_task_artifact_bytes(
         raise ValueError("task artifact name is reserved")
     artifact_dir = task_artifact_dir_path(drive_root, task_id, create=True)
     path = artifact_dir / safe_name
-    temporary = path.with_name(f".{uuid.uuid4().hex}.tmp")
+    temporary = temporary_sibling(path)
 
     def publish(_current):
         try:
@@ -1278,11 +1245,10 @@ def store_task_artifact_bytes(
             if (exc.errno not in {errno.EEXIST, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EPERM, errno.EXDEV, errno.ENOSYS}
                     and getattr(exc, "winerror", None) != 50):
                 raise
-            if path.exists():
-                if path.read_bytes() != data:
-                    raise ValueError(f"task artifact collision: {safe_name}")
-            else:
+            if not path.exists():
                 temporary.replace(path)
+            elif path.read_bytes() != data:
+                raise ValueError(f"task artifact collision: {safe_name}")
     try:
         write_bytes_atomic(temporary, data)
         update_json_locked(artifact_dir / _ARTIFACT_MANIFEST, publish)
@@ -1290,8 +1256,7 @@ def store_task_artifact_bytes(
         temporary.unlink(missing_ok=True)
     record = {**artifact_record(path, kind=kind), "immutable": True}
     _register_task_artifact_records(artifact_dir, [record])
-    return {"root": "artifact_store", "path": safe_name, "sha256": record["sha256"],
-            "bytes": record["size"], "kind": kind}
+    return {"root": "artifact_store", "path": safe_name, "sha256": record["sha256"], "bytes": record["size"], "kind": kind}
 
 
 def _register_task_artifact_records(artifact_dir: pathlib.Path, records: Iterable[Dict[str, Any]]) -> None:
@@ -1317,8 +1282,11 @@ def _register_task_artifact_records(artifact_dir: pathlib.Path, records: Iterabl
 
 def registered_task_artifact(drive_root: Any, task_id: str, name: str) -> Optional[Dict[str, Any]]:
     """Read one host registration, including an output published before task finality."""
-    root = task_artifact_dir_path(drive_root, task_id)
-    manifest = (read_json_dict(root / _ARTIFACT_MANIFEST) or {}).get("artifacts")
+    from ouroboros.confined_files import read_confined_json
+
+    root = pathlib.Path(drive_root).resolve()
+    path = task_artifact_dir_path(root, task_id) / _ARTIFACT_MANIFEST
+    manifest = (read_confined_json(root, path.relative_to(root).parts) or {}).get("artifacts")
     row = manifest.get(name) if isinstance(manifest, dict) else None
     return dict(row) if isinstance(row, dict) else None
 
@@ -1420,153 +1388,80 @@ def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str],
     return record
 
 
-def iter_artifact_tree(root: pathlib.Path) -> Iterable[pathlib.Path]:
-    """Enumerate the full tree without following directory links or hiding I/O failures."""
-    def failed(exc: OSError) -> None:
-        raise exc
-    for directory, dirs, files in os.walk(root, onerror=failed, followlinks=False):
-        dirs.sort()
-        for name in sorted([*dirs, *files]):
-            path = pathlib.Path(directory) / name
-            path.lstat()  # A disappearing or unreadable member is not an empty entry.
-            yield path
-
-
-def copy_directory_to_task_artifacts(
-    ctx: Any,
-    source_path: Union[pathlib.Path, str],
-    *,
-    kind: str = "process_output_directory",
-    member_paths: Iterable[pathlib.Path] | None = None,
-    artifact_dir: pathlib.Path | None = None,
-) -> List[Dict[str, Any]]:
-    """Package a generated directory as a manifest ledger plus zip artifact."""
-
-    source = pathlib.Path(source_path).expanduser().resolve(strict=False)
-    if not source.is_dir():
-        return []
-    if artifact_dir is None:
-        artifact_dir = task_artifact_dir_path(ctx.drive_root, task_id_for_artifacts(ctx), create=True)
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    if member_paths is None:
-        members = sorted(p for p in iter_artifact_tree(source) if p.is_file() and not p.is_symlink())
-    else:
-        members = sorted(pathlib.Path(p) for p in member_paths)
-    file_records: List[Dict[str, Any]] = []
-    tree_hasher = sha256(str(source).encode("utf-8", errors="replace") + b"\0")
-    tmp_zip_path = artifact_dir / f".directory.{uuid.uuid4().hex}.tmp"
-    tmp_ledger_path = artifact_dir / f".directory.{uuid.uuid4().hex}.json.tmp"
-    try:
-        with zipfile.ZipFile(tmp_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for path in members:
-                if path.is_symlink() or not path.is_file():
-                    raise OSError(f"directory member is unavailable: {path}")
-                try:
-                    rel = path.resolve(strict=True).relative_to(source).as_posix()
-                except ValueError as exc:
-                    raise OSError(f"directory member escapes its source: {path}") from exc
-                with archive.open(rel, "w", force_zip64=True) as member:
-                    measured = stream_artifact_file(path, member)
-                tree_hasher.update(rel.encode("utf-8", errors="replace") + b"\0")
-                tree_hasher.update(measured["sha256"].encode("ascii") + b"\0")
-                file_records.append({"path": rel, **measured})
-        safe_stem = source.name.replace("/", "_").replace("\\", "_") or "directory"
-        tree_digest = tree_hasher.hexdigest()[:8]
-        ledger_path = artifact_dir / f"{safe_stem}.{tree_digest}.manifest.json"
-        zip_path = artifact_dir / f"{safe_stem}.{tree_digest}.zip"
-        atomic_write_json(
-            tmp_ledger_path,
-            {
-                "schema_version": 1,
-                "kind": kind,
-                "source_path": str(source),
-                "file_count": len(file_records),
-                "files": file_records,
-                "zip_name": zip_path.name,
-            },
-            trailing_newline=True,
-        )
-        tmp_zip_path.replace(zip_path)
-        tmp_ledger_path.replace(ledger_path)
-    except Exception:
-        for tmp_path in (tmp_zip_path, tmp_ledger_path):
-            try:
-                if tmp_path.exists():
-                    tmp_path.unlink()
-            except OSError:
-                pass
-        raise
-    records = [
-        artifact_record(ledger_path, kind=f"{kind}_manifest", source_path=str(source)),
-        artifact_record(zip_path, kind=kind, source_path=str(source)),
-    ]
-    _register_task_artifact_records(artifact_dir, records)
-    return records
-
-
 def collect_task_artifact_records(
     drive_root: Union[pathlib.Path, str], task_id: str, *, measure: bool = True, strict: bool = False,
-    require_registered: bool = False,
+    require_registered: bool = False, anchor: Any = None,
 ) -> List[Dict[str, Any]]:
-    """List deliverables (nested ones carry ``relpath``), excluding metadata/inputs.
-    ``measure=False`` uses lstat/recorded identities, with ``measured: False``. Strict
-    listing raises on unreadable files; review's ``require_registered`` requires all entries."""
+    """List deliverables by handle, excluding metadata, inputs and SQLite WAL indexes (refused unread:
+    ``ConfinedDirectory.open_for_read``). Unmeasured rows keep registered identities; measurement
+    hashes the open file. Strict reads raise on unreadable files/metadata; ``anchor`` confines child stores."""
+    from ouroboros.confined_files import confined_directory, read_confined_json
+    from ouroboros.outcome_receipt_store import verification_receipts_path
+    from ouroboros.store import WalIndexRefused
+
     try:
-        artifact_dir = task_artifact_dir_path(pathlib.Path(drive_root), validate_task_id(task_id), create=False)
+        store = task_artifact_dir_path(drive_root, validate_task_id(task_id), create=False)
     except ValueError:
         return []
-    records: List[Dict[str, Any]] = []
-    if not artifact_dir.exists():
-        return records
-    manifest_path = artifact_dir / _ARTIFACT_MANIFEST
-    data = read_json_dict(manifest_path)
-    if data is None and strict and (manifest_path.exists() or manifest_path.is_symlink()):
-        raise OSError(f"artifact registration is unreadable: {manifest_path}")
-    raw_manifest = (data or {}).get("artifacts") if isinstance((data or {}).get("artifacts"), dict) else {}
-    manifest = {str(key): dict(value) for key, value in raw_manifest.items() if isinstance(value, dict)}
-    artifact_root = artifact_dir.resolve(strict=False)
-    if require_registered:
-        for name in manifest:
-            path = artifact_dir / name
-            if path.is_symlink() or not path.resolve().is_relative_to(artifact_root) or not path.is_file():
-                raise OSError(f"registered artifact is unavailable or outside its owner: {name}")
-    members = iter_artifact_tree(artifact_dir) if strict else artifact_dir.rglob("*")
-    for path in sorted(p for p in members if p.is_file() and not p.is_symlink()):
-        # Metadata (manifests, the registration lock) and the receipt stream (its own
-        # union writer) are not deliverables.
-        if (path.name in (_ARTIFACT_MANIFEST, SCRATCH_MANIFEST_NAME) or path == artifact_dir / (_ARTIFACT_MANIFEST + ".lock")
-                or is_verification_receipts_path(drive_root, task_id, path)):
-            continue
-        try:
-            rel_parts = path.resolve(strict=False).relative_to(artifact_root).parts
-        except (OSError, ValueError):
-            continue  # reached through a link: not this store's material
-        # Staged inputs, chat media and source handles are not deliverables.
-        if rel_parts and rel_parts[0] in {_ATTACHMENTS_SUBDIR, _CHAT_MEDIA_SUBDIR, _SOURCE_HANDLES_SUBDIR}:
-            continue
-        manifest_record = manifest.get(path.name) if path.parent == artifact_dir else None
-        nested = {"relpath": "/".join(rel_parts)} if len(rel_parts) > 1 else {}
-        try:
-            if not measure:  # an immutable registration keeps its recorded identity; nothing else is claimed
-                registered = manifest_record or {}
-                records.append({"kind": str(registered.get("kind") or "task_artifact"), "name": path.name,
-                                "path": str(path), **nested, "size": path.lstat().st_size, "measured": False,
-                                **({key: registered.get(key) for key in ("immutable", "size", "sha256")}
-                                   if registered.get("immutable") else {})})
+    root = pathlib.Path(anchor if anchor is not None else drive_root).absolute()
+    parts = store.absolute().relative_to(root).parts
+    receipts = verification_receipts_path(drive_root, task_id, create=False)
+    document = read_confined_json(root, (*parts, _ARTIFACT_MANIFEST), strict=strict) or {}
+    entries = document.get("artifacts") or {}
+    manifest = {str(k): v for k, v in entries.items() if isinstance(v, dict)} if isinstance(entries, dict) else {}
+    rows, opened = [], False
+
+    def walk(directory, relative=()):
+        for name, is_directory in sorted(directory.entries()):
+            path = store.joinpath(*relative, name)
+            if (name in {_ARTIFACT_MANIFEST, SCRATCH_MANIFEST_NAME}
+                    or path in {receipts, store / (_ARTIFACT_MANIFEST + ".lock")}
+                    or not relative and name in {_ATTACHMENTS_SUBDIR, _CHAT_MEDIA_SUBDIR, _SOURCE_HANDLES_SUBDIR}):
                 continue
-            record = artifact_record(path) | nested
-            if manifest_record:
-                record = merge_artifact_records([{**manifest_record, "path": str(path)}], [record])[0]
-            records.append(record)
-        except OSError:
-            if strict:
-                raise
-    return records
+            try:
+                if is_directory:
+                    with directory.child(name) as child:
+                        walk(child, (*relative, name))
+                    continue
+                handle, observed = directory.open_for_read(name)
+                registered = manifest.get(name) if not relative else None
+                nested = {"relpath": "/".join((*relative, name))} if relative else {}
+                with handle:
+                    if measure:
+                        row = {"kind": "task_artifact", "name": name, "path": str(path), **nested,
+                               **stream_artifact_file(handle), "status": ARTIFACT_STATUS_READY, "errors": []}
+                        if registered:
+                            row = merge_artifact_records([{**registered, "path": str(path)}], [row])[0]
+                    else:
+                        registered = registered or {}
+                        row = {"kind": str(registered.get("kind") or "task_artifact"), "name": name,
+                               "path": str(path), **nested, "size": observed.st_size, "measured": False,
+                               **({key: registered.get(key) for key in ("immutable", "size", "sha256")}
+                                  if registered.get("immutable") else {})}
+                rows.append(row)
+            except OSError as exc:  # a WAL index, refused unread, is left out as copies and settlement leave it
+                if strict and not isinstance(exc, WalIndexRefused):
+                    raise
+
+    try:
+        with confined_directory(root, parts) as directory:
+            opened = True
+            if require_registered:
+                for name in manifest:
+                    with suppress(WalIndexRefused):  # a registered index is present, and never read
+                        directory.open_for_read(name)[0].close()
+            walk(directory)
+    except FileNotFoundError:
+        if opened and strict:
+            raise
+    except OSError:
+        if strict:
+            raise
+    return sorted(rows, key=lambda row: row["path"])
 
 
 def merge_artifact_records(*groups: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     merged: Dict[str, Dict[str, Any]] = {}
-    order: List[str] = []
     for group in groups:
         for item in group:
             if not isinstance(item, dict):
@@ -1575,7 +1470,6 @@ def merge_artifact_records(*groups: Iterable[Dict[str, Any]]) -> List[Dict[str, 
             if not key:
                 continue
             if key not in merged:
-                order.append(key)
                 merged[key] = dict(item)
                 continue
             existing = merged[key]
@@ -1594,4 +1488,8 @@ def merge_artifact_records(*groups: Iterable[Dict[str, Any]]) -> List[Dict[str, 
                     merged[key][meta_key] = existing[meta_key]
             if existing.get("name") and fresh.get("kind") == "task_artifact":
                 merged[key]["name"] = existing["name"]
-    return [merged[key] for key in order]
+    return list(merged.values())
+
+
+# Public artifact API; directory packaging owns traversal and virtual member names.
+from ouroboros.artifact_directories import iter_artifact_tree, copy_directory_to_task_artifacts  # noqa: E402,F401

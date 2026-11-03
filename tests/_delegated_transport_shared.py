@@ -124,6 +124,12 @@ class _HealthStub:
             "constraints": [{"used_ratio": 1.0, "resets_at": self.reset_at}],
         }]
 
+    def quota_state(self, *, model=None, request_kind="text", **_kw):
+        return {"snapshots": [{**row, "availability": {
+            "state": "exhausted" if self.reset_at else "available", "resets_at": self.reset_at or None,
+        }} for row in self.quota_snapshots()], "absences": [],
+            "availability_scope": {"model": model, "requestKind": request_kind, "basis": "quota_block"}}
+
     def close(self): pass
 
 

@@ -9,7 +9,7 @@ import pytest
 
 from ouroboros import preflight_receipts as receipts
 from ouroboros import review_ledger
-from ouroboros.tools.registry import ToolContext
+from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests import _contributor_packet_shared as shared
 from tests.test_preflight_receipts_consumers import _foreign_review, _recording
 from tests.test_preflight_receipts import _git, _tiny_repo
@@ -34,10 +34,17 @@ def test_deterministic_refusal_reaches_every_seat_without_starting_tests(
     from ouroboros.tools.git_review_cycle import _run_reviewed_stage_cycle
 
     repo = Path(staged_body["repo"])
+    # Unlike the fixture's Git helper, the real commit consumer uses repository identity.
+    shared.git(repo, "config", "user.name", "Preflight fixture")
+    shared.git(repo, "config", "user.email", "preflight@example.invalid")
     ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "gate-drive")
     if prior_proof != "absent":
         # Model a context that still owns a prior attestation. The selected gate
         # below must not mistake it for an invocation that got past preflight.
+        # A worker mints it after its registry imported every tool module, so the browser
+        # module's PLAYWRIGHT_BROWSERS_PATH default is already in the environment the proof
+        # binds; a first registry built by the review below would change it (#2363).
+        ToolRegistry(repo_dir=repo, drive_root=ctx.drive_root)
         shared.passing_test_runner(ctx)
         if prior_proof == "stale":
             (repo / "ouroboros" / "helper.py").write_text("VALUE = 3\n", encoding="utf-8")
@@ -46,7 +53,7 @@ def test_deterministic_refusal_reaches_every_seat_without_starting_tests(
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
     checked, launched, briefs, evidence = [], [], [], []
 
-    def refuse(*args):
+    def refuse(*args, **kwargs):
         checked.append(args)
         return refusal
 
@@ -90,10 +97,8 @@ def test_deterministic_refusal_reaches_every_seat_without_starting_tests(
                                      goal="Ship the proposal", scope="helper.py", review_reference=reference,
                                      author_disposition={"disposition": "accepted",
                                                          "rationale": "Read all three seats; the refusal is known."})
-    if prior_proof == "stale":  # its new ouroboros/helper.py is refused by the continuation's own current check
+    if prior_proof == "stale":  # the continuation's current check remains visible to its Cyber author
         assert "PREFLIGHT_BLOCKED" in committed and "ouroboros/helper.py" in committed, committed
-        assert shared.git(repo, "rev-parse", "HEAD") == head and len(briefs) == 3 and not launched
-        return
     assert shared.git(repo, "rev-parse", "HEAD") != head and ctx._commit_review_status == "author_continued", committed
     assert f"review_record_id: {reference['review_record_id']}" in committed and refusal in committed
     assert len(briefs) == 3 and len(checked) == 2 and not launched
@@ -108,6 +113,9 @@ def test_nonrefused_gate_keeps_real_test_and_skip_exhibits(tmp_path, monkeypatch
     from ouroboros.tools import commit_gate, git
 
     repo = _tiny_repo(tmp_path)
+    # This fixture reaches the real runner; release policy is exercised separately.
+    monkeypatch.setattr(commit_admission, "release_metadata_diagnostics", lambda *a, **kw: {
+        "status": "not_applicable", "findings": [], "unavailable": []})
     if outcome == "failed":
         (repo / "tests" / "test_parallel.py").write_text("def test_red():\n    assert False\n", encoding="utf-8")
         _git(repo, "add", "-A")
@@ -116,6 +124,7 @@ def test_nonrefused_gate_keeps_real_test_and_skip_exhibits(tmp_path, monkeypatch
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
     monkeypatch.setenv("OUROBOROS_PRE_PUSH_TESTS", "1")
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "2")
+    monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "2")  # nested slots: the gate must really run two workers
     execute, lanes = preflight_runner._execute_pytest_pass, []
 
     def counted(*args):
@@ -141,11 +150,25 @@ def test_nonrefused_gate_keeps_real_test_and_skip_exhibits(tmp_path, monkeypatch
                   "unbound": "the run completed but minted no proof of the tested subject",
                   "managed_unbound": "the run completed but minted no proof of the tested subject"}.get(
             outcome, "skipped by the author (skip_tests)")
-        assert ctx._preflight_execution == {"status": "not_run", "reason": reason}
+        exhibit = dict(ctx._preflight_execution)
+        observed = exhibit.pop("observed", [])
+        assert exhibit == {"status": "not_run", "reason": reason}
         assert tests == {"policy": "NOT_RUN", "result": "unknown", **(
             {"reason": "tests_proof_not_for_this_candidate"} if outcome.endswith("unbound") else {})}
-        assert receipts.execution_section(ctx._preflight_execution).endswith(
-            f"NOT_RUN: {reason}. No passing test result is claimed for this candidate.")
+        section = receipts.execution_section(ctx._preflight_execution)
+        if outcome != "failed":  # nothing ran red: the compatible NOT_RUN line stays the whole fact
+            assert not observed and section.endswith(
+                f"NOT_RUN: {reason}. No passing test result is claimed for this candidate.")
+            return
+        # The red run reaches every seat as what it was, on these bytes, never as "not run".
+        [run] = observed
+        assert (run["outcome"], run["relation"], run["tested"]["head"]) == (
+            "failed", "same_bytes", _git(repo, "rev-parse", "HEAD"))
+        assert run["evidence"] == ctx._preflight_test_evidence and run["terminal"] == "read"
+        assert "test_red" in run["diagnosis"] and "assert False" in run["diagnosis"]
+        assert "FAILED: a lane exited red, on the bytes of this candidate" in section
+        assert "NOT_RUN names the missing proof only; the runs and checks below did happen." in section
+        assert "test_red" in section and "never proof" in section
 
 
 @pytest.mark.parametrize("legacy", [False, True], ids=["original-exhibit", "legacy-absent"])

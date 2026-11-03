@@ -4,12 +4,14 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 import json
+import os
 import threading
 from types import SimpleNamespace
 
 import pytest
 
 from ouroboros import task_pacing as pacing, usage_accounting as accounting
+from ouroboros.settings_integrity import task_settings_snapshot
 from tests._usage_store_testing import ledger_rows
 
 
@@ -75,10 +77,12 @@ def test_request_override_does_not_inherit_another_limits_provenance(root):
 def _run_task_scoped(root, monkeypatch, scoped):
     from ouroboros.agent import OuroborosAgent
 
-    monkeypatch.setattr("ouroboros.subagent_runtime.apply_task_start_settings_or_disclose", lambda *_: None)
+    monkeypatch.setattr("ouroboros.subagent_runtime.apply_task_start_settings_or_disclose",
+                        lambda *_: task_settings_snapshot({}, os.environ))
     monkeypatch.setattr("ouroboros.model_wait.task_model_wait_scope", lambda **_: nullcontext())
-    host = SimpleNamespace(env=SimpleNamespace(drive_root=root), _emit_live_log=lambda *_: None,
-                           _event_queue=None, _handle_task_scoped=scoped)
+    from tests._agent_entry_helpers import task_entry_agent
+
+    host = task_entry_agent(root, scoped)
     return OuroborosAgent.handle_task(host, {"id": "a", "type": "task"})
 
 

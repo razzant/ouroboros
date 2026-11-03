@@ -84,8 +84,8 @@ def test_update_merge_size_growth_warns_locally_and_pairwise_ci_catches(tmp_path
 
     # Official line: +500 lines at the TOP of mid.py (1300 total — no debt).
     trh._git(repo, "checkout", "-qb", "official")
-    (repo / "mid.py").write_text(
-        "\n".join(["official-%d" % i for i in range(500)] + body) + "\n", encoding="utf-8"
+    (repo / "mid.py").write_bytes(
+        ("\n".join(["official-%d" % i for i in range(500)] + body) + "\n").encode("utf-8")
     )
     trh._git(repo, "add", ".")
     trh._git(repo, "commit", "-qm", "official grows the top")
@@ -93,8 +93,8 @@ def test_update_merge_size_growth_warns_locally_and_pairwise_ci_catches(tmp_path
 
     # Local fork: +400 lines at the BOTTOM (1200 total — no debt either).
     trh._git(repo, "checkout", "-q", head)
-    (repo / "mid.py").write_text(
-        "\n".join(body + ["local-%d" % i for i in range(400)]) + "\n", encoding="utf-8"
+    (repo / "mid.py").write_bytes(
+        ("\n".join(body + ["local-%d" % i for i in range(400)]) + "\n").encode("utf-8")
     )
     trh._git(repo, "add", ".")
     trh._git(repo, "commit", "-qm", "fork grows the bottom")

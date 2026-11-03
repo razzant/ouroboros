@@ -314,17 +314,17 @@ class TestWakeRootCeiling:
     def _scope(self, tmp_path, monkeypatch, *, metadata=None, per_task_cap="50"):
         """The scope `handle_task` actually binds for one task."""
         from ouroboros.agent import OuroborosAgent
+        from ouroboros.settings_integrity import task_settings_snapshot
         from ouroboros.usage_accounting import current_usage_scope
 
         monkeypatch.setattr("ouroboros.subagent_runtime.apply_task_start_settings_or_disclose",
-                            lambda *_a, **_k: None)
+                            lambda *_a, **_k: task_settings_snapshot({}, os.environ))
         monkeypatch.setattr("ouroboros.model_wait.task_model_wait_scope", lambda **_k: nullcontext())
         monkeypatch.setenv("TOTAL_BUDGET", "1000")
         monkeypatch.setenv("OUROBOROS_PER_TASK_COST_USD", per_task_cap)
-        host = SimpleNamespace(
-            env=SimpleNamespace(drive_root=tmp_path), _emit_live_log=lambda *_a, **_k: None,
-            _event_queue=None, _handle_task_scoped=lambda _task: current_usage_scope(),
-        )
+        from tests._agent_entry_helpers import task_entry_agent
+
+        host = task_entry_agent(tmp_path, lambda _task: current_usage_scope())
         task = {"id": "wake-1", "type": "task"}
         if metadata is not None:
             task["metadata"] = metadata

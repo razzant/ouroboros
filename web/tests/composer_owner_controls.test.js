@@ -1,106 +1,26 @@
 // The composer's owner controls (docs/DESIGN.md "Composer owner controls"): two labelled
 // capsules. The effort range's handle math, the open/pin state machine with and without a
 // hovering pointer, keyboard, serialized saves with a refused save returning to the server's
-// value, the one global value from /api/state, teardown; the context capsule's three modes, its
+// value, independent room readback, teardown; the context capsule's three modes, its
 // save and a scrolling strip that keeps the chosen mode in view; one capsule open at a time, and
 // the names that give way on a narrow line.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { ElementStub } from './chat_dom_fixture.js';
-import {
-    applyHandle, createComposerOwnerControls, createEffortRangeControl, nearestHandle, snapRange,
-} from '../modules/composer_owner_controls.js';
+import { CHANGE_RULE, applyHandle, createEffortRangeControl, snapRange } from '../modules/composer_owner_controls.js';
+import { hoverWindow, mount, mountPair, sleep, stubDocument } from './composer_controls_fixture.js';
 
-/* A document whose listeners can be fired, and a window that may or may not hover. */
-function stubDocument() {
-    const listeners = new Map();
-    const doc = {
-        byId: new Map(), activeElement: null,
-        createElement: (tag) => new ElementStub(tag, doc),
-        addEventListener(type, fn) { listeners.set(type, [...(listeners.get(type) || []), fn]); },
-        removeEventListener(type, fn) { listeners.set(type, (listeners.get(type) || []).filter((f) => f !== fn)); },
-        fire(type, event) { for (const fn of listeners.get(type) || []) fn(event); },
-        count: (type) => (listeners.get(type) || []).length,
-    };
-    return doc;
-}
-const hoverWindow = (matches) => ({ matchMedia: (query) => ({ matches: matches && query === '(hover: hover) and (pointer: fine)' }) });
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-function mount({ hover = false, save, win } = {}) {
-    const doc = stubDocument();
-    const row = doc.createElement('div');
-    row.className = 'chat-toolbar-row';
-    row.getBoundingClientRect = () => ({ top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 });  // not laid out: no fit
-    const toasts = [];
-    const refreshes = [];
-    const layouts = [];
-    const saves = [];
-    const control = createEffortRangeControl({
-        row, doc, win: win === undefined ? hoverWindow(hover) : win,
-        saveEffortRange: save || (async (triple) => { saves.push(triple); return { ok: true, effort_range: triple }; }),
-        showToast: (message, tone) => toasts.push([message, tone]),
-        refreshState: (force) => refreshes.push(force),
-        onLayout: () => layouts.push(control?.isOpen?.()),
-    });
-    const el = control.el;
-    const segs = el.querySelectorAll('.chat-effort-seg');
-    // The strip has layout: seven 40px segments, so a boundary is x / 40.
-    segs.forEach((seg, i) => { seg.offsetLeft = i * 40; seg.offsetWidth = 40; });
-    const head = el.querySelector('.chat-effort-head');
-    const strip = el.querySelector('[data-effort-strip]');
-    const handles = { min: el.querySelector('.chat-effort-min'), rec: el.querySelector('.chat-effort-rec'), max: el.querySelector('.chat-effort-max') };
-    const fire = (node, type, event) => { for (const fn of node.listeners.get(type) || []) fn(event); };
-    const last = (node, type) => (node.listeners.get(type) || []).at(-1);
-    const pointer = (clientX, { handle = null, pointerId = 1, clientY = 10 } = {}) => ({
-        button: 0, clientX, clientY, pointerId, pointerType: 'mouse', preventDefault() {},
-        target: { closest: (selector) => (selector === '[data-handle]' ? handle : null) },
-    });
-    return {
-        control, el, row, doc, head, strip, handles, segs, toasts, refreshes, layouts, saves,
-        headClick: (detail = 1) => fire(head, 'click', { detail }),
-        key: (which, key) => fire(handles[which], 'keydown', { key, currentTarget: handles[which], preventDefault() {} }),
-        down: (x, options) => fire(strip, 'pointerdown', pointer(x, options)),
-        move: (x, pointerId = 1) => last(strip, 'pointermove')?.(pointer(x, { pointerId })),
-        up: (x, pointerId = 1) => last(strip, 'pointerup')?.(pointer(x, { pointerId })),
-        cancel: (pointerId = 1) => last(strip, 'pointercancel')?.(pointer(0, { pointerId })),
-        enter: (pointerType = 'mouse') => fire(el, 'pointerenter', { pointerType }),
-        // The stub control's rectangle is x 0..100, y 0..20; the default leave point is far outside the zone.
-        leave: (pointerType = 'mouse', { x = 500, y = 500 } = {}) => fire(el, 'pointerleave', { pointerType, clientX: x, clientY: y }),
-        docMove: (x, y) => doc.fire('pointermove', { pointerType: 'mouse', clientX: x, clientY: y }),
-        outside: () => doc.fire('pointerdown', { target: new ElementStub('div', doc) }),
-        inside: () => doc.fire('pointerdown', { target: head }),
-        escape: () => doc.fire('keydown', { key: 'Escape' }),
-        settle: () => control.pendingSave(),
-    };
-}
-
-test('handle math: every handle pushes the ones it meets; min and max never cross', () => {
+test('primary and helper bounds are independent, and helper bounds cannot cross', () => {
     const base = { min: 1, rec: 2, max: 3 };
-    assert.deepEqual(applyHandle(base, 'rec', 5), { min: 1, rec: 5, max: 5 }, 'rec carries max up');
-    assert.deepEqual(applyHandle(base, 'rec', 0), { min: 0, rec: 0, max: 3 }, 'rec carries min down');
-    assert.deepEqual(applyHandle(base, 'rec', 9), { min: 1, rec: 6, max: 6 }, 'never past the last level');
-    assert.deepEqual(applyHandle(base, 'rec', 3), { min: 1, rec: 3, max: 3 }, 'inside the range nothing else moves');
-    assert.deepEqual(applyHandle(base, 'min', 3), { min: 3, rec: 3, max: 3 }, 'min pushes rec up');
-    assert.deepEqual(applyHandle(base, 'min', 6), { min: 3, rec: 3, max: 3 }, 'min never passes max');
-    assert.deepEqual(applyHandle(base, 'max', 1), { min: 1, rec: 1, max: 1 }, 'max pushes rec down');
-    assert.deepEqual(applyHandle(base, 'max', -4), { min: 1, rec: 1, max: 1 }, 'max never passes min');
-    assert.deepEqual(applyHandle(base, 'min', 0), { min: 0, rec: 2, max: 3 });
-    assert.deepEqual(applyHandle(base, 'max', 6), { min: 1, rec: 2, max: 6 });
-    assert.deepEqual(snapRange({ min: 0.6, rec: 0.2, max: 2.4 }), { min: 1, rec: 1, max: 2 }, 'a snap keeps the order');
-    // A tap inside the range moves the recommended level, outside it the bracket on that side.
-    assert.equal(nearestHandle(base, 2), 'rec');
-    assert.equal(nearestHandle(base, 1), 'rec');
-    assert.equal(nearestHandle(base, 0), 'min');
-    assert.equal(nearestHandle(base, 6), 'max');
-    // Coinciding levels: the brackets stay reachable from either side of the pill.
-    assert.equal(nearestHandle({ min: 3, rec: 3, max: 3 }, 3), 'rec');
-    assert.equal(nearestHandle({ min: 3, rec: 3, max: 3 }, 2), 'min');
-    assert.equal(nearestHandle({ min: 3, rec: 3, max: 3 }, 4), 'max');
+    for (const rec of [0, 3, 6]) assert.deepEqual(applyHandle(base, 'rec', rec), { ...base, rec });
+    assert.deepEqual(applyHandle(base, 'min', 6), { min: 3, rec: 2, max: 3 });
+    assert.deepEqual(applyHandle(base, 'max', -4), { min: 1, rec: 2, max: 1 });
+    assert.deepEqual(applyHandle(base, 'rec', 9), { min: 1, rec: 6, max: 3 });
+    assert.deepEqual(snapRange({ min: 0.6, rec: 0.2, max: 2.4 }), { min: 1, rec: 0, max: 2 });
 });
 
-test('the control mounts after the pills, closed: ring, name and the recommended level only; three sliders out of the tab order', () => {
+test('the control mounts after the context capsule, closed: ring, name and the recommended level only; three sliders out of the tab order', () => {
     const m = mount();
     assert.equal(m.el.dataset.open, 'false');
     assert.ok(m.el.classList.contains('chat-capsule'));
@@ -121,8 +41,12 @@ test('the control mounts after the pills, closed: ring, name and the recommended
     assert.deepEqual(m.control.shown(), { min: 1, rec: 2, max: 3 }, 'the default before the first /api/state');
     assert.equal(m.el.dataset.known, 'false');
     assert.equal(m.handles.rec.getAttribute('aria-valuetext'), 'Medium');
-    assert.match(m.head.title, /^Effort: Medium, range Low–High\. Applies to new work\.$/);
-    assert.equal(m.head.getAttribute('aria-label'), m.head.title, 'the closed button says the state, not just "Effort"');
+    assert.equal(m.head.getAttribute('aria-label'), 'Primary effort: Medium; helpers Low–High.', 'the closed button says the state, not just "Effort"');
+    assert.ok(!m.head.title, 'no hover-only title: the hint says it on every surface');
+    const hint = m.el.querySelector('.ui-hint');
+    assert.equal(m.head.getAttribute('aria-describedby'), hint.id, 'a reader hears the hint as the description');
+    assert.deepEqual([hint.hidden, ...['word', 'text', 'rule'].map((part) => hint.querySelector(`.ui-hint-${part}`).textContent)],
+        [true, 'Medium', 'Primary effort; helpers between Low and High.', CHANGE_RULE], 'closed, the hint waits with its words');
     assert.match(m.el.querySelector('[data-ring-band]').getAttribute('d'), /^M[\d.]+ [\d.]+ A70 70 0 0 1 /);
     assert.equal(m.segs.length, 7);
     // The strip is the seven levels alone: no title word of its own, no separator element, no reset button.
@@ -132,7 +56,7 @@ test('the control mounts after the pills, closed: ring, name and the recommended
     assert.ok(m.row.children.includes(m.el));
 });
 
-test('/api/state is the one global value: it paints every composer, a stored minimal shows at Low', () => {
+test('an authoritative room value paints the control; a stored minimal shows at Low', () => {
     const m = mount();
     m.control.syncState({ effort_range: { min: 'minimal', recommended: 'high', max: 'ultra' } });
     assert.equal(m.el.dataset.known, 'true');
@@ -234,46 +158,26 @@ test('a drag that ends inside the hover zone does not close the strip a second l
     assert.equal(m.control.isOpen(), false, 'leaving the zone closes it');
 });
 
-test('keyboard: arrows, Home, End, PageUp/PageDown move a handle, save the full triple on each step, and push neighbours', async () => {
+test('keyboard moves primary beyond either bound while each helper handle leaves primary alone', async () => {
     const m = mount();
     m.control.syncState({ effort_range: { min: 'low', recommended: 'medium', max: 'high' } });
     m.headClick(0);
-    m.key('rec', 'ArrowRight');
-    assert.deepEqual(m.control.shown(), { min: 1, rec: 3, max: 3 });
+    m.key('rec', 'End');
     await m.settle();
-    assert.deepEqual(m.saves.at(-1), { min: 'low', recommended: 'high', max: 'high' });
-    m.key('rec', 'ArrowUp');
+    assert.deepEqual(m.saves.at(-1), { min: 'low', recommended: 'ultra', max: 'high' });
+    m.key('rec', 'Home');
     await m.settle();
-    assert.deepEqual(m.control.shown(), { min: 1, rec: 4, max: 4 }, 'rec pushes max along');
-    assert.deepEqual(m.saves.at(-1), { min: 'low', recommended: 'xhigh', max: 'xhigh' });
-    m.key('rec', 'ArrowDown');
+    assert.deepEqual(m.saves.at(-1), { min: 'low', recommended: 'none', max: 'high' });
+    m.key('min', 'End');
     await m.settle();
-    assert.deepEqual(m.control.shown(), { min: 1, rec: 3, max: 4 }, 'a pushed bracket stays where it was pushed');
-    const saved = m.saves.length;
-    m.key('max', 'End');
-    m.key('max', 'End');
+    assert.deepEqual(m.saves.at(-1), { min: 'high', recommended: 'none', max: 'high' });
+    m.key('max', 'Home');
     await m.settle();
-    assert.equal(m.saves.length, saved + 1, 'an unchanged range saves nothing');
-    m.key('max', 'End');
-    m.key('min', 'Home');
+    assert.deepEqual(m.control.shown(), { min: 3, rec: 0, max: 3 });
+    m.key('max', 'PageUp');
     await m.settle();
-    assert.deepEqual(m.saves.at(-1), { min: 'none', recommended: 'high', max: 'ultra' });
-    m.key('min', 'PageUp');
-    m.key('min', 'PageUp');
-    m.key('min', 'PageUp');
-    m.key('min', 'ArrowRight');
-    await m.settle();
-    assert.deepEqual(m.control.shown(), { min: 4, rec: 4, max: 6 }, 'min pushes rec along');
-    assert.deepEqual(m.saves.at(-1), { min: 'xhigh', recommended: 'xhigh', max: 'ultra' });
-    m.key('max', 'PageDown');
-    m.key('max', 'ArrowDown');
-    m.key('max', 'ArrowLeft');
-    await m.settle();
-    assert.deepEqual(m.control.shown(), { min: 4, rec: 4, max: 4 }, 'max comes down to min and never passes it');
-    assert.equal(m.handles.max.getAttribute('aria-valuenow'), '4');
-    assert.equal(m.handles.max.getAttribute('aria-valuetext'), 'X-High');
-    assert.deepEqual(m.saves.at(-1), { min: 'xhigh', recommended: 'xhigh', max: 'xhigh' });
-    assert.equal(m.refreshes.at(-1), true, 'every settled save re-reads /api/state for every composer');
+    assert.deepEqual(m.saves.at(-1), { min: 'high', recommended: 'none', max: 'xhigh' });
+    m.control.destroy();
 });
 
 test('a stored tier outside the owner tiers survives until the owner moves that handle', async () => {
@@ -293,68 +197,37 @@ test('a stored tier outside the owner tiers survives until the owner moves that 
     assert.deepEqual(m.saves.at(-1), { min: 'minimal', recommended: 'low', max: 'high' }, 'the untouched minimum keeps minimal');
     m.key('rec', 'ArrowLeft');
     await m.settle();
-    assert.deepEqual(m.control.shown(), { min: 0, rec: 0, max: 3 }, 'one more step pushes the minimum');
-    assert.deepEqual(m.saves.at(-1), { min: 'none', recommended: 'none', max: 'high' }, 'pushed: rewritten to an owner tier');
+    assert.deepEqual(m.control.shown(), { min: 1, rec: 0, max: 3 }, 'primary may pass the shown minimum');
+    assert.deepEqual(m.saves.at(-1), { min: 'minimal', recommended: 'none', max: 'high' }, 'the untouched bound keeps its stored tier');
 });
 
-test('pointer: a press inside the range moves the recommended level, outside it the nearest bracket; the pill pushes brackets and they stay pushed', async () => {
+test('pointer taps anywhere choose primary, a drag never moves helper bounds, and cancel restores', async () => {
     const m = mount();
     m.control.syncState({ effort_range: { min: 'low', recommended: 'medium', max: 'high' } });
     m.headClick(1);
-    m.down(60);                       // inside: segment 1 -> rec
-    assert.deepEqual(m.control.shown(), { min: 1, rec: 2, max: 3 }, 'a preview is not a commit');
-    assert.equal(m.handles.rec.dataset.dragging, 'true');
-    assert.equal(m.el.dataset.dragging, 'false', 'a press that has not moved is still a tap: its marks animate');
-    assert.equal(m.doc.activeElement, m.handles.rec);
-    m.move(180);                      // segment 4: the pill carries max along
-    assert.equal(m.el.dataset.dragging, 'true', 'once the pointer moves, the marks follow it without animating');
-    assert.equal(m.handles.max.getAttribute('aria-valuenow'), '4', 'the preview shows the pushed bracket');
-    assert.equal(m.handles.rec.style.left, '160px', 'the pill sits on a whole level while dragging');
-    m.move(100);                      // back to segment 2
-    assert.equal(m.handles.max.getAttribute('aria-valuenow'), '4', 'no spring: a pushed bracket stays pushed');
-    m.up(100);
-    await m.settle();
-    assert.deepEqual(m.control.shown(), { min: 1, rec: 2, max: 4 });
-    assert.equal(m.handles.rec.dataset.dragging, 'false');
-    assert.equal(m.el.dataset.dragging, 'false', 'a tap or a key animates again');
-    assert.deepEqual(m.saves.at(-1), { min: 'low', recommended: 'medium', max: 'xhigh' });
-    m.down(250);                      // outside above: segment 6 -> max
+    m.down(60);
+    m.move(250);
+    assert.equal(m.handles.rec.style.left, '240px');
+    assert.equal(m.handles.max.getAttribute('aria-valuenow'), '3');
     m.up(250);
     await m.settle();
-    assert.deepEqual(m.saves.at(-1), { min: 'low', recommended: 'medium', max: 'ultra' });
-    m.down(10);                       // outside below: segment 0 -> min
-    m.up(10);
+    assert.deepEqual(m.saves.at(-1), { min: 'low', recommended: 'ultra', max: 'high' });
+    m.down(10); m.up(10);
     await m.settle();
-    assert.deepEqual(m.saves.at(-1), { min: 'none', recommended: 'medium', max: 'ultra' });
-    // Grab the max bracket (boundary x=280 is level 7-1 = 6) and drag it by two segments: the
-    // offset between the grab point and the bracket is kept, so the bracket lands at 4.
-    m.down(285, { handle: m.handles.max });
-    assert.equal(m.handles.max.dataset.dragging, 'true');
-    m.move(205);
-    m.up(205);
+    assert.deepEqual(m.saves.at(-1), { min: 'low', recommended: 'none', max: 'high' });
+    m.down(165, { handle: m.handles.max }); m.move(285); m.up(285);
     await m.settle();
-    assert.deepEqual(m.control.shown(), { min: 0, rec: 2, max: 4 });
-    assert.deepEqual(m.saves.at(-1), { min: 'none', recommended: 'medium', max: 'xhigh' });
-    // pointercancel cancels the preview, a pushed bracket included, without a save.
+    assert.deepEqual(m.saves.at(-1), { min: 'low', recommended: 'none', max: 'ultra' });
     const before = m.saves.length;
-    m.down(100);
-    m.move(270);
-    assert.equal(m.handles.max.getAttribute('aria-valuenow'), '6');
-    m.cancel();
-    assert.equal(m.handles.rec.dataset.dragging, 'false');
+    m.down(10); m.move(270); m.cancel();
     await m.settle();
     assert.equal(m.saves.length, before);
-    assert.deepEqual(m.control.shown(), { min: 0, rec: 2, max: 4 });
-    assert.equal(m.handles.max.getAttribute('aria-valuenow'), '4', 'the bracket is back where it was saved');
-    // A second pointer's events are ignored while the first drags; a press on the recommended
-    // level's own segment released there changes nothing and saves nothing.
-    m.down(100);
-    m.move(200, 2);
-    m.up(200, 2);
+    assert.deepEqual(m.control.shown(), { min: 1, rec: 0, max: 6 });
+    m.down(10); m.move(200, 2); m.up(200, 2);
     assert.equal(m.handles.rec.dataset.dragging, 'true');
-    m.up(100);
-    await m.settle();
-    assert.equal(m.saves.length, before, 'released where it was pressed: no change, no save');
+    m.up(10); await m.settle();
+    assert.equal(m.saves.length, before);
+    m.control.destroy();
 });
 
 test('a strip that scrolls keeps the handle that moved in view, clear of the fade, and says where it continues', () => {
@@ -379,15 +252,13 @@ test('hover opens only where the button stays under the mouse; alone or scrollin
     const doc = stubDocument();
     const row = doc.createElement('div');
     row.className = 'chat-toolbar-row';
-    const pills = doc.createElement('div');
-    pills.className = 'chat-composer-pills';
-    const swarm = doc.createElement('button');
-    swarm.getBoundingClientRect = () => ({ width: 220 });
-    pills.appendChild(swarm);
-    row.appendChild(pills);
+    const subagents = doc.createElement('div');  // the other capsules, closed
+    subagents.className = 'chat-capsule chat-subagents-mode';
+    subagents.getBoundingClientRect = () => ({ width: 220 });
+    row.appendChild(subagents);
     const styles = new Map([[row, { paddingLeft: '8px', paddingRight: '8px', columnGap: '8px' }]]);
     const win = { ...hoverWindow(true), getComputedStyle: (node) => styles.get(node) || {} };
-    const control = createEffortRangeControl({ row, doc, win, saveEffortRange: async (triple) => ({ effort_range: triple }), showToast: () => {} });
+    const control = createEffortRangeControl({ row, doc, win, saveEffortRange: async body => ({ effort_range: body }), showToast: () => {} });
     const el = control.el;
     el.querySelector('.chat-effort-head').getBoundingClientRect = () => ({ width: 30 });
     el.querySelectorAll('.chat-effort-seg').forEach((seg) => {
@@ -398,12 +269,12 @@ test('hover opens only where the button stays under the mouse; alone or scrollin
     row.getBoundingClientRect = () => ({ width: 440 });  // a Project pane: the strip would stand alone
     enter();
     await sleep(220);
-    assert.equal(control.isOpen(), false, 'no hover-open where the pills would step aside under the mouse');
+    assert.equal(control.isOpen(), false, 'no hover-open where the others would step aside under the mouse');
     leave();
-    row.getBoundingClientRect = () => ({ width: 900 });  // room beside the pills: the button stays put
+    row.getBoundingClientRect = () => ({ width: 900 });  // room beside the others: the button stays put
     enter();
     await sleep(220);
-    assert.equal(control.isOpen(), true, 'hover opens beside the pills');
+    assert.equal(control.isOpen(), true, 'hover opens beside the others');
     control.destroy();
 });
 
@@ -436,20 +307,17 @@ test('fit: beside the other controls when the strip fits there, alone when it do
     const doc = stubDocument();
     const row = doc.createElement('div');
     row.className = 'chat-toolbar-row';
-    const pills = doc.createElement('div');
-    pills.className = 'chat-composer-pills';
-    const swarm = doc.createElement('button');
+    const subagents = doc.createElement('div');
+    subagents.className = 'chat-capsule chat-subagents-mode';
     const context = doc.createElement('div');
     context.className = 'chat-context-mode';
     const sized = (node, width) => { node.getBoundingClientRect = () => ({ width }); };
-    sized(swarm, 120);
-    sized(context, 100);              // the other capsule, closed
-    pills.appendChild(swarm);
-    row.appendChild(pills);
+    sized(subagents, 120);            // the other capsules, closed
+    sized(context, 100);
+    row.appendChild(subagents);
     row.appendChild(context);
     const styles = new Map([
         [row, { paddingLeft: '8px', paddingRight: '8px', columnGap: '8px' }],
-        [pills, { columnGap: '6px' }],
     ]);
     const resize = [];
     const win = {
@@ -457,10 +325,10 @@ test('fit: beside the other controls when the strip fits there, alone when it do
         addEventListener: (type, fn) => { if (type === 'resize') resize.push(fn); }, removeEventListener: () => {},
     };
     const control = createEffortRangeControl({
-        row, doc, win, saveEffortRange: async (triple) => ({ effort_range: triple }), showToast: () => {},
+        row, doc, win, saveEffortRange: async body => ({ effort_range: body }), showToast: () => {},
     });
     const el = control.el;
-    assert.equal(row.children.indexOf(el), 2, 'after the pills and the context capsule');
+    assert.equal(row.children.indexOf(el), 2, 'after the Subagents and Context capsules');
     const q = (selector) => el.querySelector(selector);
     styles.set(el, { borderLeftWidth: '1px', borderRightWidth: '1px' });
     styles.set(q('[data-effort-strip]'), { marginRight: '9.33px' });  // the end gutter
@@ -477,7 +345,7 @@ test('fit: beside the other controls when the strip fits there, alone when it do
     const close = () => head.listeners.get('click').forEach((fn) => fn({ detail: 1 }));
     const facts = () => [el.dataset.fit, el.style.getPropertyValue('--capsule-seg-pad'), el.dataset.tight, el.dataset.label, row.dataset.ownerSolo];
     // Words 228.72 and 14 paddings; the gutter and the borders 11.33; the head 30 bare, 77 with the
-    // name and the divider; beside it Swarm 120 and the context capsule 100, a row gap each (236).
+    // name and the divider; beside it Subagents 120 and Context 100, a row gap each (236).
     open(700);
     assert.deepEqual(facts(), ['inline', '8px', 'false', 'true', undefined], 'the owner row: beside the others at full padding');
     close();
@@ -489,12 +357,12 @@ test('fit: beside the other controls when the strip fits there, alone when it do
     close();
     open(560);
     assert.deepEqual(facts(), ['solo', '8px', 'false', 'true', 'effort'], 'no room beside them: they step aside');
-    sized(swarm, 0);                  // hidden controls measure 0: the width seen before hiding stays
+    sized(subagents, 0);              // hidden controls measure 0: the width seen before hiding stays
     sized(context, 0);
     resize.forEach((fn) => fn());
     assert.deepEqual(facts(), ['solo', '8px', 'false', 'true', 'effort'], 'a resize while alone keeps them aside');
     close();
-    sized(swarm, 120);
+    sized(subagents, 120);
     sized(context, 100);
     open(390);
     assert.deepEqual(facts(), ['solo', '3px', 'true', 'true', 'effort'], 'alone, the name stays down to 3 px');
@@ -613,54 +481,15 @@ test('destroy removes the element, its document listeners and its timers', async
     assert.equal(m.control.isOpen(), false, 'the hover timer died with the control');
 });
 
-/* Both capsules in one composer row, as chat.js builds it: the pills, then the context anchor. */
-function mountPair({ hover = false, reply, win, withBox = false } = {}) {
-    const doc = stubDocument();
-    const box = doc.createElement('section');
-    const row = doc.createElement('div');
-    box.appendChild(row);
-    row.className = 'chat-toolbar-row';
-    row.getBoundingClientRect = () => ({ top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 });  // not laid out: no fit
-    const pills = doc.createElement('div');
-    pills.className = 'chat-composer-pills';
-    row.appendChild(pills);
-    const contextEl = doc.createElement('div');
-    contextEl.className = 'chat-context-mode';
-    contextEl.dataset.contextMode = 'max';
-    row.appendChild(contextEl);
-    const posts = [];
-    const toasts = [];
-    const refreshes = [];
-    const answer = { value: reply || { ok: true } };
-    const controls = createComposerOwnerControls({
-        row, box: withBox ? box : null, doc, win: win || hoverWindow(hover), byId: (suffix) => (suffix === 'context-mode' ? contextEl : null),
-        apiFetch: async (url, init) => { posts.push([url, JSON.parse(init.body)]); return answer.value; },
-        saveEffortRange: async (triple) => ({ effort_range: triple }),
-        showToast: (message, tone) => toasts.push([message, tone]),
-        refreshState: (force) => refreshes.push(force),
-    });
-    const fire = (node, type, event) => Promise.all((node.listeners.get(type) || []).map((fn) => fn(event)));
-    const effortEl = controls.effort.el;
-    const seg = (mode) => contextEl.querySelectorAll('.chat-seg').find((node) => node.dataset.mode === mode);
-    return {
-        controls, row, box, doc, contextEl, effortEl, posts, toasts, refreshes, answer, seg,
-        contextHead: contextEl.querySelector('.chat-context-head'), effortHead: effortEl.querySelector('.chat-effort-head'),
-        press: (head, detail = 1) => fire(head, 'click', { detail }),
-        choose: (mode) => fire(contextEl, 'click', { target: { closest: (selector) => (selector === '.chat-seg' ? seg(mode) : null) } }),
-        key: (mode, key) => fire(contextEl.querySelector('.chat-context-strip'), 'keydown', {
-            key, preventDefault() {}, target: { closest: (selector) => (selector === '.chat-seg' ? seg(mode) : null) },
-        }),
-        docDown: (target) => doc.fire('pointerdown', { target }),
-    };
-}
-
 test('the context capsule: ring, Context and the mode; it opens into exactly three modes, one tab stop among them', async () => {
     const m = mountPair();
     assert.ok(m.contextEl.classList.contains('chat-capsule'));
     assert.equal(m.contextEl.getAttribute('aria-label'), 'Context size mode');
     assert.match(m.contextEl.innerHTML, /class="chat-capsule-name">Context</);
     assert.equal(m.contextEl.querySelector('.chat-capsule-value').textContent, 'Max');
-    assert.match(m.contextHead.title, /^Context mode \(owner setting\)\. Nano is the compact owner window/);
+    assert.ok(!m.contextHead.title, 'no hover-only title: the hint says it on every surface');
+    assert.deepEqual(['word', 'text', 'rule'].map((part) => m.contextHint.querySelector(`.ui-hint-${part}`).textContent),
+        ['Max', 'The full context window.', CHANGE_RULE]);
     const segs = m.contextEl.querySelectorAll('.chat-seg');
     // Three modes, a position among them, never a fill level: three arcs and three radios.
     assert.deepEqual(segs.map((node) => node.dataset.mode), ['nano', 'low', 'max']);
@@ -674,11 +503,16 @@ test('the context capsule: ring, Context and the mode; it opens into exactly thr
     assert.equal(m.contextHead.getAttribute('aria-expanded'), 'true');
     assert.deepEqual(segs.map((node) => node.tabIndex), [-1, -1, 0], 'one tab stop: the chosen mode');
     assert.equal(m.doc.activeElement, m.seg('max'), 'the keyboard lands on the chosen mode');
-    m.doc.fire('keydown', { key: 'Escape' });
+    const escape = { key: 'Escape', defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
+    m.doc.fire('keydown', escape);
     assert.equal(m.contextEl.dataset.open, 'false');
+    assert.equal(escape.defaultPrevented, true, 'the capsule took the Escape: a Project room under it stays open');
     assert.equal(m.doc.activeElement, m.contextHead, 'Esc returns focus to the head');
+    const later = { key: 'Escape', defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
+    m.doc.fire('keydown', later);
+    assert.equal(later.defaultPrevented, false, 'a closed capsule leaves Escape to the room');
     m.controls.syncState({ context_mode: 'nano' });
-    assert.equal(m.contextEl.dataset.contextMode, 'nano', 'every composer shows the one global mode');
+    assert.equal(m.contextEl.dataset.contextMode, 'nano', 'the Main composer reads Main mode');
     assert.equal(m.contextEl.querySelector('.chat-capsule-value').textContent, 'Nano');
     m.controls.syncState({ context_mode: 'huge' });
     assert.equal(m.contextEl.dataset.contextMode, 'max', 'an unknown mode reads as Max');
@@ -724,7 +558,7 @@ test('a context choice posts the owner endpoint at once, waits for the answer, s
     assert.equal(m.contextEl.dataset.contextMode, 'max');
     await m.key('max', 'ArrowDown');
     assert.equal(m.posts.length, 5, 'past the end nothing moves and nothing is posted');
-    assert.equal(m.controls.hasPendingSave(), false, 'Send waits for the effort save only');
+    assert.equal(m.controls.hasPendingSave(), false, 'both saves are settled');
     assert.equal(await m.controls.pendingSave(), true);
     m.controls.destroy();
 });
@@ -760,7 +594,7 @@ test('one capsule is open at a time: opening one closes the other at once, a nar
     assert.deepEqual([m.contextEl.dataset.open, m.effortEl.dataset.open], ['false', 'true']);
     await m.press(m.contextHead);
     assert.deepEqual([m.contextEl.dataset.open, m.effortEl.dataset.open], ['true', 'false']);
-    // A narrow line: Effort stands alone (the pills and Context step aside); once it closes and
+    // A narrow line: Effort stands alone (Subagents and Context step aside); once it closes and
     // Context opens, Context is the one alone, never hidden by Effort's flag.
     m.row.dataset.ownerSolo = 'effort';
     m.effortEl.dataset.fit = 'solo';
@@ -803,6 +637,21 @@ test('closed, the capsules keep their names while the line holds them; a narrowe
     m.contextHead.listeners.get('click').forEach((fn) => fn({ detail: 1 }));
     m.controls.syncState({});
     assert.equal(m.row.dataset.ownerCompact, undefined, 'never decided while a strip is open');
+    m.controls.destroy();
+});
+
+test('a phone\'s ☰, gone down beside the field while the row folds, is not the line the capsules are read by', () => {
+    const m = mountPair();
+    const menu = new ElementStub('button', m.doc);
+    menu.className = 'mobile-nav-toggle composer-menu';
+    menu.getBoundingClientRect = () => ({ top: 21, bottom: 53, width: 32 });  // composer_fold.js: at the field's middle
+    m.row.prepend(menu);
+    m.effortEl.getBoundingClientRect = () => ({ top: 40, bottom: 72, width: 130 });  // the names push Effort onto a second line
+    m.controls.syncState({});
+    assert.equal(m.row.dataset.ownerCompact, 'true', 'the capsules\' own line still wraps: the row keeps its fit');
+    m.effortEl.getBoundingClientRect = () => ({ top: 0, bottom: 32, width: 130 });
+    m.controls.syncState({});
+    assert.equal(m.row.dataset.ownerCompact, undefined, 'room again: the names come back');
     m.controls.destroy();
 });
 
@@ -975,3 +824,67 @@ test('a window resize fits the row immediately; destroy cancels a pending frame 
     w.frames[0]();
     assert.equal(m.row.dataset.ownerCompact, undefined, 'a late frame writes nothing');
 });
+
+test('Main and two projects read and save only their room, including delayed context saves', async () => {
+    const main = mountPair(), alpha = mountPair({ projectId: 'alpha' }), beta = mountPair({ projectId: 'beta' });
+    const data = { context_mode: 'max', effort_range: { min: 'low', recommended: 'ultra', max: 'high' }, projects: [
+        { id: 'alpha', cognition: { context_mode: 'low', effort_range: { min: 'high', recommended: 'none', max: 'max' } } },
+        { id: 'beta', cognition: { context_mode: 'nano', effort_range: { min: 'none', recommended: 'max', max: 'low' } } },
+    ] };
+    for (const m of [main, alpha, beta]) m.controls.syncState(data);
+    assert.deepEqual([main, alpha, beta].map(m => m.contextEl.dataset.contextMode), ['max', 'low', 'nano']);
+    assert.deepEqual([main, alpha, beta].map(m => m.controls.effort.stored().recommended), ['ultra', 'none', 'max']);
+    alpha.controls.syncState({ context_mode: 'max', effort_range: data.effort_range });
+    assert.equal(alpha.contextEl.dataset.contextMode, 'low', 'missing project never falls back to Main');
+    let release;
+    alpha.answer.value = new Promise(resolve => { release = resolve; });
+    const saving = alpha.choose('nano');
+    assert.equal(alpha.controls.hasPendingSave(), true);
+    release({ ok: true }); await saving;
+    assert.equal(await alpha.controls.pendingSave(), true);
+    assert.deepEqual(alpha.posts[0], ['/api/owner/context-mode', { mode: 'nano', project_id: 'alpha' }]);
+    assert.equal(main.contextEl.dataset.contextMode, 'max');
+    assert.equal(beta.contextEl.dataset.contextMode, 'nano');
+    alpha.answer.value = { ok: true, json: async () => ({ project_id: 'beta', context_mode: 'max' }) };
+    const refused = alpha.choose('max');
+    const send = alpha.controls.pendingSave();
+    await refused;
+    assert.equal(alpha.contextEl.dataset.contextMode, 'nano', 'foreign-scope response cannot repaint this room');
+    assert.equal(await send, false, 'the save this Send awaited was refused');
+    assert.equal(await alpha.controls.pendingSave(), true, 'a reported refusal does not block a later Send');
+    for (const m of [main, alpha, beta]) m.controls.destroy();
+});
+
+for (const failed of ['context', 'effort']) for (const accepts of [true, false]) {
+    test(`Send waits only for pending controls: old ${failed} refusal, new save ${accepts ? 'accepted' : 'refused'}`, async () => {
+        const m = mountPair({ projectId: 'alpha' });
+        const effort = () => {
+            const handle = m.controls.effort.el.querySelector('.chat-effort-rec');
+            for (const fn of handle.listeners.get('keydown') || []) fn({ key: 'ArrowRight', currentTarget: handle, preventDefault() {} });
+        };
+        try {
+            if (failed === 'context') {
+                m.answer.value = { ok: false, json: async () => ({ error: 'Earlier refusal' }) };
+                await m.choose('low');
+            } else {
+                m.effortAnswer.value = Promise.reject(new Error('Earlier refusal'));
+                effort(); await m.controls.effort.pendingSave();
+            }
+            assert.equal(m.toasts.length, 1);
+            assert.equal(m.controls.hasPendingSave(), false);
+            let resolve, reject;
+            const pending = new Promise((yes, no) => { resolve = yes; reject = no; });
+            if (failed === 'context') { m.effortAnswer.value = pending; effort(); }
+            else { m.answer.value = pending; void m.choose('low'); }
+            assert.equal(m.controls.hasPendingSave(), true);
+            const send = m.controls.pendingSave();
+            if (!accepts) reject(new Error('Current refusal'));
+            else resolve(failed === 'context'
+                ? { project_id: 'alpha', effort_range: { min: 'low', recommended: 'high', max: 'high' } }
+                : { ok: true });
+            assert.equal(await send, accepts, 'only this pending save decides whether Send proceeds');
+            assert.equal(m.toasts.length, accepts ? 1 : 2, 'a refused current save remains visible');
+            assert.equal(m.controls.hasPendingSave(), false);
+        } finally { m.controls.destroy(); }
+    });
+}

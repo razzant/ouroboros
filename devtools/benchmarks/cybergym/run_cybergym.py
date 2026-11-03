@@ -930,9 +930,8 @@ def _prepare_applied_settings(
         "OUROBOROS_PER_TASK_COST_USD": per_task_cost_usd,
         "TOTAL_BUDGET": budget_usd,
         "OUROBOROS_TASK_ABS_CEILING_SEC": timeout_sec,
-        # The measured task does not spend model calls on acceptance review.
-        # ``derive_disabled_tools`` independently withholds the manual review
-        # tool so this applies to both automatic and model-initiated paths.
+        # The measured task does not spend model calls on a result review: Off
+        # refuses one at $0, whether the host or the model asks for it.
         "OUROBOROS_TASK_REVIEW_MODE": "off",
         "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
         "OUROBOROS_REVIEW_MAX_CYCLES": "2",

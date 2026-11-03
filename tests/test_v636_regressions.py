@@ -270,82 +270,6 @@ def test_review_axis_preserves_agent_acceptance_disposition():
     assert decision["agent_rationale"] == "Scope drift."
 
 
-def _apply_agent_acceptance_payload(trace, payload):
-    """Drive the real agent-path acceptance merge through the tool handler."""
-    import json
-
-    from ouroboros.loop_tool_execution import process_tool_results
-
-    process_tool_results(
-        [{
-            "fn_name": "task_acceptance_review",
-            "tool_call_id": "call-agent",
-            "result": json.dumps(payload),
-            "is_error": False,
-            "args_for_log": {},
-            "tool_args": {},
-            "result_meta": {"status": "ok"},
-        }],
-        [],
-        trace,
-        emit_progress=lambda _msg, *, incident=None: None,
-    )
-
-
-def test_agent_decision_cannot_overwrite_host_acceptance_verdict():
-    """v6.78.0 P4.1 + gap G4: the agent path MERGES its stance into the existing
-    host decision. The removed code assigned a WHOLE NEW dict, so merely dropping
-    three keys would still have clobbered the host verdict."""
-    trace = {
-        "tool_calls": [],
-        "acceptance_decision": {
-            "status": "accepted",
-            "reason": "clean_pass",
-            "source": "task_acceptance_review",
-            "rationale": "Quorum PASS.",
-        },
-    }
-    _apply_agent_acceptance_payload(trace, {
-        "request": {"surface": "task_acceptance"},
-        "actors": [],
-        "parsed_findings": [],
-        "aggregate_signal": "PASS",
-        "dissent_noted": True,
-        "agent_decision": {
-            "disposition": "rejected",
-            "source": "agent_task_acceptance_review_tool",
-            "rationale": "Scope drift.",
-        },
-    })
-
-    decision = trace["acceptance_decision"]
-    assert decision["status"] == "accepted"          # host verdict preserved
-    assert decision["reason"] == "clean_pass"
-    assert decision["source"] == "task_acceptance_review"
-    assert decision["rationale"] == "Quorum PASS."
-    assert decision["agent_disposition"] == "rejected"
-    assert decision["agent_rationale"] == "Scope drift."
-    assert decision["dissent_noted"] is True
-
-
-def test_agent_decision_without_host_verdict_stays_status_less():
-    """Gap G5: with no host decision yet the agent path records its stance only —
-    it must NOT fabricate a host status it has no authority to write."""
-    trace = {"tool_calls": []}
-    _apply_agent_acceptance_payload(trace, {
-        "request": {"surface": "task_acceptance"},
-        "actors": [],
-        "parsed_findings": [],
-        "aggregate_signal": "PASS",
-        "agent_decision": {"disposition": "partial", "rationale": "Half done."},
-    })
-
-    decision = trace["acceptance_decision"]
-    assert decision.get("status", "") == ""
-    assert decision["agent_disposition"] == "partial"
-    assert decision["source"] == "agent_task_acceptance_review_tool"
-
-
 def test_provider_unavailable_no_salvage_path_does_not_raise(monkeypatch):
     """claudexor confirm-round finding: the provider-death salvage fallback reads
     ctx.drive_root, so _RoundLimitContext must carry that field — else the no-salvage
@@ -429,18 +353,25 @@ def test_entrypoints_set_dont_write_bytecode_before_project_imports():
 
 
 # --- WA3 review-round: single-reviewer degraded mode is durable across surfaces -
-def test_skill_review_history_persists_single_reviewer_marker(tmp_path):
+
+
+def test_single_reviewer_review_records_its_lost_diversity_durably():
     """v6.36.0 review finding (Bible P3): a one-slot skill TRUST-gate review records
-    single_reviewer_no_diversity DURABLY in review history, not just a log line."""
-    import json as _json
-    from ouroboros.skill_review import _append_skill_review_history, _review_history_path
-    _append_skill_review_history(
-        tmp_path, "demo",
-        status="clean", content_hash="abc", findings=[],
-        single_reviewer_no_diversity=True,
-    )
-    rec = _json.loads(_review_history_path(tmp_path, "demo").read_text(encoding="utf-8").strip().splitlines()[-1])
-    assert rec.get("single_reviewer_no_diversity") is True
+    single_reviewer_no_diversity DURABLY — read off the wave's ledger record (its panel facts)
+    into the outcome the review.json projection persists, never only a log line."""
+    from types import SimpleNamespace
+
+    from ouroboros.skill_review import _outcome_from_result
+
+    result = {"state": "settled", "aggregate": "PASS", "record_id": "rl-one-seat", "reused": False,
+              "panel": {"seats": 1, "single_model_panel": True}, "findings": {}, "cost": {"usd": 0.0},
+              "rows": [{"seat_id": "s1", "observed_model": "openai/gpt-x", "status": "responded",
+                        "requested": {"model": "openai/gpt-x", "route": "api_chat"},
+                        "answers": {"skill": {"status": "responded", "verdict": "PASS", "findings": []}}}]}
+    outcome = _outcome_from_result(SimpleNamespace(name="demo"), SimpleNamespace(tree_sha="abc", delivery={}),
+                                   result, rebuttal_sha="")
+    assert outcome.single_reviewer_no_diversity is True and outcome.record_id == "rl-one-seat"
+    assert outcome.status == "clean" and outcome.reviewer_models == ["openai/gpt-x [s1]"]
 
 
 def test_vlm_allowed_roots_derive_from_policy_matrix(tmp_path, monkeypatch):
@@ -496,7 +427,7 @@ def test_vlm_child_reads_credential_named_runtime_content(tmp_path, monkeypatch)
 
 def test_vlm_project_store_guard_applies(tmp_path):
     """SC-6 read_file parity: the per-project facts store (projects/<id>/) is
-    reachable only via the project-scoped knowledge tools — read_file denies it
+    reachable only via the project-scoped tools — read_file denies it
     for EVERY profile, so the matrix-derived runtime_data admission must too."""
     from ouroboros.tools import vision
 

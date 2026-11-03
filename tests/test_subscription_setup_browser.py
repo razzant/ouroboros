@@ -13,9 +13,11 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 from tests.test_onboarding_complete_endpoint import (
-    LIVE_SNAPSHOT, _profile, _profile_account,
+    LIVE_SNAPSHOT, _pool, _profile,
     onboarding as onboarding,  # explicit re-export of the real atomic settings fixture
 )
+from tests.ui_chat_viewport_smoke import wait_drawer_closed
+from tests.ui_console_errors import PageErrors
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 WEB = Path(__file__).resolve().parents[1] / "web"
@@ -36,7 +38,6 @@ def subscription_ui():
     }]
     posts = []
     reads = []
-    page_errors = []
     backend = {}
     settings = {
         **fixture["preview"]["model_settings"],
@@ -50,7 +51,25 @@ def subscription_ui():
         def log_message(self, *_):
             pass
 
+        def do_HEAD(self):
+            if self.path in backend.get("downloads", {}):
+                self.do_GET()
+                return
+            super().do_HEAD()
+
         def do_GET(self):
+            # Browser-managed downloads may bypass Playwright's page routing.
+            # Tests can give the isolated HTTP server exact download bytes too.
+            if self.path in backend.get("downloads", {}):
+                body = backend["downloads"][self.path]
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Disposition", 'attachment; filename="archive.zip"')
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(body)
+                return
             if self.path == "/onboarding":
                 body = (WEB / "onboarding_template.html").read_text(encoding="utf-8").replace(
                     "__ONBOARDING_BOOTSTRAP__", json.dumps(bootstrap))
@@ -127,10 +146,26 @@ def subscription_ui():
                 body = {"ok": True, "runtime_mode": "advanced", "restart_required": False}
             elif path == "/api/settings":
                 body = {"ok": True, "saved": True}
+            elif path == "/api/owner/safety-model":
+                # Save writes the checker's changed keys first (models, their flags and per-slot
+                # options, the Agents roster), in the gateway's owner transaction.
+                settings.update(payload.get("settings") or {})
+                body = {"ok": True}
         elif path == "/api/claudexor/status":
             body = fixture["status"]
         elif path == "/api/settings":
-            body = settings
+            query = parse_qs(urlparse(request.url).query)
+            if query.get("response_limit_preview") == ["1"] and backend.get("response_preview"):
+                body = backend["response_preview"](query)
+            elif query.get("response_limit_preview") == ["1"]:
+                from ouroboros.context_view_facts import window_projection
+                from ouroboros.context_window import WindowLimit, WindowRecord
+                window = int(query.get("window", [0])[0])
+                body = {"route": {}, "response_limit": {}, "window_ack": False,
+                        "window": window_projection(WindowRecord("fixture", reserve=65536,
+                            total=WindowLimit(window, "total", "user_setting") if window else None))}
+            else:
+                body = settings
         elif path == "/api/review-pool":
             body = backend.get("review_pool", {"pool": [], "excluded": [], "last_executions": {},
                                                "row_costs": {}, "config_error": "", "migration": None})
@@ -163,6 +198,7 @@ def subscription_ui():
             engine = os.environ.get("OUROBOROS_UI_BROWSER_ENGINE", "chromium")
             if engine not in {"chromium", "webkit", "firefox"}:
                 raise ValueError(f"Unsupported browser engine: {engine}")
+            page_errors = PageErrors(None, engine)
             browser = getattr(pw, engine).launch(
                 headless=True, executable_path=os.environ.get("OUROBOROS_UI_BROWSER_EXECUTABLE") or None)
             try:
@@ -173,19 +209,34 @@ def subscription_ui():
                                                **options})
                     page.route_web_socket('**/ws', lambda ws: ws.send(json.dumps({"type": "heartbeat"})))
                     page.route("**/api/**", respond)
-                    page.on("pageerror", lambda error: page_errors.append(str(error)))
-                    return page
+                    # Every error of every page counts unless the test declares a page it navigates
+                    # (``ui["errors"].watch(page)`` before the reload): then only WebKit's report of that
+                    # page's own cut-off fetch is set aside (tests/ui_console_errors.py).
+                    return page_errors.watch(page, navigates=False)
 
                 yield {"page": new_page(), "new_page": new_page, "url": f"http://127.0.0.1:{server.server_port}",
                        "posts": posts, "reads": reads, "fixture": fixture,
                        "settings": settings, "errors": page_errors, "backend": backend, "bootstrap": bootstrap}
-                assert not page_errors
+                assert not page_errors.unexpected(), page_errors.report()
             finally:
                 browser.close()
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def settings_saves(ui):
+    """What each Settings Save wrote: its generic body together with the checker's keys the same
+    Save sent first through the owner transaction (`/api/owner/safety-model`)."""
+    saves, checker = [], {}
+    for path, body in ui["posts"]:
+        if path == "/api/owner/safety-model":
+            checker = {**checker, **(body.get("settings") or {})}
+        elif path == "/api/settings":
+            saves.append({**body, **checker})
+            checker = {}
+    return saves
 
 
 def capture(page, name):
@@ -196,13 +247,49 @@ def capture(page, name):
         page.screenshot(path=str(target / f"{name}.png"), animations="disabled")
 
 
+def test_cursor_login_and_catalog_are_not_execution_readiness(subscription_ui):
+    """Real Accounts and onboarding consumers, no generation or live credentials."""
+    ui = subscription_ui
+    ui["fixture"]["status"]["profiles"]["profiles"] = [{
+        "profile": {"profile_id": "cursor-default", "harness_id": "cursor", "enabled": True},
+        "status": {"verification": "passed", "verification_source": "vendor", "availability": "available"},
+        "identity": {"label": "Cursor account"},
+    }]
+    ui["fixture"]["status"]["harnesses"] = [{
+        "id": "cursor", "display_name": "Cursor", "enabled": True, "status": "ok",
+        "models": [{"id": "cursor-test"}],
+    }]
+    ui["settings"]["OUROBOROS_SUBAGENTS"] = {"enabled": True, "items": []}
+    assert all(source["id"] != "cursor" for source in ui["fixture"]["catalog"]["model_sources"])
+    page = ui["page"]
+    page.goto(ui["url"])
+    page.click('[data-nav-page="settings"]')
+    page.click('[data-settings-tab="providers"]')
+    cursor = page.locator('[data-family="cursor"]')
+    cursor.get_by_text("Signed in", exact=True).wait_for()
+    assert "Login verified" in cursor.inner_text()
+    assert "Connected" not in cursor.inner_text()
+    assert "Sign-in does not verify main-chat support or agent execution" in page.locator(
+        "#harness-accounts-section").inner_text()
+    cursor.scroll_into_view_if_needed()
+    capture(page, "cursor-auth-only-settings")
+    ui["errors"].watch(page)  # leaving Settings may cut off the page's own reads (tests/ui_console_errors.py)
+    page.goto(ui["url"] + "/onboarding")
+    page.wait_for_function("() => document.querySelector('#agents-outcome')?.textContent.includes('Signed in to Cursor')")
+    outcome = page.locator("#agents-outcome").inner_text()
+    assert "Main still needs" in outcome
+    assert "Sign-in does not verify main-chat support or agent execution" in outcome
+    capture(page, "cursor-auth-only-onboarding")
+    assert not ui["posts"] or all(path == "/api/onboarding/subagents/preview" for path, _ in ui["posts"])
+
+
 def test_codex_quick_setup_computes_skipped_steps_and_finishes_once(subscription_ui, onboarding):
     ui = subscription_ui
     ui['backend']['client'] = onboarding.client
     onboarding.calls['snapshot_payload'] = {
         **LIVE_SNAPSHOT, 'harnesses': [LIVE_SNAPSHOT['harnesses'][1]],
-        'profiles': {'harnessAccounts': [_profile_account('codex', 'personal')],
-                     'profiles': [_profile('codex', 'personal')]},
+        'profiles': {'profiles': [_profile('codex', 'personal')], 'harnessAccounts': [],
+                     'accountPools': [_pool('codex', {'kind': 'profile', 'profileId': 'personal'})]},
         'model_catalog': ui['fixture']['catalog']['items'],
     }
     ui['fixture']['status']['profiles']['profiles'] = ui['fixture']['status']['profiles']['profiles'][:1]
@@ -251,9 +338,34 @@ def test_quick_start_requires_a_model_source_for_the_connected_harness(subscript
     assert page.locator("#quick-start-btn").is_visible() is expected
 
 
-def test_model_roles_pin_context_fallback_and_manual_draft_survive_preview(subscription_ui):
+def test_model_roles_pin_context_fallback_and_manual_draft_survive_preview(subscription_ui, tmp_path, monkeypatch):
+    from ouroboros import capability_evidence as ce
+    from ouroboros.llm import LLMClient
+    from ouroboros.provider_models import provider_for_model
+    from ouroboros.response_limits import response_limit_preview
+
     ui = subscription_ui
     page = ui["page"]
+    def catalog(source, profile=None, **_kw):
+        profile = profile or "personal"
+        row = ui["fixture"]["catalog"]["items"][0]
+        return {"source": source, "credentialProfileId": profile, "accountFingerprint": f"identity-{profile}",
+                "observedAt": ce.utc_now_iso(), "provenance": "fixture",
+                "models": [{"id": row["id"], "maxContextWindow": 500000 if profile == "work" else row["max_context_window"],
+                            "maxOutputTokens": 8192 if profile == "work" else 4096}]}
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(catalog))
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    # Discovery stores windows; each passive preview binds them through a fresh local catalog read.
+    for profile in ("personal", "work"):
+        ce.probe(tmp_path, provider="claudexor", model="claudexor::codex=gpt-test", base_url="",
+                 options={"source_id": "codex", "credential_profile_id": profile})
+    before = ce._store_path(tmp_path).read_bytes()
+    def preview(query):
+        model = query["model"][0]
+        return response_limit_preview(tmp_path, {"model": model, "provider": provider_for_model(model), "base_url": "",
+            "use_local": query["local"] == ["true"]}, account=query.get("account", [""])[0], settings=ui["settings"],
+            role=query["role"][0], window=int(query["window"][0]))
+    ui["backend"]["response_preview"] = preview
     page.goto(ui["url"] + "/onboarding")
     page.wait_for_selector('#quick-start-btn:not([hidden])')
     page.click('#next-btn')
@@ -261,23 +373,29 @@ def test_model_roles_pin_context_fallback_and_manual_draft_survive_preview(subsc
     main = page.locator('[data-model-role="main"]')
     light = page.locator('[data-model-role="light"]')
     main.locator('[data-model-role-account]').select_option('personal')
-    held_catalog = []
-    page.route('**/api/model-catalog?*credential_profile_id=work', lambda route: held_catalog.append(route))
+    held_preview = []
+    hold_preview = True
+    preview_pattern = '**/api/settings?*account=work&role=light&*'
+    def release_preview(route):
+        body = preview(parse_qs(urlparse(route.request.url).query))
+        route.fulfill(content_type='application/json', body=json.dumps(body))
+    page.route(preview_pattern, lambda route: held_preview.append(route) if hold_preview else release_preview(route))
     light.locator('[data-model-role-account]').select_option('work')
     main.locator('summary').click()
     light.locator('summary').click()
-    assert 'not known' in light.locator('[data-model-context-note]').inner_text()
+    assert light.locator('[data-model-context-note]').inner_text() == 'Context limit not known for this route.'
     page.wait_for_function("() => document.querySelector('[data-model-role=light] [data-model-role-account]').value === 'work'")
-    assert held_catalog
-    work_catalog = copy.deepcopy(ui['fixture']['catalog'])
-    work_catalog['items'][0].update(credential_profile_id='work', max_context_window=500000)
-    for route in held_catalog:
-        route.fulfill(content_type='application/json', body=json.dumps(work_catalog))
-    page.unroute('**/api/model-catalog?*credential_profile_id=work')
+    assert held_preview
+    hold_preview = False
+    for route in held_preview:
+        release_preview(route)
+    page.unroute(preview_pattern)
     page.wait_for_function("() => document.querySelector('[data-model-role=light] [data-model-context-note]').textContent.includes('500,000')")
-    assert '872,000' in main.locator('[data-model-context-note]').inner_text()
+    page.wait_for_function("() => document.querySelector('[data-model-role=main] [data-model-context-note]').textContent.includes('872,000')")
+    assert '872,000' not in light.locator('[data-model-context-note]').inner_text()
+    assert '500,000' not in main.locator('[data-model-context-note]').inner_text()
     main.locator('[data-model-role-context]').fill('1000000')
-    assert 'set by you' in main.locator('[data-model-context-note]').inner_text()
+    page.wait_for_function("() => document.querySelector('[data-model-role=main] [data-model-context-note]').textContent.includes('set in Settings')")
     page.locator('[data-model-role="vision"] [data-model-role-account]').select_option('work')
     page.click('[data-model-add]')
     fallback = page.locator('[data-model-role-group="fallback"]')
@@ -332,6 +450,7 @@ def test_model_roles_pin_context_fallback_and_manual_draft_survive_preview(subsc
     assert body['OUROBOROS_MODEL_FALLBACKS'] == 'openai::second, claudexor::codex=first'
     (row,) = body['OUROBOROS_SUBAGENTS']['items']
     assert (row['subagent_id'], row['review_eligible'], row['effort']) == ('codex', True, 'high')
+    assert ce._store_path(tmp_path).read_bytes() == before
 
 
 def test_settings_accounts_and_model_roles_use_the_same_compact_components(subscription_ui):
@@ -352,7 +471,7 @@ def test_settings_accounts_and_model_roles_use_the_same_compact_components(subsc
     assert main.locator('input').first.evaluate('(el) => getComputedStyle(el).fontSize') == '14px'
     capture(page, 'settings-models-desktop')
     page.set_viewport_size({'width': 390, 'height': 844})
-    page.wait_for_function("() => document.querySelector('#primary-sidebar').getBoundingClientRect().right <= 1")
+    wait_drawer_closed(page)
     assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
     capture(page, 'settings-models-narrow')
 
@@ -365,12 +484,13 @@ def test_cursor_only_does_not_claim_model_access_and_api_only_finishes(subscript
     }]
     page = ui['page']
     page.goto(ui['url'] + '/onboarding')
-    page.wait_for_function("() => document.querySelector('[data-agent-family=cursor]').textContent.includes('Connected')")
+    page.wait_for_function("() => document.querySelector('[data-agent-family=cursor]').textContent.includes('Signed in')")
     assert page.locator('#quick-start-btn').is_hidden()
     assert page.locator('#next-btn').is_disabled()
     assert 'Main still needs Codex' in page.locator('#agents-outcome').inner_text()
     # Removing the optional agent gives the API-only path the same five steps.
     ui['fixture']['status']['profiles']['profiles'] = []
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.locator('[data-collapse="api-access"] > summary').click()
     page.locator('#openai-key').fill('fixture-api-credential')
@@ -396,8 +516,8 @@ def test_failed_preview_allows_manual_main_and_visible_reviewer_recovery_before_
     onboarding.calls['snapshot_payload'] = {
         **LIVE_SNAPSHOT,
         'harnesses': [{**LIVE_SNAPSHOT['harnesses'][1], 'models': []}],
-        'profiles': {'harnessAccounts': [_profile_account('codex', 'personal')],
-                     'profiles': [_profile('codex', 'personal')]},
+        'profiles': {'profiles': [_profile('codex', 'personal')], 'harnessAccounts': [],
+                     'accountPools': [_pool('codex', {'kind': 'profile', 'profileId': 'personal'})]},
         'model_catalog': ui['fixture']['catalog']['items'],
     }
     page.goto(ui['url'] + '/onboarding')
@@ -557,7 +677,7 @@ def test_late_catalog_does_not_restore_access_after_the_account_disconnects(subs
     assert held
     ui['fixture']['status']['profiles']['profiles'] = []
     page.evaluate("async () => (await import('/onboarding/static/modules/claudexor_status_store.js')).claudexorStatus.refresh()")
-    page.wait_for_function("() => !document.querySelector('[data-agent-family=codex]').textContent.includes('Connected')")
+    page.wait_for_function("() => !document.querySelector('[data-agent-family=codex]').textContent.includes('Signed in')")
     for route in held:
         route.fulfill(content_type='application/json', body=json.dumps(ui['fixture']['catalog']))
     page.unroute('**/api/model-catalog')
@@ -726,8 +846,8 @@ def test_review_shortcut_reconciles_local_vision_before_preview(
     ui['fixture']['status']['profiles']['profiles'] = profiles
     onboarding.calls['snapshot_payload'] = {
         **LIVE_SNAPSHOT, 'harnesses': [LIVE_SNAPSHOT['harnesses'][1]],
-        'profiles': {'harnessAccounts': [_profile_account('codex', 'personal')],
-                     'profiles': [_profile('codex', 'personal')]},
+        'profiles': {'profiles': [_profile('codex', 'personal')], 'harnessAccounts': [],
+                     'accountPools': [_pool('codex', {'kind': 'profile', 'profileId': 'personal'})]},
         'model_catalog': ui['fixture']['catalog']['items'],
     }
     page.evaluate("async () => (await import('/onboarding/static/modules/claudexor_status_store.js')).claudexorStatus.refresh()")

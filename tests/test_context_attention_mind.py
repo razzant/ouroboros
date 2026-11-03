@@ -1,5 +1,5 @@
 """Context attention, Lane B: dialogue-scope units with typed owner protection (3A), the
-per-round facts line (5A), and the model-free rungs of the refusal ladder (7A).
+per-round facts line (5A), and the model-free steps of the refusal passes (7A).
 
 Shares the serial Main fit fixtures of ``tests.test_loop_compaction``.
 """
@@ -10,10 +10,8 @@ import json
 from dataclasses import replace
 from types import SimpleNamespace
 
-import pytest
-
 from ouroboros import context_compaction as cc
-from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY
+from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND, bound_host_row
 from ouroboros.context_source_view import _EMERGENCY_LABELS
 from ouroboros.loop_messages import CONTEXT_FACTS_NAME
 from tests.test_context_reclaim_materializer import _request
@@ -31,9 +29,14 @@ def _tool(call_id="read", text="exact evidence " * 400):
         {"role": "tool", "tool_call_id": call_id, "content": text}]
 
 
+def _owner(text):
+    """The owner's words as delivery types them (``context_budget.OWNER_WORDS_KIND``)."""
+    return {"role": "user", HOST_CONTEXT_KIND_KEY: OWNER_WORDS_KIND, "content": text}
+
+
 def _transcript():
     return [{"role": "system", "content": "SYSTEM"}, {"role": "user", "content": "Assignment: migrate the API."},
-            *_tool("one"), {"role": "assistant", "content": ASSISTANT}, {"role": "user", "content": OWNER},
+            *_tool("one"), {"role": "assistant", "content": ASSISTANT}, _owner(OWNER),
             {"role": "user", "content": HOST}, *_tool("two")]
 
 
@@ -63,21 +66,17 @@ def test_unfinished_protocol_native_and_non_text_rows_stay_atomic():
 
 
 def test_typed_owner_words_protect_their_rows_and_role_user_alone_does_not():
-    from ouroboros.tools.compact_context import owner_protected_texts
-
     messages = _transcript()
     units = cc.context_units(messages, scope="dialogue")
-    directives = [{"role": "user", "content": OWNER}, {"role": "user", "content": [{"type": "text", "text": "Answer: B"}]},
-                  {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,"}}]}]
-    texts = owner_protected_texts(SimpleNamespace(_owner_directives=directives))
-    assert texts == (OWNER, "Answer: B") and owner_protected_texts(SimpleNamespace()) == ()
-    protected = cc.owner_protected_unit_ids(messages, units, texts)
+    protected = cc.owner_protected_unit_ids(messages, units)
     assert [unit.start for unit in units if unit.unit_id in protected] == [5]  # not the host receipt at 6
-    assert cc.owner_protected_unit_ids(messages, units, ()) == frozenset()
-    mixed = _transcript() + [{"role": "user", "content": "[Quiz answered]\nAnswer: B\n(submitted from the web UI)"}]
-    mixed_units = cc.context_units(mixed, scope="dialogue")
-    protected = cc.owner_protected_unit_ids(mixed, mixed_units, ("Answer: B",))
-    assert [unit.start for unit in mixed_units if unit.unit_id in protected] == [len(mixed) - 1]  # whole row
+    untyped = [*messages[:5], {"role": "user", "content": OWNER}, *messages[6:]]  # delivered before typing
+    assert cc.owner_protected_unit_ids(untyped, cc.context_units(untyped, scope="dialogue")) == frozenset()
+    # 17.10.2026: a one-letter answer is a substring of most host rows; only the row's kind protects it.
+    answered = [*messages, _owner("A")]
+    answered_units = cc.context_units(answered, scope="dialogue")
+    protected = cc.owner_protected_unit_ids(answered, answered_units)
+    assert [unit.start for unit in answered_units if unit.unit_id in protected] == [5, len(answered) - 1]
 
 
 def test_authored_view_folds_own_prose_keeps_owner_words_and_restores_exactly(tmp_path):
@@ -85,11 +84,11 @@ def test_authored_view_folds_own_prose_keeps_owner_words_and_restores_exactly(tm
     request = replace(_request(messages, 0), working_note="Migration verified; old API kept.",
                       expected_view_revision=cc.context_reclaim_transcript_sha256(messages), keep_unit_ids=())
     assistant_unit = next(u for u in cc.context_units(messages, scope="dialogue") if cc.unit_kind(messages, u) == "assistant")
-    candidate, receipt, usage = cc.compact_tool_history_llm(
+    candidate, receipt = cc.compact_tool_history_llm(
         messages, request=request, observed_messages=messages, tool_schemas=[], drive_root=tmp_path, task_id="mind",
-        fit_candidate=lambda _m, _t: {"accepted": True}, protected_texts=(OWNER,))
-    assert receipt.status == "applied" and usage is None
-    assert {"role": "user", "content": OWNER} in candidate  # the owner's words, verbatim and whole
+        fit_candidate=lambda _m, _t: {"accepted": True})
+    assert receipt.status == "applied"
+    assert _owner(OWNER) in candidate  # the owner's words, verbatim and whole
     assert not any(m.get("role") == "assistant" and m.get("content") == ASSISTANT for m in candidate)
     assert not any(m.get("role") == "tool" for m in candidate) and candidate[:2] == messages[:2]
     restored, _ = cc._restored_source_views([{"checkpoint_ref": receipt.checkpoint_ref, "unit_id": assistant_unit.unit_id,
@@ -99,19 +98,20 @@ def test_authored_view_folds_own_prose_keeps_owner_words_and_restores_exactly(tm
     assert cc._capsule_metadata(restored[0])[1]["retention"] == "source_view"
 
 
-def test_actual_refusal_runs_the_host_copies_rung_before_any_helper(tmp_path, monkeypatch):
-    """7A end to end on the host side: the refusal opens rung (a) through the real emergency
-    pass (no model), the transcript is republished, and ONE strictly smaller retry follows;
-    the helper is never consulted while a model-free rung can still shrink the request."""
+def test_actual_refusal_runs_the_host_copies_step_first(tmp_path, monkeypatch):
+    """7A end to end on the host side: the refusal opens the first pass through the real emergency
+    pass (no model): superseded host copies collapse, bodies no usable turn showed stay raw, the
+    transcript is republished, and ONE strictly smaller retry follows before any second pass."""
     from ouroboros import loop
 
     context = _ctx(tmp_path)
-    old_facts = {"role": "user", HOST_CONTEXT_KIND_KEY: CONTEXT_FACTS_NAME, "content": HOST * 5}
-    latest_facts = {"role": "user", HOST_CONTEXT_KIND_KEY: CONTEXT_FACTS_NAME, "content": "Current measured facts"}
-    context.messages.extend([*_tool("one"), {"role": "user", "content": OWNER}, old_facts, latest_facts])
+    # 17.10.2026: the owner's one-letter answer "A" is a substring of every host row; it shields nothing now.
+    old_facts = bound_host_row(CONTEXT_FACTS_NAME, "[CONTEXT_FACTS] Answer A recorded. " + HOST * 5)
+    latest_facts = bound_host_row(CONTEXT_FACTS_NAME, "[CONTEXT_FACTS] Current measured facts")
+    context.messages.extend([*_tool("one"), _owner(OWNER), _owner("A"), old_facts, latest_facts])
     inner = context.tools._ctx
     assert not getattr(inner, "_last_context_observation", None)  # first refused request: no usable exposure
-    inner._owner_directives = [{"role": "user", "content": OWNER}]
+    inner._owner_directives = [{"role": "user", "content": OWNER}, {"role": "user", "content": "A"}]
     events, sends = [], []
     def measure(trial, **_kwargs):
         from ouroboros.loop_model_call import _remember_main_fit
@@ -119,7 +119,6 @@ def test_actual_refusal_runs_the_host_copies_rung_before_any_helper(tmp_path, mo
         _remember_main_fit(trial, measured)
         return measured
     monkeypatch.setattr(loop, "_measure_round_main_fit", measure)
-    monkeypatch.setattr(loop, "_run_main_reclaim", lambda *_a, **_kw: pytest.fail("the helper must not run before rung a"))
 
     def dispatch(ctx, disposition, *, candidate_predicate=None, max_tokens=None, **_kwargs):
         sends.append(list(ctx.messages))
@@ -136,12 +135,13 @@ def test_actual_refusal_runs_the_host_copies_rung_before_any_helper(tmp_path, mo
     assert msg["content"] == "fits" and mode == "max" and len(sends) == 2
     assert old_facts in sends[0] and old_facts not in sends[1]
     assert latest_facts in sends[1]
-    assert {"role": "user", "content": OWNER} in sends[1] and sends[1][2:4] == _tool("one")  # bodies: a later rung
+    assert _owner(OWNER) in sends[1] and _owner("A") in sends[1]  # the owner's rows stay whole
+    assert sends[1][2:4] == _tool("one")  # bodies: a later rung
     assert any(_EMERGENCY_LABELS["host_copies"] in json.dumps(m.get("content")) for m in sends[1])
-    assert inner.messages is context.messages and inner._transcript_rewrite_sanctioned == "compaction"
+    assert inner.messages is context.messages and inner._transcript_rewrite_sanctioned == "refusal_pass:host_copies"
     emergency = [e for e in events if e.get("checkpoint_kind") == "context_reclaim_emergency"]
-    assert [(e["rung"], e["status"]) for e in emergency] == [("host_copies", "applied")]
-    assert inner._context_overflow_retries == {("route-a", "exec:round:1", "host_copies")}
+    assert [(e["rung"], e["status"]) for e in emergency] == [("host_copies", "applied"), ("bodies", "no_eligible")]
+    assert inner._context_overflow_retries == {("exec:round:1", "host_copies+bodies")}  # once per round, whatever the route
 
 
 def _candidate(disposition, size):
@@ -159,7 +159,6 @@ def test_a_model_free_wake_delivery_earns_the_first_retry_before_any_rung(tmp_pa
     sends = []
     monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit()]))
     monkeypatch.setattr(loop_model_call, "_project_wake_input", lambda ctx, *, overflowed=False: overflowed)
-    monkeypatch.setattr(loop, "_run_main_reclaim", lambda *_a, **_kw: pytest.fail("no rung before the delivery retry"))
 
     def dispatch(ctx, disposition, *, candidate_predicate=None, **_kwargs):
         sends.append(candidate_predicate)
@@ -176,7 +175,7 @@ def test_a_model_free_wake_delivery_earns_the_first_retry_before_any_rung(tmp_pa
     assert context.tools._ctx._context_overflow_retries == set()
 
 
-def test_memory_rung_passes_the_actual_window_and_current_transcript(tmp_path, monkeypatch):
+def test_memory_step_passes_the_actual_window_and_current_transcript(tmp_path, monkeypatch):
     from ouroboros import loop
     from ouroboros.loop_round_limits import _coarsen_memory_view
 
@@ -184,8 +183,9 @@ def test_memory_rung_passes_the_actual_window_and_current_transcript(tmp_path, m
     monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
 
     def plan(system):
-        p = SimpleNamespace(model="same-model", route_fp="route-a", preferred_mode="max", core_sha256="a" * 64,
-                            core=object(), provider="openai", output_reserve_tokens=65_536, window_tokens=500_000)
+        p = SimpleNamespace(model="same-model", route_fp="route-a", preferred_mode="max", initial_mode="max",
+                            core_sha256="a" * 64, core=object(), provider="openai", output_reserve_tokens=65_536,
+                            window_tokens=500_000)
         p.projection = lambda mode: SimpleNamespace(system_content_json=system, calibration_ratio=1.0)
         p.reproject_transcript = lambda messages, mode: [{"role": "system", "content": system}, *messages[1:]]
 
@@ -206,22 +206,25 @@ def test_memory_rung_passes_the_actual_window_and_current_transcript(tmp_path, m
     # A large transcript changes memory granularity, never the route's physical window.
     fit = _fit(estimated_input=520_000, capacity_deficit=85_536)
     assert _coarsen_memory_view(context, fit) is True
-    # The refusal's measured deficit is what the view must save beyond the level it shows.
+    # Without a measured target the view saves the capacity deficit beyond the level it shows.
     assert seen == [{"window": 500_000, "known": True, "mode": "max", "messages": before,
                      "schemas": [], "reserve": 65_536, "refused": 85_536}]
     assert context.context_fit_plan.window_tokens == 500_000
     assert context.messages[0]["content"] == "COARSE" and context.messages[1:] == before[1:]
     assert context.tools._ctx.context_fit_plan is context.context_fit_plan
     assert _coarsen_memory_view(context, fit) is False  # already at this granularity
+    _coarsen_memory_view(context, fit, saving=12_345)  # the refusal's measured target outranks the deficit
+    assert seen[-1]["refused"] == 12_345
     fitting = _fit(estimated_input=300_000, capacity_deficit=0)  # refused although the estimate fits
     _coarsen_memory_view(context, fitting)
     assert seen[-1]["refused"] == 1  # still a strict narrowing: at least one element
+    # The refusal is the evidence: an unknown window still narrows, without inventing a window number.
     unknown = replace(fit, measurement=replace(fit.measurement, capacity_total_tokens=None))
-    count = len(seen)
-    assert _coarsen_memory_view(context, unknown) is False and len(seen) == count
+    _coarsen_memory_view(context, unknown)
+    assert seen[-1]["window"] == 0 and seen[-1]["known"] is False and seen[-1]["refused"] == 85_536
 
 
-def test_fallback_chain_admits_an_overflow_after_the_ladder_and_keeps_its_other_gates():
+def test_fallback_chain_admits_an_overflow_after_the_passes_and_keeps_its_other_gates():
     from ouroboros import loop_transport
     from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY
 
@@ -244,7 +247,8 @@ def test_facts_line_names_room_money_and_tariff_as_known_or_unknown(tmp_path, mo
     context = _ctx(tmp_path, preferred="low", mode="low")
     context.messages.extend(_tool("one"))
     before = [dict(m) for m in context.messages]
-    monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit(profile="owner_low", mode="low")]))
+    monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit(
+        profile="owner_low", mode="low", anchor_input=110_000, anchor_round=3)]))
     assert append_context_facts(context, money={"wallet": {"status": "known", "remaining_usd": 12.5},
                                                 "quota": "3 of 10 this hour"}) is True
     assert context.messages[:-1] == before  # appended as a new tail row, nothing before it rewritten
@@ -254,10 +258,11 @@ def test_facts_line_names_room_money_and_tariff_as_known_or_unknown(tmp_path, mo
     assert "model same-model" in line and "mode low" in line
     usage = context.accumulated_usage
     # Free room is the window's (#1727); the target is its own fact, measured with the reply floor.
-    free = 500_000 - usage["_context_prompt_estimate"] - usage["_context_reply_allowance_tokens"]
+    free = 500_000 - usage["_context_prompt_estimate"] - usage["_context_response_reserve_tokens"]
     room = 250_000 - usage["_context_prompt_estimate"] - 65_536
-    for part in ("window 500,000", "target 250,000", "input ~120,000 before this line (cold_estimate)",
-                 f"free {free:,}", f"target room {room:,} (reply floor 65,536)",
+    for part in ("window 500,000", "target 250,000",
+                 "input ~120,000 before this line (round 3 accepted 110,000, +10,000 since)",
+                 f"predicted free ~{free:,}", f"target room {room:,} (reply floor 65,536)",
                  "largest unit:2:3:", "own cost unknown",
                  "shared wallet $12.50 known headroom (unreserved; shared with other tasks)",
                  "quota 3 of 10 this hour", "tariff unknown", "elapsed unknown (no recorded start)",
@@ -284,6 +289,48 @@ def test_facts_line_names_room_money_and_tariff_as_known_or_unknown(tmp_path, mo
     unbound.context_fit_plan = None
     assert "input unmeasured" in context_facts_line(unbound, measured=False) and "window unknown" in context_facts_line(unbound, measured=False)
     assert append_context_facts(unbound) is True and "input unmeasured" in unbound.messages[-1]["content"]
+
+
+def test_facts_after_a_refusal_name_the_refused_size_and_no_free_room(tmp_path, monkeypatch):
+    """Both directions: an anchored, unrefused round states free room; once this model refused a
+    size in this task the line names that size and states no free room."""
+    from ouroboros import loop
+    from ouroboros.context_anchor import record_refused_input
+    from ouroboros.loop_messages import append_context_facts
+
+    context = _ctx(tmp_path)
+    monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit(anchor_input=110_000, anchor_round=3)]))
+    assert append_context_facts(context, money={})
+    line = context.messages[-1]["content"]
+    assert "free ~" in line and "refused at" not in line
+    record_refused_input(context.accumulated_usage, context.context_fit_plan, 520_000)
+    context.round_idx = 2
+    assert append_context_facts(context, money={})
+    line = context.messages[-1]["content"]
+    assert "refused at ~520,000" in line and "free unknown" in line and "free ~" not in line
+
+
+def test_after_a_refusal_free_room_is_stated_as_the_measured_lower_bound_or_unknown(tmp_path, monkeypatch):
+    """Review r1 (17.10): a refusal cleared free room for the rest of the task; the window still holds every
+    input this model accepted here, so a smaller view (a renewal, folds) reads a measured lower bound."""
+    from ouroboros import loop
+    from ouroboros.context_anchor import record_refused_input
+    from ouroboros.loop_messages import context_facts_line
+
+    context = _ctx(tmp_path)
+    record_refused_input(context.accumulated_usage, context.context_fit_plan, 933_000)
+    monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit(
+        estimated_input=500_000, anchor_input=490_000, anchor_round=9, accepted_input=921_840,
+        reply_allowance=65_536)]))
+    loop._measure_round_main_fit(context, automatic_pass_used=False)
+    line = context_facts_line(context, measured=True)
+    assert "free unknown (acceptance established no reply room)" in line
+    assert "free ~" not in line and "refused at ~933,000" in line
+    monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit(
+        estimated_input=900_000, anchor_input=890_000, anchor_round=9, accepted_input=921_840,
+        reply_allowance=65_536)]))
+    loop._measure_round_main_fit(context, automatic_pass_used=False)
+    assert "free unknown" in context_facts_line(context, measured=True)  # no room below what it accepted
 
 
 def test_facts_refresh_for_changed_send_but_preserve_all_prior_rows(tmp_path, monkeypatch):
@@ -326,4 +373,4 @@ def test_facts_largest_components_include_core_and_schemas(tmp_path, monkeypatch
     monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit()]))
     assert append_context_facts(context, money={})
     line = context.messages[-1]["content"]
-    assert "system[0:0]" in line and "tool schemas" in line and "unit:2:3:" in line
+    assert "core and books" in line and "tool schemas" in line and "unit:2:3:" in line

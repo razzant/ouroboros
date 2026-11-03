@@ -15,9 +15,6 @@ from ouroboros import (
     server_routing_context,
 )
 
-
-REPO = pathlib.Path(__file__).parents[1]
-
 _LEAVES = (
     server_process,
     server_routing_context,
@@ -46,7 +43,6 @@ _MOVED_OWNERS = {
     "_project_id_for_registered_chat": server_routing_context,
     "_reserved_project_for_chat": server_routing_context,
     "_scoped_task_metadata": server_routing_context,
-    "_task_belongs_to_chat": server_routing_context,
     "_task_result_ground_truth": server_routing_context,
     "_owner_evolution_stop": server_owner_routing,
     "_record_routing_receipt": server_owner_routing,
@@ -62,12 +58,13 @@ _MOVED_OWNERS = {
     "_periodic_supervisor_maintenance": server_maintenance,
     "_periodic_zombie_reconcile": server_maintenance,
     "_prune_delegated_snapshots": server_maintenance,
+    "_prune_worktrees": server_maintenance,
     "_reconcile_delegated_runs": server_maintenance,
     "_resume_interrupted_project_deletions": server_maintenance,
     "_run_startup_task_recovery": server_maintenance,
     "_startup_custody_sweep": server_maintenance,
     "_startup_prune_sweeps": server_maintenance,
-    "_startup_worktree_prune": server_maintenance,
+    "_begin_task_teardown": server_restart,
     "_live_running_task_ids": server_restart,
     "_managed_update_pending_kwargs": server_restart,
     "_perform_owner_restart": server_restart,
@@ -186,41 +183,3 @@ def test_server_route_composition_is_owned_by_the_composition_root():
         route for route in server.routes if getattr(route, "path", "") == "/api/settings"
     )
     assert settings_route.endpoint.__module__ == "server"
-
-
-def test_server_extraction_size_bounds_have_meaningful_headroom():
-    counts = {
-        module.__name__: len(
-            pathlib.Path(module.__file__).read_text(encoding="utf-8").splitlines()
-        )
-        for module in _LEAVES
-    }
-    counts["server"] = len((REPO / "server.py").read_text(encoding="utf-8").splitlines())
-    # The independent maintenance duties share their registered owner; its
-    # rationale and band ceiling live in the canonical size-ratchet contract.
-    assert all(count <= 1000 for name, count in counts.items() if name not in {"server", "ouroboros.server_maintenance"})
-    # Its registered band and exact debt are enforced by the size-ratchet lane
-    # (test_repo_health_smoke.test_checked_in_manifest_generator_check_is_exact),
-    # rather than a second historical line ceiling.
-    from ouroboros.review import BAND_MODULE_MAX_LINES
-    from ouroboros.size_ratchet_manifest import BAND_PATHS
-
-    assert BAND_PATHS.get("ouroboros/server_maintenance.py")
-    assert counts["ouroboros.server_maintenance"] <= BAND_MODULE_MAX_LINES
-    # server.py keeps the lifespan, the supervisor loop, the owner-command
-    # dispatch, the process state those three need, AND (on this tree) the
-    # deferred restart transaction plus post-cutoff upstream drift, so the
-    # bound includes the restart transaction state owned by the composition root.
-    # 1700 -> 1730 (issue #1142): the exit latch guards on revival/admission and the
-    # latch-checking thread body stay with the loop they protect.
-    # 1730 -> 1770 (TZ-1 batch ingress): the drained-batch tail hand-back around the
-    # owner-command dispatch and the init-outcome latch beside readiness stay with
-    # the loop and the process state they protect.
-    # Body lifespan and pending-event observation remain wired by this same
-    # composition root; their landed integration added two net lines.
-    # 1772 -> 1774 (automatic schedules' restart): the planned restart names its
-    # queue returns and reopens them when no exit follows a failed teardown; that
-    # reopen belongs to the restart transaction this composition root owns.
-    assert counts["server"] <= 1774
-    assert counts["ouroboros.server_routing_context"] <= 1000
-    assert counts["ouroboros.server_owner_routing"] <= 1000

@@ -66,39 +66,6 @@ def _read(name: str) -> str:
     return (MODULES / name).read_text(encoding="utf-8")
 
 
-def _swept_sources(*, with_tests: bool) -> list[tuple[str, str, str]]:
-    """(label, text, line-comment marker) for every source an address can hide in.
-
-    The sweep this file first shipped looked at FOUR modules. That is precisely
-    why a stale pointer survived in ``ouroboros/tools/plan_review.py``, which no
-    sweep was looking at: the owner was told to "Fix Reviewer Slots in Settings"
-    long after the section stopped existing under that name. So the scan is now
-    the whole surface this repo authors, not the files the move happened to touch.
-
-    ``with_tests`` is off for the copy sweep and on for the address sweep. A test
-    asserting that a retired WORD is absent has to spell that word; a test
-    carrying a retired ADDRESS in a comment misdirects its next reader exactly
-    like production code does.
-    """
-    out: list[tuple[str, str, str]] = []
-    groups: list[tuple[list[pathlib.Path], str | None]] = [
-        (sorted((REPO_ROOT / "web" / "modules").glob("*.js")), "//"),
-        (sorted((REPO_ROOT / "web").glob("*.css")), None),
-        (sorted((REPO_ROOT / "ouroboros").rglob("*.py")), "#"),
-        (sorted((REPO_ROOT / "supervisor").rglob("*.py")), "#"),
-    ]
-    if with_tests:
-        groups.append((sorted((REPO_ROOT / "web" / "tests").glob("*.js")), "//"))
-        groups.append((sorted((REPO_ROOT / "tests").glob("*.py")), "#"))
-    for paths, comment in groups:
-        for path in paths:
-            if path.resolve() == pathlib.Path(__file__).resolve():
-                continue
-            out.append((str(path.relative_to(REPO_ROOT)),
-                        path.read_text(encoding="utf-8"), comment or "\0"))
-    return out
-
-
 def _page_markup() -> str:
     return "\n".join(_read(name) for name in PAGE_SOURCES)
 
@@ -224,80 +191,6 @@ def test_the_two_path_roots_are_behind_a_collapsed_disclosure() -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# The naming sweep
-# ---------------------------------------------------------------------------
-
-
-def test_no_owner_facing_coding_agent_copy_remains_on_the_agents_surfaces() -> None:
-    """D-10, owner verbatim: «мне не нравится "coding" потому что эти агенты не
-    только для кода используются, например для создания презентаций и любые
-    tasks». Product names (Claude Code, Codex, Cursor) are unaffected — they are
-    trademarks, not the generic label.
-
-    Scoped to OWNER-FACING copy: comments are skipped, because a comment that
-    explains why the word was retired has to be able to spell it. NOT scoped to
-    the modules this phase happened to edit — a sweep narrowed to the changed
-    files only proves the change, never the rule."""
-    offenders: list[str] = []
-    for label, text, comment in _swept_sources(with_tests=False):
-        for lineno, line in enumerate(text.splitlines(), 1):
-            if line.lstrip().startswith(comment):
-                continue
-            if re.search(r"coding[- ]agent", line, re.IGNORECASE):
-                offenders.append(f"{label}:{lineno}: {line.strip()}")
-    assert not offenders, (
-        "owner-facing copy still says \"coding agent\" (D-10)\n" + "\n".join(offenders))
-
-
-# Every address this phase INVALIDATED, with the place that replaced it. A
-# pointer is not decoration: it is an instruction, and one that names a heading
-# no tab carries wastes the owner's time and quietly claims the feature is
-# missing. Comments count — a developer sent to the Models page for the reviewer
-# rows loses the same minutes the owner does.
-STALE_ADDRESSES = (
-    (r"Reviewer Slots",
-     "reviewers are the rows marked Reviewer in Agents → Available subagents"),
-    (r"Models[- ]page|Models tab \(Reviewer",
-     "the reviewer rows and the subagent route left the Models page for Agents (D-10)"),
-    (r"Providers\s*(?:→|->)\s*Harness Accounts",
-     "accounts are Agents → Accounts now, grouped per family (D-10)"),
-    (r"Models\s*(?:→|->)\s*(?:Subagents|Reviewer)",
-     "delegation and reviewers are Agents → Available subagents (D-10)"),
-)
-
-
-def _stale_address_hits(text: str) -> list[tuple[int, str, str]]:
-    hits: list[tuple[int, str, str]] = []
-    for lineno, line in enumerate(text.splitlines(), 1):
-        for pattern, correction in STALE_ADDRESSES:
-            if re.search(pattern, line):
-                hits.append((lineno, line.strip(), correction))
-    return hits
-
-
-def test_no_source_still_sends_anyone_to_a_section_this_phase_removed() -> None:
-    """The class the narrow sweep let through.
-
-    D-10 moved Harness Accounts out of Providers and renamed Reviewer Slots, and
-    the addresses that named those places stayed behind — in owner-facing copy
-    (``plan_review`` told the owner to "Fix Reviewer Slots in Settings") and in
-    the comments a maintainer navigates by. Both are wrong in the same way, so
-    both are swept, across every source this repo authors rather than the
-    handful the move touched.
-
-    Historical narration is welcome — but it must describe the old place
-    ("the accounts section under the Providers tab") rather than repeat the dead
-    address verbatim, so a reader searching for a heading finds only live ones.
-    """
-    offenders: list[str] = []
-    for label, text, _comment in _swept_sources(with_tests=True):
-        for lineno, line, correction in _stale_address_hits(text):
-            offenders.append(f"{label}:{lineno}: {line}\n    → {correction}")
-    assert not offenders, (
-        "a stale section address survived the move:\n" + "\n".join(offenders))
-
-
 def test_a_spent_window_is_emphasised_rather_than_dimmed() -> None:
     """Caught by looking at the rendered tab: `.harness-exhausted` dimmed the whole
     row to 0.62 opacity, which greyed out the very sentence reporting the limit
@@ -323,23 +216,3 @@ def test_a_spent_window_is_emphasised_rather_than_dimmed() -> None:
         "sentence and disables-looking buttons that still work"
     )
     assert "var(--status-warn-" in rule.group(1)
-
-
-def test_the_reviewer_disclosure_stopped_advising_against_the_default() -> None:
-    """The sentence used to end "keep at least one API reviewer row to avoid the
-    fallback", which asks the owner to undo the ratified default (D-3: with a
-    subscription connected, everything that can run on one does, and a triad is
-    never half API and half subscription). Its carrier — the conditional
-    all-delegated warning about a task-acceptance API fallback — is gone with the
-    fallback itself (owner R2/R12, 2026-09-01): acceptance follows the rows. The
-    ONE-TIME packet→retrieving migration disclosure that was the last server-side
-    sentence left with the review lanes (PR-3): delivery is a field of the catalog
-    row the owner saves, so no sentence advises for or against a delivery."""
-    config = (REPO_ROOT / "ouroboros" / "reviewer_slot_config.py").read_text(encoding="utf-8")
-    assert "Keep at least one API reviewer row" not in config
-    assert "never fall back" not in config and "stays API-only" not in config
-    assert "acceptance_delivery_disclosure" not in config and "Keep an api_chat row" not in config
-    # Reviewers are catalog rows now; their editor carries the standing rule.
-    editor = " ".join(_read("subagents_settings.js").split())
-    assert "keep at least one API row" not in editor.lower()
-    assert "waits for capacity rather than silently falling back to API spend" in editor

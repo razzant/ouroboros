@@ -56,12 +56,18 @@ function makeElement(tag) {
     return el;
 }
 
-function installDom() {
+function installDom({ coreOwned = false } = {}) {
     const body = makeElement('body');
     const previous = { document: globalThis.document, window: globalThis.window, fetch: globalThis.fetch };
     globalThis.document = {
         body,
         createElement: makeElement,
+        querySelector(selector) {
+            if (selector === 'meta[name="ouroboros-ui-owner"]') {
+                return coreOwned ? { getAttribute: (name) => name === 'content' ? 'core' : null } : null;
+            }
+            return body.querySelector(selector);
+        },
         getElementById(id) {
             const walk = (node) => {
                 for (const child of node.children) {
@@ -210,20 +216,56 @@ test('a non-2xx readiness answer blocks too, instead of falling through to the a
     }
 });
 
-test('an unconfigured install still frames the one onboarding host', async () => {
-    const dom = installDom();
+test('the core-owned client frames builtin setup without a redundant recovery footer', async () => {
+    const dom = installDom({ coreOwned: true });
     try {
         globalThis.fetch = async () => ({ status: 200, ok: true });
 
         await dom.init();
 
-        const frame = overlayIn(dom.body).querySelector('.onboarding-frame');
+        const overlay = overlayIn(dom.body);
+        const frame = overlay.querySelector('.onboarding-frame');
         assert.equal(frame.src, '/onboarding');
+        assert.equal(overlay.querySelector('.onboarding-recovery'), null);
+        assert.equal(overlay.querySelector('[data-onboarding-recovery]'), null);
+        assert.deepEqual(frame.parentElement.children, [frame], 'no footer takes space from the builtin wizard');
         // The policy itself is owned by FRAME_SANDBOX (the login step's
         // popup capability is decided there, on the completion branch); this
         // pins only that the frame is actually sandboxed by it.
         assert.equal(frame.getAttribute('sandbox'), FRAME_SANDBOX);
         assert.ok(FRAME_SANDBOX.includes('allow-scripts'));
+    } finally {
+        dom.restore();
+    }
+});
+
+test('the copied client can recover a broken selected setup without its iframe JavaScript', async () => {
+    const dom = installDom({ coreOwned: false });
+    let requests = 0;
+    let reloads = 0;
+    try {
+        globalThis.fetch = async () => { requests += 1; return { status: 200, ok: true }; };
+        globalThis.window.location.reload = () => { reloads += 1; };
+        await dom.init();
+        const overlay = overlayIn(dom.body);
+        const frame = overlay.querySelector('.onboarding-frame');
+        const recovery = overlay.querySelector('[data-onboarding-recovery]');
+        assert.equal(frame.src, '/onboarding', 'the selected view is the normal first choice');
+        assert.equal(recovery.textContent, 'Open built-in setup');
+        assert.equal(recovery.type, 'button');
+        assert.equal(frame.querySelector('[data-onboarding-recovery]'), null, 'recovery belongs to the parent');
+        assert.equal(recovery.parentElement.parentElement, frame.parentElement);
+        recovery.click();
+        assert.equal(frame.src, '/onboarding?builtin=1');
+        assert.equal(overlay.querySelector('.onboarding-frame'), frame, 'navigate the same frame');
+        assert.equal(requests, 1, 'recovery saves no settings and starts no second readiness loop');
+        assert.equal(overlayIn(dom.body), overlay, 'opening builtin setup is not completion');
+
+        for (const handler of dom.listeners) handler({
+            origin: window.location.origin, data: { type: 'ouroboros:onboarding-complete', restart_required: false },
+        });
+        assert.equal(overlayIn(dom.body), null, 'the existing completion path still works after recovery');
+        assert.equal(reloads, 1);
     } finally {
         dom.restore();
     }

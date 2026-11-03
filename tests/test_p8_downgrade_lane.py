@@ -6,7 +6,7 @@ appends money rows; the new release reconciles per row and folds the journal. A 
 whose process died between its COMMIT and the chain append reaches the chain at the next boot
 and is read by the old body; a pending invocation the new body recorded is read by the old
 body, which binds it to a run through its own chain append (the legacy custody event the new
-body folds at its next boot); a handoff row the new body wrote after the export conflicts with
+body folds in its legacy reconcile job); a handoff row the new body wrote after the export conflicts with
 the old body's rewrite of the same result and the file wins with the conflict recorded. The
 chain new -> old -> new is run twice, with the two failures around the consume and the switch
 in between (the new body rebuilds from the exported files)."""
@@ -26,7 +26,8 @@ import pytest
 from ouroboros import delegate_custody as c
 from ouroboros import delegate_custody_current as current
 from ouroboros import store, store_switch, task_store, usage_store
-from ouroboros.store_import import ensure_current_store
+from ouroboros.store_import import ensure_current_store, run_legacy_reconcile
+from ouroboros.utils import atomic_write_json
 from tests._usage_store_testing import attempt_rows_in_start_order, seed
 from tests.test_store_import import fixture_root, load
 from tests.test_store_switch import Owner, git
@@ -131,7 +132,7 @@ def test_v760_reads_the_export_and_the_new_release_reconciles_its_writes(lane_ro
     assert boot == {"status": "importing"} and store_switch.wait_ready(root, timeout=60)["status"] == "published"
     assert current.outbox_depth(root) == 0 and "run-dead" in _chain_text(root)
     outcome = _switch_to_old(root, repo, old)
-    assert outcome["status"] == "switched" and outcome["needs"] == {"facts": True, "money": True, "handles": True}
+    assert outcome["status"] == "switched" and outcome["needs"] == {"facts": True, "money": True, "handles": True, "dialogue": True}
     assert store.probe(root)[0] == "absent" and (root / "state" / "usage_attempts.jsonl").exists()
 
     read = old_body(v760, root, "write", tmp_path / "home")
@@ -168,7 +169,11 @@ def test_a_present_store_reconciles_the_old_body_writes_per_row(lane_root, v760,
     task_store.put_handoffs(root, "root1", "launch_handoffs", {"claim-2": HANDOFF})  # the new body, after the export
     read = old_body(v760, root, "write", tmp_path / "home")
     assert read["ids_after"] == ["by-old", "child1", "done1", "root1"] and read["pending"] == "pending"
-    report = ensure_current_store(root)
+    atomic_write_json(root / "state/state.json", {"current_sha": OLD_TAG})
+    opened = ensure_current_store(root, body_sha="current-body")
+    assert opened["status"] == "unchanged" and opened["legacy_reconcile"] == "scheduled"
+    assert load(root, "by-old") is None  # the boot never applies history
+    report = run_legacy_reconcile(root)["root_report"]
     assert report["status"] == "reconciled", report
     assert (report["new"], report["changed"], report["deleted"]) == (1, 1, 1), report
     assert (report["conflicts"], report["legacy_custody"]) == (1, 1), report
@@ -180,7 +185,7 @@ def test_a_present_store_reconciles_the_old_body_writes_per_row(lane_root, v760,
     with store.open_store(root, write=False) as txn:
         conflict = txn.meta("conflicts")["root1"]
     assert "claim-2" in conflict["db_body"] and "claim-1" in conflict["db_body"]
-    started = c.invocation_record(root, "inv-pending")  # the legacy append, folded once at this boot
+    started = c.invocation_record(root, "inv-pending")  # the legacy append, folded once by the job
     assert started["state"] == "started" and started["run_id"] == "run-old" and c.pending_invocations(root) == []
     assert ensure_current_store(root)["status"] == "unchanged" and sorted(c.replay(root)) == ["run-dead", "run-old"]
 

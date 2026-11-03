@@ -1,14 +1,13 @@
 """Real task-detail and census into native Main forms, including hidden publication."""
 import json
-import os
 import re
 import socket
 import traceback
-from pathlib import Path
 
 import pytest
 
 from tests.test_question_room_detail import question_world
+from tests._shared import producer_evidence_dir
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.test_main_shared_state_browser import _REAL_SOCKET_DROP
 
@@ -31,7 +30,8 @@ def test_actual_detail_recovers_native_main_context_and_hidden_publication(direc
                  drive_root=root, require_write=True)
         mark_published(root, tid, 'q')
     server['start_server']()
-    evidence = Path(os.environ.get('OUROBOROS_BROWSER_EVIDENCE_OUT', str(root.parent))) / 'room-proof'
+    evidence = producer_evidence_dir(root.parent, "room-proof",
+                                     env='OUROBOROS_BROWSER_EVIDENCE_OUT') / 'room-proof'
     evidence.mkdir(parents=True, exist_ok=True)
     with socket.socket() as probe:
         probe.bind(('127.0.0.1', 0))

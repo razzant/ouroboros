@@ -1,6 +1,6 @@
 """Read-only skill payload syntax/contract preflight for skill development.
 
-Tri-model review remains authoritative. Preflight uses argv-only subprocesses,
+The skill review remains authoritative. Preflight uses argv-only subprocesses,
 cwd=skill_dir, scrubbed env, 30s timeout, in-process Python compile(), and no
 review/enablement/grant state mutation.
 """
@@ -26,6 +26,7 @@ from ouroboros.tool_access import (
 )
 from ouroboros.tools.process_facts import publish_process_facts, signal_name_for_returncode
 from ouroboros.tools.shell import _active_subprocesses, _kill_process_group, _subprocess_lock
+from ouroboros.tools.shell_process import CommandAdmissionClosed, tracked_start
 from ouroboros.platform_layer import (
     merge_hidden_kwargs,
     subprocess_new_group_kwargs,
@@ -37,6 +38,7 @@ from ouroboros.contracts.skill_manifest import (
 )
 from ouroboros.contracts.plugin_api import ExtensionRegistrationError
 from ouroboros.extension_ui_validation import (
+    validate_contributions,
     validate_settings_schema,
     validate_ui_render,
 )
@@ -67,10 +69,9 @@ _VALIDATORS: Dict[str, Tuple[List[str], str]] = {
     ".bash": (["bash", "-n", "{path}"], "bash"),
 }
 
-# A declared module-widget entry is injected as a CLASSIC inline <script>, so the
-# grammar that matters is the Script goal, not the module goal. `node --check`
-# accepts top-level import/export in a .js file; `new vm.Script(...)` rejects it
-# exactly as the browser will, and it is suffix-independent.
+# Match the declared browser grammar, independently of suffix or package.json:
+# classic entries use Script, explicit ESM uses SourceTextModule. Node --check
+# alone can accept import/export in a classic widget's .js entry.
 _CLASSIC_SCRIPT_VALIDATOR: Tuple[List[str], str] = (
     [
         "node",
@@ -81,6 +82,11 @@ _CLASSIC_SCRIPT_VALIDATOR: Tuple[List[str], str] = (
         "{path}",
     ],
     "node",
+)
+_ESM_VALIDATOR: Tuple[List[str], str] = (
+    ["node", "--experimental-vm-modules", "-e",
+     "const fs=require('fs'),vm=require('vm');"
+     "new vm.SourceTextModule(fs.readFileSync(process.argv[1],'utf8'))", "--", "{path}"], "node",
 )
 
 
@@ -134,7 +140,8 @@ def _run_check(cmd: List[str], cwd: pathlib.Path) -> Dict[str, Any]:
     popen_kwargs.update(subprocess_new_group_kwargs())
     _check_started_ts = time.monotonic()
     try:
-        proc = Popen(cmd, **merge_hidden_kwargs(popen_kwargs))  # noqa: S603 — argv array
+        with tracked_start() as publish:
+            proc = publish(Popen(cmd, **merge_hidden_kwargs(popen_kwargs)))  # noqa: S603 — argv array
     except FileNotFoundError as exc:
         publish_process_facts(
             started_ts=_check_started_ts, pre_exec_failure="FileNotFoundError",
@@ -146,8 +153,9 @@ def _run_check(cmd: List[str], cwd: pathlib.Path) -> Dict[str, Any]:
             "timeout": False,
             "pre_exec_failure": "FileNotFoundError",
         }
-    with _subprocess_lock:
-        _active_subprocesses.add(proc)
+    except CommandAdmissionClosed as exc:  # refused before any child existed: no process facts to publish
+        return {"returncode": None, "stdout": "", "stderr": str(exc), "timeout": False,
+                "pre_exec_failure": type(exc).__name__}
     try:
         try:
             stdout, stderr = proc.communicate(timeout=_PREFLIGHT_TIMEOUT_SEC)
@@ -222,6 +230,8 @@ def _validate_widget_render(
             # The normalized entry is what the frame will fetch; carry it so the
             # caller can check the declared file actually exists on disk.
             row["entry"] = clean["entry"]
+            row["entry_type"] = clean.get("entry_type", "classic")
+            row["assets"] = clean.get("assets", [])
         return row
     except ExtensionRegistrationError as exc:
         return {
@@ -524,32 +534,45 @@ def _widget_entry_exists_finding(
         "ok": ok,
         "verified": True,
         "detail": entry if ok else f"missing or escaping module widget entry: {entry}",
+        "entry_type": row.get("entry_type", "classic"),
     }
 
 
 def _widget_schema_findings(skill_dir: pathlib.Path, manifest: Optional[SkillManifest]) -> List[Dict[str, Any]]:
     findings: List[Dict[str, Any]] = []
+    if manifest is not None and manifest.contributes:
+        _, problems = validate_contributions(manifest, skill_dir=skill_dir)
+        findings.append({"item": "contributions_schema", "source": "manifest.contributes",
+                         "ok": not problems, "verified": True,
+                         "detail": "; ".join(problems) if problems else "valid contributions"})
     if manifest is not None and isinstance(manifest.ui_tab, dict):
-        render = manifest.ui_tab.get("render")
-        schema_row = _validate_widget_render(render, source="manifest.ui_tab.render")
-        findings.append(schema_row)
-        # Generated before the containment early return below: an escaping
-        # plugin path must not silently drop the manifest entry check.
-        entry_row = _widget_entry_exists_finding(skill_dir, schema_row)
-        if entry_row is not None:
-            findings.append(entry_row)
+        findings.append(_validate_widget_render(manifest.ui_tab.get("render"), source="manifest.ui_tab.render"))
     entry_name = str(manifest.entry or "plugin.py") if manifest is not None else "plugin.py"
     plugin = (skill_dir / entry_name).resolve()
     try:
         relative_plugin = plugin.relative_to(skill_dir.resolve())
     except ValueError:
-        return findings
-    if plugin.is_file():
-        for schema_row in _registered_ui_schema_findings(plugin, source_name=relative_plugin.as_posix()):
-            findings.append(schema_row)
-            entry_row = _widget_entry_exists_finding(skill_dir, schema_row)
-            if entry_row is not None:
-                findings.append(entry_row)
+        relative_plugin = None  # Still check manifest entries when the plugin escapes.
+    if relative_plugin is not None and plugin.is_file():
+        findings.extend(_registered_ui_schema_findings(plugin, source_name=relative_plugin.as_posix()))
+    eligible = None
+    for row in list(findings):
+        entry_row = _widget_entry_exists_finding(skill_dir, row)
+        if entry_row is not None:
+            findings.append(entry_row)
+        if row.get("entry_type") != "module":
+            continue
+        if eligible is None:
+            from ouroboros.skill_loader import _iter_payload_files
+
+            root = skill_dir.resolve()
+            eligible = {p.relative_to(root).as_posix() for p in _iter_payload_files(root)}
+        paths = [row["entry"], *row["assets"]]
+        missing = [p for p in paths if p not in eligible or any(
+            part.is_symlink() for part in (root / p, *(root / p).parents)
+            if part != root and root in part.parents)]
+        findings.append({"item": "widget_assets_exist", "source": row["source"], "verified": True,
+                         "ok": not missing, "detail": f"missing, excluded or symlink files: {missing}" if missing else "ok"})
     return findings
 
 
@@ -579,7 +602,7 @@ def _plugin_permission_findings(skill_dir: pathlib.Path, manifest: Optional[Skil
     # receiver is provably the `register(api)` parameter (or an alias assigned
     # from it) keeps blocking power; an unproven receiver DEGRADES to an ok=True
     # note — the disposition every other unprovable preflight check already gets
-    # — and the tri-model review / runtime permission gate stay authoritative.
+    # — and the skill review / runtime permission gate stay authoritative.
     api_names: set[str] = set()
     for node in ast.walk(tree):
         if (
@@ -636,58 +659,6 @@ def _plugin_permission_findings(skill_dir: pathlib.Path, manifest: Optional[Skil
     return findings
 
 
-def _presence_profile_findings(
-    skill_dir: pathlib.Path,
-    manifest: SkillManifest,
-) -> List[Dict[str, Any]]:
-    """Validate the optional reviewed presence declaration without live state."""
-    try:
-        from ouroboros.presence_profile import (
-            PresenceProfileError,
-            parse_presence_profile,
-            presence_profile_fingerprint,
-        )
-    except Exception as exc:
-        log.exception("presence profile preflight failed")
-        return [{
-            "item": "presence_profile",
-            "ok": False,
-            "code": "presence_internal_error",
-            "field": "presence",
-            "detail": f"{type(exc).__name__}: presence validation failed",
-        }]
-    try:
-        profile = parse_presence_profile(manifest, skill_dir)
-    except PresenceProfileError as exc:
-        return [{
-            "item": "presence_profile",
-            "ok": False,
-            "code": exc.code,
-            "field": exc.field,
-            "detail": str(exc),
-        }]
-    except Exception as exc:
-        log.exception("presence profile preflight failed")
-        return [{
-            "item": "presence_profile",
-            "ok": False,
-            "code": "presence_internal_error",
-            "field": "presence",
-            "detail": f"{type(exc).__name__}: presence validation failed",
-        }]
-    if profile is None:
-        return []
-    return [{
-        "item": "presence_profile",
-        "ok": True,
-        "code": "",
-        "field": "presence",
-        "detail": "ok",
-        "profile_fingerprint": presence_profile_fingerprint(profile),
-        "capability_requests": len(profile.capability_requests),
-    }]
-
-
 def _handle_skill_preflight(
     ctx: ToolContext,
     skill: str = "",
@@ -716,7 +687,6 @@ def _handle_skill_preflight(
     manifest_findings: List[Dict[str, Any]] = []
     widget_findings: List[Dict[str, Any]] = []
     permission_findings: List[Dict[str, Any]] = []
-    presence_findings: List[Dict[str, Any]] = []
     manifest: Optional[SkillManifest] = None
     manifest_path = None
     for candidate in ("SKILL.md", "skill.json"):
@@ -733,7 +703,7 @@ def _handle_skill_preflight(
             manifest_findings.append({"item": "manifest_parse", "ok": True, "detail": "ok"})
             widget_findings.extend(_widget_schema_findings(skill_dir, manifest))
             permission_findings.extend(_plugin_permission_findings(skill_dir, manifest))
-            presence_findings.extend(_presence_profile_findings(skill_dir, manifest))
+            # Legacy presence declarations are migration input, not an executable profile.
             if manifest.entry:
                 entry = (skill_dir / manifest.entry).resolve()
                 ok = entry.is_file()
@@ -770,12 +740,15 @@ def _handle_skill_preflight(
             })
             widget_findings.extend(_widget_schema_findings(skill_dir, None))
 
-    # Declared module-widget entries are parsed with classic-script grammar below.
+    # Classic remains suffix-independent; opted-in entries and declared JS use ESM grammar.
     module_entries = {
         (skill_dir / str(f.get("detail") or "")).resolve()
         for f in widget_findings
-        if f.get("item") == "widget_entry_exists" and f.get("ok")
+        if f.get("item") == "widget_entry_exists" and f.get("ok") and f.get("entry_type") != "module"
     }
+    esm_files = {(skill_dir / path).resolve() for f in widget_findings
+                 if f.get("item") == "widget_schema" and f.get("entry_type") == "module"
+                 for path in [f["entry"], *f["assets"]] if path.endswith((".js", ".mjs"))}
 
     # paths scopes recent edits; otherwise walk the reviewable payload surface.
     files_to_check: List[pathlib.Path] = []
@@ -834,17 +807,18 @@ def _handle_skill_preflight(
             })
             continue
         classic_script = path in module_entries
-        validator = _CLASSIC_SCRIPT_VALIDATOR if classic_script else _VALIDATORS.get(suffix)
+        validator = (_CLASSIC_SCRIPT_VALIDATOR if classic_script else
+                     _ESM_VALIDATOR if path in esm_files else _VALIDATORS.get(suffix))
         if validator is None:
             continue
         argv_template, runtime = validator
-        grammar = {"grammar": "classic_script"} if classic_script else {}
+        grammar = {"grammar": "classic_script"} if classic_script else {"grammar": "module"} if path in esm_files else {}
         runtime_path, runtime_reason = _resolve_runtime(runtime)
         rel_path = str(path.relative_to(skill_dir))
         if runtime_path is None:
             # Missing/unusable external runtime is an environment gap, not a
             # syntax verdict. Skip it (do not block) and disclose the health
-            # reason; tri-model review still reads the file in full.
+            # reason; the skill review still reads the file in full.
             reason_note = f" ({runtime_reason})" if runtime_reason else ""
             file_findings.append({
                 "path": rel_path,
@@ -854,7 +828,7 @@ def _handle_skill_preflight(
                 "skip_reason": "runtime_unavailable",
                 "detail": (
                     f"{runtime} not usable{reason_note} — syntax not verified; "
-                    "relying on tri-model review"
+                    "relying on the skill review"
                 ),
                 **grammar,
             })
@@ -870,7 +844,7 @@ def _handle_skill_preflight(
             # (SIGKILL), a preflight-deadline kill, or a runtime that vanished
             # between resolution and exec. This is infrastructure, not a syntax
             # error: only a clean non-zero exit (rc > 0) means bad syntax.
-            # Skip so a working skill is not falsely blocked; tri-model review
+            # Skip so a working skill is not falsely blocked; the skill review
             # remains the authoritative gate.
             if timed_out:
                 skip_reason, detail = "validator_timeout", "timed out"
@@ -889,7 +863,7 @@ def _handle_skill_preflight(
                 "ok": True,
                 "skipped": True,
                 "skip_reason": skip_reason,
-                "detail": f"{runtime} syntax not verified ({detail}); relying on tri-model review",
+                "detail": f"{runtime} syntax not verified ({detail}); relying on the skill review",
                 "returncode": rc,
                 "timeout": timed_out,
                 "stderr": result["stderr"][:2000],
@@ -917,17 +891,16 @@ def _handle_skill_preflight(
     # validated (not skipped) is clean. Skipped findings (missing/killed/
     # timed-out validators) never block — they are environment limitations, not
     # syntax failures — and a file set with nothing syntax-checkable (e.g. only
-    # .txt/.md, or all validators skipped) is tolerated; tri-model review stays
+    # .txt/.md, or all validators skipped) is tolerated; the skill review stays
     # authoritative. A real syntax error (rc > 0) on any non-skipped file blocks.
     # A file count beyond the syntax-check headroom is a DEGRADED note, NOT a block: the
-    # skill-review pass now packs the whole payload under a pack-level token budget (chunked
-    # when oversized) and reads every file, so an arbitrary preflight file-count cap must not
+    # skill review judges every file (a packet seat gets the whole payload when it fits, else its
+    # index and a NOT-delivered statement; retrieving seats read the frozen copy), so a preflight file-count cap must not
     # re-introduce the hard gate the token budget replaced. omitted files are surfaced below.
     overall_ok = (
         all(f.get("ok") for f in manifest_findings)
         and all(f.get("ok") for f in widget_findings)
         and all(f.get("ok") for f in permission_findings)
-        and all(f.get("ok") for f in presence_findings)
         and all(f.get("ok") for f in file_findings if not f.get("skipped"))
     )
     skipped_files = [f for f in file_findings if f.get("skipped")]
@@ -950,14 +923,12 @@ def _handle_skill_preflight(
         "omitted_files": omitted_files,
         "ok": bool(overall_ok),
     }
-    if presence_findings:
-        payload["presence"] = presence_findings
     notes: List[str] = []
     if skipped_files:
         notes.append(
             f"{len(skipped_files)} validator(s) could not run "
             f"({', '.join(sorted({str(f.get('skip_reason') or 'skipped') for f in skipped_files}))}); "
-            "syntax for those files was not verified and tri-model review remains authoritative."
+            "syntax for those files was not verified and the skill review remains authoritative."
         )
     if dynamic_ui_findings:
         notes.append(
@@ -967,11 +938,12 @@ def _handle_skill_preflight(
     if omitted_count:
         notes.append(
             f"{omitted_count} file(s) beyond the {_PREFLIGHT_HARD_FILE_LIMIT}-file syntax-check headroom "
-            "were not individually syntax-checked; the skill-review pass reads every file under its "
-            "pack-level token budget (chunked when oversized) and remains authoritative."
+            "were not individually syntax-checked; the skill review still judges every file (a payload "
+            "too large for a packet seat is named NOT delivered beside its index; retrieving seats read "
+            "the frozen copy) and remains authoritative."
         )
     if notes:
-        # Surface the degradation explicitly (no silent skip): tri-model review
+        # Surface the degradation explicitly (no silent skip): the skill review
         # is authoritative for these files.
         payload["degraded"] = True
         payload["degraded_note"] = " ".join(notes)
@@ -982,12 +954,12 @@ _PREFLIGHT_SCHEMA = {
     "name": "skill_preflight",
     "description": (
         "Read-only payload syntax/contract validator for one skill. Runs Python "
-        "compile() (no __pycache__), bash -n, and node syntax checks (a declared module-widget "
-        "entry gets classic-script grammar) on every reviewable file, or just `paths`, plus a manifest "
-        "parse, module-widget entry existence, and static render-schema validation. Cheap and offline (no LLM, no review.json mutation, "
+        "compile() (no __pycache__), bash -n, and node syntax checks (widget entries stay classic "
+        "unless entry_type: module declares ESM) on every reviewable file, or just `paths`, plus a manifest "
+        "parse, declared widget file existence, and render-schema validation. Cheap and offline (no LLM, no review.json mutation, "
         "no review status change). Skill-development tasks use this before "
         "calling skill_review so silly syntax errors are caught "
-        "without spending tri-model review tokens. Argv-only "
+        "without spending the review panel's tokens. Argv-only "
         "subprocess invocation, cwd=skill_dir, scrubbed env, 30s "
         "per-file cap, panic-tracked process group."
     ),

@@ -29,6 +29,16 @@ def _ctx(drive_root, **kwargs) -> ToolContext:
     )
 
 
+def _write_identity(ctx, content):
+    from hashlib import sha256
+    from ouroboros.memory import Memory
+    from ouroboros.tool_access import canonical_data_root
+
+    mem = Memory(canonical_data_root(ctx))
+    mem.ensure_files()
+    return control_runtime._update_identity(ctx, content, sha256(mem.identity_path().read_bytes()).hexdigest())
+
+
 def _blocks(drive_root):
     path = drive_root / "memory" / "scratchpad_blocks.json"
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
@@ -49,7 +59,7 @@ def test_project_room_writes_the_canonical_identity(tmp_path):
     data = tmp_path / "data"
     data.mkdir()
 
-    result = control_runtime._update_identity(_ctx(data, project_id="proj_p"), _IDENTITY)
+    result = _write_identity(_ctx(data, project_id="proj_p"), _IDENTITY)
 
     assert result.startswith("OK: identity updated")
     assert (data / "memory" / "identity.md").read_text(encoding="utf-8") == _IDENTITY
@@ -71,7 +81,7 @@ def test_identity_is_written_byte_exact_with_no_temp_sibling_left(tmp_path):
         "and I revise this file when experience genuinely changes it.\r\n"
     )
 
-    result = control_runtime._update_identity(_ctx(data), content)
+    result = _write_identity(_ctx(data), content)
 
     assert result.startswith("OK: identity updated")
     memory_dir = data / "memory"
@@ -88,7 +98,7 @@ def test_main_chat_writes_the_same_files(tmp_path):
     ctx = _ctx(data)
 
     control_runtime._update_scratchpad(ctx, _NOTE)
-    control_runtime._update_identity(ctx, _IDENTITY)
+    _write_identity(ctx, _IDENTITY)
 
     assert [block["content"] for block in _blocks(data)] == [_NOTE]
     assert (data / "memory" / "identity.md").read_text(encoding="utf-8") == _IDENTITY
@@ -108,7 +118,7 @@ def test_forked_execution_drive_remembers_into_the_canonical_root(tmp_path):
     )
 
     control_runtime._update_scratchpad(ctx, _NOTE)
-    control_runtime._update_identity(ctx, _IDENTITY)
+    _write_identity(ctx, _IDENTITY)
 
     assert [block["content"] for block in _blocks(canonical)] == [_NOTE]
     assert (canonical / "memory" / "identity.md").read_text(encoding="utf-8") == _IDENTITY

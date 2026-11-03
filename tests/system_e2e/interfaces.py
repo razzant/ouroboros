@@ -565,7 +565,7 @@ class FakeClaudexorDaemon:
         }
         detail: Dict[str, Any] = {
             "id": run["id"],
-            "lastSeq": 3 if terminal else run["polls"],
+            "lastSeq": run.setdefault("terminal_seq", max(3, run["polls"])) if terminal else run["polls"],
             "summary": summary,
             "pendingInteractions": [json.loads(json.dumps(row)) for row in run["pending"]],
         }

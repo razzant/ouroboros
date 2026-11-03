@@ -12,7 +12,7 @@ These tests cover:
 - A known-incompatible model has `temperature` stripped.
 - A known-compatible model keeps `temperature`.
 - Fetch failure (network/parse error) falls back to broad support — no stripping.
-- The cache is populated once per process, not per call.
+- A request reads the catalogue observed off the turn (the boot's prefetch) and never fetches it.
 """
 
 from __future__ import annotations
@@ -30,11 +30,9 @@ def _reset_llm_cache():
     from ouroboros.llm import LLMClient
     LLMClient._SUPPORTED_PARAMS_CACHE.clear()
     LLMClient._SUPPORTED_PARAMS_FETCHED = False
-    LLMClient._REJECTED_PARAMS_CACHE.clear()
     yield
     LLMClient._SUPPORTED_PARAMS_CACHE.clear()
     LLMClient._SUPPORTED_PARAMS_FETCHED = False
-    LLMClient._REJECTED_PARAMS_CACHE.clear()
 
 
 def _install_fake_response(monkeypatch, data: dict[str, Any]) -> dict[str, int]:
@@ -181,6 +179,7 @@ class TestSupportedParametersFilter:
                 ],
             }]
         })
+        LLMClient.prefetch_openrouter_catalog()  # the boot's observation, off every turn
 
         client = LLMClient(api_key="test")
         target = client._resolve_remote_target("anthropic/claude-opus-4.6")
@@ -214,6 +213,7 @@ class TestSupportedParametersFilter:
                 ],
             }]
         })
+        LLMClient.prefetch_openrouter_catalog()
 
         client = LLMClient(api_key="test")
         target = client._resolve_remote_target("anthropic/claude-opus-4.6")
@@ -237,6 +237,7 @@ class TestSupportedParametersFilter:
 
         import requests
         monkeypatch.setattr(requests, "get", exploding_get)
+        LLMClient.prefetch_openrouter_catalog()
 
         client = LLMClient(api_key="test")
         target = client._resolve_remote_target("anthropic/claude-opus-4.6")
@@ -463,34 +464,18 @@ class TestSupportedParametersFilter:
 
         assert captured["client"]["default_headers"] == OPENROUTER_APP_HEADERS
 
-    def test_parameter_rejection_learns_sampling_strip_without_version_gate(self, monkeypatch):
+    def test_historical_model_global_rows_never_mutate_dispatch(self, monkeypatch, tmp_path):
         from ouroboros.llm import LLMClient
+        from ouroboros.provider_models import normalize_model_identity
+        from tests._shared import write_legacy_capability_rows
 
+        # Rows an older release learned, under its durable key (the normalized identity).
+        key = normalize_model_identity("anthropic/claude-opus-4.8") or "anthropic/claude-opus-4.8"
+        monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
+        write_legacy_capability_rows(tmp_path, effort_ceilings={key: "low"},
+                                     rejected_params={key: ["temperature", "extra_body.reasoning"]})
         client = LLMClient(api_key="test")
         target = client._resolve_remote_target("anthropic/claude-opus-4.8")
-        first = client._build_remote_kwargs(
-            target=target,
-            messages=[{"role": "user", "content": "hi"}],
-            reasoning_effort="medium",
-            max_tokens=256,
-            tool_choice="auto",
-            temperature=0.2,
-            tools=None,
-            skip_capability_fetch=True,
-        )
-        assert first["model"] == "anthropic/claude-opus-4.8"
-        assert first.get("temperature") == 0.2
-
-        retry = client._retry_without_optional_sampling(
-            first,
-            "anthropic/claude-opus-4.8",
-            RuntimeError("404 No endpoints found that can handle the requested parameters"),
-        )
-        assert retry is not None
-        assert "temperature" not in retry
-        assert retry["extra_body"]["reasoning"]["effort"] == "medium"
-        assert retry["extra_body"]["provider"]["require_parameters"] is True
-
         kwargs = client._build_remote_kwargs(
             target=target,
             messages=[{"role": "user", "content": "hi"}],
@@ -502,10 +487,11 @@ class TestSupportedParametersFilter:
             skip_capability_fetch=True,
         )
 
-        # Legacy model-global rows stay diagnostic and cannot mutate dispatch.
+        # Stored model-global rows are not dispatch authority.
         assert kwargs["temperature"] == 0.2
+        assert kwargs["extra_body"]["reasoning"]["effort"] == "medium"
 
-    def test_cache_fetched_at_most_once(self, monkeypatch):
+    def test_requests_read_the_catalogue_and_never_fetch_it(self, monkeypatch):
         from ouroboros.llm import LLMClient
 
         call_count = _install_fake_response(monkeypatch, {
@@ -517,9 +503,9 @@ class TestSupportedParametersFilter:
 
         client = LLMClient(api_key="test")
         target = client._resolve_remote_target("anthropic/claude-opus-4.6")
-        # Two back-to-back calls: the second must hit the cache, not the network.
-        for _ in range(2):
-            client._build_remote_kwargs(
+
+        def build():
+            return client._build_remote_kwargs(
                 target=target,
                 messages=[{"role": "user", "content": "hi"}],
                 reasoning_effort="medium",
@@ -528,10 +514,12 @@ class TestSupportedParametersFilter:
                 temperature=0.2,
                 tools=None,
             )
-        assert call_count["n"] == 1, (
-            f"Expected supported_parameters fetch to run exactly once per process, "
-            f"got {call_count['n']} calls"
-        )
+
+        assert build().get("temperature") == 0.2 and call_count["n"] == 0  # cold: unknown, not fetched
+        LLMClient.prefetch_openrouter_catalog()
+        for _ in range(2):
+            build()
+        assert call_count["n"] == 1, f"one observation serves every request, got {call_count['n']} fetches"
 
     def test_unknown_model_falls_back_to_no_stripping(self, monkeypatch):
         """A model missing from OpenRouter's /models list keeps all kwargs."""
@@ -543,6 +531,8 @@ class TestSupportedParametersFilter:
                 "supported_parameters": ["max_tokens"],  # no temperature
             }]
         })
+
+        LLMClient.prefetch_openrouter_catalog()
 
         client = LLMClient(api_key="test")
         # Query a model NOT in our fake response
@@ -558,10 +548,3 @@ class TestSupportedParametersFilter:
         )
         # Unknown model → cache miss → None → no stripping
         assert kwargs.get("temperature") == 0.2
-
-    def test_no_version_specific_sampling_gate_remains(self):
-        import pathlib
-
-        llm_text = pathlib.Path(__file__).resolve().parents[1].joinpath("ouroboros", "llm.py").read_text(encoding="utf-8")
-        assert "claude-opus-4-7" not in llm_text
-        assert "claude-opus-4.7" not in llm_text

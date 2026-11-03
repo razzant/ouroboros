@@ -1,6 +1,6 @@
 // Resources are engine facts, with independent clocks. This leaf presents them
 // and one explicit confirmation; the shared Accounts store owns all transport.
-import { accountName, accountTargetKey, quotaConstraintFact, resourceCapabilitiesRead,
+import { accountCapabilityMarks, accountName, accountTargetKey, quotaConstraintFact, resourceCapabilitiesRead,
     resetRecoverable, READ_OK } from './claudexor_status_store.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { formatRelativeAge } from './ui_helpers.js';
@@ -20,6 +20,18 @@ const dateText = value => {
 };
 const fact = (label, value) => `<div class="resource-fact"><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`;
 const note = value => value ? `<div class="resource-age">${esc(value)}</div>` : '';
+
+/** One muted line per model this account cannot serve right now; the engine probes again later. */
+export function capabilityMarkup(row, payload) {
+    return accountCapabilityMarks(payload, row).map(mark => {
+        const reason = String(mark.provider_reason || '').trim();
+        const brief = reason.length > 160 ? `${reason.slice(0, 159)}\u2026` : reason;
+        const retry = Date.parse(mark.expires_at || '') > Date.now()
+            ? `may be retried ${dateText(mark.expires_at)}` : 'the next request may recheck it';
+        return `<div data-model-capability>${esc(`Cannot serve ${mark.requested_model}${brief ? `: ${brief}` : ''}`
+            + ` \u00b7 temporary mark set ${dateText(mark.observed_at)}; ${retry}`)}</div>`;
+    }).join('');
+}
 
 export function resourceSnapshot(row, payload) {
     return (payload?.resources || []).find(resource => resource.target?.harness === row.harness
@@ -70,8 +82,11 @@ export function resetOutcome(action = {}) {
             ? 'Resource reads are shown below with their own freshness.'
             : 'Usage and remaining resets have not been updated. Refresh reads this account without repeating the reset.',
     };
+    // A reset in flight or not yet confirmed is a quiet fact (never amber, docs/DESIGN.md "Status marks"); the provider's
+    // own "already used" is a warning worth reading.
     if (!receipt || ['pending', 'unknown', 'already_used'].includes(receipt.outcome)) return {
-        tone: 'warn', title: receipt?.state === 'running' ? 'Reset is in progress' : 'Reset outcome is unconfirmed',
+        tone: receipt?.outcome === 'already_used' ? 'warn' : 'neutral',
+        title: receipt?.state === 'running' ? 'Reset is in progress' : 'Reset outcome is unconfirmed',
         body: receipt?.outcome === 'already_used'
             ? 'The provider reports that the reset was already used. This does not confirm that this request applied it.'
             : 'The provider may have applied this request. Check the same request without creating another reset.',

@@ -1,8 +1,8 @@
 """The one SSOT projection of task cost for every producer surface (C2, owner 10=B).
 
-``accounted_upper_bound_usd`` is the honest NAME for what ``cost_usd`` always was:
-the settled + reserved + unresolved upper bound from the physical attempt ledger,
-not a settled receipt. The semantics do not change (owner 10=B); the name does.
+``accounted_upper_bound_usd`` retains the settled + reserved + unresolved
+subtotal from the physical attempt ledger. Unpriced work makes it a subtotal,
+not an upper bound on the whole bill; scoped coverage travels beside it.
 ABI 7.0 (ABI-3, the approved ABI break): the deprecated ``cost_usd`` /
 ``cost_usd_with_children`` aliases are no longer EMITTED anywhere — the write
 seams strip them — while the READ side keeps resolving both spellings so every
@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import threading
+import time
 from typing import Any, Dict, Literal, Mapping, Optional, TypedDict
 
 log = logging.getLogger(__name__)
@@ -46,6 +48,7 @@ COST_OPENNESS_FIELDS = (
     # bound to the scope whose rows produced it, so a card never pairs a root-tree
     # number with own-scope openness (or a parent's zero with a child's unknown).
     "cost_presentation",
+    "cost_custody",
     "cost_accounting_status",
     "cost_accounting_error",
     "cost_final",
@@ -89,6 +92,9 @@ def honest_accounted_amount(source: Optional[Mapping[str, Any]]) -> Optional[flo
         unresolved = float(src.get("unresolved_upper_bound_usd") or 0)
     except (TypeError, ValueError):
         return amount
+    from ouroboros.delegate_custody_usage import cost_coverage_open
+    if amount == 0 and cost_coverage_open(src) and not src.get("priced_rows"):
+        return None
     if amount == 0 and unknown > 0 and reserved == 0 and unresolved == 0:
         return None
     return amount
@@ -157,11 +163,13 @@ def build_cost_presentation(
         return None
     amount = _as_amount(summary.get("accounted_usd")) if priced else None
     integrity_gap = bool(summary.get("integrity_degraded"))
-    open_accounting = open_rows > 0 or integrity_gap
+    from ouroboros.delegate_custody_usage import cost_coverage_open
+    custody_open = cost_coverage_open(summary)
+    open_accounting = open_rows > 0 or integrity_gap or custody_open
     return {
         "scope": str(scope),
         "tracked_amount": round(amount, 6) if amount is not None else None,
-        "has_unpriced": unpriced > 0,
+        "has_unpriced": unpriced > 0 or custody_open,
         "tracked_final": amount is not None and tracked_nonfinal == 0 and not integrity_gap,
         "accounting_open": open_accounting,
         "has_rows": bool(priced or unpriced),
@@ -190,7 +198,7 @@ def resolve_cost_pair(source: Optional[Mapping[str, Any]], new: str, old: str) -
 
 def with_task_cost_presentation(projection: Mapping[str, Any], task: Mapping[str, Any],
                                 drive_root: Any) -> Dict[str, Any]:
-    """Attach a root bucket without altering any existing monetary field.
+    """Attach root-scoped coverage and narrow finality without changing amounts.
 
     A root's first terminal frame can precede the supervisor's subtree refresh.
     It must already explain the tree, including roots that skip synthesis. A
@@ -205,17 +213,22 @@ def with_task_cost_presentation(projection: Mapping[str, Any], task: Mapping[str
     })
     if not lineage["is_root_task"]:
         return dict(projection)
-    carrier = None
+    from ouroboros.delegate_custody_usage import unavailable_cost_custody
+
+    carrier, bucket = None, {}
     if projection.get("cost_accounting_status") == "available":
         try:
             from ouroboros.usage_accounting import usage_breakdown
 
             bucket = usage_breakdown(pathlib.Path(task.get("budget_drive_root") or drive_root),
-                                     root_task_id=str(lineage["root_task_id"] or tid))
+                                     root_task_id=str(lineage["root_task_id"] or tid), custody_root=drive_root, include_custody=True)
             carrier = build_cost_presentation(bucket, scope=COST_SCOPE_ROOT_TREE)
         except Exception:
             log.warning("Root cost presentation unavailable for %s", tid, exc_info=True)
-    return {**projection, "cost_presentation": carrier}
+    return {**projection, "cost_presentation": carrier,
+            "cost_custody": bucket.get("cost_custody") or unavailable_cost_custody(),
+            "cost_final": bool(projection.get("cost_final") and bucket.get("cost_final")),
+            "cost_with_children_partial": bool(projection.get("cost_with_children_partial") or not bucket.get("cost_final"))}
 
 
 def honest_cost_pair_amount(
@@ -227,6 +240,13 @@ def honest_cost_pair_amount(
     if not present:
         return False, None
     probe = dict(src)
+    carrier = src.get("cost_presentation")
+    scope = COST_SCOPE_OWN if new == COST_ALIAS_PAIRS[0][0] else COST_SCOPE_ROOT_TREE
+    # Public projections omit priced_rows; their same-scope carrier retains the
+    # priced-zero evidence. A different scope or an explicit null proves none.
+    if (_as_amount(raw) == 0 and isinstance(carrier, Mapping) and carrier.get("scope") == scope
+            and carrier.get("has_rows") is True and _as_amount(carrier.get("tracked_amount")) == 0):
+        probe["priced_rows"] = 1
     probe["accounted_usd"] = raw
     return True, honest_accounted_amount(probe)
 
@@ -306,12 +326,12 @@ def carry_cost_meta(source: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
 def live_root_cost_projection(
     task_id: str, task: Mapping[str, Any], event: Mapping[str, Any], drive_root: pathlib.Path,
 ) -> Dict[str, Any]:
-    """Return a non-final root-subtree projection for the existing heartbeat.
+    """Return a non-final root-subtree projection: two reads (custody, then usage).
 
     ``{}`` means no figure: a non-root task, or a root with no attributable
-    subtree rows (absent, not zero). Consumers: the root heartbeat
-    (``supervisor.events_worker_reports``) and the live cost in
-    ``gateway.history``; ``supervisor.events`` re-exports it.
+    subtree rows (absent, not zero). Consumers: ``LiveRootCosts.refresh`` (the
+    figure root heartbeats carry) and the live cost in ``gateway.history``;
+    ``supervisor.events`` re-exports it.
     """
     from ouroboros.task_results import resolve_task_lineage
 
@@ -325,13 +345,13 @@ def live_root_cost_projection(
     if not lineage["is_root_task"]:
         return {}
     try:
-        from ouroboros.usage_accounting import usage_projection
+        from ouroboros.usage_accounting import usage_breakdown
 
-        # Every root heartbeat runs this on the supervisor loop: a contended ledger lock
-        # serves the last validated snapshot, it never parks the loop behind money.
-        usage = usage_projection(
+        # The supervisor's usage flush runs this on its thread (``LiveRootCosts``): a contended
+        # ledger lock serves the last validated snapshot, it never parks the loop behind money.
+        usage = usage_breakdown(
             pathlib.Path(task.get("budget_drive_root") or drive_root),
-            root_task_id=str(lineage["root_task_id"] or task_id), allow_stale=True,
+            root_task_id=str(lineage["root_task_id"] or task_id), allow_stale=True, custody_root=drive_root, include_custody=True,
         )
         # A root-filtered summary with no attributable rows is an empty view,
         # not measured zero.  The task-detail reader applies the same rule:
@@ -345,7 +365,8 @@ def live_root_cost_projection(
                 if key != "metadata_only"
             )
             sessions = max(0, int(usage.get("subscription_sessions") or 0))
-            if attributable_rows == 0 and sessions == 0:
+            from ouroboros.delegate_custody_usage import cost_coverage_open
+            if attributable_rows == 0 and sessions == 0 and not cost_coverage_open(usage):
                 return {}
         unknown = int(usage.get("unknown_unmetered") or 0)
         reserved = float(usage.get("reserved_usd") or 0)
@@ -361,6 +382,7 @@ def live_root_cost_projection(
             "unknown_unmetered": unknown,
             "non_final_rows": int(usage.get("non_final_rows") or 0),
             "ledger_integrity_degraded": bool(usage.get("integrity_degraded")),
+            "cost_custody": usage.get("cost_custody"),
             # Built from THIS bucket, so the amount and its explanation are one fact.
             "cost_presentation": build_cost_presentation(usage, scope=COST_SCOPE_ROOT_TREE),
         }
@@ -373,6 +395,104 @@ def live_root_cost_projection(
         }
     projection.update(cost_final=False, cost_with_children_partial=True)
     return with_cost_aliases(projection)
+
+
+class LiveRootCosts:
+    """The cost figure a root heartbeat carries, read again only when that root's money moved.
+
+    A root heartbeat used to pay ``live_root_cost_projection`` on the supervisor drain itself — a
+    custody snapshot of ``current.sqlite``, a ``usage.sqlite`` read and two path resolutions, per
+    running root, every 30 s (69 % of the drain's handler time on 01.11) — though nothing about the
+    money had changed between two beats. The figure is now that same projection, held per root and
+    read once per CHANGE of the root:
+
+    * ``mark(drive_root, root_task_id)``: the root's subtree reported usage (the ``llm_usage``
+      handler, one per model call);
+    * ``fields(drive_root, task_id, task, event)``: what one heartbeat carries, with no store read —
+      the held figure of a root, ``{}`` for a child, for a root without attributable rows and for a
+      root not read yet (absent, never zero). A root it meets for the first time in this server
+      generation is marked, so its figure exists from the next beat on;
+    * ``refresh(running, drive_root)``: the supervisor's one usage flush per loop turn, after bridge
+      intake (``server_liveness.flush_budget_projection``), reads only the marked roots that still
+      run and forgets roots that left RUNNING. Nothing marked, nothing read.
+
+    Delegated-run custody is read with the usage in the same projection, so a run that started or
+    settled with no model call of the subtree since reaches the figure with the subtree's next usage
+    row: the figure is non-final display (``cost_final`` is False), never admission (§10.28). A read
+    that failed keeps the last figure (the stale-allowed display rule); without one it shows the
+    failure (``cost_accounting_status: unavailable``), and either way the root is read again no
+    sooner than ``BUDGET_PROJECTION_RETRY_SEC``, the retry bound of the sibling budget projection.
+    Keys carry the drive root, so one process's memo never answers for another root. The figure is
+    keyed by the LOGICAL root (the projection's subtree) and remembers which RUNNING task carries it
+    (a hard-timeout retry root runs under a fresh physical id).
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._figures: Dict[tuple, Dict[str, Any]] = {}
+        self._carriers: Dict[tuple, str] = {}  # key -> the RUNNING task id whose heartbeat carries it
+        self._due: Dict[tuple, float] = {}  # key -> monotonic time from which the next read may run
+
+    @staticmethod
+    def _key(drive_root: Any, root_task_id: Any) -> tuple:
+        return (str(drive_root or ""), str(root_task_id or "").strip())
+
+    def mark(self, drive_root: Any, root_task_id: Any) -> None:
+        key = self._key(drive_root, root_task_id)
+        if key[1]:
+            with self._lock:
+                self._due[key] = 0.0  # a change is read at the next flush, whatever retry was pending
+
+    def fields(self, drive_root: Any, task_id: str, task: Mapping[str, Any],
+               event: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        from ouroboros.task_results import resolve_task_lineage
+
+        event = event if isinstance(event, Mapping) else {}
+        lineage = resolve_task_lineage(task_id, metadata=task.get("metadata"), **{
+            key: task.get(key, event.get(key)) for key in (
+                "root_task_id", "parent_task_id", "delegation_role", "original_task_id", "timeout_retry_from")})
+        if not lineage["is_root_task"]:
+            return {}
+        key = self._key(drive_root, lineage["root_task_id"] or task_id)
+        with self._lock:
+            self._carriers[key] = str(task_id)
+            figure = self._figures.get(key)
+            if figure is None:
+                self._due.setdefault(key, 0.0)
+        return dict(figure or {})
+
+    def refresh(self, running: Any, drive_root: Any) -> None:
+        if drive_root is None or not isinstance(running, Mapping):
+            return
+        from ouroboros.runtime_limits import BUDGET_PROJECTION_RETRY_SEC
+
+        now, root = time.monotonic(), str(drive_root)
+        with self._lock:
+            due = [key for key, at in self._due.items() if key[0] == root and at <= now]
+            for key in due:
+                del self._due[key]
+            if due:  # a pass with work also forgets the roots that left RUNNING
+                for key in [key for key, carrier in self._carriers.items()
+                            if key[0] == root and carrier not in running]:
+                    self._carriers.pop(key, None)
+                    self._figures.pop(key, None)
+            carriers = {key: self._carriers.get(key) for key in due}
+        for key, carrier in carriers.items():
+            meta = running.get(carrier) if carrier else None
+            task = meta.get("task") if isinstance(meta, dict) else None
+            if not isinstance(task, dict):
+                continue  # no heartbeat carries this root here: nothing to read for
+            projection = live_root_cost_projection(carrier, task, {}, drive_root)
+            failed = projection.get("cost_accounting_status") == "unavailable"
+            with self._lock:
+                if not (failed and key in self._figures):
+                    self._figures[key] = projection
+                if failed:
+                    self._due.setdefault(key, now + BUDGET_PROJECTION_RETRY_SEC)
+
+
+# The server process's one memo (the supervisor thread marks, reads and flushes it).
+LIVE_ROOT_COSTS = LiveRootCosts()
 
 
 def cost_projection(source: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -406,13 +526,18 @@ def cost_display(source: Optional[Mapping[str, Any]], *, decimals: int = 2) -> s
 
     ``$1.23`` for a final amount, ``$1.23 (upper bound, not final)`` for an open
     one, ``unknown (accounting unavailable or not settled)`` when nothing is
-    accounted.
+    accounted. ``Tracked: $1.23 (total unknown)`` preserves a known subtotal
+    when unpriced work prevents a total or an upper bound.
     """
     projection = cost_projection(source)
     amount = projection["accounted_upper_bound_usd"]
     if amount is None:
         return "unknown (accounting unavailable or not settled)"
     text = f"${amount:.{decimals}f}"
+    from ouroboros.delegate_custody_usage import cost_coverage_open
+    carrier = projection.get("cost_presentation") or {}
+    if carrier.get("has_unpriced") or projection.get("unknown_unmetered") or cost_coverage_open(projection):
+        return f"Tracked: {text} (total unknown)"
     if projection["cost_final"]:
         return text
     return f"{text} (upper bound, not final)"
@@ -424,6 +549,8 @@ __all__ = [
     "COST_SCOPE_OWN",
     "COST_SCOPE_ROOT_TREE",
     "CostPresentation",
+    "LIVE_ROOT_COSTS",
+    "LiveRootCosts",
     "build_cost_presentation",
     "carry_cost_meta",
     "cost_display",

@@ -18,6 +18,7 @@ def file_tools(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(home))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     ctx = ToolContext(repo_dir=system, drive_root=data, workspace_root=workspace,
                       workspace_mode="external", task_id="edit-owner-scope")
     registry = ToolRegistry(repo_dir=system, drive_root=data)
@@ -743,6 +744,42 @@ def test_repo_syntax_failure_is_reported_after_the_edit_lands(file_tools, form):
     assert target.read_text() == '{"value": invalid}\n'
 
 
+@pytest.mark.parametrize("root", ["active_workspace", "runtime_data",  # system_repo: same repo guard, via a candidate
+                                  "task_drive", "artifact_store", "user_files", "skill_payload"])
+def test_exact_edit_shrink_refusal_asks_only_for_force(file_tools, monkeypatch, root):
+    """Owner 1.11.2026: the 30% shrink guard, force=true and Cyber's bypass stay on every lane;
+    an exact edit is not sent back to edit_text, while write_file keeps that advice."""
+    import subprocess
+
+    registry, *_ = file_tools
+    base = _target(file_tools, root)
+    base.mkdir(parents=True, exist_ok=True)
+    target, body = base / "shrink.txt", "keep\n" + "drop\n" * 40
+    path = str(target) if root == "user_files" else target.name
+    target.write_text(body)
+    if root == "active_workspace":  # the repo lane guards tracked files
+        for args in (("init", "-q"), ("add", target.name)):
+            subprocess.run(["git", *args], cwd=base, check=True, capture_output=True)
+    drop = {"old_str": "drop\n" * 40, "new_str": ""}
+    forms = {"edit_text": {"path": path, **drop}, "edit_text_list": {"path": path, "edits": [drop]},
+             "edit_batch": {"edits": [{"path": path, **drop}]},
+             "apply_patch": {"patch": f"*** Update File: {path}\n keep\n" + "-drop\n" * 40}}
+    for form, arguments in forms.items():
+        tool, arguments = form.removesuffix("_list"), {"root": root, **_selectors(root), **arguments}
+        target.write_text(body)
+        refused = registry.execute(tool, arguments)
+        assert "WRITE_BLOCKED" in refused and "force=true; this confirms shrinking every file in the call." in refused
+        assert "edit_text for surgical edits" not in refused and target.read_text() == body, form
+        forced = registry.execute(tool, {**arguments, "force": True})
+        assert forced.startswith(("OK", "✅")) and target.read_text() == "keep\n", (form, forced)
+    target.write_text(body)
+    full = registry.execute("write_file", {"root": root, **_selectors(root), "path": path, "content": "keep\n"})
+    assert "Use edit_text for surgical edits, or pass force=true" in full and target.read_text() == body, full
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+    landed = registry.execute("edit_text", {"root": root, **_selectors(root), **forms["edit_text"]})
+    assert landed.startswith(("OK", "✅")) and target.read_text() == "keep\n", landed
+
+
 def test_duplicate_occurrence_lines_use_reader_unicode_boundaries():
     from ouroboros.tools.core import _str_match_replace
 
@@ -929,7 +966,8 @@ def test_repeated_anchor_is_a_lower_bound_and_repeated_context_is_refused():
     repeated = "def f():\n    a = 1\ndef f():\n    a = 1\n"
     same = _parse_patch("*** Update File: f.py\n@@ def f():\n-    a = 1\n+    a = 9\n")[0][0].hunks
     changed, _notes, failure = _apply_hunks_to_text(repeated, same, "f.py")
-    assert changed is None and "ambiguous" in failure and "line 2, line 4" in failure
+    assert changed is None and "ambiguous" in failure and "2 placements" in failure
+    assert "line 2: before 'def f():'" in failure and "line 4: before 'def f():'" in failure
 
 
 def test_repo_lane_delete_keeps_exact_dirty_tracked_and_binary_bytes(file_tools):

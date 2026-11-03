@@ -100,7 +100,6 @@ class TestCacheAwareReservation:
 
     def test_applied_compaction_makes_the_next_reservation_cold(self, monkeypatch, tmp_path):
         from ouroboros import loop
-        from ouroboros.context_budget import ContextReclaimReceipt
 
         request = _request(task_id="compacted")
         cold = usage_accounting._reservation_cost(request)
@@ -109,25 +108,27 @@ class TestCacheAwareReservation:
             provider=request.provider, ttl_seconds=300.0,
         )
         assert usage_accounting._reservation_cost(request) < cold
-        receipt = ContextReclaimReceipt(
-            status="applied", before_transcript_sha256="a" * 64,
-            after_transcript_sha256="b" * 64, selection_fingerprint="c" * 64,
-            selected_unit_ids=("unit",), reclaimed_tokens=10, goal_reached=True,
-            checkpoint_ref={"path": "checkpoint"}, capsule_refs=(),
-        )
-        monkeypatch.setattr(
-            loop, "compact_tool_history_llm",
-            lambda *_a, **_k: ([{"role": "assistant", "content": "summary"}], receipt, {}),
-        )
-        inner = SimpleNamespace(_pending_compaction=4)
-        loop._run_round_compaction(
-            [{"role": "user", "content": "before"}],
+        from ouroboros.context_compaction import context_reclaim_transcript_sha256
+        from ouroboros.tools.compact_context import _compact_context, record_context_view
+
+        messages = [{"role": "system", "content": "core"}, {"role": "user", "content": "before"},
+                    {"role": "assistant", "content": "", "tool_calls": [{"id": "read", "function": {"name": "read_file", "arguments": "{}"}}]},
+                    {"role": "tool", "tool_call_id": "read", "content": "Long exact evidence " * 200}]
+        inner = SimpleNamespace(active_context_mode="max", task_id="compacted", drive_root=tmp_path)
+        record_context_view(inner, messages, [])
+        assert "requested" in _compact_context(inner, working_note="The evidence was read.", keep_unit_ids=[])
+        monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
+        rebuilt = loop._run_round_compaction(
+            messages,
             loop._CompactionRoundContext(
-                tools=SimpleNamespace(_ctx=inner), drive_root=tmp_path,
+                tools=SimpleNamespace(_ctx=inner, schemas=lambda: []), drive_root=tmp_path,
                 drive_logs=tmp_path, task_id="compacted", round_idx=2,
                 event_queue=None, emit_progress=lambda _text, *, incident=None: None,
+                tool_schemas=[], fit_candidate=lambda *_: {"accepted": True},
             ),
         )
+        assert inner._context_view_receipt["status"] == "applied"
+        assert context_reclaim_transcript_sha256(rebuilt) != context_reclaim_transcript_sha256(messages)
 
         assert usage_accounting._reservation_cost(request) == cold
 
@@ -149,7 +150,7 @@ class TestCacheAwareReservation:
         )
         assert usage_accounting._reservation_cost(request) < cold
 
-        assert "registered late" in registry.execute("enable_tools", {"tools": "read_file"})
+        assert "Call schemas loaded" in registry.execute("enable_tools", {"tools": "read_file"})
         assert usage_accounting._reservation_cost(request) == cold
 
     def test_direct_route_and_ledger_identity_share_a_split(self):
@@ -1278,41 +1279,6 @@ class TestOneCeilingPerTree:
         assert "+$20.00 open holds not counted" in line
         assert "in-task cost ceiling" in line and "$50.00 hard tree cap" in line
         assert task_pacing.tree_spend_line({"settled_usd": None, "accounted_usd": 3.0}, active) == ""
-
-    def test_the_rails_line_names_the_binding_bound(self):
-        ceiling_binds = task_pacing._headroom_phrase(40.0, 10.0, 2.0)
-        wallet_binds = task_pacing._headroom_phrase(3.0, 40.0, 2.0)
-
-        assert ceiling_binds == "$8.00 unreserved budget left (in-task cost ceiling binds)"
-        assert wallet_binds == "$3.00 unreserved shared budget left (wallet binds)"
-        assert task_pacing._headroom_phrase(None, None, None) == "budget left unknown"
-
-    def test_acceptance_rails_use_global_wallet_and_tree_spend(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("TOTAL_BUDGET", "50")
-        from ouroboros.task_results import write_task_result
-        write_task_result(tmp_path, 'root', 'running', billing_group={
-            'billing_group_id': 'root', 'billing_group_limit_usd': 100.0,
-            'billing_group_limit_source': 'initial_task_admission', 'billing_group_limit_revision': 'fixture'})
-        for task_id, root_id, cost in (("child", "root", 42.0), ("other", "other", 7.0)):
-            with usage_accounting.usage_scope(usage_accounting.UsageScope(
-                drive_root=tmp_path, task_id=task_id, root_task_id=root_id,
-                global_limit_usd=50.0, root_limit_usd=100.0,
-            )):
-                reservation = usage_accounting.reserve_attempt(_request(reservation_usd=cost))
-                usage_accounting.mark_dispatched(reservation)
-                usage_accounting.settle_attempt(reservation, {}, cost_usd=cost, cost_final=True)
-        with usage_accounting.usage_scope(usage_accounting.UsageScope(
-            drive_root=tmp_path, task_id="child", root_task_id="root",
-            global_limit_usd=50.0, root_limit_usd=100.0,
-        )):
-            line = task_pacing._acceptance_rails_line_inner(
-                SimpleNamespace(has_deadline=False), self._profile(), 0,
-                {"task_cost_usd": 2.0, "cost_ceiling_usd": 47.0},
-                required_blocking=False,
-            )
-
-        assert "$2.00 spent this task" in line
-        assert "$1.00 unreserved shared budget left (wallet binds)" in line
 
 
 class TestGlobalBudgetDefault:

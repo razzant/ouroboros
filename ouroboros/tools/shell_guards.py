@@ -718,7 +718,7 @@ def _project_store_runtime_data_mentions(
 
     Parity with ``read_file(root=runtime_data)`` / ``_data_read``, which deny the
     per-project store to generic data tools unconditionally (the store is reachable
-    ONLY via the project-scoped knowledge tools — no cross-project peeking). Without
+    ONLY via the project-scoped tools — no cross-project peeking). Without
     this, the light-mode read relaxation let an interpreter read another project's
     facts through a plain ``open()`` while the file API blocked it (v6.55.0)."""
     try:

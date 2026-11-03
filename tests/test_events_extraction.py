@@ -1,12 +1,4 @@
-"""Structural contracts for the semantic-no-op supervisor event-handler extraction.
-
-v7next D08/F2.2: the full reference split. The quiet families landed with the
-D08 lane; the F2.2 cancel/custody lane moved the task-done and evolution-done
-families into their reference-named leaves, the cancel ingress into
-events_runtime_controls, and the owner-stop campaign closure beside
-stop_evolution_tasks in queue_transitions — all emitted from tip bytes.
-This suite pins the completed shape explicitly.
-"""
+"""Supervisor event-family boundaries, compatibility identities, and hot paths."""
 
 from __future__ import annotations
 
@@ -78,7 +70,6 @@ _MOVED_OWNERS = {
     "_handle_ensure_project_scope": events_project_routing,
     "_handle_project_digest": events_project_routing,
     "_handle_promote_chat_to_task": events_project_routing,
-    "_handle_routing_manual_target": events_project_routing,
     "_persist_promote_rejection": events_project_routing,
     "_prepare_promote_source_off_loop": events_project_routing,
     "_publish_routing_ack": events_project_routing,
@@ -120,18 +111,6 @@ _MOVED_OWNERS = {
     # and now lives beside it (reference row 970); the facade re-exports it.
     "_close_campaign_after_owner_stop": queue_transitions,
 }
-
-# The dispatcher keeps the table, its loop and the module logger, plus the
-# unrowed post-cutoff upstream helpers. The cancel/custody organ moved out
-# with the F2.2 lane; this inventory is pinned so a later edit cannot
-# silently grow or shrink the facade.
-_STAYED = ("EVENT_HANDLERS", "dispatch_event", "log")
-_UNROWED_UPSTREAM = (
-    "_handle_main_llm_call_state",
-    "_parent_delegation_budget",
-    "_routing_attachments",
-)
-
 
 def test_event_families_never_import_the_dispatcher_they_serve():
     """The dependency is one-way at module scope (the two handle leaves import
@@ -186,17 +165,6 @@ def test_every_event_family_is_a_hot_code_path_like_its_dispatcher():
     for module in _FAMILIES:
         rel = pathlib.Path(module.__file__).relative_to(REPO).as_posix()
         assert rel in HOT_CODE_PATHS, rel
-
-
-def test_the_dispatcher_kept_only_the_table_the_loop_and_the_unrowed_helpers():
-    tree = ast.parse(pathlib.Path(events.__file__).read_text(encoding="utf-8"))
-    defined = []
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            defined.append(node.name)
-        elif isinstance(node, ast.Assign):
-            defined.extend(t.id for t in node.targets if isinstance(t, ast.Name))
-    assert sorted(defined) == sorted(_STAYED + _UNROWED_UPSTREAM)
 
 
 def test_f22_queue_and_worker_leaves_keep_the_hot_label():

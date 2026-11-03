@@ -27,7 +27,9 @@ retires only the sleep timing; its own readiness never starts or spends under F.
 
 from __future__ import annotations
 
+import copy
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -208,7 +210,7 @@ def test_stop_and_unpublished_or_unknown_selection_authority_admit_nothing(tmp_p
 
     request_cancel(tmp_path, CHILD, reason="owner_stop", source="test")
     stopped = queue.resume_budget_paused_task(CHILD)
-    assert stopped == {"ok": False, "error": "cancel_intent_active"}, stopped
+    assert stopped["ok"] is False and stopped["error"] == "cancel_intent_active", stopped
     assert _reserve(tmp_path, CHILD) == FENCED
 
     (tmp_path / "state" / "queue_dispatch.json").write_text("{not json", encoding="utf-8")
@@ -378,12 +380,19 @@ def test_a_selected_child_that_pauses_again_needs_a_new_resume(tmp_path, monkeyp
 # --- a cold sleep beneath the latch: consumption retires the sleep clock, not the selection --
 
 def _cold_sleep_park(monkeypatch, limit_ctx, **selected):
-    """The member's own cold sleep at its round boundary (``enter_cold_sleep``, scope task)."""
+    """The member's own cold sleep at its round boundary (``enter_cold_sleep``, scope task). Arming already
+    showed a selected sender the latch holds (``dependency_held``): this park is the deliberate repeat."""
+    import json
+
     from ouroboros import budget_pause, model_sleep
+    from ouroboros.task_status import load_effective_task_result
 
     ctx = limit_ctx.tools._ctx
     monkeypatch.setattr(model_sleep, "cold_blockers", lambda _ctx, **_kw: [])
     ctx._model_sleep = {"sleep_id": "s1", "mode": "cold", **model_sleep.selectors(ctx, **selected)}
+    shown = model_sleep.unshown_holds(ctx, {task_id: load_effective_task_result(ctx.budget_drive_root, task_id)
+                                            for task_id in ctx._model_sleep["tasks"] + ctx._model_sleep["senders"]})
+    model_sleep.acknowledge_hold_delivery(ctx, json.dumps({"held": shown}))
     with pytest.raises(budget_pause.BudgetPauseRequested) as raised:
         budget_pause.enter_cold_sleep(limit_ctx)
     budget_pause.end_dispatch_fence(str(ctx.task_id))
@@ -489,7 +498,8 @@ def test_a_warm_park_before_the_cold_notification_keeps_the_selection(tmp_path, 
     worker.proc = SimpleNamespace(pid=77, is_alive=lambda: True)
     cold_started = meta["sleep_parked_at"]
     checkpoint = {"wait_id": "warm-after-cold", "task_attempt": meta["attempt"],
-                  "source_ref": {"x": 1}, "reason": "sleep", "sleep": {"senders": [ROOT]}}
+                  "source_ref": {"x": 1}, "reason": "sleep", "sleep": {"senders": [ROOT]},
+                  "budget_paused_sec": child_ctx._budget_paused_sec, "sleep_started_at": time.time()}
     handle_owner_wait({"task_id": CHILD, "wait_id": checkpoint["wait_id"], "task_attempt": meta["attempt"],
                        "worker_id": worker.wid, "pid": 77, "phase": "park", "checkpoint": checkpoint}, workers)
     warm = {"command": [(c.get("phase"), c.get("reason")) for c in sent if c.get("type") == "owner_wait"],
@@ -518,27 +528,26 @@ def test_a_warm_park_before_the_cold_notification_keeps_the_selection(tmp_path, 
 
 
 def test_a_readiness_wake_beneath_the_latch_neither_starts_nor_spends(tmp_path, monkeypatch):
-    """No owner Resume: the sleeper's own readiness is granted under F, but that grant is
-    never a selection — the launch is refused, nothing is consumed and no send reserves."""
+    """Readiness remains recorded, but the current tree stop vetoes the wake itself."""
     from ouroboros import budget_pause
     from supervisor.sleep_wake import wake_ready_sleepers
     from tests.test_model_sleep import _mail
 
     queue, workers, _sup_ctx, _child, fence_f, sent = _sleeper_under_latch(tmp_path, monkeypatch, senders=[SIBLING])
+    prior_handoff = copy.deepcopy(_pending(workers, CHILD).get("_budget_pause_resume"))
     _mail(tmp_path, CHILD, "done", sender=SIBLING)
     woke = wake_ready_sleepers(queue)
-    assert [outcome.get("ok") for outcome in woke] == [True], woke
-    handoff = _pending(workers, CHILD)["_budget_pause_resume"]
-    assert (handoff["authority"], handoff["root_fence_id"]) == ("sleep_readiness", fence_f), handoff
+    assert [outcome.get("error") for outcome in woke] == ["sleep_wake_vetoed"], woke
+    assert _pending(workers, CHILD).get("_budget_pause_resume") == prior_handoff
     workers.assign_tasks()
     row = budget_pause.budget_pause_row(tmp_path, CHILD)
     evidence = {"fence_f": fence_f, "dispatched": [task["id"] for task in sent], "reserve": _reserve(tmp_path, CHILD),
-                "grant": {key: row["grant"].get(key) for key in ("authority", "consumed_at")}, "state": row["state"],
+                "grant": row.get("grant"), "ready": row.get("sleep_ready"), "state": row["state"],
                 "latch": queue.BUDGET_ROOT_FENCES.get(ROOT)}
     _record("readiness_wake_under_latch", evidence)
     assert evidence["dispatched"] == [] and evidence["reserve"] == FENCED, evidence
-    assert evidence["grant"] == {"authority": "sleep_readiness", "consumed_at": None}, evidence
-    assert evidence["state"] == budget_pause.STATE_RESUME_GRANTED and evidence["latch"]["fence_id"] == fence_f, evidence
+    assert not evidence["grant"] and evidence["ready"], evidence
+    assert evidence["state"] == budget_pause.STATE_PAUSED and evidence["latch"]["fence_id"] == fence_f, evidence
 
 
 @pytest.mark.parametrize("wake", ["readiness", "owner"])
@@ -622,14 +631,14 @@ def _handoff(**overrides):
     ({"_budget_pause_resume": _handoff(grant_id="")}, False),
     ({"_budget_pause_resume": _handoff(authority="sleep_readiness", selected_by="sleep_wake")}, False),
     ({"_budget_pause_resume": _handoff(root_fence_id="E"),
-      "_budget_pause_hold": {"selected": True, "fence_id": "F"}}, False),
+      "_resume_selection": {"fence_id": "F"}}, False),
     ({"_budget_pause_resume": _handoff(), "_budget_pause": {"exact_continuation": True}}, False),
     ({"_budget_pause_resume": _handoff(), "_budget_pause_consumed": {"grant_id": "g1"}}, False),
-    ({"_budget_pause_resume": _handoff(), "_budget_pause_hold": {"selected": False, "reason": "x"}}, False),
+    ({"_budget_pause_resume": _handoff(), "_budget_pause_hold": {"reason": "x"}}, False),
     ({"_budget_pause_resume": _handoff(), "_continuation_prepared": True}, False),
-    ({"_budget_pause_hold": {"selected": True, "fence_id": "F"}}, True),
-    ({"_budget_pause_hold": {"selected": True, "fence_id": "E"}}, False),
-    ({"_budget_pause_hold": {"selected": False, "fence_id": "F"}}, False),
+    ({"_resume_selection": {"fence_id": "F"}}, True),
+    ({"_resume_selection": {"fence_id": "E"}}, False),
+    ({"_budget_pause_hold": {"fence_id": "F"}}, False),
     ({}, False),
 ], ids=["owner", "root_grant", "root_grant_generation_zero", "model_without_root_grant", "older_fence",
         "no_fence_at_grant", "blank_pause", "blank_grant", "sleep_readiness", "exact_decides_over_old_hold",

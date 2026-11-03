@@ -1,346 +1,44 @@
-"""Typed completion for host-admitted presence turns."""
-
+"""Inspect and edit places through the same writer as the owner Places sheet."""
 from __future__ import annotations
 
+import json
+from typing import Any
+from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
 
-import hashlib
-import json
-from typing import Any, List
-
-from ouroboros.tools.registry import ToolContext, ToolEntry
-
+# Frozen forced-finalization records still decode these wire outcomes.
 PRESENCE_OUTCOMES = ("message", "silent", "tool_delivered", "deferred")
-AUTHOR_DISPOSITIONS = ("accepted", "rejected", "partial", "deferred")
-# The initiating call returns before its own operation bound ends; the turn keeps running.
-_INITIATION_MARGIN_SEC = 10.0
 
 
-def _finish_presence(ctx: ToolContext, outcome: str, message: str = "", action: str = "finish",
-                     rationale: str = "", answer_sha256: str | None = None,
-                     pending_review: str | None = None, author_disposition: str = "",
-                     acceptance_subject: dict | None = None) -> str:
-    contract = getattr(ctx, "task_contract", {})
-    if not isinstance(contract, dict) or not isinstance(contract.get("capability_ceiling"), dict):
-        return _publish_tool_result(ctx, ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE", text=("ERROR: PRESENCE_COMPLETION_UNAVAILABLE: this is not a host-admitted presence turn.")))
-    selected = str(outcome or "").strip()
-    if selected not in PRESENCE_OUTCOMES:
-        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=("ERROR: PRESENCE_OUTCOME_INVALID: choose message, silent, tool_delivered, or deferred.")))
-    disposition = str(author_disposition or "").strip().lower()
-    if disposition and (disposition not in AUTHOR_DISPOSITIONS or not str(rationale or "").strip()):
-        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
-            "ERROR: COMPLETION_ARGUMENT: author_disposition is accepted, rejected, partial or deferred, "
-            "with a rationale.")))
-    from ouroboros.tools.control_runtime import stage_completion_request
-    reply_later = not message and answer_sha256 is None and selected in {"message", "deferred"}
-    # The author's stance toward review criticism rides the existing agent decision of the
-    # completion request, exactly as task_acceptance_review stages Main's (``consume_completion_request``).
-    decision = ({"disposition": disposition, "explicit_finish": True, "author_action": action,
-                 "rationale": " ".join(str(rationale).split())[:1000], "source": "presence_finish"}
-                if disposition else None)
-    result = stage_completion_request(ctx, {"action": action, "rationale": rationale, "pending_review": pending_review,
-        "acceptance_subject": acceptance_subject, "agent_decision": decision,
-        **({"answer_sha256": answer_sha256} if answer_sha256 is not None else {"answer": message})},
-        source="presence_finish", allow_empty=selected in {"silent", "tool_delivered"}, reply_later=reply_later)
-    if not getattr(ctx, "_completion_request", None) or getattr(ctx, "_completion_conflict", False):
-        return result
-    from ouroboros.presence_continuation import selection_for
-
-    # A ready panel or owner message may have skipped the preceding park. Its
-    # unpublished early-release choice cannot survive a new author selection.
-    ctx._presence_release = None
-    ctx._presence_completion = {
-        "outcome": selected,
-        "message": str(message or "").strip(),
-        # The author's selection revision: its output identity (``presence_continuation``).
-        "selection": selection_for(ctx, answer_sha256),
-    }
-    ctx._presence_completion_accepted = False
-    ctx._presence_completion_owner_revision = len(getattr(ctx, "_owner_directives", []) or [])
-    return result
-
-
-def _configure_presence(ctx: ToolContext, action: str, **params: Any) -> str:
-    from ouroboros.presence_bindings import (
-        PresenceBinding,
-        PresenceEndpoint,
-        list_presence_bindings,
-        new_presence_binding_id,
-        save_presence_binding,
-    )
+def _configure_presence(ctx: ToolContext, action: str, place_id: str = "", **params: Any) -> str:
+    from ouroboros.dialogue_provenance import run_origin
+    from ouroboros.places import AUTHOR_OWNER, AUTHOR_OUROBOROS, PlaceError, edit_place, get_place
+    from ouroboros.place_projection import places_view, place_view, connect_declared_place
     from ouroboros.tool_access import canonical_data_root
-
     root = canonical_data_root(ctx)
-    selected = str(action or "").strip()
-    if selected in {"inspect", "select", "runtime", "workspace"}:
-        from dataclasses import asdict, replace
-
-        from ouroboros.presence_capabilities import (
-            PresenceArgumentBinding,
-            PresenceResourceTarget,
-            PresenceScriptTarget,
-            PresenceSelection,
-            PresenceToolTarget,
-            load_presence_state,
-            presence_state_fingerprint,
-            save_presence_state,
-        )
-        from ouroboros.presence_profile import parse_presence_profile, presence_request_fingerprint
-        from ouroboros.presence_runtime import PresenceRuntimeOverrides
-        from ouroboros.skill_loader import find_skill
-
-        behavior_skill = str(params.get("behavior_skill") or "").strip()
-        loaded = find_skill(root, behavior_skill)
-        profile = parse_presence_profile(loaded.manifest, loaded.skill_dir) if loaded is not None else None
-        if loaded is None or profile is None:
-            return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE", text=("ERROR: PRESENCE_PROFILE_NOT_FOUND")))
-        state = load_presence_state(root, loaded.name)
-        requests = {
-            request.request_id: (request, presence_request_fingerprint(request))
-            for request in profile.capability_requests
-        }
-        if selected == "inspect":
-            return json.dumps(
-                {
-                    "ok": True,
-                    "behavior_skill": loaded.name,
-                    "requests": [
-                        {
-                            "id": request.request_id,
-                            "kind": request.kind,
-                            "required": request.required,
-                            "purpose": request.purpose,
-                            "fingerprint": fingerprint,
-                        }
-                        for request, fingerprint in requests.values()
-                    ],
-                    "selections": [asdict(item) for item in state.selections],
-                    "workspace_root": state.workspace_root,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-                default=str,
-            )
-        if selected == "workspace":
-            from ouroboros.workspace_admission import validate_workspace_root
-
-            requested = params.get("workspace_root")
-            if not isinstance(requested, str):
-                return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text="ERROR: PRESENCE_WORKSPACE_REQUIRED: supply workspace_root, or an empty string to clear it."))
-            workspace = validate_workspace_root(
-                requested, system_repo_dir=ctx.repo_dir, drive_root=root,
-            )
-            updated = replace(state, workspace_root=str(workspace) if workspace is not None else "")
-            save_presence_state(
-                root, loaded.name, updated,
-                expected_state_fingerprint=presence_state_fingerprint(state),
-            )
-            return json.dumps({
-                "ok": True, "workspace_root": updated.workspace_root,
-                "state_fingerprint": presence_state_fingerprint(updated),
-            }, sort_keys=True)
-        if selected == "runtime":
-            reset = bool(params.get("reset_runtime"))
-            overrides = PresenceRuntimeOverrides() if reset else PresenceRuntimeOverrides(
-                model_slot=(str(params.get("model_slot") or "").strip() or None),
-                inline_max_rounds=params.get("inline_max_rounds"),
-            )
-            updated = replace(state, runtime_overrides=overrides)
-            save_presence_state(
-                root,
-                loaded.name,
-                updated,
-                expected_state_fingerprint=presence_state_fingerprint(state),
-            )
-            return json.dumps(
-                {
-                    "ok": True,
-                    "runtime_overrides": asdict(overrides),
-                    "state_fingerprint": presence_state_fingerprint(updated),
-                },
-                sort_keys=True,
-            )
-        request_id = str(params.get("request_id") or "").strip()
-        request_row = requests.get(request_id)
-        if request_row is None:
-            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=("ERROR: PRESENCE_REQUEST_NOT_FOUND")))
-        request, request_fingerprint = request_row
-        target_type = str(params.get("target_type") or "").strip()
-        if request.kind == "tool" and target_type == "tool":
-            target = PresenceToolTarget(
-                str(params.get("tool_kind") or "builtin").strip(),
-                str(params.get("target_name") or "").strip(),
-                str(params.get("provider") or "").strip(),
-            )
-        elif request.kind == "script" and target_type == "script":
-            target = PresenceScriptTarget(
-                str(params.get("target_skill") or "").strip(),
-                str(params.get("script") or "").strip(),
-            )
-        elif request.kind == "resource" and target_type == "resource":
-            operations = params.get("operations") if isinstance(params.get("operations"), list) else []
-            target = PresenceResourceTarget(
-                str(params.get("root") or "").strip(),
-                tuple(str(item).strip() for item in operations),
-                str(params.get("path_prefix") or ".").strip(),
-                str(params.get("bucket") or "").strip(),
-                str(params.get("target_skill") or "").strip(),
-            )
+    metadata = getattr(ctx, "task_metadata", {}) or {}
+    owner = (bool(getattr(ctx, "is_direct_chat", False)) and run_origin({"metadata": metadata})["owner_ingress"]
+             and metadata.get("wake_cause") != "focus" and metadata.get("initiator") != "consciousness")
+    author = AUTHOR_OWNER if owner else AUTHOR_OUROBOROS
+    try:
+        if action == "list":
+            result = places_view(root)
+        elif action == "inspect":
+            result = {"place": place_view(root, get_place(root, place_id))}
+        elif action == "connect":
+            result = {"place": place_view(root, connect_declared_place(root, **params))}
         else:
-            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=("ERROR: PRESENCE_TARGET_KIND_MISMATCH")))
-        bindings = []
-        for raw in params.get("argument_bindings") or []:
-            if not isinstance(raw, dict):
-                return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=("ERROR: PRESENCE_ARGUMENT_BINDING_INVALID")))
-            if str(raw.get("source") or "").strip() == "resource":
-                return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=("ERROR: PRESENCE_RESOURCE_ARGUMENT_BINDING_UNSUPPORTED")))
-            resource_request_id = str(raw.get("resource_request_id") or "").strip()
-            resource_fp = requests.get(resource_request_id, (None, ""))[1] if resource_request_id else ""
-            bindings.append(PresenceArgumentBinding(
-                tuple(raw.get("argument_path") or ()),
-                str(raw.get("source") or "").strip(),
-                tuple(raw.get("source_path") or ()),
-                raw.get("static_value"),
-                resource_fp,
-            ))
-        replacement = PresenceSelection(request_fingerprint, target, tuple(bindings))
-        selections = [item for item in state.selections if item.request_fingerprint != request_fingerprint]
-        selections.append(replacement)
-        updated = replace(state, selections=tuple(selections))
-        save_presence_state(
-            root,
-            loaded.name,
-            updated,
-            expected_state_fingerprint=presence_state_fingerprint(state),
-        )
-        return json.dumps(
-            {"ok": True, "request_id": request_id, "state_fingerprint": presence_state_fingerprint(updated)},
-            sort_keys=True,
-        )
-    if selected == "list":
-        bindings = [binding.__dict__ for binding in list_presence_bindings(root)]
-        for row in bindings:
-            row["origin"] = row["origin"].__dict__
-            row["destination"] = row["destination"].__dict__
-        return json.dumps({"ok": True, "bindings": bindings}, ensure_ascii=False, sort_keys=True)
-    if selected == "disable":
-        binding_id = str(params.get("binding_id") or "").strip()
-        existing = next(
-            (item for item in list_presence_bindings(root) if item.binding_id == binding_id),
-            None,
-        )
-        if existing is None:
-            return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE", text=("ERROR: PRESENCE_BINDING_NOT_FOUND")))
-        save_presence_binding(root, PresenceBinding(**{**existing.__dict__, "enabled": False}))
-        return json.dumps({"ok": True, "binding_id": binding_id, "enabled": False})
-    if selected != "create":
-        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=("ERROR: PRESENCE_BINDING_ACTION_INVALID")))
-    origin = PresenceEndpoint(
-        str(params.get("transport") or "").strip(),
-        str(params.get("account_id") or "").strip(),
-        str(params.get("conversation_id") or "").strip(),
-        str(params.get("thread_id") or "").strip(),
-    )
-    destination = PresenceEndpoint(
-        str(params.get("destination_transport") or origin.transport).strip(),
-        str(params.get("destination_account_id") or origin.account_id).strip(),
-        str(params.get("destination_conversation_id") or origin.conversation_id).strip(),
-        str(params.get("destination_thread_id") or origin.thread_id).strip(),
-    )
-    binding = PresenceBinding(
-        new_presence_binding_id(),
-        str(params.get("transport_skill") or "").strip(),
-        str(params.get("behavior_skill") or "").strip(),
-        origin,
-        destination,
-    )
-    save_presence_binding(root, binding)
-    return json.dumps({"ok": True, "binding_id": binding.binding_id}, sort_keys=True)
-
-
-def _initiate_presence(
-    ctx: ToolContext,
-    binding_id: str,
-    message: str,
-    dedupe_key: str = "",
-) -> str:
-    """Start one reviewed presence cycle from owner/background cognition."""
-
-    from ouroboros.loop import _resolve_loop_max_rounds
-    from ouroboros.model_wait import dispatch_deadline_remaining_sec
-    from ouroboros.presence_admission import admit_presence_turn
-    from ouroboros.presence_bindings import conversation_key, list_presence_bindings
-    from ouroboros.presence_continuation import CONTINUATION_VERSION, start_proactive_turn
-    from ouroboros.presence_runner import PresenceTurnEvent
-    from ouroboros.tool_access import canonical_data_root
-
-    root = canonical_data_root(ctx)
-    selected = next(
-        (item for item in list_presence_bindings(root) if item.binding_id == str(binding_id or "")),
-        None,
-    )
-    if selected is None or not selected.enabled:
-        return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE", text=("ERROR: PRESENCE_BINDING_NOT_FOUND")))
-    prompt = str(message or "").strip()
-    if not prompt:
-        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=("ERROR: PRESENCE_INITIATION_MESSAGE_REQUIRED")))
-    admission = admit_presence_turn(
-        drive_root=root,
-        authenticated_transport_skill=selected.transport_skill,
-        binding_id=selected.binding_id,
-        global_max_rounds=_resolve_loop_max_rounds(),
-    )
-    endpoint = selected.destination
-    stable = "\0".join((
-        selected.binding_id,
-        str(getattr(ctx, "task_id", "") or "background"),
-        str(dedupe_key or "").strip(),
-        prompt,
-    ))
-    source_event_id = "presence-initiate:" + hashlib.sha256(stable.encode("utf-8")).hexdigest()[:32]
-    # The initiated turn is its own work (#1536): this call waits for its first envelope only
-    # within its own operation bound, and the turn never inherits that bound as its lifetime.
-    # This call is the turn's version-1 consumer; delivery reporting is negotiated apart.
-    remaining = dispatch_deadline_remaining_sec()
-    result = start_proactive_turn(
-        admission=admission,
-        event=PresenceTurnEvent(
-            source_event_id=source_event_id,
-            provider=endpoint.transport,
-            account_id=endpoint.account_id,
-            conversation_id=endpoint.conversation_id,
-            thread_id=endpoint.thread_id,
-            conversation_key=conversation_key(
-                endpoint.transport, endpoint.account_id, endpoint.conversation_id, endpoint.thread_id,
-            ),
-            actor={"id": "ouroboros", "display_name": "Ouroboros", "kind": "proactive_initiation"},
-            conversation={"kind": "configured_presence_destination"},
-            message={"kind": "proactive_initiation"},
-            text=prompt,
-            continuation_version=CONTINUATION_VERSION,
-        ),
-        repo_dir=ctx.repo_dir,
-        drive_root=root,
-        event_queue=getattr(ctx, "event_queue", None),
-        wait_sec=None if remaining is None else max(0.0, remaining - _INITIATION_MARGIN_SEC),
-    )
-    # One shape for completed, continuing and running: the refs a caller follows are always named.
-    return json.dumps(
-        {
-            "ok": True,
-            "status": result.status,
-            "outcome": result.outcome,
-            "delivered": result.outcome == "tool_delivered",
-            "text": result.text,
-            "turn_ref": result.task_id,
-            "work_ref": result.work_ref,
-            "continuation_ref": result.continuation_ref,
-            "output_ref": result.output_ref,
-            "continuation_version": CONTINUATION_VERSION,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    )
+            saved = edit_place(root, place_id, action, author=author, **params)
+            result = {"place": place_view(root, saved)} if saved else {}
+        return json.dumps({"ok": True, **result}, ensure_ascii=False)
+    except (PlaceError, ValueError, TypeError) as exc:
+        if getattr(exc, "code", "") == "place_activation_owner_only":
+            return _publish_tool_result(ctx, ToolResult(status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED",
+                text="Only your human switches a place to Active, on its sheet or by a word in Main; propose it there."))
+        blocked = getattr(exc, "code", "") == "place_owner_confirmation_required"
+        return _publish_tool_result(ctx, ToolResult(status="blocked" if blocked else "error",
+            code="RESOURCE_CONSTRAINT_BLOCKED" if blocked else "TOOL_ARG_ERROR",
+            text=("⚠️ RESOURCE_CONSTRAINT_BLOCKED: " if blocked else "ERROR: ") + str(exc)))
 
 
 def _cancel_presence_work(ctx: ToolContext, work_ref: str, reason: str = "") -> str:
@@ -363,155 +61,36 @@ def _cancel_presence_work(ctx: ToolContext, work_ref: str, reason: str = "") -> 
     return _cancel_task(ctx, task_id, reason)
 
 
-def get_tools() -> List[ToolEntry]:
-    return [
-        ToolEntry(
-            name="presence_finish",
-            schema={
-                "name": "presence_finish",
-                "description": (
-                    "Finish the current external presence turn with a typed delivery outcome. "
-                    "Choose finish after useful work, or stop with a rationale when work remains. Choose message to return "
-                    "a conversational reply, silent when no reply is appropriate, tool_delivered "
-                    "when an allowed tool already delivered the result, or deferred after long "
-                    "work was successfully promoted. With nonblank message text, or silent/tool_delivered, "
-                    "the host can finish after this tool batch without another model round. "
-                    "If finalization requests more work or a revision, complete it before finishing again."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "outcome": {"type": "string", "enum": list(PRESENCE_OUTCOMES)},
-                        "action": {"type": "string", "enum": ["finish", "stop"], "default": "finish"},
-                        "rationale": {"type": "string", "description": "For stop, what remains unfinished; with author_disposition, why. Delivery outcome is independent."},
-                        "answer_sha256": {"type": "string", "description": "Select an offered complete answer instead of message or reply-later."},
-                        "author_disposition": {
-                            "type": "string", "enum": list(AUTHOR_DISPOSITIONS),
-                            "description": "Your stance toward the acceptance review's criticism of this answer, with a "
-                                           "rationale: accepted (you corrected it), rejected, partial or deferred. After "
-                                           "review feedback, an Advisory finish of the current answer (corrected or not) "
-                                           "needs it to end without another panel; without it a changed answer is a new "
-                                           "nomination. Never creates a reviewer PASS; Blocking still needs approval.",
-                        },
-                        "acceptance_subject": {
-                            "type": "object",
-                            "description": "Your current subject decision when the host shows changed premises: the exact "
-                                           "owner_source_sha256 it offers, optionally complete effective_criteria or "
-                                           "material_tool_indices.",
-                            "properties": {
-                                "owner_source_sha256": {"type": "string"},
-                                "effective_criteria": {"type": "string"},
-                                "material_tool_indices": {"type": "array", "items": {"type": "integer"}},
-                            },
-                            "required": ["owner_source_sha256"],
-                        },
-                        "pending_review": {
-                            "type": "string", "enum": ["wait", "finish"], "default": "wait",
-                            "description": "Only while an acceptance review of this answer is still running and the host "
-                                           "offers the choice: wait holds it; finish releases it now while you stay "
-                                           "responsible for the review's criticism and may still correct it. Either way "
-                                           "the conversation is free while the review runs; blocking review always waits.",
-                        },
-                        "message": {
-                            "type": "string",
-                            "description": "Reply text for message, or an immediate acknowledgement for deferred. Nonblank text or answer_sha256 enables immediate finalization. Omitting both explicitly reserves the next ordinary model reply, subject to normal budget and controls; it is not yet an authored no-spend stop. Use selected bytes or silent/tool_delivered to stop without another reply.",
-                        },
-                    },
-                    "required": ["outcome"],
-                },
-            },
-            handler=_finish_presence,
-            timeout_sec=10,
-        ),
-        ToolEntry(
-            name="configure_presence",
-            schema={
-                "name": "configure_presence",
-                "description": (
-                    "Create, list, or disable an owner-controlled binding from an authenticated "
-                    "transport room to one reviewed behavior skill. Use exact provider account, "
-                    "conversation and optional thread ids supplied by the owner or transport UI. "
-                    "Use workspace to select an existing working folder for new turns; memory stays shared."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": {
-                            "type": "string",
-                            "enum": ["create", "list", "disable", "inspect", "select", "runtime", "workspace"],
-                        },
-                        "workspace_root": {
-                            "type": "string",
-                            "description": "Existing external folder for action=workspace; empty clears the selection. Does not change capability grants or shared memory.",
-                        },
-                        "binding_id": {"type": "string"},
-                        "transport_skill": {"type": "string"},
-                        "behavior_skill": {"type": "string"},
-                        "transport": {"type": "string"},
-                        "account_id": {"type": "string"},
-                        "conversation_id": {"type": "string"},
-                        "thread_id": {"type": "string"},
-                        "destination_transport": {"type": "string"},
-                        "destination_account_id": {"type": "string"},
-                        "destination_conversation_id": {"type": "string"},
-                        "destination_thread_id": {"type": "string"},
-                        "request_id": {"type": "string"},
-                        "target_type": {"type": "string", "enum": ["tool", "script", "resource"]},
-                        "tool_kind": {"type": "string", "enum": ["builtin", "extension", "mcp"]},
-                        "target_name": {"type": "string"},
-                        "provider": {"type": "string"},
-                        "target_skill": {"type": "string"},
-                        "script": {"type": "string"},
-                        "root": {"type": "string"},
-                        "operations": {"type": "array", "items": {"type": "string"}},
-                        "path_prefix": {"type": "string"},
-                        "bucket": {"type": "string"},
-                        "argument_bindings": {"type": "array", "items": {"type": "object"}},
-                        "model_slot": {"type": "string", "enum": ["main", "light"]},
-                        "inline_max_rounds": {"type": "integer", "minimum": 1},
-                        "reset_runtime": {"type": "boolean"},
-                    },
-                    "required": ["action"],
-                },
-            },
-            handler=_configure_presence,
-            timeout_sec=15,
-        ),
-        ToolEntry(
-            name="initiate_presence",
-            schema={
-                "name": "initiate_presence",
-                "description": (
-                    "Start one proactive reasoning cycle for an owner-created presence binding. "
-                    "The reviewed profile and positive capability ceiling are resolved by the host. "
-                    "The cycle must use its selected transport send capability and finish with "
-                    "tool_delivered for an external message to have been sent. The cycle is its own "
-                    "task: this call returns its first result (status completed, or continuing while "
-                    "its result awaits review), or status running if this call's own time ends first; "
-                    "the cycle then continues under its own controls."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "binding_id": {"type": "string"},
-                        "message": {"type": "string"},
-                        "dedupe_key": {"type": "string"},
-                    },
-                    "required": ["binding_id", "message"],
-                },
-            },
-            handler=_initiate_presence,
-            timeout_sec=180,
-        ),
+def get_tools() -> list[ToolEntry]:
+    return [ToolEntry(name="configure_presence", schema={
+        "name": "configure_presence",
+        "description": "Inspect places and their connector choices; edit state, wakes, notes, folder or model. "
+                       "Only your human switches a place to Active, on its sheet or by a word in Main; propose it there. "
+                       "Only an owner-door turn may confirm an owner account. A folder is an address, not a fence. "
+                       "Connect starts Silent using the installed connector's declaration; disconnect keeps room history.",
+        "parameters": {"type": "object", "properties": {
+            "action": {"type": "string", "enum": ["list", "inspect", "connect", "disconnect", "set_state",
+                "add_wake", "remove_wake", "add_note", "remove_note", "set_working_folder", "set_model",
+                "confirm_owner_account", "revoke_owner_account"]},
+            "place_id": {"type": "string"}, "connector": {"type": "string"},
+            "account_id": {"type": "string"}, "conversation_id": {"type": "string"},
+            "state": {"type": "string", "enum": ["active", "silent", "paused"]},
+            "fact": {"type": "string", "description": "A core wake fact or signal.<slug> declared by this live connector."},
+            "text": {"type": "string"}, "note_id": {"type": "string"},
+            "working_folder": {"type": "string"}, "model": {"type": "string"},
+            "platform_actor_id": {"type": "string"}, "label": {"type": "string"},
+            "expected_revision": {"type": "integer"},
+        }, "required": ["action"]},
+    }, handler=_configure_presence, timeout_sec=30),
         ToolEntry(
             name="presence_cancel_work",
             schema={
                 "name": "presence_cancel_work",
                 "description": (
-                    "Request cancellation of independent work started from this presence "
-                    "binding, in this or another of its conversations (or of this turn's own "
+                    "Request cancellation of independent work started from this "
+                    "place, in this or another of its conversations (or of this turn's own "
                     "children). The result is a request receipt, not proof the work stopped; "
-                    "work of another binding or the owner's own tasks is refused."
+                    "work of another place or the owner's own tasks is refused."
                 ),
                 "parameters": {
                     "type": "object",
@@ -526,6 +105,3 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=15,
         ),
     ]
-
-
-__all__ = ["PRESENCE_OUTCOMES", "get_tools"]

@@ -1,14 +1,12 @@
-"""Response maxima reach planning, complete compaction, and native/API consumers."""
+"""Response maxima reach planning and native/API consumers."""
 import asyncio
-import json
 from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import capability_evidence as ce, context_compaction as cc, usage_accounting as ua
+from ouroboros import capability_evidence as ce, usage_accounting as ua
 from ouroboros.response_limits import record_response_ack, resolve_response_limit
 from tests import test_llm_claudexor as claudexor_fixtures, test_processing_transport as transport_fixtures
-from tests.test_context_reclaim_materializer import _unit, _request, _SPEC, _install_pure_dependencies
 from tests.test_llm_claudexor import MODEL
 
 transport = transport_fixtures.transport
@@ -31,7 +29,7 @@ def test_native_catalog_maximum_remains_planning_evidence_not_an_engine_option(n
     assert "maxOutputTokens" not in gateway.uploads[-1][0]["options"]
 
 
-def test_real_reviewer_repair_and_forced_candidate_share_the_physical_ceiling(transport):
+def test_a_real_reviewer_send_and_the_forced_candidate_share_the_physical_ceiling(transport):
     from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
     from ouroboros.task_pacing import prospective_wrapup_attempt_request
     from tests._usage_store_testing import ledger_rows
@@ -40,66 +38,18 @@ def test_real_reviewer_repair_and_forced_candidate_share_the_physical_ceiling(tr
     route = dict(provider="openai", model=model, base_url="https://api.openai.com/v1")
     record_response_ack(root, **route, max_output_tokens=4096)
     ce.record_owner_ack(root, **route, window_tokens=100000)
-    result = run_review_request(ReviewRequest(surface="task_acceptance", goal="assess", task_id="processing", no_proxy=False,
-        max_tokens=65536, policy={"classify_outcome_tier": True, "min_successful_slots": 1}),
+    # The review_change wave's surface (a task's result review dispatches under it too).
+    result = run_review_request(ReviewRequest(surface="multi_model_review", goal="assess", task_id="processing",
+        no_proxy=False, max_tokens=65536, policy={"min_successful_slots": 1}),
         slots=[ReviewSlot(slot_id="one", model=model)], drive_root=root, llm=client)
-    assert len(sent) == 2, result.actors  # Actual reviewer sends its invalid-response repair.
-    assert all(payload["max_completion_tokens"] == 4096 for payload in sent)
-    assert len(ledger_rows(root)) == 2
+    # One answered send: the format-repair resend left with the task-acceptance machine.
+    assert len(sent) == 1, result.actors
+    assert sent[0]["max_completion_tokens"] == 4096
+    assert len(ledger_rows(root)) == 1
     prospective = prospective_wrapup_attempt_request(llm=client, messages=[{"role": "user", "content": "finish"}],
         model=model, reasoning_effort="high")
     assert prospective.max_completion_tokens == 4096
-    assert len(ledger_rows(root)) == 2  # Preparing a forced send reserves nothing.
-
-
-def test_light_map_batches_and_json_fallback_share_cap_and_keep_incomplete_source_raw(tmp_path, monkeypatch):
-    from ouroboros import llm_observability
-    _install_pure_dependencies(monkeypatch)
-    monkeypatch.setattr(cc, "_summarizer_spec", lambda: {**_SPEC, "output_budget": 512})
-    calls = []
-    def complete(_client, **kwargs):
-        source = kwargs["messages"][0]["content"]
-        rows = json.loads(source.rsplit('\n', 1)[-1])
-        calls.append((kwargs, rows))
-        assert kwargs["max_tokens"] == 512
-        assert len(rows) == 1 and rows[0]["summary_budget_tokens"] == 384
-        assert "-result-tail-" in rows[0]["content"]
-        if kwargs.get("tools"):
-            return {"content": "no structured summary"}, {}
-        entries = [{"source_id": row["source_id"], "summary": "kept complete source"} for row in rows]
-        message = {"content": json.dumps({"summaries": entries})}
-        # A partial generation must never replace the raw source, even if it parses.
-        return message, {"response_finish_reason": "length"} if "-result-tail-incomplete" in source else {}
-    monkeypatch.setattr(llm_observability, "chat_observed", complete)
-    messages = [*_unit("complete", "a"), *_unit("incomplete", "b"), *_unit("neighbor", "c")]
-    rebuilt, receipt, _ = cc.compact_tool_history_llm(messages, request=_request(messages, 99999),
-        drive_root=tmp_path, task_id="compaction", negative_memo=set())
-    assert len(calls) == 6
-    assert all("tools" in calls[i][0] and "tools" not in calls[i + 1][0] for i in (0, 2, 4))
-    assert receipt.status == "applied"
-    assert messages[2] in rebuilt and messages[3] in rebuilt
-    assert messages[0] not in rebuilt and messages[4] not in rebuilt
-
-
-def test_fold_and_structured_continuation_keep_the_same_output_budget(tmp_path, monkeypatch):
-    from ouroboros import llm_observability
-    parts = [cc._part("unit", "begin", 0), cc._part("unit", "tail", 5)]
-    calls = []
-    def complete(_client, **kwargs):
-        calls.append(kwargs)
-        source = kwargs["messages"][0]["content"]
-        rows = json.loads(source.rsplit('\n', 1)[-1])
-        assert rows[0]["summary_budget_tokens"] == 128
-        if kwargs.get("tools"):
-            return {"content": "unstructured"}, {}
-        return {"content": json.dumps({"summaries": [{"source_id": rows[0]["source_id"], "summary": "folded"}]})}, {}
-    monkeypatch.setattr(llm_observability, "chat_observed", complete)
-    answer = cc._fold_summaries(parts, {part.source_id: "complete summary " + part.text for part in parts},
-        drive_root=tmp_path, task_id="fold", spec={**_SPEC, "output_budget": 256}, summary_budget_tokens=128, usage_total={})
-    assert answer == "folded" and len(calls) == 2
-    assert all(call["max_tokens"] == 256 and call["call_type"] == "context_compaction_fold" for call in calls)
-    assert "complete summary begin" in calls[0]["messages"][0]["content"]
-    assert "complete summary tail" in calls[0]["messages"][0]["content"]
+    assert len(ledger_rows(root)) == 1  # Preparing a forced send reserves nothing.
 
 
 @pytest.mark.parametrize("role", ["main", "light", "reviewer:triad_1", "consciousness"])
@@ -405,17 +355,20 @@ def test_the_serving_artifact_is_the_live_launch_not_the_saved_settings(monkeypa
 
 
 @pytest.mark.parametrize("expired", [False, True])
-def test_settings_preview_binds_the_exact_account_and_stores_nothing(tmp_path, monkeypatch, expired):
+@pytest.mark.parametrize("account", ["", "account-b"])
+def test_settings_preview_binds_the_exact_account_and_stores_nothing(tmp_path, monkeypatch, expired, account):
     from starlette.applications import Starlette
     from starlette.routing import Route
     from starlette.testclient import TestClient
     from ouroboros.gateway import settings as gateway
     from ouroboros.llm import LLMClient
-    model, writes = "claudexor::test-source=exact-model", []
-    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(lambda source, profile=None, **kw: {
-        "source": source, "credentialProfileId": profile or "account-a", "accountFingerprint": "fingerprint-a",
-        "observedAt": "2000-01-01T00:00:00Z" if expired else ce.utc_now_iso(), "provenance": "fixture",
-        "models": [{"id": "exact-model", "maxOutputTokens": 4096}]}))
+    model, writes, reads = "claudexor::test-source=exact-model", [], []
+    def catalog(source, profile=None, *, requested_model=None):
+        reads.append((source, profile, requested_model))
+        return {"source": source, "credentialProfileId": profile or "account-a", "accountFingerprint": "fingerprint-a",
+                "observedAt": "2000-01-01T00:00:00Z" if expired else ce.utc_now_iso(), "provenance": "fixture",
+                "models": [{"id": "exact-model", "maxOutputTokens": 4096}]}
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(catalog))
     monkeypatch.setattr(gateway, "load_settings", lambda: {"OUROBOROS_MODEL": model})
     monkeypatch.setattr(gateway, "_owner_audit", lambda *a: None)
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
@@ -425,21 +378,27 @@ def test_settings_preview_binds_the_exact_account_and_stores_nothing(tmp_path, m
     client = TestClient(app)
     saved = ce._save
     monkeypatch.setattr(ce, "_save", lambda root, data: writes.append(root) or saved(root, data))
-    preview = client.get("/api/settings", params={"response_limit_preview": "1", "model": model, "local": "false"}).json()
+    params = {"response_limit_preview": "1", "model": model, "local": "false", "account": account}
+    preview = client.get("/api/settings", params=params).json()
     assert writes == []  # A passive Settings read writes no evidence.
-    assert preview["route"]["options"] == {"source_id": "test-source", "credential_profile_id": "account-a",
+    assert reads == [("test-source", account or None, "exact-model")]
+    assert not ce._store_path(tmp_path).exists()  # Even a cold preview reads the local catalog.
+    assert preview["route"]["options"] == {"source_id": "test-source", "credential_profile_id": account or "account-a",
                                            "account_fingerprint": "fingerprint-a"}
     assert preview["response_limit"]["max_output_tokens"] == 4096
     # An expired catalog is shown as such (Settings reads it as unknown), never as a current maximum.
     assert preview["response_limit"]["stale"] is expired
+    assert preview["window"]["reserve"] == (65536 if expired else 4096)
     acked = client.post("/api/owner/capability-ack", json={**preview["route"], "route_fp": preview["response_limit"]["route_fp"],
                                                            "max_output_tokens": 2048})
     if expired:  # nor can an expired account binding be acknowledged
         assert acked.status_code == 400 and "Refresh" in acked.text
         return
     assert acked.status_code == 200, acked.text
-    again = client.get("/api/settings", params={"response_limit_preview": "1", "model": model, "local": "false"}).json()
+    writes.clear()
+    again = client.get("/api/settings", params=params).json()
     assert again["response_limit"]["source"] == "owner_ack" and again["response_limit"]["max_output_tokens"] == 2048
+    assert again["window"]["reserve"] == 2048 and writes == []
 
 
 def test_a_malformed_subscription_identity_keeps_its_failed_window_evidence(tmp_path):
@@ -449,9 +408,10 @@ def test_a_malformed_subscription_identity_keeps_its_failed_window_evidence(tmp_
     assert window_scaled_reserves(0, output_reserve=65536, tokenizer_margin=1, model_id="claudexor::missing-model") == (65536, 1)
 
 
-def test_commit_gate_seats_and_the_catalog_row_price_reserve_each_route_maximum(transport, tmp_path, monkeypatch):
+def test_commit_gate_seats_reserve_each_route_maximum(transport, tmp_path):
+    """Each paid seat reserves its own route's maximum response. (A catalog row's price is no
+    longer a reservation estimate: ``review_price`` measures it from the usage ledger.)"""
     from ouroboros.review_execution import ReviewRouteKind
-    from ouroboros.tools import review_helpers
     from ouroboros.tools.review_admission import commit_gate_paid_seats
     from ouroboros.tools.review_multi_model import _review_output_budget
     root, _client, _sent = transport
@@ -463,12 +423,6 @@ def test_commit_gate_seats_and_the_catalog_row_price_reserve_each_route_maximum(
                              "session_profiles": ["", ""], "use_local": [False, False]}}
     seats = commit_gate_paid_seats(prepared, False)
     assert [seat["max_completion_tokens"] for seat in seats] == [4096, _review_output_budget()]
-    priced = []
-    monkeypatch.setattr("ouroboros.usage_admission.review_wave_admission",
-                        lambda **kw: priced.append(kw["max_completion_tokens"]) or {"slot_bounds": [None]})
-    for slot_id, model in (("one", capped), ("two", other)):
-        review_helpers.review_row_call_usd({"slot_id": slot_id, "model": model}, allow_live_fetch=False)
-    assert priced == [4096, _review_output_budget()]
 
 
 def test_light_consolidation_and_memory_fit_plan_the_route_maximum(monkeypatch):
@@ -485,7 +439,7 @@ def test_light_consolidation_and_memory_fit_plan_the_route_maximum(monkeypatch):
         return {"model": task["model"], "provider": "openrouter"}, evidence
     monkeypatch.setattr(consolidator, "_consolidation_route", lambda: ("test/model", False))
     monkeypatch.setattr(context_fit, "resolve_context_fit_route", resolve)
-    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_: 1.0)
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_, **_kw: 1.0)
     llm = _LLM()
     consolidator._call_consolidation_llm(llm, prompt, "Probe")
     assert len(llm.calls) == 1 and llm.calls[0]["max_tokens"] == 4096

@@ -8,8 +8,8 @@ predecessor, never a write. The authority is the host-written occurrence receipt
 provenance), and task metadata an ordinary admission accepted proves nothing. Real producers: the
 ``schedule_followup`` tool, the schedule table, occurrence admission (``check_scheduled_tasks``), the
 real worker start that builds the ToolContext (``agent_start``), the ``schedule_subagent`` tool and
-its supervisor admission, the reaper's retry producer (``_enqueue_retry``; the kill decision before
-it is not run here), both public APIs, the tool registry, ``write_file`` artifact registration,
+its supervisor admission, a stored pre-upgrade timeout retry (``tests._silence_reaper_support``; no
+producer mints one now), both public APIs, the tool registry, ``write_file`` artifact registration,
 terminal-file settlement and the drive-retention prune. Missing scratch after retention is an honest
 not-found; registered artifacts remain; nothing new is retained.
 """
@@ -26,7 +26,7 @@ from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.tool_access import lineage_task_ids, scheduled_origin
 from ouroboros.tools.followup import _handle_schedule_followup
 from ouroboros.tools.registry import ToolContext, ToolRegistry
-from supervisor import queue, queue_schedules, workers
+from supervisor import queue, workers
 from tests._execution_clock_seams import agent_start
 from tests.test_predecessor_lineage_read import predecessor_envelope
 from tests.test_schedule_followup import _ctx
@@ -47,7 +47,7 @@ def origin(host, monkeypatch, tmp_path):  # noqa: F811
     monkeypatch.setenv("TOTAL_BUDGET", "1000")
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
-    monkeypatch.setattr(queue_schedules, "resync_skill_schedules", lambda *_a: {})
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     monkeypatch.setattr("ouroboros.config.get_bg_wakeup_min_sec", lambda: 0)
     write_task_result(host.root, ORIGIN, "running", root_task_id=ORIGIN, billing_group=BINDING)
     for task_id, name, text in ((ORIGIN, "report.md", "ORIGIN_DRIVE"), (GRAND, "notes.md", "GRAND_DRIVE"),
@@ -106,12 +106,12 @@ def test_a_folderless_helper_start_stages_the_origin_materials_as_copies(host, o
     copies of every permitted lineage file, the origin's whole drive and artifacts included."""
     import json
 
-    from ouroboros.delegate_readonly_inputs import prepare_folderless_inputs
+    from ouroboros.delegate_readonly_inputs import prepare_readonly_inputs
 
     task = _fire(host, origin, "independent")
     _registry, ctx = _started_registry(host, task, monkeypatch)
     ctx.task_metadata["resource_intent"] = {"kind": "explicit_none"}  # folderless: no workspace
-    staged, _note = prepare_folderless_inputs(ctx, "inv-origin")
+    staged, _note = prepare_readonly_inputs(ctx, "inv-origin")[:2]
     manifest = json.loads((pathlib.Path(staged) / "inputs.json").read_text(encoding="utf-8"))
     copied = {pathlib.Path(row["source"]).name: (pathlib.Path(staged) / row["local"]).read_text()
               for row in manifest}
@@ -123,7 +123,7 @@ def test_folderless_origin_fifo_is_refused_before_open_and_regular_reads_survive
     import json
     import os
     from ouroboros import store
-    from ouroboros.delegate_readonly_inputs import prepare_folderless_inputs
+    from ouroboros.delegate_readonly_inputs import prepare_readonly_inputs
 
     if not hasattr(os, "mkfifo"):
         pytest.skip("real FIFO requires POSIX")
@@ -142,12 +142,12 @@ def test_folderless_origin_fifo_is_refused_before_open_and_regular_reads_survive
     monkeypatch.setattr(store, "open_for_read", no_nonregular_open)
     try:
         with pytest.raises(OSError, match="not a regular file"):
-            prepare_folderless_inputs(ctx, "inv-fifo")
+            prepare_readonly_inputs(ctx, "inv-fifo")[:2]
         assert fifo not in opened
         assert "ORIGIN_DRIVE" in _read(registry, "task_drive", fifo.parent / "report.md")
     finally:
         fifo.unlink()
-    staged, _note = prepare_folderless_inputs(ctx, "inv-readable")
+    staged, _note = prepare_readonly_inputs(ctx, "inv-readable")[:2]
     manifest = json.loads((pathlib.Path(staged) / "inputs.json").read_text())
     assert {pathlib.Path(row["source"]).name for row in manifest} == {"report.md", "report.txt"}
     assert all(row["sha256"] == row["source_sha256"] for row in manifest)
@@ -186,8 +186,8 @@ def test_an_unreadable_receipt_denies_now_and_the_same_actor_reads_it_again(host
 def test_its_admitted_child_and_its_retry_read_the_same_origin_one_hop(host, origin, monkeypatch):  # noqa: F811
     from ouroboros.tools.control import _schedule_task
     from supervisor import events
-    from supervisor.task_reaper import _enqueue_retry
     from tests._shared import configure_test_subagent
+    from tests._silence_reaper_support import historical_successor
 
     task = _fire(host, origin, "independent")
     _registry, ctx = _started_registry(host, task, monkeypatch)
@@ -200,10 +200,7 @@ def test_its_admitted_child_and_its_retry_read_the_same_origin_one_hop(host, ori
     assert child["delegation_role"] == "subagent" and child["root_task_id"] == task["id"]
     host.pending.remove(task)
     write_task_result(host.root, task["id"], "running", root_task_id=task["id"])
-    requeued = _enqueue_retry(queue, dict(task), task_id=task["id"], retry_task_id="retry-1", attempt=1,
-                              terminal_reason="idle_timeout",
-                              recon_fields={"cost_accounting_status": "available", "cost_final": True})
-    assert requeued == (True, 2, "idle_timeout", {})
+    historical_successor(dict(task), 1, "retry-1")
     [retry] = [t for t in host.pending if t["id"] == "retry-1"]
     for row in (child, retry):
         registry, started = _started_registry(host, row, monkeypatch)

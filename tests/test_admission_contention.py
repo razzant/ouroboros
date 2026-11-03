@@ -10,6 +10,7 @@ import pytest
 from ouroboros import _usage_wait, owner_pause, queue_observation, store, usage_accounting as ua
 from ouroboros.model_wait import task_model_wait_scope
 from ouroboros.task_results import write_task_result
+from tests._store_journal_shared import exclusive_hold, read_hold, use_journal, write_hold
 
 pytestmark = pytest.mark.serial
 
@@ -33,16 +34,17 @@ def publish(root, *, generation="new", fences=()):
 
 
 @contextlib.contextmanager
-def database_reader(root, *, exclusive=False, money=False, acquire_wait_sec=0.0):
-    """A real independent connection; release is controlled by the waiting consumer."""
+def database_reader(root, *, exclusive=False, write=False, money=False, acquire_wait_sec=0.0):
+    """A real independent connection; release is controlled by the waiting consumer. It makes
+    every other read and write busy (``exclusive``), or the next write (``write``), in the
+    store's journal mode, else it holds a read (``tests/_store_journal_shared.py``)."""
     entered, release = threading.Event(), threading.Event()
     errors = []
     path = root / "state" / ("usage.sqlite" if money else "current.sqlite")
+    hold = exclusive_hold if exclusive else write_hold if write else read_hold
     def run():
         try:
-            with contextlib.closing(store.connect(path, store.TIER_ENFORCED, wait_sec=acquire_wait_sec)) as conn:
-                conn.execute("BEGIN EXCLUSIVE" if exclusive else "BEGIN")
-                conn.execute("SELECT 1 FROM meta LIMIT 1").fetchone()
+            with contextlib.closing(hold(path, wait_sec=acquire_wait_sec)) as conn:
                 entered.set()
                 if not release.wait(8):
                     raise AssertionError("consumer never released its database fixture")
@@ -52,7 +54,7 @@ def database_reader(root, *, exclusive=False, money=False, acquire_wait_sec=0.0)
             entered.set()
     thread = threading.Thread(target=run)
     thread.start()
-    assert entered.wait(3) and not errors
+    assert entered.wait(3 + acquire_wait_sec) and not errors  # the lock may first wait out a reader
     try:
         yield lambda: (release.set(), thread.join(3))
     finally:
@@ -134,6 +136,9 @@ def test_real_control_poll_does_not_wait_for_legacy_sql_latch(root, monkeypatch,
 
 
 def test_dispatch_commit_busy_rolls_back_before_waiting_on_root_lock(root, monkeypatch):
+    # A held reader makes only a rollback-journal COMMIT busy (a WAL COMMIT waits for no reader):
+    # the subject is that journal's, which every install WAL is not proven safe on keeps.
+    use_journal(monkeypatch, "PERSIST")
     original_commit = ua.usage_store.Txn.commit
     held = contextlib.ExitStack()
     waits, sends = [], []
@@ -218,39 +223,23 @@ def test_unconfirmed_rollback_is_not_retried(root, monkeypatch):
 
 
 @pytest.mark.parametrize("strict", [False, True])
-@pytest.mark.parametrize("failure_at", ["stop", "historical", "pause_before", "pause_after"])
-def test_real_review_controller_preserves_busy_probe_without_cancelling_paid_work(root, monkeypatch, strict, failure_at):
+def test_real_review_controller_preserves_busy_probe_without_cancelling_paid_work(root, monkeypatch, strict):
     from types import SimpleNamespace
-    from ouroboros import acceptance_history, task_results
+    from ouroboros import task_results
     from ouroboros.model_wait import TaskModelWait
     from ouroboros.review_operation import ReviewOperation
 
-    purpose = {"schema_version": 1, "task_id": "root", "debt_id": "d", "source_ref": {"sha256": "original"},
-               "delivery": {"id": "delivered"}, "accounting_root_task_id": "root", "automatic": False}
-    write_task_result(root, "root", "running", acceptance_debt=purpose)
     parent = TaskModelWait(task={"id": "root"}, drive_root=root, event_queue=None, worker_slot_held=False)
     operation = ReviewOperation(parent=parent, request=SimpleNamespace(
-        surface="task_acceptance", retry_key="same", policy={"historical_acceptance": purpose}),
-        result_root=root, task_id="root")
-    monkeypatch.setattr(acceptance_history, "read_acceptance_history", lambda *_a, **_k: {"task_contract": {}})
-    monkeypatch.setattr(acceptance_history, "historical_review_controls",
-                        lambda *_a, **_k: ["root_budget_fence"] if failure_at.startswith("pause_") else [])
+        surface="multi_model_review", retry_key="same"), result_root=root, task_id="root")
     original, reads = task_results.load_task_result, []
     failed = [True]
     def load(*args, **kwargs):
         reads.append(True)
-        if failed[0] and len(reads) == (1 if failure_at == "stop" else 3) and not failure_at.startswith("pause_"):
+        if failed[0] and len(reads) == 1:
             raise store.StoreBusy("current fact contended", reason="contention")
         return original(*args, **kwargs)
     monkeypatch.setattr(task_results, "load_task_result", load)
-    original_fence, fence_reads = owner_pause.read_fence, []
-    def fence(*args, **kwargs):
-        fence_reads.append(True)
-        if failed[0] and len(fence_reads) == (1 if failure_at == "pause_before" else 2):
-            raise store.StoreBusy("pause fact contended", reason="contention")
-        return original_fence(*args, **kwargs)
-    if failure_at.startswith("pause_"):
-        monkeypatch.setattr(owner_pause, "read_fence", fence)
     before = operation._checked_at
     if strict:
         with pytest.raises(store.StoreBusy):
@@ -260,7 +249,6 @@ def test_real_review_controller_preserves_busy_probe_without_cancelling_paid_wor
         assert operation.control_state == "unknown"
     assert operation._checked_at == before and not operation._control
     failed[0] = False
-    monkeypatch.setattr(acceptance_history, "historical_review_controls", lambda *_a, **_k: [])
     assert operation.wait.control_reason(strict_current=True) is None
     assert operation.control_state == "" and operation._checked_at > before
 

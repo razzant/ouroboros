@@ -18,6 +18,7 @@ from ouroboros.tools import (
     control,
     control_events,
     control_routing,
+    control_relay,
     control_runtime,
     control_scheduling,
     control_subagent_spec,
@@ -30,6 +31,7 @@ REPO = pathlib.Path(__file__).parents[1]
 _LEAVES = (
     control_events,
     control_routing,
+    control_relay,
     control_runtime,
     control_scheduling,
     control_subagent_spec,
@@ -50,14 +52,10 @@ _MOVED_OWNERS = {
     "_attach_origin_from_metadata": control_routing,
     "_finish_swarm_handoff": control_routing,
     "_list_projects": control_routing,
-    "_promote_chat_to_task": control_routing,
-    "_route_to_project": control_routing,
-    "_steer_task": control_routing,
+    "_start_task": control_routing,
+    "_tell_task": control_relay,
     # unrowed post-cutoff upstream family riding with its only readers
     # (promote/route): the predecessor-authority selector and its two helpers.
-    "_MISSING_PREDECESSOR_SELECTOR": control_routing,
-    "_predecessor_selector_error": control_routing,
-    "_attach_predecessor_authority_from_metadata": control_routing,
     "_chat_history": control_runtime,
     "_evolution_restart_block_reason": control_runtime,
     "_promote_to_stable": control_runtime,
@@ -70,6 +68,7 @@ _MOVED_OWNERS = {
     "_toggle_evolution": control_runtime,
     "_update_identity": control_runtime,
     "_update_scratchpad": control_runtime,
+    "_update_world": control_runtime,
     # D07 half (oracle rows 2537-2556, 2569-2579 re-cut on tip bytes).
     "VALID_SUBTASK_MEMORY_MODES": control_subagent_spec,
     "schedule_subagent_properties": control_subagent_spec,
@@ -138,10 +137,9 @@ def test_control_leaves_are_non_catalog_owners_without_control_backedges():
 def test_control_catalog_handler_owners_point_at_the_carried_leaves():
     entries = {entry.name: entry for entry in control.get_tools()}
     owned = {
-        "promote_chat_to_task": (control_routing, "_promote_chat_to_task"),
+        "start_task": (control_routing, "_start_task"),
         "list_projects": (control_routing, "_list_projects"),
-        "route_to_project": (control_routing, "_route_to_project"),
-        "steer_task": (control_routing, "_steer_task"),
+        "tell_task": (control_relay, "_tell_task"),
         "set_tool_timeout": (control_runtime, "_set_tool_timeout"),
         "request_restart": (control_runtime, "_request_restart"),
         "promote_to_stable": (control_runtime, "_promote_to_stable"),
@@ -150,6 +148,7 @@ def test_control_catalog_handler_owners_point_at_the_carried_leaves():
         "update_scratchpad": (control_runtime, "_update_scratchpad"),
         "send_user_message": (control_runtime, "_send_user_message"),
         "update_identity": (control_runtime, "_update_identity"),
+        "update_world": (control_runtime, "_update_world"),
         "toggle_evolution": (control_runtime, "_toggle_evolution"),
         "toggle_consciousness": (control_runtime, "_toggle_consciousness"),
         "switch_model": (control_runtime, "_switch_model"),

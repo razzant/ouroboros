@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import textwrap
 
 import pytest
+
+from ouroboros import dialogue_store
+from ouroboros.test_evidence import diagnostic_directory
 
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture import
 from tests.ui_console_errors import record_console_errors, record_failed_loads, unexpected_console_errors
@@ -16,12 +18,10 @@ def test_ui_browser_marked_rich_markdown_and_security(direct_server_with_data): 
     """Rich chat markdown renders every supported format without activating HTML."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import expect, sync_playwright
 
     url = direct_server_with_data["url"]
     data_dir = direct_server_with_data["data_dir"]
-    logs_dir = data_dir / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
     mega_message = textwrap.dedent(
         r"""
         # Rich markdown smoke
@@ -96,9 +96,9 @@ def test_ui_browser_marked_rich_markdown_and_security(direct_server_with_data): 
          "text": "Oversized mermaid test\n\n```mermaid\ngraph TD\nA[" + ("x" * 32769) + "]\n```",
          "format": "markdown"},
     ]
-    (logs_dir / "chat.jsonl").write_text(
-        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8",
-    )
+    # The running server reads its own dialogue store (#1982), never a log file written after it started.
+    for row in rows:
+        dialogue_store.append(data_dir, "chat", row)
 
     try:
         with sync_playwright() as pw:
@@ -261,9 +261,10 @@ def test_ui_browser_marked_rich_markdown_and_security(direct_server_with_data): 
                 oversized.wait_for(state="visible", timeout=30_000)
                 oversized.locator(".md-mermaid-error").wait_for(state="visible", timeout=10_000)
                 assert oversized.locator(".md-mermaid").count() == 0
-                assert oversized.locator(".md-diagram-error-note").inner_text() == (
-                    "Diagram could not be rendered."
-                )
+                # Distant rows sleep under content-visibility and wake on the observer's next frame.
+                diagnostic = oversized.locator(".md-diagram-error-note")
+                diagnostic.scroll_into_view_if_needed()
+                expect(diagnostic).to_have_text("Diagram could not be rendered.", use_inner_text=True)
 
                 security = page.locator(".chat-bubble.assistant", has_text="Security literal").first
                 security.wait_for(state="visible", timeout=30_000)
@@ -274,9 +275,9 @@ def test_ui_browser_marked_rich_markdown_and_security(direct_server_with_data): 
                 assert "<mark>mark</mark>" in literal
                 assert "<sub>sub</sub>" in literal
                 rich.locator("h1.md-h1").scroll_into_view_if_needed()
-                page.screenshot(path=str(data_dir.parent / "rich-markdown-top.png"), full_page=True)
+                page.screenshot(path=str(diagnostic_directory(data_dir.parent, "rich-markdown") / "rich-markdown-top.png"), full_page=True)
                 rich.locator(".md-chart").scroll_into_view_if_needed()
-                page.screenshot(path=str(data_dir.parent / "rich-markdown-bottom.png"), full_page=True)
+                page.screenshot(path=str(diagnostic_directory(data_dir.parent, "rich-markdown") / "rich-markdown-bottom.png"), full_page=True)
                 assert unexpected_console_errors(console_errors, failed_loads) == []
             finally:
                 browser.close()

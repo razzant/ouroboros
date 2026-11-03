@@ -15,7 +15,7 @@ from ouroboros.tools.registry import ToolRegistry
 
 def _ctx(tmp_path):
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    trace = {"tool_calls": [{"tool": "vcs_status", "status": "ok"}], "reasoning_notes": []}
+    trace = {"tool_calls": [{"tool": "vcs_read", "status": "ok"}], "reasoning_notes": []}
     registry._ctx._execution_trace = trace
     registry._ctx._accumulated_usage = {}
     return registry, trace

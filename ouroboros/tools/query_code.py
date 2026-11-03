@@ -358,7 +358,7 @@ def _query_code(
     def admitted(target: pathlib.Path) -> bool:
         return _visible_file(ctx, repo_root, target.relative_to(repo_root).as_posix(), binding, runtime_check)
 
-    def admitted_inventory(scope: str, parse: bool = True):
+    def admitted_inventory(scope: str, parse: bool = True, name: str = ""):
         """This resource view's inventory; every inventory consumer shares its admission."""
         from ouroboros.code_intelligence import build_code_inventory
         from ouroboros.protected_artifacts import protected_artifact_paths
@@ -371,7 +371,7 @@ def _query_code(
         persist = not (exclude_paths or normalized_root == "user_files" or is_restricted_subagent_profile(ctx))
         inventory = build_code_inventory(
             repo_root, drive_root=pathlib.Path(ctx.drive_root), persist=persist, exclude_paths=exclude_paths,
-            scope=scope, path_allowed=admitted, parse=parse,
+            scope=scope, path_allowed=admitted, parse=parse, name=name,
         )
         inventory.files = [
             file for file in inventory.files
@@ -418,8 +418,10 @@ def _query_code(
             if op == "impact" or (op in {"references", "callers"} and (repo_root / scoped_path).is_file()):
                 inventory_scope = ""
             # Occurrence scans parse only token-matched current sources, so these two
-            # operations start from admitted paths instead of a repository-wide parse.
-            inventory = admitted_inventory(inventory_scope, parse=op not in {"references", "callers"})
+            # operations start from admitted paths instead of a repository-wide parse;
+            # definition parses outlines only where current bytes can hold the name.
+            inventory = admitted_inventory(inventory_scope, parse=op not in {"references", "callers"},
+                                           name=query if op == "definition" else "")
             from ouroboros.code_navigation import inventory_view
 
             if op == "impact" and ("/" in query or "\\" in query):

@@ -17,7 +17,9 @@ import ouroboros.agent_task_pipeline as pipeline
 
 
 def _rows(drive_logs):
-    return [json.loads(line) for line in (drive_logs / "chat.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    from tests._dialogue import chat_rows
+
+    return chat_rows(drive_logs.parent)
 
 
 @pytest.fixture
@@ -54,43 +56,35 @@ def test_facts_row_buys_no_model_call_and_carries_the_facts(tmp_path, no_model_c
     assert "source_coverage" not in payload
 
 
-def test_facts_row_is_never_an_authored_narrative_while_legacy_rows_still_resolve(tmp_path, no_model_calls):
-    from ouroboros.main_context_authority import project_main_task_authority
-    from ouroboros.project_dialogue import append_canonical_task_summary
+def test_facts_row_is_never_an_authored_narrative_while_a_stored_legacy_one_still_serves(tmp_path, no_model_calls):
+    """The facts row writes no narrative; a successor of such a record gets no notes row.
+    A narrative an earlier version stored beside its result is served as the notes row."""
+    from ouroboros.main_context_authority import predecessor_notes_message
     from ouroboros.task_results import load_task_result, write_task_result
 
     ref = {"kind": "task_result", "task_id": "", "reader": "get_task_result"}
-    for task_id in ("new-root", "legacy-root"):
-        write_task_result(tmp_path, task_id, "completed", result="R" * 200001)
+    write_task_result(tmp_path, "new-root", "completed", result="R" * 200001)
+    legacy_ref = {**ref, "task_id": "legacy-root"}
+    write_task_result(tmp_path, "legacy-root", "completed", result="R" * 200001, continuation_narrative={
+        "summary_kind": "authored_root_summary", "summary_id": "task-narrative:legacy-root",
+        "task_id": "legacy-root", "result_ref": legacy_ref, "source_coverage": {"task_result": legacy_ref},
+        "text": "Legacy authored account"})
     pipeline._record_task_facts(
         SimpleNamespace(drive_root=tmp_path),
         {"id": "new-root", "root_task_id": "new-root", "type": "task", "chat_id": 1, "text": "work"},
         {"rounds": 4, "cost": 0.0}, {"tool_calls": [{"tool": "read_file"}]}, tmp_path / "logs",
     )
-    # A historical paid narrative keeps resolving through the unchanged reader.
-    legacy_ref = {**ref, "task_id": "legacy-root"}
-    assert append_canonical_task_summary(tmp_path, {
-        "type": "task_summary", "summary_kind": "authored_root_summary",
-        "summary_id": "task-narrative:legacy-root", "task_id": "legacy-root",
-        "result_ref": legacy_ref, "source_coverage": {"task_result": legacy_ref},
-        "text": "Legacy authored account",
-    })
 
     assert "continuation_narrative" not in load_task_result(tmp_path, "new-root")
 
-    def projected(task_id):
-        authority = {"task_id": task_id, "result": "R" * 200001, "task_contract": {"objective": "old"},
-                     "source": {**ref, "task_id": task_id, "arguments": {"task_id": task_id, "include_authority": True}}}
-        return project_main_task_authority(
-            {"id": "next", "predecessor_authority": authority}, drive_root=tmp_path,
-        )["predecessor_authority"]["result"]
+    def notes(task_id):
+        source = {"kind": "task_result", "task_id": task_id, "tool": "get_task_result",
+                  "arguments": {"task_id": task_id, "include_authority": True}}
+        return predecessor_notes_message({"id": "next", "predecessor_authority": {"source": source}},
+                                         drive_root=tmp_path)
 
-    new = projected("new-root")
-    assert new["narrative_status"] == "unavailable"
-    assert new["narrative_gap"]["kind"] == "continuation_narrative_unavailable"
-    legacy = projected("legacy-root")
-    assert legacy["narrative_status"] == "available"
-    assert legacy["narrative"]["text"] == "Legacy authored account"
+    assert notes("new-root") is None
+    assert notes("legacy-root")["content"].endswith("Legacy authored account")
 
 
 def test_facts_row_has_no_visible_summary_even_for_a_project(tmp_path, no_model_calls):
@@ -355,11 +349,13 @@ def test_rescued_files_are_unknown_never_zero_when_the_listing_cannot_vouch(tmp_
     assert rescued_files_sentence(fact) == ("Files rescued: unknown — a task artifact store could not be "
                                             "listed; 1 listed before the failure (hashes not computed).")
 
-    def unreadable_tree(_root):
-        raise PermissionError("tree read denied")
-        yield  # pragma: no cover - a generator that fails on first read
+    from ouroboros import confined_files
 
-    monkeypatch.setattr(artifacts, "iter_artifact_tree", unreadable_tree)
+    def unreadable_tree(_directory, **_kwargs):
+        raise PermissionError("tree read denied")
+
+    # The listing's real walk: every directory is enumerated through its held handle.
+    monkeypatch.setattr(confined_files.ConfinedDirectory, "entries", unreadable_tree)
     assert rescued_files_fact("unk-2", [good])["state"] == "unknown"
     monkeypatch.undo()
 
@@ -397,13 +393,14 @@ def test_rescued_files_count_physical_files_per_distinct_store_without_deduplica
     assert artifact_store_roots(tmp_path, "dup-1", child_root=tmp_path) == [task_artifacts_dir(tmp_path, "dup-1", create=False)]
 
 
-def test_rescued_files_fact_hashes_copies_registers_and_opens_nothing_but_the_registration(tmp_path, monkeypatch):
+def test_rescued_files_fact_hashes_copies_registers_and_reads_nothing_but_the_registration(tmp_path, monkeypatch):
     """Pure: no hash, no copy, no registration write, and the only file whose content is
-    read is the store's shared registration metadata."""
+    read is the store's shared registration metadata. The confined walk opens each
+    deliverable by its held parent for kind and size; no path is opened at all."""
     import hashlib
     import io
 
-    from ouroboros import artifacts
+    from ouroboros import artifacts, confined_files
     from ouroboros.headless import task_artifacts_dir
     from ouroboros.task_finalization import rescued_files_fact
 
@@ -420,17 +417,62 @@ def test_rescued_files_fact_hashes_copies_registers_and_opens_nothing_but_the_re
                       for p in tmp_path.rglob("*"))
 
     before = snapshot()
-    opened = []
-    real_open = io.open
+    path_opens, held_opens, content_reads = [], [], []
+    real_open, real_held_open = io.open, confined_files.ConfinedDirectory.open
 
     def spying_open(file, *args, **kwargs):
-        opened.append(str(file))
+        if not isinstance(file, int):  # a descriptor the walk already holds is not a path open
+            path_opens.append(str(file))
         return real_open(file, *args, **kwargs)
+
+    class Watched:
+        """The walk's own handle; every content read is recorded by its name."""
+
+        def __init__(self, name, handle):
+            self.name, self.handle = name, handle
+
+        def _read(self, method, *args):
+            content_reads.append(self.name)
+            return getattr(self.handle, method)(*args)
+
+        def read(self, *args):
+            return self._read("read", *args)
+
+        def read1(self, *args):
+            return self._read("read1", *args)
+
+        def readinto(self, *args):
+            return self._read("readinto", *args)
+
+        def readline(self, *args):
+            return self._read("readline", *args)
+
+        def readlines(self, *args):
+            return self._read("readlines", *args)
+
+        def __iter__(self):
+            content_reads.append(self.name)
+            return iter(self.handle)
+
+        def close(self):
+            self.handle.close()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            self.handle.close()
+
+    def held_open(directory, name):
+        handle, observed = real_held_open(directory, name)
+        held_opens.append(name)
+        return Watched(name, handle), observed
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("the rescued-files fact hashes, measures, copies or registers nothing")
 
     monkeypatch.setattr(io, "open", spying_open)
+    monkeypatch.setattr(confined_files.ConfinedDirectory, "open", held_open)
     monkeypatch.setattr(artifacts, "sha256", forbidden)
     monkeypatch.setattr(hashlib, "sha256", forbidden)
     for name in ("artifact_record", "stream_artifact_file", "_register_task_artifact_records",
@@ -440,5 +482,7 @@ def test_rescued_files_fact_hashes_copies_registers_and_opens_nothing_but_the_re
     monkeypatch.undo()
 
     assert (fact["count"], fact["state"], fact["hash_computed"]) == (2, "positive", False)
-    assert set(opened) <= {str(store / artifacts._ARTIFACT_MANIFEST)}, opened
+    assert path_opens == [], path_opens
+    assert set(held_opens) <= {artifacts._ARTIFACT_MANIFEST, "a.bin", "b.bin"}, held_opens
+    assert set(content_reads) == {artifacts._ARTIFACT_MANIFEST}, content_reads
     assert snapshot() == before

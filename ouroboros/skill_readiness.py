@@ -30,7 +30,6 @@ _SKILL_PAYLOAD_EDIT_TOOLS = frozenset({
 _SKILL_PAYLOAD_SELECTOR_KEYS = {
     "run_command": "cwd", "run_script": "cwd", "delegate_start": "root",
 }
-_ROOT_TASK_PROJECTION_MAX_BYTES = 1024 * 1024
 _ROOT_TASK_PROJECTION_MAX_RECORDS = 512
 
 
@@ -100,13 +99,14 @@ def acceptance_skill_lifecycle(
     task_started_at: str = "",
     history_coverage: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Per-skill lifecycle facts for the acceptance packet — VISIBILITY ONLY.
+    """Per-skill lifecycle facts of the skills a task touched — VISIBILITY ONLY.
 
-    Names come from the task's own trace plus any skill whose review history
-    records this ``root_task_id`` (which is how a child-authored payload shows
-    up at all). A UI or manual review carries no root task id and is simply not
-    joined. Acceptance judges quality, never the execution route, so nothing
-    here is a gate.
+    The task's completion observations
+    (``task_finalization.build_completion_observations``) read them. Names come
+    from the task's own trace plus any skill whose review history records this
+    ``root_task_id`` (which is how a child-authored payload shows up at all). A
+    UI or manual review carries no root task id and is simply not joined.
+    Nothing here is a gate.
     """
     root = pathlib.Path(drive_root) if drive_root else None
     if root is None:
@@ -162,86 +162,47 @@ def acceptance_skill_lifecycle(
 def _skill_names_from_review_history(
     drive_root: pathlib.Path, root_task_id: str, *, task_started_at: str = "",
 ) -> Dict[str, Any]:
-    """Skills named by the compact root-task projection, never full histories."""
-    from ouroboros.skill_review_history import (
-        ROOT_TASK_PROJECTION_GAPS_RELATIVE_PATH, ROOT_TASK_PROJECTION_RELATIVE_PATH,
-        root_task_projection_gaps_path, root_task_projection_path,
-    )
-    from ouroboros.utils import iter_jsonl_objects
+    """The skills this root task reviewed, named by the review ledger's bounded hot index (one row per
+    ``surface="skill"`` record, its skill in ``subject.skill``), never by full records or histories."""
+    from ouroboros import review_ledger as ledger
 
-    path = root_task_projection_path(drive_root)
-    gap_path = root_task_projection_gaps_path(drive_root)
-    source_ref = {
-        "kind": "canonical_jsonl", "path": ROOT_TASK_PROJECTION_RELATIVE_PATH,
-        "reader": "read_file",
-    }
+    source_ref = {"kind": "review_ledger_index", "path": f"state/{ledger.LEDGER_SUBDIR}/{ledger.INDEX_NAME}",
+                  "reader": "read_file"}
     gaps: set[str] = set()
-    try:
-        byte_truncated = path.stat().st_size > _ROOT_TASK_PROJECTION_MAX_BYTES
-    except FileNotFoundError:
-        byte_truncated = False
-    except OSError:
-        byte_truncated = False
-        gaps.add("projection_unreadable")
     names: List[str] = []
-    try:
-        rows = list(iter_jsonl_objects(
-            path,
-            max_entries=_ROOT_TASK_PROJECTION_MAX_RECORDS,
-            tail_bytes=_ROOT_TASK_PROJECTION_MAX_BYTES,
-            gap_reasons=gaps,
-        ))
-    except OSError:
-        rows = []
-        gaps.add("projection_unreadable")
-    if byte_truncated:
-        gaps.add("tail_bytes_truncated")
-    try:
-        gap_byte_truncated = gap_path.stat().st_size > _ROOT_TASK_PROJECTION_MAX_BYTES
-    except FileNotFoundError:
-        gap_byte_truncated = False
-    except OSError:
-        gap_byte_truncated = False
-        gaps.add("projection_gap_log_unreadable")
-    try:
-        gap_rows = list(iter_jsonl_objects(
-            gap_path,
-            max_entries=_ROOT_TASK_PROJECTION_MAX_RECORDS,
-            tail_bytes=_ROOT_TASK_PROJECTION_MAX_BYTES,
-            gap_reasons=gaps,
-        ))
-    except OSError:
-        gap_rows = []
-        gaps.add("projection_gap_log_unreadable")
-    if gap_byte_truncated:
-        gaps.add("projection_gap_tail_bytes_truncated")
+    rows: List[Dict[str, Any]] = []
     cutoff = str(task_started_at or "").replace("Z", "+00:00")
     if root_task_id:
-        for row in reversed(rows):
-            row_ts = str(row.get("ts") or "").replace("Z", "+00:00")
-            if cutoff and row_ts and row_ts < cutoff:
-                break
-            if not isinstance(row, dict) or str(row.get("root_task_id") or "") != root_task_id:
-                continue
-            name = str(row.get("skill") or "").strip()
-            if name and name not in names:
-                names.append(name)
-        for row in reversed(gap_rows):
-            row_ts = str(row.get("ts") or "").replace("Z", "+00:00")
-            if cutoff and row_ts and row_ts < cutoff:
-                break
-            if isinstance(row, dict) and str(row.get("root_task_id") or "") == root_task_id:
-                gaps.add(str(row.get("reason") or "root_task_projection_gap"))
-    coverage = {
-        "rows_scanned": len(rows), "gap_rows_scanned": len(gap_rows),
-        "truncated": bool(byte_truncated or gap_byte_truncated or "max_entries_truncated" in gaps),
-        "complete": not gaps, "gap_reasons": sorted(gaps), "source_ref": source_ref,
-        "gap_source_ref": {
-            "kind": "canonical_jsonl", "path": ROOT_TASK_PROJECTION_GAPS_RELATIVE_PATH,
-            "reader": "read_file",
-        },
-    }
+        try:
+            rows = ledger.recent_records(drive_root, root_task_id, limit=_ROOT_TASK_PROJECTION_MAX_RECORDS,
+                                         hot_only=True, surface="skill")
+        except OSError:
+            gaps.add("projection_unreadable")
+        if ledger.archived_segments_exist(drive_root):
+            # Older records live in archived segments the hot read never opens: a cut only when this task
+            # could have rows there — it started before the index last rotated, or no start is known; a task
+            # that started after the newest rotation has every row of its own in the hot index.
+            rotated = ledger.newest_rotation_ts(drive_root)
+            if not cutoff or not rotated or cutoff <= rotated:
+                gaps.add("tail_bytes_truncated")
+    for row in rows:
+        row_ts = str(row.get("ts") or "").replace("Z", "+00:00")
+        if cutoff and row_ts and row_ts < cutoff:
+            continue
+        name = str((row.get("subject") or {}).get("skill") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    coverage = {"rows_scanned": len(rows), "gap_rows_scanned": 0, "truncated": "tail_bytes_truncated" in gaps,
+                "complete": not gaps, "gap_reasons": sorted(gaps), "source_ref": source_ref}
     return {"names": names, "coverage": coverage}
+
+
+# Unready packages are installed by the enable owner, never by a paid review: whatever admits the
+# bytes admits their declared dependencies (skill_dependencies.ensure_skill_dependencies).
+_DEPENDENCY_ACTION = {"phase": "dependencies", "tool": "toggle_skill", "reason": (
+    "toggle_skill enabled=true installs or refreshes the declared dependencies when the review gate admits "
+    "the current bytes; it repairs an enabled skill too. Enable only where owner intent covers it, "
+    "never over an owner's OFF.")}
 
 
 def skill_readiness_for_execution(
@@ -322,11 +283,11 @@ def skill_readiness_for_execution(
                 msg = f"deps_not_ready:{deps_status}"
                 blockers.append(msg)
                 agent_fixable.append(msg)
-                next_actions.append({"phase": "dependencies", "tool": "skill_review", "reason": "Reconcile dependencies; an unchanged matched review verdict replays without a new panel."})
+                next_actions.append(dict(_DEPENDENCY_ACTION))
             elif deps_state.get("specs_hash") != install_specs_hash(auto_specs):
                 blockers.append("deps_stale")
                 agent_fixable.append("deps_stale")
-                next_actions.append({"phase": "dependencies", "tool": "skill_review", "reason": "Refresh the declared dependency fingerprint."})
+                next_actions.append(dict(_DEPENDENCY_ACTION))
         # G3 (capinv-447) third readiness state: manually-installed dependencies
         # are DISCLOSED, not silently dropped from the dependency list. They do
         # not hard-block (the owner may have installed them system-wide, and no

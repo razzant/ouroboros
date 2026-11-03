@@ -35,6 +35,7 @@ def test_bare_name_routes_to_deliverables_container(tmp_path, monkeypatch):
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Path.home() uses USERPROFILE on Windows CI
+    monkeypatch.delenv("OUROBOROS_APP_ROOT", raising=False)  # a default install: APP_ROOT is ~/Ouroboros
     monkeypatch.setenv("OUROBOROS_DELIVERABLES_ROOT", "")  # default ~/Ouroboros/Deliverables
 
     resolved = tool_access.resolve_user_file_path(_ctx(tmp_path), "report.html")
@@ -74,6 +75,7 @@ def test_existing_home_dir_or_file_stays_home_relative(tmp_path, monkeypatch):
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Path.home() uses USERPROFILE on Windows CI
+    monkeypatch.delenv("OUROBOROS_APP_ROOT", raising=False)  # a default install: APP_ROOT is ~/Ouroboros
     (tmp_path / "Desktop").mkdir()
     (tmp_path / "existing.txt").write_text("x", encoding="utf-8")
 

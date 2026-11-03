@@ -29,7 +29,7 @@ def _request(**changes):
 def completed_late(tmp_path, monkeypatch, request):
     release, settled = threading.Event(), threading.Event()
     calls = []
-    text = json.dumps([{"item": "full source", "verdict": getattr(request, "param", "PASS"), "severity": "info",
+    text = json.dumps([{"item": "full source", "verdict": getattr(request, "param", "PASS"), "severity": "critical",
                         "reason": "complete source " * 8000 + "EOF-FINAL-EVIDENCE"}])
 
     class Slow:

@@ -14,14 +14,16 @@ import json
 import os
 import pathlib
 import shlex
+import stat
 import subprocess
 import sys
-import tracemalloc
 
 import pytest
 
 from ouroboros import review_checking as rc
 from ouroboros.subagent_worktrees import RawStagingIncomplete, isolated_git_env, stage_raw_payload_inventory
+from ouroboros.unindexed import COPIES
+from tests.group_run import run_in_group
 from tests.test_delegated_skill_payload import (  # noqa: F401
     _owned_gateway_uses_each_test_transport,
     _payload_ctx,
@@ -31,6 +33,7 @@ from tests.test_delegated_skill_payload import (  # noqa: F401
 from tests.test_review_checking import _git, author  # noqa: F401
 
 POSIX = os.name != "nt"
+REPO = pathlib.Path(__file__).resolve().parents[1]
 # A loader-visible file on every platform whose path every Git refuses to index (a .git component).
 _REFUSED = "vendored/.Git/info.txt"
 
@@ -144,6 +147,31 @@ def test_raw_staging_ignores_hostile_attributes_filters_and_config(tmp_path):
     assert not marker.exists()  # no clean/smudge/process filter ran
 
 
+
+def test_a_payload_capture_leaves_no_control_folder_where_read_only_files_refuse_deletion(tmp_path, monkeypatch):
+    """Windows refuses to delete a read-only file, and the blobs a capture stages into its
+    host-managed control object database are read-only: the control folder still goes instead
+    of staying in the temp folder forever."""
+    from ouroboros.subagent_worktrees import payload_capture_git_env
+
+    root, _env = _repo(tmp_path)
+    (root / "new.txt").write_bytes(b"staged into the control object database")
+    real_unlink = os.unlink
+
+    def windows_unlink(path, *, dir_fd=None):
+        if not os.lstat(path, dir_fd=dir_fd).st_mode & stat.S_IWRITE:
+            raise PermissionError(13, "Access is denied", path)
+        return real_unlink(path, dir_fd=dir_fd)
+
+    with payload_capture_git_env(root) as env:
+        control = pathlib.Path(env["GIT_DIR"]).parent
+        subprocess.run(["git", "hash-object", "-w", "new.txt"], cwd=root, env=env, check=True, capture_output=True)
+        objects = [p for p in (control / ".git" / "objects").rglob("*") if p.is_file()]
+        assert any(not p.stat().st_mode & stat.S_IWRITE for p in objects), "git staged read-only objects"
+        monkeypatch.setattr(os, "unlink", windows_unlink)
+        monkeypatch.setattr(os, "remove", windows_unlink)
+    assert not control.exists()
+
 @pytest.mark.skipif(not POSIX, reason="Windows has no POSIX executable bit to diverge")
 def test_baseline_modes_pin_regular_files_and_report_divergence(tmp_path):
     root, env = _repo(tmp_path)
@@ -163,7 +191,33 @@ def test_baseline_modes_pin_regular_files_and_report_divergence(tmp_path):
         "new-exec": "100644", "was-link": "100644"}
 
 
-def test_thousands_of_files_use_one_writer_process_and_never_hold_the_tree(tmp_path, monkeypatch):
+# The staging under measurement runs alone in a fresh interpreter: tracemalloc traces every thread
+# of its process, and an xdist worker still runs other tests' background threads, which allocate
+# inside the window and were counted as this call's memory (a red on a loaded CI runner).
+_MEASURED_STAGING = r"""
+import json, pathlib, subprocess, sys, tracemalloc
+from ouroboros.subagent_worktrees import isolated_git_env, stage_raw_payload_inventory
+
+root, rels = pathlib.Path(sys.argv[1]), json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+env, started, real = isolated_git_env(), [], subprocess.Popen
+
+class Recording(real):
+    def __init__(self, args, *rest, **kwargs):
+        started.append([str(arg) for arg in args])
+        super().__init__(args, *rest, **kwargs)
+
+subprocess.Popen = Recording
+tracemalloc.start()
+try:
+    divergent = stage_raw_payload_inventory(root, rels, env)
+    peak = tracemalloc.get_traced_memory()[1]
+finally:
+    tracemalloc.stop()
+print(json.dumps({"divergent": divergent, "peak": peak, "started": started}))
+"""
+
+
+def test_thousands_of_files_use_one_writer_process_and_never_hold_the_tree(tmp_path):
     root, env = _repo(tmp_path)
     count, size = 3000, 16 * 1024
     for i in range(count):
@@ -171,18 +225,18 @@ def test_thousands_of_files_use_one_writer_process_and_never_hold_the_tree(tmp_p
         path.parent.mkdir(exist_ok=True)
         path.write_bytes(i.to_bytes(4, "big") * (size // 4))
     rels = [p.relative_to(root).as_posix() for p in root.rglob("*.bin")]
-    recorder = _Recorder(monkeypatch)
-    tracemalloc.start()
-    try:
-        assert stage_raw_payload_inventory(root, rels, env) == []
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
+    listing = tmp_path / "rels.json"
+    listing.write_text(json.dumps(rels), encoding="utf-8")
+    done = run_in_group([sys.executable, "-c", _MEASURED_STAGING, str(root), str(listing)],
+                        timeout=240, cwd=REPO)
+    assert done.returncode == 0, done.stdout + done.stderr
+    measured = json.loads(done.stdout.strip().splitlines()[-1])
+    assert measured["divergent"] == []
 
     # Constant, whatever the count: one writer, one staging call, one index read proving every record landed.
-    assert [_verb(args) for args in recorder.args] == ["fast-import", "update-index", "ls-files"]
+    assert [_verb(args) for args in measured["started"]] == ["fast-import", "update-index", "ls-files"]
     # A whole-tree buffer would hold count*size (48 MiB) at once; one file at a time stays far below.
-    assert peak < count * size // 8, peak
+    assert measured["peak"] < count * size // 8, measured["peak"]
     staged = _staged(root, env)
     assert len(staged) == count
     assert staged["d07/f00007.bin"] == ("100644", _blob_id((7).to_bytes(4, "big") * (size // 4)))
@@ -336,7 +390,7 @@ def test_reviewer_capture_of_a_large_tree_keeps_raw_bytes_with_one_writer(author
     files["f.txt"] = b"edited\r\n\xff"
     recorder = _Recorder(monkeypatch)
 
-    evidence = rc.capture_seat_evidence(data, "task", "bulk", release=True)
+    evidence = rc.capture_seat_evidence(data, "task", "bulk")
 
     assert evidence["status"] == "retained", evidence
     assert recorder.git("fast-import") == 1 and recorder.git("hash-object") == 0
@@ -425,7 +479,7 @@ def test_reviewer_capture_of_a_path_git_refuses_keeps_the_copy(author, tmp_path,
     monkeypatch.setattr("ouroboros.subagent_worktrees.stage_raw_payload_inventory",
                         lambda root, paths, env: stage_raw_payload_inventory(root, {*paths, _REFUSED}, env))
 
-    evidence = rc.capture_seat_evidence(data, "task", "refused", release=True)
+    evidence = rc.capture_seat_evidence(data, "task", "refused")
 
     assert evidence["status"] == "capture_failed" and "RawStagingIncomplete" in evidence["error"], evidence
     assert _REFUSED in evidence["error"] and area.is_dir()  # never released over a dropped file
@@ -478,5 +532,6 @@ def test_payload_provisioning_of_a_path_git_refuses_never_starts_or_leaves_a_sna
     payload = delegate_payload(refusal)
     assert payload["reason"] == "execution_snapshot_failed" and payload["definitely_unrun"] is True, payload
     assert "RawStagingIncomplete" in payload["detail"] and _REFUSED in payload["detail"], payload
-    assert list((tmp_path / "snaps").glob("dlgp_*")) == [] and find_execution_snapshot("snapR") is None
+    assert not [*(tmp_path / "snaps").glob("dlgp_*"), *(tmp_path / "snaps").glob(f"{COPIES}/dlgp_*")]
+    assert find_execution_snapshot("snapR") is None
     assert not (skill / ".git").exists() and (skill / _REFUSED).read_bytes() == b"loader-visible\n"

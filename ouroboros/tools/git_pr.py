@@ -9,6 +9,7 @@ import re
 import subprocess
 from typing import List, Optional
 
+from ouroboros.git_observation import numstat_paths
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.git import _acquire_git_lock, _release_git_lock, _sanitize_git_error
 
@@ -24,10 +25,11 @@ BODY_WORKTREE_TOOLS = frozenset({
 
 def _g(args: List[str], cwd: pathlib.Path,
        env: Optional[dict] = None, timeout: int = 60) -> subprocess.CompletedProcess:
+    from ouroboros.git_observation import host_git_env
     return subprocess.run(
         ["git"] + args, cwd=str(cwd),
         capture_output=True, text=True, timeout=timeout,
-        **({"env": env} if env is not None else {}),
+        env=host_git_env(env),
     )
 
 
@@ -309,8 +311,7 @@ def _cherry_pick_pr_commits(
         return resolved_or_error
     resolved = resolved_or_error
 
-    if (_g(["diff", "--cached", "--name-only"], repo_dir).stdout.strip()
-            or _g(["diff", "--name-only"], repo_dir).stdout.strip()):
+    if _g(["status", "--porcelain", "--untracked-files=no"], repo_dir).stdout.strip():
         return (
             "⚠️ CHERRY_PICK_ERROR: Working tree has staged or unstaged changes.\n"
             "Commit or restore to HEAD before cherry-picking."
@@ -540,7 +541,9 @@ def _stage_pr_merge(
                 f"{_sanitize_git_error((co.stderr or '').strip())}"
             )
 
-        if _g(["diff", "--name-only"], repo_dir).stdout.strip():
+        cmd = ["git", "diff", "--numstat", "-z"]
+        if numstat_paths(_g(cmd[1:], repo_dir).stdout, cmd,
+                         lambda args: _g(args[1:], repo_dir).stdout, first_only=True):
             _restore_on_error()
             return (
                 f"⚠️ PR_MERGE_ERROR: Working tree on '{target_branch}' has unstaged "

@@ -110,7 +110,8 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("tree_note", {
             "name": "tree_note",
             "description": (
-                "Append a coordination entry to the SHARED task-tree ledger (the swarm "
+                "Post a coordination entry, a beacon to your parent, or a child-result decision to the "
+                "SHARED task-tree ledger (the swarm "
                 "blackboard, scoped to root_task_id — visible to the parent and all "
                 "siblings/descendants of THIS task tree). Use it to publish the shared "
                 "frame BEFORE fanning out interdependent children and to coordinate while "

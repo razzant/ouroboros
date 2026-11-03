@@ -39,14 +39,6 @@ def _apply(observed, current, tmp_path, **kwargs):
                                        drive_root=tmp_path, task_id="actor-view", fit_candidate=_fit)
 
 
-@pytest.fixture(autouse=True)
-def no_actor_model_calls(monkeypatch):
-    def forbidden(*args, **kwargs):
-        raise AssertionError("the authored path must not enter the helper/model path")
-    monkeypatch.setattr(cc, "_summarizer_spec", forbidden)
-    monkeypatch.setattr(cc, "_call_summarizer", forbidden)
-
-
 def test_observed_binding_is_separate_from_current_request_pair_and_owner_tail(tmp_path):
     owner = {"role": "user", "content": "Keep the original owner requirement."}
     observed = [{"role": "system", "content": "Identity"}, *_unit("before", names=("read_file", "search_code")),
@@ -58,8 +50,8 @@ def test_observed_binding_is_separate_from_current_request_pair_and_owner_tail(t
     current_owner = current[4]
     before = copy.deepcopy(current)
     request = _request(observed, current, keep=(units[1].unit_id,))
-    candidate, receipt, usage = _apply(observed, current, tmp_path, request=request)
-    assert receipt.status == "applied" and usage is None
+    candidate, receipt = _apply(observed, current, tmp_path, request=request)
+    assert receipt.status == "applied"
     assert current == before
     assert candidate[-3:] == [*own_request, late_owner]
     assert candidate[-1] is late_owner and candidate[2] is current_owner
@@ -97,7 +89,7 @@ def test_real_binding_mismatch_preserves_current_without_a_checkpoint(tmp_path, 
     else:
         request = dataclasses.replace(request, keep_unit_ids=("not-an-observed-unit",))
     monkeypatch.setattr(cc, "_persist_reclaim_checkpoint", lambda *a, **k: pytest.fail("mismatch checkpoint"))
-    candidate, receipt, _ = _apply(observed, current, tmp_path, request=request)
+    candidate, receipt = _apply(observed, current, tmp_path, request=request)
     assert candidate is current and receipt.status == "binding_mismatch"
 
 
@@ -108,13 +100,13 @@ def test_sealing_is_presentation_but_content_fields_remain_source(tmp_path):
     current[0]["content"][0].pop("cache_control")
     current[2]["content"] = [{"type": "text", "text": observed[2]["content"],
                               "cache_control": {"type": "ephemeral"}}]
-    candidate, receipt, _ = _apply(observed, current, tmp_path)
+    candidate, receipt = _apply(observed, current, tmp_path)
     assert receipt.status == "applied"
     assert candidate[0] is current[0]
     # A real field inside tool arguments named cache_control must never be stripped.
     observed[1]["tool_calls"][0]["function"]["arguments"] = {"cache_control": "source meaning"}
     current[1]["tool_calls"][0]["function"]["arguments"] = {"cache_control": "changed meaning"}
-    _, receipt, _ = _apply(observed, current, tmp_path)
+    _, receipt = _apply(observed, current, tmp_path)
     assert receipt.status == "binding_mismatch"
 
 
@@ -124,9 +116,25 @@ def test_real_task_seal_wrapper_preserves_the_observed_source_binding(tmp_path):
     observed = [{"role": "system", "content": "rules"}, {"role": "user", "content": "Owner task"}, *_unit("source")]
     current = copy.deepcopy(observed)
     seal_task_transcript(current)
-    assert current[1]["content"] == [{"type": "text", "text": "Owner task", "cache_control": {"type": "ephemeral"}}]
-    candidate, receipt, _ = _apply(observed, current, tmp_path)
+    assert current[1] == {**observed[1], "cache_control": {"type": "ephemeral"}}  # the content is untouched
+    candidate, receipt = _apply(observed, current, tmp_path)
     assert receipt.status == "applied" and candidate[1] is current[1]
+
+
+def test_the_seal_mark_moving_between_later_rows_keeps_the_observed_binding(tmp_path):
+    """Host and owner rows carry the boundary now; its move is cache presentation, not source."""
+    from ouroboros.context_fit import seal_task_transcript
+
+    observed = [{"role": "system", "content": "rules"}, {"role": "user", "content": "Owner task"}, *_unit("source"),
+                {"role": "user", "content": "[Host clock at this request: 2026-10-21T00:00:00Z UTC]"}]
+    seal_task_transcript(observed, min_prefix_tokens=0)
+    assert "cache_control" in observed[-1]
+    current = copy.deepcopy(observed) + _unit("request", names=("compact_context",)) + [
+        {"role": "user", "content": "A later owner line."}]
+    seal_task_transcript(current, min_prefix_tokens=0)
+    assert "cache_control" not in current[len(observed) - 1] and "cache_control" in current[-1]
+    _candidate, receipt = _apply(observed, current, tmp_path)
+    assert receipt.status == "applied"
 
 
 @pytest.mark.parametrize("position,extra", [(0, {"citation": "keep this meaning"}), (1, {})])
@@ -134,7 +142,7 @@ def test_only_plain_first_user_wrapper_can_be_normalized(tmp_path, position, ext
     observed = [{"role": "user", "content": "first"}, {"role": "user", "content": "later"}, *_unit("source")]
     current = copy.deepcopy(observed)
     current[position]["content"] = [{"type": "text", "text": observed[position]["content"], **extra}]
-    candidate, receipt, _ = _apply(observed, current, tmp_path)
+    candidate, receipt = _apply(observed, current, tmp_path)
     assert candidate is current and receipt.status == "binding_mismatch"
 
 
@@ -152,7 +160,7 @@ def test_whole_view_noop_requires_unchanged_selected_schemas_without_new_checkpo
         seen.append((messages, tools))
         return {"accepted": True, "strict_bound_proven": False}
 
-    candidate, receipt, _ = cc.compact_tool_history_llm(
+    candidate, receipt = cc.compact_tool_history_llm(
         current, request=request, observed_messages=observed, observed_tool_schemas=observed_schemas,
         tool_schemas=schemas, fit_candidate=fit, drive_root=tmp_path, task_id="actor-view")
     assert candidate is current and receipt.checkpoint_ref is None
@@ -163,14 +171,14 @@ def test_whole_view_noop_requires_unchanged_selected_schemas_without_new_checkpo
 
 def test_repeated_authored_view_is_byte_identical_without_checkpoint_or_cache_changes(tmp_path, monkeypatch):
     observed = _unit("source", "detail" * 1000)
-    candidate, first, _ = _apply(observed, copy.deepcopy(observed), tmp_path)
+    candidate, first = _apply(observed, copy.deepcopy(observed), tmp_path)
     candidate[0]["content"][0]["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
     observed = copy.deepcopy(candidate)
     own_request = _unit("repeat", names=("compact_context",))
     current = candidate + own_request
     before = cc.context_reclaim_transcript_sha256(current)
     monkeypatch.setattr(cc, "_persist_reclaim_checkpoint", lambda *a, **k: pytest.fail("no-op checkpoint"))
-    repeated, receipt, _ = _apply(observed, current, tmp_path, keep=None)
+    repeated, receipt = _apply(observed, current, tmp_path, keep=None)
     assert receipt.status == "no_op" and receipt.checkpoint_ref is None
     assert repeated is current
     assert cc.context_reclaim_transcript_sha256(repeated) == before
@@ -193,10 +201,10 @@ def test_focus_can_grow_if_the_complete_candidate_and_tools_fit(tmp_path):
                 "basis": "synthetic_complete_payload", "strict_bound_proven": False}
 
     request = dataclasses.replace(_request(observed, current, note="More detailed focus. " * 200), schema_names=("read_file",))
-    candidate, receipt, usage = cc.compact_tool_history_llm(
+    candidate, receipt = cc.compact_tool_history_llm(
         current, request=request, observed_messages=observed, drive_root=tmp_path, task_id="actor-view",
         tool_schemas=tools, fit_candidate=known_fit)
-    assert receipt.status == "applied" and usage is None
+    assert receipt.status == "applied"
     assert receipt.reclaimed_tokens == 0 and receipt.goal_reached is False
     assert receipt.fit["basis"] == "synthetic_complete_payload"
     assert receipt.schema_names == ("read_file",)
@@ -217,7 +225,7 @@ def test_fit_failure_or_new_owner_turn_keeps_current(tmp_path, failure):
             current.append({"role": "user", "content": "A new requirement."})
         return {"accepted": failure == "late_owner"}
 
-    candidate, receipt, _ = cc.compact_tool_history_llm(
+    candidate, receipt = cc.compact_tool_history_llm(
         current, request=_request(observed, current), observed_messages=observed, drive_root=tmp_path,
         task_id="actor-view", fit_candidate=None if failure == "missing" else fit)
     assert candidate is current
@@ -230,7 +238,7 @@ def test_fit_failure_or_new_owner_turn_keeps_current(tmp_path, failure):
 def test_one_note_without_removal_inserts_before_unobserved_tail(tmp_path):
     observed = [{"role": "system", "content": "rules"}, {"role": "user", "content": "task"}]
     current = copy.deepcopy(observed) + _unit("request", names=("compact_context",))
-    candidate, receipt, _ = _apply(observed, current, tmp_path, keep=None)
+    candidate, receipt = _apply(observed, current, tmp_path, keep=None)
     assert receipt.status == "applied"
     assert candidate[:2] == observed and candidate[3:] == current[2:]
     assert cc._capsule_metadata(candidate[2])[1]["authorship"] == "actor"
@@ -238,11 +246,11 @@ def test_one_note_without_removal_inserts_before_unobserved_tail(tmp_path):
 
 def test_restoration_reads_an_exact_checkpoint_unit_as_source_without_protocol_replay(tmp_path):
     observed = _unit("removed", "original source tail")
-    candidate, first, _ = _apply(observed, copy.deepcopy(observed), tmp_path)
+    candidate, first = _apply(observed, copy.deepcopy(observed), tmp_path)
     unit_ref = next(ref for ref in first.source_refs if "unit_id" in ref)
     observed = copy.deepcopy(candidate)
     current = candidate + _unit("restore", names=("compact_context",))
-    restored, receipt, _ = _apply(observed, current, tmp_path, note="Now I inspect the original again.",
+    restored, receipt = _apply(observed, current, tmp_path, note="Now I inspect the original again.",
                                  keep=None, restore=(unit_ref,))
     assert receipt.status == "applied"
     source_message = next(m for m in restored if (cc._capsule_metadata(m)[1] or {}).get("retention") == "source_view")
@@ -259,7 +267,7 @@ def test_restoration_reads_an_exact_checkpoint_unit_as_source_without_protocol_r
 @pytest.mark.parametrize("corruption", ["missing", "wrong_hash", "wrong_unit", "empty_ref", "invalid_checkpoint"])
 def test_invalid_restoration_preserves_current(tmp_path, corruption):
     source = _unit("original")
-    candidate, first, _ = _apply(source, copy.deepcopy(source), tmp_path)
+    candidate, first = _apply(source, copy.deepcopy(source), tmp_path)
     ref = copy.deepcopy(next(ref for ref in first.source_refs if "unit_id" in ref))
     if corruption == "missing":
         ref["checkpoint_ref"]["path"] += ".missing"
@@ -274,7 +282,7 @@ def test_invalid_restoration_preserves_current(tmp_path, corruption):
     else:
         ref = {}
     observed = copy.deepcopy(candidate)
-    result, receipt, _ = _apply(observed, candidate, tmp_path, keep=None, restore=(ref,))
+    result, receipt = _apply(observed, candidate, tmp_path, keep=None, restore=(ref,))
     assert result is candidate and receipt.status == "source_unavailable"
 
 
@@ -283,7 +291,7 @@ def test_current_malformed_and_undescribed_image_units_are_never_removed(tmp_pat
     image = _unit("image")
     image[1]["content"] = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]
     observed = [*malformed, *image, *_unit("ordinary")]
-    candidate, receipt, _ = _apply(observed, copy.deepcopy(observed), tmp_path)
+    candidate, receipt = _apply(observed, copy.deepcopy(observed), tmp_path)
     assert receipt.status == "applied"
     assert candidate[:3] == observed[:3]
 
@@ -303,15 +311,15 @@ def test_consumed_anthropic_source_restoration_does_not_reactivate_native_custod
     assert cc._atomic_units(turns) == ()
     # Current active custody stays intact even when another completed unit is removed.
     active = turns + _unit("other")
-    kept, receipt, _ = _apply(active, copy.deepcopy(active), tmp_path)
+    kept, receipt = _apply(active, copy.deepcopy(active), tmp_path)
     assert receipt.status == "applied" and kept[:2] == turns
     assert anthropic_tool_unit_active(kept, 0, 1)
     digest = turns[0][ANTHROPIC_NATIVE_RECEIPT_KEY]["content_sha256"]
     consumed = {"role": "assistant", "content": "Already continued.", ANTHROPIC_CONSUMED_RECEIPTS_KEY: [digest]}
     observed = turns + [consumed]
-    compacted, first, _ = _apply(observed, copy.deepcopy(observed), tmp_path)
+    compacted, first = _apply(observed, copy.deepcopy(observed), tmp_path)
     ref = next(ref for ref in first.source_refs if "unit_id" in ref)
-    restored, receipt, _ = _apply(copy.deepcopy(compacted), compacted, tmp_path,
+    restored, receipt = _apply(copy.deepcopy(compacted), compacted, tmp_path,
                                  note="Inspect the historical source.", keep=None, restore=(ref,))
     assert receipt.status == "applied"
     assert all(ANTHROPIC_NATIVE_RECEIPT_KEY not in message for message in restored)
@@ -322,19 +330,3 @@ def test_consumed_anthropic_source_restoration_does_not_reactivate_native_custod
     # Every full private byte is still reachable in the original checkpoint.
     payload = json.loads(read_actor_source_bytes(tmp_path, "actor-view", ref["checkpoint_ref"]))
     assert payload["messages"][0][ANTHROPIC_NATIVE_RECEIPT_KEY] == turns[0][ANTHROPIC_NATIVE_RECEIPT_KEY]
-
-
-def test_helper_recompaction_keeps_all_actor_source_lineage(tmp_path, monkeypatch):
-    original = _unit("first", "a" * 2000) + _unit("second", "b" * 2000)
-    authored, receipt, _ = _apply(original, copy.deepcopy(original), tmp_path, note="Detailed understanding. " * 1000)
-    old_refs = receipt.source_refs
-    monkeypatch.setattr(cc, "_summarizer_spec", lambda: {"model": "fixture", "route_fp": "fixture"})
-    monkeypatch.setattr(cc, "_call_summarizer", lambda parts, **kwargs: {p.source_id: "Helper retained the meaning." for p in parts})
-    helper_request = ContextReclaimRequest("fixture", "later", cc.context_reclaim_transcript_sha256(authored),
-                                          "cold_estimate", 1.0, 100)
-    recompressed, helper_receipt, _ = cc.compact_tool_history_llm(
-        authored, request=helper_request, drive_root=tmp_path, task_id="actor-view")
-    assert helper_receipt.status == "applied"
-    meta = cc._capsule_metadata(recompressed[0])[1]
-    assert meta is not None and meta["generation"] == 2
-    assert all(ref in meta["source_refs"] for ref in old_refs)

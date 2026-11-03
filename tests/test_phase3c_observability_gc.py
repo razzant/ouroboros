@@ -666,6 +666,7 @@ def test_startup_sweep_retries_only_pending_refs_then_prunes_without_manual_copy
 ):
     import ouroboros.observability as observability
     import ouroboros.server_maintenance as server_maintenance
+    from ouroboros import maintenance
 
     task_id = "phase3c-startup-retry"
     parent, child = _child(tmp_path, task_id)
@@ -740,7 +741,11 @@ def test_startup_sweep_retries_only_pending_refs_then_prunes_without_manual_copy
     # This test process owns no supervisor maps: it states the absence the probe proves in production.
     monkeypatch.setattr("supervisor.queue.task_settlement_liveness", lambda _task: False)
 
-    # The retry and the settlement ride the off-loop drive-custody pass, never startup.
+    # Never startup: the retry is the maintenance child's job, the settlement the off-loop
+    # drive-custody pass; a pass before the retry keeps the drive (its refs are pending).
+    server_maintenance._run_drive_custody_pass()
+    assert child.exists()
+    maintenance.run_job(parent, "child_ref_promotion")
     server_maintenance._run_drive_custody_pass()
 
     settled = load_task_result(parent, task_id) or {}
@@ -818,7 +823,7 @@ def test_startup_prune_retries_missing_pending_source_into_typed_gap(
     assert settled["child_ref_promotion"]["status"] == "complete"
 
 
-def test_periodic_maintenance_invokes_pending_ref_promotion_sweep(
+def test_periodic_maintenance_leaves_the_pending_ref_promotion_to_the_maintenance_child(
     tmp_path, monkeypatch,
 ):
     import ouroboros.observability as observability
@@ -828,16 +833,23 @@ def test_periodic_maintenance_invokes_pending_ref_promotion_sweep(
     import threading
 
     calls: list[tuple[pathlib.Path, str]] = []
+    dispatches: list[str] = []
     threads: list = []
     # The cadence state and drive root live in the maintenance owner (v7 server split).
-    # The retry is history-sized, so it rides the 300 s reconcile block on its own
-    # daemon thread and latch — never the 20 s cancel sweep, which runs beside it here.
+    # The retry is history-sized: it is the maintenance child's job (ouroboros/maintenance.py),
+    # so neither the 300 s reconcile block nor the 20 s cancel sweep runs it on a server
+    # thread; the reconcile block ends by reserving the child's slot.
     monkeypatch.setattr(server_maintenance, "DATA_DIR", tmp_path)
     monkeypatch.setattr(server_maintenance.time, "time", lambda: 10_000.0)
     monkeypatch.setattr(server_maintenance, "_LAST_CANCEL_INTENT_SWEEP", [0.0])
     monkeypatch.setattr(server_maintenance, "_CANCEL_INTENT_SWEEP_LOCK", threading.Lock())
     monkeypatch.setattr(server_maintenance, "_RECONCILE_SWEEP_LOCK", threading.Lock())
     monkeypatch.setattr(server_maintenance, "_periodic_zombie_reconcile", lambda **kwargs: None)
+    monkeypatch.setattr(server_maintenance, "_tick_maintenance_child",
+                        lambda: dispatches.append(threading.current_thread().name))
+    from ouroboros import maintenance
+
+    monkeypatch.setattr(maintenance.child, "_owed", False)  # this process's first look already happened
     monkeypatch.setattr(task_lifecycle, "sweep_cancel_intents", lambda: {})
     monkeypatch.setattr(terminal_delivery, "replay_pending_deliveries", lambda _root: None)
     monkeypatch.setattr(
@@ -859,7 +871,8 @@ def test_periodic_maintenance_invokes_pending_ref_promotion_sweep(
     for thread in threads:
         thread.join(5)
     assert [thread.name for thread in threads if thread.name not in {"cold-custody", "schedule-admission"}] == ["cancel_intent_sweep", "terminal_delivery_replay", "question_delivery_replay", "pause_notice_replay", "abandoned_usage_reconciliation", "post_task_synthesis_recovery", "reconcile-maintenance"]
-    assert calls == [(tmp_path, "reconcile-maintenance")]
+    assert calls == [], "the promotion retry ran on a server thread"
+    assert dispatches == ["reconcile-maintenance"]
     assert server_maintenance._RECONCILE_SWEEP_LOCK.acquire(timeout=2)
     server_maintenance._RECONCILE_SWEEP_LOCK.release()
     assert server_maintenance._CANCEL_INTENT_SWEEP_LOCK.acquire(timeout=2)

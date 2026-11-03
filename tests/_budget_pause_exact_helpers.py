@@ -28,6 +28,9 @@ def _install_queue(tmp_path, monkeypatch):
     monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
     monkeypatch.setattr(queue, "PENDING", workers.PENDING)
     monkeypatch.setattr(queue, "RUNNING", workers.RUNNING)
+    # queue.init keeps live acceptance seals: an earlier test's seal would enter this
+    # test's snapshot and fence its root at restore.
+    monkeypatch.setattr(queue, "ACCEPTANCE_FENCES", {})
     queue.BUDGET_ROOT_FENCES.clear()
     queue.init_queue_refs(workers.PENDING, workers.RUNNING, workers.QUEUE_SEQ_COUNTER_REF)
     monkeypatch.setattr(workers, "load_state", lambda: {"owner_chat_id": 0})

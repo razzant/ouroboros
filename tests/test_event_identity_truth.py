@@ -30,7 +30,7 @@ def test_task_received_carries_only_supplied_top_level_identity(tmp_path, monkey
     monkeypatch.setattr(module, 'resolve_dispatch_axes', lambda task: {})
     monkeypatch.setattr(module, '_record_executor_resolution', lambda *args: None)
     monkeypatch.setattr(module, 'sanitize_task_for_event', lambda task, logs: task)
-    host = SimpleNamespace(env=SimpleNamespace(drive_path=lambda name: tmp_path / name),
+    host = SimpleNamespace(env=SimpleNamespace(drive_root=tmp_path, drive_path=lambda name: tmp_path / name),
                            _persist_running_record=stop)
     with pytest.raises(StopAfterReceived):
         module.OuroborosAgent._prepare_task_context(host, {'id': 'child', **lineage}, authority_refusal={})

@@ -7,8 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros import dialogue_import, dialogue_store as ds
 from ouroboros.gateway import history
 from ouroboros.gateway.history_paging import HistorySource, decode_cursor, encode_cursor
+from ouroboros.store import StoreError
 from tests._store_shared import seed_result
 
 
@@ -38,7 +40,16 @@ def row(index, source="chat", **extra):
                else {"content": f"progress-{index}", "task_id": "root"}), **extra}
 
 
+def imported(root):
+    """What the boot and the maintenance child do before a reader runs: the cutover takes the
+    chain files a fixture wrote (or an older body appended since), the job imports the archive."""
+    dialogue_import.cutover(root)
+    if dialogue_import.pending_segments(root):
+        assert dialogue_import.run_dialogue_import(root)["state"] == "done"
+
+
 def request(root, **params):
+    imported(root)
     response = asyncio.run(history.make_chat_history_endpoint(root)(SimpleNamespace(query_params=params)))
     return response.status_code, json.loads(response.body)
 
@@ -109,15 +120,15 @@ def test_sparse_project_opens_at_its_rows_without_parsing_other_rooms_archives(t
     for archive in archives[1:]:
         write(archive, [row(index, text="foreign" + "x" * 2000) for index in range(350)])
     write(tmp_path / "logs" / "chat.jsonl", [row(9, text="foreign live")])
-    parsed, entries = [], HistorySource._entries
-    monkeypatch.setattr(HistorySource, "_entries", lambda self, start, end, gaps: (
-        parsed.append((self.source, start, end)), entries(self, start, end, gaps))[1])
+    decoded, entries = [], HistorySource._entries
+    monkeypatch.setattr(HistorySource, "_entries", lambda self, rows: (
+        decoded.extend((self.source, entry.seq) for entry in rows), entries(self, rows))[1])
     loaded = list(pages(tmp_path, chat_id=str(project["chat_id"])))
     assert len(loaded) == 1 and loaded[0]["window"]["complete"] is True
     assert [message["text"] for message in loaded[0]["messages"]] == ["human-0", "human-1", "human-2"]
-    own_end, live_base = archives[0].stat().st_size, sum(archive.stat().st_size for archive in archives)
-    assert all(end <= own_end or start >= live_base for source, start, end in parsed if source == "chat"), \
-        "the five foreign archives are ruled out by their summaries, never parsed"
+    own_end = archives[0].stat().st_size
+    assert decoded and all(seq < own_end for source, seq in decoded if source == "chat"), \
+        "the five foreign archives' rows are addressed out of the room's page, never decoded"
 
 
 def test_frozen_page_and_older_cursor_survive_rotation_and_live_append(tmp_path):
@@ -212,12 +223,12 @@ def test_historical_terminal_never_overrides_current_result_authority(tmp_path, 
 def test_required_source_failure_retries_the_same_page(tmp_path, monkeypatch):
     write(tmp_path / "logs" / "chat.jsonl", [row(index) for index in range(200)])
     first = request(tmp_path)[1]
-    original = HistorySource._read
-    monkeypatch.setattr(HistorySource, "_read", lambda *_a: (_ for _ in ()).throw(OSError("injected read failure")))
+    original = ds.probe_rows
+    monkeypatch.setattr(ds, "probe_rows", lambda *_a, **_k: (_ for _ in ()).throw(StoreError("injected store failure")))
     status, failed = request(tmp_path, cursor=first["next_cursor"])
     assert status == 503 and failed["reason_code"] == "history_source_unavailable"
     assert failed["next_cursor"] == first["next_cursor"] and failed["has_more"] is True
-    monkeypatch.setattr(HistorySource, "_read", original)
+    monkeypatch.setattr(ds, "probe_rows", original)
     status, retried = request(tmp_path, cursor=failed["next_cursor"])
     assert status == 200 and any(message["text"] == "human-0" for message in retried["messages"])
 
@@ -244,32 +255,32 @@ def test_continuation_reads_only_before_its_position(tmp_path, monkeypatch):
     state = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
     cursor = decode_cursor(encoded, 1, state["view"])
     seen = []
-    original = HistorySource._read
+    original = ds.probe_rows
 
-    def read(source, start, end):
-        seen.append((source.source, start, end))
-        return original(source, start, end)
+    def probe(root, stream, keys, **kwargs):
+        seen.append((stream, kwargs["lower"], kwargs["before"]))
+        return original(root, stream, keys, **kwargs)
 
-    monkeypatch.setattr(HistorySource, "_read", read)
+    monkeypatch.setattr(ds, "probe_rows", probe)
     assert request(tmp_path, cursor=encoded)[0] == 200
     assert seen and all(end <= cursor["before"][source] for source, _start, end in seen)
 
 
-def test_partial_live_line_is_outside_frozen_history_even_after_rotation(tmp_path):
+def test_a_torn_line_an_older_body_left_is_a_gap_outside_frozen_history(tmp_path):
+    """A store-unaware body appended after the cutover and did not finish its last line: the next
+    cutover imports its rows at their place and records the torn line as a skipped interval -- a
+    disclosed gap above the frozen page, never a row and never a change to that page."""
     path = tmp_path / "logs" / "chat.jsonl"
     write(path, [row(index) for index in range(200)])
-    with path.open("ab") as handle:
-        handle.write(b'{"direction":"in","text":"later')
     first = request(tmp_path)[1]
     with path.open("ab") as handle:
-        handle.write(b'"}\n')
-    archive = tmp_path / "archive" / "chat_20260912T000000.jsonl"
-    archive.parent.mkdir()
-    os.replace(path, archive)
-    path.touch()
+        handle.write(json.dumps(row(200, text="whole")).encode() + b"\n" + b'{"direction":"in","text":"later')
     replayed = request(tmp_path, cursor=first["page_cursor"])[1]
     assert replayed["messages"] == first["messages"]
-    assert not any(message["text"] == "later" for page in pages(tmp_path, cursor=first["next_cursor"]) for message in page["messages"])
+    status, fresh = request(tmp_path)
+    assert status == 200 and "chat_malformed_jsonl" in fresh["window"]["truncated_by"]
+    assert any(message["text"] == "whole" for message in fresh["messages"])
+    assert not any(message["text"] == "later" for page in pages(tmp_path) for message in page["messages"])
 
 
 def recoded(encoded, **fields):

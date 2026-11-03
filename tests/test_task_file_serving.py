@@ -545,7 +545,7 @@ def test_a_stale_accepted_disposition_cannot_certify_bytes_the_store_no_longer_s
     data = tmp_path / "data"
     artifact_dir = artifacts.task_artifact_dir_path(data, TASK, create=True)
     report = artifact_dir / "report.md"
-    report.write_text("version one\n", encoding="utf-8")
+    report.write_bytes(b"version one\n")  # bytes: the recorded identity below is of exactly these
     write_task_result(data, TASK, "completed", parent_task_id="parent1", root_task_id="parent1",
                       delegation_role="subagent", result="artifact-backed", artifacts=[artifacts.artifact_record(report)])
     parent = SimpleNamespace(drive_root=str(data), budget_drive_root=str(data), task_id="parent1", role="orchestrator",
@@ -555,7 +555,7 @@ def test_a_stale_accepted_disposition_cannot_certify_bytes_the_store_no_longer_s
                "child_result_sha256": shown}
     assert _tree_note(parent, "decision", "integrated the report", payload=payload).startswith("OK:")
 
-    report.write_text("version two\n", encoding="utf-8")  # same length, no re-record
+    report.write_bytes(b"version two\n")  # same length, no re-record
     view = load_effective_task_result(data, TASK)
     assert _child_result_sha256(view) == shown and _current_child_result_disposition(view) == "integrated"
     refused = _client(data).get(f"/api/tasks/{TASK}/artifacts/report.md")

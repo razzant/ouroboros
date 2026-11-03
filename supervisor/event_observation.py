@@ -1,7 +1,7 @@
 """The supervisor event bus: one Manager-backed queue, two lanes, one consumer.
 
 The bus is the ordinary ``queue.Queue`` the process-lifetime manager serves,
-with three facts kept under its own mutex and nothing else:
+with these facts kept under its own mutex and nothing else:
 
 * **Two lanes.** Every event kind rides the lane its ``EventDisposition``
   declares (``supervisor/event_taxonomy.py``): ``control`` for chat sends,
@@ -10,7 +10,9 @@ with three facts kept under its own mutex and nothing else:
   any exists, else the oldest telemetry event, FIFO inside each lane, so a
   backlog of worker telemetry can never sit in front of an answer or a control
   (owner decision, 14 Oct 2026). Producers keep one ``put``; the single
-  supervisor consumer keeps one bounded ``get`` loop. Nothing is re-put.
+  supervisor consumer takes one bounded batch per drain pass in that same order
+  (``drain``: one manager round trip, not one per event) and hands an unserved
+  tail back to the front of its lanes (``restore_front``). Nothing is re-put.
 * **Pending idle inputs.** The bounded drain cannot conclude idleness while a
   fact that may change that decision is still queued, in either lane. This
   index counts only pending envelopes; it neither folds activity nor grants a
@@ -24,11 +26,16 @@ with three facts kept under its own mutex and nothing else:
   queued or in-flight original is never duplicated and never counted as a
   retry. Volatile: a new server generation starts empty; the durable outbox
   stays the authority on what is owed.
+* **Lane depth and age.** Each envelope keeps the manager process's own
+  monotonic stamp of its put; ``lane_facts`` answers per lane how many wait
+  and how long the oldest has (the per-minute ``supervisor_load`` row reads
+  it), one process and one clock. A restored envelope keeps its first stamp.
 """
 from __future__ import annotations
 
 import logging
 import queue
+import time
 from collections import Counter, deque
 from multiprocessing.managers import SyncManager
 from typing import Any
@@ -87,25 +94,65 @@ class ObservedEventQueue(queue.Queue):
         addresses = idle_input_addresses(item)
         # Retain the addresses by value: an in-process producer may keep or
         # mutate its original dict, while the manager transport copies it.
-        self._lanes[event_lane(item)].append((item, addresses))
+        self._lanes[event_lane(item)].append((item, addresses, time.monotonic()))
         self._pending.update(addresses)
         delivery_id = outstanding_delivery_id(item)
         if delivery_id:
             self._outstanding[delivery_id] += 1
 
-    def _get(self) -> Any:
+    def _take(self) -> tuple:
         lane = self._lanes[CONTROL_LANE] or self._lanes[TELEMETRY_LANE]
-        item, addresses = lane.popleft()
+        item, addresses, put_at = lane.popleft()
         for address in addresses:
             self._pending[address] -= 1
             if not self._pending[address]:
                 del self._pending[address]
-        return item
+        return item, put_at
+
+    def _get(self) -> Any:
+        return self._take()[0]
+
+    def drain(self, max_items: int) -> list:
+        """Up to ``max_items`` envelopes ``(event, put_at)`` in ONE call, in the order that many
+        consecutive ``get`` calls would serve them now: control lane first, FIFO in each lane.
+
+        The consumer's one manager round trip per drain pass (cost law L11; one ``get_nowait``
+        per event paid ~940 proxy round trips a minute on 01.11). ``put_at`` is this bus's own
+        put stamp, opaque to the consumer: ``restore_front`` keeps the lane ages exact with it.
+        The idle-input index forgets what is taken exactly as ``get`` does; delivery membership
+        is untouched (the consumer releases each send after its handler, as before).
+        """
+        with self.mutex:
+            taken = [self._take() for _ in range(min(max(0, int(max_items)), self._qsize()))]
+            if taken:
+                self.not_full.notify(len(taken))
+        return taken
+
+    def restore_front(self, envelopes: list) -> None:
+        """Hand back the unserved tail of a ``drain``: each envelope returns to the FRONT of its
+        lane, in its order, with its own put stamp and its idle-input addresses, ahead of
+        everything put since — as if it had never been taken. Used when a drain pass stops at
+        its time bound or a handler raises; no producer put happens, membership was never released.
+        """
+        with self.mutex:
+            for item, put_at in reversed(list(envelopes)):
+                addresses = idle_input_addresses(item)
+                self._lanes[event_lane(item)].appendleft((item, addresses, put_at))
+                self._pending.update(addresses)
+            if envelopes:
+                self.not_empty.notify(len(envelopes))
 
     def pending_idle_inputs(self) -> set[str]:
         """One atomic snapshot of addresses with an unconsumed idle input, both lanes."""
         with self.mutex:
             return set(self._pending)
+
+    def lane_facts(self) -> dict[str, dict[str, Any]]:
+        """Per lane: the envelopes waiting and the age in seconds of the oldest (None when empty)."""
+        with self.mutex:
+            now = time.monotonic()
+            return {name: {"depth": len(lane), "oldest_age_sec": round(now - lane[0][2], 1) if lane else None}
+                    for name, lane in self._lanes.items()}
 
     def release_delivery(self, delivery_id: str) -> None:
         """The consumer's receipt: one queued send of this id left the handler."""
@@ -176,4 +223,16 @@ def delivery_outstanding(event_queue: Any, delivery_id: str) -> bool | None:
         return outstanding
     except Exception:
         log.warning("Supervisor delivery membership is unobservable for %s", delivery_id, exc_info=True)
+        return None
+
+
+def lane_observations(event_queue: Any) -> dict[str, dict[str, Any]] | None:
+    """``lane_facts`` read outside Q; a bus that cannot answer is unknown (None), never empty."""
+    try:
+        facts = event_queue.lane_facts()
+        if not isinstance(facts, dict):
+            raise ValueError("invalid supervisor lane observation")
+        return facts
+    except Exception:
+        log.debug("Supervisor lane depths are unobservable", exc_info=True)
         return None

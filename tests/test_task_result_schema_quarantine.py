@@ -16,6 +16,8 @@ updater shim suite (tests/test_update_tx_nminus1_shim.py).
 
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+
 import json
 import pathlib
 
@@ -140,7 +142,7 @@ def test_unstamped_history_is_quarantined_not_converted(tmp_path):
     assert events[0]["count"] == 1 and events[0]["first_task_id"] == "t5"
     assert events[0]["reasons"] == {"unstamped_pre_7_0": 1}
     # 6.3=B: log-only visibility — no chat notice is minted anywhere.
-    assert not (tmp_path / "logs" / "chat.jsonl").exists()
+    assert not dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
 
 
 def test_quarantine_is_idempotent_for_repeat_reads(tmp_path):

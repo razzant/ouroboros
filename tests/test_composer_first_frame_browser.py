@@ -41,7 +41,7 @@ PROBE = """() => {
     probe.sampleAll = () => rows.filter(r => r.isConnected).forEach(probe.sample);
     const mount = new MutationObserver(() => {
         for (const row of document.querySelectorAll('.chat-toolbar-row')) {
-            if (seen.has(row) || row.querySelectorAll('.chat-capsule').length !== 2) continue;
+            if (seen.has(row) || row.querySelectorAll('.chat-capsule').length !== 3) continue;  // Subagents, Context, Effort
             seen.add(row); rows.push(row);
             const observer = new ResizeObserver(() => probe.sample(row));
             observer.observe(row); observers.push(observer);
@@ -72,7 +72,7 @@ def _assert_phase(page, room, *, names=None):
     assert rows, (room, facts)
     assert all(row["oneLine"] and row["contained"] for row in rows), rows
     if names is not None:
-        assert all(row["names"] == [names, names] for row in rows), rows
+        assert all(row["names"] == [names] * 3 for row in rows), rows
     assert page.evaluate("__composerPaint.errors") == []
     return rows
 

@@ -13,7 +13,8 @@ import {
     nativeStatusText,
     resetNotifier,
 } from '../modules/notifications.js';
-import { loadDesktopShell } from '../modules/desktop_shell.js';
+import { loadDesktopShell, mountDesktopShell } from '../modules/desktop_shell.js';
+import { recordingAudio, settle } from './notification_audio_fixture.js';
 
 const ON = { ...DEFAULT_NOTIFY_PREFS, enabled: true };
 const FINISHED = { role: 'system', system_type: 'task_summary', task_id: 't1', chat_id: 7, content: 'Report ready' };
@@ -38,7 +39,6 @@ function fixture({ answer, prefs = ON, granted = false, extra = {}, documentRef 
     const banners = [];
     const toasts = [];
     const activated = [];
-    let tones = 0;
     let browserAsks = 0;
     class Banner {
         static permission = granted ? 'granted' : 'default';
@@ -46,31 +46,29 @@ function fixture({ answer, prefs = ON, granted = false, extra = {}, documentRef 
         constructor(title, options) { banners.push({ title, options }); }
         close() {}
     }
-    class Audio {
-        constructor() { this.currentTime = 0; this.destination = {}; }
-        resume() {}
-        close() {}
-        createOscillator() { tones += 1; return { connect() {}, start() {}, stop() {} }; }
-        createGain() { return { gain: { value: 0 }, connect() {} }; }
-    }
+    const audio = recordingAudio();
     const hostApi = {
         show_native_notification: (...args) => {
             calls.push(['show_native_notification', ...args]);
             return typeof answer === 'function' ? answer(...args) : answer;
         },
-        request_attention: (...args) => { calls.push(['request_attention', ...args]); return { ok: true, status: 'native_sound', sound_played: true }; },
+        // Model a sound-capable Windows/legacy bridge; the page must request it silently.
+        request_attention: (...args) => {
+            calls.push(['request_attention', ...args]);
+            return args[0] ? { ok: true, status: 'native_sound', sound_played: true } : { ok: true, status: 'window_only', sound_played: false };
+        },
         ...extra,
     };
     const notifier = createNotifier({
         storage: storage(prefs),
         notificationCtor: Banner,
-        audioContextCtor: Audio,
+        audioContextCtor: audio.ctor,
         showToast: (line) => { toasts.push(line); return null; },
         onActivate: (target) => activated.push(target),
         documentRef,
         hostApi,
     });
-    return { notifier, calls, banners, toasts, activated, tones: () => tones, browserAsks: () => browserAsks };
+    return { notifier, calls, banners, toasts, activated, audio, tones: () => audio.tones.length, browserAsks: () => browserAsks };
 }
 
 test('a submitted system notification is the one surface: no browser banner, no toast, no page tone', async () => {
@@ -118,37 +116,64 @@ test('a click on the system notification opens the same source a banner would', 
     fx.notifier.destroy();
 });
 
-for (const status of ['denied', 'not_determined', 'unavailable', 'failed']) {
-    test(`a ${status} answer falls back to the page's own surface, with exactly one sound`, async () => {
-        const fx = fixture({ answer: { ok: false, status, reason: 'x' } });
+/* A refused alert still reaches the owner, through the attention cue asked WITHOUT the launcher's sound,
+   and adds no page sound: a refusal is no evidence that the system lets Ouroboros sound (owner decision,
+   a2199222). A permission not yet asked, a denial, one the system could not read (`unavailable`, or its
+   own error to the question) and a failure stay quiet, and so does a `sound_setting` on the refusal: after
+   a definite failure the tone reads only the app's `shell_info()`, asked after that failure
+   (notifications_sound.test.js), which this fixture's app does not offer. */
+for (const [status, extra] of [
+    ['not_determined', {}],
+    ['not_determined', { reason: 'authorization_error: UNErrorDomain 1: x' }],
+    ['denied', {}],
+    ['unavailable', { reason: 'not_an_app_bundle' }],
+    ['failed', { reason: 'no_center' }],
+    ['failed', { reason: 'no_center', sound_setting: 'enabled' }],
+]) {
+    test(`a ${status} refusal ${JSON.stringify(extra)} falls back with no sound`, async () => {
+        const fx = fixture({ answer: { ok: false, status, platform: 'macos', reason: '', ...extra } });
         assert.equal(fx.notifier.handleFrame(FINISHED, { kind: 'chat', isMain: true }).surface, 'native');
-        await tick();
-        await tick();
+        await settle();
         assert.deepEqual(fx.toasts, ['Task finished'], 'the alert still reaches the owner');
-        assert.equal(fx.calls.filter(([name]) => name === 'request_attention').length, 1, 'the existing attention cue');
-        assert.equal(fx.tones(), 0, 'the launcher played the one system sound');
+        assert.deepEqual(fx.calls.filter(([name]) => name === 'request_attention'), [['request_attention', false]],
+            'the attention cue, never the launcher\'s own sound');
+        assert.equal(fx.audio.contexts.length, 0, 'no page tone: no audio device is even opened');
         fx.notifier.destroy();
     });
 }
 
-test('a broken bridge call is a fallback, never a lost alert', async () => {
-    const fx = fixture({ answer: () => { throw new Error('bridge gone'); } });
-    fx.notifier.handleFrame(FINISHED, { kind: 'chat', isMain: true });
-    await tick();
-    assert.deepEqual(fx.toasts, ['Task finished']);
-    const rejected = fixture({ answer: () => Promise.reject(new Error('closed')), granted: true });
-    rejected.notifier.handleFrame(FINISHED, { kind: 'chat', isMain: true });
-    await tick();
-    await tick();
-    assert.equal(rejected.banners.length, 1, 'with browser permission the browser banner takes over');
-    fx.notifier.destroy();
-    rejected.notifier.destroy();
+test('a call that throws before sending falls back silently; a failed or unreadable answer after it is unknown', async () => {
+    const thrown = fixture({ answer: () => { throw new Error('bridge gone'); } });
+    thrown.notifier.handleFrame(FINISHED, { kind: 'chat', isMain: true });
+    await settle();
+    assert.deepEqual(thrown.toasts, ['Task finished'], 'nothing was sent: the alert falls back');
+    assert.equal(thrown.tones(), 0, 'no permission fact came back: quiet');
+    thrown.notifier.destroy();
+    for (const answer of [() => Promise.reject(new Error('closed')), () => undefined, () => ({ ok: false }),
+        () => ({ status: 'denied' }), () => ({ ok: true, status: 'weird' })]) {
+        const status = { textContent: '' };
+        const fx = fixture({ answer, granted: true, documentRef: nodes({ '[data-notify-status]': [status] }) });
+        fx.notifier.configure({ shell: { desktop: true, version: '7.7.0', native: { status: 'authorized' } } });
+        fx.notifier.handleFrame(FINISHED, { kind: 'chat', isMain: true });
+        await settle();
+        assert.equal(fx.banners.length, 0, 'it may have reached the system: no second alert');
+        assert.deepEqual(fx.toasts, []);
+        assert.equal(fx.tones(), 0);
+        assert.equal(fx.calls.some(([name]) => name === 'request_attention'), false);
+        assert.match(status.textContent, /did not confirm the last alert/);
+        assert.equal(fx.notifier.activateNative(fx.calls[0][4]), true, 'its click still opens the source');
+        fx.notifier.destroy();
+    }
 });
 
-test('an app without the native method keeps every earlier path (3A)', async () => {
+test('an app without the native method falls back to the page, asking only its silent window cue (3A)', async () => {
+    // request_attention without notify_owner: its `false` only raises the window (notifications.test.js).
     const fx = fixture({ answer: null, extra: { show_native_notification: undefined } });
     assert.equal(fx.notifier.handleFrame(FINISHED, { kind: 'chat', isMain: true }).surface, 'in_app');
-    assert.equal(fx.calls.some(([name]) => name === 'show_native_notification'), false);
+    await settle();
+    assert.deepEqual(fx.calls, [['request_attention', false]], 'never the system method it lacks, never its own sound');
+    assert.deepEqual(fx.toasts, ['Task finished']);
+    assert.equal(fx.tones(), 0);
     fx.notifier.destroy();
 });
 
@@ -169,31 +194,24 @@ function oldWindowsBridge({ hidden = true } = {}) {
     return { balloons, api: { show_native_notification: undefined, request_attention: attention, notify_owner: attention } };
 }
 
-test('Sound off never reaches an older app\'s audible hidden-window balloon; Sound on still does', async () => {
-    for (const granted of [false, true]) {
-        const old = oldWindowsBridge();
-        const fx = fixture({ answer: null, granted, prefs: { ...ON, sound: false }, extra: old.api });
-        fx.notifier.handleFrame(FINISHED, { kind: 'chat', isMain: true });
-        await tick();
-        await tick();
-        assert.deepEqual(old.balloons, [], 'no balloon, so no sound the owner switched off');
-        assert.equal(fx.tones(), 0);
-        if (granted) {
-            assert.equal(fx.banners.length, 1, 'the browser banner this client allows');
-            assert.equal(fx.banners[0].options.silent, true);
-        } else {
-            assert.deepEqual(fx.toasts, ['Task finished'], 'the alert still reaches the owner, silently');
+test('an older app\'s audible hidden-window balloon is never reached, Sound on or off', async () => {
+    for (const sound of [false, true]) {
+        for (const granted of [false, true]) {
+            const old = oldWindowsBridge();
+            const fx = fixture({ answer: null, granted, prefs: { ...ON, sound }, extra: old.api });
+            fx.notifier.handleFrame(FINISHED, { kind: 'chat', isMain: true });
+            await settle();
+            assert.deepEqual(old.balloons, [], 'no balloon: that launcher would sound whatever it is asked');
+            assert.equal(fx.tones(), 0);
+            if (granted) {
+                assert.equal(fx.banners.length, 1, 'the browser banner this client allows');
+                assert.equal(fx.banners[0].options.silent, !sound, 'its sound is the system\'s, under the Sound choice');
+            } else {
+                assert.deepEqual(fx.toasts, ['Task finished'], 'the alert still reaches the owner, silently');
+            }
+            fx.notifier.destroy();
         }
-        fx.notifier.destroy();
     }
-    const old = oldWindowsBridge();
-    const loud = fixture({ answer: null, extra: old.api });
-    loud.notifier.handleFrame(FINISHED, { kind: 'chat', isMain: true });
-    await tick();
-    await tick();
-    assert.deepEqual(old.balloons, [{ title: 'Task finished', body: '', requested: true }], 'the earlier audible path');
-    assert.equal(loud.tones(), 0, 'the balloon owns its sound');
-    loud.notifier.destroy();
 });
 
 test('Sound off still asks a current app whose system notification fell back: its balloon can be silent', async () => {
@@ -253,8 +271,8 @@ test('the status line names what the desktop app can do, and the old app honestl
     assert.match(nativeStatusText({ ...on, capability: { status: 'unavailable', reason: 'not_an_app_bundle' } }),
         /unavailable to this desktop app \(7\.7\.0\) here \(not_an_app_bundle\)/);
     const legacy = nativeStatusText({ native: false, shell: { desktop: true, version: '6.82.0' } });
-    assert.match(legacy, /need the current Ouroboros desktop app; this desktop app \(6\.82\.0\) predates them/);
-    assert.match(legacy, /do not replace the app itself/);
+    assert.match(legacy, /This desktop app \(6\.82\.0\) has no system-notification method here, so alerts fall back/);
+    assert.doesNotMatch(legacy, /predates|current Ouroboros desktop app|Update/, 'a missing method proves no remedy');
 });
 
 test('permission and the last hand-off are two facts: a failure never reads as a withdrawn permission', () => {
@@ -335,14 +353,85 @@ test('a current app whose shell_info failed is never called old (desktop_shell -
     const fx = fixture({ answer: { ok: true, status: 'submitted' }, documentRef: nodes({ '[data-notify-status]': [status] }) });
     const api = { shell_info: async () => { throw new Error('bridge gone'); }, show_native_notification() {} };
     fx.notifier.configure({ shell: await loadDesktopShell({ win: { pywebview: { api } }, appVersion: async () => '7.7.0' }) });
-    assert.doesNotMatch(status.textContent, /predates/);
+    assert.doesNotMatch(status.textContent, /no system-notification method/);
     const old = await loadDesktopShell({ win: { pywebview: { api: { request_attention() {} } } }, appVersion: async () => '6.82.0' });
     const legacy = fixture({ answer: null, extra: { show_native_notification: undefined },
         documentRef: nodes({ '[data-notify-status]': [status] }) });
     legacy.notifier.configure({ shell: old });
-    assert.match(status.textContent, /this desktop app \(6\.82\.0\) predates them/, 'an app without the method is old (3A)');
+    assert.match(status.textContent, /This desktop app \(6\.82\.0\) has no system-notification method here/,
+        'an app without the method says so (3A), and nothing more');
     fx.notifier.destroy();
     legacy.notifier.destroy();
+});
+
+/* settings.js hands each shell to the notifier: `mountDesktopShell(page, (shell) => getNotifier().configure({ shell }))`.
+   A shell a failed read kept is not a new observation, so the permission the owner granted since stands. */
+test('a shell kept through a failed read never undoes a permission granted meanwhile (Settings wiring)', async () => {
+    let reads = 0;
+    let failSlowRead;
+    const status = { textContent: '' };
+    const asking = {
+        shell_info: () => {
+            reads += 1;
+            if (reads === 1) return Promise.resolve({ shell_version: '7.7.0', persistent_storage: true,
+                native_notifications: { available: true, status: 'not_determined', platform: 'macos', reason: '' } });
+            return new Promise((_resolve, reject) => { failSlowRead = reject; });
+        },
+        request_native_notifications: async () => ({ available: true, status: 'authorized', platform: 'macos', reason: '' }),
+    };
+    const fx = fixture({ answer: { ok: true, status: 'submitted' }, extra: asking,
+        documentRef: nodes({ '[data-notify-status]': [status] }) });
+    const listeners = new Map();
+    const win = { pywebview: { api: asking }, addEventListener: (type, fn) => listeners.set(type, fn),
+        removeEventListener: (type) => listeners.delete(type) };
+    let health = 0;
+    const dispose = mountDesktopShell({ querySelectorAll: () => [] }, (shell) => fx.notifier.configure({ shell }), {
+        win, load: (options) => loadDesktopShell({ ...options, appVersion: async () => { health += 1; return ''; } }),
+    });
+    try {
+        await settle();
+        assert.match(status.textContent, /has not been asked yet/);
+        listeners.get('pywebviewready')();  // its read is slow
+        await settle();
+        await fx.notifier.requestPermission();  // the owner allows notifications meanwhile
+        assert.match(status.textContent, /^System notifications are on/);
+        failSlowRead(new Error('the slow read failed'));
+        await settle();
+        assert.match(status.textContent, /^System notifications are on/, 'the kept snapshot is older than the grant');
+        assert.equal(reads, 2);
+        assert.equal(health, 0, 'no extra read of the server');
+    } finally {
+        dispose();
+        fx.notifier.destroy();
+    }
+});
+
+test('a new successful shell answer still reaches the notifier (Settings wiring)', async () => {
+    let reads = 0;
+    const status = { textContent: '' };
+    const answering = {
+        shell_info: async () => {
+            reads += 1;
+            return { shell_version: '7.7.0', persistent_storage: true, native_notifications: {
+                available: true, status: reads === 1 ? 'not_determined' : 'denied', platform: 'macos', reason: '' } };
+        },
+    };
+    const fx = fixture({ answer: { ok: true, status: 'submitted' }, extra: answering,
+        documentRef: nodes({ '[data-notify-status]': [status] }) });
+    const listeners = new Map();
+    const win = { pywebview: { api: answering }, addEventListener: (type, fn) => listeners.set(type, fn),
+        removeEventListener: (type) => listeners.delete(type) };
+    const dispose = mountDesktopShell({ querySelectorAll: () => [] }, (shell) => fx.notifier.configure({ shell }), { win });
+    try {
+        await settle();
+        assert.match(status.textContent, /has not been asked yet/);
+        listeners.get('pywebviewready')();
+        await settle();
+        assert.match(status.textContent, /^The system denied notifications/, 'the window\'s newer answer is a new fact');
+    } finally {
+        dispose();
+        fx.notifier.destroy();
+    }
 });
 
 test('the client-level notifier answers the desktop app\'s click by token', async () => {

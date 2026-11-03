@@ -400,6 +400,7 @@ def test_path_join_code_executes_once_without_guessing_a_control_write(tmp_path,
     reg = _light_registry(tmp_path)
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     root = pathlib.Path(reg._ctx.task_drive_root())
     result = reg.execute("run_script", {"script": body, "cwd": "task_drive"})
     assert "exit_code=0" in result, result

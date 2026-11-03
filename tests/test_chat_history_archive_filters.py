@@ -6,6 +6,8 @@ import json
 import re
 
 from ouroboros.memory import Memory
+from ouroboros import dialogue_store as ds
+from tests._dialogue import import_all
 from ouroboros.tools.control import get_tools
 
 
@@ -42,6 +44,7 @@ def test_chat_history_combines_archive_and_live_with_shared_provenance(tmp_path)
         _row("2026-08-21T09:00:00Z", "live hello"),
     ])
 
+    import_all(tmp_path)
     history = Memory(tmp_path).chat_history(count=2)
 
     assert history.index("archived hello") < history.index("live hello")
@@ -60,6 +63,7 @@ def test_chat_history_exact_provenance_and_inclusive_date_filters(tmp_path):
         _row("2026-08-20T10:00:01Z", "too late"),
     ])
 
+    import_all(tmp_path)
     history = Memory(tmp_path).chat_history(
         count=20,
         provider="telegram",
@@ -105,8 +109,7 @@ def test_chat_history_snapshot_refuses_append_between_pages(tmp_path):
     assert snapshot is not None
     assert "match b" in first and "match c" in first
 
-    with (tmp_path / "logs" / "chat.jsonl").open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(_row("2026-08-21T09:03:00Z", "match d")) + "\n")
+    ds.append(tmp_path, "chat", _row("2026-08-21T09:03:00Z", "match d"))
 
     second = memory.chat_history(
         count=2, offset=2, search="match", snapshot=snapshot.group(1),
@@ -139,27 +142,24 @@ def test_chat_history_snapshot_pages_when_source_is_unchanged(tmp_path):
     assert mismatch.startswith("CHAT_HISTORY_SNAPSHOT_CHANGED:")
 
 
-def test_chat_history_snapshot_retries_append_during_capture(tmp_path, monkeypatch):
-    _write(tmp_path / "logs" / "chat.jsonl", [_row("2026-08-21T09:00:00Z", "first")])
+def test_chat_history_snapshot_freezes_the_upper_bound_during_capture(tmp_path, monkeypatch):
+    ds.append(tmp_path, "chat", _row("2026-08-21T09:00:00Z", "first"))
     memory = Memory(tmp_path)
-    original = memory._read_chat_generation
+    original = ds.iter_rows
     appended = False
 
-    def read_then_append(path, **kwargs):
+    def read_then_append(root, stream, **kwargs):
         nonlocal appended
-        rows, gaps = original(path, **kwargs)
         if not appended:
             appended = True
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(_row("2026-08-21T09:01:00Z", "second")) + "\n")
-        return rows, gaps
+            ds.append(root, stream, _row("2026-08-21T09:01:00Z", "second"))
+        yield from original(root, stream, **kwargs)
 
-    monkeypatch.setattr(memory, "_read_chat_generation", read_then_append)
+    monkeypatch.setattr(ds, "iter_rows", read_then_append)
     entries, coverage = memory.read_chat_generations()
-
-    assert [row["text"] for row in entries] == ["first", "second"]
-    assert coverage["capture_attempts"] == 2
-    assert coverage["snapshot_stable"] is True
+    assert [row["text"] for row in entries] == ["first"]
+    assert coverage["capture_attempts"] == 1 and coverage["snapshot_stable"] is True
+    assert [row["text"] for row in memory.read_chat_generations()[0]] == ["first", "second"]
 
 
 def test_chat_history_gap_never_claims_complete_or_exhausted(tmp_path):

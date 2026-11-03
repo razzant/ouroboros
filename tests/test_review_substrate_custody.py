@@ -625,6 +625,7 @@ def test_review_transport_timeout_is_narrowed_by_request_deadline(tmp_path, monk
 
 def test_api_chat_retry_recomputes_transport_window(tmp_path, monkeypatch):
     from ouroboros import review_execution
+    from ouroboros.tools.scope_review_contract import SCOPE_REQUIRED_ITEMS
 
     captured = []
     transport_windows = iter((479.96, 1.0))
@@ -634,7 +635,8 @@ def test_api_chat_retry_recomputes_transport_window(tmp_path, monkeypatch):
             captured.append(kwargs["timeout"])
             if len(captured) == 1:
                 return {"content": ""}, {}
-            return {"content": '{"verdict":"PASS","findings":[],"summary":"ok"}'}, {}
+            return {"content": json.dumps([{"item": item, "verdict": "PASS", "reason": "checked"}
+                                           for item in SCOPE_REQUIRED_ITEMS])}, {}
 
     monkeypatch.setattr(
         review_execution,
@@ -661,7 +663,7 @@ def test_direct_anthropic_route_keeps_provider_default_transport(tmp_path):
 
     run_review_request(
         ReviewRequest(surface="scope", goal="review", task_id="anthropic-timeout"),
-        slots=[ReviewSlot(slot_id="slot_a", model="anthropic::claude-test", timeout_sec=0.5)],
+        slots=[ReviewSlot(slot_id="slot_a", model="anthropic::claude-test", timeout_sec=30)],
         drive_root=tmp_path,
         llm=CapturingLLM(),
     )
@@ -718,14 +720,14 @@ def test_late_error_is_not_cached_as_a_permanent_review_verdict(tmp_path):
             break
         time.sleep(0.01)
     assert not active
-    retry_slot = ReviewSlot(slot_id="slot_a", model="same/model", timeout_sec=0.5)
+    retry_slot = ReviewSlot(slot_id="slot_a", model="same/model", timeout_sec=30)
     second = run_review_request(
         request, slots=[retry_slot], drive_root=tmp_path, llm=ErrorThenSuccess(), usage_ctx=ctx,
     ).actors[0]
     # The settled error was not replayed: the retry is a new physical operation.
     assert second["operation_id"] != first.actors[0]["operation_id"]
     if second["operation_state"] == "in_flight":
-        # Its 0.5s window is not this contract. Collect THAT operation from the
+        # Its result window is not this contract. Collect THAT operation from the
         # same-context custody written before _ACTIVE retires it.
         deadline = time.monotonic() + 30.0
         while time.monotonic() < deadline:
@@ -876,7 +878,7 @@ def test_late_agent_session_preflight_failure_can_retry(tmp_path, monkeypatch):
     assert not active
     second = run_review_request(
         request, slots=[ReviewSlot(
-            slot_id="slot_a", model="same/model", timeout_sec=0.5,
+            slot_id="slot_a", model="same/model", timeout_sec=30,
             route=ReviewRouteKind.AGENT_SESSION,
         )], drive_root=tmp_path, llm=FakeLLM(), usage_ctx=ctx,
     )
@@ -971,19 +973,18 @@ def test_review_slots_keep_independent_logical_windows(tmp_path):
 
     request = ReviewRequest(surface="scope", goal="review", task_id="independent-windows")
     short_slot = ReviewSlot(slot_id="short", model="short/model", timeout_sec=0.05)
-    result = run_review_request(
-        request,
-        slots=[
-            short_slot,
-            ReviewSlot(slot_id="long", model="long/model", timeout_sec=0.5),
-        ],
-        drive_root=tmp_path,
-        llm=GatedShortLLM(),
-    )
-    rows = {actor["slot_id"]: actor for actor in result.actors}
-    assert rows["short"]["operation_state"] == "in_flight"
-    assert rows["long"]["status"] == "ok"
-    short_release.set()
+    try:
+        result = run_review_request(
+            request,
+            slots=[short_slot, ReviewSlot(slot_id="long", model="long/model", timeout_sec=30)],
+            drive_root=tmp_path,
+            llm=GatedShortLLM(),
+        )
+        rows = {actor["slot_id"]: actor for actor in result.actors}
+        assert rows["short"]["operation_state"] == "in_flight"
+        assert rows["long"]["status"] == "ok"
+    finally:
+        short_release.set()
     # Drain the released short worker before teardown (same drain as
     # test_explicit_retry_key_joins_worker_after_prompt_history_changes).
     key = _attempt_key(request, short_slot)

@@ -169,6 +169,7 @@ def test_effective_result_preserves_workspace_artifact_status_with_child_drive(t
         }),
         encoding="utf-8",
     )
+    captured_ledger = ledger_path.read_bytes()
     write_task_result(
         parent,
         task_id,
@@ -195,8 +196,9 @@ def test_effective_result_preserves_workspace_artifact_status_with_child_drive(t
     assert effective["artifact_status"] == ARTIFACT_STATUS_READY_WITH_CHANGES
     assert not effective.get("artifact_error")
     assert effective["artifact_bundle"]["status"] == ARTIFACT_STATUS_READY_WITH_CHANGES
-    refreshed_ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
-    assert refreshed_ledger["outcome_axes"]["artifacts"]["status"] == ARTIFACT_STATUS_READY_WITH_CHANGES
+    # The ledger file stays its dated capture, "finalizing" word included (#2472): the current
+    # status is the row's bundle above, never a rewrite of published bytes.
+    assert ledger_path.read_bytes() == captured_ledger
 
     copied = copy_child_task_result(parent, {"id": task_id, "workspace_root": str(repo), "drive_root": str(child)})
     assert copied is not None
@@ -385,7 +387,7 @@ def test_task_artifact_endpoint_serves_only_declared_artifacts(tmp_path):
     data = tmp_path / "data"
     artifact_dir = task_artifacts_dir(data, "task-artifact")
     patch_path = artifact_dir / "workspace.patch"
-    patch_path.write_text("diff --git a/a b/a\n", encoding="utf-8")
+    patch_path.write_bytes(b"diff --git a/a b/a\n")  # exact LF bytes on every platform
     write_task_result(
         data,
         "task-artifact",

@@ -385,12 +385,10 @@ def test_a_leaf_is_not_kept_by_a_root_when_its_own_parent_is_gone(tmp_path):
     kept = {m.get("task_id") for m in _run(tmp_path) if m.get("is_progress")}
     assert "leaf" not in kept, "an absent, dead middle parent must not be revived"
 
-    # Give the middle child one surviving lifecycle row and the chain holds again.
-    progress = [_lineage_row("2026-06-05T02:30:00Z", "mid", "completed", parent="root", root="root")] + progress
-    _write(tmp_path, chat_lines=[], progress_lines=progress, results={
-        "root": {"status": "running"},
-        "mid": {"status": "completed"},
-        "leaf": {"status": "completed"},
-    })
+    # Give the middle child one surviving lifecycle row and the chain holds again (the row is
+    # stored like the supervisor stores it; the chain file was taken by the cutover at the first read).
+    from ouroboros import dialogue_store as ds
+    ds.append(tmp_path, "progress", json.loads(_lineage_row("2026-06-05T02:30:00Z", "mid", "completed", parent="root", root="root")))
+    seed_result(tmp_path, "mid", {"_schema_version": 1, "task_id": "mid", "status": "completed"})
     kept = {m.get("task_id") for m in _run(tmp_path) if m.get("is_progress")}
     assert {"mid", "leaf"} <= kept

@@ -22,8 +22,8 @@ def test_paid_response_and_completed_tool_survive_save_contention_once(tmp_path,
 
     def tool(*_args, **_kwargs):
         effects.append("effect-once")
-        patch_document(tmp_path, "member", lambda row: {**row, "acceptance_root_cap_amendments": [
-            {"new_cap_usd": "unreadable"}]})
+        # A corrupt whole-work binding: the next admission rereads it as an unreadable authority.
+        patch_document(tmp_path, "member", lambda row: {**row, "billing_group": {"billing_group_id": "member"}})
         return "completed-effect-once"
 
     registry.override_handler("knowledge_read", tool)

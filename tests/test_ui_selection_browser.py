@@ -22,6 +22,7 @@ import urllib.request
 import pytest
 
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
+from tests.ui_console_errors import PageErrors
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 CUSTOM_TITLE = "Ouroboros custom interface"
@@ -53,7 +54,7 @@ def test_interface_choice_applies_at_restart_and_the_core_page_follows_it(direct
         browser = getattr(playwright, browser_name).launch(headless=True)
         try:
             page = browser.new_page(viewport={"width": 1400, "height": 1000})
-            saves, errors = [], []
+            saves = []
             # Each top-level document records the address it loaded with, before
             # chat.js tidies the reload bookkeeping out with history.replaceState.
             page.add_init_script("""(() => { if (window.top !== window) return;
@@ -61,7 +62,7 @@ def test_interface_choice_applies_at_restart_and_the_core_page_follows_it(direct
                 sessionStorage.setItem('__loads', JSON.stringify([...loads, location.href])); })()""")
             page.on("request", lambda request: request.method == "POST" and request.url.endswith("/api/settings")
                     and saves.append(json.loads(request.post_data or "{}")))
-            page.on("pageerror", lambda error: errors.append(str(error)))
+            errors = PageErrors(page, browser_name)
             marker = page.locator('meta[name="ouroboros-ui-owner"][content="core"]')
             connected = "() => window.__ouroWs?.isConnected?.() === true"
 
@@ -159,9 +160,6 @@ def test_interface_choice_applies_at_restart_and_the_core_page_follows_it(direct
             page.goto(url)
             page.wait_for_function(connected, timeout=30_000)
             assert marker.count() == 1
-            # WebKit reports a fetch that a navigation cancelled as an access-control
-            # failure; nothing else is tolerated.
-            assert [e for e in errors if not (browser_name == "webkit"
-                    and e.endswith("due to access control checks."))] == [], errors
+            assert errors.unexpected() == [], errors  # WebKit's report of a navigation-cancelled fetch aside
         finally:
             browser.close()

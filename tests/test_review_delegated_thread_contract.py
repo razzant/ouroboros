@@ -118,7 +118,12 @@ def test_writable_thread_uses_engine_version_without_invented_capability_flag(ve
     require_delegated_review_threads(SimpleNamespace(engine_version=version))
 
 
-def test_thread_turn_keeps_profile_intent_and_strips_run_execution_metadata():
+@pytest.mark.parametrize("geometry", [
+    {"isolation": "live"},
+    {"workspaceKind": "directory", "scopePaths": [], "isolation": "live"},
+    {"workspaceKind": "directory", "scopePaths": ["fixture"], "isolation": "live"},
+])
+def test_thread_turn_keeps_geometry_and_profile_but_not_thread_owned_addresses(geometry):
     received = []
 
     class Gateway:
@@ -129,7 +134,7 @@ def test_thread_turn_keeps_profile_intent_and_strips_run_execution_metadata():
     original = {
         "prompt": "Continue the same review", "mode": "agent", "access": "full",
         "scope": {"kind": "project", "root": "/author"},
-        "execution": {"delegated": True, "isolation": "live", "workspaceRoot": "/copy"},
+        "execution": {"delegated": True, "workspaceRoot": "/copy", **geometry},
         "_use_thread": True, "_thread_id": "thread-1",
         "credentialProfileId": None,
     }
@@ -139,7 +144,7 @@ def test_thread_turn_keeps_profile_intent_and_strips_run_execution_metadata():
 
     assert received == [("thread-1", {
         "prompt": "Continue the same review", "mode": "agent", "access": "full",
-        "credentialProfileId": None,
+        "credentialProfileId": None, "execution": geometry,
     }, "turn-2-key")]
     assert result["runId"] == "run-2"
     assert original["execution"]["workspaceRoot"] == "/copy"

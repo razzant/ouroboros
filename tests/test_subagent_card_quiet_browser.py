@@ -229,7 +229,7 @@ def test_delegation_switch_names_what_it_stops(role_ui):
 
 
 @pytest.mark.parametrize("long_labels", [False, True])
-@pytest.mark.parametrize("consumer,width,tracks", [("settings", 700, 1), ("settings", 740, 2), ("wizard", 700, 3)])
+@pytest.mark.parametrize("consumer,width,tracks", [("settings", 720, 1), ("settings", 740, 2), ("wizard", 700, 3)])
 def test_narrow_consumers_use_card_columns_and_one_dirty_indicator(role_ui, long_labels, consumer, width, tracks, record_property):
     ui = role_ui
     rows = _roster(ui)
@@ -274,7 +274,7 @@ def test_narrow_consumers_use_card_columns_and_one_dirty_indicator(role_ui, long
     }""")
     record_property("card_columns", json.dumps(shape))
     # At 740px Settings has room for two columns despite the old <=760px override.
-    # At 700px its sidebar leaves one, while the wizard's wider card holds three.
+    # At 720px, the first docked width (#1998), its sidebar leaves one, while the wizard's wider card holds three.
     assert shape["expected"] == tracks, shape
     assert shape["tracks"] == shape["expected"], shape
     assert not shape["overflow"] and not shape["pageOverflow"], shape

@@ -14,7 +14,7 @@ import pathlib
 import re
 
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
-from typing import List
+from typing import Dict, List
 
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tool_access import ResolvedResourceBinding
@@ -82,6 +82,27 @@ def _ensure_gitignore(repo_dir) -> None:
     if not gi.exists():
         _git().write_text(gi, "__pycache__/\n*.pyc\n*.pyo\n*.so\n*.dylib\n*.dll\n"
                        "*.dist-info/\nbase_library.zip\n.DS_Store\n")  # atomic (G)
+
+
+def _staged_index(repo_dir) -> Dict[str, str]:
+    """Every index path that differs from HEAD, rename sides apart, with its status letter."""
+    fields = _git().run_cmd(["git", "diff", "--cached", "--no-renames", "--name-status", "-z"],
+                            cwd=repo_dir).split("\0")
+    return dict(zip(fields[1::2], fields[0::2]))
+
+
+WHOLE_INDEX = "whole index"  # ``_staged_selection`` after a whole-tree ``git add -A``
+
+
+def _unstage_candidate(ctx: ToolContext) -> None:
+    """Undo exactly this call's staging (``ctx._staged_selection``, recorded by
+    ``_stage_candidate_for_review``): the recorded paths, so a path someone else staged
+    stays staged; the whole index after a whole-tree add; nothing before any staging."""
+    paths = getattr(ctx, "_staged_selection", None)
+    if paths == WHOLE_INDEX:
+        _git().run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+    elif paths:
+        _git().run_cmd(["git", "--literal-pathspecs", "reset", "-q", "HEAD", "--", *paths], cwd=ctx.repo_dir)
 
 
 def _unstage_binaries(repo_dir) -> List[str]:

@@ -1,9 +1,9 @@
-"""Windows-only pythonnet/pywebview runtime preparation.
+"""Windows runtime preparation and stdlib-only legacy console repair.
 
 Importing ``webview`` on Windows only works after the bundled CPython DLL and
 Python.Runtime.dll have been located, unblocked, and put on the DLL search path,
-and after pythonnet has been pointed at the .NET Framework runtime. That whole
-preparation is one concern with one caller, and it is inert everywhere else:
+and after pythonnet has been pointed at the .NET Framework runtime. The launcher
+also loads this leaf by path before package adoption to check legacy handoffs:
 every entry point returns immediately off Windows. Extracted from launcher.py at
 the module-size ceiling; launcher.py re-exports both names (same objects), so its
 import surface and the hook names the packaging checks look for are unchanged.
@@ -15,7 +15,70 @@ import os
 import pathlib
 import sys
 
-from ouroboros.platform_layer import IS_WINDOWS
+IS_WINDOWS = sys.platform == "win32"  # this leaf also runs by path before any package import
+
+
+def _legacy_gui_console(seed: pathlib.Path) -> bool:
+    """Evidence of an old onedir GUI launch, plus a visible console belonging only to us.
+
+    PyInstaller leaves its archive path in the child environment. Match it to the supplied
+    onedir seed and inspect the executable's PE subsystem; seed argv or a sole console client
+    alone says nothing about intent. Missing facts preserve the console. Inherited/spoofed
+    descriptors cannot prove exact ancestry; this is compatibility with the shipped GUI, not
+    a general detector of how someone launched Python.
+    """
+    archive = os.environ.get("_PYI_ARCHIVE_FILE", "")
+    if not archive:
+        return False
+    try:
+        seed, image = seed.resolve(), pathlib.Path(archive).resolve()
+        if seed.name != "_internal" or image.parent != seed.parent or image.suffix.lower() != ".exe":
+            return False
+        with image.open("rb") as binary:
+            if binary.read(2) != b"MZ":
+                return False
+            binary.seek(60)
+            offset = binary.read(4)
+            if len(offset) != 4:
+                return False
+            binary.seek(int.from_bytes(offset, "little"))
+            header = binary.read(94)  # PE signature + COFF header + optional header through Subsystem
+        if header[:4] != b"PE\0\0" or header[24:26] not in (b"\x0b\x01", b"\x0b\x02") or header[92:94] != b"\x02\0":
+            return False  # IMAGE_SUBSYSTEM_WINDOWS_GUI, both PE32 and PE32+
+        import ctypes
+        from ctypes import wintypes
+
+        kernel, user = ctypes.WinDLL("kernel32"), ctypes.WinDLL("user32")
+        kernel.GetConsoleProcessList.argtypes = (ctypes.POINTER(wintypes.DWORD), wintypes.DWORD)
+        kernel.GetConsoleProcessList.restype = wintypes.DWORD
+        kernel.GetConsoleWindow.argtypes = ()
+        kernel.GetConsoleWindow.restype = wintypes.HWND
+        user.IsWindowVisible.argtypes = (wintypes.HWND,)
+        user.IsWindowVisible.restype = wintypes.BOOL
+        clients = (wintypes.DWORD * 2)()
+        window = kernel.GetConsoleWindow()
+        return (kernel.GetConsoleProcessList(clients, 2) == 1 and clients[0] == os.getpid()
+                and bool(window and user.IsWindowVisible(window)))
+    except (OSError, ValueError):
+        return False
+
+
+def rehome_legacy_handoff(args) -> None:
+    """Called by launcher.py's guarded, stdlib-only prologue; never FreeConsole-and-continue."""
+    if not IS_WINDOWS:
+        return
+    seed = next((arg.partition("=")[2] if "=" in arg else args[index + 1] if index + 1 < len(args) else ""
+                 for index, arg in enumerate(args) if arg.split("=", 1)[0] == "--seed-bundle"), "")
+    if not seed or not _legacy_gui_console(pathlib.Path(seed)):
+        return
+    import subprocess
+
+    try:
+        subprocess.Popen([sys.executable, *sys.orig_argv[1:]], close_fds=True,
+                         creationflags=subprocess.CREATE_NO_WINDOW, env={**os.environ, "OUROBOROS_LAUNCHER_HANDOFF": "1"})
+        os._exit(0)
+    except OSError as exc:
+        print(f"Ouroboros could not leave this console window: {exc}", file=sys.stderr, flush=True)
 
 
 _windows_dll_dir_handles: list = []

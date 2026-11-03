@@ -8,10 +8,12 @@ existing worker or consumes its late result instead of dispatching twice.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
 import logging
+import math
 import queue
 import threading
 import time
@@ -65,6 +67,7 @@ class ActiveReviewAttempt:
     # operation an earlier process paid for, whose send moment it cannot know.
     started_at: str = ""
     logical_deadline: Optional[float] = None  # in this operation's slot clock
+    waiting_for_capacity: bool = False
     assignment: tuple = ()  # original inputs, including preparation before prompt persistence
     # The operation-owned wait/lifetime this worker belongs to (None: no owner).
     operation: Any = field(default_factory=current_review_operation)
@@ -219,6 +222,11 @@ def _review_exception_projection(
         and not isinstance(http_status, int)
         else str((exc.cause if isinstance(exc, ControlAuthorityUnavailable) else getattr(exc, "code", "")) or "")
     )
+    terminal = str(getattr(exc, "review_run_state", "") or "")
+    if terminal:
+        failure_custody.update(review_run_state=terminal, review_run_failure_code=getattr(exc, "code", ""))
+    if terminal in {"cancelled", "interrupted"}:
+        operation_state, failure_code = "settled", "review_run_cancelled"
     # Origin is a producer fact, not the rendered transport label (which can
     # contain error prose). Ledger/admission and authority refusals stay
     # independent of the owner's advisory review enforcement.
@@ -237,6 +245,10 @@ def _review_exception_projection(
         phase = "authority"
     else:
         phase = "delivery"
+    from ouroboros.owner_pause import _REVIEW_EPISODE
+
+    if not dispatched and (_REVIEW_EPISODE.get() or {}).get("pause_before_launch"):
+        failure_custody["owner_pause_preparing"] = True
     failure_custody["review_failure_phase"] = phase
     return failure_custody, capture_state, http_status, operation_state, failure_code
 
@@ -489,12 +501,14 @@ def _frozen_actor(row: Dict[str, Any], slot: Any) -> Any:
         model=str(row.get("model_id") or row.get("model") or getattr(slot, "model", "")),
         status=actor_status,
         raw_text=raw_text,
+        outcome=copy.deepcopy(row.get("outcome") or {}),
         usage=usage,
         prompt_ref=dict(row.get("prompt_ref") or {}),
         response_ref=dict(row.get("response_ref") or {}),
         late_result_pending=pending,
         http_status=http_status,
         coverage=copy.deepcopy(row.get("coverage") or {}) if isinstance(row.get("coverage"), dict) else {},
+        failure_details=copy.deepcopy(row.get("failure_details") or {}) if isinstance(row.get("failure_details"), dict) else {},
         quorum_contribution=bool(row.get("quorum_contribution")),
         operation_state=operation_state,
         recovery_binding=dict(row.get("recovery_binding") or {}),
@@ -702,7 +716,7 @@ def _attempt_key(request: Any, slot: Any) -> str:
     }
     if getattr(slot, "default_temperature", None) is not None:
         slot_data["default_temperature"] = slot.default_temperature
-    if getattr(slot, "processing_preference", ""):
+    if getattr(slot, "processing_preference", None) is not None:
         slot_data["processing_preference"] = slot.processing_preference
     if str(getattr(slot, "session_access", "") or "readonly") != "readonly":
         slot_data["session_access"] = slot.session_access  # writable rights are identity
@@ -742,30 +756,40 @@ def _attempt_key(request: Any, slot: Any) -> str:
     return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
 
 
-def _logical_timeout(slot: Any, request: Any, usage_meta: Dict[str, Any]) -> float:
+def _logical_timeout(slot: Any, request: Any, usage_meta: Dict[str, Any]) -> Optional[float]:
+    """The slot's logical window, ``None`` when nothing true bounds it: the delivery fact
+    decides, so a retrieving api row's episode never borrows one send's socket timeout."""
     deadline = str(getattr(request, "deadline_at", "") or "").strip()
     if not deadline and isinstance(usage_meta, dict):
         deadline = str(usage_meta.get("deadline_at") or "").strip()
     from ouroboros.config import get_finalization_grace_sec
+    from ouroboros.review_execution import delivery_retrieves
 
     return review_operation_timeout_sec(
         getattr(slot, "timeout_sec", None),
-        route=getattr(slot, "route", None),
+        retrieves=delivery_retrieves(getattr(slot, "route", None), getattr(slot, "native_retrieval", None)),
         deadline_at=deadline,
         transport_timeout_sec=getattr(slot, "transport_timeout_sec", None),
         reserve_sec=get_finalization_grace_sec(),
     )
 
 
-def _rejoin_window(root: Any, token: str, frozen_row: Any, logical_window: float) -> float:
+def _slot_deadline(slot_id: str, window: Optional[float]) -> float:
+    """A window's end on the slot clock; ``inf`` = no window, compared but never waited on."""
+    return math.inf if window is None else monotonic_now(slot_id) + window
+
+
+def _rejoin_window(root: Any, token: str, frozen_row: Any, logical_window: Optional[float]) -> Optional[float]:
     """Remaining ORIGINAL window of the paid operation a rejoin attaches to (#1547):
     saved facts only (durable STARTED/START_REQUESTED start + ``max_seconds``, else the
     frozen row's ``awaiting_since`` + this slot's logical window), floored at the
     settlement margin — so a repeated collect never extends it and an expired run
-    gets exactly the margin, never a fresh full window."""
+    gets exactly the margin, never a fresh full window. A recorded cap keeps its number;
+    without one, a stored request with no ``maxSeconds`` sent the run with its clock off, so
+    the rejoin has no window either (``None``); an unreadable body keeps the saved facts."""
     from ouroboros.config import NESTED_SETTLEMENT_MARGIN_SEC
 
-    started, max_seconds = "", 0.0
+    started, max_seconds, clock_off = "", 0.0, False
     if root is not None and token:
         try:
             record = invocation_record(root, token) or {}
@@ -773,9 +797,13 @@ def _rejoin_window(root: Any, token: str, frozen_row: Any, logical_window: float
             # A start never bound to a run still began at its durable request row.
             started = started or str(record.get("requested_at") or "")
             max_seconds = float(cap or record.get("max_seconds") or 0)
+            body = record.get("request")
+            clock_off = max_seconds <= 0 and isinstance(body, dict) and bool(body) and "maxSeconds" not in body
         except Exception:
             log.debug("rejoin window: durable custody unreadable", exc_info=True)
-    if not (started and max_seconds > 0) and isinstance(frozen_row, dict):
+    if clock_off:
+        return None
+    if not (started and max_seconds > 0) and isinstance(frozen_row, dict) and logical_window is not None:
         started, max_seconds = str(frozen_row.get("awaiting_since") or ""), float(logical_window)
     sent = parse_deadline_ts(started) if max_seconds > 0 else None
     remaining = (sent - utc_now()).total_seconds() + max_seconds if sent is not None else 0.0
@@ -808,6 +836,8 @@ def _emit_operation(
             # operation is the stable round identity for both terminal events.
             "round_id": str(getattr(request, "round_id", "") or entry.operation_id),
             "slot_id": str(getattr(slot, "slot_id", "") or ""),
+            # The panel this seat serves, as its wait rows name it (``review_pause.panel_activity``).
+            "model_wait_owner_id": str(getattr(getattr(entry, "operation", None), "owner_id", "") or ""),
             **extra,
         }
         if event_queue is not None:
@@ -816,6 +846,16 @@ def _emit_operation(
             from ouroboros.tools.review_helpers import emit_review_event
 
             emit_review_event(usage_ctx, {"type": "cognitive_operation", **values})
+        if phase == "started":
+            # The cue may have gone idle before this panel acquired its first seat.
+            # Both frames share the control FIFO: publish the seat before waking its reader.
+            from ouroboros.model_sleep import announce_resumed
+
+            operation = getattr(entry, "operation", None)
+            wait = getattr(operation, "wait", None)
+            if wait is not None and not operation.author_detached:
+                announce_resumed(SimpleNamespace(event_queue=wait.event_queue, task_id=task_id,
+                                                  current_chat_id=wait.task.get("chat_id")))
     except Exception:
         log.debug("review operation event failed", exc_info=True)
     try:
@@ -830,7 +870,7 @@ def _emit_operation(
 
 
 def _late_or_timeout_actor(
-    slot: Any, entry: Any, timeout: float, error_actor: Callable[..., Any],
+    slot: Any, entry: Any, timeout: Optional[float], error_actor: Callable[..., Any],
     *, released_early: bool = False,
 ) -> Any:
     if entry is not None:
@@ -844,12 +884,14 @@ def _late_or_timeout_actor(
                 entry.released_early = True  # the roster itself was registered by the caller
             else:
                 entry.timed_out = True
+    window = "no logical window" if timeout is None else f"window {timeout:g}s"
     if released_early and entry is not None:
         # Paid iff dispatched: a $0 presence until the settled row proves a physical send.
-        message = f"Pending dispatch; the physical review operation is in flight (window {timeout:g}s)"
+        message = f"Pending dispatch; the physical review operation is in flight ({window})"
         state = "pending_dispatch"
     else:
-        message = f"Timeout after {timeout:g}s; physical review operation remains in flight"
+        message = (f"Timeout after {timeout:g}s" if timeout is not None else "Wait ended (no logical window)") + (
+            "; physical review operation remains in flight")
         state = "in_flight" if entry is not None else "settled"
     actor = error_actor(
         slot, message, entry.operation_id if entry is not None else "", state,
@@ -951,20 +993,28 @@ def _settle_review_attempt(
     request: Any,
     task_id: str,
     result_queue: "queue.Queue[Any]",
+    settle_actor: Any = None,
 ) -> None:
     """Publish one physical review settlement to process-local custody."""
+    late = bool(entry.timed_out or entry.detached)
+    if (entry.pause_before_launch and str(getattr(actor, "operation_state", "")) != "custody_lost"
+            and not (getattr(actor, "usage", None) or {}).get("pending_invocation_id")):
+        # The first handoff lost to Pause under the launch lock. Its worker
+        # has now actually ended: this exact unsent refusal can be collected.
+        # The physical-capture guard below still wins if an adapter reports
+        # independent positive/unknown custody; no money fact is erased.
+        actor.operation_state = "not_dispatched"
+    (failure_custody, physical_attempt_state, terminal_provider_status,
+     pending_invocation, custody_lost) = finalize_review_actor(
+        actor, operation_id=entry.operation_id, late=late)
+    if settle_actor is not None:
+        try:
+            settle_actor(slot, actor)
+        except Exception:
+            with _ACTIVE_LOCK:
+                entry.actor = actor  # Keep the source in custody without advertising durable readiness.
+            raise
     with _ACTIVE_LOCK:
-        late = bool(entry.timed_out or entry.detached)
-        if (entry.pause_before_launch and str(getattr(actor, "operation_state", "")) != "custody_lost"
-                and not (getattr(actor, "usage", None) or {}).get("pending_invocation_id")):
-            # The first handoff lost to Pause under the launch lock. Its worker
-            # has now actually ended: this exact unsent refusal can be collected.
-            # The physical-capture guard below still wins if an adapter reports
-            # independent positive/unknown custody; no money fact is erased.
-            actor.operation_state = "not_dispatched"
-        (failure_custody, physical_attempt_state, terminal_provider_status,
-         pending_invocation, custody_lost) = finalize_review_actor(
-            actor, operation_id=entry.operation_id, late=late)
         entry.actor = actor
         entry.event.set()
         if _ACTIVE.get(entry.key) is entry:
@@ -1030,8 +1080,7 @@ def _settle_review_attempt(
             or (explicit_retry and (entry.released_early or entry.pause_before_launch)
                 and str(getattr(actor, "operation_state", "") or "") == "not_dispatched")
         )
-        released_wave: Dict[str, Any] = {}
-        quorum_wave: Dict[str, Any] = {}
+        plan_wave: Dict[str, Any] = {}
         if entry.released_early and entry.wave_key in _RELEASED_WAVES:
             roster = _RELEASED_WAVES[entry.wave_key]
             slot_id = str(getattr(slot, "slot_id", "") or "")
@@ -1045,13 +1094,10 @@ def _settle_review_attempt(
             # store failure) at $0 instead of reporting them as still owed. The live registry cannot
             # serve it — a settled entry leaves it as soon as its worker's publication ends.
             roster.setdefault("actors", {})[slot_id] = {"actor": copy.deepcopy(actor), "slot": slot}
-            if getattr(request, "surface", "") == "task_acceptance" and not unresolved:
-                roster.setdefault("verdicts", {})[slot_id] = _settled_slot_verdict(actor)
+            if getattr(request, "surface", "") == "plan_review":
+                plan_wave = copy.deepcopy(roster)  # counted completion may precede physical adviser completion
             if all(roster["slots"].values()):
-                released_wave = _RELEASED_WAVES.pop(entry.wave_key)
-            elif _released_quorum_reached(request, roster):
-                roster["quorum_announced"] = True
-                quorum_wave = copy.deepcopy(roster)
+                _RELEASED_WAVES.pop(entry.wave_key)  # every seat settled: the wave's roster is done
         if replayable and usage_ctx is not None and (late or explicit_retry):
             settled = getattr(usage_ctx, "_review_settled_attempts", None)
             if not isinstance(settled, dict):
@@ -1067,16 +1113,12 @@ def _settle_review_attempt(
             phase="failed" if actor.status == "error" else "finished",
             actor=actor,
         )
-    if entry.released_early:  # plan review's event route: the reply settles into the plan record; the last one wakes the mailbox
+    if entry.released_early:  # each reply lands; the recorded counted council decides its completion
         from ouroboros.tools.plan_ask import settle_released_reply
 
         settle_released_reply(usage_ctx, request=request, task_id=task_id, actor=actor, slot=slot,
-                              settled_wave=dict(released_wave.get("slots") or {}), roster_size=int(released_wave.get("total") or 0),
-                              settled_actors=released_wave.get("actors") or {})
-        if getattr(request, "surface", "") == "task_acceptance" and (released_wave or quorum_wave):
-            from ouroboros.acceptance_settlement import announce_acceptance_settlement
-
-            announce_acceptance_settlement(usage_ctx, request, released_wave or quorum_wave)
+                              settled_wave=dict(plan_wave.get("slots") or {}), roster_size=int(plan_wave.get("total") or 0),
+                              settled_actors=plan_wave.get("actors") or {})
     if late and not pending_invocation and not custody_lost and usage_ctx is not None:
         try:
             from ouroboros.tools.review_helpers import emit_review_event
@@ -1115,56 +1157,9 @@ def _wave_key(request: Any) -> str:
     return "|".join(str(getattr(request, key, "") or "") for key in ("surface", "task_id", "retry_key"))
 
 
-def _released_quorum_reached(request: Any, roster: Dict[str, Any]) -> bool:
-    """Whether this wave has enough answered slots to be worth waking Main for.
-
-    The panel's own ``min_successful_slots`` is the quorum; slots that ANSWERED
-    before the release (the drain collected an ok/empty actor, not a refusal or
-    an expiry) are counted from the roster's registration. A wave
-    announced at its quorum is never announced for that reason twice; the last
-    straggler still announces through the completed-roster arm.
-    """
-    if roster.get("quorum_announced"):
-        return False
-    policy = getattr(request, "policy", None) or {}
-    try:
-        quorum = max(1, int(policy.get("min_successful_slots") or 1))
-    except (TypeError, ValueError):
-        quorum = 1
-    slots = roster.get("slots") or {}
-    answered = sum(1 for status in slots.values() if status in {"ok", "empty"})
-    early = set(roster.get("answered_before_release_ids") or ()) - set(slots)
-    return len(early) + answered >= quorum
-
-
-def _settled_slot_verdict(actor: Any) -> Dict[str, str]:
-    """This ONE reviewer's own verdict, parsed where it settled.
-
-    Quorum, tier, contract demotion and dissent stay with the collecting call's
-    reducer (``review_actor_aggregation``): a settlement thread that re-derived
-    them would be a second aggregation authority. Only the reviewer's own words
-    travel, so the wake can BE the advice instead of a pointer to it.
-    """
-    from ouroboros.triad_review import parse_review_findings
-
-    try:
-        parsed, findings, signal = parse_review_findings(str(getattr(actor, "raw_text", "") or ""))
-    except Exception:
-        log.debug("released acceptance verdict could not be parsed", exc_info=True)
-        parsed, findings, signal = {}, [], ""
-    from ouroboros.utils import truncate_review_artifact
-
-    note = str((parsed or {}).get("summary") or "") if isinstance(parsed, dict) else ""
-    note = note or next((str(row.get("recommendation") or row.get("item") or "")
-                         for row in (findings or []) if isinstance(row, dict)), "")
-    note = note or str(getattr(actor, "error", "") or getattr(actor, "parse_reason", "") or "")
-    return {"verdict": str(signal or "").upper(), "note": truncate_review_artifact(" ".join(note.split()), limit=400)}
-
-
 def _register_released_roster(
     request: Any, slots: List[Any], slot_entries: Dict[str, Any], returned_ids: set,
     slot_deadlines: Dict[str, float], monotonic_now: Callable[[str], float],
-    *, answered_before_release: Any = (),
 ) -> set:
     """Register the WHOLE released roster under ONE lock hold before any released row is
     minted: a slot settling at once then finds the complete roster and cannot split the
@@ -1182,10 +1177,6 @@ def _register_released_roster(
         if released_ids:
             # A collection re-releases the wave: merging keeps the recorded outcomes.
             roster = _RELEASED_WAVES.setdefault(_wave_key(request), {"slots": {}, "total": len(slots)})
-            # Slot IDS, not a count: a re-released wave replays an already-settled
-            # slot through the drain, and an id in the roster is never counted twice.
-            roster["answered_before_release_ids"] = sorted(
-                set(roster.get("answered_before_release_ids") or ()) | set(answered_before_release))
             for slot_id in released_ids:
                 roster["slots"].setdefault(slot_id, "")
     return released_ids
@@ -1240,7 +1231,9 @@ def run_custodied_review_slots(*, request: Any, slots: List[Any], usage_ctx: Any
     A slot whose operation could not be retained before its send is refused at
     $0; a slot another live worker owns, or a settled one, still runs as before.
     """
-    with review_operation_scope(request=request, slots=slots, usage_ctx=usage_ctx,
+    from ouroboros.review_wave import review_wave_scope
+
+    with review_wave_scope(), review_operation_scope(request=request, slots=slots, usage_ctx=usage_ctx,
                                 task_id=str(custody.get("task_id") or "")) as binding:
         # A refused row names the operation its caller reserved for it (the commit's
         # write-ahead roster), so reconciliation reads a $0 refusal, never lost custody.
@@ -1259,6 +1252,47 @@ def run_custodied_review_slots(*, request: Any, slots: List[Any], usage_ctx: Any
         return sorted(actors, key=lambda actor: order.get(str(actor.slot_id), len(order)))
 
 
+def _execute_review_attempt(*, admitted, request, slot, entry, usage_ctx, task_id,
+                            review_usage_scope, run_slot, error_actor, settle_actor,
+                            result_queue, logical_deadline):
+    from ouroboros.usage_accounting import usage_scope
+
+    _emit_operation(
+        usage_ctx, task_id=task_id, request=request, entry=entry, slot=slot,
+        phase="started",
+    )
+    # No window (``inf``) scopes no execution deadline and reaches the executor as ``None``.
+    bounded = math.isfinite(logical_deadline)
+    try:
+        if not admitted:
+            actor = error_actor(slot, "Owner paused before review dispatch", entry.operation_id, "not_dispatched")
+            actor.usage["owner_pause_preparing"] = True
+        else:
+            with (usage_scope(review_usage_scope),
+                  calendar_scope(str(getattr(request, "deadline_at", "") or "")),
+                  execution_deadline_scope(logical_deadline, review_slot_id=str(slot.slot_id)) if bounded
+                  else contextlib.nullcontext(),
+                  review_pause.slot_episode(entry, review_usage_scope)):
+                actor = run_slot(
+                    slot, entry.operation_id, entry.retry_state,
+                    logical_deadline if bounded else None,
+                    entry.pending_invocation_checkpoint,
+                )
+    except Exception as exc:
+        operation_state = _worker_exception_operation_state(
+            exc, entry.retry_state,
+        )
+        actor = error_actor(
+            slot, f"{type(exc).__name__}: {exc}", entry.operation_id,
+            operation_state,
+        )
+        _attach_worker_exception_facts(actor, exc, entry.retry_state)
+    _settle_review_attempt(
+        entry, slot, actor, usage_ctx=usage_ctx, request=request,
+        task_id=task_id, result_queue=result_queue, settle_actor=settle_actor,
+    )
+
+
 def _run_custodied_review_slots(
     *,
     request: Any,
@@ -1269,10 +1303,12 @@ def _run_custodied_review_slots(
     review_usage_scope: Any,
     run_slot: Callable[[Any, str, Dict[str, Any], float, Any], Any],
     error_actor: Callable[..., Any],
+    settle_actor: Any = None,
 ) -> List[Any]:
     """Run slots with independent logical windows and late-result custody."""
-    from ouroboros.usage_accounting import usage_scope
+    from ouroboros.review_wave import current_review_wave
 
+    wave = current_review_wave()
     result_queue: "queue.Queue[Any]" = queue.Queue()
     slot_entries: Dict[str, ActiveReviewAttempt] = {}
     slot_deadlines: Dict[str, float] = {}
@@ -1297,7 +1333,7 @@ def _run_custodied_review_slots(
         ) else ""
         window = _logical_timeout(slot, request, usage_meta)
         slot_windows[slot_id] = window
-        slot_deadlines[slot_id] = monotonic_now(slot_id) + window
+        slot_deadlines[slot_id] = _slot_deadline(slot_id, window)
         custody_lost = False
         frozen_surfaces = getattr(usage_ctx, "_review_frozen_rows", None)
         frozen_surface = (
@@ -1381,8 +1417,8 @@ def _run_custodied_review_slots(
                     # Rejoin the same paid operation for what remains of ITS window (#1547).
                     window = _rejoin_window(root, retry_token, frozen_row, window)
                     slot_windows[slot_id] = window
-                    slot_deadlines[slot_id] = monotonic_now(slot_id) + window
-                if window > 0:
+                    slot_deadlines[slot_id] = _slot_deadline(slot_id, window)
+                if window is None or window > 0:
                     entry = ActiveReviewAttempt(
                         key=key,
                         operation_id=retry_operation_id or reserved_operation_id or new_call_id(
@@ -1392,6 +1428,7 @@ def _run_custodied_review_slots(
                         # physical operation is sent from here, and only now.
                         started_at="" if exact_recovery else utc_now_iso(),
                         logical_deadline=slot_deadlines[slot_id],
+                        waiting_for_capacity=wave.capacity is not None and not exact_recovery,
                         assignment=copy.deepcopy((request, slot)),
                     )
                     entry.recovery_binding = review_operation_binding(request, slot, entry.operation_id)
@@ -1420,18 +1457,20 @@ def _run_custodied_review_slots(
             return
         if entry is None:
             immediate_actors[slot_id] = error_actor(
-                slot, "Owner deadline exhausted before physical review dispatch",
-                reserved_operation_id, "not_dispatched",
+                slot, "No review window remains (owner deadline or task execution window spent) "
+                "before physical review dispatch", reserved_operation_id, "not_dispatched",
             )
             return
         slot_entries[slot_id] = entry
+        wave.register(entry)
         if not owner and bool(getattr(request, "reconcile_only", False)) and entry.logical_deadline is not None:
             # A live rejoin uses the original clock/window, never another full
             # slot timeout. The operation scope has rebound that same clock.
             slot_deadlines[slot_id] = min(slot_deadlines[slot_id], entry.logical_deadline)
-            window = max(0.0, slot_deadlines[slot_id] - monotonic_now(slot_id))
+            window = (None if math.isinf(slot_deadlines[slot_id])
+                      else max(0.0, slot_deadlines[slot_id] - monotonic_now(slot_id)))
             slot_windows[slot_id] = window
-        if window <= 0 and cached_actor is None:
+        if window is not None and window <= 0 and cached_actor is None:
             immediate_actors[slot_id] = _late_or_timeout_actor(
                 slot, entry, window, error_actor,
             )
@@ -1452,33 +1491,21 @@ def _run_custodied_review_slots(
             if entry.operation is not None:
                 entry.operation.note_dispatch()
             def worker() -> None:
-                _emit_operation(
-                    usage_ctx, task_id=task_id, request=request, entry=entry, slot=slot,
-                    phase="started",
-                )
-                try:
-                    with (usage_scope(review_usage_scope),
-                          calendar_scope(str(getattr(request, "deadline_at", "") or "")),
-                          execution_deadline_scope(slot_deadlines[slot_id], review_slot_id=slot_id),
-                          review_pause.slot_episode(entry, review_usage_scope)):
-                        actor = run_slot(
-                            slot, entry.operation_id, entry.retry_state,
-                            slot_deadlines[slot_id],
-                            entry.pending_invocation_checkpoint,
-                        )
-                except Exception as exc:
-                    operation_state = _worker_exception_operation_state(
-                        exc, entry.retry_state,
-                    )
-                    actor = error_actor(
-                        slot, f"{type(exc).__name__}: {exc}", entry.operation_id,
-                        operation_state,
-                    )
-                    _attach_worker_exception_facts(actor, exc, entry.retry_state)
-                _settle_review_attempt(
-                    entry, slot, actor, usage_ctx=usage_ctx, request=request,
-                    task_id=task_id, result_queue=result_queue,
-                )
+                if exact_recovery:
+                    permit = contextlib.nullcontext(True)  # Observing a paid run buys no worker permit.
+                else:
+                    permit = wave.worker(entry)
+                with permit as admitted:
+                    if entry.waiting_for_capacity:
+                        # The old fan-out semaphore waited before opening the slot window.
+                        slot_deadlines[slot_id] = _slot_deadline(slot_id, _logical_timeout(slot, request, usage_meta))
+                        entry.logical_deadline = slot_deadlines[slot_id]
+                        entry.waiting_for_capacity = False
+                    _execute_review_attempt(
+                        admitted=admitted, request=request, slot=slot, entry=entry, usage_ctx=usage_ctx,
+                        task_id=task_id, review_usage_scope=review_usage_scope, run_slot=run_slot,
+                        error_actor=error_actor, settle_actor=settle_actor, result_queue=result_queue,
+                        logical_deadline=slot_deadlines[slot_id])
 
             threading.Thread(
                 target=copy_wait_context().run, args=(worker,),
@@ -1515,16 +1542,22 @@ def _run_custodied_review_slots(
         calendar_remaining = seconds_until(getattr(request, "deadline_at", ""))
         wait_context = current_model_wait()
         waiting_slots = wait_context.waiting_slots() if wait_context is not None else set()
-        expired = {slot_id for slot_id in pending if slot_deadlines[slot_id] <= monotonic_now(slot_id)}
+        for slot_id in pending:
+            entry = slot_entries[slot_id]
+            if not entry.waiting_for_capacity and entry.logical_deadline is not None:
+                slot_deadlines[slot_id] = entry.logical_deadline
+        expired = {slot_id for slot_id in pending if not slot_entries[slot_id].waiting_for_capacity
+                   and slot_deadlines[slot_id] <= monotonic_now(slot_id)}
         if calendar_remaining == 0.0:
             expired.update(pending & waiting_slots)
         pending.difference_update(expired)
         if not pending:
             break
-        if operation is not None and author_detaches(operation, [slot_entries.get(slot_id) for slot_id in pending]):
+        if operation is not None and wave.observe_detach(operation, author_detaches):
             detached = True  # launched episodes finish; unsent preparation stays owned and cannot launch
             break
-        remaining = min(slot_deadlines[slot_id] - monotonic_now(slot_id) for slot_id in pending)
+        remaining = min(review_pause.DETACH_POLL_SEC if slot_entries[slot_id].waiting_for_capacity
+                        else slot_deadlines[slot_id] - monotonic_now(slot_id) for slot_id in pending)
         if calendar_remaining is not None and pending & waiting_slots:
             remaining = min(remaining, calendar_remaining)
         if drain_deadline is not None:
@@ -1542,17 +1575,13 @@ def _run_custodied_review_slots(
     returned_ids = {str(getattr(actor, "slot_id", "") or "") for actor in actors}
     released_ids = _register_released_roster(
         request, slots, slot_entries, returned_ids, slot_deadlines, monotonic_now,
-        answered_before_release={str(getattr(actor, "slot_id", "") or "") for actor in actors
-                                 if str(getattr(actor, "status", "") or "") in {"ok", "empty"}},
     ) if drain_deadline is not None else set()
     for slot in slots:
         slot_id = str(getattr(slot, "slot_id", "") or "")
         if slot_id in returned_ids:
             continue
         entry = slot_entries.get(slot_id)
-        timeout = slot_windows.get(slot_id)
-        if timeout is None:
-            timeout = _logical_timeout(slot, request, usage_meta)
+        timeout = slot_windows[slot_id] if slot_id in slot_windows else _logical_timeout(slot, request, usage_meta)
         actors.append(review_pause.detached_actor(slot, entry, error_actor, usage_ctx=usage_ctx, request=request,
                                                   operation=operation) if detached and entry is not None else
                       _late_or_timeout_actor(slot, entry, timeout, error_actor, released_early=slot_id in released_ids))

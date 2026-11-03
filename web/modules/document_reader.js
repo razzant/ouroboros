@@ -1,13 +1,17 @@
 /**
- * Read-only reader for a delivered Markdown or plain-text document (DESIGN
- * "Document reading"). It reads only the exact delivered copy — the live
- * frame's inline bytes or the immutable task-artifact route — never a current
- * file path, and it reads at most DOCUMENT_READER_MAX_BYTES of it.
+ * Read-only reader for a Markdown or plain-text document in chat, and the
+ * in-chat view of an image (DESIGN "Document reading"). A document is read only
+ * from the exact copy its message carries — the live frame's inline bytes, the
+ * immutable task-artifact route or the owner's own upload — never a current
+ * file path, and at most DOCUMENT_READER_MAX_BYTES of it. An image shows the
+ * very source its tile displays, decoded by the engine in a detached <img>,
+ * never another address.
  *
- * The body is streamed to that byte bound and the read aborts after the read
- * timeout; a transport failure offers Retry. Every close path (`close`,
- * `chat_media.release`, `closeTransient`, `destroy`) aborts the in-flight read
- * and disposes Markdown enhancements, so a late answer paints nothing.
+ * The body is streamed to that byte bound; a read or an image load stops after
+ * the read timeout, and a transport failure offers Retry. Every close path
+ * (`close`, `chat_media.release`, `closeTransient`, `destroy`) aborts the
+ * in-flight read or load and disposes Markdown enhancements, so a late answer
+ * or image event paints nothing.
  */
 
 import { apiFetch } from './api_client.js';
@@ -27,18 +31,22 @@ const ERROR_BODY_MAX_BYTES = 4096;
 
 const MARKDOWN_EXTENSIONS = new Set(['md', 'markdown', 'mdown', 'mkd']);
 const TEXT_EXTENSIONS = new Set(['txt', 'text']);
+// Raster formats the engines decode; SVG stays a file (Open/Download), never a document view.
+const IMAGE_TYPES = { png: 'png', jpg: 'jpeg', jpeg: 'jpeg', gif: 'gif', webp: 'webp', avif: 'avif' };
 
 /**
- * `markdown`, `text`, or '' when the reader does not open this file. The
- * extension decides when there is one, so `page.html` sent as `text/plain` is
- * not read; an extensionless file falls back to its MIME type.
+ * `markdown`, `text`, `image`, or '' when the reader does not open this file.
+ * The extension decides when there is one, so `page.html` sent as `text/plain`
+ * is not read; an extensionless file falls back to its MIME type.
  */
 export function documentReaderKind(filename, mime) {
     const extension = String(filename || '').match(/\.([^.\s/\\]+)$/)?.[1]?.toLowerCase() || '';
     if (MARKDOWN_EXTENSIONS.has(extension)) return 'markdown';
     if (TEXT_EXTENSIONS.has(extension)) return 'text';
+    if (Object.hasOwn(IMAGE_TYPES, extension)) return 'image';
     if (extension) return '';
     const type = String(mime || '').split(';')[0].trim().toLowerCase();
+    if (Object.values(IMAGE_TYPES).some((name) => type === `image/${name}`)) return 'image';
     return type === 'text/markdown' ? 'markdown' : type === 'text/plain' ? 'text' : '';
 }
 
@@ -194,6 +202,40 @@ export async function readDocumentBytes(source, {
 }
 
 /**
+ * The image at `src`, loaded and decoded by the engine in a detached <img>,
+ * which the promise resolves with. It rejects DocumentReadError `image` when the
+ * engine cannot load or show it and `timeout` after `timeoutMs`; with `signal`
+ * it stops loading (its source is dropped) and rejects as an abort. However it
+ * ends, its listeners and timer are gone, so a late event does nothing.
+ */
+export function loadReaderImage(src, { signal, alt = '', doc = globalThis.document, timeoutMs = DOCUMENT_READER_TIMEOUT_MS } = {}) {
+    return new Promise((resolve, reject) => {
+        const image = doc.createElement('img');
+        image.className = 'document-reader-image';
+        image.setAttribute('alt', alt);
+        let timer = null;
+        const finish = (error) => {
+            clearTimeout(timer);
+            image.removeEventListener('load', onLoad);
+            image.removeEventListener('error', onError);
+            signal?.removeEventListener('abort', onAbort);
+            if (!error) { resolve(image); return; }
+            image.removeAttribute('src');
+            reject(error);
+        };
+        const onLoad = () => finish(null);
+        const onError = () => finish(new DocumentReadError('image'));
+        const onAbort = () => finish(new DOMException('The load was stopped.', 'AbortError'));
+        if (signal?.aborted) { onAbort(); return; }
+        image.addEventListener('load', onLoad);
+        image.addEventListener('error', onError);
+        signal?.addEventListener('abort', onAbort, { once: true });
+        timer = setTimeout(() => finish(new DocumentReadError('timeout')), timeoutMs);
+        image.setAttribute('src', src);
+    });
+}
+
+/**
  * UTF-8 text of the read bytes. A partial prefix may end inside a character:
  * that trailing sequence is withheld, not called malformed. Bytes that are not
  * UTF-8 show as U+FFFD with `malformed`; a NUL byte marks the file `binary`.
@@ -208,13 +250,28 @@ export function decodeDocumentText(bytes, { partial = false } = {}) {
 }
 
 const FAILURES = {
+    review_source_changed: 'The selected saved answer changed or is unavailable. This view has not switched to another answer.',
+    review_source_unavailable: 'The selected saved review text is missing, unreadable, or failed its integrity check. Readable neighboring reviews remain available.',
+    review_source_invalid: 'This review has no valid saved source selector.',
     artifact_unverified: 'This delivered copy is missing or did not pass its integrity check, so it is not shown. Ask Ouroboros to send the file again.',
     artifact_identity_changed: 'This file changed after it was delivered, so the delivered copy cannot be shown. Ask Ouroboros to send the file again.',
     artifact_unavailable: 'This device cannot read the delivered copy right now.',
+    upload_unavailable: 'This attachment is no longer stored, so it cannot be shown. Attach the file again to share it.',
+    upload_unreadable: 'Ouroboros cannot read this attachment right now.',
 };
 
 // `[template, params, retriable]`: what the owner reads and whether Retry can help.
-function failure(error) {
+function failure(error, file) {
+    if (file.kind === 'image') {
+        if (error?.code === 'timeout') {
+            return ['The image did not arrive within {seconds} seconds, so loading stopped.',
+                { seconds: Math.round(DOCUMENT_READER_TIMEOUT_MS / 1000) }, true];
+        }
+        // Inline bytes the engine refused stay refused; an address may answer next time.
+        return String(file.src).startsWith('data:')
+            ? ['This app cannot show the image. Download it to open it in another app.', {}, false]
+            : ['Could not load the image. Retry, or download it to open it in another app.', {}, true];
+    }
     if (error?.code === 'unavailable') return ['This message carries no readable copy of the file.', {}, false];
     if (error?.code === 'incomplete') return ['The transfer ended before the whole document arrived.', {}, true];
     if (error?.code === 'timeout') {
@@ -230,21 +287,28 @@ function failure(error) {
 }
 
 let readerCount = 0;
+// An image takes the same two view buttons: the whole image fitted, never enlarged, or its own pixels, scrolled.
+const IMAGE_VIEWS = [['fit', 'Fit'], ['actual', 'Actual size']];
 
 const DIALOG_HTML = `
     <div class="document-reader-panel">
-        <header class="document-reader-head">
-            <div class="document-reader-identity" data-i18n-authored>
-                <h2 class="document-reader-title"></h2>
-                <div class="document-reader-meta"></div>
-            </div>
-            <div class="document-reader-actions">
-                <div class="document-reader-views" role="group" aria-label="View" hidden>
-                    <button type="button" class="btn btn-default" data-reader-view="formatted" aria-pressed="true">Formatted</button>
-                    <button type="button" class="btn btn-default" data-reader-view="source" aria-pressed="false">Source</button>
+        <header class="document-reader-head has-lead">
+            <div class="document-reader-lead">
+                <div class="document-reader-identity" data-i18n-authored>
+                    <h2 class="document-reader-title" tabindex="0"></h2>
+                    <div class="document-reader-meta"></div>
                 </div>
-                <button type="button" class="btn btn-default" data-reader-action="open">Open</button>
-                <button type="button" class="btn btn-default" data-reader-action="download">Download</button>
+                <div class="document-reader-actions">
+                    <div class="document-reader-views" role="group" aria-label="View" hidden>
+                        <button type="button" class="btn btn-default" data-reader-view="formatted" aria-pressed="true">Formatted</button>
+                        <button type="button" class="btn btn-default" data-reader-view="source" aria-pressed="false">Source</button>
+                    </div>
+                    <div class="document-reader-file">
+                        <button type="button" class="btn btn-default" data-reader-action="copy" hidden>Copy</button>
+                        <button type="button" class="btn btn-default" data-reader-action="open">Open</button>
+                        <button type="button" class="btn btn-default" data-reader-action="download">Download</button>
+                    </div>
+                </div>
             </div>
             <button type="button" class="btn btn-default document-reader-close" data-reader-action="close" aria-label="Close document">Close</button>
         </header>
@@ -256,10 +320,13 @@ const DIALOG_HTML = `
  * One reader per chat instance. `open(file, {owner, returnFocus, pointer})`
  * shows a modal over the conversation with the reading region focused, so keys
  * scroll it at once; opened by a pointer, its focus ring waits for the first key.
+ * A document `file` carries its message's copy as `reader`; an `image` one, the
+ * `src` its tile shows (and `title` when its header names more than the file).
  * `release(root)` closes it when the message that opened it leaves; `destroy()`
  * with the chat. Closing aborts the read, disposes Markdown enhancements and
- * returns focus to the card when it is still there, so the conversation keeps
- * its place. `actions.open/download` are the card's existing file actions.
+ * returns focus to the card when it is still there, without scrolling, so the
+ * conversation keeps its place. `actions.open/download` are the card's existing
+ * file actions, and `actions.copy` the photo menu's, offered for an image.
  */
 export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${bytes} B`, doc = globalThis.document } = {}) {
     let session = null;
@@ -278,6 +345,7 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
     function showStatus(current, key, params = {}, { retry = false, tone = 'info' } = {}) {
         const body = current.body;
         destroyChatMarkdown(body);
+        body.classList.remove('is-image', 'is-actual');
         const status = doc.createElement('div');
         status.className = `document-reader-status is-${tone}`;
         status.setAttribute('role', tone === 'error' ? 'alert' : 'status');
@@ -304,7 +372,12 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
             button.setAttribute('aria-pressed', String(button.dataset.readerView === current.view));
         }
         let content;
-        if (formatted) {
+        if (current.kind === 'image') {
+            content = current.image;
+            body.classList.add('is-image');
+            body.classList.toggle('is-actual', current.view === 'actual');
+            body.scrollLeft = 0;
+        } else if (formatted) {
             content = doc.createElement('div');
             content.className = 'document-reader-markdown';
             // Document semantics: a single newline inside a paragraph is a soft break.
@@ -327,19 +400,30 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
         const controller = new AbortController();
         current.controller = controller;
         current.loaded = false;
-        current.dialog.querySelector('.document-reader-views').hidden = true;
+        const views = current.dialog.querySelector('.document-reader-views');
+        views.hidden = true;
         setNotice(current, []);
-        showStatus(current, 'Loading the document…', {}, { tone: 'loading' });
+        const image = current.kind === 'image';
+        showStatus(current, image ? 'Loading the image…' : 'Loading the document…', {}, { tone: 'loading' });
         let result;
         try {
-            result = await readDocumentBytes(current.file.reader, { signal: controller.signal, knownSize: current.file.size });
+            result = image
+                ? await loadReaderImage(current.file.src, { signal: controller.signal, alt: current.file.title || current.file.filename, doc })
+                : await readDocumentBytes(current.file.reader, { signal: controller.signal, knownSize: current.file.size });
         } catch (error) {
             if (session !== current || controller.signal.aborted) return;
-            const [key, params, retry] = failure(error);
+            const [key, params, retry] = failure(error, current.file);
             showStatus(current, key, params, { retry, tone: 'error' });
             return;
         }
         if (session !== current || controller.signal.aborted) return;
+        if (image) {
+            current.image = result;
+            current.loaded = true;
+            views.hidden = false;
+            showContent(current);
+            return;
+        }
         const decoded = decodeDocumentText(result.bytes, { partial: result.partial });
         if (decoded.binary) {
             showStatus(current, 'This file does not look like text, so it is not shown here. Download it to open it in another app.', {}, { tone: 'error' });
@@ -356,7 +440,7 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
         setNotice(current, notices);
         current.text = decoded.text;
         current.loaded = true;
-        current.dialog.querySelector('.document-reader-views').hidden = current.kind !== 'markdown';
+        views.hidden = current.kind !== 'markdown';
         showContent(current);
     }
 
@@ -377,7 +461,7 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
     }
 
     function open(file, { owner = null, returnFocus = doc.activeElement, pointer = false } = {}) {
-        if (destroyed || !file?.reader || !file.kind) return false;
+        if (destroyed || !file?.kind || !(file.kind === 'image' ? file.src : file.reader)) return false;
         close({ restoreFocus: false });
         const dialog = doc.createElement('dialog');
         dialog.className = 'document-reader';
@@ -387,14 +471,22 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
         readerCount += 1;
         title.id = `document-reader-title-${readerCount}`;
         dialog.setAttribute('aria-labelledby', title.id);
-        title.textContent = file.filename;
+        title.textContent = file.title || file.filename;
         dialog.querySelector('.document-reader-meta').textContent = file.meta || '';
+        dialog.querySelector('[data-reader-action="copy"]').hidden = file.kind !== 'image' || !actions.copy;
         dialog.querySelector('[data-reader-action="open"]').hidden = !actions.open || !file.canOpen;
         dialog.querySelector('[data-reader-action="download"]').hidden = !actions.download;
         const current = {
-            dialog, file, owner, kind: file.kind, view: 'formatted', text: '', loaded: false, controller: null, disposers: [],
-            body: dialog.querySelector('.document-reader-body'), disposeFocus: null,
+            dialog, file, owner, kind: file.kind, view: 'formatted', text: '', image: null, loaded: false, controller: null,
+            disposers: [], body: dialog.querySelector('.document-reader-body'), disposeFocus: null,
         };
+        if (file.kind === 'image') {
+            dialog.querySelectorAll('[data-reader-view]').forEach((button, index) => {
+                [button.dataset.readerView, button.textContent] = IMAGE_VIEWS[index];
+            });
+            current.view = 'fit';
+            current.body.setAttribute('aria-label', 'Image');
+        }
         const listen = (target, type, handler) => {
             target.addEventListener(type, handler);
             current.disposers.push(() => target.removeEventListener(type, handler));
@@ -411,7 +503,7 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
                 void load(current);
                 current.body.focus();
             }
-            else if (action === 'open' || action === 'download') void actions[action]?.(file);
+            else if (action === 'open' || action === 'download' || action === 'copy') void actions[action]?.(file);
             else if (view && view !== current.view && current.loaded) {
                 current.view = view;
                 showContent(current);
@@ -423,8 +515,13 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
         listen(dialog, 'close', () => { if (session === current) close({ restoreFocus: false }); });
         doc.body.appendChild(dialog);
         session = current;
+        // The engine refocuses what was focused at showModal when the dialog closes; WebKit does
+        // not focus a pressed button, so the opener takes focus first, in place.
+        if (returnFocus && returnFocus !== doc.activeElement) returnFocus.focus?.({ preventScroll: true });
         if (typeof dialog.showModal === 'function') dialog.showModal(); else dialog.setAttribute('open', '');
-        current.disposeFocus = bindDialogFocus(dialog, { initialFocus: current.body, returnFocus, onEscape: () => close() });
+        current.disposeFocus = bindDialogFocus(dialog, {
+            initialFocus: current.body, returnFocus, onEscape: () => close(), preventScroll: true,
+        });
         void load(current);
         return true;
     }

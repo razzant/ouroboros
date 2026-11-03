@@ -6,6 +6,7 @@ import queue as stdqueue
 import pytest
 
 from ouroboros import store, task_store
+from ouroboros._usage_wait import ACQUISITION_SLICE_SEC
 from ouroboros.task_results import write_task_result
 from ouroboros.tools.control_delegation import durable_direct_child_count, schedule_delegation_refusal
 from supervisor import queue, workspace_preparation as prep
@@ -39,12 +40,12 @@ def test_final_count_contention_retains_the_eligible_first_child(env, monkeypatc
     def facts(root, *args, **kwargs):
         if kwargs.get("where") != _PARENT_ROWS:
             return original(root, *args, **kwargs)
-        under_q = queue._queue_lock._is_owned()
-        reads.append((under_q, store._WAIT_BUDGET.get()))
-        if contended and under_q and not gaps:
-            if acting:
-                claim = next(row for row in prep._LIVE.values() if row.task_id == "count-child")
-                claims.append((claim.token, dict(claim.resource)))
+        under_q, budget = queue._queue_lock._is_owned(), store._WAIT_BUDGET.get()
+        reads.append((under_q, budget))
+        # The interlocked recheck reads on the admission lane under the gate's slice budget, off Q.
+        if contended and budget is not None and not gaps:
+            claim = next(row for row in prep._LIVE.values() if row.task_id == "count-child")
+            claims.append((claim.token, dict(claim.resource)))
             with database_reader(env.data, exclusive=True):
                 try:
                     return original(root, *args, **kwargs)
@@ -55,17 +56,16 @@ def test_final_count_contention_retains_the_eligible_first_child(env, monkeypatc
 
     monkeypatch.setattr(task_store, "task_facts", facts)
     assert env.dispatch_returns(event) and env.gen.wait_idle(_WAIT_SEC)
-    if contended and not acting:
-        assert env.pending_ids() == []
-        assert env.dispatch_returns(bus.get(timeout=2))
+    assert bus.empty()  # retried at its own lane, never re-put
     row = env.row("count-child")
     assert row["status"] == "scheduled" and env.pending_ids() == ["count-child"]
     assert copies == (["count-child"] if acting else [])
     assert reads[0] == (False, None), "initial count lost its ordinary off-Q acquisition budget"
-    assert (True, 0) in reads and gaps == (["contention"] if contended else [])
-    if claims:
+    assert not any(under_q for under_q, _budget in reads), "a count was read while Q was owned"
+    assert (False, ACQUISITION_SLICE_SEC) in reads and gaps == (["contention"] if contended else [])
+    if claims:  # the retry reused the same claim and, for a copied surface, the same copy
         assert row[prep.MARKER]["token"] == claims[0][0]
-        assert row[prep.MARKER]["resource"] == claims[0][1]
+        assert row[prep.MARKER].get("resource", {}) == claims[0][1]
     assert env.dispatch_returns(event)  # an already admitted duplicate remains harmless
     assert env.pending_ids() == ["count-child"]
 
@@ -79,7 +79,7 @@ def test_contended_failed_child_body_count_rejoins_the_same_preparation(env, mon
     original = task_store.documents_by_ids
 
     def bodies(root, ids):
-        if queue._queue_lock._is_owned() and "failed-prior" in ids and not gaps:
+        if store._WAIT_BUDGET.get() is not None and "failed-prior" in ids and not gaps:
             with database_reader(env.data, exclusive=True):
                 try:
                     return original(root, ids)
@@ -104,7 +104,7 @@ def test_retry_reads_the_real_count_and_preserves_the_parent_limit(env, monkeypa
     original = task_store.task_facts
 
     def facts(root, *args, **kwargs):
-        if queue._queue_lock._is_owned() and kwargs.get("where") == _PARENT_ROWS and not gaps:
+        if store._WAIT_BUDGET.get() is not None and kwargs.get("where") == _PARENT_ROWS and not gaps:
             caught = None
             with database_reader(env.data, exclusive=True):
                 try:
@@ -139,7 +139,7 @@ def test_genuine_unknown_count_is_not_temporary_contention(env, monkeypatch, fai
         error.rollback_confirmed = False
 
     def facts(root, *args, **kwargs):
-        if queue._queue_lock._is_owned() and kwargs.get("where") == _PARENT_ROWS:
+        if store._WAIT_BUDGET.get() is not None and kwargs.get("where") == _PARENT_ROWS:
             reads.append(True)
             raise error
         return original(root, *args, **kwargs)

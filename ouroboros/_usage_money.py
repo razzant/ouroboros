@@ -97,8 +97,11 @@ def cash_contribution(row: dict) -> tuple[Decimal, ...]:
     bound = amount(row.get("reservation_upper_bound_usd")) or Decimal(0)
     state = row.get("state")
     if state == "settled" and cost is not None:
-        return (cost, cost if row.get("cost_final") else Decimal(0),
-                Decimal(0) if row.get("cost_final") else cost, Decimal(0), Decimal(0))
+        # Partial receipts declare the subtotal's precision separately from the
+        # missing remainder. Older rows retain their cost_final grammar.
+        exact = row.get("cost_final") or (row.get("cost_partial") is True and row.get("cost_estimated") is False)
+        return (cost, cost if exact else Decimal(0),
+                Decimal(0) if exact else cost, Decimal(0), Decimal(0))
     if state == "reserved":
         return (Decimal(0), Decimal(0), Decimal(0), bound, Decimal(0))
     if state in {"dispatched", "unresolved", "settled"}:

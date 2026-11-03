@@ -1,6 +1,7 @@
-"""Durable edges of Main's owners through the actual passive gateway: torn appends, kept
+"""Durable edges of Main's owners through the actual passive gateway: rolled-back SQL appends, kept
 timestamps, same-batch ask and close, legacy absence, child waits, closure wakes, non-clean finals."""
 import json
+from tests import _dialogue as dialogue_test
 import os
 import asyncio
 from collections import deque
@@ -17,16 +18,17 @@ from tests.test_quiz_history_evidence import runtime as _runtime
 owed, publication, gateway, runtime = _owed, _publication, _gateway, _runtime
 
 
-def _torn_chat(monkeypatch):
-    from ouroboros import utils
-    original = utils._write_fd_fully
-    def torn(fd, data, path):
-        if path.name == 'chat.jsonl':
-            os.write(fd, data[:23])
-            raise OSError('injected partial chat append')
-        return original(fd, data, path)
-    monkeypatch.setattr(utils, '_write_fd_fully', torn)
-    return lambda: monkeypatch.setattr(utils, '_write_fd_fully', original)
+def _failed_chat_transaction(monkeypatch):
+    from ouroboros import dialogue_store as ds
+    original = ds.insert_row
+
+    def failed(conn, stream, *args, **kwargs):
+        original(conn, stream, *args, **kwargs)
+        if stream == "chat":
+            raise ds.StoreError("injected failure after row and room writes")
+
+    monkeypatch.setattr(ds, "insert_row", failed)
+    return lambda: monkeypatch.setattr(ds, "insert_row", original)
 
 
 def _sender(root, monkeypatch):
@@ -39,7 +41,6 @@ def _sender(root, monkeypatch):
     monkeypatch.setattr(bus, 'load_state', lambda: {'owner_id': 1})
     monkeypatch.setattr(bus, 'get_bridge', lambda: bridge)
     monkeypatch.setattr(bus, 'publish_event', lambda *_a, **_kw: None)
-    monkeypatch.setattr(bus, '_advance_project_visible_revision', lambda *_a: None)
     monkeypatch.setattr(handler, '_DELIVERED_MESSAGE_IDS', deque(maxlen=256))
     return SimpleNamespace(DRIVE_ROOT=root, RUNNING={}, send_with_budget=bus.send_with_budget,
                            append_jsonl=append_jsonl), frames
@@ -53,27 +54,28 @@ def _history(root, chat_id=1):
 def _consume_payload(root, payload, pattern):
     import pathlib
     import shutil
-    import subprocess
+    from tests.group_run import run_in_group
     path = root / 'main-consumer-history.json'
     path.write_text(json.dumps(payload))
     node = shutil.which('node')
     assert node, 'Node is required for the actual Main consumer regression'
-    result = subprocess.run([node, '--test', '--test-force-exit', f'--test-name-pattern={pattern}', 'web/tests/main_durable_edges.test.js'],
+    result = run_in_group([node, '--test', '--test-force-exit', f'--test-name-pattern={pattern}', 'web/tests/main_durable_edges.test.js'],
         cwd=pathlib.Path(__file__).resolve().parents[1], env={**os.environ, 'MAIN_REVIEW_HISTORY_PAYLOAD': str(path)},
-        capture_output=True, text=True, timeout=30)
+        timeout=30)
     (root / 'consumer.log').write_text(result.stdout + result.stderr)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_torn_main_append_retries_readable_history_before_ack(owed, monkeypatch):
+def test_failed_main_transaction_retries_readable_history_before_ack(owed, monkeypatch):
     from supervisor import events_chat_delivery as handler, terminal_delivery as delivery
     from ouroboros.task_results import load_task_result
     context, frames = _sender(owed.root, monkeypatch)
-    restore = _torn_chat(monkeypatch)
+    before = dialogue_test.chat_rows(owed.root)
+    restore = _failed_chat_transaction(monkeypatch)
     handler._handle_send_message(owed.event, context)
     assert not frames and not delivery.already_delivered(owed.root, owed.event['delivery_id'])
     assert load_task_result(owed.root, 'root')['canonical_terminal_projection_ready']
-    assert not (owed.root / 'logs/chat.jsonl').read_bytes().endswith(b'\n')
+    assert dialogue_test.chat_rows(owed.root) == before
     restore()
     handler._handle_send_message(owed.event, context)
     assert delivery.already_delivered(owed.root, owed.event['delivery_id'])
@@ -82,7 +84,7 @@ def test_torn_main_append_retries_readable_history_before_ack(owed, monkeypatch)
 
 
 @pytest.mark.parametrize('kind', ['publication', 'closure', 'answer'])
-def test_torn_quiz_append_retry_leaves_readable_evidence(publication, monkeypatch, kind):
+def test_failed_quiz_transaction_retry_leaves_readable_evidence(publication, monkeypatch, kind):
     from ouroboros import owner_quiz
     from ouroboros.gateway.task_decision import _record_quiz_answer_history
     from supervisor import events_chat_delivery as handler
@@ -99,29 +101,25 @@ def test_torn_quiz_append_retry_leaves_readable_evidence(publication, monkeypatc
             handler._handle_send_quiz_state(publication.event, publication.ctx)
         else:
             _record_quiz_answer_history(publication.root, 't', None, _block(publication), duplicate=False)
-    restore = _torn_chat(monkeypatch)
+    before = dialogue_test.chat_rows(publication.root)
+    restore = _failed_chat_transaction(monkeypatch)
     try:
         send()
     except RuntimeError:
         pass
-    assert not (publication.root / 'logs/chat.jsonl').read_bytes().endswith(b'\n')
+    assert dialogue_test.chat_rows(publication.root) == before
     assert not _block(publication).get('discharged_at')
     restore()
     _quiz_due(publication)
     send()
     expected = {'publication': 'quiz', 'closure': 'quiz_closed', 'answer': 'quiz_answer'}[kind]
-    readable = []
-    for line in (publication.root / 'logs/chat.jsonl').read_text().splitlines():
-        try:
-            readable.append(json.loads(line))
-        except ValueError:
-            pass  # Preserve the injected prefix, but the retry must be a readable independent row.
+    readable = dialogue_test.chat_rows(publication.root)
     assert any(row.get('type') == expected for row in readable)
     state = {'publication': 'open', 'closure': 'closed', 'answer': 'answered'}[kind]
     assert any(row.get('quiz', {}).get('state') == state for row in _history(publication.root))
 
 
-def test_main_retry_keeps_original_nonempty_timestamp(owed, monkeypatch):
+def test_main_retry_keeps_one_row_with_original_nonempty_timestamp(owed, monkeypatch):
     from ouroboros.terminal_projection import settle_terminal_projection
     from supervisor import events_chat_delivery as handler, message_bus as bus
     first_ts = owed.event.get('ts')
@@ -136,10 +134,10 @@ def test_main_retry_keeps_original_nonempty_timestamp(owed, monkeypatch):
     monkeypatch.setattr(bus, 'get_bridge', lambda: real_bridge)
     monkeypatch.setattr(bus, 'utc_now_iso', lambda: '2099-01-01T00:00:00+00:00')
     handler._handle_send_message({**owed.queued[-1], 'format': ''}, context)
-    rows = [json.loads(line) for line in (owed.root / 'logs/chat.jsonl').read_text().splitlines()]
+    rows = dialogue_test.chat_rows(owed.root)
     rows = [row for row in rows if row.get('delivery_id') == owed.event['delivery_id']]
-    assert len(rows) == 2 and {row['ts'] for row in rows} == {first_ts}
-    assert frames[0]['ts'] == first_ts
+    assert len(rows) == 1 and rows[0]['ts'] == first_ts
+    assert len(frames) == 1 and frames[0]['ts'] == first_ts
 
 
 @pytest.mark.parametrize('lost_queue', [False, True])
@@ -162,7 +160,7 @@ def test_same_batch_ask_close_drains_and_maintenance_converges(publication, monk
     assert block['publication_evidence'] == 'pre_exposure'
     assert block['delivery']['state'] == 'delivered' and block['discharged_at']
     assert not block.get('published_at') and 'answered_at' not in block and 'answered_index' not in block
-    rows = [json.loads(line) for line in (publication.root / 'logs/chat.jsonl').read_text().splitlines()]
+    rows = dialogue_test.chat_rows(publication.root)
     assert [row['type'] for row in rows] == ['quiz_closed']
     assert publication.frames and all(row.get('state') == 'closed' for row in publication.frames)
     assert not main_decisions_snapshot(publication.root, [], {})['current_questions']
@@ -192,7 +190,7 @@ def test_real_same_tool_batch_ask_close_event_drain_leaves_only_closed_history(r
     block = quiz_states(runtime.root, runtime.task['id'])[qid]
     assert block['delivery']['state'] == 'delivered' and block['publication_evidence'] == 'pre_exposure'
     assert 'answered_at' not in block and not block.get('published_at')
-    rows = [json.loads(line) for line in (runtime.root / 'logs/chat.jsonl').read_text().splitlines()]
+    rows = dialogue_test.chat_rows(runtime.root)
     assert [row['type'] for row in rows] == ['quiz_closed']
 
 
@@ -200,16 +198,16 @@ def test_legacy_answer_absence_is_not_replay_authority(runtime, monkeypatch):
     from ouroboros import obligations, owner_quiz, startup_migrations
     from ouroboros.gateway.task_decision import answer_decision, recover_question_deliveries
     from ouroboros.task_results import write_task_result
-    from ouroboros.utils import append_jsonl
+    from ouroboros import dialogue_store as ds
     from supervisor import queue
     legacy = {'quiz_id': 'old', 'question': 'Old choice?', 'options': ['A', 'B'], 'state': 'answered',
               'asked_at': '2020-01-01T00:00:00+00:00', 'answered_at': '2020-01-02T00:00:00+00:00',
               'answered_index': 1, 'request_id': 'old-owner', 'answered_after_terminal': True, 'chat_id': 1}
     write_task_result(runtime.root, runtime.task['id'], 'completed', chat_id=1, owner_quiz={'old': legacy})
     for kind in ['quiz', 'quiz_answer']:
-        append_jsonl(runtime.root / 'logs/chat.jsonl', {'type': kind, 'direction': 'system', 'chat_id': 1,
+        ds.append(runtime.root, "chat", {'type': kind, 'direction': 'system', 'chat_id': 1,
             'ts': legacy['answered_at'], 'task_id': runtime.task['id'], 'quiz': legacy})
-    before = (runtime.root / 'logs/chat.jsonl').read_bytes()
+    before = dialogue_test.chat_rows(runtime.root)
     monkeypatch.setattr(queue, 'RUNNING', {})
     startup_migrations.prepare_startup_state(runtime.root)
     assert asyncio.run(recover_question_deliveries(runtime.root))['attempted'] == 0
@@ -218,7 +216,7 @@ def test_legacy_answer_absence_is_not_replay_authority(runtime, monkeypatch):
     assert status == 200 and reply['state'] == 'answered'
     assert reply.get('forwarded') is not True
     assert runtime.bridge._inbox.empty()
-    assert (runtime.root / 'logs/chat.jsonl').read_bytes() == before
+    assert dialogue_test.chat_rows(runtime.root) == before
     assert owner_quiz.quiz_states(runtime.root, runtime.task['id'])['old'] == legacy
     assert not owner_quiz.question_delivery_projection(legacy)
     assert not owner_quiz.question_delivery_settled(legacy)
@@ -264,8 +262,8 @@ def test_child_wait_projects_real_owner_and_control_without_expanding_census(gat
     assert not drain_owner_entries(gateway.root, 'root', kinds={KIND_MODEL_WAIT})
 
 
-def test_first_import_quarantines_a_corrupt_task_without_a_fabricated_question(gateway, monkeypatch):
-    """The store import quarantines unreadable result bytes (log-only visibility, 6.3=B) and
+def test_legacy_job_quarantines_a_corrupt_task_without_a_fabricated_question(gateway, monkeypatch):
+    """The legacy job quarantines unreadable result bytes (log-only visibility, 6.3=B) and
     occupies the identity; no question is reconstructed for it and a GET never scans."""
     from ouroboros import startup_migrations, store, store_import
     from ouroboros.memory import Memory
@@ -273,6 +271,7 @@ def test_first_import_quarantines_a_corrupt_task_without_a_fabricated_question(g
     (root / 'task_results').mkdir(exist_ok=True)
     (root / 'task_results/broken.json').write_text('{partial')
     startup_migrations.prepare_startup_state(root)
+    store_import.run_legacy_reconcile(root)
     assert store_import.occupied_reason(root, 'broken')
     monkeypatch.setattr(store_import, 'ensure_current_store', lambda *_a, **_kw: pytest.fail('GET import'))
     monkeypatch.setattr(Memory, 'read_chat_generations', lambda *_a, **_kw: pytest.fail('GET history scan'))

@@ -27,7 +27,6 @@ import copy
 import inspect
 import json
 import math
-from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -120,8 +119,19 @@ def _over_every_row(fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
 
-def _named(lines, marker):
-    return {line.split("— run ")[1].split()[0] for line in lines if marker in line}
+_FOLDED = {"NEVER READ": "unread", "AWAITS DISPOSITION": "patches"}
+
+
+def _named(lines, marker, root):
+    """Run ids from own lines or the exact foreign list the aggregate line names."""
+    from tests.test_health_invariants_ownership import _foreign_source
+
+    named = {line.split("— run ")[1].split()[0] for line in lines if marker in line and "— run " in line}
+    for line in lines:
+        if "OTHER TASKS' DELEGATED WORK" in line and marker in _FOLDED:
+            for work in _foreign_source(root, line).values():
+                named |= set(work[_FOLDED[marker]])
+    return named
 
 
 # --- health: one selected read, equal lines, the shared full-read fallback -------------
@@ -132,9 +142,9 @@ def test_health_lines_equal_the_every_row_read_for_every_reader(tmp_path, reader
     _seed_health(tmp_path)
     keyed = _delegated_lines(tmp_path, task_id=reader, active_root="/tmp/t1")
     assert keyed == _over_every_row(_delegated_lines, tmp_path, task_id=reader, active_root="/tmp/t1")
-    assert _named(keyed, "NEVER READ") == {"run-nan-complete", "run-text-complete"}, keyed
-    assert _named(keyed, "AWAITS DISPOSITION") == {"run-snapshot", "run-copy"}, keyed
-    assert _named(keyed, "OWN DELEGATED RUN ENDED") == ({"run-own"} if reader == "own" else set()), keyed
+    assert _named(keyed, "NEVER READ", tmp_path) == {"run-nan-complete", "run-text-complete"}, keyed
+    assert _named(keyed, "AWAITS DISPOSITION", tmp_path) == {"run-snapshot", "run-copy"}, keyed
+    assert _named(keyed, "OWN DELEGATED RUN ENDED", tmp_path) == ({"run-own"} if reader == "own" else set()), keyed
 
 
 def test_the_selection_skips_closed_rows_it_cannot_name(tmp_path, monkeypatch):
@@ -181,46 +191,37 @@ def test_every_stored_flag_pair_names_the_same_unread_outputs(tmp_path, monkeypa
     for reader in ("owner", "reader", ""):
         keyed = _delegated_lines(tmp_path, task_id=reader)
         assert keyed == _over_every_row(_delegated_lines, tmp_path, task_id=reader), reader
-        assert _named(keyed, "NEVER READ") == expected, reader
+        assert _named(keyed, "NEVER READ", tmp_path) == expected, reader
     decoded = _decodes(monkeypatch)
     assert set(current.health_runs(tmp_path, "reader")) == kept
     assert len(decoded) == len(kept), "only the kept rows reach Python"
 
 
-def test_a_failed_selection_reads_every_row_into_the_one_shared_state(tmp_path, monkeypatch):
-    """The own-run line has no read of its own: after a failed selection it survives only
-    because the full read lands in the state all three blocks share."""
+def test_a_failed_selection_is_said_with_its_reader_and_replays_no_row(tmp_path, monkeypatch):
+    """The three delegated-run blocks share the ONE selected read; when it fails the block says
+    custody is unavailable, names the addressed reader and skips those blocks (each would replay
+    every row for itself, and an empty replay proves no absence of obligations: an earlier build
+    fell back to that full read; no longer)."""
+    from ouroboros.context_health import build_health_invariants
+
     _seed_health(tmp_path)
     baseline = _delegated_lines(tmp_path, task_id="own")
-    assert _named(baseline, "OWN DELEGATED RUN ENDED") == {"run-own"}
-    assert "run-nan-complete" in _named(baseline, "NEVER READ")
+    assert _named(baseline, "OWN DELEGATED RUN ENDED", tmp_path) == {"run-own"}
+    assert "run-nan-complete" in _named(baseline, "NEVER READ", tmp_path)
 
     selections, replays = [], []
-    real_replay = custody.replay
 
     def failing_selection(root, task_id=""):
         selections.append(task_id)
         raise store.StoreBusy("the selected read failed")
 
     monkeypatch.setattr(current, "health_runs", failing_selection)
-    monkeypatch.setattr(custody, "replay", lambda root, rows=None: replays.append(rows) or real_replay(root, rows))
-    assert _delegated_lines(tmp_path, task_id="own") == baseline
-    assert selections == ["own"] and replays == [None], "one full read, shared by the three blocks"
-
-    # The same failure WITHOUT the shared full read leaves only the per-block replays:
-    # the unread and patch lines come back, the own-run line is lost.
-    calls = []
-
-    def first_full_read_fails(root, rows=None):
-        calls.append(rows)
-        if len(calls) == 1:
-            raise store.StoreBusy("the shared full read failed")
-        return real_replay(root, rows)
-
-    monkeypatch.setattr(custody, "replay", first_full_read_fails)
-    degraded = _delegated_lines(tmp_path, task_id="own")
-    assert degraded == [line for line in baseline if "OWN DELEGATED RUN" not in line]
-    assert len(calls) == 3
+    monkeypatch.setattr(custody, "replay", lambda root, rows=None: replays.append(rows) or {})
+    text = build_health_invariants(_env(tmp_path), task_id="own", attempt_key="1")
+    assert _delegated_lines(tmp_path, task_id="own") == [] and selections == ["own", "own"] and replays == []
+    unavailable = [line for line in text.splitlines() if "CUSTODY UNAVAILABLE" in line]
+    assert len(unavailable) == 1 and "StoreBusy: the selected read failed" in unavailable[0]
+    assert "query_data(op='sql', db='current'" in unavailable[0] and "custody_runs" in unavailable[0]
 
 
 def test_both_reads_failing_stays_a_failure_and_rewrites_no_fact(tmp_path, monkeypatch):
@@ -330,202 +331,41 @@ _HOLDERS = {
 
 
 @pytest.mark.parametrize("case", sorted(_HOLDERS))
-def test_a_foreign_payload_holder_refuses_or_releases_as_before(tmp_path, monkeypatch, case):
-    setup, holder = _HOLDERS[case]
+def test_foreign_payload_holders_are_inventory_not_an_admission_limit(tmp_path, monkeypatch, case):
+    setup, _holder = _HOLDERS[case]
     caller = _caller(tmp_path, monkeypatch)
     drive = custody.custody_root(caller)
     skill = _seed_skill(tmp_path / "data")
     _start_holder(drive, skill, **setup)
-    stored = {row[0]: row[1] for row in _stored(drive)}
-    if case == "closed, undisposed, not held":
-        assert stored["run-holder"] == current.CLOSED, "the held column alone would miss this holder"
-    if holder:
-        _no_gateway(monkeypatch)
-        out = _start(caller)
-        assert (out["status"], out["reason"], out["holder"]) == ("refused", "payload_delegation_busy", holder), out
-        assert out["holder_owner_task_id"] == "t-holder"
-    else:
-        _stub_gateway(monkeypatch)
-        assert _start(caller)["status"] == "started"
+    _stub_gateway(monkeypatch)
+    assert _start(caller)["status"] == "started"
+    assert "run-holder" in current.runs(drive)
     custody._CUSTODY.clear()
 
 
-@pytest.mark.parametrize("owner_status", ["", "failed"])
-def test_a_foreign_pending_request_refuses_until_its_owner_is_terminal(tmp_path, monkeypatch, owner_status):
-    from ouroboros.task_results import write_task_result
-
+def test_foreign_pending_payload_invocation_is_preserved_beside_new_start(tmp_path, monkeypatch):
     caller = _caller(tmp_path, monkeypatch)
     drive = custody.custody_root(caller)
     skill = _seed_skill(tmp_path / "data")
     _request_holder(drive, skill)
-    if owner_status:
-        write_task_result(drive, "t-holder", owner_status)
-        _stub_gateway(monkeypatch)
-        assert _start(caller)["status"] == "started"
-    else:
-        _no_gateway(monkeypatch)
-        out = _start(caller)
-        assert (out["reason"], out["holder"], out["holder_owner_task_id"]) == (
-            "payload_delegation_busy", "inv-holder", "t-holder"), out
-    custody._CUSTODY.clear()
-
-
-@pytest.mark.parametrize("disposed", [_ABSENT, None, "", "applied"])
-def test_a_settled_payload_row_without_a_disposition_still_holds_the_payload(tmp_path, monkeypatch, disposed):
-    """``_decode`` reads an absent field as its dataclass default, so a settled payload run whose
-    ``patch_disposed`` is absent, null or empty is undisposed and holds the payload; only a
-    non-empty disposition releases it. The writers store whole dataclasses, so these rows are
-    put directly: SQL three-valued logic must not drop what Python reads."""
-    caller = _caller(tmp_path, monkeypatch)
-    drive = custody.custody_root(caller)
-    skill = _seed_skill(tmp_path / "data")
-    facts = {"task_id": "t-holder", "authority_source": "skill_payload", "target_root": str(skill),
-             "settled": True, "terminal_state": "succeeded"}
-    if disposed is not _ABSENT:
-        facts["patch_disposed"] = disposed
-    _put_many(drive, [("run-partial", facts)])
-    if disposed is not _ABSENT and disposed:  # the sentinel itself is truthy
-        _stub_gateway(monkeypatch)
-        assert _start(caller)["status"] == "started"
-    else:
-        _no_gateway(monkeypatch)
-        out = _start(caller)
-        assert (out["status"], out["reason"], out["holder"], out["holder_owner_task_id"]) == (
-            "refused", "payload_delegation_busy", "run-partial", "t-holder"), out
-    custody._CUSTODY.clear()
-
-
-def test_an_unreadable_payload_snapshot_refuses_the_start_typed(tmp_path, monkeypatch):
-    caller = _caller(tmp_path, monkeypatch)
-    _seed_skill(tmp_path / "data")
-    snapshots, lookups = [], []
-
-    def unreadable(root):
-        snapshots.append(root)
-        raise store.StoreBusy("payload custody unreadable")
-
-    def no_holder_lookup(root, run_id):
-        lookups.append(run_id)
-        raise store.StoreBusy("an unreadable holder has no row to name")
-
-    monkeypatch.setattr(current, "payload_snapshot", unreadable)
-    monkeypatch.setattr(current, "run", no_holder_lookup)
-    _no_gateway(monkeypatch)
-    out = _start(caller)
-    assert (out["status"], out["reason"], out["holder"], out["holder_owner_task_id"]) == (
-        "refused", "payload_delegation_busy", "custody_log_unreadable", ""), out
-    assert out["detail"].startswith("Custody for the selected payload could not be read.")
-    assert "Another delegated run" not in out["detail"]
-    assert len(snapshots) == 1 and lookups == [], "no owner lookup for a holder that was never read"
-    custody._CUSTODY.clear()
-
-
-def test_a_claim_whose_snapshot_fails_refuses_and_records_no_request(tmp_path, monkeypatch):
-    caller = _caller(tmp_path, monkeypatch)
-    drive = custody.custody_root(caller)
-    _seed_skill(tmp_path / "data")
-    real = current.payload_snapshot
-    calls = []
-
-    def fails_at_the_claim(root):
-        calls.append(root)
-        if len(calls) == 2:
-            raise store.StoreBusy("payload custody unreadable at the claim")
-        return real(root)
-
-    monkeypatch.setattr(current, "payload_snapshot", fails_at_the_claim)
     _stub_gateway(monkeypatch)
-    out = _start(caller)
-    assert (out["status"], out["reason"], out["holder"]) == (
-        "refused", "payload_delegation_busy", "custody_log_unreadable"), out
-    assert out["detail"].startswith("Custody for the selected payload could not be read.")
-    assert "Another delegated run" not in out["detail"]
-    assert len(calls) == 2 and custody.pending_invocations(drive) == []
-    custody._CUSTODY.clear()
+    assert _start(caller)["status"] == "started"
+    assert any(row["invocation_id"] == "inv-holder" for row in custody.pending_invocations(drive))
 
 
-def test_an_actor_claim_keeps_unreadable_custody_distinct_from_a_known_holder(tmp_path, monkeypatch):
-    from ouroboros import delegate_recovery
-    from ouroboros.delegate_start_claims import PAYLOAD_CUSTODY_UNREADABLE, claimed_start_request
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_a_claim_preserves_unreadable_custody_refusal(tmp_path, monkeypatch, unreadable):
+    from ouroboros.delegate_start_claims import claimed_start_request
 
-    writes, reads = [], []
-    monkeypatch.setattr(custody, "custody_log_unreadable", lambda _root: False)
-    monkeypatch.setattr(delegate_recovery, "unsettled_start_ids",
-                        lambda *_args, **_kwargs: {"open_run_ids": ["run-other"]})
-    monkeypatch.setattr(custody, "record_start_requested", lambda *args, **kwargs: writes.append(kwargs) or True)
-    accepted, refusal = claimed_start_request(
-        tmp_path, claim_target="/payload/alpha",
-        payload_busy=lambda root, target: reads.append((root, target)) or PAYLOAD_CUSTODY_UNREADABLE,
-        actor_ctx=SimpleNamespace(), enforce_actor_idle=True, task_id="caller")
-    assert not accepted and refusal["reason"] == "payload_delegation_busy"
-    assert refusal["holder"] == PAYLOAD_CUSTODY_UNREADABLE and len(reads) == 1 and writes == []
-    assert refusal["detail"].startswith("Custody for the selected payload could not be read.")
-    assert "Another delegated run" not in refusal["detail"]
-
-
-@pytest.mark.parametrize("reads", ["one transaction", "two transactions"])
-def test_a_foreign_holder_starting_right_after_the_snapshot_never_vanishes(tmp_path, monkeypatch, reads):
-    """The holder (another top-level task, so no actor fence of the caller can refuse in
-    the busy check's place) records REQUESTED while the caller provisions, and its STARTED
-    commits the moment the caller's claim-time snapshot transaction closes. One
-    transaction still names it; a two-transaction read misses it and the start slips."""
-    import ouroboros.delegate_terminal as terminal
-    import ouroboros.tools.delegate_integration as integration
-
-    caller = _caller(tmp_path, monkeypatch)
-    drive = custody.custody_root(caller)
-    skill = _seed_skill(tmp_path / "data")
-    _stub_gateway(monkeypatch)
-
-    armed, depth, terminal_reads = [], [0], []
-    real_open = store.open_store
-
-    @contextmanager
-    def tracked(root, **kwargs):
-        depth[0] += 1
-        try:
-            with real_open(root, **kwargs) as txn:
-                yield txn
-        finally:
-            depth[0] -= 1
-        if armed and not kwargs.get("write"):
-            armed.clear()
-            _start_holder(drive, skill)  # REQUESTED -> STARTED, right after this read closed
-
-    real_terminal = terminal._task_is_terminal
-    monkeypatch.setattr(terminal, "_task_is_terminal",
-                        lambda root, task_id: terminal_reads.append(depth[0]) or real_terminal(root, task_id))
-    monkeypatch.setattr(store, "open_store", tracked)
-    if reads == "two transactions":
-        monkeypatch.setattr(current, "payload_snapshot", lambda root: {
-            "runs": current.runs(root, current._MAY_HOLD_PAYLOAD), "pending": current.pending(root)})
-
-    real_busy, checks = integration._payload_delegation_busy, []
-
-    def busy(root, target):
-        checks.append(target)
-        if len(checks) == 2:
-            armed.append(True)  # the claim's own check, under the payload claim lock
-        found = real_busy(root, target)
-        if len(checks) == 1:
-            assert found == ""
-            _request_holder(drive, skill)  # the foreign holder claims while this start provisions
-        return found
-
-    monkeypatch.setattr(integration, "_payload_delegation_busy", busy)
-    out = _start(caller)
-    assert len(checks) == 2 and not armed, "the hook fired at the claim"
-    started = current.runs(drive)
-    assert "run-holder" in started and custody.pending_invocations(drive) == [], "the holder really started"
-    if reads == "one transaction":
-        assert (out["status"], out["reason"], out["holder"]) == ("refused", "payload_delegation_busy",
-                                                                 "inv-holder"), out
-        assert terminal_reads and set(terminal_reads) == {0}, "terminality is read after the transaction"
-        assert set(started) == {"run-holder"}
+    writes = []
+    monkeypatch.setattr(custody, "custody_log_unreadable", lambda _root: unreadable)
+    monkeypatch.setattr(custody, "record_start_requested", lambda *_a, **kw: writes.append(kw) or True)
+    accepted, refusal = claimed_start_request(tmp_path, actor_ctx=SimpleNamespace(), task_id="caller")
+    assert accepted != unreadable
+    if unreadable:
+        assert refusal["reason"] == "replacement_custody_unknown" and not writes
     else:
-        assert out["status"] == "started", "a two-transaction read loses the holder: the negative control"
-        assert set(started) == {"run-holder", "run-p1"}, "two writers now hold one payload"
-    custody._CUSTODY.clear()
+        assert len(writes) == 1
 
 
 # --- by-id readers: the same answer, None/KeyError and the one memo seed ---------------
@@ -729,7 +569,6 @@ def _consumer_decodes(root):
     from ouroboros import delegate_continuation as continuation
     from ouroboros import model_sleep
     from ouroboros.delegate_shared import orphan_disposition_status, retry_result_status
-    from ouroboros.tools.delegate_integration import _payload_delegation_busy
     from ouroboros.tools.registry import ToolContext
 
     reader = ToolContext(repo_dir=root / "repo", drive_root=root)
@@ -742,7 +581,7 @@ def _consumer_decodes(root):
         "orphan": lambda: orphan_disposition_status(reader, root, "run-snapshot"),
         "continuation": lambda: continuation.bind_continuation(own, root, "run-own", **_CONTINUE),
         "hand-over": lambda: _hand_over(root, {"continuation_of": "run-snapshot", "snapshot_id": "snap-1"}),
-        "payload busy": lambda: _payload_delegation_busy(root, "/payload/alpha"),
+        "payload inventory": lambda: current.payload_snapshot(root),
         "every row (old input)": lambda: custody.replay(root),
     }
     counts, answers = {}, {}
@@ -755,7 +594,7 @@ def _consumer_decodes(root):
             answers[name] = consumer()
         counts[name] = len(seen)
     custody._CUSTODY.clear()
-    assert answers["payload busy"] == "run-pay-live" and answers["hand-over"] == {}
+    assert "run-pay-live" in answers["payload inventory"]["runs"] and answers["hand-over"] == {}
     sleep_terminals = [(rid, run.terminal_state in custody.TERMINAL_STATES or bool(run.settled))
                        for rid, run in answers["sleep"].items()]
     assert sleep_terminals == [("run-own", True), ("run-own-acked", True), ("run-own-live", False)]

@@ -11,6 +11,7 @@ import {
     ACTION_HURRY,
     ACTION_PAUSE,
     ACTION_RESUME,
+    ACTION_STOP_EARLIER,
     ACTION_STOP_NOW,
     TASK_CONTROL_LABELS,
     TASK_CONTROL_TRIGGER_LABEL,
@@ -27,6 +28,7 @@ import { ownerHurryProjection, summarizeChatLiveEvent, taskSoftStopPending } fro
 const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
 const activity = readFileSync(new URL('../modules/activity.js', import.meta.url), 'utf8');
 const menuSrc = readFileSync(new URL('../modules/task_control_menu.js', import.meta.url), 'utf8');
+const workSrc = readFileSync(new URL('../modules/work_status.js', import.meta.url), 'utf8');
 
 // --- the frozen owner dropdown (Q2/HQ1) ---
 
@@ -38,8 +40,11 @@ test('the dropdown offers exactly the owner-decided actions, in order', () => {
     assert.equal(TASK_CONTROL_LABELS[ACTION_HURRY], 'Hurry up');
     assert.equal(TASK_CONTROL_LABELS[ACTION_PAUSE], 'Pause');
     assert.equal(TASK_CONTROL_LABELS[ACTION_STOP_NOW], 'Stop now');
-    // A paused member offers Resume, never a second Pause; a pending Stop wins.
-    assert.deepEqual(taskControlActions({ budgetPaused: true }), [ACTION_RESUME, ACTION_STOP_NOW]);
+    // A held Continue's earlier attempt has its own Stop.
+    assert.equal(TASK_CONTROL_LABELS[ACTION_STOP_EARLIER], 'Stop earlier attempt');
+    // A paused member never offers a second Pause; Resume only where its work's Resume control asks for it.
+    assert.deepEqual(taskControlActions({ budgetPaused: true }), [ACTION_STOP_NOW]);
+    assert.deepEqual(taskControlActions({ budgetPaused: true, resume: true }), [ACTION_RESUME, ACTION_STOP_NOW]);
     assert.equal(stopPolicyFor(ACTION_PAUSE), '', 'Pause is not a stop');
 });
 
@@ -69,6 +74,25 @@ test('Pause retries an unknown answer with the same id, then a new action gets a
     assert.match(menuSrc, /anchor\.dataset\?\.id \|\| anchor\.closest\?\.\('\[data-task-id\]'\)/);
 });
 
+test("the owner's Pause press declares the owner through the shared client, the same on its retry", async () => {
+    const prior = globalThis.fetch;
+    const posts = [];
+    globalThis.fetch = async (url, init) => {
+        posts.push([url, init.method, JSON.parse(init.body)]);
+        const latch = posts.length === 1;
+        return { ok: true, status: latch ? 202 : 200, json: async () => ({ ok: true, state: 'requested', latch_pending: latch }) };
+    };
+    try {
+        assert.equal(await pauseTaskAction('owner-root', { toast: () => {}, wait: async () => {} }), true);
+    } finally { globalThis.fetch = prior; }
+    assert.deepEqual(posts.map(([url, method]) => [url, method]),
+        [['/api/tasks/owner-root/pause', 'POST'], ['/api/tasks/owner-root/pause', 'POST']]);
+    const [[, , body], [, , retry]] = posts;
+    assert.match(body.request_id, /^pause-/);
+    assert.deepEqual(body, { request_id: body.request_id, actor: 'owner' }, 'the owner declares itself, with no text');
+    assert.deepEqual(retry, body, 'completing the same action repeats the same declared press');
+});
+
 test('Resume retires an unconfirmed Pause id, but a refused Resume leaves it retryable', async () => {
     const ids = [];
     const pause = async (_id, requestId) => { ids.push(requestId); throw new Error('response lost'); };
@@ -83,6 +107,17 @@ test('Resume retires an unconfirmed Pause id, but a refused Resume leaves it ret
     await resumeTaskAction('uncertain-pause', { resume: async () => ({ ok: true }), toast });
     await pauseTaskAction('uncertain-pause', { pause, toast });
     assert.notEqual(ids[3], ids[0]);
+});
+
+test('tree Resume keeps helpers for selection and source refusals use the server sentence', async () => {
+    const seen = [], toast = (text) => seen.push(text);
+    await resumeTaskAction('answered', { resume: async () => ({ ok: true, tree_only: true }), toast });
+    assert.equal(seen.pop(), 'Resumed. Ouroboros or you choose which helpers continue.');
+    const refusal = Object.assign(new Error('pause_source_unreadable'), {
+        body: { message: 'Resume refused: Its saved state could not be restored' },
+    });
+    await resumeTaskAction('saved', { resume: async () => { throw refusal; }, toast });
+    assert.equal(seen.pop(), refusal.body.message);
 });
 
 test('a null Pause acknowledgement keeps its id; a released replay never claims Pausing', async () => {
@@ -178,9 +213,11 @@ test('the hurry path never creates a chat bubble in either surface', () => {
 // --- both surfaces share the ONE control module (owner parity) ---
 
 test('Chat and Activity both wire the shared dropdown', () => {
-    // Chat and its room header share the record-aware adapter. Activity still
-    // calls the same lower-level dropdown; the adapter owns its effect wiring.
-    assert.match(chat, /openTaskControls\(/);
+    // Chat cards and the room's Shade open it through work_status.js on their work's controls (a card
+    // no work lists keeps the record-aware adapter). Activity still calls the same lower-level dropdown.
+    assert.match(chat, /openCardControls\(/);
+    assert.match(workSrc, /openTaskControlMenu\(/);
+    assert.match(workSrc, /openTaskControls\(/);
     // Exact adapter effects are exercised in test_room_work_review_browser.py;
     // finding its own function names inside the adapter would prove nothing.
     assert.match(activity, /openTaskControlMenu\(/);
@@ -217,19 +254,18 @@ test('the chat card re-offers the escalation during a pending soft stop', () => 
     // pending menu offers only "Stop now"), while an immediate
     // stop keeps the button disabled until the terminal frame.
     assert.match(chat, /record\.cancelPendingPolicy === 'finalize'/);
-    assert.match(chat, /cancelPending: Boolean\(record\.cancelPendingPolicy\)/);
+    assert.match(workSrc, /const cancelPending = Boolean\(record\?\.cancelPendingPolicy\);/);
 });
 
 // --- budget-paused resume offer (#322) ---
 
-test('a budget-paused member offers Resume and the stop escalation only', () => {
-    assert.deepEqual(
-        taskControlActions({ budgetPaused: true }),
-        [ACTION_RESUME, ACTION_STOP_NOW],
-    );
+test('a budget-paused member offers Resume (where its work asks for it) and the stop escalation only', () => {
+    assert.deepEqual(taskControlActions({ budgetPaused: true, resume: true }), [ACTION_RESUME, ACTION_STOP_NOW]);
+    assert.deepEqual(taskControlActions({ budgetPaused: true }), [ACTION_STOP_NOW],
+        'a paused phase alone offers no Resume (a held Continue is never the owner\'s to resume)');
     // A pending cancel outranks the pause: only the hard escalation remains.
     assert.deepEqual(
-        taskControlActions({ budgetPaused: true, cancelPending: true }),
+        taskControlActions({ budgetPaused: true, cancelPending: true, resume: true }),
         [ACTION_STOP_NOW],
     );
     assert.equal(TASK_CONTROL_LABELS[ACTION_RESUME], 'Resume');
@@ -239,7 +275,8 @@ test('a budget-paused member offers Resume and the stop escalation only', () => 
 
 test('a child row never offers the whole-tree Pause; its other actions stay', () => {
     assert.deepEqual(taskControlActions({ wholeTree: false }), [ACTION_FINALIZE, ACTION_HURRY, ACTION_STOP_NOW]);
-    assert.deepEqual(taskControlActions({ wholeTree: false, budgetPaused: true }), [ACTION_RESUME, ACTION_STOP_NOW]);
+    assert.deepEqual(taskControlActions({ wholeTree: false, budgetPaused: true }), [ACTION_STOP_NOW]);
+    assert.deepEqual(taskControlActions({ wholeTree: false, budgetPaused: true, resume: true }), [ACTION_RESUME, ACTION_STOP_NOW]);
     assert.deepEqual(taskControlActions({ wholeTree: false, cancelPending: true }), [ACTION_STOP_NOW]);
     assert.deepEqual(taskControlActions({ wholeTree: true }), [ACTION_FINALIZE, ACTION_HURRY, ACTION_PAUSE, ACTION_STOP_NOW]);
 });
@@ -319,6 +356,21 @@ test('held-work facts say what is known, and an unknown start is never called ru
     assert.equal(heldWorkFacts(null), '');
 });
 
+test('a held tool call is worded by what is known, never as a call that has not returned', () => {
+    const base = { kind: 'tool_handoff', task_id: '96ac2f7c981b4f54', tool: 'run_command' };
+    assert.equal(heldWorkFacts([{ ...base, reason: 'local_completion_unknown' }]),
+        'it is unknown whether the run_command call of task 96ac2f7c981b4f54 finished: its worker cannot be proven ended');
+    assert.equal(heldWorkFacts([{ ...base, reason: 'local_call_live' }]),
+        'the run_command call of task 96ac2f7c981b4f54 is in a live worker: still running, or its finished result is not recorded yet');
+    assert.equal(heldWorkFacts([{ ...base, tool: 'mcp_gitlab__get_commit', reason: 'owner_ended_effect_unknown',
+        effects: ['MCP request'] }]),
+    'the mcp_gitlab__get_commit call of task 96ac2f7c981b4f54 ended with its worker; the outcome of its MCP request is unknown');
+    assert.equal(heldWorkFacts([{ ...base, reason: 'returned_effect_unconfirmed', effects: [] }]),
+        'the run_command call of task 96ac2f7c981b4f54 returned; its outside effect is not confirmed');
+    assert.equal(heldWorkFacts([{ ...base }]), 'a run_command call of task 96ac2f7c981b4f54 is held');
+    assert.ok(!menuSrc.includes('has not returned'), 'the false sentence is gone');
+});
+
 test('a refused Resume of a held Continue toasts its facts, with wait-or-stop only for running work', async () => {
     const toasts = [];
     const toast = (text, kind) => toasts.push([text, kind]);
@@ -332,4 +384,125 @@ test('a refused Resume of a held Continue toasts its facts, with wait-or-stop on
         ['Resume refused: delegated run run-leaf is running. Wait for that work or stop it.', 'error'],
         ['Resume refused: replay_unsafe', 'error'],
     ]);
+});
+
+test('a Resume held only by calls of unknown outcome asks once, then resumes naming them', async () => {
+    const held = { kind: 'tool_handoff', task_id: '96ac2f7c981b4f54', tool: 'run_command',
+        reason: 'local_completion_unknown', operation_id: 'op-1' };
+    const toasts = [];
+    const calls = [];
+    const asked = [];
+    const toast = (text, kind) => toasts.push([text, kind]);
+    const resume = async (id, body) => {
+        calls.push(body ?? null);
+        if (!body) {
+            throw Object.assign(new Error('owner_pause_effects_unsettled'), { status: 409,
+                body: { error: 'owner_pause_effects_unsettled', blockers: [held], acceptable_unknown: ['op-1'] } });
+        }
+        return { ok: true };
+    };
+    await resumeTaskAction('root-u', { resume, toast, askOwner: async (dialog) => { asked.push(dialog); return true; } });
+    assert.deepEqual(calls, [null, { accept_unknown: ['op-1'], reason: 'The owner resumed without these results.' }]);
+    assert.equal(asked.length, 1);
+    assert.match(asked[0].body, /^It is unknown whether the run_command call of task 96ac2f7c981b4f54 finished/);
+    assert.match(asked[0].body, /this call is never run again/);
+    assert.deepEqual(toasts, [['Resuming: the task returns to the queue.', 'info']]);
+
+    calls.length = 0;
+    toasts.length = 0;
+    await resumeTaskAction('root-u', { resume, toast, askOwner: async () => false });
+    assert.deepEqual(calls, [null], 'declining keeps the task paused');
+    assert.deepEqual(toasts, []);
+
+    const live = { ...held, operation_id: 'op-2', reason: 'local_call_live' };
+    await resumeTaskAction('root-l', {
+        resume: async () => { throw Object.assign(new Error('x'), { status: 409,
+            body: { error: 'owner_pause_effects_unsettled', blockers: [held, live] } }); },
+        toast, askOwner: async () => { throw new Error('a live call is never offered'); } });
+    assert.equal(toasts.length, 1);
+    assert.match(toasts[0][0], /^Resume refused: .*is in a live worker/);
+});
+
+test('a held model answer receiver is worded by what is known', () => {
+    assert.equal(heldWorkFacts([{ kind: 'model_handoff', task_id: 't-1', reason: 'local_completion_unknown' }]),
+        'it is unknown whether the model answer receiver of task t-1 ended: its worker cannot be proven ended');
+    assert.equal(heldWorkFacts([{ kind: 'model_handoff', task_id: 't-1', reason: 'local_call_live' }]),
+        'a model answer for task t-1 is awaited by a live worker');
+    assert.equal(heldWorkFacts([{ kind: 'model_handoff', reason: 'no_local_receiver' }]),
+        'a model request has no recorded result');
+});
+
+test('an accepted Resume keeps its own words and names the gap its Pause did not wait for', async () => {
+    const { membershipGapWords } = await import('../modules/task_control_menu.js');
+    const toasts = [];
+    const toast = (...args) => toasts.push(args);
+    const gaps = { rows: [{ task_id: 'stray', reason: 'body_unreadable' }, { task_id: 'stray-2', reason: 'body_not_object' }],
+        count: 2 };
+    // The server's own answer (queue_transitions.resume_budget_paused_task): its message words the same fact.
+    await resumeTaskAction('gap-root', { resume: async () => ({ ok: true, membership_gaps: gaps,
+        message: 'Resume accepted. The Pause did not wait for 2 saved task records ...' }), toast });
+    assert.deepEqual(toasts[0], ['Resuming: the task returns to the queue.', 'info']);
+    assert.deepEqual(toasts[1], ['The Pause did not wait for 2 saved task records that could not be read and that '
+        + 'nothing ties to this task (stray, stray-2); whether they belong here is unknown.', 'warn',
+    { ttl: 0, dismissLabel: 'Dismiss notice' }]);
+    toasts.length = 0;
+    await resumeTaskAction('tree-gap', { resume: async () => ({ ok: true, tree_only: true,
+        membership_gaps: { rows: [{ task_id: 'x', reason: 'identity_mismatch' }], count: 1 } }), toast });
+    assert.equal(toasts[0][0], 'Resumed. Ouroboros or you choose which helpers continue.');
+    assert.match(toasts[1][0], /^The Pause did not wait for 1 saved task record .* \(x\); whether it belongs here is unknown\.$/);
+    toasts.length = 0;
+    await resumeTaskAction('plain', { resume: async () => ({ ok: true }), toast });
+    assert.deepEqual(toasts, [['Resuming: the task returns to the queue.', 'info']], 'no gap, no second notice');
+    // Malformed or empty gaps say nothing rather than guess.
+    for (const bad of [null, {}, { count: 0, rows: [] }, { count: '2', rows: [] }, { count: -1 }]) {
+        assert.equal(membershipGapWords(bad, 'resume'), '');
+    }
+    assert.equal(membershipGapWords({ count: 1, rows: [{ task_id: 'a' }] }, 'pause'), '', 'only the two actions');
+    assert.match(membershipGapWords({ count: 3, rows: [] }, 'continue'), /\(…\)/, 'a count without names still counts');
+});
+
+test('a gap notice keeps all its words beside its close button; the page stack it cuts is a keyboard region', async (t) => {
+    const { announceMembershipGap } = await import('../modules/task_control_menu.js');
+    const { showToast } = await import('../modules/toast.js');
+    const { installDomDouble } = await import('./dom_double.js');
+    const env = installDomDouble();
+    t.after(() => env.restore());
+    const make = env.doc.createElement;
+    let cut = true;  // the double has no layout: the stack's measured height is given (the browser lane measures it)
+    env.doc.createElement = (tag) => Object.defineProperties(make(tag), {
+        scrollHeight: { get: () => (cut ? 900 : 40) }, clientHeight: { value: 40 } });
+    const rows = Array.from({ length: 20 }, (_, n) => ({ task_id: `${String(n).padStart(2, '0')}-${'f'.repeat(30)}`,
+        reason: 'body_unreadable' }));
+    const words = announceMembershipGap({ rows, count: 23 }, 'resume');
+    const stack = env.doc.getElementById('toast-stack');
+    const toast = stack.querySelector('.toast-warn');
+    const [box, close] = toast.children;
+    assert.equal(box.className, 'toast-words');
+    assert.equal(box.textContent, words, 'every name stays in the notice');
+    assert.match(words, /\(00-f+, 01-f+, .*, 19-f+, …\); whether they belong here is unknown\.$/);
+    assert.ok(!box.hasAttribute('tabindex'), 'the words never scroll on their own: the stack does');
+    assert.deepEqual([stack.tabIndex, stack.getAttribute('role'), stack.getAttribute('aria-label')],
+        [0, 'region', 'Scrollable notices']);
+    assert.equal(close.getAttribute('aria-label'), 'Dismiss notice');
+    cut = false;
+    toast.dispose();
+    assert.ok(!stack.hasAttribute('tabindex') && !stack.hasAttribute('role') && !stack.hasAttribute('aria-label'),
+        'once everything fits again the stack is no keyboard stop');
+    const short = showToast('One short notice.', 'warn', { ttl: 0, dismissLabel: 'Dismiss notice' }).children[0];
+    assert.equal(short.className, 'toast-words');
+    assert.ok(!stack.hasAttribute('tabindex'), 'words that fit make no keyboard stop');
+    const plain = showToast('Saved.', 'ok', { ttl: 0 });
+    assert.equal(plain.textContent, 'Saved.');
+    assert.equal(plain.children.length, 0, 'a toast without a close button keeps its words as its own text');
+    cut = true;  // a room's stack keeps its own place: never the page's scrolling region
+    const host = env.doc.createElement('div');
+    env.doc.body.append(host);
+    showToast('A room notice.', 'warn', { ttl: 0, dismissLabel: 'Dismiss notice', host });
+    assert.ok(!host.querySelector('.toast-stack--room').hasAttribute('tabindex'));
+});
+
+test('two unconfirmed effects are worded in the plural, as on the server', () => {
+    assert.equal(heldWorkFacts([{ kind: 'tool_handoff', task_id: 't', tool: 'run_command',
+        reason: 'returned_effect_unconfirmed', effects: ['started process', 'MCP request'] }]),
+    'the run_command call of task t returned; its started process and MCP request are not confirmed');
 });

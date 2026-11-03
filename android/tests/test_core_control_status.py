@@ -103,3 +103,22 @@ def test_status_marks_an_unreadable_receipt_unknown(phone):
     assert result.returncode == 0, result.stderr
     assert "Android host APK: unknown (versionCode unknown)" in result.stdout
     assert CAVEAT in result.stdout
+
+
+@pytest.mark.parametrize("code,content,pending", [
+    (0, "", True), (1, "panic", False), (2, "panic", True), (127, "panic", True), (2, "", False),
+])
+def test_panic_reader_failure_falls_back_to_the_file(phone, code, content, pending):
+    state, status = phone
+    _entry(state, success=False)
+    base = state.parents[4]
+    reader = base / "rootfs/opt/ouroboros/repo/ouroboros/installation_stop.py"
+    reader.parent.mkdir(parents=True)
+    reader.touch()
+    entry = base / "bin/enter-linux"
+    entry.write_text('#!/bin/sh\ncase "$*" in *installation_stop.py*) exit %d;; *) exit 1;; esac\n'
+                     % code, encoding="utf-8")
+    (state / "panic_stop.flag").write_text(content, encoding="utf-8")
+    result = status()
+    assert result.returncode == 0, result.stderr
+    assert ("Stopped with Panic" in result.stdout) is pending

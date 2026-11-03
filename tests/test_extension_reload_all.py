@@ -284,7 +284,7 @@ def test_reload_all_logs_per_extension_load_error(tmp_path, caplog):
     assert any("Extension reload failed for bad_register" in rec.message for rec in caplog.records)
 
 
-def test_clean_extension_runtime_state_unloads_staged_import_root(tmp_path):
+def test_clean_extension_runtime_state_releases_reusable_import_root(tmp_path):
     loaded, _repo_root, drive_root = _prepare_extension(
         tmp_path,
         "cleanup_ext",
@@ -299,7 +299,8 @@ def test_clean_extension_runtime_state_unloads_staged_import_root(tmp_path):
 
     clean_extension_runtime_state()
 
-    assert not import_root.exists()
+    assert import_root.exists()
+    assert not list((import_root / "owners").iterdir())
     assert "cleanup_ext" not in extension_loader.snapshot()["extensions"]
 
 
@@ -327,8 +328,8 @@ def test_reload_all_sweeps_stale_extension_imports(tmp_path, monkeypatch):
     assert not stale_root.exists()  # dead-owner + past-grace orphan reaped
     live_roots = list(imports_dir.iterdir())
     assert len(live_roots) == 1
-    # The freshly-staged tree is tagged with THIS process's PID.
-    assert live_roots[0].name.startswith(f"{_os.getpid()}-")
+    assert live_roots[0].name.startswith(f"sha256-{loaded.content_hash}-")
+    assert (live_roots[0] / "owners" / str(_os.getpid())).exists()
     assert (live_roots[0] / "skill").exists()
 
 

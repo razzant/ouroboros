@@ -13,6 +13,8 @@ import json
 import pathlib
 from types import SimpleNamespace
 
+from tests._dialogue import chat_rows
+
 from ouroboros.client_surface import (
     CLIENT_SURFACE_UA_LIMIT,
     client_surface_identity,
@@ -45,6 +47,15 @@ def test_normalizer_keeps_closed_keys_and_drops_unknown():
         "coarse_pointer": True,
         "captured_at": "2026-08-18T00:00:00Z",
     }
+
+
+def test_normalizer_keeps_the_interface_size_and_pixel_ratio_as_bounded_numbers():
+    fact = normalize_client_surface({"interface_size": 125, "device_pixel_ratio": 2.4999, "ua": "x"})
+    assert fact["interface_size"] == 125 and fact["device_pixel_ratio"] == 2.5
+    bounded = normalize_client_surface({"interface_size": 10_000, "device_pixel_ratio": 1e9, "ua": "x"})
+    assert bounded["interface_size"] == 500 and bounded["device_pixel_ratio"] == 16.0
+    dropped = normalize_client_surface({"interface_size": True, "device_pixel_ratio": "2", "ua": "x"})
+    assert "interface_size" not in dropped and "device_pixel_ratio" not in dropped
 
 
 def test_normalizer_empty_and_non_dict_are_none():
@@ -126,7 +137,7 @@ def test_log_chat_persists_client_surface_column(tmp_path, monkeypatch):
     fact = {"pywebview": True, "ua": "TestShell/1.0"}
     mb.log_chat("in", 1, 1, "hello", source="web", client_surface=fact)
     mb.log_chat("in", 1, 1, "bare", source="web")
-    rows = [json.loads(line) for line in (tmp_path / "logs" / "chat.jsonl").read_text().splitlines()]
+    rows = chat_rows(tmp_path)
     assert rows[0]["client_surface"] == fact
     assert "client_surface" not in rows[1]
 
@@ -221,17 +232,6 @@ def _function_calls(tree: ast.AST, func_name: str) -> set[str]:
                 if isinstance(n, ast.Call)
             }
     raise AssertionError(f"function {func_name} not found")
-
-
-def test_all_three_routing_producers_attach_client_surface():
-    # tools/control.py re-exports them; the producers live in the routing leaf.
-    tree = ast.parse((REPO / "ouroboros" / "tools" / "control_routing.py").read_text(encoding="utf-8"))
-    for producer in ("_promote_chat_to_task", "_route_to_project", "_steer_task"):
-        calls = _function_calls(tree, producer)
-        assert "_attach_client_surface" in calls, (
-            f"{producer} no longer attaches client_surface — the fact silently "
-            "dies at this transition (the is_desktop dead-wire class)"
-        )
 
 
 def test_owner_surface_note_baseline_uses_the_shared_projection():
@@ -441,7 +441,7 @@ def test_steering_and_project_mailbox_writers_pass_client_surface():
     # separately so an unrelated extra forwarding site cannot hide a dropped one.
     writers = {
         "project mailbox": REPO / "ouroboros" / "server_owner_routing.py",
-        "inbound chat journal": REPO / "supervisor" / "message_bus.py",
+        "inbound chat journal": REPO / "supervisor" / "message_ingress.py",
     }
     assert "client_surface=" in steering, "steer mailbox write dropped client_surface"
     for owner, path in writers.items():
@@ -459,7 +459,7 @@ def test_inbound_message_owner_persists_the_original_client_surface(tmp_path, mo
         SimpleNamespace(), message, chat_id=1, user_id=1,
         client_message_id="surface-message", text="owner input", ts="2026-09-07T00:00:00Z",
     )
-    row = json.loads((tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8"))
+    (row,) = chat_rows(tmp_path)
     assert row["client_surface"] == surface
     assert row["client_message_id"] == ref["client_message_id"] == "surface-message"
     assert row["text"] == "owner input" and row["direction"] == "in"
@@ -508,30 +508,19 @@ def test_chat_history_does_not_emit_client_surface(tmp_path):
 # Prompt-fact parity: SYSTEM.md product claims stay bound to the code (AC8)
 # ---------------------------------------------------------------------------
 
-def test_system_prompt_reload_claim_is_code_bound():
-    system_md = (REPO / "prompts" / "SYSTEM.md").read_text(encoding="utf-8")
-    if "reload-on-SHA" not in system_md and "reloads itself" not in system_md:
-        return  # the claim was removed together with its obligation
-    ws_js = (REPO / "web" / "modules" / "ws.js").read_text(encoding="utf-8")
-    assert "sha-change" in ws_js or "Reload on SHA change" in ws_js, (
-        "SYSTEM.md claims the UI auto-reloads on SHA change, but the ws.js "
-        "reload path is gone — the prompt now states a false product fact "
-        "(the exact failure class this feature exists to close)"
-    )
-
-
 def test_frontend_sends_raw_observables_without_device_taxonomy():
-    chat_js = (REPO / "web" / "modules" / "chat.js").read_text(encoding="utf-8")
+    # The composer (composer.js) is the chat send site.
+    composer_js = (REPO / "web" / "modules" / "composer.js").read_text(encoding="utf-8")
     surface_js = (REPO / "web" / "modules" / "client_surface.js").read_text(encoding="utf-8")
     # The send site imports AND actually spreads the snapshot field into the
     # frame (the import alone is the dead-wire class this feature closes); the
     # module measures at send time and never labels devices.
-    assert "client_surface.js" in chat_js
-    assert "...clientSurfaceField()," in chat_js
+    assert "client_surface.js" in composer_js
+    assert "...clientSurfaceField()," in composer_js
     assert "clientSurfaceSnapshot" in surface_js and "matchMedia" in surface_js
     assert "client_surface" in surface_js
     for label in ("mobile_browser", "desktop_app", "browser_tab"):
-        for src_name, src in (("chat.js", chat_js), ("client_surface.js", surface_js)):
+        for src_name, src in (("composer.js", composer_js), ("client_surface.js", surface_js)):
             assert label not in src, (
                 f"device taxonomy label {label!r} crept into {src_name} — raw "
                 "observables only, the model classifies"
@@ -566,7 +555,7 @@ def test_the_common_enqueue_stamps_one_host_receipt_for_every_transport(tmp_path
     monkeypatch.setattr(message_bus, "load_state", lambda: {})
     message_bus.record_inbound_message(bridge, command, chat_id=1, user_id=1, client_message_id="c1",
                                        text="via /api/command", ts="2026-09-26T09:00:00+00:00")
-    row = json.loads((tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8"))
+    (row,) = chat_rows(tmp_path)
     assert row["client_surface"]["received_at"] == command["received_at"] and "logged_at" not in row
 
 
@@ -596,3 +585,15 @@ def test_supervisor_intake_hands_the_receipt_stamp_to_routing(monkeypatch):
     bridge.enqueue_local_message("hello", chat_id=42, user_id=7, source="skill:telegram", received_at="2026-09-26T01:00:00+00:00")
     server._process_bridge_updates(bridge, 0, Ctx({"owner_id": 7, "owner_chat_id": 42}))
     assert [incoming["received_at"] for incoming in routed] == ["2026-09-26T01:00:00+00:00"]
+
+
+def test_routing_producers_attach_client_surface():
+    # tools/control.py re-exports them; the producers live in the routing leaf.
+    tree = ast.parse((REPO / "ouroboros" / "tools" / "control_routing.py").read_text(encoding="utf-8"))
+    calls = _function_calls(tree, "_start_task")
+    assert "_attach_client_surface" in calls, (
+        "_start_task no longer attaches client_surface — the fact silently "
+        "dies at this transition (the is_desktop dead-wire class)"
+    )
+    relay = ast.parse((REPO / "ouroboros/tools/control_relay.py").read_text(encoding="utf-8"))
+    assert "_attach_client_surface" in _function_calls(relay, "_tell_task")

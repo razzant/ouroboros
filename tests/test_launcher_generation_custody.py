@@ -174,22 +174,28 @@ def test_readiness_is_the_endpoint_the_child_published(launcher_root):
                  "fingerprint": {"source": "process_start_time", "start_time": "Thu Jan  1 00:00:00 1970",
                                  "cmd_sha256": "0" * 64}}
         bindings.write_text(json.dumps({"main": stale}), encoding="utf-8")
-        assert launcher._await_generation_endpoint(child, port_file_cleared=False, timeout=1.0) is None, \
-            "a stale binding holding the same PID is no readiness"
+        def still_waiting(**kwargs):
+            # The wait has no clock of its own: a live child that published nothing keeps it
+            # waiting; the test's own abort (a timer) ends it, never the launcher.
+            abort = threading.Event()
+            threading.Timer(1.0, abort.set).start()
+            return launcher._await_generation_endpoint(child, abort_event=abort, **kwargs) is None
+
+        assert still_waiting(port_file_cleared=False), "a stale binding holding the same PID is no readiness"
         (data / "state" / "server_port").write_text("41002", encoding="utf-8")
-        assert launcher._await_generation_endpoint(child, port_file_cleared=False, timeout=1.0) is None, \
+        assert still_waiting(port_file_cleared=False), \
             "a port file whose removal was not confirmed may predate this generation"
-        assert launcher._await_generation_endpoint(child, port_file_cleared=True, timeout=1.0) == 41002
+        assert launcher._await_generation_endpoint(child, port_file_cleared=True) == 41002
         bindings.unlink()
         record_service_binding(data, "main", "127.0.0.1", 41003, pid=child.pid)
-        assert launcher._await_generation_endpoint(child, port_file_cleared=False, timeout=5.0) == 41003
+        assert launcher._await_generation_endpoint(child, port_file_cleared=False) == 41003
     finally:
         child.kill()
         child.wait(timeout=10)
     started = time.monotonic()
-    assert launcher._await_generation_endpoint(child, port_file_cleared=True, timeout=30.0) is None
+    assert launcher._await_generation_endpoint(child, port_file_cleared=True) is None
     assert time.monotonic() - started < 2.0, "a dead child ends the wait at once"
-    assert launcher._wait_for_server(41003, timeout=30.0, proc=child) is False
+    assert launcher._wait_for_server(41003, proc=child) is False
 
 
 def test_the_clear_reports_only_a_confirmed_removal(launcher_root, monkeypatch, tmp_path):
@@ -223,7 +229,7 @@ def test_the_parsed_intent_governs_the_child_over_an_inherited_one(launcher_root
     monkeypatch.setattr(launcher, "_load_settings", lambda: {})
     monkeypatch.setattr(launcher, "_apply_settings_to_env", lambda _s: None)
     monkeypatch.setattr(launcher, "_hidden_popen", lambda cmd, **kw: captured.update(kw) or FakeProcess())
-    launcher.start_agent(port=8765)
+    launcher.start_agent(port=1)
     assert captured["env"]["OUROBOROS_LAUNCH_INTENT"] == parsed
 
 
@@ -235,7 +241,7 @@ def test_an_automatic_launcher_does_not_spawn_a_generation_after_panic(launcher_
     monkeypatch.setattr(launcher, "_launch_intent", "automatic")
     monkeypatch.setattr(launcher, "_pre_generation_cleanup", lambda: [])
     monkeypatch.setattr(launcher, "start_agent", lambda port: pytest.fail("Panic must hold the automatic start"))
-    launcher.agent_lifecycle_loop(8765)
+    launcher.agent_lifecycle_loop(1)
     assert shutdown.is_set()
     assert (data / "state" / "panic_stop.flag").read_text(encoding="utf-8") == "panic"
 

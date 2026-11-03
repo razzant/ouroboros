@@ -102,6 +102,17 @@ class UsageLockUnavailable(UsageAccountingError):
         self.error_number = error_number
 
 
+class BillingAuthorityBusy(BillingAuthorityUnavailable, UsageLockUnavailable):
+    """An ``unreadable`` billing authority whose money-store read met positive contention and
+    rolled back: every ``BillingAuthorityUnavailable`` reader keeps its answer, while a caller's
+    own unsent preparation (``_usage_wait.retry_presend``) waits it out as the lock it is."""
+
+    def __init__(self, root_task_id: str, *, rollback_confirmed: bool = False) -> None:
+        super().__init__(f"billing group authority unavailable for root {root_task_id} (money store busy)",
+                         kind="unreadable", cause="read_failed:UsageLockUnavailable", root_task_id=root_task_id)
+        self.reason, self.error_number, self.rollback_confirmed = "contention", None, rollback_confirmed
+
+
 def is_abandoned_settlement(row: Dict[str, Any]) -> bool:
     """An administratively closed attempt whose actual price is still unknown."""
     return (
@@ -147,7 +158,7 @@ def _validate_candidate_facts(row: Dict[str, Any], sequence: int) -> None:
         if context.get("profile") not in {"owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano"}:
             raise UsageLedgerCorrupt(f"invalid physical_context profile in usage row seq={sequence}")
         if context.get("rendered_mode") not in {"max", "low", "nano"} or context.get("measurement_basis") not in {
-            "fresh_route_usage", "fresh_model_usage", "cold_estimate",
+            "fresh_route_usage", "fresh_model_usage", "refused_input", "cold_estimate",
         }:
             raise UsageLedgerCorrupt(f"invalid physical_context mode/basis in usage row seq={sequence}")
         for key in ("target_total_tokens", "capacity_total_tokens"):

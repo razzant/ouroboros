@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -13,17 +14,25 @@ def _widgets_js() -> str:
     )
 
 
+def _render_js() -> str:
+    """The declarative renderer, split out of widgets.js for its second consumer."""
+    return _read("web/modules/widget_render.js")
+
+
 def _framed_widget_sources() -> str:
-    """widgets.js (page host, dispatcher, declarative renderer) plus the framed
-    mounts split out of it (widget_module.js), the in-frame bootstrap
-    (widget_frame.js), the framed-card chrome (widget_card.js), the card
-    reorder handles (widget_reorder.js) and the declarative chart helpers
-    (widget_chart.js). Negative pins run against this union so the moved code
-    never leaves their coverage."""
+    """widgets.js (page host, dispatcher) plus the declarative renderer split
+    out of it (widget_render.js), the framed mounts (widget_module.js), the
+    in-frame bootstrap (widget_frame.js and its classic bridge,
+    widget_frame_bridge.js), the framed-card chrome
+    (widget_card.js), the card reorder handles (widget_reorder.js) and the
+    declarative chart helpers (widget_chart.js). Negative pins run against this
+    union so the moved code never leaves their coverage."""
     return (
         _widgets_js()
+        + _render_js()
         + _read("web/modules/widget_module.js")
         + _read("web/modules/widget_frame.js")
+        + _read("web/modules/widget_frame_bridge.js")
         + _read("web/modules/widget_card.js")
         + _read("web/modules/widget_reorder.js")
         + _read("web/modules/widget_chart.js")
@@ -42,12 +51,14 @@ def test_widgets_support_declarative_schema_components():
     moved to the dedicated tests below (escape/sanitize, media source guard,
     download host helper, etc.)."""
     source = _widgets_js()
+    renderer = _render_js()
     assert "render.kind === 'declarative'" in source
     # Sentinel components — proof the declarative router is wired
-    assert "type === 'form'" in source
-    assert "type === 'action'" in source
-    assert "type === 'table'" in source
-    assert "type === 'markdown'" in source
+    assert "from './widget_render.js'" in source
+    assert "type === 'form'" in renderer
+    assert "type === 'action'" in renderer
+    assert "type === 'table'" in renderer
+    assert "type === 'markdown'" in renderer
     # Lifecycle / cleanup discipline: a list rebuild disposes every mounted
     # card first; leaving stops everything except the frames the owner keeps
     # running (phase 3).
@@ -110,19 +121,19 @@ def test_widgets_page_reads_cheap_list_and_reconciles_by_signature():
     # `render()` takes no force flag: there is no path that clears every owner
     # Stop and rebuilds every card while the page stays open.
     assert "async function render() {" in source
-    assert "stoppedByOwner.clear()" not in source
-    # A vanished card's declarative session state and the owner's page-session Stop
-    # are evicted on BOTH removal paths: the keyed patch, and the rebuild branch the
-    # patch never sees (the last card leaving, or the first list arriving). Eviction
-    # runs after disposal, because a declarative disposer writes that snapshot as it
-    # goes. Without it, re-enabling the only skill restores values the owner never
-    # re-entered and keeps its card suppressed.
+    assert "stoppedByOwner" not in source, "the owner's Stop lives in the start ledger (holds.js), never a page set"
+    # A vanished card's declarative session state is evicted on BOTH removal paths:
+    # the keyed patch, and the rebuild branch the patch never sees (the last card
+    # leaving, or the first list arriving). Eviction runs after disposal, because a
+    # declarative disposer writes that snapshot as it goes. Without it, re-enabling
+    # the only skill restores values the owner never re-entered. The owner's Stop
+    # stays on both paths: it holds on this device until Start.
     rebuild = source.split("// Rebuilding the shell destroys frames", 1)[1].split("renderShell(list, tabs);", 1)[0]
     assert "await disposeMountedWidgets();" in rebuild
     assert rebuild.index("await disposeMountedWidgets();") < rebuild.index("widgetSessionState.delete(key);")
-    assert "stoppedByOwner.delete(key);" in rebuild
     patch = source.split("function patchWidgetCards(", 1)[1].split("for (const tab of nextTabs)", 1)[0]
-    assert "widgetSessionState.delete(key);" in patch and "stoppedByOwner.delete(key);" in patch
+    assert "widgetSessionState.delete(key);" in patch
+    assert "holds.release" not in rebuild and "holds.release" not in patch
 
 
 def test_widgets_escape_and_sanitize_untrusted_content():
@@ -134,38 +145,44 @@ def test_widgets_escape_and_sanitize_untrusted_content():
     escapeHtml-around-untrusted-content discipline that remains local
     (table cells, JSON dumps).
     """
-    source = _widgets_js()
-    assert "renderMarkdownSafe" in source
+    renderer = _render_js()
+    assert "renderMarkdownSafe" in renderer
     # Widgets must NOT redeclare the SSOT helper locally.
     assert "function renderMarkdownSafe" not in _framed_widget_sources(), (
-        "widgets.js must use renderMarkdownSafe from utils.js (SSOT), not a local copy"
+        "the widget renderer must use renderMarkdownSafe from utils.js (SSOT), not a local copy"
     )
-    assert "escapeHtml(JSON.stringify(value, null, 2))" in source
-    assert "renderTableCell(row, c)" in source
+    assert "escapeHtml(JSON.stringify(value, null, 2))" in renderer
+    assert "renderTableCell(row, c)" in renderer
     # The table cell renderer and its http(s)-only link guard moved to
     # widget_chart.js (cycle-A fix round, ratchet room); the guard still exists.
     assert "function safeTableHref" in _read("web/modules/widget_chart.js")
 
 
 def test_widgets_media_sources_are_constrained_to_extension_routes_or_data_urls():
+    # The renderer resolves routes through the place it renders in; the Widgets
+    # page passes the card's own skill routes (behaviour: web/tests/widget_render.test.js).
     source = _widgets_js()
-    assert "function safeMediaSrc" in source
-    assert "effectiveTarget = ''" in source
-    assert "state[effectiveTarget || spec.target || 'result']" in source
-    assert "safeMediaSrc(tab, component, state, target)" in source
-    assert "const route = spec.route || spec.api_route || '';" in source
+    renderer = _render_js()
+    assert "function safeMediaSrc" in renderer
+    assert "effectiveTarget = ''" in renderer
+    assert "state[effectiveTarget || spec.target || 'result']" in renderer
+    assert "safeMediaSrc(ctx, component, state, target)" in renderer
+    assert "const route = spec.route || spec.api_route || '';" in renderer
+    assert "return ctx.routePath(route, params);" in renderer
     assert "extensionRoutePath(tab.skill, route, params)" in source
-    assert "data:(image\\/" in source
-    assert "parsed.pathname.startsWith(expectedPrefix)" in source
-    assert "parsed.origin === window.location.origin" in source
+    assert "routePrefix: extensionRoutePrefix(tab.skill)" in source
+    assert "data:(image\\/" in renderer
+    assert "expectedPrefix && parsed.origin === window.location.origin" in renderer
+    assert "parsed.pathname.startsWith(expectedPrefix)" in renderer
     assert "javascript:" not in _framed_widget_sources()
-    assert "`${treePath}.gallery.${idx}`, passiveTarget" in source
+    assert "`${treePath}.gallery.${idx}`, passiveTarget" in renderer
 
 
 def test_widgets_downloads_use_host_handler_not_navigation():
     source = _widgets_js()
     helper = _read("web/modules/ui_helpers.js") + _read("web/modules/ui_primitives.js")
-    assert "data-widget-download-url" in source
+    assert "data-widget-download-url" in _render_js()
+    assert "button.dataset.widgetDownloadUrl" in source
     assert "event.preventDefault();" in source
     assert "downloadViaHostBridge(" in source
     assert "download_file_to_downloads" in helper
@@ -211,7 +228,7 @@ def test_widgets_keep_iframe_sandbox_locked_down():
     assert "iframe.setAttribute('sandbox', 'allow-scripts');" not in source
     assert "iframe.srcdoc = srcdoc;" in source
     assert 'srcdoc="' not in source
-    assert "iframe.src = src;" in module
+    assert "iframe.src = `${lease.baseUrl}${route}`;" in module
     assert 'src="${src}"' not in source
     for forbidden in (
         "allow-same-origin",
@@ -223,25 +240,34 @@ def test_widgets_keep_iframe_sandbox_locked_down():
     ):
         assert forbidden not in source, forbidden
     assert "render.kind === 'module'" in source
-    # The module document CSP: sources are ABSOLUTE (an opaque frame's 'self' is
-    # nothing), scripts run inline / from blob: / from this skill's module
-    # prefix with 'wasm-unsafe-eval', workers from blob:, passive image / media
-    # / font loads from data: / blob: / this skill's route prefix — and nothing
-    # else: no connect-src (falls to default-src 'none'; the parent bridge is the
-    # frame's one request path) and never plain 'unsafe-eval'.
-    assert "export function moduleFrameCsp(skill, origin = window.location.origin)" in module
+    # The module document CSP, one builder per entry mode. Sources are ABSOLUTE (an
+    # opaque frame's 'self' is nothing). Classic: scripts run inline / from blob: /
+    # from this skill's module prefix with 'wasm-unsafe-eval', workers from blob:,
+    # passive image / media / font loads from data: / blob: / this mount's
+    # route lease (GET/HEAD of its own routes; nothing without one). ESM, only
+    # with a lease: the same shape over this mount's file URL
+    # alone, which also serves stylesheets and is the only document base. Neither
+    # has anything else: no connect-src (falls to default-src 'none'; the parent
+    # bridge is the frame's one request path) and never plain 'unsafe-eval'.
+    assert "export function moduleFrameCsp(skill, origin = window.location.origin, assetBase = '', resourceBase = '') {" in module
     assert "const prefix = `${origin}${extensionRoutePrefix(skill)}`;" in module
-    assert "default-src 'none'" in module
-    assert "script-src 'unsafe-inline' 'wasm-unsafe-eval' blob: ${prefix}module/" in module
-    assert "'worker-src blob:'" in module
-    assert "style-src 'unsafe-inline'" in module
-    assert "img-src data: blob: ${prefix}" in module
-    assert "media-src data: blob: ${prefix}" in module
-    assert "font-src data: blob: ${prefix}" in module
-    assert "const csp = moduleFrameCsp(tab.skill);" in module
+    builders = module.split("export function moduleFrameCsp(", 1)[1].split("\n}\n", 1)[0]
+    assert "if (assetBase) return [" in builders
+    esm, classic = ([directive for _quote, directive in re.findall(r"""^\s*(["'`])(.*)\1,$""", body, re.M)]
+                    for body in re.findall(r"return \[\n(.*?)\]\.join\('; '\);", builders, re.S))
+    assert classic == ["default-src 'none'", "script-src 'unsafe-inline' 'wasm-unsafe-eval' blob: ${prefix}module/",
+                       "worker-src blob:", "style-src 'unsafe-inline'", "img-src ${passive}",
+                       "media-src ${passive}", "font-src ${passive}"]
+    assert "const passive = ['data:', 'blob:', resourceBase].filter(Boolean).join(' ');" in builders
+    assert esm == ["default-src 'none'", "script-src 'unsafe-inline' 'wasm-unsafe-eval' blob: ${assetBase}",
+                   "worker-src blob:", "style-src 'unsafe-inline' ${assetBase}", "img-src data: blob: ${assetBase}",
+                   "media-src data: blob: ${assetBase}", "font-src data: blob: ${assetBase}", "base-uri ${assetBase}"]
+    assert "const assetBase = esm ? lease?.baseUrl || '' : '';" in module
+    assert "const resourceBase = esm ? '' : lease?.baseUrl || '';" in module
+    assert "const csp = moduleFrameCsp(tab.skill, window.location.origin, assetBase, resourceBase);" in module
     assert "connect-src" not in source
     assert "'unsafe-eval'" not in source
-    assert "window.OuroborosWidget = { fetch: request, onEvent, onTheme, download, openExternal: (url) => openExternal(url) };" in source
+    assert "window.OuroborosWidget = { fetch: request, onEvent, onTheme, download, openExternal: (url) => openExternal(url),\n        resourceBase, resourceUrl, ready };" in source
     assert "module widget fetch outside extension route prefix" in source
 
 
@@ -265,8 +291,12 @@ def test_widgets_frame_geometry_and_teardown_contract():
     assert source.index("setVerticalOverflowSuppressed(true);") < source.index("const report = () =>")
     assert "setVerticalOverflowSuppressed(outerHeight <" in source
     assert "setVerticalOverflowSuppressed(false);" in source
-    assert "nonce, WIDGET_FRAME_DEFAULT_HEIGHT, maxHeight, WIDGET_FRAME_BORDER_RESERVE," in source
-    assert source.index("<script>${resizeBridge}</script>") < source.index("<script>${escapeScript(moduleSource)}</script>")
+    assert "moduleResizeScript(WIDGET_FRAME_DEFAULT_HEIGHT, maxHeight, WIDGET_FRAME_BORDER_RESERVE)" in source
+    # The document runs the bridge, then the size reporter, then the entry: classic inline, or ESM as a module.
+    assert '<body><div id="root"></div><script>${bridge}</script><script>${resizeBridge}</script>${entryScript}</body>' in source
+    assert ": `<script>${escapeScript(moduleSource)}</script>`;" in source
+    assert ('? `<script type="module" crossorigin="anonymous" src="${escapeHtml(new URL(render.entry, assetBase).href)}">'
+            '</script>`') in source
     assert "ouro-widget-dispose" in source
     assert "if (iframe?.parentNode === mount) iframe.remove();" in source
     assert "pendingRequests.forEach((controller) => controller.abort());" in source
@@ -290,7 +320,7 @@ def test_widgets_framed_dispose_is_ordered_and_acknowledged():
     after ``WIDGET_DISPOSE_ACK_TIMEOUT_MS`` (1 s, beside the 25 s request
     timeout) — asynchronously, never blocking a page switch. The page keeps
     one settle promise per key so a remount waits for the pending stop."""
-    child = _read("web/modules/widget_frame.js")
+    child = _read("web/modules/widget_frame_bridge.js")
     parent = _read("web/modules/widget_module.js")
     jobs = _read("web/modules/widget_job.js")
     page = _widgets_js()
@@ -301,7 +331,7 @@ def test_widgets_framed_dispose_is_ordered_and_acknowledged():
     assert "await Promise.allSettled(hooks.map((fn) => Promise.resolve().then(fn)));" in dispose_body
     assert dispose_body.index("Promise.allSettled") < dispose_body.index("type: 'ouro-widget-disposed'")
     assert dispose_body.index("type: 'ouro-widget-disposed'") < dispose_body.index("item.fail(new Error('widget disposed'))")
-    assert dispose_body.index("item.fail(new Error('widget disposed'))") < dispose_body.index("window.removeEventListener('message', onMessage);")
+    assert dispose_body.index("item.fail(new Error('widget disposed'))") < dispose_body.index("port.onmessage = null;")
     # The bridge answers during the hooks: frames are refused only once `disposed`,
     # and the dispose message itself is honoured before that gate.
     frames = child.split("const onMessage = (event) =>", 1)[1].split("const request =", 1)[0]
@@ -310,11 +340,16 @@ def test_widgets_framed_dispose_is_ordered_and_acknowledged():
     # Parent: the old synchronous tail is now the post-ack `finish`.
     assert "if (msg.type === 'ouro-widget-disposed') {" in parent
     tail = parent.split("const finish = () =>", 1)[1]
-    assert tail.index("pendingRequests.forEach((controller) => controller.abort());") < tail.index("window.removeEventListener('message', onMessage);")
-    assert tail.index("window.removeEventListener('message', onMessage);") < tail.index("if (iframe?.parentNode === mount) iframe.remove();")
+    # The document's work ends (requests aborted, subscriptions and its port retired) before unlisten and removal.
+    retire = parent.split("const retireDocument = () =>", 1)[1].split("};", 1)[0]
+    assert retire.index("pendingRequests.forEach((controller) => controller.abort());") < retire.index("port.close();")
+    assert tail.index("retireDocument();") < tail.index("window.removeEventListener('message', onHello);")
+    assert tail.index("window.removeEventListener('message', onHello);") < tail.index("if (iframe?.parentNode === mount) iframe.remove();")
     assert "onDisposed = finish;" in tail
     assert "setTimeout(finish, WIDGET_DISPOSE_ACK_TIMEOUT_MS)" in tail
-    assert "postMessage({ type: 'ouro-widget-dispose', nonce }, '*');" in tail
+    # The stop is asked on the document's channel, never posted to the frame window.
+    assert "if (port && !left) post({ type: 'ouro-widget-dispose' });" in tail
+    assert "contentWindow.postMessage" not in parent and "contentWindow?.postMessage" not in parent
     assert "if (disposing) return disposing;" in parent
     # Page: one settle promise per key; a remount and the facade wait for it.
     assert "const widgetDisposing = new Map();" in page
@@ -366,7 +401,6 @@ def test_widgets_launch_policy_controls_and_stop_suppression():
     assert "export function effectiveStartMode(tab, prefs)" in card
     assert "export function isRetainedWidget(tab, prefs)" in card
     assert "return isFramedWidget(tab) && effectiveStartMode(tab, prefs) === 'retain';" in card
-    assert "? 'Keeps running'" in card
     assert "const retainsWhileHidden = (key) => isRetainedWidget(tabByKey(key), uiPreferences);" in page
     assert "if (!keep?.(key)) disposeWidgetByKey(key);" in page
     hidden_branch = page.split("async function stopVanishedRetainedWidgets() {", 1)[1].split("async function syncWidgets", 1)[0]
@@ -385,9 +419,6 @@ def test_widgets_launch_policy_controls_and_stop_suppression():
     assert '<dialog class="skills-card-menu-dialog ui-popup" role="menu"' in card
     assert 'class="skills-card-menu-trigger"' in card
     assert '<span class="ui-status" data-tone="neutral" data-widget-status hidden>' in card
-    # Owner-facing menu wording, not the enum name (CA-11).
-    assert "retain: 'Keep running'," in card
-    assert "(retain)" not in card
     # Facade: never over a settling frame (CA-13); `icon` is a glyph — an
     # identifier-like NAME (the `extension` default) falls back to the page glyph (CA-15).
     assert "mount.querySelector('[data-widget-facade], iframe')" in card
@@ -409,12 +440,12 @@ def test_widgets_launch_policy_controls_and_stop_suppression():
         assert token not in controls_css, token
     assert "color: var(--text-meta);" in controls_css
     # Page: policy gate, suppression, owner controls, whole-map persistence.
-    assert "const stoppedByOwner = new Set();" in page
+    assert "const holds = getHolds();" in page
     assert "effectiveStartMode(tab, uiPreferences) !== 'manual'" in page
-    assert "&& !stoppedByOwner.has(widgetKey(tab));" in page
+    assert "&& !holds.reason(stopHoldKey(tab)) && !holds.reason(codeHoldKey(tab), tab.revision);" in page
     assert "if (isFramedWidget(tab) && !startsOnShow(tab)) await settleStopped(card, tab);" in page
-    assert "stoppedByOwner.add(widgetKey(tab));" in page
-    assert "stoppedByOwner.delete(widgetKey(tab));" in page
+    assert "holds.stop(stopHoldKey(tab));" in page
+    assert "holds.release(stopHoldKey(tab));" in page and "holds.release(codeHoldKey(tab));" in page
     assert "apiClient.saveUiPreferences({ widget_start_mode: next })" in page
     assert "const next = withWidgetStartMode(current, key, mode);" in page
     # Launch-policy writes are serialized (AUD-13): the card applies after its write.
@@ -422,13 +453,12 @@ def test_widgets_launch_policy_controls_and_stop_suppression():
     assert "startModeWrites = write.catch(() => {});" in page
     set_mode = page.split("async function setWidgetStartMode(key, mode) {", 1)[1].split("bindWidgetCardMenus", 1)[0]
     assert set_mode.index("await write;") < set_mode.index("const card = liveCardFor(list, key);")
-    assert "bindWidgetCardMenus(list, setWidgetStartMode, widths);" in page
+    assert "bindWidgetCardMenus(list, setWidgetStartMode, widths, removeKeptCard);" in page
     assert "event.target.closest('[data-widget-power]')" in page
     # Force-stop + eviction on a vanished card; the frame keeps its ack window.
     removed_branch = page.split("for (const key of plan.removed) {", 1)[1].split("for (const tab of nextTabs) {", 1)[0]
     assert "disposeWidgetByKey(key)" in removed_branch
     assert "widgetSessionState.delete(key);" in removed_branch
-    assert "stoppedByOwner.delete(key);" in removed_branch
     assert "if (settling) retireCard(card, settling);" in removed_branch
     # A stopped framed card ends with its facade and Start (CA-13): on leave for
     # every card not kept running, and while a card starts (idempotent facade).
@@ -529,14 +559,13 @@ def test_widgets_card_width_is_owner_ui_preference():
     card = _read("web/modules/widget_card.js")
     css = _read("web/style.css")
     assert "data-widget-resize-handle" in source
-    assert "Resize width: drag or use arrow keys" in source
     assert "data-widget-arrange-status role=\"status\" aria-live=\"polite\"" in source
     sync = source.split("async function syncWidgets(generation) {", 1)[1].split("\n    }\n", 1)[0]
     assert sync.index("const readSizes = widths.beginRead();") < sync.index("requestWidgetListPayload(apiClient, controller)")
     assert "widget_size: readSizes(prefs.widget_size)," in sync
     assert "widths.readSizes(" not in source
     assert "save: (payload) => apiClient.saveUiPreferences(payload)," in source
-    assert "const cardMenus = bindWidgetCardMenus(list, setWidgetStartMode, widths);" in source
+    assert "const cardMenus = bindWidgetCardMenus(list, setWidgetStartMode, widths, removeKeptCard);" in source
     assert "export function createWidgetWidths(list, options)" in reorder
     assert "list.parentElement?.querySelector('[data-widget-arrange-status]')" in reorder
     assert "const mode = plan.availableColumns > 1 ? 'columns' : 'stack';" in reorder
@@ -562,7 +591,7 @@ def test_widgets_card_width_is_owner_ui_preference():
 
 
 def test_widget_form_label_is_accessible_heading_fallback():
-    source = _widgets_js()
+    source = _render_js()
     assert "const heading = component.title || component.label || '';" in source
     assert 'aria-label="${escapeHtml(heading)}"' in source
     assert "heading ? `<h4>${escapeHtml(heading)}</h4>` : ''" in source
@@ -584,8 +613,11 @@ def test_widget_fault_status_wraps_inside_narrow_card():
     controls = style.split(".widgets-card-controls {", 1)[1].split("}", 1)[0]
     status = style.split(".widgets-card-controls .ui-status:not([hidden]) {", 1)[1].split("}", 1)[0]
     assert "--widget-fault-status-max-width: min(240px, 35vw);" in root
-    assert "flex-wrap: wrap;" in controls
-    assert "min-width: 0;" in controls
+    # The controls wrap; `wrap-reverse` keeps the menu-and-handle pair on the head's top line and drops the
+    # lifecycle controls under it (DESIGN §2), never the pair under them. The pair and its look are measured in a
+    # real browser (tests/test_secondary_hierarchy_browser.py), the title's lines never under it.
+    assert re.search(r"flex-wrap: wrap(-reverse)?;", controls)
+    assert "min-width: min-content;" in controls
     assert "min-width: 0;" in status
     assert "max-width: var(--widget-fault-status-max-width);" in status
     assert "white-space: normal;" in status
@@ -610,7 +642,6 @@ def test_widgets_card_order_is_owner_ui_preference():
     assert "export function sortTabsByWidgetOrder" in reorder
     assert "originalIndex" in reorder
     assert "return a.originalIndex - b.originalIndex;" in reorder
-    assert "Move widget: drag or use arrow keys" in source
     assert "handle.addEventListener('keydown'" in reorder
     assert "event.key === 'ArrowUp'" in reorder
     assert "apiClient.uiPreferences()" in source
@@ -651,7 +682,7 @@ def test_widgets_v5_7_0_new_components_render():
     (HTML5 drag with on_move POST). All three must be present in the
     declarative renderer so authors can reference them in widgets, and
     none of them may bring skill-supplied JS into the SPA origin."""
-    source = _widgets_js()
+    source = _render_js()
     assert "type === 'map'" in source
     assert "type === 'calendar'" in source
     assert "type === 'kanban'" in source
@@ -664,13 +695,13 @@ def test_widgets_v5_7_0_new_components_render():
 
 
 def test_widgets_render_subscription_children():
-    source = _widgets_js()
+    source = _render_js()
     assert "type === 'subscription'" in source
     assert "component.render" in source
     assert "widget-subscription-render" in source
     assert "inheritedTarget = ''" in source
     assert "component.target || inheritedTarget || 'result'" in source
-    assert "renderComponent(tab, child, view, `${treePath}.render.${idx}`, target)" in source
+    assert "renderComponent(ctx, child, view, `${treePath}.render.${idx}`, target)" in source
     assert "const passiveTarget = inheritedTarget ? target : '';" in source
     assert "value_key" in source
     assert "items_key" in source
@@ -680,11 +711,13 @@ def test_widgets_render_subscription_children():
 
 def test_widgets_schema_v1_composition_uses_stable_tree_keys():
     source = _widgets_js()
-    assert "function componentIdentity" in source
-    assert "function indexComponentTree" in source
-    assert "type === 'group'" in source
-    assert "type === 'metric'" in source
-    assert "type === 'callout'" in source
+    renderer = _render_js()
+    assert "function componentIdentity" in renderer
+    assert "function indexComponentTree" in renderer
+    assert "indexComponentTree(components)" in source
+    assert "type === 'group'" in renderer
+    assert "type === 'metric'" in renderer
+    assert "type === 'callout'" in renderer
     assert "visibleKeys.forEach((key)" in source
     assert "components[Number(" not in _framed_widget_sources()
     assert "data-widget-kanban-key" in source
@@ -697,9 +730,10 @@ def test_widgets_forms_charts_and_kanban_keep_host_owned_contracts():
     renderer with its number formatter and http(s)-only link guard followed in
     the cycle-A fix round."""
     source = _widgets_js()
+    renderer = _render_js()
     helper = _read("web/modules/ui_helpers.js") + _read("web/modules/ui_primitives.js")
     chart = _read("web/modules/widget_chart.js")
-    assert "renderSafeField(" in source
+    assert "renderSafeField(" in renderer
     assert "collectSafeFieldValues(" in source
     assert "includePasswords: false" in source
     assert "pendingActions.has(key)" in source
@@ -711,11 +745,11 @@ def test_widgets_forms_charts_and_kanban_keep_host_owned_contracts():
     assert "spanGaps: false" in chart
     assert "export function finiteChartValue" in chart
     assert "data.map(finiteChartValue)" in chart
-    assert "aria-label=" in source
-    assert "renderChartDataTable(config, label, !chartAvailable)" in source
+    assert "aria-label=" in renderer
+    assert "renderChartDataTable(config, label, !chartAvailable)" in renderer
     assert "export function renderChartDataTable" in chart
-    assert "data-widget-kanban-move" in source
-    assert "widget-kanban-empty" in source
+    assert "data-widget-kanban-move" in renderer
+    assert "widget-kanban-empty" in renderer
     assert "listen('change', (event) =>" in source
     assert "select?.closest('[data-widget-kanban-key]')" in source
     assert "{ card_id: cardId, column_id: columnId }" in source
@@ -747,7 +781,7 @@ def test_widgets_responsive_design_system_styles_are_host_owned():
 
 
 def test_widget_public_tones_share_the_host_normalizer_and_canonical_css():
-    source = _widgets_js()
+    source = _render_js()
     helper = _read("web/modules/ui_helpers.js") + _read("web/modules/ui_primitives.js")
     style = _read("web/style.css")
     assert "function widgetTone" not in _framed_widget_sources()
@@ -761,7 +795,7 @@ def test_widget_public_tones_share_the_host_normalizer_and_canonical_css():
 
 
 def test_widget_metrics_share_the_standard_empty_value_and_numeric_formatter():
-    source = _widgets_js()
+    source = _render_js()
     assert "const numericValue = text ? Number(text) : Number.NaN;" in source
     assert "!Number.isNaN(numericValue) && !Number.isFinite(numericValue)" in source
     assert "const structured = raw !== null && typeof raw === 'object';" in source
@@ -784,7 +818,7 @@ def test_widgets_module_bridge_is_one_streaming_grammar():
     timeout constant is applied to a bridged fetch — the only timer in the relay
     is the author's opt-in ``init.timeoutMs`` (declarative requests and the
     module source load keep ``WIDGET_REQUEST_TIMEOUT_MS``)."""
-    child = _read("web/modules/widget_frame.js")
+    child = _read("web/modules/widget_frame.js") + _read("web/modules/widget_frame_bridge.js")
     parent = _read("web/modules/widget_module.js")
     page = _widgets_js()
     framed = _framed_widget_sources()
@@ -827,10 +861,13 @@ def test_widgets_module_bridge_is_one_streaming_grammar():
     assert "if (msg.op === 'subscribe') messageHandlers?.add(onWsMessage);" in parent
     assert "else if (msg.op === 'unsubscribe') messageHandlers?.delete(onWsMessage);" in parent
     assert "return mountModuleWidget(mount, tab, render, mountSignal, widgetMessageHandlers);" in page
-    # Dispose tail: open streams aborted with the pending requests, forwarding dropped.
+    # Dispose tail: the document retires (open streams aborted with the pending requests, forwarding dropped,
+    # its port closed) before the page stops listening for hellos.
+    retire = parent.split("const retireDocument = () =>", 1)[1].split("};", 1)[0]
+    assert retire.index("pendingRequests.forEach((controller) => controller.abort());") < retire.index("messageHandlers?.delete(onWsMessage);")
+    assert retire.index("messageHandlers?.delete(onWsMessage);") < retire.index("port.close();")
     tail = parent.split("const finish = () =>", 1)[1]
-    assert tail.index("pendingRequests.forEach((controller) => controller.abort());") < tail.index("messageHandlers?.delete(onWsMessage);")
-    assert tail.index("messageHandlers?.delete(onWsMessage);") < tail.index("window.removeEventListener('message', onMessage);")
+    assert tail.index("retireDocument();") < tail.index("window.removeEventListener('message', onHello);")
     # Negative pins: no string path, no alias, no second transport, no default bridge timeout.
     assert "ouro-widget-fetch-result" not in framed
     assert ".text()" not in relay
@@ -860,7 +897,7 @@ def test_widgets_module_frame_faults_reach_the_card_status_slot():
     ``dispose()``. The two height-cap attributes are stamped BEFORE the
     ``nextHeight === appliedHeight`` early return, which is exactly the case they
     exist to explain."""
-    child = _read("web/modules/widget_frame.js")
+    child = _read("web/modules/widget_frame_bridge.js")
     parent = _read("web/modules/widget_module.js")
     card = _read("web/modules/widget_card.js")
 

@@ -297,6 +297,7 @@ def test_only_evolution_push_stays_under_git_lock(
         "_evolution_publication_stopped_result",
         lambda *a, **k: order.append("authority") or "",
     )
+    monkeypatch.setattr(git_tools, "_evolution_test_publication_stop", lambda *a, **k: "")  # tested below on its own
     monkeypatch.setattr(git_tools, "_auto_push", lambda *a, **k: order.append("push") or "")
     monkeypatch.setattr(
         git_tools,
@@ -380,6 +381,59 @@ def test_revoked_publication_does_not_record_or_anchor_success(tmp_path, monkeyp
     assert failed["degraded_reasons"] == ["recorded"]
     assert not getattr(ctx, "last_reviewed_commit_sha", "")
     assert ctx._coupling_review_history == {"keep": True}
+
+
+@pytest.mark.parametrize("tests_red", [False, True], ids=["full_green", "red_postcommit"])
+@pytest.mark.parametrize("tag_created", [False, True], ids=["no_created_tag", "new_tag"])
+def test_a_test_refusal_withholds_the_push_but_keeps_reviewed_provenance(
+        tmp_path, monkeypatch, tests_red, tag_created):
+    """Unlike lost authority, a red or proof-less post-commit run only withholds publication."""
+    from ouroboros import body_candidate, mutation_attribution, preflight_qualification
+    from ouroboros.tools import git as git_tools
+
+    claim = {"campaign_id": "camp", "transaction_id": "tx", "task_id": "evo"}
+    sha = "d" * 40
+    attempts, baselines, reviewed, pushed = [], [], [], []
+    monkeypatch.setattr(git_tools, "_task_attributed_commit_paths", lambda *a, **k: (None, None, "", ("root", "task")))
+    monkeypatch.setattr(git_tools, "_check_overlapping_review_attempt", lambda *a, **k: "")
+    _patch_commit_seam(monkeypatch, "_record_commit_attempt", lambda *a, **k: attempts.append(k.get("status") or a[2]))
+    monkeypatch.setattr(git_tools, "_acquire_git_lock", lambda *a, **k: pathlib.Path("lock"))
+    monkeypatch.setattr(git_tools, "_release_git_lock", lambda *a, **k: None)
+    monkeypatch.setattr(git_tools, "_prepare_review_commit_worktree", lambda *a, **k: (False, ""))
+    _patch_commit_seam(monkeypatch, "_evolution_commit_authority", lambda *a, **k: (claim, {"ok": True}))
+    _patch_commit_seam(monkeypatch, "_verify_reviewed_commit_binding", lambda *a, **k: (True, ""))
+    _patch_commit_seam(monkeypatch, "_run_reviewed_stage_cycle", lambda *a, **k: {
+        "status": "passed", "pre_fingerprint": {"fingerprint": "pre"},
+        "post_fingerprint": {"fingerprint": "post", "binding": {"expected_tag": "v-new"}}})
+    _patch_commit_seam(monkeypatch, "run_cmd", lambda cmd, cwd=None: sha if cmd[:3] == ["git", "rev-parse", "HEAD"] else "")
+    # The reviewed name alone must not become a creation fact. Only successful
+    # creation is forwarded by the real commit owner to publication and adoption.
+    monkeypatch.setattr(git_tools, "_auto_tag_on_version_bump",
+                        lambda *a, **k: " [tagged: v-new]" if tag_created else "")
+    _patch_commit_seam(monkeypatch, "_record_evolution_commit_receipt", lambda *a, **k: "")
+
+    def post_commit(ctx, message, skip_tests, warning, force=False):
+        if tests_red:
+            warning[0] = "TESTS_FAILED (commit preserved): tests/test_far_away.py::test_x"
+            return warning[0]
+        return None
+
+    monkeypatch.setattr(git_tools, "_post_commit_result", post_commit)
+    monkeypatch.setattr(preflight_qualification, "full_proof_error", lambda *a, **k: "")
+    monkeypatch.setattr(git_tools, "_auto_push_after_review", lambda *a, **k: pushed.append(k) or " [pushed]")
+    monkeypatch.setattr(body_candidate, "record_reviewed_commit",
+                        lambda ctx, commit, **k: reviewed.append((commit, k)))
+    monkeypatch.setattr(mutation_attribution, "advance_mutation_baseline", lambda *a, **k: baselines.append(a))
+    ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, branch_dev="ouroboros",
+                          current_task_type="evolution", task_id="evo",
+                          task_metadata={"evolution_transaction": claim}, _coupling_review_history={})
+
+    result = git_tools._repo_commit_push(ctx, "test commit")
+
+    tag = "v-new" if tag_created else ""
+    assert ctx.last_reviewed_commit_sha == sha and reviewed == [(sha, {"created_tag": tag})]
+    assert ("EVOLUTION_PUBLICATION_STOPPED" in result) is tests_red
+    assert pushed == ([] if tests_red else [{"publication_paused": False, "created_tag": tag, "expected_commit_sha": sha}])
 
 
 def test_postcommit_binding_failure_contains_evolution_commit(tmp_path, monkeypatch):

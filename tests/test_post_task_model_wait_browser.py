@@ -5,8 +5,10 @@ import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
+from ouroboros import dialogue_store
 from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.task_results import load_task_result, write_task_result
+from tests import _dialogue as dialogue_test
 from tests.test_project_chat_continuity import _write_history_rows
 from tests import test_subscription_setup_browser as ui_fixture
 
@@ -26,15 +28,15 @@ def test_answered_direct_task_waits_through_task_done_and_reload(subscription_ui
     # Old rows deliberately have neither failed text nor a typed failure.
     # Only the canonical task-result file can restore the outcome after reload.
     _write_history_rows(tmp_path, task)
+    dialogue_test.import_all(tmp_path)  # old chain files, as the upgrade imports them
     write_task_result(
         tmp_path, task, main_status, result="stored result",
         root_phase_checkpoint=state, model_waits={row["wait_id"]: row},
         outcome_axes={"execution": {"status": "failed" if main_status == "failed" else "completed"}},
         reason_code="main_execution_failed" if main_status == "failed" else "",
     )
-    with (tmp_path / "logs" / "progress.jsonl").open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps({"type": "task_model_wait", "task_id": task,
-            "chat_id": 1, "ts": "2026-09-07T00:00:00Z", **row}) + "\n")
+    dialogue_store.append(tmp_path, "progress", {"type": "task_model_wait", "task_id": task,
+                                                 "chat_id": 1, "ts": "2026-09-07T00:00:00Z", **row})
     app = Starlette(routes=[Route("/history", make_chat_history_endpoint(tmp_path))])
     sockets = []
     page.route_web_socket("**/ws", lambda socket: sockets.append(socket))
@@ -69,6 +71,7 @@ def test_answered_direct_task_waits_through_task_done_and_reload(subscription_ui
     assert page.locator('[data-wait-id="post-light"]').is_visible()
     if main_status == "failed":
         assert page.get_by_text("Failed", exact=True).count() > 0
+    ui["errors"].watch(page)  # the reloads may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector('[data-wait-id="post-light"]')
     # The wait card can rejoin before the independent history request finishes.

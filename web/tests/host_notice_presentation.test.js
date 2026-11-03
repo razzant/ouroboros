@@ -122,7 +122,7 @@ test('history replay keeps the late row on its card with its record link', async
         const card = walkCard(messages, 'r1');
         assert.ok(card, 'the replayed task kept its card');
         if (card.dataset.expanded !== '1') {
-            card.querySelector('[data-live-summary-button]').listeners.get('click')[0]({ detail: 0 });
+            card.querySelector('[data-live-disclosure]').listeners.get('click')[0]({ detail: 0 });
         }
         const markup = rendered().join('');
         assert.match(markup, /reviewers later passed it\./);

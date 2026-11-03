@@ -108,17 +108,23 @@ def test_canonical_body_and_event_precede_dispatch(tmp_path, monkeypatch, reques
         assert order == ["blob", "event", "dispatch"]
 
 
-def test_raw_review_envelope_and_thread_projection_round_trip(tmp_path):
+@pytest.mark.parametrize("access,geometry", [
+    ("readonly", None), ("full", None),
+    ("full", {"workspaceKind": "directory", "scopePaths": [], "isolation": "live"}),
+])
+def test_raw_review_envelope_and_thread_projection_round_trip(tmp_path, access, geometry):
     from ouroboros.review_thread_continuity import start_review_thread_turn
+    from ouroboros.review_session_custody import recorded_review_shape
 
     body = {"prompt": "Привет\n" + "x" * 80_000,
             "instructions": "Authorization: Bearer EXAMPLE-NOT-A-REAL-CREDENTIAL",
-            "authPreference": "subscription", "mode": "ask", "access": "readonly",
+            "authPreference": "subscription", "mode": "ask" if access == "readonly" else "agent", "access": access,
             "scope": {"kind": "project", "root": str(tmp_path)},
             "harnesses": ["codex"], "primaryHarness": "codex", "maxSeconds": 300,
             "credentialProfileId": None, "_use_thread": True, "_thread_id": "thread-1",
-            "execution": {"delegated": False, "isolation": "in_place"},
             "outputSchema": {"type": "object", "properties": {"passed": {"type": "boolean"}}}}
+    if geometry is not None:
+        body["execution"] = {"delegated": True, "workspaceRoot": str(tmp_path / "copy"), **geometry}
     original = copy.deepcopy(body)
     assert custody.record_start_requested(tmp_path, invocation_id="review", task_id="task", request=body)
     row = _start_rows(tmp_path)[0]
@@ -126,6 +132,7 @@ def test_raw_review_envelope_and_thread_projection_round_trip(tmp_path):
     restored = custody.invocation_record(tmp_path, "review")["request"]
     assert restored == body == original
     assert _digest(restored) == _digest(body)
+    assert recorded_review_shape(restored) is not None
     projections = []
 
     class Gateway:
@@ -136,7 +143,13 @@ def test_raw_review_envelope_and_thread_projection_round_trip(tmp_path):
     for envelope in (body, restored):
         start_review_thread_turn(Gateway(), envelope["_thread_id"], envelope, idempotency_key="review")
     assert projections[0] == projections[1]
-    assert not {"_thread_id", "_use_thread", "scope", "execution"} & projections[0][1].keys()
+    projected = projections[0][1]
+    assert not {"_thread_id", "_use_thread", "scope"} & projected.keys()
+    if geometry is None:
+        assert "execution" not in projected, "legacy requests acquire no new geometry during replay"
+    else:
+        assert projected["execution"] == geometry
+    assert body == original
 
 
 def test_legacy_inline_wins_even_beside_an_unreadable_ref(tmp_path, monkeypatch):
@@ -161,15 +174,20 @@ def test_unreadable_ref_keeps_request_unknown_and_retry_refuses(tmp_path, damage
         Path(row["request_ref"]["path"]).unlink()
     elif damage == "corrupt":
         Path(row["request_ref"]["path"]).write_bytes(b"not gzip")
-    else:  # the stored request row itself carries a malformed reference
-        from ouroboros import obligations
+    else:  # the stored request row itself carries a malformed reference: the pending obligation
+        from ouroboros import delegate_invocation, obligations, store  # and the invocation's addressed fold
 
         row["request_ref"]["size"] = "invalid"
         obligations.add(tmp_path, "custody_open", "invocation:lost", {"request": row})
+        with store.open_store(tmp_path, write=True) as txn:
+            record = txn.get_row(delegate_invocation.INVOCATIONS, "lost")
+            record["request"]["request_ref"]["size"] = "invalid"
+            txn.put_row(delegate_invocation.INVOCATIONS, "lost", record)
     assert custody.invocation_record(tmp_path, "lost")["request"] is None
     pending = custody.pending_invocations(tmp_path)
     assert [row["invocation_id"] for row in pending] == ["lost"]
-    assert pending[0]["request"] is None and "request_ref" not in pending[0]
+    assert pending[0]["request"] is None and pending[0]["request_ref"] == row["request_ref"]
+    assert request_body(tmp_path, pending[0]) is None
     record, refusal = _validated_invocation(tmp_path, "lost", "task", "exact original")
     assert record is None
     assert json.loads(refusal.text)["reason"] == "invocation_request_unrecorded"
@@ -196,7 +214,7 @@ def test_lost_ack_keeps_the_original_start_claim_when_its_body_is_unreadable(tmp
             keys.append(idempotency_key)
             if len(keys) == 1:
                 raise gateway.ClaudexorUnavailable("daemon_unreachable", "fixture accepted start then lost reply")
-            return {"runId": "original-run"}
+            return {"runId": f"run-{len(keys)}"}
 
     stub = LostAcknowledgment()
     _select_transport_access(monkeypatch, "readonly")   # a read-only child (#1609)
@@ -216,14 +234,15 @@ def test_lost_ack_keeps_the_original_start_claim_when_its_body_is_unreadable(tmp
     _audit_task_custody(tmp_path, "owner", audit, emit_evidence=False)
     assert audit["pending_invocation_ids"] == [token]
     assert audit["unreconciled"] == [f"invocation:{token}"]
-    fresh = json.loads(delegate._delegate_start(ctx, "Inspect fixture files.").text)
-    assert fresh["reason"] == "replacement_requires_settlement" and keys == [token]
+    fresh = json.loads(delegate._delegate_start(ctx, "Inspect other fixture files.").text)
+    assert fresh["status"] == "started" and keys[0] == token and keys[1] != token
+    new_token = keys[1]
     retry = json.loads(delegate._delegate_start(ctx, "Inspect fixture files.", retry_of=token).text)
     if damage:
-        assert retry["reason"] == "invocation_request_unrecorded" and keys == [token]
+        assert retry["reason"] == "invocation_request_unrecorded" and keys == [token, new_token]
         assert "Start a new run" not in retry["detail"]
     else:
-        assert retry["status"] == "started" and keys == [token, token]
+        assert retry["status"] == "started" and keys == [token, new_token, token]
 
 
 @pytest.mark.parametrize("damage", ["missing", "corrupt"])
@@ -305,8 +324,10 @@ def test_pending_scan_only_reads_blobs_for_surviving_invocations(tmp_path, monke
     monkeypatch.setattr(observability, "read_blob_ref", read)
     pending = custody.pending_invocations(tmp_path)
     assert [row["invocation_id"] for row in pending] == ["pending"]
-    assert reads == ["pending"]
-    assert "request_ref" not in pending[0]
+    assert reads == []  # current inventory reads typed facts, not canonical bodies
+    assert pending[0]["request"] is None and pending[0]["request_ref"]
+    assert request_body(tmp_path, pending[0]) == {"prompt": "pending"}
+    assert reads == ["pending"]  # only an addressed replay resolves the surviving body
 
 
 @pytest.mark.parametrize("different", [False, True])

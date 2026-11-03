@@ -61,9 +61,11 @@ function statusPayload(loggedIn) {
         daemon: { state: 'running', engine_version: '3.3.13', runtime: {} },
         config_dir: '/home/agent',
         harnesses: [{ id: 'codex' }],
+        // The engine's bootstrap registry row for an empty family's login.
         profiles: {
-            harnessAccounts: [{ harness_id: 'codex', native_login_detected: loggedIn }],
-            profiles: [],
+            profiles: [{ profile: { harness_id: 'codex', profile_id: 'codex-default' },
+                status: { verification: loggedIn ? 'passed' : 'not_run', verification_source: 'local_store' } }],
+            harnessAccounts: [], accountPools: [],
         },
         quota: [],
     };
@@ -71,7 +73,7 @@ function statusPayload(loggedIn) {
 
 const flush = async () => { for (let i = 0; i < 40; i += 1) await Promise.resolve(); };
 
-test('the controller drives create → poll → Connected, and holds the status poll while it runs', async (t) => {
+test('the controller drives create → poll → Signed in, and holds the status poll while it runs', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     let jobState = 'running';
     let statusReads = 0;
@@ -112,7 +114,7 @@ test('the controller drives create → poll → Connected, and holds the status 
     jobState = 'succeeded';
     t.mock.timers.tick(3000);
     await flush();
-    assert.ok(host.innerHTML.includes('Connected.'), `verified state reached: ${host.innerHTML}`);
+    assert.ok(host.innerHTML.includes('Signed in.'), `verified state reached: ${host.innerHTML}`);
     assert.equal(settled, 1, 'the host was told to re-render its rows');
     assert.equal(store.polling, false, 'the settled login released the poll hold');
     assert.ok(statusReads >= 1, 'the verdict refreshed the shared status');
@@ -176,11 +178,13 @@ test('a verify-race failure is re-checked against live account status before the
         host,
         store,
         fetchImpl: async (url, init = {}) => {
+            // The engine resolves the empty family's login onto its row and names it.
             if (url === '/api/claudexor/login' && init.method === 'POST') {
-                return json(200, { job_id: 'job-2', job: { state: 'running' } });
+                return json(200, { job_id: 'job-2', job: { state: 'running', profileId: 'codex-default' } });
             }
             if (url.startsWith('/api/claudexor/login/')) {
-                return json(200, { job: { state: 'failed', outcome: { reason: 'auth_not_ready' } } });
+                return json(200, { job: { state: 'failed', profileId: 'codex-default',
+                    outcome: { reason: 'auth_not_ready' } } });
             }
             return json(404, {});
         },
@@ -190,7 +194,7 @@ test('a verify-race failure is re-checked against live account status before the
     loggedIn = true;
     t.mock.timers.tick(3000);
     await flush();
-    assert.ok(host.innerHTML.includes('Connected.'),
+    assert.ok(host.innerHTML.includes('Signed in.'),
         `the verify-race must resolve to success, not "Sign-in failed": ${host.innerHTML}`);
     ctl.dispose();
     store.dispose();
@@ -948,9 +952,9 @@ test('a terminal GET overtaking an unconfirmed DELETE keeps the settled card vis
     const closing = ctl.close(ctl.active); await flush();
     assert.equal(calls.delete, 1, 'the active-card Close owns one DELETE');
     t.mock.timers.tick(3000); await flush();
-    assert.match(host.innerHTML, /Connected\./);
+    assert.match(host.innerHTML, /Signed in\./);
     releaseDelete(); assert.equal(await closing, LOGIN_CUSTODY_RELEASED);
-    assert.equal(ctl.active?.verdict?.kind, 'success'); assert.match(host.innerHTML, /Connected\./,
+    assert.equal(ctl.active?.verdict?.kind, 'success'); assert.match(host.innerHTML, /Signed in\./,
         'the late DELETE must not erase the settled face');
     assert.deepEqual(calls, { create: 1, delete: 1, get: 1 });
     t.mock.timers.tick(60000); await flush();

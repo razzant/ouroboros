@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+    builtinTestRequest,
     providerTestNetworkErrorStatus,
     providerTestResultIsCurrent,
     providerTestStatusText,
-} from '../modules/settings.js';
+    reachesAnotherPair,
+} from '../modules/settings_connections.js';
 import { cyberReviewNote } from '../modules/settings_policy.js';
 import { renderSettingsPage } from '../modules/settings_ui.js';
 
@@ -20,6 +22,12 @@ test('provider test status uses only the controlled compact vocabulary', () => {
         providerTestNetworkErrorStatus(new Error('raw internal HTTP body')),
         'Not ready',
     );
+    const refusal = (status, body) => Object.assign(new Error(body.error), { status, body });
+    const moved = { error: 'Enter its key again to test the new address.', code: 'masked_key_endpoint_changed' };
+    assert.equal(providerTestNetworkErrorStatus(refusal(400, moved)),
+        'Not ready — Enter its key again to test the new address.');
+    assert.equal(providerTestNetworkErrorStatus(refusal(400, { error: 'raw upstream text' })), 'Not ready');
+    assert.equal(providerTestNetworkErrorStatus(refusal(502, moved)), 'Not ready');
 });
 
 test('provider test responses apply only to the exact draft generation', () => {
@@ -43,6 +51,39 @@ test('provider test responses apply only to the exact draft generation', () => {
     }), false);
 });
 
+test('the built-in compatible key names the pair its draft reaches; other keys send their own edits', () => {
+    assert.deepEqual(builtinTestRequest('openai', { OPENAI_API_KEY: 'typed' }, { OPENAI_BASE_URL: 'http://l/v1' }),
+        { provider_id: 'openai', overrides: { OPENAI_API_KEY: 'typed' } });
+    const legacy = { OPENAI_BASE_URL: 'http://l/v1', OPENAI_API_KEY: '***set***' };
+    // The legacy pair travels as the page holds it, a kept key still masked.
+    assert.deepEqual(builtinTestRequest('openai-compatible', {}, legacy), { provider_id: 'openai-compatible',
+        api_key_setting: 'OPENAI_API_KEY', overrides: legacy });
+    // Both saved, the dedicated address cleared in the row: the legacy pair, with the key as just edited.
+    assert.deepEqual(builtinTestRequest('openai-compatible', { OPENAI_COMPATIBLE_BASE_URL: '' },
+        { ...legacy, OPENAI_API_KEY: 'sk-edited', OPENAI_COMPATIBLE_BASE_URL: '', OPENAI_COMPATIBLE_API_KEY: '***set***' }),
+    { provider_id: 'openai-compatible', api_key_setting: 'OPENAI_API_KEY',
+        overrides: { OPENAI_COMPATIBLE_BASE_URL: '', OPENAI_BASE_URL: 'http://l/v1', OPENAI_API_KEY: 'sk-edited' } });
+    // A dedicated address: the row's own edits only, and the legacy pair stays home.
+    assert.deepEqual(builtinTestRequest('openai-compatible', { OPENAI_COMPATIBLE_BASE_URL: 'http://d/v1' },
+        { ...legacy, OPENAI_COMPATIBLE_BASE_URL: 'http://d/v1' }), { provider_id: 'openai-compatible',
+        api_key_setting: 'OPENAI_COMPATIBLE_API_KEY', overrides: { OPENAI_COMPATIBLE_BASE_URL: 'http://d/v1' } });
+});
+
+test('the built-in compatible row keeps its facts only while its draft reaches their pair, as Test reads it', () => {
+    const saved = { OPENAI_BASE_URL: 'http://l/v1', OPENAI_API_KEY: 'sk-legac...' };
+    // Read as Test reads it: trimmed, and a kept key compared as the mask the page holds.
+    assert.equal(reachesAnotherPair(saved, { ...saved, OPENAI_BASE_URL: ' http://l/v1 ' }), false);
+    // Edited beside the row (the address, the key it travels with) or in it (a dedicated address): another pair.
+    for (const edit of [{ OPENAI_BASE_URL: 'http://b/v1' }, { OPENAI_API_KEY: '' }, { OPENAI_API_KEY: 'sk-typed' },
+        { OPENAI_COMPATIBLE_BASE_URL: 'http://d/v1' }]) {
+        assert.equal(reachesAnotherPair(saved, { ...saved, ...edit }), true, JSON.stringify(edit));
+    }
+    // A saved dedicated pair is the endpoint: the legacy pair is beside the point until its address is cleared.
+    const both = { ...saved, OPENAI_COMPATIBLE_BASE_URL: 'http://d/v1', OPENAI_COMPATIBLE_API_KEY: 'sk-dedic...' };
+    assert.equal(reachesAnotherPair(both, { ...both, OPENAI_BASE_URL: 'http://b/v1', OPENAI_API_KEY: '' }), false);
+    assert.equal(reachesAnotherPair(both, { ...both, OPENAI_COMPATIBLE_BASE_URL: '' }), true);
+});
+
 test('every provider test button warns that one charged request is sent', () => {
     const html = renderSettingsPage();
     const buttons = [...html.matchAll(/data-provider-test="[^"]+"[^>]*>/g)];
@@ -55,23 +96,23 @@ test('every provider test button warns that one charged request is sent', () => 
     }
 });
 
-test('provider actions use the shared status-first action row contract', () => {
+test('each key row docks Test beside its other actions and reports in its own live status line', () => {
     const html = renderSettingsPage();
-    const rows = [...html.matchAll(/<div class="settings-action-row(?:"|\s)[\s\S]*?<\/div>/g)]
+    const rows = [...html.matchAll(/<div class="harness-account-row connection-row"[\s\S]*?data-connection-cache hidden><\/div>/g)]
         .map(([row]) => row);
-    // Nine provider probes plus the catalog action. The Claude-runtime
-    // status/Repair panel is retired with its product surface (the advisory
-    // pre-review runs on a configured routed model or agent session now).
-    assert.equal(rows.length, 10, 'nine provider probes plus the catalog action');
+    assert.equal(rows.length, 9, 'one built-in key row per provider card');
+    for (const row of rows) {
+        const actions = row.slice(row.indexOf('harness-account-actions'), row.indexOf('connection-fields'));
+        for (const action of ['data-connection-test', 'data-connection-toggle', 'data-connection-remove']) {
+            assert.match(actions, new RegExp(action), `${action} sits in the row's action slot`);
+        }
+        assert.match(row, /data-connection-test-status[^>]*role="status" aria-live="polite"/);
+    }
+    // The catalog refresh keeps the status-first single-action row. The Claude-runtime
+    // status/Repair panel is retired with its product surface.
+    assert.equal([...html.matchAll(/<div class="settings-action-row(?:"|\s)/g)].length, 1);
     assert.doesNotMatch(html, /settings-claude-code/);
     assert.doesNotMatch(html, /settings-ghost-btn/);
-    for (const row of rows) {
-        const statusAt = row.indexOf('role="status"');
-        const actionAt = row.indexOf('class="btn btn-default"');
-        assert.ok(statusAt >= 0, 'each action row exposes a live status');
-        assert.ok(actionAt > statusAt, 'the action is docked after the status in source order');
-        assert.match(row, /aria-live="polite"/);
-    }
 });
 
 test('access, supervisor, and review remain independent owner controls', () => {
@@ -133,8 +174,8 @@ test('settings copy distinguishes Cyber configuration authority without auto-ena
     // Each card up to the next one, wherever the Behavior order puts it.
     const supervisor = html.split('<h3>Safety Supervisor</h3>')[1].split('<h3>')[0];
     const evolution = html.split('<h3>Post-Task Self-Evolution</h3>')[1].split('<h3>')[0];
-    assert.match(supervisor, /outside Cyber Pro, the agent cannot lower its own supervision/);
-    assert.match(supervisor, /Cyber Pro also lets the agent configure Supervisor coverage/);
+    assert.match(supervisor, /outside Cyber Pro, Ouroboros cannot lower its own checks/);
+    assert.match(supervisor, /Cyber Pro also lets it configure Supervisor coverage/);
     assert.doesNotMatch(supervisor, /Owner-only/);
     assert.match(evolution, /outside Cyber Pro, only the owner can enable this/);
     assert.match(evolution, /Cyber Pro also lets the agent configure it/);

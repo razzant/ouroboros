@@ -274,7 +274,7 @@ def test_persistent_sharer_branch_unchanged_and_a_new_registration_is_owned_agai
     assert gateway.removals == []
     retired = _of(tmp_path, custody.PROJECT_RETIRED)
     assert len(retired) == 1
-    assert set(retired[0]) == {"ts", "type", "event_id", "run_id", "task_id", "project_id", "project_kept"}
+    assert set(retired[0]) == {"ts", "type", "event_id", "run_id", "task_id", "project_id", "project_kept", "custody_ordinal"}
     assert retired[0]["project_kept"] is True
 
     # A discharged project, then a NEW registration of the same root (same id):

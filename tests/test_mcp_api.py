@@ -30,7 +30,7 @@ def _isolate_manager():
 def settings_refresh_request(monkeypatch):
     """Record the save's refresh request without discovering unrelated remote tools."""
     refresh = Mock()
-    monkeypatch.setattr(mcp_client, "refresh_all_background", refresh)
+    monkeypatch.setattr(mcp_client.MCPManager, "refresh_all_background", refresh)
     return refresh
 
 
@@ -609,3 +609,9 @@ def test_settings_get_masks_mcp_auth_token(tmp_path, monkeypatch):
             assert servers[0]["auth_token"] != "Bearer plain-text-token-XYZ"
     finally:
         _stop(patches)
+
+
+@pytest.fixture(autouse=True)
+def _private_mcp_catalog_root(tmp_path, monkeypatch):
+    from ouroboros import config
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)

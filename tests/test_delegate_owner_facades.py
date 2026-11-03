@@ -55,7 +55,7 @@ DELEGATE_LEAF_OWNERS: dict[str, dict[str, str]] = {
     },
     "ouroboros.subagents": {
         "ouroboros.subagent_route_health": (
-            "route_health _exhausted_window _model_scope_matches _cooldown_active"
+            "route_health _exhausted_window"
         ),
     },
 }

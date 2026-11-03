@@ -119,10 +119,31 @@ def test_unreadable_custody_log_skips_the_sweep(tmp_path, monkeypatch):
     assert report["skipped"] == "custody_log_unreadable" and not report["removed"]
 
 
-def test_startup_custody_sweep_runs_the_state_sweep():
+def test_the_reconcile_pass_runs_the_state_sweep():
     import inspect
 
     import ouroboros.server_maintenance as sm
 
-    assert "sweep_settled_delegate_state" in inspect.getsource(sm._run_deferred_startup_prunes)
+    assert "sweep_settled_delegate_state" in inspect.getsource(__import__("ouroboros.maintenance_retirement", fromlist=["run"]).run)
     assert "sweep_settled_delegate_state" not in inspect.getsource(sm._startup_custody_sweep)
+
+
+def test_pending_adoption_keeps_wait_source_and_transaction_until_task_settles(tmp_path, monkeypatch):
+    from ouroboros import delegate_state_sweep as sweep
+
+    pending = _write_row(tmp_path, "delegate_recovery", "waiting", {
+        "status": "adopted", "task_id": "waiting", "run_id": "", "pending_invocation_id": "invocation",
+        "restart_transaction_id": "waiting-tx", "journal_cursor": 42})
+    transaction = _write_row(tmp_path, "delegate_recovery_transactions", "waiting-tx", {"schema": 1})
+    _settle_task(tmp_path, "foreign")  # Another task's result is no settlement proof.
+    assert not sweep_settled_delegate_state(tmp_path)["removed"]
+    assert pending.exists() and transaction.exists()
+    with monkeypatch.context() as patch:
+        def unreadable(*_a, **_k):
+            raise OSError("result unavailable")
+        patch.setattr("ouroboros.task_results.load_task_result", unreadable)
+        assert not sweep.sweep_settled_delegate_state(tmp_path)["removed"]
+    _settle_task(tmp_path, "waiting")
+    report = sweep_settled_delegate_state(tmp_path)
+    assert not pending.exists() and not transaction.exists()
+    assert set(report["removed"]) == {"delegate_recovery/waiting.json", "delegate_recovery_transactions/waiting-tx.json"}

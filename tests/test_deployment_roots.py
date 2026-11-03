@@ -214,7 +214,6 @@ def test_world_profile_names_the_roots_in_use_even_with_a_quote_in_the_path(tmp_
         embedded_python=sys.executable, app_version="0", hidden_run=subprocess.run,
         save_settings=lambda _settings: None, log=logging.getLogger("world-profile-test"))
     monkeypatch.setattr(launcher_bootstrap, "ensure_managed_repo", lambda _context: "unchanged")
-    monkeypatch.setattr(launcher_bootstrap, "bootstrap_native_skills", lambda _context: None)
     assert launcher_bootstrap.bootstrap_repo(context) is True
     world = (data / "memory" / "WORLD.md").read_text(encoding="utf-8")
     assert f"`{REPO}` contains my codebase" in world and f"`{data}` contains my memory" in world
@@ -241,7 +240,6 @@ def test_the_world_profile_command_suits_a_released_seeds_one_argument_profiler(
         embedded_python=sys.executable, app_version="7.6.0", hidden_run=subprocess.run,
         save_settings=lambda _settings: None, log=logging.getLogger("world-profile-test"))
     monkeypatch.setattr(launcher_bootstrap, "ensure_managed_repo", lambda _context: "unchanged")
-    monkeypatch.setattr(launcher_bootstrap, "bootstrap_native_skills", lambda _context: None)
     assert launcher_bootstrap.bootstrap_repo(context) is True
     assert (data / "memory" / "WORLD.md").read_text(encoding="utf-8").startswith("# WORLD.md")
 

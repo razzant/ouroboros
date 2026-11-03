@@ -52,7 +52,7 @@ def test_minimax_models_listing_is_never_an_image_input_source(tmp_path, monkeyp
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
     _gateway_models(monkeypatch, [{"id": "MiniMax-M3", "supports_vision": False, "context_length": 200000}])
     assert ce._provider_metadata_window("minimax", "minimax::MiniMax-M3", "https://api.minimax.invalid/v1",
-                                        allow_fetch=True, api_key="k") == 200000
+                                        allow_fetch=True, api_key="k")[0] == 200000
     assert ce._load(tmp_path)["image_input"] == {}
     from ouroboros.provider_models import supports_vision
     assert supports_vision("minimax::MiniMax-M3") is None

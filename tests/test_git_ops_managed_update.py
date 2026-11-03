@@ -61,6 +61,7 @@ def test_official_fetch_timeout_kills_the_process_tree(monkeypatch):
 
     class FakeProcess:
         returncode = 1
+        stdin = stdout = stderr = None  # the runner closes an exited child's pipes; this fake opens none
 
         def __init__(self):
             self.communicates = 0

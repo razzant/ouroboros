@@ -8,6 +8,7 @@ class names, key API endpoints, secret masking, etc.).
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 import shutil
@@ -132,13 +133,6 @@ def test_mcp_css_defines_required_classes(settings_css: str) -> None:
     assert 'class="form-field ui-field"' in source
 
 
-def test_settings_ui_mcp_section_describes_hot_reload(settings_ui_source: str) -> None:
-    """The UI copy must communicate that MCP changes are hot-reloadable
-    (it's the ergonomic difference vs A2A which requires restart)."""
-    assert "Hot-reloadable" in settings_ui_source or "hot-reloadable" in settings_ui_source
-    assert "untrusted third-party data" in settings_ui_source
-
-
 def test_mcp_ui_roundtrip_preserves_environment_and_unsupported_fields():
     """Execute the real JS projection; this is not a browser/visual receipt."""
     node = _node_bin()
@@ -173,60 +167,132 @@ assert.equal(collectMcpSettings().MCP_SERVERS[0].args, 'unsupported');
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("transport,opt_in,expected", [
-    ("stdio", True, True),
-    ("stdio", False, False),
-    ("streamable_http", True, False),
-    ("sse", True, False),
-])
-def test_mcp_ui_collection_keeps_browser_opt_in_stdio_only(transport, opt_in, expected):
-    """Run the real Save projection without dropping other server metadata."""
+def test_mcp_ui_keeps_call_lifetime_flags_as_applied_fields():
+    """``task_session``/``browser_policy`` round-trip through the real projection and are not 'retained but not applied'."""
+    node = _node_bin()
+    if not node:
+        pytest.skip("Node is unavailable")
     script = r'''
 import assert from 'node:assert/strict';
 import { applyMcpSettings, collectMcpSettings } from './web/modules/mcp_settings.js';
 const host = { innerHTML: '', querySelectorAll: () => [] };
 globalThis.document = { getElementById: (id) => id === 'mcp-servers-list' ? host : null };
 globalThis.fetch = async () => ({ ok: false });
-const [transport, optIn, expected] = JSON.parse(process.argv[1]);
-const server = { id: 'kept', enabled: false, transport, command: 'python3', args: ['server.py'],
-    url: 'https://example.test/mcp', headers: {'X-Keep': 'literal'},
-    allowed_tools: ['read'], browser_bridge: optIn, future_field: { retained: true } };
-applyMcpSettings({ MCP_SERVERS: [server] });
-const saved = collectMcpSettings().MCP_SERVERS[0];
-for (const key of Object.keys(server)) {
-    assert.deepEqual(saved[key], key === 'browser_bridge' ? expected : server[key], key);
-}
-assert.equal(Object.hasOwn(saved, 'browser_bridge'), true);
+const server = { id: 'chrome', transport: 'stdio', command: 'node', args: ['server.mjs'], enabled: true,
+    task_session: true, browser_policy: true };
+applyMcpSettings({ MCP_ENABLED: true, MCP_SERVERS: [server, { ...server, id: 'plain', task_session: false,
+    browser_policy: false }] });
+const saved = collectMcpSettings().MCP_SERVERS;
+assert.deepEqual(saved.map((row) => [row.task_session, row.browser_policy]), [[true, true], [false, false]]);
+assert.ok(!host.innerHTML.includes('Fields retained but not applied'), host.innerHTML);
 '''
-    import json
-
-    result = subprocess.run([_node_bin(), '--input-type=module', '-e', script,
-                             json.dumps([transport, opt_in, expected])], cwd=REPO_ROOT,
+    result = subprocess.run([node, "--input-type=module", "-e", script], cwd=REPO_ROOT,
                             capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
 
 
-def test_mcp_ui_preserves_explicit_chrome_protocol_on_load_and_save():
+def test_mcp_ui_will_not_save_held_flags_on_a_remote_transport_until_they_are_removed():
+    """Transport select → card notice → Save validation → Remove, through the real card handlers.
+
+    Import cannot reach this draft (it changes no transport and refuses the flags off stdio:
+    tests/test_mcp_import.py); false/false on a remote server stays equivalent to omission.
+    The rendered run that switched back to stdio with its URL still typed (Save then wrote a
+    row the loader refused, and its tools disappeared) is replayed last: each payload the real
+    writer would send goes to the real loader, and Save refuses exactly the ones it drops."""
     script = r'''
 import assert from 'node:assert/strict';
-import { applyMcpSettings, collectMcpSettings } from './web/modules/mcp_settings.js';
-const host = { innerHTML: '', querySelectorAll: () => [] };
-globalThis.document = { getElementById: id => id === 'mcp-servers-list' ? host : null };
+import { applyMcpSettings, collectMcpSettings, validateMcpSettings } from './web/modules/mcp_settings.js';
+const handlers = {};
+const field = (name, value) => ({ id: `mcp-0-${name}`, dataset: { mcpField: name }, value, checked: false,
+    addEventListener: (type, fn) => { handlers[`${name}:${type}`] = fn; } });
+const transport = field('transport', 'stdio'), url = field('url', '');
+const clear = { addEventListener: (type, fn) => { handlers['clear:' + type] = fn; } };
+const card = { dataset: { mcpIndex: '0' }, querySelectorAll: (s) => s === '[data-mcp-field]' ? [transport, url] : [],
+    querySelector: (s) => s === '[data-mcp-clear-unsupported]' ? clear : s === '[data-mcp-field="transport"]' ? transport : null };
+const host = { innerHTML: '', querySelectorAll: (s) => s === '[data-mcp-card]' ? [card] : [] };
+globalThis.document = { getElementById: (id) => id === 'mcp-servers-list' ? host : null,
+    querySelector: () => card, querySelectorAll: (s) => s === '[data-mcp-card]' ? [card] : [] };
 globalThis.fetch = async () => ({ ok: false });
-const savedEntry = { id: 'chrome', enabled: true, transport: 'stdio', command: 'node',
-    args: ['chrome_browser.js'], browser_bridge: true, browser_protocol: 'ouroboros_chrome',
-    browser_skill_binding: {skill_name: 'chrome_browser', script_path: 'scripts/server.js'} };
-applyMcpSettings({ MCP_SERVERS: [savedEntry] });
-assert.equal(collectMcpSettings().MCP_SERVERS[0].browser_protocol, 'ouroboros_chrome');
-assert.deepEqual(collectMcpSettings().MCP_SERVERS[0].browser_skill_binding, savedEntry.browser_skill_binding);
-assert.match(host.innerHTML, /Ouroboros Chrome/);
-applyMcpSettings({ MCP_SERVERS: [{...savedEntry, browser_protocol: undefined}] });
-assert.equal(collectMcpSettings().MCP_SERVERS[0].browser_protocol, 'playwright');
+const HELD = { id: 'held', enabled: true, transport: 'stdio', command: 'node', args: ['server.mjs'],
+    task_session: true, browser_policy: true };
+const notice = () => (host.innerHTML.match(/Fields retained but not applied: ([^<]*)</) || [])[1] || '';
+applyMcpSettings({ MCP_SERVERS: [HELD] });
+assert.equal(notice(), '');
+assert.equal(validateMcpSettings().length, 0);
+transport.value = 'streamable_http'; handlers['transport:input']();
+assert.match(notice(), /task_session, browser_policy/);
+let errors = validateMcpSettings();
+assert.equal(errors.length, 1);
+assert.equal(errors[0].input, transport);
+assert.match(errors[0].message, /task_session and browser_policy apply only to/);
+transport.value = 'stdio'; handlers['transport:input']();  // a display or a passing switch clears nothing
+assert.deepEqual([collectMcpSettings().MCP_SERVERS[0].task_session, collectMcpSettings().MCP_SERVERS[0].browser_policy], [true, true]);
+assert.equal(validateMcpSettings().length, 0);
+transport.value = 'sse'; handlers['transport:input']();
+url.value = 'https://example.test/mcp'; handlers['url:input']();
+assert.equal(validateMcpSettings().length, 1);
+handlers['clear:click']();
+const row = collectMcpSettings().MCP_SERVERS[0];
+assert.ok(!Object.hasOwn(row, 'task_session') && !Object.hasOwn(row, 'browser_policy'), JSON.stringify(row));
+assert.equal(row.transport, 'sse');
+assert.equal(validateMcpSettings().length, 0);
+assert.equal(notice(), '');
+assert.ok(!host.innerHTML.includes('data-mcp-lifetime'));
+applyMcpSettings({ MCP_SERVERS: [HELD, { ...HELD, id: 'policy-off', browser_policy: false }] });
+assert.equal((host.innerHTML.match(/data-mcp-lifetime/g) || []).length, 2);  // a held stdio card says what it does
+assert.equal((host.innerHTML.match(/browser_policy:/g) || []).length, 1);
+for (const off of [false, 'false', '', 0, null]) {  // false/false on a remote server equals omission
+    applyMcpSettings({ MCP_SERVERS: [{ id: 'remote', enabled: true, transport: 'streamable_http',
+        url: 'https://example.test/mcp', task_session: off, browser_policy: off }] });
+    assert.equal(notice(), '', String(off));
+    assert.equal(validateMcpSettings().length, 0, String(off));
+    assert.equal(collectMcpSettings().MCP_SERVERS[0].task_session, off);
+}
+applyMcpSettings({ MCP_SERVERS: [{ id: 'remote', transport: 'sse', url: 'https://example.test/mcp', task_session: 'true' }] });
+assert.match(notice(), /task_session/);  // the loader reads 'true' as on
+assert.equal(validateMcpSettings().length, 1);
+const snaps = [];
+const snap = (label) => snaps.push({ label, refused: validateMcpSettings().map((error) => error.message),
+    server: collectMcpSettings().MCP_SERVERS[0] });
+applyMcpSettings({ MCP_SERVERS: [HELD] });  // the rendered run: stdio → HTTP with a URL, refused, back to stdio
+transport.value = 'streamable_http'; handlers['transport:input']();
+url.value = 'http://127.0.0.1:9/mcp'; handlers['url:input']();
+snap('http-with-held-flags');
+transport.value = 'stdio'; handlers['transport:input']();
+assert.equal(notice(), 'url');
+errors = validateMcpSettings();
+assert.equal(errors.length, 1);
+assert.equal(errors[0].input, transport);
+assert.match(errors[0].message, /^url is not used by Local process \(stdio\) servers, so the server would not load with it\. /);
+assert.equal(collectMcpSettings().MCP_SERVERS[0].url, 'http://127.0.0.1:9/mcp');  // refused, never dropped
+snap('back-on-stdio-with-url');
+handlers['clear:click']();  // only the URL goes: on stdio the held flags are applied fields
+const kept = collectMcpSettings().MCP_SERVERS[0];
+assert.deepEqual([kept.transport, kept.url, kept.task_session, kept.browser_policy], ['stdio', '', true, true]);
+assert.equal(validateMcpSettings().length, 0);
+snap('back-on-stdio-url-removed');
+applyMcpSettings({ MCP_SERVERS: [{ ...HELD, future_field: { retained: true } }] });
+assert.equal(notice(), 'future_field');  // shown as before; the loader keeps it with a warning
+assert.equal(validateMcpSettings().length, 0);
+snap('unknown-field-kept');
+console.log(JSON.stringify(snaps));
 '''
-    result = subprocess.run([_node_bin(), '--input-type=module', '-e', script], cwd=REPO_ROOT,
+    result = subprocess.run([_node_bin(), "--input-type=module", "-e", script], cwd=REPO_ROOT,
                             capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
+    from ouroboros import mcp_client
+
+    loaded = {}
+    for snap in json.loads(result.stdout.strip().splitlines()[-1]):  # what the real writer would send, as loaded
+        errors = []
+        loaded[snap["label"]] = (mcp_client.normalize_server_config(snap["server"], errors=errors), errors)
+        assert (loaded[snap["label"]][0] is None) == bool(snap["refused"]), (snap, errors)  # Save refuses the drops
+    assert list(loaded) == ["http-with-held-flags", "back-on-stdio-with-url", "back-on-stdio-url-removed",
+                            "unknown-field-kept"]
+    assert loaded["back-on-stdio-with-url"][1] == ["MCP_CONFIG_ERROR: fields unsupported by this transport: url"]
+    removed = loaded["back-on-stdio-url-removed"][0]
+    assert (removed.transport, removed.task_session, removed.browser_policy) == ("stdio", True, True)
+    assert loaded["unknown-field-kept"][0].configuration_warnings  # kept with the loader's warning, never refused
 
 
 def test_mcp_test_button_preserves_saved_url_only_credentials():
@@ -291,6 +357,37 @@ assert.deepEqual(out[3].headers, entries[3].headers);
 assert.deepEqual(out[3].future_field, entries[3].future_field);
 assert.match(host.innerHTML, /malformed and retained unchanged/);
 assert.match(host.innerHTML, /Saved headers are malformed/);
+'''
+    result = subprocess.run([_node_bin(), '--input-type=module', '-e', script], cwd=REPO_ROOT,
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
+def test_mcp_cards_show_the_schema_pin_and_what_each_server_costs_a_request():
+    """#2332: the owner sees each server's weight and pins its call schemas from task start."""
+    script = r'''
+import assert from 'node:assert/strict';
+import { applyMcpSettings, collectMcpSettings } from './web/modules/mcp_settings.js';
+const host = { innerHTML: '', querySelectorAll: () => [] };
+const status = { textContent: '', dataset: {} };
+globalThis.document = { getElementById: (id) => id === 'mcp-servers-list' ? host : id === 'mcp-global-status' ? status : null,
+    querySelector: () => null };
+globalThis.fetch = async () => ({ ok: true, json: async () => ({ enabled: true, sdk_available: true, servers: [
+    { id: 'gitlab', tool_count: 99, map_tokens: 2400, schema_tokens: 31000, schemas_at_start: false },
+    { id: 'slack', tool_count: 11, map_tokens: 120, schema_tokens: 4600, schemas_at_start: true }],
+    weights: { tools: 110, map_tokens: 2600, schema_tokens_from_task_start: 4600 } }) });
+const servers = [{ id: 'gitlab', url: 'https://g.test/mcp', enabled: true },
+                 { id: 'slack', url: 'https://s.test/mcp', enabled: true, schemas_at_start: 'true' }];
+applyMcpSettings({ MCP_ENABLED: true, MCP_SERVERS: servers });
+for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+applyMcpSettings({ MCP_ENABLED: true, MCP_SERVERS: servers });
+assert.match(host.innerHTML, /data-mcp-field="schemas_at_start"/);
+assert.match(host.innerHTML, /Connections map ≈2\.4k tokens in every Low\/Max request; call schemas ≈31\.0k tokens, loaded when Ouroboros takes up this server\./);
+assert.match(host.innerHTML, /call schemas ≈4\.6k tokens in every Low\/Max request from task start/);
+assert.match(status.textContent, /Connections map ≈2\.6k tokens in every Low\/Max request; call schemas from task start ≈4\.6k tokens\./);
+const saved = collectMcpSettings().MCP_SERVERS;
+assert.equal(saved[0].schemas_at_start, false);
+assert.equal(saved[1].schemas_at_start, true);
 '''
     result = subprocess.run([_node_bin(), '--input-type=module', '-e', script], cwd=REPO_ROOT,
                             capture_output=True, text=True, timeout=15)

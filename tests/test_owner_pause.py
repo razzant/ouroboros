@@ -214,16 +214,14 @@ def test_the_tree_turns_paused_only_when_no_member_runs_and_sent_work_settled(tm
     from ouroboros.gateway.state import _chat_activities_snapshot_safe
     phase = lambda: next(row["phase"] for row in _chat_activities_snapshot_safe(tmp_path)
                          if row["activity_id"] == "root-1")
-    assert phase() == "budget_pausing"
-    # Nothing runs any more, but the child's sent run still does: not a clean Paused.
+    assert phase() == "budget_paused"
+    # The actor is Paused; its child's unsettled run stays the second-line tail and the fence stays requested.
     assert owner_pause.read_fence(tmp_path, "root-1")["state"] == owner_pause.FENCE_REQUESTED
 
     # With every member parked, only the assignment tick's re-check can notice the
     # member's stopped run ending; it re-reads the stop the park issued, never a new one.
-    from supervisor import owner_pause_control
     from supervisor.owner_pause_control import settle_requested_owner_pauses
 
-    monkeypatch.setattr(owner_pause_control, "_LAST_SETTLE_CHECK", {})
     observed: list = []
 
     def custody(_root, task_id, *, runs, **kwargs):
@@ -232,12 +230,11 @@ def test_the_tree_turns_paused_only_when_no_member_runs_and_sent_work_settled(tm
 
     monkeypatch.setattr(budget_pause, "observe_task_runs",
                         lambda root, task_id, **kw: custody(root, task_id, runs=[{"run_id": "run-1"}], **kw))
-    assert settle_requested_owner_pauses(queue, now=100.0) == []
+    assert settle_requested_owner_pauses(queue) == []
     assert observed == [("child-run", budget_pause.STOP_POLICY_TASK_OWNED, True)]
     monkeypatch.setattr(budget_pause, "observe_task_runs",
                         lambda root, task_id, **kw: custody(root, task_id, runs=[], **kw))
-    assert settle_requested_owner_pauses(queue, now=101.0) == [], "throttled per root"
-    assert settle_requested_owner_pauses(queue, now=110.0) == ["root-1"]
+    assert settle_requested_owner_pauses(queue) == ["root-1"]
     assert budget_pause.budget_pause_row(tmp_path, "child-run")["settlement"] == owner_pause.SETTLEMENT_SETTLED
     assert owner_pause.read_fence(tmp_path, "root-1")["state"] == owner_pause.FENCE_PAUSED
     assert phase() == "budget_paused"
@@ -364,20 +361,84 @@ def test_the_wake_control_is_never_dialogue_and_wakes_a_warm_owner_wait(tmp_path
     assert classify_wake([{"kind": KIND_OWNER_PAUSE, "msg_id": "owner_pause:f"}], "q") == "control:owner_pause"
 
 
-def test_the_pause_endpoint_is_text_free_and_typed(tmp_path, monkeypatch):
+def test_a_fence_keeps_its_first_declared_author_and_a_press_that_declared_nobody_claims_none(tmp_path, monkeypatch):
+    from ouroboros.control_actor import mind_control, pause_author
+    from ouroboros.owner_pause import read_fence
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+    from supervisor.owner_pause_control import request_owner_pause
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    _live_tree(tmp_path, workers)
+    owner = {"actor": "owner", "text": "", "at": "2026-10-20T00:43:00+00:00"}
+    mind = {"actor": "ouroboros", "text": "Updating to the latest version", "at": "2026-10-20T00:44:00+00:00"}
+    assert request_owner_pause("root-1", request_id="bare")["ok"]
+    fence = read_fence(tmp_path, "root-1")
+    assert "by" not in fence and pause_author(fence)["actor"] == "", "an anonymous press names nobody"
+    # A later declared press on the same closed fence fills the author it lacked...
+    assert request_owner_pause("root-1", request_id="owner-press", by=owner)["duplicate"] is True
+    fence = read_fence(tmp_path, "root-1")
+    assert fence["by"] == owner and pause_author(fence) == owner
+    # ...and a declared author is never overwritten; every press keeps its own record.
+    assert request_owner_pause("root-1", request_id="mind-press", by=mind)["duplicate"] is True
+    fence = read_fence(tmp_path, "root-1")
+    assert pause_author(fence) == owner
+    assert fence["requests"]["mind-press"]["by"] == mind and fence["requests"]["owner-press"]["by"] == owner
+    assert "by" not in fence["requests"]["bare"]
+    # A fence an earlier body wrote for a mind keeps that mind as its author.
+    write_task_result(tmp_path, "solo", STATUS_RUNNING, chat_id=0)
+    workers.RUNNING["solo"] = {"task": {"id": "solo", "type": "task", "chat_id": 0, "root_task_id": "solo"},
+                               "worker_id": 2, "attempt": 1}
+    with mind_control("mind-root", "Freeing the worker for the update"):
+        assert request_owner_pause("solo", request_id="legacy-mind")["ok"]
+    assert request_owner_pause("solo", request_id="owner-later", by=owner)["ok"]
+    fence = read_fence(tmp_path, "solo")
+    assert fence["by"]["actor"] == "ouroboros" and pause_author(fence)["actor"] == "ouroboros"
+    assert pause_author(fence)["text"] == "Freeing the worker for the update"
+
+
+def test_the_pause_endpoint_is_typed_and_records_only_a_declared_author(tmp_path, monkeypatch):
     from starlette.applications import Starlette
     from starlette.routing import Route
     from starlette.testclient import TestClient
 
+    from ouroboros.control_actor import pause_author
     from ouroboros.gateway.task_pause import api_task_pause
+    from ouroboros.owner_pause import read_fence
 
     _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
     _live_tree(tmp_path, workers)
     client = TestClient(Starlette(routes=[Route("/api/tasks/{task_id}/pause", api_task_pause, methods=["POST"])]))
+    from typing import get_type_hints
+
+    from ouroboros.gateway import task_pause
+    from ouroboros.gateway.contracts import TaskPauseRequest
+    assert task_pause._FIELDS == set(get_type_hints(TaskPauseRequest)), "the published request is the door's body"
     assert client.post("/api/tasks/root-1/pause", json={"request_id": "r", "text": "x"}).status_code == 400
     assert client.post("/api/tasks/root-1/pause", json={}).status_code == 400
-    ok = client.post("/api/tasks/root-1/pause", json={"request_id": "r"})
+    refused = client.post("/api/tasks/root-1/pause", json={"request_id": "r", "actor": "owner", "reason": 5})
+    assert refused.status_code == 400 and refused.json()["reason_code"] == "pause_reason_invalid"
+    assert read_fence(tmp_path, "root-1") == {}, "a refused body wrote nothing"
+    # An actor the core does not know is no declaration, not an error.
+    ok = client.post("/api/tasks/root-1/pause", json={"request_id": "r", "actor": "app", "reason": "mine"})
     assert ok.status_code == 200 and ok.json()["state"] == "requested"
+    fence = read_fence(tmp_path, "root-1")
+    assert "by" not in fence and pause_author(fence)["actor"] == ""
+    declared = client.post("/api/tasks/root-1/pause", json={"request_id": "r2", "actor": "owner"})
+    assert declared.status_code == 200 and declared.json()["duplicate"] is True
+    by = read_fence(tmp_path, "root-1")["by"]
+    assert by["actor"] == "owner" and by["text"] == "" and by["at"]
+    said = client.post("/api/tasks/root-1/pause",
+                       json={"request_id": "r3", "actor": "ouroboros", "reason": "  Updating everything.  "})
+    assert said.status_code == 200
+    fence = read_fence(tmp_path, "root-1")
+    assert fence["requests"]["r3"]["by"]["text"] == "Updating everything." and fence["by"] == by
+    # A long sentence is still the declaration, kept whole: the door pauses, it never judges the words.
+    long = client.post("/api/tasks/root-1/pause", json={"request_id": "r4", "actor": "ouroboros", "reason": "w " * 400})
+    assert long.status_code == 200 and read_fence(tmp_path, "root-1")["requests"]["r4"]["by"]["text"] == ("w " * 400).strip()
+    # A retry of the same press is the same Pause; its declaration is not re-read.
+    again = client.post("/api/tasks/root-1/pause", json={"request_id": "r2", "actor": "ouroboros", "reason": "no"})
+    assert again.status_code == 200 and again.json()["duplicate"] is True
+    assert read_fence(tmp_path, "root-1")["requests"]["r2"]["by"]["actor"] == "owner"
     child = client.post("/api/tasks/child-run/pause", json={"request_id": "r"})
     assert child.status_code == 409 and child.json()["reason_code"] == "not_a_root_task"
     assert client.post("/api/tasks/ghost/pause", json={"request_id": "r"}).status_code == 404
@@ -397,7 +458,6 @@ def test_a_direct_roots_warm_park_settles_when_its_requested_stop_ends_and_resum
     from ouroboros.gateways import claudexor as gw
     from ouroboros.model_wait import TaskModelWait
     from ouroboros.task_results import STATUS_RUNNING, load_task_result, write_task_result
-    from supervisor import owner_pause_control
     from supervisor.budget_resume import resume_warm_owner_pause_root
     from supervisor.owner_pause_control import (
         refresh_owner_pause_tree,
@@ -458,8 +518,7 @@ def test_a_direct_roots_warm_park_settles_when_its_requested_stop_ends_and_resum
         assert resume_warm_owner_pause_root("author")["error"] == "owner_pause_effects_unsettled"
 
         remote["state"] = "cancelled"  # the run obeys the requested stop later
-        monkeypatch.setattr(owner_pause_control, "_LAST_SETTLE_CHECK", {})
-        assert settle_requested_owner_pauses(queue, now=100.0) == ["author"]
+        assert settle_requested_owner_pauses(queue) == ["author"]
         assert remote["cancels"] == ["run-own"], "the issued stop is re-read, never repeated"
         wait = load_task_result(tmp_path, "author")["owner_wait"]
         assert [run["state"] for run in wait["owner_pause"]["external_runs"]["runs"]] == [EXTERNAL_STOP_CONFIRMED]

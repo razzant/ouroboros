@@ -11,9 +11,35 @@ from ouroboros import cancel_intents, model_wait, owner_mailbox, server_restart
 from supervisor import active_activity, workers
 from supervisor.task_model_wait import handle_task_model_wait
 from tests.test_model_wait import _action_for, _decision_clients
-from tests.test_post_task_model_wait import phase as post_phase_fixture, until
+from tests.test_native_conversation_activity import _next_native_phase
+from tests.test_post_task_model_wait import phase as post_phase_fixture
 
 phase = post_phase_fixture
+
+
+def _native_chat_thread(monkeypatch, actor, chat_id, phases, *, root, events, project_id, text="ordinary conversation"):
+    """The owner's turn through the real door (a lane RUNNING row, the ready spare's queue), carried by the
+    real worker body with ``actor`` on a thread; phases and errors travel by the queue, never by timing."""
+    from supervisor import worker_chat_lane
+    from tests.conversation_carrier_support import carry, isolate_lane_pool
+
+    [spare] = isolate_lane_pool(monkeypatch, root, event_q=events)
+    assert workers.open_repo_writer_admission()
+    worker_chat_lane.handle_chat_direct(chat_id, text, task_metadata={"project_id": project_id, "origin_suppressed": True})
+    [task_id] = [tid for tid, meta in workers.RUNNING.items() if meta.get("lane") == "conversation"]
+    assert spare.busy_task_id == task_id
+
+    def run():
+        try:
+            carry(workers, spare, actor)
+        except BaseException as error:
+            phases.put(error)
+        finally:
+            phases.put("returned")
+
+    thread = threading.Thread(target=run)
+    thread.spare, thread.task_id = spare, task_id
+    return thread
 
 
 def test_native_wait_controls_and_manual_restart_address_all_registered_actors(tmp_path, monkeypatch):
@@ -28,6 +54,7 @@ def test_native_wait_controls_and_manual_restart_address_all_registered_actors(t
     monkeypatch.setattr(task_queue, "PENDING", [])
     monkeypatch.setattr(delegate_custody, "reconcile_orphaned_runs", lambda *a, **kw: [])
     monkeypatch.setattr(server_restart, "_stop_owned_daemon", lambda *a: None)
+    monkeypatch.setattr(server_restart, "_OWNER_STOP_BEGAN", threading.Event())  # this Restart's own fact
     monkeypatch.setattr(server_restart, "_managed_update_pending_kwargs", lambda: {})
     events, published, cancelled = queue.Queue(), [], []
     context = SimpleNamespace(
@@ -72,6 +99,9 @@ def test_native_wait_controls_and_manual_restart_address_all_registered_actors(t
             assert not owner_mailbox._mailbox_path(tmp_path, "native-main").exists()
             # Reuse the new manual Restart owner, without touching a real
             # process or daemon. Each actual controller sees its own Stop.
+            from ouroboros.delegate_recovery import prepare_owner_restart
+            transaction = prepare_owner_restart(tmp_path)
+            monkeypatch.setattr(server_restart, "_LAST_RETURN_TX", {"id": transaction["transaction_id"]})
             server_restart._stop_owned_work(context)
             assert len(cancelled) == 1 and cancelled[0]["reconcile_delegate_custody"] is False
             assert all(cancel_intents.cancel_pending(tmp_path, owner.task_id) for owner in controllers)
@@ -102,6 +132,7 @@ def test_native_post_task_wait_remains_addressable_after_dialogue_closes(phase, 
     monkeypatch.setattr(task_queue, "RUNNING", {})
     monkeypatch.setattr(task_queue, "PENDING", [])
     observed = {}
+    phases = queue.Queue()
 
     class Actor:
         def handle_task(self, task):
@@ -118,27 +149,37 @@ def test_native_post_task_wait_remains_addressable_after_dialogue_closes(phase, 
             with model_wait.task_model_wait_scope(task=f.task, drive_root=f.root, event_queue=self._event_queue,
                                                   worker_slot_held=False) as owner:
                 observed["owner"] = owner
+                publish = owner._publish
+
+                def published(row, **kwargs):
+                    publish(row, **kwargs)
+                    if row["state"] == "waiting" and row.get("credential_harness") and not observed.get("published"):
+                        observed["published"] = True
+                        phases.put("model_wait")
+
+                monkeypatch.setattr(owner, "_publish", published)
                 pipeline._dispatch_root_post_task(f.env, f.task, "Already answered", self._event_queue, pending,
                     {"rounds": 3}, {}, f.root / "logs", budget_drive_root="", split_drive=False,
                     project_scoped=bool(project_id), project_task=False, parent_env=None, parent_task=None)
             return pending
 
     actor = Actor()
-    thread = threading.Thread(target=workers._run_chat_task, args=(actor, 7 if project_id else 1, "Already answered"), kwargs={
-        "task_metadata": {"project_id": project_id, "origin_suppressed": True},
-    })
+    thread = _native_chat_thread(monkeypatch, actor, 7 if project_id else 1, phases, root=f.root, events=f.events,
+                                 project_id=project_id, text="Already answered")
     release_stop, stop_observed = threading.Event(), threading.Event()
-    thread.start()
     try:
-        until(lambda: "owner" in observed and any(row.get("credential_harness") for row in observed["owner"].waits.values()))
+        thread.start()
+        _next_native_phase(phases, "model_wait")
         owner, task_id = observed["owner"], f.task["id"]
         row = next(row for row in owner.waits.values() if row["state"] == "waiting")
         assert workers.direct_chat_turn(task_id) is None  # ordinary dialogue remains closed
-        assert active_activity.get_direct_activity_registry().get(task_id).actor is actor
+        # The lane row is the turn's custody (its carrier holds the slot); no in-process actor is registered.
+        assert active_activity.get_direct_activity_registry().get(task_id) is None
+        assert workers.RUNNING[task_id]["worker_id"] == thread.spare.wid and thread.spare.busy_task_id == task_id
         assert post_task_model_wait(f.root, task_id) is owner
-        assert workers.drain_repo_writers(0) == [task_id]
+        assert workers.drain_repo_writers(0) == []  # the row is the pool's to stop, not a writer of this process
         activity = next(item for item in _chat_activities_snapshot_safe(f.root) if item["activity_id"] == task_id)
-        assert activity["kind"] == "direct_chat" and activity["phase"] == "finalizing"
+        assert activity["kind"] == "direct_chat"
         assert activity["model_waits"][row["wait_id"]]["state"] == "waiting"
         assert not row["worker_slot_held"]
         events = list(f.events.queue)
@@ -156,9 +197,10 @@ def test_native_post_task_wait_remains_addressable_after_dialogue_closes(phase, 
 
                 def hold_observed_stop():
                     reason = real_control_reason()
-                    if reason == "cancelled":
+                    if reason == "cancelled" and not stop_observed.is_set():
                         stop_observed.set()
-                        assert release_stop.wait(5), "test did not release the observed Stop"
+                        phases.put("stop_observed")
+                        release_stop.wait()  # Hold custody until the HTTP response was inspected.
                     return reason
 
                 # Keep paid post-task custody alive until HTTP reports its
@@ -175,10 +217,12 @@ def test_native_post_task_wait_remains_addressable_after_dialogue_closes(phase, 
                     assert intent["request_id"] and intent["state"] == "requested"
                     assert intent["source"] == "http_single"
                     assert not intent.get("already_settled")
-                    assert f.done.wait(5)
                     # A finished post phase is the returned turn: close() flips `closed` BEFORE
                     # it retires its consumer in this task result, a write custody must not straddle.
-                    thread.join(5)
+                    _next_native_phase(phases, "returned")
+                    observed["returned"] = True
+                    thread.join()
+                    assert f.done.is_set()
                     assert not thread.is_alive() and owner.closed and post_task_model_wait(f.root, task_id) is None
                     assert row["resolution"] == "cancelled"
                     observed["accepted_stop"] = intent["request_id"]
@@ -191,7 +235,7 @@ def test_native_post_task_wait_remains_addressable_after_dialogue_closes(phase, 
                 response = client.post(f"/api/tasks/{task_id}/cancel", json={"stop_policy": "immediate"})
                 assert response.status_code == (202 if action == "stop" else 404), response.json()
             if action == "stop":
-                assert stop_observed.wait(5)
+                _next_native_phase(phases, "stop_observed")
                 assert post_task_model_wait(f.root, task_id) is owner and not owner.closed
                 intent = cancel_intents.active_intent(f.root, task_id)
                 assert intent["source"] == "http_single" and intent["state"] == "requested"
@@ -200,7 +244,9 @@ def test_native_post_task_wait_remains_addressable_after_dialogue_closes(phase, 
             else:
                 assert observed["accepted_stop"]
                 assert not cancel_intents.active_intent(f.root, task_id)
-        thread.join(5)
+        if not observed.get("returned"):
+            _next_native_phase(phases, "returned")
+        thread.join()
         assert not thread.is_alive() and owner.closed
         stored = load_task_result(f.root, task_id)
         assert stored["status"] == "completed" and stored["result"] == "Already answered"
@@ -210,12 +256,12 @@ def test_native_post_task_wait_remains_addressable_after_dialogue_closes(phase, 
             assert f.engine.uploads[-1][0]["account"] == {"mode": "pin", "profileId": "replacement"}
         else:
             assert row["resolution"] == "cancelled"
-            assert f.stages == ["facts", "scratch", "promotion"]
+            assert f.stages == ["facts", "draft", "promotion"]
         assert workers.drain_repo_writers(0) == []
         assert post_task_model_wait(f.root, task_id) is None
     finally:
         release_stop.set()
         f.task["_skip_post_task_synthesis"] = True
         f.ready.set()
-        thread.join(5)
+        thread.join(5)  # Teardown guard only; phase ordering above has no wall-clock oracle.
         assert not thread.is_alive()

@@ -37,6 +37,7 @@ SECTION = "## Preflight test execution (host fact)"
 def gate_env(monkeypatch, receipt_python):
     monkeypatch.setenv("OUROBOROS_PRE_PUSH_TESTS", "1")
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "2")
+    monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "3")  # nested slots: receipts need two real workers; the workers case asks for three
     monkeypatch.setenv("OUROBOROS_AGENT_PYTHON", receipt_python)
     for key in ("OUROBOROS_PREFLIGHT_SERIAL", "OUROBOROS_PREFLIGHT_TIMEOUT_SEC"):
         monkeypatch.delenv(key, raising=False)
@@ -252,7 +253,7 @@ def test_a_new_process_reuses_a_complete_run_through_the_canonical_root_and_star
     [path] = _receipt_files(canonical)
     record = json.loads(path.read_text(encoding="utf-8"))
     assert path.stem == first["receipt"]["key"]
-    assert record["lanes"] == {"node": "passed", "parallel_workers": 2, "serial": "passed"}
+    assert record["lanes"] == {"node": "passed", "parallel_workers": 2, "admitted_workers": 2, "serial": "passed"}
     assert (record["authenticity"], record["task_id"], record["phase"]) == ("unsigned", "task-a", pr.PRE_COMMIT_PHASE)
 
     # Another life: another cwd, task drive, phase, launch descriptors and containment
@@ -596,7 +597,9 @@ def _fake_node(directory) -> str:
     return str(node)
 
 
-@pytest.mark.parametrize("change", ["head", "tree", "index", "env", "workers", "timeout", "node", "launch_only"])
+@pytest.mark.parametrize("change", ["head", "tree", "index", "env", "workers", "timeout", "node",
+    "launch_only", "launch_only_windows", "evidence_only",
+    pytest.param("temp_only", marks=pytest.mark.skipif(sys.platform != "darwin", reason="macOS short temp parent"))])
 def test_each_bound_input_misses_while_launch_descriptors_and_containment_do_not(tmp_path, monkeypatch,
                                                                                 stubbed_lanes, change):
     receipts.capture_executing_source_baseline()
@@ -626,13 +629,26 @@ def test_each_bound_input_misses_while_launch_descriptors_and_containment_do_not
         node_b.parent.mkdir()
         shutil.copy2(node_a, node_b)
         monkeypatch.setattr("ouroboros.preflight_node.resolve_node", lambda: str(node_b))
+    elif change == "evidence_only":  # where a run writes is not what it tests
+        monkeypatch.setenv("OUROBOROS_UI_EVIDENCE_DIR", str(tmp_path / "other-ui-evidence"))
+        from ouroboros.test_evidence import diagnostic_directory  # another destination, outside scratch
+        monkeypatch.setenv("OUROBOROS_TEST_EVIDENCE_ROOT", str(diagnostic_directory(tmp_path / "other", "receipt-identity")))
+    elif change == "temp_only":
+        import tempfile
+
+        ambient = tmp_path / ("another-long-temp-" * 8)
+        ambient.mkdir()
+        for key in ("TMPDIR", "TEMP", "TMP"):
+            monkeypatch.setenv(key, str(ambient))
+        monkeypatch.setattr(tempfile, "tempdir", str(ambient))
     else:
         for key, value in _launch_env("another-launch").items():
-            monkeypatch.setenv(key, value)
+            # Windows imports environment names in uppercase, including mixed-case launchd keys.
+            monkeypatch.setenv(key.upper() if change == "launch_only_windows" else key, value)
     ctx = _ctx(repo, canonical, "second")
     assert pr.run_hermetic_pytest(repo, ctx=ctx) is None
     status = ctx._preflight_test_disclosure["receipt"]["status"]
-    if change == "launch_only":
+    if change in {"launch_only", "launch_only_windows", "temp_only", "evidence_only"}:
         assert (status, len(stubbed_lanes), len(_receipt_files(canonical))) == ("reused", ran, 1)
     else:
         assert (status, len(_receipt_files(canonical))) == ("published", 2) and len(stubbed_lanes) > ran
@@ -660,8 +676,12 @@ def test_only_a_complete_default_run_with_a_root_and_a_baseline_becomes_durable(
     assert receipt["status"] == "declined" and expected in receipt["reason"]
     assert _receipt_files(canonical) == []
     # Reviewers read the run's own lanes whatever durability declined; a focused argv
-    # proves nothing about the candidate's default gate, so it shows no green at all.
+    # proves nothing about the candidate's default gate, so it shows no green status: its
+    # run stays an observation of the same bytes under another workload, never proof.
     exhibit = receipts.execution_exhibit(ctx)
+    if case == "focused_args":
+        [run] = exhibit.pop("observed")
+        assert (run["outcome"], run["relation"], run["differs"]) == ("passed", "same_bytes", ["workload"])
     assert exhibit.get("lanes", exhibit) == {
         "serial_escape": ["single"], "no_root": ["parallel", "serial"], "no_baseline": ["parallel", "serial"],
         "focused_args": {"status": "not_run", "reason": "the green run's proof does not cover this candidate"}}[case]
@@ -669,6 +689,9 @@ def test_only_a_complete_default_run_with_a_root_and_a_baseline_becomes_durable(
 
 @pytest.mark.parametrize("outcome", ["red", "timeout", "containment", "workers_lost", "parallel_empty"])
 def test_a_red_hung_leaking_or_partial_run_never_mints(tmp_path, monkeypatch, outcome):
+    from tests._shared import retire_synthetic_gate_hold
+    from tests.test_preflight_runner import _pin_preflight_root
+
     receipts.capture_executing_source_baseline()
     repo = _tiny_repo(tmp_path)
     canonical = tmp_path / "canonical"
@@ -679,14 +702,21 @@ def test_a_red_hung_leaking_or_partial_run_never_mints(tmp_path, monkeypatch, ou
         "parallel" if "-n" in args else "serial", (0, "green", "")))
     monkeypatch.setattr(pr, "_observed_worker_ids", lambda *_a: {"gw0"} if outcome == "workers_lost" else {"gw0", "gw1"})
     ctx = _ctx(repo, canonical)
-    error = pr.run_hermetic_pytest(repo, ctx=ctx)
-    assert _receipt_files(canonical) == []
-    if outcome == "parallel_empty":  # a green gate whose parallel lane proved no concurrency
-        assert error is None and ctx._preflight_test_proof
-        receipt = ctx._preflight_test_disclosure["receipt"]
-        assert (receipt["status"], receipt["reason"]) == ("declined", "the parallel pass collected no tests")
-    else:
-        assert error and not getattr(ctx, "_preflight_test_proof", None)
+    temp_root = (tmp_path / "preflight-root").resolve()
+    temp_root.mkdir()
+    _pin_preflight_root(monkeypatch, temp_root)
+    try:
+        error = pr.run_hermetic_pytest(repo, ctx=ctx)
+        assert _receipt_files(canonical) == []
+        if outcome == "parallel_empty":  # a green gate whose parallel lane proved no concurrency
+            assert error is None and ctx._preflight_test_proof
+            receipt = ctx._preflight_test_disclosure["receipt"]
+            assert (receipt["status"], receipt["reason"]) == ("declined", "the parallel pass collected no tests")
+        else:
+            assert error and not getattr(ctx, "_preflight_test_proof", None)
+        assert temp_root.exists() is (outcome == "containment")
+    finally:
+        retire_synthetic_gate_hold(repo, temp_root, "pid 4242 is still alive")  # the stubbed lane proved no process
 
 
 def _replace(doc: dict, **changes) -> str:
@@ -706,6 +736,9 @@ _UNUSABLE = {
                            "the node lane does not match the recipe this candidate requires"),
     "one_worker": (True, lambda text, doc: _replace(doc, lanes={**doc["lanes"], "parallel_workers": 1}),
                    "the parallel/serial lane evidence is incomplete"),
+    "no_admitted_worker": (True, lambda text, doc: _replace(doc, lanes={**doc["lanes"], "parallel_workers": 1,
+                                                                        "admitted_workers": 0}),
+                           "the parallel/serial lane evidence is incomplete"),
     "serial_missing": (True, lambda text, doc: _replace(doc, pass_seconds={"parallel": 1.0}),
                        "the executed passes are not the parallel and serial lanes"),
     "no_origin_time": (True, lambda text, doc: json.dumps({k: v for k, v in doc.items() if k != "created_at"}),
@@ -775,8 +808,14 @@ def test_the_exhibit_never_claims_a_run_for_a_candidate_edited_after_it(tmp_path
     assert pr.run_hermetic_pytest(repo, ctx=ctx) is None
     assert receipts.execution_exhibit(ctx)["status"] == "passed"
     (repo / "tests" / "test_parallel.py").write_text("def test_one():\n    assert False\n", encoding="utf-8")
-    assert receipts.execution_exhibit(ctx) == {
-        "status": "not_run", "reason": "the green run's proof does not cover this candidate"}
+    exhibit = receipts.execution_exhibit(ctx)
+    [run] = exhibit.pop("observed")
+    assert exhibit == {"status": "not_run", "reason": "the green run's proof does not cover this candidate"}
+    # The green run stays visible as what it was: a pass of the earlier bytes, not of these.
+    assert (run["outcome"], run["relation"], run["differs"]) == ("passed", "other_bytes", ["tree"])
+    section = receipts.execution_section({**exhibit, "observed": [run]})
+    assert "gate passed" not in section and "PASSED, on OTHER bytes (differs: tree)" in section
+    assert "Not proof here" in section
 
 
 @pytest.mark.parametrize("empty,baseline", [(None, True), ("parallel", True), ("serial", True), ("parallel", False)])

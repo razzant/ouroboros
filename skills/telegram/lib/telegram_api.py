@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import html as html_lib
 import mimetypes
+import os
+import pathlib
 import re
+import stat
 from typing import Any, BinaryIO, Dict, Optional
 
 import httpx
 
-from ..scripts.telegram_settings import validate_telegram_proxy as _telegram_proxy
+from ..scripts.telegram_settings import (
+    validate_telegram_api_base as _telegram_api_base,
+    validate_telegram_files_dir as _telegram_files_dir,
+    validate_telegram_proxy as _telegram_proxy,
+)
 from .telegram_i18n import Index
 
 # Telegram hard-caps a single sendMessage at 4096 UTF-16 code units.
@@ -25,7 +33,7 @@ _NOT_MODIFIED_PREFIX = "bad request: message is not modified"
 
 def _u16len(value: str) -> int:
     """Return Telegram's text length: UTF-16 code units, not code points."""
-    return sum(2 if ord(char) > 0xFFFF else 1 for char in value)
+    return len(value.encode("utf-16-le", "surrogatepass")) // 2
 
 
 def _take_u16_prefix(value: str, budget: int) -> tuple[str, str]:
@@ -563,22 +571,43 @@ def _telegram_html_to_plain(value: str) -> str:
     return html_lib.unescape(re.sub(r"<[^>]+>", "", value))
 
 
+def message_chunks(text: str, parse_mode: str = "HTML") -> list[str]:
+    """The Telegram messages ``send_message`` sends for ``text``, blank parts dropped."""
+    source = str(text or "")
+    if parse_mode != "HTML":
+        return [chunk for chunk in _chunk_raw_text(source) if chunk.strip()]
+    return [chunk for chunk in markdown_to_telegram_chunks(source) if _telegram_html_to_plain(chunk).strip()]
+
+
 class TelegramClient:
-    def __init__(self, token: str, *, trust_env: bool = False, proxy: Optional[str] = None):
+    def __init__(self, token: str, *, trust_env: bool = False, proxy: Optional[str] = None,
+                 on_message=None, reply_to_message_id: int = 0,
+                 api_base_url: Optional[str] = None, files_dir: Optional[str] = None):
         self.token = str(token or "").strip()
         self.trust_env = bool(trust_env)
+        # One observer per mirrored host row, called for EVERY confirmed part,
+        # including media and edits. A later chunk failure cannot erase earlier ids.
+        self.on_message = on_message
+        self.reply_to_message_id = int(reply_to_message_id)
         if not self.token:
             raise ValueError("TELEGRAM_BOT_TOKEN is missing")
-        # An explicit proxy replaces ambient proxies for these calls only. The target stays
-        # https://api.telegram.org, so TLS runs end to end through the tunnel: the proxy
-        # sees the host, never the token-bearing path, and redirects are never followed.
+        # An explicit proxy replaces ambient proxies for these calls only. With the default
+        # base the target stays https://api.telegram.org, so TLS runs end to end through the
+        # tunnel: the proxy sees the host, never the token-bearing path, and redirects are
+        # never followed. A TELEGRAM_API_BASE origin serves the same Bot API from the owner's
+        # server with that origin's own transport security; files_dir is a --local store.
         self.proxy = _telegram_proxy(proxy)
-        self.api_base = f"https://api.telegram.org/bot{self.token}"
-        self.file_base = f"https://api.telegram.org/file/bot{self.token}"
+        base = _telegram_api_base(api_base_url)
+        self.api_base = f"{base}/bot{self.token}"
+        self.file_base = f"{base}/file/bot{self.token}"
+        self.files_dir = _telegram_files_dir(files_dir)
 
     async def call(self, method: str, *, data: Optional[dict] = None, files: Optional[dict] = None, timeout: int = 30) -> Dict[str, Any]:
         method_text = str(method or "")
         safe_method = method_text if re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,63}", method_text) else "request"
+        if self.reply_to_message_id and method_text in {"sendMessage", "sendPhoto", "sendVideo", "sendDocument", "sendAudio"}:
+            data = {**(data or {}), "reply_to_message_id": self.reply_to_message_id,
+                    "allow_sending_without_reply": True}
         try:
             # trust_env trades ambient-proxy/SSL_CERT isolation for a proxy-routed install's
             # only egress; decided once by the caller via net_transport.env_proxies_configured.
@@ -608,6 +637,7 @@ class TelegramClient:
             api_status = response.status_code
         description = str(payload.get("description") or "").strip()
         if safe_method == "editMessageText" and description.casefold().startswith(_NOT_MODIFIED_PREFIX):
+            self._observe_message(data, data)
             # Preserve the one benign signal callers rely on without forwarding
             # Telegram's free-form suffix (which may echo the token-bearing URL).
             raise TelegramRequestRejected(
@@ -626,7 +656,17 @@ class TelegramClient:
                 status_code=api_status,
                 plain_retry_safe=(safe_method == "sendMessage" and api_status == 400),
             )
+        self._observe_message(data, payload.get("result"))
         return payload
+
+    def _observe_message(self, data, result) -> None:
+        """Only a returned Message (or an unchanged edit) proves its Telegram id."""
+        if self.on_message is None or not isinstance(result, dict):
+            return
+        chat_id = (data or {}).get("chat_id")
+        message_id = result.get("message_id")
+        if chat_id is not None and message_id:
+            self.on_message(int(chat_id), int(message_id))
 
     async def _download_bytes(self, file_path: str) -> bytes:
         try:
@@ -653,34 +693,65 @@ class TelegramClient:
             raise RuntimeError(
                 f"Telegram file download transport failed ({type(exc).__name__})."
             ) from None
+        except RuntimeError as exc:
+            if not self.files_dir:
+                raise
+            # Off the shared event loop: the store may be a slow or network disk.
+            content = await asyncio.to_thread(self._read_file_from_disk, file_path, exc)
         return bytes(content)
+
+    def _read_file_from_disk(self, file_path: str, cause: Exception) -> bytes:
+        """Read a file of a --local server from its store (tdlib/telegram-bot-api#26).
+
+        Absolute paths are taken as the server names them, others are joined under the
+        store. Lexical confinement runs first, a pure comparison, so a UNC path is refused
+        before resolve() could touch an unrelated share; either spelling of the store passes
+        (it may be a symlinked one, as /tmp on macOS). The resolved path must stay inside the
+        resolved store and is the one opened, without following a final symlink; the type
+        comes from the open file, and at most the cap plus one byte is read.
+        """
+        configured = pathlib.Path(self.files_dir)
+        store = configured.resolve()
+        raw = pathlib.Path(str(file_path or ""))
+        candidate = raw if raw.is_absolute() else store / raw
+        if not (candidate.is_relative_to(configured) or candidate.is_relative_to(store)):
+            raise cause from None
+        resolved = candidate.resolve()
+        if not resolved.is_relative_to(store):
+            raise cause from None
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+        try:
+            handle = os.fdopen(os.open(resolved, flags), "rb")
+        except OSError:
+            raise cause from None
+        with handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise cause from None
+            data = handle.read(_MAX_TELEGRAM_DOWNLOAD_BYTES + 1)
+        if len(data) > _MAX_TELEGRAM_DOWNLOAD_BYTES:
+            raise RuntimeError("Telegram file exceeds the 10 MiB download limit.") from cause
+        return data
 
     async def get_updates(self, offset: int) -> list[dict]:
         payload = await self.call("getUpdates", data={"timeout": 20, "offset": offset}, timeout=25)
         return list(payload.get("result") or [])
 
-    async def send_message(self, chat_id: int, text: str, parse_mode: str = "HTML") -> int:
+    async def send_message(self, chat_id: int, text: str, parse_mode: str = "HTML", *,
+                           disable_notification: bool = False) -> int:
         """Send a text message, chunking past Telegram's 4096-unit limit.
 
         Markdown is converted at block granularity before chunks are packed.
         Protected blocks stay whole unless one block exceeds Telegram's limit;
         oversized blocks are split with active HTML tags re-balanced.
         Returns the LAST chunk's message_id (0 on parse failure / empty input).
+        The optional on_message observer receives every confirmed chunk id.
+        ``disable_notification`` asks Telegram to deliver every part without sound:
+        the owner still gets a notification, a silent one.
         """
-        source = str(text or "")
-        chunks = (
-            markdown_to_telegram_chunks(source)
-            if parse_mode == "HTML"
-            else _chunk_raw_text(source)
-        )
+        muted = {"disable_notification": True} if disable_notification else {}
         last_message_id = 0
-        for formatted in chunks:
-            visible_text = (
-                _telegram_html_to_plain(formatted) if parse_mode == "HTML" else formatted
-            )
-            if not visible_text.strip():
-                continue
-            data = {"chat_id": str(chat_id), "text": formatted}
+        for formatted in message_chunks(text, parse_mode):
+            data = {"chat_id": str(chat_id), "text": formatted, **muted}
             if parse_mode:
                 data["parse_mode"] = parse_mode
             try:
@@ -690,7 +761,7 @@ class TelegramClient:
                     raise
                 payload = await self.call(
                     "sendMessage",
-                    data={"chat_id": str(chat_id), "text": _telegram_html_to_plain(formatted)},
+                    data={"chat_id": str(chat_id), "text": _telegram_html_to_plain(formatted), **muted},
                     timeout=20,
                 )
             try:
@@ -837,7 +908,7 @@ class TelegramClient:
 
 
 _MENU_TEXTS_EN = {
-    "menu_title_strict": "🤖 **Ouroboros Control Panel**\nStrict mode is active. Commands are blocked.\n\nSelect action:",
+    "menu_title_strict": "🤖 **Ouroboros Control Panel**\nStrict mode is active. Owner /panic remains available.\n\nSelect action:",
     "menu_title": "🤖 **Ouroboros Control Centre**\nCommand Mode: `{command_mode}`\nLanguage: `{language}`\n\nExplore and monitor the core using the buttons below:",
     "btn_metrics": "📉 Status & Metrics",
     "btn_mind": "🧠 Mind & BG",
@@ -871,9 +942,10 @@ _MENU_TEXTS_EN = {
         "• `/menu` — Show interactive control panel with active tabs\n"
         "• `/language` — Change the interface language of this installation\n"
         "• `/status` — Request live system status (if allowed)\n"
+        "• `/panic` — Emergency stop for the bound owner, in every mode\n"
         "• `/help` — Show this friendly usage guide\n\n"
         "Modes description (changed in Web UI → Settings → Telegram):\n"
-        "• **strict** — block all command injections (only `/menu`, `/help`, `/language`)\n"
+        "• **strict** — allow only `/menu`, `/help`, `/language` and owner `/panic`\n"
         "• **safe_commands** — allow status monitoring\n"
         "• **full_access** — allow status + background loop start/stop"
     ),
@@ -891,6 +963,9 @@ _MENU_TEXTS_EN = {
     "file_too_large_notice": "{filename} is saved in Ouroboros. This file exceeds the Telegram upload limit and cannot be mirrored here.",
     "file_open_app_hint": "Open the app to download it.",
     "attachments_not_attached": "Not attached to the task: {names}",
+    "routing_choose_target": "Choose a target for the last message:",
+    "routing_more_targets": "…and {count} more in the web chat.",
+    "routing_reply_with_number": "Reply with a number, or tap an option in the web chat.",
     "btn_open_app": "Open Ouroboros",
     "budget_unbounded": "unbounded",
     "bg_active_label": "ACTIVE",
@@ -899,8 +974,9 @@ _MENU_TEXTS_EN = {
     "settings_title": "⚙️ **Telegram Settings**\nConfigure the Telegram control panel and message display:",
     "btn_silent_on": "🔕 Silent Mode: ON",
     "btn_silent_off": "🔔 Silent Mode: OFF",
-    "silent_toggled_on": "🔕 Silent mode enabled — new thoughts will replace the last message",
-    "silent_toggled_off": "🔔 Silent mode disabled — each thought becomes a new message",
+    "quiet_toggled_on": "🔕 Silent mode on: replies and progress arrive without sound; questions, files "
+                        "and problems keep their sound.",
+    "quiet_toggled_off": "🔔 Silent mode off: replies arrive with their usual sound.",
     "cmd_menu": "Interactive panel",
     "cmd_language": "Interface language",
     "cmd_status": "Request status",
@@ -910,6 +986,8 @@ _MENU_TEXTS_EN = {
     "cmd_review": "Run a self-review",
     "cmd_restart": "Restart the agent",
     "cmd_panic": "Emergency stop",
+    "panic_earlier": "An earlier Panic message was not executed again. Its previous outcome is unknown.",
+    "panic_unconfirmed": "Panic was not confirmed and will not be retried. Check Ouroboros on the host computer.",
 }
 # Every line the bridge composes is English source here and translated by the install's
 # memory under the one interface language (lib/telegram_i18n.py); the skill ships no

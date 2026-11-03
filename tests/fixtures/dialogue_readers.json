@@ -1,0 +1,1083 @@
+{
+  "main": {
+    "messages": [
+      {
+        "text": "Начало",
+        "role": "user",
+        "ts": "2026-10-01T00:00:01Z",
+        "is_progress": false,
+        "system_type": "",
+        "markdown": false,
+        "source": "",
+        "sender_label": "",
+        "sender_session_id": "",
+        "client_message_id": "owner-first",
+        "task_id": "",
+        "history_id": "chat:0",
+        "history_position": {
+          "source": "chat",
+          "offset": 0
+        },
+        "row_address": "row:1@2026-10-01T00:00:01Z#7f6e6fde6789"
+      },
+      {
+        "text": "Archived answer",
+        "role": "assistant",
+        "ts": "2026-10-01T00:00:03Z",
+        "is_progress": false,
+        "system_type": "",
+        "markdown": false,
+        "source": "",
+        "sender_label": "",
+        "sender_session_id": "",
+        "client_message_id": "",
+        "task_id": "golden-task",
+        "history_id": "chat:220",
+        "history_position": {
+          "source": "chat",
+          "offset": 220
+        },
+        "row_address": "row:1@2026-10-01T00:00:03Z#7c749e59c2cc"
+      },
+      {
+        "text": "Archived progress",
+        "role": "assistant",
+        "system_type": "",
+        "ts": "2026-10-01T00:00:04Z",
+        "is_progress": true,
+        "markdown": false,
+        "task_id": "golden-task",
+        "history_id": "progress:0",
+        "history_position": {
+          "source": "progress",
+          "offset": 0
+        },
+        "task_terminal_status": "completed",
+        "row_address": "row:1@2026-10-01T00:00:04Z#deb3302caf66"
+      },
+      {
+        "text": "Current progress",
+        "role": "assistant",
+        "system_type": "",
+        "ts": "2026-10-01T00:00:06Z",
+        "is_progress": true,
+        "markdown": false,
+        "task_id": "golden-task",
+        "history_id": "progress:103",
+        "history_position": {
+          "source": "progress",
+          "offset": 103
+        },
+        "tool_evidence": {
+          "observations": [],
+          "legacy": {
+            "calls": 0,
+            "errors": 0,
+            "wait_ended": false,
+            "unknown": false
+          },
+          "coverage": {
+            "task_id": "golden-task",
+            "source": "logs/tools.jsonl",
+            "archives": 0,
+            "archive_sources": [],
+            "archives_available": 0,
+            "archives_bounded": false,
+            "matched": 0,
+            "gaps": [],
+            "live_size": 0,
+            "live_window": 0,
+            "shown": 0,
+            "unit": "calls",
+            "quota_met": false
+          }
+        },
+        "task_terminal_status": "completed",
+        "outcome_axes": {
+          "schema_version": 1,
+          "lifecycle": {
+            "status": "completed"
+          },
+          "execution": {
+            "status": "ok",
+            "reason_code": ""
+          },
+          "artifacts": {
+            "status": "not_applicable"
+          },
+          "objective": {
+            "status": "not_evaluated",
+            "source": "none"
+          },
+          "review": {
+            "status": "skipped",
+            "trigger": "not_evaluated"
+          }
+        },
+        "_is_direct_chat": false,
+        "outcome_phase": "done",
+        "outcome_final": true,
+        "continuation_offer": {
+          "eligible": false,
+          "cause": "finished",
+          "refusal": "author_finished"
+        },
+        "row_address": "row:1@2026-10-01T00:00:06Z#0568bae630f6"
+      },
+      {
+        "text": "Document",
+        "role": "assistant",
+        "ts": "2026-10-01T00:00:07Z",
+        "is_progress": false,
+        "system_type": "document",
+        "markdown": false,
+        "source": "",
+        "sender_label": "",
+        "sender_session_id": "",
+        "client_message_id": "",
+        "task_id": "golden-task",
+        "history_id": "chat:469",
+        "history_position": {
+          "source": "chat",
+          "offset": 469
+        },
+        "msg_type": "document",
+        "filename": "report.txt",
+        "mime": "application/octet-stream",
+        "download_url": "/api/tasks/golden-task/artifacts/report.txt",
+        "download_url_compat": "",
+        "caption": "",
+        "row_address": "row:1@2026-10-01T00:00:07Z#b33dae82086b"
+      },
+      {
+        "text": "Main newest",
+        "role": "assistant",
+        "ts": "2026-10-01T00:00:09Z",
+        "is_progress": false,
+        "system_type": "",
+        "markdown": false,
+        "source": "",
+        "sender_label": "",
+        "sender_session_id": "",
+        "client_message_id": "",
+        "task_id": "",
+        "history_id": "chat:784",
+        "history_position": {
+          "source": "chat",
+          "offset": 784
+        },
+        "row_address": "row:1@2026-10-01T00:00:09Z#df82c61d434f"
+      }
+    ],
+    "window": {
+      "complete": true,
+      "truncated_by": []
+    },
+    "coverage": {
+      "v": 1,
+      "view": "516d4922fa945bc0f11ad846d1282db6f9b7ceca802afcaf40ce3c731f81fd89",
+      "upper": {
+        "chat": 872,
+        "progress": 205
+      },
+      "spans": {
+        "chat": {
+          "from": 0,
+          "to": 872,
+          "chain": "<chain witness>",
+          "gaps": []
+        },
+        "progress": {
+          "from": 0,
+          "to": 205,
+          "chain": "<chain witness>",
+          "gaps": []
+        }
+      }
+    },
+    "has_more": false,
+    "next_cursor": null,
+    "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiNTE2ZDQ5MjJmYTk0NWJjMGYxMWFkODQ2ZDEyODJkYjZmOWI3Y2VjYTgwMmFmY2FmNDBjZTNjNzMxZjgxZmQ4OSIsInVwcGVyIjp7ImNoYXQiOjg3MiwicHJvZ3Jlc3MiOjIwNX0sInVuZmluaXNoZWQiOltdLCJxdW90YXMiOnsiaHVtYW4iOjE1MCwicHJvZ3Jlc3MiOjYwfSwia2luZCI6InBhZ2UiLCJiZWZvcmUiOnsiY2hhdCI6ODcyLCJwcm9ncmVzcyI6MjA1fSwicXVpZXQiOmZhbHNlLCJsb3dlciI6eyJjaGF0IjowLCJwcm9ncmVzcyI6MH0sInJlY2VudCI6dHJ1ZX0",
+    "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiNTE2ZDQ5MjJmYTk0NWJjMGYxMWFkODQ2ZDEyODJkYjZmOWI3Y2VjYTgwMmFmY2FmNDBjZTNjNzMxZjgxZmQ4OSIsInVwcGVyIjp7ImNoYXQiOjg3MiwicHJvZ3Jlc3MiOjIwNX0sInVuZmluaXNoZWQiOltdLCJxdW90YXMiOnsiaHVtYW4iOjE1MCwicHJvZ3Jlc3MiOjYwfSwia2luZCI6ImFmdGVyIiwiYmVmb3JlIjp7ImNoYXQiOjg3MiwicHJvZ3Jlc3MiOjIwNX0sInF1aWV0IjpmYWxzZSwibm90ZXMiOiIiLCJ0YXNrcyI6eyJnb2xkZW4tdGFzayI6MX0sIm5ld2VzdCI6IiIsImxpZmVjeWNsZSI6ZmFsc2V9"
+  },
+  "main_replay": {
+    "messages": [
+      {
+        "text": "Начало",
+        "role": "user",
+        "ts": "2026-10-01T00:00:01Z",
+        "is_progress": false,
+        "system_type": "",
+        "markdown": false,
+        "source": "",
+        "sender_label": "",
+        "sender_session_id": "",
+        "client_message_id": "owner-first",
+        "task_id": "",
+        "history_id": "chat:0",
+        "history_position": {
+          "source": "chat",
+          "offset": 0
+        },
+        "row_address": "row:1@2026-10-01T00:00:01Z#7f6e6fde6789"
+      },
+      {
+        "text": "Archived answer",
+        "role": "assistant",
+        "ts": "2026-10-01T00:00:03Z",
+        "is_progress": false,
+        "system_type": "",
+        "markdown": false,
+        "source": "",
+        "sender_label": "",
+        "sender_session_id": "",
+        "client_message_id": "",
+        "task_id": "golden-task",
+        "history_id": "chat:220",
+        "history_position": {
+          "source": "chat",
+          "offset": 220
+        },
+        "row_address": "row:1@2026-10-01T00:00:03Z#7c749e59c2cc"
+      },
+      {
+        "text": "Archived progress",
+        "role": "assistant",
+        "system_type": "",
+        "ts": "2026-10-01T00:00:04Z",
+        "is_progress": true,
+        "markdown": false,
+        "task_id": "golden-task",
+        "history_id": "progress:0",
+        "history_position": {
+          "source": "progress",
+          "offset": 0
+        },
+        "task_terminal_status": "completed",
+        "row_address": "row:1@2026-10-01T00:00:04Z#deb3302caf66"
+      },
+      {
+        "text": "Current progress",
+        "role": "assistant",
+        "system_type": "",
+        "ts": "2026-10-01T00:00:06Z",
+        "is_progress": true,
+        "markdown": false,
+        "task_id": "golden-task",
+        "history_id": "progress:103",
+        "history_position": {
+          "source": "progress",
+          "offset": 103
+        },
+        "tool_evidence": {
+          "observations": [],
+          "legacy": {
+            "calls": 0,
+            "errors": 0,
+            "wait_ended": false,
+            "unknown": false
+          },
+          "coverage": {
+            "task_id": "golden-task",
+            "source": "logs/tools.jsonl",
+            "archives": 0,
+            "archive_sources": [],
+            "archives_available": 0,
+            "archives_bounded": false,
+            "matched": 0,
+            "gaps": [],
+            "live_size": 0,
+            "live_window": 0,
+            "shown": 0,
+            "unit": "calls",
+            "quota_met": false
+          }
+        },
+        "task_terminal_status": "completed",
+        "outcome_axes": {
+          "schema_version": 1,
+          "lifecycle": {
+            "status": "completed"
+          },
+          "execution": {
+            "status": "ok",
+            "reason_code": ""
+          },
+          "artifacts": {
+            "status": "not_applicable"
+          },
+          "objective": {
+            "status": "not_evaluated",
+            "source": "none"
+          },
+          "review": {
+            "status": "skipped",
+            "trigger": "not_evaluated"
+          }
+        },
+        "_is_direct_chat": false,
+        "outcome_phase": "done",
+        "outcome_final": true,
+        "continuation_offer": {
+          "eligible": false,
+          "cause": "finished",
+          "refusal": "author_finished"
+        },
+        "row_address": "row:1@2026-10-01T00:00:06Z#0568bae630f6"
+      },
+      {
+        "text": "Document",
+        "role": "assistant",
+        "ts": "2026-10-01T00:00:07Z",
+        "is_progress": false,
+        "system_type": "document",
+        "markdown": false,
+        "source": "",
+        "sender_label": "",
+        "sender_session_id": "",
+        "client_message_id": "",
+        "task_id": "golden-task",
+        "history_id": "chat:469",
+        "history_position": {
+          "source": "chat",
+          "offset": 469
+        },
+        "msg_type": "document",
+        "filename": "report.txt",
+        "mime": "application/octet-stream",
+        "download_url": "/api/tasks/golden-task/artifacts/report.txt",
+        "download_url_compat": "",
+        "caption": "",
+        "row_address": "row:1@2026-10-01T00:00:07Z#b33dae82086b"
+      },
+      {
+        "text": "Main newest",
+        "role": "assistant",
+        "ts": "2026-10-01T00:00:09Z",
+        "is_progress": false,
+        "system_type": "",
+        "markdown": false,
+        "source": "",
+        "sender_label": "",
+        "sender_session_id": "",
+        "client_message_id": "",
+        "task_id": "",
+        "history_id": "chat:784",
+        "history_position": {
+          "source": "chat",
+          "offset": 784
+        },
+        "row_address": "row:1@2026-10-01T00:00:09Z#df82c61d434f"
+      }
+    ],
+    "window": {
+      "complete": true,
+      "truncated_by": []
+    },
+    "coverage": {
+      "v": 1,
+      "view": "516d4922fa945bc0f11ad846d1282db6f9b7ceca802afcaf40ce3c731f81fd89",
+      "upper": {
+        "chat": 872,
+        "progress": 205
+      },
+      "spans": {
+        "chat": {
+          "from": 0,
+          "to": 872,
+          "chain": "<chain witness>",
+          "gaps": []
+        },
+        "progress": {
+          "from": 0,
+          "to": 205,
+          "chain": "<chain witness>",
+          "gaps": []
+        }
+      }
+    },
+    "has_more": false,
+    "next_cursor": null,
+    "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiNTE2ZDQ5MjJmYTk0NWJjMGYxMWFkODQ2ZDEyODJkYjZmOWI3Y2VjYTgwMmFmY2FmNDBjZTNjNzMxZjgxZmQ4OSIsInVwcGVyIjp7ImNoYXQiOjg3MiwicHJvZ3Jlc3MiOjIwNX0sInVuZmluaXNoZWQiOltdLCJxdW90YXMiOnsiaHVtYW4iOjE1MCwicHJvZ3Jlc3MiOjYwfSwia2luZCI6InBhZ2UiLCJiZWZvcmUiOnsiY2hhdCI6ODcyLCJwcm9ncmVzcyI6MjA1fSwicXVpZXQiOmZhbHNlLCJsb3dlciI6eyJjaGF0IjowLCJwcm9ncmVzcyI6MH0sInJlY2VudCI6dHJ1ZX0"
+  },
+  "main_delta": {
+    "messages": [],
+    "window": {
+      "complete": false,
+      "truncated_by": [
+        "page"
+      ]
+    },
+    "coverage": {
+      "v": 1,
+      "view": "516d4922fa945bc0f11ad846d1282db6f9b7ceca802afcaf40ce3c731f81fd89",
+      "upper": {
+        "chat": 872,
+        "progress": 205
+      },
+      "spans": {
+        "chat": {
+          "from": 872,
+          "to": 872,
+          "chain": "<chain witness>",
+          "gaps": []
+        },
+        "progress": {
+          "from": 205,
+          "to": 205,
+          "chain": "<chain witness>",
+          "gaps": []
+        }
+      }
+    },
+    "has_more": false,
+    "next_cursor": null,
+    "page_cursor": null,
+    "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiNTE2ZDQ5MjJmYTk0NWJjMGYxMWFkODQ2ZDEyODJkYjZmOWI3Y2VjYTgwMmFmY2FmNDBjZTNjNzMxZjgxZmQ4OSIsInVwcGVyIjp7ImNoYXQiOjg3MiwicHJvZ3Jlc3MiOjIwNX0sInVuZmluaXNoZWQiOltdLCJxdW90YXMiOnsiaHVtYW4iOjE1MCwicHJvZ3Jlc3MiOjYwfSwia2luZCI6ImFmdGVyIiwiYmVmb3JlIjp7ImNoYXQiOjg3MiwicHJvZ3Jlc3MiOjIwNX0sInF1aWV0IjpmYWxzZSwibm90ZXMiOiIiLCJ0YXNrcyI6eyJnb2xkZW4tdGFzayI6MX0sIm5ld2VzdCI6IiIsImxpZmVjeWNsZSI6ZmFsc2V9"
+  },
+  "room": {
+    "messages": [
+      {
+        "text": "Foreign room",
+        "role": "assistant",
+        "ts": "2026-10-01T00:00:02Z",
+        "is_progress": false,
+        "system_type": "",
+        "markdown": false,
+        "source": "",
+        "sender_label": "",
+        "sender_session_id": "",
+        "client_message_id": "",
+        "task_id": "",
+        "history_id": "chat:124",
+        "history_position": {
+          "source": "chat",
+          "offset": 124
+        },
+        "row_address": "row:77748779@2026-10-01T00:00:02Z#8d5fc85ff9b9"
+      },
+      {
+        "text": "Room question",
+        "role": "user",
+        "ts": "2026-10-01T00:00:06Z",
+        "is_progress": false,
+        "system_type": "",
+        "markdown": false,
+        "source": "",
+        "sender_label": "",
+        "sender_session_id": "",
+        "client_message_id": "room-owner",
+        "task_id": "",
+        "history_id": "chat:338",
+        "history_position": {
+          "source": "chat",
+          "offset": 338
+        },
+        "row_address": "row:77748779@2026-10-01T00:00:06Z#7a8fdfafbc62"
+      },
+      {
+        "text": "Room answer",
+        "role": "assistant",
+        "ts": "2026-10-01T00:00:08Z",
+        "is_progress": false,
+        "system_type": "",
+        "markdown": false,
+        "source": "",
+        "sender_label": "",
+        "sender_session_id": "",
+        "client_message_id": "",
+        "task_id": "",
+        "history_id": "chat:689",
+        "history_position": {
+          "source": "chat",
+          "offset": 689
+        },
+        "row_address": "row:77748779@2026-10-01T00:00:08Z#78af2e502fc9"
+      }
+    ],
+    "window": {
+      "complete": true,
+      "truncated_by": [],
+      "latest_message": {
+        "history_id": "chat:689",
+        "out_of_order": false
+      }
+    },
+    "coverage": {
+      "v": 1,
+      "view": "a5fbd3a5c76338d04803a86208ec62f4936b5fbb69905adf866820eda2bb68db",
+      "upper": {
+        "chat": 872,
+        "progress": 205
+      },
+      "spans": {
+        "chat": {
+          "from": 0,
+          "to": 872,
+          "chain": "<chain witness>",
+          "gaps": []
+        },
+        "progress": {
+          "from": 0,
+          "to": 205,
+          "chain": "<chain witness>",
+          "gaps": []
+        }
+      }
+    },
+    "has_more": false,
+    "next_cursor": null,
+    "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjo3Nzc0ODc3OSwidmlldyI6ImE1ZmJkM2E1Yzc2MzM4ZDA0ODAzYTg2MjA4ZWM2MmY0OTM2YjVmYmI2OTkwNWFkZjg2NjgyMGVkYTJiYjY4ZGIiLCJ1cHBlciI6eyJjaGF0Ijo4NzIsInByb2dyZXNzIjoyMDV9LCJ1bmZpbmlzaGVkIjpbXSwicXVvdGFzIjp7Imh1bWFuIjoxNTAsInByb2dyZXNzIjo2MH0sImtpbmQiOiJwYWdlIiwiYmVmb3JlIjp7ImNoYXQiOjg3MiwicHJvZ3Jlc3MiOjIwNX0sInF1aWV0IjpmYWxzZSwibG93ZXIiOnsiY2hhdCI6MCwicHJvZ3Jlc3MiOjB9LCJyZWNlbnQiOnRydWV9",
+    "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjo3Nzc0ODc3OSwidmlldyI6ImE1ZmJkM2E1Yzc2MzM4ZDA0ODAzYTg2MjA4ZWM2MmY0OTM2YjVmYmI2OTkwNWFkZjg2NjgyMGVkYTJiYjY4ZGIiLCJ1cHBlciI6eyJjaGF0Ijo4NzIsInByb2dyZXNzIjoyMDV9LCJ1bmZpbmlzaGVkIjpbXSwicXVvdGFzIjp7Imh1bWFuIjoxNTAsInByb2dyZXNzIjo2MH0sImtpbmQiOiJhZnRlciIsImJlZm9yZSI6eyJjaGF0Ijo4NzIsInByb2dyZXNzIjoyMDV9LCJxdWlldCI6ZmFsc2UsIm5vdGVzIjoiIiwidGFza3MiOnt9LCJuZXdlc3QiOiIyMDI2LTEwLTAxVDAwOjAwOjA4WiIsImxpZmVjeWNsZSI6ZmFsc2V9"
+  },
+  "room_replay": {
+    "messages": [
+      {
+        "text": "Foreign room",
+        "role": "assistant",
+        "ts": "2026-10-01T00:00:02Z",
+        "is_progress": false,
+        "system_type": "",
+        "markdown": false,
+        "source": "",
+        "sender_label": "",
+        "sender_session_id": "",
+        "client_message_id": "",
+        "task_id": "",
+        "history_id": "chat:124",
+        "history_position": {
+          "source": "chat",
+          "offset": 124
+        },
+        "row_address": "row:77748779@2026-10-01T00:00:02Z#8d5fc85ff9b9"
+      },
+      {
+        "text": "Room question",
+        "role": "user",
+        "ts": "2026-10-01T00:00:06Z",
+        "is_progress": false,
+        "system_type": "",
+        "markdown": false,
+        "source": "",
+        "sender_label": "",
+        "sender_session_id": "",
+        "client_message_id": "room-owner",
+        "task_id": "",
+        "history_id": "chat:338",
+        "history_position": {
+          "source": "chat",
+          "offset": 338
+        },
+        "row_address": "row:77748779@2026-10-01T00:00:06Z#7a8fdfafbc62"
+      },
+      {
+        "text": "Room answer",
+        "role": "assistant",
+        "ts": "2026-10-01T00:00:08Z",
+        "is_progress": false,
+        "system_type": "",
+        "markdown": false,
+        "source": "",
+        "sender_label": "",
+        "sender_session_id": "",
+        "client_message_id": "",
+        "task_id": "",
+        "history_id": "chat:689",
+        "history_position": {
+          "source": "chat",
+          "offset": 689
+        },
+        "row_address": "row:77748779@2026-10-01T00:00:08Z#78af2e502fc9"
+      }
+    ],
+    "window": {
+      "complete": true,
+      "truncated_by": [],
+      "latest_message": null
+    },
+    "coverage": {
+      "v": 1,
+      "view": "a5fbd3a5c76338d04803a86208ec62f4936b5fbb69905adf866820eda2bb68db",
+      "upper": {
+        "chat": 872,
+        "progress": 205
+      },
+      "spans": {
+        "chat": {
+          "from": 0,
+          "to": 872,
+          "chain": "<chain witness>",
+          "gaps": []
+        },
+        "progress": {
+          "from": 0,
+          "to": 205,
+          "chain": "<chain witness>",
+          "gaps": []
+        }
+      }
+    },
+    "has_more": false,
+    "next_cursor": null,
+    "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjo3Nzc0ODc3OSwidmlldyI6ImE1ZmJkM2E1Yzc2MzM4ZDA0ODAzYTg2MjA4ZWM2MmY0OTM2YjVmYmI2OTkwNWFkZjg2NjgyMGVkYTJiYjY4ZGIiLCJ1cHBlciI6eyJjaGF0Ijo4NzIsInByb2dyZXNzIjoyMDV9LCJ1bmZpbmlzaGVkIjpbXSwicXVvdGFzIjp7Imh1bWFuIjoxNTAsInByb2dyZXNzIjo2MH0sImtpbmQiOiJwYWdlIiwiYmVmb3JlIjp7ImNoYXQiOjg3MiwicHJvZ3Jlc3MiOjIwNX0sInF1aWV0IjpmYWxzZSwibG93ZXIiOnsiY2hhdCI6MCwicHJvZ3Jlc3MiOjB9LCJyZWNlbnQiOnRydWV9"
+  },
+  "room_delta": {
+    "messages": [],
+    "window": {
+      "complete": false,
+      "truncated_by": [
+        "page"
+      ]
+    },
+    "coverage": {
+      "v": 1,
+      "view": "a5fbd3a5c76338d04803a86208ec62f4936b5fbb69905adf866820eda2bb68db",
+      "upper": {
+        "chat": 872,
+        "progress": 205
+      },
+      "spans": {
+        "chat": {
+          "from": 872,
+          "to": 872,
+          "chain": "<chain witness>",
+          "gaps": []
+        },
+        "progress": {
+          "from": 205,
+          "to": 205,
+          "chain": "<chain witness>",
+          "gaps": []
+        }
+      }
+    },
+    "has_more": false,
+    "next_cursor": null,
+    "page_cursor": null,
+    "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjo3Nzc0ODc3OSwidmlldyI6ImE1ZmJkM2E1Yzc2MzM4ZDA0ODAzYTg2MjA4ZWM2MmY0OTM2YjVmYmI2OTkwNWFkZjg2NjgyMGVkYTJiYjY4ZGIiLCJ1cHBlciI6eyJjaGF0Ijo4NzIsInByb2dyZXNzIjoyMDV9LCJ1bmZpbmlzaGVkIjpbXSwicXVvdGFzIjp7Imh1bWFuIjoxNTAsInByb2dyZXNzIjo2MH0sImtpbmQiOiJhZnRlciIsImJlZm9yZSI6eyJjaGF0Ijo4NzIsInByb2dyZXNzIjoyMDV9LCJxdWlldCI6ZmFsc2UsIm5vdGVzIjoiIiwidGFza3MiOnt9LCJuZXdlc3QiOiIyMDI2LTEwLTAxVDAwOjAwOjA4WiIsImxpZmVjeWNsZSI6ZmFsc2V9"
+  },
+  "logs_chat_": {
+    "name": "chat",
+    "entries": [
+      {
+        "ts": "2026-10-01T00:00:01Z",
+        "chat_id": 1,
+        "direction": "in",
+        "text": "Начало",
+        "client_message_id": "owner-first",
+        "_source_root": "<root>",
+        "_line": 1
+      },
+      {
+        "ts": "2026-10-01T00:00:02Z",
+        "chat_id": 77748779,
+        "direction": "out",
+        "text": "Foreign room",
+        "_source_root": "<root>",
+        "_line": 2
+      },
+      {
+        "ts": "2026-10-01T00:00:03Z",
+        "chat_id": 1,
+        "direction": "out",
+        "text": "Archived answer",
+        "task_id": "golden-task",
+        "_source_root": "<root>",
+        "_line": 3
+      },
+      {
+        "ts": "2026-10-01T00:00:06Z",
+        "chat_id": 77748779,
+        "direction": "in",
+        "text": "Room question",
+        "client_message_id": "room-owner",
+        "_source_root": "<root>",
+        "_line": 4
+      },
+      {
+        "ts": "2026-10-01T00:00:07Z",
+        "chat_id": 1,
+        "direction": "out",
+        "text": "Document",
+        "task_id": "golden-task",
+        "type": "document",
+        "filename": "report.txt",
+        "download_url": "/api/tasks/golden-task/artifacts/report.txt",
+        "_source_root": "<root>",
+        "_line": 5
+      },
+      {
+        "ts": "2026-10-01T00:00:08Z",
+        "chat_id": 77748779,
+        "direction": "out",
+        "text": "Room answer",
+        "_source_root": "<root>",
+        "_line": 6
+      },
+      {
+        "ts": "2026-10-01T00:00:09Z",
+        "chat_id": 1,
+        "direction": "out",
+        "text": "Main newest",
+        "_source_root": "<root>",
+        "_line": 7
+      }
+    ]
+  },
+  "logs_chat_golden-task": {
+    "name": "chat",
+    "entries": [
+      {
+        "ts": "2026-10-01T00:00:03Z",
+        "chat_id": 1,
+        "direction": "out",
+        "text": "Archived answer",
+        "task_id": "golden-task",
+        "_source_root": "<root>",
+        "_line": 3
+      },
+      {
+        "ts": "2026-10-01T00:00:07Z",
+        "chat_id": 1,
+        "direction": "out",
+        "text": "Document",
+        "task_id": "golden-task",
+        "type": "document",
+        "filename": "report.txt",
+        "download_url": "/api/tasks/golden-task/artifacts/report.txt",
+        "_source_root": "<root>",
+        "_line": 5
+      }
+    ]
+  },
+  "logs_progress_": {
+    "name": "progress",
+    "entries": [
+      {
+        "ts": "2026-10-01T00:00:04Z",
+        "chat_id": 1,
+        "task_id": "golden-task",
+        "content": "Archived progress",
+        "_source_root": "<root>",
+        "_line": 1
+      },
+      {
+        "ts": "2026-10-01T00:00:06Z",
+        "chat_id": 1,
+        "task_id": "golden-task",
+        "content": "Current progress",
+        "_source_root": "<root>",
+        "_line": 2
+      }
+    ]
+  },
+  "logs_progress_golden-task": {
+    "name": "progress",
+    "entries": [
+      {
+        "ts": "2026-10-01T00:00:04Z",
+        "chat_id": 1,
+        "task_id": "golden-task",
+        "content": "Archived progress",
+        "_source_root": "<root>",
+        "_line": 1
+      },
+      {
+        "ts": "2026-10-01T00:00:06Z",
+        "chat_id": 1,
+        "task_id": "golden-task",
+        "content": "Current progress",
+        "_source_root": "<root>",
+        "_line": 2
+      }
+    ]
+  },
+  "events_v1": [
+    {
+      "source": "chat",
+      "line": 3,
+      "ts": "2026-10-01T00:00:03Z",
+      "type": "message",
+      "task_id": "golden-task",
+      "root": "<root>",
+      "data": {
+        "ts": "2026-10-01T00:00:03Z",
+        "chat_id": 1,
+        "direction": "out",
+        "text": "Archived answer",
+        "task_id": "golden-task"
+      },
+      "seq": 1
+    },
+    {
+      "source": "progress",
+      "line": 1,
+      "ts": "2026-10-01T00:00:04Z",
+      "type": "progress",
+      "task_id": "golden-task",
+      "root": "<root>",
+      "data": {
+        "ts": "2026-10-01T00:00:04Z",
+        "chat_id": 1,
+        "task_id": "golden-task",
+        "content": "Archived progress"
+      },
+      "seq": 2
+    },
+    {
+      "source": "progress",
+      "line": 2,
+      "ts": "2026-10-01T00:00:06Z",
+      "type": "progress",
+      "task_id": "golden-task",
+      "root": "<root>",
+      "data": {
+        "ts": "2026-10-01T00:00:06Z",
+        "chat_id": 1,
+        "task_id": "golden-task",
+        "content": "Current progress"
+      },
+      "seq": 3
+    },
+    {
+      "source": "chat",
+      "line": 5,
+      "ts": "2026-10-01T00:00:07Z",
+      "type": "message",
+      "task_id": "golden-task",
+      "root": "<root>",
+      "data": {
+        "ts": "2026-10-01T00:00:07Z",
+        "chat_id": 1,
+        "direction": "out",
+        "text": "Document",
+        "task_id": "golden-task",
+        "type": "document",
+        "filename": "report.txt",
+        "download_url": "/api/tasks/golden-task/artifacts/report.txt"
+      },
+      "seq": 4
+    },
+    {
+      "source": "task_result",
+      "line": 0,
+      "ts": "2026-10-01T00:00:10Z",
+      "type": "task_result",
+      "task_id": "golden-task",
+      "data": {
+        "task_id": "golden-task",
+        "status": "completed",
+        "ts": "2026-10-01T00:00:10Z",
+        "result": "Finished",
+        "_schema_version": 1,
+        "execution_observation": {
+          "kind": "pooled",
+          "state": "terminal",
+          "source": "task_result",
+          "reason": "recorded_terminal"
+        },
+        "outcome_axes": {
+          "schema_version": 1,
+          "lifecycle": {
+            "status": "completed"
+          },
+          "execution": {
+            "status": "ok",
+            "reason_code": ""
+          },
+          "artifacts": {
+            "status": "not_applicable"
+          },
+          "objective": {
+            "status": "not_evaluated",
+            "source": "none"
+          },
+          "review": {
+            "status": "skipped",
+            "trigger": "not_evaluated"
+          }
+        }
+      },
+      "seq": 5
+    }
+  ],
+  "events_v2": [
+    {
+      "source": "progress",
+      "ts": "2026-10-01T00:00:04Z",
+      "type": "progress",
+      "task_id": "golden-task",
+      "root": "<root>",
+      "data": {
+        "ts": "2026-10-01T00:00:04Z",
+        "chat_id": 1,
+        "task_id": "golden-task",
+        "content": "Archived progress"
+      },
+      "seq": 1,
+      "event_id": "[\"<root>\",\"progress\",0]",
+      "cursor": {
+        "v": 2,
+        "seq": 1,
+        "view": "<root-dependent view>",
+        "positions": {
+          "<root>": {
+            "progress": 103,
+            "chat": 0,
+            "events": 0,
+            "tools": 0,
+            "supervisor": 0
+          }
+        }
+      }
+    },
+    {
+      "source": "progress",
+      "ts": "2026-10-01T00:00:06Z",
+      "type": "progress",
+      "task_id": "golden-task",
+      "root": "<root>",
+      "data": {
+        "ts": "2026-10-01T00:00:06Z",
+        "chat_id": 1,
+        "task_id": "golden-task",
+        "content": "Current progress"
+      },
+      "seq": 2,
+      "event_id": "[\"<root>\",\"progress\",103]",
+      "cursor": {
+        "v": 2,
+        "seq": 2,
+        "view": "<root-dependent view>",
+        "positions": {
+          "<root>": {
+            "progress": 205,
+            "chat": 0,
+            "events": 0,
+            "tools": 0,
+            "supervisor": 0
+          }
+        }
+      }
+    },
+    {
+      "source": "chat",
+      "ts": "2026-10-01T00:00:03Z",
+      "type": "message",
+      "task_id": "golden-task",
+      "root": "<root>",
+      "data": {
+        "ts": "2026-10-01T00:00:03Z",
+        "chat_id": 1,
+        "direction": "out",
+        "text": "Archived answer",
+        "task_id": "golden-task"
+      },
+      "seq": 3,
+      "event_id": "[\"<root>\",\"chat\",220]",
+      "cursor": {
+        "v": 2,
+        "seq": 3,
+        "view": "<root-dependent view>",
+        "positions": {
+          "<root>": {
+            "progress": 205,
+            "chat": 338,
+            "events": 0,
+            "tools": 0,
+            "supervisor": 0
+          }
+        }
+      }
+    },
+    {
+      "source": "chat",
+      "ts": "2026-10-01T00:00:07Z",
+      "type": "message",
+      "task_id": "golden-task",
+      "root": "<root>",
+      "data": {
+        "ts": "2026-10-01T00:00:07Z",
+        "chat_id": 1,
+        "direction": "out",
+        "text": "Document",
+        "task_id": "golden-task",
+        "type": "document",
+        "filename": "report.txt",
+        "download_url": "/api/tasks/golden-task/artifacts/report.txt"
+      },
+      "seq": 4,
+      "event_id": "[\"<root>\",\"chat\",469]",
+      "cursor": {
+        "v": 2,
+        "seq": 4,
+        "view": "<root-dependent view>",
+        "positions": {
+          "<root>": {
+            "progress": 205,
+            "chat": 689,
+            "events": 0,
+            "tools": 0,
+            "supervisor": 0
+          }
+        }
+      }
+    },
+    {
+      "source": "task_result",
+      "type": "task_result",
+      "task_id": "golden-task",
+      "data": {
+        "task_id": "golden-task",
+        "status": "completed",
+        "ts": "2026-10-01T00:00:10Z",
+        "result": "Finished",
+        "_schema_version": 1,
+        "execution_observation": {
+          "kind": "pooled",
+          "state": "terminal",
+          "source": "task_result",
+          "reason": "recorded_terminal"
+        },
+        "outcome_axes": {
+          "schema_version": 1,
+          "lifecycle": {
+            "status": "completed"
+          },
+          "execution": {
+            "status": "ok",
+            "reason_code": ""
+          },
+          "artifacts": {
+            "status": "not_applicable"
+          },
+          "objective": {
+            "status": "not_evaluated",
+            "source": "none"
+          },
+          "review": {
+            "status": "skipped",
+            "trigger": "not_evaluated"
+          }
+        }
+      },
+      "seq": 5,
+      "event_id": "",
+      "cursor": {
+        "v": 2,
+        "seq": 5,
+        "view": "<root-dependent view>",
+        "positions": {
+          "<root>": {
+            "progress": 205,
+            "chat": 872,
+            "events": 0,
+            "tools": 0,
+            "supervisor": 0
+          }
+        }
+      }
+    }
+  ],
+  "memory": "Showing 7 of 7 messages; 0 older remain. Continue with offset=7, snapshot=<snapshot>. Pagination used a live offset; repeating an offset without the returned snapshot is shiftable if history changes.\n\n← [2026-10-01T00:00] [User] Начало\n→ [2026-10-01T00:00] Foreign room\n→ [2026-10-01T00:00] Archived answer\n← [2026-10-01T00:00] [User] Room question\n→ [2026-10-01T00:00] Document\n→ [2026-10-01T00:00] Room answer\n→ [2026-10-01T00:00] Main newest"
+}

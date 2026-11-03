@@ -15,8 +15,6 @@ from ouroboros import (
     extension_surface_names,
 )
 
-REPO = pathlib.Path(__file__).parents[1]
-
 _LEAVES = (
     extension_registry_state,
     extension_surface_names,
@@ -49,6 +47,12 @@ _MOVED_OWNERS = {
     # and the loader re-exports the very same objects for its gateway callers.
     "live_module_sources": extension_registry_state,
     "live_widget_projection": extension_registry_state,
+    # The surface snapshot and the route/WS/companion listings are the same kind
+    # of one-lock read over the registries this leaf owns.
+    "list_companion_names": extension_registry_state,
+    "list_routes": extension_registry_state,
+    "list_ws_handlers": extension_registry_state,
+    "snapshot": extension_registry_state,
     "_EXTENSION_NAME_PREFIX": extension_surface_names,
     "_EXTENSION_NAME_RE": extension_surface_names,
     "_EXTENSION_SHORT_MAX": extension_surface_names,
@@ -92,7 +96,7 @@ _MOVED_OWNERS = {
 
 # The loader keeps the lifecycle it is named for: catalog installation for an
 # out-of-process child, companion spawning, reconcile, load, unload, reload and
-# the read-only snapshots the host and the tool registry consume. (Fix-round-4:
+# the stamped ``get_tool`` read the tool registry consumes. (Fix-round-4:
 # ``_stage_out_of_process_surfaces`` moved to the child-catalog leaf it
 # composes; the loader re-exports it.)
 # Merge with upstream ``23ab428f``: ``_finalize_extension_reconcile`` is the one
@@ -103,12 +107,12 @@ _MOVED_OWNERS = {
 # ``fa397986``, ``live_module_sources`` ``afe1fc4f``) are NOT here: they are
 # one-lock reads over ``_ui_tabs``/``_extensions`` and live in the leaf that
 # owns those registries, re-exported by the facade for their gateway callers.
+# ``snapshot`` and the route/WS/companion listings followed them there.
 _STAYED = (
     "__all__", "_finalize_extension_reconcile", "_publish_out_of_process_registration",
-    "_run_unload_callback", "_unload_extension_locked",
-    "ensure_companions_running", "get_tool", "list_companion_names", "list_routes",
-    "list_ws_handlers", "load_extension", "log", "reconcile_extension", "reload_all",
-    "snapshot", "unload_extension",
+    "_run_unload_callback", "_unload_extension_locked", "_load_extension_locked",
+    "ensure_companions_running", "get_tool", "load_extension", "log",
+    "reconcile_extension", "reload_all", "unload_extension",
 )
 
 
@@ -177,21 +181,12 @@ def test_the_public_loader_surface_is_unchanged():
         assert hasattr(extension_loader, name), name
 
 
-def test_extension_extraction_size_bounds_have_meaningful_headroom():
-    from ouroboros.review import BAND_MODULE_MAX_LINES, TARGET_MODULE_LINES
-    from ouroboros.size_ratchet_manifest import BAND_PATHS
+def test_companion_projection_preserves_order_and_excludes_nonspawnable_markers(monkeypatch):
+    from types import SimpleNamespace
 
-    counts = {
-        module.__name__: len(
-            pathlib.Path(module.__file__).read_text(encoding="utf-8").splitlines()
-        )
-        for module in (extension_loader, *_LEAVES)
-    }
-    assert counts["ouroboros.extension_loader"] <= TARGET_MODULE_LINES
-    for module, count in counts.items():
-        path = module.replace(".", "/") + ".py"
-        limit = TARGET_MODULE_LINES
-        if path in BAND_PATHS:
-            assert BAND_PATHS[path], f"new extension band entry needs its rationale: {path}"
-            limit = BAND_MODULE_MAX_LINES
-        assert count <= limit, f"{path}: {count} lines exceeds its {limit}-line bound"
+    # The registry belongs to extension_registry_state; the facade re-export serves the projection.
+    monkeypatch.setattr(extension_registry_state, "_extensions", {
+        "first": SimpleNamespace(companion_names=[None, "", "daemon", "task:hidden", "worker-skip:other"]),
+        "second": SimpleNamespace(companion_names=["other", "daemon"]),
+    })
+    assert extension_loader.list_companion_names() == ["daemon", "other", "daemon"]

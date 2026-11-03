@@ -8,11 +8,17 @@ import json
 import os
 import pathlib
 import shutil
+import logging
 import subprocess
+import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
+
+from ouroboros.desktop_media import host_environment
+from ouroboros.unindexed import bytecode_prefix
 
 
 BUNDLE_REPO_NAME = "repo.bundle"
@@ -24,6 +30,141 @@ DEFAULT_MANAGED_REMOTE_NAME = "managed"
 DEFAULT_MANAGED_LOCAL_BRANCH = "ouroboros"
 DEFAULT_MANAGED_LOCAL_STABLE_BRANCH = "ouroboros-stable"
 DEFAULT_MANAGED_REMOTE_STABLE_BRANCH = "ouroboros-stable"
+
+
+_BOOTSTRAP_COMMANDS = []  # live invocation owners only; never a scan of historical work
+
+
+class _SourceHandoff:
+    """Keep a Windows successor owned until transfer or Panic has won termination.
+
+    The lock covers only publication and the terminal decision, never Popen or
+    stopping a child. Panic never waits for spawn: a compatible successor observes
+    the inherited parent handle before startup, even before Popen returns here.
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.stopped = False
+        self.successor = None
+
+    def claim_stop(self):
+        with self.lock:
+            self.stopped = True
+
+    def begin(self, cancelled):
+        with self.lock:
+            if self.stopped or cancelled():
+                return False
+            return True
+
+    def stop(self):
+        from ouroboros.platform_layer import request_process_tree_kill
+
+        with self.lock:
+            self.stopped = True
+            proc = self.successor
+        return request_process_tree_kill(proc) if proc is not None else None
+
+    def spawned(self, proc, cancelled):
+        with self.lock:
+            self.successor = proc
+            stopping = self.stopped or cancelled()
+        if stopping:
+            self.stop()
+
+    def leave(self, code, cancelled):
+        with self.lock:
+            if not self.stopped and not cancelled():
+                os._exit(code)  # terminal commit, with no intervening spawn or I/O
+
+
+source_handoff = _SourceHandoff()
+
+
+def stop_bootstrap_commands(*, include_interactive=True) -> list[dict]:
+    """Request captured bootstrap children before early tray Panic hard-exits."""
+    from ouroboros.platform_layer import request_process_tree_kill
+
+    successor_stop = source_handoff.stop()
+    return ([successor_stop] if successor_stop is not None else []) + [
+            request_process_tree_kill(owner["proc"], job_handle=getattr(owner["container"], "_job", None))
+            for owner in list(_BOOTSTRAP_COMMANDS) if owner["proc"] is not None
+            and (include_interactive or owner["container"] is not None)]
+
+
+def spawn_bootstrap_command(command, shutdown, *, interactive=False, **kwargs):
+    """Capture a bootstrap command in the existing Job/lifeline owner before exposing its handle."""
+    from ouroboros.process_containment import ProcessContainer
+    from ouroboros.platform_layer import merge_hidden_kwargs
+
+    if shutdown.is_set():
+        raise InterruptedError("Launcher shutdown stopped bootstrap admission")
+    # Interactive OS installers keep their terminal and may finish after an
+    # ordinary setup-window close; Panic still has their captured Popen to stop.
+    # Frozen sys.executable is the app bootloader, not a Python CLI for the
+    # lifeline guardian. Keep group/token (Windows: Job) custody and Panic stops;
+    # frozen POSIX has no guardian for an abrupt launcher death during bootstrap.
+    owner = {"proc": None, "container": None if interactive else
+             ProcessContainer(lifeline=not getattr(sys, "frozen", False))}
+    _BOOTSTRAP_COMMANDS.append(owner)
+    try:
+        owner["proc"] = (subprocess.Popen(command, **merge_hidden_kwargs(kwargs)) if interactive
+                         else owner["container"].spawn(command, **kwargs))
+        if shutdown.is_set():
+            stop_bootstrap_commands()
+        return owner
+    except BaseException:
+        if owner["container"] is not None:
+            owner["container"].reap()
+            owner["container"].close()
+        _BOOTSTRAP_COMMANDS.remove(owner)
+        raise
+
+
+def run_bootstrap_command(command, shutdown, **kwargs):
+    """subprocess.run's result contract with early Quit/Panic and owned-tree cleanup."""
+    data, check, timeout = kwargs.pop("input", None), kwargs.pop("check", False), kwargs.pop("timeout", None)
+    if data is not None:
+        if "stdin" in kwargs:
+            raise ValueError("stdin and input arguments may not both be used")
+        kwargs["stdin"] = subprocess.PIPE
+    if kwargs.pop("capture_output", False):
+        if "stdout" in kwargs or "stderr" in kwargs:
+            raise ValueError("stdout and stderr arguments may not be used with capture_output")
+        kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    owner = spawn_bootstrap_command(command, shutdown, **kwargs)
+    proc, container = owner["proc"], owner["container"]
+    deadline = None if timeout is None else time.monotonic() + timeout
+    partial = None
+    try:
+        while True:
+            if shutdown.is_set():
+                stop_bootstrap_commands()
+                raise InterruptedError("Launcher shutdown interrupted bootstrap")
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout,
+                    output=partial.output if partial else None, stderr=partial.stderr if partial else None)
+            try:
+                stdout, stderr = proc.communicate(data, timeout=min(0.2, remaining) if remaining is not None else 0.2)
+                break
+            except subprocess.TimeoutExpired as exc:
+                partial = exc
+                data = None  # communicate retains the pending input/output across retries
+        if check and proc.returncode:
+            raise subprocess.CalledProcessError(proc.returncode, command, stdout, stderr)
+        return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+    finally:
+        error = container.reap()
+        container.close()
+        _BOOTSTRAP_COMMANDS.remove(owner)
+        proc.wait(timeout=5)
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
+        if error:
+            logging.getLogger("launcher").error("Bootstrap command cleanup unconfirmed: %s", error)
 
 
 @dataclass(frozen=True)
@@ -42,61 +183,82 @@ class BootstrapContext:
 
 def checkout_sha(repo_dir: pathlib.Path) -> str:
     """HEAD of the checkout, or "" when Git or the repository is unavailable (never a guess)."""
+    from ouroboros.platform_layer import merge_hidden_kwargs
+
     try:
-        shown = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo_dir), capture_output=True,
-                               text=True, encoding="utf-8", check=False)
+        shown = subprocess.run(["git", "rev-parse", "HEAD"], **merge_hidden_kwargs(
+            {"cwd": str(repo_dir), "capture_output": True, "text": True, "encoding": "utf-8", "check": False,
+             **({"env": host_environment()} if sys.platform == "linux" else {})}))
     except OSError:
         return ""
     return shown.stdout.strip() if shown.returncode == 0 else ""
 
 
-_LOADED_CHECKOUT_SHA = ""  # the checkout whose modules the launcher process imported (its first launch)
+_LOADED_CHECKOUT_SHA = ""  # the commit whose modules this launcher process imported (remember_loaded_checkout)
 
 
-def remember_loaded_checkout(repo_dir: pathlib.Path) -> str:
-    """Record once, at the launcher's first agent start, which commit its own modules came from."""
+def remember_loaded_checkout(repo_dir: pathlib.Path, *, bundle_dir: pathlib.Path | None = None) -> str:
+    """Record once, before bootstrap can advance the checkout, which commit the launcher's modules came
+    from: a frozen app or a seed copy imported them from ``bundle_dir`` (its manifest's ``source_sha``),
+    the checkout's own launcher from ``repo_dir`` (its HEAD)."""
     global _LOADED_CHECKOUT_SHA
-    _LOADED_CHECKOUT_SHA = _LOADED_CHECKOUT_SHA or checkout_sha(repo_dir)
+    if _LOADED_CHECKOUT_SHA:
+        return _LOADED_CHECKOUT_SHA
+    # Frozen helpers came from the seed, even when the managed checkout is newer.
+    loaded = (_read_json_file(bundle_dir / BUNDLE_MANIFEST_NAME).get("source_sha", "")
+              if bundle_dir is not None else checkout_sha(repo_dir))
+    _LOADED_CHECKOUT_SHA = str(loaded or "")
     return _LOADED_CHECKOUT_SHA
 
 
 def launcher_sources_changed(repo_dir: pathlib.Path, loaded_sha: str | None = None, *,
-                             bundle_dir: pathlib.Path | None = None) -> bool:
+                             bundle_dir: pathlib.Path | None = None, packaged: bool = False,
+                             source_root: pathlib.Path | None = None) -> bool:
     """True when the landed checkout changed a module the launcher process has loaded.
 
-    The launcher imports its helpers once; a body adoption (or any release) that
-    lands another version of them while the agent is down leaves that process
-    serving stale code, so its exit-42 branch re-executes the launcher exactly
-    then (the same move the seed-bundle first run makes). The comparison is the
+    The launcher imports its helpers once; a cold start or body adoption that
+    finds another version in the checkout hands off through ``exec_source_launcher``.
+    A server-only update leaves the launcher running. The comparison is the
     checkout's own history, not the file system: the commit the launcher imported
     from (``loaded_sha``, "" when unknown: never a relaunch) against the commit
     that now serves, over the loaded modules' repository paths plus ``launcher.py``.
     A packaged launcher loaded its modules from ``bundle_dir`` (PyInstaller names
-    them ``<pkg>/<module>.pyc`` there); they count under their repository paths.
+    them ``<pkg>/<module>.pyc`` or ``.py`` there); they count under their repository
+    paths. A path counts as named or resolved: a macOS app's bundle is
+    ``Contents/Frameworks``, whose ``<pkg>`` links into ``Contents/Resources``, so
+    there only the named path lies inside the bundle. ``source_root`` also covers
+    seed hosts that import from a separate image directory (the container's /app).
+
+    ``packaged`` (the cold check) counts the whole packaged trees,
+    ``ouroboros`` and ``supervisor``, not only what is loaded so far: later imports
+    (Panic sweep, restart acknowledgement, server records) would come from the seed
+    too. Conservative by design: a body-only change there hands off as well, while a
+    ``server.py``-only update keeps the launcher.
     """
-    import sys
+    from ouroboros.platform_layer import merge_hidden_kwargs
 
     loaded_sha = _LOADED_CHECKOUT_SHA if loaded_sha is None else loaded_sha
     head = checkout_sha(repo_dir)
     if not loaded_sha or not head or head == loaded_sha:
         return False
-    roots = [pathlib.Path(root).resolve() for root in (repo_dir, bundle_dir) if root]
-    loaded = {"launcher.py"}
+    roots = [pathlib.Path(os.path.abspath(root)) for root in (repo_dir, bundle_dir, source_root) if root]
+    roots += [root.resolve() for root in roots]
+    loaded = {"launcher.py", *(("ouroboros", "supervisor") if packaged else ())}
     for module in list(sys.modules.values()):
         source = getattr(module, "__file__", None)
         if not source:
             continue
         try:
-            path = pathlib.Path(source).resolve()
+            named = pathlib.Path(os.path.abspath(source))
+            paths = (named, named.resolve())
         except OSError:
             continue
-        for root in roots:
-            if path.is_relative_to(root):
-                relative = path.relative_to(root)
-                loaded.add((relative.with_suffix(".py") if relative.suffix == ".pyc" else relative).as_posix())
-                break
+        relative = next((path.relative_to(root) for path in paths for root in roots if path.is_relative_to(root)), None)
+        if relative is not None:
+            loaded.add((relative.with_suffix(".py") if relative.suffix == ".pyc" else relative).as_posix())
     probe = subprocess.run(["git", "diff", "--quiet", loaded_sha, head, "--", *sorted(loaded)],
-                           cwd=str(repo_dir), capture_output=True, check=False)
+                           **merge_hidden_kwargs({"cwd": str(repo_dir), "capture_output": True, "check": False,
+                               **({"env": host_environment()} if sys.platform == "linux" else {})}))
     return probe.returncode == 1
 
 
@@ -127,17 +289,16 @@ def embedded_python_env(data_dir: pathlib.Path, base: dict[str, str] | None = No
     stated here rather than changed unilaterally. Recovery is manual and total:
     delete ``<data>/state/python-userbase`` and relaunch.
     """
-    env = dict(os.environ if base is None else base)
+    # Defaults are for bootstrap host commands. Source-launcher probe/exec pass
+    # their explicit GUI base and must retain it for GI and WebKit helpers.
+    env = dict((host_environment() if sys.platform == "linux" else os.environ) if base is None else base)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    state_dir = pathlib.Path(data_dir) / "state"
-    pycache_dir = state_dir / "pycache"
-    user_base = state_dir / "python-userbase"
-    for directory in (pycache_dir, user_base):
-        try:
-            directory.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
-    env["PYTHONPYCACHEPREFIX"] = str(pycache_dir)
+    user_base = pathlib.Path(data_dir) / "state" / "python-userbase"
+    try:
+        user_base.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    env["PYTHONPYCACHEPREFIX"] = bytecode_prefix(data_dir, env.get("PYTHONPYCACHEPREFIX", ""))  # a custom one stays
     env["PYTHONUSERBASE"] = str(user_base)
     env.pop("PYTHONNOUSERSITE", None)
     return env
@@ -529,542 +690,14 @@ def install_deps(context: BootstrapContext) -> bool:
     return True
 
 
-_SEED_COMPLETE_MARKER = ".bootstrap-seed-complete"
-_POST_BOOTSTRAP_NEW_NATIVE_SEEDS = frozenset({"telegram", "unix_computer_use"})
-
-
-def _read_skill_manifest(skill_dir: pathlib.Path):
-    """Read a seed manifest with the shared parser, or return None."""
-    for candidate in ("SKILL.md", "skill.json"):
-        path = skill_dir / candidate
-        if not path.is_file():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        try:
-            from ouroboros.contracts.skill_manifest import parse_skill_manifest_text
-            manifest = parse_skill_manifest_text(text)
-        except Exception:
-            return None
-        return manifest
-    return None
-
-
-def _read_skill_manifest_version(skill_dir: pathlib.Path) -> str:
-    """Return the parsed seed version, or an empty string when unavailable."""
-    manifest = _read_skill_manifest(skill_dir)
-    return str(manifest.version or "").strip() if manifest is not None else ""
-
-
-def _reseed_native_skill_in_place(
-    seed_skill: pathlib.Path,
-    target_skill: pathlib.Path,
-    log_obj: Any,
-    *,
-    drive_root: pathlib.Path | None = None,
-    skill_name: str | None = None,
-    old_version: str = "",
-    new_version: str = "",
-) -> bool:
-    """Replace launcher-owned native skill files in place.
-
-    Refreshes the hash-pinned native-trust verdict (review.json) for the new
-    payload when ``drive_root`` is provided; an explicit owner enable/disable
-    choice is preserved (auto-enable fires only when no choice exists yet).
-    """
-    try:
-        if target_skill.exists():
-            shutil.rmtree(target_skill)
-        shutil.copytree(seed_skill, target_skill)
-        # Preserve launcher-owned provenance on the replacement copy.
-        (target_skill / ".seed-origin").write_text(
-            f"seeded_from={seed_skill.parent.name}\nupgrade=true\n",
-            encoding="utf-8",
-        )
-        if drive_root is not None:
-            # The launcher just wrote repo-reviewed bytes: refresh the
-            # hash-pinned native-trust verdict for the new payload.
-            _stamp_native_seed_trust(pathlib.Path(drive_root), target_skill, log_obj)
-            _carry_grants_across_reseed(pathlib.Path(drive_root), target_skill, log_obj)
-        return True
-    except OSError as exc:
-        log_obj.warning(
-            "Failed to upgrade native skill in place %s -> %s: %s",
-            seed_skill, target_skill, exc,
-        )
-        return False
-
-
-def _per_skill_version_resync(
-    seed_dir: pathlib.Path,
-    native_root: pathlib.Path,
-    log_obj: Any,
-    *,
-    drive_root: pathlib.Path | None = None,
-) -> int:
-    """Re-seed only marker-owned native skills whose seed version changed.
-
-    Payload drift at an equal manifest version is logged as a warning and the
-    installed files are kept; it never blocks.
-    """
-    if not seed_dir.is_dir() or not native_root.is_dir():
-        return 0
-    upgraded = 0
-    for entry in sorted(seed_dir.iterdir()):
-        if not entry.is_dir() or entry.name.startswith("."):
-            continue
-        if not any((entry / candidate).is_file() for candidate in ("SKILL.md", "skill.json")):
-            continue
-        target = native_root / entry.name
-        if not target.exists():
-            # Respect deletion/absence; resync upgrades only existing skills.
-            continue
-        if not (target / ".seed-origin").is_file():
-            # User-managed skill in native/: never touch.
-            continue
-        seed_manifest = _read_skill_manifest(entry)
-        target_manifest = _read_skill_manifest(target)
-        if seed_manifest is None or target_manifest is None:
-            continue
-        seed_version = str(seed_manifest.version or "").strip()
-        target_version = str(target_manifest.version or "").strip()
-        if not seed_version or not target_version:
-            continue
-        if seed_version == target_version:
-            try:
-                from ouroboros.skill_loader import compute_content_hash
-                seed_hash = compute_content_hash(
-                    entry, manifest_entry=seed_manifest.entry,
-                    manifest_scripts=seed_manifest.scripts,
-                )
-                target_hash = compute_content_hash(
-                    target, manifest_entry=target_manifest.entry,
-                    manifest_scripts=target_manifest.scripts,
-                )
-            except Exception as exc:
-                log_obj.warning(
-                    "Native skill %s version %s payload comparison unavailable (%s)",
-                    entry.name, seed_version, type(exc).__name__,
-                )
-            else:
-                if seed_hash != target_hash:
-                    log_obj.warning(
-                        "Native skill %s version %s payload differs (seed=%s, installed=%s); "
-                        "installed files retained because the manifest version is unchanged",
-                        entry.name, seed_version, seed_hash, target_hash,
-                    )
-            continue
-        log_obj.info(
-            "Native skill %s version drift (seed=%s, installed=%s) — re-seeding",
-            entry.name, seed_version, target_version,
-        )
-        if _reseed_native_skill_in_place(
-            entry, target, log_obj,
-            drive_root=drive_root,
-            skill_name=entry.name,
-            old_version=target_version,
-            new_version=seed_version,
-        ):
-            upgraded += 1
-    return upgraded
-
-
-# Auto-enable exemption: tool registration + local subprocess are the basic
-# extension substrate. Externally-facing capabilities (net, route, widget,
-# inject_chat, subscribe_event, ...) keep the skill DISABLED until the owner
-# enables it, even though the native-trust review verdict is stamped.
-_NATIVE_AUTO_ENABLE_EXEMPT_PERMISSIONS = frozenset({"tool", "subprocess"})
-
-
-def _stamp_native_seed_trust(
-    drive_root: pathlib.Path,
-    skill_dir: pathlib.Path,
-    log_obj: Any,
-) -> None:
-    """Hash-pin a native-trust review verdict for a launcher-seeded skill.
-
-    The payload bytes shipped through the repo commit gate (its review wave), so a
-    launcher-written native skill gets ``status=clean`` bound to the payload
-    hash computed AFTER seeding (control files excluded from the hash). Any
-    later edit flips the verdict stale exactly like an ordinary review.
-    Zero-grant skills (no secret keys, no privileged permissions, only
-    tool/subprocess surface) also auto-enable. Owner opt-out:
-    ``OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS=false``. Never raises.
-    """
-    try:
-        from ouroboros.config import get_trust_native_seeded_skills
-
-        if not get_trust_native_seeded_skills():
-            return
-        from ouroboros.skill_loader import (
-            SkillReviewState,
-            load_skill,
-            requested_core_setting_keys,
-            requested_skill_permissions,
-            save_enabled,
-            save_review_state,
-        )
-        from ouroboros.utils import utc_now_iso
-
-        skill = load_skill(skill_dir, drive_root)
-        if skill is None or skill.load_error or not skill.content_hash:
-            log_obj.warning(
-                "Native-trust stamp skipped for %s: %s",
-                skill_dir.name,
-                (skill.load_error if skill else "no manifest"),
-            )
-            return
-        # ABI-1: native_seed is a PASS-minting path and shares the NEW-PASS
-        # admission predicate — a seeded extension without the plugin_api
-        # field gets NO trust verdict (bundled skills ship the field).
-        from ouroboros.contracts.plugin_api import extension_new_pass_admission_error
-
-        admission_error = extension_new_pass_admission_error(skill.manifest)
-        if admission_error:
-            log_obj.warning(
-                "Native-trust stamp refused for %s (PluginAPI 2.0 admission): %s",
-                skill.name, admission_error,
-            )
-            return
-        save_review_state(
-            drive_root,
-            skill.name,
-            SkillReviewState(
-                status="clean",
-                content_hash=skill.content_hash,
-                findings=[],
-                reviewer_models=["repo_commit_gate"],
-                timestamp=utc_now_iso(),
-                review_profile="native_seed",
-            ),
-        )
-        keys = requested_core_setting_keys(list(skill.manifest.env_from_settings or []))
-        perms = requested_skill_permissions(
-            list(skill.manifest.permissions or []),
-            list(skill.manifest.subscribe_events or []),
-        )
-        zero_grant = (
-            not keys
-            and not perms
-            and set(skill.manifest.permissions or []) <= _NATIVE_AUTO_ENABLE_EXEMPT_PERMISSIONS
-        )
-        # Owner sovereignty: auto-enable only when NO explicit choice exists.
-        # A version resync must never override an owner's disable (same
-        # precedent as OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: existing explicit
-        # choices are preserved).
-        from ouroboros.skill_loader import skill_state_dir
-
-        no_explicit_choice = not (skill_state_dir(drive_root, skill.name) / "enabled.json").exists()
-        auto_enabled = bool(zero_grant and no_explicit_choice)
-        if auto_enabled:
-            save_enabled(drive_root, skill.name, True)
-        log_obj.info(
-            "Native-trust review stamped for seeded skill %s (auto_enabled=%s)",
-            skill.name, auto_enabled,
-        )
-    except Exception:
-        log_obj.warning("Native-trust stamp failed for %s", skill_dir, exc_info=True)
-
-
-def _carry_grants_across_reseed(
-    drive_root: pathlib.Path,
-    skill_dir: pathlib.Path,
-    log_obj: Any,
-) -> None:
-    """Carry owner grants across a native re-seed when the requested sets are
-    unchanged (owner «A», v7next §6.1-Δ). Grants are content-hash-bound, so a
-    version resync used to orphan them (the telegram precedent) even though
-    the skill requests EXACTLY the same keys/permissions; a changed requested
-    set keeps the ordinary re-grant flow. Never raises."""
-    try:
-        from ouroboros.skill_loader import (
-            load_skill,
-            load_skill_grants,
-            requested_core_setting_keys,
-            requested_skill_permissions,
-            save_skill_grants,
-        )
-
-        skill = load_skill(skill_dir, drive_root)
-        if skill is None or skill.load_error or not skill.content_hash:
-            return
-        grants = load_skill_grants(drive_root, skill.name)
-        old_hash = str(grants.get("content_hash") or "")
-        if not old_hash or old_hash == skill.content_hash:
-            return
-        granted_keys = list(grants.get("granted_keys") or [])
-        granted_permissions = list(grants.get("granted_permissions") or [])
-        if not granted_keys and not granted_permissions:
-            return
-        new_keys = requested_core_setting_keys(list(skill.manifest.env_from_settings or []))
-        new_permissions = requested_skill_permissions(
-            list(skill.manifest.permissions or []),
-            list(skill.manifest.subscribe_events or []),
-        )
-        if sorted(grants.get("requested_keys") or []) != sorted(new_keys):
-            return
-        if sorted(grants.get("requested_permissions") or []) != sorted(new_permissions):
-            return
-        save_skill_grants(
-            drive_root,
-            skill.name,
-            granted_keys,
-            content_hash=skill.content_hash,
-            requested_keys=new_keys,
-            granted_permissions=granted_permissions,
-            requested_permissions=new_permissions,
-        )
-        log_obj.info(
-            "Carried owner grants across native re-seed for %s (requested sets unchanged)",
-            skill.name,
-        )
-    except Exception:
-        log_obj.warning("Grant carry across re-seed failed for %s", skill_dir, exc_info=True)
-
-
-def _migrate_control_file_hashes(target_root: pathlib.Path, log_obj: Any) -> None:
-    """One-shot re-pin for reviews recorded with the legacy control-file hash.
-
-    v6.31 excluded lifecycle control files (``.seed-origin``) from the payload
-    hash; a review pinned to the LEGACY hash would go stale on update without
-    any payload change. When the stored hash equals the legacy-computed hash
-    (proving no edits happened), re-pin it to the new-semantics hash with the
-    same verdict. Never raises.
-    """
-    native_root = target_root / "native"
-    if not native_root.is_dir():
-        return
-    try:
-        from ouroboros.skill_loader import (
-            compute_content_hash,
-            load_skill,
-            save_review_state,
-        )
-    except Exception:
-        return
-    # Only native-bucket payloads are affected by the exemption (the hash for
-    # other buckets is byte-identical before/after the semantics change), so
-    # scanning native/ alone is complete by construction.
-    for entry in sorted(native_root.iterdir()):
-        try:
-            if not entry.is_dir() or not (entry / ".seed-origin").is_file():
-                continue
-            drive_root = target_root.parent
-            skill = load_skill(entry, drive_root)
-            if skill is None or skill.load_error or not skill.content_hash:
-                continue
-            review = skill.review
-            if not review.content_hash or review.content_hash == skill.content_hash:
-                continue
-            legacy_hash = compute_content_hash(
-                entry,
-                manifest_entry=skill.manifest.entry,
-                manifest_scripts=skill.manifest.scripts,
-                include_control_files=True,
-            )
-            if review.content_hash != legacy_hash:
-                continue  # genuinely edited payload — stays stale
-            review.content_hash = skill.content_hash
-            save_review_state(drive_root, skill.name, review)
-            log_obj.info(
-                "Re-pinned legacy control-file review hash for native skill %s",
-                skill.name,
-            )
-        except Exception:
-            log_obj.debug("Control-file hash migration failed for %s", entry, exc_info=True)
-
-
-def _seed_skills_into(seed_dir: pathlib.Path, target_root: pathlib.Path, log_obj: Any) -> int:
-    """Copy seed skills into ``target_root/native/`` once, guarded by a marker.
-
-    The marker preserves deletion intent: after first bootstrap, an empty
-    native bucket is not auto-populated again.
-    """
-    if not seed_dir.is_dir():
-        return 0
-    native_root = target_root / "native"
-    try:
-        # Prefer the canonical layout helper; fall back to manual mkdir.
-        try:
-            from ouroboros.config import ensure_data_skills_dir
-            ensure_data_skills_dir(target_root.parent)
-        except Exception:
-            target_root.mkdir(parents=True, exist_ok=True)
-            for bucket in ("native", "clawhub", "external"):
-                (target_root / bucket).mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        log_obj.warning("Skills data root setup failed: %s", exc)
-        return 0
-
-    marker_path = native_root / _SEED_COMPLETE_MARKER
-    if marker_path.is_file():
-        # Bootstrap already ran; do not resurrect deleted seed skills.
-        try:
-            from ouroboros.skill_loader import discover_skills
-
-            installed_names = {
-                skill.name for skill in discover_skills(target_root.parent)
-            }
-        except Exception:
-            log_obj.warning(
-                "New native skill seeding skipped: installed skill names could not be inspected",
-                exc_info=True,
-            )
-            return 0
-        copied = 0
-        for name in sorted(_POST_BOOTSTRAP_NEW_NATIVE_SEEDS):
-            entry = seed_dir / name
-            dest = native_root / name
-            offered_marker = native_root / f".post-bootstrap-seed-{name}"
-            if offered_marker.exists():
-                continue
-            if dest.exists() or not any((entry / candidate).is_file() for candidate in ("SKILL.md", "skill.json")):
-                continue
-            if name in installed_names:
-                log_obj.warning(
-                    "New bundled native skill %s was not seeded because an installed payload already uses that name",
-                    name,
-                )
-                continue
-            try:
-                shutil.copytree(entry, dest)
-                (dest / ".seed-origin").write_text(
-                    f"seeded_from={seed_dir.name}\npost_bootstrap_new_seed=true\n",
-                    encoding="utf-8",
-                )
-                offered_marker.write_text("offered\n", encoding="utf-8")
-                copied += 1
-                installed_names.add(name)
-                _stamp_native_seed_trust(target_root.parent, dest, log_obj)
-            except OSError as exc:
-                log_obj.warning("Failed to copy new bundled native skill %s -> %s: %s", entry, dest, exc)
-        return copied
-
-    # Existing unmarked native content is treated as user-managed; mark complete
-    # without copying to avoid clobbering it.
-    try:
-        existing = [p for p in native_root.iterdir() if not p.name.startswith(".")]
-    except OSError:
-        existing = []
-    if existing:
-        try:
-            marker_path.write_text(
-                "Bootstrap inferred from pre-existing native/ contents.\n",
-                encoding="utf-8",
-            )
-        except OSError as exc:
-            log_obj.warning("Failed to write %s: %s", marker_path, exc)
-        return 0
-
-    copied = 0
-    for entry in sorted(seed_dir.iterdir()):
-        if not entry.is_dir() or entry.name.startswith("."):
-            continue
-        if not any((entry / candidate).is_file() for candidate in ("SKILL.md", "skill.json")):
-            continue
-        dest = native_root / entry.name
-        if dest.exists():
-            continue
-        try:
-            shutil.copytree(entry, dest)
-            # Per-skill marker lets source classification prove launcher ownership.
-            (dest / ".seed-origin").write_text(
-                f"seeded_from={seed_dir.name}\n", encoding="utf-8",
-            )
-            copied += 1
-            _stamp_native_seed_trust(target_root.parent, dest, log_obj)
-        except OSError as exc:
-            log_obj.warning("Failed to copy seed skill %s -> %s: %s", entry, dest, exc)
-
-    # Always mark completion so subsequent launches do not retry seeding.
-    try:
-        marker_path.write_text(
-            f"Bootstrap-seed completed; copied {copied} skill(s) from {seed_dir}.\n",
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        log_obj.warning("Failed to write %s: %s", marker_path, exc)
-
-    if copied:
-        log_obj.info(
-            "Bootstrapped %d native skill(s) from seed %s into %s",
-            copied, seed_dir, native_root,
-        )
-    return copied
-
-
 def ensure_data_skills_seeded() -> int:
-    """Seed native skills once, then version-resync marker-owned native skills."""
-    import logging as _logging
-    from ouroboros.config import DATA_DIR, REPO_DIR
+    """Startup work of the built-in skill source on the data root (``skill_builtin``):
+    the one-time identity conversion, re-seeding built-ins whose bundled version changed
+    and releasing built-ins the app no longer bundles. A new install gets its built-ins
+    from the starter selection, never from this hook."""
+    from ouroboros.skill_builtin import ensure_builtin_skills
 
-    log_obj = _logging.getLogger(__name__)
-    seed_dir = pathlib.Path(REPO_DIR) / "skills"
-    target_root = pathlib.Path(DATA_DIR) / "skills"
-    copied = _seed_skills_into(seed_dir, target_root, log_obj)
-    drive_root = pathlib.Path(DATA_DIR)
-    try:
-        # One-shot v6.31 hash-semantics migration (control files left the hash).
-        _migrate_control_file_hashes(target_root, log_obj)
-    except Exception:  # pragma: no cover - defensive
-        log_obj.warning("Control-file hash migration raised", exc_info=True)
-    try:
-        upgraded = _per_skill_version_resync(
-            seed_dir, target_root / "native", log_obj,
-            drive_root=drive_root,
-        )
-    except Exception:  # pragma: no cover - defensive
-        log_obj.warning("Native skill version-resync raised", exc_info=True)
-        upgraded = 0
-    try:
-        cleanup_orphaned_seed_markers(seed_dir, target_root / "native", log_obj)
-    except Exception:  # pragma: no cover - defensive
-        log_obj.warning("Orphaned seed-marker cleanup raised", exc_info=True)
-    return copied + upgraded
-
-
-def cleanup_orphaned_seed_markers(
-    seed_dir: pathlib.Path,
-    native_root: pathlib.Path,
-    log_obj,
-) -> None:
-    """Strip seed markers for native skills no longer shipped in ``repo/skills``.
-
-    Payloads stay in place; only ownership is reclassified to user-managed.
-    """
-    if not native_root.is_dir():
-        return
-    for entry in native_root.iterdir():
-        if not entry.is_dir() or entry.name.startswith("."):
-            continue
-        marker = entry / ".seed-origin"
-        if not marker.is_file():
-            continue
-        if (seed_dir / entry.name).is_dir():
-            continue
-        try:
-            marker.unlink()
-            log_obj.info(
-                "Native skill %r seed has been removed from repo/skills/; "
-                "re-classifying installed copy as external (user-managed).",
-                entry.name,
-            )
-        except OSError:  # pragma: no cover - defensive
-            log_obj.warning(
-                "Failed to strip orphaned .seed-origin from %s",
-                entry, exc_info=True,
-            )
-
-
-def bootstrap_native_skills(context: BootstrapContext) -> None:
-    """Best-effort one-time copy of ``repo/skills/*`` into the data plane."""
-    _seed_skills_into(
-        context.repo_dir / "skills",
-        context.data_dir / "skills",
-        context.log,
-    )
+    return ensure_builtin_skills()
 
 
 def bootstrap_repo(context: BootstrapContext) -> bool:
@@ -1086,7 +719,7 @@ def bootstrap_repo(context: BootstrapContext) -> bool:
         if not world_path.exists():
             # Roots ride the environment and the path argv (a quote in it cannot break the
             # program text); the one-argument call also suits an older seed's profiler.
-            env = {**os.environ, "PYTHONPATH": str(context.repo_dir),
+            env = {**(host_environment() if sys.platform == "linux" else os.environ), "PYTHONPATH": str(context.repo_dir),
                    "OUROBOROS_REPO_DIR": str(context.repo_dir), "OUROBOROS_DATA_DIR": str(context.data_dir)}
             context.hidden_run(
                 [
@@ -1103,7 +736,6 @@ def bootstrap_repo(context: BootstrapContext) -> bool:
     except Exception as exc:
         context.log.warning("World profile generation failed: %s", exc)
 
-    bootstrap_native_skills(context)
     deps_ok = True
     if outcome != "unchanged":
         deps_ok = install_deps(context)
@@ -1231,11 +863,152 @@ def parse_launch_options(argv):
     return options
 
 
-def source_handoff_argv(argv) -> list[str]:
+def macos_source_entry(bundle_dir: pathlib.Path) -> pathlib.Path | None:
+    """The installed, signed Python host in Contents/MacOS; never a python symlink.
+
+    Its location keeps the ordinary app's WebKit profile. Its explicit signing
+    identifier keeps notification authorization. An older bundle has no entry;
+    updating source alone cannot add one to a sealed application.
+    """
+    if bundle_dir.name != "Frameworks" or bundle_dir.parent.name != "Contents" \
+            or bundle_dir.parent.parent.suffix != ".app":
+        return None
+    entry = bundle_dir.parent / "MacOS" / "ouroboros-shell"
+    return entry if entry.is_file() and not entry.is_symlink() and os.access(entry, os.X_OK) else None
+
+
+def find_embedded_python(bundle_dir: pathlib.Path, *, macos: bool) -> str:
+    """Select plain Python for the body/probes; an app entry must never replace it."""
+    from ouroboros.platform_layer import embedded_python_candidates
+
+    for path in embedded_python_candidates(bundle_dir):
+        if path.exists():
+            return str(path)
+    if macos and macos_source_entry(bundle_dir) is not None:
+        raise RuntimeError("The app's bundled Python is missing; the source entry cannot run the server.")
+    return sys.executable
+
+
+def shell_runtime_facts(repo_dir: pathlib.Path, seed: pathlib.Path | None, shell_version: str, *, macos: bool) -> dict:
+    """Installed seed and loaded source provenance; neither asserts native permission."""
+    frozen = getattr(sys, "frozen", False)
+    try:
+        bundle_version = (seed / "VERSION").read_text().strip() if seed else ""
+    except OSError:
+        bundle_version = ""
+    entry = macos_source_entry(seed) if macos and seed else None
+    return {"shell_version": shell_version, "bundle_version": bundle_version,
+            "source_launcher": not frozen,
+            "source_revision": remember_loaded_checkout(repo_dir, bundle_dir=seed if frozen else None),
+            "macos_source_entry": bool(entry and pathlib.Path(sys.executable) == entry) if macos and seed else None}
+
+
+# Consumed by launcher.py's stdlib prologue before any package import.
+LAUNCHER_HANDOFF_ENV = "OUROBOROS_LAUNCHER_HANDOFF"
+
+
+def exec_source_launcher(context: BootstrapContext, argv: list[str], *, release_lock: Callable[[], None],
+                         acquire_lock: Callable[[], bool], before_release: Callable[[], None],
+                         on_failure: Callable[[], None], desktop: bool, macos: bool, cancelled=lambda: False) -> None:
+    """Hand off to compatible managed source; keep the shell on probe or spawn refusal.
+
+    macOS selects its signed entry and probes imports/protocol with plain Python before
+    teardown or unlocking. POSIX replaces the process image with that exact command.
+    Windows spawns a quoted argv, preserving an attached CLI console and hiding only
+    when there is none. Remove the old icon while holding the lock; a definite refusal
+    reacquires it before restoring the shell, or exits if another launcher took it.
+    A successor that starts and then fails is not a spawn refusal; no retry state is kept.
+    """
+    from ouroboros.platform_layer import IS_WINDOWS, inherited_console_kwargs
+
+    entry = macos_source_entry(context.bundle_dir) if macos else None
+    frozen = getattr(sys, "frozen", False)
+    if not source_launcher_importable(
+            context, desktop=desktop, python=(find_embedded_python(context.bundle_dir, macos=macos)
+                if entry is not None or frozen else context.embedded_python),
+            require_macos_entry=entry is not None):
+        return  # old/rollback source or a missing dependency must not lose the working shell
+    handoff = source_handoff_argv(argv, keep_runtime_venv=entry is not None)
+    if frozen:
+        handoff += ["--seed-bundle", str(context.bundle_dir)]
+    command = [str(entry) if entry else context.embedded_python, str(context.repo_dir / "launcher.py"), *handoff]
+    context.log.info("Loading managed source launcher through %s", command[0])
+    # The source shell needs the dependencies bootstrap installed in the userbase,
+    # too. Do not export PYTHONHOME or change any child's process/bundle identity.
+    env = embedded_python_env(context.data_dir, {**os.environ, LAUNCHER_HANDOFF_ENV: "1"})
+    if cancelled():
+        return
+    before_release()
+    release_lock()
+    try:
+        if cancelled():
+            if acquire_lock():
+                on_failure()
+            return  # the Panic owner must finish even if another launcher took the lock
+        if not IS_WINDOWS:
+            os.execve(command[0], command, env)  # returns only by raising
+        from ouroboros.server_control import _windows_restart_handoff
+
+        # Use the direct-restart parent handle/stdio contract. A current source
+        # launcher refuses its parent's Panic before startup; old source still
+        # imports/runs, but cannot guarantee this pre-Popen-return stop boundary.
+        with _windows_restart_handoff(env, context.log) as (_, inheritance):
+            if not source_handoff.begin(cancelled):
+                return
+            successor = None
+            try:
+                successor = subprocess.Popen(command, env=env, **inherited_console_kwargs(),
+                                             **{"close_fds": True, **inheritance})
+            finally:
+                source_handoff.spawned(successor, cancelled)
+    except Exception:
+        context.log.error("The checkout's launcher did not start", exc_info=True)
+        if acquire_lock():
+            on_failure()
+            return
+        if cancelled():
+            return  # a failed spawn cannot hard-exit over Panic's pending stop/writes
+        context.log.error("Another launcher took the single-instance lock meanwhile; this one exits")
+        source_handoff.leave(1, cancelled)
+        return
+    source_handoff.leave(0, cancelled)  # no atexit release over the successor's PID lock
+
+
+def source_launcher_importable(context: BootstrapContext, *, desktop: bool, python: str | None = None,
+                               require_macos_entry: bool = False) -> bool:
+    """Bounded handoff check using plain Python, before losing the running shell.
+
+    Import only: no main(), window, server or notification center. A source update
+    with missing dependencies can keep using the running shell until repaired.
+    Entry compatibility is explicit, not inferred from version or Git ancestry:
+    an older launcher can import yet use sys.executable (the entry) for its body.
+    """
+    code = "import launcher" + ("; import webview" if desktop else "")
+    if require_macos_entry:
+        code += ("\nif getattr(launcher, 'MACOS_SOURCE_ENTRY_PROTOCOL', None) != 1:\n"
+                 "    raise SystemExit('Source launcher does not support macOS source entry protocol 1')\n")
+    env = embedded_python_env(context.data_dir, {**os.environ, "PYTHONPATH": str(context.repo_dir)})
+    try:
+        result = context.hidden_run([python or context.embedded_python, "-c", code], cwd=str(context.repo_dir),
+                                    env=env, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            return True
+        reason = _pip_output_tail(result)
+    except (OSError, subprocess.SubprocessError) as exc:
+        reason = str(exc)
+    context.log.warning("Source launcher probe failed; keeping the running shell: %s", reason)
+    return False
+
+
+def source_handoff_argv(argv, *, keep_runtime_venv: bool = False) -> list[str]:
     """The argv a relaunch hands to the checkout's own launcher.
 
     ``--runtime-venv`` was consumed here: the relaunch interpreter IS that venv, and
-    an older rollback launcher must not receive an option it never knew."""
+    an older rollback launcher must not receive an option it never knew. The macOS
+    app entry instead hosts the shell on bundled Python, so it must retain the
+    option selecting the body's separate interpreter."""
+    if keep_runtime_venv:
+        return list(argv)
     handoff, items = [], iter(argv)
     for item in items:
         if item == "--runtime-venv":
@@ -1247,14 +1020,9 @@ def source_handoff_argv(argv) -> list[str]:
 
 def automatic_launch_allowed(intent: str, data_dir: pathlib.Path, log: Any) -> bool:
     if intent == "automatic":
-        # The server consumes this existing marker on an explicit owner start.
-        # A boot entry must not start it and accidentally erase the owner's Stop.
-        # The same file also carries owner_restart_no_resume: that is a restart,
-        # not Panic, and must remain launchable. No second stop-state store.
-        try:
-            stopped = (data_dir / "state" / "panic_stop.flag").read_text(encoding="utf-8").strip() == "panic"
-        except FileNotFoundError:
-            stopped = False
+        from ouroboros.installation_stop import installation_panic
+
+        stopped = installation_panic(data_dir)
         if stopped:
             log.info("Automatic start skipped: Ouroboros was stopped with Panic.")
             print("Ouroboros is stopped. Use Start to resume.", flush=True)

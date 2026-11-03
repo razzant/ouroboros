@@ -1,8 +1,9 @@
 """Synthesis sees task observations without mistaking tool success for receipt."""
 
+from tests import _dialogue as dialogue_test
+
 import hashlib
 import json
-import shutil
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from ouroboros.projects_registry import bind_task_to_project, create_project
 from ouroboros.task_finalization import build_completion_observations, build_sealed_final_package, sealed_final_prompt_section
 from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.task_status import load_effective_task_result
+from tests._store_shared import remove_store_tree
 
 
 def _trace():
@@ -81,7 +83,7 @@ def test_sealed_observations_survive_copyback_and_recovery_without_global_attrib
     if source_root != canonical:
         assert not (task_artifact_dir_path(source_root, "observation") / ref["path"]).exists()
         copied = copy_child_task_result(canonical, {"id": "observation", "drive_root": str(source_root)})
-        shutil.rmtree(source_root)
+        remove_store_tree(source_root)
     else:
         copied = stored
     assert (task_artifact_dir_path(canonical, "observation") / ref["path"]).read_bytes() == raw
@@ -143,7 +145,7 @@ def test_facts_row_buys_no_packet_and_persists_no_narrative(tmp_path, monkeypatc
     env = SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path)
     pipeline._store_task_result(env, task, "Photo sent.", {"rounds": 4, "cost": 0}, _trace())
     pipeline._record_task_facts(env, task, {"rounds": 4, "cost": 0}, _trace(), tmp_path / "logs")
-    [row] = [json.loads(line) for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()]
+    [row] = dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
     assert row["summary_kind"] == "host_task_facts" and row["text"] == ""
     assert row["tool_calls"] == 41 and row["tool_errors"] == 0 and row["routing_tool_calls"] == 0
     assert row["tool_call_counts"] == {"send_photo": 1, "send_user_message": 40}

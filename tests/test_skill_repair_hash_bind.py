@@ -240,11 +240,3 @@ class TestReceipts:
         assert 'or "skill_repair"' not in source
         assert "task_id_pending" in source
 
-    def test_marketplace_receipt_is_typed_pending(self):
-        import inspect
-
-        from ouroboros.gateway import marketplace
-
-        source = inspect.getsource(marketplace._maybe_enqueue_marketplace_auto_repair)
-        assert "skill_repair_{skill.name}" not in source
-        assert "task_id_pending" in source

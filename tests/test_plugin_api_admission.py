@@ -28,7 +28,7 @@ from ouroboros.skill_loader import (
 )
 from ouroboros.skill_review import review_skill
 
-from tests._skill_review_shared import _make_actor, _make_ctx, _pass_array_for_script_skill
+from tests._skill_review_shared import _make_ctx
 
 log = logging.getLogger(__name__)
 
@@ -66,14 +66,6 @@ def _build_extension_payload(
     return skill_dir
 
 
-def _pass_panel():
-    canned = json.dumps({"results": [
-        _make_actor("reviewer-a", _pass_array_for_script_skill()),
-        _make_actor("reviewer-b", _pass_array_for_script_skill()),
-    ]})
-    return patch("ouroboros.tools.review._handle_multi_model_review", return_value=canned)
-
-
 def _refuse_dispatch():
     return patch(
         "ouroboros.tools.review._handle_multi_model_review",
@@ -95,7 +87,7 @@ def test_fieldless_extension_artifact_is_refused_a_new_pass_before_dispatch(
         outcome = review_skill(ctx, "noapifield")
     assert outcome.status == "pending"
     assert "PluginAPI 2.0 admission" in outcome.error
-    assert outcome.paid is False and outcome.wave_id == ""
+    assert outcome.paid is False and outcome.record_id == ""  # refused before any wave: no record
     assert [f["item"] for f in outcome.findings] == ["plugin_api_admission"]
     persisted = load_review_state(ctx.drive_root, "noapifield")
     assert persisted.status == "pending"
@@ -107,9 +99,12 @@ def test_declared_2_0_extension_artifact_still_earns_a_pass(tmp_path, monkeypatc
     _build_extension_payload(skills_root, "withapifield", plugin_api_line='plugin_api: "2.0"\n')
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
     ctx = _make_ctx(tmp_path)
-    with _pass_panel():
-        outcome = review_skill(ctx, "withapifield")
+    from tests.test_skill_review_persist_guard import _clean_wave
+
+    sends = _clean_wave(monkeypatch)  # the fold's physical seam: every seat answers clean through custody
+    outcome = review_skill(ctx, "withapifield")
     assert outcome.status == "clean", outcome.error
+    assert sends, "a declared 2.0 extension earns its PASS from a real wave"
     assert load_review_state(
         ctx.drive_root, "withapifield", skill_type="extension"
     ).status == "clean"
@@ -219,106 +214,73 @@ def test_owner_attestation_admits_a_declared_2_0_extension(tmp_path, monkeypatch
     assert outcome.review_profile == "owner_attested"
 
 
-# --- native seed closed + grants resync --------------------------------------
+# --- built-in trusted basis closed + grants carried across re-seed ------------
 
 
-def _seed_pair(tmp_path, *, plugin_api_line: str, extra_frontmatter: str = ""):
-    seed_root = tmp_path / "repo_seed"
-    seed_dir = _build_extension_payload(
-        seed_root, "nativeext",
-        plugin_api_line=plugin_api_line, extra_frontmatter=extra_frontmatter,
-    )
+def _seed_root(tmp_path, label: str, *, plugin_api_line: str, extra_frontmatter: str = "",
+               version: str = "0.1.0") -> pathlib.Path:
+    root = tmp_path / label
+    seed = _build_extension_payload(root, "nativeext", plugin_api_line=plugin_api_line,
+                                    extra_frontmatter=extra_frontmatter)
+    if version != "0.1.0":
+        manifest = (seed / "SKILL.md").read_text(encoding="utf-8")
+        (seed / "SKILL.md").write_text(manifest.replace("version: 0.1.0", f"version: {version}"), encoding="utf-8")
+    return root
+
+
+def test_builtin_trusted_basis_is_closed_to_fieldless_extensions(tmp_path):
+    """ABI-1: the trusted install basis is a PASS-equivalent path and shares the
+    NEW-PASS admission predicate; the same payload with the field is admitted."""
+    from ouroboros.skill_builtin import install_builtin_skill
+    from ouroboros.skill_loader import find_skill
+
     drive_root = tmp_path / "drive"
-    native_root = drive_root / "skills" / "native"
-    native_root.mkdir(parents=True, exist_ok=True)
-    return seed_dir, native_root / "nativeext", drive_root
+    result = install_builtin_skill("nativeext", drive_root=drive_root,
+                                   seed_dir=_seed_root(tmp_path, "noapi", plugin_api_line=""))
+    assert result["ok"] and result["basis"] == "trusted"
+    gate = find_skill(drive_root, "nativeext").review.gate_for(result["digest"])
+    assert gate["executable_review"] is False
+
+    result = install_builtin_skill("nativeext", drive_root=drive_root,
+                                   seed_dir=_seed_root(tmp_path, "api", plugin_api_line='plugin_api: "2.0"\n'))
+    skill = find_skill(drive_root, "nativeext")
+    gate = skill.review.gate_for(skill.content_hash)
+    assert gate["executable_review"] is True and gate["blocking_reason"] == "trusted_source"
+    assert skill.review.status == "pending"  # no synthetic critic verdict is written
 
 
-def test_native_seed_trust_is_closed_to_fieldless_extensions(tmp_path):
-    import shutil
-
-    from ouroboros.launcher_bootstrap import _stamp_native_seed_trust
-
-    seed_dir, target, drive_root = _seed_pair(tmp_path, plugin_api_line="")
-    shutil.copytree(seed_dir, target)
-    (target / ".seed-origin").write_text("seeded_from=test\n", encoding="utf-8")
-    _stamp_native_seed_trust(drive_root, target, log)
-    assert load_review_state(drive_root, "nativeext").status == "pending"
-
-    # The SAME payload with the field earns the native-trust verdict.
-    shutil.rmtree(target)
-    seed_dir2, target2, _ = _seed_pair(tmp_path, plugin_api_line='plugin_api: "2.0"\n')
-    shutil.copytree(seed_dir2, target2)
-    (target2 / ".seed-origin").write_text("seeded_from=test\n", encoding="utf-8")
-    _stamp_native_seed_trust(drive_root, target2, log)
-    stamped = load_review_state(
-        drive_root, "nativeext",
-        skill_type="extension", skill_dir=target2,
-    )
-    assert stamped.status == "clean"
-    assert stamped.review_profile == "native_seed"
-
-
-def test_native_reseed_with_unchanged_requested_sets_carries_grants(tmp_path):
+def test_builtin_reseed_with_unchanged_requested_sets_carries_grants(tmp_path, monkeypatch):
     """Owner «A» (§6.1-Δ): a bundled version bump with identical requested
     key/permission sets must not orphan the owner's grants (the telegram
     precedent); a CHANGED requested set keeps the ordinary re-grant flow."""
-    import shutil
+    import ouroboros.config as config
+    from ouroboros.skill_builtin import install_builtin_skill, reseed_changed_builtins
+    from ouroboros.skill_loader import load_skill, load_skill_grants, save_skill_grants
 
-    from ouroboros.launcher_bootstrap import _reseed_native_skill_in_place
-    from ouroboros.skill_loader import load_skill_grants, save_skill_grants
-
+    monkeypatch.setattr(config, "get_auto_grant_enabled", lambda: False)
     extra = "env_from_settings: [TELEGRAM_BOT_TOKEN]\n"
-    seed_root_v1 = tmp_path / "seed_v1"
-    installed = _build_extension_payload(
-        seed_root_v1, "nativeext",
-        plugin_api_line='plugin_api: "2.0"\n', extra_frontmatter=extra,
-    )
+    api = 'plugin_api: "2.0"\n'
     drive_root = tmp_path / "drive"
-    native_root = drive_root / "skills" / "native"
-    native_root.mkdir(parents=True)
-    target = native_root / "nativeext"
-    shutil.copytree(installed, target)
-    (target / ".seed-origin").write_text("seeded_from=test\n", encoding="utf-8")
+    assert install_builtin_skill("nativeext", drive_root=drive_root,
+                                 seed_dir=_seed_root(tmp_path, "v1", plugin_api_line=api, extra_frontmatter=extra))["ok"]
+    target = drive_root / "skills" / "native" / "nativeext"
     old = load_skill(target, drive_root)
-    assert old is not None and old.content_hash
-    save_skill_grants(
-        drive_root, "nativeext", ["TELEGRAM_BOT_TOKEN"],
-        content_hash=old.content_hash, requested_keys=["TELEGRAM_BOT_TOKEN"],
-    )
+    save_skill_grants(drive_root, "nativeext", ["TELEGRAM_BOT_TOKEN"],
+                      content_hash=old.content_hash, requested_keys=["TELEGRAM_BOT_TOKEN"])
 
-    # v2 seed: same requested sets, different bytes (version bump).
-    seed_root_v2 = tmp_path / "seed_v2"
-    seed_v2 = _build_extension_payload(
-        seed_root_v2, "nativeext",
-        plugin_api_line='plugin_api: "2.0"\n', extra_frontmatter=extra,
-    )
-    manifest = (seed_v2 / "SKILL.md").read_text(encoding="utf-8")
-    (seed_v2 / "SKILL.md").write_text(
-        manifest.replace("version: 0.1.0", "version: 0.2.0"), encoding="utf-8",
-    )
-    assert _reseed_native_skill_in_place(seed_v2, target, log, drive_root=drive_root)
+    assert reseed_changed_builtins(drive_root, seed_dir=_seed_root(
+        tmp_path, "v2", plugin_api_line=api, extra_frontmatter=extra, version="0.2.0")) == 1
     new = load_skill(target, drive_root)
-    assert new is not None and new.content_hash != old.content_hash
+    assert new.content_hash != old.content_hash
     grants = load_skill_grants(drive_root, "nativeext")
     assert grants["content_hash"] == new.content_hash
     assert grants["granted_keys"] == ["TELEGRAM_BOT_TOKEN"]
 
-    # v3 seed: the requested set CHANGES -> no carry, ordinary re-grant flow.
-    seed_root_v3 = tmp_path / "seed_v3"
-    seed_v3 = _build_extension_payload(
-        seed_root_v3, "nativeext",
-        plugin_api_line='plugin_api: "2.0"\n',
-        extra_frontmatter="env_from_settings: [TELEGRAM_BOT_TOKEN, GITHUB_TOKEN]\n",
-    )
-    manifest = (seed_v3 / "SKILL.md").read_text(encoding="utf-8")
-    (seed_v3 / "SKILL.md").write_text(
-        manifest.replace("version: 0.1.0", "version: 0.3.0"), encoding="utf-8",
-    )
-    assert _reseed_native_skill_in_place(seed_v3, target, log, drive_root=drive_root)
+    assert reseed_changed_builtins(drive_root, seed_dir=_seed_root(
+        tmp_path, "v3", plugin_api_line=api, version="0.3.0",
+        extra_frontmatter="env_from_settings: [TELEGRAM_BOT_TOKEN, GITHUB_TOKEN]\n")) == 1
     third = load_skill(target, drive_root)
-    grants = load_skill_grants(drive_root, "nativeext")
-    assert grants["content_hash"] != third.content_hash, (
+    assert load_skill_grants(drive_root, "nativeext")["content_hash"] != third.content_hash, (
         "a changed requested set must not silently carry old grants to the new hash"
     )
 
@@ -327,7 +289,7 @@ def test_bundled_extension_seeds_declare_the_plugin_api_field():
     """Q6/Q-B: bundled skills ship the field in the same release that closes
     native-seed trust to field-less extensions."""
     repo_root = pathlib.Path(__file__).parents[1]
-    for name in ("telegram", "unix_computer_use"):
+    for name in ("telegram", "unix_computer_use", "windows_computer_use"):
         from ouroboros.contracts.skill_manifest import parse_skill_manifest_text
 
         manifest = parse_skill_manifest_text(

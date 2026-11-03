@@ -31,6 +31,7 @@ from pathlib import Path
 import pytest
 
 from tests.candidate_checkout import candidate_checkout
+from tests._shared import producer_evidence_dir
 from tests.system_e2e.harness import (
     ArtifactOracle,
     KeylessIsolatedServer,
@@ -320,12 +321,12 @@ def _card_lines(page, task_id):
 
 def _expand(page, task_id):
     """Open a live card's timeline, so a screenshot shows its rows, not only the summary."""
-    button = _card(page, task_id).locator("[data-live-summary-button]")
+    button = _card(page, task_id).locator(":scope > [data-live-summary-button] [data-live-disclosure]")
     button.wait_for(state="attached", timeout=30000)
     if button.get_attribute("aria-expanded") != "true":
         button.click()
     page.wait_for_function("id => document.querySelector(`#page-chat .chat-live-card[data-task-id=\"${id}\"] "
-                           "[data-live-summary-button]`)?.getAttribute('aria-expanded') === 'true'",
+                           "> [data-live-summary-button] [data-live-disclosure]`)?.getAttribute('aria-expanded') === 'true'",
                            arg=task_id, timeout=15000)
 
 
@@ -333,32 +334,34 @@ def _fold(view):
     return next((line for line in (view or {}).get("lines", []) if " tool call" in line["text"]), None)
 
 
-def _menu(page):
-    page.locator("#page-chat .chat-header-more").evaluate("details => { details.open = true; }")
-    return {cmd: page.locator(f'#page-chat [data-chat-command="{cmd}"]').evaluate(
-        "b => ({text: b.textContent, on: b.classList.contains('on'), tone: b.dataset.tone || '', title: b.title})")
-        for cmd in ("bg", "evolve")}
+def _chip(page):
+    # The bar's consciousness chip (consciousness_status.js): its word, its one mark and the words that say it all.
+    return page.locator("#page-chat .cx-chip").evaluate(
+        "b => ({label: b.getAttribute('aria-label') || '', word: b.querySelector('.cx-chip-word').textContent,"
+        " off: b.dataset.off === 'true', shape: b.querySelector('.status-mark').dataset.shape,"
+        " hue: b.querySelector('.status-mark').dataset.hue})")
 
 
-def _wait_menu(page, bg_text, evolve_text, timeout=45000):
+def _wait_chip(page, predicate, timeout=45000):
     page.wait_for_function(
-        """([bg, evolve]) => {
-            const text = cmd => document.querySelector(`#page-chat [data-chat-command="${cmd}"]`)?.textContent;
-            return text('bg') === bg && text('evolve') === evolve;
-        }""", arg=[bg_text, evolve_text], timeout=timeout)
-    return _menu(page)
+        "source => { const chip = document.querySelector('#page-chat .cx-chip');"
+        " return Boolean(chip && !chip.hidden) && new Function('chip', `return ${source}`)(chip); }",
+        arg=predicate, timeout=timeout)
+    return _chip(page)
+
+
+# The chip says the host's own sentence for its state (consciousness_view.py).
+UNKNOWN_CHIP = "chip.getAttribute('aria-label').startsWith('Consciousness: The stored consciousness control is unknown')"
 
 
 def _evolution_pills(page):
     page.locator('[data-nav-page="dashboard"]').click()
     page.locator('[data-dashboard-tab="evolution"]').click()
-    page.locator("#evo-mode-pill").wait_for(state="visible", timeout=30000)
-    page.wait_for_function("() => !/^Evolution$/.test(document.querySelector('#evo-mode-pill')?.textContent || '')",
-                           timeout=30000)
-    return {"evolution": page.locator("#evo-mode-pill").inner_text(),
-            "consciousness": page.locator("#evo-bg-pill").inner_text(),
-            "evolution_class": page.locator("#evo-mode-pill").get_attribute("class"),
-            "consciousness_class": page.locator("#evo-bg-pill").get_attribute("class")}
+    page.locator("#evo-campaign-chip").wait_for(state="visible", timeout=30000)  # shown once the state answered
+    return {"evolution": page.locator("#evo-campaign-chip").inner_text(),
+            "consciousness": page.locator("#evo-consciousness").inner_text(),
+            "evolution_tone": page.locator("#evo-campaign-chip").get_attribute("data-tone"),
+            "consciousness_tone": page.locator("#evo-consciousness").get_attribute("data-tone")}
 
 
 def _to_chat(page):
@@ -381,7 +384,8 @@ def test_batch1_unknown_controls_and_tool_history_reach_the_real_spa(batch1_clon
 
     from ouroboros.tool_call_log import logical_calls
 
-    evidence = Path(os.environ.get("OUROBOROS_BROWSER_EVIDENCE_OUT") or tmp_path / "evidence")
+    evidence = producer_evidence_dir(tmp_path / "evidence", "batch1-consumers",
+                                     env="OUROBOROS_BROWSER_EVIDENCE_OUT")
     evidence.mkdir(parents=True, exist_ok=True)
     receipt: dict = {"assertions": [], "red": []}
 
@@ -464,27 +468,29 @@ def test_batch1_unknown_controls_and_tool_history_reach_the_real_spa(batch1_clon
                 try:
                     page.goto(server.base_url, wait_until="domcontentloaded")
                     page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === WebSocket.OPEN)", timeout=60000)
-                    menu = _wait_menu(page, "Consciousness · unknown", "Evolve · unknown")
-                    assert not menu["bg"]["on"] and not menu["evolve"]["on"] and menu["bg"]["tone"] == "warn"
-                    page.screenshot(path=str(shots / "01-boot1-unknown-controls-menu.png"), animations="disabled")
-                    passed("chat_menu_unknown", menu=menu)
+                    chip = _wait_chip(page, UNKNOWN_CHIP)
+                    # An unknown control is never Off: a faint ring and no word, the words say unknown.
+                    assert not chip["off"] and chip["shape"] == "ring" and chip["word"] == "", chip
+                    page.screenshot(path=str(shots / "01-boot1-unknown-consciousness-chip.png"), animations="disabled")
+                    passed("chat_chip_unknown", chip=chip)
                     pills = _evolution_pills(page)
-                    assert pills["evolution"] == "Evolution unknown" and pills["consciousness"] == "Consciousness unknown", pills
+                    assert pills["evolution"] == "Unknown" and pills["consciousness"] == "Consciousness unknown", pills
                     page.screenshot(path=str(shots / "02-boot1-unknown-evolution-panel.png"), animations="disabled")
                     passed("evolution_panel_unknown", pills=pills)
-                    # A narrow viewport: the longer unknown labels must still fit the menu.
+                    # A narrow viewport: the bar keeps the chip whole beside the title and Panic.
                     mobile = browser.new_page(viewport={"width": 390, "height": 844}, has_touch=True, is_mobile=True)
                     mobile_observer = _Observer(mobile)
                     try:
                         mobile.goto(server.base_url, wait_until="domcontentloaded")
-                        mobile_menu = _wait_menu(mobile, "Consciousness · unknown", "Evolve · unknown")
-                        fit = mobile.evaluate("""() => [...document.querySelectorAll('#page-chat [data-chat-command="bg"], '
-                            + '#page-chat [data-chat-command="evolve"]')].map(b => { const r = b.getBoundingClientRect();
+                        mobile_chip = _wait_chip(mobile, UNKNOWN_CHIP)
+                        fit = mobile.evaluate("""() => [...document.querySelectorAll('#page-chat .cx-chip, '
+                            + '#page-chat [data-chat-command="panic"]')].map(b => { const r = b.getBoundingClientRect();
                             return {left: r.left, right: r.right, width: r.width, visible: r.width > 0 && r.height > 0,
                                     viewport: innerWidth}; })""")
-                        mobile.screenshot(path=str(shots / "02m-boot1-unknown-controls-menu-390.png"), animations="disabled")
-                        assert all(item["visible"] and item["left"] >= 0 and item["right"] <= item["viewport"] for item in fit), fit
-                        passed("mobile_menu_unknown_fits", menu=mobile_menu, geometry=fit,
+                        mobile.screenshot(path=str(shots / "02m-boot1-unknown-consciousness-chip-390.png"), animations="disabled")
+                        assert len(fit) == 2 and all(item["visible"] and item["left"] >= 0 and item["right"] <= item["viewport"]
+                                                     for item in fit), fit
+                        passed("mobile_chip_unknown_fits", chip=mobile_chip, geometry=fit,
                                console_network=mobile_observer.outside(set()))
                         assert not mobile_observer.outside(set()), mobile_observer.rows
                     finally:
@@ -557,10 +563,10 @@ def test_batch1_unknown_controls_and_tool_history_reach_the_real_spa(batch1_clon
                     observer.phase = "owner-commands"
                     _send(page, "/evolve stop")
                     wait_until(lambda: _api(server, "/api/state")["evolution_enabled"] is False, 60)
-                    menu = _wait_menu(page, "Consciousness · unknown", "Evolve")
-                    assert not menu["evolve"]["on"] and menu["evolve"]["tone"] == ""
+                    chip = _wait_chip(page, UNKNOWN_CHIP)
+                    assert "evolution campaign running" not in chip["label"] and chip["word"] != "Evolving", chip
                     page.screenshot(path=str(shots / "06-boot1-known-disabled-beside-unknown.png"), animations="disabled")
-                    passed("known_disabled_distinct_from_unknown", menu=menu,
+                    passed("known_disabled_distinct_from_unknown", chip=chip,
                            api={k: _api(server, "/api/state")[k] for k in ("evolution_enabled", "bg_consciousness_enabled")})
 
                     # -- A transiently unreadable primary: display-only backup, no known control.
@@ -571,13 +577,13 @@ def test_batch1_unknown_controls_and_tool_history_reach_the_real_spa(batch1_clon
                         wait_until(lambda: _api(server, "/api/state")["state_quality"]["quality"] == "recovered_transient", 30)
                         transient = _api(server, "/api/state")
                         assert transient["evolution_enabled"] is None and transient["bg_consciousness_enabled"] is None
-                        menu = _wait_menu(page, "Consciousness · unknown", "Evolve · unknown")
+                        chip = _wait_chip(page, UNKNOWN_CHIP)
                         page.screenshot(path=str(shots / "07-boot1-transient-unreadable-unknown.png"), animations="disabled")
-                        passed("transient_unreadable_is_unknown", state_quality=transient["state_quality"], menu=menu)
+                        passed("transient_unreadable_is_unknown", state_quality=transient["state_quality"], chip=chip)
                     finally:
                         primary.chmod(0o600)
                     wait_until(lambda: _api(server, "/api/state")["evolution_enabled"] is False, 30)
-                    _wait_menu(page, "Consciousness · unknown", "Evolve")
+                    _wait_chip(page, UNKNOWN_CHIP)
                     passed("returning_primary_restores_known_control")
                     observer.phase = "boot1"
 
@@ -674,7 +680,7 @@ def test_batch1_unknown_controls_and_tool_history_reach_the_real_spa(batch1_clon
                     page.screenshot(path=str(shots / "10-boot2-reconnected-same-page.png"), animations="disabled")
                     page.reload(wait_until="domcontentloaded")
                     page.get_by_text("Batch1 turn A is complete.", exact=True).wait_for(timeout=60000)
-                    menu = _wait_menu(page, "Consciousness · unknown", "Evolve")
+                    _wait_chip(page, UNKNOWN_CHIP)
                     page.wait_for_timeout(3000)
                     for label, task in (("a", a_id), ("b", b_id), ("c", c_id)):
                         if _card(page, task).count():
@@ -684,7 +690,7 @@ def test_batch1_unknown_controls_and_tool_history_reach_the_real_spa(batch1_clon
                                                          animations="disabled")
                     reloaded = {task: _card_lines(page, task) for task in (a_id, b_id, c_id)}
                     page.screenshot(path=str(shots / "11-boot2-reloaded-chat.png"), full_page=True, animations="disabled")
-                    receipt["reload"] = {"menu": menu, "cards": reloaded, "reconnected_b": reconnected_b}
+                    receipt["reload"] = {"chip": _chip(page), "cards": reloaded, "reconnected_b": reconnected_b}
                     a_reload_text = _card_text(page, a_id)
                     if re.search(r"\b\d+ errors?\b", a_reload_text) or (_fold(reloaded[a_id]) or {}).get("cls", "").find("warn") >= 0:
                         red("reload_turn_a_timeout_counted_as_error", card=reloaded[a_id],
@@ -724,18 +730,17 @@ def test_batch1_unknown_controls_and_tool_history_reach_the_real_spa(batch1_clon
                     _send(page, "/bg start")
                     wait_until(lambda: _api(server, "/api/state")["bg_consciousness_enabled"] is True, 60)
                     scenario["closed"] = True
-                    menu_on = _wait_menu(page, "Consciousness", "Evolve")
-                    assert menu_on["bg"]["on"] and not menu_on["evolve"]["on"]
+                    chip_on = _wait_chip(page, "chip.dataset.off === 'false' && !chip.getAttribute('aria-label').includes('is unknown')")
+                    assert chip_on["word"] != "Off" and "evolution campaign running" not in chip_on["label"], chip_on
                     page.screenshot(path=str(shots / "13-boot2-known-enabled-and-disabled.png"), animations="disabled")
                     _send(page, "/bg stop")
                     wait_until(lambda: _api(server, "/api/state")["bg_consciousness_enabled"] is False, 60)
-                    menu_off = _wait_menu(page, "Consciousness", "Evolve")
-                    page.wait_for_function("() => !document.querySelector('#page-chat [data-chat-command=\"bg\"]').classList.contains('on')",
-                                           timeout=30000)
-                    menu_off = _menu(page)
+                    chip_off = _wait_chip(page, "chip.dataset.off === 'true'")
+                    assert chip_off["word"] == "Off", chip_off
+                    assert chip_off["label"] == "Consciousness: Background consciousness is off.", chip_off
                     pills2 = _evolution_pills(page)
                     page.screenshot(path=str(shots / "14-boot2-known-controls-evolution-panel.png"), animations="disabled")
-                    passed("known_enabled_and_disabled_distinct", menu_on=menu_on, menu_off=menu_off, pills=pills2)
+                    passed("known_enabled_and_disabled_distinct", chip_on=chip_on, chip_off=chip_off, pills=pills2)
                     observer.phase = "boot2"
                     receipt["observer"] = observer.classified()
                     unexpected = observer.outside({"crash-restart"})

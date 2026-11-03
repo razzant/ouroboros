@@ -12,6 +12,34 @@ from tests.test_budget_pause_holds import _fenced_member, _idle_worker, _source_
 pytestmark = pytest.mark.serial
 
 
+@pytest.mark.parametrize("saved_pause,selected", [(True, True), (False, True), (True, False), (False, False)])
+def test_new_saved_pause_does_not_rearm_historic_selected_panic(tmp_path, monkeypatch, saved_pause, selected):
+    from supervisor.events_budget import BUDGET_HOLD_KEY, HOLD_PANIC
+    from ouroboros import budget_pause
+    queue, state, workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
+    task, _ = _parked(tmp_path, monkeypatch, task_id="root", scope="root")
+    if not saved_pause:
+        task.pop("_budget_pause")
+    if selected:
+        task["_resume_selection"] = {"selected_by": "owner", "fence_id": "older-fence", "root_task_id": "root"}
+    else:
+        task[BUDGET_HOLD_KEY] = {"reason": HOLD_PANIC, "root_task_id": "root"}
+    before = copy.deepcopy(task)
+    saved = budget_pause.budget_pause_row(tmp_path, "root")
+    sent = []
+    _idle_worker(workers, sent)
+    workers.assign_tasks()
+    assert not sent
+    assert budget_pause.budget_pause_row(tmp_path, "root") == saved
+    if saved_pause or not selected:
+        assert task.get(BUDGET_HOLD_KEY) == before.get(BUDGET_HOLD_KEY)
+        assert task.get("_resume_selection") == before.get("_resume_selection")
+        assert task.get("_budget_pause") == before.get("_budget_pause")
+    else:
+        assert BUDGET_HOLD_KEY not in task and "_resume_selection" not in task
+
+
 @pytest.mark.parametrize("late_carrier", ["none", "before_assignment", "before_root_resume"])
 def test_new_root_pause_invalidates_child_selection_until_selected_again(tmp_path, monkeypatch, late_carrier):
     queue, state, workers = _install_queue(tmp_path, monkeypatch)
@@ -26,7 +54,7 @@ def test_new_root_pause_invalidates_child_selection_until_selected_again(tmp_pat
     workers.PENDING.remove(root)  # root ran, then paused for a second time
     root2, _ = _parked(tmp_path, monkeypatch, task_id="root", scope="root")
     assert "_budget_pause_resume" not in child and "_budget_pause" in child
-    assert not sibling["_budget_pause_hold"]["selected"]
+    assert "_budget_pause_hold" in sibling and "_resume_selection" not in sibling
     if late_carrier != "none":
         child.clear()
         child.update(old_child)  # a stale queue carrier cannot bypass either consumer
@@ -46,7 +74,7 @@ def test_new_root_pause_invalidates_child_selection_until_selected_again(tmp_pat
     workers.assign_tasks()
     assert [row["id"] for row in sent] == ["root", "child"]
     assert sent[-1]["_budget_pause_resume"]["root_grant_id"] == second["grant_id"]
-    assert not sibling["_budget_pause_hold"]["selected"]
+    assert "_budget_pause_hold" in sibling and "_resume_selection" not in sibling
 
 
 def test_assignment_rechecks_root_grant_even_when_no_fence_is_left(tmp_path, monkeypatch):
@@ -118,6 +146,7 @@ def _dead_granted_task(tmp_path, monkeypatch):
 @pytest.mark.parametrize("snapshot_ok", [True, False])
 def test_dead_unconsumed_grant_keeps_exact_hold_when_revocation_stores_fail(tmp_path, monkeypatch, snapshot_ok):
     from ouroboros import budget_pause
+    from ouroboros.work_stop import continuation_refusal
     from supervisor import events_budget, worker_health
 
     queue, workers, job, row = _dead_granted_task(tmp_path, monkeypatch)
@@ -132,7 +161,7 @@ def test_dead_unconsumed_grant_keeps_exact_hold_when_revocation_stores_fail(tmp_
     worker_health._recover_crashed_task_without_terminal(job, queue)
     assert terminals == [] and not workers.RUNNING
     held = workers.PENDING[0]
-    hold = held["_budget_pause_hold"]
+    hold = continuation_refusal(held)
     assert hold["grant_id"] == original_grant["grant_id"] and hold["pause_id"] == row["pause_id"]
     assert hold["snapshot_persisted"] is snapshot_ok and "_budget_pause_resume" not in held
     assert held["_budget_pause"]["checkpoint"]["source_ref"] == row["source_ref"]
@@ -147,7 +176,7 @@ def test_dead_unconsumed_grant_keeps_exact_hold_when_revocation_stores_fail(tmp_
     assert [task["id"] for task in sent] == ["dead"]
 
 
-def test_consumed_grant_crash_never_enters_ordinary_retry(tmp_path, monkeypatch):
+def test_consumed_grant_without_new_working_source_is_never_reexecuted(tmp_path, monkeypatch):
     from ouroboros import budget_pause, delegate_recovery
     from ouroboros.task_results import load_task_result
     from supervisor import worker_health
@@ -162,6 +191,8 @@ def test_consumed_grant_crash_never_enters_ordinary_retry(tmp_path, monkeypatch)
     monkeypatch.setattr(owner_wait, "rebind_restored_route", lambda *_a, **_k: (None, "max"))
     budget_pause.resume_paused_loop(SimpleNamespace(_ctx=ctx), saved, [], {}, {}, set(),
                                     budget_remaining_usd=5.0)
+    from ouroboros.working_checkpoint import discard
+    discard(tmp_path, "dead")  # no current source: old Resume bytes are never a retry source
     monkeypatch.setattr(delegate_recovery, "reconcile_unrecoverable_task", lambda *_a, **_k: None)
     monkeypatch.setattr(queue, "enqueue_task", lambda *_a, **_k: pytest.fail("completed effects replayed"))
     terminals = []
@@ -175,7 +206,7 @@ def test_consumed_grant_crash_never_enters_ordinary_retry(tmp_path, monkeypatch)
 @pytest.mark.parametrize("fences", ["budget", "acceptance", "both"])
 @pytest.mark.parametrize("source_state", ["intact", "missing", "corrupt"])
 def test_invalid_fences_retain_exact_source_locators(tmp_path, monkeypatch, fences, source_state):
-    from supervisor.events_budget import budget_hold_fact
+    from ouroboros.work_stop import continuation_refusal
 
     queue, _, workers = _install_queue(tmp_path, monkeypatch)
     task, row = _parked(tmp_path, monkeypatch, task_id="saved")
@@ -194,7 +225,7 @@ def test_invalid_fences_retain_exact_source_locators(tmp_path, monkeypatch, fenc
     assert queue.restore_pending_from_snapshot() == 1
     held = workers.PENDING[0]
     assert held["_budget_pause"]["checkpoint"] == task["_budget_pause"]["checkpoint"]
-    assert budget_hold_fact(held) and held["_budget_pause"]["checkpoint"]["source_ref"] == row["source_ref"]
+    assert continuation_refusal(held) and held["_budget_pause"]["checkpoint"]["source_ref"] == row["source_ref"]
     sent = []
     _idle_worker(workers, sent)
     workers.assign_tasks()
@@ -207,6 +238,8 @@ def test_invalid_fences_retain_exact_source_locators(tmp_path, monkeypatch, fenc
                                           ("row", "pause_id"), ("grant", "grant_id")])
 def test_empty_resume_identity_cannot_match_or_overwrite(tmp_path, monkeypatch, surface, key):
     from ouroboros import budget_pause
+    from ouroboros import task_results
+    from ouroboros.work_stop import continuation_refusal
     from supervisor.budget_resume import revoke_exact_budget_resume
 
     queue, state, workers = _install_queue(tmp_path, monkeypatch)
@@ -222,11 +255,20 @@ def test_empty_resume_identity_cannot_match_or_overwrite(tmp_path, monkeypatch, 
     writes = []
     monkeypatch.setattr(budget_pause, "set_budget_pause", lambda *_a, **_k: writes.append(True))
     assert revoke_exact_budget_resume(task, "restart_before_dispatch") is False
-    assert not writes and "_budget_pause_resume" not in task and task["_budget_pause_hold"]
+    assert not writes and "_budget_pause_resume" not in task and continuation_refusal(task)
     sent = []
     _idle_worker(workers, sent)
     workers.assign_tasks()
-    assert sent == [] and not queue.resume_budget_paused_task("malformed")["ok"] and not writes
+    assert sent == [] and not writes
+    if surface != "handoff":
+        # Resume independently reads the durable result, not the revoker's cached row.
+        read = task_results.load_task_result
+        monkeypatch.setattr(task_results, "load_task_result", lambda root, tid, **kw:
+            {**read(root, tid, **kw), "budget_pause": row} if tid == "malformed" else read(root, tid, **kw))
+        assert not queue.resume_budget_paused_task("malformed")["ok"] and not writes
+    else:
+        # A damaged handoff cannot permanently veto a fresh, valid durable source.
+        assert queue.resume_budget_paused_task("malformed")["ok"] and len(writes) == 2
 
 
 def test_resume_tool_selects_root_grandchild_and_parent_child_but_no_other_tree(tmp_path, monkeypatch):
@@ -270,7 +312,8 @@ def test_hold_reads_controls_from_canonical_budget_root(tmp_path, monkeypatch, c
     monkeypatch.setattr(model_wait, "current_model_wait", lambda: None)
     assert budget_pause._hold_control_reason(ctx) == ""
     if control == "panic":
-        (tmp_path / "state" / "panic_stop.flag").write_text("stop")
+        monkeypatch.setattr(model_wait, "current_model_wait",
+                            lambda: SimpleNamespace(control_reason=lambda: "panic"))
     else:
         request_cancel(tmp_path, "split", reason="owner_stopped", source="test")
     assert budget_pause._hold_control_reason(ctx) == ("panic" if control == "panic" else "cancelled")
@@ -290,10 +333,15 @@ def test_failed_finite_lifetime_read_refuses_delegation_without_reset(tmp_path, 
     assert not result.refusal_code and result.seconds == 8
 
 
-def test_direct_actor_releases_local_fence_after_parking_same_id(tmp_path, monkeypatch):
+def test_a_lane_turns_exact_pause_is_parked_by_the_supervisor_from_its_row(tmp_path, monkeypatch):
+    """A direct turn is a conversation-lane RUNNING row: its carrier's body returns the pause event, the
+    supervisor parks the SAME id (RUNNING -> PENDING) exactly as for any carried task -- one path, so no
+    duplicate park -- and the owner's Resume continues it. (The in-process park and its failure path are
+    gone with the server-thread lane: the ordinary path is the only one.)"""
     from ouroboros import budget_pause
-    from supervisor import message_bus, worker_chat_lane
+    from supervisor import message_bus, worker_process
     from tests._budget_pause_exact_helpers import _fast_hold, _quiet_external
+    from tests.conversation_carrier_support import lane_row, park_lane_pause
 
     queue, state, workers = _install_queue(tmp_path, monkeypatch)
     monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
@@ -305,59 +353,24 @@ def test_direct_actor_releases_local_fence_after_parking_same_id(tmp_path, monke
         budget_pause.request_pause(limit, rail=budget_pause.RAIL_GLOBAL_EXHAUSTED,
                                    scope="global", reason_text="budget")
     task = {"id": "direct", "type": "task", "chat_id": 7, "text": "work",
-            "project_id": "fixture", "_is_direct_chat": True}
-    events, released = [], []
-    monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put=events.append))
+            "project_id": "fixture", "_is_direct_chat": True, "_attempt": 1}
+    slot = lane_row(workers, task)
+    events = []
     monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(push_log=lambda _evt: None))
     agent = SimpleNamespace(handle_task=lambda _task: [budget_pause.pause_event(task, raised.value.pause)])
     assert budget_pause.dispatch_fenced("direct")
     try:
-        assert worker_chat_lane._execute_chat_task({"task": task, "agent": agent, "chat_id": 7,
-                                                    "registry": SimpleNamespace(unregister=released.append)})
-        assert released == ["direct"] and not budget_pause.dispatch_fenced("direct")
+        worker_process.run_worker_task(agent, dict(workers.RUNNING["direct"]["task"]), wid=slot.wid,
+                                       out_q=SimpleNamespace(put=events.append), repo_dir=str(tmp_path),
+                                       drive_root=str(tmp_path))
+        [event] = events  # the carrier emits the pause once, addressed by its slot
+        assert event["type"] == "budget_pause" and event["_is_direct_chat"] is True and event["worker_id"] == slot.wid
+        park_lane_pause(event)
         assert workers.PENDING[0]["id"] == "direct" and workers.PENDING[0]["_budget_pause"]
-        assert not events  # inline park consumed the pause; no duplicate supervisor event
+        assert not workers.RUNNING and slot.busy_task_id is None
         assert queue.resume_budget_paused_task("direct")["ok"]
     finally:
         budget_pause.end_dispatch_fence("direct")
-
-
-def test_direct_actor_releases_local_fence_even_when_the_inline_park_fails(tmp_path, monkeypatch):
-    """Negative twin of the inline park: when the in-process park raises, the pause
-    event takes the ordinary supervisor path (never lost) AND the turn's local
-    dispatch fence is still released — the actor has unwound, and a fence left
-    closed in the supervisor process would refuse the resumed turn's sends."""
-    from ouroboros import budget_pause
-    from supervisor import events_budget, message_bus, worker_chat_lane
-    from tests._budget_pause_exact_helpers import _fast_hold, _quiet_external
-
-    queue, state, workers = _install_queue(tmp_path, monkeypatch)
-    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
-    ctx, limit = _loop_ctx(tmp_path, "direct-fb", direct=True)
-    ctx.current_chat_id = 7
-    _fast_hold(monkeypatch, budget_pause)
-    _quiet_external(monkeypatch, budget_pause)
-    with pytest.raises(budget_pause.BudgetPauseRequested) as raised:
-        budget_pause.request_pause(limit, rail=budget_pause.RAIL_GLOBAL_EXHAUSTED,
-                                   scope="global", reason_text="budget")
-    task = {"id": "direct-fb", "type": "task", "chat_id": 7, "text": "work",
-            "project_id": "fixture", "_is_direct_chat": True}
-    events, released = [], []
-    monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put=events.append))
-    monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(push_log=lambda _evt: None))
-    monkeypatch.setattr(events_budget, "install_exact_budget_pause",
-                        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("queue lock unavailable")))
-    agent = SimpleNamespace(handle_task=lambda _task: [budget_pause.pause_event(task, raised.value.pause)])
-    assert budget_pause.dispatch_fenced("direct-fb")
-    try:
-        assert worker_chat_lane._execute_chat_task({"task": task, "agent": agent, "chat_id": 7,
-                                                    "registry": SimpleNamespace(unregister=released.append)})
-        assert released == ["direct-fb"] and not budget_pause.dispatch_fenced("direct-fb")
-        # The pause was not parked here, so its event reached the ordinary path intact.
-        assert [e["type"] for e in events] == ["budget_pause"] and events[0]["_is_direct_chat"] is True
-        assert workers.PENDING == []
-    finally:
-        budget_pause.end_dispatch_fence("direct-fb")
 
 
 def _bare_loop(tmp_path, monkeypatch):
@@ -435,15 +448,15 @@ def test_a_zero_dispatch_selection_is_rechecked_against_the_live_root_grant_at_d
     sibling = _fenced_member(workers, "sibling", "root")
     first = queue.resume_budget_paused_task("root")
     assert first["ok"] and queue.resume_budget_paused_task("sibling", selected_by="root")["ok"]
-    assert sibling["_budget_pause_hold"]["selected"] is True
-    assert sibling["_budget_pause_hold"]["root_grant_id"] == first["grant_id"]
+    assert "_resume_selection" in sibling and "_budget_pause_hold" not in sibling
+    assert sibling["_resume_selection"]["root_grant_id"] == first["grant_id"]
     workers.PENDING.remove(root)  # the root ran on, then paused AGAIN under global scope: no new fence
     _parked(tmp_path, monkeypatch, task_id="root", scope="global")
     assert "root" not in queue.BUDGET_ROOT_FENCES
     sent = []
     _idle_worker(workers, sent)
     workers.assign_tasks()
-    assert sent == [] and sibling["_budget_pause_hold"]["selected"] is False
+    assert sent == [] and "_budget_pause_hold" in sibling and "_resume_selection" not in sibling
     assert sibling["_budget_pause_hold"]["detail"] == "root_resume_generation_stale"
     second = queue.resume_budget_paused_task("root")
     assert second["ok"] and second["grant_id"] != first["grant_id"]
@@ -453,7 +466,7 @@ def test_a_zero_dispatch_selection_is_rechecked_against_the_live_root_grant_at_d
     workers.WORKERS[0].busy_task_id = None
     workers.assign_tasks()
     assert [task["id"] for task in sent] == ["root", "sibling"]
-    assert sent[-1]["_budget_pause_hold"]["root_grant_id"] == second["grant_id"]
+    assert sent[-1]["_resume_selection"]["root_grant_id"] == second["grant_id"]
 
 
 def test_a_hold_ended_by_control_inside_the_refused_dispatch_rail_is_a_truthful_terminal(tmp_path, monkeypatch):
@@ -475,3 +488,57 @@ def test_a_hold_ended_by_control_inside_the_refused_dispatch_rail_is_a_truthful_
     assert usage["execution_status"] == "failed" and usage["reason_code"] == "deadline_local"
     assert trace["forced_finalization"]["control_reason"] == "deadline"
     assert isinstance(text, str) and text
+
+
+def test_consumed_resume_crash_retries_current_working_source_without_old_grant(tmp_path, monkeypatch):
+    from ouroboros import budget_pause, owner_wait, working_checkpoint as wc
+    from supervisor import worker_health
+
+    queue, workers, job, _ = _dead_granted_task(tmp_path, monkeypatch)
+    monkeypatch.setattr(worker_health, "_dead_job_is_current", lambda j: workers.RUNNING.get("dead") is j["meta"])
+    ctx, limit = _loop_ctx(tmp_path, "dead")
+    old = copy.deepcopy(job["task"]["_budget_pause_resume"])
+    saved = budget_pause.load_budget_pause(ctx, old)
+    monkeypatch.setattr(owner_wait, "rebind_restored_route", lambda *_a, **_k: (None, "max"))
+    budget_pause.resume_paused_loop(SimpleNamespace(_ctx=ctx), saved, [], {}, {}, set(), budget_remaining_usd=5.0)
+    # A newer batch owns an unfinished effect. Recovery must keep its UNKNOWN closure.
+    limit.messages.append({"role": "user", "content": "new work after Resume"})
+    wc.save_round(limit, "pre_effect")
+    before = budget_pause.budget_pause_row(tmp_path, "dead")
+    worker_health._recover_crashed_task_without_terminal(job, queue)
+    [retry] = workers.PENDING
+    assert retry["id"] == "dead" and retry["_attempt"] == 2 and not workers.RUNNING
+    assert "_budget_pause_resume" not in retry and "_budget_pause" not in retry
+    assert budget_pause.budget_pause_row(tmp_path, "dead") == before
+    with pytest.raises(ValueError, match="no live single-use grant"):
+        budget_pause.load_budget_pause(ctx, old)
+    restored = wc.load_recovery(ctx, retry["_working_recovery"])
+    assert restored["working"]["boundary"] == "pre_effect"
+    assert restored["working"]["pending_tool_call_ids"] == ["call_b"]
+    assert any(row.get("content") == "new work after Resume" for row in restored["messages"])
+    from tests.test_budget_pause_holds import _idle_worker
+    sent = []
+    _idle_worker(workers, sent)
+    workers.assign_tasks()
+    assert [task["id"] for task in sent] == ["dead"]
+    assert sent[0]["_working_recovery"] == retry["_working_recovery"]
+    from ouroboros import loop
+    from tests.test_loop_transport_wait import _loop_kwargs
+    from tests.test_working_checkpoint import _registry
+
+    registry = _registry(tmp_path, monkeypatch, "dead", 2)
+    registry._ctx.working_recovery = retry["_working_recovery"]
+    monkeypatch.setattr(registry, "execute_result", lambda *_a, **_k: pytest.fail("UNKNOWN effect replayed"))
+    seen = []
+
+    def dispatch(call, disposition, **kwargs):
+        seen.extend(call.messages)
+        return {"role": "assistant", "content": "Continued new work", "tool_calls": []}, 0.0
+
+    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+    kwargs = {**_loop_kwargs(tmp_path, registry, [], llm=SimpleNamespace(default_model=lambda: "m")), "task_id": "dead"}  # the checkpoint ran on Main
+    result, _usage, _trace = loop.run_llm_loop(**kwargs)
+    assert result == "Continued new work"
+    assert any(row.get("content") == "done a" for row in seen)
+    unknown = next(row for row in seen if row.get("tool_call_id") == "call_b")
+    assert "UNKNOWN" in unknown["content"] and "NOT re-executed" in unknown["content"]

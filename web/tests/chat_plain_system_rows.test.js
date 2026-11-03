@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 
 import { createChatInstance } from '../modules/chat.js';
 import { applyPayload, flushMisses, setMissTransport } from '../modules/i18n.js';
-import { installDom as installHistoryDom } from './chat_dom_fixture.js';
+import { TextStub, installDom as installHistoryDom } from './chat_dom_fixture.js';
 
 // Source pins below match across line breaks; normalize CRLF so a Windows
 // checkout (core.autocrlf) reads the same bytes the regexes were written for.
@@ -66,7 +66,7 @@ class ElementStub {
         this._innerHTML = this._textContent
             .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
     }
-    get textContent() { return this._textContent; }
+    get textContent() { return this._textContent + this.children.filter((child) => child.nodeType === 3).map((child) => child.data).join(''); }
     set innerHTML(value) {
         this._innerHTML = String(value || '');
         if (!this.ownerDocument) return;
@@ -137,6 +137,9 @@ class ElementStub {
         node.parentElement = null;
     }
     remove() { this.parentNode?.removeChild?.(this); this.isConnected = false; }
+    get firstElementChild() { return this.children.find((child) => child.nodeType !== 3) || null; }
+    get firstChild() { return this.children[0] || null; }
+    get lastChild() { return this.children.at(-1) || null; }
     replaceChildren(...nodes) { this.children = []; nodes.forEach((node) => this.appendChild(node)); }
     contains(node) {
         if (node === this) return true;
@@ -187,10 +190,12 @@ function installDom(fetchImpl = async () => ({ ok: true, json: async () => ({ ac
         WebSocket: globalThis.WebSocket,
         ResizeObserver: globalThis.ResizeObserver,
         requestAnimationFrame: globalThis.requestAnimationFrame,
+        getComputedStyle: globalThis.getComputedStyle,
     };
     const document = {
         byId: new Map(), hidden: false, activeElement: null,
         createElement(tag) { return new ElementStub(tag, document); },
+        createTextNode(data) { return new TextStub(data); },
         createDocumentFragment() {
             const fragment = new ElementStub('#document-fragment', document);
             fragment.isDocumentFragment = true;
@@ -202,6 +207,7 @@ function installDom(fetchImpl = async () => ({ ok: true, json: async () => ({ ac
     const mount = new ElementStub('div', document);
     document.byId.set('content', mount);
     const storage = new Map();
+    globalThis.getComputedStyle = () => ({ lineHeight: '24px', height: '168px', getPropertyValue: () => '7' });
     globalThis.document = document;
     globalThis.window = {
         document, location: { href: 'http://local/' }, history: { replaceState() {} },
@@ -264,7 +270,7 @@ const PLAIN_ROW = {
     role: 'system',
     system_type: 'project_completion_summary',
     markdown: false,
-    content: 'Launch › Ship · Completed\nOpen the Project for details.',
+    content: 'Launch › Ship · Done with warnings\nThe reviewers did not reach a verdict on this answer.',
     project_id: 'launch',
     project_name: 'Launch',
     ts: '2026-08-31T00:00:00Z',
@@ -319,7 +325,7 @@ test('plain project row renders escaped text with the Project reference and no m
         // Escaped plain text: the raw newline survives (pre-wrap), so the row
         // did NOT pass through the markdown renderer (whose no-parser fallback
         // rewrites \n to <br>) and produced no heading elements.
-        assert.match(bubble.innerHTML, /Launch › Ship · Completed\nOpen the Project for details\./);
+        assert.match(bubble.innerHTML, /Launch › Ship · Done with warnings\nThe reviewers did not reach a verdict on this answer\./);
         assert.doesNotMatch(bubble.innerHTML, /<br>|<h1|<h2|md-h1|md-h2/);
         // Bug report #9: no enhancement pass — Mermaid/Chart/KaTeX/code-copy
         // only ever activate behind enhanceChatMarkdown's enhanced stamp.
@@ -328,7 +334,8 @@ test('plain project row renders escaped text with the Project reference and no m
         const message = bubble.querySelector('.message');
         const actions = bubble.children.find((node) => node.classList.contains('system-message-actions'));
         assert.equal(message.contains(actions), false);
-        assert.equal(bubble.children.indexOf(actions), bubble.children.indexOf(message) + 2);
+        // Right after the prose: the row's one time line is its own time, not a note between (owner 17.10, Q7 A).
+        assert.equal(bubble.children.indexOf(actions), bubble.children.indexOf(message) + 1);
         assert.ok(actions, 'system-message-actions container present');
         // The row points at its Project with the one reference, never a button of its own.
         assert.deepEqual(referenceShape(actions.children[0]), LAUNCH_REFERENCE);
@@ -347,7 +354,7 @@ const MIRROR_ROW = {
     completion_answer: '**Done: PR #7 merged.**\n\nSecond paragraph.',
 };
 
-test('a nonclean final keeps one factual limitation, Files, and one logical delivery across retries', () => {
+test('a nonclean final keeps one factual limitation, Project reference, and one logical delivery across retries', () => {
     const { prior, mount } = installDom();
     let instance;
     try {
@@ -365,10 +372,9 @@ test('a nonclean final keeps one factual limitation, Files, and one logical deli
         const limitation = final.querySelector('.project-answer-limitation');
         assert.equal(limitation.textContent, row.completion_reason);
         assert.equal(limitation.title, row.completion_reason);
-        assert.equal(final.querySelector('.system-message-actions').children[1].textContent, 'Files');
-        // The fold control follows Files, collapsed, and stays hidden until a measure finds hidden text.
-        const fold = final.querySelector('.system-message-actions').children[2];
-        assert.deepEqual([fold.textContent, fold.hidden, fold.getAttribute('aria-expanded')], ['Show full', true, 'false']);
+        const actions = final.querySelector('.system-message-actions');
+        assert.equal(actions.children.length, 1);
+        assert.equal(actions.children[0].dataset.intent, 'open-project');
         assert.match(final.innerHTML, /Done: PR #7 merged/);
         made.handlers.get('chat')({ ...PLAIN_ROW, task_id: 'stopped-task', completion_reason: 'Stopped.' });
         assert.equal(findBubble('system').querySelector('.project-answer-limitation'), null,
@@ -391,14 +397,13 @@ test('a completion row carrying the answer renders as an ordinary Ouroboros mess
         assert.match(bubble.innerHTML, /<div class="sender">Ouroboros<\/div>/);
         // His words, through the markdown path — and none of the host's pointer text.
         assert.match(bubble.innerHTML, /Done: PR #7 merged\./);
-        assert.doesNotMatch(bubble.innerHTML, /Open the Project for details|Completed/);
+        assert.doesNotMatch(bubble.innerHTML, /Done with warnings|did not reach a verdict/);
         const message = bubble.querySelector('.message');
         const actions = bubble.children.find((node) => node.classList.contains('system-message-actions'));
-        assert.equal(bubble.children.indexOf(actions), bubble.children.indexOf(message) + 2);
+        assert.equal(bubble.children.indexOf(actions), bubble.children.indexOf(message) + 1);
         // The SAME reference the System row carries: the voice of a row never chooses how the
-        // UI points at its Project. An answer adds only its own fold control after it.
-        assert.equal(actions.children.length, 2);
-        assert.ok(Object.hasOwn(actions.children[1].dataset, 'answerFold'));
+        // UI points at its Project. The mirror has no second route into the result.
+        assert.equal(actions.children.length, 1);
         const chip = actions.children[0];
         assert.deepEqual(referenceShape(chip), LAUNCH_REFERENCE);
         // The stub DOM has no event loop: run the chip's own click listener and
@@ -415,7 +420,7 @@ test('a completion row carrying the answer renders as an ordinary Ouroboros mess
             globalThis.CustomEvent = priorCustomEvent;
         }
         assert.deepEqual(opened, {
-            type: 'ouro:open-project', detail: { project: { id: 'launch', name: 'Launch' }, task_id: '', quiz_id: '' },
+            type: 'ouro:open-project', detail: { project: { id: 'launch', name: 'Launch' }, task_id: '', quiz_id: '', pointer: false },
         });
     } finally {
         instance?.destroy();
@@ -473,8 +478,8 @@ test('the fold is CSS over the complete answer: clamp always, fade only when fol
     const rules = block.slice(0, block.indexOf('design-system:migrated-end'));
     assert.match(rules, /\.chat-bubble\.project-answer > \.message \{ max-height: var\(--project-answer-fold\); overflow: hidden; \}/);
     assert.match(rules, /\.chat-bubble\.project-answer\.is-folded > \.message \{[^}]*mask-image/);
-    // Show full lifts the clamp in place; a real browser proves focus, viewport and reload.
-    assert.match(rules, /\.chat-bubble\.project-answer\.is-expanded > \.message \{ max-height: none; \}/);
+    // The Project is the route to the complete answer; the mirror never expands in place.
+    assert.doesNotMatch(rules, /\.project-answer\.is-expanded/);
     assert.doesNotMatch(rules, /user-select|font-size: \d|#[0-9a-fA-F]{3,6}\b/);
     // chat.js stays a caller: the decoration lives in its own module.
     assert.match(chatSource, /decorateProjectRow\(bubble, \{ \.\.\.meta, \.\.\.opts, role,/);
@@ -847,7 +852,7 @@ test('the legacy-memory notice reads in the install language; other plain system
             restoreDom(prior);
         }
         // Not every System row: a plain Project row stays as the host wrote it.
-        assert.match(render(PLAIN_ROW), /Launch › Ship · Completed/);
+        assert.match(render(PLAIN_ROW), /Launch › Ship · Done with warnings/);
         assert.doesNotMatch(render(PLAIN_ROW), /Запуск/);
         applyPayload({ language: 'ru', english: false, entries: {} });
         assert.match(render(notice), /Memory: what Ouroboros remembered before this update/);
@@ -863,4 +868,79 @@ test('the legacy-memory notice reads in the install language; other plain system
         applyPayload({ language: '', english: true, entries: {} });
         setMissTransport(() => null);
     }
+});
+
+
+// Owner 1A/2A (21.10; docs/DESIGN.md "Project completion mirror"): Main's row for a Project ending with no authored
+// answer reads as the work, its true outcome and its cause, then the labelled preserved output; the Project is named
+// once, by its reference; a typed cause with no sentence yet says so and keeps its exact code in the row's details.
+const ENDING_NOTICE = { neutral: false, detail: 'example_new_reason.', phase: 'error',
+    salvage: 'Preserved intermediate output (not a final answer): Two update scenarios remain unchecked.',
+    cause: 'The recorded reason has no description yet.', undescribed: ['example_new_reason'] };
+const ENDING_ROW = { ...PLAIN_ROW, task_id: 'ended-root', delivery_id: 'project-completion:ended-root', task_name: 'Ship release',
+    status: 'failed', completion_reason: 'example_new_reason.', completion_notice: ENDING_NOTICE,
+    content: `Launch › Ship release · Failed\nexample_new_reason. ${ENDING_NOTICE.salvage}` };
+const elements = (node) => node.children.filter((child) => child.nodeType !== 3);
+
+function renderEnding(row, role = 'system') {
+    const { prior, mount } = installDom();
+    const made = makeInstance(mount);
+    made.handlers.get('chat')(row);
+    return { prior, instance: made.instance, bubble: findBubble(role) };
+}
+
+test('a no-answer ending reads as its work, true outcome and cause; the Project once; the exact code in details', () => {
+    const { prior, instance, bubble } = renderEnding(ENDING_ROW);
+    try {
+        const message = bubble.querySelector('.message');
+        assert.ok(message.classList.contains('project-ending'));
+        const [head, cause, details, salvage] = elements(message);
+        const [title, outcome] = elements(head);
+        assert.deepEqual([title.textContent, outcome.textContent, outcome.dataset.tone], ['Ship release', 'Failed', 'error']);
+        assert.ok(outcome.classList.contains('ui-status'), 'the status sentence: its word and dot');
+        assert.equal(cause.textContent, ENDING_NOTICE.cause);
+        assert.equal(details.tagName, 'DETAILS');
+        assert.deepEqual(elements(details).map((node) => [node.tagName, node.textContent]),
+            [['SUMMARY', 'Recorded details'], ['P', 'Recorded reason: example_new_reason']]);
+        assert.equal(salvage.textContent, ENDING_NOTICE.salvage, 'preserved output stays labelled, never an answer');
+        const words = [head, ...elements(head), cause, ...elements(details), salvage].map((node) => node.textContent).join('\n');
+        assert.doesNotMatch(words, /Launch/, 'the Project is named once, by its reference');
+        assert.doesNotMatch(cause.textContent, /example_new_reason/, 'the line never shows the raw code');
+        const actions = bubble.children.find((node) => node.classList.contains('system-message-actions'));
+        assert.equal(bubble.children.indexOf(actions), bubble.children.indexOf(message) + 1);
+        assert.deepEqual(referenceShape(actions.children[0]), LAUNCH_REFERENCE);
+        // Display only: the bubble was built from the canonical text, which Copy keeps.
+        assert.match(bubble.innerHTML, /Launch › Ship release · Failed\nexample_new_reason\./);
+        assert.ok(bubble.querySelector('.chat-message-copy'));
+    } finally { instance.destroy(); restoreDom(prior); }
+});
+
+test('an ending without the typed view keeps its retained text, never re-read into fields', () => {
+    for (const row of [
+        { ...ENDING_ROW, completion_notice: { neutral: false, detail: 'example_new_reason.', phase: 'error', salvage: ENDING_NOTICE.salvage } },
+        { ...ENDING_ROW, task_name: '' },
+        { ...ENDING_ROW, completion_notice: { ...ENDING_NOTICE, phase: 'working' } },
+    ]) {
+        const { prior, instance, bubble } = renderEnding(row);
+        try {
+            assert.equal(bubble.querySelector('.message').classList.contains('project-ending'), false);
+            assert.match(bubble.innerHTML, /Launch › Ship release · Failed\nexample_new_reason\./);
+            assert.equal(bubble.querySelector('.project-ending-details'), null);
+            const actions = bubble.children.find((node) => node.classList.contains('system-message-actions'));
+            assert.deepEqual(referenceShape(actions.children[0]), LAUNCH_REFERENCE);
+        } finally { instance.destroy(); restoreDom(prior); }
+    }
+});
+
+test('an authored final keeps its answer; its limitation says an undescribed cause neutrally, the code in details', () => {
+    const { prior, instance, bubble } = renderEnding({ ...ENDING_ROW, completion_answer: 'The audit is complete.',
+        completion_notice: { ...ENDING_NOTICE, salvage: '' } }, 'assistant');
+    try {
+        assert.equal(bubble.querySelector('.message').classList.contains('project-ending'), false, 'the answer is untouched');
+        const limitation = bubble.querySelector('.project-answer-limitation');
+        assert.deepEqual([limitation.textContent, limitation.title], [ENDING_NOTICE.cause, ENDING_NOTICE.cause]);
+        const details = bubble.querySelector('.project-ending-details');
+        assert.equal(bubble.children.indexOf(details), bubble.children.indexOf(limitation) + 1);
+        assert.equal(elements(details)[1].textContent, 'Recorded reason: example_new_reason');
+    } finally { instance.destroy(); restoreDom(prior); }
 });

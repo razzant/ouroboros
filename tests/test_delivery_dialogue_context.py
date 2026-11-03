@@ -15,7 +15,7 @@ from ouroboros.tools.owner_delivery import (
     deliver_owner_event, pending_owner_dialogue, publish_pending_owner_dialogue,
 )
 from ouroboros.working_checkpoint import close_unanswered_calls
-from tests.test_context_reclaim_materializer import _request, _SPEC
+from tests.test_context_reclaim_materializer import _request
 from tests.test_main_authored_context import call, main_loop as _main_loop
 
 main_loop = _main_loop
@@ -53,11 +53,13 @@ def test_real_send_producer_is_a_separate_exact_row_after_the_completed_batch(ma
     assert facts["delivery_confirmation"] == facts["read_confirmation"] == "unknown"
     assert not pending_owner_dialogue(f.ctx)
     assert all(exact not in str(d) for d in getattr(f.ctx, "_owner_directives", []))
-    # Appending explicit dialogue does not rewrite any earlier byte of history.
-    assert after[:len(before)] == before
+    # Appending explicit dialogue does not rewrite any earlier byte of history; only the seal's
+    # host-only boundary mark (a message-level cache_control) moves on to the newest row.
+    unmarked = lambda rows: [{k: v for k, v in m.items() if k != "cache_control"} for m in rows]  # noqa: E731
+    assert unmarked(after[:len(before)]) == unmarked(before)
 
 
-@pytest.mark.parametrize("recovery", ["authored", "helper", "emergency"])
+@pytest.mark.parametrize("recovery", ["authored", "emergency"])
 def test_outward_speech_survives_while_the_unrelated_large_tool_body_folds(main_loop, monkeypatch, recovery):
     f = main_loop
     f.ctx.current_chat_id = 1
@@ -75,14 +77,9 @@ def test_outward_speech_survives_while_the_unrelated_large_tool_body_folds(main_
         rebuilt, receipt = emergency_address_view(messages, request, rung="unseen_bodies",
                                                   drive_root=f.ctx.drive_root, task_id=f.ctx.task_id)
     else:
-        if recovery == "helper":
-            monkeypatch.setattr(cc, "_summarizer_spec", lambda: dict(_SPEC))
-            monkeypatch.setattr(cc, "_call_summarizer", lambda parts, **_kw: {
-                part.source_id: "Attributed helper account of the tool result." for part in parts})
-        else:
-            request = replace(request, working_note="The large source is recorded; the question remains explicit.",
-                              expected_view_revision=request.transcript_sha256, keep_unit_ids=())
-        rebuilt, receipt, _ = cc.compact_tool_history_llm(messages, keep_recent=0, request=request,
+        request = replace(request, working_note="The large source is recorded; the question remains explicit.",
+                          expected_view_revision=request.transcript_sha256, keep_unit_ids=())
+        rebuilt, receipt = cc.compact_tool_history_llm(messages, request=request,
             observed_messages=messages, tool_schemas=[], fit_candidate=lambda *_: {"accepted": True},
             drive_root=f.ctx.drive_root, task_id=f.ctx.task_id)
     assert receipt.status == "applied"
@@ -166,7 +163,7 @@ def test_budget_abort_after_real_outward_send_preserves_pending_speech_on_restor
     closed = close_unanswered_calls(restored, "budget pause")
     from ouroboros.loop_round_limits import _run_round_compaction
     from tests.test_context_view_tool import _context
-    restored, _ = _run_round_compaction(restored, _context(f.ctx.drive_root, f.ctx, [], monkeypatch))
+    restored = _run_round_compaction(restored, _context(f.ctx.drive_root, f.ctx, [], monkeypatch))
     assert closed == ["say", "large"]
     assert _dialogue(restored) == pending and not pending_owner_dialogue(f.ctx)
     assert f.events.qsize() == count  # restoring words never dispatches a send

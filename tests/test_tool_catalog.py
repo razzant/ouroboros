@@ -56,7 +56,8 @@ def test_tool_entry_is_shallow_frozen():
         "schema": typing.Dict[str, typing.Any],
         "handler": typing.Callable,
         "is_code_tool": bool,
-        "timeout_sec": int,
+        # 1A: additive ``None`` for a long-lived, Stop-observing entry; the default stays 360.
+        "timeout_sec": typing.Optional[int],
         "mutates_worktree": bool,
         # tip drift: upstream added the compat-alias field after the reference
         # cutoff (pinned in tests/test_tool_owner_facades.py as well).
@@ -384,6 +385,9 @@ def test_acting_mcp_collisions_are_visible_only_after_exact_grant(
         def enabled_servers_without_tools(self):
             return []
 
+        def catalog_notices(self):
+            return []
+
     monkeypatch.setattr(mcp_client, "ensure_configured_from_settings", lambda **_kwargs: None)
     monkeypatch.setattr(mcp_client, "get_manager", lambda: FakeManager())
 
@@ -409,3 +413,9 @@ def test_acting_mcp_collisions_are_visible_only_after_exact_grant(
             if item.get("reason") == "name_collision"
         ]
         assert {item.get("kind") for item in collisions} == expected_kinds
+
+
+@pytest.fixture(autouse=True)
+def _private_mcp_catalog_root(tmp_path, monkeypatch):
+    from ouroboros import config
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)

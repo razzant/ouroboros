@@ -20,6 +20,19 @@ def _running(root, workers, task_id="root"):
     return task
 
 
+def _next_boot_after_owner_restart(root, monkeypatch, queue, *, refusal="selection_owner_held"):
+    import threading
+    from ouroboros import delegate_recovery, server_restart
+    from supervisor.worker_chat_lane import auto_resume_after_restart
+
+    assert queue.resume_budget_paused_task("root")["error"] == refusal
+    monkeypatch.setattr(server_restart, "_OWNER_STOP_BEGAN", threading.Event())
+    monkeypatch.setattr(server_restart, "_owner_restart_requested", threading.Event())
+    monkeypatch.setattr(delegate_recovery, "_PROCESS_GENERATION", "next-test-generation")
+    auto_resume_after_restart()
+    assert delegate_recovery.active_restart_transaction(root)["door_applied_at"]
+
+
 def test_pause_during_registry_preparation_prevents_handler(tmp_path, monkeypatch):
     from ouroboros import safety
     from ouroboros.tools.registry import ToolRegistry
@@ -119,6 +132,7 @@ def test_unstarted_pause_restart_explicit_resume_preserves_identity(tmp_path, mo
     active = json.loads(dr._active_restart_transaction_path(tmp_path).read_text(encoding="utf-8"))
     assert dr._read_restart_transaction(tmp_path, active["transaction_id"])["queue_ids"] == ["root"]
     assert budget_hold_fact(task) is None
+    _next_boot_after_owner_restart(tmp_path, monkeypatch, q)
     result = q.resume_budget_paused_task("root")
     assert result["ok"], result
     assert workers.PENDING == [task] and task["_admission_owner_token"] == "same-token"
@@ -171,6 +185,7 @@ def test_warm_sleep_checkpoint_survives_restart_then_explicit_resume(tmp_path, m
     assert load_task_result(tmp_path, "root")["status"] != "cancelled"
     task = workers.PENDING[0]
     assert budget_hold_fact(task)["reason"] == "owner_restart_hold"
+    _next_boot_after_owner_restart(tmp_path, monkeypatch, q, refusal="restart_no_resume")
     assert q.resume_budget_paused_task("root")["ok"]
     ctx.budget_pause_resume = task["_budget_pause_resume"]
     restored = budget_pause.load_budget_pause(ctx)
@@ -254,9 +269,10 @@ def test_cold_consumption_propagates_retry_time_to_all_clocks(tmp_path, monkeypa
     worker = workers.WORKERS[meta["worker_id"]]
     worker.proc = SimpleNamespace(pid=77, is_alive=lambda: True)
     worker.reaping = False
-    checkpoint = {"wait_id": "warm-after-cold", "task_attempt": meta["attempt"],
-                  "source_ref": {"x": 1}, "reason": "sleep", "sleep": {"senders": ["peer"]}}
     clock[0] += 20
+    checkpoint = {"wait_id": "warm-after-cold", "task_attempt": meta["attempt"],
+                  "source_ref": {"x": 1}, "reason": "sleep", "sleep": {"senders": ["peer"]},
+                  "budget_paused_sec": ctx._budget_paused_sec, "sleep_started_at": clock[0]}
     handle_owner_wait({"task_id": "sleeper", "wait_id": checkpoint["wait_id"],
         "task_attempt": meta["attempt"], "worker_id": worker.wid, "pid": 77,
         "phase": "park", "checkpoint": checkpoint}, workers)

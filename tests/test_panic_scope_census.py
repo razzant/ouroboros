@@ -268,6 +268,9 @@ def test_the_allowlisted_service_env_and_mcp_stdio_env_keep_the_installation_mar
     from ouroboros.tools.services import _service_env
     from ouroboros.workspace_executor import _executor_service_env, service_env
 
+    # The unmarked control is explicit even when pytest itself is a scoped service.
+    for name in ps.scope_entries(os.environ):
+        monkeypatch.delenv(name)
     install, task = ps.mint_marker(ps.INSTALL_SCOPE_PREFIX), ps.mint_marker(ps.TASK_SCOPE_PREFIX)
     captured = []
     monkeypatch.setattr(mcp_client, "_MCP_SDK_AVAILABLE", True)

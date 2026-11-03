@@ -481,7 +481,7 @@ def test_forced_finalization_with_answer_is_best_effort():
     """Deadline/budget/round-limit forced finalization with a REAL extracted
     model answer is the typed best_effort shelf, not a failure. Structural
     gate: forced reason code + the loop's typed _best_effort_extracted fact +
-    non-empty non-error text."""
+    non-empty text; punctuation does not establish provenance."""
     from ouroboros.outcomes import EXECUTION_BEST_EFFORT, derive_loop_outcome
 
     for reason in ("budget_exhausted", "round_limit", "finalization_grace", "deadline_local"):
@@ -517,18 +517,27 @@ def test_forced_finalization_with_answer_is_best_effort():
     )
     assert empty["outcome_axes"]["execution"]["status"] == "failed"
 
-    # Error-marker text stays a failure even with the fact set — BOTH marker
-    # families (⚠️ and ❌, e.g. deep-self-review error strings) are rejected.
+    # Genuine extracted answers can start with either former error marker.
     for marker_text in (
-        "⚠️ Task exceeded MAX_ROUNDS (200).",
-        "❌ Deep self-review unavailable: configure OUROBOROS_MODEL_DEEP_SELF_REVIEW.",
+        "⚠️ Three modules fixed; integration tests remain unverified.",
+        "❌ The login test still fails. The saved patch fixes the other two cases.",
     ):
         marker = derive_loop_outcome(
             marker_text,
             {"execution_status": "failed", "reason_code": "round_limit", "_best_effort_extracted": True},
             {"tool_calls": [], "reasoning_notes": []},
         )
-        assert marker["outcome_axes"]["execution"]["status"] == "failed", marker_text
+        execution = marker["outcome_axes"]["execution"]
+        assert execution["status"] == EXECUTION_BEST_EFFORT, marker_text
+        assert execution["reason_code"] == "round_limit" and execution["failure"] is None
+
+    for notice in ("⚠️ Task exceeded MAX_ROUNDS (200).",
+                   "❌ Deep self-review unavailable: configure OUROBOROS_MODEL_DEEP_SELF_REVIEW."):
+        unextracted = derive_loop_outcome(
+            notice, {"execution_status": "failed", "reason_code": "round_limit"},
+            {"tool_calls": [], "reasoning_notes": []},
+        )
+        assert unextracted["outcome_axes"]["execution"]["status"] == "failed", notice
 
     # Non-forced failure reasons keep failing regardless of text/fact.
     other = derive_loop_outcome(
@@ -1300,8 +1309,8 @@ def test_omitted_ledger_stub_keeps_the_real_summary_across_artifact_finalization
     real ledger held nine entries and a failing verification receipt was
     rewritten to "0 entries / no failures / execution ok" on the record the
     owner and the parent read — the stub is a projection of the artifact file,
-    never a source. The stub's summary is now re-projected from the refreshed
-    file, and the recomputed bundle describes the bytes actually on disk.
+    never a source. The stub's summary is now computed in memory from the
+    complete file, whose captured bytes and identity stay as recorded (#2472).
     """
     from hashlib import sha256
 
@@ -1333,6 +1342,7 @@ def test_omitted_ledger_stub_keeps_the_real_summary_across_artifact_finalization
         outcome_axes={"lifecycle": {"status": STATUS_COMPLETED}, "execution": {"status": EXECUTION_OK}},
     )
 
+    captured = pathlib.Path(refs["artifact"]["path"]).read_bytes()
     for run in ("first", "second"):
         headless.finalize_task_artifacts(parent, {"id": task_id, "workspace_root": str(repo)})
         stored = load_task_result(parent, task_id)
@@ -1348,6 +1358,7 @@ def test_omitted_ledger_stub_keeps_the_real_summary_across_artifact_finalization
             if item.get("kind") == "verification_ledger"
         )
         data = pathlib.Path(ledger_item["path"]).read_bytes()
+        assert data == captured and stub["summary_source_sha256"] == refs["artifact"]["sha256"], run
         assert ledger_item["size"] == len(data), run
         assert ledger_item["sha256"] == sha256(data).hexdigest(), run
         on_disk = json.loads(data.decode("utf-8"))

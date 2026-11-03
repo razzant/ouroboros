@@ -3,6 +3,10 @@ tool_use from its matching tool_result. The fix lives in the single send-time ch
 LLMClient._normalize_system_message_placement (covers every provider builder)."""
 from __future__ import annotations
 
+import copy
+
+import pytest
+
 from ouroboros.llm import LLMClient
 
 
@@ -76,3 +80,55 @@ def test_normalizer_idempotent():
     once = LLMClient()._normalize_system_message_placement(base)
     twice = LLMClient()._normalize_system_message_placement(once)
     assert [m["role"] for m in once] == [m["role"] for m in twice]
+
+
+@pytest.mark.parametrize("failure", ["missing", "orphan", "foreign", "duplicate_call", "duplicate_result", "missing_id"])
+def test_incomplete_or_ambiguous_episode_retains_all_rows(failure):
+    opening = _assistant_toolcall()
+    opening["tool_calls"].extend(_assistant_toolcall("c2")["tool_calls"])
+    result = {"role": "tool", "tool_call_id": "c1", "content": "exact\r\nresult"}
+    rows = [opening, _img_user(), result]
+    if failure != "missing":
+        rows.append({"role": "tool", "tool_call_id": "c2", "content": "second"})
+    if failure == "orphan":
+        rows.pop(0)
+    elif failure == "foreign":
+        rows.append({"role": "tool", "tool_call_id": "foreign", "content": "unrelated"})
+    elif failure == "duplicate_call":
+        opening["tool_calls"].append(copy.deepcopy(opening["tool_calls"][0]))
+    elif failure == "duplicate_result":
+        rows.extend([{"role": "user", "content": "after completion"}, copy.deepcopy(result)])
+    elif failure == "missing_id":
+        rows[-1].pop("tool_call_id")
+    original = copy.deepcopy(rows)
+    assert LLMClient()._normalize_system_message_placement(rows) == original
+    assert rows == original
+
+
+def test_native_answer_with_image_multitool_notices_and_reused_ids():
+    opening = _assistant_toolcall()
+    opening["tool_calls"].extend(_assistant_toolcall("c2")["tool_calls"])
+    native = {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "c1", "content": "native answer"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}}]}
+    tool = {"role": "tool", "tool_call_id": "c2", "content": "second answer"}
+    owner = {"role": "user", "content": "An intervening owner message."}
+    episode = [opening, {"role": "system", "content": "late"}, owner, native, tool]
+    original = copy.deepcopy(episode + episode)  # IDs are reused in distinct assistant turns
+    once = LLMClient()._normalize_system_message_placement(original)
+    assert once == LLMClient()._normalize_system_message_placement(once)
+    for offset in (0, 5):
+        assert once[offset:offset + 3] == [opening, native, tool]
+        assert once[offset + 3]["content"] == "[SYSTEM NOTICE]\nlate"
+        assert once[offset + 4] == owner
+    assert original == episode + episode
+
+
+def test_incomplete_episode_keeps_notice_demotion_separate():
+    opening = _assistant_toolcall()
+    opening["tool_calls"].extend(_assistant_toolcall("c2")["tool_calls"])
+    tool = {"role": "tool", "tool_call_id": "c1", "content": "only one answer"}
+    rows = [opening, {"role": "system", "content": "notice"}, tool]
+    out = LLMClient()._normalize_system_message_placement(rows)
+    assert out == [opening, tool, {"role": "user", "content": "[SYSTEM NOTICE]\nnotice"}]
+    assert LLMClient()._normalize_system_message_placement(out) == out

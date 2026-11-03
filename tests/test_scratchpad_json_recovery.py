@@ -1,23 +1,21 @@
-"""Scratchpad JSON recovery preserves source memory, typed outcomes and paid usage.
+"""A fold's text is the mind's own: stored verbatim, never parsed, never a note (#918).
 
-Answers still shaped like the older prompt (``knowledge_entries`` beside the block) are
-read for their compressed block alone: no note is created or revised.
+This file pinned how the retired post-task Light pass recovered its JSON answer
+(``{"compressed_block": …}``, fenced, prose-tailed, malformed) and ignored the older
+prompt's ``knowledge_entries``. No model answer is parsed for the scratchpad any more:
+the integrating mind passes the accepted text to ``update_scratchpad`` with ``replaces``.
+The same corpus of answer shapes now proves that whatever the text looks like it lands
+as written — a nomination-shaped text creates or revises no note, a JSON-looking text is
+not unwrapped — and that an empty text changes nothing. The paid-stage accounting the
+file also pinned belongs to the remaining fallback draft stage (``test_budget_tracking``).
 """
-import copy
 import json
-from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import consolidator as c
-from ouroboros.post_task_synthesis import _run_scratchpad_consolidation
-from ouroboros.utils import extract_trailing_json_object
-from tests import test_consolidator_context_fit as fit_helpers
-from tests.test_consolidator_context_fit import _LLM
-from tests.test_memory_maintenance_visibility import _events, _scratchpad
+from ouroboros.memory import Memory, scratchpad_block_sha256
+from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-
-fit = fit_helpers.fit
 FINAL = {"knowledge_entries": [], "compressed_block": "Actual consolidated memory."}  # older answer shape
 NOMINATING = json.dumps({"knowledge_entries": [{"topic": "lessons/new", "content": "# Lesson\nNominated."},
                                               {"topic": "untouched", "scope": "global", "edits": [
@@ -25,101 +23,72 @@ NOMINATING = json.dumps({"knowledge_entries": [{"topic": "lessons/new", "content
                          "compressed_block": "Actual consolidated memory."})
 JSON = json.dumps(FINAL)
 EXAMPLE = json.dumps({"knowledge_entries": [], "compressed_block": "Quoted prompt example."})
-USAGE = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15,
-         "cost": 0.02, "provider": "openrouter", "resolved_model": "light/fixture"}
 CASES = [
-    ("pure", JSON, "replaced", ""),
-    ("old_nominations", NOMINATING, "replaced", ""),
-    ("fenced", "```json\n" + JSON + "\n```", "replaced", ""),
-    ("prose_tail", "Here is the consolidated memory.\n" + JSON, "replaced", ""),
-    ("example_then_tail", "Example: " + EXAMPLE + "\nActual result:\n" + JSON,
-     "replaced", ""),
-    ("prose_fenced_tail", "Here is the result.\n```json\n" + JSON + "\n```",
-     "replaced", ""),
-    ("empty", "", "call_failed", "empty_summary"),
-    ("invalid", "No JSON result.", "failed", "scratchpad_consolidation_failed"),
-    ("malformed", '{"compressed_block":', "failed", "scratchpad_consolidation_failed"),
-    ("array", "[]", "failed", "scratchpad_consolidation_failed"),
-    ("wrong_block_type", '{"knowledge_entries":[],"compressed_block":7}',
-     "failed", "scratchpad_consolidation_failed"),
-    ("missing_block", '{"knowledge_entries":[]}', "empty_block", ""),
-    ("empty_block", '{"knowledge_entries":[],"compressed_block":"   "}', "empty_block", ""),
-    ("prose_after_object", "Example: " + JSON + "\nThis is only an example.",
-     "failed", "scratchpad_consolidation_failed"),
-    ("duplicate_tail", 'Result:\n{"compressed_block":"first","compressed_block":"second"}',
-     "failed", "scratchpad_consolidation_failed"),
+    ("pure", JSON),
+    ("old_nominations", NOMINATING),
+    ("fenced", "```json\n" + JSON + "\n```"),
+    ("prose_tail", "Here is the consolidated memory.\n" + JSON),
+    ("example_then_tail", "Example: " + EXAMPLE + "\nActual result:\n" + JSON),
+    ("prose_fenced_tail", "Here is the result.\n```json\n" + JSON + "\n```"),
+    ("invalid", "No JSON result."),
+    ("malformed", '{"compressed_block":'),
+    ("wrong_block_type", '{"knowledge_entries":[],"compressed_block":7}'),
+    ("missing_block", '{"knowledge_entries":[]}'),
+    ("empty_block", '{"knowledge_entries":[],"compressed_block":"   "}'),
+    ("prose_after_object", "Example: " + JSON + "\nThis is only an example."),
+    ("duplicate_tail", 'Result:\n{"compressed_block":"first","compressed_block":"second"}'),
 ]
+EMPTY = [("empty", ""), ("blank", "   \n  "), ("array", "[]")]
 
 
 def _memory_bytes(root):
     return {p.relative_to(root).as_posix(): p.read_bytes() for p in (root / "memory").rglob("*") if p.is_file()}
 
 
-def _run_case(tmp_path, label, raw, *, stage=False, monkeypatch=None):
-    memory = _scratchpad(tmp_path)
-    memory.load_identity()  # Normal startup precedes the write-preservation snapshot.
+def _install(tmp_path):
+    memory = Memory(tmp_path)
+    for index in range(4):
+        memory.append_scratchpad_block(f"block-{index}-" + (chr(97 + index) * 8_000), source=f"source-{index}")
     knowledge = tmp_path / "memory" / "knowledge"
     knowledge.mkdir(parents=True, exist_ok=True)
     (knowledge / "untouched.md").write_text("# Existing note\nKeep unchanged.\n", encoding="utf-8")
-    before = copy.deepcopy(memory.load_scratchpad_blocks())
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="fold-shapes"))
+    return memory, registry
+
+
+def _knowledge(files):
+    return {key: value for key, value in files.items() if key.startswith("memory/knowledge")}
+
+
+@pytest.mark.parametrize("label,text", CASES, ids=[row[0] for row in CASES])
+def test_a_fold_stores_any_text_verbatim_and_writes_no_note(tmp_path, label, text):
+    memory, registry = _install(tmp_path)
+    before = memory.load_scratchpad_blocks()
     files_before = _memory_bytes(tmp_path)
-    llm = _LLM(effect=lambda client, prompt: ({"content": raw}, dict(USAGE)))
-    accounted = []
-    if stage:
-        import supervisor.state as state
-        monkeypatch.setattr(state, "update_budget_from_usage", lambda usage: accounted.append(copy.deepcopy(usage)))
-        env = SimpleNamespace(drive_root=tmp_path, drive_path=lambda path: tmp_path / path)
-        outcome = _run_scratchpad_consolidation(env, memory, llm)
-        assert len(accounted) == 1
-        usage = accounted[0]
-    else:
-        usage = c.consolidate_scratchpad(memory, llm)
-        outcome = None
+
+    result = registry.execute_result("update_scratchpad", {
+        "content": text, "replaces": [scratchpad_block_sha256(block) for block in before[:2]]})
+
+    assert result.status == "ok", result.text
     after = memory.load_scratchpad_blocks()
-    files_after = _memory_bytes(tmp_path)
-    [event] = _events(tmp_path, "scratchpad_consolidation")
+    assert after[0]["content"] == text and after[1:] == before[2:]
+    assert _knowledge(_memory_bytes(tmp_path)) == _knowledge(files_before)
+    assert not (tmp_path / "memory" / "knowledge_history.jsonl").exists()
     journal = [json.loads(row) for row in memory.journal_path().read_text(encoding="utf-8").splitlines()]
-    consolidated = [row for row in journal if row.get("type") == "blocks_consolidated"]
-    assert len(llm.calls) == 1, "formatting never causes another synthetic model call"
-    assert usage["prompt_tokens"] == 10 and usage["completion_tokens"] == 5 and usage["cost"] == 0.02
-    assert event["accounted_upper_bound_usd"] == 0.02
-    assert "knowledge_writes" not in event
-    # no note is created or revised, whatever the answer nominated
-    assert ({k: v for k, v in files_after.items() if k.startswith("memory/knowledge/")}
-            == {k: v for k, v in files_before.items() if k.startswith("memory/knowledge/")})
-    if event["outcome"] == "replaced":
-        assert after[0]["content"] == FINAL["compressed_block"]
-        assert after[1:] == before[2:]
-        assert len(consolidated) == 1 and consolidated[0]["source_blocks"] == before[:2]
-        assert "knowledge_entries" not in consolidated[0]
-        assert after[0]["metadata"]["source_ref"]["entry_id"] == event["source_entry_id"]
-    else:
-        assert after == before and files_after == files_before
-        assert not consolidated and event["source_entry_id"] == ""
-    parsed = extract_trailing_json_object(raw)[1]
-    return {"usage": usage, "event": event, "stage_outcome": outcome,
-            "accounting_calls": len(accounted), "canonical_extractor_result": parsed}
+    [preserved] = [row for row in journal if row.get("type") == "fold_sources_preserved"]
+    assert preserved["source_blocks"] == before[:2] and "knowledge_entries" not in preserved
+    assert preserved["fold_block"]["content"] == text
 
 
-@pytest.mark.parametrize("label,raw,outcome,error", CASES, ids=[row[0] for row in CASES])
-def test_scratchpad_reply_preserves_memory_and_usage(tmp_path, fit, label, raw, outcome, error):
-    record = _run_case(tmp_path, label, raw)
-    assert record["event"]["outcome"] == outcome
-    errors = record["usage"].get("_consolidation_errors") or []
-    assert [row["kind"] for row in errors] == ([error] if error else [])
-    assert record["event"]["last_error_kind"] == (error or None)
-    if label in {"pure", "fenced", "prose_tail", "example_then_tail", "prose_fenced_tail"}:
-        assert record["canonical_extractor_result"] == FINAL
-    elif label in {"prose_after_object", "duplicate_tail"}:
-        assert record["canonical_extractor_result"] is None
+@pytest.mark.parametrize("label,text", EMPTY, ids=[row[0] for row in EMPTY])
+def test_an_empty_fold_text_changes_nothing(tmp_path, label, text):
+    memory, registry = _install(tmp_path)
+    before = memory.load_scratchpad_blocks()
+    files_before = _memory_bytes(tmp_path)
 
+    result = registry.execute_result("update_scratchpad", {
+        "content": text, "replaces": [scratchpad_block_sha256(block) for block in before[:2]]})
 
-@pytest.mark.parametrize("label,raw,expected", [
-    ("stage_pure", JSON, ""),
-    ("stage_prose", "Result:\n" + JSON, ""),
-    ("stage_empty", "", "empty_summary"),
-    ("stage_invalid", "No JSON result.", "scratchpad_consolidation_failed"),
-])
-def test_actual_post_task_accounting(tmp_path, fit, monkeypatch, label, raw, expected):
-    record = _run_case(tmp_path, label, raw, stage=True, monkeypatch=monkeypatch)
-    assert record["stage_outcome"] == expected and record["accounting_calls"] == 1
+    assert result.status != "ok" and result.code == "TOOL_ARG_ERROR"
+    assert memory.load_scratchpad_blocks() == before and _memory_bytes(tmp_path) == files_before

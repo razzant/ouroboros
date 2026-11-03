@@ -175,12 +175,12 @@ class UiLanguageChangedOutbound(TypedDict):
 
 
 class UiI18nUpdatedOutbound(TypedDict):
-    """WS frame: the translation memory of ``language`` reached ``revision`` (generated, imported or regenerated)."""
+    """WS frame: the translation memory of ``language`` reached ``revision`` (generated, imported, regenerated or an owner pin)."""
 
     type: Literal["ui_i18n_updated"]
     language: str
     revision: int
-    applied: NotRequired[int]  # entries the generator wrote in this batch; absent for import and regenerate
+    applied: NotRequired[int]  # entries the generator wrote in this batch; absent for import, regenerate and a pin
 
 
 __all__ = [

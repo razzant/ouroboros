@@ -14,9 +14,12 @@ const TRANSPORTS = [
     { value: 'sse', label: 'SSE (Server-Sent Events)' },
     { value: 'stdio', label: 'Local process (stdio)' },
 ];
+// task_session/browser_policy: set by Import and kept as saved, with no control of their own. A held stdio card
+// says what they do; off stdio they are unsupported fields that Save refuses until they are removed.
+const LIFETIME_FLAGS = ['task_session', 'browser_policy'];
 const SERVER_FIELDS = new Set(['id', 'slug', 'name', 'label', 'enabled', 'transport', 'url',
     'command', 'args', 'auth_header', 'auth_token', 'headers', 'allowed_tools', 'cwd', 'env', 'env_from_settings',
-    'browser_bridge', 'browser_protocol', 'browser_skill_binding']);
+    'schemas_at_start', ...LIFETIME_FLAGS]);
 
 let mcpServers = [];
 let mcpStatusByServer = {};
@@ -50,8 +53,6 @@ function emptyServer() {
         auth_header: 'Authorization',
         auth_token: '',
         allowed_tools: [],
-        browser_bridge: false,
-        browser_protocol: 'playwright',
     };
 }
 
@@ -119,6 +120,64 @@ function toolCountLabel(count) {
     return `${count} tool${count === 1 ? '' : 's'}`;
 }
 
+function tokensLabel(count) {
+    const n = Number(count || 0);
+    return n < 1000 ? `≈${n} tokens` : `≈${(n / 1000).toFixed(1)}k tokens`;
+}
+
+function isPinned(server) {
+    return [true, 'true', 'True'].includes(server.schemas_at_start);
+}
+
+/** A call-lifetime flag the loader applies (``normalize_server_config``'s reading); false or absent is off. */
+function lifetimeFlagOn(value) {
+    return value === true || (typeof value !== 'boolean'
+        && ['1', 'true', 'yes', 'on'].includes(String(value ?? '').trim().toLowerCase()));
+}
+
+/** Flags that are on while the transport is not stdio: the loader refuses such a server, so Save does too. */
+function remoteLifetimeFlags(server) {
+    return server.transport === 'stdio' ? [] : LIFETIME_FLAGS.filter((key) => lifetimeFlagOn(server[key]));
+}
+
+/**
+ * Why Save refuses this card, or ''. The loader (``normalize_server_config``) refuses a server whose known
+ * fields its transport does not use (a URL left from another transport included), not one with unknown fields,
+ * which it keeps with a warning; ``unsupportedFields`` already lists both, so only its known names refuse.
+ */
+function refusedFieldsMessage(server) {
+    const refused = unsupportedFields(server).filter((key) => SERVER_FIELDS.has(key));
+    if (!refused.length) return '';
+    const flags = refused.filter((key) => LIFETIME_FLAGS.includes(key));
+    const fields = refused.filter((key) => !LIFETIME_FLAGS.includes(key));
+    const label = (TRANSPORTS.find((item) => item.value === server.transport) || TRANSPORTS[0]).label;
+    return [
+        fields.length ? `${fields.join(', ')} ${fields.length > 1 ? 'are' : 'is'} not used by ${label} servers, `
+            + `so the server would not load with ${fields.length > 1 ? 'them' : 'it'}.` : '',
+        flags.length ? `${flags.join(' and ')} ${flags.length > 1 ? 'apply' : 'applies'} only to Local process `
+            + '(stdio) servers.' : '',
+        'Choose a transport that uses these fields, or use Remove unsupported fields.',
+    ].filter(Boolean).join(' ');
+}
+
+/** The read-only line of a held stdio server: what its Import-set flags do (no control of their own). */
+function lifetimeNote(server) {
+    if (server.transport !== 'stdio' || !lifetimeFlagOn(server.task_session)) return '';
+    return 'task_session: a task’s calls share one running server process until its tool loop ends.'
+        + (lifetimeFlagOn(server.browser_policy)
+            ? ' browser_policy: that process may ask Ouroboros’s browser rules about its requests.' : '');
+}
+
+/** What this server costs the request: its part of the connections map, and its call schemas. */
+function weightLabel(server) {
+    const status = mcpStatusByServer[String(server.id ?? '')] || null;
+    if (!status || status.schema_tokens == null) return '';
+    const schemas = isPinned(server)
+        ? `call schemas ${tokensLabel(status.schema_tokens)} in every Low/Max request from task start`
+        : `call schemas ${tokensLabel(status.schema_tokens)}, loaded when Ouroboros takes up this server`;
+    return `Connections map ${tokensLabel(status.map_tokens)} in every Low/Max request; ${schemas}.`;
+}
+
 function unsupportedFields(server) {
     const unused = server.transport === 'stdio' ? ['url', 'auth_token', 'headers']
         : ['command', 'args', 'cwd', 'env', 'env_from_settings'];
@@ -130,7 +189,7 @@ function unsupportedFields(server) {
     if (server.transport === 'stdio' && draft.auth_header && draft.auth_header !== 'Authorization') {
         fields.push('auth_header');
     }
-    return fields;
+    return [...fields, ...remoteLifetimeFlags(server)];
 }
 
 /** The saved-status parts of a card: its badge and its discovered tools' list items. */
@@ -138,11 +197,17 @@ function statusParts(server) {
     const status = mcpStatusByServer[String(server.id ?? '')] || null;
     const toolCount = status ? Number(status.tool_count || 0) : 0;
     const lastError = status ? String(status.last_error || '') : '';
-    const lastRefreshed = status ? String(status.last_refreshed || '') : '';
+    const listedAt = status ? String(status.listed_at || '') : '';
+    const attempt = status?.latest_attempt;
     const tools = status && Array.isArray(status.tools) ? status.tools : [];
-    const badge = lastError ? [`Error: ${lastError}`, 'mcp-server-status-danger']
-        : toolCount > 0 ? [`${toolCountLabel(toolCount)} discovered`, 'mcp-server-status-ok']
-            : lastRefreshed ? ['0 tools discovered', 'mcp-server-status-warn'] : ['Not refreshed yet', 'mcp-server-status-muted'];
+    let label = listedAt ? `${toolCountLabel(toolCount)} (listed ${listedAt})`
+        : attempt ? 'Never listed under the current configuration' : 'Not listed yet';
+    if (attempt?.ok === false) label += `; last attempt ${attempt.at} failed: ${attempt.error}`;
+    else if (attempt?.partial) label += `; last attempt ${attempt.at} was partial`;
+    else if (lastError) label += `; ${lastError}`;
+    if (status?.publication_error) label += `; catalog publication failed: ${status.publication_error}`;
+    const badge = [label, lastError || status?.publication_error ? 'mcp-server-status-danger'
+        : toolCount > 0 ? 'mcp-server-status-ok' : listedAt ? 'mcp-server-status-warn' : 'mcp-server-status-muted'];
     const toolItems = tools.map((t) => `
                 <li>
                     <strong>${escapeHtml(t.name || t.prefixed_name || '')}</strong>
@@ -169,6 +234,8 @@ function paintStatus() {
         const card = isServer(server) ? cardFor(server) : null;
         if (!card) continue;
         const { badgeText, badgeClass, toolItems } = statusParts(server);
+        const weight = card.querySelector('[data-mcp-weight]');
+        if (weight) { weight.textContent = weightLabel(server); weight.hidden = !weight.textContent; }
         const badge = card.querySelector('.mcp-server-status');
         badge.className = badgeClass;
         if (badge.textContent !== badgeText) badge.textContent = badgeText;
@@ -199,6 +266,7 @@ function renderServerCard(server, index) {
         ? server.env_from_settings : JSON.stringify(server.env_from_settings ?? {}, null, 2);
     const literalEnv = typeof server.env === 'string' ? server.env : JSON.stringify(server.env ?? {}, null, 2);
     const enabled = server.enabled === true || server.enabled === 'True' || server.enabled === 'true';
+    const weight = weightLabel(server);
     const allowedTools = Array.isArray(server.allowed_tools) ? server.allowed_tools.join(', ') : '';
     const transportOptions = TRANSPORTS.map((opt) => {
         const selected = opt.value === transport ? ' selected' : '';
@@ -209,6 +277,7 @@ function renderServerCard(server, index) {
     const message = cardMessages.get(server);
     const pending = pendingActions.get(server) || new Set();
     const notice = endpointNotice(server);
+    const lifetime = lifetimeNote(server);
 
     return `
         <article class="mcp-server-card" data-mcp-card data-mcp-index="${index}">
@@ -216,11 +285,16 @@ function renderServerCard(server, index) {
                 <div class="mcp-server-card-title">
                     <strong>${escapeHtml(name || id || `MCP Server ${index + 1}`)}</strong>
                     <span class="${badgeClass}">${escapeHtml(badgeText)}</span>
+                    <span class="ui-field-help" data-mcp-weight ${weight ? '' : 'hidden'}>${escapeHtml(weight)}</span>
                 </div>
                 <div class="mcp-server-card-actions">
                     <label class="mcp-server-enabled">
                         <input class="ui-checkbox" type="checkbox" aria-label="MCP server ${index + 1}: Enabled" data-mcp-field="enabled" ${enabled ? 'checked' : ''}>
                         <span>Enabled</span>
+                    </label>
+                    <label class="mcp-server-enabled" title="Off: Ouroboros sees this server's tools in its connections map and loads their call schemas when it needs them. On: in Low and Max the call schemas are in every request from the start of each task.">
+                        <input class="ui-checkbox" type="checkbox" aria-label="MCP server ${index + 1}: Call schemas from task start" data-mcp-field="schemas_at_start" ${isPinned(server) ? 'checked' : ''}>
+                        <span>Schemas from task start</span>
                     </label>
                     <button type="button" class="btn btn-default" data-mcp-test ${pending.has('test') ? 'disabled' : ''}>Test draft catalog</button>
                     <button type="button" class="btn btn-default" data-mcp-refresh ${pending.has('refresh') ? 'disabled' : ''}>Refresh saved catalog</button>
@@ -251,22 +325,6 @@ function renderServerCard(server, index) {
                 </div>
             </div>
             ${isStdio ? `
-            <div class="form-row">
-                <label class="mcp-server-enabled">
-                    <input class="ui-checkbox" type="checkbox" data-mcp-field="browser_bridge" ${server.browser_bridge === true ? 'checked' : ''}>
-                    <span>Task-owned browser bridge</span>
-                </label>
-            </div>
-            <div class="form-row">
-                <div class="form-field ui-field">
-                    <label for="mcp-${index}-browser-protocol">Browser protocol</label>
-                    <select class="ui-control" id="mcp-${index}-browser-protocol" data-mcp-field="browser_protocol" aria-label="MCP server ${index + 1}: Browser protocol">
-                        <option value="playwright" ${server.browser_protocol !== 'ouroboros_chrome' ? 'selected' : ''}>Playwright MCP</option>
-                        <option value="ouroboros_chrome" ${server.browser_protocol === 'ouroboros_chrome' ? 'selected' : ''}>Ouroboros Chrome</option>
-                    </select>
-                    <span class="ui-field-help">Chrome requires a task-owned bridge and a connected extension.</span>
-                </div>
-            </div>
             <div class="form-row">
                 <div class="form-field ui-field">
                     <label for="mcp-${index}-args">Arguments (one per line)</label>
@@ -299,6 +357,7 @@ function renderServerCard(server, index) {
                     <input type="text" class="ui-control" id="mcp-${index}-allowed_tools" aria-label="MCP server ${index + 1}: Allowed tools (optional, comma-separated)" data-mcp-field="allowed_tools" value="${escapeHtml(allowedTools)}" placeholder="search, read_repo" autocomplete="off" spellcheck="false">
                 </div>
             </div>
+            ${lifetime ? `<div class="form-row"><span class="muted" data-mcp-lifetime>${escapeHtml(lifetime)}</span></div>` : ''}
             <div class="settings-inline-status mcp-server-message" data-mcp-message ${message ? `data-tone="${escapeHtml(message.tone)}"` : 'hidden'}>${escapeHtml(message?.text || '')}</div>
             ${unsupported.length ? `<div class="form-row"><span class="muted">Fields retained but not applied: ${escapeHtml(unsupported.join(', '))}</span>
                 <button type="button" class="btn btn-default" data-mcp-clear-unsupported>Remove unsupported fields</button></div>` : ''}
@@ -318,7 +377,7 @@ function bindCardEvents(card) {
         input.addEventListener('input', () => {
             const field = input.dataset.mcpField;
             const server = rowServer;
-            if (field === 'enabled' || field === 'browser_bridge') {
+            if (field === 'enabled' || field === 'schemas_at_start') {
                 server[field] = Boolean(input.checked);
             } else if (field === 'allowed_tools') {
                 server.allowed_tools = String(input.value || '')
@@ -345,8 +404,9 @@ function bindCardEvents(card) {
         });
         input.addEventListener('change', () => {
             const field = input.dataset.mcpField;
-            if (field === 'enabled' || field === 'browser_bridge') {
+            if (field === 'enabled' || field === 'schemas_at_start') {
                 rowServer[field] = Boolean(input.checked);
+                if (field === 'schemas_at_start') paintStatus();
                 serverEdited(rowServer);
             }
         });
@@ -368,13 +428,19 @@ function bindCardEvents(card) {
         const index = mcpServers.indexOf(rowServer);
         if (index >= 0) mcpServers.splice(index, 1);
         renderAll();
+        revealAfterRemove(index);
         notifyChanged();
     });
 
     card.querySelector('[data-mcp-test]')?.addEventListener('click', async () => {
         const server = rowServer;
         const errors = validateHeaderFields(card, server, saved?.identity);
-        if (errors.length) { setCardMessage(server, errors[0].message, 'danger'); errors[0].input.focus(); return; }
+        if (errors.length) {
+            setCardMessage(server, errors[0].message, 'danger');
+            if (errors[0].input.hidden) resetSecretReveals(card); // a shown value stands in for its input
+            errors[0].input.focus();
+            return;
+        }
         const generation = draftGenerations.get(server) || 0;
         setPending(server, 'test', true);
         setCardMessage(server, 'Testing connection...', 'muted', 'test');
@@ -414,9 +480,11 @@ function bindCardEvents(card) {
         setCardMessage(server, 'Refreshing tools...', 'muted', 'refresh');
         try {
             const data = await jsonPost('/api/mcp/refresh', { server_id: sid }, { rejectOkFalse: true });
+            if (data.published === false) throw new Error(data.publication_error || 'Catalog was not published');
             await refreshStatus();
             if (mcpServers.includes(server)) setCardMessage(server, `Saved catalog refreshed — ${toolCountLabel(Number(data.tool_count || 0))} discovered. No tool was called.`, 'ok', 'refresh');
         } catch (err) {
+            await refreshStatus();
             if (mcpServers.includes(server)) setCardMessage(server, `Refresh failed: ${err && err.message ? err.message : err}`, 'danger', 'refresh');
         } finally {
             setPending(server, 'refresh', false);
@@ -446,9 +514,18 @@ function renderAll() {
         : `<article class="mcp-server-card" data-mcp-invalid="${idx}"><span class="ui-field-help">MCP entry ${idx + 1} is malformed and retained unchanged. Remove it explicitly to discard it.</span><button type="button" class="btn btn-default" data-mcp-invalid-remove>Remove</button></article>`).join('');
     host.querySelectorAll('[data-mcp-card]').forEach((card) => bindCardEvents(card));
     host.querySelectorAll('[data-mcp-invalid-remove]').forEach((button) => button.addEventListener('click', () => {
-        mcpServers.splice(Number(button.closest('[data-mcp-invalid]').dataset.mcpInvalid), 1);
-        renderAll(); notifyChanged();
+        const index = Number(button.closest('[data-mcp-invalid]').dataset.mcpInvalid);
+        mcpServers.splice(index, 1);
+        renderAll(); revealAfterRemove(index); notifyChanged();
     }));
+}
+
+// After a Remove the caret goes to the entry now in that place, else to Add (DESIGN "List editors");
+// a malformed entry has no field, only its own Remove.
+function revealAfterRemove(index) {
+    const card = document.getElementById('mcp-servers-list')?.children[Math.min(index, mcpServers.length - 1)];
+    if (card) revealNewRow(card, card.querySelector('[data-mcp-field="id"]') || card.querySelector('button'));
+    else document.getElementById('btn-mcp-add-server')?.focus();
 }
 
 function renderEnvelopeStatus() {
@@ -473,7 +550,9 @@ function renderEnvelopeStatus() {
     const totalTools = Array.isArray(mcpStatusEnvelope.servers)
         ? mcpStatusEnvelope.servers.reduce((sum, s) => sum + Number(s.tool_count || 0), 0)
         : 0;
-    el.textContent = `${total} server${total === 1 ? '' : 's'} configured, ${totalTools} tool${totalTools === 1 ? '' : 's'} discovered.`;
+    const weights = mcpStatusEnvelope.weights;
+    const cost = weights ? ` Connections map ${tokensLabel(weights.map_tokens)} in every Low/Max request; call schemas from task start ${tokensLabel(weights.schema_tokens_from_task_start)}.` : '';
+    el.textContent = `${total} server${total === 1 ? '' : 's'} configured, ${totalTools} tool${totalTools === 1 ? '' : 's'} discovered.${cost}`;
     el.dataset.tone = 'ok';
 }
 
@@ -597,8 +676,7 @@ export function applyMcpSettings(settings) {
             auth_header: String(s.auth_header ?? 'Authorization'),
             auth_token: String(s.auth_token ?? ''),
             allowed_tools: Array.isArray(s.allowed_tools) ? s.allowed_tools.map(String) : [],
-            browser_bridge: s.browser_bridge === true,
-            browser_protocol: s.browser_protocol === 'ouroboros_chrome' ? 'ouroboros_chrome' : 'playwright',
+            schemas_at_start: isPinned(s),
         };
         savedMcpSecrets.set(server, { identity: serverIdentity(s), url: server.url });
         return server;
@@ -612,15 +690,9 @@ export function validateMcpSettings() {
     const errors = [];
     document.querySelectorAll('[data-mcp-card]').forEach((card) => {
         const server = mcpServers[Number(card.dataset.mcpIndex)];
-        if (server) {
-            errors.push(...validateHeaderFields(card, server, savedMcpSecrets.get(server)?.identity));
-            if (server.browser_protocol === 'ouroboros_chrome'
-                    && (server.transport !== 'stdio' || server.browser_bridge !== true)) {
-                errors.push({ input: card.querySelector('[data-mcp-field="browser_protocol"]')
-                    || card.querySelector('[data-mcp-field="transport"]'),
-                    message: 'Ouroboros Chrome requires a local stdio server with Task-owned browser bridge enabled.' });
-            }
-        }
+        if (server) errors.push(...validateHeaderFields(card, server, savedMcpSecrets.get(server)?.identity));
+        const refused = server ? refusedFieldsMessage(server) : '';
+        if (refused) errors.push({ input: card.querySelector('[data-mcp-field="transport"]'), message: refused });
     });
     document.querySelectorAll('[data-mcp-field="env"], [data-mcp-field="env_from_settings"]').forEach((input) => {
         let value, parsed = false;
@@ -656,8 +728,7 @@ function collectServer(s) {
         auth_header: String(s.auth_header || 'Authorization').trim() || 'Authorization',
         auth_token: String(s.auth_token || ''),
         allowed_tools: Array.isArray(s.allowed_tools) ? s.allowed_tools.map(String) : [],
-        browser_bridge: String(s.transport || 'streamable_http') === 'stdio' && s.browser_bridge === true,
-        browser_protocol: s.browser_protocol === 'ouroboros_chrome' ? 'ouroboros_chrome' : 'playwright',
+        schemas_at_start: isPinned(s),
         ...credentialPayload(s),
     };
 }
@@ -671,7 +742,7 @@ export function mcpDraftSnapshot() {
 function draftFreshness() {
     return JSON.stringify(mcpServers.map((server) => {
         if (!isServer(server)) return server;
-        const { enabled: _enabled, allowed_tools: _allowedTools, ...fields } = server;
+        const { enabled: _enabled, allowed_tools: _allowedTools, schemas_at_start: _pin, ...fields } = server;
         return [fields, headerDraftRows(server)];
     }));
 }

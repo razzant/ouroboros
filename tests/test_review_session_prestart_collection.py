@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import acceptance_retrieving, delegate_custody, review_checking
+from ouroboros import delegate_custody, review_checking
 from ouroboros import review_execution, review_operation, review_substrate, subagents
 from ouroboros.observability import persist_call, read_call_payload
 from tests._review_session_route_shared import (
@@ -25,7 +25,7 @@ def fail(message):
     return raise_error
 
 
-@pytest.mark.parametrize('stage', ['unconfigured', 'target', 'root', 'gateway', 'health', 'source', 'checking', 'budget', 'deadline', 'stamp', 'start_false', 'start_landed_false', 'start_ambiguous', 'after_row'])
+@pytest.mark.parametrize('stage', ['unconfigured', 'target', 'root', 'gateway', 'health', 'checking', 'budget', 'deadline', 'stamp', 'start_false', 'start_landed_false', 'start_ambiguous', 'after_row'])
 def test_actual_prestart_failures_collect_without_new_start(tmp_path, monkeypatch, fake_route, stage):  # noqa: F811
     from ouroboros import budget_pause
 
@@ -44,8 +44,6 @@ def test_actual_prestart_failures_collect_without_new_start(tmp_path, monkeypatc
         monkeypatch.setattr('ouroboros.claudexor_daemon.ensure_owned_gateway', fail('gateway unavailable'))
     elif stage == 'health':
         monkeypatch.setattr(subagents, 'route_health', lambda *a, **k: ('route_unavailable', ''))
-    elif stage == 'source':
-        monkeypatch.setattr(acceptance_retrieving, 'prepare_session_source', fail('source unavailable'))
     elif stage == 'checking':
         slot = replace(slot, session_access='workspace_write')
         monkeypatch.setattr(review_checking, 'session_checking', fail('checking unavailable'))

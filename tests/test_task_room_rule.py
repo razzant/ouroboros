@@ -8,6 +8,8 @@ pinned or origin-addressed row keeps its producer's address).
 """
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+
 import json
 from types import SimpleNamespace
 
@@ -31,7 +33,7 @@ def _bus(monkeypatch, root):
 
 
 def _progress_rows(root):
-    return [json.loads(line) for line in (root / "logs/progress.jsonl").read_text().splitlines()]
+    return dialogue_test.log_rows(root / "logs/progress.jsonl")
 
 
 def _world(root):
@@ -107,7 +109,7 @@ def test_a_fixed_row_type_keeps_its_producers_address_and_borrows_no_lineage(tmp
     rooms = _world(tmp_path)
     bus, sent = _bus(monkeypatch, tmp_path)
     bus.send_with_budget(rooms["native"], "Not delivered", task_id="kid-1", role="system", system_type=system_type)
-    stored = [json.loads(line) for line in (tmp_path / "logs/chat.jsonl").read_text().splitlines()][-1]
+    stored = dialogue_test.log_rows(tmp_path / "logs/chat.jsonl")[-1]
     assert stored["chat_id"] == rooms["native"] == sent[-1][0][0], "the producer's address stands"
     assert not {"delegation_role", "parent_task_id", "root_task_id"} & set(stored), "the target is not the speaker"
 
@@ -240,6 +242,44 @@ def test_an_absent_id_is_read_once_per_resolver(tmp_path, monkeypatch):
     rooms.warm(["ghost-1", "ghost-2"])
     assert counts["open_store"] == 2 and rooms("ghost-2") == 0 and counts["open_store"] == 2
     assert pr.RoomResolver(tmp_path)("ghost-1") == 0 and counts["open_store"] == 3, "a fresh resolver (a new frame) asks again"
+
+
+def test_a_warm_follows_the_ancestors_of_remembered_tasks_and_says_when_it_could_not(tmp_path, monkeypatch):
+    """Children whose lineage is remembered still send the rule to their ancestors: the warm reads those
+    too, so the rule then walks them with no read per id, and it answers False while the store cannot
+    answer them (a memory count is then not reused) instead of leaving one failing read per task."""
+    rooms = _world(tmp_path)
+    leaves = [f"leaf-{i}" for i in range(6)]
+    for leaf in leaves:
+        write_task_result(tmp_path, leaf, "running", delegation_role="subagent", parent_task_id="grand-1",
+                          root_task_id="root-1", chat_id=1)
+    for key in [key for key in pr._TASK_LINEAGE if key[0] == str(tmp_path)]:
+        del pr._TASK_LINEAGE[key]
+    assert set(pr._read_lineage(tmp_path, leaves)) == set(leaves)  # the leaves are remembered, their ancestors not
+    attempts, real = [], pr._read_lineage
+    monkeypatch.setattr(pr, "_read_lineage", lambda *args, **_kwargs: attempts.append(sorted(args[1])))  # None: busy
+    assert pr.RoomResolver(tmp_path).warm(leaves) is False and attempts == [["grand-1"]]  # a root is only asked its binding
+    monkeypatch.setattr(pr, "_read_lineage", real)
+    counts = _count_store_work(monkeypatch)
+    resolver = pr.RoomResolver(tmp_path)
+    assert resolver.warm(leaves) is True and counts["open_store"] == 2  # two generations: grand-1, then its parent and root
+    assert [resolver(leaf) for leaf in leaves] == [rooms["b"]] * 6 and counts["open_store"] == 2
+
+
+def test_a_warm_stops_where_the_rule_stops_at_a_remembered_tasks_binding(tmp_path, monkeypatch):
+    """A remembered task whose walk ends at a bound parent needs no further lineage: the warm reads none
+    (not the bound parent, not the root), even while the store is busy, and the rule still answers."""
+    rooms = _world(tmp_path)
+    for key in [key for key in pr._TASK_LINEAGE if key[0] == str(tmp_path)]:
+        del pr._TASK_LINEAGE[key]
+    assert set(pr._read_lineage(tmp_path, ["grand-1"])) == {"grand-1"}  # remembered; its parent mid-1 is bound to B
+    attempts, real = [], pr._read_lineage
+    monkeypatch.setattr(pr, "_read_lineage", lambda *args, **_kwargs: attempts.append(sorted(args[1])))  # None: busy
+    assert pr.RoomResolver(tmp_path).warm(["grand-1"]) is True and attempts == []
+    monkeypatch.setattr(pr, "_read_lineage", real)
+    counts = _count_store_work(monkeypatch)
+    resolver = pr.RoomResolver(tmp_path)
+    assert resolver.warm(["grand-1"]) is True and resolver("grand-1") == rooms["b"] and counts["open_store"] == 0
 
 
 def _request(root, body):

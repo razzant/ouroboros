@@ -21,10 +21,7 @@ from ouroboros.llm import LLMClient
 from ouroboros.outcomes import derive_loop_outcome
 from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, write_owner_message
 from ouroboros.tools.registry import ToolRegistry
-from tests.test_acceptance_async_loop import full_loop as full_loop_fixture
 from tests.test_completion_selection import finish
-
-full_loop = full_loop_fixture
 
 PRIMARY = "openai/model-a"
 SUCCESSOR = "anthropic/model-b"
@@ -237,21 +234,25 @@ def test_reused_tool_context_does_not_inherit_previous_handover(episode, prior_t
 
 
 def test_owner_followup_after_incomplete_can_resume_tools_and_heal_warning(episode, monkeypatch):
+    from ouroboros.tools import review_result
+
     agent = SimpleNamespace(_owner_message_admission_lock=threading.Lock(),
                             _accepting_owner_messages=True, _busy=True, _current_task_id=TASK)
     episode.tools._ctx.owner_message_admission_lock = agent._owner_message_admission_lock
     episode.tools._ctx.owner_message_admission_agent = agent
 
-    acceptance = loop._run_task_acceptance_review_once
+    # The owner writes while the incomplete answer is at its delivery step, right before
+    # the admission close drains the mailbox (the result review's step in the real path).
+    at_delivery = review_result.result_review_at_delivery
     sent = []
 
-    def followup_at_seal(**kwargs):
-        if not sent and kwargs["llm_trace"].get("authoring_handover_incomplete"):
+    def followup_at_delivery(ctx, content, llm_trace, hold):
+        if not sent and llm_trace.get("authoring_handover_incomplete"):
             write_owner_message(episode.root, "Read the evidence once more and finish.", TASK, msg_id="followup")
             sent.append(1)
-        return acceptance(**kwargs)
+        return at_delivery(ctx, content, llm_trace, hold)
 
-    monkeypatch.setattr(loop, "_run_task_acceptance_review_once", followup_at_seal)
+    monkeypatch.setattr(review_result, "result_review_at_delivery", followup_at_delivery)
 
     def informed_final(state, _usage, _kwargs):
         source = state.tools._ctx._acceptance_observation["owner_source_sha256"]
@@ -313,55 +314,3 @@ def test_second_toolless_handover_preserves_real_skill_readiness_nudge(episode):
     assert any("SKILL_NOT_FINALIZED" in str(row.get("content", ""))
                for row in episode.calls[-1]["messages"])
     assert usage["reason_code"] == "authoring_handover_incomplete"
-
-
-def test_acceptance_improvement_after_incomplete_heals_warning(episode, full_loop, monkeypatch):
-    from ouroboros.loop_nudges import _maybe_inject_finalization_nudges
-    from tests.test_acceptance_async_loop import keep, select_completion
-    from tests.test_loop_acceptance_gate import _order_acceptance_feedback
-
-    f = full_loop
-    monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", _maybe_inject_finalization_nudges)
-    f.ctx.context_fit_plan = episode.tools._ctx.context_fit_plan
-    f.run_args["messages"] = f.ctx.context_fit_plan.messages_for("max")
-    f.run_args["llm"] = SimpleNamespace(default_model=lambda: PRIMARY)
-    (f.ctx.repo_dir / "evidence.txt").write_text("Verified predecessor evidence", encoding="utf-8")
-    f.reviewer_verdict = "FAIL"
-    _order_acceptance_feedback(f, monkeypatch, "Still incomplete", "ready")
-
-    def main(_llm, messages, model, _schemas, _effort, _retries, _logs,
-             _task_id, _round, _events, usage, *_args, **kwargs):
-        f.model_inputs.append(deepcopy(messages))
-        f.model_step += 1
-        if f.model_step == 1:
-            return _read(), 0.0
-        if f.model_step == 2:
-            usage["_last_llm_error_kind"] = "invalid_continuation"
-            return None, 0.0
-        usage.pop("_last_llm_error_kind", None)
-        if f.model_step == 3:
-            assert model == SUCCESSOR
-            return _text("Initial WIP"), 0.0
-        if f.model_step == 4:
-            return select_completion(f, "Still incomplete"), 0.0
-        if f.model_step == 5:
-            assert f.review_requests and f.review_requests[0].subject == "Still incomplete"
-            assert f.ctx._execution_trace["authoring_handover_incomplete"]["incomplete_observed"]
-            f.reviewer_verdict = "PASS"
-            return _read(), 0.0
-        if f.model_step == 6:
-            return select_completion(f, "Fresh report after acceptance feedback"), 0.0
-        assert f.model_step < 9, f.progress
-        return keep(f), 0.0
-
-    monkeypatch.setattr(loop, "call_llm_with_retry", main)
-    text, usage, trace = f.run()
-    assert text == "Fresh report after acceptance feedback"
-    assert len(_handover_notes(trace)) == 1
-    assert [row["tool"] for row in trace["tool_calls"] if not row.get("completion_control")] == ["read_file", "read_file"]
-    assert trace["route_handovers"][0]["incomplete_observed"] is True
-    assert trace["route_handovers"][0]["status"] == "recovered"
-    assert "authoring_handover_incomplete" not in trace
-    assert usage.get("reason_code") != "authoring_handover_incomplete"
-    assert trace["acceptance_decision"]["status"] == "accepted"
-    assert [request.subject for request in f.review_requests] == ["Still incomplete", text]

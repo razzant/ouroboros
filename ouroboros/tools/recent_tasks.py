@@ -9,7 +9,9 @@ from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
-from ouroboros.outcomes import normalize_outcome_axes
+from ouroboros.outcomes import normalize_outcome_axes, verification_ledger_view
+from ouroboros.tool_capabilities import tool_result_limit
+from ouroboros.task_carrier import execution_kind
 from ouroboros.task_status import effective_task_result
 from ouroboros.dialogue_provenance import (
     PRESENCE_OWN_WORK_SCOPE,
@@ -24,6 +26,9 @@ from ouroboros.dialogue_provenance import (
 _MAX_TASKS = 20
 _PREVIEW_CHARS = 800
 _ORIGIN_KEYS = ("provider", "conversation_id", "thread_id", "conversation_key", "source_event_id")
+# A listing row names its task's contract; the whole contract is one get_task_result read away.
+_CONTRACT_FACTS = ("task_type", "status", "source", "deadline_at")
+_CONTRACT_TEXTS = ("objective", "expected_output", "constraints", "context")
 
 
 def _coerce_limit(value: Any) -> int:
@@ -45,11 +50,45 @@ def _read_json(path: pathlib.Path) -> tuple[Dict[str, Any] | None, str]:
     return data, ""
 
 
-def _preview(text: Any) -> str:
+def _preview(text: Any, chars: int = _PREVIEW_CHARS) -> str:
     value = str(text or "")
-    if len(value) <= _PREVIEW_CHARS:
+    if len(value) <= chars:
         return value
-    return value[:_PREVIEW_CHARS] + f"\n... (truncated preview from {len(value)} chars)"
+    return value[:chars] + f"\n... (truncated preview from {len(value)} chars)"
+
+
+def _source_read(task_id: str, binding: str | None) -> str:
+    scope = f", presence_scope='{PRESENCE_OWN_WORK_SCOPE}'" if binding is not None else ""
+    return f"get_task_result(task_id='{task_id}', include_authority=True{scope})"
+
+
+def _page_json(page: Dict[str, Any]) -> str:
+    return json.dumps(page, ensure_ascii=False, separators=(",", ":"))
+
+
+def _counted_axes(axes: Dict[str, Any]) -> Dict[str, Any]:
+    """The outcome axes with each evidence list (of records) as its length; statuses and named lists stay whole."""
+    return {name: ({key: len(value) if isinstance(value, list) and any(isinstance(v, dict) for v in value) else value
+                    for key, value in axis.items()} if isinstance(axis, dict) else axis) for name, axis in axes.items()}
+
+
+def _contract_facts(contract: Dict[str, Any], *, description: str) -> Dict[str, Any]:
+    """A contract's short facts and text previews, the names of what the row leaves to the full read."""
+    facts: Dict[str, Any] = {key: contract[key] for key in _CONTRACT_FACTS if contract.get(key) not in (None, "")}
+    for key in _CONTRACT_TEXTS:
+        value = contract.get(key)
+        if isinstance(value, str) and value:
+            facts[key] = {"same_as": "description"} if key == "objective" and value == description else _preview(value)
+    omitted = sorted(key for key, value in contract.items()
+                     if key not in facts and key != "schema_version" and value not in (None, "", [], {}))
+    return {**facts, **({"omitted": omitted} if omitted else {})}
+
+
+def _row_stub(row: Dict[str, Any], chars: int) -> Dict[str, Any]:
+    """A row with a reader that alone exceeds the page: its identity, origin, size and that reader."""
+    keep = ("task_id", "status", "presence_origin", "source_read")
+    return {**{key: row[key] for key in keep if key in row},
+            "description": _preview(row.get("description")), "omitted_chars": chars}
 
 
 def _task_record(
@@ -69,7 +108,8 @@ def _task_record(
         return None, {"task_id": task_id, "error": f"{type(exc).__name__}: {exc}"}
     if raw is None:
         return None, {"task_id": task_id, "error": "the row left the store during the read"}
-    data = effective_task_result(drive_root, raw)
+    # The display read (task_status.effective_task_result): a listing builds no artifact view.
+    data = effective_task_result(drive_root, raw, materialize_artifacts=False)
     withheld = False
     if binding is not None:
         # A scoped page lists this binding's row; a retry successor it redirects to is judged too.
@@ -80,12 +120,18 @@ def _task_record(
     from ouroboros.cost_projection import cost_projection
 
     _cost = cost_projection(data)
+    task_name = str(data.get("task_id") or task_id)
+    description = str(data.get("description") or "")
+    axes = normalize_outcome_axes(data)
+    # A listing row carries facts and bounded previews beside the single-task read that holds the
+    # whole record; a withheld row has no reader this binding may open, so it keeps its bodies.
+    compact = not withheld
     record: Dict[str, Any] = {
-        "task_id": str(data.get("task_id") or task_id),
+        "task_id": task_name,
         "ts": str(data.get("ts") or ""),
         "status": str(data.get("status") or ""),
-        "outcome_axes": normalize_outcome_axes(data),
-        "description": str(data.get("description") or ""),
+        "outcome_axes": _counted_axes(axes) if compact else axes,
+        "description": _preview(description) if compact else description,
         # SSOT cost projection (C2/ABI-3): honest null (never a fabricated $0),
         # the honest name only, finality unfabricated.
         "accounted_upper_bound_usd": _cost["accounted_upper_bound_usd"],
@@ -95,25 +141,23 @@ def _task_record(
     }
     if isinstance(data.get("execution_observation"), dict):
         record["execution_observation"] = dict(data["execution_observation"])
+    if compact:
+        record["source_read"] = _source_read(task_name, binding)
     if isinstance(data.get("task_contract"), dict):
-        record["task_contract"] = data.get("task_contract")
+        record["task_contract"] = (_contract_facts(data["task_contract"], description=description)
+                                   if compact else data["task_contract"])
     if isinstance(data.get("artifact_bundle"), dict):
-        record["artifact_bundle"] = data.get("artifact_bundle")
+        bundle = data["artifact_bundle"]
+        rows = [bundle.get(key) if isinstance(bundle.get(key), list) else [] for key in ("artifacts", "errors")]
+        record["artifact_bundle"] = ({"status": bundle.get("status"), "recorded_artifacts": len(rows[0]),
+                                      **({"errors": len(rows[1])} if rows[1] else {})} if compact else bundle)
     if isinstance(data.get("focus"), dict):
         from ouroboros.focus import compact_focus
         focus = compact_focus(data.get("focus"))
         if focus is not None:
             record["focus"] = focus
-    ledger = data.get("verification_ledger") if isinstance(data.get("verification_ledger"), dict) else {}
-    if ledger:
-        # An omitted-to-artifact stub carries no entries; its summary is the
-        # count authority, and for a full ledger the two always agree.
-        ledger_summary = ledger.get("summary") if isinstance(ledger.get("summary"), dict) else {}
-        record["verification_ledger"] = {
-            "schema_version": ledger.get("schema_version"),
-            "summary": ledger_summary,
-            "entry_count": ledger_summary.get("entry_count", len(ledger.get("entries") or []) if isinstance(ledger.get("entries"), list) else 0),
-        }
+    if ledger := verification_ledger_view(data.get("verification_ledger")):
+        record["verification_ledger"] = ledger  # dated beside the current artifact_bundle
     if include_results:
         record["result"] = result
     if include_traces:
@@ -136,18 +180,12 @@ def _queue_snapshot(drive_root: pathlib.Path) -> tuple[Dict[str, Any], bool]:
     Never written means nothing was ever queued; a written snapshot that cannot be
     read, or lists its rows in a shape this reader cannot walk, proves no absence.
     """
-    path = drive_root / "state" / "queue_snapshot.json"
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    from ouroboros.queue_observation import load_queue_document
+
+    data = load_queue_document(drive_root)  # shared task values expanded, parsed once per publication
+    if data.get("_snapshot_missing"):
         return {}, False
-    except (OSError, UnicodeDecodeError):
-        return {}, True
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return {}, True
-    if not isinstance(data, dict) or any(not isinstance(data.get(key, []), list) for key in ("running", "pending")):
+    if data.get("_snapshot_invalid") or any(not isinstance(data.get(key, []), list) for key in ("running", "pending")):
         return {}, True
     return data, False
 
@@ -163,8 +201,7 @@ def _owner_record(row: Dict[str, Any] | None, queued: Dict[str, Any]) -> Dict[st
 
 
 def _running_tasks(drive_root: pathlib.Path, binding: str | None = None) -> List[Dict[str, Any]]:
-    snapshot, _error = _read_json(drive_root / "state" / "queue_snapshot.json")
-    snapshot = snapshot or {}
+    snapshot, _error = _queue_snapshot(drive_root)
     running = snapshot.get("running")
     if not isinstance(running, list):
         return []
@@ -185,6 +222,8 @@ def _running_tasks(drive_root: pathlib.Path, binding: str | None = None) -> List
         task_id = str(item.get("id") or item.get("task_id") or "")
         if binding is not None and not presence_related_work(binding, _owner_record(facts.get(task_id), task)):
             continue  # a scoped page lists no foreign running work, whatever a stale queue row claims
+        if binding is None and execution_kind(task) == "presence":
+            continue  # a correspondent's turn is its place's (live works says so), never the owner's running task
         rows.append({
             "task_id": task_id,
             "status": "running",
@@ -301,9 +340,7 @@ def _handle_recent_tasks(
         restricted=_restricted_actor(ctx), binding=binding,
         exclude=str(getattr(ctx, "task_id", "") or "") if binding is not None else "",
     )
-    if binding is not None:
-        page["presence_scope"] = {"scope": PRESENCE_OWN_WORK_SCOPE, "binding_id": binding}
-    text = json.dumps(page, ensure_ascii=False, indent=2)
+    text = _page_json(page)
     if page.get("error"):
         # Snapshot refusal returns no page. Per-row unreadable_tasks/read_gap
         # disclosures still accompany a successfully returned partial page.
@@ -331,8 +368,6 @@ def recent_tasks_page(
     except (TypeError, ValueError):
         skip = 0
     requested_snapshot = str(snapshot or "").strip().lower()
-    tasks: List[Dict[str, Any]] = []
-    unreadable_tasks: List[Dict[str, str]] = []
     inventory: List[Dict[str, Any]] = []
     current_snapshot = ""
     stable = False
@@ -346,9 +381,9 @@ def recent_tasks_page(
         read_gap.update(gap)
         return rows
 
+    entries: List[tuple[str, Any]] = []  # one per consumed inventory slot, in page order
     for _attempt in range(2):
-        tasks = []
-        unreadable_tasks = []
+        entries = []
         before = _inventory()
         current_snapshot = _recent_tasks_snapshot(
             before,
@@ -359,10 +394,10 @@ def recent_tasks_page(
         selected = before[skip:skip + task_limit]
         for item in selected:
             if item.get("queue_task_id"):
-                tasks.append({
+                entries.append(("task", {
                     "task_id": str(item["queue_task_id"]), "status": str(item.get("status") or ""),
                     "description": str(item.get("description") or ""), "source": "queue_snapshot",
-                })
+                }))
                 continue
             record, error = _task_record(
                 str(item["name"]),
@@ -376,36 +411,62 @@ def recent_tasks_page(
                     # A restricted actor gets no cross-focus catalogue (see
                     # _handle_live_roots); a root's authored focus is part of it.
                     record.pop("focus", None)
-                tasks.append(record)
-            elif error is not None:
-                unreadable_tasks.append(error)
+                entries.append(("task", record))
+            else:
+                entries.append(("unreadable", error))
         inventory = _inventory()
         stable = before == inventory
         if stable:
             break
     total = len(inventory)
-    returned = min(task_limit, max(0, total - skip))
-    remaining = max(0, total - skip - returned)
-    base = {
-        "running": _running_tasks(drive_root, binding),
-        "tasks": tasks,
-        "unreadable_tasks": unreadable_tasks,
-        "source": {"reader": "recent_tasks", "root": "canonical_task_results"},
-        "total": total,
-        "returned": returned,
-        "offset": skip,
-        "remaining": remaining,
-        "snapshot": current_snapshot,
-        "next": ({
-            "limit": task_limit,
-            "offset": skip + returned,
+    running = _running_tasks(drive_root, binding)
+
+    def assemble(rows: List[tuple[str, Any]]) -> Dict[str, Any]:
+        returned = len(rows)  # consumed inventory slots: unreadable rows count, ``next`` resumes after them
+        remaining = max(0, total - skip - returned)
+        return {
+            "running": running,
+            "tasks": [row for kind, row in rows if kind == "task"],
+            "unreadable_tasks": [row for kind, row in rows if kind == "unreadable" and row is not None],
+            "source": {"reader": "recent_tasks", "root": "canonical_task_results"},
+            "total": total,
+            "returned": returned,
+            "offset": skip,
+            "remaining": remaining,
             "snapshot": current_snapshot,
-            "include_results": bool(include_results),
-            "include_traces": bool(include_traces),
-            **({"presence_scope": PRESENCE_OWN_WORK_SCOPE} if binding is not None else {}),
-        } if remaining else None),
-        **({"read_gap": dict(read_gap)} if read_gap else {}),
-    }
+            "next": ({
+                "limit": task_limit,
+                "offset": skip + returned,
+                "snapshot": current_snapshot,
+                "include_results": bool(include_results),
+                "include_traces": bool(include_traces),
+                **({"presence_scope": PRESENCE_OWN_WORK_SCOPE} if binding is not None else {}),
+            } if remaining else None),
+            **({"read_gap": dict(read_gap)} if read_gap else {}),
+            **({"presence_scope": {"scope": PRESENCE_OWN_WORK_SCOPE, "binding_id": binding}}
+               if binding is not None else {}),
+        }
+
+    base = assemble(entries)
+    bound = tool_result_limit("recent_tasks")
+
+    def paged_chars(rows: List[tuple[str, Any]]) -> int:
+        # What the cursor pages, as sent: the live-work header is outside it and stays whole.
+        return len(_page_json({**assemble(rows), "running": [], "page_chars_bound": bound}))
+
+    if stable and not include_results and not include_traces and paged_chars(entries) > bound:
+        # The declared producer page (tool_capabilities.TOOL_RESULT_LIMITS) holds whole rows; the rest
+        # is the next page. Explicit result/trace bodies are the caller's chosen size, and a row
+        # without a reader (no source_read) is never shortened.
+        fitted = entries
+        while len(fitted) > 1 and paged_chars(fitted) > bound:
+            fitted = fitted[:-1]
+        row = fitted[0][1] if fitted and fitted[0][0] == "task" else {}
+        if paged_chars(fitted) > bound and row.get("source_read"):
+            fitted = [("task", _row_stub(row, len(_page_json(row))))]
+        base = assemble(fitted)
+        if paged_chars(fitted) <= bound:
+            base["page_chars_bound"] = bound
     if not stable:
         return {
             **base,
@@ -467,7 +528,10 @@ def get_tools() -> List[ToolEntry]:
             "name": "recent_tasks",
             "description": (
                 "Read recent task results from the canonical task root. Use when prior work, "
-                "continuations, retries, or incomplete current context may matter."
+                "continuations, retries, or incomplete current context may matter. Rows are compact: "
+                "previews, counts and each task's get_task_result address; a page holds the whole rows "
+                "that fit its size and `next` continues it. The running list, rows without an address and "
+                "include_results/include_traces pages are not shortened."
             ),
             "parameters": {
                 "type": "object",

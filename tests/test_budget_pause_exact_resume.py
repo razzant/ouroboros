@@ -568,14 +568,14 @@ def test_threshold_refresh_reads_the_ledger_now_never_a_cached_snapshot(tmp_path
 
 def test_state_phase_budget_pausing_reads_the_durable_row(tmp_path, monkeypatch):
     from ouroboros import budget_pause
-    from ouroboros.gateway import state as gw_state
+    from ouroboros.work_stop import row_pausing
 
     ctx, _limit, _pause_row = _pause(tmp_path, monkeypatch, task_id="phase-1")
     budget_pause.end_dispatch_fence("phase-1")
     row = {"_attempt": 1, "budget_drive_root": str(tmp_path)}
-    assert gw_state._managed_task_budget_pausing(tmp_path, row, "phase-1") is True
-    assert gw_state._managed_task_budget_pausing(tmp_path, {"_attempt": 2}, "phase-1") is False
-    assert gw_state._managed_task_budget_pausing(tmp_path, {"_attempt": 1}, "absent") is False
+    assert row_pausing(tmp_path, row, "phase-1") is True
+    assert row_pausing(tmp_path, {"_attempt": 2}, "phase-1") is False
+    assert row_pausing(tmp_path, {"_attempt": 1}, "absent") is False
 
 
 def test_resume_child_tool_only_targets_own_children(monkeypatch):
@@ -618,29 +618,6 @@ def test_resume_child_task_is_policy_covered_and_exposed_beside_its_own_family()
     assert "resume_child_task" in caps.OBSERVE_WORLD_MUTATION_TOOLS
     assert "resume_child_task" in disabled_tools_for("observe")
     assert "resume_child_task" not in disabled_tools_for("full")
-
-
-def _repo_file(*parts):
-    return pathlib.Path(__file__).resolve().parents[1].joinpath(*parts).read_text()
-
-
-def test_activity_rows_show_a_held_budget_row_as_paused_not_queued():
-    """Scope note (static pin; the browser check is the parent's): a row whose root
-    fence was lifted carries an unselected HOLD and nothing will dispatch it, so
-    listing it as plain "queued" promises work that cannot start."""
-    source = _repo_file("web", "modules", "activity.js")
-    assert "_budget_pause_hold" in source and "heldRow" in source
-    assert "|| heldRow(t)" in source  # consulted by the pending-row pause predicate
-
-
-def test_runbook_does_not_promise_a_managed_outage_window_the_runtime_has_no_rail_for():
-    """F8: with no deadline and an unlimited absolute ceiling, a managed task's
-    transport-outage episode has NO window of its own — the 6h operation-window
-    fallback belongs to other operations. The runbook names the optional rails an
-    operator can set instead of promising a timeout that does not exist."""
-    source = _repo_file("devtools", "benchmarks", "continual_learning", "RUNBOOK.md")
-    assert "6h operation window from episode entry" not in source
-    assert "OUROBOROS_TASK_ABS_CEILING_SEC" in source and "idle reaper" in source
 
 
 # --------------------------------------------------------------------------- consumption publication holds

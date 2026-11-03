@@ -1,0 +1,294 @@
+{
+  "skills": [
+    {
+      "name": "update_rejected",
+      "type": "extension",
+      "version": "0.3.1",
+      "description": "The previous release is running again after an update review.",
+      "enabled": true,
+      "source": "ouroboroshub",
+      "permissions": [
+        "net",
+        "widget",
+        "route"
+      ],
+      "installed_at": "2026-09-20T10:00:00Z",
+      "content_hash": "0305fd55a4c7786753043df9b26c2dbadcc35285daffe623e3dc72e5afc7dfea",
+      "removal": "uninstall",
+      "payload_root": "skills/ouroboroshub/weather",
+      "review_status": "pending",
+      "review_stale": false,
+      "review_gate": {
+        "status": "pending",
+        "stale": false,
+        "executable_review": true,
+        "blocking_reason": "trusted_source",
+        "review_enforcement": "blocking",
+        "summary": "Installed unchanged from a source the owner trusts; no review is required for these exact bytes.",
+        "preflight_failed": false,
+        "preflight_failed_stale": false
+      },
+      "executable_review": true,
+      "live_loaded": true,
+      "dispatch_live": true,
+      "grants": {
+        "all_granted": true
+      },
+      "category": [
+        "city"
+      ],
+      "install": {
+        "source": {
+          "id": "ouroboros",
+          "kind": "hub",
+          "name": "Ouroboros",
+          "part": "official"
+        },
+        "official": true,
+        "release": {
+          "version": "0.3.1",
+          "digest": "0305fd55a4c7786753043df9b26c2dbadcc35285daffe623e3dc72e5afc7dfea"
+        },
+        "basis": "trusted",
+        "base_known": true,
+        "modified": false,
+        "turn_on_when_ready": true,
+        "installed_by": "ouroboros",
+        "installed_at": "2026-09-20T10:00:00Z",
+        "reason": "the owner asked for the forecast",
+        "task_id": "t-weather",
+        "update_available": {
+          "version": "0.3.2",
+          "digest": "18a28b775e3f493d5323080c50523e2bec1356e37e76aa918f1fb298d9fd5d94"
+        },
+        "withdrawn": null,
+        "left_source": false,
+        "update_rejected": {
+          "version": "0.3.2",
+          "digest": "18a28b775e3f493d5323080c50523e2bec1356e37e76aa918f1fb298d9fd5d94",
+          "reason": "review_blockers",
+          "at": "2026-10-18T00:10:00Z"
+        }
+      },
+      "skill_review": {
+        "current": {},
+        "history": [
+          {
+            "job_id": "review-rejected-update",
+            "content_hash": "18a28b775e3f493d5323080c50523e2bec1356e37e76aa918f1fb298d9fd5d94",
+            "review_round": 1,
+            "snapshot_attempt": 1,
+            "lifecycle_status": "completed",
+            "review_status": "blockers",
+            "terminal_reason": "The update sends location to an undocumented endpoint."
+          }
+        ],
+        "history_omitted": 0
+      }
+    },
+    {
+      "name": "pending_update",
+      "type": "extension",
+      "version": "0.3.1",
+      "description": "A new release is being reviewed before it can run.",
+      "enabled": false,
+      "source": "ouroboroshub",
+      "permissions": [
+        "net",
+        "tool",
+        "widget"
+      ],
+      "installed_at": "2026-10-17T14:58:00Z",
+      "content_hash": "f61d8564d92fada803e0b87c59310fd0176708c6d3c3f08335eb9b7793e979c1",
+      "removal": "uninstall",
+      "payload_root": "skills/ouroboroshub/whoop-health",
+      "review_status": "pending",
+      "review_stale": false,
+      "review_gate": {
+        "status": "pending",
+        "stale": false,
+        "executable_review": false,
+        "blocking_reason": "review_pending",
+        "review_enforcement": "blocking",
+        "summary": "Review is pending or did not produce an executable verdict.",
+        "preflight_failed": false,
+        "preflight_failed_stale": false
+      },
+      "executable_review": false,
+      "skill_review": {
+        "current": {
+          "lifecycle_status": "running",
+          "content_hash": "h-wh",
+          "started_at": "2026-10-17T14:58:00Z"
+        },
+        "history": []
+      },
+      "grants": {
+        "all_granted": false,
+        "requested_keys": [
+          "WHOOP_CLIENT_ID",
+          "WHOOP_CLIENT_SECRET"
+        ],
+        "missing_keys": [
+          "WHOOP_CLIENT_ID",
+          "WHOOP_CLIENT_SECRET"
+        ]
+      },
+      "owner_attestable": true,
+      "category": [
+        "health"
+      ],
+      "install": {
+        "source": {
+          "id": "ouroboros-community",
+          "kind": "hub",
+          "name": "Ouroboros Community",
+          "part": "community"
+        },
+        "official": false,
+        "release": {
+          "version": "0.3.1",
+          "digest": "f61d8564d92fada803e0b87c59310fd0176708c6d3c3f08335eb9b7793e979c1"
+        },
+        "basis": "review",
+        "base_known": true,
+        "modified": false,
+        "turn_on_when_ready": true,
+        "installed_by": "owner",
+        "update_available": null,
+        "withdrawn": null,
+        "left_source": false,
+        "installed_at": "2026-10-17T14:58:00Z",
+        "pending_update": {
+          "version": "2.0.0",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    {
+      "name": "self_checked",
+      "type": "extension",
+      "version": "0.3.1",
+      "description": "Ouroboros checked this release and recorded its reasoning.",
+      "enabled": true,
+      "source": "ouroboroshub",
+      "permissions": [
+        "net",
+        "widget",
+        "route"
+      ],
+      "installed_at": "2026-09-20T10:00:00Z",
+      "content_hash": "0305fd55a4c7786753043df9b26c2dbadcc35285daffe623e3dc72e5afc7dfea",
+      "removal": "uninstall",
+      "payload_root": "skills/ouroboroshub/weather",
+      "review_status": "pending",
+      "review_stale": false,
+      "review_gate": {
+        "status": "pending",
+        "stale": false,
+        "executable_review": true,
+        "blocking_reason": "self_check",
+        "review_enforcement": "blocking",
+        "summary": "Ouroboros read this exact release and recorded why it may run.",
+        "preflight_failed": false,
+        "preflight_failed_stale": false
+      },
+      "executable_review": true,
+      "live_loaded": true,
+      "dispatch_live": true,
+      "grants": {
+        "all_granted": true
+      },
+      "category": [
+        "city"
+      ],
+      "install": {
+        "source": {
+          "id": "ouroboros",
+          "kind": "hub",
+          "name": "Ouroboros",
+          "part": "official"
+        },
+        "official": true,
+        "release": {
+          "version": "0.3.1",
+          "digest": "0305fd55a4c7786753043df9b26c2dbadcc35285daffe623e3dc72e5afc7dfea"
+        },
+        "basis": "self_check",
+        "base_known": true,
+        "modified": false,
+        "turn_on_when_ready": true,
+        "installed_by": "ouroboros",
+        "installed_at": "2026-09-20T10:00:00Z",
+        "reason": "the owner asked for the forecast",
+        "task_id": "t-weather",
+        "update_available": null,
+        "withdrawn": null,
+        "left_source": false,
+        "check": {
+          "by": "ouroboros",
+          "notes": "I read the exact release, checked its network calls and found that it only contacts the documented weather provider. <script>alert(\"notes\")</script> The files match the requested task and need no additional access. The files match the requested task and need no additional access. The files match the requested task and need no additional access. The files match the requested task and need no additional access. The files match the requested task and need no additional access. The files match the requested task and need no additional access. The files match the requested task and need no additional access. The files match the requested task and need no additional access. ",
+          "at": "2026-10-18T00:00:00Z"
+        }
+      }
+    },
+    {
+      "name": "old_tool",
+      "type": "script",
+      "version": "0.2.0",
+      "description": "A tool its author withdrew.",
+      "enabled": true,
+      "source": "ouroboroshub",
+      "permissions": [
+        "net"
+      ],
+      "installed_at": "2026-09-01T10:00:00Z",
+      "content_hash": "9379211e691539e6fd5850bc92b58800e7938a8024e4209a8908bc7eb67dd354",
+      "removal": "uninstall",
+      "payload_root": "skills/ouroboroshub/old_tool",
+      "review_status": "clean",
+      "review_stale": false,
+      "review_gate": {
+        "status": "clean",
+        "stale": false,
+        "executable_review": true,
+        "blocking_reason": "ready",
+        "review_enforcement": "blocking",
+        "summary": "Review is executable: verdict clean.",
+        "preflight_failed": false,
+        "preflight_failed_stale": false
+      },
+      "executable_review": true,
+      "grants": {
+        "all_granted": true
+      },
+      "install": {
+        "source": {
+          "id": "ouroboros-community",
+          "kind": "hub",
+          "name": "Ouroboros Community",
+          "part": "community"
+        },
+        "official": false,
+        "release": {
+          "version": "0.2.0",
+          "digest": "9379211e691539e6fd5850bc92b58800e7938a8024e4209a8908bc7eb67dd354"
+        },
+        "basis": "review",
+        "base_known": true,
+        "modified": false,
+        "turn_on_when_ready": true,
+        "installed_by": "owner",
+        "update_available": null,
+        "withdrawn": {
+          "reason": "Sends data to an unnamed server.",
+          "at": "2026-10-16",
+          "version": "0.2.0"
+        },
+        "left_source": false,
+        "installed_at": "2026-09-01T10:00:00Z"
+      },
+      "category": []
+    }
+  ]
+}

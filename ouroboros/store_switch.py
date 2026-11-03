@@ -158,7 +158,8 @@ def switch_needs(repo_dir: Any, target_sha: str) -> Dict[str, bool]:
     """What the target tree cannot read, computed from the target before anything moves."""
     return {"facts": target_file_bytes(repo_dir, target_sha, "ouroboros/store.py") is None,
             "money": target_file_bytes(repo_dir, target_sha, "ouroboros/usage_store.py") is None,
-            "handles": target_file_bytes(repo_dir, target_sha, "ouroboros/evidence_packs.py") is None}
+            "handles": target_file_bytes(repo_dir, target_sha, "ouroboros/evidence_packs.py") is None,
+            "dialogue": target_file_bytes(repo_dir, target_sha, "ouroboros/dialogue_store.py") is None}
 
 
 def switch_or_reset(root: Any, repo_dir: Any, *, target_sha: str, target_ref: str, reason: str, door: str,
@@ -167,12 +168,37 @@ def switch_or_reset(root: Any, repo_dir: Any, *, target_sha: str, target_ref: st
     the intent and moves nothing (the seam exports and switches at the restart exit the door
     requests next); a target with it runs the door's own reset now, as before the store.
     Returns ``(ok, message, deferred)``."""
-    if switch_needs(repo_dir, target_sha)["facts"]:
+    needs = switch_needs(repo_dir, target_sha)
+    if needs["facts"] or needs.get("dialogue"):
         record_switch_intent(root, target_sha=target_sha, target_ref=target_ref, reason=reason, door=door)
         return True, (f"authority switch to {target_sha[:12]} recorded: the facts are exported and the checkout "
                       "moves at the restart exit"), True
-    ok, message = reset()
+    refusal = _hand_off_stores(pathlib.Path(root))
+    if refusal:
+        store.forget_handoffs()
+        return False, f"switch refused: a store could not be handed off ({refusal})", False
+    try:
+        ok, message = reset()
+    except BaseException as exc:
+        if getattr(exc, "before_tree_effects", False):  # the reset changed nothing: this process keeps its stores
+            store.forget_handoffs()
+        raise
     return ok, message, False
+
+
+def _hand_off_stores(root: pathlib.Path) -> str:
+    """Every present store of the root and its retained drives leaves WAL before the door moves the
+    checkout (``store.hand_off``); the refusal text when one cannot."""
+    try:
+        from ouroboros import dialogue_store
+
+        for drive in (root, *store_import.descendant_drives(root)):
+            store.hand_off(drive)
+            dialogue_store.hand_off(drive)
+        usage_store.hand_off(root)
+    except (OSError, store.StoreError, UsageAccountingError) as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return ""
 
 
 def next_engine_pin(repo_dir: Any, target_sha: str):
@@ -356,6 +382,7 @@ def _refuse(root: pathlib.Path, intent: Dict[str, Any], receipt: Dict[str, Any],
     """Nothing switches: the intent is set aside, both authorities stay (restored if a previous
     attempt moved them); progress retains the reason for the next startup owner notice."""
     restored = _abandon(root, receipt)
+    store.forget_handoffs()  # this process keeps its stores
     refused = root / INTENT_REL.with_name(f"{INTENT_REL.stem}.refused-{_stamp()}.json")
     os.replace(root / INTENT_REL, refused)
     _progress(root, "refused", intent=intent, reason=reason, restored=restored, intent_moved_to=refused.name, **facts)
@@ -408,6 +435,12 @@ def run_switch_seam(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, 
             _progress(root, "handles")
             steps["handles"] = (restore_handles or evidence_packs.restore_checkpoint_handles)(root)
             _write_receipt(root, receipt)
+        if needs.get("dialogue"):
+            from ouroboros.dialogue_import import export_for_older_body
+
+            _progress(root, "dialogue")
+            steps["dialogue"] = export_for_older_body(root)  # the post-cutover rows back into the chains
+            _write_receipt(root, receipt)
     except (OSError, store.StoreError, UsageAccountingError) as exc:
         receipt["export"] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "at": utc_now_iso()}
         _write_receipt(root, receipt)
@@ -418,6 +451,9 @@ def run_switch_seam(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, 
         with store.open_store(drive, write=True, service=True) as txn:
             txn.set_meta("export", receipt["export"])
     _write_receipt(root, receipt)
+    refusal = _hand_off_stores(root)  # the older body also gets no WAL file (``switch_or_reset``)
+    if refusal:
+        return _refuse(root, intent, receipt, f"store hand-off: {refusal}")
     os.unlink(root / INTENT_REL)  # consumed BEFORE the switch: the old body never sees an intent
     store.fsync_directory(root / "state")
     receipt["retired"] = {str(drive): _retire(drive) for drive in roots}
@@ -509,8 +545,9 @@ def _run(root: pathlib.Path, repo_dir: Any, boot: _Boot, request_restart: Callab
             if resumed["status"] == "switched":
                 outcome = resumed  # the window stays open: nothing is imported into a retired store
             else:
-                report = prepare_startup_state(root, repo_dir=repo_dir, strict=False)
-                outcome = {"status": "published" if store.published(root) else str(report.get("status") or "unavailable"),
+                report = prepare_startup_state(root, repo_dir=repo_dir, strict=False, initialize_journal=True)
+                outcome = {"status": "published" if report.get("status") != "unavailable" and store.published(root)
+                           else str(report.get("status") or "unavailable"),
                            "report": report}
                 if outcome["status"] == "published":
                     flush_outbox(root)  # a custody event committed before a death reaches its chain at the next boot
@@ -577,9 +614,11 @@ def require_published(root: Any) -> Dict[str, Any]:
 
 
 def when_ready(root: Any, *steps: Callable[[], Any]) -> None:
-    """Run ``steps`` in order once ROOT's boot import has published (on its thread), or now
-    when none runs here: the providerless door's recovery and readiness. A boot that did not
-    publish drops them (the process stays not ready)."""
+    """Run ``steps`` in order once ROOT's boot import has published (on its thread), or at once
+    on a thread of their own when it already published or none runs here (the providerless
+    door's recovery and readiness): never on the caller's thread, whose next work a step may
+    wait on (the lifespan starts the boot coordinator, and with it the extensions, after this
+    call). A boot that did not publish drops them (the process stays not ready)."""
     with _GUARD:
         boot = _BOOTS.get(str(pathlib.Path(root)))
         if boot is not None and not boot.done.is_set():
@@ -588,8 +627,7 @@ def when_ready(root: Any, *steps: Callable[[], Any]) -> None:
     if boot is not None and not boot.published:
         log.critical("%d step(s) dropped: the current-facts store is not published (%s)", len(steps), boot.outcome.get("status"))
         return
-    for step in steps:
-        _step(step)
+    threading.Thread(target=lambda: [_step(step) for step in steps], daemon=True, name="store-ready-steps").start()
 
 
 def switch_at_restart(root: Any, repo_dir: Any, cleanup: Any) -> Dict[str, Any]:
@@ -597,18 +635,20 @@ def switch_at_restart(root: Any, repo_dir: Any, cleanup: Any) -> Dict[str, Any]:
     census: ``worker_exits`` the pool's kill census (``supervisor.workers.last_worker_exit_census``),
     ``live_children`` the handles still alive after it, ``owned_stop`` ``stop_owned_work``'s
     outcome; an unconfirmed stop in any of them (a missing census included) is a blocker the
-    seam refuses on, never a wait. Never raises."""
+    seam refuses on, never a wait. After that stop the door owner's bounded Git runs as this
+    exit's own finalization (``shell_process.exit_finalization``); Panic still ends it. Never raises."""
     root = pathlib.Path(root)
     owner = None
     if read_switch_intent(root) is None:
         head = rev_parse(repo_dir, "HEAD")
-        if not head or not switch_needs(repo_dir, head)["facts"]:
+        needs = switch_needs(repo_dir, head) if head else {}
+        if not (needs.get("facts") or needs.get("dialogue")):  # the deferring needs of ``switch_or_reset``
             return {"status": "no_intent"}
-        # T2: the checked-out tree already lacks the store (the agent's vcs_revert, a manual
-        # checkout) and no door recorded the switch: the export runs before this exit with HEAD
-        # as the target; nothing resets a second time.
+        # T2: the checked-out tree already lacks the store or the dialogue store (the agent's
+        # vcs_revert, a manual checkout) and no door recorded the switch: the export runs before
+        # this exit with HEAD as the target; nothing resets a second time.
         record_switch_intent(root, target_sha=head, target_ref="HEAD", door="vcs_rollback",
-                                          reason="the checked-out tree already lacks the store")
+                                          reason="the checked-out tree cannot read the current stores")
         owner = lambda intent: (True, "the checkout already is the target")  # noqa: E731
     wait_ready(root)  # a boot-smoke rollback can arrive while this process still imports: the export reads a published store
     facts = cleanup if isinstance(cleanup, dict) else {}
@@ -620,8 +660,11 @@ def switch_at_restart(root: Any, repo_dir: Any, cleanup: Any) -> Dict[str, Any]:
         ("owned_work_unconfirmed", stop.get("state") != "completed" or bool(stop.get("unconfirmed"))),
     ) if blocked]
     try:
-        outcome = run_switch_seam(root, repo_dir=repo_dir, owner=owner, blockers=blockers,
-                                               restore_handles=evidence_packs.restore_checkpoint_handles)
+        from ouroboros.tools.shell_process import exit_finalization
+
+        with exit_finalization():
+            outcome = run_switch_seam(root, repo_dir=repo_dir, owner=owner, blockers=blockers,
+                                      restore_handles=evidence_packs.restore_checkpoint_handles)
     except Exception as exc:
         log.critical("Authority switch at the restart exit raised; the intent waits for the next boot", exc_info=True)
         outcome = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}

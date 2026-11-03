@@ -9,13 +9,14 @@ import { applyPayload, setMissTransport, CODE_PREFIX } from '../modules/i18n.js'
 import { taskPresentation, taskReasonPhrase } from '../modules/log_events.js';
 import { questionPresentation } from '../modules/question_presentation.js';
 import { acceptanceIncidentClauses } from '../modules/acceptance_incident_presentation.js';
-import { formatMsgTime, routingAnnotationText, routingOptionLabel } from '../modules/chat_activity.js';
+import { formatMsgTime } from '../modules/chat_activity.js';
+import { routingAnnotationText, routingOptionLabel } from '../modules/routing_receipt.js';
 import { cancelCauseClauses } from '../modules/cancel_presentation.js';
 
 setMissTransport(() => Promise.resolve(null));
 
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/outcome_phase_parity.json', import.meta.url), 'utf8'));
-const ENGLISH_HEADLINES = { done: 'Done', warn: 'Done with warnings', cancelled: 'Cancelled', error: 'Failed', timeout: 'Failed', lifecycle_error: 'Failed', working: 'Working' };
+const ENGLISH_HEADLINES = { done: 'Done', warn: 'Done with warnings', cancelled: 'Stopped', error: 'Failed', timeout: 'Failed', lifecycle_error: 'Failed', working: 'Working' };
 
 const RU = {
     language: 'ru', english: false, revision: 2,

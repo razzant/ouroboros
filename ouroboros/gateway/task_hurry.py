@@ -34,7 +34,8 @@ def _admit_hurry_locked(task_id: str) -> Tuple[Optional[Dict[str, Any]], str, in
 
     Returns ``(task_row, refusal_reason, attempt)``. Runs UNDER the queue lock:
     live membership (RUNNING or PENDING), root-only eligibility (managed
-    children refused), sealed-acceptance-fence refusal, and the cancel-pending
+    children refused), the refusal of a root whose admission seal is sealed
+    (``ACCEPTANCE_FENCES``, the seal's historical name), and the cancel-pending
     re-check all happen inside one transaction so a racing cancel ingress and
     this admission cannot both win. For a queue task (RUNNING or PENDING) it also
     seeds an absent task-result lifecycle via ``ensure_control_task_result``
@@ -80,6 +81,10 @@ def _admit_hurry_locked(task_id: str) -> Tuple[Optional[Dict[str, Any]], str, in
             task = direct_chat_turn(task_id)
         if task is None:
             return None, "task_not_live", attempt
+        from ouroboros.task_carrier import execution_kind
+
+        if execution_kind(task) == "presence":  # a correspondent's turn, live: no Hurry, nothing seeded (as Pause)
+            return None, "presence_hurry_unsupported", attempt
         lineage = resolve_task_lineage(
             task_id,
             metadata=task.get("metadata"),

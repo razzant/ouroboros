@@ -3,11 +3,11 @@
 Provenance is host-authored; relationship is an explicit model decision. A row
 written before relationships were recorded (no ``followup_relation`` at all)
 keeps its published launch and own-root expense rules, relationship still
-``unknown``: only an actual Stop, manual Restart or owner Pause of its origin
+``unknown``: only an actual Stop or owner Pause of its origin
 holds it, and no shared wallet is inferred. A published owner-door row (no
 source, origin or relationship) is independent. A recorded but unreadable
 relationship never dispatches or acquires a wallet. A Stop's identity survives in
-the original result; Restart's identity lives in the existing schedule document.
+the original result; Restart's episode is history in the schedule document.
 Neither enabled nor a timestamp releases a control. The lifecycle writer alone
 records an audited release of the exact observed hold.
 
@@ -28,7 +28,7 @@ from contextlib import ExitStack, contextmanager
 STOP_SOURCES = frozenset({"http_single", "http_cascade", "http_graceful",
                           "owner", "owner_stop", "agent_tool", "owner_restart"})
 HOST_FIELDS = ("followup_origin", "followup_relation", "followup_hold",
-               "followup_released", "followup_restart_seen", "followup_wait")
+               "followup_released", "followup_wait")
 _CONTROL_DEPTH = threading.local()
 
 
@@ -151,11 +151,8 @@ def policy_view(root, data, record):
     controls, wait, busy = {}, "", False
     released = record.get("followup_released") or {}
     try:
-        restart = data.get("followup_restart") or {}
-        restart_id = str(restart.get("control_id") or "")
-        if restart_id and restart_id != record.get("followup_restart_seen"):
-            controls["restart"] = restart_id
-        if (pathlib.Path(root) / "state/owner_restart_no_resume.flag").exists():
+        from ouroboros.delegate_recovery import owner_restart_in_progress, pending_owner_restart
+        if owner_restart_in_progress(root) or pending_owner_restart(root):
             wait = "owner_restart_in_progress"
         origin = origin_of(record)
         origin_ids = set(origin.values()) - {""}
@@ -214,11 +211,30 @@ def policy_view(root, data, record):
               "origin_owner_paused" if controls else "")
     hold = None
     if reason:
-        identity = {"schedule_id": record.get("id"), "controls": controls, "relation": kind,
-                    "revision": (record.get("followup_relation") or {}).get("revision")}
-        hold = {"hold_id": hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest(),
+        hold = {"hold_id": _hold_id(record, controls),
                 "reason": reason, "controls": controls}
     return {"relation": kind, "controls": controls, "wait": wait, "hold": hold, **({"busy": True} if busy else {})}
+
+
+def _hold_id(record, controls):
+    identity = {"schedule_id": record.get("id"), "controls": controls, "relation": relation_kind(record),
+                "revision": (record.get("followup_relation") or {}).get("revision")}
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
+def current_hold(record):
+    """Classify old Restart fan-out as history, retaining every other control.
+
+    Occurrence claims and firing history are untouched. The scheduler includes
+    legacy Restart holds even on disabled settled rows, then audits retirement.
+    A mixed hold gets the identity of its remaining controls: a Restore naming
+    the old combined hold cannot release the reclassified one.
+    """
+    hold = record.get("followup_hold")
+    if not isinstance(hold, dict) or "restart" not in (hold.get("controls") or {}):
+        return hold
+    controls = {k: v for k, v in hold["controls"].items() if k != "restart"}
+    return {**hold, "controls": controls, "hold_id": _hold_id(record, controls)} if controls else None
 
 
 def observed_store(root, data):
@@ -227,7 +243,8 @@ def observed_store(root, data):
     for row in out.get("tasks", []):
         view = policy_view(root, out, row)
         durable = row.get("followup_hold")
-        observed = view.get("hold") or durable
+        observed = view.get("hold") or current_hold(row)
+        row.pop("followup_hold", None)
         if observed:
             row["followup_hold"] = observed
         row["hold_persisted"] = bool(durable and durable == observed)
@@ -236,20 +253,52 @@ def observed_store(root, data):
     return out
 
 
-def refresh_policy(root, data, record):
+def scan_policy(root, snapshot):
+    """Off-Q observations of rows that can act or still bind an admitted task.
+
+    Pre-occurrence one-shots can retain an unstarted last_task_id: that live
+    binding still owes Stop/Restore convergence even though the row is disabled.
+    Settled historical ids need only their typed status, never their origins,
+    except rows with an unretired Restart control. Those already in this finite
+    schedule snapshot join the ordinary audited refresh once, including disabled
+    rows; no task-history scan or GET-side migration is needed.
+    """
+    from ouroboros.store import StoreError, acquisition_budget
+    from ouroboros.task_store import task_versions
+    from ouroboros.task_status import SETTLED_STATUSES
+
+    rows = [row for row in snapshot.get("tasks") or [] if isinstance(row, dict)]
+    try:
+        with acquisition_budget(0):  # optional legacy inventory must not stall the active rows
+            versions = task_versions(root, [row["last_task_id"] for row in rows
+                                           if row.get("last_task_id") and not row.get("enabled", True)
+                                           and not isinstance(row.get("occurrence"), dict)])
+    except StoreError:
+        versions = {}  # unknown legacy bindings wait for the next scan
+    live = {tid for tid, (_seq, status, _owes) in versions.items() if status not in SETTLED_STATUSES}
+    return {str(row.get("id") or ""): (row, policy_view(root, snapshot, row)) for row in rows
+            if row.get("enabled", True) or isinstance(row.get("occurrence"), dict)
+            or row.get("delete_requested_at") or row.get("last_task_id") in live
+            or "restart" in ((row.get("followup_hold") or {}).get("controls") or {})}
+
+
+def refresh_policy(root, data, record, *, observed=None):
     """Persist restrictions only through the table producer's audited write seam."""
     from supervisor import queue_schedules as store
 
-    view = policy_view(root, data, record)
-    hold = view.get("hold") or record.get("followup_hold")
+    view = policy_view(root, data, record) if observed is None else observed
+    hold = view.get("hold") or current_hold(record)
     if view.get("busy") or record.get("followup_hold") == hold and record.get("followup_wait", "") == view["wait"]:
         return view  # contention is not a restriction to persist: no write, no audit flap
     before = copy.deepcopy(record)
     after = {**record, "followup_wait": view["wait"]}
+    after.pop("followup_hold", None)
     if hold:
         after["followup_hold"] = hold
     audit = dict(drive_root=pathlib.Path(root), operation_id=uuid.uuid4().hex, actor="host",
-                 task_id="", action="hold", schedule_id=str(record["id"]), reason=hold["reason"] if hold else view["wait"])
+                 task_id="", action="hold", schedule_id=str(record["id"]),
+                 reason=hold["reason"] if hold else view["wait"] or (
+                     "restart_history" if "restart" in ((before.get("followup_hold") or {}).get("controls") or {}) else ""))
     if not store._audit_schedule_mutation(phase="intent", result="intended", before=before, **audit):
         raise store.ScheduleRefused("audit_unavailable", "follow-up restriction audit unavailable; dispatch remains blocked")
     record.clear()
@@ -421,7 +470,8 @@ def task_binding(root, record):
     return copy.deepcopy(binding)
 
 
-def restore_followup(root, data, current, *, expected_hold_id, resolved, actor, task_id, reason):
+def restore_followup(root, data, current, *, expected_hold_id, resolved, actor, task_id, reason,
+                     writer_kind="consciousness", writer_metadata=None):
     """Release precisely a durable, observed generation; never enable other holds."""
     from supervisor import queue_schedules as store
     with control_guard(root, current):
@@ -455,6 +505,9 @@ def restore_followup(root, data, current, *, expected_hold_id, resolved, actor, 
             if relation_kind(current) != "unknown":
                 raise store.ScheduleRefused("relationship_immutable", "only an unknown relationship can be resolved")
             after["followup_origin"], after["followup_relation"] = resolved
+        from ouroboros.consciousness_authority import stamp_schedule_writer
+        stamp_schedule_writer(after, writer_kind, writer_metadata,
+                              started_root=relation_kind(after) == "independent")
         after["followup_released"] = {**(after.get("followup_released") or {}), **hold.get("controls", {})}
         after.pop("followup_hold", None)
         after["followup_wait"] = policy_view(root, data, after)["wait"]
@@ -471,24 +524,22 @@ def restore_followup(root, data, current, *, expected_hold_id, resolved, actor, 
 
 
 def record_restart(root, *, new=False):
-    """Before consuming the existing Restart marker, retain its exact identity.
+    """Retain the manual Restart episode before consuming its existing marker.
 
-Only manual Restart calls this. A crash after the marker but before this write
-keeps admission closed; boot installs the restriction before consuming the flag.
-"""
+    The marker closes admission during restart. Crossing this episode fences an
+    off-lock preparation once; healthy future schedules acquire no durable hold.
+    """
     from supervisor import queue_schedules as store
 
     with store.schedule_transaction(root):
         data = store.load_schedule_store(root)
         # Each boot retry while the marker exists may tighten the generation.
-        # No release is allowed during that interval. Reusing a pending bit
-        # could confuse a previous crash with a later manual Restart.
-        control = {"control_id": uuid.uuid4().hex, "pending": True}
+        control = {"control_id": uuid.uuid4().hex}
         audit = dict(drive_root=pathlib.Path(root), operation_id=control["control_id"], actor="owner:restart",
-                     task_id="", action="hold", schedule_id="*", reason="manual_restart")
+                     task_id="", action="record_restart", schedule_id="*", reason="manual_restart")
         if not store._audit_schedule_mutation(phase="intent", result="intended", **audit):
-            raise store.ScheduleRefused("audit_unavailable", "Restart follow-up restriction not persisted")
+            raise store.ScheduleRefused("audit_unavailable", "Restart episode not recorded")
         data["followup_restart"] = control
         store._write_scheduled_tasks(data, root)
-        if not store._audit_schedule_mutation(phase="outcome", result="held", **audit):
-            raise store.ScheduleRefused("changed_audit_incomplete", "Restart restriction durable; outcome audit unavailable")
+        if not store._audit_schedule_mutation(phase="outcome", result="recorded", **audit):
+            raise store.ScheduleRefused("changed_audit_incomplete", "Restart episode recorded; outcome audit unavailable")

@@ -46,7 +46,9 @@ def test_one_named_row_is_the_whole_panel(h: Harness, monkeypatch, member) -> No
     record = rl.load_record(h.drive, result["record_id"])
     assert record["surface"] == "preflight"
     assert [seat["seat_id"] for seat in record["rows"]] == [reviewer]
-    assert (result["panel"]["composition"], result["panel"]["chosen_by"]) == ("composed", "author")
+    assert (result["panel"]["composition"], result["panel"]["chosen_by"]) == ("composed", "ouroboros")
+    assert not {"pool", "strictness", "reason_missing"} & result["panel"].keys()
+    assert not {"pool", "strictness", "reason_missing"} & record["panel"].keys()
 
 
 @pytest.mark.parametrize("reviewer, aggregate", [("t1", "NOT_PERFORMED"), ("t2", "PASS"), ("s1", "PASS")])
@@ -81,7 +83,7 @@ def test_the_preflight_record_never_answers_a_change_wave_over_the_same_subject(
     again = _look(h, "api-scout")
     assert len(h.wave.calls) == 1 and again["reused"] and again["record_id"] == first["record_id"]
 
-    change = h.run(root="system_repo", subject="worktree", reviewers=["api-scout"])
+    change = h.run(root="system_repo", subject="worktree", reviewers=[_pool()[0], "api-scout"], reason="Focused change check")
     assert len(h.wave.calls) == 2, "a surface=change wave over the same worktree is new paid work"
     assert change["record_id"] != first["record_id"] and not change["reused"]
     keys = {rl.load_record(h.drive, rid)["fingerprints"]["reuse_key"] for rid in (first["record_id"], change["record_id"])}

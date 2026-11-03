@@ -129,99 +129,25 @@ def test_normalize_reasoning_effort_uses_scale():
     assert normalize_reasoning_effort("bogus") == "medium"
 
 
-# --- 1.8 learned effort ceiling: clamp + DISCLOSURE (adversarial r1) ----------
+# --- 1.8 effort tier notes: clamp DISCLOSURE (adversarial r1) ----------------
 
 @pytest.fixture
-def _clean_effort_ceiling_cache():
-    from ouroboros.llm import LLMClient
+def _clean_effort_clamp_note():
+    """The per-call tier note lives in the test's context: a payload build that staged one
+    without a send (the DeepSeek case of test_provider_key_test) must not reach these calls."""
+    from ouroboros.llm_capability_policy import _EFFORT_CLAMP_CVAR
 
-    LLMClient._EFFORT_CEILING_CACHE.clear()
-    LLMClient._EFFORT_CEILING_LOADED.clear()
-    # v6.73.2: _clamp_effort_for_model also consults the floor stores now;
-    # restore them too so clamp tests leave no cross-file state.
-    LLMClient._EFFORT_FLOOR_CACHE.clear()
-    LLMClient._EFFORT_FLOOR_LOADED.clear()
+    _EFFORT_CLAMP_CVAR.set(None)
     yield
-    LLMClient._EFFORT_CEILING_CACHE.clear()
-    LLMClient._EFFORT_CEILING_LOADED.clear()
-    LLMClient._EFFORT_FLOOR_CACHE.clear()
-    LLMClient._EFFORT_FLOOR_LOADED.clear()
-
-
-def test_effort_clamp_records_disclosure(_clean_effort_ceiling_cache):
-    """A learned-ceiling clamp is NEVER silent: the client records the requested→
-    applied pair, and popping it twice yields it exactly once (per-call semantics)."""
-    from ouroboros.llm import LLMClient
-
-    client = LLMClient(api_key="test")
-    LLMClient._EFFORT_CEILING_CACHE["openai/gpt-test"] = "high"
-    assert client._clamp_effort_for_model("openai/gpt-test", "xhigh") == "high"
-    note = client._pop_effort_clamp_disclosure()
-    assert note == {
-        "requested": "xhigh", "applied": "high",
-        "reason": "learned_ceiling", "model": "openai/gpt-test",
-    }
-    assert client._pop_effort_clamp_disclosure() is None
-
-
-def test_effort_clamp_no_disclosure_without_actual_clamp(_clean_effort_ceiling_cache):
-    from ouroboros.llm import LLMClient
-
-    client = LLMClient(api_key="test")
-    LLMClient._EFFORT_CEILING_CACHE["openai/gpt-test"] = "high"
-    # Under the ceiling: no clamp, no note.
-    assert client._clamp_effort_for_model("openai/gpt-test", "medium") == "medium"
-    assert client._pop_effort_clamp_disclosure() is None
-    # A clamped attempt followed by an unclamped one must NOT leak the stale note
-    # (the pending record resets at every payload build).
-    client._clamp_effort_for_model("openai/gpt-test", "max")
-    client._clamp_effort_for_model("openai/gpt-test", "low")
-    assert client._pop_effort_clamp_disclosure() is None
-
-
-def test_record_effort_ceiling_floors_at_low(_clean_effort_ceiling_cache):
-    """Rejections of the LOWEST thinking tiers must not poison the route: learning
-    a ceiling below "low" (i.e. minimal→none) would permanently disable thinking
-    off one bad request — the drop-param retry already covers unsupported carriers."""
-    from ouroboros.llm import LLMClient
-
-    LLMClient._record_effort_ceiling("anthropic/claude-test", "minimal")
-    assert "anthropic/claude-test" not in LLMClient._EFFORT_CEILING_CACHE
-    LLMClient._record_effort_ceiling("anthropic/claude-test", "low")
-    assert "anthropic/claude-test" not in LLMClient._EFFORT_CEILING_CACHE
-    # A genuine high-tier rejection still learns (and a LOWER ceiling wins).
-    LLMClient._record_effort_ceiling("anthropic/claude-test", "xhigh")
-    assert LLMClient._EFFORT_CEILING_CACHE["anthropic/claude-test"] == "high"
-    LLMClient._record_effort_ceiling("anthropic/claude-test", "high")
-    assert LLMClient._EFFORT_CEILING_CACHE["anthropic/claude-test"] == "medium"
-    LLMClient._record_effort_ceiling("anthropic/claude-test", "xhigh")  # never regain
-    assert LLMClient._EFFORT_CEILING_CACHE["anthropic/claude-test"] == "medium"
-
-
-def test_generic_param_rejection_learns_no_effort_ceiling(_clean_effort_ceiling_cache):
-    """A temperature-only 400 must not teach a phantom effort ceiling."""
-    from ouroboros.llm import LLMClient
-
-    payload = {"model": "m", "temperature": 0.2, "reasoning_effort": "xhigh"}
-    retry = LLMClient()._retry_without_optional_sampling(
-        payload, "openai/gpt-test", RuntimeError("400: temperature is not supported"),
-    )
-    assert retry is not None and "temperature" not in retry
-    assert "openai/gpt-test" not in LLMClient._EFFORT_CEILING_CACHE
-    # An effort-implicating rejection DOES learn.
-    retry2 = LLMClient()._retry_without_optional_sampling(
-        payload, "openai/gpt-test", RuntimeError("400: reasoning_effort value not supported"),
-    )
-    assert retry2 is not None
-    assert LLMClient._EFFORT_CEILING_CACHE.get("openai/gpt-test") == "high"
+    _EFFORT_CLAMP_CVAR.set(None)
 
 
 def test_anthropic_direct_effort_rejection_degrades_gracefully(
-    _clean_effort_ceiling_cache, monkeypatch
+    _clean_effort_clamp_note, monkeypatch
 ):
     """Scope r7 advisory asked for proof: an older direct-Anthropic endpoint that
     400s the thinking/output_config carriers routes through the SAME
-    _retry_without_optional_sampling as other lanes — the call degrades to
+    request-wire recovery as other lanes — the call degrades to
     'no forced thinking' instead of hard-failing."""
     import json as _json
 
@@ -256,7 +182,6 @@ def test_anthropic_direct_effort_rejection_degrades_gracefully(
 
     monkeypatch.setattr(_requests, "post", fake_post)
     client = LLMClient(api_key="test")
-    LLMClient._REJECTED_PARAMS_CACHE.clear()
     target = {"provider": "anthropic", "resolved_model": "claude-old", "usage_model": "anthropic/claude-old",
               "base_url": "https://api.anthropic.test", "api_key": "k"}
     msg, _ = client._chat_anthropic(target, [{"role": "user", "content": "hi"}], None, "high", 128, "auto")
@@ -264,51 +189,16 @@ def test_anthropic_direct_effort_rejection_degrades_gracefully(
     assert len(calls) == 2  # 400 with the carrier, then the degraded retry
     assert "output_config" in calls[0] and "output_config" not in calls[1]
     assert "thinking" not in calls[1]
-    LLMClient._REJECTED_PARAMS_CACHE.clear()
-
-
-def test_openrouter_nested_reasoning_rejection_retries_and_learns(_clean_effort_ceiling_cache):
-    """Triad r6: the OpenRouter lane carries effort NESTED as
-    extra_body.reasoning.effort — an effort rejection there must (a) retry with
-    ONLY the nested carrier removed (provider routing survives), (b) learn the
-    ceiling, and (c) the rejected-params cache must strip the nested slot on the
-    NEXT payload build."""
-    from ouroboros.llm import LLMClient
-
-    payload = {
-        "model": "vendor/model-x",
-        "messages": [],
-        "extra_body": {
-            "reasoning": {"effort": "xhigh", "exclude": False},
-            "provider": {"require_parameters": True},
-        },
-    }
-    retry = LLMClient()._retry_without_optional_sampling(
-        payload, "vendor/model-x", RuntimeError("400: reasoning effort not supported on this endpoint"),
-    )
-    assert retry is not None
-    assert "reasoning" not in retry["extra_body"]
-    assert retry["extra_body"]["provider"] == {"require_parameters": True}
-    assert LLMClient._EFFORT_CEILING_CACHE.get("vendor/model-x") == "high"
-    # The learned rejection strips the nested carrier on subsequent builds.
-    fresh = {"extra_body": {"reasoning": {"effort": "high"}, "provider": {"order": ["a"]}}}
-    LLMClient._apply_rejected_param_cache(fresh, "vendor/model-x")
-    assert "reasoning" not in fresh["extra_body"]
-    assert fresh["extra_body"]["provider"] == {"order": ["a"]}
-    # A NON-effort error with only the nested carrier present does not retry.
-    payload2 = {"model": "m", "extra_body": {"reasoning": {"effort": "low"}}}
-    assert LLMClient()._retry_without_optional_sampling(
-        payload2, "vendor/model-y", RuntimeError("400: bad request shape"),
-    ) is None
 
 
 def test_anthropic_direct_effort_mapping_and_clamp_disclosure(
-    _clean_effort_ceiling_cache, monkeypatch
+    _clean_effort_clamp_note, monkeypatch, tmp_path
 ):
-    """Anthropic maps minimal to low while legacy model-global clamps stay inert."""
+    """Anthropic maps minimal to low; a stored legacy ceiling never clamps the sent effort."""
     import requests as _requests
 
     from ouroboros.llm import LLMClient
+    from tests._shared import write_legacy_capability_rows
 
     monkeypatch.setenv("TOTAL_BUDGET", "0")
 
@@ -337,21 +227,24 @@ def test_anthropic_direct_effort_mapping_and_clamp_disclosure(
     assert captured[-1]["output_config"] == {"effort": "low"}
     assert "reasoning_effort_clamped" not in usage
 
-    LLMClient._EFFORT_CEILING_CACHE["anthropic/claude-test-5"] = "high"
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
+    write_legacy_capability_rows(tmp_path, effort_ceilings={"anthropic/claude-test-5": "high"})
     _, usage2 = client._chat_anthropic(target, msgs, None, "xhigh", 128, "auto")
     assert captured[-1]["output_config"] == {"effort": "xhigh"}
     assert "reasoning_effort_clamped" not in usage2
 
 
-def test_remote_lane_usage_carries_clamp_disclosure(_clean_effort_ceiling_cache):
+def test_remote_lane_usage_carries_clamp_disclosure(_clean_effort_clamp_note):
     """The OpenRouter/OpenAI-compatible lane's usage normalizer merges the pending
     clamp note recorded at payload build (the r1 fix initially landed the pop in the
     GigaChat normalizer — a lane that never clamps; pinned here on the REAL lane)."""
     from ouroboros.llm import LLMClient
+    from ouroboros.llm_capability_policy import _EFFORT_CLAMP_CVAR
 
     client = LLMClient(api_key="test")
-    LLMClient._EFFORT_CEILING_CACHE["openai/gpt-test"] = "medium"
-    assert client._clamp_effort_for_model("openai/gpt-test", "high") == "medium"
+    # Staged the way the DeepSeek/Z.ai payload builders stage a tier note.
+    _EFFORT_CLAMP_CVAR.set({"requested": "high", "applied": "medium",
+                            "reason": "provider_wire_mapping", "model": "openai/gpt-test"})
     _, usage = client._normalize_remote_response(
         {"choices": [{"message": {"role": "assistant", "content": "ok"}}],
          "usage": {"prompt_tokens": 2, "completion_tokens": 1}},

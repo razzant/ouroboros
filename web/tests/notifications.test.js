@@ -15,6 +15,7 @@ import {
     readNotifyPrefs,
     writeNotifyPrefs,
 } from '../modules/notifications.js';
+import { recordingAudio, settle } from './notification_audio_fixture.js';
 
 const ON = { ...DEFAULT_NOTIFY_PREFS, enabled: true };
 
@@ -245,6 +246,18 @@ test('one turn ending is one notification, not a reply plus a terminal', () => {
     assert.equal(decideNotification(terminal, { ...ON, main_reply: true }, seen).reason, 'duplicate');
 });
 
+test('a Main turn left to run in the background rings as a finished task; an inline turn still does not', () => {
+    const ending = (owner) => classifyLiveFrame(
+        { type: 'task_done', status: 'completed', chat_id: 1, _is_direct_chat: true, ...(owner ? { execution_owner: owner } : {}) },
+        { kind: 'log', isMain: true, isRoot: true, taskId: 't-bg' },
+    );
+    const pooled = ending({ kind: 'pooled' });
+    assert.equal(pooled?.category, 'task_done', 'the pool ran its last attempt: the owner hears that the work ended');
+    assert.equal(pooled.key, 'conclusion:t-bg', 'the same key its final answer row would use, so one banner');
+    assert.equal(ending({ kind: 'direct' }), null, 'an inline conversation turn ends as a reply, not a task');
+    assert.equal(ending(null), null, 'without a carrier fact the historical origin still decides');
+});
+
 test('ordinary replies are Main-only, and progress/user frames are never events', () => {
     const main = classifyLiveFrame(
         { role: 'assistant', content: 'Here it is.', client_message_id: 'cm-1' },
@@ -292,7 +305,8 @@ test('the status line states what this client can actually do', () => {
 });
 
 test('attention status distinguishes native desktop attention from browser support', () => {
-    assert.match(attentionStatusText({ nativeAttention: true }), /system sound/);
+    assert.match(attentionStatusText({ nativeAttention: true }), /only visual attention/);
+    assert.match(attentionStatusText({ status: 'native_sound' }), /reported a sound/);
     assert.match(attentionStatusText({ supported: true }), /Browser notifications/);
     assert.match(attentionStatusText({ bridge: true }), /will be confirmed/);
     assert.match(attentionStatusText(), /no native attention bridge/);
@@ -344,63 +358,93 @@ test('a granted client gets one banner per logical event, tagged for collapse', 
     assert.equal(fx.toasts.length, 0);
 });
 
-test('desktop host attention is requested once without replacing banner delivery', () => {
-    let calls = 0;
+/* A current app's system notification that did not reach the system (desktop_notifications.refused). */
+const REFUSED = { ok: false, status: 'failed', platform: 'windows', reason: 'balloon_not_submitted' };
+/* A refusal carrying a sound setting is no evidence by itself: after a definite failure the fallback tone
+   reads only the app's `shell_info()`, asked after that failure (notifications_sound.test.js), which these
+   launchers do not offer. */
+const SOUND_ON_REFUSED = { ok: false, status: 'failed', platform: 'macos', reason: 'no_center', sound_setting: 'enabled' };
+const FINISHED_ROW = { role: 'system', system_type: 'task_summary', task_id: 'native-1' };
+
+test('a current app whose system notification fell back asks its attention cue once, without its sound', async () => {
+    const calls = [];
     const notifier = createNotifier({
         storage: fakeStorage({ [NOTIFY_PREFS_KEY]: JSON.stringify(ON) }),
         notificationCtor: undefined,
         audioContextCtor: null,
         showToast: () => {},
         documentRef: fakeDocument(),
-        hostApi: { request_attention: () => { calls += 1; return { ok: true, status: 'native_sound' }; } },
+        hostApi: {
+            show_native_notification: () => REFUSED,
+            request_attention: (...args) => { calls.push(args); return { ok: true, status: 'window_only' }; },
+        },
     });
-    const result = notifier.handleFrame(
-        { role: 'system', system_type: 'task_summary', task_id: 'native-1' },
-        { kind: 'chat', isMain: true },
-    );
-    assert.equal(result.surface, 'in_app');
-    assert.equal(calls, 1);
+    assert.equal(notifier.handleFrame(FINISHED_ROW, { kind: 'chat', isMain: true }).surface, 'native');
+    await settle();
+    assert.deepEqual(calls, [[false]]);
     notifier.destroy();
 });
 
-test('with an older launcher (no notify_owner, so no background mode) the banner owns sound', () => {
-    let calls = 0;
-    class FakeNotification {
-        static permission = 'granted';
-        constructor() {}
+test('an app whose notify_owner predates system notifications is never asked, Sound on or off: the browser banner or the toast', async () => {
+    for (const sound of [true, false]) {
+        for (const [permission, surface] of [['granted', 'banner'], [undefined, 'in_app']]) {
+            const calls = [];
+            const banners = [];
+            const toasts = [];
+            const attention = { textContent: '' };
+            const audio = recordingAudio();
+            const notifier = createNotifier({
+                storage: fakeStorage({ [NOTIFY_PREFS_KEY]: JSON.stringify({ ...ON, sound }) }),
+                notificationCtor: permission
+                    ? class { static permission = permission; constructor(title, options) { banners.push(options); } }
+                    : undefined,
+                audioContextCtor: audio.ctor,
+                showToast: (line) => { toasts.push(line); },
+                documentRef: fakeDocument({ '[data-notify-attention-status]': [attention] }),
+                hostApi: {
+                    request_attention: (...args) => { calls.push(['request_attention', ...args]); return { ok: true }; },
+                    notify_owner: (...args) => { calls.push(['notify_owner', ...args]); return { ok: true, status: 'background', banner: true }; },
+                },
+            });
+            assert.equal(notifier.handleFrame(FINISHED_ROW, { kind: 'chat', isMain: true }).surface, surface);
+            await settle();
+            assert.deepEqual(calls, [], 'an older launcher may sound whatever it is asked: it is not called');
+            assert.equal(audio.tones.length, 0, 'no system evidence that sound is allowed: no page tone either');
+            if (permission) assert.equal(banners[0].silent, !sound, 'the browser banner keeps the Sound choice');
+            else assert.deepEqual(toasts, ['Task finished']);
+            notifier.mountSettings();
+            assert.equal(attention.textContent, '', 'no attention cue to describe');
+            notifier.destroy();
+        }
     }
-    const bannerNotifier = createNotifier({
-        storage: fakeStorage({ [NOTIFY_PREFS_KEY]: JSON.stringify(ON) }),
-        notificationCtor: FakeNotification,
-        audioContextCtor: null,
-        hostApi: { request_attention: () => { calls += 1; return { ok: true }; } },
-        documentRef: fakeDocument(),
-    });
-    assert.equal(bannerNotifier.handleFrame(
-        { role: 'system', system_type: 'task_summary', task_id: 'banner-1' },
-        { kind: 'chat', isMain: true },
-    ).surface, 'banner');
-    assert.equal(calls, 0, 'its window is never hidden on purpose: banner sound stays with the Notification API');
-    bannerNotifier.destroy();
-
-    let soundValue = null;
-    const silentNotifier = createNotifier({
-        storage: fakeStorage({ [NOTIFY_PREFS_KEY]: JSON.stringify({ ...ON, sound: false }) }),
-        notificationCtor: undefined,
-        audioContextCtor: null,
-        hostApi: { request_attention: (sound) => { soundValue = sound; return { ok: true }; } },
-        showToast: () => {},
-        documentRef: fakeDocument(),
-    });
-    assert.equal(silentNotifier.handleFrame(
-        { role: 'system', system_type: 'task_summary', task_id: 'silent-1' },
-        { kind: 'chat', isMain: true },
-    ).surface, 'in_app');
-    assert.equal(soundValue, false);
-    silentNotifier.destroy();
 });
 
-test('with banner permission, a launcher that can hide its window answers before any browser banner', async () => {
+test('the oldest app, request_attention without notify_owner, gets only its silent window cue, Sound on or off', async () => {
+    for (const sound of [true, false]) {
+        const calls = [];
+        const toasts = [];
+        const attention = { textContent: '' };
+        const audio = recordingAudio();
+        const notifier = createNotifier({
+            storage: fakeStorage({ [NOTIFY_PREFS_KEY]: JSON.stringify({ ...ON, sound }) }),
+            notificationCtor: undefined,
+            audioContextCtor: audio.ctor,
+            showToast: (line) => { toasts.push(line); },
+            documentRef: fakeDocument({ '[data-notify-attention-status]': [attention] }),
+            // Its `false` only shows the window, on every platform (platform_layer.request_native_attention).
+            hostApi: { request_attention: (...args) => { calls.push(args); return { ok: true, status: 'window_only', sound_played: false }; } },
+        });
+        assert.equal(notifier.handleFrame(FINISHED_ROW, { kind: 'chat', isMain: true }).surface, 'in_app');
+        await settle();
+        assert.deepEqual(calls, [[false]], 'never its own sound');
+        assert.equal(audio.contexts.length + audio.tones.length, 0, 'it reports no system permission: no page tone');
+        assert.deepEqual(toasts, ['Task finished']);
+        assert.match(attention.textContent, /raise this window without a sound of its own/);
+        notifier.destroy();
+    }
+});
+
+test('with banner permission, a current app that can hide its window answers before any browser banner', async () => {
     const calls = [];
     const banners = [];
     const toasts = [];
@@ -423,21 +467,23 @@ test('with banner permission, a launcher that can hide its window answers before
         showToast: (line) => { toasts.push(line); },
         documentRef: fakeDocument(),
         hostApi: {
+            show_native_notification: () => REFUSED,
             request_attention: (...args) => { calls.push(['request_attention', ...args]); return { ok: true }; },
             notify_owner: (...args) => { calls.push(['notify_owner', ...args]); return notifyOwner(); },
         },
     });
     const deliver = async (notifier, id) => {
         const out = notifier.handleFrame({ role: 'system', system_type: 'task_summary', task_id: id }, { kind: 'chat', isMain: true });
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        await settle();
         notifier.destroy();
         return out.surface;
     };
-    const asked = [['notify_owner', true, 'Task finished', '', false]];
+    // Never the launcher's own sound (macOS Glass, a Windows beep): it is asked silently.
+    const asked = [['notify_owner', false, 'Task finished', '', false]];
 
     // Hidden on purpose: the launcher's own banner (it opens the window) and no browser banner,
     // whose focus() cannot undo a hide; the queued banner owns the sound, so no page tone.
-    assert.equal(await deliver(make(() => ({ ok: true, status: 'background', banner: true, sound_played: false })), 'h'), 'host');
+    assert.equal(await deliver(make(() => ({ ok: true, status: 'background', banner: true, sound_played: false })), 'h'), 'native');
     assert.deepEqual(calls, asked);
     assert.equal(banners.length, 0);
     assert.equal(oscillators, 0);
@@ -446,7 +492,7 @@ test('with banner permission, a launcher that can hide its window answers before
     // Visible: the launcher does nothing (no raise, no system sound); the browser banner owns the sound.
     calls.length = 0;
     toasts.length = 0;
-    assert.equal(await deliver(make(() => ({ ok: false, status: 'visible' })), 'v'), 'host');
+    assert.equal(await deliver(make(() => ({ ok: false, status: 'visible' })), 'v'), 'native');
     assert.deepEqual(calls, asked, 'never the raise-and-sound cue for a visible window');
     assert.equal(banners.length, 1);
     assert.equal(banners[0].options.silent, false);
@@ -455,13 +501,14 @@ test('with banner permission, a launcher that can hide its window answers before
 
     // A launcher that cannot answer: the browser banner, as before.
     calls.length = 0;
-    assert.equal(await deliver(make(() => Promise.reject(new Error('bridge gone'))), 'r'), 'host');
+    assert.equal(await deliver(make(() => Promise.reject(new Error('bridge gone'))), 'r'), 'native');
     assert.equal(banners.length, 2);
 });
 
-test('a launcher that takes the alert text gets it; an older one keeps the sound-only call', () => {
+test('a current app takes the alert text, asked without its sound; the oldest one gets no text', async () => {
     const calls = [];
     const host = {
+        show_native_notification: () => REFUSED,
         request_attention: (...args) => { calls.push(['request_attention', ...args]); return { ok: true }; },
         notify_owner: (...args) => { calls.push(['notify_owner', ...args]); return { ok: true, status: 'background' }; },
     };
@@ -476,9 +523,10 @@ test('a launcher that takes the alert text gets it; an older one keeps the sound
     const frame = (id) => ({ role: 'system', system_type: 'task_summary', task_id: id, content: 'Report ready' });
     const newer = make(host, { ...ON, show_text: true });
     newer.handleFrame(frame('text-1'), { kind: 'chat', isMain: true });
+    await settle();
     assert.equal(calls.length, 1);
     assert.equal(calls[0][0], 'notify_owner');
-    assert.equal(calls[0][1], true);
+    assert.equal(calls[0][1], false, 'never the launcher\'s own sound (macOS Glass, a Windows beep)');
     assert.equal(typeof calls[0][2], 'string');
     assert.equal(calls[0][3], 'Report ready');
     newer.destroy();
@@ -486,71 +534,74 @@ test('a launcher that takes the alert text gets it; an older one keeps the sound
     calls.length = 0;
     const private_ = make(host);
     private_.handleFrame(frame('text-2'), { kind: 'chat', isMain: true });
+    await settle();
     assert.equal(calls[0][3], '', 'message text stays private unless the owner turned it on');
     private_.destroy();
 
     calls.length = 0;
-    const older = make({ request_attention: host.request_attention });
+    const older = make({ request_attention: host.request_attention }, { ...ON, show_text: true });
     older.handleFrame(frame('text-3'), { kind: 'chat', isMain: true });
-    assert.deepEqual(calls, [['request_attention', true]]);
+    await settle();
+    assert.deepEqual(calls, [['request_attention', false]], 'its silent window cue only, never the text');
     older.destroy();
+
+    calls.length = 0;
+    const alias = make({ request_attention: host.request_attention, notify_owner: host.notify_owner });
+    alias.handleFrame(frame('text-4'), { kind: 'chat', isMain: true });
+    await settle();
+    assert.deepEqual(calls, [], 'its notify_owner may show a balloon Windows sounds: never asked');
+    alias.destroy();
     assert.match(attentionStatusText({ status: 'background' }), /instead of opening this window/);
 });
 
-test('in-app fallback tone is used when native window attention cannot play sound', async () => {
-    let oscillators = 0;
-    class FakeAudioContext {
-        constructor() { this.currentTime = 0; this.destination = {}; }
-        resume() {}
-        close() {}
-        createOscillator() { oscillators += 1; return { connect() {}, start() {}, stop() {} }; }
-        createGain() { return { gain: { value: 0 }, connect() {} }; }
-    }
-    const notifier = createNotifier({
-        storage: fakeStorage({ [NOTIFY_PREFS_KEY]: JSON.stringify(ON) }),
-        notificationCtor: undefined,
-        audioContextCtor: FakeAudioContext,
-        hostApi: { request_attention: () => ({ ok: true, status: 'window_only', sound_played: false }) },
-        showToast: () => {},
-        documentRef: fakeDocument(),
-    });
-    notifier.handleFrame(
-        { role: 'system', system_type: 'task_summary', task_id: 'window-only' },
-        { kind: 'chat', isMain: true },
-    );
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(oscillators, 1);
-    notifier.destroy();
+test('a browser\'s permission is no evidence that sound is allowed: its in-app fallback stays quiet', async () => {
+    const tonesWith = async (notificationCtor) => {
+        const audio = recordingAudio();
+        const toasts = [];
+        const notifier = createNotifier({
+            storage: fakeStorage({ [NOTIFY_PREFS_KEY]: JSON.stringify(ON) }),
+            notificationCtor,
+            audioContextCtor: audio.ctor,
+            showToast: (line) => { toasts.push(line); },
+            documentRef: fakeDocument(),
+        });
+        notifier.handleFrame({ role: 'system', system_type: 'task_summary', task_id: 'browser' }, { kind: 'chat', isMain: true });
+        await settle();
+        notifier.destroy();
+        assert.deepEqual(toasts, ['Task finished'], 'the alert still reaches the owner');
+        return audio.tones.length;
+    };
+    assert.equal(await tonesWith(class { static permission = 'default'; }), 0, 'not yet asked is not a grant');
+    assert.equal(await tonesWith(class { static permission = 'denied'; }), 0);
+    assert.equal(await tonesWith(undefined), 0, 'nothing to read');
+    assert.equal(await tonesWith(class { static permission = 'granted'; constructor() { throw new Error('no banner here'); } }), 0,
+        'a granted banner that could not be shown says nothing of sound');
 });
 
-test('a native banner from the launcher owns the sound: the page adds no tone after it', async () => {
-    let oscillators = 0;
-    class FakeAudioContext {
-        constructor() { this.currentTime = 0; this.destination = {}; }
-        resume() {}
-        createOscillator() { oscillators += 1; return { connect() {}, start() {}, stop() {} }; }
-        createGain() { return { gain: { value: 0 }, connect() {} }; }
-    }
+test('whatever the launcher answers, the page adds no tone of its own', async () => {
     const tonesFor = async (answer) => {
-        oscillators = 0;
+        const audio = recordingAudio();
         const notifier = createNotifier({
             storage: fakeStorage({ [NOTIFY_PREFS_KEY]: JSON.stringify(ON) }),
             notificationCtor: undefined,
-            audioContextCtor: FakeAudioContext,
-            hostApi: { request_attention: () => answer, notify_owner: () => answer },
+            audioContextCtor: audio.ctor,
+            hostApi: { show_native_notification: () => SOUND_ON_REFUSED, request_attention: () => answer, notify_owner: () => answer },
             showToast: () => {},
             documentRef: fakeDocument(),
         });
         notifier.handleFrame({ role: 'system', system_type: 'task_summary', task_id: 'b' }, { kind: 'chat', isMain: true });
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        await settle();
         notifier.destroy();
-        return oscillators;
+        return audio.contexts.length + audio.tones.length;
     };
     // Windows, window hidden: the balloon is queued and the OS plays its sound.
     assert.equal(await tonesFor({ ok: true, status: 'background', banner: true, sound_played: false }), 0);
-    // macOS, window hidden: a Dock badge is no banner; the launcher's own sound counts, a failed one does not.
+    // macOS, window hidden: a Dock badge; an older launcher's own sound, or none at all.
     assert.equal(await tonesFor({ ok: true, status: 'background', banner: false, sound_played: true }), 0);
-    assert.equal(await tonesFor({ ok: true, status: 'background', banner: false, sound_played: false }), 1);
+    assert.equal(await tonesFor({ ok: true, status: 'background', banner: false, sound_played: false }), 0,
+        'no evidence the system lets Ouroboros sound: the earlier page beep is gone');
+    assert.equal(await tonesFor({ ok: true, status: 'window_only', sound_played: false }), 0);
+    assert.equal(await tonesFor(Promise.reject(new Error('bridge gone'))), 0);
 });
 
 test('a banner click focuses the window and hands the target to navigation', () => {

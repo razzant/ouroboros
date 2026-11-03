@@ -9,9 +9,11 @@ identity, which is why a caller that must say exactly which events it showed rea
 
 One call is one bounded read inside an existing wait: it opens the stream at a cursor, reads
 to a caller-given ``seq`` fence, the stream's own end, a byte bound or a wall-clock bound,
-and closes it. It never subscribes, retries or polls. Only whole frames count as read, so
-``through_seq`` is always a cursor the next read can resume from exactly. Presence of the
-route is negotiated from the engine's own catalog, like every other optional route.
+and closes it. It never subscribes, retries or polls. A line ends only at CR, LF or CRLF,
+so U+0085, U+2028 and U+2029 inside a served JSON line stay text. Only whole frames count
+as read, so ``through_seq`` is always a cursor the next read can resume from exactly.
+Presence of the route is negotiated from the engine's own catalog, like every other
+optional route.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ import json
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, Iterator, List, Optional, Tuple
 
 import httpx
 
@@ -30,9 +32,10 @@ RUN_EVENTS_OPERATION = ("GET", "/v2/runs/:id/events")
 # One wait poll's worth of journal is far below this; a read that reaches it stops at the
 # last whole frame and says so, and the next read resumes from that cursor.
 MAX_READ_BYTES = 8 * 1024 * 1024
-# Catalog answers per exact engine identity (version, build sha): a route cannot appear or
-# vanish without the engine changing, so one catalog read per identity per process.
-_SUPPORT: Dict[Tuple[str, str], bool] = {}
+# The catalog per exact engine identity (version, build sha): a route cannot appear or vanish
+# without the engine changing, so one catalog read per identity per process, shared by every
+# route question (the event stream's here, the compact wait's in ``claudexor_observation``).
+_SUPPORT: Dict[Tuple[str, str], FrozenSet[Tuple[str, str]]] = {}
 _SUPPORT_LOCK = threading.Lock()
 
 
@@ -57,25 +60,64 @@ class RunEventsRead:
     bytes_read: int = 0
 
 
+def engine_identity(gateway: Any) -> Tuple[str, str]:
+    """The exact engine behind a handshaken gateway: ``(version, build sha)``."""
+    return (str(getattr(gateway, "engine_version", "") or ""), str(getattr(gateway, "engine_build_sha", "") or ""))
+
+
+def route_listed(gateway: Any, operation: Tuple[str, str], *, timeout_sec: Optional[float]) -> bool:
+    """Does the engine's catalog list ``operation`` (``(method, path)``)? One catalog read per
+    exact engine identity, shared by every route question; a hole on that read propagates
+    typed, so no caller reads a timeout as "not listed"."""
+    key = engine_identity(gateway)
+    with _SUPPORT_LOCK:
+        listed = _SUPPORT.get(key)
+    if listed is None:
+        listed = frozenset((str(row.get("method") or ""), str(row.get("path") or ""))
+                           for row in gateway.operations(timeout_sec=timeout_sec) if isinstance(row, dict))
+        with _SUPPORT_LOCK:
+            _SUPPORT[key] = listed
+    return operation in listed
+
+
+# Each harness row's declared ``liveInput`` per exact engine identity: a static profile facet of
+# the engine build, unlike the row's presence (a harness's availability), which is never cached.
+_LIVE_INPUT: Dict[Tuple[str, str], Dict[str, str]] = {}
+
+
+def declared_live_input(gateway: Any, route: str, *, timeout_sec: Optional[float]) -> Optional[str]:
+    """``route``'s declared ``liveInput`` (``"none"`` for a row without it), ``None`` when the
+    capability catalog does not list the route. One catalog read — the engine's full harness
+    doctor, seconds on a busy daemon, asked at every supervised wait before — per exact engine
+    identity (version AND build sha) serves every later question; an unlisted route is asked
+    again. The identity is the gateway's own handshake, else one this process remembers for the
+    same daemon generation; with neither, the read is made and remembered by nobody (no
+    handshake is spent here). A hole on a read propagates typed."""
+    from ouroboros.gateways.claudexor_metadata import remembered_engine
+
+    key = engine_identity(gateway) if getattr(gateway, "engine_version", "") else remembered_engine(gateway)
+    key = key if key and all(key) else None
+    with _SUPPORT_LOCK:
+        known = (_LIVE_INPUT.get(key) or {}) if key else {}
+    if route not in known:
+        rows = gateway.agent_capabilities(timeout_sec=timeout_sec).get("harnesses") or []
+        known = {**known, **{str(row["id"]): str(row.get("liveInput") or "none")
+                             for row in rows if isinstance(row, dict) and row.get("id")}}
+        if key:
+            with _SUPPORT_LOCK:
+                _LIVE_INPUT[key] = known
+    return known.get(route)
+
+
 def run_events_supported(gateway: Any, *, timeout_sec: float) -> bool:
     """Does the handshaken engine behind ``gateway`` list the run event stream?
 
     An unhandshaken transport, or one without the stream seam (an older client or a test
     double), is answered ``False`` without a request: the caller keeps its window view.
     """
-    version = str(getattr(gateway, "engine_version", "") or "")
-    if not version or not callable(getattr(gateway, "open_run_events", None)):
+    if not getattr(gateway, "engine_version", "") or not callable(getattr(gateway, "open_run_events", None)):
         return False
-    key = (version, str(getattr(gateway, "engine_build_sha", "") or ""))
-    with _SUPPORT_LOCK:
-        if key in _SUPPORT:
-            return _SUPPORT[key]
-    method, path = RUN_EVENTS_OPERATION
-    supported = any(row.get("method") == method and row.get("path") == path
-                    for row in gateway.operations(timeout_sec=timeout_sec) if isinstance(row, dict))
-    with _SUPPORT_LOCK:
-        _SUPPORT[key] = supported
-    return supported
+    return route_listed(gateway, RUN_EVENTS_OPERATION, timeout_sec=timeout_sec)
 
 
 def _refusal(response: Any) -> ClaudexorUnavailable:
@@ -112,7 +154,7 @@ def read_run_events(gateway: Any, run_id: str, *, after_seq: int, through_seq: O
                 raise _refusal(response)
             opened = True
             frame: Dict[str, str] = {}
-            for line in response.iter_lines():
+            for line in _lines(response.iter_text()):
                 result.bytes_read += len(line) + 1
                 if line:
                     if not line.startswith(":"):
@@ -135,6 +177,35 @@ def read_run_events(gateway: Any, run_id: str, *, after_seq: int, through_seq: O
             "daemon_unreachable", f"Claudexor run event stream unreachable: {type(exc).__name__}: {exc}",
         ) from exc
     return result
+
+
+def _lines(chunks: Iterable[str]) -> Iterator[str]:
+    """Event-stream lines from decoded text chunks, scanning each chunk once.
+
+    Only CRLF, LF and CR end a line; ``str.splitlines`` and HTTPX ``iter_lines`` also
+    cut at U+0085, U+2028 and U+2029, which JSON leaves unescaped inside a string. A CR
+    that ends one chunk ends its line at once; an LF opening the next chunk is its CRLF
+    pair, not an empty line. An unterminated tail is yielded at EOF as HTTPX did:
+    without the blank line after it, it never completes a frame.
+    """
+    pending: List[str] = []
+    after_cr = False
+    for chunk in chunks:
+        if after_cr and chunk.startswith("\n"):
+            chunk, after_cr = chunk[1:], False
+        if not chunk:
+            continue
+        after_cr = chunk.endswith("\r")
+        lines = chunk.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        if len(lines) > 1:
+            pending.append(lines[0])
+            yield "".join(pending)
+            yield from lines[1:-1]
+            pending = []
+        if lines[-1]:
+            pending.append(lines[-1])
+    if pending:
+        yield "".join(pending)
 
 
 def _dispatch(frame: Dict[str, str], result: RunEventsRead, through_seq: Optional[int]) -> bool:

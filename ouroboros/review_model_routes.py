@@ -21,30 +21,10 @@ from ouroboros.settings_integrity import runtime_setting
 
 
 def _exclusive_direct_remote_provider_env() -> str:
-    has_openrouter = bool(str(runtime_setting("OPENROUTER_API_KEY", "") or "").strip())
-    has_openai = bool(str(runtime_setting("OPENAI_API_KEY", "") or "").strip())
-    has_anthropic = bool(str(runtime_setting("ANTHROPIC_API_KEY", "") or "").strip())
-    has_minimax = bool(str(runtime_setting("MINIMAX_API_KEY", "") or "").strip())
-    has_legacy_base = bool(str(runtime_setting("OPENAI_BASE_URL", "") or "").strip())
-    has_compatible = bool(str(runtime_setting("OPENAI_COMPATIBLE_BASE_URL", "") or "").strip())
-    has_cloudru = bool(str(runtime_setting("CLOUDRU_FOUNDATION_MODELS_API_KEY", "") or "").strip())
-    has_gigachat = bool(str(runtime_setting("GIGACHAT_CREDENTIALS", "") or "").strip()) or (
-        bool(str(runtime_setting("GIGACHAT_USER", "") or "").strip())
-        and bool(str(runtime_setting("GIGACHAT_PASSWORD", "") or "").strip())
-    )
-    # OpenRouter / legacy OpenAI base / OpenAI-compatible all route through the
-    # OpenRouter-style stack, so their presence means "not an exclusive direct
-    # provider". Among the registered direct providers, return one only when
-    # exactly one is configured.
-    if has_openrouter or has_legacy_base or has_compatible:
-        return ""
-    direct = [name for name, present in (
-        ("openai", has_openai), ("anthropic", has_anthropic), ("minimax", has_minimax),
-        ("cloudru", has_cloudru), ("gigachat", has_gigachat),
-        ("deepseek", bool(str(runtime_setting("DEEPSEEK_API_KEY", "") or "").strip())),
-        ("zai", bool(str(runtime_setting("ZAI_API_KEY", "") or "").strip())),
-    ) if present]
-    return direct[0] if len(direct) == 1 else ""
+    """The one direct provider this process reaches, else '' (``provider_models.exclusive_direct_kind``)."""
+    from ouroboros.provider_models import exclusive_direct_kind
+
+    return exclusive_direct_kind()
 
 
 def adaptive_quorum(n_slots: int) -> int:

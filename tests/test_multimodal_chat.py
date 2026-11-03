@@ -3,9 +3,12 @@ blocks, eviction, image-aware token estimates, compaction safety, and
 non-vision lane placeholders."""
 
 import base64
+from copy import deepcopy
 import json
 
-from ouroboros.context_budget import IMAGE_BLOCK_CHAR_EQUIVALENT, MAX_LIVE_IMAGE_BLOCKS
+import pytest
+
+from ouroboros.context_budget import IMAGE_BLOCK_CHAR_EQUIVALENT, MAX_LIVE_IMAGE_BLOCKS, LIVE_IMAGE_BLOCKS_HIGH_WATER
 
 
 def _image_block(tag: str = "x", caption: str = "") -> dict:
@@ -81,11 +84,21 @@ class TestWebAttachmentBlocks:
 
 
 class TestImageEviction:
-    def test_keeps_only_newest_k(self):
+    @pytest.mark.parametrize("count", range(6, LIVE_IMAGE_BLOCKS_HIGH_WATER + 1))
+    def test_up_to_high_water_appends_without_changing_sent_images(self, count):
+        from ouroboros.loop_messages import _append_or_merge_user_content
+
+        messages = [{"role": "user", "content": [_image_block(str(idx))]} for idx in range(count - 1)]
+        sent = deepcopy(messages)
+        _append_or_merge_user_content(messages, [_image_block(str(count - 1))])
+        assert messages[:-1] == sent
+        assert sum(block.get("type") == "image_url" for msg in messages for block in msg["content"]) == count
+
+    def test_eleventh_image_retires_oldest_six_together(self):
         from ouroboros.loop_messages import _append_or_merge_user_content
 
         messages = []
-        for idx in range(MAX_LIVE_IMAGE_BLOCKS + 2):
+        for idx in range(LIVE_IMAGE_BLOCKS_HIGH_WATER + 1):
             _append_or_merge_user_content(
                 messages,
                 [
@@ -103,9 +116,51 @@ class TestImageEviction:
             if isinstance(block, dict) and block.get("type") == "image_url"
         ]
         assert len(live) == MAX_LIVE_IMAGE_BLOCKS
+        assert [block["_caption"] for block in live] == [f"shot-{idx}" for idx in range(6, 11)]
         rendered = json.dumps(messages, ensure_ascii=False)
-        assert "[image evicted: shot-0]" in rendered
-        assert "[image evicted: shot-1]" in rendered
+        assert all(f"[image evicted: shot-{idx}]" in rendered for idx in range(6))
+
+    @pytest.mark.parametrize(("prior", "incoming"), [(5, 6), (9, 3), (0, 11), (2, 14)])
+    def test_incoming_batch_keeps_five_newest_even_when_batch_exceeds_high_water(self, prior, incoming):
+        from ouroboros.loop_messages import _append_or_merge_user_content
+
+        messages = [{"role": "user", "content": [_image_block(str(idx), caption=f"shot-{idx}")]}
+                    for idx in range(prior)]
+        _append_or_merge_user_content(messages, [
+            _image_block(str(idx), caption=f"shot-{idx}") for idx in range(prior, prior + incoming)])
+        blocks = [block for row in messages for block in row["content"]]
+        live = [block["_caption"] for block in blocks if block.get("type") == "image_url"]
+        assert live == [f"shot-{idx}" for idx in range(prior + incoming - MAX_LIVE_IMAGE_BLOCKS, prior + incoming)]
+        assert sum("[image evicted:" in block.get("text", "") for block in blocks) == prior + incoming - len(live)
+
+    def test_eviction_names_its_change_of_sent_history_and_a_fit_names_none(self):
+        """The evicted bytes were already sent: the next observation says who changed them."""
+        from types import SimpleNamespace
+
+        from ouroboros.loop_messages import _append_or_merge_user_content
+        from ouroboros.transcript_prefix import SANCTION_ATTR
+
+        for prior, origin in ((LIVE_IMAGE_BLOCKS_HIGH_WATER, "image_eviction"), (1, None)):
+            slot = SimpleNamespace()
+            messages = [{"role": "user", "content": [_image_block(str(idx))]} for idx in range(prior)]
+            _append_or_merge_user_content(messages, [_image_block("new")], slot=slot)
+            assert getattr(slot, SANCTION_ATTR, None) == origin
+
+    def test_a_tool_image_names_its_eviction_on_the_live_slot(self, monkeypatch):
+        """view_image and the host's auto-attach run on a staged copy; the stamp belongs to the live slot."""
+        from types import SimpleNamespace
+
+        from ouroboros.tools import vision
+        from ouroboros.transcript_prefix import SANCTION_ATTR
+
+        live = SimpleNamespace(messages=[{"role": "user", "content": [_image_block(str(idx))]}
+                                         for idx in range(LIVE_IMAGE_BLOCKS_HIGH_WATER)])
+        monkeypatch.setattr(vision, "_load_local_image_payload", lambda _ctx, _path, retain_original=False: (
+            {"base64": "QUFB", "mime": "image/png", "source_path": "/tmp/shot.png", "source_sha256": "fixture"}, ""))
+        staged = SimpleNamespace(messages=live.messages)
+        ok, _note = vision.attach_local_image_to_context(staged, "shot.png", stamp=live)
+        assert ok and getattr(live, SANCTION_ATTR, None) == "image_eviction"
+        assert getattr(staged, SANCTION_ATTR, None) is None
 
     def test_placeholder_includes_reviewable_path(self):
         from ouroboros.loop_messages import _evict_stale_image_blocks
@@ -113,7 +168,7 @@ class TestImageEviction:
         block = _image_block("a", caption="screen")
         block["_source_path"] = "/data/uploads/screenshots/x.png"
         messages = [{"role": "user", "content": [block]}]
-        _evict_stale_image_blocks(messages, incoming=MAX_LIVE_IMAGE_BLOCKS)
+        _evict_stale_image_blocks(messages, incoming=LIVE_IMAGE_BLOCKS_HIGH_WATER)
         text = messages[0]["content"][0]["text"]
         # Re-view hint points at view_image (local-file, native context, NOT web-gated);
         # VLM tools are also outside _WEB_TOOLS as of v6.45.
@@ -190,14 +245,19 @@ class TestCompactionAndLanes:
         from ouroboros.llm import LLMClient
 
         cleaned = LLMClient._copy_messages_with_cache_policy(
-            [{"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": "u"}, "_caption": "c", "_source_path": "p"},
+            [{"role": "tool", "tool_call_id": "i", "content": "staged", "_review_image_id": "1:i"},
+             {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": "u"}, "_caption": "c", "_source_path": "p",
+                 "_source_sha256": "hash", "_review_image_id": "1:i"},
             ]}],
             allow_message_cache_control=False,
             flatten_tool_content_blocks=False,
         )
-        block = cleaned[0]["content"][0]
+        assert "_review_image_id" not in cleaned[0] and cleaned[0]["tool_call_id"] == "i"
+        block = cleaned[1]["content"][0]
         assert "_caption" not in block and "_source_path" not in block
+        assert "_source_sha256" not in block and "_review_image_id" not in block
+        assert block["image_url"] == {"url": "u"}
 
     def test_vision_preparation_runs_outside_main_physical_binding(self, tmp_path, monkeypatch):
         from ouroboros import usage_accounting as ua

@@ -51,6 +51,30 @@ def test_one_carrier_is_produced_for_new_roots_and_read_back_everywhere(tmp_path
     assert resolve_project_id({"workspace_root": str(tmp_path), "metadata": {}}).startswith("proj_")
 
 
+def test_only_a_matching_host_late_answer_snapshot_attributes_new_roots():
+    from copy import deepcopy
+    from ouroboros.dialogue_provenance import (
+        presence_binding_authority_metadata, presence_metadata_binding, presence_root_carrier,
+    )
+
+    block = {"quiz_id": "question", "state": "answered", "answered_after_terminal": True,
+             "presence_contact": {"task_id": "source", "binding_id": BINDING, "source_event_id": "event"}}
+    owner = {"late_answer": {"task_id": "source", "quiz_id": "question",
+                            "answer_snapshot": {"task_id": "source", "quiz": block}}}
+    assert presence_metadata_binding(owner) is None
+    assert presence_binding_authority_metadata(owner) == {}, "the owner's delegates retain owner authority"
+    assert presence_root_carrier(owner) == {"presence_binding_authority": {"binding_id": BINDING}}
+    for path, value in [("quiz_id", "other"), ("state", "open"), ("answered_after_terminal", False)]:
+        changed = deepcopy(owner)
+        changed["late_answer"]["answer_snapshot"]["quiz"][path] = value
+        assert presence_root_carrier(changed) == {}
+    lost = deepcopy(owner)
+    lost["late_answer"]["answer_snapshot"]["quiz"]["presence_contact"]["task_id"] = "other"
+    assert presence_root_carrier(lost) == {}
+    assert presence_root_carrier(owner, task_contract={"capability_ceiling": {}}) == {
+        "presence_binding_authority": {"binding_id": ""}}
+
+
 def test_a_presence_childs_promote_and_follow_up_stay_its_bindings_work_under_the_ceiling(tmp_path, monkeypatch):
     """A delegated descendant carries the binding, not the speaker. The real promote tool,
     the real supervisor admission, the readers, steer and a follow-up of that root keep
@@ -62,8 +86,8 @@ def test_a_presence_childs_promote_and_follow_up_stay_its_bindings_work_under_th
     from ouroboros.owner_mailbox import drain_owner_entries
     from ouroboros.peer_roster import maybe_append_roster_note
     from ouroboros.project_facts import resolve_project_id
-    from ouroboros.tools.control import _steer_task
-    from ouroboros.tools.control_routing import _promote_chat_to_task
+    from ouroboros.tools.control import _tell_task
+    from ouroboros.tools.control_routing import _start_task
     from ouroboros.tools.followup import _handle_schedule_followup, _manage_schedules
     from ouroboros.tools.project_journal import _scope_authority
     from ouroboros.tools.recent_tasks import _restricted_actor
@@ -102,8 +126,8 @@ def test_a_presence_childs_promote_and_follow_up_stay_its_bindings_work_under_th
             put_nowait=lambda event: emitted.append(event) or _handle_promote_chat_to_task(event, handler_ctx)),
     )
 
-    out = _promote_chat_to_task(child_ctx, "Compile the full audit", title="Full audit", project_name="Widened",
-                                workspace_root=str(tmp_path / "elsewhere"), source="api", predecessor_task_id="")
+    out = _start_task(child_ctx, "Compile the full audit", title="Full audit", project_name="Widened",
+                                workspace_root=str(tmp_path / "elsewhere"), source="api")
 
     authority = {"binding_id": BINDING}
     [evt], [root] = emitted, pending
@@ -125,8 +149,8 @@ def test_a_presence_childs_promote_and_follow_up_stay_its_bindings_work_under_th
     assert "PRESENCE_CAPABILITY_BLOCKED" not in registry.execute("get_task_result", {"task_id": root["id"]})
     stranger, _stranger = _registry(tmp_path, binding=OTHER)
     assert "PRESENCE_CAPABILITY_BLOCKED" in stranger.execute("get_task_result", {"task_id": root["id"]})
-    steered = _steer_task(_steering_turn(tmp_path, _supervisor(tmp_path, pending=[root]), []), root["id"], "Q2 is in.")
-    assert "written to its mailbox" in steered and len(drain_owner_entries(tmp_path, root["id"])) == 1
+    steered = _tell_task(_steering_turn(tmp_path, _supervisor(tmp_path, pending=[root]), []), root["id"], "Q2 is in.")
+    assert "Message written to" in steered and len(drain_owner_entries(tmp_path, root["id"])) == 1
 
     # A follow-up of that root keeps the same carrier and ceiling, never a Project.
     # The root now acts as a worker, publishing the admitted queue metadata.
@@ -144,10 +168,19 @@ def test_a_presence_childs_promote_and_follow_up_stay_its_bindings_work_under_th
     assert followup["metadata"]["presence_binding_authority"] == authority and "presence" not in followup["metadata"]
     assert followup["task_contract"]["capability_ceiling"] == ceiling
     assert not followup.get("project_id") and presence_related_work(BINDING, followup)
-    # Work acting for a binding reads no owner schedule table, exactly as its speaker cannot.
-    assert "RESOURCE_CONSTRAINT_BLOCKED" in _manage_schedules(root_ctx, "list")
-    child_tools = types.SimpleNamespace(task_metadata=_worker_metadata(child), task_contract=child["task_contract"])
-    assert "RESOURCE_CONSTRAINT_BLOCKED" in _manage_schedules(child_tools, "list")
+    # Work acting for a binding reads that binding's own follow-ups and never the owner's table,
+    # exactly as its speaker (#1589); changing an owner row stays refused before any read.
+    from supervisor.schedule_lifecycle import upsert_scheduled_task
+    upsert_scheduled_task({"id": "owner-row", "name": "Owner's own", "timezone": "UTC",
+                           "trigger": {"type": "cron", "expr": "0 * * * *"},
+                           "task": {"type": "task", "text": "Owner work"}}, drive_root=tmp_path)
+    listed = json.loads(_manage_schedules(root_ctx, "list"))
+    assert [row["id"] for row in listed["tasks"]] == [record["id"]] and listed["total"] == 1
+    child_tools = types.SimpleNamespace(task_metadata=_worker_metadata(child), task_contract=child["task_contract"],
+                                        drive_root=tmp_path)
+    assert [row["id"] for row in json.loads(_manage_schedules(child_tools, "list"))["tasks"]] == [record["id"]]
+    assert "RESOURCE_CONSTRAINT_BLOCKED" in _manage_schedules(root_ctx, "disable", schedule_id="owner-row",
+                                                              reason="not mine")
 
     # An ordinary child's promote is unchanged: no carrier, and its project request stands.
     _plain_evt, plain = _admitted_child(tmp_path, monkeypatch, _parent(tmp_path, {}, task_id="owner-root", ceiling=False))
@@ -155,8 +188,8 @@ def test_a_presence_childs_promote_and_follow_up_stay_its_bindings_work_under_th
     plain_ctx = types.SimpleNamespace(**{**vars(child_ctx), "task_id": plain["id"], "task_metadata": _worker_metadata(plain),
                                          "task_contract": plain["task_contract"],
                                          "event_queue": types.SimpleNamespace(put_nowait=plain_events.append)})
-    _promote_chat_to_task(plain_ctx, "Owner-side work", title="Owner-side work",
-                          project_name="Chosen", predecessor_task_id="")
+    _start_task(plain_ctx, "Owner-side work", title="Owner-side work",
+                          project_name="Chosen")
     assert not {"presence", "presence_binding_authority"} & set(plain_events[0])
     assert plain_events[0]["project_name"] == "Chosen"
 
@@ -177,7 +210,7 @@ def test_supervisor_steering_follows_the_canonical_binding_over_a_stale_queue_ro
     import supervisor.queue as queue
     from ouroboros.owner_mailbox import drain_owner_entries
     from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX
-    from ouroboros.tools.control import _steer_task
+    from ouroboros.tools.control import _tell_task
     from supervisor.events import _handle_steer_task
 
     monkeypatch.setattr(queue, "DRIVE_ROOT", str(tmp_path))
@@ -196,11 +229,11 @@ def test_supervisor_steering_follows_the_canonical_binding_over_a_stale_queue_ro
     turn = _steering_turn(tmp_path, supervisor_ctx, [])
 
     for target in ("mine-pending", "legacy-pending"):  # own pending work stays steerable (owner Q2)
-        assert "written to its mailbox" in _steer_task(turn, target, "New figures."), target
+        assert "Message written to" in _tell_task(turn, target, "New figures."), target
         assert len(drain_owner_entries(tmp_path, target)) == 1
     for target in ("theirs-pending", "theirs-running", "torn-carrier"):
-        refused = _steer_task(turn, target, "stop")
-        assert "STEER_REJECTED" in refused and "presence_work_not_related" in refused, target
+        refused = _tell_task(turn, target, "stop")
+        assert "TELL_REJECTED" in refused and "presence_work_not_related" in refused, target
         assert drain_owner_entries(tmp_path, target) == []
 
     def stamped(stamp, token):  # the entries this one event adds
@@ -234,7 +267,7 @@ def test_an_unreadable_queue_snapshot_is_a_stated_gap_not_absent_queued_work(tmp
         assert page["read_gap"] == {"queue_snapshot": "unreadable"}, torn
         assert [row["task_id"] for row in page["tasks"]] == ["done-here"]
     section = build_presence_context_section(tmp_path, {**_presence(), "instructions": "Be useful."}, "turn-x")
-    assert "unreadable now: the queue snapshot (queued work); this binding's work may be among them" in section
+    assert "unreadable now: the queue snapshot (queued work); this place's work may be among them" in section
 
     _queue(tmp_path, pending=[{"id": "queued-only", "delegation_role": "root",
                                "metadata": {"presence": _presence(key=THREAD)}}])

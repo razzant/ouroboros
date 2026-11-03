@@ -80,21 +80,15 @@ def evolution_stop_reason(campaign: Optional[Dict[str, Any]] = None) -> str:
     """Why no new evolution may be admitted regardless of state.json: a received
     Stop (latch or durable intent) or an unconsumed Panic flag. "" when none."""
     from supervisor import queue
-    from supervisor.state_initialization import confirm_absent
+    from ouroboros.installation_stop import installation_panic
 
     if _STOP_LATCH["stopped"]:
         return "stop_latched"
     if isinstance((campaign if campaign is not None else _read_evolution_campaign()).get("stop_intent"), dict):
         return "stop_intent"
-    path = pathlib.Path(queue.DRIVE_ROOT) / "state" / "panic_stop.flag"
     try:
-        try:
-            os.lstat(path)
-        except FileNotFoundError:
-            confirm_absent(path)
-            return ""
-        return "panic_flag"
-    except OSError:
+        return "panic_flag" if installation_panic(queue.DRIVE_ROOT, strict=True) else ""
+    except (OSError, UnicodeError):
         return "panic_flag_unknown"
 
 
@@ -150,11 +144,13 @@ def _deliver_pending_owner_report() -> None:
 
 
 def enqueue_evolution_task_if_needed() -> None:
-    """Queue evolution only when idle, enabled, within budget, and not failure-paused."""
+    """Queue evolution only when idle (no conversation turn holds it), enabled and admitted by the global budget limit.
+
+    Failure and repeat counts are evidence for the mind, never a stop (owner, 2026-11-02)."""
     from supervisor import queue as q
 
     q._deliver_pending_owner_report()
-    if q.PENDING or q.RUNNING:
+    if q.PENDING or q.project_running():
         return
     from supervisor.state import StateUnavailable, control_is, update_state
 
@@ -194,44 +190,8 @@ def enqueue_evolution_task_if_needed() -> None:
         q.send_with_budget(int(owner_chat_id), block, role="system", system_type="evolution_notice")
         return
 
-    consecutive_failures = int(st.get("evolution_consecutive_failures") or 0)
-    if consecutive_failures >= 3:
-        q.pause_evolution_campaign("paused after consecutive failures")
-        q.disable_evolution_projection()
-        q.send_with_budget(
-            int(owner_chat_id),
-            f"🧬⚠️ Evolution paused: {consecutive_failures} consecutive failures. "
-            f"Use /evolve start to resume after investigating the issue.",
-            role="system", system_type="evolution_notice")
-        return
-
-    # Objective repeats count non-consecutive no-ops by the transaction's canonical
-    # fingerprint, clearing only on absorption. The failure streak cannot catch
-    # these loops because every non-failing cycle resets it (events.py).
-    objective_repeat_counts = campaign.get("objective_repeat_counts") or {}
-    active_objective_fp = canonical_objective_fingerprint(
-        str(campaign.get("objective") or ""),
-    )
-    objective_repeats = (
-        int(objective_repeat_counts.get(active_objective_fp, 0))
-        if active_objective_fp else 0
-    )
-    if objective_repeats >= q.OBJECTIVE_REPEAT_CAP:
-        q.pause_evolution_campaign(
-            "paused: objective re-proposed without ever absorbing",
-        )
-        q.disable_evolution_projection()
-        q.send_with_budget(
-            int(owner_chat_id),
-            f"🧬⚠️ Evolution paused: the current objective ran {objective_repeats} reviewed "
-            f"cycles WITHOUT ever being absorbed — it keeps getting re-proposed and never lands "
-            f"(a self-maintenance loop, not progress). A plain resume won't help; use "
-            f"/evolve start with a DIFFERENT objective.",
-            role="system", system_type="evolution_notice")
-        return
-
-    try:  # on the supervisor loop: ride the snapshot, decide the reserve refusal on the exact read
-        remaining = q.budget_remaining(st, strict=True, allow_stale=True, refuse_below=q.EVOLUTION_BUDGET_RESERVE)
+    try:  # on the supervisor loop: ride the snapshot; an exhausted answer is decided on the exact read
+        remaining = q.budget_remaining(st, strict=True, allow_stale=True)
     except Exception:
         log.error("Evolution scheduling deferred: cost accounting unavailable", exc_info=True)
         q.append_jsonl(q.DRIVE_ROOT / "logs" / "events.jsonl", {
@@ -239,15 +199,8 @@ def enqueue_evolution_task_if_needed() -> None:
             "action": "dispatch_deferred", "owner_visible": True,
         })
         return
-    if remaining < q.EVOLUTION_BUDGET_RESERVE:
-        q.pause_evolution_campaign("budget reserve reached")
-        q.disable_evolution_projection()
-        q.send_with_budget(
-            int(owner_chat_id),
-            f"💸 Evolution stopped: ${remaining:.2f} remaining "
-            f"(reserve ${q.EVOLUTION_BUDGET_RESERVE:.0f} for conversations).",
-            role="system", system_type="evolution_notice")
-        return
+    if remaining <= 0:
+        return  # the limit refuses new paid admission; the campaign and its switch stay as they are
     cycle = int(st.get("evolution_cycle") or 0) + 1
     tid = uuid.uuid4().hex[:8]
     transaction = q.begin_evolution_transaction(tid, cycle=cycle, campaign=campaign)
@@ -386,6 +339,7 @@ def start_evolution_campaign(objective: str = "", *, source: str = "owner", orig
     try:
         campaign = _read_evolution_campaign()
         owner_start = str(source or "") in _OWNER_START_SOURCES
+        origin = {**(origin or {}), "work_kind": "owner"} if owner_start else origin
         if not owner_start and evolution_stop_reason(campaign):
             return {}  # a received Stop yields only to the owner's own start (#1307)
         prior_campaign_id = str(campaign.get("id") or "")
@@ -416,12 +370,11 @@ def start_evolution_campaign(objective: str = "", *, source: str = "owner", orig
             if not str(campaign.get("source") or "").strip() and source:
                 campaign["source"] = str(source)
             if (str(source or "") in ("owner", "owner_chat") and campaign.get("status") == "paused"
-                    and consciousness_origin_metadata(campaign)):
-                # The owner's explicit start ADOPTS a paused consciousness campaign: its cycles are
-                # the owner's work now, no longer bound by the consciousness allowance (BIBLE P0).
-                for key in ("initiator", "usage_category", "consciousness_autonomy"):
+                    and campaign.get("initiator") == "consciousness"):
+                # Owner adoption replaces the campaign's inherited authority (BIBLE P0).
+                for key in ("initiator", "usage_category", "consciousness_autonomy", "consciousness_cause", "origin_wake_task_id", "focus"):
                     campaign.pop(key, None)
-                campaign["adopted_by_owner_at"] = now
+                campaign.update(work_kind="owner", adopted_by_owner_at=now)
             campaign.update({k: v for k, v in consciousness_origin_metadata(origin).items() if not campaign.get(k)})
             campaign["status"] = "active"
             campaign.pop("pause_reason", None)
@@ -447,8 +400,8 @@ def pause_evolution_campaign(reason: str = "") -> Dict[str, Any]:
 
     RESUMABLE: a later ``/evolve start`` resumes the SAME campaign in place
     (start_evolution_campaign treats ``paused`` as resumable). Used by the system
-    breakers (light mode, consecutive failures, objective-repeat cap, budget reserve,
-    restart-blocked) — NOT by an owner stop. For an owner stop use
+    breakers (light mode, a refused consciousness admission, blocked bootstrap or
+    restart) — NOT by an owner stop. For an owner stop use
     ``complete_evolution_campaign`` (terminal).
     """
     from supervisor import state
@@ -911,9 +864,9 @@ def link_evolution_rescue(drive_root: pathlib.Path, rescue_info: Dict[str, Any])
 def _bump_objective_repeat_count(campaign: Dict[str, Any], tx: Dict[str, Any]) -> None:
     """BUG3: count one non-absorbing cycle against its objective fingerprint.
 
-    Cumulative PER-FINGERPRINT (not a consecutive streak), so a re-proposed blocked objective
-    still accumulates toward the pause gate. A transaction without an ``objective_fp`` is
-    skipped, never bucketed under the empty key.
+    Cumulative PER-FINGERPRINT (not a consecutive streak), so a re-proposed objective keeps
+    its whole unabsorbed record as evidence; nothing pauses on it. A transaction without an
+    ``objective_fp`` is skipped, never bucketed under the empty key.
     """
     fp = str((tx or {}).get("objective_fp") or "")
     if not fp:
@@ -1140,6 +1093,7 @@ def _resume_evolution_terminal_effects(
     campaign_id: str, task_id: str, tx: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Finish idempotent effects that follow the durable terminal transition."""
+    from ouroboros.server_restart import defer_evolution_restart
     from supervisor import queue
 
     resumed = dict(tx or {})
@@ -1151,7 +1105,8 @@ def _resume_evolution_terminal_effects(
         except Exception:
             log.warning("Failed to persist evolution cleanup evidence for %s", task_id, exc_info=True)
     if (
-        resumed.get("cycle_outcome") == "waiting_for_restart"
+        not defer_evolution_restart(resumed)
+        and resumed.get("cycle_outcome") == "waiting_for_restart"
         and resumed.get("restart_required")
         and not resumed.get("restart_verified")
     ):
@@ -1194,7 +1149,10 @@ def update_evolution_campaign_after_task(
     try:
         # The complete read/check/mutate/write is protected by the same state lock
         # used by pause, owner stop, boot reconciliation, and transaction updates.
-        campaign = _read_evolution_campaign()
+        campaign = read_json_dict(_evolution_campaign_path())
+        if campaign is None:
+            return {"accepted": True, "persisted": False, "replay": False,
+                    "reason": "campaign_unavailable", "transaction": {}}
         if campaign.get("status") not in {"active", "paused"}:
             return {
                 "accepted": False, "persisted": False, "replay": False,
@@ -1342,6 +1300,7 @@ def update_evolution_campaign_after_task(
             else:
                 campaign["cost_accounting_status"] = "unavailable"
             campaign["updated_at"] = utc_now_iso()
+            write_failure = "campaign_write_refused"
             try:
                 persisted = _write_evolution_campaign(
                     campaign,
@@ -1350,14 +1309,11 @@ def update_evolution_campaign_after_task(
                 )
             except Exception:
                 log.warning("Failed to persist evolution terminal for %s", task_id, exc_info=True)
-                return {
-                    "accepted": True, "persisted": False, "replay": False,
-                    "reason": "campaign_write_failed", "transaction": {},
-                }
+                persisted, write_failure = False, "campaign_write_failed"
             if not persisted:
                 return {
                     "accepted": True, "persisted": False, "replay": False,
-                    "reason": "campaign_write_refused", "transaction": {},
+                    "reason": write_failure, "transaction": {},
                 }
     finally:
         state.release_file_lock(state.STATE_LOCK_PATH, lock_fd)
@@ -1543,25 +1499,34 @@ def write_pending_restart_marker(
     return path
 
 
-def request_evolution_restart(drive_root: pathlib.Path, tx: Dict[str, Any], log: Any = None) -> None:
-    """Write the exact restart-verify claim, then ask the server to restart.
-    ``OUROBOROS_EVOLUTION_AUTO_RESTART`` off skips ONLY the restart: the marker is
-    what lets the next boot — the owner's manual one included — attribute the cycle
-    by exact claim rather than the weaker markerless reconcile (W4-F3)."""
+def request_evolution_restart(drive_root: pathlib.Path, tx: Dict[str, Any], log: Any = None,
+                              *, request: Optional[Dict[str, Any]] = None) -> str:
+    """Prepare the exact boot claim, including for manual restart when auto-restart is off.
+    Return a known decision or unconfirmed; an agent intent retries the latter on its drain tick."""
+    auto = str(os.environ.get("OUROBOROS_EVOLUTION_AUTO_RESTART", "true") or "true").lower() not in {"0", "false", "no", "off"}
     commit_sha = str(tx.get("commit_sha") or "").strip()
     if not commit_sha:
-        return
+        return "evolution_commit_missing"
     claim = {key: str(tx.get(key) or "") for key in ("campaign_id", "transaction_id", "task_id")}
     claim["commit_sha"] = commit_sha
-    authority = check_evolution_authority(**claim)
-    if not authority.get("ok"):
-        if log is not None:
-            log.warning("Automatic evolution restart cancelled: exact authority changed (%s)",
-                        authority.get("reason") or "unknown")
-        return
     try:
+        authority = check_evolution_authority(**claim)
+        if not authority.get("ok"):
+            reason = str(authority.get("reason") or "")
+            if not auto:
+                return "evolution_auto_restart_off"
+            if reason == "owner_stopped":  # authority also uses this for unreadable stop evidence
+                from supervisor.state import control_is, read_state
+
+                if (not control_is(read_state().projection(), "evolution_owner_stopped", True)
+                        and evolution_stop_reason() not in {"stop_latched", "stop_intent", "panic_flag"}):
+                    return "unconfirmed"
+            if log is not None:
+                log.warning("Automatic evolution restart not requested: authority check (%s)", reason or "unknown")
+            return ("unconfirmed" if reason in {"", "state_lock_unavailable", "state_controls_unknown"}
+                    else f"evolution_{reason}")
         existing = read_json_dict(pathlib.Path(drive_root) / "state" / "pending_restart_verify.json") or {}
-        restart_reason = (
+        restart_reason = str((request or {}).get("reason") or "").strip() or (
             str(existing.get("reason") or "").strip() if existing.get("evolution_claim") == claim else ""
         ) or "supervisor_auto_evolution_restart"
         write_pending_restart_marker(
@@ -1569,19 +1534,26 @@ def request_evolution_restart(drive_root: pathlib.Path, tx: Dict[str, Any], log:
             reason=restart_reason, evolution_claim=claim,
         )
         from ouroboros import body_adoption
-        if not body_adoption.authorize_for_task(drive_root, claim["task_id"], commit_sha, restart_reason):
-            return  # a candidate commit with no authorized adoption cannot be restarted into
-        if str(os.environ.get("OUROBOROS_EVOLUTION_AUTO_RESTART", "true") or "true").lower() in {"0", "false", "no", "off"}:
+
+        authorized = body_adoption.authorize_for_task(drive_root, claim["task_id"], commit_sha, restart_reason)
+        if not auto:
             if log is not None:
                 log.info("Automatic evolution restart is off; the restart-verify marker for %s awaits "
                          "a manual restart", commit_sha[:12])
-            return
+            return "evolution_auto_restart_off"
+        if not authorized:
+            return "unconfirmed"  # this bool also covers unreadable/partially prepared adoption
         from supervisor import workers
 
         workers.get_event_q().put({
             "type": "restart_request", "reason": restart_reason,
+            "task_id": claim["task_id"],
             "evolution_restart": True, "ts": utc_now_iso(),
+            **({"phase": "ready", "request_id": request["request_id"], "task_attempt": request["task_attempt"]}
+               if request else {}),
         })
+        return "requested"
     except Exception:
         if log is not None:
             log.debug("Failed to request automatic evolution restart", exc_info=True)
+        return "unconfirmed" if auto else "evolution_auto_restart_off"

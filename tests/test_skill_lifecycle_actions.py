@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 
 import pytest
 
+from ouroboros import dialogue_store
 from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.owner_mailbox import acknowledge_task_messages, revoke_owner_control, write_owner_message
 from ouroboros.owner_quiz import record_answered, record_asked
@@ -14,7 +14,6 @@ from ouroboros.project_dialogue import build_owner_message_ref
 from ouroboros.skill_lifecycle_actions import run_skill_action
 from ouroboros.skill_loader import SkillReviewState, load_skill, load_skill_grants, save_review_state
 from ouroboros.tools.registry import ToolContext
-from ouroboros.utils import append_jsonl
 from tests._extension_loader_shared import _write_ext_skill
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
 
@@ -40,7 +39,7 @@ def skill_actor(tmp_path, monkeypatch):
 
 def _owner_chat(ctx, *, chat_id=42, text="Grant demo the inject_chat permission."):
     ref = build_owner_message_ref(chat_id=chat_id, client_message_id="owner-command", ts="2026-09-06T10:00:00Z", text=text)
-    append_jsonl(ctx.drive_root / "logs" / "chat.jsonl", {**ref, "direction": "in", "text": text})
+    dialogue_store.append(ctx.drive_root, "chat", {**ref, "direction": "in", "text": text})
     return {"kind": "chat", "ref": ref}
 
 
@@ -114,7 +113,7 @@ def test_owner_action_refuses_unproven_source_or_changed_request(skill_actor, in
     assert load_skill_grants(ctx.drive_root, "demo")["granted_permissions"] == []
 
 
-def test_auto_repair_cannot_enable_from_its_generated_request(skill_actor):
+def test_selected_skill_task_without_enable_needs_the_owners_words_to_enable(skill_actor):
     ctx, _skill, revision = skill_actor
     ctx.task_constraint = TaskConstraint(skill_name="demo", payload_root="skills/external/demo", allow_enable=False)
     assert run_skill_action(ctx, "demo", "enable")["status_code"] == 403
@@ -162,25 +161,15 @@ def test_only_proven_later_owner_disable_supersedes_repair_intent(skill_actor, m
         text = "Run demo again now."
         ref = build_owner_message_ref(chat_id=42, client_message_id="new-owner-request",
                                      ts="2026-09-06T12:00:00Z", text=text)
-        append_jsonl(ctx.drive_root / "logs" / "chat.jsonl", {**ref, "direction": "in", "text": text})
+        dialogue_store.append(ctx.drive_root, "chat", {**ref, "direction": "in", "text": text})
         result = run_skill_action(ctx, "demo", "enable", owner_source={"kind": "chat", "ref": ref})
     assert result["ok"] and load_enabled(ctx.drive_root, "demo"), result
 
 
-def test_launcher_grant_preserves_server_reconcile_ownership(skill_actor):
-    ctx, _skill, revision = skill_actor
-    seen = []
-
-    def server_reconcile(loaded):
-        seen.append(loaded.content_hash)
-        assert load_skill_grants(ctx.drive_root, "demo")["granted_permissions"] == ["inject_chat"]
-        return {"action": "extension_inactive", "reason": "disabled", "process": "server", "live_loaded": False}
-
-    host = SimpleNamespace(drive_root=ctx.drive_root, repo_dir=ctx.repo_dir, task_id="", current_chat_id=0)
-    result = run_skill_action(host, "demo", "grant", expected_content_hash=revision, items=["inject_chat"],
-                             _owner_actor="owner_launcher", _reconcile_grant=server_reconcile)
-    assert result["ok"] and result["process"] == "server", result
-    assert seen == [revision]
+# Retired: test_launcher_grant_preserves_server_reconcile_ownership. Verdict: the launcher no longer runs the
+# grant owner in its own process (once turn-on installs packages that would run pip/venv inside the frozen
+# launcher); after its native confirm it POSTs /api/skills/<name>/grants, pinned in
+# tests/test_skill_enable_dependencies.py::test_the_launcher_grant_goes_through_the_server.
 
 
 def test_grant_canonicalizes_duplicate_items_once(skill_actor):
@@ -203,9 +192,10 @@ def test_child_cannot_acquire_owner_action_authority(skill_actor, mode):
 
 @pytest.mark.parametrize("action", ["grant", "enable"])
 def test_non_owner_presence_cannot_reuse_an_owner_chat_reference(skill_actor, action):
-    from ouroboros.presence_authority import build_presence_capability_ceiling, presence_ceiling_payload
-    from ouroboros.presence_capabilities import PresenceProfileResolution
-    from ouroboros.presence_runtime import ResolvedPresenceRuntime
+    from ouroboros.presence_authority import presence_ceiling_payload
+    from tests.frozen_presence_authority import build_presence_capability_ceiling
+    from tests.frozen_presence_capabilities import PresenceProfileResolution
+    from tests.frozen_presence_runtime import ResolvedPresenceRuntime
 
     ctx, _payload, revision = skill_actor
     source = _owner_chat(ctx)

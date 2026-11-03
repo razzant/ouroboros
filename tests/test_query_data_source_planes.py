@@ -118,10 +118,11 @@ def test_canonical_queue_reads_follow_the_same_actors_read_file_admission(planes
 
 
 def test_presence_ceiling_narrows_the_canonical_plane_like_read_file(planes, monkeypatch):
-    from ouroboros.presence_authority import build_presence_capability_ceiling, presence_ceiling_payload
-    from ouroboros.presence_capabilities import (PresenceProfileResolution, PresenceResourceTarget,
+    from ouroboros.presence_authority import presence_ceiling_payload
+    from tests.frozen_presence_authority import build_presence_capability_ceiling
+    from tests.frozen_presence_capabilities import (PresenceProfileResolution, PresenceResourceTarget,
                                                  PresenceSelection, PresenceToolTarget)
-    from ouroboros.presence_runtime import ResolvedPresenceRuntime
+    from tests.frozen_presence_runtime import ResolvedPresenceRuntime
 
     monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "cyber_pro")
     canonical = planes["canonical"]
@@ -147,6 +148,37 @@ def test_presence_ceiling_narrows_the_canonical_plane_like_read_file(planes, mon
         if expected == "blocked":
             assert "Presence resource ceiling" in result["message"] and result["plane"] == "canonical"
             assert "data" not in result and "canonical bytes" not in json.dumps(result)
+
+
+def test_storage_uses_the_installation_or_native_pin_with_existing_read_authority(planes):
+    relative = "state/storage_measurement.json"
+    target = planes["canonical"] / relative
+    target.write_text('{"plane":"installation"}', encoding="utf-8")
+    (planes["helper"] / relative).write_text('{"plane":"helper"}', encoding="utf-8")
+    ctx = _contexts(planes)["helper"]
+    helper = _registry(ctx)
+    assert _read_admitted(helper, target)
+    status, result = _query(helper, op="json", kind="storage")
+    assert status == "ok" and result["data"]["plane"] == "installation" and "removers" in result["data"]
+    assert result["source"]["plane"] == "canonical"
+
+    ctx.task_contract = {"resource_policy": {"protected_artifacts": [
+        {"paths": [str(target)], "role": "black_box_reference"}]}}
+    restricted = _registry(ctx)
+    assert not _read_admitted(restricted, target)
+    status, refused = _query(restricted, op="json", kind="storage")
+    assert status == "blocked" and refused["plane"] == "canonical" and "data" not in refused
+
+    pin = planes["pin"] / relative
+    pin.write_text('{"plane":"retained"}', encoding="utf-8")
+    native = _registry(ToolContext(repo_dir=planes["repo"], drive_root=planes["pin"], task_id="native",
+                                  budget_drive_root=str(planes["canonical"]),
+                                  task_metadata={"native_data_root": str(planes["pin"])}))
+    status, result = _query(native, op="json", kind="storage")
+    assert status == "ok" and result["source"]["plane"] == "native_pin" and result["data"]["plane"] == "retained"
+    pin.unlink()
+    status, missing = _query(native, op="json", kind="storage")  # no count there: its removers alone
+    assert status == "ok" and missing["source"]["plane"] == "native_pin" and set(missing["data"]) == {"removers"}
 
 
 def test_explicit_child_queue_logs_and_sql_keep_their_local_planes(planes, monkeypatch):
@@ -215,8 +247,28 @@ def test_blobs_fall_back_to_the_owner_only_after_a_proven_local_miss(planes, mon
     status, packed = _query(helper, op="blob", sha256=packed_digest)
     assert status == "ok" and packed["data"] == {"packed": "owner pack"} and packed["source"]["plane"] == "canonical"
     status, missing = _query(helper, op="blob", sha256="0" * 64)
-    assert status == "unavailable" and missing["message"] == "blob not found in the caller or canonical plane"
+    assert status == "unavailable" and missing["message"].startswith("blob not found in the caller or canonical plane;")
+    assert "memory_read(source_ref=" in missing["message"]  # the miss names the task-source reader, not another plane
     assert owner_path.read_bytes() == owner_bytes  # reads never touch the owner's bytes
+
+
+def test_money_sql_reads_the_installations_one_ledger_from_any_focus(planes):
+    """A drive of its own holds no money ledger, so a helper's db=money answered not_found while the
+    installation's ledger stood; it reads the owner's, named as such, and the owner still reads its own."""
+    from ouroboros import usage_accounting as ua
+
+    ua.record_subscription_session("sess-1", drive_root=planes["canonical"], route="codex", task_id="helper",
+                                   prompt_tokens=None, completion_tokens=None, cached_tokens=None, spend_usd=0.0)
+    query = dict(op="sql", db="money", query="SELECT task_id FROM attempts")
+    contexts = _contexts(planes)
+    for name in ("forked_root", "helper"):
+        status, result = _query(_registry(contexts[name]), **query)
+        assert status == "ok" and result["data"]["rows"] == [["helper"]], (name, result)
+        assert result["source"]["plane"] == "canonical"
+    status, own = _query(_registry(contexts["root"]), **query)
+    assert status == "ok" and own["source"]["plane"] == "caller"
+    _status, current = _query(_registry(contexts["helper"]), op="sql", query="SELECT count(*) AS n FROM tasks")
+    assert "caller" in (current.get("plane"), current["source"].get("plane"))  # the task facts store stays the caller's
 
 
 def test_packed_blobs_need_the_actors_read_of_the_pack_file_itself(planes, monkeypatch):
@@ -260,7 +312,7 @@ def test_packed_blobs_need_the_actors_read_of_the_pack_file_itself(planes, monke
     assert status == "blocked" and "escapes" in escaped["message"], escaped
     pack_path.unlink()  # an indexed pack that is gone stays absence, not a refusal
     status, missing = _query(helper, op="blob", sha256=digest)
-    assert status == "unavailable" and missing["message"] == "blob not found in the caller or canonical plane", missing
+    assert status == "unavailable" and missing["message"].startswith("blob not found in the caller or canonical plane;"), missing
 
 
 @pytest.mark.parametrize("mode", ["light", "advanced", "pro", "cyber_pro"])
@@ -337,7 +389,7 @@ def test_native_reviewers_stay_on_their_pinned_plane(planes, monkeypatch):
             status, blob = _query(registry, op="blob", sha256=pinned)  # the pin is this reviewer's own drive
             assert status == "ok" and blob["data"] == expected and blob["source"]["plane"] == "caller", blob
         status, blob = _query(registry, op="blob", sha256=digest)
-        assert status == "unavailable" and blob["message"] == "blob not found in the caller plane", blob
+        assert status == "unavailable" and blob["message"].startswith("blob not found in the caller plane;"), blob
         (pin / "state/queue_snapshot.json").unlink()
         status, gone = _query(registry, op="json", kind="queue_snapshot")
         assert status == "unavailable" and gone["plane"] == "native_pin" and "data" not in gone

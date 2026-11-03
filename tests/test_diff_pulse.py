@@ -138,7 +138,7 @@ def test_a_body_edit_carries_the_pulse_and_a_foreign_project_edit_does_not(tmp_p
     body = str(_registry(tmp_path / "a", external=False).execute(tool, CODE[tool]))
     assert body.startswith("✅"), body[:300]
     assert "Diff pulse since canonical/ouroboros merge-base" in body and "ouroboros/loop.py 2 (+1/-0)" in body
-    assert DIFF_PULSE_QUESTION in body and "Reference book" not in body  # no book was touched
+    assert DIFF_PULSE_QUESTION in body and "Text growth" not in body  # no book or ruled text was touched
     # A user's project with the same layout and the official remote is not the body.
     foreign = str(_registry(tmp_path / "b", external=True).execute(tool, CODE[tool]))
     assert foreign.startswith("✅") and "Diff pulse" not in foreign, foreign[:300]

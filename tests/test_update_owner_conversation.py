@@ -24,6 +24,7 @@ import supervisor.update_merge as update_merge
 import supervisor.worker_chat_lane as lane
 import supervisor.workers as workers
 from ouroboros.contracts.schema_versions import SCHEMA_VERSION_KEY
+from tests.conversation_carrier_support import dispatched_tasks, isolate_lane_pool, lane_rows
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 RESOLVER_ID = "update_assisted_merge_abc12345"
@@ -108,62 +109,80 @@ def _wire_gate(monkeypatch, reason: str, notices: list):
     monkeypatch.setattr(workers, "send_with_budget", lambda _chat_id, text, **_k: notices.append(text))
 
 
-def test_direct_lane_runs_the_turn_while_the_resolver_holds_the_repo(tx_repo, monkeypatch):
+def _lane_carrier(monkeypatch, tmp_path):
+    """The real lane admission over a fresh pool table with one ready carrier (owner decision 1A)."""
+    from supervisor import message_bus
+
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(send_chat_action=lambda *a, **k: None))
+    [spare] = isolate_lane_pool(monkeypatch, tmp_path / "data")
+    return spare
+
+
+def test_direct_lane_runs_the_turn_while_the_resolver_holds_the_repo(tx_repo, tmp_path, monkeypatch):
     tx = _write_tx("assisted_resolution")
-    notices, turns = [], []
+    notices = []
     _wire_gate(monkeypatch, update_merge.assisted_writer_gate_reason(tx), notices)
-    monkeypatch.setattr(lane, "_handle_chat_direct_locked", lambda *a, **k: turns.append(a[1]))
+    spare = _lane_carrier(monkeypatch, tmp_path)
 
     lane.handle_chat_direct(1, "how is the update going?")
 
-    assert turns == ["how is the update going?"]
+    # Admitted to the lane and handed to its carrier: the body runs there, never in this process.
+    [row] = lane_rows(workers).values()
+    assert row["task"]["text"] == "how is the update going?" and row["worker_id"] == spare.wid
+    assert [task["text"] for task in dispatched_tasks(spare)] == ["how is the update going?"]
     assert notices == []
 
 
-def test_direct_lane_refuses_while_the_tree_is_being_materialized(tx_repo, monkeypatch):
+def test_direct_lane_refuses_while_the_tree_is_being_materialized(tx_repo, tmp_path, monkeypatch):
     _write_tx("materializing_assisted")
-    notices, turns = [], []
+    notices = []
     _wire_gate(monkeypatch, "managed_update_tx:materializing_assisted", notices)
-    monkeypatch.setattr(lane, "_handle_chat_direct_locked", lambda *a, **k: turns.append(a[1]))
+    spare = _lane_carrier(monkeypatch, tmp_path)
 
     lane.handle_chat_direct(1, "hello?")
 
-    assert turns == []
+    assert lane_rows(workers) == {} and dispatched_tasks(spare) == []
     assert len(notices) == 1 and LOCK_NOTICE in notices[0]
 
 
-def test_native_turn_reaches_execution_while_the_resolver_holds_the_repo(tx_repo, monkeypatch):
-    import supervisor.state as state
+@pytest.mark.parametrize('live', [False, True])
+def test_native_turn_reaches_execution_while_the_resolver_holds_the_repo(tx_repo, tmp_path, monkeypatch, live):
+    from ouroboros.task_carrier import EXECUTOR_INLINE_CALL
+    from supervisor import inline_carrier
 
     tx = _write_tx("assisted_resolution")
-    notices, turns = [], []
+    notices, calls = [], []
     _wire_gate(monkeypatch, update_merge.assisted_writer_gate_reason(tx), notices)
-    monkeypatch.setattr(state, "load_state", lambda: {})
-    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
-    monkeypatch.setattr(
-        lane, "_run_chat_task",
-        lambda agent, chat_id, text, image_data, **kw: turns.append((agent, text, kw)),
-    )
+    spare = _lane_carrier(monkeypatch, tmp_path)
+    monkeypatch.setattr(inline_carrier, "run_inline_turn", lambda *a, **kw: calls.append((a, kw)))
 
-    lane.handle_chat_direct(1, "why did the merge conflict?")
+    turn = object() if live else None
+    lane.handle_chat_direct(1, "why did the merge conflict?", realtime_turn=turn)
 
-    assert turns == [(None, "why did the merge conflict?", {"task_constraint": None, "task_metadata": None})]  # construction belongs to registered execution
+    if live:
+        # A live call keeps a thread of this process (``executor=inline_call``, owner decision 3A).
+        [(args, kwargs)] = calls
+        assert args[:2] == (1, "why did the merge conflict?") and kwargs["realtime_turn"] is turn
+        assert kwargs["executor"] == EXECUTOR_INLINE_CALL and kwargs["execution"] is not None
+        assert lane_rows(workers) == {}
+    else:
+        assert calls == []
+        assert [task["text"] for task in dispatched_tasks(spare)] == ["why did the merge conflict?"]
     assert notices == []
 
 
-def test_native_execution_refuses_during_a_destructive_window(tx_repo, monkeypatch):
-    import supervisor.state as state
+def test_native_execution_refuses_during_a_destructive_window(tx_repo, tmp_path, monkeypatch):
+    from supervisor import inline_carrier
 
     _write_tx("assisted_resolution")
-    notices, turns = [], []
+    notices, calls = [], []
     _wire_gate(monkeypatch, "managed_update:rollback", notices)
-    monkeypatch.setattr(state, "load_state", lambda: {})
-    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
-    monkeypatch.setattr(lane, "_run_chat_task", lambda *a, **k: turns.append(a))
+    spare = _lane_carrier(monkeypatch, tmp_path)
+    monkeypatch.setattr(inline_carrier, "run_inline_turn", lambda *a, **kw: calls.append((a, kw)))
 
     lane.handle_chat_direct(1, "hello?")
 
-    assert turns == []
+    assert calls == [] and lane_rows(workers) == {} and dispatched_tasks(spare) == []
     assert len(notices) == 1 and LOCK_NOTICE in notices[0]
 
 
@@ -194,7 +213,7 @@ def test_main_steers_the_resolver_through_the_mailbox_while_the_gate_is_closed(
     tx_repo, tmp_path, monkeypatch,
 ):
     import supervisor.queue as supervisor_queue
-    from ouroboros.owner_mailbox import drain_owner_messages
+    from ouroboros.owner_mailbox import drain_owner_entries
     from supervisor.steering import _handle_steer_task
 
     tx = _write_tx("assisted_resolution")
@@ -219,7 +238,7 @@ def test_main_steers_the_resolver_through_the_mailbox_while_the_gate_is_closed(
         "client_message_id": "steer-owner-1",
     }, handler_ctx)
 
-    assert drain_owner_messages(tmp_path, RESOLVER_ID) == [
+    assert [e["text"] for e in drain_owner_entries(tmp_path, RESOLVER_ID)] == [
         "Keep our local config.py changes; take upstream for loop.py.",
     ]
 

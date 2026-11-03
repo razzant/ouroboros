@@ -2,9 +2,9 @@
 
 Pins the three seams the browser contract depends on:
 
-1. ``supervisor.workers._run_chat_task`` tracks the turn in the
-   ``DirectActivityRegistry`` through preparation, ``agent.handle_task`` and event delivery
-   with the correct ``kind``/``client_message_id``/``project_id``.
+1. the lane admission (``supervisor.workers.handle_chat_direct``) writes the turn's RUNNING
+   row, which the census (``/api/state`` ``active_direct_turns``) lists with the correct
+   ``kind``/``client_message_id``/``project_id`` for as long as a carrier holds it.
 2. ``supervisor.events._handle_typing_start`` stamps ``kind`` and
    ``client_message_id`` from the registry onto the typing action — and leaves
    them empty for untracked tasks. No in-repo client reads the stamp (wire
@@ -15,6 +15,8 @@ Pins the three seams the browser contract depends on:
 """
 
 from __future__ import annotations
+
+from types import SimpleNamespace
 
 import pytest
 
@@ -30,21 +32,27 @@ def _clean_registry():
 
 
 # ---------------------------------------------------------------------------
-# Seam 1: _run_chat_task <-> DirectActivityRegistry
+# Seam 1: the lane admission <-> the census (the RUNNING row, as /api/state reads it)
 # ---------------------------------------------------------------------------
 
 
-class _RegistryProbeAgent:
-    """Snapshots the global registry while the turn is 'running'."""
+def _census():
+    from ouroboros.gateway.state import _direct_turns_snapshot_safe
+
+    return _direct_turns_snapshot_safe()
+
+
+class _CensusProbeAgent:
+    """Snapshots the census while the turn is 'running' in its carrier."""
 
     def __init__(self):
         self.task = None
-        self.snapshot_during = None
+        self.census_during = None
 
     def handle_task(self, task):
         self.task = task
-        self.snapshot_during = get_direct_activity_registry().snapshot()
-        return []
+        self.census_during = _census()
+        return [{"type": "task_done", "task_id": task["id"], "chat_id": task["chat_id"]}]
 
 
 def _patch_workers(monkeypatch, tmp_path):
@@ -52,80 +60,55 @@ def _patch_workers(monkeypatch, tmp_path):
 
     import supervisor.message_bus as message_bus
     import supervisor.workers as workers
+    from tests.conversation_carrier_support import isolate_lane_pool
 
     drive = tmp_path / "drive"
     (drive / "logs").mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(workers, "DRIVE_ROOT", drive)
-    # These tests pin the registry/bridge seams, not the process-lifetime event
-    # bus. Use a local queue so the turn never touches get_event_q(): a prior
-    # TestClient lifespan in the same xdist worker leaves _EVENT_Q_SHUTDOWN
-    # latched (server shutdown calls shutdown_event_q()), and the real
-    # get_event_q() then raises before agent.handle_task ever runs (seen on the
-    # Windows CI shard; same isolation precedent as
+    # These tests pin the census/bridge seams, not the process-lifetime event bus: a local
+    # queue keeps the turn off get_event_q() (same isolation precedent as
     # tests/test_promote_event_transport.py::_isolate_event_bus_shutdown_latch).
-    monkeypatch.setattr(workers, "get_event_q", lambda: queue.Queue())
+    bus = queue.Queue()
+    [spare] = isolate_lane_pool(monkeypatch, drive, event_q=bus)
     # Capture the turn's start announce (bridge typing frame) instead of
     # touching the real singleton bridge.
     bridge_probe = _BridgeProbe()
     monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge_probe)
-    return workers, bridge_probe
+    return workers, bridge_probe, spare, bus
 
 
-def test_run_chat_task_tracks_direct_turn_for_its_duration(tmp_path, monkeypatch):
-    workers, bridge = _patch_workers(monkeypatch, tmp_path)
+def test_admitted_turn_is_in_the_census_for_its_duration(tmp_path, monkeypatch):
+    from tests.conversation_carrier_support import carry
 
-    agent = _RegistryProbeAgent()
-    workers._run_chat_task(
-        agent,
-        7,
-        "hello",
-        None,
-        task_metadata={
-            "origin_message_ref": {"client_message_id": "cmid-42"},
-        },
-    )
-
-    assert agent.task is not None
-    snap = agent.snapshot_during
-    assert isinstance(snap, list) and len(snap) == 1
-    turn = snap[0]
-    assert turn["activity_id"] == str(agent.task["id"])
-    assert turn["chat_id"] == 7
-    assert turn["client_message_id"] == "cmid-42"
-    assert turn["kind"] == "direct_chat"
-    assert turn["phase"] == "preparing"
-    # Cleared once the turn concluded.
+    workers, bridge, spare, bus = _patch_workers(monkeypatch, tmp_path)
+    workers.handle_chat_direct(7, "hello", None, task_metadata={"origin_message_ref": {"client_message_id": "cmid-42"}})
+    # The admission wrote the row; the census lists it from the row (no process-local actor).
+    [turn] = _census()
+    assert turn["chat_id"] == 7 and turn["client_message_id"] == "cmid-42" and turn["kind"] == "direct_chat"
+    assert turn["phase"] == "working" and turn["carrier"] == "worker"  # handed to the lane spare
     assert get_direct_activity_registry().snapshot() == []
+    agent = _CensusProbeAgent()
+    carry(workers, spare, agent)
+    assert agent.task["id"] == turn["activity_id"]
+    assert [row["activity_id"] for row in agent.census_during] == [turn["activity_id"]]
+    # The carrier's task_done ends the row (the supervisor's pooled custody pops it).
+    done = [event for event in list(bus.queue) if event.get("type") == "task_done"]
+    assert [event["task_id"] for event in done] == [turn["activity_id"]]
     # The authoritative start is announced immediately (2A): the client's
     # `Sending...` retires on this frame, which also carries the
     # activity<->client_message_id link for the keyed conclusion.
     announces = [c for c in bridge.calls if c["action"] == "typing"]
     assert len(announces) == 1
     assert announces[0]["chat_id"] == 7
-    assert announces[0]["activity_id"] == str(agent.task["id"])
+    assert announces[0]["activity_id"] == turn["activity_id"]
     assert announces[0]["client_message_id"] == "cmid-42"
     assert announces[0]["kind"] == "direct_chat"
     assert announces[0]["phase"] == "thinking"
 
 
-def test_run_chat_task_tracks_direct_turn_with_project_id(tmp_path, monkeypatch):
-    workers, bridge = _patch_workers(monkeypatch, tmp_path)
-
-    agent = _RegistryProbeAgent()
-    workers._run_chat_task(
-        agent,
-        3,
-        "decide",
-        None,
-        task_metadata={
-            "client_message_id": "cmid-flat",
-            "project_id": "proj-x",
-        },
-    )
-
-    snap = agent.snapshot_during
-    assert isinstance(snap, list) and len(snap) == 1
-    turn = snap[0]
+def test_admitted_turn_census_row_carries_its_project_id(tmp_path, monkeypatch):
+    workers, bridge, spare, _bus = _patch_workers(monkeypatch, tmp_path)
+    workers.handle_chat_direct(3, "decide", None, task_metadata={"client_message_id": "cmid-flat", "project_id": "proj-x"})
+    [turn] = _census()
     assert turn["kind"] == "direct_chat"
     # Flat metadata key is the fallback when origin_message_ref is absent.
     assert turn["client_message_id"] == "cmid-flat"
@@ -136,44 +119,35 @@ def test_run_chat_task_tracks_direct_turn_with_project_id(tmp_path, monkeypatch)
     assert announces[0]["kind"] == "direct_chat"
 
 
-def test_run_chat_task_unregisters_and_keys_error_final_when_agent_raises(tmp_path, monkeypatch):
-    workers, bridge = _patch_workers(monkeypatch, tmp_path)
-    sent = []
-    monkeypatch.setattr(
-        workers, "send_with_budget", lambda *a, **k: sent.append((a, k))
-    )
+def test_a_carrier_failure_is_the_turns_own_terminal_and_the_start_announce_links_the_submission(tmp_path, monkeypatch):
+    from ouroboros.task_results import load_task_result
+    from tests.conversation_carrier_support import carry
+
+    workers, bridge, spare, _bus = _patch_workers(monkeypatch, tmp_path)
+    drive = workers.DRIVE_ROOT
 
     class _BoomAgent:
+        env = SimpleNamespace(drive_root=drive, drive_path=lambda name: drive / name)
+
         def handle_task(self, task):
             self.task = task
             raise RuntimeError("deliberate failure")
 
+    workers.handle_chat_direct(5, "boom", None, task_metadata={"origin_message_ref": {"client_message_id": "cmid-err"}})
     agent = _BoomAgent()
-    # _run_chat_task swallows the error (reports to chat); the registry must
-    # not leak a ghost activity that would pin "Thinking..." forever.
-    workers._run_chat_task(
-        agent,
-        5,
-        "boom",
-        None,
-        task_metadata={"origin_message_ref": {"client_message_id": "cmid-err"}},
-    )
+    # The carrier records the exception as the turn's own terminal before it unwinds (owner
+    # decision 1A, 11.10.2026); the registry keeps no ghost activity that would pin "Thinking...".
+    with pytest.raises(RuntimeError, match="deliberate failure"):
+        carry(workers, spare, agent)
     assert get_direct_activity_registry().snapshot() == []
-    # The error final is keyed with the turn's activity id so the client
-    # concludes exactly this turn (4A) instead of relying on an unkeyed sweep.
-    assert len(sent) == 1
-    args, kwargs = sent[0]
-    assert args[0] == 5
-    assert kwargs.get("task_id") == str(agent.task["id"])
-    assert kwargs.get("progress_meta") == {"task_terminal_status": "failed"}
-    # The failed turn re-announces the activity<->client_message_id link right
-    # before the keyed final, so the client retires the `Sending...` submission
-    # even when the start announce never reached it.
+    stored = load_task_result(drive, agent.task["id"])
+    assert stored["status"] == "failed" and "deliberate failure" in stored["result"]
+    # The start announce carried the activity<->client_message_id link the keyed conclusion needs.
     announces = [c for c in bridge.calls if c["action"] == "typing"]
-    assert len(announces) == 2  # start announce + pre-final announce
-    assert announces[-1]["activity_id"] == str(agent.task["id"])
-    assert announces[-1]["client_message_id"] == "cmid-err"
-    assert announces[-1]["kind"] == "direct_chat"
+    assert len(announces) == 1
+    assert announces[0]["activity_id"] == str(agent.task["id"])
+    assert announces[0]["client_message_id"] == "cmid-err"
+    assert announces[0]["kind"] == "direct_chat"
 
 
 # ---------------------------------------------------------------------------

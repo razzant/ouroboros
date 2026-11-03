@@ -14,7 +14,7 @@ import pytest
 from ouroboros import review_checking as rc
 from ouroboros.config import CLAUDEXOR_DELEGATED_WORKSPACE_ROOT_MIN_VERSION
 from ouroboros.subagents import delegated_run_shape
-from tests.test_review_checking import _author_state, _git, author  # noqa: F401
+from tests.test_review_checking import _author_state, _git, author, old_clone_seat  # noqa: F401
 
 
 def _bytes_git(root, *args):
@@ -58,7 +58,7 @@ def test_workspace_write_capture_preserves_raw_bytes_without_running_filters(aut
     named.parent.mkdir()
     named.write_bytes(b"<coverage>\r\nbyte exact\x00</coverage>")
 
-    evidence = rc.capture_seat_evidence(data, "task", "raw", release=True)
+    evidence = rc.capture_seat_evidence(data, "task", "raw")
 
     assert evidence["status"] == "retained", evidence
     assert not marker.exists()
@@ -86,11 +86,12 @@ def test_linked_source_and_linked_reviewer_index_leave_source_controls_unchanged
     control_before = linked_index.read_bytes()
     # The reviewer index may even point to source controls: it is never copied,
     # read or written by host capture. Its worktree bytes are the evidence.
-    (area / ".git" / "index").unlink()
-    (area / ".git" / "index").symlink_to(linked_index)
+    area_index = pathlib.Path(_git(area, "rev-parse", "--path-format=absolute", "--git-path", "index"))
+    area_index.unlink()
+    area_index.symlink_to(linked_index)
     raw = b"linked checking bytes\r\n\x00"
     (area / "f.txt").write_bytes(raw)
-    evidence = rc.capture_seat_evidence(data, "task", "linked", release=True)
+    evidence = rc.capture_seat_evidence(data, "task", "linked")
 
     assert evidence["status"] == "retained", evidence
     assert linked_index.read_bytes() == control_before
@@ -102,10 +103,12 @@ def test_linked_source_and_linked_reviewer_index_leave_source_controls_unchanged
 
 @pytest.mark.skipif(os.name == "nt", reason="symlink privileges vary on Windows")
 @pytest.mark.parametrize("control", ["config", "objects"])
-def test_linked_reviewer_control_is_refused_without_touching_source(author, tmp_path, control):  # noqa: F811
+def test_an_older_clone_seats_linked_control_is_refused_without_touching_source(author, tmp_path, control):  # noqa: F811
+    """A seat made before linked worktrees keeps its own Git controls; one the reviewer replaced
+    with a link is refused (its capture would read through it), and the copy stays recoverable."""
     data = tmp_path / "data"
     source = rc.freeze_checking_source(author, data_root=data, subject=rc.SUBJECT_INDEX)
-    area = pathlib.Path(rc.prepare_seat_area(data, "task", "linked-control", source))
+    area = old_clone_seat(data, author, source, "linked-control")
     before = _author_state(author)
     config_before = (author / ".git" / "config").read_bytes()
     target = area / ".git" / control
@@ -116,7 +119,7 @@ def test_linked_reviewer_control_is_refused_without_touching_source(author, tmp_
     target.symlink_to(author / ".git" / control, target_is_directory=control == "objects")
     (area / "f.txt").write_bytes(b"must remain recoverable\r\n")
 
-    evidence = rc.capture_seat_evidence(data, "task", "linked-control", release=True)
+    evidence = rc.capture_seat_evidence(data, "task", "linked-control")
 
     assert evidence["status"] == "capture_failed", evidence
     assert f".git/{control}" in evidence["error"]
@@ -138,7 +141,7 @@ def test_reviewer_index_flags_cannot_hide_changes_or_invent_raw_evidence(author,
     (area / ".gitignore").unlink()
     unusual_name = "odd name.txt" if os.name == "nt" else "odd\nname.txt"
     (area / unusual_name).write_bytes(b"raw filename\r\n")
-    evidence = rc.capture_seat_evidence(data, "task", "index-flags", release=True)
+    evidence = rc.capture_seat_evidence(data, "task", "index-flags")
 
     assert evidence["status"] == "retained", evidence
     replay = _replay_patch(tmp_path, source, evidence)
@@ -163,7 +166,7 @@ def test_directory_replaced_by_symlink_records_link_without_reading_target(autho
     shutil.rmtree(area / "nested")
     (area / "nested").symlink_to(outside, target_is_directory=True)
 
-    evidence = rc.capture_seat_evidence(data, "task", "link", release=True)
+    evidence = rc.capture_seat_evidence(data, "task", "link")
 
     assert evidence["status"] == "retained", evidence
     replay = _replay_patch(tmp_path, source, evidence)
@@ -173,7 +176,7 @@ def test_directory_replaced_by_symlink_records_link_without_reading_target(autho
 
 
 @pytest.mark.parametrize("populated", [False, True])
-def test_baseline_gitlink_is_preserved_and_populated_nested_worktree_keeps_copy(author, tmp_path, populated):  # noqa: F811
+def test_baseline_gitlink_is_preserved_and_populated_nested_worktree_is_a_named_gap(author, tmp_path, populated):  # noqa: F811
     commit = _git(author, "rev-parse", "HEAD")
     _git(author, "update-index", "--add", "--cacheinfo", f"160000,{commit},nested")
     data = tmp_path / "data"
@@ -183,17 +186,17 @@ def test_baseline_gitlink_is_preserved_and_populated_nested_worktree_keeps_copy(
     if populated:
         (area / "nested" / "probe.txt").write_bytes(b"nested reviewer output")
 
-    evidence = rc.capture_seat_evidence(data, "task", "gitlink", release=True)
+    evidence = rc.capture_seat_evidence(data, "task", "gitlink")
 
     # No nested Git command or child config is needed to keep the immutable
-    # baseline gitlink. Files beneath it are disclosed, never silently dropped.
+    # baseline gitlink. Files beneath it are disclosed, never silently dropped;
+    # a receipt that names its gap releases the copy.
     assert evidence["after_tree"] == source["tree"], evidence
     assert evidence["changed"] == []
-    assert area.exists() is populated
+    assert not area.exists()
     if populated:
         assert evidence["status"] == "partial"
         assert evidence["gaps"] == [{"path": "nested", "reason": "nested_git_worktree_not_captured"}]
-        assert (area / "nested" / "probe.txt").read_bytes() == b"nested reviewer output"
     else:
         assert evidence["status"] == "retained" and evidence["gaps"] == []
 
@@ -207,7 +210,7 @@ def test_linked_checking_root_is_not_captured_or_reused_as_author(author, tmp_pa
     original = area.with_name("original-area")
     area.rename(original)
     area.symlink_to(author, target_is_directory=True)
-    evidence = rc.capture_seat_evidence(data, "task", "linked-root", release=True)
+    evidence = rc.capture_seat_evidence(data, "task", "linked-root")
     assert evidence["status"] == "capture_failed" and "target was not read" in evidence["error"]
     with pytest.raises(rc.CheckingAreaUnavailable, match="symlink"):
         rc.prepare_seat_area(data, "task", "linked-root", source)

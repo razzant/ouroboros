@@ -127,13 +127,13 @@ test('the replay batch no longer bypasses the status reducer', () => {
     assert.doesNotMatch(chatSource, /_rebuildBatch\.status/);
     assert.doesNotMatch(chatSource, /createRebuildBatch/);
     // setStatus has exactly three callsites: the reducer (syncChatStatus) and the
-    // panel-boot seed — which asks the same pure reducer, so a late panel says
-    // Starting… until the host is ready (В9) — plus its own definition. The
-    // replay-batch "Working..." write and the literal 'Online' seed are gone.
+    // panel-boot seed — which asks the same producer over the server's room, so a
+    // late panel says Starting… until the host is ready (В9) — plus its own
+    // definition. The replay-batch "Working..." write and the literal 'Online' seed are gone.
     const calls = chatSource.match(/setStatus\(/g) || [];
     assert.equal(calls.length, 3);
-    assert.match(chatSource, /const derived = deriveChatStatus\(\);\s*setStatus\(derived\.kind, derived\.text\);/);
-    assert.match(chatSource, /const seed = computeDerivedChatStatus\(\{ supervisorStarting: !hostReady \}\);\s*if \(ws\.isConnected\?\.\(\)\) setStatus\(seed\.kind, seed\.text\);/);
+    assert.match(chatSource, /const derived = deriveChatStatus\(\);\s*setStatus\(derived\);/);
+    assert.match(chatSource, /const seed = deriveChatStatus\(\);\s*if \(ws\.isConnected\?\.\(\)\) setStatus\(seed\);/);
     assert.doesNotMatch(chatSource, /setStatus\('online', 'Online'\)/);
     // The reducer still runs unconditionally right after the replay dispatch, so
     // a replayed unfinished foreground card reaches the badge through it.

@@ -11,6 +11,10 @@ allowlist below, with a reason.
 
 import ast
 import pathlib
+from types import MappingProxyType
+from typing import Mapping, NamedTuple
+
+import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -85,13 +89,8 @@ def _call_name(func):
     return ""
 
 
-def _emitted_types(*, commands=False):
-    """Supervisor events, or with ``commands`` the supervisor->worker input commands.
-
-    A put into a worker's ``in_q`` is answered by ``worker_main``, never by a
-    supervisor handler: it is neither an event nor an allowlist excuse.
-    """
-    emitted = {}
+def _runtime_trees():
+    """Read current runtime source; callers own the trees, with no global cache."""
     files = [REPO / "server.py"]
     files += list((REPO / "ouroboros").rglob("*.py"))
     files += list((REPO / "supervisor").rglob("*.py"))
@@ -99,9 +98,20 @@ def _emitted_types(*, commands=False):
     for path in files:
         try:
             trees[path] = ast.parse(path.read_text(encoding="utf-8"))
-        except Exception:
+        except (OSError, SyntaxError):
             continue
-    constants = _string_constants(trees.values())
+    return trees
+
+
+def _emitted_types(trees=None, constants=None, *, commands=False):
+    """Supervisor events, or with ``commands`` the supervisor->worker input commands.
+
+    A put into a worker's ``in_q`` is answered by ``worker_main``, never by a
+    supervisor handler: it is neither an event nor an allowlist excuse.
+    """
+    trees = _runtime_trees() if trees is None else trees
+    constants = _string_constants(trees.values()) if constants is None else constants
+    emitted = {}
     for path, tree in trees.items():
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -131,10 +141,11 @@ def _emitted_types(*, commands=False):
                     emitted.setdefault(event_type, []).append(
                         f"{path.relative_to(REPO)}:{node.lineno}"
                     )
-    return emitted
+    return MappingProxyType({kind: tuple(sites) for kind, sites in emitted.items()})
 
 
-def _registered_types():
+def _registered_types(trees=None):
+    trees = _runtime_trees() if trees is None else trees
     registered = set()
     for name in (
         "supervisor/events.py",
@@ -142,7 +153,7 @@ def _registered_types():
         "supervisor/events_chat_delivery.py",
         "supervisor/telemetry_events.py",
     ):
-        tree = ast.parse((REPO / name).read_text(encoding="utf-8"))
+        tree = trees[REPO / name]
         for node in ast.walk(tree):
             if not isinstance(node, ast.Assign):
                 continue
@@ -157,12 +168,29 @@ def _registered_types():
                     for key in node.value.keys
                     if isinstance(key, ast.Constant)
                 }
-    return registered
+    return frozenset(registered)
 
 
-def test_every_emitted_literal_type_has_a_handler():
-    emitted = _emitted_types()
-    registered = _registered_types()
+class EventIndex(NamedTuple):
+    emitted: Mapping[str, tuple[str, ...]]
+    commands: Mapping[str, tuple[str, ...]]
+    registered: frozenset[str]
+
+
+@pytest.fixture(scope="session")
+def event_index():
+    """Read this candidate once; share only immutable facts, never mutable ASTs."""
+    trees = _runtime_trees()
+    constants = _string_constants(trees.values())
+    return EventIndex(
+        _emitted_types(trees, constants),
+        _emitted_types(trees, constants, commands=True),
+        _registered_types(trees),
+    )
+
+
+def test_every_emitted_literal_type_has_a_handler(event_index):
+    emitted, registered = event_index.emitted, event_index.registered
     # Sanity: the scan sees real emitters and the registry parse worked.
     assert "task_done" in emitted
     assert "task_done" in registered
@@ -179,24 +207,24 @@ def test_every_emitted_literal_type_has_a_handler():
     )
 
 
-def test_allowlist_entries_stay_emitted():
+def test_allowlist_entries_stay_emitted(event_index):
     """An allowlist row for a type nobody emits any more is stale."""
-    emitted = _emitted_types()
+    emitted = event_index.emitted
     stale = ALLOWLIST - set(emitted)
     assert not stale, f"ALLOWLIST rows no longer emitted anywhere: {stale}"
 
 
-def test_worker_input_commands_are_not_supervisor_events():
+def test_worker_input_commands_are_not_supervisor_events(event_index):
     """The idle probe goes in on ``in_q``; only its answer is a supervisor event."""
-    commands, emitted, registered = _emitted_types(commands=True), _emitted_types(), _registered_types()
+    commands, emitted, registered = event_index.commands, event_index.emitted, event_index.registered
     assert "worker_quiescence" in commands and "worker_quiescence" not in emitted
     assert "worker_quiescence" not in registered | ALLOWLIST
     assert "worker_quiescent" in emitted and "worker_quiescent" in registered
 
 
-def test_previously_dropped_types_are_registered():
+def test_previously_dropped_types_are_registered(event_index):
     """The concrete v6.69.0-class omissions stay fixed."""
-    registered = _registered_types()
+    registered = event_index.registered
     for event_type in (
         "review_wave_budget_partial_unknown",
         "task_message_injected",

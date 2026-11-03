@@ -6,20 +6,20 @@ import json
 
 import pytest
 
-from ouroboros import evidence_packer as packer
+from ouroboros import maintenance
 from ouroboros import startup_historical_audit as audit
 
 
-@pytest.mark.parametrize("kind", ["packer", "audit"])
+@pytest.mark.parametrize("kind", ["maintenance", "audit"])
 @pytest.mark.parametrize("case", [
     "completed", "unknown", "failed", "nonzero", "malformed", "bool_count", "negative",
     "overflow", "stop_during_spawn", "stop_after_publication", "read_error", "record_error", "already_stopped",
 ])
 def test_maintenance_completion_contract(tmp_path, monkeypatch, kind, case):
-    module = packer if kind == "packer" else audit
-    job = packer.EvidencePacker() if kind == "packer" else audit.HistoricalAudit()
-    counters = ({**dict.fromkeys(packer._COUNTERS, 0), "packed": 1, "candidates": 2, "raw": 3, "compressed": 1, "unlinked": 1}
-                if kind == "packer" else
+    module = maintenance if kind == "maintenance" else audit
+    job = maintenance.MaintenanceChild() if kind == "maintenance" else audit.HistoricalAudit()
+    counters = ({"jobs": {"evidence_packing": {"state": "done", "items": 1}}}
+                if kind == "maintenance" else
                 {"facts_written": 1, "manifests_checked": 2, "wall_seconds": 0, "cpu_seconds": 0})
     status = case if case in {"unknown", "failed"} else "completed"
     payload = {"status": status, **counters, "extra": "discarded"}
@@ -75,8 +75,9 @@ def test_maintenance_completion_contract(tmp_path, monkeypatch, kind, case):
                 raise OSError("synthetic record failure")
 
     monkeypatch.setattr(module, "spawn_maintenance_job", spawn)
-    if kind == "packer":
-        monkeypatch.setattr(packer.packs, "record_storage_pack", record)
+    if kind == "maintenance":
+        monkeypatch.setattr(maintenance, "due", lambda _root: ["evidence_packing"])
+        monkeypatch.setattr(maintenance, "_record", record)
     else:
         monkeypatch.setattr(job, "_record", record)
     if case == "already_stopped":
@@ -85,10 +86,10 @@ def test_maintenance_completion_contract(tmp_path, monkeypatch, kind, case):
 
     if case == "already_stopped":
         assert spawned == signals == []
-        assert records == ([] if kind == "packer" else [{"phase": "stopped"}])
+        assert records == ([] if kind == "maintenance" else [{"phase": "stopped"}])
         assert job._process is None
         return
-    assert spawned == ["evidence_packer" if kind == "packer" else "startup_historical_audit"]
+    assert spawned == ["maintenance" if kind == "maintenance" else "startup_historical_audit"]
     assert records[0] == {"phase": "started", "pid": 4242}
     errors = case in {"read_error", "record_error"}
     stopped = case in {"stop_during_spawn", "stop_after_publication"}
@@ -100,5 +101,5 @@ def test_maintenance_completion_contract(tmp_path, monkeypatch, kind, case):
         phase = "stopped" if stopped else "unknown" if invalid else "failed" if case == "nonzero" else status
         assert records[1:] == [{"phase": phase, "exit_code": child.wait(), **({} if invalid else counters)}]
     assert child.stdout.closed is (case != "record_error")
-    assert job._process is (None if kind == "packer" else child)
+    assert job._process is (None if kind == "maintenance" else child)
     assert job._stopped.is_set() is (stopped or (errors and kind == "audit"))

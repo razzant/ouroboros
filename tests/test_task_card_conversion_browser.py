@@ -1,5 +1,7 @@
 """Converting a RUNNING direct Main turn into a project, end to end in a browser.
 
+One work, one card: the click moves the work and the SAME Main card becomes its portal.
+
 Owner decision 16.09: a direct conversation turn that does real work IS a full
 task card in Main, and it offers "Turn into project" WHILE IT RUNS — not only
 after it ends. The running half is what no unit test can certify: the click has
@@ -15,9 +17,7 @@ produces the final answer whose delivery room is the whole point.
 """
 
 import json
-import os
 import uuid
-from pathlib import Path
 
 import pytest
 
@@ -27,8 +27,10 @@ from tests.system_e2e.harness import (
     start_server, wait_durable_result, wait_until,
 )
 from tests.test_chat_addressing_browser import ToolCallOnlyModel
+from tests._shared import producer_evidence_dir
 from tests.test_owner_wait_integration import wait_clone as clone_fixture
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
+from tests.ui_console_errors import PageErrors
 
 wait_clone = clone_fixture
 pytestmark = [pytest.mark.serial, pytest.mark.ui_browser]
@@ -53,12 +55,36 @@ _MAIN_CARD_FACTS = """id => {
     const card = document.querySelector(`#page-chat .chat-live-card[data-task-id="${id}"]`);
     return {
         card: !!card,
-        converted: card?.dataset.projectCreated || '',
-        bound: card?.dataset.projectBound || '',
+        portal: card?.dataset.portal || '',
         pointer: !!card?.querySelector('.chat-live-bound-pointer'),
         convert_buttons: document.querySelectorAll('#page-chat [data-turn-into-project]').length,
     };
 }"""
+
+
+def _lane_facts(data_root, task_id):
+    """What the published queue says of this turn (ARCHITECTURE "Conversation lane"): an owner turn owns a RUNNING
+    row published at admission, never a PENDING one, carried by a conversation-lane slot beside the project pool
+    that MAX_WORKERS bounds."""
+    from ouroboros.queue_observation import load_queue_document
+
+    document = load_queue_document(data_root)
+    rows = {part: [row for row in document.get(part) or [] if isinstance(row, dict) and row.get("id") == task_id]
+            for part in ("running", "pending")}
+    owner = ((rows["running"] or [{}])[0].get("task") or {}).get("_execution_owner") or {}
+    return {"running": len(rows["running"]), "pending": len(rows["pending"]), "kind": owner.get("kind"),
+            "lane": owner.get("lane"), "project_workers": document.get("worker_total"),
+            "project_workers_idle": document.get("assignable_idle_workers")}
+
+
+def _lane_violation(lane):
+    """Why these queue facts are not a direct turn carried by the conversation lane ('' when they are)."""
+    if (lane["running"], lane["pending"]) != (1, 0):
+        return (f"the queue lists the turn {lane['running']}x RUNNING and {lane['pending']}x PENDING, "
+                "not once RUNNING and never PENDING")
+    if (lane["kind"], lane["lane"]) != ("direct", "conversation"):
+        return f"the turn is carried by {lane['kind']}/{lane['lane']}, not by the conversation lane"
+    return ""
 
 
 def _task_rows(oracle, task_id):
@@ -100,7 +126,8 @@ def test_running_direct_turn_converts_to_project_and_its_answer_follows(
         **original_env(server), "HOME": str(home), "USERPROFILE": str(home),
         "XDG_CONFIG_HOME": str(home / ".config"),
     })
-    evidence = Path(os.environ.get("OUROBOROS_BROWSER_EVIDENCE_OUT") or tmp_path / "evidence")
+    evidence = producer_evidence_dir(tmp_path / "evidence", "task-card-conversion",
+                                     env="OUROBOROS_BROWSER_EVIDENCE_OUT")
     evidence = evidence / f"convert-running-{engine}-{theme}-{width}"
     evidence.mkdir(parents=True, exist_ok=True)
     with ToolCallOnlyModel(steps, final_answer=CARD_NAME, gate=gate) as stub:
@@ -110,8 +137,7 @@ def test_running_direct_turn_converts_to_project_and_its_answer_follows(
             with sync_playwright() as pw:
                 browser = getattr(pw, engine).launch()
                 page = browser.new_page(viewport={"width": width, "height": 900}, has_touch=width < 980)
-                errors = []
-                page.on("pageerror", lambda error: errors.append(str(error)))
+                errors = PageErrors(page, engine)
                 page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
                 page.add_init_script(f"localStorage.setItem('ouroboros.theme', '{theme}')")
                 try:
@@ -136,12 +162,14 @@ def test_running_direct_turn_converts_to_project_and_its_answer_follows(
                         f'.chat-live-card[data-task-id="{task_id}"][data-finished="0"]'
                     ).count() == 1, "the conversion control is not on a RUNNING card"
                     assert convert.count() == 1
-                    assert task_id not in oracle.running_ids(), "a direct turn must not take a pool worker"
+                    lane = _lane_facts(server.data_root, task_id)
+                    assert not (why := _lane_violation(lane)), \
+                        f"a direct turn is carried by the conversation lane, not a project pool worker: {why}: {lane}"
                     at_click = {
                         "stored_status": str(oracle.task_result(task_id).get("status") or ""),
                         "gate_held": gate.held, "gate_released": gate.release.is_set(),
                         "binding": project_id_for_task(server.data_root, task_id),
-                        "card_finished": card.get_attribute("data-finished"),
+                        "card_finished": card.get_attribute("data-finished"), "lane": lane,
                         "title": card.locator("[data-live-title]").inner_text().strip(),
                     }
                     assert at_click["stored_status"] == "running", at_click
@@ -171,15 +199,15 @@ def test_running_direct_turn_converts_to_project_and_its_answer_follows(
                     assert payload["handoff_receipt"] == "durable", payload
                     assert payload["handoff_id"].startswith("project-handoff:"), payload
 
-                    # The Main card became the project chip, and stopped offering
-                    # a second conversion of the same work.
+                    # The SAME Main card became the work's portal (one work, one card): it keeps
+                    # its Stop, names its Project at the start of its action row, and offers no second conversion.
                     converted = page.locator(
-                        f'.chat-live-card[data-task-id="{task_id}"][data-project-created="1"]')
+                        f'.chat-live-card[data-task-id="{task_id}"][data-portal="1"]')
                     converted.wait_for(timeout=30000)
                     page.wait_for_selector(
-                        f'.chat-live-card[data-task-id="{task_id}"].project-handoff', timeout=30000)
+                        f'.chat-live-card[data-task-id="{task_id}"] > .chat-live-foot > .chat-live-foot-end'
+                        ' > .chat-live-bound-pointer', timeout=30000)
                     assert converted.get_attribute("data-project-id") == project["id"]
-                    assert converted.get_attribute("data-handoff-id") == payload["handoff_id"]
                     assert converted.get_attribute("data-receipt") is None, "a durable receipt is not marked as a gap"
                     assert converted.locator(".chat-live-project-name").inner_text().strip()
                     assert page.locator(f'.chat-live-card[data-task-id="{task_id}"]'
@@ -228,25 +256,25 @@ def test_running_direct_turn_converts_to_project_and_its_answer_follows(
                     page.get_by_text(marker, exact=False).first.wait_for(timeout=30000)
                     # Zero convert buttons is also the state of a card whose
                     # binding has not landed yet. Wait for the fact the
-                    # assertion below requires: no card, or a card that names
-                    # its project.
+                    # assertion below requires: no card, or the work's portal.
                     reloaded = wait_until(
                         lambda: (lambda facts: facts if (
-                            not facts["card"] or facts["converted"] == "1" or facts["bound"] == "1"
+                            not facts["card"] or facts["portal"] == "1"
                         ) else None)(
                             page.evaluate(_MAIN_CARD_FACTS, task_id)),
                         30) or page.evaluate(_MAIN_CARD_FACTS, task_id)
                     assert reloaded["convert_buttons"] == 0, \
                         f"Main still offers to convert work that already has a project: {reloaded}"
-                    # A surviving card names its Project instead of offering
-                    # a second conversion; the durable receipt survives separately.
-                    assert not reloaded["card"] or reloaded["converted"] == "1" or reloaded["bound"] == "1", \
+                    # A surviving card is the work's portal naming its Project instead of
+                    # offering a second conversion; the durable receipt row is data, not an entry.
+                    assert not reloaded["card"] or (reloaded["portal"] == "1" and reloaded["pointer"]), \
                         f"a surviving Main card does not name its project: {reloaded}"
                     main_text = page.locator("#page-chat").inner_text()
                     page.locator('#page-chat .project-answer').filter(has_text='The converted turn finished its work.').wait_for(timeout=30000)
                     page.wait_for_selector('#page-chat .project-answer.is-folded', timeout=30000)
-                    page.wait_for_function("() => [...document.querySelectorAll('#page-chat .project-handoff:not([hidden]) .chat-live-phase')].some(n => n.textContent === 'Done')", timeout=30000)
-                    assert page.locator('#page-chat .project-handoff:not([hidden])').count() == 1
+                    page.wait_for_function("() => [...document.querySelectorAll('#page-chat .chat-live-card[data-portal]:not([hidden]) .chat-live-phase')].some(n => n.textContent === 'Done')", timeout=30000)
+                    assert page.locator('#page-chat .chat-live-card[data-portal="1"]:not([hidden])').count() == 1
+                    assert page.locator('#page-chat .project-handoff').count() == 0, "no second entry beside the card"
                     assert marker in main_text, "Main lost the owner message the turn started from"
                     main_history = page.evaluate(
                         "async () => (await (await fetch('/api/chat/history?chat_id=1')).json())")
@@ -261,7 +289,7 @@ def test_running_direct_turn_converts_to_project_and_its_answer_follows(
                     page.wait_for_selector("#project-panel:not([hidden])")
                     page.locator("#project-panel").get_by_text('The converted turn finished its work.', exact=False).first.wait_for(timeout=30000)
                     page.screenshot(path=str(evidence / "reloaded-project.png"), full_page=True, animations="disabled")
-                    assert not errors, errors
+                    assert not errors.unexpected(), errors
                     (evidence / "receipt.json").write_text(json.dumps({
                         "engine": engine, "theme": theme, "width": width, "task": task, "at_click": at_click,
                         "from_task_response": payload, "binding": binding,

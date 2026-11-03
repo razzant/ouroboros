@@ -12,6 +12,7 @@ import pytest
 
 from ouroboros.task_results import load_task_result
 from ouroboros.tools.registry import ToolContext
+from tests import _dialogue as dialogue_test
 from tests._shared import configure_test_subagent
 from tests.test_subagent_role_texts import _env
 from tests._store_shared import result_signature, seed_result, unreadable_result
@@ -199,14 +200,13 @@ def test_depth_refusal_persists_only_the_supplied_role(tmp_path, monkeypatch, ro
 def test_final_only_history_recovers_role_without_rewriting_old_rows(tmp_path, role_fields, role):
     from ouroboros.gateway.history import make_chat_history_endpoint
 
-    logs, results = tmp_path / "logs", tmp_path / "task_results"
-    logs.mkdir()
+    results = tmp_path / "task_results"
     results.mkdir()
-    history = logs / "chat.jsonl"
-    history.write_text(json.dumps({
+    history = tmp_path / "archive" / "chat_20260821T100001.jsonl"
+    dialogue_test.seed(tmp_path, archives={history.name: [{
         "ts": "2026-08-21T10:00:01Z", "chat_id": 7, "direction": "out",
         "task_id": "historic-child", "text": "Retained child findings",
-    }) + "\n", encoding="utf-8")
+    }]})
     result = results / "historic-child.json"
     result.write_text(json.dumps({
         "_schema_version": 1, "task_id": "historic-child", "status": "completed",
@@ -216,6 +216,8 @@ def test_final_only_history_recovers_role_without_rewriting_old_rows(tmp_path, r
     originals = {path: path.read_bytes() for path in (history, result)}
     from ouroboros.store_import import ensure_current_store
     ensure_current_store(tmp_path)  # the boot door imports the historic file; a page read never imports
+    dialogue_test.import_all(tmp_path)
+    stored_rows = dialogue_test.chat_rows(tmp_path)
     endpoint = make_chat_history_endpoint(tmp_path)
     response = asyncio.run(endpoint(SimpleNamespace(query_params={"chat_id": "7"})))
     assert response.status_code == 200
@@ -224,6 +226,7 @@ def test_final_only_history_recovers_role_without_rewriting_old_rows(tmp_path, r
     assert row["subagent_role"] == role
     assert row["model"] == "openai/fixture-model"
     assert row["parent_task_id"] == "parent"
+    assert dialogue_test.chat_rows(tmp_path) == stored_rows
     assert {path: path.read_bytes() for path in originals} == originals
 
 

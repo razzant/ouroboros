@@ -1,5 +1,7 @@
 """Live executor facts survive the real progress/delivery/history seams."""
 
+from tests import _dialogue as dialogue_test
+
 import asyncio
 import json
 import queue
@@ -217,7 +219,7 @@ def test_wait_to_live_chat_to_history_keeps_each_own_actor_without_terminal_clai
     )
     for frame in frames:
         events_chat_delivery._handle_send_message(frame, delivery)
-    stored = [json.loads(line) for line in (tmp_path / "logs" / "progress.jsonl").read_text().splitlines()]
+    stored = dialogue_test.log_rows(tmp_path / "logs" / "progress.jsonl")
     response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"limit": "10"})))
     replay = [row for row in json.loads(response.body)["messages"] if row.get("is_progress")]
     for rows in (live, stored, replay):

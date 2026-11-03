@@ -137,9 +137,19 @@ def _subagent_and_update_guard_result(
     acting_tool_grants: Any,
     repo_mutation: bool,
 ) -> ToolResult | None:
-    """Early dispatch gates (native denial, or ``None`` to allow): the read-only and
-    acting subagent tool-name allowlists, and the managed-update merge write-exclusivity
-    (P2/SC2 — only the authorized resolution task may run code tools while a merge is staged)."""
+    """Early dispatch gates (native denial, or ``None`` to allow): the task-diagnostic,
+    read-only and acting subagent tool-name allowlists, and the managed-update merge
+    write-exclusivity (P2/SC2 — only the authorized resolution task may run code tools
+    while a merge is staged)."""
+    from ouroboros.tool_capabilities import TASK_DIAGNOSTIC_TOOL_NAMES, schema_selection_tools_for_context
+    from ouroboros.work_diagnostics import context_ref
+
+    if context_ref(registry._ctx) and (
+            entry is None or name not in TASK_DIAGNOSTIC_TOOL_NAMES | schema_selection_tools_for_context(registry._ctx)):
+        return ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
+            "⚠️ DIAGNOSTIC_CAPABILITY_BLOCKED: this task-related diagnostic may inspect "
+            "work and request existing task controls; it has no product-write or external-tool authority."
+        ))
     if local_readonly_subagent and entry is not None and not registry._readonly_tool_allowed(name):
         return ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
             "⚠️ LOCAL_READONLY_SUBAGENT_BLOCKED: this subagent may inspect "
@@ -147,7 +157,7 @@ def _subagent_and_update_guard_result(
             "external tools and may write knowledge notes, memory marks and "
             "chronicle page drafts in its own name, but may not call first-party "
             f"local tool {name!r}. Parent tasks must perform other writes, commits, "
-            "review gates, tool expansion, runtime control, shell, and skills. "
+            "review gates, tool grants, runtime control, shell, and skills. "
             "Nested readonly delegation is allowed only through schedule_subagent "
             "within configured depth/cap limits."
         ))
@@ -159,8 +169,8 @@ def _subagent_and_update_guard_result(
             "⚠️ ACTING_SUBAGENT_BLOCKED: this mutative subagent may read and "
             "write inside its assigned write root and run shell/services "
             f"there, but may not call first-party tool {name!r}. It cannot "
-            "commit the live body, run review/runtime/skills lifecycle, enable "
-            "tools, or write identity or scratchpad (chronicle pages and parts only "
+            "commit the live body, run review gates/runtime/skills lifecycle, grant "
+            "itself tools, or write identity or scratchpad (chronicle pages and parts only "
             "as its own drafts); the parent applies isolated patches "
             "or verifies shared external files and is the sole live-body committer."
         ))
@@ -278,15 +288,15 @@ def _resource_allowed(ctx: Any, key: str) -> bool:
             resources.update(raw)
     if not resources:
         return True
-    for name in (key, f"allow_{key}"):
-        value = resources.get(name)
-        if isinstance(value, bool):
-            return value
     if key == "web":
         for name in ("network", "allow_network", "internet", "external_network"):
             value = resources.get(name)
             if isinstance(value, bool) and not value:
                 return False
+    for name in (key, f"allow_{key}"):
+        value = resources.get(name)
+        if isinstance(value, bool):
+            return value
     if key == "network":
         for name in ("internet", "external_network"):
             value = resources.get(name)
@@ -326,6 +336,9 @@ def _disabled_tools(ctx: Any) -> frozenset:
     # too (harmless: nothing registers it), so old contracts round-trip as-is.
     if "claude_code_edit" in names:
         names.add("delegate_start")
+    from ouroboros.contracts.task_contract import expand_disabled_tool_names
+
+    names.update(expand_disabled_tool_names(names))
     # Rename compatibility: contracts that withheld `advisory_review` keep
     # withholding the SAME organ under its new name, and vice versa (a new
     # contract naming only the new spelling must also silence the alias).
@@ -333,6 +346,10 @@ def _disabled_tools(ctx: Any) -> frozenset:
         names.add("preflight_review")
     if "preflight_review" in names:
         names.add("advisory_review")
+    # Exact aliases keep saved restrictions in both directions.
+    for spellings in ({"commit_reviewed", "vcs_commit_reviewed"}, {"ocr_pdf", "extract_pdf_text"}):
+        if names & spellings:
+            names.update(spellings)
     return frozenset(names)
 
 
@@ -343,20 +360,82 @@ def disabled_tools_dispatch_only(ctx: Any) -> bool:
     return is_consciousness_origin(getattr(ctx, "task_metadata", None))
 
 
-_GITHUB_TOKEN_TOOLS = frozenset({
-    "list_github_prs",
-    "get_github_pr",
-    "get_github_checks",
-    "comment_on_pr",
-    "pr_merge",
-    "list_github_issues",
-    "get_github_issue",
-    "comment_on_issue",
-    "close_github_issue",
-    "create_github_issue",
-    "submit_skill_to_hub",
-    "generate_evolution_stats",
-})
+_GITHUB_TOKEN_TOOLS = frozenset({"github_read", "github_write", "pr_merge", "submit_skill_to_hub"})
+_NETWORK_BUILTIN_TOOLS = _WEB_TOOLS | _GITHUB_TOKEN_TOOLS | {
+    "vcs_pull_ff", "generate_image", "list_image_models", "recover_image",
+}
+
+
+def _builtin_network_allowed(ctx: Any, name: str) -> bool:
+    """Whether a built-in's network resource gate permits this task's call."""
+    return name not in _NETWORK_BUILTIN_TOOLS or _resource_allowed(ctx, "network")
+
+# Retired names withhold covered methods and api; list disables also cover search.
+# Issue/PR numbers share routes, so comment/title/body restrictions cannot split without a read.
+# Rows: successor, ((method, constraints), ...); empty constraints match the whole method.
+# '*' target is positive; other fields are non-null (including ""/False). include matches a facet.
+_RETIRED_GITHUB_TOOLS: dict[str, tuple[str, tuple[tuple[str, dict[str, str]], ...]]] = {
+    "list_github_issues": ("github_read", (("list", {"kind": "issue"}), ("search", {}), ("api", {}))),
+    "get_github_issue": ("github_read", (("get", {"kind": "issue"}), ("list", {"kind": "comment", "target": "*"}), ("api", {}))),
+    "list_github_prs": ("github_read", (("list", {"kind": "pr"}), ("search", {}), ("api", {}))),
+    "get_github_pr": ("github_read", (("get", {"kind": "pr"}), ("list", {"kind": "review", "target": "*"}),
+                                    ("list", {"kind": "review_comment", "target": "*"}), ("list", {"kind": "comment", "target": "*"}), ("api", {}))),
+    "get_github_checks": ("github_read", (("checks", {}), ("api", {}))),
+    "comment_on_issue": ("github_write", (("comment", {}), ("api", {}))),
+    "comment_on_pr": ("github_write", (("comment", {}), ("review", {}), ("api", {}))),
+    "close_github_issue": ("github_write", (("update", {"state": "closed"}), ("api", {}))),
+    "create_github_issue": ("github_write", (("create_issue", {}), ("api", {}))),
+    "create_github_pr": ("github_write", (("create_pr", {}), ("api", {}))),
+    "update_github_pr": ("github_write", (("update", {"title": "*"}), ("update", {"body": "*"}),
+                                       ("update", {"base": "*"}), ("api", {}))),
+    "set_github_pr_ready": ("github_write", (("update", {"draft": "*"}), ("api", {}))),
+    "get_github_run_log": ("github_read", (("get", {"kind": "run", "include": "log"}), ("api", {}))),
+    "list_github_run_artifacts": ("github_read", (("list", {"kind": "artifact"}), ("api", {}))),
+    "download_github_artifact": ("github_read", (("download", {"kind": "artifact"}), ("api", {}))),
+}
+
+
+_RETIRED_VCS_TOOLS = {"vcs_status": "status", "vcs_diff": "diff"}
+
+
+def _retired_vcs_action_refusal(ctx: Any, name: str, args: Any) -> str:
+    if name == "vcs_read":
+        for retired, action in _RETIRED_VCS_TOOLS.items():
+            if retired in _disabled_tools(ctx) and args.get("action") == action:
+                return (f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.disabled_tools withholds {retired!r}, "
+                        f"which vcs_read(action={action!r}) would carry out for this task.")
+    return ""
+
+
+def _retired_github_method_refusal(ctx: Any, name: str, args: Any) -> str:
+    """The refusal for a successor method a retired, disabled GitHub tool name covered; '' to allow."""
+    if name not in ("github_read", "github_write"):
+        return ""
+    from ouroboros.tools.github import _canonical_github_args
+
+    # Mutate the invocation's arguments so dispatch consumes exactly the values admitted here.
+    args = _canonical_github_args(args if isinstance(args, dict) else {})
+    disabled = _disabled_tools(ctx)
+    method = str(args.get("method") or "")
+    target = str(args.get("target") or "").strip()
+    has_target = not isinstance(args.get("target"), bool) and target.isdigit() and int(target) > 0
+
+    def matches(key: str, value: str) -> bool:
+        if value == "*":
+            return has_target if key == "target" else args.get(key) is not None
+        if key == "include":
+            return isinstance(args.get(key), list) and value in args[key]
+        return str(args.get(key) or "") == value
+
+    for retired, (successor, rows) in _RETIRED_GITHUB_TOOLS.items():
+        if retired not in disabled or successor != name:
+            continue
+        for withheld, constraint in rows:
+            if withheld == method and all(matches(key, value) for key, value in constraint.items()):
+                call = ", ".join([f"method={method!r}"] + [f"{key}={value!r}" for key, value in constraint.items()])
+                return (f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.disabled_tools withholds {retired!r}, "
+                        f"which {name}({call}) would carry out for this task.")
+    return ""
 
 
 def _builtin_tool_availability(name: str, ctx: Any = None) -> tuple[bool, str, str]:
@@ -374,17 +453,17 @@ def _builtin_tool_availability(name: str, ctx: Any = None) -> tuple[bool, str, s
     tool = str(name or "").strip()
     if tool == "web_search":
         try:
-            from ouroboros.tools.search import _available_web_search_backends
+            from ouroboros.tools.search import _available_web_search_backends, _web_search_unavailability
 
             if not _available_web_search_backends():
-                return False, "missing_credential", "web_search_backend"
+                return (False, *_web_search_unavailability())
         except ImportError:
             return True, "", ""
         except Exception:
             return True, "", ""
     if tool in _GITHUB_TOKEN_TOOLS:
         detail = "GITHUB_TOKEN"
-        if tool in {"submit_skill_to_hub", "generate_evolution_stats"}:
+        if tool == "submit_skill_to_hub":
             configured = bool(os.environ.get("GITHUB_TOKEN", "").strip())
         else:
             from ouroboros.tools.github import github_cli_configured
@@ -414,7 +493,11 @@ def _capability_resource_guard_result(
     metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
     if refusal := observe_argument_refusal(metadata, name, args):
         return ToolResult(status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED", text=refusal)
-    if name in _disabled_tools(ctx):
+    from ouroboros.place_guard import dispatch_refusal
+    if refusal := dispatch_refusal(ctx, name, args, ext_tool=ext_tool, is_mcp=is_mcp):
+        return ToolResult(status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED", text=refusal)
+    disabled = _disabled_tools(ctx)
+    if name in disabled:
         return ToolResult(
             status="blocked",
             code="RESOURCE_CONSTRAINT_BLOCKED",
@@ -423,6 +506,8 @@ def _capability_resource_guard_result(
                 f"withholds {name!r} for this task."
             ),
         )
+    if refusal := (_retired_github_method_refusal(ctx, name, args) or _retired_vcs_action_refusal(ctx, name, args)):
+        return ToolResult(status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED", text=refusal)
     available, unavailable_reason, unavailable_detail = _builtin_tool_availability(name, ctx)
     if not available:
         suffix = f" ({unavailable_detail})" if unavailable_detail else ""
@@ -442,21 +527,21 @@ def _capability_resource_guard_result(
                 "requires allowed_resources.web/network."
             ),
         )
+    if not _builtin_network_allowed(ctx, name):
+        return ToolResult(
+            status="blocked",
+            code="RESOURCE_CONSTRAINT_BLOCKED",
+            text=(
+                "⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.network=false "
+                f"blocks {name!r}."
+            ),
+        )
     if name in _WEB_TOOLS and not _resource_allowed(ctx, "web"):
         return ToolResult(
             status="blocked",
             code="RESOURCE_CONSTRAINT_BLOCKED",
             text=(
                 "⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.web=false "
-                f"blocks {name!r}."
-            ),
-        )
-    if name in {"vcs_pull_ff", "generate_image", "list_image_models", "recover_image"} and not _resource_allowed(ctx, "network"):
-        return ToolResult(
-            status="blocked",
-            code="RESOURCE_CONSTRAINT_BLOCKED",
-            text=(
-                "⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.network=false "
                 f"blocks {name!r}."
             ),
         )
@@ -870,7 +955,7 @@ def _shell_git_and_runtime_block(
                     f"⚠️ GIT_VIA_SHELL_BLOCKED: `git {subcmd}` is blocked for acting "
                     "self_worktree children (no commits; the parent integrates the "
                     "returned patch and is the sole committer). For read-only git: "
-                    "vcs_status, vcs_diff tools, or run_command with git "
+                    "vcs_read tool, or run_command with git "
                     "log/show/diff/status/rev-list/show-ref/for-each-ref/listing branch-tag forms."
                 ),
             )
@@ -915,7 +1000,7 @@ def _shell_git_and_runtime_block(
             "the Ouroboros runtime (system repo / data drives): self-repo changes go "
             "through commit_reviewed, which enforces pre-commit checks and review. "
             "Read-only git (status/log/diff/show/rev-parse/branch- and tag-listing, "
-            "or the vcs_status/vcs_diff tools) works everywhere, and mutating git is "
+            "or the vcs_read tool) works everywhere, and mutating git is "
             "free in any tree OUTSIDE the runtime (e.g. ~/projects, /tmp, an attached "
             "project folder)."
         ),

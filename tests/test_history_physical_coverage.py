@@ -1,6 +1,7 @@
-"""Coverage uses delivered physical boundaries of the real history endpoint."""
-from tests.test_chat_history_paging import isolated_runtime, write, row, request, pages  # noqa: F401
+"""Coverage uses delivered coordinate boundaries of the real history endpoint."""
+from ouroboros import dialogue_import
 from ouroboros.gateway.history_paging import decode_cursor
+from tests.test_chat_history_paging import isolated_runtime, write, row, request, pages  # noqa: F401
 
 
 def test_coverage_excludes_quota_deferred_backdated_row(tmp_path):
@@ -24,20 +25,18 @@ def test_coverage_discloses_disabled_source_and_parse_gap(tmp_path):
     assert page['coverage']['spans']['chat']['gaps']
 
 
-def test_root_witness_survives_rotation_but_not_prefix_replacement(tmp_path):
+def test_the_chain_witness_is_one_durable_coordinate_space(tmp_path):
+    """The store's coordinates survive every append and an older body's rotation: a page read
+    before stays compatible with every page read after (the client's rule in
+    web/modules/chat_history.js historyCoverage: a span's witness is listed by the newer read)."""
     live = tmp_path / 'logs/chat.jsonl'
     write(live, [row(1)])
     _, first = request(tmp_path)
-    archive = tmp_path / 'archive/chat_20260901T000000.jsonl'
-    archive.parent.mkdir(); live.rename(archive)
-    write(live, [row(2)])
+    write(live, [row(2)])  # a store-unaware body appended; the next cutover imports it at its place
     _, second = request(tmp_path)
-    assert _compatible(first, second), 'rotation keeps the renamed live segment and its base'
-    replacement = archive.with_suffix('.replacement')
-    write(replacement, [row(3)])
-    replacement.replace(archive)
-    _, third = request(tmp_path)
-    assert not _compatible(first, third) and not _compatible(second, third)
+    assert _compatible(first, second) and _compatible(second, first)
+    assert [message['text'] for message in second['messages']] == ['human-1', 'human-2']
+    assert second['coverage']['spans']['chat']['to'] > first['coverage']['spans']['chat']['to']
 
 
 def _compatible(page, head):
@@ -46,22 +45,33 @@ def _compatible(page, head):
     return page['coverage']['spans']['chat']['chain'].split('.')[-1] in head['coverage']['spans']['chat']['chain'].split('.')
 
 
-def test_replacing_a_later_archive_invalidates_every_page_read_before(tmp_path):
-    archives = [tmp_path / f'archive/chat_2026090{day}T000000.jsonl' for day in (1, 2)]
-    for index, path in enumerate(archives):
-        write(path, [row(index)])
-    write(tmp_path / 'logs/chat.jsonl', [row(2)])
-    loaded = list(pages(tmp_path, n_human='1'))
-    assert len(loaded) == 3 and all(_compatible(page, loaded[0]) for page in loaded)
-    # Same bytes and size under a new inode: offsets would still line up, but
-    # the rows read from the old file are no longer this chain's rows.
-    replacement = archives[1].with_suffix('.replacement')
-    write(replacement, [row(1)])
-    replacement.replace(archives[1])
-    _, head = request(tmp_path, n_human='1')
-    assert [_compatible(page, head) for page in loaded] == [False, False, False]
-    assert head['coverage']['spans']['chat']['chain'].split('.')[0] == loaded[0]['coverage']['spans']['chat']['chain'].split('.')[0], \
-        'the untouched first archive keeps its own prefix witness'
+def test_a_frozen_segment_that_changed_before_its_import_is_a_disclosed_gap_never_other_rows(tmp_path):
+    """An archive segment rewritten under the import (its size is not the ledger's) is never
+    imported: the pages spanning it name the gap (``chat_segment_unimportable``) and page on
+    past it; an untouched segment imports and leaves no gap."""
+    for root in (tmp_path / 'changed', tmp_path / 'frozen'):
+        archives = [root / f'archive/chat_2026090{day}T000000.jsonl' for day in (1, 2)]
+        for index, path in enumerate(archives):
+            write(path, [row(index)])
+        write(root / 'logs/chat.jsonl', [row(2)])
+        dialogue_import.cutover(root)  # the archive is planned, not imported yet
+        if root.name == 'changed':
+            archives[1].write_bytes(archives[1].read_bytes() + b'{"direction": "in", "text": "written after the plan"}\n')
+    loaded = list(pages(tmp_path / 'changed', n_human='1'))
+    texts = [message['text'] for page in loaded for message in page['messages']]
+    assert texts == ['human-2', 'human-0'], 'the changed segment holds no rows the store can vouch for'
+    # The segment that changed and every segment whose chain place it shifted are gaps on the pages
+    # spanning their coordinates; the rows the store already held keep theirs and are still delivered.
+    shifted_from = (tmp_path / 'changed' / 'archive' / 'chat_20260901T000000.jsonl').stat().st_size
+    spanning = [page for page in loaded if page['coverage']['spans']['chat']['to'] > shifted_from]
+    assert spanning and all(page['coverage']['spans']['chat']['gaps'] == ['segment_unimportable'] for page in spanning)
+    assert all('chat_segment_unimportable' in page['window']['truncated_by'] for page in spanning)
+    assert all(page['coverage']['spans']['chat']['gaps'] == [] for page in loaded if page not in spanning)
+    assert loaded[-1]['coverage']['spans']['chat']['from'] == 0 and loaded[-1]['has_more'] is False
+    frozen = list(pages(tmp_path / 'frozen', n_human='1'))
+    assert [message['text'] for page in frozen for message in page['messages']] == ['human-2', 'human-1', 'human-0']
+    assert all(page['coverage']['spans']['chat']['gaps'] == [] for page in frozen)
+    assert not any('segment_unimportable' in cause for page in frozen for cause in page['window']['truncated_by'])
 
 
 def test_sparse_project_opens_with_its_answer_and_retained_origin_in_one_read(tmp_path):

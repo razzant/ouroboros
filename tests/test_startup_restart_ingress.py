@@ -1,12 +1,14 @@
 """Startup Restart shares the owner, while each transport keeps its authority and facts."""
+
+from tests import _dialogue as dialogue_test
 from types import SimpleNamespace
-import json
 import threading
 
 import pytest
 from starlette.testclient import TestClient
 
 from tests.test_onboarding_process_controls import startup_controls as startup_controls
+from tests.test_launcher_handoff_stop import native_guard  # noqa: F401
 
 pytestmark = pytest.mark.serial
 
@@ -62,14 +64,14 @@ def test_ws_typed_restart_preserves_surface_when_supervisor_becomes_ready(
     assert kwargs['task_metadata']['client_surface']['viewport'] == {'w': 390, 'h': 900}
     assert kwargs['task_metadata']['client_surface']['received_at']
     path = obj.data / 'logs/chat.jsonl'
-    rows = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()]
+    rows = dialogue_test.log_rows(path)
     assert len(rows) == 1 and rows[0]['client_message_id'] == 'the-message'
     assert kwargs['accepted_source_row'] == rows[0]
     assert echoes[0]['ingress_accepted'] is True and echoes[0]['sender_session_id'] == 'the-sender'
     update = bridge.get_updates(0, timeout=0)[0]['message']
     assert message_bus.record_inbound_message(bridge, update, chat_id=23, user_id=1,
         client_message_id='the-message', text='/restart', ts=rows[0]['ts']) == kwargs['accepted_source_ref']
-    assert len(path.read_text(encoding='utf-8').splitlines()) == 1, 'ready handoff must not re-log the accepted message'
+    assert len(dialogue_test.log_text(path).splitlines()) == 1, 'ready handoff must not re-log the accepted message'
 
 
 @pytest.mark.parametrize('case', ['known', 'unknown', 'unbound', 'foreign', 'changed_after_admission', 'ready', 'ready_after_admission'])
@@ -194,7 +196,7 @@ def test_correlated_restart_is_accepted_once_without_holding_ingress_or_claiming
         assert operation['status'] == ('pending' if checkout_ok else 'failed')
         rejoined = client.post('/chat/inject', headers=headers, json=body)
         assert rejoined.json()['rejoined'] is True and calls == ['checkout']
-    rows = [json.loads(line) for line in (obj.data / 'logs/chat.jsonl').read_text(encoding='utf-8').splitlines()]
+    rows = dialogue_test.log_rows(obj.data / 'logs/chat.jsonl')
     assert len([row for row in rows if row.get('direction') == 'in']) == 1
     replies = [row for row in rows if row.get('origin_message_ref')]
     assert replies
@@ -270,7 +272,7 @@ def test_typed_restart_keeps_ordered_receipts_and_echo_before_dispatch(startup_c
         return obj.server._startup_owner_command(command, **kwargs)
 
     def restart(_ctx, _reply=None):
-        rows = [json.loads(line) for line in (obj.data / 'logs/chat.jsonl').read_text(encoding='utf-8').splitlines()]
+        rows = dialogue_test.log_rows(obj.data / 'logs/chat.jsonl')
         observed.append(([row['client_message_id'] for row in rows if row.get('direction') == 'in'], list(echoes)))
         restarted.set()
         return True, 'ok'

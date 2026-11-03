@@ -18,7 +18,7 @@ from ouroboros.contracts.skill_payload_policy import (
     is_skill_owner_state_alias,
     is_skill_owner_state_target,
 )
-from ouroboros.presence_capabilities import (
+from tests.frozen_presence_capabilities import (
     PresenceArgumentBinding,
     PresenceResourceTarget,
     PresenceScriptTarget,
@@ -32,7 +32,7 @@ from ouroboros.presence_capabilities import (
     resolve_presence_profile_state,
     save_presence_state,
 )
-from ouroboros.presence_profile import (
+from tests.frozen_presence_profile import (
     PresenceCapabilityRequest,
     PresenceProfile,
     PresenceProfileError,
@@ -40,7 +40,7 @@ from ouroboros.presence_profile import (
     presence_profile_fingerprint,
     presence_request_fingerprint,
 )
-from ouroboros.presence_runtime import (
+from tests.frozen_presence_runtime import (
     PresenceRuntimeDefaults,
     PresenceRuntimeError,
     PresenceRuntimeOverrides,
@@ -762,7 +762,7 @@ def test_skill_preflight_absent_presence_keeps_output_shape(tmp_path, monkeypatc
     assert "presence" not in payload
 
 
-def test_skill_preflight_reports_valid_and_invalid_presence(tmp_path, monkeypatch):
+def test_skill_preflight_ignores_legacy_presence_blocks(tmp_path, monkeypatch):
     ctx = _preflight_ctx(tmp_path)
     skills_root = tmp_path / "skills"
     _write_skill(
@@ -782,13 +782,12 @@ def test_skill_preflight_reports_valid_and_invalid_presence(tmp_path, monkeypatc
     valid = json.loads(_handle_skill_preflight(ctx, skill="community-helper"))
     invalid = json.loads(_handle_skill_preflight(ctx, skill="invalid-helper"))
     assert valid["ok"] is True
-    assert valid["presence"][0]["ok"] is True
-    assert len(valid["presence"][0]["profile_fingerprint"]) == 64
-    assert invalid["ok"] is False
-    assert invalid["presence"][0]["code"] == "presence_invalid"
+    assert "presence" not in valid
+    assert invalid["ok"] is True
+    assert "presence" not in invalid
 
 
-def test_skill_preflight_unexpected_profile_failure_is_fail_closed(tmp_path, monkeypatch):
+def test_skill_preflight_never_calls_retired_profile_parser(tmp_path, monkeypatch):
     ctx = _preflight_ctx(tmp_path)
     skills_root = tmp_path / "skills"
     _write_skill(
@@ -797,7 +796,7 @@ def test_skill_preflight_unexpected_profile_failure_is_fail_closed(tmp_path, mon
     )
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
 
-    import ouroboros.presence_profile as profile_module
+    import tests.frozen_presence_profile as profile_module
     from ouroboros.tools.skill_preflight import _handle_skill_preflight
 
     def _crash(*_args, **_kwargs):
@@ -806,6 +805,5 @@ def test_skill_preflight_unexpected_profile_failure_is_fail_closed(tmp_path, mon
     monkeypatch.setattr(profile_module, "parse_presence_profile", _crash)
     payload = json.loads(_handle_skill_preflight(ctx, skill="community-helper"))
 
-    assert payload["ok"] is False
-    assert payload["presence"][0]["code"] == "presence_internal_error"
-    assert "synthetic parser crash" not in payload["presence"][0]["detail"]
+    assert payload["ok"] is True
+    assert "presence" not in payload

@@ -11,6 +11,7 @@
    visible order until a window reload rebuilds the cards; keyboard reorder
    through the handle follows the key order. */
 
+import { haptic } from './haptics.js';
 import { widgetKey } from './widget_list.js';
 import { applyMasonry } from './masonry.js';
 import {
@@ -115,6 +116,7 @@ export function bindWidgetCardReorder(list, currentOrder, onOrderChange) {
             draggedKey = card.dataset.widgetKey || '';
             if (!draggedKey) return;
             card.classList.add('dragging');
+            haptic('pickup');
             if (event.dataTransfer) {
                 event.dataTransfer.effectAllowed = 'move';
                 event.dataTransfer.setData('text/plain', draggedKey);

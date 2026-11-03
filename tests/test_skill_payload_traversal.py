@@ -22,10 +22,9 @@ def _write_files(root, files):
 
 
 def _expected_hash(files):
-    digest = hashlib.sha256()
-    for name, content in sorted(files.items(), key=lambda item: Path(item[0])):
-        digest.update(name.encode("utf-8") + b"\0" + hashlib.sha256(content).digest())
-    return digest.hexdigest()
+    from ouroboros.skill_identity import release_digest_from_file_digests
+
+    return release_digest_from_file_digests((name, hashlib.sha256(content).digest()) for name, content in files.items())
 
 
 @pytest.mark.parametrize("cache_name", sorted(_SKILL_DIR_CACHE_NAMES))

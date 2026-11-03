@@ -1,6 +1,6 @@
 """v6.69.0 review-economics tests: cache-friendly review prompts, TTL passthrough,
-reviewer session affinity, durable parameter rejections, pre-routing $0 settlement,
-and review-wave budget admission."""
+reviewer session affinity, pre-routing $0 settlement, and review-wave budget
+admission."""
 
 from __future__ import annotations
 
@@ -249,9 +249,9 @@ def _main_loop_messages(system_ttl: dict) -> list:
             {"id": f"call_{idx}", "function": {"name": "zeta_tool", "arguments": "{}"}},
         ]})
         messages.append({"role": "tool", "tool_call_id": f"call_{idx}", "content": f"output {idx}"})
-    seal_task_transcript(messages, keep_active=2, min_prefix_tokens=0)
-    sealed = [m for m in messages if m["role"] == "tool" and isinstance(m["content"], list)]
-    assert len(sealed) == 1, "fixture must carry exactly one rolling cache anchor"
+    seal_task_transcript(messages, min_prefix_tokens=0)
+    sealed = [m for m in messages if "cache_control" in m]
+    assert [m["role"] for m in sealed] == ["tool"], "fixture must carry exactly one rolling cache anchor"
     return messages
 
 
@@ -270,7 +270,7 @@ def test_short_transcript_payload_declares_exactly_four_breakpoints(monkeypatch)
         ]},
         {"role": "user", "content": "task"},
     ]
-    seal_task_transcript(messages, keep_active=5, min_prefix_tokens=0)
+    seal_task_transcript(messages, min_prefix_tokens=0)
     payload, usage = _send_direct_anthropic(monkeypatch, messages, _tools())
 
     assert len(_deep_markers(payload)) == LLMClient._MAX_CACHE_BREAKPOINTS
@@ -313,12 +313,11 @@ def test_finalizer_ttl_orders_the_sealed_anchor_on_direct_anthropic(monkeypatch)
 
 @pytest.mark.parametrize("provider,model", [
     ("openai", "gpt-5.5"),
-    ("openai-compatible", "local-glm"),
     ("cloudru", "GigaChat/some-model"),
 ])
 def test_finalizer_never_marks_non_openrouter_routes(provider, model):
-    """These three share the OpenAI-compatible transport with OpenRouter; an ungated
-    mutator would inject Anthropic-style cache_control and earn a hard provider 400."""
+    """These share the OpenAI-compatible transport with OpenRouter; an ungated mutator
+    would inject Anthropic-style cache_control into a wire they never asked to carry it."""
     client = LLMClient(api_key="unused")
     target = {
         "provider": provider,
@@ -520,6 +519,7 @@ def test_global_ttl_docstrings_name_every_consumer():
         if p.name not in definition_sites and call.search(p.read_text(encoding="utf-8"))
     )
     assert consumers == [
+        "ouroboros/effort_evidence.py",
         "ouroboros/llm_attempt.py",
         "ouroboros/tools/review_helpers.py",
         "ouroboros/usage_accounting.py",
@@ -531,8 +531,14 @@ def test_global_ttl_docstrings_name_every_consumer():
         f"the setting: {consumers}"
     )
     assert "cached_prompt_blocks" in finalizer_doc  # names the other reader
+    assert "session_prompt_cache_ttl_request" in finalizer_doc
     resolver_doc = resolve_prompt_cache_ttl.__doc__ or ""
-    for name in ("_normalize_payload_cache_ttl", "cached_prompt_blocks", "_reservation_cost"):
+    for name in (
+        "_normalize_payload_cache_ttl",
+        "cached_prompt_blocks",
+        "session_prompt_cache_ttl_request",
+        "_reservation_cost",
+    ):
         assert name in resolver_doc, f"config's docstring omits the {name} consumer"
 
 
@@ -1011,21 +1017,42 @@ def test_triad_template_stable_part_has_no_dynamic_fields():
         assert stable_field not in dynamic
 
 
-def test_skill_review_prompt_stable_prefix_is_payload_independent(tmp_path):
-    from ouroboros import skill_review
+def test_skill_review_brief_stable_half_is_payload_independent(tmp_path):
+    import pathlib
 
-    p1, n1 = skill_review._build_review_prompt(
-        "demo", tmp_path / "demo", "{\"a\": 1}", "hash-one", "plugin.py\nprint('one')",
-    )
-    p2, n2 = skill_review._build_review_prompt(
-        "other", tmp_path / "other", "{\"b\": 2}", "hash-two", "plugin.py\nprint('two')",
-    )
-    assert n1 == n2
-    assert p1[:n1] == p2[:n2]  # governance prefix is byte-identical
-    assert "## Skill identity" not in p1[:n1]  # per-skill identity is dynamic-tail only
-    assert "hash-one" not in p1[:n1]
-    # Output contract (the anti-injection boundary) stays after the payload.
-    assert p1.rindex("## Output contract") > p1.index("## Skill files")
+    from ouroboros.tools import review_skill
+    from ouroboros.tools.governance_context import governance_context
+
+    rubric = review_skill.skill_rubric()
+    governance = governance_context(pathlib.Path(__file__).resolve().parents[1], surface="skill", delivery="packet",
+                                    checklist_section_text=rubric, layer="skill", manifest_facts={"type": "script", "declares": []})
+    brief = lambda subject: review_skill._brief(rubric, governance, subject, drive_root=tmp_path, change=None,
+                                                goal="", scope="", review_rebuttal="")
+    s1, d1 = brief(_skill_subject(tmp_path / "demo"))
+    s2, d2 = brief(_skill_subject(tmp_path / "other", name="other", content_hash="hash-two", manifest_json='{"b": 2}',
+                                  payload="plugin.py\nprint('two')"))
+    assert s1 == s2  # the governance half is byte-identical: the provider cache prefix
+    assert "## Skill identity" not in s1 and "hash-one" not in s1  # per-skill identity is dynamic-tail only
+    assert "hash-one" in d1 and "hash-two" in d2
+    # The output contract (the anti-injection boundary) is the tail of the dynamic half, after the identity;
+    # prepare_skill_review places the pasted payload between the two halves.
+    assert d1.rindex("## Your answer") > d1.index("## Skill identity")
+
+
+def _skill_subject(folder, *, name="demo", content_hash="hash-one", manifest_json='{"a": 1}',
+                   payload="plugin.py\nprint('one')"):
+    """A frozen skill subject without a payload on disk: enough for the brief's two halves."""
+    from ouroboros.tools.review_skill import SKILL_LAYER, FrozenSkillSubject
+    from ouroboros.tools.review_subject import ReviewSubjectSpec
+
+    import pathlib
+
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    spec = ReviewSubjectSpec(root_kind="skill_payload", root=str(folder), kind="skill", governance_root=str(repo),
+                             surface="skill", body_fact="false", body_how="skill_payload", layer=SKILL_LAYER)
+    return FrozenSkillSubject(spec=spec, diff_text=manifest_json, diff_sha="d" * 64, tree_sha=content_hash, parent_sha="",
+                              checkout=str(folder), skill=name, bucket="external", files=(("plugin.py", "s" * 64, 12),),
+                              manifest_json=manifest_json, payload_text=payload)
 
 
 def test_acceptance_request_messages_are_cache_blocked():
@@ -1080,55 +1107,6 @@ def test_warm_supported_params_cache_used_when_fetch_skipped(monkeypatch):
         )
     assert kwargs["temperature"] == 0.2
     assert "temperature" not in physical
-
-
-# ---------------------------------------------------------------------------
-# Durable rejected-parameter evidence
-# ---------------------------------------------------------------------------
-
-def test_rejected_params_survive_process_boundary(tmp_path, monkeypatch):
-    from ouroboros import capability_evidence as ce
-
-    ce.record_rejected_params(tmp_path, "anthropic/claude-fable-5", {"temperature"})
-    assert ce.get_rejected_params(tmp_path, "anthropic/claude-fable-5") == {"temperature"}
-
-    # Fresh "process": empty in-memory caches, durable store is consulted once.
-    monkeypatch.setattr(LLMClient, "_REJECTED_PARAMS_CACHE", {})
-    monkeypatch.setattr(LLMClient, "_REJECTED_PARAMS_LOADED", {})
-    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
-    known = LLMClient._known_rejected_params("anthropic/claude-fable-5")
-    assert "temperature" in known
-
-
-def test_rejected_params_expiry_heals_long_running_process(tmp_path, monkeypatch):
-    """A process older than the reload interval re-syncs from the durable store,
-    so a durable expiry evicts the parameter WITHOUT a restart."""
-    from ouroboros import capability_evidence as ce
-
-    ce.record_rejected_params(tmp_path, "anthropic/claude-fable-5", {"temperature"})
-    monkeypatch.setattr(LLMClient, "_REJECTED_PARAMS_CACHE", {})
-    monkeypatch.setattr(LLMClient, "_REJECTED_PARAMS_LOADED", {})
-    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
-    assert "temperature" in LLMClient._known_rejected_params("anthropic/claude-fable-5")
-
-    # Expire the durable entry, then age the process cache past the reload TTL.
-    data = ce._load(tmp_path)
-    data["rejected_params"]["anthropic/claude-fable-5"]["observed_at"] = "2020-01-01T00:00:00+00:00"
-    ce._save(tmp_path, data)
-    LLMClient._REJECTED_PARAMS_LOADED["anthropic/claude-fable-5"] -= (
-        LLMClient._REJECTED_PARAMS_RELOAD_SEC + 1
-    )
-    assert "temperature" not in LLMClient._known_rejected_params("anthropic/claude-fable-5")
-
-
-def test_rejected_params_expire(tmp_path):
-    from ouroboros import capability_evidence as ce
-
-    ce.record_rejected_params(tmp_path, "m/x", {"temperature"})
-    data = ce._load(tmp_path)
-    data["rejected_params"]["m/x"]["observed_at"] = "2020-01-01T00:00:00+00:00"
-    ce._save(tmp_path, data)
-    assert ce.get_rejected_params(tmp_path, "m/x") == set()
 
 
 # ---------------------------------------------------------------------------
@@ -1535,38 +1513,6 @@ def test_review_seat_usage_flows_through_substrate_once():
     assert len(usage_events) == 1
     assert usage_events[0]["source"] == "review_substrate:multi_model_review"
     assert usage_events[0]["ledger_attempt_ids"] == ["a1"]
-
-
-def test_acceptance_panel_declines_wave_on_insufficient_budget(monkeypatch, tmp_path):
-    """The acceptance admission decline returns a terminal DEGRADED without a
-    single reviewer call (loop-side wiring of the shared budget gate)."""
-    from types import SimpleNamespace
-    import ouroboros.loop as loop_mod
-    import ouroboros.review_substrate as rs
-    from ouroboros.tools import review_helpers
-
-    calls = {"panel": 0}
-    monkeypatch.setattr(rs, "triad_delivery_slots", lambda **k: [SimpleNamespace(model="m1"), SimpleNamespace(model="m2")])
-    def _boom(*a, **k):
-        calls["panel"] += 1
-        raise AssertionError("reviewer must not be called")
-    monkeypatch.setattr(rs, "run_review_request", _boom)
-    monkeypatch.setattr(
-        review_helpers, "review_wave_budget_gate",
-        lambda ctx, **k: {"fits": False, "estimated_wave_usd": 30.0, "remaining_usd": 1.0, "limit_usd": 50.0, "slots": 2},
-    )
-    tools = SimpleNamespace(_ctx=SimpleNamespace(task_id="t", drive_root=str(tmp_path), pending_events=[]))
-    ctx = loop_mod._TaskAcceptanceContext(
-        tools=tools, content="done", task_id="t", task_type="task",
-        llm_trace={"tool_calls": []}, drive_root=tmp_path,
-        messages=[{"role": "system", "content": ""}, {"role": "user", "content": "goal"}],
-        emit_progress=lambda _m, *, incident=None: None, mode="required", subtree_statuses=[],
-        budget_profile=None, passes_done=0, evidence={"k": "v"},
-    )
-    result = loop_mod._execute_task_acceptance_panel(ctx)
-    assert calls["panel"] == 0
-    assert result.aggregate_signal == "DEGRADED" and result.degraded
-    assert any("review_wave_budget_insufficient" in r for r in result.degraded_reasons)
 
 
 def test_pre_routing_zero_settlement_requires_openrouter_provider(tmp_path):

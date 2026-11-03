@@ -1,8 +1,8 @@
 """Minimal real-browser client of the live E2E stand, resolved typed.
 
 ``resolve_ui_client`` prefers the suite's own ``tests.system_e2e.interfaces.PlaywrightUIClient``
-when that lane has landed an implementation with this surface (open/goto/computed_property/
-send_chat/screenshot/rebind/close); otherwise the built-in ``UIProbe`` below runs headless
+when that lane has landed an implementation with this surface (open/goto/color_scheme/
+computed_property/send_chat/screenshot/rebind/close); otherwise the built-in ``UIProbe`` below runs headless
 Chromium against the lane's ``IsolatedServer``. Every unavailability is a TYPED reason recorded
 in the lane result (``ui_unavailable:<why>``) — never a silently passed acceptance check.
 
@@ -17,7 +17,8 @@ from __future__ import annotations
 import pathlib
 from typing import Any, Callable
 
-UI_METHODS = ("open", "goto", "computed_property", "send_chat", "screenshot", "rebind", "close")
+UI_METHODS = ("open", "goto", "color_scheme", "computed_property", "send_chat", "screenshot", "rebind", "close")
+SCREENSHOT_SETTLE_MS = 10_000
 
 
 class UIProbe:
@@ -45,23 +46,36 @@ class UIProbe:
         self.page.goto(self.base_url + path, wait_until="domcontentloaded", timeout=60_000)
         self.page.wait_for_selector(ready_selector, timeout=60_000)
 
+    def color_scheme(self, scheme: str) -> None:
+        """The device appearance this page's next documents see: what a client with no saved choice follows (System)."""
+        self.page.emulate_media(color_scheme=scheme)
+
     def computed_property(self, selector: str, prop: str) -> str:
         return str(self.page.evaluate(
             "([sel, prop]) => getComputedStyle(document.querySelector(sel)).getPropertyValue(prop)",
             [selector, prop]))
 
     def send_chat(self, text: str, *, swarm: bool = False) -> None:
-        """The owner's send path: arm Swarm (force_plan on the WS frame) when asked, then send."""
+        """The owner's send path: when asked, put this room's Subagents capsule on Swarm first (a setting of the
+        room, saved before the send and kept after it), then send."""
         if swarm:
-            self.page.click("#chat-swarm")
-            self.page.wait_for_selector('#chat-swarm[data-armed="true"]', timeout=10_000)
+            self.page.click("#chat-subagents-mode .chat-subagents-head")
+            self.page.click('#chat-subagents-mode .chat-seg[data-mode="swarm"]')
+            self.page.wait_for_selector('#chat-subagents-mode[data-mode="swarm"][data-disabled="false"]', timeout=30_000)
+            self.page.keyboard.press("Escape")
         self.page.fill("#chat-input", text)
         self.page.click("#chat-send")
-        if swarm:
-            self.page.wait_for_selector('#chat-swarm[data-armed="false"]', timeout=30_000)
 
     def screenshot(self, path: pathlib.Path) -> None:
+        """A shot of the page, not of its first frame (SM1_a1 of 2026-11-03 captured `Connecting…`). The wait is bounded
+        and no gate: a page that keeps polling is shot as it stands; a dead one still raises for ``GuardedUI`` to type."""
+        from playwright.sync_api import TimeoutError as PlaywrightTimeout
+
         pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.page.wait_for_load_state("networkidle", timeout=SCREENSHOT_SETTLE_MS)
+        except PlaywrightTimeout:
+            pass
         self.page.screenshot(path=str(path), full_page=True)
 
     def close(self) -> None:
@@ -101,6 +115,9 @@ class GuardedUI:
 
     def goto(self, path: str = "/", *, ready_selector: str | None = None) -> None:
         self._call("goto", path, **({"ready_selector": ready_selector} if ready_selector else {}))
+
+    def color_scheme(self, scheme: str) -> None:
+        self._call("color_scheme", scheme)
 
     def computed_property(self, selector: str, prop: str) -> str | None:
         return self._call("computed_property", selector, prop)

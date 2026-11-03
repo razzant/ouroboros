@@ -10,7 +10,7 @@ import pytest
 
 from ouroboros import context_compaction as cc
 from ouroboros.model_send_seal import EXPOSURE_ATOMS_BASIS
-from tests.test_context_reclaim_materializer import _SPEC, _request
+from tests.test_context_reclaim_materializer import _request
 
 
 def source(call_id="read", text="exact evidence " * 500):
@@ -46,29 +46,29 @@ def test_complete_source_survives_real_transport_syntax(dialect):
     assert cc.exposed_context_units(altered, physical) == ()
 
 
-def test_unconsumed_new_result_is_not_paid_for_or_replaced(tmp_path, monkeypatch):
+def test_unexposed_new_result_is_not_folded_by_an_exposure_bound_view(tmp_path):
+    """Both directions: a view bound to the exposure of an earlier send folds the unit that send
+    showed and leaves the unit added since raw; an empty exposure folds nothing."""
     observed = source()
     current = observed + source("read", "new result " * 500)
-    calls = []
-    monkeypatch.setattr(cc, "_summarizer_spec", lambda: dict(_SPEC))
-    monkeypatch.setattr(cc, "_call_summarizer", lambda parts, **_: calls.extend(parts) or {
-        part.source_id: "The actor inspected the original evidence." for part in parts})
     exposed = cc.exposed_context_units(observed, observed)
-    candidate, receipt, _ = cc.compact_tool_history_llm(
-        current, request=_request(current, 20_000), drive_root=tmp_path, task_id="exposure",
-        exposed_units=exposed,
+    request = replace(_request(current, 20_000), working_note="The original evidence was inspected.",
+                      expected_view_revision=cc.context_reclaim_transcript_sha256(current), keep_unit_ids=())
+    candidate, receipt = cc.compact_tool_history_llm(
+        current, request=request, observed_messages=current, tool_schemas=[],
+        fit_candidate=lambda *_: {"accepted": True}, drive_root=tmp_path, task_id="exposure", exposed_units=exposed,
     )
-    assert receipt.status == "applied" and len(calls) == 1
+    assert receipt.status == "applied"
     assert candidate[1:] == current[2:]
-    assert candidate[0]["role"] == "user"
-    assert cc._capsule_metadata(candidate[0])[1]["authorship"] == "helper"
-    assert "Host memory record" in candidate[0]["content"][0]["text"]
-    calls.clear()
-    unchanged, receipt, usage = cc.compact_tool_history_llm(
-        current, request=_request(current, 20_000), drive_root=tmp_path, task_id="exposure",
-        exposed_units=[],
+    assert candidate[0]["role"] == "assistant"
+    assert cc._capsule_metadata(candidate[0])[1]["authorship"] == "actor"
+    assert "Actor-authored working view" in candidate[0]["content"][0]["text"]
+    noted, receipt = cc.compact_tool_history_llm(
+        current, request=request, observed_messages=current, tool_schemas=[],
+        fit_candidate=lambda *_: {"accepted": True}, drive_root=tmp_path, task_id="exposure", exposed_units=[],
     )
-    assert unchanged is current and receipt.status == "no_eligible" and usage is None and calls == []
+    assert receipt.status == "applied" and noted[:len(current)] == current  # the note is added; nothing unshown folds
+    assert len(noted) == len(current) + 1 and cc._capsule_metadata(noted[-1])[1]["authorship"] == "actor"
 
 
 def test_result_bytes_do_not_prove_the_wrong_call_received_them():
@@ -131,8 +131,13 @@ def test_observation_reads_exact_physical_source_and_inspection_restores_it(tmp_
     assert observed["exposure_basis"] == EXPOSURE_ATOMS_BASIS
     assert len(observed["exposed_units"]) == 1
     inspected = json.loads(_compact_context(ctx, inspect=True))
-    assert [unit["physically_exposed"] for unit in inspected["units"]] == [True, False]
-    restore = inspected["units"][0]["restore_ref"]
+    assert [unit["exposed"] for unit in inspected["units"]] == [True, False]
+    # The inventory always names the memory view's elements (C7); this context observed none.
+    assert inspected["inventory"] == {"units": 2, "eligible": 2, "tokens": sum(u["tokens"] for u in inspected["units"]),
+                                      "by_kind": {"memory": {"units": 0, "tokens": 0},
+                                                  "tool": {"units": 2, "tokens": sum(u["tokens"] for u in inspected["units"])}}}
+    first = inspected["units"][0]
+    restore = {"checkpoint_ref": inspected["restore_checkpoint"], "unit_id": first["unit_id"], "raw_sha256": first["raw_sha256"]}
     messages, _ = cc._restored_source_views([restore], drive_root=tmp_path, task_id="exposure",
                                           request=_request([], 0))
     assert messages[0]["role"] == "user" and "exact evidence" in messages[0]["content"][0]["text"]
@@ -162,7 +167,6 @@ def test_exposure_restores_through_one_continuation(tmp_path):
 
 def test_inspected_child_handle_is_readable_now_and_retained_canonically(tmp_path):
     import shutil
-    from dataclasses import asdict
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.tool_access_roots import resource_root_path
     from ouroboros.tools.compact_context import _compact_context, record_context_view
@@ -171,105 +175,53 @@ def test_inspected_child_handle_is_readable_now_and_retained_canonically(tmp_pat
     ctx = SimpleNamespace(task_id="child", drive_root=child, budget_drive_root=canonical)
     record_context_view(ctx, source(), [])
     inspected = json.loads(_compact_context(ctx, inspect=True))
-    ref = inspected["units"][0]["restore_ref"]["checkpoint_ref"]
+    ref = inspected["restore_checkpoint"]
+    restore_ref = {"checkpoint_ref": ref, "unit_id": inspected["units"][0]["unit_id"],
+                   "raw_sha256": inspected["units"][0]["raw_sha256"]}
     own = read_actor_source_bytes(child, "child", ref)
     assert read_actor_source_bytes(canonical, "child", ref) == own
     assert (resource_root_path(ctx, ref["root"]) / ref["path"]).read_bytes() == own
     relocated = tmp_path / "relocated-child"
     shutil.move(child, relocated)
     assert read_actor_source_bytes(relocated, "child", ref) == own
-    restored, _ = cc._restored_source_views([inspected["units"][0]["restore_ref"]],
-        drive_root=relocated, task_id="child", request=_request([], 0))
+    restored, _ = cc._restored_source_views([restore_ref], drive_root=relocated, task_id="child", request=_request([], 0))
     assert "exact evidence " * 500 in restored[0]["content"][0]["text"]
     original = source()
     request = replace(_request(original, 0), working_note="I kept the evidence.",
         expected_view_revision=cc.context_reclaim_transcript_sha256(original), keep_unit_ids=(),
-        restore_unit_refs=(inspected["units"][0]["restore_ref"],))
-    authored, receipt, _ = cc.compact_tool_history_llm(original, request=request,
+        restore_unit_refs=(restore_ref,))
+    _authored, receipt = cc.compact_tool_history_llm(original, request=request,
         drive_root=relocated, task_id="child", observed_messages=original, observed_tool_schemas=[],
         fit_candidate=lambda *_args: {"accepted": True})
     assert receipt.status == "applied" and receipt.restored_unit_refs[0]["checkpoint_ref"]["read"]
-    from ouroboros.review_source_closure import retain_review_refs
-    retained = tmp_path / "review-custody"
-    history = {"messages": authored, "view_receipt": asdict(receipt)}
-    retained_history = retain_review_refs(history, relocated, retained, "child", carrier="checkpoint")
-    assert retained_history == history  # Source/capsule identity is byte-stable during promotion.
-    shutil.rmtree(relocated)
-    exact = read_actor_source_bytes(retained, "child", receipt.restored_unit_refs[0]["checkpoint_ref"])
-    assert exact == own
+    assert read_actor_source_bytes(relocated, "child", receipt.restored_unit_refs[0]["checkpoint_ref"]) == own
     for field, value in (("kind", "unowned"), ("sha256", "0" * 64)):
-        bad = copy.deepcopy(inspected["units"][0]["restore_ref"])
+        bad = copy.deepcopy(restore_ref)
         bad["checkpoint_ref"][field] = value
-        _, refused, _ = cc.compact_tool_history_llm(original,
-            request=replace(request, restore_unit_refs=(bad,)), drive_root=retained, task_id="child",
+        _, refused = cc.compact_tool_history_llm(original,
+            request=replace(request, restore_unit_refs=(bad,)), drive_root=relocated, task_id="child",
             observed_messages=original, fit_candidate=lambda *_args: {"accepted": True})
         assert refused.status == "source_unavailable"
 
 
-def test_legacy_capsule_remains_readable_after_helper_attribution_change(tmp_path, monkeypatch):
-    monkeypatch.setattr(cc, "_summarizer_spec", lambda: dict(_SPEC))
-    monkeypatch.setattr(cc, "_call_summarizer", lambda parts, **_: {p.source_id: "A summary" for p in parts})
+def test_legacy_helper_capsule_with_the_retired_contract_digest_stays_readable(tmp_path):
+    """A record the retired helper summarizer wrote (third-person host record, its own contract digest,
+    no authorship) still validates as a capsule, so live transcripts keep rendering and restoring it;
+    a digest nobody ever stamped does not."""
     current = source()
-    candidate, receipt, _ = cc.compact_tool_history_llm(current, request=_request(current, 500),
-        drive_root=tmp_path, task_id="legacy")
-    assert receipt.status == "applied"
-    legacy = copy.deepcopy(candidate[0])
-    legacy["role"] = "assistant"
+    request = _request(current, 500)
+    unit = cc._atomic_units(current)[0]
+    checkpoint = cc._persist_reclaim_checkpoint(current, request, cc._Selection((unit,), "l" * 64, 0),
+                                                drive_root=tmp_path, task_id="legacy")
+    legacy, _ = cc._capsule_message(unit, "The helper's retelling of the source.",
+                                    [cc._part(unit.unit_id, unit.source_text)], checkpoint, request,
+                                    label="Host memory record from a summarization helper, generation 1; exact source retained by checkpoint")
     meta = legacy["content"][0]["_context_capsule"]
     meta.pop("authorship")
-    meta["summary_contract_digest"] = cc._LEGACY_SUMMARY_CONTRACT_DIGEST
-    assert cc._capsule_metadata(legacy)[1] is not None
-
-
-@pytest.mark.parametrize("boundary", [None, "Owner changed the goal", "[Control] Preserve the pending decision"])
-def test_automatic_range_record_preserves_boundaries_and_each_original_restore_ref(tmp_path, monkeypatch, boundary):
-    from ouroboros.tools.compact_context import _compact_context, record_context_view
-
-    messages = source("left", "LEFT_EXACT_SOURCE " * 500)
-    if boundary:
-        messages.append({"role": "user", "content": boundary})
-    messages += source("right", "RIGHT_EXACT_SOURCE " * 500)
-    calls = []
-    monkeypatch.setattr(cc, "_summarizer_spec", lambda: dict(_SPEC))
-    monkeypatch.setattr(cc, "_call_summarizer", lambda parts, **_: calls.extend(parts) or {
-        part.source_id: "The actor inspected the complete source." for part in parts})
-    candidate, receipt, _ = cc.compact_tool_history_llm(
-        messages, request=_request(messages, 100_000), drive_root=tmp_path, task_id="ranges",
-        automatic_deficit_tokens=1, exposed_units=cc.exposed_context_units(messages, messages))
-    assert receipt.status == "applied" and len(calls) == 2
-    capsules = [message for message in candidate if cc._capsule_metadata(message)[1]]
-    assert len(capsules) == (2 if boundary else 1)
-    assert all(cc._capsule_metadata(message)[1]["generation"] == 1 for message in capsules)
-    if boundary:
-        assert candidate[1] == {"role": "user", "content": boundary}
-        assert all(boundary not in part.text for part in calls)
-
-    ctx = SimpleNamespace(task_id="ranges", drive_root=tmp_path, budget_drive_root=tmp_path)
-    record_context_view(ctx, candidate, [])
-    inspected = json.loads(_compact_context(ctx, inspect=True))
-    refs = [ref for unit in inspected["units"] for ref in unit["source_refs"]
-            if all(key in ref for key in ("checkpoint_ref", "unit_id", "raw_sha256"))]
-    assert len(refs) == 2 and len({ref["unit_id"] for ref in refs}) == 2
-    restored, _ = cc._restored_source_views(refs, drive_root=tmp_path, task_id="ranges",
-                                          request=_request(candidate, 0))
-    assert "LEFT_EXACT_SOURCE " * 500 in restored[0]["content"][0]["text"]
-    assert "RIGHT_EXACT_SOURCE " * 500 in restored[1]["content"][0]["text"]
-
-    calls.clear()
-    exposed = cc.exposed_context_units(candidate, candidate)
-    unchanged, skipped, usage = cc.compact_tool_history_llm(
-        candidate, request=_request(candidate, 100_000), drive_root=tmp_path, task_id="ranges",
-        automatic_deficit_tokens=1, exposed_units=exposed)
-    assert unchanged is candidate and skipped.status == "no_eligible" and usage is None and calls == []
-    authored_request = replace(_request(candidate, 0), working_note="I revised my interpretation.",
-        expected_view_revision=cc.context_reclaim_transcript_sha256(candidate),
-        keep_unit_ids=(), restore_unit_refs=tuple(refs))
-    authored, authored_receipt, _ = cc.compact_tool_history_llm(
-        candidate, request=authored_request, drive_root=tmp_path, task_id="ranges",
-        observed_messages=candidate, observed_tool_schemas=[], exposed_units=exposed,
-        fit_candidate=lambda _messages, _tools: {"accepted": True})
-    assert authored_receipt.status == "applied" and calls == []
-    assert any(message["role"] == "assistant" and "I revised my interpretation." in str(message["content"])
-               for message in authored)
-    assert all(any(marker in str(message["content"]) for message in authored)
-               for marker in ("LEFT_EXACT_SOURCE " * 500, "RIGHT_EXACT_SOURCE " * 500))
+    for digest, readable in ((cc._LEGACY_CAPSULE_CONTRACT_DIGEST, True), (cc._CAPSULE_CONTRACT_DIGEST, True), ("f" * 64, False)):
+        meta["summary_contract_digest"] = digest
+        assert (cc._capsule_metadata(legacy)[1] is not None) is readable
+    meta["summary_contract_digest"] = cc._LEGACY_CAPSULE_CONTRACT_DIGEST
+    restored, _ = cc._restored_source_views([{"checkpoint_ref": checkpoint, "unit_id": unit.unit_id, "raw_sha256": unit.raw_sha256}],
+                                            drive_root=tmp_path, task_id="legacy", request=request)
+    assert "exact evidence" in restored[0]["content"][0]["text"]

@@ -2,22 +2,30 @@
 import { fetchJson } from './api_client.js';
 import {
     agentsStepHtml,
+    EARLIER_SAVE_KEPT_TEXT,
+    EARLIER_SAVE_OTHER_VALUES_TEXT,
+    completionAttemptId,
     completionFailureNotice,
     createAgentsStep,
     familyLabels,
     onboardingSettingsDraft,
-    readCompletionAnswer,
+    postCompletion,
+    readCompletionAttempt,
 } from './onboarding_agents_step.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { bindLanguageSettings, languageBlockHtml, saveLanguageChoice } from './settings_language.js';
 import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from './ui_helpers.js';
-import { createModelRolesEditor, modelRolesHost, modelRoleMap, parseModelSource } from './model_roles.js';
-import { ALLOW_EMPTY_REVIEW_POOL, PACKET_ONLY_POOL_WARNING, availableSubagentsEditorHost, packetOnlyReviewPool, reviewPoolRows } from './subagents_settings.js';
+import { createModelRolesEditor, inheritTargetOf, modelRolesHost, modelRoleMap, parseModelSource } from './model_roles.js';
+import { ALLOW_EMPTY_REVIEW_POOL, PACKET_ONLY_POOL_WARNING, availableSubagentsEditorHost, packetOnlyReviewPool, reviewPoolRows, reviewerTickCaption } from './subagents_settings.js';
 import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, processingIntentLabel,
-    configuredApiProviders, apiProviderLabel } from './route_editor_primitives.js';
+    configuredApiProviders, apiProviderLabel, compatibleEndpoint } from './route_editor_primitives.js';
 import { MODEL_CATALOG_TIMEOUT_MS, mergeModelCatalog, catalogReadState, summarizeReadErrors } from './settings_catalog.js';
 import { accountRows } from './claudexor_status_store.js';
 import { accountRowFacts } from './harness_accounts.js';
+import { createStarterSkillsRow } from './onboarding_starter_skills.js';
+import { createConnectionsEditor } from './settings_connections.js';
+import { PROVIDER_CARDS, providerSettingsCard } from './settings_provider_cards.js';
+import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
 
 (() => {
         // The served wizard document needs its own menu-key binding.
@@ -55,8 +63,6 @@ import { accountRowFacts } from './harness_accounts.js';
         const MODEL_DEFAULTS = bootstrap.modelDefaults || {};
         const LOCAL_PRESETS = bootstrap.localPresets || {};
         const INITIAL_STATE = bootstrap.initialState || {};
-        // Credential placeholders retain stored values through the shared validator.
-        const SECRET_PLACEHOLDER = bootstrap.secretPlaceholder || '';
         const root = document.getElementById('root');
 
     const state = Object.assign({
@@ -71,7 +77,7 @@ import { accountRowFacts } from './harness_accounts.js';
         subagentsOpen: false,
         localSourceOpen: Boolean(INITIAL_STATE.localSource),
         moreProvidersOpen: Boolean(INITIAL_STATE.cloudruKey || INITIAL_STATE.minimaxKey || INITIAL_STATE.deepseekKey
-            || INITIAL_STATE.zaiKey || INITIAL_STATE.compatibleBaseUrl || INITIAL_STATE.compatibleApiKey),
+            || INITIAL_STATE.zaiKey),
         localStatusText: 'Status: Offline',
         localStatusTone: 'muted',
         localTestResult: '',
@@ -87,10 +93,12 @@ import { accountRowFacts } from './harness_accounts.js';
         recoveryPrepared: false,
         recoveryMain: '',
         presetFailure: null,
-        // Set when completion answered 503 `settings_save_timeout`: the save is
-        // still running in the server, so the wizard offers "Check status"
-        // instead of a blind retry (a second write over an unknown first).
-        saveUnknown: false,
+        // The id of the last save whose outcome is unknown (503 `settings_save_timeout`, a lost or
+        // unreadable answer): "Check status" reads back exactly that attempt instead of a blind retry
+        // (a second write over an unknown first). Any new explicit save replaces it; one refused before
+        // writing anything hands it back. `saveAttemptDraft` is the values that attempt carried.
+        saveAttempt: '',
+        saveAttemptDraft: '',
         // Set once completion SUCCEEDED but the receipt says the saved runtime
         // mode needs a restart, in the one shell that cannot restart anything.
         completedRestartMode: '',
@@ -106,6 +114,11 @@ import { accountRowFacts } from './harness_accounts.js';
     let catalogGeneration = 0;
     const stepScrollPositions = new Map();
     let suggestedVisionModel = null;
+    let connectionsEditor = null;
+    let footerObserver = null;
+    let compatibleCatalogs = {};
+    const compatibleCard = PROVIDER_CARDS.find((card) => card.kind === 'openai-compatible');
+    const starterSkills = createStarterSkillsRow(); // the Summary's Starter skills row keeps its ticks across renders
     const modelRoles = createModelRolesEditor({ hostId: 'onboarding-model-roles', onChange: (settings, { slot } = {}) => {
         if (slot === 'vision') suggestedVisionModel = null;
         adoptModelSettings(settings);
@@ -130,8 +143,7 @@ import { accountRowFacts } from './harness_accounts.js';
     }
 
     function hasApiAccess() {
-        return PROVIDER_FIELDS.some((field) => !['MINIMAX_REGION', 'ZAI_PLAN', 'OPENAI_COMPATIBLE_API_KEY'].includes(field.settingKey)
-            && trim(state[field.stateKey]));
+        return configuredApiProviders(draftSettings(), PROVIDER_PROFILES).length > 0;
     }
 
     function hasModelSubscription() {
@@ -169,9 +181,7 @@ import { accountRowFacts } from './harness_accounts.js';
                 clearTimeout(timer);
                 if (generation !== catalogGeneration) return;
                 catalogRequest = null;
-                modelSources = (modelCatalog.model_sources || []).filter((source) => state.agentsConnected.includes(source.credentialHarness));
-                clearFreshSubscriptionDefaults();
-                modelRoles.adoptCatalog({ ...modelCatalog, model_sources: modelSources });
+                adoptModelCatalog();
                 refreshSummary();
             });
         syncCurrentStepActionState();
@@ -187,7 +197,7 @@ import { accountRowFacts } from './harness_accounts.js';
             adoptModelSettings(response.model_settings);
             if (JSON.stringify(draftSettings()) !== previous) loadModelRoles();
         }
-        modelRoles.adoptCatalog(response);
+        if (Array.isArray(response.items)) adoptModelCatalog(response);
         if (state.agentsConnected.length) void refreshModelSources();
         refreshSummary();
     }
@@ -195,6 +205,13 @@ import { accountRowFacts } from './harness_accounts.js';
     function loadModelRoles() {
         modelRoles.load(draftSettings(), { ...SETUP_CONTRACT,
             modelSlots: MODEL_SLOTS.map((slot) => ({ ...slot, settingsToggleId: '' })) });
+    }
+
+    function adoptModelCatalog(data) {
+        if (data) modelCatalog = mergeModelCatalog(modelCatalog, data);
+        modelSources = (modelCatalog.model_sources || []).filter((source) => state.agentsConnected.includes(source.credentialHarness));
+        clearFreshSubscriptionDefaults();
+        modelRoles.adoptCatalog({ ...modelCatalog, model_sources: modelSources }, { connectionCatalogs: compatibleCatalogs });
     }
 
     function trim(value) {
@@ -218,21 +235,11 @@ import { accountRowFacts } from './harness_accounts.js';
     }
 
     function moreProviderFields() {
-        return PROVIDER_FIELDS.filter((field) => field.group === 'more');
+        return PROVIDER_FIELDS.filter((field) => field.group === 'more' && !field.settingKey.startsWith('OPENAI_COMPATIBLE_'));
     }
 
     function hasMoreProviderValue() {
         return moreProviderFields().some((field) => trim(state[field.stateKey]).length > 0);
-    }
-
-    // A credential prefilled from disk arrives as SECRET_PLACEHOLDER, never as
-    // the value, so "is this configured?" can no longer be answered by length.
-    // The length rule stays for what the owner types here: it is the client
-    // mirror of the server's too-short check.
-    function isConfiguredCredential(value) {
-        const text = trim(value);
-        if (!text) return false;
-        return text === SECRET_PLACEHOLDER || text.length >= 10;
     }
 
         function isLocalFilesystemSource(value) {
@@ -244,27 +251,14 @@ import { accountRowFacts } from './harness_accounts.js';
             return (items || []).find((item) => item.value === value) || {};
         }
 
-        function detectProviderProfile() {
-            const configured = Object.fromEntries(PROVIDER_FIELDS.map((field) => [
-                field.settingKey,
-                isConfiguredCredential(state[field.stateKey]),
-            ]));
-            const hasOpenrouter = configured.OPENROUTER_API_KEY;
-            const hasCompatible = trim(state.compatibleBaseUrl).length > 0;
-            const direct = [
-                ['OPENAI_API_KEY', 'openai'],
-                ['CLOUDRU_FOUNDATION_MODELS_API_KEY', 'cloudru'],
-                ['MINIMAX_API_KEY', 'minimax'],
-                ['DEEPSEEK_API_KEY', 'deepseek'], ['ZAI_API_KEY', 'zai'],
-                ['ANTHROPIC_API_KEY', 'anthropic'],
-            ].filter(([settingKey]) => configured[settingKey]);
-            if (hasOpenrouter) return 'openrouter';
-            if (hasCompatible) return 'openai-compatible';
-            if (direct.length > 1) return 'direct-multi';
-            if (direct.length === 1) return direct[0][1];
-            if (hasLocalModel()) return 'local';
-            return 'openrouter';
-        }
+    function detectProviderProfile() {
+        const kinds = [...new Set(configuredApiProviders(draftSettings(), PROVIDER_PROFILES)
+            .map((entry) => entry.id.split('@')[0]))];
+        if (kinds.includes('openrouter')) return 'openrouter';
+        if (kinds.includes('openai-compatible')) return 'openai-compatible';
+        if (kinds.length > 1) return 'direct-multi';
+        return kinds[0] || (hasLocalModel() ? 'local' : 'openrouter');
+    }
 
     function activeProviderProfile() {
         const profile = detectProviderProfile();
@@ -316,6 +310,8 @@ import { accountRowFacts } from './harness_accounts.js';
             retry.hidden = !state.agentsConnected.length && !agentsStep?.previewError;
             retry.disabled = Boolean(catalogRequest || agentsStep?.previewPending);
         }
+        const accessRow = document.getElementById('onboarding-access-row');
+        if (accessRow) accessRow.hidden = Boolean(note?.hidden && retry?.hidden);
         const recover = document.getElementById('skip-presets-btn');
         if (recover) {
             recover.hidden = !shouldOfferPresetSkip();
@@ -332,6 +328,8 @@ import { accountRowFacts } from './harness_accounts.js';
         // started against the previous provider/local/model/settings draft;
         // an owner-edited actor list ignores this through its own dirty gate.
         agentsStep?.invalidateGeneratedPreview();
+        // Key rows read their facts from this draft: a legacy pair's row follows the OpenAI key beside it.
+        connectionsEditor?.refresh(draftSettings());
         syncCurrentStepActionState();
     }
 
@@ -397,6 +395,8 @@ import { accountRowFacts } from './harness_accounts.js';
     }
 
         function validateProvidersStep() {
+            const connectionError = connectionsEditor?.validate()[0];
+            if (connectionError) return connectionError.message;
             const keyValues = PROVIDER_FIELDS.map((field) => [field, trim(state[field.stateKey])]);
             const localSource = trim(state.localSource);
             const localFilename = trim(state.localFilename);
@@ -406,9 +406,9 @@ import { accountRowFacts } from './harness_accounts.js';
             // the owner never touched arrives here unchanged; rejecting it blocks
             // Next/Save on the providers step and the offending value becomes the
             // one value the wizard can never replace.
-            const shortKey = keyValues.find(([field, value]) => value && (field.inputType || 'password') === 'password' && value.length < 10 && value !== trim(INITIAL_STATE[field.stateKey]));
+            const shortKey = keyValues.find(([field, value]) => field.settingKey !== 'OPENAI_COMPATIBLE_API_KEY' && value && (field.inputType || 'password') === 'password' && value.length < 10 && value !== trim(INITIAL_STATE[field.stateKey]));
             if (shortKey) return `${shortKey[0].label.replace(' API Key', '')} API key looks too short.`;
-            const hasRemote = keyValues.some(([field, value]) => value && !['OPENAI_COMPATIBLE_API_KEY', 'MINIMAX_REGION', 'ZAI_PLAN'].includes(field.settingKey));
+            const hasRemote = hasApiAccess();
             if (!hasRemote && !localSource && !hasModelSubscription()) {
                 return state.agentsConnected.length
                     ? 'A Main model source has not been confirmed. Retry discovery, add an API key, or choose a local model.'
@@ -456,7 +456,7 @@ import { accountRowFacts } from './harness_accounts.js';
     }
 
     function validateCurrentStep() {
-        if (['accounts', 'providers'].includes(state.currentStep)) return validateProvidersStep();
+        if (state.currentStep === 'accounts') return validateProvidersStep();
         if (state.currentStep === 'models') return validateModelsStep();
         if (state.currentStep === 'review_mode') return validateReviewStep();
         if (state.currentStep === 'budget') return validateBudgetStep();
@@ -467,13 +467,11 @@ import { accountRowFacts } from './harness_accounts.js';
         const error = validateCurrentStep();
         state.error = error;
         if (error) return syncCurrentStepActionState();
-        if (['accounts', 'providers'].includes(state.currentStep)) applyModelDefaults(false);
-        if (['accounts', 'providers', 'models', 'review_mode', 'budget'].includes(state.currentStep)) {
-            // Preview is enrichment, never a navigation or model-discovery gate. Refresh (also Retry) in the background
-            // after a valid draft; it replaces generated rows only and keeps owner-edited models, reviewers and subagents.
-            // Finish checks the receipt only if generated rows still own the editor.
-            if (agentsStep) void agentsStep.refreshSubagentsPreview({ force: true });
-        }
+        if (state.currentStep === 'accounts') applyModelDefaults(false);
+        // Preview is enrichment, never a navigation or model-discovery gate. Refresh (also Retry) in the background
+        // after a valid draft; it replaces generated rows only and keeps owner-edited models, reviewers and subagents.
+        // Finish checks the receipt only if generated rows still own the editor.
+        if (agentsStep) void agentsStep.refreshSubagentsPreview({ force: true });
         const index = STEP_ORDER.indexOf(state.currentStep);
         if (index >= 0 && index < STEP_ORDER.length - 1) {
             navigateStep(STEP_ORDER[index + 1]);
@@ -591,21 +589,17 @@ import { accountRowFacts } from './harness_accounts.js';
             ] : [['Budget', 'Subscription quota · wait and auto-continue on reset']]),
             ...MODEL_SLOTS.map((slot) => [slot.label.replace(/ Model$/, ''), modelSummary(slot)]),
         ];
-        if (trim(state.openrouterKey)) rows.splice(1, 0, ['OpenRouter', 'configured']);
-        if (trim(state.openaiKey)) rows.splice(1, 0, ['OpenAI', 'configured']);
-        if (trim(state.cloudruKey)) rows.splice(1, 0, ['Cloud.ru', 'configured']);
-        if (trim(state.minimaxKey)) rows.splice(1, 0, ['MiniMax', 'configured']);
-        if (trim(state.deepseekKey)) rows.splice(1, 0, ['DeepSeek', 'configured']);
-        if (trim(state.zaiKey)) rows.splice(1, 0, ['Z.ai (GLM)', trim(state.zaiPlan) === 'coding' ? 'configured · coding plan' : 'configured']);
-        if (trim(state.anthropicKey)) rows.splice(1, 0, ['Anthropic', 'configured']);
-        if (hasLocalModel()) {
-            rows.splice(
-                1,
-                0,
-                ['Local source', trim(state.localSource) + (trim(state.localFilename) ? ` / ${trim(state.localFilename)}` : '')],
-                ['Local routing', localRoutingLabel(state.localRoutingMode)],
-            );
-        }
+        const compatible = compatibleEndpoint(draftSettings());
+        const keys = [
+            ['anthropicKey', 'Anthropic'], ['zaiKey', 'Z.ai (GLM)', trim(state.zaiPlan) === 'coding' ? 'configured · coding plan' : ''],
+            ['deepseekKey', 'DeepSeek'], ['minimaxKey', 'MiniMax'], ['cloudruKey', 'Cloud.ru'],
+            ['openaiKey', 'OpenAI', compatible.legacy && compatible.baseUrl ? `configured · also used by the legacy address ${compatible.baseUrl}` : ''],
+            ['openrouterKey', 'OpenRouter'],
+        ].filter(([key]) => trim(state[key])).map(([, label, value]) => [label, value || 'configured']);
+        rows.splice(1, 0, ...(hasLocalModel() ? [
+            ['Local source', trim(state.localSource) + (trim(state.localFilename) ? ` / ${trim(state.localFilename)}` : '')],
+            ['Local routing', localRoutingLabel(state.localRoutingMode)],
+        ] : []), ...keys);
         rows.push(['Agents', agentsSummaryValue()]);
         rows.push(['Reviewers', reviewPoolRows(catalogDraft()).map(reviewerSummary).join(' · ')
             || 'None — the main model reviews alone']);
@@ -618,7 +612,8 @@ import { accountRowFacts } from './harness_accounts.js';
     function modelSummary(slot) {
         const values = trim(state[slot.stateKey]).split(',').map((value) => value.trim()).filter(Boolean);
         const inherited = !values.length && slot.slot !== 'fallback';
-        if (inherited) values.push(trim(state.mainModel));
+        const from = MODEL_SLOTS.find((entry) => entry.slot === inheritTargetOf(slot)) || { stateKey: 'mainModel', label: 'Main' };
+        if (inherited) values.push(trim(state[from.stateKey] || '') || trim(state.mainModel));  // Safety: Light, then Main
         return values.map((value, index) => {
             const { source, model } = parseModelSource(value);
             const account = slot.slot === 'fallback' ? state.modelAccounts.fallback?.[index] : state.modelAccounts[slot.slot];
@@ -626,11 +621,25 @@ import { accountRowFacts } from './harness_accounts.js';
             const processing = slot.slot === 'fallback' ? state.modelProcessingPreferences?.fallback?.[index] : state.modelProcessingPreferences?.[slot.slot];
             const assignment = source.startsWith('subscription:')
                 ? `${source.slice(13)} · ${model} · ${account ? `Account: ${account}` : 'Auto rotation'}` : value;
-            return `${inherited ? 'Uses Main · ' : ''}${assignment} · Processing: ${processingIntentLabel(processing, state.processingPreference)}${Number(context) > 0 ? ` · ${Number(context).toLocaleString('en-US')} tokens, set by you` : ''}`;
+            return `${inherited ? `Uses ${from.label.replace(/ Model$/, '')} · ` : ''}${assignment} · Processing: ${processingIntentLabel(processing, state.processingPreference)}${Number(context) > 0 ? ` · ${Number(context).toLocaleString('en-US')} tokens, set by you` : ''}`;
         }).join(' → ') || 'None';
     }
 
     function catalogDraft() { return agentsStep?.availableSubagents || state.availableSubagents; }
+    // Everything one explicit save sends but its attempt id (the staged language is applied after, on its own): Start
+    // posts it, and a confirmed attempt completes the wizard only while this still equals what that attempt sent.
+    function completionPayload() {
+        return {
+            // Observations are not authority: the endpoint re-proves eligibility.
+            subscriptionsConnected: state.agentsConnected.length > 0,
+            skipSubscriptionPresets: state.skipSubscriptionPresets,
+            ...draftSettings(),
+            // Completion validates this visible draft and never replaces it.
+            OUROBOROS_SUBAGENTS: catalogDraft(),
+            ...(agentsStep?.allowEmptyReviewPool ? { [ALLOW_EMPTY_REVIEW_POOL]: true } : {}),
+            ...starterSkills.payload(),
+        };
+    }
 
     function reviewerSummary(row) {
         const account = row.route?.credential_profile_id;
@@ -685,25 +694,19 @@ import { accountRowFacts } from './harness_accounts.js';
             `;
         }
 
-        function renderProvidersStep({ embedded = false } = {}) {
-        const selectedProfile = activeProviderProfile();
+        // The provider fields, compatible servers and local model inside Accounts' API disclosure.
+        function renderProvidersStep() {
         const localPreset = trim(state.localPreset);
         const localSourceOpen = state.localSourceOpen || hasLocalModel();
         const moreProvidersOpen = state.moreProvidersOpen || hasMoreProviderValue();
         return `
-            ${embedded ? '' : `<div class="step-header">
-                <div>
-                    <h2 class="step-title">${escapeHtml(STEP_META.providers?.title || 'API access')}</h2>
-                    <p class="step-copy">${escapeHtml(STEP_META.providers?.copy || '')}</p>
-                </div>
-            </div>
-                <div class="panel-card">
-                    <h3>Keys first, routing second</h3>
-                    <p>${escapeHtml(PROVIDER_PROFILES[selectedProfile]?.providerCopy || '')}</p>
-                </div>`}
                 <div class="field-grid">
                     ${primaryProviderFields().map(providerKeyField).join('')}
                 </div>
+            <div data-settings-panel="providers">
+                ${providerSettingsCard({ ...compatibleCard, title: 'Custom OpenAI-compatible servers',
+                    open: Boolean(state.compatibleBaseUrl || state.legacyCompatibleBaseUrl || state.connections?.length) })}
+            </div>
             <details class="wizard-collapse" data-collapse="more-providers" ${moreProvidersOpen ? 'open' : ''}>
                 <summary>
                     <span>More options</span>
@@ -749,25 +752,10 @@ import { accountRowFacts } from './harness_accounts.js';
         `;
     }
 
-    function renderAgentsStep() {
-        // SKIPPABLE by construction: `validateCurrentStep` returns '' for this
-        // step, so Continue is never disabled and no field here can block
-        // finishing. An agent plan is an amplifier, never an admission gate.
-        return `
-            <div class="step-header">
-                <div>
-                    <h2 class="step-title">${escapeHtml(STEP_META.agents.title)}</h2>
-                    <p class="step-copy">${escapeHtml(STEP_META.agents.copy)}</p>
-                </div>
-            </div>
-            ${agentsStepHtml()}
-        `;
-    }
-
     function bindAgentsStep() {
         if (!agentsStep) {
             agentsStep = createAgentsStep({
-                isVisible: () => ['accounts', 'agents', 'models', 'budget'].includes(state.currentStep),
+                isVisible: () => ['accounts', 'models', 'budget'].includes(state.currentStep),
                 onChange: (connected) => {
                     state.agentsConnected = connected;
                     void refreshModelSources();
@@ -797,13 +785,14 @@ import { accountRowFacts } from './harness_accounts.js';
                 <p class="step-copy">Start with Codex, or connect API access. You can add more accounts any time.</p>
             </div></div>
             ${agentsStepHtml({ compact: true, showRoster: false })}
-            <div id="onboarding-access-note" class="wizard-inline-note" role="status" hidden></div>
-            <button id="onboarding-access-retry" class="btn btn-default" type="button" hidden>Retry model discovery</button>
+            <div id="onboarding-access-row" class="wizard-access-row" hidden>
+                <div id="onboarding-access-note" class="wizard-inline-note" role="status" hidden></div>
+                <button id="onboarding-access-retry" class="btn btn-default" type="button" hidden>Retry model discovery</button>
+            </div>
             <details class="wizard-collapse" data-collapse="api-access" ${state.apiAccessOpen || hasApiAccess() ? 'open' : ''}>
                 <summary><span>API keys and local models</span><span class="selection-badge">${hasApiAccess() ? 'Configured' : 'Optional'}</span></summary>
-                <div class="wizard-collapse-body">${renderProvidersStep({ embedded: true })}</div>
+                <div class="wizard-collapse-body">${renderProvidersStep()}</div>
             </details>
-            <div class="wizard-inline-note">Subscription limits still apply. This connection does not enable paid credits or change your provider's spending limits.</div>
         `;
     }
 
@@ -837,22 +826,27 @@ import { accountRowFacts } from './harness_accounts.js';
         `;
     }
 
-        function renderCompatibleModelLoader() {
-            return `
+    function compatibleSources() {
+        return configuredApiProviders(draftSettings(), PROVIDER_PROFILES)
+            .filter((entry) => entry.id.split('@')[0] === 'openai-compatible');
+    }
+
+    function renderCompatibleModelLoader() {
+        return `
             <div class="panel-card" id="compatible-model-loader">
-                <h3>Load models from endpoint</h3>
-                <p class="field-note">Fetch the model list from your configured URL, then click a model to fill all empty slots.</p>
+                <h3>Models from your server</h3>
                 <div class="compatible-model-actions">
+                    <label class="ui-field">Server
+                        <select class="ui-control" id="compatible-model-source">${compatibleSources().map((entry) =>
+                            `<option value="${escapeHtml(entry.id)}">${escapeHtml(entry.label)}</option>`).join('')}</select>
+                    </label>
                     <button type="button" class="btn btn-secondary" id="load-compatible-models">Load models</button>
-                    <span id="compatible-load-status" class="field-note compatible-load-status"></span>
                 </div>
-                <div id="compatible-model-list" class="compatible-model-list" hidden></div>
-            </div>
-            `;
-        }
+                <div id="compatible-load-status" class="field-note compatible-load-status" role="status">Choose a source for each role below. You can also type any model ID.</div>
+            </div>`;
+    }
 
         function renderModelsStep() {
-            const profile = activeProviderProfile();
             return `
             <div class="step-header">
                 <div>
@@ -860,7 +854,7 @@ import { accountRowFacts } from './harness_accounts.js';
                     <p class="step-copy">${escapeHtml(STEP_META.models.copy)}</p>
                 </div>
             </div>
-                ${profile === 'openai-compatible' ? renderCompatibleModelLoader() : ''}
+                ${compatibleSources().length ? renderCompatibleModelLoader() : ''}
                 ${modelRolesHost('onboarding-model-roles')}
                 <details class="wizard-collapse" data-collapse="subagents" ${state.subagentsOpen ? 'open' : ''}><summary>Available subagents</summary>
                     <div class="wizard-collapse-body">${availableSubagentsEditorHost('onboarding-available-subagents')}</div>
@@ -870,7 +864,7 @@ import { accountRowFacts } from './harness_accounts.js';
 
     function reviewersNote() {
         const count = reviewPoolRows(catalogDraft()).length;
-        if (count) return `Reviewers: ${count} — the rows marked Reviewer under Models → Available subagents. Outside Cyber Pro each of them reviews every change to Ouroboros itself; in Cyber Pro the agent composes the panel from them.`;
+        if (count) return `Reviewers: ${count} — the rows marked Reviewer under Models → Available subagents. ${reviewerTickCaption(state.reviewEnforcement, state.runtimeMode)}`;
         if (agentsStep?.previewError) return 'Automatic reviewers are unavailable. Mark rows as Reviewer under Models → Available subagents, or use Main on the summary.';
         return (catalogDraft()?.items || []).length ? 'No row is marked Reviewer, so the main model reviews alone. Mark rows under Models → Available subagents for a second opinion.'
             : 'Reviewers will be prepared from your connected access.';
@@ -958,7 +952,7 @@ import { accountRowFacts } from './harness_accounts.js';
     }
 
     function refreshSummary() {
-        const summary = root.querySelector('.summary-card');
+        const summary = root.querySelector('.summary-card-rows');
         if (summary) summary.innerHTML = summaryRowsHtml();
         syncCurrentStepActionState();
     }
@@ -971,7 +965,7 @@ import { accountRowFacts } from './harness_accounts.js';
                     <p class="step-copy">${escapeHtml(STEP_META.summary.copy)}</p>
                 </div>
             </div>
-            <div class="summary-card">${summaryRowsHtml()}</div>
+            <div class="summary-card"><div data-starter-skills></div><div class="summary-card-rows">${summaryRowsHtml()}</div></div>
             ${state.reviewEnforcement === 'blocking' && trim(state.runtimeMode) !== 'cyber_pro' && packetOnlyReviewPool(catalogDraft())
                 ? `<div class="wizard-inline-note" data-tone="warn" data-review-pool-warning>${escapeHtml(PACKET_ONLY_POOL_WARNING)}</div>` : ''}
             ${languageBlockHtml({ onboarding: true })}
@@ -989,9 +983,9 @@ import { accountRowFacts } from './harness_accounts.js';
             </div>
             <div class="panel-card">
                 <h3>Runtime mode takes effect at the next boot</h3>
-                <p>Ouroboros saved <code>${escapeHtml(state.completedRestartMode)}</code> as the runtime mode for the next boot, but this
+                <div class="wizard-inline-note">Ouroboros saved <code>${escapeHtml(state.completedRestartMode)}</code> as the runtime mode for the next boot, but this
                 process is still running the mode it started with. Restart Ouroboros to run in the mode you chose.
-                Opening the app now works — it simply runs in the previous mode until you do.</p>
+                Opening the app now works — it simply runs in the previous mode until you do.</div>
                 <div class="wizard-runtime-strip">
                     <button type="button" class="btn btn-primary" id="open-app-btn">Open Ouroboros in the current mode</button>
                 </div>
@@ -1002,8 +996,6 @@ import { accountRowFacts } from './harness_accounts.js';
     function renderStepContent() {
         if (state.currentStep === 'accounts') return renderAccountsStep();
         if (state.completedRestartMode) return renderRestartRequiredScreen();
-        if (state.currentStep === 'providers') return renderProvidersStep();
-        if (state.currentStep === 'agents') return renderAgentsStep();
         if (state.currentStep === 'models') return renderModelsStep();
         if (state.currentStep === 'review_mode') return renderReviewModeStep();
         if (state.currentStep === 'budget') return renderBudgetStep();
@@ -1016,8 +1008,8 @@ import { accountRowFacts } from './harness_accounts.js';
             const done = STEP_ORDER.indexOf(state.currentStep) > index;
             const meta = STEP_META[stepId];
             return `
-                <div class="wizard-step ${active ? 'active' : ''} ${done ? 'done' : ''}">
-                    <div class="wizard-step-index">Step ${index + 1}</div>
+                <div class="wizard-step ${active ? 'active' : ''} ${done ? 'done' : ''}"${active ? ' aria-current="step"' : ''}>
+                    <div class="wizard-step-index"><span class="wizard-step-word">Step&nbsp;</span>${index + 1}</div>
                     <p class="wizard-step-title">${escapeHtml(meta.title)}</p>
                     <p class="wizard-step-copy">${escapeHtml(meta.railCopy || '')}</p>
                 </div>
@@ -1026,31 +1018,28 @@ import { accountRowFacts } from './harness_accounts.js';
     }
 
     function render() {
+        connectionsEditor?.destroy();
+        connectionsEditor = null;
+        resetSecretReveals(root);
         const meta = STEP_META[state.currentStep];
         const index = STEP_ORDER.indexOf(state.currentStep);
         // An UNKNOWN save (503 settings_save_timeout: the write may still be
         // running in the server) makes "Check status" the primary action and
         // the re-submit an explicit, secondary "Retry save" — never the default
         // button beside it, which re-POSTed a second write over the first.
-        const saveUnknown = state.currentStep === 'summary' && state.saveUnknown;
+        const saveUnknown = state.currentStep === 'summary' && Boolean(state.saveAttempt);
         const nextLabel = state.currentStep === 'summary'
             ? (state.saving ? 'Saving...' : (saveUnknown ? 'Retry save' : 'Start Ouroboros'))
             : 'Continue';
         root.innerHTML = `
             <div class="wizard-shell">
-                <div class="wizard-header">
-                    <div>
-                        <h1 class="wizard-title">Ouroboros</h1>
-                        <p class="wizard-subtitle">Your accounts, your models, one Ouroboros.</p>
-                    </div>
-                    <div class="wizard-badge">Step ${index + 1} of ${STEP_ORDER.length}</div>
-                </div>
-                <div class="wizard-steps">${stepCards()}</div>
+                <div class="wizard-steps" role="group" aria-label="Step ${index + 1} of ${STEP_ORDER.length}">${stepCards()}</div>
                 <div class="wizard-content">
                     ${renderStepContent()}
                     ${state.completedRestartMode ? '' : `
                     <div class="wizard-footer">
-                        <div class="footer-copy">${escapeHtml(meta.footer)}</div>
+                        <div class="wizard-error" role="status">${escapeHtml(state.error)}</div>
+                        <div class="footer-copy">${escapeHtml(saveUnknown ? 'The last save did not return a confirmed result.' : meta.footer)}</div>
                         <div class="footer-actions">
                             <button class="btn btn-secondary" id="back-btn" type="button" ${index === 0 || state.saving || state.preparingRecovery ? 'disabled' : ''}>Back</button>
                             ${state.currentStep === 'accounts' ? `<button class="btn btn-secondary" id="quick-start-btn" type="button" ${hasModelSubscription() ? '' : 'hidden'}>Review &amp; start</button>` : ''}
@@ -1063,15 +1052,41 @@ import { accountRowFacts } from './harness_accounts.js';
                             ` : ''}
                         </div>
                     </div>
-                    <div class="wizard-error" role="status">${escapeHtml(state.error)}</div>
                     `}
                 </div>
             </div>
         `;
         bindEvents();
+        starterSkills.mount(root.querySelector('[data-starter-skills]'));
         disposeLanguage?.();   // the Language block lives on the summary step only; its binder owns its listeners
         disposeLanguage = state.currentStep === 'summary' && !state.completedRestartMode ? bindLanguageSettings(root, { staged: state.languageChoice, stage: (value) => { state.languageChoice = value; } }) : null;
         renderLocalStatus();
+        observeFooter();
+        revealCurrentStep();
+    }
+
+    // The page's scroll padding clears the pinned footer by its real height, which a wrapped reason changes.
+    function observeFooter() {
+        footerObserver?.disconnect();
+        const footer = root.querySelector('.wizard-footer');
+        const measure = () => document.documentElement.style.setProperty('--wizard-footer-height', `${footer?.getBoundingClientRect().height || 0}px`);
+        measure();
+        footerObserver = footer ? new ResizeObserver(measure) : null;
+        footerObserver?.observe(footer);
+    }
+
+    // WebKit's own reveal of a keyboard-focused control ignores the page's scroll padding and can stop under the
+    // footer; this one honours it. A pointer's click on a button never moves it out from under the pointer.
+    function clearFooterOnFocus(event) {
+        const target = event.target;
+        if (target instanceof Element && target.matches(':focus-visible') && !target.closest('.wizard-footer')) target.scrollIntoView({ block: 'nearest' });
+    }
+
+    // A rail narrower than its steps scrolls sideways: the current step, the one place this page says where you are, stays in it.
+    function revealCurrentStep() {
+        const rail = root.querySelector('.wizard-steps');
+        const current = rail?.querySelector('.wizard-step.active');
+        if (current && rail.scrollWidth > rail.clientWidth) rail.scrollLeft = current.offsetLeft - rail.offsetLeft - (rail.clientWidth - current.offsetWidth) / 2;
     }
 
         function bindClearButtons() {
@@ -1110,6 +1125,40 @@ import { accountRowFacts } from './harness_accounts.js';
     }
 
     function bindProvidersStep() {
+        const panel = root.querySelector('[data-settings-panel="providers"]');
+        if (panel) {
+            const mountedConnections = JSON.stringify(state.connections || []);
+            const changed = () => {
+                const rows = connectionsEditor?.collect().OUROBOROS_CONNECTIONS;
+                // collect() is a mount-relative patch; undo must restore that baseline too.
+                state.connections = rows ?? JSON.parse(mountedConnections);
+                for (const field of compatibleCard.fields) {
+                    const input = panel.querySelector(`#${field.id}`);
+                    const stateKey = PROVIDER_FIELDS.find((entry) => entry.settingKey === field.settingKey)?.stateKey;
+                    if (input && stateKey) state[stateKey] = input.value;
+                }
+                compatibleCatalogs = {};
+                markStepEdited();
+            };
+            connectionsEditor = createConnectionsEditor({ root, onChange: changed });
+            for (const field of compatibleCard.fields) {
+                const input = panel.querySelector(`#${field.id}`);
+                input.value = draftSettings()[field.settingKey] || '';
+                const stateKey = PROVIDER_FIELDS.find((entry) => entry.settingKey === field.settingKey)?.stateKey;
+                input.dataset.appliedValue = INITIAL_STATE[stateKey] || '';
+            }
+            // The card's own fields first, as Settings does: load() binds each row it mounts.
+            bindSecretInputs(panel);
+            connectionsEditor.load(draftSettings(), { modelSlots: MODEL_SLOTS });
+            // Back remounts the draft, not a saved document. Show and Test must still
+            // use edited values locally rather than look up an unsaved row's key.
+            panel.querySelectorAll('[data-connection-row][data-uid]').forEach((row) => {
+                const saved = (INITIAL_STATE.connections || []).find((entry) => entry.kind === row.dataset.kind && entry.name === row.dataset.name);
+                row.querySelectorAll('[data-connection-field]').forEach((input) => {
+                    input.dataset.appliedValue = saved?.[input.dataset.connectionField] || '';
+                });
+            });
+        }
             const localPreset = document.getElementById('local-preset');
             const localSource = document.getElementById('local-source');
         const localFilename = document.getElementById('local-filename');
@@ -1209,76 +1258,47 @@ import { accountRowFacts } from './harness_accounts.js';
         syncCurrentStepActionState();
     }
 
-        function bindCompatibleModelLoader() {
-            const loadBtn = document.getElementById('load-compatible-models');
-            if (!loadBtn) return;
-            loadBtn.addEventListener('click', async () => {
-                const baseUrl = trim(state.compatibleBaseUrl).replace(/\/+$/, '');
-                const apiKey = trim(state.compatibleApiKey);
-                const statusEl = document.getElementById('compatible-load-status');
-                const listEl = document.getElementById('compatible-model-list');
-                if (!baseUrl) {
-                    if (statusEl) statusEl.textContent = 'Go back and enter a base URL first.';
-                    return;
-                }
-                if (statusEl) statusEl.textContent = 'Loading…';
-                loadBtn.disabled = true;
-                try {
-                    let models;
-                    if (HOST_MODE === 'web') {
-                        const resp = await fetch('/api/openai-compatible/models', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ baseUrl, apiKey }),
-                            cache: 'no-store',
-                        });
-                        const data = await resp.json().catch(() => ({}));
-                        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-                        models = (data.models || []).map((m) => trim(m)).filter(Boolean).sort();
-                    } else {
-                        if (!window.pywebview?.api?.fetch_compatible_models) {
-                            throw new Error('Desktop model-fetch bridge unavailable.');
-                        }
-                        const result = await window.pywebview.api.fetch_compatible_models({ baseUrl, apiKey });
-                        if (result?.error) throw new Error(result.error);
-                        models = (result?.models || []).map((m) => trim(m)).filter(Boolean).sort();
-                    }
-                    if (!models.length) throw new Error('No models returned by endpoint.');
-                    if (statusEl) statusEl.textContent = `${models.length} model${models.length === 1 ? '' : 's'} found — click one to fill empty slots.`;
-                    if (listEl) {
-                        listEl.hidden = false;
-                        listEl.innerHTML = models.map((m) =>
-                            `<button type="button" class="selection-pill" data-apply-model="${escapeHtml(m)}">${escapeHtml(m)}</button>`
-                        ).join('');
-                    }
-                } catch (err) {
-                    const msg = String(err?.message || err || 'Unknown error');
-                    if (statusEl) statusEl.textContent = `Failed: ${msg}`;
-                    if (listEl) { listEl.hidden = true; listEl.innerHTML = ''; }
-                } finally {
-                    loadBtn.disabled = false;
-                }
-            });
-            if (!root._compatModelListenerBound) {
-                root._compatModelListenerBound = true;
-                root.addEventListener('click', (event) => {
-                    const pill = event.target.closest('[data-apply-model]');
-                    if (!pill) return;
-                    const modelId = `openai-compatible::${pill.dataset.applyModel}`;
-                    if (!trim(state.mainModel)) state.mainModel = modelId;
-                    if (!trim(state.lightModel)) state.lightModel = modelId;
-                    if (!trim(state.fallbackModel)) state.fallbackModel = modelId;
-                    state.modelsDirty = true;
-                    agentsStep?.invalidateGeneratedPreview();
-                    render();
+    function bindCompatibleModelLoader() {
+        const button = document.getElementById('load-compatible-models');
+        const select = document.getElementById('compatible-model-source');
+        const status = document.getElementById('compatible-load-status');
+        if (!button) return;
+        select.addEventListener('change', () => { status.textContent = 'Load this server’s models, or type a model ID below.'; });
+        button.addEventListener('click', async () => {
+            const source = select.value;
+            const name = source.split('@')[1] || '';
+            const row = name ? state.connections.find((entry) => entry.kind === 'openai-compatible' && entry.name === name) : null;
+            // The built-in source sends the one pair the draft reaches, naming whose key a kept one is.
+            const { baseUrl, apiKey, apiKeySetting } = name ? { baseUrl: row?.base_url, apiKey: row?.api_key || '' }
+                : compatibleEndpoint(draftSettings());
+            const payload = { baseUrl, apiKey, ...(name ? { connection: name } : { apiKeySetting }) };
+            const sent = JSON.stringify(payload);
+            status.textContent = 'Loading…';
+            button.disabled = true;
+            try {
+                const data = await fetchJson('/api/openai-compatible/models', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: sent, cache: 'no-store',
                 });
+                if (disposed || !button.isConnected) return;
+                const models = (data.models || []).map(trim).filter(Boolean).sort();
+                compatibleCatalogs[source] = models.map((id) => ({ value: `${source}::${id}`, label: id }));
+                adoptModelCatalog();
+                if (select.value === source) status.textContent = models.length
+                    ? `${models.length} model${models.length === 1 ? '' : 's'} listed for this server. Choose one in its role below.`
+                    : 'No models listed. You can type a model ID below.';
+            } catch (error) {
+                if (!disposed && button.isConnected && select.value === source) status.textContent = `Could not load models: ${error.message}. You can type a model ID below.`;
+            } finally {
+                if (button.isConnected) button.disabled = false;
             }
-        }
+        });
+    }
 
     function bindModelsStep() {
         bindCompatibleModelLoader();
         loadModelRoles();
         modelRoles.mount();
+        adoptModelCatalog();
         agentsStep?.mount();
         agentsStep?.setProcessingPreference(state.processingPreference);
         syncCurrentStepActionState();
@@ -1294,6 +1314,8 @@ import { accountRowFacts } from './harness_accounts.js';
                 choice.setAttribute('aria-pressed', String(selected));
             });
             markStepEdited();
+            const note = root.querySelector('[data-reviewers-note]');  // what a tick means under the mode just chosen
+            if (note) note.textContent = reviewersNote();
         }));
     }
 
@@ -1365,69 +1387,50 @@ import { accountRowFacts } from './harness_accounts.js';
         render();
     }
 
+    let checkOwner = 0;   // the newest "Check status"; an older one's answer is never acted on
+
     async function checkSaveStatus() {
-        // Completion answered 503 `settings_save_timeout`: its body kept running in the server past the shared writer
-        // bound, so whether the bytes landed is UNKNOWN (`saved: null`) and a retry would be a second write. Re-read the
-        // readiness probe the overlay itself gates on — 204 means a startup-ready provider is on disk, i.e. the
-        // transaction landed — and proceed exactly as a completion receipt would; otherwise stay open.
+        // The completion's answer did not say what happened (503 `settings_save_timeout`, `saved: null`, a lost or unreadable
+        // reply). Read back THIS attempt by the id the wizard sent, never the readiness probe a provider saved earlier already
+        // passes: only its own receipt completes, exactly as the reply would have; a recorded failure shows as that reply
+        // would have; stored-but-finishing and unconfirmed keep the draft and send nothing.
+        if (state.saving || !state.saveAttempt) return;
+        const owner = ++checkOwner;
+        const attempt = state.saveAttempt;
         state.error = '';
         render();
-        let status = 0;
-        try {
-            const response = await fetch('/api/onboarding', { method: 'GET', headers: { Accept: 'application/json' } });
-            status = response.status;
-        } catch (error) {
-            state.error = `Could not check the save status: ${String(error?.message || error)}. Try again in a moment.`;
-            render();
-            return;
+        const outcome = await readCompletionAttempt(attempt);
+        // Retry save (a new attempt), a newer check or leaving the page retired this answer: it touches nothing of theirs.
+        if (disposed || owner !== checkOwner || attempt !== state.saveAttempt) return;
+        if (!['completed', 'failed'].includes(outcome.state)) { state.error = outcome.text; return render(); }
+        if (outcome.state === 'completed' && state.saveAttemptDraft !== JSON.stringify(completionPayload())) {
+            // That save is confirmed, but the values shown changed after it was sent: its receipt does not complete them.
+            Object.assign(state, { saveAttempt: '', saveAttemptDraft: '', error: EARLIER_SAVE_OTHER_VALUES_TEXT });
+            return render();
         }
-        if (status === 204) {
-            // The transaction landed. Its staged language needs the settings lock the finishing save may still hold: while that writer answers busy, stay with the draft so the next check applies it.
-            if (!(await applyStagedLanguage())) {
-                state.error = 'Setup is saved. The interface language is still being applied — check again in a moment. If this repeats, choose English or a code such as pt-BR in the control above and check again.';
-                return render();
-            }
-            state.saveUnknown = false;
-            await agentsStep?.disposeForCompletion();
-            agentsStep = null;
-            // The receipt's `restart_required` never arrived: the boot-pinned
-            // mode is what the page loaded with, so a changed choice is treated
-            // as needing a restart — the honest side to err on.
-            announceCompletion({
-                runtime_mode: state.runtimeMode,
-                restart_required: trim(state.runtimeMode) !== trim(INITIAL_STATE.runtimeMode),
-            });
-            return;
-        }
-        state.error = 'Setup is not complete yet — the save may still be running in the server. Check again in a moment; if it never completes, finish setup again.';
+        // Acted on as the save's own reply is: Start/Retry stay held, as in saveWizard, until it has settled.
+        state.saving = true;
         render();
+        if (outcome.state === 'failed') return showCompletionFailure(outcome.failure);
+        // Its staged language needs the settings lock the finishing save may still hold: while that writer answers busy, stay with the draft so the next check applies it.
+        if (!(await applyStagedLanguage())) {
+            state.saving = false;
+            state.error = 'Setup is saved. The interface language is still being applied — check again in a moment. If this repeats, choose English or a code such as pt-BR in the control above and check again.';
+            return render();
+        }
+        state.saveAttempt = '';
+        await agentsStep?.disposeForCompletion();
+        agentsStep = null;
+        if (!disposed) announceCompletion(outcome.receipt);
     }
 
     async function completeOnboardingAtomically(payload) {
         // The atomic completion (D-8): server-side fresh-install proof, the
         // structural provider gate, optional agent-preset compilation, a single
-        // persist, then supervisor start.
-        const response = await fetch(ONBOARDING_COMPLETE_ENDPOINT, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-        // A body that will not parse is UNKNOWN, not empty. Substituting `{}`
-        // made a 200 carrying HTML (a proxy error page, a login redirect) look
-        // like a completion, and `{}` being truthy meant the caller announced
-        // success with `restart_required` silently gone.
-        let data = null;
-        let parsed = true;
-        try {
-            data = await response.json();
-        } catch (err) {
-            parsed = false;
-        }
-        if (!data || typeof data !== 'object') { data = {}; parsed = false; }
-        // ONE reader for both answers (typed refusal, success envelope); the branches are node-tested in onboarding_agents_step.js.
-        const answer = readCompletionAnswer({
-            status: response.status, ok: response.ok, parsed, data,
-        });
+        // persist, then supervisor start. ONE reader for every answer — typed
+        // refusal, success envelope, a body that will not parse (unknown, never
+        // `{}`), none at all — node-tested in onboarding_agents_step.js.
+        const answer = await postCompletion(ONBOARDING_COMPLETE_ENDPOINT, payload);
         if (answer.failure) {
             const error = new Error(answer.failure.message);
             Object.assign(error, answer.failure);
@@ -1491,30 +1494,37 @@ import { accountRowFacts } from './harness_accounts.js';
         if (state.error) return syncCurrentStepActionState();
         state.saving = true;
         state.error = '';
+        // This save supersedes an earlier unknown one, so a late answer to that never confirms this one,
+        // and it retires a check still reading that one.
+        const earlier = { attempt: state.saveAttempt, draft: state.saveAttemptDraft };
+        state.saveAttempt = '';
+        checkOwner += 1;
         render();
-        const payload = {
-            // Observations are not authority: the endpoint re-proves eligibility.
-            subscriptionsConnected: state.agentsConnected.length > 0,
-            skipSubscriptionPresets: state.skipSubscriptionPresets,
-            ...onboardingSettingsDraft({ state, providerFields: PROVIDER_FIELDS, budgetFields: BUDGET_FIELDS, modelSlots: MODEL_SLOTS, trim }),
-            // Completion validates this visible draft and never replaces it.
-            OUROBOROS_SUBAGENTS: catalogDraft(),
-            ...(agentsStep?.allowEmptyReviewPool ? { [ALLOW_EMPTY_REVIEW_POOL]: true } : {}),
-        };
+        const attempt = completionAttemptId();
+        const sent = completionPayload();
+        const draft = JSON.stringify(sent);
+        const payload = { ...sent, attempt_id: attempt };
         try {
             await saveWizardPayload(payload);
+            starterSkills.destroy();
         } catch (error) {
-            // The wizard STAYS OPEN with the real reason. A typed preset refusal
-            // wrote nothing, so the offered escape is honest: finish without the
-            // agent defaults and keep everything editable in Settings.
-            const notice = completionFailureNotice(error);
-            if (notice.saved) await applyStagedLanguage();   // the settings landed (a later step failed): the staged language goes with them
-            state.saving = false;
-            state.presetFailure = notice.canSkip ? { code: notice.code } : null;
-            state.saveUnknown = Boolean(notice.saveUnknown);
-            state.error = notice.text;
-            render();
+            await showCompletionFailure(error, { attempt, draft }, earlier);
         }
+    }
+
+    // The wizard STAYS OPEN with the real reason. A typed preset refusal wrote nothing, so the offered escape is
+    // honest: finish without the agent defaults and keep everything editable in Settings. An unknown outcome keeps
+    // its attempt for "Check status"; a refusal that wrote nothing keeps the earlier unknown one, and says so.
+    async function showCompletionFailure(error, sent = {}, earlier = {}) {
+        const notice = completionFailureNotice(error);
+        if (notice.saved) await applyStagedLanguage();   // the settings landed (a later step failed): the staged language goes with them
+        state.saving = false;
+        state.presetFailure = notice.canSkip ? { code: notice.code } : null;
+        const kept = notice.saveUnknown ? sent : (notice.saved === false && earlier.attempt ? earlier : {});
+        state.saveAttempt = kept.attempt || '';
+        state.saveAttemptDraft = kept.draft || '';
+        state.error = kept === earlier ? `${notice.text} — ${EARLIER_SAVE_KEPT_TEXT}` : notice.text;
+        render();
     }
 
     function bindEvents() {
@@ -1550,8 +1560,6 @@ import { accountRowFacts } from './harness_accounts.js';
             if (!disposed) syncCurrentStepActionState();
         });
         if (state.currentStep === 'accounts') { bindProvidersStep(); bindAgentsStep(); }
-        if (state.currentStep === 'providers') bindProvidersStep();
-        if (state.currentStep === 'agents') bindAgentsStep();
         if (state.currentStep === 'models') bindModelsStep();
         if (state.currentStep === 'review_mode') bindReviewModeStep();
         if (state.currentStep === 'budget') bindBudgetStep();
@@ -1559,13 +1567,19 @@ import { accountRowFacts } from './harness_accounts.js';
     }
 
     applyModelDefaults(false);
+    root.addEventListener('focusin', clearFooterOnFocus);
     window.addEventListener('pagehide', (event) => {
         if (event.persisted) return;
         disposed = true;
+        root.removeEventListener('focusin', clearFooterOnFocus);
         disposeLanguage?.();
         catalogGeneration += 1;
         catalogRequest?.controller.abort();
         modelRoles.destroy();
+        connectionsEditor?.destroy();
+        footerObserver?.disconnect();
+        resetSecretReveals(root);
+        starterSkills.destroy();
     });
     render();
 })();

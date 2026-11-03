@@ -14,7 +14,7 @@ from ouroboros.contracts.task_constraint import (
     normalize_task_constraint,
 )
 from ouroboros.tool_access import active_tool_profile
-from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, ACTING_SUBAGENT_TOOL_NAMES
+from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, ACTING_SUBAGENT_TOOL_NAMES, META_TOOL_NAMES
 from ouroboros.runtime_mode_policy import mode_allows_protected_write
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros import subagent_worktrees as sw
@@ -275,7 +275,8 @@ def test_shrink_guard_covers_redundant_root_prefix(tmp_path, monkeypatch):
 def test_acting_tool_visibility_is_acting_set(tmp_path):
     reg, _ctx, _wt = _acting_registry(tmp_path)
     names = set(reg.initial_tool_names())
-    assert names == set(ACTING_SUBAGENT_TOOL_NAMES)
+    # The schema selectors ride every role (#1860): they load schemas and grant nothing.
+    assert names == set(ACTING_SUBAGENT_TOOL_NAMES) | META_TOOL_NAMES
     assert "commit_reviewed" not in names
     assert "integrate_subagent_patch" in names
 
@@ -304,19 +305,26 @@ def test_worktree_root_isolation_guard(tmp_path):
 
 
 def test_worktree_prune_guards_outside_root(tmp_path):
-    # A corrupt registry entry pointing OUTSIDE the worktree root must never cause deletion.
+    # A record pointing OUTSIDE the worktree root (corrupt, or left by a root that moved) must
+    # never cause deletion, even once its task is proven over. Nor is it forgotten (#1239): the
+    # record stays with a removal stamp, and the next pass of this process does not retry it.
+    from ouroboros.task_results import write_task_result
     repo = tmp_path / "repo"
     _init_repo(repo, {"a.txt": "hi\n"})
     data = tmp_path / "data"; data.mkdir()
     wtroot = tmp_path / "wtroot"
     outside = tmp_path / "precious"; outside.mkdir()
     (outside / "keep.txt").write_text("x", encoding="utf-8")
-    sw._save_registry(
-        [{"task_id": "evil", "path": str(outside), "branch": "", "repo_dir": str(repo), "created_at": 0.0}],
-        data_dir=data,
-    )
-    sw.prune_orphans(worktree_root=wtroot, data_dir=data, retention_days=0)
+    sw._put_record({"task_id": "evil", "path": str(outside), "branch": "", "repo_dir": str(repo),
+                    "created_at": 0.0}, data_dir=data)
+    write_task_result(data, "evil", "completed")
+    report = sw.prune_orphans(worktree_root=wtroot, data_dir=data, retention_days=0, live=lambda _task: False)
     assert outside.exists() and (outside / "keep.txt").exists()  # guard prevented deletion
+    assert report == {"removed": 0, "kept": 1}
+    (row,) = sw.list_worktrees(data_dir=data)
+    assert row["path"] == str(outside) and row.get("removal_failed")
+    assert sw.prune_orphans(worktree_root=wtroot, data_dir=data, retention_days=0,
+                            live=lambda _task: False) == {"removed": 0, "kept": 1}
 
 
 def test_worktree_prune_missing(tmp_path):
@@ -326,8 +334,13 @@ def test_worktree_prune_missing(tmp_path):
     wtroot = tmp_path / "wtroot"
     h = sw.provision_worktree(repo_dir=repo, task_id="t2", worktree_root=wtroot, data_dir=data)
     import shutil
+    from ouroboros.task_results import write_task_result
     shutil.rmtree(h.path)
-    res = sw.prune_orphans(worktree_root=wtroot, data_dir=data, retention_days=9999)
+    # A missing checkout is forgotten only once its task is proven over (C10: terminal row, negative probe).
+    kept = sw.prune_orphans(worktree_root=wtroot, data_dir=data, retention_days=9999, live=lambda _task: True)
+    assert kept["removed"] == 0 and kept["kept"] == 1
+    write_task_result(data, "t2", "completed")
+    res = sw.prune_orphans(worktree_root=wtroot, data_dir=data, retention_days=9999, live=lambda _task: False)
     assert res["removed"] == 1 and res["kept"] == 0
 
 
@@ -625,8 +638,8 @@ def test_mode_allows_protected_write_matrix():
 def test_acting_schemas_subset_of_acting_set(tmp_path):
     reg, _ctx, _wt = _acting_registry(tmp_path, grants=("mcp_foo",))
     names = {s["function"]["name"] for s in reg.schemas()}
-    # No first-party tool outside the acting set; ungranted ext/MCP never leak.
-    assert names <= set(ACTING_SUBAGENT_TOOL_NAMES)
+    # No first-party tool outside the acting set and its selectors; ungranted ext/MCP never leak.
+    assert names <= set(ACTING_SUBAGENT_TOOL_NAMES) | META_TOOL_NAMES
     assert reg._acting_tool_grants() == {"mcp_foo"}
 
 
@@ -1332,8 +1345,8 @@ def test_provision_genesis_project_is_durable_and_isolated(tmp_path):
     assert pathlib.Path(h.path).exists() and (pathlib.Path(h.path) / ".git").exists()
     assert h.base_sha  # seed commit exists
     assert sw._is_within(pathlib.Path(h.path), proot)
-    # NOT added to the worktree registry (durable, not GC-tracked).
-    assert all(e.get("path") != h.path for e in sw._load_registry(data))
+    # NOT given a copy record (durable, not GC-tracked).
+    assert all(e.get("path") != h.path for e in sw._records(data))
     # remove only inside projects root; refuses arbitrary paths.
     assert sw.remove_genesis_project(str(tmp_path / "elsewhere")) is False
     assert sw.remove_genesis_project(h.path, projects_root=proot) is True

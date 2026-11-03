@@ -1,15 +1,6 @@
-"""One subject, two doors, the same brief (seam 4 of the review operation).
-
-``review_change(root="system_repo", subject="index")`` and the commit gate's
-review-only cycle review the same staged index through the same seats, the same
-body-layer rules and the same prompt text. The ONLY differences the two doors
-may leave in a brief are the narrative line that names the wave (the gate hands
-the reviewers the intended commit message, the operation its own wave label
-``review_change: staged index of <root> ...``, both inside the
-``## Informational context — commit message`` block the goal section renders)
-and the gate's own test execution exhibit, which a standalone operation has no
-fact for. This test pins the differences to exactly those blocks.
-"""
+"""Index review and the commit gate's review-only cycle share one subject, seats and body rules.
+The only brief differences are the narrative line in ``## Informational context — commit message``
+and the gate's test execution exhibit; a standalone operation has no execution fact."""
 
 import hashlib
 import json
@@ -35,8 +26,7 @@ COMMIT_MESSAGE = "fix: return the proposal's constant\n\nThe narrative body of t
 
 
 def _brief_text(brief: dict) -> str:
-    """Every byte a seat was given: the message texts (plain or block-structured)
-    and, for a retrieving seat, its session task."""
+    """All delivered message bodies and, for a retrieving seat, its session task."""
     parts = []
     for message in brief["messages"]:
         content = message.get("content") or ""
@@ -138,14 +128,23 @@ def test_review_change_on_the_system_index_is_the_commit_gates_brief(staged_body
         assert hashlib.sha256(aligned.encode()).hexdigest() == hashlib.sha256(gate_text.encode()).hexdigest(), slot_id
         assert "## Informational context — commit message" in gate_text, slot_id
 
+    # Reviewing the contribution does not authorize a neutral commit on the serving checkout.
+    head = shared.git(repo, "rev-parse", "HEAD")
+    commit_ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "commit-drive")
+    git_mod._reset_commit_review_state(commit_ctx)
+    monkeypatch.setattr(substrate, "run_review_request", lambda *a, **kw: pytest.fail("serving refusal precedes paid review"))
+    refused = git_mod._run_reviewed_stage_cycle(commit_ctx, COMMIT_MESSAGE, 0, require_release_tag=False)
+    assert refused["status"] == "blocked" and refused["block_reason"] == "preflight", refused
+    assert "VERSION is not in scope" in refused["message"]
+    assert shared.git(repo, "rev-parse", "HEAD") == head
+
 
 QUESTIONS = ["Does the proposal's constant reach every caller of the helper?", "Which test pins the new value?"]
 PRIOR_OBLIGATION = "ob-prior-round-7"
 
 
 def _seed_open_obligation(drive_root: Path, repo: Path) -> None:
-    """One obligation of this checkout left open by an earlier round, in the durable
-    advisory state every door reads its history from."""
+    """Seed an earlier open obligation in the durable state both doors read."""
     from ouroboros.review_state import AdvisoryReviewState, ObligationItem, make_repo_key, save_state
 
     state = AdvisoryReviewState()
@@ -247,7 +246,7 @@ def _golden_with_critic(briefs: list, critic: str):
     return run_review_request
 
 
-def _gate_with_critic(staged_body, tmp_path, monkeypatch, *, mode: str, **args):
+def _gate_with_critic(staged_body, tmp_path, monkeypatch, *, mode: str, expected_status="passed", **args):
     """The gate's review-only cycle with an unmarked enabled row ``scout`` beside the golden pool."""
     from tests.review_pool_rosters import pool_seat
 
@@ -257,8 +256,9 @@ def _gate_with_critic(staged_body, tmp_path, monkeypatch, *, mode: str, **args):
     monkeypatch.setattr(substrate, "run_review_request", _golden_with_critic(briefs, "scout"))
     ctx = ToolContext(repo_dir=Path(staged_body["repo"]), drive_root=tmp_path / "gate-drive")
     outcome = _run_non_committing_review_cycle(ctx, COMMIT_MESSAGE, skip_advisory_review=True, goal=GOAL, scope=SCOPE, **args)
-    assert outcome["status"] == "passed", outcome
-    record = review_ledger.load_record(ctx.drive_root, outcome["review_record_id"])
+    assert outcome["status"] == expected_status, outcome
+    reference = outcome["review_reference"] if expected_status == "reviewed" else outcome
+    record = review_ledger.load_record(ctx.drive_root, reference["review_record_id"])
     return record, sorted(brief["slot_id"] for brief in briefs)
 
 
@@ -271,19 +271,21 @@ def test_in_cyber_pro_commit_reviewed_composes_its_panel_from_the_pool_and_recor
     assert sent == ["s1", "scout"]  # the rest of the pool was not paid
     panel = record["panel"]
     assert (panel["composition"], panel["chosen_by"], panel["reason"], panel["reason_missing"]) == (
-        "composed", "author", REASON, False)
+        "composed", "ouroboros", REASON, False)
     assert (panel["assigned"], panel["additional"], panel["seats"], panel["additional_seats"]) == (["s1"], ["scout"], 1, 1)
     assert panel["reviewers_requested"] == ["s1", "scout"]
     assert {row["seat_id"]: row["additional"] for row in record["rows"]} == {"s1": False, "scout": True}
     assert record["verdict"]["aggregate"] == "PASS" and record["mode"] == "cyber_pro"
 
 
-def test_below_cyber_pro_the_whole_pool_judges_the_commit_and_named_rows_only_add(staged_body, tmp_path, monkeypatch):
+def test_blocking_widens_the_commit_panel_and_records_the_request(staged_body, tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     record, sent = _gate_with_critic(staged_body, tmp_path, monkeypatch, mode="pro", reviewers=["t1", "scout"])
     assert sent == ["s1", "scout", "t1", "t2"]
     panel = record["panel"]
     assert (panel["composition"], panel["chosen_by"], panel["reason_missing"], panel["reviewers_subset_ignored"]) == (
-        "full_pool", "owner", False, True)
+        "full_pool", "ouroboros", False, True)
+    assert panel["widened_from"] == ["t1", "scout"]
     assert (sorted(panel["assigned"]), panel["additional"], panel["seats"]) == (["s1", "t1", "t2"], ["scout"], 3)
     assert record["verdict"]["aggregate"] == "PASS"
 
@@ -535,11 +537,11 @@ def _pending_then_answering_seat(seat_id: str, token: str):
     return answer, starts
 
 
-def _paid_rows(drive: Path, project: Path) -> list:
+def _paid_rows(drive: Path, project: Path, *, paid_only: bool = True) -> list:
     from ouroboros.review_state import load_state, make_repo_key
 
     return [row for row in load_state(drive).filter_attempts(repo_key=make_repo_key(project), tool_name="review_change")
-            if row.paid]
+            if row.paid or not paid_only]
 
 
 def test_a_rerun_of_a_pending_round_rejoins_its_operation_and_passes_a_reached_ceiling(tmp_path, monkeypatch):
@@ -631,23 +633,23 @@ class _ProcessDied(BaseException):
     """The review process dies mid-wave: nothing settles, no cleanup of ours runs."""
 
 
-def _dies_right_after_the_paid_stamp(monkeypatch):
-    """The process is lost the moment the wave's paid row is durable: the row says
-    ``reviewing`` with its seats reserved and tokenless, and no seat ever answers."""
+def _dies_right_after_the_reservation(monkeypatch):
+    """The process is lost the moment the wave's reserved row is durable: the row says
+    ``reviewing`` with its seats reserved, tokenless and owned, and no seat is ever sent."""
     import ouroboros.tools.review_change as review_change_mod
-    from ouroboros.review_dispatch import ReviewPaidStamp
 
     real = review_change_mod.install_paid_stamp
 
     def install(ctx, wave):
         holder = real(ctx, wave)
-        write = ctx._review_paid_stamp
+        stamp = ctx._review_paid_stamp
+        reserve = stamp.reserve
 
-        def write_then_die() -> None:
-            write()
+        def reserve_then_die() -> None:
+            reserve()
             raise _ProcessDied()
 
-        ctx._review_paid_stamp = ReviewPaidStamp(write_then_die, fail_closed=True)
+        stamp.reserve = reserve_then_die
         return holder
 
     monkeypatch.setattr(review_change_mod, "install_paid_stamp", install)
@@ -668,11 +670,12 @@ def _restart(monkeypatch, *, dead_pid: int):
 
 
 def test_a_wave_lost_to_process_death_is_closed_at_startup_and_a_new_wave_may_pay(tmp_path, monkeypatch):
-    """D2-02. The paid attempt row of a ``review_change`` wave is bound to the process
-    that pays it, as the gate's rows are. When that process dies mid-wave (a tokenless
+    """D2-02. The reserved attempt row of a ``review_change`` wave is bound to the process
+    that owns its seats, as the gate's rows are. When that process dies mid-wave (a tokenless
     seat still reserved), the next generation's startup reconciliation proves the owner
     dead and closes the row as an infra failure — so a rerun of the round pays a NEW
-    wave instead of forever collecting an open operation nobody can finish."""
+    wave instead of forever collecting an open operation nobody can finish. A wave lost
+    before its first send spent no paid cycle (#2410)."""
     import os
 
     from ouroboros.review_owner_custody import reconcile_review_custody_on_process_start
@@ -684,19 +687,20 @@ def test_a_wave_lost_to_process_death_is_closed_at_startup_and_a_new_wave_may_pa
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", shared.golden_physical_seam(sends))
     ask = dict(subject="index", goal="Bump", scope="app.py")
     with monkeypatch.context() as dying:
-        _dies_right_after_the_paid_stamp(dying)
+        _dies_right_after_the_reservation(dying)
         with pytest.raises(_ProcessDied):
             run_review_change(ctx, **ask)
-    assert sends == []  # paid, then lost before any seat was sent
-    rows = _paid_rows(ctx.drive_root, project)
-    assert len(rows) == 1 and rows[0].status == "reviewing", rows
+    assert sends == []  # reserved, then lost before any seat was sent
+    rows = _paid_rows(ctx.drive_root, project, paid_only=False)
+    assert len(rows) == 1 and rows[0].status == "reviewing" and not rows[0].paid, rows
+    assert rows[0].review_owner_pid == os.getpid()
     assert all(not row.get("pending_invocation_id") for row in rows[0].triad_raw_results)  # tokenless
     lost_record = rows[0].review_record_id
 
     _restart(monkeypatch, dead_pid=os.getpid())
     outcome = reconcile_review_custody_on_process_start(ctx.drive_root)
     assert [row.review_record_id for row in outcome["reconciled"]] == [lost_record], outcome
-    rows = _paid_rows(ctx.drive_root, project)
+    rows = _paid_rows(ctx.drive_root, project, paid_only=False)
     assert (rows[0].status, rows[0].block_reason, rows[0].late_result_pending) == ("failed", "infra_failure", False)
 
     restarted = ToolContext(repo_dir=ctx.repo_dir, system_repo_dir=ctx.system_repo_dir, drive_root=ctx.drive_root,
@@ -706,8 +710,8 @@ def test_a_wave_lost_to_process_death_is_closed_at_startup_and_a_new_wave_may_pa
     assert rerun["record_id"] != lost_record
     assert sorted(send["slot_id"] for send in sends) == ["s1", "t1", "t2"]  # a new wave, nothing rejoined
     assert all(not send["reconcile_only"] for send in sends)
-    rows = _paid_rows(ctx.drive_root, project)
-    assert [row.status for row in rows] == ["failed", "reviewed"]
+    assert [(row.status, row.paid) for row in _paid_rows(ctx.drive_root, project, paid_only=False)] == [
+        ("failed", False), ("reviewed", True)]
 
 
 def test_the_same_restart_keeps_a_tokened_pending_round_for_its_exact_rejoin(tmp_path, monkeypatch):

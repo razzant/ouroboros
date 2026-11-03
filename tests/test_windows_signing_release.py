@@ -9,6 +9,7 @@ PowerShell scripts, or a test of the protected Environment's settings.
 from fnmatch import fnmatch
 from itertools import product
 from pathlib import Path
+import json
 import re
 
 import yaml
@@ -71,11 +72,13 @@ def test_signing_job_runs_only_when_configured_and_alone_holds_the_secrets():
     assert "needs.build.result == 'success'" in signing["if"]
     assert signing["environment"] == "windows-release-signing"
     assert signing["permissions"] == {"contents": "read", "artifact-metadata": "write"}
-    assert signing["outputs"] == {"archive_sha256": "${{ steps.release_asset.outputs.sha256 }}"}
+    assert signing["outputs"] == {"archive_sha256": "${{ steps.release_asset.outputs.sha256 }}",
+                                  "signed_files": "${{ steps.sign.outputs.signed_files }}"}
     # The Environment and its secrets reach this one step of this one job.
     bound = [name for name, job in jobs.items() if "environment" in job]
     assert bound == ["windows-sign"]
-    sign = step(signing, "Sign, verify and package Windows executable")
+    sign = step(signing, "Sign, verify and package Windows executables")
+    assert sign["id"] == "sign"
     assert {key: sign["env"][key] for key in SECRETS} == {
         key: f"${{{{ secrets.{key} }}}}" for key in SECRETS
     }
@@ -92,7 +95,7 @@ def test_signing_job_runs_only_when_configured_and_alone_holds_the_secrets():
     order = [step_index(signing, name) for name in (
         "Download unsigned Windows archive (never a release asset)",
         "Check unsigned archive digest before extraction",
-        "Sign, verify and package Windows executable",
+        "Sign, verify and package Windows executables",
         "Locate final release archive",
         "Transfer signed Windows archive (not yet release proof)",
     )]
@@ -125,11 +128,20 @@ def test_proof_job_proves_both_modes_without_secrets():
     assert step_index(proof, check["name"]) < step_index(proof, smoke["name"])
     assert smoke["run"].index("Expand-Archive") < smoke["run"].index("verify_windows_signature.ps1")
     assert "if ($env:WINDOWS_SIGNER_THUMBPRINT)" in smoke["run"]
+    # Every catalogued executable, not just the launcher.
+    assert "verify_windows_signature.ps1 -ExtractedRoot $SmokeRoot" in smoke["run"]
+    # The windowless interpreter runs isolated, reports through a file and is
+    # waited for with a bound, so a stuck GUI process cannot hang the proof.
+    probe = smoke["run"][smoke["run"].index("python-standalone\\pythonw.exe"):]
+    assert "-I -B -c" in probe and "WaitForExit(60000)" in probe and "$Process.Kill()" in probe
+    assert "$Process.ExitCode -ne 0" in probe and "Get-Content -Raw -LiteralPath $Probe" in probe
     record = step(proof, "Record packaged artifact smoke")
     assert record["env"] == {
         "SIGNER_THUMBPRINT": "${{ steps.smoke_windows.outputs.signer_thumbprint }}",
         "SIGNER_PUBLISHER": "${{ steps.smoke_windows.outputs.signer_publisher }}",
+        "SIGNED_FILES": "${{ needs.windows-sign.outputs.signed_files }}",
     }
+    assert '--authenticode-files "$SIGNED_FILES"' in record["run"]
     for check_name in ("authenticode_signer", "timestamp", "signed_payload_archive_match"):
         assert f"--check {check_name}" in record["run"]
     (release_upload,) = uploads(proof)
@@ -188,13 +200,21 @@ def test_signing_script_uses_maintained_java_and_judges_the_outcome_itself():
     assert invocation.rstrip().endswith("*> $null")
     assert "$_" not in signing[signing.index("& $Java -jar"):signing.index("} finally { Pop-Location }")]
     assert "CodeSignTool sign exited $SignExit" in signing
-    assert "exited 0 but wrote no signed Ouroboros.exe" in signing
+    assert "exited 0 but wrote no signed file" in signing
+    # Provenance and the unsigned state of every catalogued file are checked
+    # before the tool download and the first billed request.
+    preflight = signing.index("foreach ($Entry in $Catalog.files)")
+    for marker in ("-ne 'NotSigned'", "$Entry.upstreamSha256"):
+        assert preflight < signing.index(marker) < signing.index("Invoke-WebRequest")
     order = [signing.index(marker) for marker in (
-        "-output_dir_path=$Signed",
-        "-Executable $SignedExecutable",
-        "Copy-Item -LiteralPath $SignedExecutable",
-        "-Executable $Executable",
+        "Invoke-WebRequest",
+        "foreach ($Target in $Targets)",
+        "-output_dir_path=$Output",
+        "-Executable $SignedFile",
+        "Copy-Item -LiteralPath $SignedFile",
+        "-Executable $Target.File",
         "pack_windows_archive.ps1",
+        "'signed_files='",
     )]
     assert order == sorted(order)
 
@@ -203,13 +223,35 @@ def test_verifier_uses_signtool_exit_codes_and_runs_outside_ci():
     verification = source("scripts/verify_windows_signature.ps1")
     assert "Get-AuthenticodeSignature -LiteralPath $Executable" in verification
     assert "$Signature.Status -ne 'Valid'" in verification
-    assert "verify /pa /tw /v $Executable" in verification
+    assert "verify /pa /all /tw /v $Executable" in verification
     switch = verification[verification.index("switch ($LASTEXITCODE)"):]
     assert "0 { }" in switch and "2 {" in switch and "default {" in switch
     for english in ("Successfully verified", "Number of warnings"):
         assert english not in verification
     assert "RUNNER_TEMP" not in verification
     assert "Thumbprint = $Actual" in verification and "Publisher  =" in verification
+
+
+def test_signing_catalog_names_three_executables_of_the_pinned_python():
+    catalog = json.loads(source("scripts/windows_signing_catalog.json"))
+    paths = [entry["path"] for entry in catalog["files"]]
+    assert paths == ["Ouroboros/Ouroboros.exe", "Ouroboros/_internal/python-standalone/python.exe",
+                     "Ouroboros/_internal/python-standalone/pythonw.exe"]
+    pinned = {entry["path"].rsplit("/", 1)[1]: entry.get("upstreamSha256") for entry in catalog["files"]}
+    assert pinned["Ouroboros.exe"] is None  # built per run; its unsigned hash is recorded, not pinned
+    assert all(re.fullmatch(r"[0-9a-f]{64}", pinned[name]) for name in ("python.exe", "pythonw.exe"))
+    # venv launcher templates are not release-signed (docs and notes say so).
+    assert not any("venv" in path for path in paths)
+    # A Python upgrade that changes the downloader pin must restate the catalog.
+    downloader = source("scripts/download_python_standalone.ps1")
+    pins = dict(re.findall(r'^\$(Release|PyVersion|Sha256|Platform) = "([^"]+)"$', downloader, re.MULTILINE))
+    assert catalog["pythonUpstream"] == {
+        "release": pins["Release"], "pythonVersion": pins["PyVersion"], "archiveSha256": pins["Sha256"],
+        "archive": f"cpython-{pins['PyVersion']}+{pins['Release']}-{pins['Platform']}-install_only_stripped.tar.gz",
+    }
+    smoke = step(workflow_jobs()["windows-proof"], "Smoke final Windows archive")["run"]
+    for path in paths[1:]:
+        assert "$SmokeRoot\\" + path.replace("/", "\\") in smoke
 
 
 def expression_value(expression, context):

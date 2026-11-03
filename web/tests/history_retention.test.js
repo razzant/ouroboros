@@ -48,7 +48,7 @@ test('details and Logs show every grouped failure reason instead of a circular p
     assert.match(historyRetentionView({ history_retention: { status: 'problem' } }).body, /No failure reason was recorded/);
 });
 
-test('Show details hydrates retention on the real finished card and live retry clears its problem', async () => {
+test('Details hydrates retention on the real finished card and live retry clears its problem', async () => {
     const id = 'history-task';
     const detail = { task_id: id, status: 'completed', history_retention: { status: 'pending' } };
     const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () =>
@@ -70,7 +70,7 @@ test('Show details hydrates retention on the real finished card and live retry c
         const card = walkCard(globalThis.document.byId.get('chat-messages'), id);
         assert.equal(card.dataset.finished, '1');
         assert.doesNotMatch(card.querySelector('[data-live-meta]').innerHTML, /history/i);
-        const toggle = () => card.querySelector('[data-live-summary-button]').listeners.get('click')[0]({ detail: 0 });
+        const toggle = () => card.querySelector('[data-live-disclosure]').listeners.get('click')[0]({ detail: 0 });
         if (card.dataset.expanded === '1') toggle();
         toggle();
         assert.equal(card.dataset.expanded, '1');

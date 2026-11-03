@@ -243,6 +243,7 @@ def test_reservation_race_with_persistent_absence_still_refuses(tmp_path, monkey
     monkeypatch.setattr(queue_observation, "DISPATCH_PUBLICATION_WAIT_SEC", 0.2)
     clock = [0.0]
     monkeypatch.setattr(_usage_wait, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(queue_observation, "_monotonic", lambda: clock[0])
 
     def unavailable(seconds):
         assert not held
@@ -329,7 +330,11 @@ def test_async_cancellation_joins_the_publication_wait_without_a_send(tmp_path, 
         with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, task_id=CHILD, root_task_id=ROOT)):
             task = asyncio.create_task(ua.execute_physical_attempt_async(ua.AttemptRequest(model="m", provider="p"), send))
             try:
-                assert await asyncio.to_thread(waiting.wait, 3)
+                # Preparation (first store creation, earlier locks) has no test clock:
+                # the attempt either enters its publication wait or ends on its own.
+                while not waiting.is_set() and not task.done():
+                    await asyncio.sleep(0.01)
+                assert waiting.is_set(), task
                 task.cancel()
                 assert await asyncio.to_thread(cancellations[0].wait, 3)
                 release.set()
@@ -424,14 +429,15 @@ def test_repeated_publication_races_share_one_wait_budget(tmp_path, monkeypatch,
     reservation = _reserve(tmp_path, CHILD) if operation == "dispatch" else None
     clock, held, acquisitions, waits = [0.0], [], [], []
     original = ua._locked
+    original_read = queue_observation.load_queue_document
     monkeypatch.setattr(queue_observation, "DISPATCH_PUBLICATION_WAIT_SEC", 0.2)
     timer = SimpleNamespace(monotonic=lambda: clock[0])
     monkeypatch.setattr(_usage_wait, "time", timer)
+    monkeypatch.setattr(queue_observation, "_monotonic", timer.monotonic)
 
     @contextlib.contextmanager
     def locked(*args, **kwargs):
         with original(*args, **kwargs) as view:
-            clock[0] += 0.1
             acquisitions.append(True)
             assert len(acquisitions) <= 3, "publication retries reset their deadline"
             (tmp_path / "state/queue.alive").unlink()
@@ -441,6 +447,11 @@ def test_repeated_publication_races_share_one_wait_budget(tmp_path, monkeypatch,
             finally:
                 held.pop()
 
+    def read_publication(*args, **kwargs):
+        if held:
+            clock[0] += 0.05  # Charge the failed publication probe, not store acquisition.
+        return original_read(*args, **kwargs)
+
     def publish(seconds):
         assert not held
         waits.append(seconds)
@@ -448,6 +459,7 @@ def test_repeated_publication_races_share_one_wait_budget(tmp_path, monkeypatch,
         _publish(tmp_path)
 
     monkeypatch.setattr(ua, "_locked", locked)
+    monkeypatch.setattr(queue_observation, "load_queue_document", read_publication)
     monkeypatch.setattr(queue_observation, "_sleep", publish)
     with pytest.raises(ua.ControlAuthorityUnavailable, match="root budget fence authority unavailable") as refused:
         ua.mark_dispatched(reservation) if reservation else _reserve(tmp_path, CHILD)
@@ -463,9 +475,10 @@ def test_nested_precheck_near_expiry_keeps_the_outer_publication_deadline(tmp_pa
     _publish(tmp_path)
     reservation = _reserve(tmp_path, CHILD) if operation == "dispatch" else None
     clock, held, acquisitions, waits, precheck_gaps = [0.0], [], [], [], []
-    original_lock, original_probe = ua._locked, queue_observation.dispatch_probe
+    original_lock, original_read = ua._locked, queue_observation.load_queue_document
     monkeypatch.setattr(queue_observation, "DISPATCH_PUBLICATION_WAIT_SEC", 0.2)
     monkeypatch.setattr(_usage_wait, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(queue_observation, "_monotonic", lambda: clock[0])
 
     @contextlib.contextmanager
     def locked(*args, **kwargs):
@@ -478,13 +491,13 @@ def test_nested_precheck_near_expiry_keeps_the_outer_publication_deadline(tmp_pa
             finally:
                 held.pop()
 
-    def probe(root):
+    def read_publication(root, name):
         if waits and not held:
             # Publication returns, then is revoked at the next pre-lock check.
             precheck_gaps.append(clock[0])
             clock[0] += 0.001
             (tmp_path / "state/queue.alive").unlink(missing_ok=True)
-        return original_probe(root)
+        return original_read(root, name)
 
     def publish(seconds):
         assert not held
@@ -495,7 +508,7 @@ def test_nested_precheck_near_expiry_keeps_the_outer_publication_deadline(tmp_pa
         _publish(tmp_path)
 
     monkeypatch.setattr(ua, "_locked", locked)
-    monkeypatch.setattr(queue_observation, "dispatch_probe", probe)
+    monkeypatch.setattr(queue_observation, "load_queue_document", read_publication)
     monkeypatch.setattr(queue_observation, "_sleep", publish)
     token = _usage_wait._CANCEL.set(threading.Event())
     try:
@@ -511,9 +524,10 @@ def test_nested_precheck_near_expiry_keeps_the_outer_publication_deadline(tmp_pa
 
 
 @pytest.mark.parametrize("reservation_race", [2], indirect=True)
-def test_dispatch_reacquisition_refreshes_attempt_and_billing(tmp_path, monkeypatch, reservation_race):
-    from ouroboros.task_results import write_task_result
-
+def test_dispatch_reacquisition_refreshes_the_attempt_after_a_custody_write(tmp_path, monkeypatch, reservation_race):
+    """A custody write that lands while the dispatch waits out a publication moves the reserved row's
+    revision; the reacquired dispatch transitions that CURRENT row, keeping the write, and sends once.
+    (The billing it sends under is the binding as recorded: no owner amendment overlays it any more.)"""
     held, _, _ = reservation_race
     prepared, sent = [], []
 
@@ -526,18 +540,12 @@ def test_dispatch_reacquisition_refreshes_attempt_and_billing(tmp_path, monkeypa
             assert row["state"] == "reserved"
             assert view.record_recovery(attempt_id, {"observation": "during_publication"},
                                         expected_revision=row["revision"])
-        write_task_result(tmp_path, ROOT, "running", acceptance_root_cap_amendments=[{
-            "accounting_root_task_id": ROOT, "source_identity": "amended",
-            "source_ref": "owner-message", "recorded_at": OLD_TS, "new_cap_usd": 0.5,
-        }])
         _publish(tmp_path)
 
     def send():
         [row] = ua.read_usage_records(tmp_path)
         assert row["state"] == "dispatched" and row["revision"] == 3
         assert row["recovery"] == {"observation": "during_publication"}
-        assert row["root_limit_usd"] == row["billing_group_limit_usd"] == 0.5
-        assert row["root_limit_revision"] == row["billing_group_limit_revision"] == "amended"
         sent.append(row["attempt_id"])
         return {"usage": {"cost": 0.02}}
 

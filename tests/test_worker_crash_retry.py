@@ -10,7 +10,7 @@ Covers:
 
 from __future__ import annotations
 
-import sys
+import copy
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -848,6 +848,27 @@ def test_child_terminal_survives_dead_worker_without_retry(tmp_path, monkeypatch
     assert events.empty() and load_task_result(tmp_path, job['task_id'])['accounted_upper_bound_usd'] == 1.25
 
 
+def test_a_crashed_child_retries_on_its_own_id_under_its_parent_and_root(tmp_path, monkeypatch):
+    """The same-id crash retry is the same delegated child, one attempt later, under the same parent
+    and root: never re-rooted, never a new id or a timeout successor."""
+    import supervisor.queue as q
+    from supervisor.worker_health import recover_confirmed_dead_worker
+    from ouroboros.task_results import write_task_result
+
+    job, _events = _reserved_job(tmp_path, monkeypatch, child=True, exitcode=1, attempt=1)
+    lineage = {'parent_task_id': 'parent-task', 'root_task_id': 'root-task', 'delegation_role': 'subagent'}
+    for task in {id(job['task']): job['task'], id(job['meta']['task']): job['meta']['task']}.values():
+        task.update(lineage)
+    write_task_result(tmp_path, job['task_id'], 'running', **lineage)
+    enqueued = []
+    monkeypatch.setattr(q, 'enqueue_task', lambda task, front=False: enqueued.append(dict(task)) or task)
+    recover_confirmed_dead_worker(job)
+    [retry] = enqueued
+    assert (retry['id'], retry['_attempt']) == (job['task_id'], 2)
+    assert {key: retry.get(key) for key in lineage} == lineage
+    assert not retry.get('timeout_retry_from') and retry.get('original_task_id', job['task_id']) == job['task_id']
+
+
 def test_file_preparation_runs_without_queue_or_lifecycle_lock(tmp_path, monkeypatch):
     import threading
     import supervisor.queue as q
@@ -1082,7 +1103,7 @@ def test_storm_honors_saved_children_before_pool_stop(tmp_path, monkeypatch):
         # Model the normal event owner's release, after validating the real frame.
         W.RUNNING.pop(done['task_id'])
     _stop_crashed_worker_pool(jobs[-1])
-    W.kill_workers.assert_called_once_with(disable_reason='worker_crash_storm')
+    W.kill_workers.assert_called_once_with(disable_reason='worker_crash_storm', lanes=frozenset({'project'}))
     W.respawn_worker.assert_not_called()
     q.enqueue_task.assert_not_called()
 
@@ -1157,11 +1178,12 @@ def test_real_crash_retry_keeps_prepared_scope_across_registry_activity(tmp_path
         from ouroboros.gateway.projects import api_project_from_task
         from tests.test_project_lease_ui_conversion import _request
 
+        running_before = copy.deepcopy(admitted)
         response = asyncio.run(api_project_from_task(_request(tmp_path, {
             "task_id": "crash", "id": "target", "name": "Target"})))
         assert response.status_code == 200
-        assert admitted["_project_admission"] == registry.project_admission_basis(
-            "target", registry.get_reserved_project(tmp_path, "target"), frozen=True)
+        assert admitted == running_before  # conversion does not retarget a running execution
+        assert registry.project_id_for_task(tmp_path, "crash") == "target"
     real_enqueue = q.enqueue_task
     def enqueue(payload, **kwargs):
         registry.touch_project(tmp_path, "other")
@@ -1179,97 +1201,13 @@ def test_real_crash_retry_keeps_prepared_scope_across_registry_activity(tmp_path
         [retry] = q.PENDING
         assert retry["id"] == "crash" and retry["_attempt"] == 2
         assert retry["_project_admission"]["project_id"] == "target"
-        if basis_kind != "legacy":
+        if basis_kind.startswith("converted"):
+            assert retry["_project_admission"] == registry.project_admission_basis(
+                "target", registry.get_reserved_project(tmp_path, "target"), frozen=True)
+        elif basis_kind != "legacy":
             assert retry["_project_admission"] == admitted["_project_admission"]
         assert retry["workspace_root"] == "/synthetic/frozen-resource"
         assert not done
-
-
-# ---------------------------------------------------------------------------
-# Test: a confirmed worker death settles what its browser bridges left
-# ---------------------------------------------------------------------------
-
-def _orphaned_bridge_browser(root, task_id):
-    """What a dead worker's bridge leaves: its server gone, its detached browser live."""
-    import os
-    import subprocess
-    import sys
-    from ouroboros import mcp_task_sessions
-    from ouroboros.process_containment import CONTAINMENT_ENV_PREFIX
-
-    marker = f"{CONTAINMENT_ENV_PREFIX}{mcp_task_sessions._scope(root, task_id)}deadbeef"
-    spawn = ("import subprocess, sys; print(subprocess.Popen([sys.executable, '-c', 'import time; "
-             "time.sleep(120)'], start_new_session=True, stdin=subprocess.DEVNULL, "
-             "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).pid)")
-    server = subprocess.run([sys.executable, "-c", spawn], env={**os.environ, marker: "1"},
-                            capture_output=True, text=True, timeout=30, check=True)
-    return marker, int(server.stdout)
-
-
-def _bridge_retry_ctx(root, task_id):
-    return SimpleNamespace(task_id=task_id, task_attempt=2, task_lifecycle_bound=True, drive_root=root,
-                           task_metadata={}, task_contract={}, messages=[])
-
-
-@pytest.mark.serial  # Real marked processes (tests/conftest lane policy).
-@pytest.mark.skipif(sys.platform == "win32", reason="Detached environment-marker bridge custody is POSIX-only")
-@pytest.mark.parametrize("closure", ["confirmed", "unconfirmed", "scan_raises"])
-def test_confirmed_death_settles_bridge_scope_before_retry(tmp_path, monkeypatch, caplog, closure):
-    import os
-    import signal
-    import supervisor.queue as q
-    import supervisor.workers as W
-    from ouroboros import mcp_client, mcp_task_sessions
-    from ouroboros.process_containment import pid_is_zombie, pids_with_env_marker
-    from supervisor.worker_health import recover_confirmed_dead_worker
-    from tests.test_mcp_task_browser_bridge import _entry, _server
-
-    for registry in ("_sessions", "_ended_attempts", "_failed_opens"):
-        monkeypatch.setattr(mcp_task_sessions, registry, type(getattr(mcp_task_sessions, registry))())
-    job, _events = _reserved_job(tmp_path, monkeypatch)
-    task_id = job["task_id"]
-    marker, orphan = _orphaned_bridge_browser(tmp_path, task_id)
-
-    def live():
-        return [pid for pid in pids_with_env_marker(marker) or [] if not pid_is_zombie(pid)]
-
-    order = []
-    actual_stop_scope = mcp_task_sessions.stop_scope
-
-    def stop_scope(root, scoped_task, **kwargs):
-        assert not q._queue_lock._is_owned() and task_id in W.RUNNING
-        order.append(("settle", root, scoped_task))
-        if closure == "scan_raises":
-            raise OSError("process table unreadable")
-        if closure == "unconfirmed":
-            return {"closure": "unconfirmed: process table unreadable"}
-        return actual_stop_scope(root, scoped_task, **kwargs)
-
-    monkeypatch.setattr(mcp_task_sessions, "stop_scope", stop_scope)
-    monkeypatch.setattr(q, "enqueue_task", lambda task, front=False: order.append(("retry", task["_attempt"])) or task)
-    retry = _bridge_retry_ctx(tmp_path, task_id)
-    cfg = mcp_client.normalize_server_config(_entry(_server(tmp_path)))
-    try:
-        assert live() == [orphan]
-        with caplog.at_level("ERROR", logger="ouroboros.mcp_task_sessions"):
-            recover_confirmed_dead_worker(job)
-        # The death stands whatever the scan says: retried once, slot released.
-        assert order == [("settle", tmp_path, task_id), ("retry", 2)]
-        assert task_id not in W.RUNNING
-        W.respawn_worker.assert_called_once_with(0)
-        if closure == "confirmed":
-            assert not live()
-            pytest.importorskip("mcp")
-            assert "browser_tabs" in {tool["name"] for tool in mcp_task_sessions.discover(cfg, retry, 15)}
-        else:
-            assert "Browser bridge closure unconfirmed" in caplog.text
-            assert live() == [orphan]  # Never reported closed: the retry may not reopen.
-            with pytest.raises(RuntimeError, match="earlier bridge processes are still live"):
-                mcp_task_sessions.discover(cfg, retry, 15)
-    finally:
-        mcp_task_sessions.stop_task(retry)
-        if live():
-            os.kill(orphan, signal.SIGKILL)
 
 
 def _run_worker_main_once(monkeypatch, tmp_path, task, error):
@@ -1514,3 +1452,100 @@ def test_an_unrecorded_handle_task_exception_keeps_the_single_crash_retry(tmp_pa
 
     assert [task["_attempt"] for task in retried] == [2]
     assert task_results.load_task_result(tmp_path, job["task_id"])["status"] == "interrupted"
+
+
+def test_a_dead_carriers_turn_retries_on_its_lane_never_through_pending(tmp_path, monkeypatch):
+    """Review M4: a conversation-lane turn whose carrier exited with no terminal retries once (same id, its next
+    attempt) on the LANE, whatever the project pool says: never PENDING, where only project slots are assigned
+    and the project crash fuse would hold it. Here the project pool is fenced, and the lane's idle carrier takes
+    the retry at once, with the turn's own lane facts."""
+    import supervisor.queue as q
+    import supervisor.workers as W
+    from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
+    from supervisor.worker_health import recover_confirmed_dead_worker
+    from tests.conversation_carrier_support import dispatched_tasks, install_lane_spare
+
+    task = {**_make_task("lane-turn"), "_is_direct_chat": True,
+            "_execution_owner": {"kind": "direct", "lane": LANE_CONVERSATION, "executor": EXECUTOR_WORKER}}
+    carrier = _make_worker(busy_task_id=task["id"], exitcode=0)  # it exited: no signal, no terminal written
+    carrier.lane = LANE_CONVERSATION
+    W.WORKERS[0] = carrier
+    W.RUNNING[task["id"]] = {"task": task, "attempt": 1, "worker_id": 0, "lane": LANE_CONVERSATION,
+                             "client_message_id": "cm-1", "reply_expected": True, "started_at": time.time()}
+    spare = install_lane_spare(W, 90)
+    monkeypatch.setattr(W, "QUEUE_MAX_RETRIES", 1)
+    monkeypatch.setattr(W, "_WORKER_POOL_DISABLED_REASON", "worker_crash_storm")  # the project fuse is down
+    monkeypatch.setattr(W, "respawn_worker", MagicMock())
+    enqueued = []
+    monkeypatch.setattr(q, "enqueue_task", lambda queued, front=False: enqueued.append(queued) or queued)
+    W.ensure_workers_healthy()
+    job = q._reap_queue.get_nowait()
+    with patch("ouroboros.headless.prepare_terminal_task_files", return_value={"error": "", "terminal_source_present": False}):
+        recover_confirmed_dead_worker(job)
+    assert enqueued == [] and W.PENDING == []
+    retry = W.RUNNING[task["id"]]
+    assert retry["lane"] == LANE_CONVERSATION and retry["attempt"] == 2 and retry["task"]["_attempt"] == 2
+    assert retry["client_message_id"] == "cm-1" and retry["reply_expected"] is True
+    assert retry["worker_id"] == spare.wid and spare.busy_task_id == task["id"]
+    assert [queued["id"] for queued in dispatched_tasks(spare)] == [task["id"]]
+
+
+def test_a_signal_killed_presence_carrier_settles_its_host_waiter_and_reads_as_a_settled_loss(tmp_path, monkeypatch):
+    """Review C2 on the crash path: a Presence carrier killed by a signal writes no terminal and sends no
+    settlement. Crash recovery records the host's terminal as a reconciled running attempt; its task_done
+    settles the Host waiter with a typed retry (the reservation returns), and the resend's replay is the retained
+    unknown-outcome refusal: a lost local stack is never projected as a completed, silent answer."""
+    import queue as stdqueue
+
+    import supervisor.queue as q
+    import supervisor.workers as W
+    from ouroboros.presence_events import PresenceTurnError
+    from ouroboros.presence_executions import PresenceTurnExecutions, PresenceTurnInterrupted
+    from ouroboros.presence_runner import presence_turn_replay
+    from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
+    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.utils import append_jsonl
+    from supervisor import events
+    from supervisor.worker_health import recover_confirmed_dead_worker
+
+    turn_id = "presence-turn"
+    metadata = {"source": "presence", "presence": {"binding_id": "b", "event": {"source_event_id": "e1",
+                                                                                 "conversation_key": "k"}}}
+    task = {**_make_task(turn_id), "type": "presence", "_is_direct_chat": True, "_presence_turn": True,
+            "metadata": metadata, "_execution_owner": {"kind": "presence", "lane": LANE_CONVERSATION,
+                                                       "executor": EXECUTOR_WORKER}}
+    write_task_result(tmp_path, turn_id, "running", metadata=metadata, _is_direct_chat=True)  # the carrier's barrier
+    carrier = _make_worker(busy_task_id=turn_id, exitcode=-9)
+    carrier.lane = LANE_CONVERSATION
+    W.WORKERS[0] = carrier
+    W.RUNNING[turn_id] = {"task": task, "attempt": 1, "worker_id": 0, "lane": LANE_CONVERSATION,
+                          "started_at": time.time()}
+    registry, released = PresenceTurnExecutions(), []
+    waiter, _ = registry.start_or_dispatch(turn_id, reserve=lambda: True, release=lambda: released.append(1),
+                                           dispatch=lambda execution: None)
+    bus = stdqueue.Queue()
+    monkeypatch.setattr(W, "get_event_q", lambda: bus)
+    monkeypatch.setattr(W, "respawn_worker", MagicMock())
+    monkeypatch.setattr(W, "send_with_budget", lambda *a, **k: None)
+    W.ensure_workers_healthy()
+    job = q._reap_queue.get_nowait()
+    with patch("ouroboros.headless.prepare_terminal_task_files", return_value={"error": "", "terminal_source_present": False}):
+        recover_confirmed_dead_worker(job)
+    row = load_task_result(tmp_path, turn_id)
+    assert row["status"] == "failed"
+    done = []
+    while not bus.empty():
+        frame = bus.get_nowait()
+        if frame.get("type") == "task_done":
+            done.append(frame)
+    assert [frame["task_id"] for frame in done] == [turn_id] and turn_id not in W.RUNNING
+    events._handle_task_done(done[0], SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=W.RUNNING, WORKERS={},
+                                                      append_jsonl=append_jsonl,
+                                                      persist_queue_snapshot=lambda reason="": None))
+    with pytest.raises(PresenceTurnInterrupted):
+        waiter.result.result(timeout=1)
+    assert released == [1] and registry.live() == []
+    with pytest.raises(PresenceTurnError) as refused:
+        presence_turn_replay(tmp_path, turn_id, "k")
+    assert refused.value.code == "presence_attempt_outcome_unknown" and refused.value.disposition == "retained"
+    assert row.get("status_reconciled_from") == "running"  # the reconciled origin the Presence rule reads

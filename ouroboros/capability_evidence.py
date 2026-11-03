@@ -26,31 +26,38 @@ from training metadata or the persistent probe cache.
 
 from __future__ import annotations
 
+from ouroboros.density_probe import (  # noqa: F401 — public compatibility surface
+    cold_start_density_probe, DENSITY_PROBE_MAX_TOKENS, DENSITY_PROBE_EFFORT, DENSITY_PROBE_SYSTEM_PROMPT,
+)
+
 import hashlib
 import json
 import logging
 import pathlib
 import re
 import threading
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now
 from ouroboros.utils import (
     atomic_write_json,
-    estimate_tokens,
     is_credential_header_name,
+    json_snapshot,
+    json_update_lock,
     read_json_dict,
     utc_now_iso,
 )
-from ouroboros.config import runtime_setting
+from ouroboros.context_budget import _parse_ctx_limit_number  # noqa: F401 — shared overflow parser
 
 log = logging.getLogger(__name__)
 
-# Serialises the load->mutate->save of the two owner-only writers (probe cache +
-# owner-ack) within the process so neither loses the other's update; atomic_write_json
-# additionally prevents torn/corrupt files across processes (durable-state SSOT).
+# Every whole-store load->mutate->save (``_store_transaction``) runs under this RLock for the
+# process's threads and a stable sidecar lock for other processes; atomic_write_json alone only
+# prevents torn files, so a stale snapshot could otherwise erase or resurrect a newer record.
 _STORE_LOCK = threading.RLock()
+_STORE_LOCK_WAIT_SEC = 4.0  # the platform lock's established bounded wait
 
 STATUS_CONFIRMED = "confirmed"
 STATUS_ASSERTED = "asserted"
@@ -61,77 +68,68 @@ SOURCE_PROVIDER_METADATA = "provider_metadata"
 SOURCE_LOCAL_HEALTH = "local_health"
 SOURCE_OWNER_ACK = "owner_ack"
 SOURCE_USER_SETTING = "user_setting"
-SOURCE_GENERATIVE_PROBE = "generative_probe"
 SOURCE_NONE = "none"
 
-# Context-overflow rejections carry the model's limit in the human-readable message
-# (NOT the `code` field, which varies: context_length_exceeded / invalid_request_error /
-# 400 / 1261). Parse the number from the text across the known provider phrasings.
-_CTX_LIMIT_PATTERNS: Tuple[re.Pattern[str], ...] = (
-    re.compile(r"maximum context length is\s*([0-9][0-9,]*)", re.I),
-    re.compile(r"context length is\s*([0-9][0-9,]*)", re.I),
-    re.compile(r"longer than the model's context length\s*\(?\s*([0-9][0-9,]*)", re.I),
-    re.compile(r"maximum allowed length\s*\(?\s*([0-9][0-9,]*)", re.I),
-    re.compile(r"context (?:window|length)\s*(?:of|is)?\s*([0-9][0-9,]*)\s*tokens", re.I),
-    re.compile(r"maximum (?:input |prompt )?(?:length|tokens?)\s*(?:is|of)?\s*([0-9][0-9,]*)", re.I),
+#: The refused request's whole input where the provider states it beside the limit: OpenAI ("your messages
+#: resulted in N tokens"), Anthropic ("prompt is too long: N tokens", "context limit: N + R") and Gemini
+#: ("input token count (N)").
+_CTX_INPUT_PATTERNS: Tuple[re.Pattern[str], ...] = (
+    re.compile(r"resulted in\s*([0-9][0-9,]*)\s*tokens", re.I),
+    re.compile(r"prompt is too long:\s*([0-9][0-9,]*)\s*tokens", re.I),
+    re.compile(r"context limit:\s*([0-9][0-9,]*)\s*\+", re.I),
+    re.compile(r"(?:input length|the input)\s*\(\s*([0-9][0-9,]*)\s*tokens?\b", re.I),
+    re.compile(r"([0-9][0-9,]*)\s*tokens? from the input messages", re.I),
+    re.compile(r"input token count\s*\(?\s*([0-9][0-9,]*)", re.I),
 )
+#: Shares of the input where only the parts are stated: OpenAI's messages and functions (tool definitions),
+#: OpenRouter's "N of <kind> input".
+_CTX_INPUT_PART = re.compile(r"([0-9][0-9,]*)\s*(?:of [a-z]+ input|in the (?:messages|functions))", re.I)
+#: The reply the refused request reserved ("R in the completion" / "in the output", Anthropic's "+ R").
+_CTX_REPLY_PATTERNS: Tuple[re.Pattern[str], ...] = (
+    re.compile(r"([0-9][0-9,]*)\s*tokens? for the completion", re.I),
+    re.compile(r"([0-9][0-9,]*)\s*in the (?:completion|output)", re.I),
+    re.compile(r"context limit:\s*[0-9][0-9,]*\s*\+\s*([0-9][0-9,]*)", re.I),
+)
+#: OpenAI's and OpenRouter's "you requested (about) N tokens" is a total: the input plus that reserved reply.
+_CTX_TOTAL_PATTERN = re.compile(r"you requested (?:(?:about|a total of)\s*)?([0-9][0-9,]*)\s*tokens", re.I)
 
 
-def _parse_ctx_limit_number(text: str) -> int:
-    """Extract the model's context-token limit from an overflow error message, or 0."""
-    for pat in _CTX_LIMIT_PATTERNS:
-        m = pat.search(str(text or ""))
-        if m:
-            try:
-                return int(m.group(1).replace(",", ""))
-            except (ValueError, TypeError):
-                continue
-    return 0
+def gateway_double_counted_cache(prompt_tokens: int, cached_tokens: int) -> bool:
+    """A cache-inclusive total landing on 2 x cached (+-1): a gateway adding the cache read on top.
+
+    Neither a density witness nor a conversation's size anchor (``context_anchor``) learns from it
+    (``observe_token_density`` names the paid run that showed it)."""
+    return bool(cached_tokens) and abs(int(prompt_tokens) - 2 * int(cached_tokens)) <= 1
 
 
-def classify_generative_probe_response(
-    status_code: Optional[int],
-    body_text: str,
-    *,
-    canaries: Optional[List[str]] = None,
-    echoed_text: str = "",
-    usage_prompt_tokens: int = 0,
-    sent_token_estimate: int = 0,
-) -> Tuple[int, str, str]:
-    """Pure (no-network) classifier for a generative context-window probe response.
+def _parse_ctx_requested(text: str) -> Tuple[int, int, int]:
+    """``(input, reply, total)`` of a refused request as the provider stated them beside its limit; 0 = unstated.
 
-    Free-only policy (owner Q1): confirm a window ONLY from a FREE pre-inference
-    reject that states the limit; a genuine 200 (the model ACCEPTED — and would bill —
-    the oversized input) never auto-confirms >=1M, it routes to owner-ack.
-    Returns ``(window_tokens, status, detail)``.
+    A total beside its reply share gives the input as the difference, whatever parts it lists (messages,
+    functions, images); else a stated whole input; else the sum of the stated input parts. A bare total stays a
+    total: it already holds the reply that request reserved.
     """
-    # 4xx: pre-inference reject (free). Parse the limit NUMBER from the text.
-    if isinstance(status_code, int) and 400 <= status_code < 500:
-        n = _parse_ctx_limit_number(body_text)
-        if n > 0:
-            return n, STATUS_CONFIRMED, f"generative overflow reject: max {n} tokens"
-        # e.g. Zhipu code 1261 (no number) or a 413 size reject -> cannot size it.
-        return 0, STATUS_UNPROBEABLE, "overflow reject without a parseable limit; owner-ack required"
-    # 200: the oversized input was ACCEPTED. Under free-only this is a possibly-PAID
-    # accept and must NOT confirm >=1M (owner chose owner-ack). Truncation guard is
-    # recorded for forensics but does not change the owner-ack outcome.
-    if status_code == 200:
-        cs = canaries or []
-        echoed_ok = bool(cs) and all(c in (echoed_text or "") for c in cs)
-        usage_ok = sent_token_estimate > 0 and usage_prompt_tokens >= int(0.95 * sent_token_estimate)
-        detail = "oversized input accepted (200); free-only policy -> owner-ack"
-        if not (echoed_ok and usage_ok):
-            detail = "oversized input 200 but truncation suspected (canaries/usage); owner-ack"
-        return 0, STATUS_UNPROBEABLE, detail
-    # transport / 5xx / timeout / unknown -> transient failure (short TTL, retried).
-    return 0, STATUS_FAILED, f"generative probe transport/server error (status={status_code})"
+    text = str(text or "")
+
+    def first(patterns: Tuple[re.Pattern[str], ...]) -> int:
+        for pat in patterns:
+            m = pat.search(text)
+            if m:
+                return int(m.group(1).replace(",", ""))
+        return 0
+
+    reply = first(_CTX_REPLY_PATTERNS)
+    total = first((_CTX_TOTAL_PATTERN,))
+    if reply and total > reply:
+        return total - reply, reply, total
+    stated = first(_CTX_INPUT_PATTERNS) or sum(int(n.replace(",", "")) for n in _CTX_INPUT_PART.findall(text))
+    return stated, reply, total
+
 
 _KNOWN_STATUS = {STATUS_CONFIRMED, STATUS_ASSERTED}
 
 _CONFIRMED_TTL_SEC = 24 * 3600
 _FAILED_TTL_SEC = 10 * 60
-
-ONE_MILLION = 1_000_000
 
 
 @dataclass
@@ -150,24 +148,14 @@ class CapabilityEvidence:
     account_fingerprint: str = ""
     provenance: str = ""
     response_limit: Dict[str, Any] = field(default_factory=dict)
+    route_facts: Dict[str, Any] = field(default_factory=dict)
+
+    window_kind: str = "total"  # metadata may explicitly state an input-only limit
+    retired_ack: Dict[str, Any] = field(default_factory=dict)
+    server_window: Dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> Dict[str, Any]:
-        return {
-            "window_tokens": int(self.window_tokens or 0),
-            "status": self.status,
-            "source": self.source,
-            "route_fp": self.route_fp,
-            "model": self.model,
-            "provider": self.provider,
-            "ts": self.ts,
-            "detail": self.detail,
-            "stale": bool(self.stale),
-            "source_id": self.source_id,
-            "credential_profile_id": self.credential_profile_id,
-            "account_fingerprint": self.account_fingerprint,
-            "provenance": self.provenance,
-            "response_limit": self.response_limit,
-        }
+        return {**asdict(self), "window_tokens": int(self.window_tokens or 0), "stale": bool(self.stale)}
 
 
 def is_known(evidence: Any, *, require_fresh: bool = False) -> bool:
@@ -188,31 +176,6 @@ def is_known(evidence: Any, *, require_fresh: bool = False) -> bool:
         str(getattr(evidence, "status", "") or "") in _KNOWN_STATUS
         and int(getattr(evidence, "window_tokens", 0) or 0) > 0
         and not (require_fresh and bool(getattr(evidence, "stale", False)))
-    )
-
-
-def confirms_at_least(
-    evidence: Any, threshold: int = ONE_MILLION, *, require_fresh: bool = False,
-) -> bool:
-    """True only when KNOWN evidence meets the threshold.
-
-    unprobeable / failed / None / below-threshold all fail closed.
-
-    ``require_fresh`` picks the caller's freshness policy EXPLICITLY, because the two
-    directions carry opposite risk and the choice must be visible at the call site:
-
-    * a gate that AUTHORIZES on the evidence (blocking scope-review authority, BIBLE
-      P3) passes ``require_fresh=True`` — an expired or outage-carried window is a
-      dated impression, not the sourced Capability Evidence the floor turns on;
-    * a gate that would DOWNGRADE the owner's own cognitive horizon on a provider blip
-      keeps the default ``False`` — this module's standing invariant is that an outage
-      must never erase a prior confirmed record (P4/P1)."""
-    # A role's ordinary sizing override is not the route-bound acknowledgement
-    # that a governance gate asks the owner to make through its dedicated path.
-    return (
-        getattr(evidence, "source", "") != SOURCE_USER_SETTING
-        and is_known(evidence, require_fresh=require_fresh)
-        and int(getattr(evidence, "window_tokens", 0) or 0) >= int(threshold)
     )
 
 
@@ -313,6 +276,9 @@ def _load(drive_root: Any) -> Dict[str, Any]:
     if isinstance(data, dict):
         data.setdefault("probes", {})
         data.setdefault("owner_acks", {})
+        # Model-global rows older releases learned (effort bands, rejected parameters) stay
+        # loadable and every writer carries them forward; nothing reads them. Exact-route
+        # request adaptation belongs to ``request_wire_recovery``.
         data.setdefault("effort_ceilings", {})
         data.setdefault("effort_floors", {})
         data.setdefault("rejected_params", {})
@@ -325,6 +291,12 @@ def _load(drive_root: Any) -> Dict[str, Any]:
     }
 
 
+def _read(drive_root: Any) -> Dict[str, Any]:
+    """The store as readers share it: one parse per file identity (``json_snapshot``), never
+    mutated; a writer's ``_load`` takes its own fresh copy inside ``_store_transaction``."""
+    return json_snapshot(_store_path(drive_root)) or {}
+
+
 def _save(drive_root: Any, data: Dict[str, Any]) -> bool:
     path = _store_path(drive_root)
     try:
@@ -335,19 +307,36 @@ def _save(drive_root: Any, data: Dict[str, Any]) -> bool:
         return False
 
 
-def _store_evidence(drive_root: Any, kind: str, fp: str, value: Dict[str, Any]) -> None:
-    """Locked, atomic read-modify-write of one evidence entry (``probes`` or
-    ``owner_acks``). The lock re-reads the CURRENT file inside the critical section
-    so a concurrent owner-ack and probe never clobber each other; the network probe
-    itself runs OUTSIDE this lock. Never raises."""
+@contextmanager
+def _store_transaction(drive_root: Any) -> Iterator[None]:
+    """Hold the store for one fresh load -> mutation -> atomic save, across threads and processes.
+
+    Threads of this process queue on ``_STORE_LOCK``; other processes on the store's sidecar
+    ``capability_evidence.json.lock``, the one ``update_json_locked`` would take (``json_update_lock``).
+    Not re-entrant per store: a nested transaction on the same store waits out the bounded wait.
+    Raises ``TimeoutError`` when another process keeps the sidecar past that wait: a best-effort
+    observation skips its write, an owner action reports the failure. Network reads stay outside.
+    """
+    with _STORE_LOCK, json_update_lock(_store_path(drive_root), timeout_sec=_STORE_LOCK_WAIT_SEC):
+        yield
+
+
+def _store_evidence(drive_root: Any, kind: str, fp: str, value: Dict[str, Any]) -> bool:
+    """One ``_store_transaction`` writing one evidence entry of namespace ``kind``.
+
+    It re-reads the CURRENT file inside the transaction, so no writer in any process saves a
+    stale snapshot over another's record; the network read runs OUTSIDE it. Returns whether
+    the entry was saved and never raises: a write that fails or finds the store busy leaves
+    the previous file as it was, including an older record of this key."""
     try:
-        with _STORE_LOCK:
+        with _store_transaction(drive_root):
             data = _load(drive_root)
             _drop_expired_probes(data)
             data.setdefault(kind, {})[fp] = value
-            _save(drive_root, data)
+            return _save(drive_root, data)
     except Exception:
         log.debug("capability evidence store failed (%s)", kind, exc_info=True)
+        return False
 
 
 def _drop_expired_probes(data: Dict[str, Any]) -> None:
@@ -392,166 +381,6 @@ def _age_seconds(ts: str) -> float:
     return max(0.0, (utc_now() - parsed).total_seconds())
 
 
-# --- Learned reasoning-effort ceilings (v6.57.0) -------------------------------
-# A COMPLETELY SEPARATE namespace ("effort_ceilings") from the context-window
-# evidence (probes/owner_acks) — it shares only the store file and the lock.
-# It NEVER touches window records, so the BIBLE P3 ≥1M scope-review floor
-# evidence path is untouched. Value shape:
-#   {"ceiling": "<effort>", "observed_at": iso, "reason": "provider_rejected"}
-# KEYING: this historical namespace uses NORMALIZED MODEL IDENTITY rather than
-# the exact route fingerprint used by current request-wire compatibility. It is
-# retained for diagnostics and upgrade regression compatibility only; production
-# request construction, scheduling, and recovery do not consult it as authority.
-
-def record_effort_ceiling(drive_root: Any, fingerprint: str, ceiling: str) -> None:
-    """Persist the learned reasoning-effort ceiling. The key is the normalized
-    model identity (see the namespace note above), not a full route fingerprint.
-    Best-effort, never raises; a lower ceiling always wins (a route never silently
-    regains an effort a provider already rejected within the cache window)."""
-    fp = str(fingerprint or "").strip()
-    ceil = str(ceiling or "").strip().lower()
-    if not fp or not ceil:
-        return
-    try:
-        with _STORE_LOCK:
-            data = _load(drive_root)
-            entry = data.setdefault("effort_ceilings", {}).get(fp) or {}
-            data["effort_ceilings"][fp] = {
-                "ceiling": ceil,
-                "observed_at": utc_now_iso(),
-                "reason": "provider_rejected",
-                "prev": entry.get("ceiling") or "",
-            }
-            _save(drive_root, data)
-    except Exception:
-        log.debug("record_effort_ceiling failed", exc_info=True)
-
-
-def get_effort_ceiling(drive_root: Any, fingerprint: str) -> str:
-    """Return the learned effort ceiling for a normalized model identity, or ""
-    when none. Fail-open (any error → "")."""
-    fp = str(fingerprint or "").strip()
-    if not fp:
-        return ""
-    try:
-        entry = _load(drive_root).get("effort_ceilings", {}).get(fp)
-        return str((entry or {}).get("ceiling") or "").strip().lower()
-    except Exception:
-        return ""
-
-
-# --- Learned reasoning-effort floors (v6.73.2) ----------------------------------
-# Historical VALUE-TOO-LOW mirror of effort_ceilings. Some endpoints make
-# reasoning mandatory, but current adaptation is exact-route, success-confirmed
-# request-wire evidence. These model-global rows remain diagnostic/read-compatible.
-# Historical lifecycle remains readable: ceilings are sticky, while floors expire
-# like rejected_params. Since normal dispatch ignores this namespace, expiry changes
-# diagnostic state only; exact-route request-wire evidence owns runtime self-healing.
-
-_EFFORT_FLOORS_TTL_SEC = 14 * 24 * 3600.0
-
-
-def record_effort_floor(drive_root: Any, fingerprint: str, floor: str) -> None:
-    """Persist the learned reasoning-effort floor for a normalized model identity.
-
-    Best-effort, never raises; a HIGHER floor always wins on merge (mirror of the
-    ceiling's lower-wins rule — a provider-required minimum is never silently
-    lowered within the cache window)."""
-    from ouroboros.config import effort_rank
-    fp = str(fingerprint or "").strip()
-    value = str(floor or "").strip().lower()
-    if not fp or not value:
-        return
-    try:
-        with _STORE_LOCK:
-            data = _load(drive_root)
-            store = data.setdefault("effort_floors", {})
-            entry = store.get(fp) or {}
-            prev = str(entry.get("floor") or "").strip().lower()
-            fresh = _age_seconds(str(entry.get("observed_at") or "")) < _EFFORT_FLOORS_TTL_SEC
-            if fresh and prev and effort_rank(prev) >= effort_rank(value):
-                value = prev
-            store[fp] = {
-                "floor": value,
-                "observed_at": utc_now_iso(),
-                "reason": "provider_required",
-                "prev": prev,
-            }
-            _save(drive_root, data)
-    except Exception:
-        log.debug("record_effort_floor failed", exc_info=True)
-
-
-def get_effort_floor(drive_root: Any, fingerprint: str) -> str:
-    """Return the non-expired learned effort floor for a normalized model
-    identity, or "" (fail-open: absence, expiry, or any error → "")."""
-    fp = str(fingerprint or "").strip()
-    if not fp:
-        return ""
-    try:
-        entry = _load(drive_root).get("effort_floors", {}).get(fp) or {}
-        if _age_seconds(str(entry.get("observed_at") or "")) >= _EFFORT_FLOORS_TTL_SEC:
-            return ""
-        return str(entry.get("floor") or "").strip().lower()
-    except Exception:
-        return ""
-
-
-# --- Learned rejected request parameters (v6.69.0) ------------------------------
-# Same design as effort_ceilings: a separate namespace ("rejected_params") keyed by
-# the NORMALIZED MODEL IDENTITY, sharing only the store file and lock. A provider
-# rejection of an optional request parameter (e.g. temperature on a reasoning
-# model) is learned reactively in llm.py; persisting it here means a NEW process
-# (worker restart, review subprocess) strips the parameter proactively instead of
-# re-paying a 404 + retry on its first call. Entries EXPIRE (providers change
-# supported_parameters independently of releases — the mutable-external-fact rule
-# in DEVELOPMENT.md), after which the reactive retry re-learns if still true.
-# Fail-open everywhere: any error → no durable knowledge → today's behavior.
-
-_REJECTED_PARAMS_TTL_SEC = 14 * 24 * 3600.0
-
-
-def record_rejected_params(drive_root: Any, fingerprint: str, params: Any) -> None:
-    """Persist provider-rejected optional request parameters for a model identity.
-
-    Merges with (non-expired) existing knowledge; best-effort, never raises."""
-    fp = str(fingerprint or "").strip()
-    values = sorted({str(p).strip() for p in (params or []) if str(p or "").strip()})
-    if not fp or not values:
-        return
-    try:
-        with _STORE_LOCK:
-            data = _load(drive_root)
-            store = data.setdefault("rejected_params", {})
-            entry = store.get(fp) or {}
-            existing = entry.get("params") if _age_seconds(str(entry.get("observed_at") or "")) < _REJECTED_PARAMS_TTL_SEC else []
-            merged = sorted({*(existing or []), *values})
-            store[fp] = {
-                "params": merged,
-                "observed_at": utc_now_iso(),
-                "reason": "provider_rejected",
-            }
-            _save(drive_root, data)
-    except Exception:
-        log.debug("record_rejected_params failed", exc_info=True)
-
-
-def get_rejected_params(drive_root: Any, fingerprint: str) -> Set[str]:
-    """Return non-expired learned rejected parameters for a model identity.
-
-    Empty set on absence, expiry, or any error (fail-open)."""
-    fp = str(fingerprint or "").strip()
-    if not fp:
-        return set()
-    try:
-        entry = _load(drive_root).get("rejected_params", {}).get(fp) or {}
-        if _age_seconds(str(entry.get("observed_at") or "")) >= _REJECTED_PARAMS_TTL_SEC:
-            return set()
-        return {str(p) for p in (entry.get("params") or []) if str(p or "").strip()}
-    except Exception:
-        return set()
-
-
 # --- Measured tokenizer density -------------------------------------------------
 # One raw pair namespace keyed by normalized model. Reducers choose witnessed
 # values; no independently refreshed aggregate scalar is an authority.
@@ -580,7 +409,7 @@ MAIN_DENSITY_BASIS = "bounded_proxy_v2"
 COLD_START_TOKEN_DENSITY = 1.65
 MEASURED_DENSITY_SAFETY_FACTOR = 1.05
 
-_DENSITY_MEMO: Dict[str, Tuple[float, str]] = {}
+_DENSITY_MEMO: Dict[str, Tuple[float, str, int]] = {}
 
 
 def _density_observation_seq(pair: Dict[str, Any]) -> int:
@@ -621,6 +450,7 @@ def record_token_density(
     source: str = "dispatch_usage",
     route_fp: str = "",
     basis: str = "raw",
+    view_kind: str = "",
 ) -> None:
     """Persist one timestamped raw witness, best-effort and write-throttled.
 
@@ -639,15 +469,16 @@ def record_token_density(
     # the same numeric density must not throttle the FIRST witness as "no drift" —
     # that left the resolver cold for the whole freshness window on an
     # upgraded store (final-lane finding, probe-reproduced).
-    memo_key = f"{fp}\0{route}\0{basis}"
+    memo_key = f"{drive_root}\0{fp}\0{route}\0{basis}\0{view_kind}"
     memo = _DENSITY_MEMO.get(memo_key)
     if (
         memo and _age_seconds(memo[1]) < _TOKEN_DENSITY_FRESH_SEC
         and abs(density - memo[0]) <= _TOKEN_DENSITY_DRIFT_TOLERANCE * memo[0]
+        and int(prompt_chars) / 2 <= memo[2] <= int(prompt_chars) * 2
     ):
         return
     try:
-        with _STORE_LOCK:
+        with _store_transaction(drive_root):
             data = _load(drive_root)
             store = data.setdefault("token_density", {})
             entry = store.get(fp) or {}
@@ -661,6 +492,7 @@ def record_token_density(
                 pair for pair in pairs
                 if str(pair.get("route_fp") or "") == route
                 and str(pair.get("basis") or "raw") == str(basis or "raw")
+                and str(pair.get("view_kind") or "") == view_kind
             ]
             newest = max(
                 enumerate(route_pairs),
@@ -674,8 +506,9 @@ def record_token_density(
                 newest is not None
                 and _age_seconds(str(newest.get("observed_at") or "")) < _TOKEN_DENSITY_FRESH_SEC
                 and abs(density - known) <= _TOKEN_DENSITY_DRIFT_TOLERANCE * known
+                and int(prompt_chars) / 2 <= int(newest["prompt_chars"]) <= int(prompt_chars) * 2
             ):
-                _DENSITY_MEMO[memo_key] = (known, str(newest.get("observed_at") or ""))
+                _DENSITY_MEMO[memo_key] = (known, str(newest.get("observed_at") or ""), int(newest["prompt_chars"]))
                 return
             observed_at = utc_now_iso()
             observation_seq = max(
@@ -689,8 +522,10 @@ def record_token_density(
                 "source": str(source or "dispatch_usage"),
                 "route_fp": route,
                 "basis": str(basis or "raw"),
+                "view_kind": view_kind,
             })
-            indexed_pairs = list(enumerate(pairs))
+            other_views = [pair for pair in pairs if str(pair.get("view_kind") or "") != view_kind]
+            indexed_pairs = list(enumerate(pair for pair in pairs if str(pair.get("view_kind") or "") == view_kind))
             densest_index, densest = max(
                 indexed_pairs,
                 key=lambda item: (
@@ -708,9 +543,9 @@ def record_token_density(
                 )
                 if index != densest_index
             ][:_TOKEN_DENSITY_MAX_PAIRS - 1]
-            store[fp] = {"pairs": [densest, *newest_rest]}
+            store[fp] = {"pairs": [*other_views, densest, *newest_rest]}
             if _save(drive_root, data):
-                _DENSITY_MEMO[memo_key] = (density, observed_at)
+                _DENSITY_MEMO[memo_key] = (density, observed_at, int(prompt_chars))
     except Exception:
         log.debug("record_token_density failed", exc_info=True)
 
@@ -721,7 +556,7 @@ def get_token_density(drive_root: Any, fingerprint: str) -> float:
     if not fp:
         return 0.0
     try:
-        pairs = (_load(drive_root).get("token_density", {}).get(fp) or {}).get("pairs") or []
+        pairs = (_read(drive_root).get("token_density", {}).get(fp) or {}).get("pairs") or []
         return max([
             _density_of(pair.get("prompt_chars"), pair.get("prompt_tokens"))
             for pair in pairs
@@ -743,10 +578,8 @@ def _normalized_density_model(model_id: str) -> str:
 def _fresh_density_pairs(
     store: Dict[str, Any], model_id: str = "", *, basis: str = "",
 ) -> List[Tuple[Dict[str, Any], float]]:
-    # Without ``model_id`` every model's rows are returned — ONLY for the main
-    # resolver's exact-route lookup (a route fingerprint belongs to one model;
-    # the caller filters on it). No resolver reduces over other models' rows:
-    # another tokenizer's density is no evidence about this route.
+    # Exact-route lookup spans storage keys: the local lane records "local-model"
+    # while the route fingerprint binds the configured model name.
     # ``basis`` filters to rows measured on one named basis. The MAIN fit
     # resolver passes MAIN_DENSITY_BASIS — its multiplier must match the fit
     # estimator's own measure: a pre-basis row (no stamp) or a legacy ``raw``
@@ -767,31 +600,39 @@ def _fresh_density_pairs(
     ]
 
 
-def resolve_main_token_density(drive_root: Any, route_fp: str, model_id: str) -> Tuple[float, str]:
-    """Newest fresh exact-route witness, then exact-model witness, then neutral."""
+def resolve_main_token_density(
+    drive_root: Any, route_fp: str, model_id: str, *, estimate_tokens: Optional[int] = None,
+    view_kind: str = "",
+) -> Tuple[float, str]:
+    """Newest comparable witness of this exact route and view, else the cold family estimate.
+
+    View kinds are exact: unclassified legacy rows never calibrate a classified
+    focus, own wake or owner turn. When sizing a candidate, compare raw input with raw input (``prompt_chars / 4``),
+    within a factor of two. A small helper cannot calibrate a large conversation.
+    """
     try:
-        store = _load(drive_root).get("token_density", {}) or {}
+        store = _read(drive_root).get("token_density", {}) or {}
         route = str(route_fp or "").strip()
+
+        def comparable(item):
+            return str(item[0].get("view_kind") or "") == view_kind and (estimate_tokens is None
+                or estimate_tokens / 2 <= int(item[0]["prompt_chars"]) / 4 <= estimate_tokens * 2)
+
         route_pairs = [
             item for item in _fresh_density_pairs(store, basis=MAIN_DENSITY_BASIS)
-            if route and str(item[0].get("route_fp") or "") == route
+            if route and str(item[0].get("route_fp") or "") == route and comparable(item)
         ]
         if route_pairs:
             return max(
                 enumerate(route_pairs),
                 key=lambda item: (*_density_recency_key(item[1][0]), item[0]),
             )[1][1], "fresh_route_usage"
-        model_pairs = _fresh_density_pairs(
-            store, _normalized_density_model(model_id), basis=MAIN_DENSITY_BASIS,
-        )
-        if model_pairs:
-            return max(
-                enumerate(model_pairs),
-                key=lambda item: (*_density_recency_key(item[1][0]), item[0]),
-            )[1][1], "fresh_model_usage"
     except Exception:
         pass
-    return 1.0, "cold_estimate"
+    # Empirical tokenizer classes (audit D8), never a per-model window table.
+    from ouroboros.provider_models import parse_model_route
+    native = parse_model_route(str(model_id).lower()).model
+    return (4 / 2.7 if "claude" in native else 1.0), "cold_estimate"
 
 
 def resolve_review_token_density(drive_root: Any, model_id: str) -> Tuple[float, str]:
@@ -810,7 +651,7 @@ def resolve_review_token_density(drive_root: Any, model_id: str) -> Tuple[float,
     1.81 sized gpt-5.6-terra, measured 0.87-0.96, at 1.90 and cut its scope cap
     from 575,757 to 499,627 of a 1,050,000-token window)."""
     try:
-        store = _load(drive_root).get("token_density", {}) or {}
+        store = _read(drive_root).get("token_density", {}) or {}
         exact = _fresh_density_pairs(store, _normalized_density_model(model_id))
         if exact:
             return max(item[1] for item in exact) * MEASURED_DENSITY_SAFETY_FACTOR, "measured"
@@ -822,115 +663,6 @@ def resolve_review_token_density(drive_root: Any, model_id: str) -> Tuple[float,
 def resolve_token_density(drive_root: Any, model_id: str) -> Tuple[float, str]:
     """Compatibility alias for the conservative review reducer."""
     return resolve_review_token_density(drive_root, model_id)
-
-
-# Cold-start density probe (owner decisions R60/R61 for the packed deep
-# self-review; the commit gate runs the same rung since 2026-09-05): when a
-# review pack is refused or degraded under the COLD floor, ONE bounded send on
-# the exact model sources a real witness for the store above.
-# Room for a reasoning model to finish thinking AND answer: a cap that ends the
-# call mid-reasoning comes back with no content and no usage — no witness.
-DENSITY_PROBE_MAX_TOKENS = 256
-DENSITY_PROBE_EFFORT = "low"
-DENSITY_PROBE_SYSTEM_PROMPT = "Token-density calibration probe: reply with the single word OK."
-
-
-def cold_start_density_probe(
-    drive_root: Any,
-    llm: Any,
-    emit_progress: Any,
-    model: str,
-    sample: str,
-    *,
-    task_id: str,
-    call_type: str,
-    source: str,
-    model_role: str = "", model_account_override: Optional[str] = None,
-) -> str:
-    """The cold-start density rung for the commit triad packet.
-    Returns a typed outcome:
-
-    ``"warm"`` — a fresh exact-model witness already governs: nothing is sent;
-    ``"no_sample"`` — nothing to measure on; ``"failed"`` / ``"no_usage"`` /
-    ``"unrecorded"`` — the probe sent but yielded no governing witness (the
-    cold cap stands, disclosed on progress); ``"measured"`` — the witness is
-    recorded and now governs, so the caller recomputes the cap and rebuilds
-    ONCE.
-
-    The calibrated input cap is the density-form bound over a FRESH exact-model
-    witness, else the cold floor ``COLD_START_TOKEN_DENSITY`` — which lies
-    above every measured density, so a repository whose required set fits warm
-    is refused cold, and the refusal happens before any send, so the model
-    never records the witness that would have admitted it. This rung breaks
-    that loop with ONE bounded send on the exact model (``sample``: a slice of
-    the real pack, a few output tokens) through the ordinary observed call,
-    under ``physical_attempt_limit(1)`` so the transport ladder's own retries
-    (a body-error reroute, an encrypted-reasoning strip) cannot turn the ONE
-    send into several paid attempts. It never runs on a warm store and never
-    retries. ``BudgetExceeded`` propagates:
-    the paid ledger's refusal is budget vocabulary the caller discloses in its
-    own terms (the deep review lets it reach the agent's budget rail; the
-    commit gate records a typed disclosure and keeps its existing refusal)."""
-    from ouroboros.llm_observability import chat_observed
-    from ouroboros.usage_accounting import BudgetExceeded, physical_attempt_limit
-
-    _density, density_source = resolve_review_token_density(drive_root, model)
-    if density_source == "measured":
-        return "warm"
-    if not sample:
-        return "no_sample"
-    emit_progress(
-        f"No fresh token-density witness for {model}: one bounded probe "
-        f"(~{estimate_tokens(sample):,} estimated tokens) calibrates the input cap..."
-    )
-    try:
-        with physical_attempt_limit(1):
-            _response, usage = chat_observed(
-                llm,
-                drive_root=drive_root,
-                task_id=task_id,
-                call_type=call_type,
-                messages=[
-                    {"role": "system", "content": DENSITY_PROBE_SYSTEM_PROMPT},
-                    {"role": "user", "content": sample},
-                ],
-                model=model,
-                model_role=model_role, model_account_override=model_account_override,
-                tools=None,
-                reasoning_effort=DENSITY_PROBE_EFFORT,
-                max_tokens=DENSITY_PROBE_MAX_TOKENS,
-                temperature=None,
-                no_proxy=True,
-            )
-    except BudgetExceeded:
-        raise
-    except Exception as exc:
-        from ouroboros.llm_claudexor import propagate_model_error
-        propagate_model_error(exc)
-        log.warning("Token-density probe failed (%s): %s", call_type, exc, exc_info=True)
-        emit_progress(f"Density probe failed ({type(exc).__name__}); the cold input cap stands.")
-        return "failed"
-    real = int((usage or {}).get("prompt_tokens") or 0)
-    if real <= 0:
-        emit_progress("Density probe returned no usage (prompt_tokens=0); the cold input cap stands.")
-        return "no_usage"
-    actual_model = str(((usage or {}).get("model_role_route") or {}).get("model")
-                       or (usage or {}).get("resolved_model") or model)
-    record_token_density(
-        drive_root,
-        _normalized_density_model(actual_model),
-        prompt_chars=len(DENSITY_PROBE_SYSTEM_PROMPT) + len(sample),
-        prompt_tokens=real,
-        source=source,
-    )
-    if _normalized_density_model(actual_model) != _normalized_density_model(model):
-        emit_progress(f"Density witness belongs to the switched model {actual_model}; the original pack cap is unchanged.")
-        return "unrecorded"
-    density, density_source = resolve_review_token_density(drive_root, model)
-    emit_progress(f"Token density for {model}: {density:.2f} ({density_source}).")
-    # A witness the store refused (too few chars, an insane ratio) leaves the
-    # cold cap standing — disclosed above by the unchanged source.
-    return "measured" if density_source == "measured" else "unrecorded"
 
 
 # --- Owner acknowledgement (asserted) -----------------------------------------
@@ -948,7 +680,9 @@ def record_owner_ack(
     note: str = "",
     expected_route_fp: str = "",
 ) -> Dict[str, Any]:
-    """Persist a route-fingerprinted owner acknowledgement of a context window."""
+    """Persist a route-fingerprinted owner acknowledgement of a context window.
+
+    Returns the record only once it is saved; a busy or unwritable store raises ``OSError``."""
     fp = route_fingerprint(provider=provider, base_url=base_url, model=model, headers=headers, options=options)
     if expected_route_fp and expected_route_fp != fp:
         raise ValueError("Capability acknowledgement route fingerprint mismatch")
@@ -977,25 +711,52 @@ def record_owner_ack(
     }
     if binding_evidence is not None:
         record["binding_evidence"] = binding_evidence.to_json()
-    _store_evidence(drive_root, "owner_acks", fp, record)
+    if not _store_evidence(drive_root, "owner_acks", fp, record):
+        raise OSError("Could not persist the capability acknowledgement")
     return record
 
 
+def retired_owner_ack(record: Any) -> bool:
+    """Retire only the fixed 1M acknowledgements from the removed dialogs."""
+    return isinstance(record, dict) and record.get("window_tokens") == 1_000_000 and record.get("note") in {
+        "owner-confirmed via settings save", "owner-confirmed via context-mode toggle",
+        "owner-confirmed scope reviewer window",
+    }
+
+
 def list_owner_acks(drive_root: Any) -> List[Dict[str, Any]]:
-    return list(_load(drive_root).get("owner_acks", {}).values())
+    return [{**row, "retired": retired_owner_ack(row)} for row in _read(drive_root).get("owner_acks", {}).values()]
 
 
 def revoke_owner_ack(drive_root: Any, route_fp: str) -> bool:
-    with _STORE_LOCK:
+    """Remove one acknowledgement; a busy or unwritable store raises, never reporting a removal."""
+    with _store_transaction(drive_root):
         data = _load(drive_root)
         if route_fp in data.get("owner_acks", {}):
             del data["owner_acks"][route_fp]
-            _save(drive_root, data)
+            if not _save(drive_root, data):
+                raise OSError("Could not persist the capability acknowledgement removal")
             return True
     return False
 
 
 # --- Probing (opportunistic, cached) ------------------------------------------
+
+def record_route_facts(drive_root, *, provider, model, base_url, facts):
+    """Publish the selected catalog's dated conversation bound, independent of acceptance.
+
+    A catalog can withdraw a window by declaring it unknown. Its labelled facts
+    stay beside the ordinary capability record; accepted input never raises W.
+    """
+    fp = route_fingerprint(provider=provider, model=model, base_url=base_url)
+    evidence = CapabilityEvidence(
+        window_tokens=facts.conversation_window_tokens or 0,
+        status=STATUS_CONFIRMED if facts.conversation_window_tokens is not None else STATUS_UNPROBEABLE,
+        source="route_catalog", route_fp=fp, model=model, provider=provider,
+        ts=utc_now_iso(), detail=facts.source, route_facts=asdict(facts))
+    _store_evidence(drive_root, "probes", fp, evidence.to_json())
+    return evidence
+
 
 def _cached_evidence(record: Dict[str, Any], fp: str, model: str, provider: str,
                      *, stale: bool = False, detail: str = "") -> CapabilityEvidence:
@@ -1010,6 +771,10 @@ def _cached_evidence(record: Dict[str, Any], fp: str, model: str, provider: str,
         credential_profile_id=str(record.get("credential_profile_id") or ""),
         account_fingerprint=str(record.get("account_fingerprint") or ""),
         provenance=str(record.get("provenance") or ""),
+        route_facts=dict(record.get("route_facts") or {}),
+
+
+        window_kind=str(record.get("window_kind") or "total"),
     )
 
 
@@ -1081,15 +846,14 @@ def _openai_compatible_metadata_window(
 
     ``api_key`` may be passed by callers that already hold the key in scope (e.g.
     the settings-save gate, which has the not-yet-persisted value in ``current``).
-    When omitted the function falls back to the already-saved settings on disk."""
+    When omitted it is the key of the connection ``model`` names (``_route_api_key``)."""
     if not allow_fetch or not str(base_url or "").strip() or not str(model or "").strip():
         return 0
     try:
         import httpx
 
         if api_key is None:
-            from ouroboros.config import runtime_settings
-            api_key = str((runtime_settings() or {}).get("OPENAI_COMPATIBLE_API_KEY") or "")
+            api_key = _route_api_key(model)
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         from ouroboros.net_transport import verify_kwargs
         resp = httpx.get(str(base_url).rstrip("/") + "/models", headers=headers, timeout=5.0, **verify_kwargs())
@@ -1098,10 +862,13 @@ def _openai_compatible_metadata_window(
         items = payload.get("data") if isinstance(payload, dict) else payload
         if provider == "openai-compatible":  # MiniMax /models carries no modality field
             from ouroboros.vision_routing import record_catalog_image_input
-            record_catalog_image_input(provider, base_url, items, source="the OpenAI-compatible gateway's /models")
-        # The saved model is normally provider-prefixed (e.g. ``openai-compatible::llama-3``)
+            # Scoped to the key this request sent ("" = none), never one resolved after the response.
+            record_catalog_image_input(provider, base_url, items, source="the OpenAI-compatible gateway's /models",
+                                       api_key=api_key)
+        # The saved model is normally route-prefixed (e.g. ``openai-compatible::llama-3``)
         # while /models lists the BARE id — match either spelling.
-        wanted = {str(model), str(model).split("::", 1)[-1]}
+        from ouroboros.provider_models import parse_model_route
+        wanted = {str(model), parse_model_route(model).model}
         matched = [item for item in (items or []) if isinstance(item, dict)
                    and str(item.get("id") or item.get("name") or "") in wanted]
         from ouroboros.response_limits import positive_limit, record_metadata_limit
@@ -1121,30 +888,38 @@ def _openai_compatible_metadata_window(
         return 0
 
 
+def _route_api_key(model: str) -> str:
+    """The key of the connection ``model`` names, from the one resolver: never another
+    connection's (a default key sent to a named endpoint), '' when the route cannot serve."""
+    try:
+        from ouroboros.llm_routing import resolve_target
+        return str(resolve_target(model).get("api_key") or "")
+    except Exception:
+        return ""
+
+
 def _provider_metadata_window(
     provider: str, model: str, base_url: str, allow_fetch: bool, api_key: Optional[str] = None
-) -> int:
-    """Best-effort live window from provider metadata. 0 = no metadata source."""
+) -> Tuple[int, str]:
+    """Provider window and its observation time; cached facts keep their original date."""
     p = str(provider or "").strip().lower()
     # OpenRouter publishes context_length in /models (one cached fetch).
     if "openrouter" in p or (not p and "/" in str(model or "")):
         try:
             from ouroboros.llm import LLMClient
-            return int(LLMClient.openrouter_context_length(model, allow_fetch=allow_fetch) or 0)
+            from ouroboros.provider_models import parse_model_route
+            # The catalog lists native ids; a route spelling (``openrouter[@name]::``) names the same model.
+            window = LLMClient.openrouter_context_length(parse_model_route(model).model, allow_fetch=allow_fetch)
+            return int(window or 0), LLMClient._CONTEXT_LENGTH_OBSERVED_AT
         except Exception:
-            return 0
+            return 0, ""
     # CW6: OpenAI-compatible /models probe (vLLM/Ollama/...) before falling to unprobeable.
     if p in {"openai-compatible", "minimax"}:
-        if p == "minimax" and api_key is None:
-            try:
-                from ouroboros.config import runtime_settings
-                api_key = str((runtime_settings() or {}).get("MINIMAX_API_KEY") or "")
-            except Exception:
-                api_key = ""
-        return _openai_compatible_metadata_window(model, base_url, allow_fetch, api_key=api_key, provider=p)
+        window = _openai_compatible_metadata_window(model, base_url, allow_fetch, api_key=api_key, provider=p)
+        return window, utc_now_iso() if window else ""
     # GigaChat's /models (aget_models) lists model ids but does NOT publish a per-model
     # context window, so a gigachat route stays unprobeable (owner-ack path) — no probe.
-    return 0
+    return 0, ""
 
 
 def _local_health_window(model: str) -> int:
@@ -1176,56 +951,6 @@ def _metadata_fetch_transport_failed(provider: str, model: str, use_local: bool)
         return False
 
 
-_GENERATIVE_PROBE_PROVIDERS = {"cloudru", "openai-compatible", "minimax", "openai", "openrouter"}
-_PROBE_CANARIES = ["OBOCANARYBEGIN7Q", "OBOCANARYMID7Q", "OBOCANARYEND7Q"]
-
-
-def _generative_probe_enabled() -> bool:
-    return (runtime_setting("OUROBOROS_GENERATIVE_PROBE", "1") or "").strip().lower() not in {"", "0", "false", "no", "off"}
-
-
-def _generative_probe_pad_chars() -> int:
-    try:
-        return max(200_000, int(runtime_setting("OUROBOROS_GENERATIVE_PROBE_CHARS", "5000000") or "5000000"))
-    except (ValueError, TypeError):
-        return 5_000_000
-
-
-def _generative_probe_window(
-    provider: str, model: str, base_url: str = "", api_key: Optional[str] = None,
-) -> Tuple[int, str, str]:
-    """Empirically size a route's window with ONE oversized request, free-only.
-
-    Sends a deliberately over-window input on an OpenAI-compatible route; the
-    provider rejects it PRE-inference (free) with the limit in the message. Never
-    raises — any setup/transport error returns FAILED (-> fail-closed owner-ack).
-    """
-    if not _generative_probe_enabled() or provider not in _GENERATIVE_PROBE_PROVIDERS:
-        return 0, STATUS_UNPROBEABLE, "generative probe not applicable/enabled for this route"
-    pad = _generative_probe_pad_chars()
-    chunk = "x " * (pad // 4)
-    content = f"{_PROBE_CANARIES[0]} {chunk} {_PROBE_CANARIES[1]} {chunk} {_PROBE_CANARIES[2]} Echo the three OBOCANARY tokens verbatim."
-    sent_estimate = max(1, len(content) // 4)
-    # Transport lives in the shared LLMClient seam (DEVELOPMENT.md): it owns route
-    # resolution, the per-provider token key, the hard timeout, and never-raises. This
-    # module only CLASSIFIES the raw outcome into window evidence (fail-closed).
-    try:
-        from ouroboros.llm import LLMClient
-
-        out = LLMClient().probe_oversized_context(model, content, base_url=base_url, api_key=api_key)
-    except Exception as exc:  # pragma: no cover - defensive
-        return 0, STATUS_FAILED, f"generative probe failed: {type(exc).__name__}"
-    if out.get("ok"):
-        return classify_generative_probe_response(
-            200, "", canaries=_PROBE_CANARIES, echoed_text=str(out.get("echoed_text") or ""),
-            usage_prompt_tokens=int(out.get("usage_prompt") or 0), sent_token_estimate=sent_estimate,
-        )
-    status = out.get("status_code")
-    return classify_generative_probe_response(
-        status if isinstance(status, int) else None, str(out.get("body") or ""),
-    )
-
-
 def _probe_window(
     drive_root: Any,
     *,
@@ -1236,34 +961,21 @@ def _probe_window(
     options: Optional[Dict[str, Any]] = None,
     use_local: bool = False,
     allow_fetch: bool = True,
-    allow_generative: bool = False,
     force: bool = False,
     api_key: Optional[str] = None,
 ) -> CapabilityEvidence:
     """Resolve Capability Evidence for a route, using the cache unless ``force``.
 
-    Owner-ack wins; local capacity is read from the serving instance on every
+    Local capacity is read from the serving instance on every
     call. Remote routes use fresh cache -> provider metadata -> unprobeable.
     Network probing is skipped when allow_fetch=False (hot-path callers)."""
     fp = route_fingerprint(provider=provider, base_url=base_url, model=model, headers=headers, options=options)
-    data = _load(drive_root)
+    data = _read(drive_root)
     account_options = options if isinstance(options, dict) else {}
     subscription = provider == "claudexor" and not use_local
     account_bound = all(account_options.get(key) for key in (
         "source_id", "credential_profile_id", "account_fingerprint",
     ))
-
-    # Owner-ack always wins as ASSERTED evidence for its exact route.
-    ack = data.get("owner_acks", {}).get(fp)
-    if ack and (not subscription or account_bound):
-        return CapabilityEvidence(
-            window_tokens=int(ack.get("window_tokens") or 0), status=STATUS_ASSERTED,
-            source=SOURCE_OWNER_ACK, route_fp=fp, model=model, provider=provider,
-            ts=str(ack.get("ts") or ""), detail=f"owner-ack by {ack.get('owner') or 'owner'}",
-            source_id=str(account_options.get("source_id") or ""),
-            credential_profile_id=str(account_options.get("credential_profile_id") or ""),
-            account_fingerprint=str(account_options.get("account_fingerprint") or ""),
-        )
 
     if use_local:
         # Stored local rows have no serving-instance binding and may contain
@@ -1279,12 +991,7 @@ def _probe_window(
     if subscription and not account_bound and str((cached or {}).get("status") or "") in _KNOWN_STATUS:
         # Model-only legacy evidence cannot certify any subscription account.
         cached = None
-    # An EXPLICIT generative probe (owner toggle/save, allow_generative=True) must run even
-    # when a prior LAZY (allow_generative=False) call left a fresh UNPROBEABLE/FAILED record
-    # — otherwise the owner's empirical probe is silently short-circuited and never fires.
-    # Only a CONFIRMED cache is authoritative enough to skip the live probe on that path.
-    _skip_cache_for_generative = allow_generative and str((cached or {}).get("status") or "") != STATUS_CONFIRMED
-    if cached and not force and not _skip_cache_for_generative:
+    if cached and not force:
         age = _age_seconds(str(cached.get("ts") or ""))
         ttl = _CONFIRMED_TTL_SEC if cached.get("status") == STATUS_CONFIRMED else _FAILED_TTL_SEC
         if age <= ttl:
@@ -1310,42 +1017,13 @@ def _probe_window(
             ev = CapabilityEvidence(0, STATUS_FAILED, SOURCE_NONE, fp, model, provider,
                                     ts=utc_now_iso(), detail=f"model catalog unavailable: {type(exc).__name__}")
         _store_evidence(drive_root, "probes", ev.route_fp, ev.to_json())
-        if (not ev.stale and ev.provenance and parse_deadline_ts(ev.ts)
-                and ev.source_id and ev.credential_profile_id and ev.account_fingerprint):
-            # Metadata established the missing identity for this exact account.
-            # Reuse only its owner authority, never stale metadata over this read.
-            bound_options = {**account_options, "source_id": ev.source_id,
-                             "credential_profile_id": ev.credential_profile_id,
-                             "account_fingerprint": ev.account_fingerprint}
-            acknowledged = probe(drive_root, provider=provider, model=model, base_url=base_url,
-                                 headers=headers, options=bound_options, allow_fetch=False)
-            if acknowledged.source == SOURCE_OWNER_ACK:
-                return acknowledged
         return ev
 
-    # Live probe.
-    window = 0
-    source = SOURCE_NONE
-    if window <= 0:
-        meta = _provider_metadata_window(provider, model, base_url, allow_fetch=allow_fetch, api_key=api_key)
-        if meta > 0:
-            window, source = meta, SOURCE_PROVIDER_METADATA
-
-    # Generative probe: only when metadata gave nothing AND a toggle/save call-site
-    # opted in (allow_generative) — never on the lazy per-task hot path. Confirms a
-    # window empirically via a free over-window reject; a 200/numberless reject -> owner-ack.
-    if window <= 0 and allow_generative and not use_local:
-        gwin, gstatus, gdetail = _generative_probe_window(provider, model, base_url, api_key=api_key)
-        if gwin > 0:
-            window, source = gwin, SOURCE_GENERATIVE_PROBE
-        elif gstatus == STATUS_FAILED:
-            ev = CapabilityEvidence(0, STATUS_FAILED, SOURCE_NONE, fp, model, provider,
-                                    ts=utc_now_iso(), detail=gdetail)
-            _store_evidence(drive_root, "probes", fp, ev.to_json())
-            return ev
-
+    window, observed_at = _provider_metadata_window(provider, model, base_url, allow_fetch=allow_fetch, api_key=api_key)
     if window > 0:
-        ev = CapabilityEvidence(window, STATUS_CONFIRMED, source, fp, model, provider, ts=utc_now_iso(), detail="live probe")
+        ev = CapabilityEvidence(window, STATUS_CONFIRMED, SOURCE_PROVIDER_METADATA, fp, model, provider,
+                                ts=observed_at, stale=_age_seconds(observed_at) > _CONFIRMED_TTL_SEC,
+                                detail="provider metadata")
         _store_evidence(drive_root, "probes", fp, ev.to_json())
         return ev
 
@@ -1370,12 +1048,36 @@ def _probe_window(
     return ev
 
 
+def with_role_window(evidence: CapabilityEvidence, window: int) -> CapabilityEvidence:
+    """The role declaration wins without borrowing a metadata observation date."""
+    from dataclasses import replace
+
+    return replace(evidence, window_tokens=window, window_kind="total", status=STATUS_ASSERTED,
+                   source=SOURCE_USER_SETTING, stale=False, ts="", detail="role Window set by owner") if window else evidence
+
+
 def probe(drive_root: Any, **route) -> CapabilityEvidence:
     """Resolve independent context and output facts; one owner's window ack cannot suppress output discovery."""
-    from dataclasses import asdict
+    from dataclasses import asdict, replace
     from ouroboros.response_limits import probe_response_limit
 
     evidence = _probe_window(drive_root, **route)
+    if is_known(evidence, require_fresh=True):
+        evidence.server_window = dict(tokens=evidence.window_tokens, kind=evidence.window_kind,
+                                      source=evidence.source, observed_at=evidence.ts)
+    ack = _read(drive_root).get("owner_acks", {}).get(evidence.route_fp)
+    options = {**(route.get("options") or {}), **{key: getattr(evidence, key) for key in (
+        "source_id", "credential_profile_id", "account_fingerprint") if getattr(evidence, key)}}
+    bound = route["provider"] != "claudexor" or all(options.get(key) for key in (
+        "source_id", "credential_profile_id", "account_fingerprint"))
+    if retired_owner_ack(ack):
+        evidence.retired_ack = {key: ack.get(key) for key in ("window_tokens", "ts", "note")}
+    elif ack and bound:
+        evidence = replace(evidence, window_tokens=int(ack.get("window_tokens") or 0),
+            window_kind="total", status=STATUS_ASSERTED, source=SOURCE_OWNER_ACK, stale=False,
+            ts=str(ack.get("ts") or ""), detail=f"owner-ack by {ack.get('owner') or 'owner'}",
+            **{key: str(options.get(key) or "") for key in (
+                "source_id", "credential_profile_id", "account_fingerprint")})
     evidence.response_limit = asdict(probe_response_limit(drive_root, evidence, route))
     return evidence
 
@@ -1387,7 +1089,7 @@ def probe(drive_root: Any, **route) -> CapabilityEvidence:
 # excluding it would starve the route of density witnesses entirely.
 _CACHE_INCLUSIVE_PROMPT_TOKEN_PROVIDERS = frozenset({
     "openrouter", "openai", "openai-compatible", "cloudru", "local", "anthropic",
-    "deepseek", "zai",
+    "deepseek", "zai", "claudexor",
 })
 
 
@@ -1417,7 +1119,7 @@ def observe_token_density(request: Any, usage: Optional[Dict[str, Any]], *, driv
         # uncached == cached +-1 is a coincidence whose loss costs nothing
         # (writes are throttled and five pairs retained); uncached ABOVE cached
         # is ordinary and stays measurable.
-        if cached and abs(real - 2 * cached) <= 1:
+        if gateway_double_counted_cache(real, cached):
             return
         # The witness MUST calibrate the basis the fit estimator measures on
         # (MAIN_DENSITY_BASIS: bounded image proxy, system counted) — the
@@ -1435,14 +1137,25 @@ def observe_token_density(request: Any, usage: Optional[Dict[str, Any]], *, driv
             return
         from ouroboros.provider_models import normalize_model_identity
 
+        physical = request.physical_context
+        main = bool(getattr(physical, "view_kind", ""))
+        route = str(getattr(physical, "route_fp", "") or "")
+        bound = provider != "claudexor" and bool(getattr(physical, "window_witness_bound", True))
+        if main and bound and route:
+            from ouroboros.context_window import record_observation
+            record_observation(drive_root_resolver(request.drive_root),
+                getattr(physical, "window_observation_fp", ""), accepted=real, kind="input",
+                reserve=int(getattr(physical, "response_reserve_tokens", 0) or 0),
+                transmitted=int(getattr(request, "max_completion_tokens", 0) or 0))
         record_token_density(
             drive_root_resolver(request.drive_root),
             normalize_model_identity(str(request.model or "")),
             prompt_chars=estimate * 4,
             prompt_tokens=real,
             source="dispatch_usage",
-            route_fp=str(request.physical_context.route_fp if request.physical_context else ""),
+            route_fp=route if main and bound else "",
             basis=basis,
+            **({"view_kind": physical.view_kind} if main and bound else {}),
         )
     except Exception:
         log.debug("token-density observation skipped", exc_info=True)

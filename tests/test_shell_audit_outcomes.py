@@ -19,6 +19,7 @@ pytestmark = pytest.mark.serial
 def registry(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     consume_last_process_facts()
     registry, _, _, _ = _registry_under_fake_home(tmp_path, monkeypatch)
     yield registry

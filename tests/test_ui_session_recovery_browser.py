@@ -30,6 +30,7 @@ import urllib.request
 import pytest
 
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
+from tests.ui_console_errors import PageErrors
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 
@@ -236,8 +237,8 @@ def _at_sign_in(next_path: str | None = None):
 
 def _chat_frame(text: str) -> str:
     # The composer's own frame shape (chat.js), sent through the page's real socket manager.
-    return ("() => window.__ouroWs.send({type: 'chat', content: %s, sender_session_id: 'session-recovery-test', "
-            "force_plan: false}).status" % json.dumps(text))
+    return ("() => window.__ouroWs.send({type: 'chat', content: %s, sender_session_id: 'session-recovery-test'})"
+            ".status" % json.dumps(text))
 
 
 def _history_text(page) -> str:
@@ -258,8 +259,7 @@ def test_separate_interface_signs_in_returns_and_recovers_an_expired_session(sep
             context = browser.new_context(viewport={"width": 1200, "height": 820})
             context.add_init_script(_OBSERVE)
             page = context.new_page()
-            errors, addresses = [], []
-            page.on("pageerror", lambda error: errors.append(str(error)))
+            errors, addresses = PageErrors(page, browser_name), []
             page.on("framenavigated", lambda frame: frame == page.main_frame and addresses.append(frame.url))
 
             # An empty cookie jar opens the interface host's `/`: the page itself is
@@ -347,10 +347,8 @@ def test_separate_interface_signs_in_returns_and_recovers_an_expired_session(sep
             (evidence / f"{browser_name}-sign-in.json").write_text(json.dumps({
                 "addresses": addresses, "proxy": proxy.records, "socket_closes": closes,
                 "interface_host_paths": host.paths, "page_errors": errors}, indent=2), encoding="utf-8")
-            # WebKit reports a fetch that a navigation cancelled (the page leaving
-            # for sign-in) as an access-control failure; nothing else is tolerated.
-            cancelled = [e for e in errors if browser_name == "webkit" and e.endswith("due to access control checks.")]
-            assert [e for e in errors if e not in cancelled] == [], errors
+            # The page leaving for sign-in cancels fetches (WebKit's report of them is set aside).
+            assert errors.unexpected() == [], errors
         finally:
             browser.close()
 

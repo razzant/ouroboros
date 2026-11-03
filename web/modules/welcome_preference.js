@@ -13,7 +13,7 @@ export function welcomeText(value) {
 // control: docs/DESIGN.md "Chat authorship and System rows"), read when Main connects.
 // Only a successful recent read whose own window reports complete coverage can
 // confirm emptiness; every read in flight, failed or partial withdraws it, and any
-// insertion into the feed decides again. Chrome (the typing indicator, the reconnect
+// insertion into the feed decides again. Chrome (the typing indicator, the restart
 // notice) is not content: the history loading state counts the same nodes.
 export function mountEmptyChatWelcome(messages) {
     const doc = messages.ownerDocument;

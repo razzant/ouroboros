@@ -3,10 +3,12 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
+import time
 
 import pytest
 
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture
+from tests.ui_chat_viewport_smoke import wait_drawer_closed
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 
@@ -59,8 +61,9 @@ def test_activity_relationship_hold_and_stale_restore(direct_server_with_data, m
             response = page.request.get(server['url'] + '/api/schedules').json()
             (evidence / 'before-restore.json').write_text(json.dumps(response, indent=2))
             print('G1_BROWSER_SCHEDULES', json.dumps(response))
-            section.locator('summary').wait_for(state='visible')
-            section.locator('summary').click()
+            history = section.locator('[data-activity-history] > summary')
+            history.wait_for(state='visible')
+            history.click()
             button = section.get_by_role('button', name='Restore hold')
             button.wait_for(state='visible')
             assert button.get_attribute('data-hold-id') == old_id
@@ -70,19 +73,26 @@ def test_activity_relationship_hold_and_stale_restore(direct_server_with_data, m
             for width in (1440, 390):
                 page.set_viewport_size({'width': width, 'height': 960})
                 if width < 700:
-                    page.wait_for_function("() => document.querySelector('#primary-sidebar').getBoundingClientRect().right <= 1")
+                    wait_drawer_closed(page)
                 section.scroll_into_view_if_needed()
-                assert section.locator('.activity-sub').evaluate('(el) => el.scrollWidth <= el.clientWidth + 1')
+                assert section.locator('.activity-sub').evaluate_all(
+                    '(els) => els.length > 0 && els.every((el) => el.scrollWidth <= el.clientWidth + 1)')
                 page.screenshot(path=str(evidence / f'g1-activity-{width}.png'), full_page=True)
             page.set_viewport_size({'width': 1440, 'height': 960})
             # A new accepted Stop while the old DOM still offers its old identity.
             request_cancel(root, ORIGIN, reason='New Stop', source='http_single', requested_by='owner',
                            allow_settled_target=True)
+            # The live server's schedule tick persists the new hold on its own (~0.5 s); wait for it so
+            # the stale click meets an already-refreshed row and changes nothing (#1462).
+            deadline = time.monotonic() + 30
+            while load_schedule_store(root)['tasks'][0]['followup_hold']['hold_id'] == old_id:
+                assert time.monotonic() < deadline, 'the schedule tick never persisted the new hold'
+                time.sleep(0.1)
             with page.expect_response(lambda r: r.request.method == 'POST' and r.url.endswith('/action')) as receipt:
                 button.click()
             result = receipt.value.json()
             assert result['status'] == 'stale_hold', result
-            assert result['ok'] is False and result['changed'] is True, result
+            assert result['ok'] is False and result['changed'] is False, result
             assert result['running_or_queued'] is True, result
             assert receipt.value.request.post_data_json['expected_hold_id'] == old_id
             [current] = load_schedule_store(root)['tasks']
@@ -96,7 +106,10 @@ def test_activity_relationship_hold_and_stale_restore(direct_server_with_data, m
             }, indent=2, default=str))
             page.wait_for_function("() => [...document.querySelectorAll('#toast-stack .toast')].every(el => Number(getComputedStyle(el).opacity) > 0.95)")
             page.screenshot(path=str(evidence / 'g1-activity-stale-restore.png'), full_page=True)
-            assert page.locator('#toast-stack .toast-danger').filter(has_text='restore refused: stale_hold').count() == 1, toasts
+            # Refused without changing anything (activity.js scheduleOutcomeToast; the policy suite covers
+            # the request that itself persisted the new hold, which reads "refused").
+            assert page.locator('#toast-stack .toast-danger').filter(
+                has_text='restore did not change anything: stale_hold').count() == 1, toasts
             assert 'restored' not in toasts.lower() and 'applied' not in toasts.lower(), toasts
             # The backend's real audit-failure path is covered in the policy
             # suite. Here adapt a REAL applied release response to that wire
@@ -111,6 +124,8 @@ def test_activity_relationship_hold_and_stale_restore(direct_server_with_data, m
                     'status': 'changed_audit_incomplete', 'audit': 'incomplete'})
             page.route('**/api/schedules/*/action', incomplete_audit)
             page.locator('#toast-stack').evaluate('(el) => el.replaceChildren()')
+            # The refusal re-renders the section with the persisted new hold; press that control.
+            section.locator(f'[data-hold-id="{current["followup_hold"]["hold_id"]}"]').wait_for()
             button.click()
             page.locator('#toast-stack .toast-warn').filter(has_text='applied, but its audit record is incomplete').wait_for()
             assert len(applied) == 1

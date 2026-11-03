@@ -79,13 +79,17 @@ def pool(tmp_path, monkeypatch):
     original = workers.Worker(0, Process(42), InputQueue(), busy_task_id="owner")
     affirm_ready(original)
     slots[0] = original
+    # The project pool's own growth and retirement are read here; the conversation lane's
+    # spare and its replenishment are ``tests/test_conversation_lane_pool.py``'s (4A).
+    from supervisor import conversation_lane
+    monkeypatch.setattr(conversation_lane, "reconcile_conversation_lane", lambda: None)
     started = time.time() - 4000
     running["owner"] = {"task": root_task, "worker_id": 0, "attempt": 3,
                         "started_at": started, "last_heartbeat_at": time.time()}
     write_task_result(tmp_path, "owner", "running", result="prepared", total_rounds=7)
     source = store_actor_source_bytes(tmp_path, "owner", category="context_checkpoints",
                                      source_id="wait", data=b'{"effects":"done"}', extension="json")
-    wait = {"wait_id": "wait", "task_attempt": 3, "quiz_id": "quiz", "source_ref": source,
+    wait = {"wait_id": "wait", "task_attempt": 3, "reason": "owner", "quiz_id": "quiz", "source_ref": source,
             "execution_drive_root": str(tmp_path), "started_at": started}
     event = {"type": "owner_wait", "task_id": "owner", "worker_id": 0, "pid": 42,
              "task_attempt": 3, "wait_id": "wait", "phase": "park", "checkpoint": wait}
@@ -93,9 +97,10 @@ def pool(tmp_path, monkeypatch):
                            event=event, wait=wait, created=created)
 
 
-def maintain_capacity():
+def maintain_capacity(demand: int = 0):
+    """``demand``: queued work the forecast reports; growth buys only that (4A), never a spare."""
     worker_owner_wait.maintain_owner_wait_capacity()
-    worker_pool_lifecycle.reconcile_worker_capacity(lambda: 0)
+    worker_pool_lifecycle.reconcile_worker_capacity(lambda: demand)
 
 
 def quiesce_and_reap(worker):
@@ -129,7 +134,7 @@ def test_park_is_durable_before_ack_and_preserves_running_ownership(pool):
 
 
 def test_snapshot_failure_never_lends_capacity_or_confirms_park(pool, monkeypatch):
-    monkeypatch.setattr(queue, "persist_queue_snapshot", lambda **kw: False)
+    monkeypatch.setattr(queue, "publish_queue_snapshot", lambda **kw: False)
     worker_owner_wait.handle_owner_wait(pool.event, workers)
     assert pool.original.in_q.get_nowait()["phase"] == "refused"
     assert pool.original.active_capacity and not pool.created
@@ -137,7 +142,7 @@ def test_snapshot_failure_never_lends_capacity_or_confirms_park(pool, monkeypatc
 
 def test_replacement_readiness_and_same_stack_resume(pool):
     park(pool)
-    maintain_capacity()
+    maintain_capacity(demand=1)
     replacement = workers.WORKERS[1]
     assert replacement.reaping and replacement.active_capacity
     assert pool.original is workers.WORKERS[0] and len(pool.created) == 1
@@ -173,7 +178,7 @@ def test_foreign_or_stale_event_does_not_park(pool, field, value):
 
 def test_dead_parked_worker_is_removed_without_respawn(pool):
     park(pool)
-    maintain_capacity()
+    maintain_capacity(demand=1)
     replacement = workers.WORKERS[1]
     pool.original.proc.alive = False
     assert workers.respawn_worker(0)
@@ -184,7 +189,6 @@ def test_dead_parked_worker_is_removed_without_respawn(pool):
 def test_owner_wait_spares_only_idle_timeout(pool, monkeypatch, hard_axis):
     park(pool)
     monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 10)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 1)
     monkeypatch.setattr(queue, "get_task_abs_ceiling_sec", lambda: 1000 if hard_axis == "absolute_ceiling" else 10000)
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 0)
     monkeypatch.setattr(queue, "_ensure_reaper_started", lambda: None)
@@ -195,7 +199,7 @@ def test_owner_wait_spares_only_idle_timeout(pool, monkeypatch, hard_axis):
     queue._enforce_task_timeouts_locked(workers, time.time(), 0, {})
     if hard_axis:
         job = reaps.get_nowait()
-        assert job["terminal_reason"] == hard_axis and not job["will_retry"]
+        assert job["terminal_reason"] == hard_axis and not {"will_retry", "retry_task_id"} & set(job)
     else:
         assert reaps.empty() and "owner" in workers.RUNNING
 
@@ -203,7 +207,7 @@ def test_owner_wait_spares_only_idle_timeout(pool, monkeypatch, hard_axis):
 def test_resume_snapshot_failure_keeps_original_parked(pool, monkeypatch):
     park(pool)
     worker_owner_wait.handle_owner_wait({**pool.event, "phase": "resume"}, workers)
-    monkeypatch.setattr(queue, "persist_queue_snapshot", lambda **kw: False)
+    monkeypatch.setattr(queue, "publish_queue_snapshot", lambda **kw: False)
     maintain_capacity()
     assert not pool.original.active_capacity and pool.original.in_q.empty()
     assert load_task_result(pool.root, "owner")["owner_wait"]["state"] == "waiting"
@@ -217,7 +221,7 @@ def test_ordinary_pool_does_not_grow_to_configured_max(pool, monkeypatch):
 
 def exhausted_replacement(pool):
     park(pool)
-    maintain_capacity()
+    maintain_capacity(demand=1)
     replacement = workers.WORKERS[1]
     replacement.proc.alive = False
     replacement.readiness_exhausted = True
@@ -254,7 +258,7 @@ def test_exhausted_reservation_and_original_rollback_together(pool, monkeypatch,
 
         monkeypatch.setattr(worker_owner_wait, "set_owner_wait", fail_first)
     elif failure == "snapshot":
-        monkeypatch.setattr(queue, "persist_queue_snapshot", lambda **k: False)
+        monkeypatch.setattr(queue, "publish_queue_snapshot", lambda **k: False)
     else:
         def fail_command(*a, **k):
             raise OSError("command unavailable")
@@ -290,7 +294,7 @@ def test_stop_policy_keeps_its_authority_at_resume(pool, monkeypatch, policy, gr
     from ouroboros import cancel_intents
 
     park(pool)
-    maintain_capacity()
+    maintain_capacity(demand=1)
     replacement = workers.WORKERS[1]
     replacement.reaping = False
     affirm_ready(replacement)
@@ -374,7 +378,7 @@ def test_cold_assignment_restores_old_clock_without_budget_replay_classification
 def test_stopped_last_sleeper_preserves_enabled_capacity_only(pool, monkeypatch, replacement_exists, disabled):
     park(pool)
     if replacement_exists:
-        maintain_capacity()
+        maintain_capacity(demand=1)
     if disabled:
         monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "worker_crash_storm")
     workers.RUNNING.pop("owner")
@@ -424,7 +428,6 @@ def test_cold_loading_gets_new_idle_observation_without_resetting_hard_clock(poo
     workers.PENDING.append(task)
     workers.assign_tasks()
     monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 10)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 1)
     monkeypatch.setattr(queue, "get_task_abs_ceiling_sec", lambda: 1000 if hard_axis == "absolute_ceiling" else 10000)
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 0)
     monkeypatch.setattr(queue, "_ensure_reaper_started", lambda: None)
@@ -502,7 +505,7 @@ def test_failed_grant_rolls_back_marker_and_wait_together(pool, monkeypatch, fai
     park(pool)
     worker_owner_wait.handle_owner_wait({**pool.event, "phase": "resume"}, workers)
     if failure == "snapshot":
-        monkeypatch.setattr(queue, "persist_queue_snapshot", lambda **kw: False)
+        monkeypatch.setattr(queue, "publish_queue_snapshot", lambda **kw: False)
     else:
         def fail_command(*args, **kwargs):
             raise OSError("input queue unavailable")
@@ -516,7 +519,7 @@ def test_failed_grant_rolls_back_marker_and_wait_together(pool, monkeypatch, fai
 
 @pytest.mark.parametrize("stage", ["resumed", "cold_loading", "ordinary", "other_attempt"])
 def test_idle_timeout_never_clones_a_checkpointed_attempt(pool, monkeypatch, stage):
-    from supervisor import evolution_lifecycle, state, task_reaper
+    from supervisor import evolution_lifecycle, state
 
     if stage == "cold_loading":
         monkeypatch.setattr(state, "budget_remaining", lambda *args, **kwargs: 100)
@@ -536,26 +539,15 @@ def test_idle_timeout_never_clones_a_checkpointed_attempt(pool, monkeypatch, sta
             pool.meta["owner_wait"]["task_attempt"] = 2
     monkeypatch.setattr(queue, "QUEUE_MAX_RETRIES", 3)
     monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 10)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 1)
     monkeypatch.setattr(queue, "get_task_abs_ceiling_sec", lambda: 10000)
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 0)
     monkeypatch.setattr(queue, "_ensure_reaper_started", lambda: None)
     reaps = stdqueue.Queue()
     monkeypatch.setattr(queue, "_reap_queue", reaps)
     queue._enforce_task_timeouts_locked(workers, time.time() + 1000, 0, {})
-    job = reaps.get_nowait()
-    assert job["terminal_reason"] == "idle_timeout"
-    if job["will_retry"]:
-        requeued, new_attempt, _, _ = task_reaper._enqueue_retry(
-            queue, job["task"], task_id=job["task_id"], retry_task_id=job["retry_task_id"],
-            attempt=job["attempt"], terminal_reason=job["terminal_reason"], recon_fields={},
-        )
-        assert requeued and new_attempt == 4
-        assert workers.PENDING[-1]["id"] != "owner"
-        assert workers.PENDING[-1]["text"] == "work"
-    expected_retry = stage in ("ordinary", "other_attempt")
-    assert job["will_retry"] is expected_retry
-    assert bool(workers.PENDING) is expected_retry
+    assert reaps.empty() and not workers.PENDING
+    assert workers.RUNNING["owner"]["silence_attention"]["state"] == "pending_attention"
+    assert not workers.RUNNING["owner"].get("finalization_requested_at")
 
 
 def test_the_wait_stamp_rides_park_grant_and_restart_handoff_beside_the_task_start(pool):

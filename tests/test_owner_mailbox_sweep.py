@@ -1,4 +1,4 @@
-"""CPL4-C18 pins: startup sweep of mailboxes whose task settled off-path.
+"""CPL4-C18 pins: the drive-custody pass sweeps mailboxes whose task settled off-path.
 
 A mailbox (and its acks file) goes only when the task's durable result is
 SETTLED; no result, a non-terminal result, or an unclassifiable filename
@@ -64,9 +64,10 @@ def test_orphan_acks_without_mailbox_left_alone(tmp_path):
     assert _ack_path(tmp_path, "t-ghost").exists()
 
 
-def test_startup_prune_sweeps_run_the_mailbox_sweep():
+def test_the_drive_custody_pass_runs_the_mailbox_sweep():
     import inspect
 
     import ouroboros.server_maintenance as sm
 
-    assert "sweep_settled_owner_mailboxes" in inspect.getsource(sm._run_deferred_startup_prunes)
+    assert "sweep_settled_owner_mailboxes" in inspect.getsource(sm._run_drive_custody_pass)
+    assert "sweep_settled_owner_mailboxes" not in inspect.getsource(sm._run_reconcile_prunes)

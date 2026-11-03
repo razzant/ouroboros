@@ -154,12 +154,12 @@ def test_the_nested_tier_is_answered_inside_the_log_envelope():
         assert EVENT_DISPOSITIONS[name].answered_by == "supervisor.events_worker_reports"
     # The one the nested branch persists is named there literally; the other
     # two are forwarded live and durable via their own producers (the checkpoint
-    # producer writes events.jsonl and the System row's progress.jsonl itself).
+    # producer writes events.jsonl and the System row's dialogue progress itself).
     assert 'data.get("type") == "task_start_settings_reload_failed"' in owner
     assert '"task_checkpoint", "task_start_settings_reload_failed"' not in owner
     producer = (REPO / "ouroboros" / "loop_messages.py").read_text(encoding="utf-8")
     assert 'append_jsonl(drive_logs / "events.jsonl", payload)' in producer
-    assert 'append_jsonl(drive_logs / "progress.jsonl", payload)' in producer
+    assert 'dialogue_store.append_quietly(drive_logs.parent, "progress", payload)' in producer
     from supervisor.worker_process import WORKER_LOG_SINK_SUPPRESSED_TYPES
 
     assert "task_checkpoint" in WORKER_LOG_SINK_SUPPRESSED_TYPES

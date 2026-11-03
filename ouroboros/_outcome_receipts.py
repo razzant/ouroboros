@@ -73,6 +73,7 @@ class ReviewRunSelection:
 
     all_runs: List[Dict[str, Any]]
     current_runs: List[Dict[str, Any]]
+    # Historical name: only superseded clean runs exist, so none binds the delivered answer.
     superseded_only_acceptance_gap: bool
     superseded_aggregate_signals: List[str]
     current_candidate_unaccepted: bool
@@ -83,9 +84,12 @@ def select_current_review_runs(
     review_runs: Any,
     *,
     delivery_candidate: Any,
-    review_decision: Any,
 ) -> ReviewRunSelection:
-    """Select current review runs without erasing conservative stale failures."""
+    """Select current review runs without erasing conservative stale failures.
+
+    A result review of an earlier answer is superseded when a later answer is
+    delivered; the delivery candidate's binding is never authoritative, so a
+    superseded PASS can never approve the answer actually delivered."""
     all_runs = [
         run for run in (review_runs or [])
         if isinstance(run, dict) and run.get("authority") != "agent_advisory"
@@ -94,40 +98,26 @@ def select_current_review_runs(
     candidate = delivery_candidate if isinstance(delivery_candidate, dict) else {}
     binding = candidate.get("acceptance_binding")
     binding = binding if isinstance(binding, dict) else {}
-    decision = review_decision if isinstance(review_decision, dict) else {}
     candidate_unaccepted = bool(candidate) and binding.get("authoritative") is False
     superseded_signals = [
         str(run.get("aggregate_signal") or "").upper() for run in all_runs
     ]
-    acceptance_gap = bool(
+    superseded_gap = bool(
         all_runs
         and not current_runs
         and candidate_unaccepted
-        and not (decision.get("panel_id") and decision.get("binding_hash"))
         and "FAIL" not in superseded_signals
         and "DEGRADED" not in superseded_signals
     )
-    # A host decision that names a panel by id AND binding applied THAT panel's
-    # verdict (an earlier revision accepted on the reviewers' word): when no run
-    # is current, the named run speaks alone and an older superseded FAIL stays
-    # audit evidence instead of outvoting the applied PASS. With no named panel
-    # the conservative rule stands: every stale run is retained.
-    named = [
-        run for run in all_runs
-        if decision.get("panel_id") and decision.get("binding_hash")
-        and str(run.get("panel_id") or "") == str(decision.get("panel_id"))
-        and str(run.get("binding_hash") or "") == str(decision.get("binding_hash"))
-    ]
-    selected = [] if acceptance_gap else (current_runs if current_runs else (named or all_runs))
+    # With no current run the conservative rule stands: every stale run is retained.
+    selected = [] if superseded_gap else (current_runs or all_runs)
     return ReviewRunSelection(
         all_runs=all_runs,
         current_runs=selected,
-        superseded_only_acceptance_gap=acceptance_gap,
+        superseded_only_acceptance_gap=superseded_gap,
         superseded_aggregate_signals=superseded_signals,
         current_candidate_unaccepted=candidate_unaccepted,
-        # A decision-named panel replaces the stale runs for the ledger as well:
-        # an older FAIL reads as superseded, not as live failure evidence.
-        has_replacement=bool(current_runs) or bool(named),
+        has_replacement=bool(current_runs),
     )
 
 
@@ -135,7 +125,7 @@ def review_run_ledger_status(
     run: Dict[str, Any],
     selection: ReviewRunSelection,
 ) -> tuple[str, bool]:
-    """Project one acceptance run into the verification ledger."""
+    """Project one review run into the verification ledger."""
     signal = str(run.get("aggregate_signal") or "").upper()
     superseded = bool(run.get("superseded_by_revision")) and (
         selection.has_replacement
@@ -377,7 +367,7 @@ def receipt_identity_parts(receipt: Dict[str, Any]) -> tuple[str, str, str]:
 
 def receipt_identity(receipt: Dict[str, Any]) -> tuple[str, str]:
     """THE typed reconciliation key of ONE verification receipt (v6.78.0, owner Q28=B) —
-    ``ReceiptIdentity.key``, named here because the ledger, the acceptance summary and
+    ``ReceiptIdentity.key``, named here because the ledger, the verification summary and
     the architecture docs all call it "the receipt identity".
 
     Kind ``none`` with an empty value means the receipt names no verification at all and
@@ -531,8 +521,8 @@ def disclosed_list_projection(
 
     The bound stays — reviewer packets are budgeted — but it may never be SILENT. Every
     projection emits ``<key>`` (the carried items, each string bounded through the SSOT
-    ``utils.truncate_review_artifact`` or the caller's redacting wrapper of it, so a
-    clipped string carries its own omission note) AND ``<key>_omitted``, the EXACT number
+    ``utils.truncate_review_artifact``, so a clipped string carries its own omission
+    note) AND ``<key>_omitted``, the EXACT number
     of items left out (0 when nothing was, stated rather than left to inference). A
     hand-rolled ``[:N]`` on one of these surfaces is the anti-pattern this replaces:
     it destroys evidence and leaves no trace that evidence was destroyed.
@@ -573,9 +563,8 @@ def _lifecycle_row(
     """One ``artifact_lifecycle`` entry with its path DISCLOSED-bounded (the structural
     existence/surface flags are kept whole; a non-dict row is bounded as text).
 
-    ``bound`` is the caller's string bound — the SSOT truncator by default, and the
-    REDACTING ``review_evidence._accept_redact_cap`` wherever the row reaches an
-    external reviewer, since a lifecycle path is raw host filesystem surface."""
+    ``bound`` is the caller's string bound — the SSOT truncator by default, and
+    ``review_evidence._accept_cap`` wherever the row reaches a reviewer."""
     if not isinstance(item, dict):
         return bound(str(item), cap)
     if "path" not in item:
@@ -601,9 +590,8 @@ def receipt_identity_projection(
     carried, whichever one ``receipt_identity`` selected as primary.
 
     Bounding is DISCLOSED, never silent (BIBLE P1). Long strings go through the
-    caller's ``bound`` — the SSOT ``truncate_review_artifact`` by default, and the
-    redacting ``_accept_redact_cap`` (which wraps the same helper) on the reviewer
-    path, because a receipt's command text is raw host stdout. The path LIST is
+    caller's ``bound`` — the SSOT ``truncate_review_artifact`` by default, and
+    ``_accept_cap`` (which wraps the same helper) on the reviewer path. The path LIST is
     additionally capped in length, so it always reports ``paths_omitted`` and, when
     a path set exists, ``paths_identity_sha256`` — the hash of the FULL normalized
     set that ``_reconciles`` compares. The bounded list is therefore checkable
@@ -613,11 +601,8 @@ def receipt_identity_projection(
     identity = receipt_canonical_identity(receipt)
     return {
         # AGENT-SUPPLIED text, exactly like the `check` beside it — so it goes through
-        # the caller's `bound` on the SAME cap, never inserted raw (round 3): the
-        # reviewer path's `bound` is the REDACTING `_accept_redact_cap`, and a raw
-        # `criterion_id` would have been the one identity component reaching external
-        # acceptance reviewers unredacted, and unbounded enough to overflow the pack's
-        # immutable core. Every OTHER field here is either bounded through `bound` too
+        # the caller's `bound` on the SAME cap, never inserted raw (round 3): an
+        # unbounded `criterion_id` could overflow a review packet's immutable core. Every OTHER field here is either bounded through `bound` too
         # (`check`, `paths`) or host-minted and closed (`reconciliation_identity` is one
         # of four fixed kind strings, `expected_whitespace_normalized` a bool,
         # `paths_omitted` an int, `paths_identity_sha256` a hex digest).
@@ -674,8 +659,8 @@ def verification_receipt_ledger_row(receipt: Dict[str, Any]) -> Dict[str, Any]:
         "contract_kind": str(receipt.get("contract_kind") or ""),
         # v6.78.0 (Q28=B): `criterion_id` / `check` / `paths` (+ `paths_omitted` and
         # `paths_identity_sha256`) and the disclosed identity rule all come from the
-        # SHARED `receipt_identity_projection`, so this row and the acceptance
-        # `verification_summary` can never disagree about the identity reconciliation used.
+        # SHARED `receipt_identity_projection`, so this row and the
+        # `verification_summary` section can never disagree about the identity reconciliation used.
         **receipt_identity_projection(receipt),
         "expected": truncate_review_artifact(receipt.get("expected"), limit=200),
         # Verification SEMANTICS so a reviewer sees how `expected` was matched
@@ -774,12 +759,12 @@ def _outstanding(
     which the newer one's own clean re-grounding reports nothing outstanding at all —
     fail check A, fail check B, pass check B answered "no red" while A was still red;
     masked c1, masked c2, cleanly-reconciled c2 lost masked c1 the same way. Both flags
-    then told the acceptance reviewer and the finalization nudge that no verification
+    then told the reviewers and the finalization nudge that no verification
     was outstanding, which is the one answer that must be unrepresentable here.
 
     Computing the outstanding SET per candidate makes it so; the ``latest_*`` helpers
     are then just its newest element, and callers that need the whole picture (the
-    acceptance ``verification_summary`` counts) read the list."""
+    ``verification_summary`` counts) read the list."""
     valid = [receipt for receipt in receipts if isinstance(receipt, dict)]
     outstanding: List[Dict[str, Any]] = []
     for index, receipt in enumerate(valid):
@@ -888,7 +873,7 @@ def latest_unreconciled_failed_receipt(receipts: List[Dict[str, Any]]) -> Option
     with NO key at all keeps the older any-later-green rule. Advisory, never a gate.
     The NEWEST element of the OUTSTANDING SET (``unreconciled_failed``)
     — never a single latest-pointer, which a newer red would let erase an older still-red
-    one. Shared SSOT by the finalize nudge and the acceptance verification_summary so the
+    one. Shared SSOT by the finalize nudge and the verification_summary so the
     reconciliation rule lives in one place."""
     return latest_unreconciled_failed(receipts, RED_RECONCILING_STATUSES)
 
@@ -918,7 +903,7 @@ def latest_unreconciled_masked_pass(receipts: List[Dict[str, Any]]) -> Optional[
     The NEWEST element of the OUTSTANDING SET (``unreconciled_masked``),
     so a cleanly reconciled newer masked check no longer takes an older one with it.
     FLAG-driven (typed receipt field); advisory only. Shared SSOT by the finalize nudge and
-    the acceptance verification_summary."""
+    the verification_summary."""
     return latest_unreconciled_masked(receipts, RED_RECONCILING_STATUSES)
 
 

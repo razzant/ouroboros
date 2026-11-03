@@ -269,10 +269,11 @@ test('a table is a focusable region with faded edges only while it scrolls, and 
         setAttribute: (name, value) => attributes.set(name, String(value)),
         removeAttribute: (name) => attributes.delete(name),
         toggleAttribute: (name, force) => { if (force) attributes.set(name, ''); else attributes.delete(name); return force; },
+        get tabIndex() { return Number(attributes.get('tabindex') ?? -1); },
         set tabIndex(value) { attributes.set('tabindex', String(value)); },
     };
     table.closest = () => wrap;
-    wrap.closest = () => wrap;
+    wrap.closest = (selector) => selector === '.md-table-wrap' ? wrap : null;
     const listeners = new Map();
     const root = {
         isConnected: true, matches: () => false,
@@ -322,10 +323,11 @@ function fakeTableWrap(name) {
         setAttribute: (key, value) => attributes.set(key, String(value)),
         removeAttribute: (key) => attributes.delete(key),
         toggleAttribute: (key, force) => { if (force) attributes.set(key, ''); else attributes.delete(key); return force; },
+        get tabIndex() { return Number(attributes.get('tabindex') ?? -1); },
         set tabIndex(value) { attributes.set('tabindex', String(value)); },
     };
     table.closest = () => wrap;
-    wrap.closest = () => wrap;
+    wrap.closest = (selector) => selector === '.md-table-wrap' ? wrap : null;
     return wrap;
 }
 
@@ -386,6 +388,17 @@ test('a compact surface binds only its tables, follows later writes, and an ance
         assert.deepEqual(Object.fromEntries(later.attributes), {
             'data-scroll-end': '', role: 'region', 'aria-label': 'Scrollable table', tabindex: '0',
         }, 'an overflowing compact table is a keyboard region with its hidden side faded');
+        // Late registration and keyed attribute writes must respect the containing preview.
+        let folded = true;
+        later.closest = (selector) => selector === '.md-table-wrap' ? later : folded ? {} : null;
+        resized([{ target: later.firstElementChild }]);
+        assert.equal(later.tabIndex, -1);
+        later.tabIndex = 0;
+        written([{ type: 'attributes', target: later, attributeName: 'tabindex' }]);
+        assert.equal(later.tabIndex, -1, 'a later attribute write cannot reopen a folded table');
+        folded = false;
+        resized([{ target: later.firstElementChild }]);
+        assert.equal(later.tabIndex, 0, 'an ordinary visible table keeps keyboard scrolling');
         later.scrollLeft = 600;
         // A host's own tests may call every scroll listener with no event.
         assert.doesNotThrow(() => listeners.get('scroll:true')());
@@ -398,6 +411,14 @@ test('a compact surface binds only its tables, follows later writes, and an ance
         assert.deepEqual(Object.fromEntries(later.attributes), {
             'data-scroll-start': '', role: 'region', 'aria-label': 'Scrollable table', tabindex: '0',
         });
+
+        // Unfolding may remove tabindex before the table also stops overflowing.
+        later.removeAttribute('tabindex');
+        later.scrollWidth = later.clientWidth;
+        written([{ type: 'attributes', target: later, attributeName: 'tabindex' }]);
+        assert.equal(later.hasAttribute('role'), false);
+        assert.equal(later.hasAttribute('aria-label'), false);
+        assert.equal(later.hasAttribute('tabindex'), false);
 
         // A replaced table is released; one moved within the root stays observed.
         inside.delete(first);
@@ -417,6 +438,40 @@ test('a compact surface binds only its tables, follows later writes, and an ance
     } finally {
         globalThis.ResizeObserver = prior.ResizeObserver;
         globalThis.MutationObserver = prior.MutationObserver;
+    }
+});
+
+test('a resize batch measures every table first, then marks every one: a mark never lays out the next table', () => {
+    const prior = globalThis.ResizeObserver;
+    let resized = null;
+    globalThis.ResizeObserver = class {
+        constructor(fn) { resized = fn; }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+    };
+    const steps = [];
+    const wraps = ['one', 'two'].map((name) => {
+        const wrap = fakeTableWrap(name);
+        let width = wrap.scrollWidth;
+        Object.defineProperty(wrap, 'scrollWidth', { get: () => { steps.push(`read ${name}`); return width; } });
+        const toggle = wrap.toggleAttribute;
+        wrap.toggleAttribute = (key, force) => { steps.push(`mark ${name}`); return toggle(key, force); };
+        return wrap;
+    });
+    const root = {
+        nodeType: 1, querySelectorAll: (selector) => selector === '.md-table-wrap' ? wraps : [],
+        setAttribute() {}, removeAttribute() {}, addEventListener() {}, removeEventListener() {},
+    };
+    try {
+        const dispose = bindMarkdownTables(root);
+        resized(wraps.flatMap((wrap) => [{ target: wrap }, { target: wrap.firstElementChild }]));
+        assert.deepEqual(steps, ['read one', 'read two', 'mark one', 'mark one', 'mark two', 'mark two'],
+            'each table once, read before any write');
+        assert.equal(wraps.every((wrap) => wrap.attributes.has('data-scroll-end')), true);
+        dispose();
+    } finally {
+        globalThis.ResizeObserver = prior;
     }
 });
 

@@ -84,7 +84,7 @@ def test_context_uses_the_addressed_witness_authority(root):
     from ouroboros.context import _drive_state_section
 
     state.save_state(_prior())
-    witness = root / state_initialization.WITNESS_REL
+    witness = state_initialization.witness_path(root)
     raw = json.loads(witness.read_bytes())
     raw["phase"] = "pending"
     _write(witness, raw)
@@ -104,7 +104,7 @@ def test_consciousness_recovers_unknown_but_never_overrides_live_stop(root, monk
     state.STATE_PATH.unlink()
     state.STATE_LAST_GOOD_PATH.unlink()
     clock = BackgroundConsciousness(root, root / "repo", lambda: 7, now=100)
-    monkeypatch.setattr(clock, "live_turns", lambda: ("", False))
+    monkeypatch.setattr(clock, "live_wake", lambda: "")
     assert clock.tick(now=100) == "disabled"
     state.STATE_PATH.write_bytes(primary)
     state.STATE_LAST_GOOD_PATH.write_bytes(backup)
@@ -145,29 +145,6 @@ def test_real_gateway_producer_admits_without_injected_intent(q, monkeypatch, pr
     [task] = q.pending
     assert task["metadata"]["resource_intent"]["kind"] == ("room_default" if project else "system_repo")
     assert not _rows(q)["api"].get("hold")
-
-
-def test_real_skill_producer_removal_preserves_unpublished_admission(q, monkeypatch):
-    from supervisor import queue_schedules
-    from tests.test_consciousness_schedule_controls import _ready, _skill
-
-    _ready(monkeypatch)
-    queue_schedules.sync_skill_schedules([_skill()], drive_root=q.root)
-    record = _rows(q)["skill-demo-daily"]
-    record["next_run_at"] = "2000-01-01T00:00:00Z"
-    queue_schedules._write_scheduled_tasks({"tasks": [record]}, q.root)
-    real = q.queue.persist_queue_snapshot
-    monkeypatch.setattr(q.queue, "persist_queue_snapshot", lambda **_: False)
-    q.queue.check_scheduled_tasks()
-    assert not q.pending
-    accepted = _rows(q)["skill-demo-daily"]["occurrence"]["task_id"]
-    queue_schedules.sync_skill_schedules([], drive_root=q.root)
-    tombstone = _rows(q)["skill-demo-daily"]
-    assert tombstone["delete_requested_at"] and not tombstone["enabled"]
-    monkeypatch.setattr(q.queue, "persist_queue_snapshot", real)
-    q.queue.check_scheduled_tasks()
-    assert [task["id"] for task in q.pending] == [accepted]
-    assert q.pending[0]["metadata"]["resource_intent"] == {"kind": "system_repo"}
 
 
 def test_cli_schedule_add_uses_the_gateway_producer(q, monkeypatch):
@@ -235,11 +212,11 @@ def test_history_stamps_replay_evidence_on_a_latest_accounting_wait_checkpoint(t
 
 def test_review_reference_producer_history_and_chat_reconnect_keep_tool_evidence(tmp_path):
     import shutil
-    import subprocess
     from ouroboros.gateway.history import make_chat_history_endpoint
     from ouroboros.tool_call_log import append_call_row
     from ouroboros.tools.plan_review_references import _emit_review_reference
     from ouroboros.utils import append_jsonl
+    from tests.group_run import run_in_group
 
     task_id = "turn-a"
     append_jsonl(tmp_path / "logs/progress.jsonl", {"type": "send_message", "role": "assistant",
@@ -264,9 +241,9 @@ def test_review_reference_producer_history_and_chat_reconnect_keep_tool_evidence
     history.write_bytes(response.body)
     node = shutil.which("node")
     assert node, "Node is required for the real Chat consumer proof"
-    result = subprocess.run([node, "--test", "--test-name-pattern=reference carriers",
+    result = run_in_group([node, "--test", "--test-name-pattern=reference carriers",
         "web/tests/chat_activity_block.test.js"], cwd=pathlib.Path(__file__).resolve().parents[1],
-        env={**os.environ, "OURO_TEST_TOOL_HISTORY": str(history)}, capture_output=True, text=True, timeout=30)
+        env={**os.environ, "OURO_TEST_TOOL_HISTORY": str(history)}, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
 
 

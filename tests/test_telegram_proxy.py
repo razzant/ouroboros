@@ -234,7 +234,6 @@ def _bridge_events():
             "options": [{"label": "sqlite"}, {"label": "postgres"}]}
     return [
         ("_make_outbound", {"text": "hello", "transport": {}}),
-        ("_make_typing", {"transport": {}}),
         ("_make_photo", {"image_base64": base64.b64encode(b"png").decode(), "transport": {}}),
         ("_make_video", {"video_base64": base64.b64encode(b"mp4").decode(), "transport": {}}),
         ("_make_document", {"file_base64": base64.b64encode(b"doc").decode(), "filename": "a.txt"}),
@@ -260,10 +259,20 @@ def test_every_bridge_client_carries_exactly_the_local_proxy(tmp_path, monkeypat
     asyncio.run(plugin._start_poller(api))
     for factory, event in _bridge_events():
         asyncio.run(getattr(plugin, factory)(api)(event))
+    asyncio.run(plugin._typing_cue(api)._send(42))  # the typing refresher's own sends
     assert asyncio.run(notifier._push_notification(api, 42, "done", trust_env=False)) == ("sent", None)
 
     assert [(level, message) for level, message in api.logs if level != "info"] == []
-    assert _RecordingClient.built == [(_TOKEN, {"trust_env": False, "proxy": local_proxy})] * 10
+    assert len(_RecordingClient.built) == 10
+    for index, (token, options) in enumerate(_RecordingClient.built):
+        assert token == _TOKEN
+        options = dict(options)
+        if index in {1, 2, 3, 4, 5, 6}:  # mirrored rows, excluding quiz-state edits and typing
+            assert callable(options.pop("on_message"))
+            assert options.pop("reply_to_message_id") == 0
+        assert options == {"trust_env": False, "proxy": local_proxy,
+                           "api_base_url": "https://api.telegram.org",
+                           "files_dir": None}
 
 
 def test_a_malformed_proxy_stops_the_bridge_without_leaking_it(tmp_path):
@@ -306,7 +315,7 @@ def test_upgrade_keeps_token_grant_and_local_proxy(
 ):
     """The proxy is skill-local state: reseeding changes payload, not credentials or grants."""
     import ouroboros.config as config
-    from ouroboros.launcher_bootstrap import _per_skill_version_resync
+    from ouroboros.skill_builtin import reseed_changed_builtins
     from ouroboros.skill_loader import (
         load_skill,
         load_skill_grants,
@@ -319,7 +328,8 @@ def test_upgrade_keeps_token_grant_and_local_proxy(
     installed = native / "telegram"
     shutil.copytree(_ROOT, installed)
     manifest = (installed / "SKILL.md").read_text(encoding="utf-8")
-    manifest = manifest.replace("version: 1.2.13", "version: 1.2.12")
+    current_version = load_skill(_ROOT, drive).manifest.version
+    manifest = manifest.replace(f"version: {current_version}", "version: 1.2.13", 1)
     (installed / "SKILL.md").write_text(manifest, encoding="utf-8")
     (installed / ".seed-origin").write_text("seeded_from=test\n", encoding="utf-8")
     settings = {"TELEGRAM_BOT_TOKEN": _TOKEN, **({"TELEGRAM_PROXY": _PROXY} if owner_set_proxy else {})}
@@ -328,7 +338,9 @@ def test_upgrade_keeps_token_grant_and_local_proxy(
     local_state = drive / "state" / "skills" / "telegram"
     local_state.mkdir(parents=True)
     local_settings = local_state / "settings.json"
-    local_settings.write_text(json.dumps({"TELEGRAM_PROXY": _PROXY if owner_set_proxy else ""}), encoding="utf-8")
+    local_settings.write_text(json.dumps({"TELEGRAM_PROXY": _PROXY if owner_set_proxy else "",
+                                          "TELEGRAM_API_BASE": "http://127.0.0.1:8081",
+                                          "TELEGRAM_API_FILES_DIR": str(tmp_path / "tba-store")}), encoding="utf-8")
     settings_before = local_settings.read_bytes()
     old = load_skill(installed, drive)
     assert old is not None and not old.load_error
@@ -338,10 +350,10 @@ def test_upgrade_keeps_token_grant_and_local_proxy(
                       requested_permissions=permissions)
 
     log = logging.getLogger("tests.telegram_proxy")
-    assert _per_skill_version_resync(_ROOT.parent, native, log, drive_root=drive) == 1
+    assert reseed_changed_builtins(drive, seed_dir=_ROOT.parent, log_obj=log) == 1
     new = load_skill(installed, drive)
     grants = load_skill_grants(drive, "telegram")
-    assert new.manifest.version == "1.2.13" and new.content_hash != old.content_hash
+    assert new.manifest.version == current_version and new.content_hash != old.content_hash
     assert grants["content_hash"] == new.content_hash
     assert local_settings.read_bytes() == settings_before
     assert grants["granted_keys"] == ["TELEGRAM_BOT_TOKEN"]

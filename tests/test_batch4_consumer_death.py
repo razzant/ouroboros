@@ -36,6 +36,10 @@ def test_confirmed_death_retires_only_exact_consumer(tmp_path, monkeypatch, evid
                                      'billing_group_limit_source': 'initial_task_admission',
                                      'billing_group_limit_revision': 'admission-1'})
     monkeypatch.setenv('TOTAL_BUDGET', '1000')
+    # The receiver is bound as the worker image would bind it: this pid, another custody session
+    # (a row this very image wrote is never retired: tool_custody.written_by_this_image).
+    monkeypatch.setattr('ouroboros.tool_custody.owner_proof',
+                        lambda: {'pid': os.getpid(), 'kernel_birth': '', 'session': 'the-dead-worker'})
     owner = model_wait.TaskModelWait(task={'id': task_id, '_attempt': 7}, drive_root=tmp_path,
                                     event_queue=None, worker_slot_held=True)
     with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, task_id=task_id, root_task_id=task_id)):
@@ -52,7 +56,8 @@ def test_confirmed_death_retires_only_exact_consumer(tmp_path, monkeypatch, evid
     birth = attempt.get('local_answer_owner_birth')
     assert birth
     worker = job['worker']
-    worker.proc.pid, worker.process_birth = os.getpid(), birth
+    worker.proc.pid, worker.process_birth, worker.kernel_birth = os.getpid(), birth, ''
+
     if evidence == 'wrong_birth':
         worker.process_birth = birth + '-other'
     elif evidence == 'missing_birth':
@@ -76,8 +81,14 @@ def test_confirmed_death_retires_only_exact_consumer(tmp_path, monkeypatch, evid
     monkeypatch.setattr('ouroboros.headless.prepare_terminal_task_files',
                         lambda *_a, **_k: {'terminal_source_present': False})
     worker_health.recover_confirmed_dead_worker(job)
+    assert owner.answer_consumer_id not in load_task_result(tmp_path, task_id).get('retired_model_consumers', {}), \
+        'the queue-locked door only owes the write'
+    from ouroboros import custody_owed
+    custody_owed.drain()
     retired = load_task_result(tmp_path, task_id).get('retired_model_consumers', {})
-    should_retire = evidence in {'exact', 'external'}
+    # A current dead job's joined Process retires every receiver of that process, whatever its task or
+    # tree; a stale job, another pid or birth, a live or unjoined process and a failing store do not.
+    should_retire = evidence in {'exact', 'external', 'wrong_root', 'wrong_task'}
     assert (owner.answer_consumer_id in retired) == should_retire
     assert load_task_result(tmp_path, task_id)['launch_handoffs'] == handoffs
     assert ua.read_usage_records(tmp_path, final_only=True) == before
@@ -153,6 +164,8 @@ def test_real_process_death_uses_recorded_birth_and_retains_unknown_money(tmp_pa
         monkeypatch.setattr('ouroboros.headless.prepare_terminal_task_files',
                             lambda *_a, **_k: {'terminal_source_present': False})
         worker_health.recover_confirmed_dead_worker(job)
+        from ouroboros import custody_owed
+        assert custody_owed.drain() == 0, 'the exit door owed it; the process that knows the death writes it'
         assert before[-1]['local_answer_consumer_id'] in load_task_result(tmp_path, task_id)['retired_model_consumers']
         assert not any(b['kind'] == 'model_handoff' for b in conflicting_writers(queue, task_id))
         assert ua.read_usage_records(tmp_path, final_only=True) == before

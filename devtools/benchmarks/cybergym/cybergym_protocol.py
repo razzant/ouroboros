@@ -201,7 +201,7 @@ def derive_disabled_tools(extra: Iterable[str] = ()) -> tuple[str, ...]:
         "schedule_subagent", "delegate_start", "delegate_wait", "delegate_cancel",
         "delegate_answer", "delegate_message", "claude_code_edit", "wait_task", "wait_tasks",
         "get_task_result", "peek_task", "cancel_task", "discard_child_result",
-        "task_acceptance_review", "request_deep_self_review",
+        "request_deep_self_review",
     }
     try:
         from ouroboros.tool_capabilities import CORE_TOOL_NAMES

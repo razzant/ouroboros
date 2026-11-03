@@ -260,6 +260,17 @@ def test_exact_provider_canary_matrix_logical_turns_and_attempt_bound():
         for row in matrix
         if row.credential_required
     ) == 11
+    # The routes to Google, Anthropic and OpenAI read a secret of their own: the shared CI key is refused
+    # there (HTTP 403, provider terms). The rest of OpenRouter keeps the shared key; every route is required.
+    assert {row.canary_id: (row.credential_env, row.credential_required)
+            for row in matrix if row.expected_provider == "openrouter"} == {
+        "openrouter_gemini": ("OPENROUTER_PROVIDER_ROUTES_API_KEY", True),
+        "openrouter_opus": ("OPENROUTER_PROVIDER_ROUTES_API_KEY", True),
+        "openrouter_fable": ("OPENROUTER_PROVIDER_ROUTES_API_KEY", True),
+        "openrouter_gpt": ("OPENROUTER_PROVIDER_ROUTES_API_KEY", True),
+        "openrouter_grok": ("OPENROUTER_API_KEY", True),
+        "openrouter_deepseek": ("OPENROUTER_API_KEY", True),
+    }
 
 
 def test_direct_anthropic_named_tool_choice_projects_without_type_error():
@@ -311,6 +322,38 @@ def test_required_and_optional_credential_policy(monkeypatch):
 
     monkeypatch.setenv(required.credential_env, "test-present")
     assert require_provider_canary_credential(required) is None
+
+
+def test_each_openrouter_check_sends_its_own_secret_and_only_while_it_runs(monkeypatch, request, tmp_path):
+    """The live check, offline: the real client resolves each route's key, and no request leaves."""
+    import os
+
+    from ouroboros import config
+    from ouroboros.llm import LLMClient
+    from tests import provider_contract_diagnostics
+    from tests import test_provider_integration as integration
+
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")  # the CI lane saves no document
+    monkeypatch.setenv("OPENROUTER_API_KEY", "shared-ci-key")
+    monkeypatch.setenv("OPENROUTER_PROVIDER_ROUTES_API_KEY", "provider-routes-ci-key")
+    monkeypatch.setattr(provider_contract_diagnostics, "provider_evidence",
+                        lambda request, canary: contextlib.nullcontext())
+    monkeypatch.setattr(integration, "_get_llm_client", LLMClient)
+    sent = {}
+
+    def send(client, *, canary, **kwargs):
+        sent[canary.canary_id] = client.resolve_remote_target(canary.model)["api_key"]
+        return {}, {}, None, None
+
+    monkeypatch.setattr(integration, "run_provider_contract_canary", send)
+    for canary in provider_canary_matrix():
+        if canary.expected_provider == "openrouter":
+            with pytest.MonkeyPatch.context() as check:
+                integration.test_full_registry_provider_contract(canary, [], request, check)
+            assert os.environ["OPENROUTER_API_KEY"] == "shared-ci-key", canary.canary_id  # its check only
+    routes = {"openrouter_gemini", "openrouter_opus", "openrouter_fable", "openrouter_gpt"}
+    assert sent == {canary_id: "provider-routes-ci-key" if canary_id in routes else "shared-ci-key"
+                    for canary_id in [*sorted(routes), "openrouter_grok", "openrouter_deepseek"]}
 
 
 def _bind_candidate(model, tools, messages, tool_choice):

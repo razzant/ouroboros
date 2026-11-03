@@ -1,0 +1,340 @@
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"We","reasoning_details":[{"type":"reasoning.text","text":"We","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"igh which roots the words shar","reasoning_details":[{"type":"reasoning.text","text":"igh which roots the words shar","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"e before looking anyt","reasoning_details":[{"type":"reasoning.text","text":"e before looking anyt","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"hing up; t","reasoning_details":[{"type":"reasoning.text","text":"hing up; t","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"hen check each root ","reasoning_details":[{"type":"reasoning.text","text":"hen check each root ","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"once. Weigh whi","reasoning_details":[{"type":"reasoning.text","text":"once. Weigh whi","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"ch root","reasoning_details":[{"type":"reasoning.text","text":"ch root","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"s the words share before","reasoning_details":[{"type":"reasoning.text","text":"s the words share before","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" looking any","reasoning_details":[{"type":"reasoning.text","text":" looking any","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"thing up; then check each","reasoning_details":[{"type":"reasoning.text","text":"thing up; then check each","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" root once. Weigh ","reasoning_details":[{"type":"reasoning.text","text":" root once. Weigh ","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"which roots the wor","reasoning_details":[{"type":"reasoning.text","text":"which roots the wor","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"ds share before looki","reasoning_details":[{"type":"reasoning.text","text":"ds share before looki","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"ng","reasoning_details":[{"type":"reasoning.text","text":"ng","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" any","reasoning_details":[{"type":"reasoning.text","text":" any","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"thing up; then check","reasoning_details":[{"type":"reasoning.text","text":"thing up; then check","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" each","reasoning_details":[{"type":"reasoning.text","text":" each","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" root once. Wei","reasoning_details":[{"type":"reasoning.text","text":" root once. Wei","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"gh which r","reasoning_details":[{"type":"reasoning.text","text":"gh which r","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"oots the words share before loo","reasoning_details":[{"type":"reasoning.text","text":"oots the words share before loo","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"king anythin","reasoning_details":[{"type":"reasoning.text","text":"king anythin","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"g up; then check each root onc","reasoning_details":[{"type":"reasoning.text","text":"g up; then check each root onc","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"e. Weigh which roots the wo","reasoning_details":[{"type":"reasoning.text","text":"e. Weigh which roots the wo","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"rds sha","reasoning_details":[{"type":"reasoning.text","text":"rds sha","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"re before looking anyt","reasoning_details":[{"type":"reasoning.text","text":"re before looking anyt","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"hing up; then check ea","reasoning_details":[{"type":"reasoning.text","text":"hing up; then check ea","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"ch root once. Weigh which ro","reasoning_details":[{"type":"reasoning.text","text":"ch root once. Weigh which ro","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"ots the ","reasoning_details":[{"type":"reasoning.text","text":"ots the ","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"words share ","reasoning_details":[{"type":"reasoning.text","text":"words share ","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"b","reasoning_details":[{"type":"reasoning.text","text":"b","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"efore looking anything up; th","reasoning_details":[{"type":"reasoning.text","text":"efore looking anything up; th","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"en check each root once. Weigh wh","reasoning_details":[{"type":"reasoning.text","text":"en check each root once. Weigh wh","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"ich roots the wor","reasoning_details":[{"type":"reasoning.text","text":"ich roots the wor","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"ds share before lo","reasoning_details":[{"type":"reasoning.text","text":"ds share before lo","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"oking anything up; then c","reasoning_details":[{"type":"reasoning.text","text":"oking anything up; then c","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"heck each root once","reasoning_details":[{"type":"reasoning.text","text":"heck each root once","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":". We","reasoning_details":[{"type":"reasoning.text","text":". We","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"igh which roots the words","reasoning_details":[{"type":"reasoning.text","text":"igh which roots the words","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" share befo","reasoning_details":[{"type":"reasoning.text","text":" share befo","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"re looking any","reasoning_details":[{"type":"reasoning.text","text":"re looking any","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"thing up; then check each","reasoning_details":[{"type":"reasoning.text","text":"thing up; then check each","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" root once. Weigh which roots ","reasoning_details":[{"type":"reasoning.text","text":" root once. Weigh which roots ","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"the wor","reasoning_details":[{"type":"reasoning.text","text":"the wor","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"ds share before loo","reasoning_details":[{"type":"reasoning.text","text":"ds share before loo","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"king anyth","reasoning_details":[{"type":"reasoning.text","text":"king anyth","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"in","reasoning_details":[{"type":"reasoning.text","text":"in","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"g up; then check each root ","reasoning_details":[{"type":"reasoning.text","text":"g up; then check each root ","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"once. Weigh w","reasoning_details":[{"type":"reasoning.text","text":"once. Weigh w","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"hich roots the words share before l","reasoning_details":[{"type":"reasoning.text","text":"hich roots the words share before l","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"ooking anything up; then","reasoning_details":[{"type":"reasoning.text","text":"ooking anything up; then","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" check each root","reasoning_details":[{"type":"reasoning.text","text":" check each root","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" once. Weigh which roots","reasoning_details":[{"type":"reasoning.text","text":" once. Weigh which roots","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" the words sh","reasoning_details":[{"type":"reasoning.text","text":" the words sh","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"are before looking anyt","reasoning_details":[{"type":"reasoning.text","text":"are before looking anyt","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"hing u","reasoning_details":[{"type":"reasoning.text","text":"hing u","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"p; then che","reasoning_details":[{"type":"reasoning.text","text":"p; then che","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"ck each root once. Weigh whic","reasoning_details":[{"type":"reasoning.text","text":"ck each root once. Weigh whic","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"h roots the words share before","reasoning_details":[{"type":"reasoning.text","text":"h roots the words share before","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" looking anythi","reasoning_details":[{"type":"reasoning.text","text":" looking anythi","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"ng up; then che","reasoning_details":[{"type":"reasoning.text","text":"ng up; then che","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"ck each root once.","reasoning_details":[{"type":"reasoning.text","text":"ck each root once.","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" Weigh wh","reasoning_details":[{"type":"reasoning.text","text":" Weigh wh","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"ich roots the words","reasoning_details":[{"type":"reasoning.text","text":"ich roots the words","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" share before lookin","reasoning_details":[{"type":"reasoning.text","text":" share before lookin","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"g ","reasoning_details":[{"type":"reasoning.text","text":"g ","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning_details":[{"type":"reasoning.text","signature":"CAQS7hgKEAgTGAI4AUIIdGhp…","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"anything up; then check eac","reasoning_details":[{"type":"reasoning.text","text":"anything up; then check eac","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"h root once. Weigh w","reasoning_details":[{"type":"reasoning.text","text":"h root once. Weigh w","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"hich roots","reasoning_details":[{"type":"reasoning.text","text":"hich roots","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" t","reasoning_details":[{"type":"reasoning.text","text":" t","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"he words share befo","reasoning_details":[{"type":"reasoning.text","text":"he words share befo","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"re looking anyt","reasoning_details":[{"type":"reasoning.text","text":"re looking anyt","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"hing up; then check each ","reasoning_details":[{"type":"reasoning.text","text":"hing up; then check each ","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"root once. Weigh which r","reasoning_details":[{"type":"reasoning.text","text":"root once. Weigh which r","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"oots the words sh","reasoning_details":[{"type":"reasoning.text","text":"oots the words sh","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"ar","reasoning_details":[{"type":"reasoning.text","text":"ar","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"e before looki","reasoning_details":[{"type":"reasoning.text","text":"e before looki","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"ng anything up; ","reasoning_details":[{"type":"reasoning.text","text":"ng anything up; ","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"then check each ","reasoning_details":[{"type":"reasoning.text","text":"then check each ","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"root once. Weigh","reasoning_details":[{"type":"reasoning.text","text":"root once. Weigh","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" w","reasoning_details":[{"type":"reasoning.text","text":" w","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"hich roots the w","reasoning_details":[{"type":"reasoning.text","text":"hich roots the w","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"ords share be","reasoning_details":[{"type":"reasoning.text","text":"ords share be","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"fore looking anything up; the","reasoning_details":[{"type":"reasoning.text","text":"fore looking anything up; the","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"n check e","reasoning_details":[{"type":"reasoning.text","text":"n check e","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"ac","reasoning_details":[{"type":"reasoning.text","text":"ac","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning_details":[{"type":"reasoning.text","signature":"CAQShQkKEQgTGAI4AUIJbmFy…","format":"anthropic-claude-v1","index":1}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"id":"toolu_fixture_0","type":"function","function":{"name":"run_command","arguments":""}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":""}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\": [\"We\", \"ig"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"\", \"h which roots "}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"the words share befo"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"re looking anythi"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"ng up; then check each "}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"root once. W"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"eigh"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":" which roots the w"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"ord"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"s share before "}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"lookin"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"g an"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"ything up; "}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"then "}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"check each root"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":" once"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":". Weigh which root"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"s the words sh"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"are before looki"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"ng anything u"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"p"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"; then check each roo"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"t once. Wei"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"gh which roots the"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":" words shar"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"e bef\"], \"timeo"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"ut_sec\": 60}"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":""}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":""}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":""}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":1,"id":"toolu_fixture_1","type":"function","function":{"name":"search_code","arguments":""}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":1,"function":{"arguments":""}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":1,"function":{"arguments":"{\"query\": \"ore"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":1,"function":{"arguments":" look"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":1,"function":{"arguments":"\", \"regex\": true"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":1,"function":{"arguments":", \"root\": \"ing a"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":1,"function":{"arguments":"nythi"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":1,"function":{"arguments":"\", \"path\": \"ng up;"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":1,"function":{"arguments":" then check"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":1,"function":{"arguments":" each root once. Weig"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":1,"function":{"arguments":"h which roots "}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":1,"function":{"arguments":"the words share"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":1,"function":{"arguments":" before looking any"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":1,"function":{"arguments":"thing up; t"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":1,"function":{"arguments":"hen che"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":1,"function":{"arguments":"\", \"max_results\": 100"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":1,"function":{"arguments":"}"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":null},"finish_reason":"tool_calls","native_finish_reason":"tool_use"}]}
+
+data: {"id":"gen-fixture-twoblock","object":"chat.completion.chunk","created":1792489942,"model":"anthropic/claude-opus-5.5","provider":"Claude Platform on AWS","service_tier":"default","choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"tool_calls","native_finish_reason":"tool_use"}],"usage":{"prompt_tokens":363392,"completion_tokens":1429,"total_tokens":364821,"cost":0.1514032,"is_byok":false,"prompt_tokens_details":{"cached_tokens":350196,"cache_write_tokens":0,"audio_tokens":0,"video_tokens":0},"cost_details":{"upstream_inference_cost":0.1514032,"upstream_inference_prompt_cost":0.1228232,"upstream_inference_completions_cost":0.02858},"completion_tokens_details":{"reasoning_tokens":992,"image_tokens":0,"audio_tokens":0}}}
+
+data: [DONE]
+

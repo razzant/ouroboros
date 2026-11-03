@@ -1,14 +1,13 @@
 # The ONE provider-canary definition: real requests to model providers, called by
 #   - .github/workflows/ci.yml → manual runs and `v*` tags, where
 #     `release-preflight` requires this job's result
-#   - .github/workflows/provider-canary-push.yml → path-filtered pushes to
-#     `main` / `ouroboros` / `ouroboros-stable`
+#   - .github/workflows/provider-canary-push.yml → standalone manual runs
 # Never wired to `pull_request` or `schedule`: the lane spends provider credit
 # and reads repository secrets.
 #
 # The matrix owns required/optional credential policy. Its disjoint markers let
 # manual/tag callers keep optional qualification honestly red outside release
-# dependencies; push callers keep all. Every producer exit remains authoritative.
+# dependencies; the standalone caller keeps all. Every producer exit remains authoritative.
 # All secrets are optional at this reusable boundary so pytest can report a fork's
 # missing credentials. Quota/rate-limit/5xx/timeout remain inconclusive skips.
 # The required floor is enforced on official release tags. Pre-tag qualification
@@ -24,6 +23,8 @@ on:
         default: all
     secrets:
       OPENROUTER_API_KEY:
+        required: false
+      OPENROUTER_PROVIDER_ROUTES_API_KEY:
         required: false
       OPENAI_API_KEY:
         required: false
@@ -52,11 +53,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped  # the SQLite and journal mode fresh installs run
       - name: Run integration tests
         id: provider_tests
         env:
           SCOPE: ${{ inputs.scope }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_PROVIDER_ROUTES_API_KEY: ${{ secrets.OPENROUTER_PROVIDER_ROUTES_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}

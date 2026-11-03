@@ -92,7 +92,7 @@ def _crash_restore_and_resume(queue, state, workers, monkeypatch) -> dict:
     monkeypatch.setattr(state, "budget_remaining", lambda _st, **_k: 5.0)
     assert queue.resume_budget_paused_task(TASK_ID)["ok"]
     assert budget_hold_fact(row) is None
-    return dict(row["_working_recovery"], _stop_cause=hold.get("stop_cause"))
+    return dict(row["_working_recovery"], _stop_cause=hold.get("door"))
 
 
 def _second_generation(base: Path, drive: Path, handoff: dict, monkeypatch) -> tuple:
@@ -201,7 +201,7 @@ def test_sigkill_between_checkpoint_temp_and_replace_keeps_previous_state_and_re
     # existing stale-temp sweep's (every boot, once older than its age guard).
     wc.discard(drive, TASK_ID)
     assert temp.is_file()
-    from ouroboros.utils import sweep_stale_temp_files
+    from ouroboros.temp_sweep import sweep_stale_temp_files
 
     assert sweep_stale_temp_files(drive, min_age_sec=3600.0, scripts=False) == 0, "a fresh temp is never reaped"
     assert sweep_stale_temp_files(drive, min_age_sec=0.0, scripts=False) == 1 and not temp.exists()

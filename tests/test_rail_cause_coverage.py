@@ -6,12 +6,13 @@ record and on the ``task_incident`` key.
 
 Coverage is IMPORT-based: the sets below are the modules' own typed
 vocabularies (``outcomes.BEST_EFFORT_REASON_CODES``, both sides of
-``outcomes.ACCEPTANCE_BYPASS_REASON_BY_RAIL``, the ``REASON_*`` constants and
-``queue_timeouts.TIMEOUT_TERMINAL_REASONS``), never a regex over source text,
+``outcomes.ACCEPTANCE_BYPASS_REASON_BY_RAIL``, the ``REASON_*`` constants,
+``queue_timeouts.TIMEOUT_TERMINAL_REASONS`` and Continue's
+``owner_continue.TECHNICAL_REASON_CODES``), never a regex over source text,
 so a reason minted outside a registry is a registry bug rather than a silent
-raw code on the card. A code with no sentence still stays raw by design
-(docs/DESIGN.md §4); the exemptions below are the codes that render nothing on
-purpose.
+raw code on the card. A code with no sentence stays raw in host text and reads
+``reason_undescribed`` where details carry it (docs/DESIGN.md §4); the
+exemptions below are the codes that render nothing on purpose.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import outcomes
+from ouroboros.owner_continue import TECHNICAL_REASON_CODES
 from ouroboros.project_dialogue import (
     OUTCOME_PHASE_HEADLINE,
     TASK_CAUSE_PHRASES,
@@ -34,7 +36,8 @@ from supervisor.queue_timeouts import TIMEOUT_TERMINAL_REASONS
 from tests._cancel_intents_shared import qenv  # noqa: F401 - shared reaper fixture
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-TWIN = REPO / "web" / "modules" / "log_events.js"
+TWIN = REPO / "web" / "modules" / "task_reason_words.js"
+PRESENTER = REPO / "web" / "modules" / "log_events.js"
 
 # The codes that state nothing by design: a clean delivery has no cause, and the
 # owner's own stop carries its marker instead of a sentence, on both surfaces.
@@ -52,8 +55,11 @@ def _imported_reason_codes() -> set:
         named
         | set(outcomes.BEST_EFFORT_REASON_CODES)
         | set(outcomes.ACCEPTANCE_BYPASS_REASON_BY_RAIL)
-        | set(outcomes.ACCEPTANCE_BYPASS_REASONS)
+        # Old task records still carry these bypass reasons; nothing writes them now.
+        | set(outcomes.ACCEPTANCE_BYPASS_REASON_BY_RAIL.values())
         | set(TIMEOUT_TERMINAL_REASONS)
+        # Continue's technical endings: the worker, reaper and recovery codes a task row carries.
+        | set(TECHNICAL_REASON_CODES)
     ) - SILENT_BY_DESIGN
 
 
@@ -63,7 +69,8 @@ def test_every_imported_reason_code_has_one_sentence_in_both_twins():
     codes = _imported_reason_codes()
     assert {"round_limit", "finalization_grace", "deadline_local", "children_unabsorbed",
             "context_overflow", "absolute_ceiling", "deadline", "idle_timeout",
-            "provider_failure", "empty_final_text"} <= codes
+            "provider_failure", "empty_final_text", "worker_crash_signal",
+            "orphaned_running_after_worker_restart"} <= codes
     twin = TWIN.read_text(encoding="utf-8")
     for code in sorted(codes):
         assert code in TASK_CAUSE_PHRASES, f"no owner sentence for typed reason {code!r}"
@@ -76,6 +83,16 @@ def test_the_twins_carry_byte_identical_sentences_for_every_key():
         assert f'{code}: "{sentence}",' in twin, code
 
 
+def test_browser_bypass_dedup_map_matches_the_producer_vocabulary():
+    import re
+
+    text = PRESENTER.read_text(encoding="utf-8")
+    block = text.split("const bypass = {", 1)[1].split("};", 1)[0]
+    pairs = re.findall(r"(\w+): '([^']+)'", block)
+    assert len(pairs) == len(dict(pairs))
+    assert dict(pairs) == outcomes.ACCEPTANCE_BYPASS_REASON_BY_RAIL
+
+
 def test_the_timeout_rails_are_one_typed_tuple_in_priority_order():
     from supervisor import queue_timeouts
 
@@ -85,7 +102,7 @@ def test_the_timeout_rails_are_one_typed_tuple_in_priority_order():
 
 
 def test_c1_adds_no_status_word():
-    assert list(OUTCOME_PHASE_HEADLINE.values()) == ["Working", "Done", "Done with warnings", "Failed", "Cancelled"]
+    assert list(OUTCOME_PHASE_HEADLINE.values()) == ["Working", "Done", "Done with warnings", "Failed", "Stopped"]
 
 
 # ---------------------------------------------------------------- the card line
@@ -112,8 +129,35 @@ def test_a_railed_best_effort_row_states_the_rail_in_owner_words():
     assert _completion_verdict(railed, {}) == "The task hit its round limit before it could finish cleanly."
 
 
-def test_an_unknown_rail_code_still_stays_raw_on_the_row():
+def test_an_unknown_rail_code_stays_raw_in_host_text_and_reads_neutrally_where_details_carry_it():
     assert _completion_verdict(_reaped("some_future_rail"), {}) == "some_future_rail."
+    codes: list = []
+    assert (_completion_verdict(_reaped("some_future_rail"), {}, undescribed=codes)
+            == TASK_CAUSE_PHRASES["reason_undescribed"])
+    assert codes == ["some_future_rail"]
+    # A real producer's code has its words, and leaves nothing for the details.
+    known: list = []
+    assert (_completion_verdict(_reaped("worker_crash_signal"), {}, undescribed=known)
+            == f"{TASK_CAUSE_PHRASES['worker_crash_signal']}.")
+    assert known == []
+
+
+def test_details_surfaces_read_the_shared_fixture_as_the_card_does():
+    """Owner 21.10, 2A: ``acceptance_clause`` is host text (raw for a code with no sentence,
+    asserted in test_project_plain_rows / test_terminal_truth_projection_p5); a surface with details
+    reads ``described_clause`` and collects ``undescribed``, as reason_detail.test.js asserts the
+    browser twin on the same rows, in both lifecycle positions."""
+    import json
+
+    fixture = REPO / "web" / "tests" / "fixtures" / "outcome_phase_parity.json"
+    cases = [case for case in json.loads(fixture.read_text(encoding="utf-8"))["cases"] if "acceptance_clause" in case]
+    assert any(case.get("undescribed") for case in cases), "the fixture lost its undescribed row"
+    for case in cases:
+        for result, event in ((case["record"], {}), ({}, case["record"])):
+            codes: list = []
+            assert (_completion_verdict(result, event, undescribed=codes)
+                    == case.get("described_clause", case["acceptance_clause"])), case["name"]
+            assert codes == case.get("undescribed", []), case["name"]
 
 
 # ---------------------------------------------------------------- the reaper's surfaces
@@ -186,7 +230,7 @@ def test_the_kill_notice_leads_with_the_cause_and_keeps_the_typed_task_done(qenv
     tr.reap_timed_out_task({
         "worker_id": 0, "proc": None, "task_id": "reap1", "task": {"id": "reap1", "chat_id": 4},
         "task_type": "chat", "terminal_reason": "absolute_ceiling", "attempt": 3, "owner_chat_id": 0,
-        "runtime_sec": 10.0, "will_retry": False, "ceiling_reached": True,
+        "runtime_sec": 10.0, "ceiling_reached": True,
     })
     (chat_id, text, kw), = sent
     assert chat_id == 4

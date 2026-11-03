@@ -20,7 +20,7 @@
    — one finished task has several wire shapes, and a quiz frame can be
    delivered more than once.
 
-   Preferences are client-local like the appearance choice (web/theme.js): the
+   Preferences stay with this client's origin: the
    desktop window and each browser keep their own, nothing is sent to the
    server, and the controls carry no `s-` id, so the Settings collector never
    posts them.
@@ -30,16 +30,28 @@
    the system took the alert, in front or not, and owns its sound, so the page adds
    no tone and no toast; its click hands back a token that opens the same source a
    browser banner would. `unknown` means it was handed over and not answered in
-   time: it may still appear, so the page adds nothing and keeps its click target.
+   time — or the call failed after it was made, or its answer cannot be read: it
+   may still appear, so the page adds nothing and keeps its click target.
    A refusal — not yet allowed, denied, unavailable, failed — or an app too old to
    have the method falls back to the browser banner or the in-app toast. Settings
    keeps the system's permission and what became of the last alert apart, so a
    failed hand-off never reads as a withdrawn permission. Only the owner's gesture
    (switching notifications on, Test) asks the system for permission.
 
-   Not claimed: no OS permission prompt, Do Not Disturb setting or platform
-   limit is bypassed. Where the Notification API is missing or denied, delivery
-   degrades to the in-app toast and says so in Settings. */
+   A fallback's own sound is the soft app tone, at the owner's App tone volume, and
+   the launcher is never asked for its sound (macOS Glass, a Windows beep). The tone
+   sounds by itself only after the system definitely failed to take an alert, on
+   positive evidence the desktop app reads AFTER that failure; an unknown or denied
+   permission stays quiet. Preview tone is the
+   owner's own press.
+   A decision is a snapshot, so every effect that starts after an await asks the
+   current choices again: switching notifications, the category or Sound off stops
+   it, and a silent decision never gains a sound.
+
+   OS permission refusals and platform limits are respected; the separate app
+   tone does not promise to follow Focus or Do Not Disturb.
+   Where the Notification API is missing or denied, delivery degrades to the
+   in-app toast and says so in Settings. */
 
 import { TERMINAL_TASK_STATUSES } from './chat_activity.js';
 import { getLogTaskGroupId } from './log_events.js';
@@ -54,7 +66,9 @@ export const NOTIFY_PREFS_KEY = 'ouroboros.notifications';
 export const NOTIFY_CATEGORIES = ['needs_answer', 'task_done', 'important', 'main_reply'];
 
 /* Ordinary Main replies start OFF and message text starts HIDDEN. Both are my
-   recommendation rather than an owner decision, and both are one click away. */
+   recommendation rather than an owner decision, and both are one click away.
+   `tone_volume` (0–100) is the soft app tone's level only; 0 silences that tone,
+   never a system notification, whose sound and volume stay the system's. */
 export const DEFAULT_NOTIFY_PREFS = Object.freeze({
     enabled: false,
     needs_answer: true,
@@ -63,6 +77,7 @@ export const DEFAULT_NOTIFY_PREFS = Object.freeze({
     main_reply: false,
     sound: true,
     show_text: false,
+    tone_volume: 40,
 });
 
 export const NOTIFY_TITLES = Object.freeze({
@@ -85,19 +100,24 @@ const LINEAGE_LIMIT = 2000;
 /* Click tokens of system notifications that were submitted or may have been; a
    click after a reload (or past this bound) only opens the window. */
 const NATIVE_LIMIT = 200;
+/* Soft C5 sine: 25 ms attack, 310 ms duration; peak 0.05 × (level/100)².
+   The default level 40 peaks near −42 dBFS, not a speaker loudness guarantee. */
+const TONE = Object.freeze({ hz: 523.25, peak: 0.05, rise: 0.025, fade: 0.3, seconds: 0.31, floor: 0.00001 });
 /* The web owner thread. A frame with no chat id at all is legacy Main traffic,
    exactly as the chat log gate reads it. */
 const MAIN_CHAT_ID = 1;
 
 const asBool = (value, fallback) => (typeof value === 'boolean' ? value : fallback);
+const asLevel = (value, fallback) => (typeof value === 'number' && Number.isFinite(value)
+    ? Math.min(100, Math.max(0, Math.round(value))) : fallback);
 
 /** Tolerant read of a stored preference object: unknown keys are dropped and a
  *  missing or malformed value keeps the shipped default for that key alone. */
 export function normalizeNotifyPrefs(raw) {
     const source = raw && typeof raw === 'object' ? raw : {};
     const prefs = { ...DEFAULT_NOTIFY_PREFS };
-    for (const key of Object.keys(DEFAULT_NOTIFY_PREFS)) {
-        prefs[key] = asBool(source[key], DEFAULT_NOTIFY_PREFS[key]);
+    for (const [key, fallback] of Object.entries(DEFAULT_NOTIFY_PREFS)) {
+        prefs[key] = typeof fallback === 'number' ? asLevel(source[key], fallback) : asBool(source[key], fallback);
     }
     return prefs;
 }
@@ -211,6 +231,7 @@ export function classifyLiveFrame(frame, { kind = 'chat', isMain = false, isRoot
         // Log frames carry runtime diagnostics, not owner-facing prose, so this
         // one stays title-only even when message text is switched on.
         if (text(frame.type || frame.event) !== 'task_done') return null;
+        if (frame.quiet_effective === true) return null;
         if (!rootEligible(taskId)) return null;
         // A task_done frame is not always an ending: an update or restart
         // teardown pushes a NON-settled `interrupted` terminal and requeues the
@@ -221,8 +242,10 @@ export function classifyLiveFrame(frame, { kind = 'chat', isMain = false, isRoot
         // consciousness wake-up, any conversation turn. Calling that "a task
         // finished" would ring on every answer while the owner's ordinary-reply
         // toggle is off, which is the opposite of what the toggle promises. A
-        // conversation's ending belongs to `main_reply` and nowhere else.
-        if (frame._is_direct_chat === true) return null;
+        // conversation's ending belongs to `main_reply` and nowhere else. The flag is the work's historical
+        // origin; the attempt's carrier says what ran it: a turn handed to the worker pool
+        // (`continue_in_background`) ended as background work and rings like one.
+        if (frame._is_direct_chat === true && text(frame.execution_owner?.kind) !== 'pooled') return null;
         return {
             category: 'task_done',
             key: `conclusion:${taskId}`,
@@ -275,6 +298,7 @@ export function classifyLiveFrame(frame, { kind = 'chat', isMain = false, isRoot
     // every stopped or failed conversation "a task finished" — it falls through
     // to the ordinary-reply category below instead.
     if (systemType === 'task_summary') {
+        if (frame.quiet_effective === true) return null;
         if (!rootEligible(taskId)) return null;
         return {
             category: 'task_done',
@@ -324,6 +348,7 @@ export function decideNotification(candidate, prefs, seenKeys) {
         title: candidate.title,
         body: clean.show_text ? candidate.body : '',
         sound: clean.sound,
+        volume: clean.tone_volume,
         category: candidate.category,
         key: candidate.key,
         target: candidate.target,
@@ -349,14 +374,16 @@ export function notifyStatusText({ enabled, supported, permission, storageAvaila
     return 'System banners are enabled for this client.';
 }
 
-/** Explain the separate native-attention capability without calling it a banner. */
+/** Explain the separate native-attention capability without calling it a banner. The page asks it
+ *  for no sound of its own, so a raised window is `window_only` by design, not a failed sound. */
 export function attentionStatusText({ enabled = true, nativeAttention = false, supported = false, status = '', bridge = false } = {}) {
     if (!enabled) return 'Notifications are off; no attention is requested from this system.';
-    if (status === 'window_only') return 'Desktop attention can raise this window, but its system sound is unavailable; the app tone is used when needed.';
+    if (status === 'window_only') return 'Desktop attention can raise this window without a sound of its own; the soft app tone plays only where the system confirms sound is allowed.';
     if (status === 'unsupported' || status === 'unavailable') return 'Desktop attention is unavailable in this launcher; browser or in-app delivery remains available.';
-    if (status === 'background') return 'Desktop attention is available; while Ouroboros runs in the background, alerts use a system banner or sound instead of opening this window.';
-    if (status === 'native_sound' || nativeAttention) return 'Desktop attention is available; the launcher may raise this window and use the system sound.';
-    if (bridge) return 'This desktop client exposes an attention bridge; its sound capability will be confirmed on the next alert.';
+    if (status === 'background') return 'Desktop attention is available; while Ouroboros runs in the background, alerts use a system banner or a Dock mark instead of opening this window.';
+    if (status === 'native_sound') return 'The launcher reported a sound; this client requested only visual attention.';
+    if (nativeAttention) return 'Desktop attention is available; this client requests only visual attention.';
+    if (bridge) return 'This desktop client exposes an attention bridge; what it can do will be confirmed on the next alert.';
     if (supported) return 'Browser notifications are available; desktop attention depends on the client.';
     return 'This client has no native attention bridge; alerts stay inside the app.';
 }
@@ -371,9 +398,10 @@ export function nativeStatusText({ enabled = true, shell = null, native = false,
     const app = `this desktop app${shell.version ? ` (${shell.version})` : ''}`;
     const fallback = banner ? 'a browser banner or the app' : 'the app';
     if (!native) {
-        // Owner decision 3A: an app without the native method falls back, and says why.
-        return `System notifications need the current Ouroboros desktop app; ${app} predates them, so alerts `
-            + `fall back to ${fallback}. Updates inside Ouroboros do not replace the app itself.`;
+        // Owner decision 3A: an app without the native method falls back, and says why. Only the observed fact:
+        // a missing method proves neither an old app nor a remedy; Dashboard > Updates owns update actions.
+        return `${app.charAt(0).toUpperCase()}${app.slice(1)} has no system-notification method here, so alerts `
+            + `fall back to ${fallback}.`;
     }
     const status = text(capability?.status);
     const why = (fact) => (text(fact?.reason) ? ` (${text(fact.reason)})` : '');
@@ -400,7 +428,7 @@ export function nativeStatusText({ enabled = true, shell = null, native = false,
     if (last === 'unknown') {
         return 'The system did not confirm the last alert in time; it may still appear there, so the app did not repeat it.';
     }
-    if (status === 'authorized' || last === 'submitted') {
+    if (status === 'authorized') {
         // A server that lacks an optional capability says so (Linux: `sound`, `actions`).
         const limits = Array.isArray(capability?.limits) ? capability.limits : [];
         const lacks = [limits.includes('no_sound') && 'plays no sound for them',
@@ -408,6 +436,10 @@ export function nativeStatusText({ enabled = true, shell = null, native = false,
         return 'System notifications are on: alerts go to the system, whose notification settings, Focus or '
             + 'Do Not Disturb decide how they appear and sound.'
             + (lacks.length ? ` This system's notification server ${lacks.join(' and ')}.` : '');
+    }
+    if (last === 'submitted') {
+        return 'The system accepted the last alert; notification permission could not be confirmed. '
+            + 'Its notification settings, Focus or Do Not Disturb still decide how it appears and sounds.';
     }
     return '';
 }
@@ -457,6 +489,8 @@ export function createNotifier({
     let storageAvailable = true;
     let destroyed = false;
     let audioCtx = null;
+    let toneSeq = 0; // the newest tone request; an older one waiting for the device yields
+    let toneUntil = -Infinity; // audio-context time until which the last tone sounds
     let activate = onActivate;
     let toast = showToast;
     let nativeAttention = false;
@@ -505,24 +539,58 @@ export function createNotifier({
     // Insertion-ordered: drop the oldest key, never the newest.
     const remember = (key) => boundedAdd(seen, key, SEEN_LIMIT);
 
-    function tone() {
-        if (!audioContextCtor) return;
+    // Recheck live choices after awaits; a silent decision stays silent. Test ignores categories.
+    const wanted = (decision) => !destroyed && prefs.enabled
+        && (decision.test === true || prefs[decision.category] === true);
+    const audible = (decision) => wanted(decision) && decision.sound === true && prefs.sound;
+
+    // Recheck after device resume; only the newest request plays, without overlapping tones.
+    async function playTone(levelNow) {
+        if (!audioContextCtor || !(levelNow() > 0)) return false;
+        const request = ++toneSeq;
         try {
-            audioCtx = audioCtx || new audioContextCtor();
-            audioCtx.resume?.();
-            const osc = audioCtx.createOscillator();
-            const gain = audioCtx.createGain();
+            const ctx = audioCtx || (audioCtx = new audioContextCtor());
+            await ctx.resume?.();
+            const level = levelNow();
+            if (destroyed || request !== toneSeq || !(level > 0)) return false;
+            if (ctx.state !== undefined && ctx.state !== 'running') return false;
+            const start = ctx.currentTime || 0;
+            if (start < toneUntil) return false;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
             osc.type = 'sine';
-            osc.frequency.value = 660;
-            gain.gain.value = 0.05;
+            osc.frequency.value = TONE.hz;
+            gain.gain.setValueAtTime(0, start);
+            gain.gain.linearRampToValueAtTime(TONE.peak * (level / 100) ** 2, start + TONE.rise);
+            gain.gain.exponentialRampToValueAtTime(TONE.floor, start + TONE.fade);
             osc.connect(gain);
-            gain.connect(audioCtx.destination);
-            const now = audioCtx.currentTime || 0;
-            osc.start(now);
-            osc.stop(now + 0.12);
+            gain.connect(ctx.destination);
+            osc.start(start);
+            osc.stop(start + TONE.seconds);
+            toneUntil = start + TONE.seconds;
+            return true;
         } catch {
-            // A device that refuses audio is not a delivery failure.
+            return false; // A device that refuses audio is not a delivery failure.
         }
+    }
+
+    /* Only definite `failed` permits a fresh read AFTER failure; cached permission cannot
+       license a tone after revocation. Explicit refusals and unknown delivery stay quiet.
+       The read never asks permission; playTone rechecks mute after the device wakes too. */
+    async function fallbackTone(decision) {
+        if (!audible(decision) || text(decision.refusal?.status) !== 'failed') return;
+        const api = nativeHost();
+        if (typeof api?.shell_info !== 'function') return;
+        const fact = await readSystem(api);
+        if (!audible(decision) || text(fact?.status) !== 'authorized' || text(fact?.sound_setting) !== 'enabled') return;
+        await playTone(() => (audible(decision) ? Math.min(decision.volume, prefs.tone_volume) : 0));
+    }
+
+    // Explicit Preview needs Sound and notifications on, not category or OS notification permission.
+    function previewTone() {
+        if (!prefs.enabled || !prefs.sound || !(prefs.tone_volume > 0)) return Promise.resolve(false);
+        const chosen = prefs.tone_volume;
+        return playTone(() => (!destroyed && prefs.enabled && prefs.sound ? Math.min(chosen, prefs.tone_volume) : 0));
     }
 
     function showBanner(decision) {
@@ -532,7 +600,7 @@ export function createNotifier({
             const note = new notificationCtor(decision.title, {
                 body: decision.body || undefined,
                 tag: decision.key,
-                silent: !decision.sound,
+                silent: !audible(decision),
             });
             note.onclick = () => {
                 try { focusWindow(); } catch { /* a blocked focus is not fatal */ }
@@ -562,44 +630,80 @@ export function createNotifier({
         syncSettings();
     }
 
-    /* One alert's answer: `submitted`, `unknown`, or `failed` for everything that never reached the
-       system — a refusal, a broken bridge call, an answer this page cannot read. */
-    function noteDelivery(answer) {
+    const REFUSALS = ['not_determined', 'denied', 'unavailable', 'failed'];
+
+    /* One alert's answer: `submitted`; `failed` for a typed refusal (desktop_notifications.refused) or a
+       call that threw synchronously, which is taken as never sent (an assumption about today's bridge: its
+       call throws only before it posts anything); `unknown` for the rest — unanswered in time, a rejected
+       call, an answer this page cannot read — which may still have reached the system: a rejection never
+       proves that nothing was submitted. */
+    function noteDelivery(answer, sent) {
         const status = text(answer?.status);
-        let outcome = 'failed';
+        let outcome = sent ? 'unknown' : 'failed';
         if (answer?.ok === true && status === 'submitted') {
             outcome = 'submitted';
-            nativeCapability = { ...nativeCapability, status: 'authorized', reason: '' };
-        } else if (status === 'unknown') {
-            outcome = 'unknown';
-        } else if (PERMISSION_STATES.includes(status)) {
-            nativeCapability = { ...nativeCapability, status, reason: text(answer?.reason) };
+        } else if (answer?.ok === false && REFUSALS.includes(status)) {
+            outcome = 'failed';
+            if (PERMISSION_STATES.includes(status)) nativeCapability = { ...nativeCapability, status, reason: text(answer?.reason) };
         }
         nativeOutcome = { status: outcome, reason: outcome === 'submitted' ? '' : text(answer?.reason) };
         syncSettings();
         return outcome;
     }
 
+    /* The app's read of the system's permission and sound setting (read-only, the same answer Settings
+       shows), or null when the app cannot give one. */
+    async function readSystem(api) {
+        try { return (await api.shell_info())?.native_notifications || null; } catch { return null; }
+    }
+
     function deliver(decision) {
         const api = nativeHost();
         if (!api) return deliverInPage(decision);
+        if (typeof api.shell_info === 'function') void prepare(api, decision);
+        else dispatch(api, decision);
+        return 'native';
+    }
+
+    /* macOS may accept a request with nil error after permission was revoked. Read BEFORE
+       the final live-preference check, not inside native submission after that check.
+       A failed read proves no refusal; delivery can still answer for itself. Never ask here. */
+    async function prepare(api, decision) {
+        const fact = await readSystem(api);
+        if (!wanted(decision)) return;
+        noteCapability(fact);
+        if (PERMISSION_STATES.includes(text(fact?.status)) && fact.status !== 'authorized') {
+            const refusal = { ...fact, ok: false };
+            noteDelivery(refusal, false); // no request has been handed over
+            deliverInPage({ ...decision, refusal });
+        } else dispatch(api, decision);
+    }
+
+    /* Last page-controlled dispatch, including after Test's permission wait. No cancellation
+       is promised once the bridge takes the call; bridge hand-off is not OS submission. */
+    function dispatch(api, decided) {
+        if (!wanted(decided)) return;
+        const decision = { ...decided, sound: audible(decided) };
         const token = `n${tokenSeq += 1}-${Date.now().toString(36)}`;
         nativeTargets.set(token, decision);
         if (nativeTargets.size > NATIVE_LIMIT) nativeTargets.delete(nativeTargets.keys().next().value);
-        const settle = (answer) => {
+        const settle = (answer, sent) => {
             if (destroyed) return;
-            // Submitted, or handed over without an answer: the system may show it, in front or not (2A),
-            // and owns its sound (1A), so nothing else is shown and the click target stays.
-            if (noteDelivery(answer) !== 'failed') return;
+            // Submitted, or possibly handed over: the system may show it, in front or not (2A), and owns
+            // its sound (1A), so nothing else is shown and the click target stays.
+            if (noteDelivery(answer, sent) !== 'failed') return;
             nativeTargets.delete(token);
-            deliverInPage(decision); // never reached the system: the typed fallback
+            // Never reached the system: the typed fallback, unless the owner switched it off meanwhile.
+            if (wanted(decision)) deliverInPage({ ...decision, refusal: answer });
         };
+        let pending;
         try {
-            void Promise.resolve(api.show_native_notification(
-                decision.title, decision.body || '', Boolean(decision.sound), token,
-            )).then(settle, () => settle(null));
-        } catch { settle(null); }
-        return 'native';
+            pending = api.show_native_notification(decision.title, decision.body || '', Boolean(decision.sound), token);
+        } catch {
+            settle(null, false); // taken as never sent: today's bridge throws only before it posts
+            return;
+        }
+        void Promise.resolve(pending).then((answer) => settle(answer, true), () => settle(null, true));
     }
 
     /** The desktop app hands back a clicked system notification's token (launcher_background.open_notification). */
@@ -612,29 +716,29 @@ export function createNotifier({
         return true;
     }
 
-    /* A legacy `notify_owner` bridge without `show_native_notification` cannot keep Sound off: hidden,
-       (`request_attention` is the same method there) shows a Windows balloon with Windows' sound
-       whatever the page asks, and a core update cannot change that frozen launcher. A silent alert
-       therefore never asks it: the browser banner or the in-app toast, without a sound. */
-    const attentionBridge = (decision) => {
+    /* Update cannot replace a legacy launcher's frozen code. One whose `request_attention` has no
+       `notify_owner` alias only raises the window for `false`, on every platform, so it is asked that.
+       One with the alias may show a hidden window's balloon, which Windows sounds whatever is asked:
+       it is never asked (DESIGN §9). */
+    const attentionBridge = () => {
         const api = bridge();
-        return !decision.sound && !nativeHost() && typeof api?.notify_owner === 'function' ? null : api;
+        return nativeHost() || typeof api?.notify_owner !== 'function' ? api : null;
     };
 
     function deliverInPage(decision) {
         const banner = supported() && permission() === 'granted';
-        const api = attentionBridge(decision);
+        const api = attentionBridge();
         if (banner && typeof api?.notify_owner === 'function') {
             // A launcher that can hide its window on purpose answers first: hidden, its own native
             // signal is the one that opens the window (focus() cannot undo a hide); visible, it does
             // nothing (last argument) and the browser banner owns the sound, with no raise.
             const answer = (result) => {
-                if (destroyed) return;
+                if (!wanted(decision)) return;
                 if (result?.status === 'background') inApp(decision, api, result);
                 else if (!showBanner(decision)) inApp(decision, api);
             };
             try {
-                void Promise.resolve(api.notify_owner(Boolean(decision.sound), decision.title, decision.body || '', false))
+                void Promise.resolve(api.notify_owner(false, decision.title, decision.body || '', false))
                     .then(answer, () => answer(null));
             } catch { answer(null); }
             return 'host';
@@ -648,18 +752,19 @@ export function createNotifier({
             try {
                 // A newer launcher takes the (privacy-filtered) text for its banner while its window is hidden on purpose.
                 const cue = answered || (typeof api.notify_owner === 'function'
-                    ? api.notify_owner(Boolean(decision.sound), decision.title, decision.body || '')
-                    : api.request_attention(Boolean(decision.sound)));
+                    ? api.notify_owner(false, decision.title, decision.body || '')
+                    : api.request_attention(false));
                 void Promise.resolve(cue).then((result) => {
                     if (destroyed) return;
                     nativeAttention = Boolean(result?.ok);
                     attentionStatus = String(result?.status || 'unavailable');
-                    // A native banner owns its sound (queued: not reported as played); no page tone after it.
-                    if (decision.sound && result?.sound_played !== true && result?.banner !== true) tone();
+                    // A banner the launcher showed is a system notification (its sound is the system's), and an
+                    // older launcher may still report a sound it played: neither gets a second one.
+                    if (result?.sound_played !== true && result?.banner !== true) void fallbackTone(decision);
                     syncSettings();
-                }).catch(() => { if (!destroyed && decision.sound) tone(); });
-            } catch { if (decision.sound) tone(); }
-        } else if (decision.sound) tone();
+                }, () => { if (!destroyed) void fallbackTone(decision); });
+            } catch { void fallbackTone(decision); }
+        } else void fallbackTone(decision);
         const line = decision.body ? `${decision.title}: ${decision.body}` : decision.title;
         try {
             // The in-app surface must reach the source too, so the returned node
@@ -720,10 +825,12 @@ export function createNotifier({
         for (const node of root.querySelectorAll('[data-notify-attention-status]')) {
             const api = bridge();
             // While alerts go to the system, the attention cue is only their fallback: no second line
-            // until an alert actually fell back to it.
+            // until an alert actually fell back to it. An older app that attentionBridge never asks has
+            // no cue to describe; the line above already says where its alerts go.
             const systemOwns = native && text(nativeCapability?.status) === 'authorized'
                 && text(nativeOutcome?.status) !== 'failed';
-            const next = systemOwns ? '' : attentionStatusText({
+            const unasked = Boolean(api) && !attentionBridge();
+            const next = systemOwns || unasked ? '' : attentionStatusText({
                 enabled: prefs.enabled,
                 nativeAttention,
                 supported: supported(),
@@ -734,6 +841,19 @@ export function createNotifier({
         }
         for (const button of root.querySelectorAll('[data-notify-test]')) {
             button.disabled = !prefs.enabled;
+        }
+        // The App tone volume row: inert while notifications or Sound are off, like the categories.
+        const muted = !prefs.enabled || !prefs.sound;
+        for (const input of root.querySelectorAll('[data-notify-volume]')) {
+            if (input.value !== String(prefs.tone_volume)) input.value = String(prefs.tone_volume);
+            input.disabled = muted;
+        }
+        for (const node of root.querySelectorAll('[data-notify-volume-value]')) {
+            const next = `${prefs.tone_volume}%`;
+            if (node.textContent !== next) node.textContent = next;
+        }
+        for (const button of root.querySelectorAll('[data-notify-preview]')) {
+            button.disabled = muted || prefs.tone_volume === 0 || !audioContextCtor;
         }
     }
 
@@ -755,10 +875,13 @@ export function createNotifier({
 
     async function setPref(key, value) {
         if (!(key in DEFAULT_NOTIFY_PREFS)) return prefs;
-        prefs = normalizeNotifyPrefs({ ...prefs, [key]: Boolean(value) });
+        const numeric = typeof DEFAULT_NOTIFY_PREFS[key] === 'number';
+        // A level the control cannot express (empty, NaN) keeps the current one; the slider never plays it.
+        if (numeric && (value === '' || value === null || !Number.isFinite(Number(value)))) return prefs;
+        prefs = normalizeNotifyPrefs({ ...prefs, [key]: numeric ? Number(value) : Boolean(value) });
         storageAvailable = writeNotifyPrefs(storage, prefs);
-        // Enabling is a user gesture: the only moment a permission prompt and
-        // an audio context may legitimately be created.
+        // Enabling is a user gesture: the only moment a permission prompt
+        // may legitimately be shown.
         if (key === 'enabled' && prefs.enabled) {
             await requestPermission();
         }
@@ -776,20 +899,29 @@ export function createNotifier({
             target: {},
         }, { ...prefs, important: true, show_text: true }, null);
         if (!decision.deliver) return null;
+        decision.test = true;
         if (typeof nativeHost()?.request_native_notifications !== 'function') return { ...decision, surface: deliver(decision) };
         // The Test click is the owner's gesture: the system may ask its one question first, then the
         // alert goes the ordinary way. A live alert never asks.
-        void requestPermission().then(() => { if (!destroyed) deliver(decision); });
+        void requestPermission().then(() => { if (wanted(decision)) deliver(decision); });
         return { ...decision, surface: 'native' };
     }
 
     const onChange = (event) => {
+        const volume = event?.target?.closest?.('[data-notify-volume]');
+        if (volume) { void setPref('tone_volume', volume.value); return; }
         const input = event?.target?.closest?.('[data-notify-pref]');
         if (!input) return;
         void setPref(input.getAttribute('data-notify-pref'), input.checked);
     };
+    // Dragging the level only stores it and repaints its value: no sound until Preview tone is pressed.
+    const onInput = (event) => {
+        const volume = event?.target?.closest?.('[data-notify-volume]');
+        if (volume) void setPref('tone_volume', volume.value);
+    };
     const onClick = (event) => {
         if (event?.target?.closest?.('[data-notify-test]')) test();
+        if (event?.target?.closest?.('[data-notify-preview]')) void previewTone();
     };
     const onStorage = (event) => {
         if (event?.key && event.key !== NOTIFY_PREFS_KEY) return;
@@ -798,6 +930,7 @@ export function createNotifier({
     };
 
     documentRef?.addEventListener?.('change', onChange);
+    documentRef?.addEventListener?.('input', onInput);
     documentRef?.addEventListener?.('click', onClick);
     globalThis.addEventListener?.('storage', onStorage);
 
@@ -860,6 +993,7 @@ export function createNotifier({
         requestPermission,
         handleFrame,
         test,
+        previewTone,
         mountSettings: syncSettings,
         activateNative,
         configure({ onActivate: nextActivate, showToast: nextToast, shell: nextShell } = {}) {
@@ -875,6 +1009,7 @@ export function createNotifier({
             destroyed = true;
             while (attachDisposers.length) attachDisposers.pop()?.();
             documentRef?.removeEventListener?.('change', onChange);
+            documentRef?.removeEventListener?.('input', onInput);
             documentRef?.removeEventListener?.('click', onClick);
             globalThis.removeEventListener?.('storage', onStorage);
             try { audioCtx?.close?.(); } catch { /* nothing to close */ }

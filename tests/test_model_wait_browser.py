@@ -7,6 +7,7 @@ import json
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
+from tests.test_reconnect_feed_browser import HISTORY_LANDED
 
 subscription_ui = setup_browser.subscription_ui
 capture = setup_browser.capture
@@ -15,6 +16,15 @@ pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 TASK = "analysis-task"
 # The wait picker offers an API lane per provider whose credential is stored.
 API_LANE = "api:openai"
+
+
+def _chip_look(card):
+    """The card chip's status mark (docs/DESIGN.md "Status marks"): its body tone, the mark's shape and hue, and
+    whether any of its dots animates."""
+    return card.locator('[data-live-phase]').evaluate("""el => { const mark = el.querySelector(':scope > .status-mark');
+        const dots = [...mark.querySelectorAll('i')].map(dot => getComputedStyle(dot).animationName);
+        return {tone: el.dataset.chipTone, shape: mark.dataset.shape, hue: mark.dataset.hue,
+            animation: dots.find(name => name !== 'none') || 'none'}; }""")
 
 
 @pytest.fixture
@@ -149,7 +159,8 @@ def test_multiple_waits_toggle_and_exact_role_switch_wait_for_application(waitin
     card = page.locator(f'.chat-live-card[data-task-id="{TASK}"]')
     assert page.locator('.model-wait-row').count() == 2
     assert card.locator('[data-live-phase]').inner_text() == 'Waiting for access'
-    assert not card.locator('[data-live-typing]').is_visible()
+    # Quota that resumes by itself: a neutral chip with still dots, nothing that moves and no owner's amber.
+    assert _chip_look(card) == {'tone': 'neutral', 'shape': 'still', 'hue': 'ink', 'animation': 'none'}
     assert card.get_attribute('data-expanded') == '0'
     assert 'worker slot' in card.locator('[data-wait-slot]').inner_text()
     assert light.locator('[data-wait-auto]').is_checked()
@@ -244,6 +255,7 @@ def test_network_retry_reuses_request_and_terminal_history_suppresses_old_waits(
     page.wait_for_selector('.model-wait-row', state='detached')
     ui['emit']({**ui['rows']['light-wait'], 'revision': 99})
     assert page.locator('.model-wait-row').count() == 0
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector(f'.chat-live-card[data-task-id="{TASK}"][data-finished="1"]')
     assert page.locator('.model-wait-row').count() == 0
@@ -270,6 +282,7 @@ def test_wait_updates_preserve_reading_position_away_from_the_live_edge(waiting_
         'role': 'user', 'text': f'Earlier message {index}: ' + 'Context retained for the task. ' * 12,
         'client_message_id': f'earlier-{index}', 'ts': f'2026-09-06T21:{index:02d}:00Z',
     } for index in range(24)]
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector('.chat-bubble.user')
     page.wait_for_selector('[data-wait-id="light-wait"]')
@@ -303,6 +316,7 @@ def test_mixed_access_wait_replays_and_opens_accounts_without_automatic_login(wa
     assert mixed.locator('[data-wait-auto-label]').inner_text() == 'Continue automatically when access is restored'
     assert 'Some accounts need sign-in; others are waiting for quota.' in mixed.inner_text()
     assert 'Auto rotation' in mixed.inner_text() and 'Account:' not in mixed.inner_text()
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector('[data-wait-id="light-wait"]')
     assert mixed.locator('[data-wait-reason]').inner_text() == 'Waiting for access'
@@ -341,6 +355,7 @@ def test_dated_unavailable_pool_waits_visibly_without_a_sign_in_prompt(waiting_u
     ui['rows']['light-wait'].update(revision=3, reset_at=None)
     ui['emit'](ui['rows']['light-wait'])
     page.wait_for_function("() => document.querySelector('[data-wait-id=light-wait] [data-wait-reset]').textContent.includes('The reset time is not known.')")
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector('[data-wait-id="light-wait"]')
     assert pool.locator('[data-wait-reason]').inner_text() == 'Waiting for an account'
@@ -361,6 +376,7 @@ def test_direct_api_wait_never_offers_subscription_login_or_auto_rotation(waitin
     page.set_viewport_size({'width': 390, 'height': 844})
     assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
     capture(page, 'waiting-direct-api-access-narrow')
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector('[data-wait-id="light-wait"]')
     assert card.locator('[data-wait-login]').is_hidden()
@@ -371,9 +387,14 @@ def test_wait_reconnect_preserves_unsubmitted_form_without_context_or_animation(
     ui, page = waiting_ui, waiting_ui["page"]
     row = page.locator('[data-wait-id="main-wait"]')
     page.evaluate("() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))")
-    assert page.locator('.chat-live-card[data-model-waiting="1"] .chat-live-phase').evaluate(
-        "el => getComputedStyle(el).animationName"
-    ) == "none"
+    waiting_card = page.locator('.chat-live-card[data-model-waiting="1"]')
+    # An automatic wait is neutral and still; the same wait once only the owner can end it is the owner's move, amber.
+    assert _chip_look(waiting_card) == {'tone': 'neutral', 'shape': 'still', 'hue': 'ink', 'animation': 'none'}
+    ui['rows']['main-wait'].update(revision=2, auto_continue=False, requires_owner_action=True)
+    ui['emit'](ui['rows']['main-wait'])
+    page.wait_for_function("() => document.querySelector('.chat-live-card[data-model-waiting=\"1\"] .chat-live-phase')"
+                           "?.dataset.chipTone === 'owner'")
+    assert _chip_look(waiting_card) == {'tone': 'owner', 'shape': 'dot', 'hue': 'owner', 'animation': 'none'}
     row.locator('[data-wait-change]').click()
     field = row.locator('[data-model-role-model]')
     field.wait_for()
@@ -385,9 +406,11 @@ def test_wait_reconnect_preserves_unsubmitted_form_without_context_or_animation(
     field.focus()
     field.evaluate("el => el.setSelectionRange(2, 8)")
     document_id = page.evaluate("window.waitDocumentId = crypto.randomUUID()")
+    page.evaluate(HISTORY_LANDED)
     with page.expect_response('**/api/chat/history*'):
         ui["sockets"][-1].close()
-    page.get_by_text("Reconnected", exact=True).wait_for()
+    page.wait_for_function("() => window.historyLanded > 0")  # response received; assert the retained form below
+    assert page.locator('[data-system-type="reconnect"]').count() == 0, "a reconnect adds no row"
     assert page.evaluate("window.waitDocumentId") == document_id
     assert field.input_value() == 'unfinished-owner-model'
     assert field.evaluate("el => document.activeElement === el")
@@ -467,11 +490,12 @@ def test_paid_review_controls_survive_author_terminal_and_reload(waiting_ui, tmp
     card.wait_for()
     assert waiter.is_visible(), 'paid review outlives the terminal author'
     assert page.locator('[data-wait-id="main-wait"]').count() == 0
-    assert not card.locator('[data-live-typing]').is_visible()
+    assert _chip_look(card) == {'tone': 'ok', 'shape': 'dot', 'hue': 'ok', 'animation': 'none'}
     waiter.locator('[data-wait-auto]').uncheck()
     waiter.locator('[data-wait-notice]').filter(has_text='Request accepted').wait_for()
     assert ui['controls'][-1]['decision_id'] == f'model_wait:{TASK}:light-wait'
     ui['apply']('light-wait')
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     card.wait_for()
     waiter.wait_for()
@@ -615,12 +639,13 @@ def test_a_checked_role_save_that_did_not_land_is_told_once_its_wait_settles(wai
     closing = {**copy.deepcopy(repeat), 'wait_id': 'closing-wait', 'role': 'light', 'revision': 1, 'state': 'waiting'}
     for key in ('applied_request_id', 'resolution'):
         closing.pop(key, None)
-    ui['rows']['closing-wait'] = closing
+    # This wait is closing-task's own: the census (which the frame below reads again) lists it under no other task.
     frame({'type': 'log', 'chat_id': 1, 'data': {'type': 'task_model_wait', 'task_id': task, 'chat_id': 1,
                                                  'ts': '2026-09-06T22:03:01Z', **closing}})
     answers['closing-wait'] = [lambda body: (202, {
         'ok': True, 'decision_id': body['decision_id'], 'request_id': body['request_id'], 'state': 'waiting',
-        'duplicate': False, 'applied': False, 'saved': False, 'wait': pending('closing-wait', body)})]
+        'duplicate': False, 'applied': False, 'saved': False,
+        'wait': {**copy.deepcopy(closing), 'pending_action': {k: v for k, v in body.items() if k != 'decision_id'}}})]
     closing_view = choose('closing-wait', 'closing-model')
     closing_view.locator('[data-wait-notice]').filter(has_text='Settings were not saved.').wait_for()
     frame({'type': 'log', 'chat_id': 1, 'data': {'type': 'task_done', 'task_id': task, 'status': 'completed',

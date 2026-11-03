@@ -40,6 +40,8 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from tests.ui_console_errors import PageErrors
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = Path("docs/examples/separate_ui")
 CADDY_ENV = "SEPARATE_UI_CADDY"
@@ -357,22 +359,29 @@ class Core:
     def pid(self) -> int | None:
         return self.process.proc.pid if self.process.proc is not None else None
 
+    def _keeping_log(self):
+        """A start or readiness wait that fails leaves this core's log with the run's evidence; the failure goes on."""
+        from ouroboros.test_evidence import keep_startup_log
+
+        return keep_startup_log(self.root, self.process.log_path.relative_to(self.root))
+
     def start(self, *, configured: bool = True) -> None:
         """Start and prove the answering process is this checkout's; an unconfigured core has no workers."""
         from tests.candidate_checkout import verify_checkout
         from tests.test_ui_smoke_playwright import _wait_health, _wait_supervisor_ready
 
-        verify_checkout(self.checkout, self.candidate)
-        self.candidate.hold()  # pinned before the spawn; released only once the tree is proven gone
-        self.process.start()
-        _wait_health(self.url, timeout_sec=60)
-        _wait_supervisor_ready(self.url, timeout_sec=90)
-        if configured:
-            self.prove_origin()
-        else:  # the static and Python origin proofs, without the worker-pool requirement
-            with urllib.request.urlopen(self.url + "/onboarding/static/candidate-sentinel.txt", timeout=5) as r:  # noqa: S310
-                assert r.read() == self.candidate.sentinel_bytes
-            assert _fetch_json(self.url + "/api/health")["runtime_version"] == self.candidate.version_text
+        with self._keeping_log():  # every start: the first, and each restart's
+            verify_checkout(self.checkout, self.candidate)
+            self.candidate.hold()  # pinned before the spawn; released only once the tree is proven gone
+            self.process.start()
+            _wait_health(self.url, timeout_sec=60)
+            _wait_supervisor_ready(self.url, timeout_sec=90)
+            if configured:
+                self.prove_origin()
+            else:  # the static and Python origin proofs, without the worker-pool requirement
+                with urllib.request.urlopen(self.url + "/onboarding/static/candidate-sentinel.txt", timeout=5) as r:  # noqa: S310
+                    assert r.read() == self.candidate.sentinel_bytes
+                assert _fetch_json(self.url + "/api/health")["runtime_version"] == self.candidate.version_text
 
     def prove_origin(self) -> None:
         from tests.candidate_checkout import assert_served_candidate
@@ -391,19 +400,25 @@ class Core:
         self.start()
 
     def wait_ready(self, timeout: float = 90) -> dict:
+        """Ready again after the core restarted or reconfigured itself (setup, the chat's Restart)."""
         from tests.test_ui_smoke_playwright import _wait_health, _wait_supervisor_ready
 
-        _wait_health(self.url, timeout_sec=int(timeout))
-        _wait_supervisor_ready(self.url, timeout_sec=int(timeout))
-        return _fetch_json(self.url + "/api/state")
+        with self._keeping_log():
+            _wait_health(self.url, timeout_sec=int(timeout))
+            _wait_supervisor_ready(self.url, timeout_sec=int(timeout))
+            return _fetch_json(self.url + "/api/state")
 
     def boots(self) -> int:
         """How many times a server generation started listening in this core's log."""
         return self.process.log_text().count("Starting Ouroboros server on")
 
     def jsonl(self, relative: str) -> list[dict]:
-        """Rows of one of the core's own JSONL records (``logs/chat.jsonl`` ...)."""
+        """Core log rows: dialogue from SQL, other streams from their JSONL records."""
         path = self.data_dir / relative
+        if relative in {"logs/chat.jsonl", "logs/progress.jsonl"}:
+            from tests._dialogue import log_rows
+
+            return log_rows(path)
         if not path.exists():
             return []
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -423,18 +438,23 @@ def _python() -> str:
 
 
 @contextmanager
-def real_core(root: Path, *, provider: bool = True, password: str = PASSWORD, settings: dict | None = None):
-    """A started core with UI serving off; ``provider=False`` is a fresh install with no settings."""
-    from ouroboros.test_environment import isolated_environment
+def real_core(root: Path, *, provider: bool = True, password: str = PASSWORD, settings: dict | None = None,
+              ui_dir: Path | str = "none"):
+    """A real core; main UI defaults off, and ``provider=False`` leaves settings absent.
+
+    ``ui_dir`` lets a client-entry test exercise selected files through this same core instead
+    of mistaking separately hosted files for the core's selected setup/sign-in pages.
+    """
+    from ouroboros.test_environment import isolated_environment, owned_process_temp
     from tests.candidate_checkout import candidate_checkout, require_candidate_interpreter
 
-    # ``root`` itself holds the isolated home, data and tmp: macOS caps a socket path at 104
-    # bytes, and the core's worker manager listens beneath TMPDIR.
+    # ``root`` itself holds the isolated home and data. macOS caps a socket path at 104 bytes and the
+    # core's worker manager listens beneath TMPDIR: short under a launcher, else ``root/tmp``.
     root.mkdir(parents=True, exist_ok=True)
     checkout = root / "repo"
     with ExitStack() as stack:
         candidate = stack.enter_context(candidate_checkout(REPO_ROOT, checkout, origin_proof=True))
-        env = isolated_environment(root, checkout)
+        env = isolated_environment(root, checkout, process_temp=owned_process_temp())
         data_dir = Path(env["OUROBOROS_DATA_DIR"])
         values = dict(settings or {})
         model = ModelStub()  # a fresh install points its setup at it
@@ -443,7 +463,9 @@ def real_core(root: Path, *, provider: bool = True, password: str = PASSWORD, se
             values.update(dict.fromkeys(("OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_FALLBACKS"),
                                         "openai-compatible::mock-model"))
             values.update(OPENAI_COMPATIBLE_API_KEY="separate-ui-key", OPENAI_COMPATIBLE_BASE_URL=model.base_url,
-                          OUROBOROS_MAX_WORKERS=1, OUROBOROS_RUNTIME_MODE="light")
+                          OUROBOROS_MAX_WORKERS=1, OUROBOROS_RUNTIME_MODE="light",
+                          # a fresh root with a ready provider would clone the skill hub at boot (#1995)
+                          OUROBOROS_STARTER_SKILLS="[]")
         if values:
             (data_dir / "settings.json").write_text(json.dumps(values), encoding="utf-8")
         port = free_port()
@@ -452,8 +474,9 @@ def real_core(root: Path, *, provider: bool = True, password: str = PASSWORD, se
         env.update({
             "OUROBOROS_SERVER_HOST": "127.0.0.1", "OUROBOROS_SERVER_PORT": str(port),
             "OUROBOROS_HOST_SERVICE_PORT": str(free_port()), "OUROBOROS_NETWORK_PASSWORD": password,
-            # The operator's choice, never saved: the core serves no main interface.
-            "OUROBOROS_UI_DIR": "none",
+            "OUROBOROS_MAX_WORKERS": "1",  # fresh setup also keeps this fixture's pool bounded
+            # The fixture's explicit choice, never silently persisted by a read.
+            "OUROBOROS_UI_DIR": str(ui_dir),
             # A Restart must not reset this copy to a managed branch (no managed remote exists).
             "OUROBOROS_DISABLE_MANAGED_UPDATES": "1",
             # A visitor through the proxy is not loopback: Files needs the operator's root.
@@ -673,8 +696,7 @@ class BrowserSession:
         self.context = self.browser.new_context(viewport={"width": viewport[0], "height": viewport[1]}, **options)
         self.context.add_init_script(_RECORD_LOADS)
         self.page = self.context.new_page()
-        self.errors: list[str] = []
-        self.page.on("pageerror", lambda error: self.errors.append(str(error)))
+        self.errors = PageErrors(self.page, name)
 
     def loads(self) -> list[str]:
         return self.page.evaluate("() => JSON.parse(sessionStorage.getItem('__loads') || '[]')")
@@ -718,8 +740,7 @@ class BrowserSession:
         }""", [path, headers or {}])
 
     def unexpected_errors(self) -> list[str]:
-        # WebKit reports a fetch that a navigation cancelled as an access-control failure.
-        return [e for e in self.errors if not (self.name == "webkit" and e.endswith("due to access control checks."))]
+        return self.errors.unexpected()
 
     def close(self) -> None:
         self.browser.close()

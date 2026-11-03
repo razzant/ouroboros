@@ -7,6 +7,9 @@
 
 from __future__ import annotations
 
+from ouroboros import dialogue_store
+from tests import _dialogue as dialogue_test
+
 import asyncio
 import json
 from types import SimpleNamespace
@@ -36,16 +39,14 @@ def test_conversion_projects_canonical_owner_request_and_rehomes_subagents(tmp_p
     from ouroboros.projects_registry import project_binding_for_task, project_chat_for_task
     from ouroboros.task_results import STATUS_RUNNING, write_task_result
 
-    (tmp_path / "logs").mkdir()
-    (tmp_path / "logs" / "chat.jsonl").write_text(
+    dialogue_store.append(
+        tmp_path, "chat",
         # The owner's original request lives in the MAIN chat (chat_id 1). It is
         # logged at receive time with NO task_id. The immutable binding stores a
         # source reference so the Project lens can render this same row.
-        json.dumps({"ts": "2026-06-18T00:00:00Z", "direction": "in", "chat_id": 1,
-                    "client_message_id": "owner-1", "text": "build cyberpunk racing"}) + "\n",
-        encoding="utf-8",
+        {"ts": "2026-06-18T00:00:00Z", "direction": "in", "chat_id": 1,
+         "client_message_id": "owner-1", "text": "build cyberpunk racing"},
     )
-    (tmp_path / "logs" / "progress.jsonl").write_text("", encoding="utf-8")
     # v6.73.0: the origin identity is captured at ingress and persisted on the
     # TASK RECORD; post-hoc conversion reads it from there (never a content lookup).
     write_task_result(
@@ -70,10 +71,11 @@ def test_conversion_projects_canonical_owner_request_and_rehomes_subagents(tmp_p
     assert binding["source_text"] == "build cyberpunk racing"
 
     # A subagent emits progress; its rows carry main chat_id but lineage roots at "root".
-    with (tmp_path / "logs" / "progress.jsonl").open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"ts": "2026-06-18T00:01:00Z", "content": "child working",
-                             "chat_id": 1, "task_id": "child", "parent_task_id": "root",
-                             "root_task_id": "root", "subagent_event": "progress"}) + "\n")
+    dialogue_store.append(tmp_path, "progress", {
+        "ts": "2026-06-18T00:01:00Z", "content": "child working",
+        "chat_id": 1, "task_id": "child", "parent_task_id": "root",
+        "root_task_id": "root", "subagent_event": "progress",
+    })
 
     project_view = _history(tmp_path, proj_chat)
     # The canonical owner request is the first Project message...
@@ -94,11 +96,7 @@ def test_conversion_projects_canonical_owner_request_and_rehomes_subagents(tmp_p
     # Main still renders that same canonical row exactly once.
     owner_user_rows = [m for m in main_view if m.get("role") == "user" and "cyberpunk racing" in m.get("text", "")]
     assert len(owner_user_rows) == 1
-    raw_rows = [
-        json.loads(line)
-        for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    raw_rows = dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
     assert len([row for row in raw_rows if "cyberpunk racing" in row.get("text", "")]) == 1
     # The subagent's raw chat stays out of main; only sanitized progress may mirror.
     assert all(not (m.get("task_id") == "child" and m.get("role") == "user") for m in main_view)
@@ -108,16 +106,14 @@ def test_repeat_conversion_does_not_duplicate_owner_message(tmp_path):
     """A repeated conversion keeps one canonical row and one immutable ref."""
     from ouroboros.gateway.projects import api_project_from_task
 
-    (tmp_path / "logs").mkdir()
-    (tmp_path / "logs" / "chat.jsonl").write_text(
-        json.dumps({
+    dialogue_store.append(
+        tmp_path, "chat", {
             "ts": "2026-06-18T00:00:00Z",
             "direction": "in",
             "chat_id": 1,
             "client_message_id": "owner-repeat",
             "text": "build cyberpunk racing",
-        }) + "\n",
-        encoding="utf-8",
+        },
     )
 
     from ouroboros.project_dialogue import build_owner_message_ref
@@ -136,11 +132,7 @@ def test_repeat_conversion_does_not_duplicate_owner_message(tmp_path):
     asyncio.run(api_project_from_task(_request(tmp_path, body)))
     asyncio.run(api_project_from_task(_request(tmp_path, body)))
 
-    rows = [
-        json.loads(line)
-        for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    rows = dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
     canonical = [r for r in rows if r.get("direction") == "in" and "cyberpunk racing" in r.get("text", "")]
     assert len(canonical) == 1
 
@@ -153,9 +145,6 @@ def test_conversion_reuses_proactive_suggested_name(tmp_path):
     from ouroboros.gateway.projects import api_project_from_task
     from ouroboros.task_results import STATUS_RUNNING, write_task_result
 
-    (tmp_path / "logs").mkdir()
-    (tmp_path / "logs" / "chat.jsonl").write_text("", encoding="utf-8")
-    (tmp_path / "logs" / "progress.jsonl").write_text("", encoding="utf-8")
     write_task_result(
         tmp_path, "root", STATUS_RUNNING,
         suggested_name="Cyber Racing Game",

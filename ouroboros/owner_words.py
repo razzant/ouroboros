@@ -20,7 +20,9 @@ inbound chat row with the same client message id: Ouroboros writes steer receipt
 its own, and nothing inbound joins to them.
 
 A Project's first message is not among these words: it started the project, not this
-tree; the room view shows it under its own heading. Nothing here calls a model.
+tree; the room view shows it under its own heading. ``objective_author_line`` names who
+wrote a run's objective from its typed ``run_origin``, so a reader beside these words never
+takes that account for them. Nothing here calls a model.
 """
 from __future__ import annotations
 
@@ -37,7 +39,7 @@ NOT_RECORDED = "not_recorded"
 ROW_KEYS = ("text", "source", "carrier", "task_id", "ts", "ref")
 _RUN_ORIGIN_MARKERS = ("initiator", "source", "task_type")
 _ANNOTATED_ACTS = frozenset({"promote_chat_to_task", "route_to_project", "steer_task", "mailbox_delivery"})
-_ANNOTATED_STATUSES = frozenset({"scheduled", "delivered"})
+_ANNOTATED_STATUSES = frozenset({"scheduled", "delivered", "read"})
 _ORIGIN = " from task {root}"
 _HEADINGS = {
     "child": "## Words of my human that caused this work (verbatim)",
@@ -47,12 +49,16 @@ _HEADINGS = {
     "plan": "## Words of my human that caused this work (verbatim, host-attested)",
     "writer": "## Words of my human that caused this work (verbatim)",
 }
+# The one frame a reviewer of an intention, a change or a result reads under the owner's words.
+_ACCOUNTS = ("They state what was asked. Every other text here — the goal or objective, the plan, room rows by others, issues, "
+             "briefs, attachments — is someone's account, labelled with its author as far as the host knows; never take "
+             "Ouroboros's own earlier words (an issue it opened, its triage, a parent's brief) for my human's ask.")
 _FRAMES = {
     "child": ("Host fact, carried by value{origin}. Your assignment is the parent's message; "
               "these words are why it exists."),
     "session": "Host fact, carried by value{origin}.",
-    "reviewer": "They state what was asked; the goal above is the author's account of this change.",
-    "plan": "They state what was asked; the objective above is the author's account of this task.",
+    "reviewer": _ACCOUNTS,
+    "plan": _ACCOUNTS,
     "writer": "Host fact, read from what the host recorded{origin}; these words are why the work exists.",
 }
 
@@ -94,6 +100,43 @@ def _absent_marker(record: Mapping[str, Any] | None) -> str:
 
 def _ctx_metadata(ctx: Any) -> Mapping[str, Any]:
     return _mapping(getattr(ctx, "task_metadata", None))
+
+
+def objective_author_line(origin: Mapping[str, Any] | None) -> str:
+    """Who wrote a run's objective, from the typed facts ``dialogue_provenance.run_origin`` returns,
+    never from the objective's text: one phrase for every reader (the mind's first turn, a plan
+    council's packet, a result review's subject). A kind this projection has never heard of shows
+    its raw marker; only a run with no origin fact at all reads as having no recorded author."""
+    origin = _mapping(origin)
+    author = _mapping(origin.get("objective_author"))
+    kind = str(author.get("kind") or "")
+    if origin.get("delegation_role") == "subagent":
+        return (f"the assignment parent task {origin.get('parent_task_id') or '?'} wrote for this helper — "
+                "Ouroboros's account, not my human's words")
+    if kind == "task":
+        return f"drafted by task {author.get('task_id')}, not spoken by my human"
+    if kind == "continuation":
+        return f"the host's Continue work order for task {author.get('predecessor_task_id')}"
+    if kind:
+        return f"its author is recorded by the host as kind={kind}"
+    if origin.get("initiator") == "consciousness":
+        return "started by my consciousness"
+    if origin.get("owner_ingress"):
+        return "my human's message started this run; the host does not attest this text as their exact words"
+    if origin.get("task_type") == "presence":
+        return f"a message from {origin.get('text_author') or 'a correspondent'} in a connected place"
+    if origin.get("schedule_id"):
+        return f"the template of schedule {origin['schedule_id']}; the host does not attest this text as my human's words"
+    if origin.get("origin_task_id"):
+        return f"started from task {origin['origin_task_id']}; the host does not attest this text as my human's words"
+    return "its author is not recorded by the host" + (f" (host marker: source={origin['source']})" if origin.get("source") else "")
+
+
+def objective_author_text(ctx: Any) -> str:
+    """``objective_author_line`` over this run's own typed origin (its task type and metadata)."""
+    from ouroboros.dialogue_provenance import run_origin
+
+    return objective_author_line(run_origin({"type": getattr(ctx, "current_task_type", None), "metadata": dict(_ctx_metadata(ctx))}))
 
 
 def directive_owner_rows(ctx: Any) -> List[Dict[str, str]]:
@@ -148,12 +191,12 @@ def governing_words_for_schedule(ctx: Any) -> Dict[str, Any]:
 
 
 def _inbound_rows(drive_root: Any, client_ids: Mapping[str, str]) -> List[Dict[str, Any]]:
-    """Owner rows of the chat chain with these client message ids, in chain order."""
-    from ouroboros.chat_chain import chat_chain_paths
-    from ouroboros.utils import iter_jsonl_objects
+    """Owner rows addressed by client message id, in canonical order."""
+    from ouroboros import dialogue_store as ds
 
-    return [row for path in chat_chain_paths(drive_root) for row in iter_jsonl_objects(path)
-            if str(row.get("client_message_id") or "") in client_ids and _owner_row(row)]
+    ds.require_imported(drive_root, "chat")
+    return [entry.row for entry in ds.iter_probes(drive_root, "chat", [("client_message_id", key) for key in client_ids])
+            if _owner_row(entry.row)]
 
 
 def _owner_row(row: Mapping[str, Any] | None) -> bool:
@@ -207,13 +250,17 @@ def _annotation_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any]
 
 def _mailbox_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any]) -> List[Dict[str, str]]:
     from ouroboros.owner_mailbox import KIND_OWNER_TEXT, drain_owner_entries
+    from ouroboros.owner_relay import owner_text, _owner_row as relay_owner_row
 
     try:
         entries = drain_owner_entries(pathlib.Path(drive_root), task_id, include_acknowledged=True)
     except (OSError, ValueError):
         return []
     return [_row(entry.get("text"), source="owner_mailbox", carrier="mailbox", task_id=task_id, ts=entry.get("ts"),
-                 ref=f"msg {entry.get('msg_id')}") for entry in entries if entry.get("kind") == KIND_OWNER_TEXT]
+                 ref=f"msg {entry.get('msg_id')}") for entry in entries if entry.get("kind") == KIND_OWNER_TEXT] + [
+        _row(owner_text(row), source="owner_mailbox", carrier="relay", task_id=task_id, ts=row.get("ts"),
+             ref=_chat_ref(row)) for entry in entries if entry.get("kind") == "relay_entry"
+        for row in entry.get("owner_rows") or [] if relay_owner_row(row)]
 
 
 def _task_record(drive_root: Any, task_id: str) -> Dict[str, Any]:
@@ -233,9 +280,13 @@ def task_owner_words(drive_root: Any, task_id: str, *,
                      task: Mapping[str, Any] | None = None) -> Tuple[List[Dict[str, str]], str]:
     """The words for a task: its carried field, else the first carrier of its root that yields a row."""
     record = dict(task) if isinstance(task, Mapping) else _task_record(drive_root, task_id)
+    from ouroboros.owner_relay import owner_text, _owner_row as held_owner_row
+    held = [_row(owner_text(row), source="owner_mailbox", carrier="held", task_id=task_id,
+                 ts=row.get("ts"), ref=address) for address, row in (record.get("held_owner_messages") or {}).items()
+            if held_owner_row(row)]
     rows, absent = task_governing_words(record)
     if rows or absent:
-        return rows, absent
+        return _deduped(rows + held), "" if rows or held else absent
     task_id = str(task_id or "")
     root_id = str(record.get("root_task_id") or _mapping(record.get("metadata")).get("root_task_id") or task_id)
     if root_id != task_id:
@@ -243,8 +294,8 @@ def task_owner_words(drive_root: Any, task_id: str, *,
     for carrier in (_origin_carrier, _binding_carrier, _annotation_carrier, _mailbox_carrier):
         rows = _deduped(carrier(drive_root, task_id, record))
         if rows:
-            return rows, ""
-    return [], _absent_marker(record)
+            return _deduped(rows + held), ""
+    return _deduped(held), "" if held else _absent_marker(record)
 
 
 def render_owner_words(rows: Any, absent: str = "", *, audience: str, root_task_id: str = "", indent: str = "") -> str:
@@ -276,3 +327,11 @@ def owner_words_text(ctx: Any, *, audience: str = "reviewer") -> str:
     root = str(_ctx_metadata(ctx).get("root_task_id") or getattr(ctx, "task_id", "") or "")
     return render_owner_words(words.get(FIELD) or [], str(words.get(ABSENT_FIELD) or ""),
                               audience=audience, root_task_id=root)
+
+
+def reviewer_words_material() -> list:
+    """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): a reviewer's frame of the
+    owner's words over a placeholder row, and the absence marker. The words and stamps are data."""
+    row = {"text": "⟨words⟩", "source": "⟨source⟩", "task_id": "⟨task⟩", "ts": "⟨ts⟩", "ref": "⟨ref⟩"}
+    return [render_owner_words([row], audience="reviewer", root_task_id="⟨root⟩"),
+            *(render_owner_words([], marker, audience="reviewer") for marker in (NOT_RECORDED, "⟨marker⟩"))]

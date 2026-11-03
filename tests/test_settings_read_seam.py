@@ -158,7 +158,7 @@ def test_reading_settings_writes_nothing_to_disk(isolated_settings):
     from ouroboros import config as cfg
     from ouroboros.gateway.owner_settings import _owner_read_settings_raw
 
-    _seed(isolated_settings, LEGACY_OWNER_DOCUMENT)
+    _seed(isolated_settings, {**LEGACY_OWNER_DOCUMENT, "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full"})
     before = isolated_settings.read_bytes()
     before_mtime = isolated_settings.stat().st_mtime_ns
 
@@ -172,15 +172,15 @@ def test_reading_settings_writes_nothing_to_disk(isolated_settings):
     assert not pathlib.Path(str(isolated_settings) + ".lock").exists()
 
 
-def test_the_one_read_that_writes_is_the_context_compatibility_migration(isolated_settings):
+def test_the_one_read_that_writes_is_the_migrating_context_compatibility_read(isolated_settings):
     """The single, deliberate exception, pinned rather than assumed.
 
     A document that carries a context mode WITHOUT the false provenance marker is
     ambiguous for the BIBLE P3 scope gate, and the one-window compatibility migration
     resolves it by writing the canonical pair back — under the settings lock, through
-    the live-data guard. So `load_settings` on such a file performs exactly ONE write
-    and is stable from then on. `_owner_read_settings_raw` performs NONE even on the
-    same file: it uses the non-persisting normalizer, so an owner GET is always a read.
+    the live-data guard. Only `load_settings(migrate=True)` (the boot, onboarding
+    completion) does that: it performs exactly ONE write and is stable from then on. An
+    ordinary `load_settings` and `_owner_read_settings_raw` perform NONE: a read is a read.
 
     This is easy to miss because a fixture whose document has no context keys makes any
     "a read writes nothing" assertion pass vacuously — which is how a live settings file
@@ -195,8 +195,10 @@ def test_the_one_read_that_writes_is_the_context_compatibility_migration(isolate
     for _ in range(3):
         _owner_read_settings_raw()
     assert isolated_settings.read_bytes() == before, "an owner read migrated the file"
+    assert cfg.load_settings()["OUROBOROS_CONTEXT_MODE"] == "max"
+    assert isolated_settings.read_bytes() == before, "an ordinary read migrated the file"
 
-    settings = cfg.load_settings()
+    settings = cfg.load_settings(migrate=True)
     after_first = isolated_settings.read_bytes()
     assert after_first != before, "the compatibility migration did not converge"
     stored = json.loads(after_first.decode("utf-8"))
@@ -206,7 +208,7 @@ def test_the_one_read_that_writes_is_the_context_compatibility_migration(isolate
     assert settings["OUROBOROS_CONTEXT_MODE"] == "max"
 
     for _ in range(3):
-        cfg.load_settings()
+        cfg.load_settings(migrate=True)
     assert isolated_settings.read_bytes() == after_first, "the migration is not idempotent"
 
 
@@ -389,9 +391,10 @@ def test_every_owner_endpoint_reaches_the_same_normalized_read(isolated_settings
         "_api_owner_runtime_mode_sync",
         "_api_owner_auto_grant_sync",
         "_api_owner_context_mode_sync",
-        "_api_owner_safety_mode_sync",
         "_api_settings_post_locked",
     }, readers
+    from ouroboros.gateway import safety_settings
+    assert _callers(safety_settings, "_owner_update_settings") == {"_persist"}
 
 
 def test_normalize_settings_raw_is_idempotent(isolated_settings):
@@ -439,6 +442,7 @@ def test_wakeup_bounds_read_normalization_preserves_valid_values_and_does_not_wr
     from ouroboros import config as cfg
 
     _seed(isolated_settings, {
+        "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full",
         "OUROBOROS_BG_WAKEUP_MIN": minimum,
         "OUROBOROS_BG_WAKEUP_MAX": maximum,
     })
@@ -517,8 +521,8 @@ def test_every_settings_writer_puts_the_one_serializers_bytes_on_disk(isolated_s
     """One serializer, one spelling. Each of the five writers, driven through its real
     entry point, leaves exactly ``serialize_settings(document).encode("utf-8")`` on disk:
     the three prologue-routed savers produce identical bytes for identical content, and
-    the two exempt writers — the context-pair migration, which is the one READ that
-    writes, and the Colab generator for the Drive root — produce the serializer's bytes
+    the two exempt writers — the context-pair migration, the one READ that writes
+    (``migrate=True``), and the Colab generator for the Drive root — produce the serializer's bytes
     for what they persist. The writers once disagreed on ``ensure_ascii``, and a writer
     that re-derived the JSON text itself agreed with the serializer only by coincidence:
     mutate the serializer and that writer keeps its old spelling while the others follow.
@@ -561,9 +565,9 @@ def test_every_settings_writer_puts_the_one_serializers_bytes_on_disk(isolated_s
     _save_settings(isolated_settings, dict(document))
     on_disk["packaged_cli._save_settings"] = isolated_settings.read_bytes()
 
-    # The migration is the one read that writes: an ambiguous Low makes the load persist.
+    # The migrating read is the one read that writes: an ambiguous Low makes it persist.
     _seed(isolated_settings, {**document, "OUROBOROS_CONTEXT_MODE": "low"})
-    cfg.load_settings()
+    cfg.load_settings(migrate=True)
     on_disk["context_mode_compat.normalize_and_persist_context_mode_compat"] = (
         isolated_settings.read_bytes())
 
@@ -932,3 +936,59 @@ def test_the_retirement_notice_stays_quiet_for_a_document_without_ghosts(
         cfg.normalize_settings_raw({"TOTAL_BUDGET": 10.0})
 
     assert [r.getMessage() for r in caplog.records] == []
+
+
+def test_a_settings_read_takes_no_lock_and_reads_a_torn_document_again_behind_its_writer(isolated_settings,
+                                                                                         monkeypatch):
+    """An ordinary read never creates, waits on or removes ``settings.json.lock`` (every reader of every
+    process once serialized on that one name). A document caught mid-way by ``save_settings``' in-place
+    fallback (truncate, then write: a prefix of one JSON object never decodes) is read once more behind
+    the lock its writer holds until the bytes are complete, never answered with defaults; a document
+    that stays undecodable is read again once, not in a loop."""
+    from ouroboros import config as cfg
+
+    _seed(isolated_settings, {**LEGACY_OWNER_DOCUMENT, "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full",
+                              "TOTAL_BUDGET": 33.0})
+    foreign = pathlib.Path(str(isolated_settings) + ".lock")
+    foreign.write_text("pid=1 ts=0\n")  # another process's writer holds the lock
+    held = foreign.stat().st_mtime_ns
+    taken = []
+    monkeypatch.setattr(cfg, "_acquire_settings_lock", lambda timeout=2.0: taken.append("read") or None)
+    assert cfg.load_settings()["TOTAL_BUDGET"] == 33.0
+    assert taken == [] and foreign.stat().st_mtime_ns == held
+
+    complete = isolated_settings.read_bytes()
+    isolated_settings.write_bytes(complete[: len(complete) // 2])  # the in-place fallback, caught mid-write
+
+    def writer_finishes(timeout=2.0):
+        taken.append("torn")
+        isolated_settings.write_bytes(complete)  # the writer completes before it releases its lock
+        return None
+
+    monkeypatch.setattr(cfg, "_acquire_settings_lock", writer_finishes)
+    assert cfg.load_settings()["TOTAL_BUDGET"] == 33.0
+    assert taken == ["torn"]
+
+    taken.clear()
+    monkeypatch.setattr(cfg, "_acquire_settings_lock", lambda timeout=2.0: taken.append("broken") or None)
+    isolated_settings.write_bytes(complete[:-1])  # undecodable for good (a hand edit)
+    assert cfg.load_settings()["TOTAL_BUDGET"] == cfg.SETTINGS_DEFAULTS["TOTAL_BUDGET"]
+    assert taken == ["broken"]
+
+    # Windows: an open that meets a writer's replace is refused (a sharing violation): read again behind its lock.
+    isolated_settings.write_bytes(complete)
+    taken.clear()
+    opened, real_open = [], pathlib.Path.open
+
+    def refused_once(path, *args, **kwargs):
+        if path == isolated_settings and not opened:
+            opened.append(1)
+            raise PermissionError(13, "The process cannot access the file")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", refused_once)
+    monkeypatch.setattr(cfg, "_acquire_settings_lock", lambda timeout=2.0: taken.append("replacing") or None)
+    assert cfg.load_settings()["TOTAL_BUDGET"] == 33.0 and taken == ["replacing"]
+    isolated_settings.unlink()  # an absent document is no writer's: defaults, no lock
+    taken.clear()
+    assert cfg.load_settings()["TOTAL_BUDGET"] == cfg.SETTINGS_DEFAULTS["TOTAL_BUDGET"] and taken == []

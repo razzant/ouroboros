@@ -1,17 +1,16 @@
-"""Static web serving: the selected main interface and the core's own web resources.
+"""One generation's selected interface and optional complete setup/login views.
 
-The builtin ``web/`` tree always belongs to the core: the onboarding wizard loads its
-whole module graph from ``/onboarding/static`` and the author kit reads its controls
-from it. ``OUROBOROS_UI_DIR`` selects only what ``/`` and ``/static`` serve: empty is
-the builtin interface, ``none`` serves no main interface (API, WebSocket, onboarding,
-extensions and files stay), and an absolute or ``~`` directory with the ``web/`` layout
-is a trusted alternative published as-is. The choice is applied once per server
-generation (``ServedUI.apply`` in the lifespan), so serving, ``/api/state`` and the
-builtin page marker always describe the same applied selection.
+``OUROBOROS_UI_DIR`` selects ``/`` and ``/static``; a directory may also provide
+``onboarding.html`` and ``auth/index.html``. Its ``auth/`` is a public login asset
+bundle. Missing optional pages fall back whole-page: the builtin wizard's graph
+under ``/onboarding/static`` and the optional author kit always remain builtin.
+Empty selects builtin, ``none`` serves no main interface, and a trusted directory
+is published as-is. ``ServedUI.apply`` pins the choice once per server generation.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import logging
 import os
@@ -29,6 +28,9 @@ UI_DIR_SETTING = "OUROBOROS_UI_DIR"
 # Response-only ownership marker of the builtin index (never written into web/index.html):
 # a page carrying it was served by the core itself and follows that core's served-UI facts.
 UI_OWNER_MARKER = '<meta name="ouroboros-ui-owner" content="core">'
+# Response-only too: the installation's appearance scope, which web/theme.js reads before any style.
+APPEARANCE_SCOPE_META = "ouroboros-appearance-scope"
+TELEGRAM_MINIAPP_HEADER = "X-Ouroboros-Telegram-MiniApp"
 _NO_STORE = {"Cache-Control": "no-store"}
 _NO_MAIN_UI_PAGE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><title>Ouroboros</title></head>
@@ -90,25 +92,38 @@ class NoCacheStaticFiles:
             await self._app(scope, receive, send)
 
 
-def _core_owned(html: str) -> str:
-    """Stamp the ownership marker first in ``<head>`` (browsers hoist a leading meta there)."""
+def appearance_scope(drive_root: Any) -> str:
+    """The installation's appearance scope: a digest of its own identity, the same on every port and
+    another for every other installation (a copied or moved data root is one). ``""`` until the
+    identity is minted, then kept through a record that fails to read again. Logical separation,
+    never a secret: the browser keeps the choice in a cookie of this name, which reaches every
+    server on that host."""
+    from ouroboros.install_identity import recorded_id
+
+    identity = recorded_id(drive_root) if drive_root else ""
+    return hashlib.sha256(f"ouroboros appearance scope\0{identity}".encode()).hexdigest()[:16] if identity else ""
+
+
+def _core_owned(html: str, facts: str = "") -> str:
+    """Stamp the ownership marker and the response's other ``facts`` first in ``<head>`` (browsers hoist a leading meta there)."""
     if "<head>" in html:
-        return html.replace("<head>", "<head>" + UI_OWNER_MARKER, 1)
-    return UI_OWNER_MARKER + html
+        return html.replace("<head>", "<head>" + UI_OWNER_MARKER + facts, 1)
+    return UI_OWNER_MARKER + facts + html
 
 
-def make_index_page(web_dir: pathlib.Path):
-    """The builtin index: core-owned, so marked and never cached across a selection change."""
+def make_index_page(web_dir: pathlib.Path, head=None):
+    """The builtin index: core-owned, so marked and never cached across a selection change.
+    ``head(request)`` names the response's further leading metas (the appearance scope)."""
     async def index_page(_request) -> HTMLResponse:
         index = web_dir / "index.html"
         if index.exists():
             html = index.read_bytes().decode("utf-8")  # the checkout's exact bytes, line endings included
-            if _request.headers.get("X-Ouroboros-Telegram-MiniApp") == "1":
+            if _request.headers.get(TELEGRAM_MINIAPP_HEADER) == "1":
                 # The authenticated sidecar proxy already stamps this presentation
                 # hint. Bootstrap navigates to this document, so it needs its own SDK.
                 html = html.replace("<html", '<html data-ouroboros-host="telegram"', 1)
                 html = html.replace("<head>", '<head><script async src="https://telegram.org/js/telegram-web-app.js"></script>', 1)
-            return HTMLResponse(_core_owned(html), headers=_NO_STORE)
+            return HTMLResponse(_core_owned(html, head(_request) if head else ""), headers=_NO_STORE)
         return HTMLResponse("<html><body><h1>Ouroboros — web/ not found</h1></body></html>", status_code=404)
 
     return index_page
@@ -177,6 +192,8 @@ def select_ui(value: Any, builtin_dir: pathlib.Path, *, protected: tuple[pathlib
 class _Generation(NamedTuple):
     selection: UiSelection
     static: Any  # the ASGI app serving /static, None without a main interface
+    auth_static: Any = None  # the selected directory's intentionally public auth/ bundle
+    drive_root: Any = None  # whose installation identity names the appearance scope
 
 
 class ServedUI:
@@ -192,16 +209,29 @@ class ServedUI:
         self.builtin_dir = resolve_web_dir(self.repo_dir)
         self.builtin_dir.mkdir(parents=True, exist_ok=True)
         self._builtin_static = NoCacheStaticFiles(directory=str(self.builtin_dir))
-        self._builtin_page = make_index_page(self.builtin_dir)
+        self._builtin_page = make_index_page(self.builtin_dir, head=lambda request: self.appearance_meta(request.headers))
         self._current = _Generation(UiSelection("builtin", self.builtin_dir), self._builtin_static)
 
     @property
     def selection(self) -> UiSelection:
         return self._current.selection
 
+    def appearance_meta(self, headers: Mapping[str, str]) -> str:
+        """The appearance scope's meta for a builtin entry page (``/``, ``/onboarding``, the network login form), else ``""``.
+
+        Offered only while this generation serves the builtin interface, so every page of one origin keeps the
+        choice in one place, and never to the Telegram Mini App: its proxy origin does not move with the port, and
+        its connecting page reads that origin's own store."""
+        current = self._current
+        if current.selection.source != "builtin" or headers.get(TELEGRAM_MINIAPP_HEADER) == "1":
+            return ""
+        scope = appearance_scope(current.drive_root)
+        return f'<meta name="{APPEARANCE_SCOPE_META}" content="{scope}">' if scope else ""
+
     def mounts(self) -> list[Mount]:
-        """The core's own resources (always builtin), then the selected ``/static``."""
+        """Public selected login assets, builtin recovery resources, then selected main assets."""
         return [
+            Mount("/auth", app=self.auth_assets, name="auth_assets"),
             Mount("/onboarding/static", app=self._builtin_static, name="onboarding_static"),
             Mount("/static", app=self.static, name="static"),
         ]
@@ -212,21 +242,24 @@ class ServedUI:
         from ouroboros.server_process import record_applied_restart_settings
 
         requested = str(settings.get(UI_DIR_SETTING) or "")
+        drive_root = getattr(getattr(app, "state", None), "drive_root", None)
         try:
-            drive_root = getattr(getattr(app, "state", None), "drive_root", None)
             owned = (drive_root, self.repo_dir, pathlib.Path(SETTINGS_PATH).parent)  # data, source, credentials
             protected = tuple(pathlib.Path(p).resolve() for p in owned if p)
             selection = select_ui(requested, self.builtin_dir, protected=protected)
             static = None
+            auth_static = None
             if selection.source == "builtin":
                 static = self._builtin_static
             elif selection.source == "directory":
                 static = NoCacheStaticFiles(directory=str(selection.root))
+                auth_static = NoCacheStaticFiles(directory=str(selection.root / "auth"), check_dir=False)
         except Exception as exc:  # the core, its API and its controls start whatever the selection
             selection = UiSelection("builtin", self.builtin_dir,
                                     f"{UI_DIR_SETTING} {requested!r} was not applied: {type(exc).__name__}: {exc}")
             static = self._builtin_static
-        self._current = _Generation(selection, static)
+            auth_static = None
+        self._current = _Generation(selection, static, auth_static, drive_root)
         app.state.served_ui = self
         record_applied_restart_settings({UI_DIR_SETTING: requested})
         if selection.error:
@@ -235,6 +268,33 @@ class ServedUI:
             log.info("Main interface: %s%s", selection.source,
                      f" ({selection.root})" if selection.source == "directory" else "")
         return selection
+
+    def custom_page(self, relative_path: str) -> str | None:
+        """Read an optional whole page from the applied directory, never from saved intent.
+
+        The two callers name onboarding.html or auth/index.html. Read before sending
+        headers so a known read failure can still choose a complete builtin page.
+        Missing is ordinary; unreadable or invalid UTF-8 is a diagnosed fallback.
+        """
+        selection = self._current.selection
+        if selection.source != "directory":
+            return None
+        path = selection.root / relative_path
+        try:
+            return path.read_bytes().decode("utf-8")
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeError) as exc:
+            log.warning("Could not read selected interface page %s; using builtin: %s", path, exc)
+            return None
+
+    async def auth_assets(self, scope, receive, send):
+        """Serve only the selected login bundle; login/logout are reserved for the auth gate."""
+        current = self._current
+        app = current.auth_static
+        if app is None or not (current.selection.root / "auth").is_dir():
+            app = PlainTextResponse("Not Found", status_code=404)
+        await app(scope, receive, send)
 
     async def index_page(self, request):
         current = self._current

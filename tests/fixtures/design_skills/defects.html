@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Seeded layout defects</title>
+<!-- Each block plants one defect that measure.js must report; clean.html is the same page without them. -->
+<style>
+  body { margin: 0; padding: 24px; background: #ffffff; color: #1c2230; font: 16px/1.5 system-ui, sans-serif; }
+  .tabs { width: 300px; display: flex; gap: 8px; overflow-x: auto; white-space: nowrap; margin-bottom: 24px; }
+  .tab { flex: none; min-height: 32px; padding: 6px 14px; border: 1px solid #9aa3b2; border-radius: 16px; background: #f3f4f7; color: #1c2230; font: inherit; }
+  .card { height: 80px; overflow: hidden; width: 360px; padding: 12px; background: #f3f4f7; margin-bottom: 24px; }
+  .card p { margin: 0; }
+  .label-row { position: relative; margin-bottom: 24px; }
+  .label { margin: 0; }
+  .badge { position: absolute; left: 40px; top: 0; width: 120px; height: 28px; background: #ffd966; }
+  .tail { position: absolute; top: 540px; left: 24px; margin: 0; }
+  .bar { position: fixed; left: 0; right: 0; bottom: 0; height: 72px; background: #e9ecf2; display: flex; align-items: center; padding: 0 24px; }
+  .bar button { min-height: 40px; padding: 8px 16px; border: 1px solid #9aa3b2; border-radius: 20px; background: #ffffff; color: #1c2230; font: inherit; }
+  @font-face { font-family: "Ghost Face"; src: url(missing-ghost-face.woff2) format("woff2"); }
+  .side { position: absolute; left: 440px; top: 24px; width: 320px; display: grid; gap: 12px; justify-items: start; }
+  .side p { margin: 0; }
+  .self-cut, .ellipsis { width: 160px; overflow: hidden; white-space: nowrap; }
+  .ellipsis { text-overflow: ellipsis; }
+  .pair { display: flex; gap: 1px; }
+  .pair button, .icon { min-height: 32px; padding: 6px 12px; border: 1px solid #9aa3b2; border-radius: 8px; background: #f3f4f7; color: #1c2230; font: inherit; }
+  .icon { width: 16px; height: 16px; min-height: 0; padding: 0; }
+  .tiny { font-size: 9px; }
+  .faint { padding: 4px 8px; background: #a0a0a0; color: #8a8a8a; }
+  .pale { padding: 4px 8px; color: oklch(0.86 0 0); }
+  .washed { padding: 4px 8px; background: linear-gradient(90deg, #ffffff, #c9d2e3); }
+  .ghost { font-family: "Ghost Face", sans-serif; }
+  .nudge { margin-left: 2px !important; }
+  .stack { display: flex; }
+  .stack .under { margin-left: -6px; }
+  .wide { position: absolute; left: 700px; top: 470px; width: 200px; height: 10px; background: #eef1f6; }
+</style>
+</head>
+<body>
+  <div class="tabs" id="tabs">
+    <button class="tab">General</button><button class="tab">Models</button><button class="tab">Skills</button>
+    <button class="tab">Network</button><button class="tab">Advanced</button>
+  </div>
+  <div class="card" id="card">
+    <p>This paragraph is longer than its card. The card has a fixed height and hides what does not fit,
+      so the last lines of this text are cut off at the bottom edge of the card and never reach the reader.</p>
+  </div>
+  <div class="label-row"><p class="label" id="label">Notification sound settings</p><div class="badge" id="badge"></div></div>
+  <p class="tail" id="tail">The last line of content sits where the fixed bar is drawn.</p>
+  <div class="side">
+    <p class="self-cut" id="self-cut">A label far too long for the narrow box it sits in</p>
+    <p class="ellipsis" id="ellipsis">A label shortened on purpose with an ellipsis</p>
+    <div class="pair"><button class="first">Save</button><button class="second">Cancel</button></div>
+    <button class="icon" id="icon" aria-label="Close"></button>
+    <p class="tiny" id="tiny">Fine print that is too small to read</p>
+    <p class="faint" id="faint">Grey on grey</p>
+    <p class="pale" id="pale">Pale oklch text on white</p>
+    <p class="washed" id="washed">Text over a gradient</p>
+    <p class="ghost" id="ghost">A face that never loaded</p>
+    <img id="broken" src="missing-picture.png" width="20" height="20" alt="">
+    <p class="nudge" id="nudge">Two pixels off the column</p>
+    <div class="stack pair"><button class="over">Undo</button><button class="under">Redo</button></div>
+  </div>
+  <div class="wide" id="wide"></div>
+  <div class="bar" id="bar"><button>Send</button></div>
+</body>
+</html>

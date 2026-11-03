@@ -13,6 +13,7 @@ writer explicitly.
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -108,8 +109,7 @@ def test_owner_pause_settlement_never_overwrites_a_newer_resume_or_pause(tmp_pat
         return _quiet_custody(root, task_id, **kw)
 
     monkeypatch.setattr(budget_pause, "observe_task_runs", observe)
-    monkeypatch.setattr(owner_pause_control, "_LAST_SETTLE_CHECK", {})
-    settled = owner_pause_control.settle_requested_owner_pauses(queue, now=100.0)
+    settled = owner_pause_control.settle_requested_owner_pauses(queue)
     row = budget_pause.budget_pause_row(tmp_path, "solo")
     if kind == "none":
         # The fix is not vacuous: an uncontested observation still settles the tree.
@@ -181,8 +181,7 @@ def test_one_superseded_member_neither_blocks_its_sibling_nor_the_tree_census(tm
     monkeypatch.setattr(owner_pause_control, "refresh_owner_pause_tree",
                         lambda root_id: census.append(root_id) or real_refresh(root_id))
     monkeypatch.setattr(budget_pause, "observe_task_runs", observe)
-    monkeypatch.setattr(owner_pause_control, "_LAST_SETTLE_CHECK", {})
-    assert owner_pause_control.settle_requested_owner_pauses(queue, now=100.0) == []
+    assert owner_pause_control.settle_requested_owner_pauses(queue) == []
     a, b = (budget_pause.budget_pause_row(tmp_path, member) for member in ("child-a", "child-b"))
     assert a["grant"]["grant_id"] == "g-newer" and a["resume_generation"] == 1
     assert a["settlement"] == owner_pause.SETTLEMENT_EXTERNAL_RUNNING, "the lost write was dropped, not retried blind"
@@ -191,7 +190,7 @@ def test_one_superseded_member_neither_blocks_its_sibling_nor_the_tree_census(tm
     assert owner_pause.read_fence(tmp_path, "root-1")["state"] == owner_pause.FENCE_REQUESTED
 
     # The next pass re-observes the member under its current identity and settles the tree.
-    assert owner_pause_control.settle_requested_owner_pauses(queue, now=110.0) == ["root-1"]
+    assert owner_pause_control.settle_requested_owner_pauses(queue) == ["root-1"]
     a = budget_pause.budget_pause_row(tmp_path, "child-a")
     assert a["settlement"] == owner_pause.SETTLEMENT_SETTLED and a["grant"]["grant_id"] == "g-newer"
     assert owner_pause.read_fence(tmp_path, "root-1")["state"] == owner_pause.FENCE_PAUSED
@@ -319,7 +318,7 @@ def test_warm_park_reread_never_restores_a_resumed_direct_stack(tmp_path, monkey
         return observed
 
     def tick():
-        box["settled"] = owner_pause_control.settle_requested_owner_pauses(queue, now=100.0)
+        box["settled"] = owner_pause_control.settle_requested_owner_pauses(queue)
 
     def poll(seconds):  # the parked direct actor's poll; other threads sleep for real
         if threading.current_thread() is not actor or "tick" in box:
@@ -338,7 +337,6 @@ def test_warm_park_reread_never_restores_a_resumed_direct_stack(tmp_path, monkey
         return None
 
     monkeypatch.setattr(budget_pause, "observe_task_runs", observe)
-    monkeypatch.setattr(owner_pause_control, "_LAST_SETTLE_CHECK", {})
     monkeypatch.setattr(owner_wait.time, "sleep", poll)
     try:
         cause = owner_wait.park_owner_pause_warm(limit, ctx, fence=owner_pause.read_fence(tmp_path, "author"),
@@ -389,7 +387,8 @@ def test_warm_park_reread_never_rewrites_a_granted_pool_mirror(pool, monkeypatch
 
     requested = {"custody_read": "ok", "runs": [{"run_id": "run-own", "state": "stop_requested"}]}
     confirmed = {"custody_read": "ok", "runs": [{"run_id": "run-own", "state": "stop_confirmed"}]}
-    wait = {**pool.wait, "quiz_id": "", "reason": "owner_pause", "owner_pause": {"external_runs": requested}}
+    wait = {**pool.wait, "quiz_id": "", "reason": "owner_pause", "budget_paused_sec": 0.0,
+            "sleep_started_at": time.time(), "owner_pause": {"external_runs": requested}}
     worker_owner_wait.handle_owner_wait({**pool.event, "checkpoint": wait}, workers)
     assert pool.original.in_q.get_nowait()["phase"] == "parked"
     with queue._queue_lock:
@@ -431,7 +430,8 @@ def test_warm_park_reread_drops_only_a_superseded_row(pool, monkeypatch, landed)
     from supervisor import owner_pause_control, queue, worker_owner_wait, workers
 
     requested = {"custody_read": "ok", "runs": [{"run_id": "run-own", "state": "stop_requested"}]}
-    wait = {**pool.wait, "quiz_id": "", "reason": "owner_pause", "owner_pause": {"external_runs": requested}}
+    wait = {**pool.wait, "quiz_id": "", "reason": "owner_pause", "budget_paused_sec": 0.0,
+            "sleep_started_at": time.time(), "owner_pause": {"external_runs": requested}}
     worker_owner_wait.handle_owner_wait({**pool.event, "checkpoint": wait}, workers)
     assert pool.original.in_q.get_nowait()["phase"] == "parked"
     snapshot = {**pool.meta, "owner_wait": dict(pool.meta["owner_wait"])}

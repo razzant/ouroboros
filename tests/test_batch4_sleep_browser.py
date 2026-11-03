@@ -110,7 +110,9 @@ def test_sleep_lends_capacity_preserves_identity_and_owner_hold(direct_server_wi
                 record['sleep_snapshot'] = snapshot(root)
                 record['sleep_queue_api'] = b4._get(page, url, '/api/tasks?queue_only=1')
                 open_activity_fresh(page)
-                sleep_label = page.locator('.activity-row', has_text='Batch4 Alpha').inner_text()
+                sleeper = page.locator('.activity-row', has_text='Batch4 Alpha')
+                expect(sleeper.locator('.activity-sub')).to_contain_text('Waiting · Sleeping until it is woken', timeout=30_000)
+                sleep_label = sleeper.inner_text()
                 record['sleep_activity_label'] = sleep_label
                 page.screenshot(path=str(evidence / '01-sleeping-capacity-released.png'))
 
@@ -147,7 +149,7 @@ def test_sleep_lends_capacity_preserves_identity_and_owner_hold(direct_server_wi
                 assert model.main_calls('ALPHA') == 1
                 record['held_queue_api'] = b4._get(page, url, '/api/tasks?queue_only=1')
                 open_activity_fresh(page)
-                hold_label = 'paused' if mode == 'warm' else 'held after Restart'
+                hold_label = 'Paused' if mode == 'warm' else 'Paused · Held after a restart'
                 expect(page.locator('.activity-row', has_text='Batch4 Alpha')).to_contain_text(hold_label, timeout=30_000)
                 page.screenshot(path=str(evidence / '02-ready-but-owner-held.png'))
                 trigger = page.locator(f'[data-act="task-control"][data-id="{b4.ALPHA}"]')
@@ -159,7 +161,7 @@ def test_sleep_lends_capacity_preserves_identity_and_owner_hold(direct_server_wi
                 record['resumed_queue_api'] = b4._get(page, url, '/api/tasks?queue_only=1')
                 open_activity_fresh(page)
                 active = page.locator('.activity-row', has_text='Batch4 Alpha')
-                expect(active).to_contain_text('running', timeout=30_000)
+                expect(active).to_contain_text('Working', timeout=30_000)
                 expect(active).not_to_contain_text('sleep')
                 page.screenshot(path=str(evidence / '03-resumed-running-not-sleeping.png'))
                 assert running['id'] == b4.ALPHA and running['started_at'] == checkpoint_started

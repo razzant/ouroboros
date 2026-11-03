@@ -32,10 +32,10 @@ Lifecycle belongs to the installation, not the process that first needed it:
   invalid discovery and incompatible/malformed replies never permit that
   fallback. Never stop a live responder known only by name or by
   the descriptor port (a foreign daemon on a recycled port stays disclosed, not
-  killed). A newer runtime pin is never hot-swapped: the live engine keeps
-  serving until a planned restart whose landed checkout pins another engine
-  ends it (``server_restart._stop_owned_daemon_for_new_pin``), the owner's
-  Restart or Panic stops it, or it exits; the next start selects the pin.
+  killed). A runtime pin is never hot-swapped: the live engine keeps serving
+  until a planned restart onto another pin, not a lower release, ends it
+  (``server_restart._stop_owned_daemon_for_new_pin``), the owner's Restart or
+  Panic stops it, or it exits; the next start selects the pin (PERSISTENCE.md).
 
 Zero auth logic lives here or anywhere in Ouroboros: login jobs, device-code
 custody, verification and rotation are the daemon's own product surface,
@@ -44,7 +44,6 @@ reached through the ``/v2`` control API (``gateways/claudexor.py``).
 
 from __future__ import annotations
 import json
-import re
 
 import logging
 import os
@@ -79,21 +78,15 @@ log = logging.getLogger(__name__)
 
 _OWNED_DIR_NAME = "claudexor"
 CUSTODY_PURPOSE = "claudexor_daemon"
-# Admission, distinct from reachability: a 3.4+ daemon serves the authenticated
-# handshake BEFORE its admission gate (the body says `servingMode`), while every
-# product route answers 503 `daemon_recovery_only` (retryable) until journal
-# recovery completes. Recovery can persist indefinitely (blocked journal
-# partitions), so the wait is bounded and ends in the typed refusal the 503
-# already produces (D28) — never a silent indefinite wait, never a kill of a
-# recovering daemon. The 150 ms cadence is the engine CLI's own.
+# Admission, distinct from reachability: a 3.4+ daemon serves the authenticated handshake
+# BEFORE its admission gate (the body says `servingMode`) while every product route answers
+# 503 `daemon_recovery_only` (retryable) until journal recovery completes; recovery can last
+# indefinitely, so the wait is bounded and ends in the typed refusal the 503 already produces
+# (D28) — never a silent indefinite wait, never a kill. The 150 ms cadence is the engine's own.
 
-# Engines at/above this version own the limit-action default themselves
-# (kind-aware "auto" semantics, Clawdexor A6): subscription profiles rotate,
-# metered API keys fail, and the OWNER's explicit choices always win. Blanket
-# "rotate" writes from this side would overwrite that judgment, so reconcile
-# skips those engines entirely. Confirmed shipped in the actual 3.6.0 release
-# (claudexor 31aa51c9, schema limit_action enum carries kind-aware "auto"), so
-# this floor names the real release wave (issue #246); it is deliberately not
+# Engines at/above this version own the limit-action default themselves (kind-aware "auto",
+# Clawdexor A6): blanket "rotate" writes would overwrite the owner's choices, so reconcile
+# skips them. Shipped in 3.6.0 (claudexor 31aa51c9, issue #246); deliberately not
 # CLAUDEXOR_MIN_VERSION (owner decision 5=A: no floor bump).
 _ROTATION_AUTO_SEMANTICS_MIN_VERSION = "3.6.0"
 _ROTATION_RECEIPT_NAME = "claudexor_rotation_provisioning.json"
@@ -108,6 +101,12 @@ from ouroboros.config import (
     CLAUDEXOR_OPERATOR_STOP_TIMEOUT_SEC as _OPERATOR_STOP_TIMEOUT_SEC,
     CLAUDEXOR_STOP_EXIT_WAIT_SEC as _STOP_EXIT_WAIT_SEC,
 )
+
+
+def _release(gateway: Any) -> None:
+    """Close a gateway (a double may offer only the context protocol)."""
+    close = getattr(gateway, "close", None)
+    close() if callable(close) else gateway.__exit__(None, None, None)
 
 
 def _handshake_serving_mode(body: Any) -> str:
@@ -372,6 +371,7 @@ class OwnedClaudexorDaemon:
         self._proven_engine_version = ""
         self._engine_build_sha = ""
         self._silent_listener = False  # last probe: a listener accepted, then sent no answer
+        self._attach = threading.local()  # the calling thread's attach request (ensure_owned_gateway)
         self._generation = 0
         self._stopping = False
         self._panic_requested = False
@@ -391,18 +391,11 @@ class OwnedClaudexorDaemon:
     # -- state ------------------------------------------------------------
 
     def _classify_liveness(self, *, timeout_sec: Optional[float] = None) -> tuple:
-        """(endpoint_or_None, state, detail) — the ONE liveness probe.
-
-        The bearer token in OUR descriptor is the identity proof: each home's
-        daemon mints its own random token, so an AUTHENTICATED handshake can
-        only succeed against the daemon serving our home. An auth refusal
-        (401/403) therefore means something ELSE answered on the descriptor's
-        stale port — a foreign daemon, alive, not ours: disclosed, never
-        killed, never adopted. A transport failure is distinguished privately
-        from other stale evidence so explicit stop can use measured custody;
-        protocol, discovery and malformed-response failures confer no such
-        authority. Public status still projects all those failures as stale.
-        """
+        """(endpoint_or_None, state, detail) — the ONE liveness probe. Our descriptor's bearer
+        token is the identity proof, so a 401/403 is a foreign daemon on a recycled port
+        (disclosed, never killed or adopted); a transport failure is kept apart from other
+        stale evidence so explicit stop can use measured custody; protocol, discovery and
+        malformed-response failures confer no such authority."""
         from ouroboros.gateways.claudexor import (
             ClaudexorGateway,
             ClaudexorUnavailable,
@@ -410,6 +403,11 @@ class OwnedClaudexorDaemon:
         )
         import httpx
 
+        deadline = getattr(self._attach, "deadline", None)
+        if deadline is not None and time.monotonic() >= deadline:
+            # The attaching caller's allowance ended: no request starts after it. The last
+            # probe's facts stand, so the start's typed outcome is the one it already earned.
+            return None, "allowance_spent", "the caller's allowance ended before this probe"
         self._silent_listener = False
         if not owned_daemon_provisioned():
             self._engine_version = self._engine_build_sha = ""
@@ -418,32 +416,31 @@ class OwnedClaudexorDaemon:
             endpoint = discover_daemon_at(owned_config_dir())
         except ClaudexorUnavailable as exc:
             return None, "stale", f"{exc.code}: {exc}"
+        sink = getattr(self._attach, "sink", None)
+        timeout_sec = self._attach_bound(timeout_sec)
+        gateway = ClaudexorGateway(endpoint)
         try:
-            with ClaudexorGateway(endpoint) as gateway:
-                handshake = (
-                    gateway.handshake()
-                    if timeout_sec is None
-                    else gateway.handshake(timeout_sec=timeout_sec)
-                )
-                self._engine_version = gateway.engine_version
-                self._proven_engine_version = str(gateway.engine_version or "")
-                engine = handshake.get("engine") if isinstance(handshake.get("engine"), dict) else {}
-                self._engine_build_sha = str(engine.get("sha") or "")
-                # Reachable-recovering is still "running" (the handshake proves
-                # identity and liveness); admission is a separate, later
-                # question answered by `ensure_owned_gateway`'s own handshakes.
+            handshake = gateway.handshake(**({} if timeout_sec is None else {"timeout_sec": timeout_sec}))
+            self._engine_version = gateway.engine_version
+            self._proven_engine_version = str(gateway.engine_version or "")
+            engine = handshake.get("engine") if isinstance(handshake.get("engine"), dict) else {}
+            self._engine_build_sha = str(engine.get("sha") or "")
+            # Reachable-recovering is still "running" (the handshake proves identity and
+            # liveness); admission is the attaching caller's later question on this same gateway.
+            if sink is not None:
+                sink.append((gateway, handshake))
+            else:
+                _release(gateway)
             return endpoint, "running", ""
         except ClaudexorUnavailable as exc:
+            _release(gateway)
             self._engine_version = self._engine_build_sha = ""
             self._silent_listener = isinstance(exc.__cause__, (httpx.ReadTimeout, httpx.ReadError, httpx.RemoteProtocolError))
             status = int(getattr(exc, "status_code", 0) or 0)
             if status in (401, 403):
                 return None, "foreign_daemon", (
-                    f"{exc.code}: a live daemon answered on the owned home's "
-                    "descriptor port but REFUSED our home's token — a foreign "
-                    "daemon recycled the port. It is not ours: disclosed, not "
-                    "killed; a restart of OUR daemon rewrites the descriptor."
-                )
+                    f"{exc.code}: a live daemon answered on the owned home's descriptor port but REFUSED "
+                    "our home's token — a foreign daemon recycled the port; not ours, disclosed, not killed.")
             # Local request/configuration errors and decoded response failures
             # do not prove an unavailable network; received refusals still win.
             if status < 400 and exc.code == "daemon_unreachable" and isinstance(
@@ -452,25 +449,37 @@ class OwnedClaudexorDaemon:
             ):
                 return None, _TRANSPORT_UNREACHABLE, f"{exc.code}: {exc}"
             return None, "stale", f"{exc.code}: {exc}"
+        except BaseException:
+            _release(gateway)  # a decoded-body or thread-retire failure leaves no open client behind
+            raise
+
+    def _attach_bound(self, bound: Optional[float] = None) -> Optional[float]:
+        """The probe's read bound under the attaching caller's clock (``ensure_owned_gateway``):
+        the phase's own bound (``bound`` when the phase names one, as a readiness poll or the
+        re-probe after runtime preparation does; else a passive sweep's short bound, else the
+        gateway's default read bound) clamped to what remains of the caller's allowance,
+        floored so a loopback handshake can complete; outside an attach, the bound as given."""
+        from ouroboros.gateways.claudexor import _READ_TIMEOUT_SEC
+
+        if bound is None:
+            bound = getattr(self._attach, "bound", None)
+        deadline = getattr(self._attach, "deadline", None)
+        if deadline is None:
+            return bound
+        return max(min(_READ_TIMEOUT_SEC if bound is None else bound, deadline - time.monotonic()),
+                   _ADMISSION_POLL_SEC / 3.0)
 
     @property
     def engine_version(self) -> str:
         """Serving version PROVEN by the last SUCCESSFUL handshake here, else ''.
 
-        A request-shape floor reads this before it has a gateway, so a FAILED
-        probe leaves it exactly as it was: a handshake timeout, a token refusal
-        or a momentarily unreachable socket is silence about the engine, never
-        evidence that a version it already served is gone. Blanking it there
-        would flip a running caller's request shape between the candidate it
-        was priced on and the send, which is a different bug wearing this
-        field's clothes. Only another successful handshake replaces the value,
-        and that is exactly how a deliberate stop or a planned restart on a new
-        pin publishes its engine: the next ``ensure_owned_gateway`` re-proves
-        the serving version, and until then the last proven one stands. Engine
-        DOWNGRADE is not a supported direction, so a supported replacement can
-        only prove the same version or a newer one. ``_engine_version`` stays
-        the liveness projection — current probe, blanked on failure — which is
-        what status and the pin comparison read.
+        A request-shape floor reads this before it has a gateway, so a FAILED probe
+        leaves it as it was: a timeout, a token refusal or an unreachable socket is
+        silence about the engine, never evidence that a version it served is gone;
+        blanking it would flip a running caller's request shape mid-turn. Only another
+        successful handshake replaces it (downgrade is unsupported, so a replacement
+        proves the same version or newer). ``_engine_version`` stays the liveness
+        projection, blanked on failure, which status and the pin comparison read.
         """
         return self._proven_engine_version
 
@@ -725,7 +734,7 @@ class OwnedClaudexorDaemon:
         from ouroboros.process_custody import spawn_supervised
         from ouroboros.platform_layer import subprocess_new_group_kwargs
 
-        log.info("Spawning owned claudexord under %s from %s", config_dir, runtime.get("source") or "external")
+        log.info("Spawning owned claudexord under %s from %s on %s", config_dir, runtime.get("source") or "external", command[0])
         _write_ownership_marker()
         with self._lock:
             self._check_start_generation(generation)
@@ -761,10 +770,14 @@ class OwnedClaudexorDaemon:
             self.panic_stop(request_only=True)
 
     def _wait_for_start(self, generation: int, startup_wait_sec: Optional[float]) -> Any:
-        from ouroboros.gateways.claudexor import SHORT_POLL_TIMEOUT_SEC, ClaudexorUnavailable
+        from ouroboros.gateways.claudexor import _OBSERVATION_READ_TIMEOUT, SHORT_POLL_TIMEOUT_SEC, ClaudexorUnavailable
 
         wait = _SPAWN_WAIT_SEC if startup_wait_sec is None else max(0.0, float(startup_wait_sec))
-        deadline = time.monotonic() + wait
+        started = time.monotonic()
+        deadline = started + wait
+        caller = getattr(self._attach, "deadline", None)  # the attaching caller's own allowance ends it sooner
+        if caller is not None and caller < deadline:
+            deadline, wait = caller, max(0.0, caller - started)
         while True:
             self._check_start_generation(generation)
             remaining = deadline - time.monotonic()
@@ -780,10 +793,13 @@ class OwnedClaudexorDaemon:
         pids = self._startup_pids()
         detail = self._startup_diagnostic(pids)
         if pids:  # a live listener that accepted and stayed silent is not answering, not starting
-            code, said = (("daemon_not_answering", f"process is alive but did not answer in this {wait:.1f}s wait; retry joins the same daemon")
+            code, said = (("daemon_not_answering", f"process is alive but did not answer in this {wait:.1f}s wait "
+                           f"({_OBSERVATION_READ_TIMEOUT}); retry joins the same daemon")
                           if self._silent_listener else ("daemon_starting", f"is still starting after this {wait:.1f}s wait; retry joins the same startup"))
             self._last_error = f"{code}: {detail}"
-            raise ClaudexorUnavailable(code, f"owned daemon {said}; {detail}", status_code=503)
+            raise ClaudexorUnavailable(code, f"owned daemon {said}; {detail}", status_code=503,
+                                       observation_timeout=self._silent_listener,
+                                       observation_reason=_OBSERVATION_READ_TIMEOUT if self._silent_listener else "")
         with self._lock:
             self._check_start_generation(generation)
         failure = self._settle_exited_child()
@@ -1226,26 +1242,18 @@ def warm_owned_daemon() -> bool:
 def owned_engine_version() -> str:
     """The serving version proven by the last SUCCESSFUL handshake, no new I/O.
 
-    A feature floor that must be decided BEFORE a gateway exists (the model
-    lane freezes its request bytes before it connects) reads the version the
-    previous ensure/handshake already proved, and keeps reading the same answer
-    while probes fail — several callers probe this singleton concurrently, so a
-    transient failure must not change one caller's request shape mid-turn.
-    Empty means no handshake has succeeded in this process yet, and every floor
-    then fails CLOSED — a process's first model call sends the legacy shape
-    rather than probing the control plane again or trusting the next-spawn pin,
-    which a live daemon may intentionally lag.
+    A feature floor decided BEFORE a gateway exists (the model lane freezes its request
+    bytes before it connects) reads the version a previous handshake proved and keeps
+    reading it while probes fail, so a transient failure never changes a caller's request
+    shape mid-turn. Empty means none succeeded in this process yet: every floor then fails
+    CLOSED (the legacy shape), never trusting the next-spawn pin a live daemon may lag.
     """
     return get_owned_daemon().engine_version
 
 
 def read_owned_gateway(*, timeout_sec: Optional[float] = None) -> Any:
-    """Connect to the owned engine for metadata, without starting or repairing it.
-
-    Discovery is explicitly owned-only, including on unprovisioned installs.
-    Callers own close(); discovery/handshake failures retain their typed refusal.
-    An attach-only selection reads the selected home and records no stop target.
-    """
+    """Connect to the owned engine for metadata, without starting or repairing it (owned-only
+    discovery; callers own close(); an attach-only selection records no stop target)."""
     from ouroboros.gateways.claudexor import ClaudexorGateway, discover_daemon_at
 
     home = attach_home()
@@ -1261,87 +1269,126 @@ def read_owned_gateway(*, timeout_sec: Optional[float] = None) -> Any:
     return gateway
 
 
+def _caller_allowance() -> Optional[float]:
+    """What the calling operation has left of its OWN logical window (a review slot's clock, a
+    bounded tool call, a calendar deadline), read from the existing wait context; ``None`` when
+    the caller declared none."""
+    from ouroboros.model_wait import current_model_wait, dispatch_deadline_remaining_sec
+
+    owner = current_model_wait()
+    bounds = [dispatch_deadline_remaining_sec(), owner.execution_window_remaining() if owner is not None else None]
+    known = [bound for bound in bounds if bound is not None]
+    return min(known) if known else None
+
+
 def ensure_owned_gateway(*, admission_wait_sec: Optional[float] = None,
                          startup_wait_sec: Optional[float] = None) -> Any:
     """Return an authenticated gateway to the lazily ensured owned daemon.
 
-    This is the explicit start/probe seam — the ONE funnel every consumer
-    (delegation, review sessions, account surfaces, login) passes through,
-    which is why the rotation reconcile rides it: spawn AND owned-attach paths,
-    on every ensure, best-effort (see ``reconcile_rotation``); never attach-only.
-    The gateway transport itself stays pure I/O; callers own ``close()`` (or
-    use it as a context manager). ``stop()`` owns the separate marker, transport
-    and process-identity checks for stopping an attached daemon.
+    Every consumer starts/probes here; rotation reconciliation covers spawn and owned-attach
+    paths, never attach-only; callers close the gateway, ``stop()`` verifies custody.
 
-    ADMISSION is waited for here — outside the daemon manager's lock, the same
-    way for a fresh spawn and an attach. A daemon whose handshake explicitly
-    says ``servingMode=recovery_only`` answers every product route 503
-    (``daemon_recovery_only``, retryable), so the handshake is re-polled about
-    every 150 ms under a wall-clock deadline of ``admission_wait_sec`` seconds
-    (default ``_ADMISSION_WAIT_SEC``, resolved at call time so tests can shrink
-    it), each poll's read phase bounded by what is left of the window. Expiry
-    raises the SAME typed refusal the 503 produces — the dispatch table already
-    classifies it (auto → native with a loud marker, pin → blocked) — and the
-    recovering daemon is left alive (D28: bounded wait, then typed refusal;
-    never a silent indefinite wait, never a kill). ``admission_wait_sec=0`` is
-    the zero-wait variant for callers that must not stall on ADMISSION: a
-    recovering daemon is an immediate typed refusal there, and the initial
-    handshake below is read-bounded by the same small window. The wait bounds
-    admission only. ``startup_wait_sec`` separately narrows the caller's control
-    readiness wait (default ``config.CLAUDEXOR_STARTUP_WAIT_SEC``); its expiry keeps
-    live startup custody: ``daemon_starting``, or ``daemon_not_answering`` for a silent listener.
-    Ordinary attach probes retain their transport ceiling; runtime preparation
-    is separate from both waits. Neither zero-wait parameter promises zero
-    total latency or permission to stop the process.
-    An expired/failed admission also skips the reconcile: the recovering
-    daemon 503s settings reads anyway, and the next ensure retries it.
+    The probe that proves the daemon live (``_classify_liveness``) IS this call's handshake:
+    its open gateway comes back to this thread, so START never classifies by a second one
+    (27.10: that second, five-second handshake failed every review seat of a live, busy
+    daemon). A silent listener keeps its typed custody (``daemon_not_answering`` with
+    ``observation_reason=observation_read_timeout``); a START caller with no explicit wait
+    retries it within ITS OWN logical allowance (``_caller_allowance``), which no handshake
+    resets and which bounds EVERY probe and wait of the start: each probe's read (its phase's
+    bound clamped to the remainder, the re-probe after runtime preparation included; no probe
+    starts after the allowance), the readiness wait, the backoff (re-checked before another
+    probe) and the admission window below. Runtime preparation itself is not a probe and is
+    not clamped. A passive sweep (``admission_wait_sec=0``) bounds
+    its probe by ``SHORT_POLL_TIMEOUT_SEC`` and never retries. ADMISSION (``recovery_only``)
+    is re-polled on the same gateway under ``admission_wait_sec``, expiring into the typed
+    refusal the 503 produces (D28). ``startup_wait_sec`` narrows the readiness wait as before.
+    Neither zero-wait parameter promises zero total latency or permission to stop the
+    process. Failed admission skips reconciliation until the next ensure.
     """
     from ouroboros.gateways.claudexor import (
         SHORT_POLL_TIMEOUT_SEC, ClaudexorGateway, ClaudexorUnavailable,
     )
 
+    from ouroboros.delegate_recovery import owner_restart_in_progress
+    from ouroboros.config import DATA_DIR
+    if owner_restart_in_progress(DATA_DIR):
+        raise ClaudexorUnavailable("owner_restart", "The owning generation is restarting.")
+
     wait = _ADMISSION_WAIT_SEC if admission_wait_sec is None else max(
         0.0, float(admission_wait_sec))
     daemon = get_owned_daemon()
     home = attach_home()
+    sweep = admission_wait_sec is not None and wait <= 0
+    allowance = _caller_allowance() if admission_wait_sec is None and home is None else None
+    deadline = None if allowance is None else time.monotonic() + max(0.0, allowance)
+    gateway = body = None
     if home is not None:  # attach-only: no start, no runtime pin, no ownership claim
-        endpoint = attached_endpoint(home)
-    else:
-        endpoint = (daemon.ensure_running() if startup_wait_sec is None
-                    else daemon.ensure_running(startup_wait_sec=startup_wait_sec))
-    gateway = ClaudexorGateway(endpoint)
+        gateway = ClaudexorGateway(attached_endpoint(home))
+        try:
+            body = gateway.handshake(timeout_sec=max(wait, SHORT_POLL_TIMEOUT_SEC))
+        except Exception:
+            gateway.close()
+            raise
+    attach = getattr(daemon, "_attach", None)
+    while gateway is None:
+        fresh: list = []
+        proven = False
+        if attach is not None:  # the probe, the readiness wait and the admission poll all end at ``deadline``
+            attach.sink, attach.bound, attach.deadline = fresh, (SHORT_POLL_TIMEOUT_SEC if sweep else None), deadline
+        try:
+            endpoint = (daemon.ensure_running() if startup_wait_sec is None
+                        else daemon.ensure_running(startup_wait_sec=startup_wait_sec))
+            proven = True
+        except ClaudexorUnavailable as exc:
+            unanswered = exc.code in ("daemon_not_answering", "daemon_starting")
+            if deadline is None or not unanswered or time.monotonic() >= deadline:
+                raise
+            time.sleep(min(_ADMISSION_POLL_SEC, max(0.0, deadline - time.monotonic())))
+            if time.monotonic() >= deadline:
+                raise  # the backoff spent the allowance: no probe starts after it
+            continue
+        finally:
+            if attach is not None:
+                attach.sink = attach.bound = attach.deadline = None
+            for extra, _body in (fresh[:-1] if proven else fresh):
+                _release(extra)
+        if fresh:
+            gateway, body = fresh[-1]
+        else:  # a replaced probe proved nothing this caller can reuse: handshake once, as before
+            gateway = ClaudexorGateway(endpoint)
+            try:
+                body = gateway.handshake(timeout_sec=max(wait, SHORT_POLL_TIMEOUT_SEC))
+            except Exception:
+                gateway.close()
+                raise
     try:
-        # Read-bounded: a daemon that accepts the socket but withholds the
-        # handshake must not hold a zero/small-wait caller for the transport's
-        # 60s default read — the sweep's whole posture is "skip, next tick".
-        body = gateway.handshake(timeout_sec=max(wait, SHORT_POLL_TIMEOUT_SEC))
-        deadline = time.monotonic() + wait
+        admitted_from = time.monotonic()
+        admission = admitted_from + wait
+        if deadline is not None:
+            admission = min(admission, deadline)  # the caller's allowance, never a fresh window of its own
 
         def _expired() -> ClaudexorUnavailable:
             return ClaudexorUnavailable(
-                "daemon_recovery_only",
-                "the owned daemon is reachable but still admitting only "
-                f"recovery work after {wait:.1f}s; its product routes "
-                "answer 503 (retryable) until journal recovery completes",
-            )
+                "daemon_recovery_only", "the owned daemon is reachable but still admitting only recovery "
+                f"work after {max(0.0, admission - admitted_from):.1f}s; its product routes answer 503 "
+                "(retryable) until recovery completes")
 
         while _handshake_serving_mode(body) == "recovery_only":
-            remaining = deadline - time.monotonic()
+            remaining = admission - time.monotonic()
             if remaining <= 0:
                 raise _expired()
             time.sleep(min(_ADMISSION_POLL_SEC, remaining))
-            # The WHOLE declared window is usable (proton0 review): the last
-            # read gets the thin residue, floored so a loopback handshake can
-            # still complete — a daemon that admitted normal work at the
-            # window's edge is observed, not discarded. A transport failure
-            # inside that final residue counts as expiry (typed, never a
-            # transport mislabel); a mid-window one propagates unchanged.
-            remaining = deadline - time.monotonic()
+            # The WHOLE window is usable (each read's bound reaches the window's end, the last one
+            # floored so a loopback handshake can complete) and no read starts after it; a transport
+            # failure inside the window's last read is expiry, mid-window propagates.
+            remaining = admission - time.monotonic()
+            if remaining <= 0:
+                raise _expired()
             try:
                 body = gateway.handshake(
                     timeout_sec=max(remaining, _ADMISSION_POLL_SEC / 3.0))
             except ClaudexorUnavailable:
-                if deadline - time.monotonic() <= 0:
+                if admission - time.monotonic() <= 0:
                     raise _expired() from None
                 raise
     except Exception:
@@ -1374,227 +1421,3 @@ __all__ = [
     "resolve_claudexord",
 ]
 
-
-# --- Connect's vendor-CLI install (domain operation of the owned data plane;
-# the accounts gateway only invokes it and translates the typed result) ---
-_HARNESS_INSTALL_STDOUT_LIMIT = 64 * 1024
-_HARNESS_INSTALL_CORE_FIELDS = frozenset({
-    "ok", "dryRun", "exitCode", "target", "harness", "command",
-    "installLocation", "installedBinary", "installedVersion", "pinnedVersion",
-    "verification",
-})
-_HARNESS_INSTALL_PROVENANCE_FIELDS = frozenset({"installerSha256", "installerByteLength"})
-_LOCAL_INSTALL_VERIFICATIONS = frozenset({
-    "release_verified", "deterministic_only", "unattended_unpinned",
-})
-_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
-
-
-def is_immediate_missing_cli_job(job: Dict[str, Any], harness: str, gateway: Any) -> bool:
-    """Match only the pinned engine's synchronous missing-vendor-CLI result."""
-    if not isinstance(job, dict):
-        return False
-    outcome = job.get("outcome")
-    if (
-        not isinstance(job.get("jobId"), str)
-        or not job["jobId"]
-        or job.get("harness") != harness
-        or job.get("action") != "login"
-        or job.get("state") != "not_supported"
-        or job.get("phase") != "completed"
-        or not isinstance(outcome, dict)
-        or outcome.get("reason") != "not_supported"
-        or "command" not in job
-        or job.get("command") is not None
-        or job.get("authorization") is not None
-        or job.get("nativeCommand") is not None
-    ):
-        return False
-
-    from ouroboros.claudexor_runtime import get_runtime_manager
-
-    pin = get_runtime_manager().pin
-    return bool(
-        pin is not None
-        and pin.cli_entrypoint is not None
-        and gateway.engine_version == pin.version
-        and gateway.engine_build_sha == pin.build_sha
-    )
-
-
-def _drain_installer_stdout(pipe: Any, output: bytearray, state: Dict[str, bool]) -> None:
-    try:
-        while True:
-            chunk = pipe.read(8192)
-            if not chunk:
-                break
-            remaining = _HARNESS_INSTALL_STDOUT_LIMIT - len(output)
-            if remaining > 0:
-                output.extend(chunk[:remaining])
-            if len(chunk) > remaining:
-                state["overflow"] = True
-    except Exception:
-        state["read_error"] = True
-    finally:
-        try:
-            pipe.close()
-        except Exception:
-            pass
-
-
-def _valid_install_success(payload: Any, harness: str) -> bool:
-    if not isinstance(payload, dict):
-        return False
-    fields = frozenset(payload)
-    with_provenance = _HARNESS_INSTALL_CORE_FIELDS | _HARNESS_INSTALL_PROVENANCE_FIELDS
-    if fields not in (_HARNESS_INSTALL_CORE_FIELDS, with_provenance):
-        return False
-    verification = payload.get("verification")
-    if (
-        payload.get("ok") is not True
-        or payload.get("dryRun") is not False
-        or type(payload.get("exitCode")) is not int
-        or payload["exitCode"] != 0
-        or payload.get("target") != "local"
-        or payload.get("harness") != harness
-        or not isinstance(payload.get("command"), str)
-        or not payload["command"]
-        or not isinstance(payload.get("installLocation"), str)
-        or not payload["installLocation"]
-        or not isinstance(payload.get("installedBinary"), str)
-        or not os.path.isabs(payload["installedBinary"])
-        or not isinstance(payload.get("installedVersion"), str)
-        or not payload["installedVersion"].strip()
-        or len(payload["installedVersion"]) > 256
-        or not isinstance(verification, str)
-        or verification not in _LOCAL_INSTALL_VERIFICATIONS
-        or (
-            verification == "unattended_unpinned"
-            and payload.get("pinnedVersion") is not None
-        )
-        or (
-            verification != "unattended_unpinned"
-            and not (
-                isinstance(payload.get("pinnedVersion"), str)
-                and bool(payload["pinnedVersion"])
-            )
-        )
-    ):
-        return False
-    if fields == with_provenance:
-        return bool(
-            verification == "unattended_unpinned"
-            and isinstance(payload.get("installerSha256"), str)
-            and _SHA256_HEX.fullmatch(payload["installerSha256"])
-            and type(payload.get("installerByteLength")) is int
-            and payload["installerByteLength"] > 0
-        )
-    return True
-
-
-def install_missing_harness_cli(harness: str) -> None:
-    from ouroboros.claudexor_runtime import ClaudexorRuntimeError, get_runtime_manager
-    from ouroboros.config import get_claudexor_harness_install_timeout_sec
-    from ouroboros.gateways.claudexor import ClaudexorUnavailable
-    from ouroboros.platform_layer import merge_hidden_kwargs, subprocess_new_group_kwargs
-    # The same custody set /panic reaps (isolated_deps._run is the template):
-    # an in-flight vendor installer must not survive an emergency stop.
-    from ouroboros.tools.shell import _active_subprocesses, _kill_process_group, _subprocess_lock
-
-    try:
-        command = get_runtime_manager().ensure_cli_command()
-    except ClaudexorRuntimeError as exc:
-        raise ClaudexorUnavailable(exc.code, str(exc)) from exc
-    if len(command) != 2:
-        raise ClaudexorUnavailable(
-            "runtime_cli_unavailable", "the exact managed Claudexor CLI is not selectable"
-        )
-    argv = [
-        *command, "harness", "install", harness,
-        "--target", "local", "--yes", "--json",
-    ]
-    # The SAME data-plane binding the owned daemon starts with: the config-dir
-    # override is the complete relocatable root (D30), and the cross-home
-    # overrides the daemon scrubs must not reach the installer either —
-    # otherwise the CLI acts on the operator's personal Claudexor home.
-    env = dict(os.environ)
-    env["CLAUDEXOR_CONFIG_DIR"] = str(owned_config_dir())
-    for crossing in ("CLAUDEXOR_DAEMON_SOCK", "CLAUDEXOR_CONTROL_PORT"):
-        env.pop(crossing, None)
-    kwargs = merge_hidden_kwargs(subprocess_new_group_kwargs())
-    timeout_sec = get_claudexor_harness_install_timeout_sec()
-    try:
-        # Registration is atomic WITH the spawn: /panic snapshots the tracked
-        # set under this same lock, so it can never observe the child alive
-        # but untracked (the round-2 reviewer's interleaving).
-        with _subprocess_lock:
-            proc = subprocess.Popen(
-                argv,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                env=env,
-                **kwargs,
-            )
-            _active_subprocesses.add(proc)
-    except OSError as exc:
-        raise ClaudexorUnavailable(
-            "harness_install_spawn_failed",
-            f"managed Claudexor installer could not start: {type(exc).__name__}",
-        ) from exc
-
-    output = bytearray()
-    state: Dict[str, bool] = {}
-    reader = threading.Thread(
-        target=_drain_installer_stdout,
-        args=(proc.stdout, output, state),
-        name="claudexor-installer-stdout",
-        daemon=True,
-    )
-    reader.start()
-    try:
-        try:
-            exit_code = proc.wait(timeout=timeout_sec)
-        except subprocess.TimeoutExpired as exc:
-            _kill_process_group(proc)
-            try:
-                proc.wait(timeout=10)
-            except Exception:
-                pass
-            raise ClaudexorUnavailable(
-                "harness_install_timeout",
-                f"managed Claudexor installer exceeded {timeout_sec:d}s",
-            ) from exc
-    finally:
-        with _subprocess_lock:
-            _active_subprocesses.discard(proc)
-        # Bounded CLEANUP of an already-finished/killed child's pipe, not a
-        # behavioral wait: the drain thread ends when the pipe does.
-        reader.join(timeout=10)
-        if reader.is_alive():
-            try:
-                proc.stdout.close()
-            except Exception:
-                pass
-            reader.join(timeout=1)
-        if reader.is_alive():
-            state["read_error"] = True
-
-    if exit_code != 0:
-        raise ClaudexorUnavailable(
-            "harness_install_failed", f"managed Claudexor installer exited with code {exit_code}"
-        )
-    if state.get("overflow") or state.get("read_error"):
-        raise ClaudexorUnavailable(
-            "harness_install_invalid_response", "managed Claudexor installer output was invalid"
-        )
-    try:
-        payload = json.loads(bytes(output))
-    except (UnicodeDecodeError, ValueError) as exc:
-        raise ClaudexorUnavailable(
-            "harness_install_invalid_response", "managed Claudexor installer returned invalid JSON"
-        ) from exc
-    if not _valid_install_success(payload, harness):
-        raise ClaudexorUnavailable(
-            "harness_install_invalid_response", "managed Claudexor installer receipt was invalid"
-        )

@@ -53,6 +53,11 @@ def resolve_quiz_publication(root: Any, task_id: str, block: dict, proposed_chat
                 or block.get("publication_evidence") not in {"pre_exposure", "history"}):
             raise ValueError("publication_address_unknown")
         return block["publication_chat_id"]
+    # A host-bound place question is private Main contact even if its work is
+    # later bound to a Project. The external room is never a fallback address.
+    from ouroboros.presence_owner_contact import private_main_contact
+    if private_main_contact(block, task_id):
+        return WEB_UI_CHAT_ID
     from ouroboros.projects_registry import RoomResolver
 
     # Use the public task-tree room rule before the immutable publication is bound.
@@ -172,6 +177,8 @@ def address_task_event(running: Any, drive_root: Any, payload: Dict[str, Any]) -
     for key in ("parent_task_id", "root_task_id"):
         if not payload.get(key) and task_row.get(key):
             payload[key] = str(task_row[key])
+    if task_row.get("_execution_owner"):
+        payload.setdefault("execution_owner", dict(task_row["_execution_owner"]))
     if task_row.get("_is_direct_chat"):
         # A direct turn resumed from its exact budget pause runs on a pooled
         # worker (#1196): its frames keep the lane fact the direct lane would
@@ -251,12 +258,15 @@ class TurnEventQueue:
     pooled task's control events are handled while its RUNNING row exists and
     keep their producer shape. The direct lane stamps every task-scoped event,
     plus its turn-only extras: the origin label and the Stop marker on work frames.
+    ``on_frame(kind, data)`` sees each of the task's own frames as it passes (the
+    direct lane reads its start facts there).
     """
 
     def __init__(self, inner: Any, task_id: Any, chat_id: Any, initiator: Any = "",
                  on_first_work: Optional[Callable[[], None]] = None, *,
                  lineage: Optional[Dict[str, Any]] = None, direct_chat: bool = True,
-                 telemetry_only: bool = False) -> None:
+                 telemetry_only: bool = False,
+                 on_frame: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> None:
         self._inner = inner
         self._task_id = str(task_id or "")
         # None is absence (a task admitted without an address stamps none);
@@ -270,10 +280,18 @@ class TurnEventQueue:
         # the lane hangs the turn namer on it, so a turn is named exactly
         # when its block becomes a task card and never for a greeting.
         self._on_first_work = on_first_work
+        self._on_frame = on_frame
 
     @property
     def task_id(self) -> str:
         return self._task_id
+
+    def end_turn(self) -> None:
+        """The task's body ended in this process: drop its hooks (the namer's closure holds the whole task,
+        the frame observer its execution). The small immutable late-event address stays, so a late row of
+        this task is still stamped with its own chat and lineage."""
+        self._on_first_work = None
+        self._on_frame = None
 
     def stamp_payload(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Stamp one of this task's own task-scoped payloads in place (lineage, chat, lane fact)."""
@@ -298,6 +316,11 @@ class TurnEventQueue:
         data = item.get("data") if kind == "log_event" else item
         if not isinstance(data, dict) or str(data.get("task_id") or "") != self._task_id:
             return item
+        if self._on_frame is not None:
+            try:
+                self._on_frame(kind, data)
+            except Exception:
+                log.debug("frame observer failed for %s", self._task_id, exc_info=True)
         if kind == "task_dispatch_resolved":
             # The worker's own dispatch resolution (XG-2R.1) is the one place the
             # effective lane becomes known inside the task: refresh by value.
@@ -357,19 +380,29 @@ class TurnEventQueue:
 _TASK_ENDPOINTS: Dict[str, TurnEventQueue] = {}
 
 
-def task_event_queue(inner: Any, task: Dict[str, Any]) -> TurnEventQueue:
-    """The pooled task's per-task endpoint, created at task start and handed down.
+def task_event_queue(inner: Any, task: Dict[str, Any], *, initiator: Any = "",
+                     on_first_work: Optional[Callable[[], None]] = None,
+                     on_frame: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> TurnEventQueue:
+    """The task's per-task endpoint, created at task start and handed down.
 
     Captures the task's chat (``None`` when it carries none; 0 is the hidden
-    partition and is kept) and its lineage by value, stamps only the telemetry
-    lane, and registers itself for the process's log sink."""
+    partition and is kept) and its lineage by value, and registers itself for the
+    process's log sink. A pooled task stamps only the telemetry lane; a conversation
+    turn the lane carries (``execution_owner.lane == "conversation"``) stamps every
+    task-scoped event plus the turn-only extras — its origin label, the Stop marker
+    on work frames — with the carrier's hooks (the namer on first work, the frame
+    observer that feeds its receipt and phases), as the in-process lane once did."""
     chat_id = task.get("chat_id")
     try:
         chat_id = None if chat_id in (None, "") else int(chat_id)
     except (TypeError, ValueError):
         chat_id = None
-    endpoint = TurnEventQueue(inner, str(task.get("id") or ""), chat_id, lineage=task,
-                              direct_chat=bool(task.get("_is_direct_chat")), telemetry_only=True)
+    owner = task.get("_execution_owner") if isinstance(task.get("_execution_owner"), dict) else {}
+    conversation = owner.get("lane") == "conversation"
+    endpoint = TurnEventQueue(inner, str(task.get("id") or ""), chat_id, initiator if conversation else "",
+                              on_first_work if conversation else None, lineage=task,
+                              direct_chat=bool(task.get("_is_direct_chat")), telemetry_only=not conversation,
+                              on_frame=on_frame if conversation else None)
     if endpoint.task_id:
         _TASK_ENDPOINTS[endpoint.task_id] = endpoint
     return endpoint

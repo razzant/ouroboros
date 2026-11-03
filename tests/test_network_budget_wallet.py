@@ -154,7 +154,7 @@ def test_forced_prompt_facts_are_priced_before_the_wrap_up_is_admitted(tmp_path,
                                      "ask_id": "a1", "revision": 1}],
                 "holding": ["triad_a:o1"], "pending_asks": [], "asks_dispatched": 1, "force_plan_met": True}
     ctx = _ctx(active_use_local=True, drive_root=tmp_path, drive_logs=tmp_path / "logs",
-               llm=SimpleNamespace(), llm_trace={"force_plan_decision": decision})
+               llm=SimpleNamespace(), llm_trace={"plan_gate": decision})
     priced = []
     monkeypatch.setattr(task_pacing, "prepared_wrapup_candidate",
                         lambda _ctx, messages, **_k: (priced.append(messages), (_request(1.5, "local"), messages))[1])
@@ -169,7 +169,7 @@ def test_forced_prompt_facts_are_priced_before_the_wrap_up_is_admitted(tmp_path,
     assert "[BUDGET LIMIT]" in str(last["content"])
     # Nothing to state, nothing priced: a closed gate adds no block to the probe.
     priced.clear()
-    ctx.llm_trace = {"force_plan_decision": {**decision, "status": "clear", "open_objections": [], "holding": []}}
+    ctx.llm_trace = {"plan_gate": {**decision, "status": "clear", "open_objections": [], "holding": []}}
     with accounting.usage_scope(scope):
         loop._soft_land_exhausted_ceiling(ctx, ceiling)
     assert "[TASK_STATE_FACTS]" not in str(next(m for m in reversed(priced[0]) if m["role"] == "user")["content"])

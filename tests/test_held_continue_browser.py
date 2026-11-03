@@ -1,10 +1,11 @@
 """#1721 in the real browser and server: a held Continue names its observed blocker everywhere.
 
 The candidate server runs from the candidate bytes (``direct_server_with_data``); the predecessor's
-interruption and its unbound delegated start are real durable rows; the Continue press, the Activity
-read and the Resume refusal go through the real endpoints. The toast is transient, so the persistent
-Activity row must keep the cause readable on its own: on a phone and a desktop, in both themes and both
-engines, once every toast is gone. Screenshots for visual review: ``OUROBOROS_UI_EVIDENCE_DIR``, else
+interruption and its unbound delegated start are real durable rows; the Continue press and the Activity
+read go through the real endpoints. A held Continue starts by itself once the earlier attempt's work
+settles, so nothing offers Resume for it. The toast is transient, so the persistent Activity row must
+keep the cause readable on its own: on a phone and a desktop, in both themes and both engines, once
+every toast is gone. Screenshots for visual review: ``OUROBOROS_UI_EVIDENCE_DIR``, else
 ``<data>/ui-evidence/held-continue``.
 """
 from __future__ import annotations
@@ -17,6 +18,7 @@ import pytest
 
 from tests.test_continue_independent_review import _current_pool, _pending, _rows  # noqa: F401 - pytest fixture
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture
+from tests.ui_chat_viewport_smoke import wait_drawer_closed
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 UNBOUND = "a delegated start has an unknown outcome (no run was recorded)"
@@ -49,7 +51,7 @@ def _toasts_gone(page):
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
-def test_held_continue_toast_activity_reason_and_resume_refusal(direct_server_with_data, engine):  # noqa: F811
+def test_held_continue_toast_activity_reason_and_no_resume(direct_server_with_data, engine):  # noqa: F811
     from playwright.sync_api import sync_playwright
 
     from ouroboros import delegate_custody as dc
@@ -81,22 +83,25 @@ def test_held_continue_toast_activity_reason_and_resume_refusal(direct_server_wi
             ack = sent.value.json()
             assert ack["ok"] and ack["held"] is True and successor == ack["successor_task_id"], ack
             assert ack["blockers"][0]["stop_outcome"] == "pending_invocation_unbound", ack
-            toast = page.locator("#toast-stack .toast").filter(has_text="Continue accepted and held")
+            toast = page.locator("#toast-stack .toast").filter(has_text="Continue accepted;")
             toast.wait_for()
-            assert toast.inner_text().strip() == f"Continue accepted and held: {UNBOUND}. Resume in Activity checks it again."
+            assert toast.inner_text().strip() == (
+                f"Continue accepted; it starts by itself when the earlier attempt's work finishes: {UNBOUND}.")
             page.wait_for_function("() => [...document.querySelectorAll('#toast-stack .toast')]"
                                    ".every(el => Number(getComputedStyle(el).opacity) > 0.95)")
             page.screenshot(path=str(evidence / f"{engine}-1-continue-held-toast.png"), full_page=True)
 
             page.click('[data-nav-page="dashboard"]')
             page.click('[data-dashboard-tab="activity"]')
-            row = page.locator('[data-activity-section="queue"] .activity-row').filter(has_text="held: earlier work")
+            row = page.locator('[data-activity-section="queue"] .activity-row').filter(
+                has=page.locator(f'[data-act="task-control"][data-id="{successor}"]'))
             row.wait_for()
             meta = row.locator(".activity-sub").inner_text().strip()
-            assert meta.startswith(f"held: earlier work not proven settled · {UNBOUND}"), meta
+            assert meta.startswith("Waiting · Continue starts when the earlier attempt's work is confirmed finished"
+                                   f" · {UNBOUND}"), meta
             assert "paused (budget)" not in row.inner_text()
             control = row.locator('[data-act="task-control"]')
-            assert control.get_attribute("data-budget-paused") == "1", "its existing Resume is the one action"
+            assert control.get_attribute("data-resume") is None, "it starts by itself: no Resume is offered"
             _toasts_gone(page)
             for theme in ("dark", "light"):
                 page.emulate_media(color_scheme=theme)  # System, the default choice, follows the OS
@@ -104,8 +109,7 @@ def test_held_continue_toast_activity_reason_and_resume_refusal(direct_server_wi
                 for width in (1440, 390):
                     page.set_viewport_size({"width": width, "height": 960})
                     if width < 700:
-                        page.wait_for_function(
-                            "() => document.querySelector('#primary-sidebar').getBoundingClientRect().right <= 1")
+                        wait_drawer_closed(page)
                     row.scroll_into_view_if_needed()
                     geometry = row.evaluate(ROW_GEOMETRY)
                     observed[f"{theme}-{width}"] = geometry
@@ -122,33 +126,25 @@ def test_held_continue_toast_activity_reason_and_resume_refusal(direct_server_wi
                                     full_page=True)
             page.emulate_media(color_scheme="dark")
 
-            # At phone width and from the keyboard: the row's one control opens its menu, Resume rechecks.
+            # At phone width and from the keyboard: the row's one control opens its menu, with Stop and no Resume.
             control.focus()
             page.keyboard.press("Enter")
-            item = page.locator('[data-task-control="resume"]')
-            item.wait_for()
-            item.focus()
-            with page.expect_response(lambda r: r.request.method == "POST" and r.url.endswith("/resume")) as resumed:
-                page.keyboard.press("Enter")
-            assert resumed.value.status == 409, resumed.value.status
-            body = resumed.value.json()
-            assert body["error"] == "predecessor_writers_unsettled" and "action" not in body, body
-            refusal = page.locator("#toast-stack .toast-danger").filter(has_text="Resume refused")
-            refusal.wait_for()
-            assert refusal.inner_text().strip() == f"Resume refused: {UNBOUND}."
-            page.wait_for_function("() => [...document.querySelectorAll('#toast-stack .toast')]"
-                                   ".every(el => Number(getComputedStyle(el).opacity) > 0.95)")
-            page.screenshot(path=str(evidence / f"{engine}-3-resume-refused-toast-390.png"), full_page=True)
-            _toasts_gone(page)
-            # The refusal changed nothing: the same row still says why, whole, and focus is back on its control.
+            menu = page.locator("body > .task-control-menu")
+            menu.wait_for()
+            items = menu.evaluate("n => [...n.querySelectorAll('.task-control-item')].map(i => i.dataset.taskControl)")
+            assert items == ["stop_now"], "a held Continue offers neither Pause nor Resume: " + str(items)
+            page.screenshot(path=str(evidence / f"{engine}-3-held-row-menu-390.png"), full_page=True)
+            page.keyboard.press("Escape")
+            menu.wait_for(state="detached")
+            # Opening the menu changed nothing: the same row still says why, whole, and focus is back on its control.
             after = row.evaluate(ROW_GEOMETRY)
             assert not after["clipped"] and not after["under_control"] and after["lines"] > 1, after
             assert row.locator(".activity-sub").inner_text().strip() == meta
             assert page.evaluate("() => document.activeElement?.dataset?.act") == "task-control"
-            row.screenshot(path=str(evidence / f"{engine}-4-activity-held-row-after-refusal-390.png"))
+            row.screenshot(path=str(evidence / f"{engine}-4-activity-held-row-after-menu-390.png"))
             (evidence / f"{engine}-facts.json").write_text(json.dumps({
-                "continue_ack": ack, "activity_meta": meta, "row_geometry": observed, "after_refusal": after,
-                "resume_refusal": body, "candidate": server["candidate_identity"]}, indent=2, default=str))
+                "continue_ack": ack, "activity_meta": meta, "row_geometry": observed, "after_menu": after,
+                "menu_items": items, "candidate": server["candidate_identity"]}, indent=2, default=str))
             print("HELD_CONTINUE_EVIDENCE", engine, evidence)
         finally:
             browser.close()

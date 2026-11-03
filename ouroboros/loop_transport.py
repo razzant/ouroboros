@@ -34,11 +34,9 @@ row and its ordinary progress; exhaustion is a note for an interactive turn,
 while a managed task's exhaustion is its terminal result. Every episode note is
 the host speaking about the turn: it passes ``incident=None`` and keeps the
 default voice, so an ``emit_progress`` callable handed to ``run_llm_loop`` must
-accept the emitter's keyword facts (``incident``, ``narration``).
+accept the emitter's keyword facts (``incident``, ``narration``, ``reasoning``).
 
-Also hosts the owner-facing provider-failure text helpers and terminal salvage
-readers used by that terminal path (extracted from ``loop.py``, which is at its
-size-ratchet byte cap).
+Terminal/fallback text and salvage readers share this owner (extracted from byte-capped ``loop.py``).
 """
 
 from __future__ import annotations
@@ -59,6 +57,7 @@ from ouroboros.config import (
 from ouroboros.deadline_utils import parse_deadline_ts
 from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY, _TRANSIENT_BACKOFF_CAP_SEC, _exception_body
 from ouroboros.llm_probe import upstream_transport_reachable
+from ouroboros.model_concurrency import capacity_refusal
 from ouroboros.owner_mailbox import OwnerMailboxPeek
 from ouroboros.utils import append_jsonl, utc_now_iso
 
@@ -73,15 +72,11 @@ _FINAL_REDIAL_MARGIN_SEC = 3.0
 
 @dataclass
 class TransportWaitEpisode:
-    """One remote outage or chosen wait for temporary primary-provider refusals.
+    """One outage or chosen wait for a temporary primary refusal.
 
-    The latch — not the mutable ``_last_llm_error_kind`` projection — carries the
-    terminal cause: later failures (a failed local fallback pass, the deadline
-    admission gate) overwrite the usage projection, and the terminal decision
-    must stay deterministic (no forced-final resend after a waited-out outage).
-    ``interactive`` is the wait-class fact (every turn stamped direct-chat);
-    ``wait_bound_sec`` is the local ceiling an interactive turn gets in place
-    of the queue rails it does not have.
+    The latched cause survives later fallback/admission errors overwriting usage;
+    exhaustion stays deterministic, without forced-final resend. Direct-chat turns
+    are ``interactive``; their local ``wait_bound_sec`` replaces absent queue rails.
     """
 
     wait_cause: str = "transport_unavailable"
@@ -95,7 +90,8 @@ class TransportWaitEpisode:
     final_redial_done: bool = False
     outcome_custody: Dict[str, Any] = field(default_factory=dict)
     continuation_granted: bool = False
-    mailbox_peek: OwnerMailboxPeek = field(default_factory=OwnerMailboxPeek, repr=False)
+    # A context-only place arrival shortens no backoff: it reaches the next round's drain at the scheduled redial.
+    mailbox_peek: OwnerMailboxPeek = field(default_factory=lambda: OwnerMailboxPeek(waking_only=True), repr=False)
 
     @property
     def waited_sec(self) -> float:
@@ -279,7 +275,10 @@ def fallback_chain_allowed(
         return False
     if last_error_kind == "provider_outcome_unknown":
         return new_generation_after_unknown(ctx, accumulated_usage)
-    return last_error_kind not in ("deadline_exhausted", "llm_output_exhausted")
+    if last_error_kind == "llm_output_exhausted":
+        from ouroboros.loop_output_exhaustion import ready_for_fallback
+        return ready_for_fallback(usage) and not getattr(ctx, "route_wait_on_primary", False)
+    return last_error_kind not in ("deadline_exhausted", "output_recovery_interrupted")
 
 
 def reconcile_transport_wait(
@@ -395,7 +394,8 @@ def reconcile_transport_wait(
         unknown = unknown_again
         if msg_present or (error_kind != "transport_unavailable" and not unknown and not refused):
             return None
-        interactive = bool(getattr(ctx, "is_direct_chat", False))
+        from ouroboros.task_carrier import conversation_origin
+        interactive = conversation_origin(ctx)  # the owner's foreground turn, carried or inline
         episode = TransportWaitEpisode(
             wait_cause=error_kind,
             outcome_custody=dict((getattr(ctx, "_accumulated_usage", {}) or {}).get("_pending_transport_outcome") or {}),
@@ -415,8 +415,9 @@ def reconcile_transport_wait(
              "on the same primary with paced requests; prior attempt costs remain recorded." if refused else
              "🌐 Provider connection was lost after dispatch. The outcome and any unreported cost remain unknown. "
              "Waiting for connectivity, then continuing from saved work with a new attempt; another charge is possible."
-             if unknown else "🌐 The request did not reach the provider — waiting and "
-             "redialing automatically (failed attempts are $0).")
+             if unknown else "🌐 No local model slot was free, so this request was not sent — waiting under Concurrent Requests "
+             "per Model and trying again automatically ($0)." if capacity_refusal(getattr(ctx, "_accumulated_usage", None)) else
+             "🌐 The request did not reach the provider — waiting and redialing automatically (failed attempts are $0).")
             + ("" if interactive else " Stop cancels."),
             incident=None,
         )
@@ -555,8 +556,9 @@ def _owner_signal_pending(
 ) -> bool:
     """Peek unread input; acceptance may exclude context-only task messages.
 
-    Transport and wait callers still wake for every message. Owner admission
-    uses the same typed provenance boundary as the ordinary mailbox drain.
+    Transport and wait callers wake for what their ``waking_only`` peek counts: every
+    message but a context-only place arrival. Owner admission uses the same typed
+    provenance boundary as the ordinary mailbox drain.
     """
     if incoming_messages is not None and not incoming_messages.empty():
         return True
@@ -601,7 +603,7 @@ def transport_wait_step(
     interactive turn, its ``wait_bound_sec`` measured from episode entry; the
     ``ended`` detail names the rail that expired. The acceptance-review
     percentage reserve is deliberately NOT a wait ceiling (Q18), and the
-    supervisor's absolute 6h ceiling stays an external rail, not duplicated here.
+    supervisor's optional task lifetime stays an external rail, not duplicated here.
     """
     elapsed = time.monotonic() - episode.started_monotonic
     # Signed windows (negative = how long ago that rail expired) decide the
@@ -625,6 +627,9 @@ def transport_wait_step(
     remaining = bound_signed if bound_binds else deadline_signed
     if remaining is not None:
         remaining = max(0.0, remaining)
+    capacity = capacity_refusal(getattr(getattr(tools, "_ctx", None), "_accumulated_usage", None))
+    waiting_for = ("a free local model slot" if capacity else "the primary provider"
+                   if episode.wait_cause in PRIMARY_REFUSAL_KINDS else "a provider connection")
 
     def _ended(detail: str) -> bool:
         emit_network_wait_event(
@@ -632,12 +637,9 @@ def transport_wait_step(
             redials=episode.redials, model=model, detail=detail,
         )
         if episode.interactive:
-            emit_progress(
-                ("🌐 Stopped waiting for the primary provider after " if episode.wait_cause in PRIMARY_REFUSAL_KINDS
-                 else "🌐 Stopped waiting for a provider connection after ") +
-                f"{elapsed / 60.0:.1f} min — this turn ends as an outage.",
-                incident=None,
-            )
+            emit_progress(f"🌐 Stopped waiting for {waiting_for} after {elapsed / 60.0:.1f} min — " + (
+                "its last request was not sent, and this turn ends without an answer." if capacity
+                else "this turn ends as an outage."), incident=None)
         return False
 
     if error_kind == "deadline_exhausted":
@@ -670,12 +672,9 @@ def transport_wait_step(
         episode.final_redial_done = True
     if time.monotonic() - episode.last_note_monotonic >= note_interval:
         episode.last_note_monotonic = time.monotonic()
-        emit_progress(
-            ("🌐 Still waiting for the primary provider — " if episode.wait_cause in PRIMARY_REFUSAL_KINDS
-             else "🌐 Still waiting for a provider connection — ") + f"{elapsed / 60.0:.0f} min "
-            f"elapsed, {episode.redials} redials; will resume automatically.",
-            incident=None,  # a periodic note is never a toast; the episode always passes incident=
-        )
+        emit_progress(f"🌐 Still waiting for {waiting_for} — {elapsed / 60.0:.0f} min elapsed, {episode.redials} " + (
+            "retries; the latest request was not sent" if capacity else "redials") + "; will resume automatically.",
+            incident=None)  # a periodic note is never a toast; the episode always passes incident=
     emit_network_wait_event(
         drive_logs, task_id=task_id, phase="waiting", elapsed_sec=elapsed,
         redials=episode.redials, model=model, next_sleep_sec=sleep_sec,
@@ -842,9 +841,17 @@ def provider_terminal_fallback_text(
                 f"after {waited_sec / 60.0:.1f} min. No new summary request was sent. "
                 "Completed work and the original attempt-cost records are preserved.")
     if is_context_overflow:
+        from ouroboros.context_anchor import REFUSED_INPUTS_KEY
+
+        refused = min((int(v) for v in (accumulated_usage.get(REFUSED_INPUTS_KEY) or {}).values() if v), default=0)
+        parts = ", ".join(f"{label} ~{int(tokens):,}" for label, tokens in accumulated_usage.get("_context_refusal_frame") or [])
+        facts = "; ".join(fact for fact in (f"smallest refused request ~{refused:,} tokens" if refused else "",
+                                             f"largest parts: {parts}" if parts else "") if fact)
         return (
-            "⚠️ The context exceeded the selected model window; no further provider call was made. "
-            "Any files written so far are preserved in the workspace."
+            "⚠️ Context-size recovery ended without a fitting request; no further provider call was made. "
+            "The recovery passes, the configured fallback and a renewed view could not make it fit"
+            f"{f' ({facts})' if facts else ''}. The exact transcript and any files written so far are preserved."
+            + _failure_window_fact(accumulated_usage, overflow=True)
         )
     if is_transport_wait:
         if unknown:
@@ -858,21 +865,19 @@ def provider_terminal_fallback_text(
         # A released attempt proves only that the request never reached the provider: a broken
         # connect, an incomplete upload or an engine refusal before dispatch, never a provider reply.
         code = str(accumulated_usage.get("_last_llm_provider_code") or "")
-        if interactive and waited_sec > 0:
-            text = ("⚠️ The request did not reach the provider; this turn waited and "
-                    f"redialed for {waited_sec / 60.0:.1f} min and ended as an outage, not completed.")
-        elif interactive:
-            text = ("⚠️ The request did not reach the provider, and no wait window was left; "
-                    "this turn ended as an outage, not completed.")
+        subject = "this turn" if interactive else "the task"
+        kept = "" if interactive else " Any files written so far are preserved in the workspace."
+        if capacity_refusal(accumulated_usage):  # the install's own limit stayed full, not a provider outage
+            waited = f" after {waited_sec / 60.0:.1f} min of waiting" if waited_sec > 0 else ""
+            text = ("⚠️ Local model capacity stayed unavailable: no slot under Concurrent Requests per Model freed for "
+                    f"the last request, so it was not sent, and {subject} ended{waited} without completing.")
         elif waited_sec > 0:
-            text = ("⚠️ The request did not reach the provider; the task waited and redialed "
-                    f"for {waited_sec / 60.0:.1f} min until its own limits ran out and ended as an outage, not completed. "
-                    "Any files written so far are preserved in the workspace.")
+            text = (f"⚠️ The request did not reach the provider; {subject} waited and redialed for {waited_sec / 60.0:.1f} "
+                    f"min{'' if interactive else ' until its own limits ran out'} and ended as an outage, not completed.")
         else:
-            text = ("⚠️ The request did not reach the provider, and the owner deadline left no "
-                    "time to wait; the task ended as an outage, not completed. Any files "
-                    "written so far are preserved in the workspace.")
-        return text + (f" Last reported code: {code}." if code else "")
+            text = ("⚠️ The request did not reach the provider, and " + ("no wait window was left" if interactive else
+                    "the owner deadline left no time to wait") + f"; {subject} ended as an outage, not completed.")
+        return text + kept + (f" Last reported code: {code}." if code else "")
     if is_deadline_exhausted:
         text = "⚠️ The owner deadline ended primary model work; any files written so far are preserved."
         if unknown:
@@ -886,13 +891,31 @@ def provider_terminal_fallback_text(
         f"{_unknown_terminal_recovery_hint(accumulated_usage) if unknown else provider_recovery_hint(accumulated_usage)}"
         f"{UNKNOWN_ATTEMPT_COST_NOTE if unknown else ''} "
         "Any files written so far are preserved in the workspace."
+        + _failure_window_fact(accumulated_usage)
     )
 
 
+def _failure_window_fact(usage, *, overflow=False):
+    if not overflow and usage.get("_last_llm_error_kind") not in {"bad_request", "request_too_large", "context_overflow"}:
+        return ""
+    from ouroboros.capability_evidence import _parse_ctx_requested
+    from ouroboros.context_view_facts import required_book_fact, window_projection
+    from ouroboros.context_window import WindowRecord
 
-# The host's own words for a failure class when the provider left no readable
-# sentence (#1369). The typed kind stays on the record and in the llm_api_error
-# event; a person reads the class, never the exception repr.
+    input_tokens, _reply, total = _parse_ctx_requested(usage.get("_last_llm_provider_message", ""))
+    if input_tokens or total:
+        request = f"request {'input' if input_tokens else 'total'} {input_tokens or total:,} tokens (provider stated)"
+    else:
+        estimate = int(usage.get("_context_prompt_estimate") or 0)
+        request = f"request input estimated {estimate:,} tokens" if estimate else "request size unknown"
+    window = usage.get("_context_window") or window_projection(WindowRecord("", reserve=int(
+        usage.get("_context_response_reserve_tokens") or 0)))
+    return f"\n{request}; assumed {window['text']}." + (required_book_fact(usage) if overflow else "")
+
+
+
+# Host vocabulary: terminal rows without provider words, and fallback's previous route.
+# Typed kinds stay in the record/llm_api_error; owner text never uses exception repr.
 _FAILURE_KIND_WORDS = {
     "auth_error": "an authentication or authorization refusal",
     "quota_exhausted": "a quota or billing refusal",
@@ -902,6 +925,7 @@ _FAILURE_KIND_WORDS = {
     "request_too_large": "a request the provider found too large",
     "context_overflow": "a context overflow",
     "transport_unavailable": "a request that never reached the provider",
+    "provider_policy_refusal": "a refusal before any provider was reached (a connection that is unavailable, or a policy)",
     "provider_outcome_unknown": "an attempt with no known outcome",
     "provider_transient": "a temporary provider failure",
     "provider_incomplete_response": "an incomplete response",
@@ -912,25 +936,19 @@ _FAILURE_KIND_WORDS = {
     "model_substituted": "an answer from a model other than the requested one",
     "deadline_exhausted": "the owner deadline running out before dispatch",
 }
-# Logs hold the host's record, not necessarily the provider's whole sentence: a
-# stream error frame's text reaches the durable event only as a bounded excerpt.
+# Logs may retain only a bounded stream-error excerpt, not the whole provider sentence.
 _DIAGNOSTIC_POINTER = "The task's Logs keep the host's record of this failure."
-# The owner's quote of a provider sentence passes the SSOT display bound; past it
-# the quote is shortened in words beside the Logs pointer, never silently cut.
+# Quotes past the SSOT display bound disclose shortening beside the Logs pointer.
 _OWNER_QUOTE_LIMIT = 600
 
 
 def owner_provider_message(failure: Any) -> str:
-    """The provider's OWN sentence about a failed call, whole, or "" when there is none.
+    """Whole provider sentence from a structured body/stream error or body-error dict.
 
-    ``failure`` is the raised exception — a structured error body's ``message``,
-    a stream error's provider message — or an empty response's body-error dict
-    (its ``message``). A Python exception repr is never one of those: it stays in
-    the durable ``llm_api_error`` event and ``_last_llm_error`` for diagnostics
-    (#1369). Nor is a Claudexor engine error's text: its ``display_message`` joins
-    host-side diagnostics (stage, cause, engine code, the engine's own message)
-    and its provider body stays private, so only its typed provider fields speak
-    (``owner_provider_fields``). The owner's row bounds it (``provider_failure_hint``).
+    No sentence returns "". Exception repr belongs to ``llm_api_error`` and
+    ``_last_llm_error`` diagnostics, not owner text. Claudexor's composed display
+    (stage/cause/engine/capability facts) and private body are excluded; only its
+    ``owner_provider_fields`` speak. ``_provider_quote`` bounds the owner's quote.
     """
     from ouroboros.llm_claudexor import ClaudexorModelError
     from ouroboros.utils import sanitize_tool_result_for_log
@@ -948,9 +966,7 @@ def owner_provider_message(failure: Any) -> str:
 
 
 def owner_provider_fields(failure: Any) -> Dict[str, str]:
-    """The typed fields a provider itself returned through the Claudexor engine —
-    its error ``code`` and the refused ``parameter`` — or {}. An unknown outcome
-    exposes none, as in ``ClaudexorModelError.display_message``."""
+    """Typed Claudexor provider code/parameter, or {} (also for an unknown outcome)."""
     from ouroboros.llm_claudexor import ClaudexorModelError
     from ouroboros.utils import sanitize_tool_result_for_log
 
@@ -964,13 +980,10 @@ def owner_provider_fields(failure: Any) -> Dict[str, str]:
 
 
 def stamp_owner_provider_message(accumulated_usage: Dict[str, Any], failure: Any) -> None:
-    """Replace ``_last_llm_provider_message`` with ``failure``'s own sentence and
-    ``_last_llm_provider_fields`` with its typed provider fields, or clear them.
-    ``_last_llm_provider_message_cut`` marks a sentence its producer already cut
-    (an empty response's body error keeps only a bounded ``message``).
+    """Replace/clear this call's provider sentence, fields and producer-cut marker.
 
-    Stamped by the call owner (``loop_llm_call``) at each failed call, so an
-    earlier round's sentence never speaks for this one.
+    ``loop_llm_call`` stamps each failure so older words cannot speak for it;
+    body-error messages may already be bounded (``_last_llm_provider_message_cut``).
     """
     cut = isinstance(failure, dict) and failure.get("message_truncated") is True
     for key, value in (("_last_llm_provider_message", owner_provider_message(failure)),
@@ -981,16 +994,13 @@ def stamp_owner_provider_message(accumulated_usage: Dict[str, Any], failure: Any
             accumulated_usage[key] = value
 
 
-def provider_failure_hint(accumulated_usage: Dict[str, Any]) -> str:
-    """The provider's own sentence (a long one shortened in words, with the Logs
-    pointer), or the host's classification with that pointer.
+def _failure_words(kind: str) -> str:
+    """The table's words for a failure class; a class it does not list is only a provider failure."""
+    return _FAILURE_KIND_WORDS.get(kind, "a provider failure")
 
-    Quotes only ``_last_llm_provider_message`` — text a provider positively
-    authored (``stamp_owner_provider_message``); typed provider fields without a
-    sentence are named as the provider's beside the host's classification. The
-    exception repr in ``_last_llm_error`` and an engine's composed display text
-    are never appended: they belong to Logs and task details.
-    """
+
+def _provider_quote(accumulated_usage: Dict[str, Any]) -> str:
+    """The provider's own sentence, a long one shortened in words beside the Logs pointer, or ""."""
     from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact
 
     message = " ".join(sanitize_tool_result_for_log(
@@ -1000,10 +1010,21 @@ def provider_failure_hint(accumulated_usage: Dict[str, Any]) -> str:
         return f" The provider said: \"{message}\""
     if message:  # its producer or the SSOT cut it (the SSOT's anti-waste floor lets a small overflow through whole)
         return f" The provider said: \"{message[:_OWNER_QUOTE_LIMIT].rstrip()}…\" (shortened). {_DIAGNOSTIC_POINTER}"
+    return ""
+
+
+def provider_failure_hint(accumulated_usage: Dict[str, Any]) -> str:
+    """Quote only the stamped provider sentence; disclose shortening with a Logs pointer.
+
+    Without a sentence, attribute typed provider fields beside the host's class and
+    Logs pointer. Exception repr and composed engine text stay in Logs/task details.
+    """
+    if quote := _provider_quote(accumulated_usage):
+        return quote
     kind = str(accumulated_usage.get("_last_llm_error_kind") or "").strip()
     if not kind and not str(accumulated_usage.get("_last_llm_error") or "").strip():
         return ""
-    words = _FAILURE_KIND_WORDS.get(kind, "a provider failure")
+    words = _failure_words(kind)
     fields = accumulated_usage.get("_last_llm_provider_fields")
     fields = fields if isinstance(fields, dict) else {}
     named = [f'{label} "{fields[key]}"' for key, label in (("code", "error code"), ("parameter", "parameter"))
@@ -1012,6 +1033,39 @@ def provider_failure_hint(accumulated_usage: Dict[str, Any]) -> str:
         return (f" The provider reported {' and '.join(named)} but no sentence the host can quote; "
                 f"the host classified the failure as {words}. {_DIAGNOSTIC_POINTER}")
     return f" No readable provider message is available; the host classified the failure as {words}. {_DIAGNOSTIC_POINTER}"
+
+
+def _failure_is_own(accumulated_usage: Dict[str, Any], model: str, fresh: bool) -> bool:
+    """Whether the last failure row is ``model``'s own call's (``fresh``: that call replaced the row it found)."""
+    return fresh and (accumulated_usage.get("_last_llm_failure") or {}).get("model") == model
+
+
+def fallback_reason_text(accumulated_usage: Dict[str, Any], model: str, use_local: bool = False, *,
+                         named: bool = True, entry: bool = False, fresh: bool = True) -> str:
+    """Explain ``model``'s last failure and surviving facts, then quote its provider sentence.
+
+    No duplicate class/typed fields; only a shortened quote points at Logs. A host fence can keep an older kind or leave
+    an earlier route's sentence: only this call's own failure row makes them this route's (``entry``: the kind the walk
+    entered on is the acting route's own even without a row, its sentence still not). ``fresh=False``: the call left
+    the row it found (a gate that sent nothing), which stays the earlier attempt's under the same model name too."""
+    kind = str(accumulated_usage.get("_last_llm_error_kind") or "").strip()
+    own = _failure_is_own(accumulated_usage, model, fresh)
+    route = f" on {model}{' (local)' if use_local else ''}" if named else ""
+    after = {"auth_error": "; sign-in is still needed there",
+             "provider_outcome_unknown": "; the earlier attempt’s outcome and cost stay unknown"}.get(kind, "")
+    cause = (f" after {_failure_words(kind)}{route}{after}" if kind and (own or entry)
+             else f" after no usable answer{route}" if named else "; no cause of its own is known here")
+    return f"{cause}.{_provider_quote(accumulated_usage) if own else ''}"
+
+
+def fallback_last_attempt_words(accumulated_usage: Dict[str, Any], model: str, *, fresh: bool = True) -> str:
+    """The walk's end row after its last attempt's route: that attempt's own result alone. An outcome the host does not
+    know stays that attempt's own, true whether its operation is still readable (fenced) or not: no ending and no
+    earlier attempt (``fallback_reason_text`` keeps ``the earlier attempt`` for the next attempt's row)."""
+    if _failure_is_own(accumulated_usage, model, fresh) and str(
+            accumulated_usage.get("_last_llm_error_kind") or "").strip() == "provider_outcome_unknown":
+        return f", has no known outcome; its outcome and cost stay unknown.{_provider_quote(accumulated_usage)}"
+    return f", ended without a usable reply{fallback_reason_text(accumulated_usage, model, named=False, fresh=fresh)}"
 
 
 # What the host KNOWS it did. It asks again and names no account; which account
@@ -1147,6 +1201,14 @@ def provider_recovery_hint(accumulated_usage: Dict[str, Any]) -> str:
             " The provider refused the stored continuation of this conversation "
             "rather than the request itself. Dropping it and sending the same "
             "conversation again is the repair, and this round already spent it."
+        )
+    from ouroboros.llm_substitution import capability_refused
+
+    if kind == "bad_request" and capability_refused(accumulated_usage):
+        return (
+            " The accounts tried cannot serve this model, and this round asks no other account. "
+            "A later request may reach another one; when none can, the owner chat names them "
+            "and Accounts shows any temporary marks."
         )
     if kind in {"quota_exhausted", "auth_error", "request_too_large", "bad_request", "context_overflow"}:
         guidance = {

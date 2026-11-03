@@ -85,7 +85,7 @@ def test_current_attempt_projection_hides_historical_wait_in_real_js(tmp_path, m
     monkeypatch.setattr(queue, "RUNNING", {task["id"]: meta} if where == "running" else {})
     monkeypatch.setattr(queue, "PENDING", [task] if where == "pending" else [])
     monkeypatch.setattr(queue, "BUDGET_ROOT_FENCES", {})
-    monkeypatch.setattr(state, "_direct_turns_snapshot_safe", lambda: [])
+    monkeypatch.setattr(state, "_direct_turns_snapshot_safe", lambda **_kwargs: [])
     snapshot = state._chat_activities_snapshot_safe(tmp_path)
     assert len(snapshot) == 1 and snapshot[0]["task_attempt"] == 2
     assert snapshot[0]["model_waits"] == task["model_waits"]  # Preserve history.

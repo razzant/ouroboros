@@ -154,7 +154,8 @@ def test_saved_schedule_pause_retains_cap_and_unrelated_hold_across_stale_restar
     assert not consumed and len(retained) == 1 and retained[0]['id'] == tid
     assert retained[0]['_consciousness_continuation'] is True
     workers.PENDING[:] = retained
-    (root / 'state/owner_restart_no_resume.flag').unlink()
+    from ouroboros.delegate_recovery import consume_owner_restart, pending_owner_restart
+    consume_owner_restart(root, pending_owner_restart(root))
     resumed = queue.resume_budget_paused_task(tid)
     if owner_hold:
         assert not resumed['ok'] and retained[0]['_owner_hold'] == fields['_owner_hold']

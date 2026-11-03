@@ -10,6 +10,7 @@ import pytest
 
 from tests import test_ui_smoke_playwright as smoke
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _SETTLE_RESTORE_FRAMES
+from tests.ui_console_errors import PageErrors
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 
@@ -67,8 +68,7 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch(headless=True)
         page = browser.new_page(viewport={"width": width, "height": 1000})
-        errors = []
-        page.on('pageerror', lambda error: errors.append(str(error)))
+        errors = PageErrors(page, engine)
         page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
         page.add_init_script("""const originalSend = WebSocket.prototype.send;
             WebSocket.prototype.send = function(data) {
@@ -95,6 +95,13 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
                 expect(page.locator('#btn-save-settings')).to_be_enabled(timeout=30_000)
                 expect(page.locator('#settings-status')).to_contain_text('saved', timeout=30_000)
 
+            def reconnect():
+                # The same body reconnects, which keeps this document only once the page remembered the served
+                # SHA: dropped before its first read after open, ws.js reloads it as unknown (#2432).
+                page.wait_for_function("() => Boolean(window.__ouroWs?._lastSha)", timeout=30_000)
+                page.evaluate("window.__testSockets[0].close()")
+                page.wait_for_function("window.__testSockets.some(socket => socket.readyState === WebSocket.OPEN)")
+
             open_settings()
             # Worker application is published only after its real pool starts.
             page.wait_for_function("""async () => {
@@ -111,8 +118,7 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
             page.wait_for_function('window.restartSent === true')
             expect(page.locator('#btn-restart-now')).to_be_visible()
             fill_value('#s-workers', 3)  # preserve a draft over reconnect metadata
-            page.evaluate("window.__testSockets[0].close()")
-            page.wait_for_function("window.__testSockets.some(socket => socket.readyState === WebSocket.OPEN)")
+            reconnect()
             expect(page.locator('#s-workers')).to_have_value('3')
             expect(page.locator('#btn-restart-now')).to_be_visible()
             fill_value('#s-workers', 1)
@@ -146,8 +152,7 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
             expect(page.locator('#settings-restart-status')).to_contain_text('Restart may apply')
             expect(page.locator('#btn-restart-now')).to_be_visible()
             fill_value('#s-workers', 3)
-            page.evaluate("window.__testSockets[0].close()")
-            page.wait_for_function("window.__testSockets.some(socket => socket.readyState === WebSocket.OPEN)")
+            reconnect()
             expect(page.locator('#s-workers')).to_have_value('3')
             expect(page.locator('#btn-restart-now')).to_be_visible()
             page.locator('#settings-restart-status').scroll_into_view_if_needed()
@@ -227,7 +232,7 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
             open_settings()
             page.locator('[data-settings-tab="agents"]').click()
             expect(page.locator('[data-subagent-field="access"]')).to_have_value('workspace_write')
-            assert errors == []
+            assert errors.unexpected() == [], errors
         except Exception:
             evidence = pathlib.Path(os.environ.get('OUROBOROS_UI_EVIDENCE_DIR', str(settings_server['data_dir'].parent)))
             evidence.mkdir(parents=True, exist_ok=True)

@@ -14,6 +14,7 @@ import json
 
 from ouroboros.owner_quiz import quiz_states, record_asked
 from ouroboros.task_results import STATUS_RUNNING, write_task_result
+from tests._dialogue import chat_rows
 from tests.test_quiz_answer import _escalate, _tool_ctx
 
 def _stamp(minutes_ago: float) -> str:
@@ -27,11 +28,10 @@ def _shown(iso: str) -> str:
 
 
 def _chat_rows(tmp_path, *rows):
-    path = tmp_path / "logs" / "chat.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row) + "\n")
+    from ouroboros import dialogue_store as ds
+
+    for row in rows:
+        ds.append(tmp_path, "chat", row)
 
 
 def _ask(ctx):
@@ -140,7 +140,7 @@ def test_send_quiz_carries_host_facts_and_names_the_project_on_the_event_only(tm
     assert topic == CHAT_QUIZ
     assert event["host_facts"] == "Asked by task task-1, origin unknown."
     assert event["project_name"] == "Facts Project"
-    stored = [json.loads(line) for line in (tmp_path / "logs/chat.jsonl").read_text(encoding="utf-8").splitlines()]
+    stored = chat_rows(tmp_path)
     assert stored[-1]["quiz"]["host_facts"] == "Asked by task task-1, origin unknown."
     room = json.loads(_assemble_history_response(tmp_path, project["chat_id"], 10, 0))["messages"]
     assert room[0]["msg_type"] == "quiz" and room[0]["quiz"]["host_facts"] == "Asked by task task-1, origin unknown."
@@ -159,7 +159,7 @@ def test_send_quiz_without_host_facts_or_project_adds_neither(tmp_path, monkeypa
     [quiz_frame] = frames
     [(_topic, event)] = events
     assert "host_facts" not in quiz_frame and "host_facts" not in event and "project_name" not in event
-    stored = json.loads((tmp_path / "logs/chat.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    stored = chat_rows(tmp_path)[-1]
     assert "host_facts" not in stored["quiz"]
 
 

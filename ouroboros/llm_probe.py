@@ -13,9 +13,10 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Optional
 
+from ouroboros.model_concurrency import limit_physical_send
+
 from ouroboros.usage_accounting import (
     UsageScope,
-    current_usage_scope,
     physical_attempt_limit,
     usage_scope,
 )
@@ -54,7 +55,7 @@ def _accounted_send(
     request = _attempt_request(target, final_candidate, source=source)
     return _execute_candidate(
         request,
-        lambda: send(final_candidate),
+        limit_physical_send(target, lambda: send(final_candidate)),
         _candidate_before_dispatch(final_candidate, request),
     )
 
@@ -65,94 +66,6 @@ def accounted_one_shot(target: dict[str, Any], candidate: dict[str, Any], send, 
     with usage_scope(UsageScope(task_id=task_id, root_task_id=task_id, category="provider_test",
                                 non_task_operation=True, source=source)), physical_attempt_limit(1):
         return _accounted_send(target, candidate, send, source=source)
-
-
-def probe_oversized_context(
-    client,
-    model: str,
-    content: str,
-    *,
-    base_url: str = "",
-    max_output_tokens: int = 8,
-    timeout: float = 20.0,
-    api_key: Optional[str] = None,
-) -> dict[str, Any]:
-    """Compatibility implementation for the generative context-window probe."""
-    try:
-        target = client._resolve_remote_target(model)
-        if str(base_url or "").strip():
-            target = {**target, "base_url": str(base_url).strip()}
-        if api_key is not None:
-            target = {**target, "api_key": api_key}
-        remote = client._get_remote_client(target)
-        resolved_model = str(target.get("resolved_model") or model.split("::")[-1])
-        provider = str(target.get("provider") or "")
-    except Exception as exc:  # pragma: no cover - setup failure -> fail-closed
-        return {
-            "ok": False,
-            "status_code": None,
-            "body": f"probe setup failed: {type(exc).__name__}",
-            "echoed_text": "",
-            "usage_prompt": 0,
-        }
-
-    cap = (
-        {"max_completion_tokens": max_output_tokens}
-        if provider == "openai"
-        else {"max_tokens": max_output_tokens}
-    )
-    candidate = {
-        "model": resolved_model,
-        "messages": [{"role": "user", "content": content}],
-        "temperature": 0,
-        **cap,
-    }
-
-    def dispatch() -> Any:
-        return _accounted_send(
-            target,
-            candidate,
-            lambda payload: remote.with_options(timeout=timeout).chat.completions.create(**payload),
-            source="capability_probe",
-        )
-
-    try:
-        if current_usage_scope() is None:
-            with usage_scope(UsageScope(
-                task_id="system:capability_probe",
-                root_task_id="system:capability_probe",
-                category="capability_probe",
-                non_task_operation=True,
-                source="capability_probe",
-            )):
-                response = dispatch()
-        else:
-            response = dispatch()
-        echoed, usage_prompt = "", 0
-        try:
-            echoed = str(response.choices[0].message.content or "")
-            usage_prompt = int(getattr(getattr(response, "usage", None), "prompt_tokens", 0) or 0)
-        except Exception:
-            pass
-        return {
-            "ok": True,
-            "status_code": 200,
-            "body": "",
-            "echoed_text": echoed,
-            "usage_prompt": usage_prompt,
-        }
-    except Exception as exc:
-        status = getattr(exc, "status_code", None) or getattr(
-            getattr(exc, "response", None), "status_code", None
-        )
-        body = str(getattr(exc, "message", "") or getattr(exc, "body", "") or str(exc))
-        return {
-            "ok": False,
-            "status_code": status if isinstance(status, int) else None,
-            "body": body,
-            "echoed_text": "",
-            "usage_prompt": 0,
-        }
 
 
 def _plain(value: Any) -> Any:
@@ -413,7 +326,6 @@ __all__ = [
     "PROVIDER_TEST_PROMPT",
     "accounted_one_shot",
     "controlled_probe_error",
-    "probe_oversized_context",
     "probe_provider_readiness",
 ]
 

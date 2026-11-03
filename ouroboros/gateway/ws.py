@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import functools
 import inspect
 import json
@@ -20,9 +21,41 @@ from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
 
-_ws_clients: list[WebSocket] = []
+
+class _Connection:
+    """One open browser socket and its ONE writer.
+
+    Broadcast frames reach the socket in order through its own outbox, served by one writer
+    task for the socket's whole life: a frame is never a coroutine of its own, and a slow or
+    half-open socket delays only itself (WS4). A send that fails retires the connection (it
+    leaves the registry; its receive loop ends on its own) and its diagnostic row is written
+    off the loop. Replies to the socket's own frames (notices, ``panic_accepted``) are sent by
+    its receive loop directly, as before.
+    """
+
+    __slots__ = ("ws", "outbox", "writer")
+
+    def __init__(self, ws: Any) -> None:
+        self.ws = ws
+        self.outbox: asyncio.Queue = asyncio.Queue()
+        self.writer = asyncio.get_running_loop().create_task(self._write(), name="ws-writer")
+
+    async def _write(self) -> None:
+        while True:
+            data, msg_type = await self.outbox.get()
+            try:
+                await self.ws.send_text(data)
+            except Exception as exc:
+                _retire(self, msg_type, exc)
+                return
+
+
+_ws_clients: list[_Connection] = []
 _ws_lock = threading.Lock()
 _event_loop: asyncio.AbstractEventLoop | None = None
+# Frames encoded off the loop and not yet handed to the writers: one loop wake per burst.
+_pending: collections.deque = collections.deque()
+_flush_scheduled = False
 
 
 def set_event_loop(loop: asyncio.AbstractEventLoop | None) -> None:
@@ -99,7 +132,7 @@ def has_ws_clients() -> bool:
 async def close_all_ws(*, code: int = 1012, reason: str = "Server restarting") -> None:
     """Close every connected browser websocket best-effort."""
     with _ws_lock:
-        clients = list(_ws_clients)
+        clients = [connection.ws for connection in _ws_clients]
     for ws in clients:
         try:
             await ws.close(code=code, reason=reason)
@@ -107,66 +140,111 @@ async def close_all_ws(*, code: int = 1012, reason: str = "Server restarting") -
             pass
 
 
-async def broadcast_ws(msg: dict) -> None:
-    """Send a message to all connected WebSocket clients."""
-    data = json.dumps(msg, ensure_ascii=False, default=str)
-    msg_type = str(msg.get("type", "unknown"))
+def _register(ws: Any) -> _Connection:
+    """Open the socket's writer (on the loop) and list the connection for broadcasts."""
+    connection = _Connection(ws)
     with _ws_lock:
-        clients = list(_ws_clients)
-        total_clients = len(clients)
-    dead = []
-    # WS4: send to all clients CONCURRENTLY — one slow / half-open client no longer
-    # head-of-lines the broadcast (and the heartbeat) to every other client.
-    results = await asyncio.gather(
-        *(ws.send_text(data) for ws in clients), return_exceptions=True
-    )
-    for ws, result in zip(clients, results):
-        if isinstance(result, BaseException):
-            log.info(
-                "WebSocket send failed for msg type=%s; dropping client (%s)",
-                msg_type,
-                type(result).__name__,
-            )
-            dead.append(ws)
-    if dead:
-        with _ws_lock:
-            for ws in dead:
-                try:
-                    _ws_clients.remove(ws)
-                except ValueError:
-                    pass
-        try:
-            from ouroboros.utils import append_jsonl
-
-            append_jsonl(
-                pathlib.Path(DATA_DIR) / "logs" / "events.jsonl",
-                {
-                    "ts": utc_now_iso(),
-                    "type": "broadcast_partial_failure",
-                    "msg_type": msg_type,
-                    "dead_clients": len(dead),
-                    "total_clients": total_clients,
-                },
-            )
-        except Exception:
-            log.debug("Failed to emit broadcast_partial_failure event", exc_info=True)
+        _ws_clients.append(connection)
+    return connection
 
 
-def broadcast_ws_sync(msg: dict) -> None:
-    """Thread-safe sync wrapper for broadcasting."""
-    loop = _event_loop
-    if loop is None:
-        return
-    coro = broadcast_ws(msg)
+def _unregister(connection: _Connection) -> int:
+    with _ws_lock:
+        if connection in _ws_clients:
+            _ws_clients.remove(connection)
+        total = len(_ws_clients)
+    connection.writer.cancel()
+    return total
+
+
+def _retire(connection: _Connection, msg_type: str, exc: BaseException) -> None:
+    """A writer whose send failed: drop the connection and record the fact OFF the loop.
+
+    The ``broadcast_partial_failure`` row keeps its shape (one dead client per failed writer);
+    it used to be appended synchronously inside the broadcast, a file lock and a write on the
+    event loop. The default executor takes it now; a full executor only delays the row."""
+    log.info("WebSocket send failed for msg type=%s; dropping client (%s)", msg_type, type(exc).__name__)
+    with _ws_lock:
+        total_clients = len(_ws_clients)
+        if connection in _ws_clients:
+            _ws_clients.remove(connection)
+    row = {"ts": utc_now_iso(), "type": "broadcast_partial_failure", "msg_type": msg_type,
+           "dead_clients": 1, "total_clients": total_clients}
     try:
-        asyncio.run_coroutine_threadsafe(coro, loop)
-    except RuntimeError:
-        # A closed or already-stopped loop never schedules the coroutine. The
-        # broadcast is deliberately a no-op then, but the coroutine object must
-        # still be closed here: dropped un-awaited it emits "coroutine
-        # 'broadcast_ws' was never awaited" from whatever code is running when
-        # it is collected, blaming an innocent caller for this line.
-        coro.close()
+        asyncio.get_running_loop().run_in_executor(None, _record_failure, pathlib.Path(DATA_DIR), row)
+    except Exception:
+        log.debug("Failed to hand off broadcast_partial_failure", exc_info=True)
+
+
+def _record_failure(data_dir: pathlib.Path, row: dict) -> None:
+    try:
+        from ouroboros.utils import append_jsonl
+
+        append_jsonl(data_dir / "logs" / "events.jsonl", row)
+    except Exception:
+        log.debug("Failed to emit broadcast_partial_failure event", exc_info=True)
+
+
+def _encode(msg: dict) -> str:
+    return json.dumps(msg, ensure_ascii=False, default=str)
+
+
+def _queue_frame(msg: dict) -> bool:
+    """Encode one frame and queue it for the writers; returns whether the caller must schedule
+    the flush (False: no socket is open, or a flush is already scheduled).
+
+    Nothing is encoded for nobody: a frame with no open socket costs only this check (cost
+    law L10; every ``log`` frame used to be JSON-encoded on the loop with no browser open)."""
+    global _flush_scheduled
+    with _ws_lock:
+        if not _ws_clients:
+            return False
+    frame = (_encode(msg), str(msg.get("type", "unknown")))
+    with _ws_lock:
+        _pending.append(frame)
+        schedule, _flush_scheduled = not _flush_scheduled, True
+    return schedule
+
+
+def _flush_pending() -> None:
+    """On the loop: hand every queued frame, in order, to every open connection's writer."""
+    global _flush_scheduled
+    with _ws_lock:
+        frames, connections = list(_pending), list(_ws_clients)
+        _pending.clear()
+        _flush_scheduled = False
+    for connection in connections:
+        for frame in frames:
+            connection.outbox.put_nowait(frame)
+
+
+async def broadcast_ws(msg: dict) -> None:
+    """Hand one frame to every open connection's writer (on the loop), behind every frame
+    queued before it; the writers send. A frame with no open socket is not even encoded."""
+    _queue_frame(msg)
+    _flush_pending()
+
+
+def broadcast_ws_sync(msg: dict) -> bool:
+    """Thread-safe broadcast. ``True`` when a running server loop took the frame (an open socket
+    or none — a frame for nobody is dropped unencoded); ``False`` in a process without one (a
+    pooled worker) or once the loop stopped. The frame is encoded on the caller's thread and one
+    ``call_soon_threadsafe`` flush carries a whole burst to the writers: no coroutine per frame,
+    and a stopped or closed loop never holds an un-awaited one."""
+    global _flush_scheduled
+    loop = _event_loop
+    if loop is None or not loop.is_running():
+        return False
+    if not _queue_frame(msg):
+        return True
+    try:
+        loop.call_soon_threadsafe(_flush_pending)
+    except RuntimeError:  # the loop closed after the check: nothing will flush these frames
+        with _ws_lock:
+            _pending.clear()
+            _flush_scheduled = False
+        return False
+    return True
 
 
 async def _dispatch_extension_message(
@@ -294,15 +372,25 @@ async def _dispatch_extension_message(
     return True
 
 
-def _initialization_notice(client_message_id: str = "", chat_id: int = 1) -> str:
-    """The refusal of this socket's frame; it names that frame so only its Sending settles."""
+def _initialization_notice(client_message_id: str = "", chat_id: int = 1, *, reason: str = "") -> str:
+    """The refusal of this socket's frame; it names that frame so only its Sending settles.
+    ``reason`` says in plain words why the message was not saved (no bridge yet: the store is
+    still migrating, or the start failed); a refused acceptance keeps the generic sentence."""
     return json.dumps({
         "type": "chat", "chat_id": chat_id,
         "role": "system", "system_type": "initialization_notice",
-        "content": "⚠️ System is still initializing. Please wait a moment and try again.",
+        "content": reason or "⚠️ System is still initializing. Please wait a moment and try again.",
         "ts": utc_now_iso(),
         **({"client_message_id": client_message_id} if client_message_id else {}),
     })
+
+
+def _no_bridge_notice(websocket: WebSocket, client_message_id: str, chat_id: int) -> str:
+    """The notice for a chat frame that arrived before the dialogue opened."""
+    from ouroboros.server_liveness import boot_notice
+
+    return _initialization_notice(client_message_id, chat_id,
+                                  reason=boot_notice(getattr(websocket.app, "state", None)))
 
 
 async def _accept_chat_after(websocket: WebSocket, previous: asyncio.Task | None, accept,
@@ -320,17 +408,21 @@ async def _accept_chat_after(websocket: WebSocket, previous: asyncio.Task | None
         await asyncio.wait((previous,))  # its failure was its own notice
     try:
         await run_sync_to_completion(accept)
-    except Exception:
+    except Exception as exc:
+        from ouroboros.store import StoreBusy
+
+        busy = isinstance(exc, StoreBusy) or isinstance(exc.__cause__, StoreBusy)
+        reason = "⚠️ Your message was not saved: the dialogue store is busy. Please send it again." if busy else ""
         try:
-            await websocket.send_text(_initialization_notice(client_message_id, chat_id))
+            await websocket.send_text(_initialization_notice(client_message_id, chat_id, reason=reason))
         except Exception:
             log.debug("WebSocket closed before its chat failure notice", exc_info=True)
 
 
 async def ws_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
+    connection = _register(websocket)
     with _ws_lock:
-        _ws_clients.append(websocket)
         total = len(_ws_clients)
     log.info("WebSocket client connected (total: %d)", total)
     # Tail of this socket's chat acceptances: each waits for the one before it,
@@ -374,6 +466,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
 
             payload = msg.get("content", "") if msg_type == "chat" else msg.get("cmd", "")
             if msg_type in ("chat", "command") and (payload or (msg_type == "chat" and msg.get("attachments"))):
+
                 try:
                     thread_id = int(msg.get("chat_id") or 1) if msg_type == "chat" else 1
                 except (TypeError, ValueError):
@@ -383,24 +476,28 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                     from supervisor.message_bus import try_get_bridge
 
                     bridge = try_get_bridge()
+                    if str(payload).strip().lower().startswith("/panic"):
+                        from ouroboros.panic_source import source_evidence
+                        from ouroboros.server_control import request_panic
+                        evidence = source_evidence(websocket, "chat_command" if msg_type == "chat" else "web_ui_ws",
+                                                   client_surface=msg.get("client_surface"))
+                        if request_panic(bridge, payload, evidence=evidence,
+                                         startup_owner_command=getattr(websocket.app.state, "startup_owner_command", None)):
+                            await websocket.send_text(json.dumps({"type": "panic_accepted"}))
+                        else:
+                            await websocket.send_text(json.dumps({"type": "log", "data": {
+                                "level": "warning", "message": "Panic emergency owner is unavailable."}}))
+                        continue  # Never enter ordered chat acceptance or ordinary command admission.
                     if msg_type == "chat":
-                        # The composer sends slash text as a chat frame. Offer
-                        # Panic to the authenticated socket's emergency door
-                        # before this socket's ordered chat-acceptance tail;
-                        # otherwise an earlier blocked append could delay Stop.
-                        if bridge is not None and bridge.panic.request(payload):
-                            continue
-                        force_plan = bool(msg.get("force_plan"))
                         client_surface = normalize_client_surface(msg.get("client_surface"))
                         task_metadata: dict[str, Any] = {
-                            "force_plan": force_plan,
-                            "force_plan_source": "swarm" if force_plan else "",
+                            "reply_to": msg.get("reply_to", ""),
                         }
                         # Attachment inspection belongs to the ordered acceptance
                         # worker, so this socket can receive Panic during disk I/O.
                         if client_surface is not None:
                             # Sending-surface observables ride task_metadata
-                            # (the force_plan rail): they pass the bus whitelist
+                            # through the bus whitelist
                             # nested, reach direct/ephemeral/queued turns, and
                             # land in chat.jsonl at the canonical-row writer.
                             client_surface["received_at"] = utc_now_iso()
@@ -432,8 +529,10 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                             controls.add(control)
                             control.add_done_callback(controls.discard)
                             continue
-                    if bridge is None:
-                        raise AssertionError("message bus is not initialized")
+                    if bridge is None:  # the store is still migrating (or the start failed): say so
+                        await websocket.send_text(_no_bridge_notice(
+                            websocket, str(msg.get("client_message_id") or ""), thread_id))
+                        continue
                     if msg_type == "chat":
                         accept = (functools.partial(_accept_with_attachments, bridge, payload, send_kwargs,
                                                     msg["attachments"]) if msg.get("attachments")
@@ -449,12 +548,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
     except Exception as exc:
         log.warning("WebSocket error: %s", exc)
     finally:
-        with _ws_lock:
-            try:
-                _ws_clients.remove(websocket)
-            except ValueError:
-                pass
-            total = len(_ws_clients)
+        total = _unregister(connection)
         log.info("WebSocket client disconnected (total: %d)", total)
         if accepting is not None:
             # Received chat frames keep custody through disconnect or cancellation:

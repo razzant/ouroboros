@@ -13,7 +13,7 @@ import uuid
 import pytest
 
 from tests import test_ui_smoke_playwright as ui
-from tests.candidate_checkout import SENTINEL_ROUTE
+from tests.candidate_checkout import SENTINEL_ROUTE, candidate_checkout
 from tests._store_shared import read_result
 
 pytestmark = [pytest.mark.serial, pytest.mark.ui_browser]
@@ -85,7 +85,7 @@ def _terminal_result(data_dir: Path, task_id: str):
     return row if row.get("status") in {"completed", "failed", "cancelled", "rejected_duplicate"} else None
 
 
-def test_real_server_pool_runs_a_submitted_task_to_completion(tmp_path, monkeypatch):
+def test_real_server_pool_runs_a_submitted_task_to_completion(tmp_path, ui_candidate_checkout):
     """Readiness is not execution: a worker of the real pool must complete a queued task.
 
     `POST /api/tasks` admits a root task to the supervisor queue — unlike a chat
@@ -97,8 +97,7 @@ def test_real_server_pool_runs_a_submitted_task_to_completion(tmp_path, monkeypa
     """
     from tests.system_e2e.harness import ScriptedStubModel, keyless_settings, write_settings_file
 
-    monkeypatch.setenv("OUROBOROS_RUN_UI_SMOKE", "1")
-    fixture = ui.direct_server_with_data.__wrapped__(tmp_path)
+    fixture = ui.direct_server_with_data.__wrapped__(tmp_path, ui_candidate_checkout)
     with ScriptedStubModel(final_answer="Pooled worker answer: OK.") as stub:
         try:
             running = next(fixture)
@@ -129,13 +128,14 @@ def test_real_server_pool_runs_a_submitted_task_to_completion(tmp_path, monkeypa
             assert json.loads(_served(running, "/api/health"))["runtime_version"] == running["candidate_version"]
         finally:
             fixture.close()
-    assert not (tmp_path / "repo").exists()
+    # Proven gone: the case hands the session's copy back to its owner, which deletes it once.
+    assert ui_candidate_checkout.unproven == 0 and ui_candidate_checkout.path.exists()
 
 
 @pytest.mark.parametrize("launcher", ["direct", "settings"])
-def test_real_server_uses_disposable_candidate_and_keeps_identity_through_restart(tmp_path, monkeypatch, launcher):
-    monkeypatch.setenv("OUROBOROS_RUN_UI_SMOKE", "1")
-    fixture = ui.direct_server_with_data.__wrapped__(tmp_path)
+def test_real_server_uses_disposable_candidate_and_keeps_identity_through_restart(
+        tmp_path, monkeypatch, launcher, ui_candidate_checkout):
+    fixture = ui.direct_server_with_data.__wrapped__(tmp_path, ui_candidate_checkout)
     try:
         if launcher == "settings":
             from tests.test_settings_restart_browser import settings_server
@@ -145,7 +145,8 @@ def test_real_server_uses_disposable_candidate_and_keeps_identity_through_restar
         else:
             running = next(fixture)
         assert running["repo_dir"] != Path(ui.REPO_ROOT)
-        assert running["repo_dir"].is_relative_to(tmp_path)
+        assert running["repo_dir"] == ui_candidate_checkout.path  # the session's one copy, this case's own data
+        assert running["data_dir"].is_relative_to(tmp_path)
         assert len(running["candidate_identity"]) == 64
         settings = (running["data_dir"] / "settings.json").read_text()
         assert "ui-smoke-key" in settings
@@ -164,7 +165,7 @@ def test_real_server_uses_disposable_candidate_and_keeps_identity_through_restar
         assert os.environ["OUROBOROS_DATA_DIR"] != str(running["data_dir"])
     finally:
         fixture.close()
-    assert not (tmp_path / "repo").exists()
+    assert ui_candidate_checkout.unproven == 0 and ui_candidate_checkout.path.exists()
 
 
 def test_concurrent_servers_keep_distinct_roots_and_owner_sentinels(tmp_path, monkeypatch):
@@ -179,27 +180,29 @@ def test_concurrent_servers_keep_distinct_roots_and_owner_sentinels(tmp_path, mo
         (path / "sentinel").write_bytes(b"owner state")
         monkeypatch.setenv(key, str(path))
     before = {path.relative_to(owner): path.read_bytes() for path in owner.rglob("sentinel")}
-    monkeypatch.setenv("OUROBOROS_RUN_UI_SMOKE", "1")
     barrier = Barrier(2)
 
     def run(number):
         root = tmp_path / f"run-{number}"
-        fixture = ui.direct_server_with_data.__wrapped__(root)
-        try:
-            running = next(fixture)
-            assert running["data_dir"].is_relative_to(root)
-            assert running["repo_dir"].is_relative_to(root)
-            barrier.wait(timeout=90)  # Both owned servers must be alive together.
-            assert _served(running, SENTINEL_ROUTE) == running["candidate_sentinel"]
-            return running["url"], running["candidate_identity"], running["candidate_sentinel"]
-        finally:
-            fixture.close()
-            assert not (root / "repo").exists()
+        # Each its own session-style copy, as separate xdist workers have.
+        with candidate_checkout(Path(ui.REPO_ROOT), root / "candidate", origin_proof=True) as copy:
+            fixture = ui.direct_server_with_data.__wrapped__(root, copy)
+            try:
+                running = next(fixture)
+                assert running["data_dir"].is_relative_to(root)
+                assert running["repo_dir"].is_relative_to(root)
+                barrier.wait(timeout=90)  # Both owned servers must be alive together.
+                assert _served(running, SENTINEL_ROUTE) == running["candidate_sentinel"]
+                facts = running["url"], running["candidate_identity"], running["candidate_sentinel"]
+            finally:
+                fixture.close()
+        assert not (root / "candidate").exists()
+        return facts
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         first, second = executor.map(run, range(2))
     assert first[0] != second[0]
     assert first[1] == second[1], "the same source selection is one candidate identity"
-    assert first[2] != second[2], "each live server proved its OWN checkout, not a shared one"
+    assert first[2] != second[2], "each concurrent session's server proved its OWN copy"
     assert {path.relative_to(owner): path.read_bytes()
             for path in owner.rglob("*") if path.is_file()} == before

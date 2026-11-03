@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
-from ouroboros.triad_review import parse_model_review_results
+from ouroboros.triad_review import parse_seat_answers
 
 from tests._review_substrate_shared import FakeLLM
 
@@ -76,15 +76,16 @@ class ActorErrorSlotLLM:
         return {"content": json.dumps({"verdict": "PASS", "findings": [], "summary": "ok"})}, {}
 
 
-def test_degraded_or_errored_acceptance_slot_abstains_when_quorum_remains(tmp_path):
+def test_a_degraded_verdict_slot_abstains_when_quorum_remains(tmp_path):
     """T1 (v6.35.0): a single unparseable/DEGRADED-verdict slot must NOT poison a
-    clean 2-of-3 PASS quorum. A participation fault also abstains on task
-    acceptance when the configured PASS quorum remains; no-quorum is DEGRADED."""
+    clean 2-of-3 PASS quorum, even under fail-closed participation. A participation
+    fault still fail-closes, as on every surface: the exemption that let it abstain
+    while the PASS quorum remained was task acceptance's own and left with it."""
     slots = [ReviewSlot(slot_id=f"s{i}", model=f"m-{i}") for i in range(3)]
 
     def _req():
         return ReviewRequest(
-            surface="task_acceptance", goal="g", subject="done",
+            surface="result", goal="g", subject="done",
             policy={"fail_closed_on_errors": True, "min_successful_slots": 2}, task_id="t",
         )
 
@@ -93,16 +94,7 @@ def test_degraded_or_errored_acceptance_slot_abstains_when_quorum_remains(tmp_pa
     assert ok.degraded is False
 
     bad = run_review_request(_req(), slots=slots, drive_root=tmp_path, llm=ActorErrorSlotLLM())
-    assert bad.aggregate_signal == "PASS"
-    assert bad.degraded is False
-
-
-class PassNoTierLLM:
-    """PASS verdict but NO outcome_tier — the non-compliant reviewer the required-
-    tier contract must catch (a tier-less PASS must not aggregate to a clean PASS)."""
-
-    def chat(self, **kwargs):
-        return {"content": json.dumps({"verdict": "PASS", "findings": [], "summary": "ok"})}, {}
+    assert bad.aggregate_signal == "DEGRADED"
 
 
 class PassWithTierLLM:
@@ -112,20 +104,10 @@ class PassWithTierLLM:
         return {"content": json.dumps(body)}, {}
 
 
-class PassTierNoCoachLLM:
-    """PASS with a valid outcome_tier but EMPTY completion_coach — still
-    non-responsive to the required-tier contract (both keys required)."""
-
-    def chat(self, **kwargs):
-        body = {"verdict": "PASS", "outcome_tier": "solved", "completion_coach": "",
-                "criteria_used": [{"criterion": "verified", "status": "supported", "evidence_refs": ["verification_summary"]}], "findings": [], "summary": "ok"}
-        return {"content": json.dumps(body)}, {}
-
-
 class PoisonDegradedSlotLLM:
     """Two slots PASS+solved; the '-2' slot returns a DEGRADED verdict carrying a
     BLOCKED outcome_tier + a critical finding — a parse-degraded actor that must
-    NOT poison the clean quorum PASS capsule (v6.36.0 review finding)."""
+    NOT poison the clean quorum PASS's tier (v6.36.0 review finding)."""
 
     def chat(self, **kwargs):
         if str(kwargs.get("model", "")).endswith("-2"):
@@ -145,106 +127,22 @@ class PoisonDegradedSlotLLM:
         })}, {}
 
 
-def test_degraded_actor_does_not_poison_acceptance_capsule(tmp_path):
-    """v6.36.0 (scope review finding): aggregate_outcome_tier / build_improvement_
-    capsule must draw tier/coach/findings ONLY from actors that contributed to the
-    aggregate verdict — a single parse-degraded slot carrying a BLOCKED tier must
-    not inject a blocking improvement note into an otherwise-clean quorum PASS.
-    v6.55.0 (codex/fable-5 cumulative review): a DELIBERATE minority DEGRADED
-    verdict carrying a concrete recommendation now surfaces as ONE labeled
-    non-veto [DISSENT] line (the GAIA 3cef3a44 class) — while the mainline
-    capsule (tier / coach / bullets) stays unpoisoned exactly as before."""
-    from ouroboros.review_substrate import aggregate_outcome_tier, build_improvement_capsule
+def test_a_degraded_actor_does_not_poison_the_aggregate_tier(tmp_path):
+    """v6.36.0 (scope review finding): aggregate_outcome_tier draws its tier ONLY from
+    actors that contributed to the aggregate verdict, so a single parse-degraded slot
+    carrying a BLOCKED tier never names an otherwise-clean quorum PASS (the panel reason
+    reads this tier). The improvement capsule and its [DISSENT] line, which drew from the
+    same actors, left with task acceptance."""
+    from ouroboros.review_substrate import aggregate_outcome_tier
     slots = [ReviewSlot(slot_id=f"s{i}", model=f"m-{i}") for i in range(3)]
     req = ReviewRequest(
-        surface="task_acceptance", goal="g", subject="done",
-        policy={"classify_outcome_tier": True, "min_successful_slots": 2}, task_id="t",
+        surface="result", goal="g", subject="done",
+        policy={"min_successful_slots": 2}, task_id="t",
     )
     res = run_review_request(req, slots=slots, drive_root=tmp_path, llm=PoisonDegradedSlotLLM())
     assert res.aggregate_signal == "PASS"
-    # The degraded '-2' slot's BLOCKED tier / coach must NOT surface.
+    # The degraded '-2' slot's BLOCKED tier must NOT surface.
     assert aggregate_outcome_tier(res) == "solved"
-    capsule = build_improvement_capsule(res)
-    assert "STOP everything" not in capsule
-    assert "blocked" not in capsule.lower()
-    # ...but its deliberate DEGRADED verdict + concrete recommendation IS the
-    # dissent class: one labeled line, never a mainline bullet.
-    assert "[DISSENT — s2 said DEGRADED]" in capsule
-    assert "do not ship this" in capsule
-    assert "- do not ship this" not in capsule
-
-
-class ContractDegradedPassLLM:
-    """Two slots PASS+solved+coach (contract-valid); the '-2' slot returns
-    verdict=PASS but a BLOCKED outcome_tier with an EMPTY completion_coach — a
-    CONTRACT-DEGRADED PASS (non-responsive to the required-tier contract). It must
-    not contribute its blocked tier / finding to the clean quorum capsule
-    (v6.36.0 round-2 scope finding: the live PASS-but-contract-degraded path)."""
-
-    def chat(self, **kwargs):
-        if str(kwargs.get("model", "")).endswith("-2"):
-            return {"content": json.dumps({
-                "verdict": "PASS", "outcome_tier": "blocked_with_evidence", "completion_coach": "",
-                "findings": [{"verdict": "FAIL", "severity": "critical",
-                              "item": "poison2", "recommendation": "block this hard"}],
-                "summary": "x",
-            })}, {}
-        return {"content": json.dumps({
-            "verdict": "PASS", "outcome_tier": "solved", "completion_coach": "ship",
-            "criteria_used": [{"criterion": "verified", "status": "supported",
-                               "evidence_refs": ["verification_summary"]}],
-            "findings": [], "summary": "ok",
-        })}, {}
-
-
-def test_contract_degraded_pass_does_not_poison_capsule(tmp_path):
-    """v6.36.0 round-2 scope finding: a verdict=PASS actor that VIOLATES the
-    required tier/coach contract is demoted to non-contributing (signal->DEGRADED),
-    so it can't feed its blocked tier / finding into the clean quorum PASS capsule —
-    the live path the DEGRADED-verdict-only test did not cover."""
-    from ouroboros.review_substrate import (
-        aggregate_outcome_tier,
-        build_improvement_capsule,
-        compact_review_projection,
-    )
-    slots = [ReviewSlot(slot_id=f"s{i}", model=f"m-{i}") for i in range(3)]
-    req = ReviewRequest(
-        surface="task_acceptance", goal="g", subject="done",
-        policy={"classify_outcome_tier": True, "min_successful_slots": 2}, task_id="t",
-    )
-    res = run_review_request(req, slots=slots, drive_root=tmp_path, llm=ContractDegradedPassLLM())
-    assert res.aggregate_signal == "PASS"          # the two contract-valid solved PASS reach quorum
-    assert aggregate_outcome_tier(res) == "solved"  # the blocked contract-degraded PASS is excluded
-    malformed = next(actor for actor in res.actors if actor["slot_id"] == "s2")
-    assert malformed["transport_status"] == "success"
-    assert malformed["parse_status"] == "malformed"
-    assert malformed["semantic_verdict"] == ""
-    assert malformed["quorum_contribution"] is False
-    assert "violated the required" in malformed["reason"]
-    projected = compact_review_projection([dict(res.__dict__)])["panels"][0]
-    projected_malformed = next(
-        actor for actor in projected["actors"] if actor["slot_id"] == "s2"
-    )
-    assert projected_malformed["parse_status"] == "malformed"
-    assert projected_malformed["semantic_verdict"] == ""
-    capsule = build_improvement_capsule(res)
-    assert "block this hard" not in capsule
-    assert "blocked" not in capsule.lower()
-
-
-def test_solved_pass_with_required_coach_does_not_force_reloop(tmp_path):
-    """v6.36.0 round-2 cross-module finding: a contract-valid SOLVED review carries
-    a required completion_coach, but a coach ALONE must not force a revise round —
-    build_improvement_capsule returns '' for a solved/no-findings result."""
-    from ouroboros.review_substrate import build_improvement_capsule
-    slots = [ReviewSlot(slot_id=f"s{i}", model=f"m-{i}") for i in range(3)]
-    req = ReviewRequest(
-        surface="task_acceptance", goal="g", subject="done",
-        policy={"classify_outcome_tier": True, "min_successful_slots": 2}, task_id="t",
-    )
-    res = run_review_request(req, slots=slots, drive_root=tmp_path, llm=PassWithTierLLM())
-    assert res.aggregate_signal == "PASS"
-    assert build_improvement_capsule(res) == ""  # solved + coach, no findings -> finalize, no re-loop
 
 
 def test_single_configured_reviewer_marks_no_diversity(tmp_path):
@@ -279,36 +177,13 @@ def test_single_configured_reviewer_marks_no_diversity(tmp_path):
     assert "single_reviewer_no_diversity" not in three.degraded_reasons
 
 
-def test_required_outcome_tier_is_enforced_at_quorum(tmp_path):
-    """T1 (v6.35.0): with classify_outcome_tier policy, a PASS WITHOUT a valid
-    outcome_tier cannot count toward a clean quorum — the required-tier contract
-    is enforced at the parser/quorum level, not just asked for in the prompt.
-
-    v6.46.0 (Q7): on the ADVISORY task-acceptance surface, a SOLVED deliverable has
-    no tier-up step, so an empty completion_coach must NOT demote a solved PASS to
-    DEGRADED. A tier-LESS PASS is still non-responsive."""
-    slots = [ReviewSlot(slot_id=f"s{i}", model=f"m-{i}") for i in range(3)]
-
-    def _req():
-        return ReviewRequest(
-            surface="task_acceptance", goal="g", subject="done",
-            policy={"classify_outcome_tier": True, "min_successful_slots": 2}, task_id="t",
-        )
-
-    no_tier = run_review_request(_req(), slots=slots, drive_root=tmp_path, llm=PassNoTierLLM())
-    assert no_tier.aggregate_signal == "DEGRADED"  # tier-less PASS is still non-responsive
-
-    # Advisory carve-out: a SOLVED PASS without a coach is RESPONSIVE (nothing to improve).
-    no_coach = run_review_request(_req(), slots=slots, drive_root=tmp_path, llm=PassTierNoCoachLLM())
-    assert no_coach.aggregate_signal == "PASS"
-
-    with_tier = run_review_request(_req(), slots=slots, drive_root=tmp_path, llm=PassWithTierLLM())
-    assert with_tier.aggregate_signal == "PASS"
-
-
 def test_p3_surfaces_ignore_task_acceptance_tier_policy(tmp_path):
     """Defense in depth: even if a caller accidentally carries the task-only
     classify_outcome_tier flag, commit/scope FAILs remain authoritative vetoes."""
+    from ouroboros.tools.scope_review_contract import SCOPE_REQUIRED_ITEMS
+
+    coupling_fail = json.dumps([{"item": item, "verdict": "FAIL", "severity": "critical", "reason": "broken caller"}
+                                for item in SCOPE_REQUIRED_ITEMS])
     for surface in ("multi_model_review", "scope_review"):
         result = run_review_request(
             ReviewRequest(
@@ -320,7 +195,8 @@ def test_p3_surfaces_ignore_task_acceptance_tier_policy(tmp_path):
             ),
             slots=[ReviewSlot(slot_id="s0", model="m-0")],
             drive_root=tmp_path,
-            llm=FencedArrayLLM(),
+            llm=FencedArrayLLM() if surface == "multi_model_review" else
+                SimpleNamespace(chat=lambda **_kw: ({"content": coupling_fail}, {})),
         )
         assert result.aggregate_signal == "FAIL"
         assert result.actors[0]["signal"] == "FAIL"
@@ -471,30 +347,6 @@ def test_one_llm_usage_row_per_physical_reviewer_call(tmp_path):
     assert len(usage_events) == 3
     assert {event["slot_id"] for event in usage_events} == {"slot_a", "slot_b", "slot_c"}
     assert {event["source"] for event in usage_events} == {"review_substrate:multi_model_review"}
-
-
-def test_format_repair_emits_one_usage_row_per_send_without_aggregate(tmp_path):
-    class RepairLLM:
-        def __init__(self):
-            self.calls = 0
-
-        def chat(self, **_kwargs):
-            self.calls += 1
-            if self.calls == 1:
-                return {"content": "malformed"}, {"prompt_tokens": 3, "ledger_attempt_ids": ["a1"]}
-            return {"content": "[]"}, {"prompt_tokens": 4, "ledger_attempt_ids": ["a2"]}
-
-    ctx = SimpleNamespace(task_id="repair-usage", event_queue=None, pending_events=[])
-    llm = RepairLLM()
-    run_review_request(
-        ReviewRequest(surface="task_acceptance", goal="review", task_id=ctx.task_id),
-        slots=[ReviewSlot(slot_id="slot_a", model="same/model")],
-        drive_root=tmp_path, llm=llm, usage_ctx=ctx,
-    )
-
-    rows = [event for event in ctx.pending_events if event.get("type") == "llm_usage"]
-    assert llm.calls == 2
-    assert [row["ledger_attempt_ids"] for row in rows] == [["a1"], ["a2"]]
 
 
 def test_failed_physical_reviewer_send_still_emits_its_usage_row(tmp_path):
@@ -713,7 +565,7 @@ def test_p3_commit_actor_retries_same_slot_model_once_then_blocks(tmp_path):
     recovered_llm.chat.side_effect = [
         TimeoutError("transient timeout"),
         (
-            {"content": "{\"verdict\":\"PASS\",\"findings\":[],\"summary\":\"ok\"}"},
+            {"content": "[]\nNO_FINDINGS"},
             {"prompt_tokens": 1, "completion_tokens": 1},
         ),
     ]
@@ -784,7 +636,7 @@ def test_p3_api_actor_retries_an_empty_response_once_on_the_same_slot_model(tmp_
     recovered_llm.chat.side_effect = [
         ({"content": ""}, {"prompt_tokens": 0, "completion_tokens": 0}),
         (
-            {"content": "{\"verdict\":\"PASS\",\"findings\":[],\"summary\":\"ok\"}"},
+            {"content": "[]\nNO_FINDINGS"},
             {"prompt_tokens": 1, "completion_tokens": 1},
         ),
     ]
@@ -816,7 +668,7 @@ def _one_seat(llm, model, *, parts, tmp_path, session_task=""):
     retrieving = "coupling" in parts
     model, payload, err = asyncio.run(_query_model(
         llm, model, [] if retrieving else [{"role": "user", "content": "PACKET"}], asyncio.Semaphore(1),
-        ctx=ctx, slot_id="slot_1", route=ReviewRouteKind.API_CHAT,
+        ctx=ctx, slot_id="slot_1", route=ReviewRouteKind.API_CHAT, parts=parts,
         session_task=session_task, session_root=str(tmp_path), native_retrieval=retrieving,
         session_policy={"output_contract": REVIEW_TWO_PART_OBJECT_CONTRACT} if retrieving else None))
     envelope = _parse_model_response(model, payload, err)
@@ -925,14 +777,14 @@ def test_review_substrate_preserves_explicit_zero_budget_rails(tmp_path):
 
 
 def test_triad_actor_records_preserve_review_refs():
-    parsed = parse_model_review_results({
+    parsed = parse_seat_answers({
         "results": [{
             "model": "m1",
             "text": "[{\"item\":\"x\",\"verdict\":\"PASS\",\"severity\":\"advisory\",\"reason\":\"ok\"}]",
             "prompt_ref": {"manifest_ref": {"path": "prompt.json"}},
             "response_ref": {"manifest_ref": {"path": "response.json"}},
         }]
-    })
+    }, {})
 
     actor = parsed.actor_records[0].to_dict()
     assert actor["prompt_ref"]["manifest_ref"]["path"] == "prompt.json"
@@ -963,5 +815,3 @@ def test_two_part_seat_record_preserves_substrate_refs(tmp_path):
     assert record["prompt_ref"]["manifest_ref"]["path"]
     assert record["response_ref"]["manifest_ref"]["path"]
     assert record["answers"]["coupling"]["verdict"] == "PASS" and record["answers"]["change"]["verdict"] == "PASS"
-
-

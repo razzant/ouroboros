@@ -24,7 +24,8 @@ def _init_repo(tmp_path):
     (repo / "a.txt").write_text("base\n")
     (repo / "BIBLE.md").write_text("constitution\n")
     (repo / "ouroboros").mkdir()
-    for name in ("store.py", "usage_store.py"):  # a store-bearing tree: the ordinary rollback resets at once
+    # A tree bearing every store a current release carries: the ordinary rollback resets at once.
+    for name in ("store.py", "usage_store.py", "dialogue_store.py"):
         (repo / "ouroboros" / name).write_text("# store\n", encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "base")
@@ -708,6 +709,7 @@ def test_boot_resume_does_not_enqueue_a_duplicate_assisted_resolver(tmp_path, mo
 
 def test_assisted_resolver_readiness_waits_for_clean_tree_boot(tmp_path, monkeypatch):
     import supervisor.workers as workers
+    from supervisor import worker_pool_lifecycle
 
     proc = SimpleNamespace(pid=1234, is_alive=lambda: True)
     monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path / "data")
@@ -718,17 +720,16 @@ def test_assisted_resolver_readiness_waits_for_clean_tree_boot(tmp_path, monkeyp
         return True
 
     monkeypatch.setattr(workers, "ensure_worker_pool_started", start_pool)
-    monkeypatch.setattr(
-        workers,
-        "_first_worker_event_since",
-        lambda *_args: {"pid": 1234, "git_sha": "base-sha"},
-    )
+    # The proof reads every ready row since its start: the resolver's project slot's, never the lane spare's.
+    monkeypatch.setattr(worker_pool_lifecycle, "_worker_events_since",
+                        lambda *_args: [{"pid": 1234, "git_sha": "base-sha"}])
 
     assert update_merge.ensure_assisted_resolver_ready("base-sha", timeout_sec=0.1) is True
 
 
 def test_assisted_resolver_readiness_rejects_wrong_sha(tmp_path, monkeypatch):
     import supervisor.workers as workers
+    from supervisor import worker_pool_lifecycle
 
     proc = SimpleNamespace(pid=1234, is_alive=lambda: True)
     monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path / "data")
@@ -738,11 +739,9 @@ def test_assisted_resolver_readiness_rejects_wrong_sha(tmp_path, monkeypatch):
         "ensure_worker_pool_started",
         lambda **_kwargs: workers.WORKERS.setdefault(0, SimpleNamespace(proc=proc)) is not None,
     )
-    monkeypatch.setattr(
-        workers,
-        "_first_worker_event_since",
-        lambda *_args: {"pid": 1234, "git_sha": "stale-sha"},
-    )
+    # The proof reads every ready row since its start: the resolver's project slot's, never the lane spare's.
+    monkeypatch.setattr(worker_pool_lifecycle, "_worker_events_since",
+                        lambda *_args: [{"pid": 1234, "git_sha": "stale-sha"}])
 
     assert update_merge.ensure_assisted_resolver_ready("base-sha", timeout_sec=0.1) is False
 

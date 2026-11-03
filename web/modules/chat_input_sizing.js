@@ -69,13 +69,23 @@ export function attachChatInputSizing(input) {
             : -(px(style.paddingTop) + px(style.paddingBottom));
         const scrollTop = input.scrollTop;
         // Measured at its natural one-row height without a scrollbar, which would
-        // narrow the text it measures.
+        // narrow the text it measures. The row around it keeps its height meanwhile:
+        // where the composer is in flow (the phone's keyboard is up) a one-row field
+        // for that instant would lengthen the feed, and WebKit clamps the feed's
+        // scroll to that length, leaving the newest message under the field.
+        const holder = input.parentElement;
+        const held = holder?.style.getPropertyValue('min-height') ?? '';
+        if (holder) holder.style.setProperty('min-height', `${holder.offsetHeight}px`);
         input.dataset.sizing = 'fit';
         input.style.removeProperty('--chat-input-height');
         const needed = input.scrollHeight + box;
         const capped = needed > cap;
         input.style.setProperty('--chat-input-height', `${capped ? cap : needed}px`);
         input.dataset.sizing = capped ? 'capped' : 'fit';
+        if (holder) {
+            if (held) holder.style.setProperty('min-height', held);
+            else holder.style.removeProperty('min-height');
+        }
         input.scrollTop = !capped ? 0 : edited ? scrollAfterEdit(scrollTop) : scrollTop;
         width = usedWidth();
     }

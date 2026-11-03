@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from typing import Any, Callable, Collection, Dict, Iterable, Mapping, Tuple
+from typing import Any, Callable, Collection, Dict, Iterable, Mapping, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,9 @@ class ToolEntry:
     schema: Dict[str, Any]
     handler: Callable  # fn(ctx: ToolContext, **args) -> str
     is_code_tool: bool = False
-    timeout_sec: int = 360
+    # The host's outer wait for one call; ``None`` = a long-lived handler that observes the
+    # owner's controls itself (``contracts/tool_abi.py``), never a default.
+    timeout_sec: Optional[int] = 360
     # Capability flag: tool can mutate the live repo worktree. The dispatcher
     # snapshots `git status --porcelain` around flagged tools and invalidates
     # advisory freshness when the worktree ACTUALLY changed — covering error

@@ -1,14 +1,16 @@
 """SSE /api/tasks/{id}/events follow-phase tests (v6.90.x P2).
 
-The stream's initial replay is a full archive-aware merge; the follow phase
-reads only appended bytes per (root, source) log, re-discovers late-spawned
-child roots each tick, and heals mid-stream rotation by reading the newest
-archive's unconsumed suffix. seq stays monotonic in-stream and the
-cross-reconnect cursor contract (ouroboros/cli.py::_watch_task) is preserved.
+The stream's initial replay is a full merge (the dialogue store's rows of the task tree by
+indexed probe, the file logs archive-aware); the follow phase reads only the rows stored and
+the bytes appended since per (root, source), re-discovers late-spawned child roots each
+tick, and heals a file log's mid-stream rotation by reading the newest archive's unconsumed
+suffix. seq stays monotonic in-stream and the cross-reconnect cursor contract
+(ouroboros/cli.py::_watch_task) is preserved.
 """
 
 from __future__ import annotations
 
+from ouroboros import dialogue_import, dialogue_store as ds
 from ouroboros.utils import utc_now_iso
 from tests._shared import write_queue_document
 
@@ -73,8 +75,7 @@ def _seed_running_task(tmp_path, task_id="t1", progress_rows=2):
 
 
 def _append_progress(data, task_id, content, ts):
-    with (data / "logs" / "progress.jsonl").open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"ts": ts, "content": content, "task_id": task_id}) + "\n")
+    ds.append(data, "progress", {"ts": ts, "content": content, "task_id": task_id})
 
 
 def _seed_events_running_task(tmp_path, task_id="t1", event_rows=2):
@@ -171,24 +172,19 @@ def test_sse_cursor_resume_matches_initial_replay_positions(tmp_path):
     ]
 
 
-def test_sse_survives_mid_stream_rotation_without_loss_or_duplicates(tmp_path):
+def test_sse_delivers_rows_stored_mid_stream_once(tmp_path):
+    """Two rows stored between ticks arrive exactly once each, after the replayed history and
+    never re-emitting it (the store has no rotation: a coordinate is read once)."""
     data = _seed_running_task(tmp_path)
-    live = data / "logs" / "progress.jsonl"
-    fired = {"rotated": False, "finalized": False}
+    fired = {"stored": False, "finalized": False}
 
     def on_event(event, events):
-        if not fired["rotated"] and len(events) >= 3:
-            # An unconsumed row lands just before the rotation…
-            _append_progress(data, "t1", "pre-rotation", "2026-01-01T00:02:00Z")
-            archive_dir = data / "archive"
-            archive_dir.mkdir(exist_ok=True)
-            os.replace(live, archive_dir / "progress_20260101T000200.jsonl")
-            live.touch()
-            # …and a fresh row starts the new live file.
-            _append_progress(data, "t1", "post-rotation", "2026-01-01T00:02:01Z")
-            fired["rotated"] = True
-        if fired["rotated"] and not fired["finalized"] and any(
-            (e.get("data") or {}).get("content") == "post-rotation" for e in events
+        if not fired["stored"] and len(events) >= 3:
+            _append_progress(data, "t1", "second append", "2026-01-01T00:02:00Z")
+            _append_progress(data, "t1", "third append", "2026-01-01T00:02:01Z")
+            fired["stored"] = True
+        if fired["stored"] and not fired["finalized"] and any(
+            (e.get("data") or {}).get("content") == "third append" for e in events
         ):
             _finalize(data, "t1")
             fired["finalized"] = True
@@ -197,9 +193,7 @@ def test_sse_survives_mid_stream_rotation_without_loss_or_duplicates(tmp_path):
     events = asyncio.run(_consume(response, on_event))
 
     contents = [(e.get("data") or {}).get("content") for e in events if e["type"] == "progress"]
-    # The archive suffix (pre-rotation) and the new live row both arrive, exactly
-    # once each, and the pre-rotation history is not re-emitted.
-    assert contents == ["step-0", "step-1", "pre-rotation", "post-rotation"]
+    assert contents == ["step-0", "step-1", "second append", "third append"]
     seqs = [e["seq"] for e in events]
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
     assert events[-1]["data"]["status"] == "completed"
@@ -207,16 +201,11 @@ def test_sse_survives_mid_stream_rotation_without_loss_or_duplicates(tmp_path):
 
 def test_sse_discovers_late_spawned_child_root(tmp_path):
     data = _seed_running_task(tmp_path, task_id="p1", progress_rows=1)
-    # A row in the PARENT's progress log that matches the lineage only via
-    # subagent_task_id, written (and consumed) BEFORE the child is discovered
+    # A row in the PARENT's progress stream that matches the lineage only via
+    # subagent_task_id, stored (and consumed) BEFORE the child is discovered
     # (P2 review, fix 3): only the filter-growth re-merge can recover it.
-    with (data / "logs" / "progress.jsonl").open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({
-            "ts": "2026-01-01T00:02:30Z",
-            "content": "pre-spawn-lineage",
-            "task_id": "",
-            "subagent_task_id": "c1",
-        }) + "\n")
+    ds.append(data, "progress", {"ts": "2026-01-01T00:02:30Z", "content": "pre-spawn-lineage",
+                                 "task_id": "", "subagent_task_id": "c1"})
     child_drive = tmp_path / "childdrive"
     fired = {"spawned": False, "finalized": False}
 
@@ -275,19 +264,21 @@ def test_iter_task_events_reads_progress_archive_chain(tmp_path):
         encoding="utf-8",
     )
     write_task_result(data, "t1", "completed", result="done", ts="2026-01-01T00:00:10Z")
+    assert dialogue_import.run_dialogue_import(data)["state"] == "done"
 
     events = iter_task_events(data, "t1")
 
     progress = [e for e in events if e["type"] == "progress"]
     assert [(e["data"]["content"]) for e in progress] == ["archived", "live"]
+    assert [e["line"] for e in progress] == [1, 2], "the durable position among the stream's objects"
     assert [e["seq"] for e in events] == list(range(1, len(events) + 1))
     assert events[0]["type"] == "task_result"
 
 
-def test_sse_archive_floor_skips_archives_predating_task_creation(tmp_path):
-    """An archive whose rotation stamp predates proven task creation is never
-    read (bounds the scan to the task lifetime); archives
-    stamped after creation are still consulted."""
+def test_sse_replays_every_stored_row_of_the_task_whatever_archive_held_it(tmp_path):
+    """The creation floor bounded a file scan; a stored row is one indexed probe away, so the
+    legacy replay holds every row that names the task, an archive rotated before its creation
+    included (the import disclosed where it came from; a reused id is the caller's)."""
     data = tmp_path / "data"
     (data / "logs").mkdir(parents=True)
     (data / "archive").mkdir()
@@ -307,45 +298,46 @@ def test_sse_archive_floor_skips_archives_predating_task_creation(tmp_path):
     )
     write_task_result(data, "t1", "running", result="working", ts="2026-01-01T00:01:00Z",
                       created_at="2026-01-01T00:01:00Z")
+    assert dialogue_import.run_dialogue_import(data)["state"] == "done"
 
     events = iter_task_events(data, "t1")
 
     contents = [(e.get("data") or {}).get("content") for e in events if e["type"] == "progress"]
-    assert contents == ["recent-archived", "live-row"]  # "ancient" skipped
+    assert contents == ["ancient", "recent-archived", "live-row"]
 
 
 def test_sse_rotation_stash_consumed_keeps_new_live_offset(tmp_path):
-    """Fix 2: when the inode flip was observed BEFORE the archive became visible
-    (offset stashed, new live file partially consumed), the later archive tick
+    """Fix 2 (the file logs; events here): when the inode flip was observed BEFORE the archive
+    became visible (offset stashed, new live file partially consumed), the later archive tick
     must keep the current live offset/ino — resetting to 0 would re-emit the
     already-consumed rows of the new live file."""
     from ouroboros.gateway.tasks import _TaskEventFollower
 
-    data = _seed_running_task(tmp_path)
-    live = data / "logs" / "progress.jsonl"
+    data = _seed_events_running_task(tmp_path)
+    live = data / "logs" / "events.jsonl"
     follower = _TaskEventFollower(data, "t1")
-    follower.full_merge()  # consumes step-0/step-1
+    follower.full_merge()  # consumes event-0/event-1
 
     # An unconsumed row lands, then the live file is replaced while its archive
     # is NOT yet visible (moved aside), and the new live file starts.
-    _append_progress(data, "t1", "pre-rotation", "2026-01-01T00:02:00Z")
+    _append_events(data, "t1", "pre-rotation", "2026-01-01T00:02:00Z")
     side = tmp_path / "rotated_aside.jsonl"
     os.replace(live, side)
     live.touch()
-    _append_progress(data, "t1", "post-rotation-1", "2026-01-01T00:02:01Z")
+    _append_events(data, "t1", "post-rotation-1", "2026-01-01T00:02:01Z")
 
     rows, _ = follower.poll()  # stash tick: consumes part of the NEW live file
-    assert [(r.get("data") or {}).get("content") for r in rows if r["type"] == "progress"] == [
+    assert [(r.get("data") or {}).get("content") for r in rows if r["type"] == "llm_call"] == [
         "post-rotation-1"
     ]
 
     # The archive becomes visible; more rows land on the new live file.
     (data / "archive").mkdir(exist_ok=True)
-    os.replace(side, data / "archive" / "progress_20260101T000201.jsonl")
-    _append_progress(data, "t1", "post-rotation-2", "2026-01-01T00:02:02Z")
+    os.replace(side, data / "archive" / "events_20260101T000201.jsonl")
+    _append_events(data, "t1", "post-rotation-2", "2026-01-01T00:02:02Z")
 
     rows, _ = follower.poll()
-    contents = [(r.get("data") or {}).get("content") for r in rows if r["type"] == "progress"]
+    contents = [(r.get("data") or {}).get("content") for r in rows if r["type"] == "llm_call"]
     # The archive suffix and the new live delta — and NO duplicate of the
     # already-consumed post-rotation-1.
     assert contents == ["pre-rotation", "post-rotation-2"]
@@ -384,24 +376,24 @@ def test_sse_older_ts_append_triggers_full_remerge_without_losing_newer_rows(tmp
 
 
 def test_sse_double_rotation_between_ticks_delivers_all_rows_once(tmp_path):
-    """Fix 7b: two rotations between ticks — the first new archive is read from
-    the consumed offset, the second fully, the new live file from 0; every row
+    """Fix 7b (the file logs; events here): two rotations between ticks — the first new archive
+    is read from the consumed offset, the second fully, the new live file from 0; every row
     arrives exactly once."""
-    data = _seed_running_task(tmp_path)
-    live = data / "logs" / "progress.jsonl"
+    data = _seed_events_running_task(tmp_path)
+    live = data / "logs" / "events.jsonl"
     fired = {"rotated": False, "finalized": False}
 
     def on_event(event, events):
         if not fired["rotated"] and len(events) >= 3:
             archive_dir = data / "archive"
             archive_dir.mkdir(exist_ok=True)
-            _append_progress(data, "t1", "rot1-row", "2026-01-01T00:02:00Z")
-            os.replace(live, archive_dir / "progress_20260101T000200.jsonl")
+            _append_events(data, "t1", "rot1-row", "2026-01-01T00:02:00Z")
+            os.replace(live, archive_dir / "events_20260101T000200.jsonl")
             live.touch()
-            _append_progress(data, "t1", "rot2-row", "2026-01-01T00:02:01Z")
-            os.replace(live, archive_dir / "progress_20260101T000201.jsonl")
+            _append_events(data, "t1", "rot2-row", "2026-01-01T00:02:01Z")
+            os.replace(live, archive_dir / "events_20260101T000201.jsonl")
             live.touch()
-            _append_progress(data, "t1", "post-row", "2026-01-01T00:02:02Z")
+            _append_events(data, "t1", "post-row", "2026-01-01T00:02:02Z")
             fired["rotated"] = True
         if fired["rotated"] and not fired["finalized"] and any(
             (e.get("data") or {}).get("content") == "post-row" for e in events
@@ -412,8 +404,8 @@ def test_sse_double_rotation_between_ticks_delivers_all_rows_once(tmp_path):
     response = asyncio.run(api_task_events(_request(data, "t1")))
     events = asyncio.run(_consume(response, on_event))
 
-    contents = [(e.get("data") or {}).get("content") for e in events if e["type"] == "progress"]
-    assert contents == ["step-0", "step-1", "rot1-row", "rot2-row", "post-row"]
+    contents = [(e.get("data") or {}).get("content") for e in events if e["type"] == "llm_call"]
+    assert contents == ["event-0", "event-1", "rot1-row", "rot2-row", "post-row"]
     seqs = [e["seq"] for e in events]
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
     assert events[-1]["data"]["status"] == "completed"

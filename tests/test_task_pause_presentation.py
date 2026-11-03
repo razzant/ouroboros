@@ -4,22 +4,25 @@ import pytest
 from ouroboros.gateway.state import _activity_pause_cause
 
 
-@pytest.mark.parametrize("reason", ["budget", "owner", "sleep"])
+@pytest.mark.parametrize("reason", ["budget", "sleep"])
 def test_exact_pause_cause_comes_from_marker(reason):
     assert _activity_pause_cause({"_budget_pause": {"reason": reason}}, {}) == reason
 
 
 def test_owner_tree_and_restart_hold_do_not_inherit_a_budget_label():
-    assert _activity_pause_cause({"_budget_pause": {"reason": "budget"}}, {"cause": "owner_pause"}) == "owner"
+    fence = {"cause": "owner_pause", "status": "active"}
+    assert _activity_pause_cause({"_budget_pause": {"reason": "budget"}}, fence) == "owner"
     assert _activity_pause_cause({"_budget_pause_hold": {"reason": "owner_restart_hold"}}, {}) == "restart"
     # #1563: work saved before the application stopped waits under the same published cause.
     assert _activity_pause_cause({"_budget_pause_hold": {"reason": "saved_work_hold"}}, {}) == "restart"
     # Once the owner's Resume released (selected) that hold, a later owner Pause names itself.
     for reason in ("owner_restart_hold", "saved_work_hold"):
-        released = {"_budget_pause_hold": {"reason": reason, "selected": True}}
-        assert _activity_pause_cause(released, {"cause": "owner_pause"}) == "owner"
+        released = {"_resume_selection": {"selected_by": "owner"}}
+        assert _activity_pause_cause(released, fence) == "owner"
     assert _activity_pause_cause({}, {}) == "unknown"
-    assert _activity_pause_cause({"reason_code": "budget_exhausted"}, {}) == "budget"
+    # Terminal history is not a current stop; an orphaned owner marker is Q9 selection.
+    assert _activity_pause_cause({"reason_code": "budget_exhausted"}, {}) == "unknown"
+    assert _activity_pause_cause({"_budget_pause": {"reason": "owner"}}, {}) == "unknown"
 
 
 @pytest.mark.serial
@@ -37,10 +40,12 @@ def test_census_carries_typed_pause_cause_for_a_parked_direct_root(tmp_path, mon
     rows = _chat_activities_snapshot_safe(tmp_path, direct_turns=[])
     row = next(row for row in rows if row["activity_id"] == "paused")
     assert row["kind"] == "direct_chat" and row["phase"] == "budget_paused"
-    assert row["pause_cause"] == cause
+    assert row["pause_cause"] == ("unknown" if cause == "owner" else cause)
+    if cause == "owner":
+        assert row["stop"]["cause"] == "awaiting_selection"
 
 
-@pytest.mark.parametrize("synthesis,named", [("paused", True), ("pending_once", True), ("refresh", False), ("", False)])
+@pytest.mark.parametrize("synthesis,named", [("running", True), ("pending_once", True), ("refresh", False), ("", False)])
 def test_only_a_stored_answer_names_its_late_work(tmp_path, synthesis, named):
     """Activity names an answered root's remaining work; a working turn whose checkpoint holds
     only the pre-answer cost "refresh" pseudo-status is not answered and is never so labelled."""
@@ -61,13 +66,13 @@ def test_late_work_dates_the_answer_only_by_the_executor_terminal_fact(tmp_path)
     from ouroboros.task_results import write_task_result
     from ouroboros.terminal_time import terminal_time_fact
 
-    paused = {"root_phase_checkpoint": {"post_task_synthesis": "paused"}}
+    running = {"root_phase_checkpoint": {"post_task_synthesis": "running"}}
     observed = write_task_result(tmp_path, "observed", "completed", _terminal_observed=True,
-                                 suggested_name="Audit the release", **paused)
+                                 suggested_name="Audit the release", **running)
     occurred = terminal_time_fact(observed)["occurred_at"]
     assert occurred, "the executor observed this terminal"
     assert _task_activity_facts(tmp_path, "observed")["display"]["late_work"] == {
         "title": "Audit the release", "answered_at": occurred}
     # A record without the executor's own observation keeps an unknown time, never its row ts.
-    write_task_result(tmp_path, "legacy", "completed", suggested_name="Legacy", **paused)
+    write_task_result(tmp_path, "legacy", "completed", suggested_name="Legacy", **running)
     assert _task_activity_facts(tmp_path, "legacy")["display"]["late_work"]["answered_at"] == ""

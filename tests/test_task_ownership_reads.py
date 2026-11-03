@@ -56,6 +56,9 @@ def test_reciprocal_retry_links_read_once_before_locked_resolution(env, monkeypa
 
 
 def test_control_review_and_paused_fence_share_the_same_parse(env, monkeypatch):
+    """The review-operation check and the Pause fence read one parse. A preparation bound to the
+    owner's Pause was written only by the retired task acceptance: with its controller dead it holds
+    nothing any more, while a live controller still owns the task."""
     entry = {'state': review_operation.OPERATION_PREPARING,
              'controller': {'fixture': 'dead'}, 'intent_ref': {'id': 'intent'},
              'preparation_pause': {'root_task_id': 'root', 'fence_id': 'fence'}}
@@ -63,8 +66,11 @@ def test_control_review_and_paused_fence_share_the_same_parse(env, monkeypatch):
                                    review_operations={'operation': entry})
     monkeypatch.setattr(review_operation, 'controller_state', lambda _: 'dead')
     counts = count_reads(monkeypatch)
-    assert queue_transitions.task_has_live_ownership('root')
+    assert not queue_transitions.task_has_live_ownership('root')
     assert counts == {'root': 1}
+    monkeypatch.setattr(review_operation, 'controller_state', lambda _: 'alive')
+    assert queue_transitions.task_has_live_ownership('root')
+    assert counts == {'root': 2}  # one parse per check
 
 
 def test_mutation_boundary_observes_new_memory_owner(env, monkeypatch):

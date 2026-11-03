@@ -138,6 +138,15 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "warning",
             "inspect the version-control refusal",
         ),
+        # #1969: an apply that had to prepare its capture returns it for inspection
+        # and applies nothing. The protocol worked, so the call is no error; its own
+        # bucket stays outside the success set, so no integration effect is claimed.
+        "INTEGRATION_INSPECTION_REQUIRED": _code_spec(
+            "ok",
+            "inspection_required",
+            "info",
+            "read the retained capture, then decide it with a later apply",
+        ),
         "LEGACY_WARNING": _code_spec(
             "ok",
             "ok",
@@ -436,6 +445,9 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "warning",
             "select an input file inside the task's readable resource roots and grants",
         ),
+        "MCP_CATALOG_UNAVAILABLE": _code_spec(
+            "unavailable", "unavailable", "warning", "refresh or repair the MCP listing; tool absence is unknown",
+        ),
         "MCP_UNAVAILABLE": _code_spec(
             "unavailable",
             "unavailable",
@@ -483,6 +495,13 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "unknown_tool",
             "error",
             "select a registered visible tool",
+        ),
+        # A route's physical ceiling on schemas per request: the tools stay callable.
+        "TOOL_SCHEMA_LIMIT": _code_spec(
+            "unavailable",
+            "resource_constraint_blocked",
+            "warning",
+            "load fewer schemas at once, or work on a route without the ceiling",
         ),
         "TOOL_ERROR": _code_spec(
             "error",
@@ -882,6 +901,7 @@ _EXACT_IDENTIFIER_CODES = MappingProxyType(
         "COGNITIVE_TOOL_REQUIRED": "COGNITIVE_TOOL_REQUIRED",
         "RESOURCE_CONSTRAINT_BLOCKED": "RESOURCE_CONSTRAINT_BLOCKED",
         "RESOURCE_POLICY_BLOCKED": "RESOURCE_POLICY_BLOCKED",
+        "TOOL_SCHEMA_LIMIT": "TOOL_SCHEMA_LIMIT",
         "DATA_READ_BLOCKED": "DATA_BLOCKED",
         "DATA_LIST_BLOCKED": "DATA_BLOCKED",
         "WORKSPACE_MODE_BLOCKED": "WORKSPACE_BLOCKED",
@@ -898,9 +918,8 @@ _EXACT_IDENTIFIER_CODES = MappingProxyType(
         "SAFETY_VIOLATION": "SAFETY_VIOLATION",
         "CAPABILITY_UNAVAILABLE": "CAPABILITY_UNAVAILABLE",
         "MCP_DISABLED": "MCP_UNAVAILABLE",
-        # #1262: a name absent from the current MCP catalog is the caller's unknown
-        # tool, not a provider outage; a known disabled server or a catalog that
-        # could not be listed keeps MCP_UNAVAILABLE (MCP_DISABLED, MCP_CATALOG_*).
+        # Catalog gaps differ from proven absence and disabled providers.
+        "MCP_CATALOG_UNAVAILABLE": "MCP_CATALOG_UNAVAILABLE",
         "MCP_TOOL_NOT_FOUND": "UNKNOWN_TOOL",
         "MCP_TOOL_DISALLOWED": "ACCESS_BLOCKED",
         "MCP_TOOL_TIMEOUT": "MCP_TIMEOUT",
@@ -960,6 +979,7 @@ _EXACT_IDENTIFIER_CODES = MappingProxyType(
         "RUN_SCRIPT_BLOCKED": "RUN_SCRIPT_BLOCKED",
         "REVIEW_BLOCKED": "REVIEW_BLOCKED",
         "GIT_ERROR": "GIT_ERROR",
+        "INTEGRATE_DELEGATED_INSPECT_CAPTURE": "INTEGRATION_INSPECTION_REQUIRED",
         # #1657: source-confirmed refusals/failures with invariant meanings.
         # These reuse existing codes; no suffix rule or custody/completion fact
         # is inferred from text. In particular, conflict/partial/overflow and

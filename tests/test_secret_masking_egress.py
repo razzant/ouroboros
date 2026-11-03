@@ -25,6 +25,7 @@ def reader(tmp_path, monkeypatch):
         path.mkdir()
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(home))
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     return ToolRegistry(repo, data), repo, home
 
 

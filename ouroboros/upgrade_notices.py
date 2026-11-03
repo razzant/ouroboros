@@ -7,7 +7,10 @@ behind the owner's back; it is stated ONCE, factually, in the owner's chat.
 The same holds for the memory the old dialogue writer left: the chronicle
 imports it unchanged, it keeps working in that format and is folded gradually,
 and the owner hears once how much of it there is and that Ouroboros can be asked
-to keep folding it, part by part. (Which reviewers run is no longer a notice
+to keep folding it, part by part. The per-call ceiling went the other way: the
+owner retired it on every install, a configured value included, so each install
+with a settings document hears once what bounds a command, an in-slot wait and the
+silence before attention now. (Which reviewers run is no longer a notice
 of this module: the review lanes became rows of the subagent catalog, and the
 migration's own one-time report — ``server_maintenance._startup_review_pool_notice``
 — says which rows run now.)
@@ -32,6 +35,8 @@ log = logging.getLogger(__name__)
 
 OPTIONAL_BOUNDS_NOTICE_KEY = "optional_bounds_notified"
 LEGACY_MEMORY_NOTICE_KEY = "legacy_memory_notified"
+COMMAND_TIMEOUT_NOTICE_KEY = "command_timeout_notified"
+_CALL_CEILING_KEY = "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC"
 # The old dialogue writer's retelling; its cursor file alone holds no retelling to tell about.
 _LEGACY_MEMORY_FILES = ("dialogue_blocks.json", "dialogue_summary.md")
 _NOT_PIECES = frozenset({"gap", "cursor_gap"})
@@ -52,23 +57,18 @@ def optional_bound_facts(document: Optional[Mapping[str, Any]], settings: Mappin
     merged settings into it. Presence is independent of validity: even null or
     blank is ``saved_invalid``. An absent key equal to the document default is
     ``document_absent_key``; any other finite value can only come from the
-    environment. Runtime getters apply their floors to an isolated projection
-    of this startup view, without consulting or changing the process environment.
+    environment. Both runtime getters apply an accepted value as written, so the
+    parsed startup view is the effective bound.
     """
     from ouroboros.settings_scales import OPTIONAL_BOUND_LEGACY, optional_bound_value, parse_positive_or_unlimited
-    from ouroboros.runtime_limits import get_max_rounds, get_task_abs_ceiling_sec
-    from ouroboros.settings_integrity import task_settings_scope, task_settings_snapshot
 
     facts: List[Dict[str, Any]] = []
-    getters = {"OUROBOROS_MAX_ROUNDS": get_max_rounds, "OUROBOROS_TASK_ABS_CEILING_SEC": get_task_abs_ceiling_sec}
     for key, legacy in OPTIONAL_BOUND_LEGACY.items():
         present = isinstance(document, Mapping) and key in document
         raw = document[key] if present else settings.get(key, legacy if document is not None else "unlimited")
         value = optional_bound_value(key, settings.get(key, raw))
         if value is None:
             continue  # unlimited, including a fresh install's shipped default
-        with task_settings_scope(task_settings_snapshot({}, {key: str(value)})):
-            value = getters[key]()
         if present:
             try:
                 parse_positive_or_unlimited(int(raw) if isinstance(raw, float) and raw.is_integer() else raw)
@@ -85,8 +85,6 @@ def optional_bound_facts(document: Optional[Mapping[str, Any]], settings: Mappin
 
 def optional_bounds_notice(facts: List[Dict[str, Any]]) -> str:
     """The owner-facing sentence for ``optional_bound_facts`` ('' when nothing is finite)."""
-    from ouroboros.settings_scales import optional_bound_value
-
     if not facts:
         return ""
     why = {
@@ -100,11 +98,33 @@ def optional_bounds_notice(facts: List[Dict[str, Any]]) -> str:
         origin = str(fact["origin"])
         reason = (f"the value {fact['raw']!r} is not a positive number or 'unlimited', so the finite fallback applies"
                   if origin.endswith("_invalid") else why.get(origin, origin))
-        if optional_bound_value(fact["key"], fact["raw"]) != fact["value"]:
-            reason += f" as {fact['raw']!r}; the runtime minimum applies"
         parts.append(f"{label} = {fact['value']} {unit} ({reason})".replace("  ", " "))
     return ("⚙️ Task limits on this install: " + "; ".join(parts) + ". New installs ship without these "
             "limits (unlimited); nothing was changed here. Change them in Settings → Advanced → Runtime Limits.")
+
+
+def command_timeout_notice(document: Optional[Mapping[str, Any]], settings: Mapping[str, Any]) -> str:
+    """The owner-facing sentence that the per-call ceiling is retired (3A; 30 Oct: await B, silence A).
+
+    Owed once to every install with a settings document, whatever the value or its origin: the
+    owner retired the ceiling everywhere, a manually saved value included, and an install that
+    ran under the implicit default need not have saved the key, so the document is the only fact.
+    A fresh install hears it once its first document exists, so the words claim no ceiling of
+    this install: they say what earlier versions did and name a value only where the document
+    carries one (the read seam no longer honors the key, ``RETIRED_SETTING_KEYS``). An install
+    without a settings document hears nothing.
+    """
+    if document is None:
+        return ""
+    value, idle = document.get(_CALL_CEILING_KEY), settings.get("OUROBOROS_TASK_IDLE_TIMEOUT_SEC")
+    shown = f"; {value} s in this install's settings" if str(value if value is not None else "").strip() else ""
+    idle_shown = f" ({idle} s here)" if str(idle if idle is not None else "").strip() else ""
+    return (f"⏱️ The separate per-call ceiling of earlier versions (1800 s by default{shown}) is retired. run_command, "
+            "run_script and verify_and_record run for the timeout a call asks for, else Tool Timeout, narrowed only "
+            "by the task's own deadline or execution budget; a task whose deadline or budget is spent, or a timeout "
+            "this platform cannot wait on, starts no command. An in-slot await_messages wait lasts as long as it asks, "
+            f"within the deadline and Stop. A task is flagged idle after Idle Timeout{idle_shown} of silence, no longer "
+            "after at least that ceiling plus two minutes.")
 
 
 def legacy_memory_facts(root: Any) -> Optional[Dict[str, Any]]:
@@ -193,6 +213,10 @@ def startup_upgrade_notices(settings: Mapping[str, Any]) -> None:
             text = optional_bounds_notice(optional_bound_facts(_raw_settings_document(), settings or {}))
             if text:
                 owed.append((OPTIONAL_BOUNDS_NOTICE_KEY, text, "optional_bounds_notice"))
+        if not state.get(COMMAND_TIMEOUT_NOTICE_KEY):
+            text = command_timeout_notice(_raw_settings_document(), settings or {})
+            if text:
+                owed.append((COMMAND_TIMEOUT_NOTICE_KEY, text, "command_timeout_notice"))
         if not state.get(LEGACY_MEMORY_NOTICE_KEY) and message_bus.DATA_DIR:
             try:
                 text = legacy_memory_notice(legacy_memory_facts(message_bus.DATA_DIR))

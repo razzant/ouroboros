@@ -139,6 +139,11 @@ def test_direct_start_carries_assignment_and_a_predecessor_brief(tmp_path, monke
         },
     }
 
+    from ouroboros.task_results import write_task_result
+    previous = contract["predecessor_authority"]
+    original = json.loads(json.dumps(contract))
+    write_task_result(tmp_path, "cat-old", "completed", result=previous["result"],
+                      task_contract=previous["task_contract"])
     request = _start_with_contract(tmp_path, monkeypatch, contract)
     assert "OLD_RECEIPT_BODY" not in request["instructions"]
     marker = "HOST TASK CONTRACT AUTHORITY (normalized JSON; predecessor is a brief):\n"
@@ -153,11 +158,18 @@ def test_direct_start_carries_assignment_and_a_predecessor_brief(tmp_path, monke
     assert normalized["delegation_budget"]["intent_note"] == "L1\nL2\nL3"
     assert normalized["allowed_resources"]["network"] is False
     brief = normalized["predecessor_authority"]
-    for key in ("source", "result", "origin_message_text", "task_contract"):
-        assert brief[key] == contract["predecessor_authority"][key]
-    assert "verification_receipts" not in brief
-    assert brief["omitted_fields"]["verification_receipts"] > 0
-    assert "OLD_RECEIPT_BODY" in json.dumps(contract)  # the caller is untouched
+    for key in ("source", "origin_message_text"):
+        assert brief[key] == previous[key]
+    for key in ("result", "task_contract", "verification_receipts"):
+        assert key not in brief and brief["omitted_fields"][key] > 0
+    assert contract == original  # the caller and its full predecessor data are untouched
+    from ouroboros.tools.control import _get_task_result
+    from ouroboros.tools.registry import ToolContext
+    saved = json.loads(_get_task_result(ToolContext(repo_dir=tmp_path / "repo", drive_root=tmp_path),
+        brief["source"]["task_id"], include_authority=True))["authority"]
+    assert saved["result"] == previous["result"]
+    assert saved["task_contract"]["objective"] == previous["task_contract"]["objective"]
+    assert saved["task_contract"]["context"] == previous["task_contract"]["context"]
     assert "get_task_result" in payload[end:] and "launching task" in payload[end:]
     assert "delegate_answer" in payload[end:] and "input_required" in payload[end:]
 

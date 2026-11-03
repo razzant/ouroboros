@@ -30,6 +30,7 @@ from ouroboros.subagent_messages import subagent_message_meta
 from ouroboros.task_results import write_task_result
 from supervisor import events_chat_delivery, message_bus
 from tests.test_delegated_activity import Daemon, _gateway, _harness, _run_event
+from tests.test_reconnect_feed_browser import HISTORY_LANDED
 from tests.test_subscription_setup_browser import capture, subscription_ui as subscription_ui
 from tests.test_task_file_serving import _client
 
@@ -43,7 +44,7 @@ VISIBLE, SNAPSHOT = ("""ids => ids.map(id => Array.from(document.querySelectorAl
     .filter(line => !line.hidden).map(line => line.%s.replace(/\\s+/g, ' ').trim()))""" % key for key in ("innerText", "textContent"))
 EXPAND = """ids => { for (const id of ids) {
     const card = document.querySelector(`.chat-live-card[data-task-id="${id}"]`);
-    if (card && card.dataset.expanded !== '1') card.querySelector('[data-live-summary-button]').click();
+    if (card && card.dataset.expanded !== '1') card.querySelector('[data-live-disclosure]').click();
 } }"""
 
 
@@ -69,9 +70,6 @@ class Producer:
 
     def __init__(self, data, monkeypatch):
         self.data, self.live = data, []
-        (data / "logs").mkdir(parents=True, exist_ok=True)
-        (data / "logs" / "chat.jsonl").touch()
-        (data / "logs" / "progress.jsonl").touch()
         bridge = message_bus.LocalChatBridge()
         bridge._broadcast_fn = self.live.append
         monkeypatch.setattr(message_bus, "DATA_DIR", data)
@@ -229,10 +227,10 @@ def test_delegated_rows_live_reconnect_reload_root_child_source_and_final_gap(en
 
     root_card = page.locator(f'#chat-messages .chat-live-card[data-task-id="{ROOT}"]').first
     root_card.wait_for()
-    root_card.locator("[data-live-summary-button]").first.click()
+    root_card.locator("[data-live-disclosure]").first.click()
     kid_card = page.locator(f'.chat-live-card[data-task-id="{KID}"]').first
     kid_card.wait_for()
-    kid_card.locator("[data-live-summary-button]").first.click()
+    kid_card.locator("[data-live-disclosure]").first.click()
     page.wait_for_function(f"() => document.querySelector('#chat-live-timeline-{KID} .chat-delegated-final')")
 
     texts = page.evaluate(VISIBLE, [ROOT, KID])
@@ -291,22 +289,25 @@ def test_delegated_rows_live_reconnect_reload_root_child_source_and_final_gap(en
 
     fetched = len(served)
     page.evaluate("() => { window.__live1350 = true; }")
+    page.evaluate(HISTORY_LANDED)
     sockets[-1].close()                               # reconnect: the client refetches history
     for _ in range(100):
         if len(sockets) >= 2 and len(served) > fetched:
             break
         page.wait_for_timeout(100)
     assert len(sockets) >= 2 and len(served) > fetched, (len(sockets), len(served), fetched)
-    page.get_by_text("Reconnected", exact=True).first.wait_for()
+    page.wait_for_function("() => window.historyLanded > 0")  # response received; assert the rebuilt rows below
     assert page.evaluate("() => window.__live1350 === true") and "_ouro_refresh" not in page.url, \
         "the reconnect refetched history into the live page instead of reloading it"
     page.wait_for_timeout(500)
+    assert page.locator('[data-system-type="reconnect"]').count() == 0, "a reconnect adds no row"
     page.evaluate(EXPAND, [ROOT, KID])
     page.wait_for_function(f"() => document.querySelectorAll('#chat-live-timeline-{KID} > .chat-live-line').length > 3")
     reconnected = page.evaluate(SNAPSHOT, [ROOT, KID])
     capture(page, "1350-reconnected")
     assert reconnected == caught_up, "a reconnect adopts the live rows instead of drawing them again"
 
+    ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.locator(f'#chat-messages .chat-live-card[data-task-id="{ROOT}"]').first.wait_for()
     page.evaluate(EXPAND, [ROOT])
@@ -327,4 +328,4 @@ def test_delegated_rows_live_reconnect_reload_root_child_source_and_final_gap(en
     _evidence("1350-history-pages.json", served)
     _evidence("1350-dom.json", {"live_with_gap": live_snapshot, "caught_up": caught_up, "reconnected": reconnected,
                                 "reloaded": reloaded})
-    assert not ui["errors"], ui["errors"]
+    assert not ui["errors"].unexpected(), ui["errors"].report()

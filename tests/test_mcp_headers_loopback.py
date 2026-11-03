@@ -92,7 +92,7 @@ def loopback():
 
 
 def test_saved_headers_initialize_list_and_call_over_http_and_sse(loopback, settings_client, monkeypatch):  # noqa: F811
-    monkeypatch.setattr(mcp_client, "refresh_all_background", lambda **kwargs: None)
+    monkeypatch.setattr(mcp_client.MCPManager, "refresh_all_background", lambda *args, **kwargs: None)
     client, on_disk, saved = settings_client
     http_app, http_url = loopback("http", {"Authorization": BEARER, "X-Api-Key": CUSTOM})
     sse_app, sse_url = loopback("sse", {"Authorization": BASIC, "X-Api-Key": CUSTOM})
@@ -405,3 +405,9 @@ def test_cyber_url_userinfo_replaces_a_configured_authorization_header(loopback,
         {"id": "u", "enabled": True, "url": url, "headers": {"Authorization": BEARER, "X-Api-Key": CUSTOM}}]})
     assert manager.refresh_server("u")["ok"]
     assert {headers["authorization"] for headers in app.seen} == {basic}
+
+
+@pytest.fixture(autouse=True)
+def _private_mcp_catalog_root(tmp_path, monkeypatch):
+    from ouroboros import config
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)

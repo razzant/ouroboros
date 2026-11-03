@@ -51,8 +51,8 @@ def test_active_lifecycle_job_is_merged_into_skill_event_stream():
 def test_card_renders_pending_lifecycle_chip():
     src = _read("web/modules/skill_card_renderer.js")
     assert "lifecyclePendingLabel" in src
-    assert "Disabling…" in src  # "Disabling…"
-    assert "Enabling…" in src
+    assert "Turning off…" in src
+    assert "Turning on…" in src
     assert "Deleting…" in src
     # The pending chip takes precedence over the stale persisted status.
     assert "if (skill.lifecycle_pending) {" in src
@@ -62,7 +62,7 @@ def test_card_renders_failed_lifecycle_feedback():
     src = _read("web/modules/skill_card_renderer.js")
     assert "function lifecycleFailedLabel" in src
     assert "skill.lifecycle_status === 'failed'" in src
-    assert "skills-status-danger" in src
+    assert "chipHtml(lifecycleFailedLabel(skill.lifecycle_kind), 'danger')" in src
     assert "skill.lifecycle_error" in src
 
 

@@ -76,7 +76,9 @@ def _reviewed_skill(skill_dir: pathlib.Path, drive_root: pathlib.Path):
     return loaded
 
 
-def test_reducer_matches_loader_canonical_inventory_order(tmp_path):
+def test_snapshot_identity_is_the_release_digest_of_the_canonical_inventory(tmp_path):
+    from ouroboros.skill_identity import release_declaration, release_digest_from_file_digests
+
     skill_dir = _write_skill(tmp_path / "skills" / "demo")
     (skill_dir / "payload.bin").write_bytes(b"payload")
     manual = []
@@ -85,13 +87,19 @@ def test_reducer_matches_loader_canonical_inventory_order(tmp_path):
             rel = path.relative_to(skill_dir).as_posix()
             manual.append((rel, hashlib.sha256(path.read_bytes()).digest()))
 
+    # The loader's content hash is the release digest: these files plus the manifest's declaration.
+    declaration = release_declaration(skill_dir)
+    assert declaration == [{"kind": "pip", "package": "example-package"}]
+    assert release_digest_from_file_digests(manual, declaration) == compute_content_hash(skill_dir)
+    # The version-1 reducer survives only to recognize records made before the release digest.
     historical = hashlib.sha256()
     for rel, file_digest in manual:
         historical.update(rel.encode("utf-8"))
         historical.update(b"\0")
         historical.update(file_digest)
-    assert reduce_skill_content_hash(manual) == historical.hexdigest()
-    assert reduce_skill_content_hash(manual) == compute_content_hash(skill_dir)
+    assert reduce_skill_content_hash(manual) == historical.hexdigest() != compute_content_hash(skill_dir)
+    loaded = load_skill(skill_dir, tmp_path)
+    assert capture_skill_publish_candidate(loaded).content_hash == compute_content_hash(skill_dir)
 
 
 def test_snapshot_hash_parity_and_full_public_control_views(tmp_path):
@@ -133,7 +141,7 @@ def test_snapshot_hash_parity_and_full_public_control_views(tmp_path):
 
 def test_environment_template_roundtrips_import_list_review_and_publish(tmp_path, monkeypatch):
     from ouroboros.marketplace.fetcher import stage
-    from ouroboros.skill_review_packs import _build_skill_file_packs
+    from ouroboros.skill_review_packs import frozen_payload_files, payload_pack
     from ouroboros.tools.registry import ToolContext
     from ouroboros.tools.skill_exec import _handle_list_skills
     from ouroboros.tools.review_file_pack import build_touched_file_pack
@@ -149,9 +157,9 @@ def test_environment_template_roundtrips_import_list_review_and_publish(tmp_path
     assert [row["name"] for row in json.loads(_handle_list_skills(ctx))["skills"]] == ["demo"]
     row = json.loads(_handle_list_skills(ctx, name="demo"))["skills"][0]
     assert not row["load_error"] and row["content_hash"] == loaded.content_hash
-    packs = _build_skill_file_packs(payload, expected_content_hash=loaded.content_hash)
-    assert "### .env.example" in "\n".join(packs)
-    assert content.decode() in "\n".join(packs)
+    pack = payload_pack(frozen_payload_files(payload))
+    assert "### .env.example" in pack
+    assert content.decode() in pack
     touched, omitted = build_touched_file_pack(payload, [".env.example"])
     assert not omitted and "APP_NAME=example" in touched
     snapshot = capture_skill_publish_snapshot(loaded)

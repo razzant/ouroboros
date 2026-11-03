@@ -59,12 +59,16 @@ def test_actual_auto_and_pinned_attempt_reach_result_and_context(tmp_path, monke
     assert row["applied_model"] == "observed-model"
     assert row["observed_route"]["model"] == "observed-model"
     assert row["attempt_id"] == usage["llm_call_refs"][0]["llm_call_id"]
-    # The context projection is the stored row with ONE change: the actor is named
-    # by the handle of the row's own recorded identity (its standard processing
-    # is the baseline, so it is not said), never by the stored key.
+    # The context keeps the recorded actor and execution identities; the exact
+    # reader holds the detailed account/model evidence without copying it inline.
     handle = f"{TARGET}/high" + (f"/@{pin}" if pin else "")
-    assert _delegation_capability_fact()["subagents_last_executions"][0] == {
-        **row["latest_by_subagent"]["worker"], "selected_subagent_id": handle}
+    fact = _delegation_capability_fact()
+    shown = fact["subagents_last_executions"][0]
+    assert shown["selected_subagent_id"] == handle and shown["task_id"] == "history-actor"
+    assert shown["attempt_id"] == row["attempt_id"] and shown["outcome"] == row["outcome"]
+    assert "applied_profile" not in shown and "observed_route" not in shown
+    reader = next(item for item in fact["readers"] if item["arguments"]["path"].endswith("subagent_last_delegation.json"))
+    assert json.loads((tmp_path / reader["arguments"]["path"]).read_text(encoding="utf-8")) == row
 
 
 @pytest.mark.parametrize("provider", ["claudexor", "openai"])

@@ -1,0 +1,187 @@
+{
+  "groups": [
+    {
+      "category": "messaging",
+      "label": "Messaging",
+      "items": [
+        {
+          "id": "builtin/telegram",
+          "name": "telegram",
+          "description": "Message your own Ouroboros from Telegram: text, photos, files and the Mini App.",
+          "official": true,
+          "builtin": true,
+          "recommended": true,
+          "needs_keys": [
+            "TELEGRAM_BOT_TOKEN"
+          ]
+        },
+        {
+          "id": "ouroboros/slack-bridge",
+          "name": "slack-bridge",
+          "description": "Ouroboros talks with people in Slack: threads, replies, files.",
+          "official": true,
+          "builtin": false,
+          "recommended": false,
+          "needs_keys": [
+            "SLACK_BOT_TOKEN",
+            "SLACK_APP_TOKEN"
+          ]
+        }
+      ]
+    },
+    {
+      "category": "computer",
+      "label": "Computer control",
+      "items": [
+        {
+          "id": "builtin/unix_computer_use",
+          "name": "unix_computer_use",
+          "description": "Desktop control: screenshots, clicks, typing. Turn it on when you need it.",
+          "official": true,
+          "builtin": true,
+          "recommended": false,
+          "needs_keys": []
+        }
+      ]
+    },
+    {
+      "category": "documents",
+      "label": "Documents",
+      "items": [
+        {
+          "id": "ouroboros/pdf_tools",
+          "name": "pdf_tools",
+          "description": "Read PDF files and make new ones.",
+          "official": true,
+          "builtin": false,
+          "recommended": true,
+          "needs_keys": []
+        },
+        {
+          "id": "ouroboros/word_tools",
+          "name": "word_tools",
+          "description": "Read Word documents and make new ones.",
+          "official": true,
+          "builtin": false,
+          "recommended": true,
+          "needs_keys": []
+        }
+      ]
+    },
+    {
+      "category": "search",
+      "label": "Search & research",
+      "items": [
+        {
+          "id": "ouroboros/duckduckgo",
+          "name": "duckduckgo",
+          "description": "Web search. No key needed.",
+          "official": true,
+          "builtin": false,
+          "recommended": true,
+          "needs_keys": []
+        },
+        {
+          "id": "ouroboros/keenable",
+          "name": "keenable",
+          "description": "Focused web search and page reading, with site and date filters.",
+          "official": true,
+          "builtin": false,
+          "recommended": false,
+          "needs_keys": [
+            "KEENABLE_API_KEY"
+          ]
+        },
+        {
+          "id": "ouroboros/perplexity",
+          "name": "perplexity",
+          "description": "Deep web research with cited sources.",
+          "official": true,
+          "builtin": false,
+          "recommended": false,
+          "needs_keys": [
+            "OPENROUTER_API_KEY"
+          ]
+        }
+      ]
+    },
+    {
+      "category": "ouroboros",
+      "label": "About Ouroboros",
+      "items": [
+        {
+          "id": "ouroboros/memory-atlas",
+          "name": "memory-atlas",
+          "description": "Browse Ouroboros's memory and see where each fact came from.",
+          "official": true,
+          "builtin": false,
+          "recommended": true,
+          "needs_keys": []
+        }
+      ]
+    },
+    {
+      "category": "writing",
+      "label": "Writing & review",
+      "items": [
+        {
+          "id": "ouroboros/anti-slop",
+          "name": "anti-slop",
+          "description": "Helps Ouroboros write clear, honest text in your voice.",
+          "official": true,
+          "builtin": false,
+          "recommended": true,
+          "needs_keys": []
+        }
+      ]
+    }
+  ],
+  "hub_rows": [
+    {
+      "id": "ouroboros",
+      "name": "Ouroboros",
+      "trust": "trusted",
+      "part": "official"
+    },
+    {
+      "id": "ouroboros-community",
+      "name": "Ouroboros Community",
+      "trust": "review",
+      "part": "community"
+    }
+  ],
+  "sources": [
+    {
+      "id": "builtin",
+      "name": "Built in",
+      "kind": "builtin",
+      "trust": "trusted",
+      "confirmed": true,
+      "state": "ready"
+    },
+    {
+      "id": "ouroboros",
+      "name": "Ouroboros",
+      "kind": "hub",
+      "url": "https://github.com/razzant/OuroborosHub",
+      "ref": "main",
+      "part": "official",
+      "trust": "trusted",
+      "confirmed": false,
+      "state": "ready",
+      "last_read_at": "2026-10-17T14:58:00Z"
+    },
+    {
+      "id": "ouroboros-community",
+      "name": "Ouroboros Community",
+      "kind": "hub",
+      "url": "https://github.com/razzant/OuroborosHub",
+      "ref": "main",
+      "part": "community",
+      "trust": "review",
+      "confirmed": false,
+      "state": "ready",
+      "last_read_at": "2026-10-17T14:58:00Z"
+    }
+  ]
+}

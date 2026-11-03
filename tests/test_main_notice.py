@@ -1,10 +1,11 @@
-"""A Project root's deliberate Main notice (issue #1412).
+"""A Project root's deliberate Main notice.
 
-``send_user_message(destination="main")`` is the one plain-text channel from a
-owner-visible Project room to the owner's main chat. These tests pin both
-ends: the tool's frame, the supervisor's routing, the durable row the history
-replay reads, and that the notice never stands in for the task's final answer.
-The default destination keeps today's current-room behaviour.
+``send_user_message(destination="main")`` addresses the owner's main chat from an
+owner-visible Project room. It is one message: written to Main, shown by its
+work's Project too (one row identity, read once). These tests pin both ends: the
+tool's frame, the supervisor's routing, the durable row the history replay reads,
+and that the notice never stands in for the task's final answer. The default
+destination keeps today's current-room behaviour.
 """
 import asyncio
 import json
@@ -144,18 +145,17 @@ def host(tmp_path, monkeypatch):
     from ouroboros.utils import append_jsonl
     from supervisor import events_chat_delivery as delivery, message_bus
 
-    frames, advanced = [], []
+    frames = []
     bridge = message_bus.LocalChatBridge({})
     bridge._broadcast_fn = frames.append
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
     monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
     monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 7})
-    monkeypatch.setattr(message_bus, "_advance_project_visible_revision", advanced.append)
     monkeypatch.setattr(message_bus, "publish_event", lambda *_a, **_k: None)
     monkeypatch.setattr(delivery, "_DELIVERED_MESSAGE_IDS", deque(maxlen=256))
     ctx = types.SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING={}, append_jsonl=append_jsonl,
                                 send_with_budget=message_bus.send_with_budget)
-    return types.SimpleNamespace(ctx=ctx, frames=frames, advanced=advanced,
+    return types.SimpleNamespace(ctx=ctx, frames=frames,
                                  handle=lambda evt: delivery._handle_send_message(evt, ctx))
 
 
@@ -170,7 +170,7 @@ def _history(tmp_path, chat_id):
 class TestDeliveryAndReplay:
     @pytest.mark.parametrize("live", [True, False], ids=["live", "deferred"])
     @pytest.mark.parametrize("born_in", ["project", "main", "main_unstamped"])
-    def test_notice_reaches_main_live_and_on_reload_never_the_project(self, tmp_path, host, live, born_in):
+    def test_notice_is_one_message_in_main_and_its_project_live_and_on_reload(self, tmp_path, host, live, born_in):
         project_chat = _project(tmp_path)
         # A root bound after admission keeps the chat it was born in on its row;
         # lineage still routes its ordinary replies into the Project thread.
@@ -189,19 +189,30 @@ class TestDeliveryAndReplay:
         for evt in events:
             host.handle(evt)
 
-        by_type = {frame.get("system_type"): frame for frame in host.frames if frame.get("type") == "chat"}
+        chats = [frame for frame in host.frames if frame.get("type") == "chat"]
+        by_type = {frame.get("system_type"): frame for frame in chats}
         notice, reply = by_type["main_notice"], by_type["proactive_message"]
+        # One frame, one notification: written to Main, also reaching the Project's panel.
+        assert [frame.get("system_type") for frame in chats].count("main_notice") == 1
         assert notice["chat_id"] == 1 and not notice.get("project_thread")
+        assert notice["also_rooms"] == [project_chat]
         assert notice["task_id"] == "root-project"
-        assert reply["chat_id"] == project_chat and reply.get("project_thread") is True
-        assert host.advanced == [1, project_chat]  # the notice never bumps Project unread
+        assert reply["chat_id"] == project_chat and reply.get("project_thread") is True and "also_rooms" not in reply
+        from ouroboros import dialogue_store
+        # Unread where it is shown: one revision in Main and one in the Project, stamped on the row.
+        assert dialogue_store.room(tmp_path, 1)["revision"] == 1
+        assert dialogue_store.room(tmp_path, project_chat)["revision"] == 2
+        assert notice["room_revisions"] == {"1": 1, str(project_chat): notice["room_revisions"][str(project_chat)]}
 
         main_rows = _history(tmp_path, 1)
         project_rows = _history(tmp_path, project_chat)
         main_notices = [row for row in main_rows if row.get("system_type") == "main_notice"]
+        project_notices = [row for row in project_rows if row.get("system_type") == "main_notice"]
         assert [row["text"] for row in main_notices] == ["Cursor account needs on-demand usage enabled."]
         assert main_notices[0]["role"] == "assistant" and main_notices[0]["task_id"] == "root-project"
+        # The same row, not a copy: one address in both rooms, the live frame's too.
+        assert [row["row_address"] for row in project_notices] == [main_notices[0]["row_address"]] == [notice["row_address"]]
+        # Ordinary work speech still lives in its Project only.
         assert all(row.get("system_type") != "proactive_message" for row in main_rows)
-        assert all(row.get("system_type") != "main_notice" for row in project_rows)
         assert [row["text"] for row in project_rows if row.get("system_type") == "proactive_message"] == [
             "Continuing with two reviewers."]

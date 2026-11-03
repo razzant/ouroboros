@@ -37,6 +37,7 @@ def test_pre_effect_refusal_leaves_sleep_pause_continue_usable(tmp_path, monkeyp
     q, _, workers = _install_queue(tmp_path, monkeypatch)
     _running(tmp_path, workers)
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.task_metadata = {'work_kind': 'owner'}
     ctx = registry._ctx
     ctx.task_id = ctx.root_task_id = 'root'
     ctx.task_attempt = 1
@@ -66,6 +67,7 @@ def test_unwound_command_error_keeps_error_without_ghost_custody(tmp_path, monke
     q, _, workers = _install_queue(tmp_path, monkeypatch)
     _running(tmp_path, workers)
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.task_metadata = {'work_kind': 'owner'}
     registry._ctx.task_id = registry._ctx.root_task_id = 'root'
     def ambiguous(*_a, **_k):
         raise {'unknown': OSError('after effect'), 'timeout': subprocess.TimeoutExpired('unknown', 1),
@@ -151,6 +153,7 @@ def test_command_refusal_and_unknown_outcomes_reach_real_continue(tmp_path, monk
     q, _, workers = _install_queue(tmp_path, monkeypatch)
     _running(tmp_path, workers)
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.task_metadata = {'work_kind': 'owner'}
     registry._ctx.task_id = registry._ctx.root_task_id = 'root'
     if outcome == 'unknown':
         monkeypatch.setattr(shell, '_tracked_subprocess_run', lambda *_a, **_k: (_ for _ in ()).throw(OSError('unknown')))

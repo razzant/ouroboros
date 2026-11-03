@@ -287,7 +287,7 @@ def test_every_supervisor_worker_tree_kill_is_the_shared_one():
     }
     assert direct == {"worker_pool_lifecycle.py"}
     for module, name, keep in (
-        ("workers", "kill_workers", False),
+        ("workers", "_tear_down_slots", False),  # kill_workers' teardown of the doomed slots
         ("worker_pool_lifecycle", "_kill_survivors", False),
         ("worker_pool_lifecycle", "kill_workers_for_update", False),
         ("worker_pool_lifecycle", "_replace_unready_slot", False),
@@ -300,7 +300,7 @@ def test_every_supervisor_worker_tree_kill_is_the_shared_one():
         assert "kill_worker_tree(" in source, name
         assert ("keep_services=True" in source) is keep, name
     respawn = _function_source(root / "supervisor" / "worker_pool_lifecycle.py", "respawn_worker")
-    assert "return _spawn_worker_slot(wid, old, ready_attempt=ready_attempt)" in respawn
+    assert 'return _spawn_worker_slot(wid, old, ready_attempt=ready_attempt, lane=getattr(old, "lane", LANE_PROJECT))' in respawn
 
 
 def test_retained_purpose_never_rescues_a_stale_identity(tmp_path, monkeypatch):
@@ -325,6 +325,8 @@ def test_both_server_sweeps_preserve_legacy_daemon_records(tmp_path, monkeypatch
     calls, threads = [], []
     monkeypatch.setattr(server_maintenance, "DATA_DIR", tmp_path)
     monkeypatch.setattr(server_maintenance, "_installed_skill_names", lambda: None)
+    # Not this fixture's duty: the real child's own thread would outlive the test (it has its own tests).
+    monkeypatch.setattr(server_maintenance, "_tick_maintenance_child", lambda: None)
     monkeypatch.setattr(server_maintenance, "_reconcile_delegated_runs", lambda *a, **kw: None)
     monkeypatch.setattr(server_maintenance, "_cursor_refresh_settled_terminals", lambda *a, **kw: None)
     monkeypatch.setattr(server_maintenance, "_LAST_CANCEL_INTENT_SWEEP", [time.time()])

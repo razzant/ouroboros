@@ -62,6 +62,23 @@ def persisted(tmp_path, history, fields=None):
     return pointer, reader, authored
 
 
+def same_decisions(current, history):
+    """The resident row's decisions equal the producer's verbatim; each ``source`` key names an address
+    entry bound to the same immutable source (an unbound source stays as the producer wrote it)."""
+    from ouroboros.review_history_view import _decision_ref
+
+    rows, original = current["decision_rows"], history["decision_rows"]
+    assert len(rows) == len(original), (len(rows), len(original))
+    for shown, row in zip(rows, original):
+        assert {k: v for k, v in shown.items() if k != "source"} == {k: v for k, v in row.items() if k != "source"}
+        ref = _decision_ref(row.get("source"))
+        if ref is None:
+            assert shown.get("source") == row.get("source")
+        else:
+            assert current["addresses"][shown["source"]]["source_ref"] == ref
+    return True
+
+
 def restore_split(split):
     result = copy.deepcopy(split["mandatory"])
     for body in split["bodies"]:

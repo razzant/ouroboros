@@ -8,7 +8,7 @@ import re
 import pytest
 
 from tests.test_chat_history_paging_browser import (
-    _assert_at_newest, _open, _open_project, _step, _idle, _write, _result, _screenshot, _FRAMES,
+    MAIN, _append, _assert_at_newest, _evidence_dir, _open, _open_project, _step, _idle, _result, _screenshot, _FRAMES,
 )
 from tests.test_chat_history_recovery_browser import _click_project
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
@@ -59,7 +59,7 @@ def test_deep_reopen_delay_retry_and_live_arrival(direct_server_with_data, brows
     project = create_project(root, "continuity-room", name="History continuity")
     other = create_project(root, "other-room", name="Other room")
     start = datetime(2026, 9, 1, tzinfo=timezone.utc)
-    _write(root / "logs" / "chat.jsonl", [{
+    _append(root, "chat", [{
         "direction": "in", "chat_id": project["chat_id"],
         "ts": (start + timedelta(minutes=index)).isoformat(),
         "client_message_id": f"continuity-{index}",
@@ -91,6 +91,7 @@ def test_deep_reopen_delay_retry_and_live_arrival(direct_server_with_data, brows
                 read_back()
                 _screenshot(page, tmp_path, f"continuity-before-{mode}-{browser_engine}")
                 page.locator('#project-panel-close').click()
+                page.locator(feed).wait_for(state='detached')  # the exit ends before this cold reopen
                 page.evaluate("fault => { window.__continuityFault = fault; }", {
                     "chatId": project["chat_id"], "delay": 800 if mode == "delayed" else 0,
                     "fail": mode if mode in {"recent", "saved"} else None,
@@ -101,6 +102,12 @@ def test_deep_reopen_delay_retry_and_live_arrival(direct_server_with_data, brows
                     retry = page.locator(f'{feed} .chat-load-older button')
                     page.wait_for_function("feed => document.querySelector(`${feed} .chat-load-older button`)?.textContent === 'Retry loading messages'", arg=feed)
                     assert 'could not be loaded' in page.locator(feed).locator('..').locator('.chat-load-older-note').inner_text()
+                    # The failed read leaves the CSS-visible feed off screen until the panel's entrance.
+                    page.wait_for_function("""() => {
+                        const panel = document.getElementById('project-panel');
+                        return panel.classList.contains('open')
+                            && !panel.getAnimations().some(a => a.pending || a.playState === 'running');
+                    }""")
                     retry.evaluate("node => node.addEventListener('click', () => { window.__continuityFault = null; }, {once:true, capture:true})")
                     retry.click()
                 _idle(page, feed)
@@ -117,6 +124,7 @@ def test_deep_reopen_delay_retry_and_live_arrival(direct_server_with_data, brows
             # other room; opened again, the room is at its newest message.
             read_back()
             page.locator('#project-panel-close').click()
+            page.locator(feed).wait_for(state='detached')
             page.evaluate("fault => { window.__continuityFault = fault; }", {
                 "chatId": project["chat_id"], "delay": 800})
             _click_project(page, project)
@@ -177,13 +185,19 @@ def test_terminal_publication_timing_and_answer_copy(direct_server_with_data, br
                 # One compact limitation beside each non-clean final; the clean one stays unadorned.
                 assert [row.locator('.project-answer-limitation').all_inner_texts() for row in rows.all()] == [
                     [], ['Failed'], ['Failed']]
-                notes = rows.locator('.msg-provenance:not(.project-answer-limitation)').all_inner_texts()
-                assert 'Task ended' in notes[0] and 'Sep 25, 2026' in notes[0]
-                assert 'Sep 24, 2026' in notes[1] and 'Notification added Sep 26, 2026' in notes[1]
-                assert notes[2].startswith('Task end time not recorded')
-                assert 'Notification added Sep 26, 2026' in notes[2]
-                assert rows.nth(1).evaluate("node => !node.querySelector('.message').contains(node.querySelector('.msg-provenance'))")
-                return notes
+                # One compact time line (owner 17.10, Q7 A): the row's own time also says when its task ended, both
+                # facts only when their minutes differ; the full instants are its title and spoken text, no second note.
+                times = rows.locator(':scope > .msg-time').evaluate_all("""ns => ns.map(n => [
+                    n.querySelector('[aria-hidden="true"]').textContent, n.title, n.querySelector('.msg-time-full').textContent])""")
+                assert [shown for shown, _, _ in times] == [
+                    'Sep 25, 15:19', 'Ended Sep 24, 18:18 · added Sep 26, 19:21', 'End time not recorded · added Sep 26, 19:21']
+                assert all(title == spoken for _, title, spoken in times), times
+                # ICU spells the date/time joint differently per engine; the facts are fixed.
+                assert re.search(r'^Task ended Sep 25, 2026\D+03:19 PM · Notification added Sep 25, 2026\D+03:19 PM$', times[0][1])
+                assert re.search(r'^Task ended Sep 24, 2026\D+06:18 PM · Notification added Sep 26, 2026\D+07:21 PM$', times[1][1])
+                assert re.search(r'^Task end time not recorded · Notification added Sep 26, 2026\D+07:21 PM$', times[2][1])
+                assert rows.locator(':scope > .msg-provenance:not(.project-answer-limitation)').count() == 0
+                return times
             before = check()
             _screenshot(page, tmp_path, f'terminal-times-{browser_engine}')
             page.reload(wait_until='domcontentloaded')
@@ -191,7 +205,7 @@ def test_terminal_publication_timing_and_answer_copy(direct_server_with_data, br
             assert check() == before
             page.set_viewport_size({'width':390, 'height':844})
             if page.locator('#nav-drawer-backdrop').is_visible():
-                page.locator('#nav-drawer-backdrop').click(position={'x':380, 'y':400})
+                page.locator('#nav-drawer-backdrop').click()  # the room's quarter, all the scrim covers
             page.evaluate(_FRAMES)
             assert check() == before
             _screenshot(page, tmp_path, f'terminal-times-narrow-{browser_engine}')
@@ -236,7 +250,7 @@ def test_project_room_terminal_lines_separate_end_and_notification(direct_server
                     card = page.locator(f'{feed} .chat-live-card[data-task-id="{task_id}"]')
                     card.wait_for(state='attached')
                     if card.get_attribute('data-expanded') != '1':
-                        card.locator(':scope > [data-live-summary-button]').click()
+                        card.locator(':scope > [data-live-summary-button] [data-live-disclosure]').click()
                     found[task_id] = card.locator(':scope > [data-live-timeline]').inner_text()
                 return found
 
@@ -272,7 +286,7 @@ def test_latest_supersedes_a_held_question_reveal_and_a_later_reveal_lands(direc
 
     root = direct_server_with_data['data_dir']
     project = create_project(root, 'navigation-room', name='Addressed history')
-    _write(root / 'logs/chat.jsonl', [{
+    _append(root, 'chat', [{
         'direction': 'in', 'chat_id': project['chat_id'],
         'ts': '2026-09-03T10:00:00Z' if index >= 1180 else '2026-09-01T10:00:00Z',
         'client_message_id': f'navigation-{index}', 'text': f'NAVIGATION_MESSAGE_{index:04d}',
@@ -306,6 +320,7 @@ def test_latest_supersedes_a_held_question_reveal_and_a_later_reveal_lands(direc
             }""")
             page.evaluate(_FRAMES)
             page.locator('#project-panel-close').click()
+            page.locator(feed).wait_for(state='detached')  # reopening mid-exit would keep its loaded pages
             page.evaluate("""project => {
                 window.__holdQuestion = true;
                 window.dispatchEvent(new CustomEvent('ouro:open-project', {
@@ -367,10 +382,31 @@ _FIRST_VISIBLE = """root => {
     const node = [...root.querySelectorAll('.chat-bubble[data-history-id]')].find(n => n.getBoundingClientRect().bottom > top + 1);
     return node && {id:node.dataset.historyId, offset:node.getBoundingClientRect().top - top, scrollTop:root.scrollTop};
 }"""
+# A Project feed's presses, scrolls, scrollends and the app's own scrollTop writes, in order: what tells
+# a missed thumb, a release without its scrollend and a competing write apart when a drag fails (#2266).
+_FEED_EVENTS = """feedId => {
+    const log = window.__feedEvents = [];
+    const own = node => new RegExp(feedId).test(node?.id || '');
+    const find = () => [...document.querySelectorAll('[id$="messages"]')].find(own);
+    const note = (type, feed, more) => log.push({type, at: Math.round(performance.now()), ...more,
+        ...(feed && {gap: Math.round(feed.scrollHeight - feed.scrollTop - feed.clientHeight), client: feed.clientHeight})});
+    for (const type of ['pointerdown', 'pointerup', 'pointercancel'])
+        addEventListener(type, event => note(type, find(), {target: event.target?.id || event.target?.nodeName,
+            x: event.clientX, y: event.clientY}), {capture: true, passive: true});
+    for (const type of ['scroll', 'scrollend'])
+        addEventListener(type, event => own(event.target) && note(type, event.target), {capture: true, passive: true});
+    addEventListener('resize', () => note('resize', find()), {passive: true});
+    const scrollTop = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop');
+    Object.defineProperty(Element.prototype, 'scrollTop', {...scrollTop, set(value) {
+        if (own(this)) note('write', this, {value: Math.round(value), by: (new Error().stack || '').split('\\n').slice(1, 4).join(' < ')});
+        scrollTop.set.call(this, value);
+    }});
+}"""
 
 
-def _deep_gesture_history(root):
-    """A Review card, a photo and the reading target live on the third saved page."""
+def _deep_gesture_history(root, narration=''):
+    """A Review card, a photo and the reading target live on the third saved page; ``narration``
+    lengthens each line of the Review card's own narration."""
     from ouroboros.artifacts import store_task_artifact_bytes
     from ouroboros.projects_registry import create_project
     from tests.test_chat_history_paging_browser import _result
@@ -387,13 +423,14 @@ def _deep_gesture_history(root):
     rows[425] = {'direction': 'out', 'chat_id': cid, 'ts': at(425), 'type': 'photo', 'task_id': 'gesture-media',
                  'text': 'Held photo', 'caption': 'Held photo', 'mime': 'image/png',
                  'download_url': f'/api/tasks/gesture-media/artifacts/{image_name}'}
-    _write(root / 'logs' / 'chat.jsonl', rows)
+    _append(root, 'chat', rows)
     review = {'panels': [{'panel_id': 'gesture-panel', 'surface': 'task_acceptance', 'aggregate_signal': 'PASS',
                           'transport_status': 'success', 'parse_status': 'valid',
                           'reason': 'DEEP_REVIEW_DETAIL ' + 'Reviewed evidence stays readable. ' * 12, 'actors': []}]}
-    _write(root / 'logs' / 'progress.jsonl', [
+    _append(root, 'progress', [
         *[{'ts': at(420, index), 'chat_id': cid, 'task_id': 'deep-review',
-           'content': f'Deep review narration {index}. ' + 'Inspecting retained history. ' * 6} for index in range(3)],
+           'content': f'Deep review narration {index}. ' + 'Inspecting retained history. ' * 6 + narration}
+          for index in range(3)],
         *[{'ts': at(700 + index // 2, index % 2), 'chat_id': cid, 'task_id': 'later-work',
            'content': f'Later work {index:03d}'} for index in range(200)],
     ])
@@ -428,10 +465,10 @@ def _nested_full_output_history(root, card_after=49):
     def minute(index):
         return f'2026-09-01T{10 + index // 60:02d}:{index % 60:02d}'
     at = minute(card_after)
-    _write(root / 'logs/chat.jsonl', [
+    _append(root, 'chat', [
         {'direction': 'in', 'chat_id': cid, 'ts': f'{minute(index)}:00Z',
          'client_message_id': f'nested-{index}', 'text': f'Nested context {index:03d}'} for index in range(200)])
-    _write(root / 'logs/progress.jsonl', [
+    _append(root, 'progress', [
         {'chat_id': cid, 'ts': f'{at}:30Z', 'task_id': 'nested-parent', 'content': 'Parent narration'},
         {'chat_id': cid, 'ts': f'{at}:31Z', 'task_id': 'nested-child', **lineage,
          'subagent_event': 'completed', 'status': 'completed', 'content': 'Child finished',
@@ -449,7 +486,7 @@ def _open_nested_full_output(page, url, project):
     for card in (parent, child):
         card.wait_for(state='attached')
         if card.get_attribute('data-expanded') != '1':
-            card.locator(':scope > [data-live-summary-button]').click()
+            card.locator(':scope > [data-live-summary-button] [data-live-disclosure]').click()
     line = child.locator(':scope > [data-live-timeline] > .chat-live-line.expandable')
     line.locator('[data-live-line-toggle]').click()
     body = line.locator(':scope > .chat-live-line-body-full')
@@ -526,6 +563,228 @@ def test_wheel_inside_full_output_neither_pages_nor_follows_until_its_edge(direc
             browser.close()
 
 
+# #1524: a real wheel with the pointer on a named part of a card moves the feed exactly as far as the
+# same wheel moves it over plain feed in that engine and page: the engine's own step, never a constant,
+# since a Linux WebKit run has moved a feed by about half a wheel's delta. The part is first brought to
+# the middle of the feed by script (a script decides no reading intent), so the feed has room both ways.
+_AIM_AT_PART = """(part, [feedSelector, bare]) => {
+    const feed = document.querySelector(feedSelector);
+    const mid = feed.getBoundingClientRect().top + feed.getBoundingClientRect().height / 2;
+    let box = part.getBoundingClientRect();
+    feed.scrollTop += (box.top + box.height / 2) - mid;
+    box = part.getBoundingClientRect();
+    let x = box.left + Math.min(box.width - 3, Math.max(6, box.width * 0.3));
+    let y = Math.min(box.bottom - 2, Math.max(box.top + 2, mid));
+    // ``bare``: where the part's own box is hit (a gap or its padding), as the UI lane's wheel once hit a
+    // bare actions row; a part with no such point keeps the default point, and onSelf says which it was.
+    scan: for (const row of bare ? [box.top + box.height / 2, box.bottom - 2, box.top + 2] : []) {
+        for (let column = box.left + 2; column < box.right - 1; column += 3) {
+            if (document.elementFromPoint(column, row) === part) { x = column; y = row; break scan; }
+        }
+    }
+    const hit = document.elementFromPoint(x, y);
+    return {x, y, onPart: part === hit || part.contains(hit), onSelf: part === hit,
+            hit: hit && (hit.className || hit.tagName),
+            up: feed.scrollTop, down: feed.scrollHeight - feed.clientHeight - feed.scrollTop};
+}"""
+# A point of the feed with no card and no clipping or scrolling box between it and the feed.
+_PLAIN_POINT = """feedSelector => {
+    const feed = document.querySelector(feedSelector);
+    const box = feed.getBoundingClientRect();
+    const plain = node => {
+        if (!node || !(node === feed || feed.contains(node))) return false;
+        for (let el = node; el !== feed; el = el.parentElement) {
+            if (el.classList.contains('chat-live-card') || getComputedStyle(el).overflowY !== 'visible') return false;
+        }
+        return true;
+    };
+    for (let row = 0; row < 24; row++) {
+        const y = box.top + box.height / 2 + (row % 2 ? -1 : 1) * Math.ceil(row / 2) * 16;
+        for (let x = box.right - 24; x > box.left + 4; x -= 12) {
+            const hit = document.elementFromPoint(x, y);
+            if (plain(hit)) return {x, y, hit: hit.className || hit.tagName, up: feed.scrollTop,
+                                    down: feed.scrollHeight - feed.clientHeight - feed.scrollTop};
+        }
+    }
+    return null;
+}"""
+# The feed's and the probed part's scrollTop once both have stopped for six frames; after a wheel
+# (``from`` given), only once they moved or 600 ms passed, so a late-starting scroll is not read as none.
+_SETTLED_TOPS = """([feedSelector, partIsScroller, from]) => new Promise(done => {
+    const feed = document.querySelector(feedSelector);
+    const part = partIsScroller ? document.querySelector('[data-wheel-probe]') : null;
+    const read = () => [feed.scrollTop, part ? part.scrollTop : 0];
+    const start = performance.now();
+    let last = read(), still = 0;
+    const tick = () => {
+        const now = read();
+        still = now[0] === last[0] && now[1] === last[1] ? still + 1 : 0;
+        last = now;
+        const moved = !from || now[0] !== from[0] || now[1] !== from[1];
+        if (still >= 6 && (moved || performance.now() - start > 600)) done(now);
+        else requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+})"""
+
+
+def _wheel_at(page, feed, x, y, dy, scroller=False):
+    """One real wheel at (x, y): how far the feed and the probed part moved, settled before and after."""
+    page.mouse.move(x, y)
+    before = page.evaluate(_SETTLED_TOPS, [feed, scroller, None])
+    page.mouse.wheel(0, dy)
+    after = page.evaluate(_SETTLED_TOPS, [feed, scroller, before])
+    return {'feed': round(after[0] - before[0], 2), 'part': round(after[1] - before[1], 2)}
+
+
+def _plain_step(page, feed, dy):
+    """How far this engine moves the feed for one wheel of ``dy`` over plain feed, from its middle."""
+    page.locator(feed).evaluate('n => { n.scrollTop = Math.round((n.scrollHeight - n.clientHeight) / 2); }')
+    page.evaluate(_FRAMES)
+    tries = []
+    for _ in range(3):  # an engine may drop a wheel; only this reference may be asked again
+        point = page.evaluate(_PLAIN_POINT, feed)
+        assert point and min(point['up'], point['down']) > 4 * abs(dy), ('no plain feed with room both ways', point)
+        tries.append(dict(_wheel_at(page, feed, point['x'], point['y'], dy), hit=point['hit']))
+        if tries[-1]['feed']:
+            break
+    assert tries[-1]['feed'] * dy > 0, ('a wheel over plain feed did not move it: nothing to compare with', tries)
+    return tries[-1]['feed'], tries
+
+
+def _wheel_over(page, feed, part, dy, scroller=False, bare=False):
+    """One real wheel over ``part``: how far the feed and (for a scroller) the part moved, and what it hit."""
+    part.evaluate("n => { document.querySelectorAll('[data-wheel-probe]').forEach(m => m.removeAttribute('data-wheel-probe'));"
+                  " n.setAttribute('data-wheel-probe', ''); }")
+    aim = part.evaluate(_AIM_AT_PART, [feed, bare])
+    assert aim['onPart'], ('the pointer is not on the named part', aim)
+    assert min(aim['up'], aim['down']) > 4 * abs(dy), ('the feed has no room both ways', aim)
+    page.evaluate(_FRAMES)
+    return dict(_wheel_at(page, feed, aim['x'], aim['y'], dy, scroller), hit=aim['hit'], on_self=aim['onSelf'])
+
+
+def _toggle_card(page, card, expanded):
+    if (card.get_attribute('data-expanded') == '1') != expanded:
+        card.locator(':scope > [data-live-summary-button] [data-live-disclosure]').click()
+        page.evaluate(_FRAMES)
+        assert (card.get_attribute('data-expanded') == '1') == expanded
+
+
+@pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
+def test_wheel_aimed_at_a_card_moves_the_feed_unless_a_scroller_there_consumes_it(
+        direct_server_with_data, browser_engine, tmp_path):
+    """#1524: a real wheel moves the feed exactly as far as the same wheel over plain feed, on the heading
+    and summary row of a collapsed or an expanded root or child card, and on the heading, foot, actions
+    row and action button of Main's live card, whose actions row is where the UI lane's Linux WebKit once
+    saw a wheel scroll nothing.
+    A bounded scroller there takes the wheel instead, and a part that swallows it is told apart, so a
+    swallowed wheel could not pass as this. The claim is this engine run's: Linux WebKit and the system
+    WKWebView are their own runs."""
+    from playwright.sync_api import sync_playwright
+    from tests.ui_chat_viewport_smoke import _emit_ws_frame
+
+    project = _nested_full_output_history(direct_server_with_data['data_dir'], card_after=120)
+    dy = 120
+    seen = {'wheel': dy}
+
+    def check(key, moved, feed_by, part_by=0):
+        seen[key] = moved
+        assert abs(moved['feed'] - feed_by) <= 1 and abs(moved['part'] - part_by) <= 1, (key, moved, feed_by, part_by)
+
+    with sync_playwright() as pw:
+        browser = getattr(pw, browser_engine).launch(headless=True)
+        seen['browser'] = f'{browser_engine} {browser.version}'
+        try:
+            page = browser.new_page(viewport={'width': 1280, 'height': 850})
+            feed, _child, _line, _body = _open_nested_full_output(page, direct_server_with_data['url'], project)
+            step = {}
+            for sign in (1, -1):
+                step[sign], seen[f'plain feed {sign * dy}'] = _plain_step(page, feed, sign * dy)
+
+            def card(task):
+                return page.locator(f'{feed} .chat-live-card[data-task-id="{task}"]')
+
+            def over_card_parts(task, expanded):
+                for name, selector in (('heading', ':scope > [data-live-summary-button] .chat-live-title'),
+                                       ('summary row', ':scope > [data-live-summary-button]')):
+                    for sign in (1, -1):
+                        check(f'{task} {"expanded" if expanded else "collapsed"} {name} {sign * dy}',
+                              _wheel_over(page, feed, card(task).locator(selector).first, sign * dy), step[sign])
+
+            # A child's card lives in its parent's; a collapsed parent hides it, so the child goes first.
+            for task in ('nested-child', 'nested-parent'):
+                _toggle_card(page, card(task), True)
+                over_card_parts(task, True)
+            for task in ('nested-child', 'nested-parent'):
+                _toggle_card(page, card(task), False)
+                over_card_parts(task, False)
+
+            # A bounded scroller under the pointer, at mid-range, takes the wheel and the feed stays: the
+            # child's full output, a box inside the child card inside its parent.
+            for task in ('nested-parent', 'nested-child'):
+                _toggle_card(page, card(task), True)
+            line = card('nested-child').locator(':scope > [data-live-timeline] > .chat-live-line.expandable')
+            output = line.locator(':scope > .chat-live-line-body-full')
+            if not output.is_visible():
+                line.locator('[data-live-line-toggle]').click()
+            output.get_by_text('UNIQUE_NESTED_TAIL', exact=False).wait_for(state='attached')
+            room = output.evaluate('n => { n.scrollTop = Math.round((n.scrollHeight - n.clientHeight) / 2);'
+                                   ' return Math.min(n.scrollTop, n.scrollHeight - n.clientHeight - n.scrollTop); }')
+            assert room > 2 * dy, ('the full output needs room both ways', room)
+            moved = _wheel_over(page, feed, output, dy, scroller=True)
+            seen['nested scroller'] = moved
+            assert moved['part'] > 0 and abs(moved['feed']) <= 1, moved
+
+            # The control: a box that swallows the wheel, put in the same feed. If a swallowed wheel moved
+            # anything here, the checks above could not tell a swallowed wheel from a passed one.
+            page.evaluate("""feedSelector => {
+                const box = document.createElement('div');
+                box.dataset.wheelControl = '';
+                box.style.cssText = 'height:140px;overflow:auto;flex:none;align-self:stretch';
+                box.innerHTML = '<div style="height:600px">control</div>';
+                box.addEventListener('wheel', event => event.preventDefault(), {passive: false});
+                const first = document.querySelector(feedSelector + ' .chat-live-card');
+                first.parentElement.insertBefore(box, first);
+                box.scrollTop = 200;
+            }""", feed)
+            check('swallowing control', _wheel_over(page, feed, page.locator(f'{feed} [data-wheel-control]'), dy,
+                                                    scroller=True), 0)
+
+            # Main's live card: its heading and its actions row (a run that can be stopped).
+            page = browser.new_page(viewport={'width': 1280, 'height': 850})
+            _open(page, direct_server_with_data['url'])
+            stamp = lambda index: f'2026-11-01T10:{index // 60:02d}:{index % 60:02d}+00:00'
+            for index in range(12):
+                _emit_ws_frame(page, {'type': 'chat', 'role': 'user', 'chat_id': 1, 'content': 'Earlier message. ' * 12,
+                                      'client_message_id': f'wheel-pre-{index}', 'ts': stamp(index)})
+            for index in range(6):
+                _emit_ws_frame(page, {'type': 'chat', 'role': 'assistant', 'is_progress': True, 'narration': True,
+                                      'cancelable': True, 'chat_id': 1, 'task_id': 'wheel-live',
+                                      'content': f'Live narration {index}. ' + 'Checking each result. ' * 4,
+                                      'ts': stamp(30 + index)})
+            for index in range(12):
+                _emit_ws_frame(page, {'type': 'chat', 'role': 'user', 'chat_id': 1, 'content': 'Later message. ' * 12,
+                                      'client_message_id': f'wheel-post-{index}', 'ts': stamp(60 + index)})
+            live = page.locator(f'{MAIN} .chat-live-card[data-task-id="wheel-live"]')
+            live.wait_for(state='visible')
+            for sign in (1, -1):
+                step[sign], seen[f'main plain feed {sign * dy}'] = _plain_step(page, MAIN, sign * dy)
+            for expanded in (True, False):
+                _toggle_card(page, live, expanded)
+                for name, selector, bare in (('heading', ':scope > [data-live-summary-button] .chat-live-title', False),
+                                             ('foot', ':scope > .chat-live-foot', True),
+                                             ('actions', ':scope .chat-live-actions', True),
+                                             ('action button', ':scope .chat-live-actions .btn', False)):
+                    part = live.locator(selector).first
+                    assert part.count() == 1 and part.is_visible(), (expanded, name)
+                    for sign in (1, -1):
+                        check(f'live {"expanded" if expanded else "collapsed"} {name} {sign * dy}',
+                              _wheel_over(page, MAIN, part, sign * dy, bare=bare), step[sign])
+        finally:
+            (_evidence_dir(tmp_path) / f'card-wheel-{browser_engine}.json').write_text(json.dumps(seen, indent=2))
+            browser.close()
+
+
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
 def test_feed_scrollbar_drag_to_the_live_edge_follows_new_replies(direct_server_with_data, browser_engine, tmp_path):
     """#1347 A: dragging the feed's own scrollbar to the bottom leads to the present;
@@ -533,37 +792,51 @@ def test_feed_scrollbar_drag_to_the_live_edge_follows_new_replies(direct_server_
     from playwright.sync_api import sync_playwright
 
     from ouroboros.projects_registry import create_project
+    from tests.test_chat_history_paging_browser import _evidence_dir
     from tests.ui_chat_viewport_smoke import _emit_ws_frame
 
     root = direct_server_with_data['data_dir']
     project = create_project(root, 'scrollbar-room', name='Scrollbar drag')
     cid = project['chat_id']
-    _write(root / 'logs/chat.jsonl', [
+    _append(root, 'chat', [
         {'direction': 'in', 'chat_id': cid, 'ts': f'2026-09-01T10:{index:02d}:00Z',
          'client_message_id': f'drag-{index}', 'text': f'Scrollbar context {index:02d}'} for index in range(60)])
+    facts = {'presses': []}
     with sync_playwright() as pw:
         # Classic scrollbars: headless Chromium hides them by default.
         options = {'ignore_default_args': ['--hide-scrollbars']} if browser_engine == 'chromium' else {}
         browser = getattr(pw, browser_engine).launch(headless=True, **options)
         try:
             page = browser.new_page(viewport={'width': 1280, 'height': 850})
+            page.add_init_script(f'({_FEED_EVENTS})({json.dumps("^pchat-.*-messages$")})')
             _open(page, direct_server_with_data['url'])
             feed = _open_project(page, project)
             root_feed = page.locator(feed)
-            bar = root_feed.evaluate('n => n.offsetWidth - n.clientWidth')
+            # The panel slides in (--motion-open) and can still be moving after the room settles:
+            # a press measured before it stops lands beside the 6px scrollbar and drags nothing.
+            root_feed.evaluate("""feed => Promise.all(document.getAnimations()
+                .filter(motion => motion.effect?.target?.contains?.(feed) && motion.effect.getComputedTiming().endTime !== Infinity)
+                .map(motion => motion.finished.catch(() => {})))""")
+            bar = facts['bar'] = root_feed.evaluate('n => n.offsetWidth - n.clientWidth')
             assert bar > 0, 'a classic feed scrollbar is present'
             _bookmark_place(page, page.locator(f'{feed} [data-client-message-id="drag-10"]'), 40)
-            box = root_feed.bounding_box()
-            x = box['x'] + box['width'] - bar / 2
             thumb_js = """n => n.getBoundingClientRect().top
                 + (n.scrollTop + n.clientHeight / 2) / n.scrollHeight * n.clientHeight"""
+            end_gap = 'n => n.scrollHeight - n.scrollTop - n.clientHeight'
 
-            def drag(to_y):
-                page.mouse.move(x, root_feed.evaluate(thumb_js))
+            def drag(to_y, hold=0):
+                box = root_feed.bounding_box()  # where the scrollbar is at this press
+                press = {'x': box['x'] + box['width'] - bar / 2, 'y': root_feed.evaluate(thumb_js), 'to_y': to_y}
+                facts['presses'].append(press)
+                page.mouse.move(press['x'], press['y'])
                 page.mouse.down()
-                page.mouse.move(x, to_y, steps=12)
+                page.mouse.move(press['x'], to_y, steps=12)
+                if hold:
+                    page.wait_for_timeout(hold)
                 page.mouse.up()
                 page.evaluate(_FRAMES)
+                press['gap'] = root_feed.evaluate(end_gap)
+                return press['gap']
 
             def reply(key):
                 _emit_ws_frame(page, {'type': 'chat', 'role': 'user', 'chat_id': cid, 'content': f'A new reply {key}',
@@ -571,33 +844,147 @@ def test_feed_scrollbar_drag_to_the_live_edge_follows_new_replies(direct_server_
                 page.locator(f'{feed} [data-client-message-id="{key}"]').wait_for(state='attached')
                 page.evaluate(_FRAMES)
 
-            drag(box['y'] + box['height'] - 2)
-            dragged = root_feed.evaluate('n => n.scrollHeight - n.scrollTop - n.clientHeight')
+            dragged = facts['dragged'] = drag(root_feed.evaluate('n => n.getBoundingClientRect().bottom') - 2)
             assert dragged <= 2, dragged
             reply('drag-new')
-            gap = root_feed.evaluate('n => n.scrollHeight - n.scrollTop - n.clientHeight')
+            gap = facts['gap'] = root_feed.evaluate(end_gap)
             _screenshot(page, tmp_path, f'scrollbar-drag-follows-{browser_engine}')
             assert gap <= 2, f'the dragged-to-bottom feed follows the new reply ({gap}px short)'
 
             # Released a little above the end; a taller window then clamps the feed
             # to its end. Only the release decided following: a new reply stays below.
+            # The thumb rests before the release, as a hand's does: WebKit then reports the
+            # drag's last scroll and its scrollend before the release, none after it.
             ratio = root_feed.evaluate('n => n.scrollHeight / n.clientHeight')
-            drag(root_feed.evaluate(thumb_js) - 90 / ratio)
-            released = root_feed.evaluate('n => n.scrollHeight - n.scrollTop - n.clientHeight')
+            released = facts['released'] = drag(root_feed.evaluate(thumb_js) - 90 / ratio, hold=300)
             assert 48 < released < 150, released
             page.set_viewport_size({'width': 1280, 'height': 1000})
             page.wait_for_timeout(150)
             page.evaluate(_FRAMES)
-            resized = root_feed.evaluate('n => n.scrollHeight - n.scrollTop - n.clientHeight')
-            first = root_feed.evaluate(_FIRST_VISIBLE)
+            resized = facts['resized'] = root_feed.evaluate(end_gap)
+            assert resized <= 2, ('the taller window clamps the feed to its end', released, resized)
+            first = facts['first'] = root_feed.evaluate(_FIRST_VISIBLE)
             reply('drag-away')
-            kept = page.locator(f'{feed} [data-history-id="{first["id"]}"]').evaluate(_OFFSET)
-            away = root_feed.evaluate('n => n.scrollHeight - n.scrollTop - n.clientHeight')
+            kept = facts['kept'] = page.locator(f'{feed} [data-history-id="{first["id"]}"]').evaluate(_OFFSET)
+            away = facts['away'] = root_feed.evaluate(end_gap)
             _screenshot(page, tmp_path, f'scrollbar-drag-released-away-{browser_engine}')
-            (tmp_path / f'scrollbar-drag-{browser_engine}.json').write_text(json.dumps({
-                'bar': bar, 'dragged': dragged, 'gap': gap, 'released': released, 'resized': resized,
-                'first': first, 'kept': kept, 'away': away}))
             assert abs(kept - first['offset']) <= 2 and away > 20, ('a drag released away does not follow', first, kept, away)
             assert page.evaluate('() => window.__historyReads.every(read => !read.cursor)'), 'a scrollbar drag pages nothing'
         finally:
+            try:
+                facts['events'] = page.evaluate('() => window.__feedEvents')
+            except Exception as error:  # the measured facts still go out with the page gone
+                facts['events'] = repr(error)
+            (_evidence_dir(tmp_path) / f'scrollbar-drag-{browser_engine}.json').write_text(json.dumps(facts, indent=1))
+            browser.close()
+
+
+# A settled Main question copy retires after a delay (chat_decision.js settleMirror); held here so that
+# its retirement can run right after a scrollbar release.
+_HOLD_RETIREMENT = """() => {
+    const later = window.setTimeout;
+    window.setTimeout = (callback, ms, ...rest) => String(callback).includes('removeMirror')
+        ? (window.__retire = callback, 0) : later(callback, ms, ...rest);
+}"""
+
+
+@pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
+def test_scrollbar_drag_released_away_stays_when_a_question_copy_below_retires(direct_server_with_data, browser_engine, tmp_path):
+    """#2266: a settled Main question copy below a passage a scrollbar drag left retires through the
+    app's own write; the browser clamps the shorter feed to its end. That is no scroll of the drag:
+    a new reply still stays below."""
+    from urllib.parse import urlsplit
+
+    from playwright.sync_api import sync_playwright
+
+    from tests.test_chat_history_paging_browser import _evidence_dir
+    from tests.ui_chat_viewport_smoke import _OBSERVE_STATE_READS, _emit_ws_frame
+
+    root = direct_server_with_data['data_dir']
+    _append(root, 'chat', [
+        {'direction': 'in', 'chat_id': 1, 'ts': f'2026-09-01T10:{index:02d}:00Z',
+         'client_message_id': f'main-{index}', 'text': f'Main context {index:02d}'} for index in range(60)])
+    question = {'task_id': 'retire-task', 'quiz_id': 'retire-q', 'quiz_state': 'open', 'project_id': 'retire-room',
+                'project_name': 'Retire room', 'project_chat_id': 12, 'question': 'Keep this copy of the output?',
+                'options': ['Yes', 'No'], 'ts': '2026-09-01T11:00:00Z'}
+    facts = {}
+    with sync_playwright() as pw:
+        options = {'ignore_default_args': ['--hide-scrollbars']} if browser_engine == 'chromium' else {}
+        browser = getattr(pw, browser_engine).launch(headless=True, **options)
+        try:
+            page = browser.new_page(viewport={'width': 1280, 'height': 850})
+            page.add_init_script(f'({_FEED_EVENTS})({json.dumps("^chat-messages$")})')
+            page.add_init_script(f'({_HOLD_RETIREMENT})()')
+            page.add_init_script(f'({_OBSERVE_STATE_READS})()')
+            # Main keeps a question copy only while a complete census names it (chat_decision.js
+            # syncCurrentQuestions); as on a real host, this one is named until it is answered.
+            census = {'current_questions': [question], 'current_questions_complete': True}
+
+            def state_read(route):
+                response = route.fetch()
+                route.fulfill(response=response, json={**response.json(), **census})
+
+            page.route(lambda url: urlsplit(url).path == '/api/state', state_read)
+            page.route('**/api/tasks/retire-task', lambda route: route.fulfill(json={
+                'task_id': 'retire-task', 'project_id': 'retire-room',
+                'question_rooms': {'retire-q': {'state': 'known', 'chat_id': 12, 'project_id': 'retire-room'}},
+                'owner_quiz': {'retire-q': {**question, 'state': 'open', 'asked_at': question['ts']}}}))
+            _open(page, direct_server_with_data['url'])
+            feed = page.locator(MAIN)
+            _emit_ws_frame(page, {**question, 'type': 'chat', 'chat_id': 1, 'role': 'system',
+                                  'system_type': 'project_question_pointer'})
+            copy = page.locator(f'{MAIN} .chat-quiz-card[data-quiz-id="retire-q"]')
+            copy.wait_for(state='visible')
+            # A census read made since the copy appeared has applied (one may have been in flight before it).
+            census_since = '(settled) => window.__stateReadsInFlight === 0 && window.__stateReadsSettled >= settled + 2'
+            page.wait_for_function(census_since, arg=page.evaluate('() => window.__stateReadsSettled'))
+            assert copy.count() == 1, 'the census names the open copy: it stays'
+            _emit_ws_frame(page, {'type': 'quiz_state', 'task_id': 'retire-task', 'quiz_id': 'retire-q',
+                                  'state': 'answered', 'answered_index': 0})
+            page.wait_for_function("() => typeof window.__retire === 'function'")
+            census['current_questions'] = []
+            page.wait_for_function(census_since, arg=page.evaluate('() => window.__stateReadsSettled'))
+            page.evaluate(_FRAMES)
+            bar = facts['bar'] = feed.evaluate('n => n.offsetWidth - n.clientWidth')
+            assert bar > 0, 'a classic feed scrollbar is present'
+            end_gap = 'n => n.scrollHeight - n.scrollTop - n.clientHeight'
+            assert feed.evaluate(end_gap) <= 2, 'Main opens at its newest message, the copy at the bottom'
+            facts['copy_height'] = copy.evaluate('n => n.closest(".chat-bubble").getBoundingClientRect().height')
+            # Released a little above the end, the thumb at rest first (WebKit then reports the
+            # drag's scrollend before the release); the copy's retirement runs right after the release.
+            box = feed.bounding_box()
+            x = box['x'] + box['width'] - bar / 2
+            y = feed.evaluate("""n => n.getBoundingClientRect().top
+                + (n.scrollTop + n.clientHeight / 2) / n.scrollHeight * n.clientHeight""")
+            ratio = feed.evaluate('n => n.scrollHeight / n.clientHeight')
+            page.evaluate("() => addEventListener('pointerup', () => setTimeout(() => window.__retire(), 0), {once: true})")
+            page.mouse.move(x, y)
+            page.mouse.down()
+            page.mouse.move(x, y - 90 / ratio, steps=12)
+            page.wait_for_timeout(300)
+            page.mouse.up()
+            copy.wait_for(state='detached')
+            page.evaluate(_FRAMES)
+            facts['released_events'] = page.evaluate('() => window.__feedEvents.filter(e => e.type === "pointerup").length')
+            retired = facts['retired'] = feed.evaluate(end_gap)
+            assert retired <= 2 < facts['copy_height'], ('the retirement clamped the feed to its end', facts)
+            first = facts['first'] = feed.evaluate(_FIRST_VISIBLE)
+            _screenshot(page, tmp_path, f'scrollbar-retire-before-reply-{browser_engine}')
+            _emit_ws_frame(page, {'type': 'chat', 'role': 'user', 'chat_id': 1, 'content': 'A new reply after the retirement',
+                                  'ts': '2026-09-01T11:30:00Z', 'client_message_id': 'main-after',
+                                  'sender_session_id': 'other-tab'})
+            page.locator(f'{MAIN} [data-client-message-id="main-after"]').wait_for(state='attached')
+            page.evaluate(_FRAMES)
+            kept = facts['kept'] = feed.evaluate('(root, id) => root.querySelector(`[data-history-id="${id}"]`)'
+                                                 '.getBoundingClientRect().top - root.getBoundingClientRect().top', first['id'])
+            away = facts['away'] = feed.evaluate(end_gap)
+            _screenshot(page, tmp_path, f'scrollbar-retire-after-reply-{browser_engine}')
+            assert abs(kept - first['offset']) <= 2 and away > 20, ('a retirement below does not make the drag follow', facts)
+            assert page.evaluate('() => window.__historyReads.every(read => !read.cursor)'), 'a scrollbar drag pages nothing'
+        finally:
+            try:
+                facts['events'] = page.evaluate('() => window.__feedEvents')
+            except Exception as error:  # the measured facts still go out with the page gone
+                facts['events'] = repr(error)
+            (_evidence_dir(tmp_path) / f'scrollbar-retire-{browser_engine}.json').write_text(json.dumps(facts, indent=1))
             browser.close()

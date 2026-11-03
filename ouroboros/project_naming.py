@@ -24,6 +24,7 @@ import contextvars
 import logging
 import pathlib
 import threading
+import time
 from dataclasses import replace
 from typing import Any, Callable, Dict, Optional, Sequence
 
@@ -96,7 +97,7 @@ def _light_naming_model() -> str:
 
 
 def _naming_timeout_sec() -> float:
-    """Provider-call transport timeout for the naming LIGHT call. SSOT: config
+    """Operation ceiling for the naming LIGHT call. SSOT: config
     SETTINGS_DEFAULTS (no duplicated literal — the default IS the SSOT value)."""
     from ouroboros.config import runtime_setting
 
@@ -173,6 +174,7 @@ def llm_project_name(
     llm_client: Optional[Any] = None,
     drive_root: Optional[Any] = None,
     task_id: str = "",
+    caller_deadline_ts: Optional[float] = None,
 ) -> str:
     """SYNC bounded LLM-first project title. On ANY failure returns the heuristic
     fallback over ``fallback_candidates`` then ``owner_text``. Never raises.
@@ -180,8 +182,9 @@ def llm_project_name(
     ``use_local=None`` (the default) routes via the runtime ``USE_LOCAL_LIGHT`` flag so a
     local-only / local-light deployment names with its configured local model instead of a
     remote provider. The provider call is wrapped in the #4 per-model concurrency slot so a
-    flurry of namers cannot storm one model's rate limit, carries a bounded transport timeout
-    so a stalled provider can't wedge card creation, and — when ``drive_root`` is given —
+    flurry of namers cannot storm one model's rate limit. One absolute deadline covers
+    preparation, slot waiting and recovery; an earlier caller bound wins. Already-sent
+    work retains settlement custody. When ``drive_root`` is given, the call
     runs through ``chat_observed`` for its forensic trace. The physical send is bound to a
     ``project_naming`` usage scope, which is the sole monetary authority for the attempt.
     """
@@ -191,6 +194,9 @@ def llm_project_name(
         return fb
     use_local = _light_use_local(use_local)
     try:
+        deadline_ts = time.time() + _naming_timeout_sec()
+        if caller_deadline_ts is not None:
+            deadline_ts = min(deadline_ts, caller_deadline_ts)
         from ouroboros import model_concurrency
         from ouroboros.llm import LLMClient
 
@@ -208,11 +214,12 @@ def llm_project_name(
             reasoning_effort="low",
             max_tokens=256,
             use_local=use_local,
-            timeout=_naming_timeout_sec(),
+            timeout=max(0.0, deadline_ts - time.time()),
+            caller_deadline_ts=deadline_ts,
         )
         from ouroboros.usage_accounting import usage_scope
 
-        with model_concurrency.model_call_slot(model, use_local):
+        with model_concurrency.model_call_scope(model, use_local, deadline_ts=deadline_ts):
             with usage_scope(_project_naming_usage_scope(drive_root, task_id)):
                 if drive_root is not None:
                     from ouroboros.llm_observability import chat_observed
@@ -255,6 +262,8 @@ async def llm_project_name_async(
     if not text:
         return fb
     eff_timeout = _naming_async_timeout_sec() if timeout_sec is None else float(timeout_sec)
+    # Capture both ceilings before scheduling: a delayed worker gets only what remains.
+    deadline_ts = time.time() + min(eff_timeout, _naming_timeout_sec())
     try:
         return await asyncio.wait_for(
             asyncio.to_thread(
@@ -265,8 +274,9 @@ async def llm_project_name_async(
                 llm_client=llm_client,
                 drive_root=drive_root,
                 task_id=task_id,
+                caller_deadline_ts=deadline_ts,
             ),
-            timeout=max(0.1, eff_timeout),
+            timeout=max(0.0, deadline_ts - time.time()),
         )
     except Exception:
         log.debug("llm_project_name_async timed out/failed; using heuristic", exc_info=True)
@@ -318,14 +328,12 @@ def spawn_turn_namer(
     except (OSError, TypeError, ValueError):
         return
 
+    deadline_ts = time.time() + _naming_timeout_sec()
+
     def _work() -> None:
         try:
-            # v6.58.0 (§3.4b): HARD total wall-clock bound. The transport timeout bounds
-            # ONE attempt, but llm.chat's retry/fallback chain under a degraded provider
-            # could stretch the whole call to tens of minutes (the incident where the
-            # card was named 24 minutes late). A title is cosmetic: if it hasn't landed
-            # within the transport budget + slack, drop it — the id/title heuristics and
-            # the convert path's own bounded inline call (8s) already cover naming.
+            # Stop publishing after the naming window plus the existing settlement
+            # slack. A physical call may outlive that wait; keep its late cost refresh.
             _result: list[str] = []
             _detached = threading.Event()
             _finished = threading.Event()
@@ -342,7 +350,9 @@ def spawn_turn_namer(
 
             def _call() -> None:
                 try:
-                    _result.append(llm_project_name(body, drive_root=drive_root, task_id=task_id))
+                    _result.append(llm_project_name(
+                        body, drive_root=drive_root, task_id=task_id, caller_deadline_ts=deadline_ts,
+                    ))
                 except Exception:
                     log.debug("turn namer inner call failed for %s", task_id, exc_info=True)
                 finally:
@@ -354,7 +364,7 @@ def spawn_turn_namer(
             copy_task_settings_context(settings_context)
             inner = threading.Thread(target=settings_context.run, args=(_call,), name=f"namer-call-{task_id}", daemon=True)
             inner.start()
-            if not _finished.wait(timeout=max(0.0, _naming_timeout_sec() + 30.0)):
+            if not _finished.wait(timeout=max(0.0, deadline_ts + 30.0 - time.time())):
                 _detached.set()
                 # Close the race where settlement lands between wait() and
                 # the detached marker. The once-guard covers both interleavings.

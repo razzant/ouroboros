@@ -56,6 +56,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ouroboros.gateway._helpers import json_error, request_json_or
+from ouroboros.gateway.claudexor_passive import roster_error
 
 log = logging.getLogger(__name__)
 
@@ -172,37 +173,6 @@ def _login_disclosure_native(operations: List[Dict[str, Any]]) -> bool:
     return False
 
 
-# The UNIFIED ACCOUNT MODEL's feature marker (frozen contract, sprint plan §L.2):
-# `GET /v2/account-pools` ships in the same engine change that migrates every
-# default CLI login into a named registry row, empties `harnessAccounts` and
-# carries the pool routing verdict in the additive `accountPools` key. One
-# structural marker for the one feature, and it is the catalog ID — the
-# engine's own stable identifier for the operation, not the path spelling.
-# Absent on every 3.5.0 engine.
-_ACCOUNT_POOLS_OPERATION_ID = "get:account-pools"
-
-
-def _unified_accounts_native(operations: List[Dict[str, Any]]) -> bool:
-    """Does this engine serve the UNIFIED account model (every account a named
-    registry row, routing facts in ``accountPools``)?
-
-    True iff the ``/v2/operations`` catalog advertises the account-pools read
-    under its EXACT catalog id (the ``_login_disclosure_native`` pattern). The
-    expensive direction is a false POSITIVE: it would make the client treat a
-    legacy engine's native pseudo-rows as named profiles (Remove buttons on
-    rows the engine cannot delete, a verify-race that never resolves). A false
-    negative only costs the old rendering, which is correct on every engine
-    that lacks the route. Pure for unit tests; a caller that could not READ
-    the catalog must pass [] and get False — fail closed to the old behavior.
-    """
-    for op in operations:
-        if not isinstance(op, dict):
-            continue
-        if str(op.get("id") or "") == _ACCOUNT_POOLS_OPERATION_ID:
-            return True
-    return False
-
-
 def _login_capable_harness_ids(rows: List[Dict[str, Any]]) -> "set | None":
     """Harnesses whose manifest declares a ``native_session`` auth source.
 
@@ -235,16 +205,12 @@ def _login_capable_harness_ids(rows: List[Dict[str, Any]]) -> "set | None":
     return capable if readable else None
 
 
-def _account_row_visible(harness_id: str, row: Dict[str, Any], capable) -> bool:
-    """Account-surface row predicate: manifest-declared login capability OR the
-    daemon vouching an actual login on the row itself (``native_login_detected``)
-    — a harness with a null/unreadable manifest must not lose the account the
-    owner is really logged into. Deliberately NOT "keep all unknown-manifest
-    rows": that would resurrect raw-api (manifest-null on the live engine),
-    which is the exact leak this filter closes."""
-    if capable is None:
-        return True
-    return harness_id in capable or bool(row.get("native_login_detected"))
+def _account_row_visible(harness_id: str, capable) -> bool:
+    """Account-surface predicate: manifest-declared login capability. Deliberately
+    NOT "keep all unknown-manifest rows": that would resurrect raw-api
+    (manifest-null on the live engine), which is the exact leak this filter
+    closes. ``capable is None`` (no readable manifest at all) fails open."""
+    return capable is None or harness_id in capable
 
 
 # One status read per variant (with or without per-harness models) at a time: concurrent
@@ -256,7 +222,7 @@ _STATUS_LOCK = threading.Lock()
 _STATUS_IN_FLIGHT: Dict[bool, Future] = {}
 _FACET_MEMORY: Dict[Tuple[str, str, bool], Dict[str, Any]] = {}
 _FACET_FIELDS = {"catalog": ("harnesses",), "accounts": ("profiles",),
-                 "quota": ("quota", "quota_absences", "resources")}
+                 "quota": ("quota", "quota_absences", "resources", "availability_scope")}
 
 
 def _status_payload(include_models: bool, *, join: bool = True) -> Dict[str, Any]:
@@ -345,14 +311,10 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
             "accounts": READ_NOT_READ,
             "quota": READ_NOT_READ,
         },
-        # UNIFIED ACCOUNT MODEL feature fact (sprint plan §L.2): True only when
-        # the engine's own /v2/operations catalog was READ and advertises
-        # `GET /v2/account-pools`. Anything else — old engine, unreadable
-        # catalog, no daemon — is False: the client falls closed to the legacy
-        # native-pseudo-row rendering, which is correct on every engine that
-        # lacks the route. Deliberately NOT a facet: like the login-capability
-        # manifest read it is a rendering input whose failure is absorbed, not
-        # reported.
+        # True when THIS read's roster is the unified account model, the only
+        # one the accounts facet answers (``claudexor_passive.roster_error``).
+        # A pre-unified roster fails that facet as `account_model_unsupported`;
+        # the operations catalog never decides it.
         "unified_accounts": False,
         # The Subagents section's «last delegated run» receipt — Ouroboros's
         # own projection, not daemon truth, so it is served even with the
@@ -368,6 +330,7 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
             payload["daemon"]["engine_version"] = gateway.engine_version
 
             def _quota_state() -> Dict[str, Any]:
+                from ouroboros.claudexor_observations import read_quota
                 from ouroboros.gateways.claudexor import account_resource_capabilities
 
                 try:
@@ -379,16 +342,28 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
                 payload["resource_capabilities"] = capabilities
                 reader = getattr(gateway, "quota_state", None)
                 if callable(reader):
-                    if capabilities["read"]:
-                        result = reader(view="resources")
-                        if not isinstance(result, dict) or not isinstance(result.get("resources"), list):
-                            raise ClaudexorUnavailable("malformed_response", "Account resources were not returned")
-                        return result
-                    return reader()
+                    return read_quota(gateway, require_resources=capabilities["read"])
                 # Compatibility for old embedded gateway doubles. The shipped
-                # gateway has quota_state, so the live status path always uses
-                # one physical GET and one evidence epoch.
+                # gateway has quota_state; its shared reader preserves one
+                # complete evidence epoch, including negotiated legacy resources.
                 return {"snapshots": gateway.quota_snapshots(), "absences": []}
+
+            def _capability_marks() -> Dict[str, Any] | None:
+                from ouroboros.gateways.claudexor_routing import capability_marks_supported, read_capability_marks
+                from ouroboros.utils import utc_now_iso
+
+                # Optional and passive: an engine that does not advertise the rows (or
+                # whose catalog is unreadable: resource_capabilities_read owns that) is
+                # not asked, and a failed read is one dated fact, never "no marks".
+                try:
+                    if not capability_marks_supported(operations_call.result()):
+                        return None
+                except Exception:
+                    return None
+                try:
+                    return {"evidence": read_capability_marks(gateway)}
+                except Exception:
+                    return {"failed_at": utc_now_iso()}
             # The catalog, manifest, profile and quota reads are INDEPENDENT GETs
             # over one thread-safe httpx client, and each costs SECONDS daemon-side
             # (it probes the real coding-agent CLIs on every read: binary, version,
@@ -398,12 +373,13 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
             # on its own (see `_facet_outcome`), a refusal surfaces as that facet's
             # own typed error below WITHOUT downgrading the siblings that
             # landed, and a manifest refusal still fails OPEN.
-            with ThreadPoolExecutor(max_workers=5) as pool:
+            with ThreadPoolExecutor(max_workers=6) as pool:
                 operations_call = pool.submit(lambda: gateway.operations())
                 catalog_call = pool.submit(gateway.agent_capabilities)
                 manifests_call = pool.submit(gateway.harnesses)
                 profiles_call = pool.submit(gateway.credential_profiles)
                 quota_call = pool.submit(_quota_state)
+                marks_call = pool.submit(_capability_marks)
                 # Deferred lookup on purpose: the failure of THIS read (or a
                 # transport double that lacks the method) must land inside the
                 # future, where the absorbed fail-closed handling below owns it.
@@ -413,8 +389,7 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
             # would leave `accounts` reported as unread even though its own read
             # succeeded. Each facet answers only for itself.
             catalog_outcome = _facet_outcome(catalog_call, envelope=("harnesses",))
-            profiles_outcome = _facet_outcome(
-                profiles_call, envelope=("profiles", "harnessAccounts"))
+            profiles_outcome = _facet_outcome(profiles_call, check=roster_error)
             quota_outcome = _facet_outcome(
                 quota_call,
                 envelope=("snapshots",),
@@ -428,9 +403,10 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
             # A refused facet keeps its own typed error; the daemon that answered the
             # handshake and its other facets stay as read (no whole-payload `unreachable`).
             payload["_facet_errors"] = {
-                facet: outcome[2].code if outcome[2] is not None else "malformed_response"
+                facet: getattr(outcome[2], "code", outcome[2]) or "malformed_response"
                 for facet, outcome in (("catalog", catalog_outcome), ("accounts", profiles_outcome),
                                        ("quota", quota_outcome)) if outcome[0] == READ_FAILED}
+            payload["unified_accounts"] = profiles_outcome[0] == READ_OK
             catalog = catalog_outcome[1] if catalog_outcome[0] == READ_OK else {}
             # Account surfaces show only harnesses with a login concept. On a
             # transient manifest-read failure — or a successful read with zero
@@ -442,24 +418,20 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
                 capable = _login_capable_harness_ids(manifests_call.result())
             except ClaudexorUnavailable:
                 capable = None
-            # The unified-accounts feature fact, from the engine's own route
-            # catalog. An unreadable catalog fails CLOSED to the old behavior
-            # (False) — the legacy rendering is correct on every engine, while
-            # a guessed True would draw named-row affordances over pseudo-rows
-            # the engine cannot honor. Absorbed like the manifest read: a
-            # rendering input, never a reported facet.
+            # The operations catalog gates other capabilities (per-account model
+            # catalogs below, resources, marks); an unreadable one withholds only
+            # them, absorbed like the manifest read, never a reported facet.
             operations = []
             try:
                 operations = operations_call.result()
-                payload["unified_accounts"] = _unified_accounts_native(operations)
             except Exception:
-                log.debug("operations catalog read failed; assuming legacy account model",
+                log.debug("operations catalog read failed; capability-gated reads are skipped",
                           exc_info=True)
             rows: List[Dict[str, Any]] = []
             for row in catalog.get("harnesses") or []:
                 if not isinstance(row, dict):
                     continue
-                if not _account_row_visible(str(row.get("id") or ""), row, capable):
+                if not _account_row_visible(str(row.get("id") or ""), capable):
                     continue
                 projected = {
                     "id": str(row.get("id") or ""),
@@ -493,35 +465,22 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
                 rows.append(projected)
             payload["harnesses"] = rows
             profiles = profiles_outcome[1] if profiles_outcome[0] == READ_OK else {}
-            accounts = profiles.get("harnessAccounts") if isinstance(profiles, dict) else None
-            if capable is not None and isinstance(accounts, list):
-                # The daemon emits a native pseudo-row for EVERY adapter,
-                # including the API-key-only ones; same filter, same reason —
-                # but a vouched login (native_login_detected) keeps its row
-                # even when the manifest is unreadable.
-                profiles["harnessAccounts"] = [
-                    r for r in accounts
-                    if isinstance(r, dict)
-                    and _account_row_visible(str(r.get("harness_id") or ""), r, capable)
-                ]
             wrappers = profiles.get("profiles") if isinstance(profiles, dict) else None
             if capable is not None and isinstance(wrappers, list):
-                # Named credential-profile wrappers leak the same way: an
+                # Named credential-profile wrappers leak like catalog rows: an
                 # api_key-kind profile registered for a non-loginable harness
-                # would render a fake-loginable account row. Keep a wrapper
-                # only for a login-capable harness OR one the daemon vouches a
-                # native login for among the pseudo-rows above.
-                vouched = {
-                    str(r.get("harness_id") or "")
-                    for r in (accounts if isinstance(accounts, list) else [])
-                    if isinstance(r, dict) and r.get("native_login_detected")
-                }
+                # would render a fake-loginable account row. An old client's
+                # `harnessAccounts` carrier rides through unread.
                 profiles["profiles"] = [
                     w for w in wrappers
-                    if isinstance(w, dict)
-                    and isinstance(w.get("profile"), dict)
-                    and str(w["profile"].get("harness_id") or "") in (capable | vouched)
+                    if str(w["profile"].get("harness_id") or "") in capable
                 ]
+            marks = marks_call.result()
+            if profiles_outcome[0] == READ_OK and marks is not None:
+                # The open roster envelope carries them (public schema unchanged):
+                # marks only beside a successful account read, a failure once.
+                profiles = ({**profiles, "routing_evidence": marks["evidence"]} if "evidence" in marks else
+                            {**profiles, "routing_evidence_read": {"state": READ_FAILED, "observed_at": marks["failed_at"]}})
             payload["profiles"] = profiles
             quota = quota_outcome[1] if quota_outcome[0] == READ_OK else {}
             raw_snapshots = quota.get("snapshots") if isinstance(quota, dict) else None
@@ -536,6 +495,8 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
             ]
             if isinstance(quota.get("resources"), list):
                 payload["resources"] = quota["resources"]
+            if "availability_scope" in quota:
+                payload["availability_scope"] = quota["availability_scope"]
     except ClaudexorUnavailable as exc:
         payload["daemon"]["state"] = "unreachable"
         payload["daemon"]["last_error"] = f"{exc.code}: {exc}"
@@ -546,7 +507,7 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
 
 
 def _facet_outcome(
-    call: "Future", *, envelope: tuple = (), list_fields: tuple = (),
+    call: "Future", *, envelope: tuple = (), list_fields: tuple = (), check=None,
 ) -> tuple:
     """Classify ONE fanned-out read: (state, value, error).
 
@@ -556,11 +517,9 @@ def _facet_outcome(
 
     ``envelope`` names EVERY key the facet's own reader promises to deliver;
     all of them must be present for the body to count as the shape we asked
-    for. Requiring only one was its own version of the bug: the accounts
-    envelope carries named profiles AND native rows, and half an envelope made
-    the missing half an authoritative empty. This is not schema validation; it
-    closes ONE reachable case, and TWO different bodies reach it. A NON-OBJECT
-    body — null, a list, a string — is collapsed by the transport into an empty
+    for. This is not schema validation; it closes ONE reachable case, and TWO
+    different bodies reach it. A NON-OBJECT body — null, a list, a string — is
+    collapsed by the transport into an empty
     ``{}`` (both ``ClaudexorGateway.agent_capabilities`` and
     ``credential_profiles`` end in ``return body if isinstance(body, dict) else
     {}``), so it arrives here already looking like a legitimate empty answer. A
@@ -570,7 +529,9 @@ def _facet_outcome(
     both land on the same verdict here. An envelope carrying none of its keys is
     a read that did not answer, not an account store that is empty. Quota requires
     its canonical ``snapshots`` member as an array while retaining the typed
-    absences from that same evidence envelope.
+    absences from that same evidence envelope. ``check`` is a facet's whole
+    content rule and returns the typed code of a body it does not answer (the
+    accounts roster: ``claudexor_passive.roster_error``).
     """
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
@@ -584,7 +545,8 @@ def _facet_outcome(
         return (READ_FAILED, None, None)
     if list_fields and not all(isinstance(value.get(key), list) for key in list_fields):
         return (READ_FAILED, None, None)
-    return (READ_OK, value, None)
+    code = check(value) if check else ""
+    return (READ_FAILED, None, code) if code else (READ_OK, value, None)
 
 
 async def api_claudexor_status(request: Request) -> JSONResponse:
@@ -817,7 +779,7 @@ def _login_create(body: Dict[str, Any]) -> Dict[str, Any]:
         # this FIRST create with its structural pre-command missing-binary
         # terminal job, install that vendor CLI once and create the job once
         # more; a second refusal is returned, never looped.
-        from ouroboros.claudexor_daemon import (
+        from ouroboros.claudexor_harness_install import (
             install_missing_harness_cli,
             is_immediate_missing_cli_job,
         )
@@ -1052,9 +1014,7 @@ async def api_claudexor_credential_profile(request: Request) -> JSONResponse:
     Two thin proxies on one route, same rule as their siblings: the daemon
     owns the account record. DELETE asks the engine to forget one named
     account (``DELETE /v2/credential-profiles/:harness/:profileId``) — nothing
-    here touches a vendor credential file, and a legacy engine's native CLI
-    login has no route because this process cannot honestly sign it out.
-    PATCH is the Enabled toggle
+    here touches a vendor credential file. PATCH is the Enabled toggle
     (``PATCH /v2/credential-profiles/:harness/:profileId`` with the engine's
     own strict ``{enabled}`` body): whether this account participates in the
     engine's rotation pool. The refusal, in both cases, is the answer.

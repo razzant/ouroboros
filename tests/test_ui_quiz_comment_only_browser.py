@@ -20,12 +20,11 @@ Only model judgment is a fixture (the scripted stub asks, then finishes); the se
 the worker, the WebSocket ingress and the decision endpoint are the production ones.
 """
 import json
-import os
-from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
 
+from tests._shared import producer_evidence_dir
 from devtools.benchmarks.common.server_runner import _api
 from tests.test_owner_wait_integration import wait_clone as clone_fixture
 from tests.system_e2e.harness import (
@@ -49,6 +48,11 @@ MAIN_COPY_ANSWERED = """([selector, answer]) => {
     const card = document.querySelector(selector);
     return card?.dataset.state === 'answered' && card.querySelector('.chat-quiz-answer')?.textContent === answer;
 }"""
+
+def _evidence_dir(tmp_path):
+    return producer_evidence_dir(tmp_path / "screenshots", "quiz-comment-only",
+                                 env="OUROBOROS_BROWSER_EVIDENCE_OUT")
+
 
 # The two IME orders, dispatched in the real engine: Chromium/Firefox mark the composing
 # keydown; WebKit ends the composition first and marks the committing Enter only with 229.
@@ -148,8 +152,7 @@ def test_comment_only_question_renders_and_takes_a_free_text_answer(wait_clone, 
 
     root = tmp_path / "instance" / "data"
     root.mkdir(parents=True)
-    screenshots = Path(os.environ.get("OUROBOROS_BROWSER_EVIDENCE_OUT") or tmp_path / "screenshots")
-    screenshots.mkdir(parents=True, exist_ok=True)
+    screenshots = _evidence_dir(tmp_path)
     shot = f"{engine}-{width}-{send_by}-comment-only"
     steps = [
         {"tool": "escalate", "arguments": {"question": QUESTION, "options": [],
@@ -251,8 +254,7 @@ def test_project_question_takes_own_words_on_enter_in_the_project_or_its_main_co
     root.mkdir(parents=True)
     files = tmp_path / "files"
     files.mkdir()
-    screenshots = Path(os.environ.get("OUROBOROS_BROWSER_EVIDENCE_OUT") or tmp_path / "screenshots")
-    screenshots.mkdir(parents=True, exist_ok=True)
+    screenshots = _evidence_dir(tmp_path)
     shot = f"{engine}-{width}-project-answered-in-{answer_in}"
     steps = [
         {"tool": "escalate", "arguments": {"question": PROJECT_QUESTION, "options": OPTIONS,
@@ -290,7 +292,7 @@ def test_project_question_takes_own_words_on_enter_in_the_project_or_its_main_co
                     task, wait = _task_waiting(oracle, message_id)
                     key = f'[data-task-id="{task["id"]}"][data-quiz-id="{wait["quiz_id"]}"]'
                     in_project = panel.locator(f'.chat-quiz-card{key}:not(.project-question-card)')
-                    main_copy = f'.main-attention .project-question-card{key}'
+                    main_copy = f'#chat-messages .project-question-card{key}'
                     in_main = page.locator(main_copy)
                     in_project.get_by_text(PROJECT_QUESTION, exact=True).wait_for(timeout=30000)
                     in_main.wait_for(state="attached", timeout=30000)
@@ -301,7 +303,6 @@ def test_project_question_takes_own_words_on_enter_in_the_project_or_its_main_co
                     if answer_in == "main":
                         page.locator('#project-panel-close').click()
                         panel.wait_for(state="hidden")
-                        page.locator('.main-attention-summary').click()
                     card = in_project if answer_in == "project" else in_main
                     field = card.locator('.chat-quiz-comment')
                     card.scroll_into_view_if_needed()

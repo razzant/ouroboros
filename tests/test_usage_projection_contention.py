@@ -34,6 +34,7 @@ from ouroboros import usage_accounting as ua
 from ouroboros import usage_store
 from ouroboros.runtime_limits import USAGE_DISPLAY_LOCK_TIMEOUT_SEC
 from ouroboros.usage_ledger import UsageLockUnavailable
+from tests._store_journal_shared import exclusive_hold
 from tests.worker_pool_support import affirm_ready
 
 pytestmark = pytest.mark.serial  # 64 real threads + supervisor.state module globals
@@ -115,14 +116,15 @@ def _held_ledger_lock(data_root):
 
 @contextlib.contextmanager
 def _held_exclusive(data_root):
-    """A commit in progress, held: SQLite's EXCLUSIVE lock, which readers wait on."""
+    """SQLite's EXCLUSIVE lock, held, which readers wait on: a commit in progress on the rollback
+    journal; under WAL, where a commit holds no reader off, the file's exclusive lock that a
+    handoff, a last close's checkpoint or a recovery takes (``exclusive_hold``)."""
     usage_store.store_tier(data_root, wait_sec=5.0)
     held, release = threading.Event(), threading.Event()
 
     def committer():
-        conn = usage_store._connect(data_root / usage_store.STORE_REL, usage_store.TIER_ENFORCED)
+        conn = exclusive_hold(data_root / usage_store.STORE_REL)
         try:
-            conn.execute("BEGIN EXCLUSIVE")
             held.set()
             release.wait(timeout=60)
             conn.execute("ROLLBACK")
@@ -327,20 +329,21 @@ def _assignment_with_an_evolution_row(data_root, monkeypatch, *, settle_at):
 
 
 def test_an_evolution_row_the_exact_budget_affords_is_assigned_under_a_held_writer(data_root, monkeypatch):
-    """``assign_tasks`` refuses at TWO floors: zero, and the evolution reserve. Under
-    a held write lock its read is exact, so an affordable evolution row is assigned."""
-    workers, pending, reasons = _assignment_with_an_evolution_row(data_root, monkeypatch, settle_at=0.10)
+    """``assign_tasks`` refuses at zero. Under a held write lock its read is exact, so an
+    affordable evolution row is assigned."""
+    workers, pending, _reasons = _assignment_with_an_evolution_row(data_root, monkeypatch, settle_at=0.10)
     with _held_ledger_lock(data_root):
         _, elapsed = _timed(workers.assign_tasks)
     assert elapsed < _MAX_READ_SEC
-    assert pending == [] and "evolution_dropped_budget" not in reasons  # exact budget: $4.90
+    assert pending == [] and list(workers.RUNNING) == ["evo-1"]  # exact budget: $4.90
 
 
-def test_an_evolution_row_the_exact_budget_cannot_afford_is_still_dropped(data_root, monkeypatch):
-    """The quiet direction: the refusal itself is untouched when the money is really gone."""
-    workers, pending, reasons = _assignment_with_an_evolution_row(data_root, monkeypatch, settle_at=3.50)
+def test_an_evolution_row_below_two_dollars_is_assigned_not_dropped(data_root, monkeypatch):
+    """Positive money under the former $2 Evolution reserve is ordinary money (owner decision
+    2026-11-02): the queued row reaches its worker instead of leaving the queue unrecorded."""
+    workers, pending, _reasons = _assignment_with_an_evolution_row(data_root, monkeypatch, settle_at=3.50)
     workers.assign_tasks()
-    assert pending == [] and "evolution_dropped_budget" in reasons  # exact budget: $1.50
+    assert pending == [] and list(workers.RUNNING) == ["evo-1"]  # exact budget: $1.50
 
 
 @pytest.mark.parametrize("free_worker", [True, False])
@@ -384,11 +387,11 @@ def test_assignment_answers_under_a_held_writer_when_money_is_there(data_root, m
     """With money plainly there the tick answers at once under a held write lock."""
     from supervisor import state
 
-    workers, pending, reasons = _assignment_with_an_evolution_row(data_root, monkeypatch, settle_at=0.10)
+    workers, pending, _reasons = _assignment_with_an_evolution_row(data_root, monkeypatch, settle_at=0.10)
     assert state.budget_remaining({}, strict=True, allow_stale=True) == pytest.approx(4.90)
     with _held_ledger_lock(data_root):
         _, elapsed = _timed(workers.assign_tasks)
-    assert elapsed < _MAX_READ_SEC and pending == [] and "evolution_dropped_budget" not in reasons
+    assert elapsed < _MAX_READ_SEC and pending == [] and list(workers.RUNNING) == ["evo-1"]
 
 
 def _display_readers(data_root, state):

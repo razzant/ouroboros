@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._delegate_capture_child import capture_child  # noqa: F401
+
 from ouroboros import delegate_collection as body
 from ouroboros import delegate_custody as custody
 from ouroboros import delegate_custody_current as current
@@ -165,12 +167,118 @@ def test_foreground_supervision_joins_collection_without_a_model_wake(tmp_path, 
     assert json.loads(result.text)["status"] == "terminal" and len(money) == 1
 
 
+def test_foreground_supervision_wakes_on_terminal_custody_without_a_collector(tmp_path, monkeypatch):
+    from ouroboros import delegate_supervision
+    from ouroboros.tools.registry import ToolContext
+
+    entry = started(tmp_path)
+    assert body.observe_run(tmp_path, entry, terminal())
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=entry.task_id)
+    monkeypatch.setattr(delegate_supervision, "_leaf_live_input", lambda *args: "unknown")
+    result = delegate_supervision.supervised_wait(ctx, entry.run_id, wait_once=lambda *_a, **_k:
+        json.dumps({"status": "no_progress", "run_id": entry.run_id}))
+    payload = json.loads(result.text)
+    assert payload["status"] == "terminal_custody"
+    assert payload["terminal_facts"] == [{"id": "run:" + entry.run_id,
+                                          "reason": "run:" + entry.run_id, "state": "succeeded"}]
+
+
 def test_collector_does_not_take_over_review_panel(tmp_path, money):
     entry = started(tmp_path, source="review_substrate_commit")
     assert entry.review_owned
     result = body.collect_terminal(tmp_path, entry.run_id, detail=terminal())
     assert result["reason"] == "collection_owner_mismatch" and not money
     assert not current.run(tmp_path, entry.run_id).terminal_state
+
+
+@pytest.mark.parametrize("contended", [False, True])
+def test_foreground_supervision_returns_review_collection_refusal(tmp_path, monkeypatch, money, contended):
+    """A terminal execution cannot make a permanent collection refusal retryable."""
+    from ouroboros import delegate_supervision
+    from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+    from ouroboros.tools.delegate_terminal_evidence import collect_and_deliver_terminal
+    from ouroboros.tools.registry import ToolContext
+
+    entry = started(tmp_path, source="review_substrate_commit")
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=entry.task_id)
+    monkeypatch.setattr(delegate_supervision, "_leaf_live_input", lambda *args: "unknown")
+    monkeypatch.setattr(delegate_supervision, "_TICK_SEC", 0)
+    observations = []
+
+    def observed(*args, **kwargs):
+        assert not observations, "permanent collection refusal was silently retried"
+        payload = collect_and_deliver_terminal(ctx, entry.run_id, terminal(), body._shape(entry), entry, None)
+        observations.append(payload)
+        return json.dumps(payload)
+
+    lock = custody.disposition_lock_path(tmp_path, entry)
+    fd = None
+    if contended:
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        fd = acquire_exclusive_file_lock(lock, timeout_sec=0)
+        assert fd is not None
+    try:
+        result = delegate_supervision.supervised_wait(ctx, entry.run_id, wait_once=observed)
+    finally:
+        if fd is not None:
+            release_exclusive_file_lock(lock, fd)
+    payload = json.loads(result.text)
+    assert len(observations) == 1
+    assert payload["status"] == "refused" and payload["ok"] is False
+    assert result.code == payload["host_code"] == "TOOL_REPORTED_FAILURE"
+    assert payload["reason"] == "collection_owner_mismatch"
+    assert payload["collection"] == {"status": "unavailable", "reason": "collection_owner_mismatch"}
+    assert payload["state"] == "succeeded" and payload["answered"] is True
+    assert payload["run_id"] == entry.run_id and payload["last_seq"] == 4
+    assert "review" in payload["detail"].lower()
+    assert "primary_output" not in payload and "output_delivery" not in payload
+    fresh = current.run(tmp_path, entry.run_id)
+    assert fresh.review_owned and fresh.task_id == entry.task_id
+    assert fresh.terminal_state == "succeeded" and fresh.terminal_source
+    assert not fresh.output_source and not fresh.output_consumed
+    assert not fresh.settled and not fresh.ledger_recorded and not money
+    assert not fresh.patch_captured and not fresh.patch_disposed
+
+
+def test_foreground_collection_preserves_missing_custody_refusal(tmp_path, monkeypatch, money):
+    from ouroboros import platform_layer
+    from ouroboros.tools.delegate_terminal_evidence import collect_and_deliver_terminal
+    from ouroboros.tools.registry import ToolContext
+
+    entry = started(tmp_path)
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=entry.task_id)
+    acquire, read = platform_layer.acquire_exclusive_file_lock, current.run
+    target_lock = custody.disposition_lock_path(tmp_path, entry)
+    locked = False
+
+    def acquired(path, **kwargs):
+        nonlocal locked
+        fd = acquire(path, **kwargs)
+        if path == target_lock:
+            locked = fd is not None
+        return fd
+
+    monkeypatch.setattr(platform_layer, "acquire_exclusive_file_lock", acquired)
+    monkeypatch.setattr(current, "run", lambda *args, **kwargs: None if locked else read(*args, **kwargs))
+    result = collect_and_deliver_terminal(ctx, entry.run_id, terminal(), body._shape(entry), entry, None)
+    assert locked and result["status"] == "refused" and result["ok"] is False
+    assert result["reason"] == "custody_missing"
+    assert result["collection"] == {"status": "unavailable", "reason": "custody_missing"}
+    assert not money and "primary_output" not in result
+
+
+def test_missing_retention_stays_pending_without_fabricated_output(tmp_path, monkeypatch, money):
+    from ouroboros.tools.delegate_terminal_evidence import collect_and_deliver_terminal
+    from ouroboros.tools.registry import ToolContext
+
+    entry = started(tmp_path)
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=entry.task_id)
+    monkeypatch.setattr(body, "_retain_output", lambda *args, **kwargs: {})
+    result = collect_and_deliver_terminal(ctx, entry.run_id, terminal(), body._shape(entry), entry, None)
+    assert result["status"] == "observation_pending" and result["collection"]["status"] == "pending"
+    assert "primary_output" not in result and "output_delivery" not in result
+    fresh = current.run(tmp_path, entry.run_id)
+    assert not fresh.output_source and not fresh.output_complete and not fresh.output_consumed
 
 
 def test_small_retained_inline_delivery_credits_only_the_actual_full_view(tmp_path, money):
@@ -198,7 +306,7 @@ def _until(check):
     raise AssertionError("physical work did not reach the expected barrier")
 
 
-def test_slow_capture_does_not_block_another_terminal_observation(tmp_path, monkeypatch, money):
+def test_slow_capture_does_not_block_another_terminal_observation(tmp_path, monkeypatch, money, capture_child):  # noqa: F811
     from ouroboros.tools import delegate_integration
     a = started(tmp_path, "run-a", execution_root=str(tmp_path / "copy-a"), snapshot_id="snap-a")
     b = started(tmp_path, "run-b")
@@ -233,13 +341,13 @@ def test_slow_capture_does_not_block_another_terminal_observation(tmp_path, monk
         available = collect_and_deliver_terminal(ctx, a.run_id, terminal(a.run_id), body._shape(a), a, None)
         assert available["status"] == "terminal" and available["output_delivery"]["complete"]
         assert available["workspace_capture"]["status"] == "pending"
-        assert not available["settlement"]["settled"] and not release.is_set()
-        runtime.request(b.run_id)
+        assert available["settlement"]["settled"] and not release.is_set()
+        assert runtime.ensure_runs([(b.run_id, b.invocation_id)])
         _until(lambda: current.run(tmp_path, b.run_id).terminal_state)
         assert not release.is_set()
         body.stop_body_runtime(tmp_path, wait=False)
         assert not runtime.ensure_runs([(b.run_id, b.invocation_id)])
-        assert body.start_body_runtime(tmp_path, gateway_factory=Gateway) is runtime
+        assert any(thread.is_alive() for thread in capture_child.threads.values()), "the maintenance child still owns physical capture"
     finally:
         release.set()
         runtime.close(wait=True)
@@ -338,6 +446,33 @@ def test_one_unanswered_reader_does_not_hide_another_selected_run(tmp_path, monk
         runtime.close(wait=True)
 
 
+def test_observation_reuses_one_client_and_rebuilds_it_after_a_failed_read(tmp_path):
+    """A handshake and an HTTP client per poll of every held run kept the server busy: the
+    generation keeps one client, drops it on a failed read and closes it when it ends."""
+    a, b = started(tmp_path, "run-a"), started(tmp_path, "run-b")
+    made, closed, fail = [], [], {"once": True}
+    class Gateway:
+        def __init__(self):
+            made.append(self)
+        def get_run(self, rid, **kwargs):
+            if rid == a.run_id and fail.pop("once", False):
+                raise ConnectionError("the daemon moved")
+            return {"summary": {"runId": rid, "state": "running"}, "lastSeq": 1, "pendingInteractions": []}
+        def close(self):
+            closed.append(self)
+    stop = threading.Event()
+    stop.set()  # no background ticks: the observations below are the only ones
+    runtime = body.BodyRuntime(tmp_path, stop_event=stop, gateway_factory=Gateway, max_workers=2)
+    runtime.thread.join(10)
+    with pytest.raises(ConnectionError):
+        runtime._observe(a)
+    for entry in (a, b, b, a):
+        runtime._observe(entry)
+    assert len(made) == 2 and closed == [made[0]]
+    runtime._drop_observer_gateway()
+    assert closed == made
+
+
 def test_automatic_availability_is_not_an_owner_omission(tmp_path, money):
     from ouroboros.context_health import _unread_output_line
     entry = started(tmp_path)
@@ -395,3 +530,20 @@ def test_directory_capture_keeps_complete_files_while_money_is_pending(tmp_path,
     assert not fresh.patch_disposed and not engine.applies and not engine.decisions
     assert held.run_id in current.runs(ctx.drive_root, "state=?", (current.HELD,))
     assert not (target / ".git").exists() and not (target / "out.bin").exists()
+
+
+def test_a_typed_capture_failure_stays_owed(tmp_path, monkeypatch, money):
+    """A capture that reports ``status: failed`` (its exception was caught inside) is a failure
+    the collector keeps owing, not a success that erases it; a later good capture clears it."""
+    from ouroboros.tools import delegate_integration
+
+    entry = started(tmp_path)
+    outcomes = iter([{"status": "failed", "note": "patch capture failed (RuntimeError: Symlink loop)"},
+                     {"status": "ready_with_changes"}])
+    monkeypatch.setattr(delegate_integration, "capture_terminal_patch_for_drive", lambda *a, **kw: next(outcomes))
+    failures = {}
+    first = body.collect_terminal(tmp_path, entry.run_id, detail=terminal(), failures=failures)
+    assert "capture:RuntimeError" in first["errors"] and "capture" in failures
+    assert first["workspace_capture"]["status"] == "failed"
+    second = body.collect_terminal(tmp_path, entry.run_id, detail=terminal(), failures=failures, recapture=True)
+    assert not any(error.startswith("capture:") for error in second["errors"]) and "capture" not in failures

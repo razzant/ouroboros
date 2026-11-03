@@ -12,8 +12,10 @@
 // commit gate already run — no network, no npm, no configuration to drift.
 //
 // Guarantee: over `web/app.js` and `web/modules/*.js` — the ES modules the
-// page loads — every identifier READ at runtime resolves on the ES2022 scope
-// chain or is one of the listed globals below. Not covered, by construction:
+// page loads — and `web/theme.js`, the classic script every first-party page
+// runs before CSS (parsed as the script it is, not as a module), every
+// identifier READ at runtime resolves on the ES2022 scope chain or is one of
+// the listed globals below. Not covered, by construction:
 // inline <script> blocks in served HTML; anything reached only through a
 // string (`eval`, `window[name]`, dynamic `import()` specifiers); `typeof name`
 // (exempt by design — it never throws, matching ESLint's no-undef); and
@@ -101,6 +103,11 @@ function moduleFiles() {
     }
     return files;
 }
+
+// Classic scripts of our own, loaded by a plain <script> tag or inlined into a standalone page
+// (ouroboros/standalone_page.py). Their own names live inside IIFEs; what they read of
+// the page's globals is the platform's.
+const CLASSIC_SCRIPTS = ['theme.js'];
 
 // --- scope analysis -------------------------------------------------------
 
@@ -413,9 +420,9 @@ function reference(identifier, scope, report) {
     report.push(`${name} (line ${line})`);
 }
 
-export function undeclaredReferences(source, sourceFile = '<memory>') {
+export function undeclaredReferences(source, sourceFile = '<memory>', { sourceType = 'module' } = {}) {
     const ast = acorn.parse(source, {
-        ecmaVersion: 2024, sourceType: 'module', locations: true, allowHashBang: true,
+        ecmaVersion: 2024, sourceType, locations: true, allowHashBang: true,
     });
     const report = [];
     walk(ast, new Scope(null, true), report, null, null);
@@ -508,6 +515,25 @@ test('every browser module references only names it declares, imports, or the pl
         'Undeclared identifier(s) in web modules — a call to a deleted/renamed function '
         + 'throws ReferenceError at runtime on the path that reaches it:\n' + findings.join('\n'),
     );
+});
+
+test('a classic script is parsed as a script, and an undeclared call inside its IIFE is caught', () => {
+    const probe = `
+        // Its own names live in the IIFE; a feature test of a missing global never throws.
+        (() => { 'use strict'; const kept = readKept(); function readKept() { return 1; } paintGone(kept); })();
+        window.ouroProbe = { get kept() { return typeof undeclaredFeature === 'function'; } };
+    `;
+    assert.deepEqual(undeclaredReferences(probe, 'classic.js', { sourceType: 'script' }), ['classic.js: paintGone (line 3)']);
+    // A module parse would refuse what a sloppy classic script may contain.
+    assert.throws(() => undeclaredReferences('with (window) { document; }', 'sloppy.js'), SyntaxError);
+    assert.deepEqual(undeclaredReferences('with (window) { document; }', 'sloppy.js', { sourceType: 'script' }), []);
+});
+
+test('every classic script references only names it declares or the platform provides', () => {
+    const findings = CLASSIC_SCRIPTS.flatMap((name) => undeclaredReferences(
+        readFileSync(join(WEB_DIR, name), 'utf8'), name, { sourceType: 'script' }));
+    assert.deepEqual(findings, [], 'Undeclared identifier(s) in a classic script, a ReferenceError before CSS on '
+        + 'the path that reaches it:\n' + findings.join('\n'));
 });
 
 // --- import linkage --------------------------------------------------------------

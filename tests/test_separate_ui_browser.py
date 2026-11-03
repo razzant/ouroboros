@@ -28,6 +28,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import shutil
 import socket
 import ssl
@@ -335,7 +336,8 @@ def _signed_session(data_dir: Path, age_sec: int) -> str:
 
 def _history_notice(page) -> str:
     """The Main feed's persistent history note ("Some saved history is not loaded ..."), if shown."""
-    return page.evaluate("""() => [...document.querySelectorAll('#page-chat .chat-history-status')]
+    return page.evaluate("""() => [...document.querySelectorAll(
+        '#page-chat .chat-history-status, #page-chat .chat-load-older.has-gaps :is(.chat-load-older-note, .chat-history-gap)')]
         .filter(node => !node.hidden).map(node => node.textContent.trim()).join(' | ')""")
 
 
@@ -519,17 +521,19 @@ def test_stop_ends_a_held_task_and_the_core_records_the_stop(stack):
 
 def _seed_late_quiz(core, question: str) -> tuple[str, str]:
     """A question its (completed) task asked in Main, written by the core's own writers."""
-    from ouroboros.owner_quiz import record_asked
+    from ouroboros import dialogue_store
+    from ouroboros.owner_quiz import record_asked, record_publication
     from ouroboros.task_results import write_task_result
 
     task_id, quiz_id = "separate-ui-late-task", "late-q"
     write_task_result(core.data_dir, task_id, "completed", chat_id=1)
     record_asked(core.data_dir, task_id, quiz_id=quiz_id, question=question, options=["Keep", "Change"], chat_id=1)
+    # The publication writer binds the card's address before exposing it; only that address takes a late answer (#1899).
+    record_publication(core.data_dir, task_id, quiz_id, 1)
     quiz = {"quiz_id": quiz_id, "question": question, "state": "open", "chat_id": 1,
             "options": [{"label": "Keep"}, {"label": "Change"}], "asked_at": "2026-10-13T00:00:00Z"}
-    with (core.data_dir / "logs" / "chat.jsonl").open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps({"ts": "2026-10-13T00:00:00Z", "direction": "out", "chat_id": 1, "text": question,
-                                 "type": "quiz", "task_id": task_id, "quiz": quiz}) + "\n")
+    dialogue_store.append(core.data_dir, "chat", {"ts": "2026-10-13T00:00:00Z", "direction": "out", "chat_id": 1,
+                                                  "text": question, "type": "quiz", "task_id": task_id, "quiz": quiz})
     return task_id, quiz_id
 
 
@@ -755,9 +759,14 @@ def test_widgets_and_the_author_kit_run_through_the_proxy_under_the_password(sta
             probe = page.frame_locator(f'{card(PROBE + ":probe")} iframe')
             for key, value in (("data", "separate-ui"), ("module", "blob-module-ok"), ("blob-image", "1")):
                 probe.locator(f'#root[data-{key}="{value}"]').wait_for(timeout=30_000)
-            # A load that bypasses the bridge: its outcome is the engine's cookie policy (compared below).
+            # A load that bypasses the bridge and the lease: the frame's own policy admits images from its lease only
+            # (compared below).
             probe.locator("#root[data-passive]").wait_for(timeout=30_000)
             passive = probe.locator("#root").get_attribute("data-passive")
+            # The owner sees that policy refuse it on the card itself.
+            blocked = page.locator(f'{card(PROBE + ":probe")} [data-widget-status][data-widget-fault]')
+            blocked.wait_for(timeout=30_000)
+            blocked_text = blocked.inner_text()
             fault = page.locator(f'{card(PROBE + ":fault")} [data-widget-status][data-widget-fault]')
             fault.wait_for(timeout=30_000)
             fault_text = fault.inner_text()
@@ -782,22 +791,37 @@ def test_widgets_and_the_author_kit_run_through_the_proxy_under_the_password(sta
         finally:
             session.close()
     stack.extra["widgets"] = {"toggles": toggles, "fault": fault_text, "preview": preview, "page_src": frame_src,
-                              "hits": hits, "passive_load": passive}
+                              "hits": hits, "passive_load": passive, "passive_banner": blocked_text}
     # The fault reaches its card in both engines; WebKit masks the frame's message as "Script error.".
     assert fault_text.startswith("Widget script error: "), fault_text
     assert "separate-ui deliberate fault" in fault_text or browser_name == "webkit", fault_text
     assert preview == "My notes: List, enabled", preview
-    assert frame_src == "/api/extensions/author_ui_kit/page"
+    # A route frame loads from its mount's route lease (docs/WIDGET_HOST_PROTOCOL.md "Route leases"): an absolute URL on
+    # the one TLS origin the page was served from, never the core's own address and never the skill's un-leased route.
+    leased = re.fullmatch(rf"{re.escape(stack.url)}(/api/widget-resources/[A-Za-z0-9_-]{{43}}/)page", frame_src)
+    assert leased, frame_src
+    lease_uri = f"{leased.group(1)}page"
     routed = stack.routed()
-    statuses = {(r["uri"], r["status"]) for r in routed if r["uri"].startswith("/api/extensions/")}
-    # Chromium sends no session from the sandboxed frame (401, refused); WebKit was observed to send it.
-    passive_status = {"refused": 401, "loaded": 200}[passive]
+    prefixes = ("/api/extensions/", "/api/widget-resources/", "/api/widgets/")
+    statuses = {(r["uri"], r["status"]) for r in routed if r["uri"].startswith(prefixes)}
     for expected in ((f"/api/extensions/{PROBE}/data", 200), (f"/api/extensions/{PROBE}/lib", 200),
-                     (f"/api/extensions/{PROBE}/logo", 200), (f"/api/extensions/{PROBE}/logo?passive=1", passive_status),
-                     (f"/api/extensions/{PROBE}/disposed", 200), ("/api/extensions/author_ui_kit/author-kit", 200),
-                     ("/api/extensions/author_ui_kit/page", 200), (f"/api/extensions/{PROBE}/module/widget.js", 200)):
+                     (f"/api/extensions/{PROBE}/logo", 200), (f"/api/extensions/{PROBE}/disposed", 200),
+                     ("/api/extensions/author_ui_kit/author-kit", 200), (f"/api/extensions/{PROBE}/module/widget.js", 200),
+                     ("/api/widgets/asset-leases", 200), (lease_uri, 200)):
         assert expected in statuses, (expected, sorted(statuses))
-    assert {r["role"] for r in routed if r["uri"].startswith("/api/extensions/")} == {"core"}
+    # The page was asked for only after the signed-in session minted its lease through the proxy.
+    asked = next(i for i, r in enumerate(routed) if r["uri"] == lease_uri)
+    assert any(r["method"] == "POST" and r["uri"] == "/api/widgets/asset-leases" and r["status"] == 200
+               for r in routed[:asked])
+    # Everything that bypasses the bridge and the lease is refused by the frame's own policy before it is sent (WebKit
+    # too): the passive image of the skill's raw route and the route page's raw address never reach the proxy.
+    assert passive == "refused", passive
+    assert blocked_text.startswith("Widget blocked by frame policy: "), blocked_text
+    assert blocked_text.endswith(f"/api/extensions/{PROBE}/logo?passive=1"), blocked_text
+    bypassing = [r["uri"] for r in routed if r["uri"].startswith(f"/api/extensions/{PROBE}/logo?")
+                 or r["uri"] == "/api/extensions/author_ui_kit/page"]
+    assert not bypassing, bypassing
+    assert {r["role"] for r in routed if r["uri"].startswith(prefixes)} == {"core"}
     assert not [p for p in stack.interface_paths() if p.startswith(("/api", "/auth", "/ws", "/onboarding"))]
 
 
@@ -838,8 +862,8 @@ def test_update_status_restart_and_panic_are_the_cores_own_process_facts(stack):
             session.shot("2-restarted")
 
             # Panic: the core stops everything and exits; the interface host is untouched.
-            page.locator('[data-chat-command="panic"]').click()
-            page.locator("[data-confirm-ok]").click()
+            page.locator('#page-chat [data-chat-command="panic"]').click()
+            expect(page.locator("[data-confirm-ok]")).to_have_count(0)
             exit_code = core.process.wait_exit(90)
             page.wait_for_function(DISCONNECTED, timeout=30_000)
             after = {"api": session.api("GET", "/api/state", None)["status"],
@@ -889,8 +913,10 @@ def test_a_fresh_install_is_set_up_without_a_key_through_the_proxy(tmp_path, req
             before = session.api("GET", "/api/onboarding/bootstrap", None)
             wizard = page.frame_locator("#onboarding-overlay iframe.onboarding-frame")
             wizard.locator('[data-collapse="api-access"] > summary').click(timeout=30_000)
-            wizard.locator('[data-collapse="more-providers"] > summary').click()
-            wizard.locator("#openai-compatible-url").fill(core.model.base_url)
+            # A keyless endpoint is the compatible card's own Default key (docs/DESIGN.md §7: a key is a row of its
+            # provider's card), and the card opens by its own head, apart from the "More options" disclosure.
+            wizard.locator('[data-provider-card="compatible"] [data-provider-toggle]').click()
+            wizard.locator("#s-openai-compatible-base-url").fill(core.model.base_url)
             session.shot("1-setup-provider")
             wizard.locator("#next-btn").click()
             wizard.locator('[data-model-role="main"] [data-model-role-model]').fill("openai-compatible::mock-model")

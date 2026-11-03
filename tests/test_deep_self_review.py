@@ -14,6 +14,7 @@ from ouroboros.provider_models import OPENAI_DIRECT_DEFAULTS
 from ouroboros.deep_self_review import deep_review_route, main_review_row
 from ouroboros.tools.review_helpers import _is_probably_binary
 from tests.test_git_review_preflight_gate import _roster
+from tests.test_review_pool import provider_call
 
 
 class TestApiRouteAvailability:
@@ -77,7 +78,7 @@ class TestApiRouteAvailability:
         with mock.patch.dict(os.environ, env, clear=True):
             row = main_review_row()
             route = deep_review_route()
-        assert (row.slot_id, row.kind, row.target_id, row.use_local) == ("main", "api_chat", "openai/main-model", None)
+        assert (row.slot_id, row.kind, row.target_id, row.use_local) == ("main", "api_chat", "openai/main-model", False)
         assert route == ("", "openai/main-model")
 
 
@@ -245,7 +246,7 @@ class TestRunSystemReview:
         assert record["surface"] == "system" and record["subject"]["kind"] == "system"
         [seat] = record["rows"]
         assert (seat["seat_id"], seat["parts"], seat["parts_answered"]) == ("api-scout", ["report"], ["report"])
-        assert record["panel"]["chosen_by"] == "author" and record["panel"]["reviewers_requested"] == ["api-scout"]
+        assert record["panel"]["chosen_by"] == "ouroboros" and record["panel"]["reviewers_requested"] == ["api-scout"]
         assert record["verdict"]["report"] == {"delivered": True, "chars": len("REPORT BODY")}
         assert record["verdict"]["aggregate"] != "PASS"
         assert (system_ctx.drive_root / "memory" / "deep_review.md").read_text(encoding="utf-8") == "REPORT BODY"
@@ -272,6 +273,31 @@ class TestRunSystemReview:
         set_review_pool(monkeypatch, pool_roster(*mixed_pool_rows(), pool_seat(
             "deep-session", "codex=gpt-5.6-sol", kind="agent_session", effort="xhigh", profile_id="prof-1", marked=False)))
         return "deep-session"
+
+    @pytest.mark.parametrize("local", [False, True], ids=["remote", "local"])
+    def test_a_bare_review_sends_mains_whole_binding(self, system_ctx, monkeypatch, local):
+        """``/review`` with no reviewer named sends Main's model, local flag, account pin and
+        processing (``main_review_row``) on the provider call itself."""
+        import ouroboros.deep_self_review as dsr
+        from ouroboros.review_native_episode import NativeToolRoundReviewExecutor
+        from ouroboros.tools.review_change import system_review_row
+
+        for key, value in {"OPENAI_API_KEY": "sk-present-key", "OUROBOROS_MODEL": "openai::gpt-5.6-sol",
+                           "USE_LOCAL_MAIN": str(local), "OUROBOROS_MODEL_ACCOUNTS": '{"main": "personal"}',
+                           "OUROBOROS_PROCESSING_PREFERENCE": "fast",
+                           "OUROBOROS_MODEL_PROCESSING_PREFERENCES": '{"main": "economy"}'}.items():
+            monkeypatch.setenv(key, value)
+        sent = {}
+
+        def execute(executor):
+            sent["kwargs"] = executor._chat_kwargs([], [], 8)
+            raise RuntimeError("sent")
+
+        monkeypatch.setattr(NativeToolRoundReviewExecutor, "execute", execute)
+        dsr.run_deep_self_review(system_ctx.repo_dir, system_ctx.drive_root, None, lambda _line: None,
+                                 slot=system_review_row(""))
+        assert provider_call(monkeypatch, sent["kwargs"]) == (
+            "openai::gpt-5.6-sol", "reviewer:main", "personal", "economy", local)
 
     def test_the_record_names_the_chosen_rows_real_seat_plan(self, system_ctx, monkeypatch):
         """D1-04 / V11 / D2-03: the system seat is written in the wave's shared ``rows``

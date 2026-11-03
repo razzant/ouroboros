@@ -30,6 +30,7 @@ export class NodeStub {
     set textContent(value) { this._text = String(value ?? ''); }
     get textContent() { return this._text; }
     append(...nodes) { nodes.forEach((node) => { node.parentNode = this; this.children.push(node); }); }
+    appendChild(node) { this.append(node); return node; }
     // A parentless node stands in for a mounted root until it is removed.
     get isConnected() { return this.parentNode ? this.parentNode.isConnected : !this.detached; }
     remove() {
@@ -45,6 +46,12 @@ export class NodeStub {
         if (!parent) return;
         node.parentNode = parent;
         parent.children.splice(parent.children.indexOf(this), 0, node);
+    }
+    after(node) {
+        const parent = this.parentNode;
+        if (!parent) return;
+        node.parentNode = parent;
+        parent.children.splice(parent.children.indexOf(this) + 1, 0, node);
     }
     replaceWith(node) {
         const parent = this.parentNode;
@@ -62,7 +69,10 @@ export class NodeStub {
     matches(selector) {
         return selector === ':focus-visible' && globalThis.document.activeElement === this && !globalThis.document.pointerModality;
     }
-    addEventListener(type, handler) { this.listeners.set(type, handler); }
+    addEventListener(type, handler) {
+        const previous = this.listeners.get(type);
+        this.listeners.set(type, previous ? event => { previous(event); handler(event); } : handler);
+    }
     click(event = {}) {
         const handler = this.listeners.get('click');
         if (handler) handler({ target: this, detail: 0, stopPropagation() {}, preventDefault() {}, ...event });
@@ -87,6 +97,18 @@ export class NodeStub {
     querySelectorAll(selector) { return this.collect(selector.replace(/^\./, '')); }
 }
 
+// Match chat_media.bubbleFrameNode: sender/optional Project reference, card, then time alone.
+export function frameBubble(_msg, card, { voice = [] } = {}) {
+    const node = (className, text = '') => { const el = new NodeStub(); el.className = className; el.textContent = text; return el; };
+    const line = (className, anchor, parts) => {
+        if (!parts.length) return anchor;
+        const wrap = node(className); wrap.append(anchor, ...parts); return wrap;
+    };
+    const bubble = new NodeStub();
+    bubble.append(line('chat-bubble-voice', node('sender', 'Ouroboros'), voice), card, node('msg-time', '10:00'));
+    return bubble;
+}
+
 export function countPropertyWrites(target, key) {
     let value = target[key];
     let writes = 0;
@@ -100,11 +122,14 @@ export function countPropertyWrites(target, key) {
 
 export function fixture({ fetchImpl, renderMarkdown, enhanceMarkdown, onDomWrite, fetchDetail, isMain = false,
     frameNode = (_msg, node) => node, insertMessageNode = null, removeMessageNode = null, focusAfterRemoval = null,
-    currentQuestionHost = null, onQuestionsChanged, rawDetail = false } = {}) {
-    const prior = { document: globalThis.document, crypto: globalThis.crypto, window: globalThis.window };
+    onQuestionsChanged, rawDetail = false, storage = null, events = null, projectId = '', chatId = 1 } = {}) {
+    const prior = { document: globalThis.document, crypto: globalThis.crypto, window: globalThis.window, localStorage: globalThis.localStorage };
+    const saved = new Map();
+    globalThis.localStorage = storage || { getItem: key => saved.get(key) || null,
+        setItem: (key, value) => saved.set(key, value), removeItem: key => saved.delete(key) };
     globalThis.document = { createElement: (tag) => new NodeStub(tag) };
     const opened = [];
-    globalThis.window = { dispatchEvent: (event) => opened.push(event.detail) };
+    globalThis.window = events || { dispatchEvent: (event) => opened.push(event.detail) };
     if (!globalThis.crypto?.randomUUID) Object.defineProperty(globalThis, 'crypto', {
         configurable: true, value: { randomUUID: () => 'fixed-request-id' },
     });
@@ -134,14 +159,15 @@ export function fixture({ fetchImpl, renderMarkdown, enhanceMarkdown, onDomWrite
                     : { state: 'unknown' };
             return { ...detail, question_rooms: Object.fromEntries(Object.keys(detail.owner_quiz || {}).map(id => [id, room])) };
         },
-        isMain,
+        isMain, projectId, chatId,
         insertMessageNode,
         removeMessageNode,
         focusAfterRemoval,
-        currentQuestionHost,
         onQuestionsChanged,
     });
     return { decision, toasts, calls, opened, restore: () => {
+        decision.destroy();
+        globalThis.localStorage = prior.localStorage;
         globalThis.document = prior.document;
         globalThis.window = prior.window;
         Object.defineProperty(globalThis, 'crypto', { configurable: true, value: prior.crypto });

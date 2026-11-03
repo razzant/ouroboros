@@ -53,7 +53,7 @@ def test_configured_readonly_session_receives_own_scope_and_real_lineage_inputs(
 
 
 def test_readonly_input_scan_failure_and_symlink_refuse_before_engine(tmp_path, monkeypatch):
-    from ouroboros.delegate_readonly_inputs import prepare_folderless_inputs
+    from ouroboros.delegate_readonly_inputs import prepare_readonly_inputs
     from tests.test_delegated_skill_payload import _payload_ctx
 
     ctx = _payload_ctx(tmp_path, monkeypatch)
@@ -63,7 +63,7 @@ def test_readonly_input_scan_failure_and_symlink_refuse_before_engine(tmp_path, 
     outside.mkdir()
     (scratch / "delegated_readonly_inputs").symlink_to(outside, target_is_directory=True)
     with pytest.raises(ValueError):
-        prepare_folderless_inputs(ctx, "invocation")
+        prepare_readonly_inputs(ctx, "invocation")
     assert list(outside.iterdir()) == []
 
 
@@ -80,7 +80,7 @@ def test_restored_unstarted_claim_recovers_and_delete_preserves_accepted_work(q,
     q.queue.check_scheduled_tasks()
     assert [task["id"] for task in q.pending] == [claimed["task_id"]]
     outcome = q.queue.mutate_scheduled_task("delete", "s1", reason="owner", actor="owner")
-    assert outcome["status"] == "delete_deferred"
+    assert outcome["status"] == "withdrawn"
     assert _rows(q)["s1"]["occurrence"]["token"] == claimed["token"]
 
 

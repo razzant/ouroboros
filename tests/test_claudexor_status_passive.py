@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
 from starlette.applications import Starlette
-from starlette.testclient import TestClient
 from starlette.routing import Route
+from starlette.testclient import TestClient
 
 from ouroboros import claudexor_daemon as owned
 from ouroboros import claudexor_runtime as runtime
@@ -35,7 +37,8 @@ def metadata_engine(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime.ClaudexorRuntimeManager, "ensure", forbidden)
     monkeypatch.setattr(owned.subprocess, "Popen", forbidden)
     monkeypatch.setattr(wire, "discover_daemon", forbidden)
-    state = {"reachable": True, "handshake_error": False, "accounts_view": False}
+    state = {"reachable": True, "handshake_error": False, "accounts_view": False,
+             "engine_version": wire.CLAUDEXOR_MIN_VERSION}
 
     def respond(request):
         calls.append((request.method, request.url.path, dict(request.url.params)))
@@ -45,7 +48,7 @@ def metadata_engine(monkeypatch, tmp_path):
         if request.url.path == "/v2/handshake":
             return httpx.Response(200, json={"compatible": not state["handshake_error"],
                 "protocolMajor": wire.CLAUDEXOR_PROTOCOL_MAJOR,
-                "engine": {"version": wire.CLAUDEXOR_MIN_VERSION}})
+                "engine": {"version": state["engine_version"]}})
         if request.url.path == "/v2/operations":
             return httpx.Response(200, json={"operations": [
                 {"method": "GET", "path": path, "parameters": [
@@ -53,7 +56,9 @@ def metadata_engine(monkeypatch, tmp_path):
                 for path in ("/v2/model-sources", "/v2/model-sources/:id/models", "/v2/harnesses/:id/models")
             ] if state["accounts_view"] else []})
         if request.url.path in state.get("responses", {}):
-            return httpx.Response(200, json=deepcopy(state["responses"][request.url.path]))
+            answer = state["responses"][request.url.path]
+            # A callable is a non-200 engine answer, e.g. a typed ControlProblem.
+            return answer(request) if callable(answer) else httpx.Response(200, json=deepcopy(answer))
         if request.url.path == "/v2/model-sources":
             return httpx.Response(200, json={"sources": [{"id": "codex", "label": "Codex",
                 "credentialHarness": "codex"}]})
@@ -177,7 +182,7 @@ def test_status_native_models_reuse_negotiated_account_catalog(metadata_engine, 
     state["responses"] = {
         "/v2/agent-capabilities": {"harnesses": [{"id": "codex", "displayName": "Codex", "enabled": True}]},
         "/v2/harnesses": {"harnesses": []},
-        "/v2/credential-profiles": {"profiles": [], "harnessAccounts": []},
+        "/v2/credential-profiles": {"profiles": [], "harnessAccounts": [], "accountPools": []},
         "/v2/quota": {"snapshots": [], "absences": []},
         "/v2/harnesses/codex/models": envelope if account_view else {"harnessId": "codex", "models": [{"id": "legacy"}]},
     }
@@ -209,6 +214,50 @@ def test_status_native_models_reuse_negotiated_account_catalog(metadata_engine, 
     assert all(client.is_closed for client in clients)
 
 
+STATUS_GOLDEN = Path(__file__).resolve().parents[1] / "web" / "tests" / "fixtures" / "status_quota_refused.json"
+
+
+def test_status_golden_is_this_producers_answer_to_one_refused_read(metadata_engine, monkeypatch, tmp_path):
+    """web/tests/fixtures/status_quota_refused.json, the payload the status store is judged
+    against, is this producer's answer when the catalog and a unified roster land and only
+    the quota read is refused. Engine HTTP is faked; the clock and the home path are fixed.
+    After a deliberate producer change, rerun with OUROBOROS_WRITE_STATUS_GOLDEN=1 and
+    review web/tests/claudexor_status_store.test.js against the rewritten file."""
+    from ouroboros import config, utils
+    from ouroboros.gateway.claudexor_accounts import _status_payload
+
+    state, _, clients, provision, config_dir = metadata_engine
+    state["engine_version"] = "4.7.0"
+    state["responses"] = {
+        "/v2/agent-capabilities": {"harnesses": [{
+            "id": "codex", "displayName": "Codex CLI", "status": "ok", "enabled": True,
+            "providerFamily": "openai", "accessProfilesSupported": ["readonly", "workspace_write"]}]},
+        "/v2/harnesses": {"harnesses": []},
+        "/v2/credential-profiles": {
+            "profiles": [{"profile": {"harness_id": "codex", "profile_id": "koshak", "enabled": True},
+                          "status": {"verification": "passed", "verification_source": "vendor"},
+                          "identity": {"email": "owner@example.com", "plan": "pro"}}],
+            "harnessAccounts": [],
+            "accountPools": [{"harness_id": "codex", "next_up": {"kind": "profile", "profileId": "koshak"}}]},
+        "/v2/quota": lambda _request: httpx.Response(
+            503, json={"code": "quota_probe_failed", "message": "quota read died"}),
+    }
+    monkeypatch.setattr(owned, "get_owned_daemon", lambda: SimpleNamespace(status_dict=lambda: {
+        "state": "running",
+        "runtime": {"state": "ready", "version": "4.7.0", "target_version": "4.7.0", "source": "release"}}))
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")  # no delegated run recorded
+    monkeypatch.setattr(utils, "utc_now_iso", lambda: "2026-10-27T12:00:00+00:00")
+    provision()
+    payload = json.loads(json.dumps(_status_payload(include_models=False, join=False)))
+    assert payload["config_dir"] == str(config_dir)
+    payload["config_dir"] = "/tmp/claudexor"
+    if os.environ.get("OUROBOROS_WRITE_STATUS_GOLDEN") == "1":
+        STATUS_GOLDEN.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    assert json.loads(STATUS_GOLDEN.read_text(encoding="utf-8")) == payload, (
+        f"{STATUS_GOLDEN.name} drifted from _status_payload; see this test's docstring")
+    assert all(client.is_closed for client in clients)
+
+
 @pytest.mark.parametrize("operation", ["sources", "catalog", "capability"])
 def test_cold_metadata_is_unknown_not_healthy(metadata_engine, tmp_path, operation):
     from ouroboros import capability_evidence as ce
@@ -218,9 +267,8 @@ def test_cold_metadata_is_unknown_not_healthy(metadata_engine, tmp_path, operati
     _, calls, clients, _, config_dir = metadata_engine
     if operation == "capability":
         evidence = ce.probe(tmp_path / "evidence", provider="claudexor",
-            model="claudexor::codex=exact-model", allow_fetch=True, allow_generative=False)
+            model="claudexor::codex=exact-model", allow_fetch=True)
         assert evidence.status == ce.STATUS_FAILED and evidence.window_tokens == 0
-        assert not ce.confirms_at_least(evidence)
     else:
         with pytest.raises(ClaudexorUnavailable) as caught:
             if operation == "sources":

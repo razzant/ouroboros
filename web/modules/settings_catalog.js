@@ -1,6 +1,7 @@
 import { accountRows, claudexorStatus, READ_OK } from './claudexor_status_store.js';
 import { apiFetch } from './api_client.js';
 import { setInlineStatus } from './ui_helpers.js';
+import { parseModelSource } from './route_editor_primitives.js';
 export const MODEL_CATALOG_TIMEOUT_MS = 25000;
 let catalogRefreshSeq = 0;
 const buttonRefreshes = new WeakMap();
@@ -88,6 +89,15 @@ export function mergeModelCatalog(previous = {}, incoming = {}) {
         items: merge('items', (item) => JSON.stringify([item.value || item.id, item.credential_profile_id || ''])),
         model_sources: merge('model_sources', (source) => source.id),
     };
+}
+
+/** Overlay successful connection-local lists on a general catalog, preserving its read provenance.
+ * An empty list replaces that source too; identical model names in other sources are unrelated. */
+export function withConnectionCatalogs(catalog = {}, connectionCatalogs = {}) {
+    return { ...catalog, items: [
+        ...(catalog.items || []).filter((item) => !Object.hasOwn(connectionCatalogs, parseModelSource(item.value || item.id).source)),
+        ...Object.values(connectionCatalogs).flat(),
+    ] };
 }
 
 /** Keep last-known native choices only for account reads that did not succeed. */

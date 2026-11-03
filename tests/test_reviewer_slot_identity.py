@@ -142,13 +142,20 @@ def test_triad_row_ids_come_from_the_one_mint(tmp_path, monkeypatch):
 
 def test_skill_review_dispatches_through_the_slot_id_stamping_entry():
     """The to_dict positional fallback in ReviewActorRecord is LEGACY-READ-ONLY:
-    that holds only while every live producer stamps slot_id. skill_review's one
-    dispatch is review._handle_multi_model_review — the stamping entry the chunk
-    -merge identity tests drive — so pin the call site itself."""
+    that holds only while every live producer stamps slot_id. Since the fold,
+    skill_review's one dispatch is the shared review_change wave (subject
+    "skill"), whose seats go through review._dispatch_unified_review →
+    review._handle_multi_model_review, the stamping entry the chunk-merge
+    identity tests drive; skill_review itself calls no dispatcher of its own."""
     source = (REPO / "ouroboros" / "skill_review.py").read_text(encoding="utf-8")
-    assert source.count("run_review=") == 1, "skill_review grew a second review dispatch"
-    assert "run_review=_handle_multi_model_review" in source
-    assert "from ouroboros.tools.review import _handle_multi_model_review" in source
+    assert source.count("run_review_change(") == 1, "skill_review grew a second review dispatch"
+    assert 'run_review_change(ctx, subject="skill"' in source
+    assert "_handle_multi_model_review" not in source and "run_review=" not in source
+    wave = (REPO / "ouroboros" / "tools" / "parallel_review.py").read_text(encoding="utf-8")
+    assert "_dispatch_unified_review" in wave
+    dispatch = (REPO / "ouroboros" / "tools" / "review.py").read_text(encoding="utf-8")
+    body = dispatch.split("def _dispatch_unified_review(", 1)[1].split("\ndef ", 1)[0]
+    assert "_handle_multi_model_review(" in body
 
 
 # An interpolated slot id built anywhere but the mint is the defect class itself:

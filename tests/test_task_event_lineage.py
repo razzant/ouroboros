@@ -20,7 +20,6 @@ import pytest
 
 from supervisor.log_addressing import (
     TASK_LINEAGE_FIELDS,
-    TurnEventQueue,
     stamp_recorded_row,
     task_event_queue,
     task_lineage,
@@ -125,28 +124,48 @@ def test_a_warm_workers_next_task_does_not_relabel_the_previous_tasks_late_frame
     assert stamp_recorded_row(unknown) == {"type": "llm_api_error", "task_id": "never-ran"}
 
 
-def test_the_direct_lane_endpoint_keeps_its_turn_stamps():
-    """The direct lane's existing contract (chat, lane fact, origin, Stop marker
-    on work frames, first-work callback) is unchanged by the pooled generalization."""
+@pytest.mark.parametrize("metadata,named", [({}, True),
+    ({"initiator": "consciousness", "wake_cause": "own_clock"}, False),
+    ({"initiator": "consciousness", "wake_cause": "focus"}, False),
+    ({"initiator": "consciousness", "usage_category": "consciousness_task"}, True)])
+def test_the_conversation_carrier_endpoint_keeps_its_turn_stamps(monkeypatch, tmp_path, metadata, named):
+    """The carrier names working Main turns, while a wake supplies its own title at finish."""
+    from ouroboros import project_naming
+    from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
+    from supervisor.worker_process import run_worker_task
+
+    (tmp_path / "logs").mkdir()
     captured, inner = _capture()
     fired = []
-    turn = TurnEventQueue(inner, "turn-1", 42, initiator="consciousness", on_first_work=lambda: fired.append(1))
-    turn.put({"type": "task_done", "task_id": "turn-1"})
-    assert captured[-1]["chat_id"] == 42 and captured[-1]["_is_direct_chat"] is True
-    assert captured[-1]["initiator"] == "consciousness"
-    turn.put({"type": "log_event", "data": {"type": "tool_call_started", "task_id": "turn-1", "tool": "read_file"}})
-    assert captured[-1]["data"]["cancelable"] is True and fired == [1]
+    monkeypatch.setattr(project_naming, "spawn_turn_namer", lambda *a, **kw: fired.append(1))
+    agent = SimpleNamespace()
+
+    def handle_task(task):
+        turn = agent._event_queue
+        turn.put({"type": "task_done", "task_id": task["id"]})
+        assert captured[-1]["chat_id"] == 42 and captured[-1]["_is_direct_chat"] is True
+        assert captured[-1].get("initiator", "") == metadata.get("initiator", "")
+        turn.put({"type": "log_event", "data": {"type": "tool_call_started", "task_id": task["id"], "tool": "read_file"}})
+        return []
+
+    agent.handle_task = handle_task
+    # The admitted seed as the lane dispatches it: the carrier facts and the first-step facts.
+    task = {"id": "turn-1", "chat_id": 42, "text": "Work", "metadata": dict(metadata), "_is_direct_chat": True,
+            "_execution_owner": {"kind": "direct", "lane": LANE_CONVERSATION, "executor": EXECUTOR_WORKER},
+            "_conversation_prepare": {"quiet": False, "reply_expected": True}}
+    run_worker_task(agent, task, wid=0, out_q=inner, repo_dir=str(tmp_path), drive_root=str(tmp_path))
+    assert captured[-1]["data"]["cancelable"] is True and fired == ([1] if named else [])
     assert "root_task_id" not in captured[-1]["data"], "a turn without lineage stamps none"
 
 
-def test_the_pooled_worker_installs_the_endpoint_around_handle_task_and_the_sink_stamps_by_task():
-    from supervisor.worker_process import worker_main
+def test_the_worker_body_installs_the_endpoint_around_handle_task_and_the_sink_stamps_by_task():
+    from supervisor.worker_process import run_worker_task, worker_main
 
-    src = inspect.getsource(worker_main)
-    assert "task_queue = task_event_queue(out_q, task)" in src
-    assert "runner._event_queue = task_queue" in src and "runner._event_queue = pool_queue" in src
-    assert "task_queue.put(stamp_finalization_enqueue(e2))" in src
-    assert "stamp_recorded_row(dict(obj))" in src
+    body = inspect.getsource(run_worker_task)
+    assert "task_queue = task_event_queue(out_q, task" in body
+    assert "runner._event_queue = task_queue" in body and "runner._event_queue = pool_queue" in body
+    assert "task_queue.put(stamp_finalization_enqueue(e2))" in body
+    assert "stamp_recorded_row(dict(obj))" in inspect.getsource(worker_main)
 
 
 @pytest.fixture

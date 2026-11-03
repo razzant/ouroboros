@@ -22,11 +22,18 @@ class _Api:
 
 class _Rec:
     sent = []; edited = []; _id = [1000]
-    def __init__(self, token, **_kwargs): pass
-    async def send_message(self, chat_id, text, parse_mode="HTML"):
-        _Rec._id[0] += 1; _Rec.sent.append((chat_id, text, parse_mode, _Rec._id[0])); return _Rec._id[0]
+    muted = []
+    def __init__(self, token, **kwargs): self.on_message = kwargs.get("on_message")
+    async def send_message(self, chat_id, text, parse_mode="HTML", *, disable_notification=False):
+        _Rec._id[0] += 1; _Rec.sent.append((chat_id, text, parse_mode, _Rec._id[0]))
+        if disable_notification:
+            _Rec.muted.append(_Rec._id[0])
+        if self.on_message: self.on_message(chat_id, _Rec._id[0])
+        return _Rec._id[0]
     async def edit_message_text(self, chat_id, message_id, text, parse_mode="HTML"):
-        _Rec.edited.append((chat_id, message_id, text, parse_mode)); return True
+        _Rec.edited.append((chat_id, message_id, text, parse_mode))
+        if self.on_message: self.on_message(chat_id, message_id)
+        return True
     async def send_chat_action(self, chat_id, action="typing"): pass
 
 
@@ -37,16 +44,20 @@ def _setup(tmp_path, monkeypatch, **settings):
     (sd / "settings.json").write_text(json.dumps(base), encoding="utf-8")
     monkeypatch.setattr(plugin, "TelegramClient", _Rec)
     _Rec.sent = []; _Rec.edited = []; _Rec._id = [1000]
+    _Rec.muted = []
     return plugin, _Api(sd)
 
 
-def test_subagent_gets_one_edited_bubble(tmp_path, monkeypatch):
-    plugin, api = _setup(tmp_path, monkeypatch)
+@pytest.mark.parametrize("silent", ["off", "on"])
+def test_subagent_gets_one_edited_bubble(tmp_path, monkeypatch, silent):
+    plugin, api = _setup(tmp_path, monkeypatch, TELEGRAM_SILENT_MODE=silent)
     handle = plugin._make_outbound(api)
     asyncio.run(handle({"text": "Subagent abc scheduled (researcher)", "is_progress": True,
                         "subagent_event": "scheduled", "subagent_task_id": "abc123", "subagent_role": "researcher"}))
     assert len(_Rec.sent) == 1 and not _Rec.edited
     first_id = _Rec.sent[0][3]
+    # A helper's card is technical progress: Silent mode sends it without sound.
+    assert _Rec.muted == ([first_id] if silent == "on" else [])
     asyncio.run(handle({"text": "Subagent abc completed (researcher)", "is_progress": True,
                         "subagent_event": "completed", "subagent_task_id": "abc123", "subagent_role": "researcher", "cost_usd": 0.04}))
     assert len(_Rec.sent) == 1                       # NO second message
@@ -92,6 +103,25 @@ def test_a_cards_placed_row_is_a_progress_note_here(tmp_path, monkeypatch, mirro
     assert [sent[1] for sent in _Rec.sent] == [row["text"]]
 
 
+@pytest.mark.parametrize("mirror", [None, "off", "on"])
+def test_wrap_up_receipt_row_goes_while_other_card_rows_follow_the_toggle(tmp_path, monkeypatch, mirror):
+    """#1564: the host types Wrap up's saved-work row as a terminal receipt, so it reaches
+    this chat with progress mirroring off; an untyped custody row and progress do not."""
+    plugin, api = _setup(tmp_path, monkeypatch, **({} if mirror is None else {"TELEGRAM_MIRROR_PROGRESS": mirror}))
+    handle = plugin._make_outbound(api)
+    row = {"role": "system", "system_type": "custody_notice", "card_row": "timeline", "task_id": "root-1"}
+    receipt = {**row, "text": "Work saved at Wrap up:\n- Subtask kid (Stopped): its text is saved",
+               "card_row_id": "cascade:root-1:ci_1:retained_work", "terminal_receipt": "retained_work"}
+    custody = {**row, "text": "Open delegated execution: run-x.", "card_row_id": "final:root-1:abc:custody_notice"}
+    for event in (receipt, custody, {"text": "Thinking...", "is_progress": True}):
+        asyncio.run(handle(event))
+    sent = [entry[1] for entry in _Rec.sent]
+    assert sent[0] == receipt["text"]
+    assert (custody["text"] in sent) is (mirror == "on")
+    if mirror != "on":
+        assert sent == [receipt["text"]]
+
+
 def test_real_reply_is_sent(tmp_path, monkeypatch):
     plugin, api = _setup(tmp_path, monkeypatch)
     handle = plugin._make_outbound(api)
@@ -99,11 +129,13 @@ def test_real_reply_is_sent(tmp_path, monkeypatch):
     assert len(_Rec.sent) == 1 and "answer" in _Rec.sent[0][1]
 
 
+@pytest.mark.parametrize("notify", ["off", "on"])
 @pytest.mark.parametrize("silent", [None, "off", "on"], ids=["default", "off", "on"])
-def test_a_terminal_answer_reaches_telegram_alone_and_keeps_the_silent_reply_chain(tmp_path, monkeypatch, silent):
-    """The real terminal delivery sends the model's answer alone through Telegram's
-    edit mode: the host notice stays a field of the result and never becomes a
-    second message (the non-clean line of the notifier carries that fact now)."""
+def test_a_terminal_answer_reaches_telegram_alone_and_keeps_every_reply(tmp_path, monkeypatch, silent, notify):
+    """The real terminal delivery sends the model's answer alone, as its own message: the
+    host notice stays a field of the result and never becomes a second message, and
+    Silent mode mutes the replies without replacing any of them; additional completion
+    notices have their own opt-in toggle."""
     from collections import deque
     import queue
 
@@ -113,7 +145,9 @@ def test_a_terminal_answer_reaches_telegram_alone_and_keeps_the_silent_reply_cha
     from supervisor import events_chat_delivery as delivery, message_bus
     from supervisor.terminal_delivery import pending_deliveries
 
-    settings = {} if silent is None else {"TELEGRAM_SILENT_MODE": silent}
+    settings = {"TELEGRAM_NOTIFY_TASKS": notify}
+    if silent is not None:
+        settings["TELEGRAM_SILENT_MODE"] = silent
     plugin, api = _setup(tmp_path, monkeypatch, **settings)
     handle = plugin._make_outbound(api)
     published, frames = [], []
@@ -127,7 +161,6 @@ def test_a_terminal_answer_reaches_telegram_alone_and_keeps_the_silent_reply_cha
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
     monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
     monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 7})
-    monkeypatch.setattr(message_bus, "_advance_project_visible_revision", lambda _chat: None)
     monkeypatch.setattr(message_bus, "publish_event", publish)
     monkeypatch.setattr(delivery, "_DELIVERED_MESSAGE_IDS", deque(maxlen=256))
     host = types.SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING={}, append_jsonl=append_jsonl,
@@ -144,7 +177,7 @@ def test_a_terminal_answer_reaches_telegram_alone_and_keeps_the_silent_reply_cha
     assert not tool_ctx.pending_events
     assert all(row["system_type"] == "proactive_message" for row in published)
     assert all("task_terminal_status" not in row for row in published)
-    assert len(_Rec.edited) == (1 if silent == "on" else 0)
+    assert _Rec.edited == []
 
     answer, notice = "Complete model answer: λ", "Plan review stayed open; inspect the task details."
     event = prepare_terminal_send_event(tmp_path, task, answer, {
@@ -164,21 +197,19 @@ def test_a_terminal_answer_reaches_telegram_alone_and_keeps_the_silent_reply_cha
     ]
     assert pending_deliveries(tmp_path) == []
     visible = {row[3]: row[1] for row in _Rec.sent}
-    for _chat, message_id, text, _format in _Rec.edited:
-        visible[message_id] = text
-    assert list(visible.values()) == ([answer] if silent == "on" else [*ongoing, answer])
+    assert list(visible.values()) == [*ongoing, answer]
     assert all(notice not in text for text in visible.values())
-    if silent == "on":
-        # The system notice neither overwrites nor takes ownership of the normal edit chain.
-        assert plugin._get_silent_msg(api, 42) == _Rec.sent[0][3]
-        delivery._handle_send_message({"type": "send_message", "chat_id": 1,
-                                       "text": "Separate host receipt", "role": "system",
-                                       "system_type": "terminal_incident"}, host)
-        receipt_id = _Rec.sent[-1][3]
-        assert "sent to owner chat" in _send_user_message(tool_ctx, "A later ongoing reply.")
-        delivery._handle_send_message(events.get_nowait(), host)
-        assert _Rec.edited[-1][1:3] == (_Rec.sent[0][3], "A later ongoing reply.")
-        assert all(row[1] != receipt_id for row in _Rec.edited)
+    assert _Rec.muted == (list(visible) if silent == "on" else [])
+    # A host notice keeps its sound and a later reply is again its own message.
+    delivery._handle_send_message({"type": "send_message", "chat_id": 1,
+                                   "text": "Separate host receipt", "role": "system",
+                                   "system_type": "terminal_incident"}, host)
+    receipt_id = _Rec.sent[-1][3]
+    assert receipt_id not in _Rec.muted
+    assert "sent to owner chat" in _send_user_message(tool_ctx, "A later ongoing reply.")
+    delivery._handle_send_message(events.get_nowait(), host)
+    assert _Rec.sent[-1][1] == "A later ongoing reply." and _Rec.edited == []
+    assert plugin._get_silent_msg(api, 42) == 0
 
 
 def test_routing_refusal_speaks_in_the_third_person(tmp_path, monkeypatch):
@@ -212,8 +243,9 @@ def test_a_landed_receipt_stays_silent_unless_a_file_was_not_attached(tmp_path, 
 
 
 def test_the_not_attached_line_speaks_the_install_language(tmp_path, monkeypatch):
-    """The bridge composes this line itself, so it reads its own text table in the install's
-    language; the file names stay as the owner gave them."""
+    """The bridge composes these lines itself (the not-attached line and the picker's own lines), so
+    one message reads its own text table in the install's language; target labels and file names
+    stay as the host and the owner gave them."""
     from ouroboros import i18n_memory as memory
 
     plugin, api = _setup(tmp_path, monkeypatch)
@@ -222,11 +254,20 @@ def test_the_not_attached_line_speaks_the_install_language(tmp_path, monkeypatch
     monkeypatch.setenv("OUROBOROS_UI_LANGUAGE", "ru")
     memory.update_memory(data, "ru", lambda doc: (memory.apply_generated(doc, {
         "code:tg.menu.attachments_not_attached": {"text": "Не приложено к задаче: {names}"},
+        "code:tg.menu.routing_choose_target": {"text": "Куда отправить последнее сообщение:"},
+        "code:tg.menu.routing_more_targets": {"text": "…и ещё {count} в веб-чате."},
+        "code:tg.menu.routing_reply_with_number": {"text": "Ответьте номером или выберите вариант в веб-чате."},
     }, model="test"), doc)[1], create=True)
     handle = plugin._make_outbound(api)
-    asyncio.run(handle({"annotation_type": "routing_ack", "status": "delivered", "target": "t1", "attachment_manifest": [
-        {"ordinal": 0, "label": "отчёт.pdf", "status": "rejected", "reason": "source_missing"}]}))
+    rejected = [{"ordinal": 0, "label": "отчёт.pdf", "status": "rejected", "reason": "source_missing"}]
+    asyncio.run(handle({"annotation_type": "routing_ack", "status": "delivered", "target": "t1",
+                        "attachment_manifest": rejected}))
     assert [row[1] for row in _Rec.sent] == ["Не приложено к задаче: отчёт.pdf"]
+    asyncio.run(handle({"annotation_type": "routing_ack", "status": "needs_manual_target", "attachment_manifest": rejected,
+                        "options": [{"task_id": f"t{n}", "label": f"Work {n}"} for n in range(1, 10)]}))
+    assert _Rec.sent[-1][1].splitlines() == [
+        "Куда отправить последнее сообщение:", *[f"{n}. Work {n}" for n in range(1, 9)], "…и ещё 1 в веб-чате.",
+        "Ответьте номером или выберите вариант в веб-чате.", "Не приложено к задаче: отчёт.pdf"]
 
 
 def test_subagent_cards_off_hides_activity(tmp_path, monkeypatch):
@@ -419,16 +460,13 @@ def test_load_runtime_state_rejects_invalid_port_before_http(monkeypatch):
 
 
 def test_recent_thoughts_discloses_long_entry_and_reconstructible_source(tmp_path):
+    from ouroboros import dialogue_store as ds
+
     plugin = _load_plugin()
     data = tmp_path / "data"
-    log = data / "logs" / "progress.jsonl"
-    log.parent.mkdir(parents=True)
     timestamp = "2026-07-30T10:11:12Z"
     task_id = "task-abcdef123456"
-    log.write_text(
-        json.dumps({"ts": timestamp, "task_id": task_id, "text": "x" * 300}) + "\n",
-        encoding="utf-8",
-    )
+    ds.append(data, "progress", {"ts": timestamp, "task_id": task_id, "text": "x" * 300})
 
     class Api:
         @staticmethod
@@ -438,17 +476,17 @@ def test_recent_thoughts_discloses_long_entry_and_reconstructible_source(tmp_pat
     text = plugin._load_recent_thoughts(Api())
 
     assert "OMISSION NOTE: truncated at 100 chars; original length 300" in text
-    assert f"Full ref: data/logs/progress.jsonl @ {timestamp} task {task_id}" in text
-    assert text.endswith("Showing up to 4 recent entries. Full source: data/logs/progress.jsonl")
+    assert f"Full ref: data/state/dialog.sqlite (progress) @ {timestamp} task {task_id}" in text
+    assert text.endswith("Showing up to 4 recent entries. Full source: data/state/dialog.sqlite (progress)")
 
 
 def test_recent_thoughts_preserves_short_entry_and_discloses_list_projection(tmp_path):
+    from ouroboros import dialogue_store as ds
+
     plugin = _load_plugin()
     data = tmp_path / "data"
-    log = data / "logs" / "progress.jsonl"
-    log.parent.mkdir(parents=True)
     note = "plain short entry byte intact"
-    log.write_text(json.dumps({"text": note}) + "\n", encoding="utf-8")
+    ds.append(data, "progress", {"text": note})
 
     class Api:
         @staticmethod
@@ -457,7 +495,7 @@ def test_recent_thoughts_preserves_short_entry_and_discloses_list_projection(tmp
 
     assert plugin._load_recent_thoughts(Api()) == (
         f"• {note}\n\n"
-        "Showing up to 4 recent entries. Full source: data/logs/progress.jsonl"
+        "Showing up to 4 recent entries. Full source: data/state/dialog.sqlite (progress)"
     )
 
 

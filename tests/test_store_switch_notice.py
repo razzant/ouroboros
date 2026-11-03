@@ -92,8 +92,10 @@ def test_notice_waits_for_owner_and_publication_and_preserves_each_outcome(switc
 def test_supervisor_wires_switch_notice_after_publication_and_bus_initialization():
     source = (pathlib.Path(__file__).resolve().parents[1] / "server.py").read_text(encoding="utf-8")
     body = source.split("def _run_supervisor(settings: dict) -> None:", 1)[1].split("\ndef ", 1)[0]
-    assert body.index("store_switch.require_published(DATA_DIR)") < body.index("bus_init(")
-    assert body.index("bus_init(") < body.index("store_switch.startup_notice(DATA_DIR)")
+    dialogue = source.split("def _open_dialogue(", 1)[1].split("\ndef ", 1)[0]
+    assert "bus_init(" in dialogue, "the bus is initialized where the dialogue opens"
+    assert body.index("store_switch.require_published(DATA_DIR)") < body.index("_open_dialogue(")
+    assert body.index("_open_dialogue(") < body.index("store_switch.startup_notice(DATA_DIR)")
 
 
 def test_previous_body_outcome_and_failed_send_remain_owed(switch_root, target_repo, owner_chat, monkeypatch):

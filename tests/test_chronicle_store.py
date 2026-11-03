@@ -622,13 +622,13 @@ def test_rebuilt_index_has_the_same_rows_folds_sequences_and_page_order(tmp_path
     assert snapshot() == before
 
 
-def test_index_schema_is_version_one_and_a_foreign_version_replays(tmp_path):
+def test_index_schema_is_version_three_and_a_foreign_version_replays(tmp_path):
     store = ChronicleStore(tmp_path)
     kept = note(store, "survives")
     with sqlite3.connect(store.index_path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
         names = {name for (name,) in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert {"records", "state", "active_marks", "page_rows", "folded"} <= names
+        assert {"records", "state", "active_marks", "page_rows", "folded", "tail_rows", "told"} <= names
         db.execute("PRAGMA user_version=7")
     assert store.get(kept["id"])["sequence"] == kept["sequence"]
 

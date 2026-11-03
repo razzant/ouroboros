@@ -2,10 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { createChatInstance } from '../modules/chat.js';
-import { createChatMedia } from '../modules/chat_media.js';
-import { mountResultFilesReader } from '../modules/result_files.js';
 import { taskArtifactDownloadUrl } from '../modules/api_client.js';
-import { createMainAttention } from '../modules/main_attention.js';
+import { stampNodeTimestamp } from '../modules/chat_activity.js';
+import { createMainWaiting } from '../modules/main_waiting.js';
 import { installDom, restoreDom, ElementStub, walkCard } from './chat_dom_fixture.js';
 import { fixture as mediaFixture, NodeStub } from './helpers/media_dom.js';
 
@@ -58,32 +57,6 @@ test('actual two-page history controller folds closure after canonical GC withou
     } finally { instance.destroy(); restoreDom(env.prior); globalThis.WebSocket = priorSocket; }
 });
 
-test('Main Files mounts the production reader for every nested member despite unavailable siblings and archive', async () => {
-    const env = installDom();
-    const media = createChatMedia({ chatSessionId: '', durableChatMediaUrl: value => value,
-        formatMsgTime: () => null, senderLabel: () => '', stampNodeTimestamp() {}, insertMessageNode() {} });
-    try {
-        const bubble = document.createElement('div'), actions = document.createElement('div');
-        env.mount.append(bubble); bubble.append(actions);
-        const artifacts = Array.from({ length: 25 }, (_, id) => ({ name: `part-${id}.txt`, relpath: `research/part-${id}.txt`, status: 'ready' }));
-        artifacts.push({ name: 'missing.txt', relpath: 'research/missing.txt', status: 'missing' },
-            { name: 'report.md', status: 'ready' }, { name: 'image.png', status: 'ready' });
-        const rendered = [];
-        const button = mountResultFilesReader(bubble, actions, 'task-1', async () => ({ task_id: 'task-1', artifacts,
-            artifact_archives: { research: { available: false } } }), row => {
-                const result = media.buildDocumentBubble(row); rendered.push({ row, html: result.innerHTML }); return result;
-            });
-        button.click(); await turn();
-        assert.equal(all(bubble, node => Object.hasOwn(node.dataset, 'resultFile')).length, 28);
-        assert.equal(all(bubble, node => node.tagName === 'DETAILS').length, 1);
-        assert.equal(rendered.length, 27);
-        assert.ok(rendered.filter(({ row }) => /\.(txt|md)$/.test(row.filename)).every(({ html }) => /is-read/.test(html)));
-        assert.equal(rendered[24].row.download_url, taskArtifactDownloadUrl('task-1', 'part-24.txt', 'research/part-24.txt'));
-        assert.ok(rendered.at(-1).html.includes('chat-file-thumb'));
-        assert.match(find(bubble, node => node.dataset.resultFile === 'research/missing.txt').textContent, /missing/);
-    } finally { media.destroy(); restoreDom(env.prior); }
-});
-
 test('nested text opens the existing document dialog and noncanonical addresses cannot enter its reader', async t => {
     const focus = NodeStub.prototype.focus;
     const replaceChildren = NodeStub.prototype.replaceChildren;
@@ -122,18 +95,25 @@ test('Main child wait uses child revision for auto-off and the existing sign-in 
         model: 'claudexor::codex=test-model', auto_continue: true, credential_harness: 'codex', credential_profile_id: 'fixture' };
     const env = installDom(async (url, init) => { calls.push({ url, body: JSON.parse(init.body) });
         return { ok: true, json: async () => ({ ok: true, wait }) }; });
-    const attention = createMainAttention({ mount: env.mount, openSettings: page => { settings.push(page); return false; } });
+    // The child's wait is one owner-action System message in Main's feed.
+    const feed = document.createElement('div');
+    env.mount.append(feed);
+    const waiting = createMainWaiting({ page: env.mount, messagesDiv: feed, toolbar: null, stampNodeTimestamp,
+        insertMessageNode: node => { feed.append(node); return true; },
+        openSettings: page => { settings.push(page); return false; } });
     try {
-        attention.snapshot({ main_attention_complete: true, main_attention: [projected || { task_id: 'child', root_task_id: 'root',
+        waiting.snapshot({ main_attention_complete: true, main_attention: [projected || { task_id: 'child', root_task_id: 'root',
             project_id: 'build', phase: 'working', task_attempt: 3, model_waits: { login: wait } }] });
-        const login = find(env.mount, node => Object.hasOwn(node.dataset, 'waitLogin'));
+        const message = find(feed, node => node.dataset.ownerAction === 'child');
+        assert.ok(message?.classList.contains('owner-action'), 'the child task, not its root, owns the message');
+        const login = find(message, node => Object.hasOwn(node.dataset, 'waitLogin'));
         assert.ok(login); login.click(); await turn(); assert.deepEqual(settings, ['providers']);
-        const auto = find(env.mount, node => Object.hasOwn(node.dataset, 'waitAuto'));
+        const auto = find(message, node => Object.hasOwn(node.dataset, 'waitAuto'));
         auto.checked = false;
         for (const handler of auto.listeners.get('change')) await handler({ target: auto });
         assert.equal(calls[0].body.decision_id, 'model_wait:child:login');
         assert.equal(calls[0].body.revision, 3); assert.equal(calls[0].body.auto_continue, false);
-    } finally { attention.destroy(); restoreDom(env.prior); }
+    } finally { waiting.destroy(); restoreDom(env.prior); }
 });
 
 test('native Project nonclean final keeps one answer and limitation live and after actual history assembly', async t => {

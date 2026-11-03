@@ -1,18 +1,17 @@
-"""The acceptance packet's per-skill lifecycle facts (visibility only).
+"""The per-skill lifecycle facts of a task's related skills (visibility only).
 
-A task that authored or repaired a skill used to hand the panel no way to see
-whether that skill actually reached a reviewed, ready, enabled state. These
-facts close that gap. They are facts, never a gate: acceptance judges quality,
-never the execution route.
+A task that authored or repaired a skill used to leave no way to see whether
+that skill actually reached a reviewed, ready, enabled state. These facts close
+that gap; the task's completion observations carry them to post-task synthesis.
+They are facts, never a gate on the execution route.
 """
 
 from __future__ import annotations
 
 import json
+
 import pathlib
 
-from ouroboros.review_evidence import build_task_acceptance_evidence
-from ouroboros.review_evidence_refs import acceptance_evidence_ref_vocabulary
 from ouroboros.skill_loader import find_skill
 from ouroboros.skill_readiness import (
     _skill_names_from_review_history,
@@ -20,7 +19,6 @@ from ouroboros.skill_readiness import (
     skill_names_touched_by_trace,
     skill_readiness_for_execution,
 )
-from ouroboros.tools.registry import ToolContext
 
 
 def _write_skill(drive_root: pathlib.Path, name: str) -> pathlib.Path:
@@ -34,23 +32,20 @@ def _write_skill(drive_root: pathlib.Path, name: str) -> pathlib.Path:
     return skill_dir
 
 
-def _write_history(drive_root: pathlib.Path, name: str, root_task_id: str) -> None:
-    path = drive_root / "state" / "skills" / name / "review_history.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"ts": "2026-09-03T00:00:00+00:00", "status": "pass",
-                    "root_task_id": root_task_id}) + "\n",
-        encoding="utf-8",
-    )
-    projection = drive_root / "state" / "skill_review_root_tasks.jsonl"
-    with projection.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"root_task_id": root_task_id, "skill": name}) + "\n")
+def _write_record(drive_root: pathlib.Path, name: str, root_task_id: str) -> str:
+    """One settled ``surface="skill"`` ledger record of ``name`` under ``root_task_id`` (the wave merges the
+    frozen subject's own identity before writing, as ``review_change._finish_record`` does)."""
+    from ouroboros import review_ledger
+    from tests.test_review_ledger import _answer, _facts, _raw
 
-
-def _ctx(drive_root: pathlib.Path, tmp_path: pathlib.Path, task_id: str) -> ToolContext:
-    repo = tmp_path / "repo"
-    repo.mkdir(exist_ok=True)
-    return ToolContext(repo_dir=repo, drive_root=drive_root, task_id=task_id)
+    rows = [_raw("s1", "openai/gpt-5", parts=("skill",), answers={"skill": _answer("skill")})]
+    subject = {"root_kind": "skill_payload", "root": f"/skills/external/{name}", "kind": "skill", "base": "", "head": "",
+               "tree_sha": "h" * 64, "diff_sha": "d" * 64, "checkout": ""}
+    record = review_ledger.build_wave_record(_facts(rows, task_id=root_task_id, subject=subject), surface="skill",
+                                             drive_root=drive_root)
+    record.subject = {**dict(record.subject), "skill": name, "content_hash": "h" * 64}
+    review_ledger.write_record(drive_root, record)
+    return record.record_id
 
 
 def test_the_lifecycle_scan_joins_trace_edits_and_this_root_task_history(tmp_path):
@@ -59,8 +54,8 @@ def test_the_lifecycle_scan_joins_trace_edits_and_this_root_task_history(tmp_pat
     _write_skill(drive_root, "edited")
     _write_skill(drive_root, "child_authored")
     _write_skill(drive_root, "someone_elses")
-    _write_history(drive_root, "child_authored", "root-1")
-    _write_history(drive_root, "someone_elses", "root-other")
+    _write_record(drive_root, "child_authored", "root-1")
+    _write_record(drive_root, "someone_elses", "root-other")
 
     trace = {"tool_calls": [
         {"tool": "write_file", "args": {"path": "data/skills/external/edited/SKILL.md"}},
@@ -89,8 +84,8 @@ def test_the_lifecycle_facts_match_the_readiness_predicate(tmp_path):
     assert row["ready"] is readiness.ready
     assert row["blockers"] == readiness.blockers
     assert row["enabled"] is bool(skill.enabled)
-    # An unreviewed, disabled self-authored skill is exactly what the panel
-    # needs to see, so the row must be honest rather than empty.
+    # An unreviewed, disabled self-authored skill is exactly what must stay
+    # visible, so the row must be honest rather than empty.
     assert row["ready"] is False
     assert row["blockers"]
 
@@ -159,101 +154,54 @@ def test_real_skill_payload_selectors_feed_lifecycle_rows(tmp_path):
     )] == ["command-edited", "script-edited", "delegate-edited"]
 
 
-def test_split_root_packet_reads_skill_lifecycle_from_the_canonical_root(tmp_path):
-    canonical = tmp_path / "canonical"
-    execution = tmp_path / "execution"
-    canonical.mkdir()
-    execution.mkdir()
-    _write_skill(canonical, "canonical-skill")
-    ctx = ToolContext(
-        repo_dir=tmp_path, drive_root=execution, budget_drive_root=canonical,
-        task_id="task-split-skill",
-    )
-
-    packet = build_task_acceptance_evidence(
-        ctx,
-        llm_trace={"tool_calls": [{
-            "tool": "skill_review", "args": {"skill": "canonical-skill"},
-        }]},
-        drive_root=execution,
-        task_id="task-split-skill",
-    )
-
-    assert packet["skill_lifecycle"][0]["name"] == "canonical-skill"
-    assert packet["skill_lifecycle"][0].get("present", True) is True
-
-
-def test_the_packet_carries_the_section_and_the_vocabulary_resolves_it(tmp_path):
+def test_no_touched_skill_yields_no_lifecycle_rows(tmp_path):
     drive_root = tmp_path / "drive"
     drive_root.mkdir()
-    _write_skill(drive_root, "alpha")
-    ctx = _ctx(drive_root, tmp_path, "task-skill")
-    trace = {"tool_calls": [
-        {"tool": "write_file", "args": {"path": "data/skills/external/alpha/SKILL.md"},
-         "status": "ok"},
-    ]}
-    packet = build_task_acceptance_evidence(
-        ctx, llm_trace=trace, drive_root=drive_root, task_id="task-skill",
-    )
-    assert packet["skill_lifecycle"][0]["name"] == "alpha"
-    assert packet["__provenance__"]["skill_lifecycle"] == "host_attested"
-    assert acceptance_evidence_ref_vocabulary(packet)["skill_lifecycle"] == "packet_section"
-
-
-def test_no_touched_skill_adds_no_section(tmp_path):
-    drive_root = tmp_path / "drive"
-    drive_root.mkdir()
-    ctx = _ctx(drive_root, tmp_path, "task-plain")
-    packet = build_task_acceptance_evidence(
-        ctx, llm_trace={"tool_calls": [{"tool": "run_command", "status": "ok"}]},
-        drive_root=drive_root, task_id="task-plain",
-    )
-    assert "skill_lifecycle" not in packet
     assert acceptance_skill_lifecycle(drive_root, {"tool_calls": []}, "") == []
     assert acceptance_skill_lifecycle(None, {"tool_calls": []}, "") == []
 
 
 def test_bounded_history_projection_discloses_both_omission_limits(tmp_path):
+    """The root task's skills come from the ledger's HOT index alone (one bounded read); rows of other roots are
+    skipped, and rotated index segments the hot read never opens are disclosed as truncation."""
+    from ouroboros import review_ledger
+
     drive_root = tmp_path / "drive"
     drive_root.mkdir()
     _write_skill(drive_root, "visible")
-    projection = drive_root / "state" / "skill_review_root_tasks.jsonl"
-    projection.parent.mkdir(parents=True, exist_ok=True)
-    rows = [
-        json.dumps({
-            "root_task_id": "other", "skill": f"skill-{index}",
-            "padding": "x" * 1500,
-        })
-        for index in range(800)
-    ]
-    rows.append(json.dumps({"root_task_id": "root-1", "skill": "visible"}))
-    projection.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    for index in range(3):
+        _write_record(drive_root, f"skill-{index}", "other")
+    _write_record(drive_root, "visible", "root-1")
 
     history = _skill_names_from_review_history(drive_root, "root-1")
     assert history["names"] == ["visible"]
-    assert history["coverage"]["rows_scanned"] <= 512
-    assert history["coverage"]["truncated"] is True
-    assert set(history["coverage"]["gap_reasons"]) >= {
-        "tail_bytes_truncated", "max_entries_truncated",
-    }
+    assert history["coverage"]["rows_scanned"] == 1 and history["coverage"]["truncated"] is False  # the root's own rows
+    assert history["coverage"]["complete"] is True and history["coverage"]["gap_reasons"] == []
     assert history["coverage"]["source_ref"] == {
-        "kind": "canonical_jsonl",
-        "path": "state/skill_review_root_tasks.jsonl",
-        "reader": "read_file",
+        "kind": "review_ledger_index", "path": "state/review_ledger/index.jsonl", "reader": "read_file",
     }
 
-    ctx = _ctx(drive_root, tmp_path, "task-bounded-history")
-    packet = build_task_acceptance_evidence(
-        ctx, llm_trace={"tool_calls": [{
-            "tool": "skill_review", "args": {"skill": "visible"},
-        }]}, drive_root=drive_root, task_id="task-bounded-history",
-    )
-    assert packet["skill_lifecycle_history_coverage"]["truncated"] is True
-    assert packet["skill_lifecycle_complete"] is False
-    assert acceptance_evidence_ref_vocabulary(packet)["skill_lifecycle"] == "partial"
-    partial = next(
-        row for row in packet["__unresolved_partial_artifacts__"]
-        if row["tool"] == "skill_lifecycle"
-    )
-    assert partial["status"] == "not_materialized_for_reviewer"
-    assert partial["source_ref"] == history["coverage"]["source_ref"]
+    # An archived segment beside the hot index: older records live where the bounded read never looks — a cut
+    # for a task whose start is unknown or precedes the index's newest rotation (opus R1-8 / R2-3, subagent 2);
+    # a task that started after that rotation has every row of its own in the hot index, and says so. The
+    # rotation's time is the segment's name: a row carried into the fresh hot index (its record no longer
+    # resolves) can be far older than the rows the rotation archived, so the hot index's first row says nothing.
+    (review_ledger.ledger_dir(drive_root) / "index.20260101T000000.jsonl").write_text("", encoding="utf-8")
+    assert review_ledger.newest_rotation_ts(drive_root) == "2026-01-01T00:00:00+00:00"
+    history = _skill_names_from_review_history(drive_root, "root-1")
+    assert history["names"] == ["visible"] and history["coverage"]["truncated"] is True
+    assert history["coverage"]["complete"] is False and history["coverage"]["gap_reasons"] == ["tail_bytes_truncated"]
+    before = _skill_names_from_review_history(drive_root, "root-1", task_started_at="2000-01-01T00:00:00+00:00")
+    assert before["coverage"]["truncated"] is True and before["coverage"]["complete"] is False
+    since = _skill_names_from_review_history(drive_root, "root-1", task_started_at="2026-01-02T00:00:00+00:00")
+    assert since["names"] == ["visible"] and since["coverage"]["truncated"] is False
+    assert since["coverage"]["complete"] is True and since["coverage"]["gap_reasons"] == []
+    # A later rotation archived rows of a task that started before it: a cut, whatever the hot head holds —
+    # here an old commit row carried into the fresh hot index ahead of everything (its record no longer resolves).
+    (review_ledger.ledger_dir(drive_root) / "index.20261021T000000.jsonl").write_text("", encoding="utf-8")
+    hot = review_ledger.index_path(drive_root)
+    carried = json.dumps({"record_id": "rl-carried", "surface": "commit_gate", "state": "settled",
+                          "ts": "2025-01-01T00:00:00+00:00", "subject": {}}) + "\n"
+    hot.write_text(carried + hot.read_text(encoding="utf-8"), encoding="utf-8")
+    spanning = _skill_names_from_review_history(drive_root, "root-1", task_started_at="2026-06-01T00:00:00+00:00")
+    assert spanning["coverage"]["truncated"] is True and spanning["coverage"]["complete"] is False

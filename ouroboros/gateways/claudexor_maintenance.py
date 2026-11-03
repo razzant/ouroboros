@@ -1,7 +1,8 @@
 """Typed maintenance transport over the existing owned Claudexor HTTP client.
 
 The engine owns installation and job facts. This mixin only negotiates the four
-routes, preserves their bodies and marks an unconfirmed create for same-key rejoin.
+routes, preserves their bodies and marks an unconfirmed create for same-key rejoin;
+the retention record's read is a fifth, read-only route.
 """
 from __future__ import annotations
 
@@ -66,6 +67,23 @@ class ClaudexorMaintenanceGateway:
                                "context": {"requestId": key, "acceptance": "unknown",
                                            "remedy": "Retry the same body with the same Idempotency-Key"}}
             raise
+
+    def maintenance_gc_last(self, *, timeout_sec=None) -> dict:
+        """``{"last": record | None}``: the engine's last retention pass, read-only (``GET
+        /v2/maintenance/gc`` never starts one). An engine without the route (404/405) answers the
+        typed ``maintenance_unavailable``: its record is unsupported, never an empty one."""
+        from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+        try:
+            body = _object(self._request("GET", "/v2/maintenance/gc", timeout_sec=timeout_sec))
+        except ClaudexorUnavailable as exc:
+            if exc.status_code in (404, 405):
+                raise ClaudexorUnavailable("maintenance_unavailable", "This engine keeps no retention pass record",
+                                           status_code=exc.status_code) from exc
+            raise
+        if "last" not in body or not (body["last"] is None or isinstance(body["last"], dict)):
+            raise ClaudexorUnavailable("malformed_response", "Claudexor retention record is missing")
+        return body
 
     def maintenance_operation(self, operation_id: str) -> dict:
         return self._maintenance_operation(self._maintenance_request(

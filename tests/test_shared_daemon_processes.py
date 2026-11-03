@@ -321,6 +321,7 @@ def test_loopback_fixture_bind_does_not_require_reverse_dns(monkeypatch):
 @pytest.fixture
 def shared_tree(tmp_path, monkeypatch, request):
     from ouroboros import config
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
     source = str(pathlib.Path(__file__).resolve().parents[1])

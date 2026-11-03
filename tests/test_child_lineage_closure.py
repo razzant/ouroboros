@@ -40,7 +40,7 @@ def _old_select_lineage(root, parent, root_id, *, direct_only=False, queue_membe
         params.append(root_id)
     with store.open_store(root, write=False) as txn:
         fetched = task_store._fetch(txn, f"t.task_id IN ({' UNION '.join(selects)})", params)
-    return task_store._decode(*fetched)
+    return task_store._decode(fetched)
 
 
 def old_find_child_tasks(drive_root, *, parent_task_id="", root_task_id="", exclude_task_id="",
@@ -427,6 +427,7 @@ def test_a_lowered_variable_limit_refuses_only_the_retired_expansion(tmp_path, m
     retired one-variable-per-seed expansion, the negative control, cannot run at all."""
     drive = tmp_path / "data"
     _wide_queue(drive)
+    store.close_connections(store.store_path(drive))
     connect = store.connect
 
     def lowered(*args, **kwargs):

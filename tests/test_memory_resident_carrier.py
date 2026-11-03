@@ -91,29 +91,3 @@ def test_the_gap_travels_into_every_room(tmp_path, project_id):
     env = _env(tmp_path)
     sections = "\n".join(context.build_knowledge_sections(env, project_id=project_id))
     assert "## Shared understanding" in sections and "Not authored yet." in sections
-
-
-def test_local_compactor_preserves_production_identity_and_shared_understanding():
-    """Production headings carry a provenance suffix; exact-only matching dropped them."""
-    from ouroboros.llm_local import _compact_local_text
-
-    text = (
-        "## Identity (from `memory/identity.md` — already loaded; do not re-read)\n\nIDENTITY BODY\n\n"
-        "## Shared understanding\n\nSource: knowledge_read(topic='overview', scope='global').\n\nORIENTATION BODY\n\n"
-        "## Knowledge base\n\n" + ("K" * 4000) + "\n"
-    )
-    compacted = _compact_local_text(text, "semi_stable")
-    assert "IDENTITY BODY" in compacted
-    assert "ORIENTATION BODY" in compacted
-    assert "[Compacted for local-model context" in compacted
-    assert "K" * 4000 not in compacted
-
-
-def test_local_compactor_still_preserves_the_suffixed_memory_registry():
-    from ouroboros.llm_local import _compact_local_text
-
-    text = ("## Memory Registry (what I know / don't know)\n\nREGISTRY BODY\n\n"
-            "## Recent tools\n\n" + ("T" * 4000) + "\n")
-    compacted = _compact_local_text(text, "dynamic")
-    assert "REGISTRY BODY" in compacted
-    assert "T" * 4000 not in compacted

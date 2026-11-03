@@ -217,7 +217,7 @@ def test_ui_smoke_widget_board_masonry_and_owner_widths(direct_server_with_data,
 
     def choose(page, tab: str, item: str) -> None:
         page.locator(f"{card(tab)} [data-widget-menu-trigger]").click()
-        page.locator(f'body > .skills-card-menu-dialog[open] [data-widget-size="{item}"]').click()
+        page.locator(f'body > .skills-card-menu-dialog:not([data-leaving])[open] [data-widget-size="{item}"]').click()
 
     def same(a: float, b: float) -> bool:
         return abs(a - b) <= 1.5
@@ -268,7 +268,7 @@ def test_ui_smoke_widget_board_masonry_and_owner_widths(direct_server_with_data,
 
                 # The card menu: one column is checked; Full width spans every column.
                 page.locator(f"{card('gauge')} [data-widget-menu-trigger]").click()
-                menu = page.locator("body > .skills-card-menu-dialog[open]")
+                menu = page.locator("body > .skills-card-menu-dialog:not([data-leaving])[open]")
                 menu.wait_for()
                 assert menu.locator('[data-widget-size="1"]').get_attribute("aria-checked") == "true"
                 assert menu.locator("[data-widget-size-note]").is_hidden()
@@ -332,9 +332,9 @@ def test_ui_smoke_widget_board_masonry_and_owner_widths(direct_server_with_data,
                 assert page.locator(f"{card('notes')} [data-widget-resize-handle]").is_hidden()
                 assert sorted(width_fixed(page)) == sorted(key.values()), "in a stack no step changes a card"
                 page.locator(f"{card('gauge')} [data-widget-menu-trigger]").click()
-                page.locator("body > .skills-card-menu-dialog[open] [data-widget-size-note]").wait_for(state="visible")
+                page.locator("body > .skills-card-menu-dialog:not([data-leaving])[open] [data-widget-size-note]").wait_for(state="visible")
                 page.screenshot(path=str(evidence_dir / f"widget-board-stack-menu-{browser_name}.png"))
-                page.locator('body > .skills-card-menu-dialog[open] [data-widget-size="2"]').click()
+                page.locator('body > .skills-card-menu-dialog:not([data-leaving])[open] [data-widget-size="2"]').click()
                 wait_saved(page, "gauge", {"w": 2})
                 assert status(page) == "Width: 2 columns", "on a narrow list the menu is the only path"
                 assert same(rects(page)["gauge"]["width"], list_width(page))

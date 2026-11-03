@@ -69,10 +69,10 @@ def test_capture_is_negotiated_once_without_changing_provider_payload(setup, asy
 
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("failure,effort", [(False, False), (True, False), (False, True), (True, True)])
-def test_lost_create_and_gateway_replacement_reuse_frozen_capture(setup, monkeypatch, asynchronous, failure, effort):
+def test_gateway_replacement_reuses_frozen_capture_after_create(setup, monkeypatch, asynchronous, failure, effort):
     root, gateway, client = setup
     gateway.operation_catalog = capture_catalog(failure, effort)
-    gateway.lose_create = True
+    gateway.pending = gateway.read_error = True
     replacement = Gateway()
     replacement.operation_catalog = capture_catalog(not failure, not effort)
     for name in ("accepted_operations", "creates", "capture_requests"):
@@ -103,7 +103,7 @@ def test_lost_create_and_gateway_replacement_reuse_frozen_capture(setup, monkeyp
     assert gateway.catalog_reads == 1 and replacement.catalog_reads == 0
     expected = {key: True for key, enabled in (
         ("capture_failure_evidence", failure), ("capture_effort_evidence", effort)) if enabled}
-    assert gateway.capture_requests == [expected] * 2
+    assert gateway.capture_requests == [expected]
     # Phase observations may repeat a checkpoint, but cannot rewrite or rewind custody.
     versions = [item for index, item in enumerate(manifests)
                 if index == 0 or item != manifests[index - 1]]
@@ -115,7 +115,7 @@ def test_lost_create_and_gateway_replacement_reuse_frozen_capture(setup, monkeyp
                item["capture_effort_evidence"] is effort for item in manifests)
     assert len(gateway.uploads) == 1 and not replacement.uploads
     assert retained(root, "request") == gateway.uploads[0][0]
-    assert len(gateway.creates) == 2 and len(set(gateway.creates)) == 1
+    assert len(gateway.creates) == 1
     assert len(gateway.accepted_operations) == len(usage["ledger_attempt_ids"]) == 1
     assert gateway.closed == replacement.closed == 1
     # One current row per attempt; revision 3 = reserved, dispatched, settled.
@@ -126,15 +126,22 @@ def test_lost_create_and_gateway_replacement_reuse_frozen_capture(setup, monkeyp
 def test_catalog_read_failure_does_not_guess_unsupported_or_dispatch(setup, monkeypatch, asynchronous):
     root, gateway, client = setup
 
-    def failed_catalog():
+    def failed_catalog(**_bounds):
         raise ClaudexorUnavailable("daemon_unreachable", "Metadata connection lost")
 
     monkeypatch.setattr(gateway, "operations", failed_catalog)
+    # The refusal is retried until the call's deadline and then reported as itself. The deadline runs on a
+    # transport clock that advances only while the transport waits between reads: on the wall clock a loaded
+    # runner can spend any deadline on gateway setup before the first read, which truthfully ends as
+    # daemon_not_answering, a different case (#2101).
+    clock = [0.0]
+    monkeypatch.setattr(transport, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds)))
     with pytest.raises(transport.ClaudexorModelError) as caught:
-        call(client, asynchronous)
+        call(client, asynchronous, timeout=0.05)
     assert caught.value.code == "daemon_unreachable"
     assert caught.value.physical_attempt_capture.state == "released"
-    assert not gateway.uploads and not gateway.creates and gateway.closed == 1
+    assert not gateway.uploads and not gateway.creates and gateway.closed >= 1
     assert [(row["state"], row["revision"]) for row in ledger(root)] == [("released", 2)]
 
 

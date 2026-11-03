@@ -73,11 +73,17 @@ def _bounded(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         for key in ("attemptId", "harnessId", "messageId", "outcome"):
             if isinstance(row.get(key), str) and row[key]:
                 item[key] = _label(row[key])
+        # The engine's opaque utterance key is compared whole, never cut.
+        for key in ("speechKey", "speechOp"):
+            if isinstance(row.get(key), str) and row[key]:
+                item[key] = row[key]
         if row.get("textKind") in _TEXT_KINDS and isinstance(row.get("detail"), str):
             # The typed body preserves stream whitespace; the engine's title is
             # only a preview. Keep the same disclosed bound, without a second copy.
             item.update(title=_label(row["detail"]), textKind=row["textKind"],
                         textDelta=row.get("textDelta") is True)
+            if row.get("textFinal") is True:
+                item["textFinal"] = True
         out.append(item)
     return out
 
@@ -277,9 +283,9 @@ class WindowObservations:
 # metadata with a hard expiry (no background thread holds anything): the worker
 # grants it for one window, bounded by min(task deadline, the run's own
 # maxSeconds horizon, this absolute ceiling), and releases it when the wait
-# returns. The ceiling exceeds the delegate_wait ToolEntry timeout (2100s, which
-# DELEGATE_WAIT_CEILING_SEC equals) by +300 headroom so a full window plus its
-# own teardown can never be idle-killed mid-hold.
+# returns. The ceiling exceeds one hold's bound (DELEGATE_WAIT_CEILING_SEC, 2100s:
+# the 1800s max window plus its teardown) by +300 headroom so a full window never
+# draws silence attention mid-hold; the call's own outer bound is the task lifetime.
 DELEGATE_WAIT_LEASE_GRACE_SEC = 120
 EXTERNAL_WAIT_LEASE_CEILING_SEC = DELEGATE_WAIT_CEILING_SEC + 300
 
@@ -341,6 +347,50 @@ def emit_external_wait_lease(ctx: Any, run_id: str, until_ts: float,
         })
     except Exception:
         log.debug("external-wait lease emission failed", exc_info=True)
+
+
+class HoldLease:
+    """ONE idle-rail lease for a whole supervising hold (``delegate_supervision.supervised_wait``),
+    spoken only when it changes.
+
+    The hold observes its run(s) every three seconds through ``_delegate_wait(observation_only)``,
+    which used to grant, re-grant and release a fresh lease on every beat: three control events
+    per beat per held run (``external_wait_lease`` reached 788 a minute on 01.11), each a bus
+    round trip, a dispatch and a frame, restating a fact that had not changed. The hold now grants
+    one lease (one ``lease_id``) before its first observation, renews it only once less than the
+    teardown grace remains (so a beat bounded by the read window can never outlive it), and
+    releases it once when the hold ends. The bound is the same ``external_wait_lease_until`` over
+    the observed run's own timing (read once per run: a run's start and cap never change); a
+    renewal that would not move the expiry later (a run at its own horizon, a spent deadline)
+    is not spoken.
+    """
+
+    def __init__(self, ctx: Any) -> None:
+        import uuid
+
+        self._ctx, self._lease_id, self._until, self._run_id = ctx, uuid.uuid4().hex, 0.0, ""
+        self._timing: Dict[str, Any] = {}
+
+    def renew(self, run_id: str) -> None:
+        if self._until - time.time() > DELEGATE_WAIT_LEASE_GRACE_SEC:
+            return
+        from ouroboros import delegate_custody as custody
+        from ouroboros.deadline_utils import parse_deadline_ts, window_within_deadline
+        from ouroboros.gateways.claudexor import _READ_TIMEOUT_SEC
+
+        if run_id not in self._timing:
+            started, max_seconds = custody.run_timing(custody.custody_root(self._ctx), run_id)
+            self._timing[run_id] = (parse_deadline_ts(started), max_seconds)
+        until = external_wait_lease_until(
+            self._ctx, window_within_deadline(self._ctx, int(_READ_TIMEOUT_SEC)), *self._timing[run_id])
+        if until > self._until:
+            self._until, self._run_id = until, run_id
+            emit_external_wait_lease(self._ctx, run_id, until, lease_id=self._lease_id)
+
+    def release(self) -> None:
+        if self._until:
+            emit_external_wait_lease(self._ctx, self._run_id, 0.0, lease_id=self._lease_id)
+            self._until = 0.0
 
 
 def poll_bound(seconds_left: float, *, strict: bool = False) -> float:
@@ -534,6 +584,7 @@ def _fitted_pending(payload: Dict[str, Any], pending: List[Dict[str, Any]],
 
 def live_line(run_id: str, advance: _Advance) -> str:
     parts: List[str] = []
+    keyed: Dict[Any, int] = {}
     previous_stream = None
     for row in advance.events:
         text_kind = row.get("textKind")
@@ -543,6 +594,18 @@ def live_line(run_id: str, advance: _Advance) -> str:
             actor = "/".join(str(row[key]) for key in ("harnessId", "attemptId") if row.get(key))
             if actor:
                 text = f"[{actor}] {text}"
+        # One engine-keyed utterance: its fragments join and its complete text replaces them.
+        scope = (row.get("attemptId"), row.get("harnessId"), row.get("speechKey"))
+        if is_text and text_kind == "message" and scope[2] and row.get("speechOp") in ("fragment", "complete") \
+                and not row.get("textFinal"):
+            if scope in keyed:
+                at = keyed[scope]
+                parts[at] = text if row["speechOp"] == "complete" else parts[at] + text
+            elif text:
+                keyed[scope] = len(parts)
+                parts.append(text)
+            previous_stream = None
+            continue
         stream = (text_kind, row.get("attemptId"), row.get("harnessId")) \
             if is_text and row.get("textDelta") is True else None
         if not text:
@@ -577,13 +640,13 @@ def executor_observation(
     identify a later live/reviewer attempt. Current live detail supplies no
     per-attempt observed model; the requested model stays labelled as such.
     """
+    from ouroboros.delegate_custody_usage import names_another_run
     from ouroboros.subagent_messages import executor_observation_meta
 
     task_id = str(getattr(ctx, "task_id", "") or "")
-    summary = detail.get("summary") or {}
     if (getattr(entry, "task_id", None) != task_id
             or getattr(entry, "run_id", None) != run_id
-            or summary.get("runId", run_id) != run_id
+            or names_another_run(detail, run_id)
             or detail.get("lastSeq") != advance.seq):
         return {}
     actor = next((row for row in reversed(_rows(detail))
@@ -646,6 +709,22 @@ def emit(ctx: Any, run_id: str, advance: _Advance, *,
         log.debug("delegated progress emit failed", exc_info=True)
 
 
+def emit_stream(ctx: Any, run_id: str, read: Any, *, after_seq: int) -> None:
+    """Push the events of one journal read the wait made itself (``delegate_observe.step``)
+    to the live progress surface, each frame committed once handed over; a broken channel
+    never aborts the wait."""
+    fn = getattr(ctx, "emit_progress_fn", None)
+    if not callable(fn):
+        return
+    from ouroboros import delegate_activity
+    try:
+        for activity, commit in delegate_activity.stream_observations(ctx, run_id, read, after=after_seq):
+            fn(delegate_activity.progress_text(activity), delegated_activity=activity)
+            commit()
+    except Exception:
+        log.debug("delegated stream emit failed", exc_info=True)
+
+
 def emit_retained(ctx: Any, run_id: str) -> None:
     """Retry local activity delivery without delaying a ready result on transport."""
     fn = getattr(ctx, "emit_progress_fn", None)
@@ -671,6 +750,40 @@ def paused_note(pending_interactions: Optional[List[Dict[str, Any]]]) -> str:
             "later round), or "
             f"keep waiting (call again) — {waiting_expiry_clause(pending_interactions)}. "
             "Do not cancel a run merely because it asked a question.")
+
+
+def message_journal_receipt(ctx: Any, result: Any) -> Any:
+    """Attach peer journal rows at the ordinary receipt boundary, never a wake.
+
+    Receipts may repeat rows by message_id. No read cursor or ACK advances
+    here, so losing a receipt before transcript insertion loses no message.
+    The existing wake renderer retains oversized receipts before projecting.
+    """
+    from ouroboros.delegate_message_store import journal
+    from ouroboros.delegate_shared import delegate_payload, delegate_result
+    from ouroboros.tool_capabilities import tool_result_limit
+
+    payload = delegate_payload(result)
+    run_id = str(payload.get("run_id") or "")
+    if not run_id or payload.get("message_id") or payload.get("ok") is False:
+        return result
+    rows = []
+    try:
+        rows = journal(ctx, run_id)
+    except Exception:
+        payload["peer_messages_delivery"] = {"complete": False, "reason": "journal_unavailable"}
+    else:
+        if not rows:
+            return result
+        payload["peer_messages"] = rows
+    if len(json.dumps(payload, ensure_ascii=False, indent=2)) > tool_result_limit("delegate_wait"):
+        from ouroboros.delegate_supervision import _render_wake_payload
+
+        payload = delegate_payload(_render_wake_payload(ctx, payload))
+        if "wake_delivery" in payload and rows:
+            payload["wake_delivery"]["note"] = (
+                f"Full receipt and {len(rows)} peer messages at source. Read before relying on omitted detail.")
+    return delegate_result(payload, meta=result.meta)
 
 
 def window_payload(

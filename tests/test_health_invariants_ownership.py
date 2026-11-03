@@ -1,15 +1,15 @@
-"""Delegated-run health obligations shape their instruction by ownership.
+"""Delegated-run health obligations follow ownership.
 
-The warnings stay globally visible (a preserved-and-invisible result is how
-work rots on disk), but only the OWNER task receives the call-shaped
-instruction: ``integrate_delegated_patch`` refuses a non-owner with
+The obligations stay globally visible (a preserved-and-invisible result is how
+work rots on disk), but only the OWNER task receives each run's line with its
+call-shaped instruction: ``integrate_delegated_patch`` refuses a non-owner with
 ``run_not_owned`` while the owner task is LIVE, and the read acknowledgement
-only credits the owner, so a foreign reader must be told WHO can act, never
-handed a ready-to-paste call that structurally refuses. Once the owner task is
-terminal, apply needs matching target authority but reject does not, so the
-clause states that split without minting a callable shape.
+only credits the owner. All foreign runs share one line with the authority rule
+and a pointer to the exact owner/run list in the existing source store.
 """
 
+import json
+import re
 import types
 
 import ouroboros.context_health as context_health
@@ -42,23 +42,51 @@ def _foreign_runs(monkeypatch):
         custody, "undisposed_patches", lambda root, state=None: [patch])
 
 
-def test_non_owner_gets_no_call_shaped_instruction(tmp_path, monkeypatch):
+def _foreign_source(root, text):
+    from ouroboros.tools.query_data import _query_data
+    from ouroboros.tools.registry import ToolContext
+
+    pointer = re.search("query_data\\(op='blob', sha256='([a-f0-9]{64})'\\)", text)
+    assert pointer
+    reply = json.loads(_query_data(ToolContext(repo_dir=root, drive_root=root, task_id="reader"),
+                                  op="blob", sha256=pointer.group(1)))
+    assert reply["status"] == "ok"
+    return reply["data"]
+
+
+def test_foreign_obligations_share_one_line_with_a_readable_exact_list(tmp_path, monkeypatch):
     _foreign_runs(monkeypatch)
     text = context_health.build_health_invariants(_env(tmp_path), task_id="task-other")
-    assert "DELEGATED RESULT NEVER READ" in text
-    assert "DELEGATED PATCH AWAITS DISPOSITION" in text
-    assert "owner task task-owner" in text.lower() or "task-owner" in text
-    # The obligation is visible; the DIRECTLY CALLABLE shape is not. The clause
-    # names the tool only inside the conditional rule (a terminal owner's orphan
-    # has distinct apply/reject authority), never as a
-    # ready-to-paste call this foreign reader could make against a LIVE owner.
+    rows = [line for line in text.splitlines() if "DELEGATED WORK" in line]
+    assert len(rows) == 1 and "WARNING:" in rows[0]
+    assert _foreign_source(tmp_path, rows[0]) == {
+        "task-owner": {"unread": ["run-u"], "patches": ["run-p"], "yours": []}}
+    assert "DELEGATED RESULT NEVER READ" not in text and "DELEGATED PATCH AWAITS DISPOSITION" not in text
     assert "integrate_delegated_patch(run_id='run-p'" not in text
-    assert "once that task is terminal" in text
-    assert "apply requires the caller's active Git root or fresh payload binding" in text
-    assert "reject may release it even from a different active root" in text
-    assert "disposition row records who acted" in text
+    assert "after it ends, a live top-level task may reject from any root" in rows[0]
+    assert "apply to the original target when location and current write rights permit" in rows[0]
+    assert "payloads need a fresh binding" in rows[0]
     assert "read_file" not in text
-    assert "run_not_owned" in text
+
+
+def test_hundreds_of_foreign_owners_still_get_one_line_and_own_runs_stay_full(tmp_path, monkeypatch):
+    import ouroboros.delegate_custody as custody
+    from ouroboros.delegate_custody import RunCustody
+
+    def unread(run_id, task):
+        run = RunCustody(run_id=run_id, task_id=task)
+        run.output_artifact = f"delegated/{run_id}.out"
+        return run
+
+    runs = [unread(f"run-a{i}", f"task-{i}") for i in range(300)] + [unread("run-own", "me")]
+    monkeypatch.setattr(custody, "settled_unread_outputs", lambda root, state=None: runs)
+    monkeypatch.setattr(custody, "undisposed_patches", lambda root, state=None: [])
+    text = context_health.build_health_invariants(_env(tmp_path), task_id="me")
+    folded = [line for line in text.splitlines() if "DELEGATED WORK" in line]
+    assert len(folded) == 1 and len(folded[0]) < 700 and "INFO:" in folded[0]
+    source = _foreign_source(tmp_path, folded[0])
+    assert len(source) == 300 and all(source[f"task-{i}"]["unread"] == [f"run-a{i}"] for i in range(300))
+    assert "DELEGATED RESULT NEVER READ — run run-own" in text and "run-own" not in "".join(folded)
 
 
 def test_architecture_states_the_terminal_owner_apply_reject_authority_split():
@@ -117,8 +145,8 @@ def test_one_custody_read_per_health_invariant_build(tmp_path, monkeypatch):
 # The recovery root's prompt carried sixteen near-identical abstract rows: the
 # foreign branch keys on task identity alone, so it printed the rule even where
 # the run's recorded target WAS that reader's own active root. `active_root` is
-# threaded from the call site (the module has no ctx) and answered with the same
-# predicate the apply gate asks, so the two can never disagree.
+# threaded from the call site (the module has no ctx); 'yours' keeps the exact-or-
+# nested relationship, not the apply gate's wider orphan geometry or write rights.
 
 
 def _foreign_patch_targeting(monkeypatch, target_root):
@@ -134,18 +162,15 @@ def _foreign_patch_targeting(monkeypatch, target_root):
 
 def _patch_row(text):
     return next(line for line in text.splitlines()
-                if "DELEGATED PATCH AWAITS DISPOSITION" in line)
+                if "OTHER TASKS' DELEGATED WORK" in line)
 
 
-def test_reader_whose_active_root_is_the_target_gets_the_concrete_call(tmp_path, monkeypatch):
+def test_reader_whose_active_root_is_the_target_keeps_that_fact_in_the_source(tmp_path, monkeypatch):
     target = tmp_path / "target"
     _foreign_patch_targeting(monkeypatch, target)
     text = context_health.build_health_invariants(
         _env(tmp_path), task_id="task-other", active_root=str(target))
-    # The static rule still leads; the call FOLLOWS it.
-    assert "apply requires the caller's active Git root or fresh payload binding" in text
-    assert "Your own active root already satisfies that target" in text
-    assert "integrate_delegated_patch(run_id='run-p', decision='apply'|'reject')" in text
+    assert _foreign_source(tmp_path, text)["task-owner"]["yours"] == ["run-p"]
 
 
 def test_reader_whose_active_root_contains_a_host_minted_target_gets_the_call(tmp_path, monkeypatch):
@@ -159,7 +184,7 @@ def test_reader_whose_active_root_contains_a_host_minted_target_gets_the_call(tm
     _foreign_patch_targeting(monkeypatch, target)
     text = context_health.build_health_invariants(
         _env(tmp_path), task_id="task-other", active_root=str(parent))
-    assert "integrate_delegated_patch(run_id='run-p', decision='apply'|'reject')" in text
+    assert _foreign_source(tmp_path, text)["task-owner"]["yours"] == ["run-p"]
 
 
 def test_an_unrelated_active_root_keeps_the_static_row_byte_for_byte(tmp_path, monkeypatch):
@@ -171,3 +196,21 @@ def test_an_unrelated_active_root_keeps_the_static_row_byte_for_byte(tmp_path, m
         _env(tmp_path), task_id="task-other", active_root=str(tmp_path / "elsewhere")))
     assert unrelated == static
     assert "integrate_delegated_patch(run_id='run-p'" not in unrelated
+
+
+def test_failed_foreign_list_retention_discloses_the_gap_and_keeps_the_list(tmp_path, monkeypatch):
+    from ouroboros import observability
+    _foreign_runs(monkeypatch)
+    monkeypatch.setattr(observability, "write_blob", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    text = context_health.build_health_invariants(_env(tmp_path), task_id="task-other")
+    assert "retention unavailable; exact list:" in text
+    assert '"task-owner"' in text and '"run-u"' in text and '"run-p"' in text
+
+
+def test_sibling_host_targets_are_not_mislabelled_as_this_readers_own_folder(tmp_path, monkeypatch):
+    projects_root = tmp_path / "projects"
+    target, active = projects_root / "A", projects_root / "B"
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_PROJECTS_ROOT", str(projects_root))
+    _foreign_patch_targeting(monkeypatch, target)
+    text = context_health.build_health_invariants(_env(tmp_path), task_id="other", active_root=str(active))
+    assert _foreign_source(tmp_path, text)["task-owner"]["yours"] == []

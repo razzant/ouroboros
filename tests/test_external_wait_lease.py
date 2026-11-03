@@ -6,8 +6,9 @@ legitimately silent: the run streams into the daemon, not into the supervisor's
 per window, bounded by min(task deadline, the run's own maxSeconds horizon, an
 absolute ceiling), released when the wait returns — and it spares ONLY the idle
 rail: the explicit deadline, the absolute ceiling, budget fences and cancel all
-cut through it. No background thread holds anything (a thread-pool timeout does
-not kill threads; a lease is a number).
+cut through it. Since #1376 that rail records dated silence attention, never a
+grace window or stop. No background thread holds anything (a thread-pool timeout
+does not kill threads; a lease is a number).
 """
 
 import datetime as dt
@@ -232,7 +233,6 @@ def _enforcer(monkeypatch, tmp_path, running, *, abs_ceiling=10_000_000):
     monkeypatch.setattr(queue_mod, "RUNNING", running)
     monkeypatch.setattr(queue_mod, "PENDING", [])
     monkeypatch.setattr(queue_mod, "get_task_idle_timeout_sec", lambda: 900)
-    monkeypatch.setattr(queue_mod, "get_per_call_timeout_ceiling_sec", lambda: 60)
     monkeypatch.setattr(queue_mod, "get_task_abs_ceiling_sec", lambda: abs_ceiling)
     monkeypatch.setattr(queue_mod, "FINALIZATION_GRACE_SEC", 300)
     monkeypatch.setattr(queue_mod, "_request_finalization_grace",
@@ -252,12 +252,14 @@ def test_a_live_lease_spares_the_idle_rail(monkeypatch, tmp_path):
         "external_wait_lease_until": 3000.0,
     }
     _enforcer(monkeypatch, tmp_path, {"t1": meta})(2500.0)  # idle > 960s, leased
-    assert "finalization_requested_at" not in meta
+    assert "finalization_requested_at" not in meta and "silence_attention" not in meta
 
-    # The SAME idleness with the lease expired opens the grace episode.
+    # The SAME idleness with the lease expired is dated silence: attention, no grace.
     meta["external_wait_lease_until"] = 2400.0
     _enforcer(monkeypatch, tmp_path, {"t1": meta})(2500.0)
-    assert meta["finalization_requested_at"] == 2500.0
+    assert meta["silence_attention"]["state"] == "pending_attention"
+    assert meta["silence_attention"]["observed_at"] == 2500.0
+    assert "finalization_requested_at" not in meta
 
 
 def test_the_lease_never_spares_deadline_or_ceiling(monkeypatch, tmp_path):
@@ -283,23 +285,27 @@ def test_the_lease_never_spares_deadline_or_ceiling(monkeypatch, tmp_path):
     assert meta2.get("finalization_reason") == "deadline"
 
 
-def test_no_task_lifetime_never_ends_a_progressing_task_and_idle_still_binds(monkeypatch, tmp_path):
+def test_no_task_lifetime_never_ends_a_progressing_task_and_silence_still_gets_attention(monkeypatch, tmp_path):
     """#1196: an unlimited lifetime is no ceiling at all — a task a year old keeps running
-    while it progresses — and the idle rail still binds once it stops progressing."""
+    while it progresses — and once it stops progressing the idle rail still dates the
+    silence (#1376: attention, never a stop)."""
     year = 365 * 86400.0
     meta = {"task": {"id": "t1", "chat_id": 7}, "started_at": 1000.0,
             "last_progress_at": 1000.0 + year, "worker_id": 0}
     _enforcer(monkeypatch, tmp_path, {"t1": meta}, abs_ceiling=None)(1010.0 + year)
-    assert "finalization_requested_at" not in meta
+    assert "finalization_requested_at" not in meta and "silence_attention" not in meta
     meta["last_progress_at"] = 1000.0
     _enforcer(monkeypatch, tmp_path, {"t1": meta}, abs_ceiling=None)(1010.0 + year)
-    assert meta.get("finalization_reason") == "idle_timeout"
+    assert meta["silence_attention"]["state"] == "pending_attention"
+    assert meta["silence_attention"]["last_progress_at"] == 1000.0
+    assert "finalization_requested_at" not in meta
 
 
 def test_an_operation_lease_stays_finite_without_a_task_lifetime(monkeypatch, tmp_path):
-    """#1196: without a task lifetime the operation's own finite window bounds the idle
-    reprieve from its start fact, so a lost terminal can never spare the rail forever."""
-    from ouroboros.config import OPERATION_WINDOW_FALLBACK_SEC
+    """#1196: without a task lifetime the finite idle lease bounds the idle reprieve from its
+    start fact, so a lost terminal can never spare the rail forever. The renamed constant is
+    attention only: the operation it describes gets no timer from it (1A)."""
+    from ouroboros.config import IDLE_LEASE_MAX_SEC
     from supervisor import events as events_mod
 
     monkeypatch.setattr("ouroboros.config.get_task_abs_ceiling_sec", lambda: None)
@@ -311,7 +317,7 @@ def test_an_operation_lease_stays_finite_without_a_task_lifetime(monkeypatch, tm
          "phase": "started", "kind": "llm", "task_attempt": 1},
         types.SimpleNamespace(RUNNING={"t5": meta}),
     )
-    assert meta["active_operation_leases"]["llm-1"]["until_ts"] == 1100.0 + OPERATION_WINDOW_FALLBACK_SEC
+    assert meta["active_operation_leases"]["llm-1"]["until_ts"] == 1100.0 + IDLE_LEASE_MAX_SEC == 1100.0 + 21600
 
 
 def test_parallel_cognitive_operations_are_independent_and_attempt_bound(
@@ -364,7 +370,7 @@ def test_parallel_cognitive_operations_are_independent_and_attempt_bound(
     )
     assert set(meta["active_operation_leases"]) == {"review-1"}
     _enforcer(monkeypatch, tmp_path, {"t3": meta})(2500.0)
-    assert "finalization_requested_at" not in meta
+    assert "finalization_requested_at" not in meta and "silence_attention" not in meta
 
     events_mod._handle_cognitive_operation(
         {
@@ -376,7 +382,9 @@ def test_parallel_cognitive_operations_are_independent_and_attempt_bound(
     )
     assert "active_operation_leases" not in meta
     _enforcer(monkeypatch, tmp_path, {"t3": meta})(2500.0)
-    assert meta.get("finalization_requested_at") == 2500.0
+    assert meta["silence_attention"]["state"] == "pending_attention"
+    assert meta["silence_attention"]["task_attempt"] == 2
+    assert "finalization_requested_at" not in meta
 
 
 def test_cognitive_operation_event_reaches_idle_enforcer_via_dispatch(
@@ -577,12 +585,44 @@ def test_active_llm_call_spares_idle_without_elapsed_expiry(monkeypatch, tmp_pat
     # The call has been silent longer than the current 2700s transport default.
     # Elapsed time is not semantic stall evidence; only hard task axes cut through.
     _enforcer(monkeypatch, tmp_path, {"t4": meta}, abs_ceiling=10_000)(5000.0)
-    assert "finalization_requested_at" not in meta
+    assert "finalization_requested_at" not in meta and "silence_attention" not in meta
 
     meta.pop("active_llm_call")
     _enforcer(monkeypatch, tmp_path, {"t4": meta}, abs_ceiling=10_000)(5000.0)
-    assert meta["finalization_requested_at"] == 5000.0
-    assert meta["finalization_reason"] == "idle_timeout"
+    assert meta["silence_attention"]["state"] == "pending_attention"
+    assert meta["silence_attention"]["observed_at"] == 5000.0
+    assert "finalization_requested_at" not in meta
+
+
+@pytest.mark.parametrize("kind, phase, stamped", [
+    ("tool", "finished", True), ("tool", "failed", False), ("review", "finished", True), ("review", "failed", True),
+    ("llm", "finished", False), ("vlm", "failed", False), ("in_slot_wait", "finished", False),
+])
+def test_only_a_closed_tool_or_review_lease_is_fresh_progress(kind, phase, stamped, monkeypatch):
+    """A completed tool call and a review seat that physically ended, with an answer or an error, are the
+    task's own work: the confirmed lease closes INTO a progress stamp, so no tick reads the task as lease-less
+    and stale (a deep self-review reports nothing else before it ends; tests/test_deep_review_lease.py drives
+    that branch). A tool's ``failed`` stamps nothing, a model call is stamped by its own usage row and a wait
+    mark is no work; a terminal with no confirmed lease behind it never stamps."""
+    from supervisor import events as events_mod
+
+    monkeypatch.setattr(events_mod.time, "time", lambda: 5000.0)
+    meta = {"task": {"id": "t9", "chat_id": 7}, "attempt": 1, "started_at": 1000.0,
+            "last_progress_at": 1000.0, "worker_id": 0}
+    ctx = types.SimpleNamespace(RUNNING={"t9": meta})
+
+    def emit(step):
+        events_mod._handle_cognitive_operation({"type": "cognitive_operation", "task_id": "t9", "operation_id": "op-1",
+                                                "phase": step, "kind": kind, "task_attempt": 1}, ctx)
+
+    emit("started")
+    emit(phase)
+    assert "active_operation_leases" not in meta
+    closed_at = 5000.0 if stamped else 1000.0
+    assert meta["last_progress_at"] == closed_at
+    monkeypatch.setattr(events_mod.time, "time", lambda: 6000.0)
+    emit(phase)  # replayed: the lease it would close is gone
+    assert meta["last_progress_at"] == closed_at
 
 
 def test_stale_attempt_llm_call_does_not_spare_idle(monkeypatch, tmp_path):
@@ -595,7 +635,9 @@ def test_stale_attempt_llm_call_does_not_spare_idle(monkeypatch, tmp_path):
         "active_llm_call": {"task_attempt": 1, "llm_call_id": "stale"},
     }
     _enforcer(monkeypatch, tmp_path, {"t5": meta})(2500.0)
-    assert meta["finalization_reason"] == "idle_timeout"
+    assert meta["silence_attention"]["state"] == "pending_attention"
+    assert meta["silence_attention"]["task_attempt"] == 2
+    assert "finalization_requested_at" not in meta
 
 
 @pytest.mark.parametrize("hard_axis", ["deadline", "absolute_ceiling"])

@@ -44,6 +44,19 @@ function pythonTupleNames(source, name) {
     return new Set([...body.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]));
 }
 
+/** Fields a Python TypedDict `class name(Base...):` declares, its in-file bases' included; `known` maps an
+ *  imported base to its fields. A frame's contract is what it declares, whichever class statement declares it. */
+function pythonClassFields(source, name, known = {}) {
+    const header = source.match(new RegExp(`^class ${name}\\(([A-Za-z_]\\w*)[^)]*\\):.*\\n`, 'm'));
+    assert.ok(header, `class ${name} not found — the wire contract moved, update this test`);
+    const start = header.index + header[0].length;
+    const end = source.slice(start).search(/^\S/m);  // the class body ends at the next top-level line
+    const body = end === -1 ? source.slice(start) : source.slice(start, start + end);
+    const base = header[1];
+    const inherited = known[base] ?? (base === 'TypedDict' ? new Set() : pythonClassFields(source, base, known));
+    return new Set([...inherited, ...[...body.matchAll(/^ {4}([a-z_]+): /gm)].map((m) => m[1])]);
+}
+
 test('every accounting field the costs page reads is a field the history endpoint emits', () => {
     // v7 moved the cost-breakdown endpoint (and its field tuple) out of
     // gateway/history.py into gateway/cost_breakdown.py; history.py re-exports it.
@@ -230,35 +243,31 @@ test('the UNIFIED wire shape feeds the same readers: all rows named, pools carry
 
 test('delivered photo, video, and document rows keep their replay wire fields', () => {
     const history = repoFile('ouroboros/gateway/history.py');
+    const deliveries = repoFile('ouroboros/gateway/history_deliveries.py');
     const chat = moduleFile('chat.js');
 
-    const documentBranch = history.slice(
-        history.indexOf('if entry.get("type") == "document":'),
-        history.indexOf('elif entry.get("type") in {"photo", "video"}',
-            history.indexOf('if entry.get("type") == "document":')),
-    );
+    // history.py hands every stored delivery row to the one projection in history_deliveries.py.
+    assert.match(history, /if delivery := delivery_fields\(entry\):\n\s+rec\.update\(delivery\)/);
+    const branch = (start, end) => deliveries.slice(deliveries.indexOf(start), deliveries.indexOf(end));
+    const documentBranch = branch('if kind == "document":', 'if kind in {"photo", "video"}');
     for (const field of ['msg_type', 'filename', 'mime', 'download_url', 'caption', 'size_bytes']) {
-        assert.match(documentBranch, new RegExp(`rec\\["${field}"\\]`),
-            `document replay no longer emits ${field}`);
+        assert.ok(documentBranch.includes(`"${field}"`), `document replay no longer emits ${field}`);
     }
-
-    const mediaBranchStart = history.indexOf('elif entry.get("type") in {"photo", "video"}');
-    const mediaBranch = history.slice(mediaBranchStart, history.indexOf('\n            if ', mediaBranchStart));
-    // Same keyword-argument idiom as the links branch below.
-    for (const field of ['msg_type=', 'mime=', 'download_url=', 'download_url_compat=', 'caption=']) {
-        assert.ok(mediaBranch.includes(field), `photo/video replay no longer emits ${field}`);
+    const mediaBranch = branch('if kind in {"photo", "video"}', 'if kind == "links"');
+    for (const field of ['msg_type', 'mime', 'download_url', 'download_url_compat', 'caption']) {
+        assert.ok(mediaBranch.includes(`"${field}"`), `photo/video replay no longer emits ${field}`);
     }
-
-    const linksBranchStart = history.indexOf('elif entry.get("type") == "links"');
-    const linksBranch = history.slice(linksBranchStart, history.indexOf('\n            if ', linksBranchStart));
-    for (const field of ['msg_type="links"', 'actions=', 'title=']) {
+    const linksBranch = branch('if kind == "links"', 'if kind == "card"');
+    for (const field of ['"msg_type": "links"', '"actions"', '"title"']) {
         assert.ok(linksBranch.includes(field), `links replay no longer emits ${field}`);
     }
+    assert.ok(branch('if kind == "card"', 'return {}').includes('"msg_type": "card"'), 'card replay lost its msg_type');
 
-    assert.match(chat, /\['document', 'photo', 'video', 'links', 'quiz'\]\.includes\(msg\.msg_type\)/);
-    assert.match(chat, /if \(msg\.msg_type === 'document'\) appendDocumentBubble\(msg\);/);
-    assert.match(chat, /else if \(msg\.msg_type === 'links'\) appendLinksMessage\(msg\);/);
-    assert.match(chat, /else appendMediaBubble\(msg\);/);
+    // Replay draws every delivery row through the one table in chat_media.js, before final handling.
+    const media = moduleFile('chat_media.js');
+    assert.match(media, /const replayed = \{ document: appendDocumentBubble, links: appendLinksMessage, quiz: appendQuizMessage,\s+card: appendCardMessage, photo: appendMediaBubble, video: appendMediaBubble \};/);
+    const replay = chat.indexOf('if (appendDelivery(msg)) continue;');
+    assert.ok(replay > 0 && replay < chat.indexOf('if (taskId && replayConcludesTask(msg))'), 'deliveries replay before final handling');
 });
 
 test('live structured delivery frames keep additive grouping and size fields', () => {
@@ -266,8 +275,13 @@ test('live structured delivery frames keep additive grouping and size fields', (
     const contracts = repoFile('ouroboros/gateway/contracts.py');
     const types = moduleFile('api_types.js');
 
+    // Every structured delivery frame declares the shared stored-row identity, directly or through its family's base.
+    const reference = pythonClassFields(repoFile('ouroboros/gateway/reference_contracts.py'), 'ChatReferenceFields');
+    assert.ok(reference.has('row_address'), 'ChatReferenceFields not parsed — the contract moved, update this test');
     for (const className of ['PhotoOutbound', 'VideoOutbound', 'DocumentOutbound', 'LinksOutbound', 'QuizOutbound']) {
-        assert.ok(contracts.includes(`class ${className}(TypedDict):`));
+        const fields = pythonClassFields(contracts, className, { ChatReferenceFields: reference });
+        const missing = [...reference].filter((field) => !fields.has(field));
+        assert.deepEqual(missing, [], `${className} no longer declares the shared row identity: ${missing}`);
         assert.ok(types.includes(`@typedef {Object} ${className}`));
     }
     assert.match(bus, /"type": "photo",[\s\S]*?"task_id": str\(task_id or ""\)/);
@@ -275,10 +289,11 @@ test('live structured delivery frames keep additive grouping and size fields', (
     assert.match(bus, /"type": "document",[\s\S]*?"size_bytes": size_bytes,[\s\S]*?"task_id": str\(task_id or ""\)/);
     assert.match(bus, /"type": "links",[\s\S]*?"actions": validated,[\s\S]*?"task_id": str\(task_id or ""\)/);
     assert.match(bus, /"type": "quiz",[\s\S]*?"quiz_id": qid,[\s\S]*?"task_id": str\(task_id or ""\)/);
-    // Replay: the quiz row joins the non-terminal delivery family in chat.js
-    // BEFORE the finishLiveCard/plainUntypedFinal block.
+    // Replay: the quiz row joins the non-terminal delivery family (chat_media.js's table, drawn by chat.js
+    // BEFORE the finishLiveCard/plainUntypedFinal block).
     const chat = moduleFile('chat.js');
-    assert.match(chat, /msg\.msg_type === 'quiz'\) appendQuizMessage\(msg\)/);
+    assert.match(moduleFile('chat_media.js'), /quiz: appendQuizMessage,/);
+    assert.ok(chat.indexOf('if (appendDelivery(msg)) continue;') < chat.indexOf('if (taskId && replayConcludesTask(msg))'));
     // The card gets the SAME sanitizing markdown pipeline as assistant bubbles.
     assert.match(chat, /mountMarkdown: mountChatMarkdown/);
     assert.match(chat, /enhanceMarkdown: enhanceMountedMarkdown/);

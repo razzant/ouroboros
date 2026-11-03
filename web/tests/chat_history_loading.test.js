@@ -244,9 +244,14 @@ test('delayed latest cannot certify newer retained recent rows until the physica
     });
     const first = f.instance.refreshHistory({ revision: 1 });
     await settle(); f.reads[0].ok(covered(0, 80, 80, 70)); await first;
+    // The reader turned back into history: the shifted read below re-anchors nothing.
+    f.messages.scrollTop = 400;
+    for (const handler of f.messages.listeners.get('wheel')) handler({ type: 'wheel', deltaY: -1, target: f.messages, timeStamp: 0 });
     const second = f.instance.refreshHistory({ revision: 2 });
     await settle(); f.reads[1].ok(covered(90, 100, 100, 95)); await second;
-    await settle(); assert.equal(f.reads.length, 3, 'latest rebase is held');
+    await settle(); assert.equal(f.reads.length, 2, 'a shifted window re-anchors at the read in hand, never by a second read');
+    globalThis.document.byId.get('chat-scroll-bottom').click();
+    await settle(); assert.equal(f.reads.length, 3, '↓ across the gap: its latest rebase is held');
     const third = f.instance.refreshHistory({ revision: 3 });
     await settle(); f.reads[3].ok(covered(180, 200, 200, 190)); await third;
     f.reads[2].ok(covered(0, 100, 100, 95, 'fill-gap'));

@@ -1,12 +1,4 @@
-"""Delegation-budget + in-task project-scoping affordances (v6.37.0).
-
-Extracted from ``ouroboros/tools/control.py`` to keep that dispatcher module under
-the module-size hard gate. These are the cyber-racing postmortem additions: the
-typed child delegation-budget narrowing (C3.1) and the ``ensure_project_scope``
-tool handler (C4.1). ``control.py`` imports both; ``_ensure_project_scope`` reaches
-back into ``control._emit_control_event`` lazily (call-time) so there is no import
-cycle.
-"""
+"""Delegation-budget narrowing and the same-work ``move_to_project`` handler."""
 
 from __future__ import annotations
 
@@ -62,9 +54,13 @@ class DelegationAdmissionDecision:
 
 
 def check_delegation_admission(
-    parent_budget: Dict[str, Any], *, direct_child_count: int | None = 0,
+    parent_budget: Dict[str, Any], *, direct_child_count: int | None = 0, room_mode: str = "auto",
 ) -> DelegationAdmissionDecision:
     """Enforce explicit recursion rights while keeping omitted legacy permissive."""
+    if room_mode == "off":
+        from ouroboros.subagent_runtime import SUBAGENTS_OFF_DETAIL
+
+        return DelegationAdmissionDecision(False, "subagents_off_in_room", SUBAGENTS_OFF_DETAIL, direct_child_count)
     budget = parent_budget if isinstance(parent_budget, dict) else {}
     if direct_child_count is None:
         count = None
@@ -698,7 +694,7 @@ def profile_from_task_constraint(task_constraint: Dict[str, Any]) -> str:
 
 def ensure_cooperative_shared_root(ctx: Any, root_task_id: str) -> str:
     """Mint (once per task-tree) ONE shared from-scratch git tree for a cooperative
-    acting-subagent build, reusing ``subagent_worktrees.provision_genesis_project``
+    acting-subagent build, reusing ``genesis_project.provision_genesis_project``
     (a durable standalone repo under the projects root, outside repo/ and data/).
     Cached by ``root_task_id`` so multiple fan-out waves share ONE tree. Children
     write into it via ``write_surface=external_workspace``; deeper descendants inherit
@@ -713,7 +709,7 @@ def ensure_cooperative_shared_root(ctx: Any, root_task_id: str) -> str:
         if cached and pathlib.Path(cached).is_dir():
             return cached
         try:
-            from ouroboros.subagent_worktrees import provision_genesis_project
+            from ouroboros.genesis_project import provision_genesis_project
 
             handle = provision_genesis_project(
                 repo_dir=ctx.repo_dir,
@@ -860,156 +856,51 @@ def child_budget_for_schedule(
     return child_budget
 
 
-def _ensure_project_scope(ctx: ToolContext, project_name: str = "", project_id: str = "") -> str:
-    """Create (or attach to) a named Ouroboros PROJECT and scope THE CURRENT task to
-    it — the in-task structural affordance for "create a project named X" once work
-    is already running. promote_chat_to_task only creates a NEW task in a project;
-    this binds the task you are ALREADY in (so you don't fall back to a bare mkdir).
-    Idempotent for the same project; refuses to re-scope to a different one.
-    Subagents inherit the parent's scope and cannot change it.
-    """
-    # delegation_role lives on the task metadata / contract lineage, NOT as a
-    # ToolContext attribute — read it the canonical way.
-    _meta = getattr(ctx, "task_metadata", {})
-    _meta = _meta if isinstance(_meta, dict) else {}
-    _contract = getattr(ctx, "task_contract", {})
-    _contract = _contract if isinstance(_contract, dict) else {}
-    _lineage = _contract.get("lineage", {}) if isinstance(_contract.get("lineage", {}), dict) else {}
-    if str(_meta.get("delegation_role") or _lineage.get("delegation_role") or "").strip() == "subagent":
-        return "⚠️ TOOL_ERROR (ensure_project_scope): subagents inherit the parent's project scope and cannot change it."
-    from ouroboros.project_facts import (
-        explicit_project_id_ok,
-        project_id_from_display_name,
-        sanitize_project_id,
-    )
+def _move_to_project(ctx: ToolContext, project_name: str = "", project_id: str = "") -> str:
+    """Place this work in a room; execution scope changes at readmission only."""
+    meta = getattr(ctx, "task_metadata", {}) or {}
+    contract = getattr(ctx, "task_contract", {}) or {}
+    lineage = contract.get("lineage") or {}
+    if str(meta.get("delegation_role") or lineage.get("delegation_role") or "") == "subagent":
+        return "⚠️ TOOL_ERROR (move_to_project): subagents inherit the parent's project scope."
+    from ouroboros.project_facts import explicit_project_id_ok, project_id_from_display_name
     from ouroboros.project_naming import clean_model_title
-
-    # Run the agent-supplied name through the SAME lexical cleaner admission naming and
-    # turn-into-project conversion use (project_naming SSOT) so every project-naming path
-    # produces consistent titles (quote/emoji strip, length cap); fall back to the raw value.
-    display_name = clean_model_title(project_name) or str(project_name or "").strip()
-    explicit = str(project_id or "").strip()
-    if explicit:
-        if not explicit_project_id_ok(explicit):
-            return (
-                f"⚠️ TOOL_ARG_ERROR (ensure_project_scope): project_id {explicit!r} is not "
-                "filesystem-clean; use lowercase alphanumeric/_/-/. (<=64 chars)"
-            )
-        pid = sanitize_project_id(explicit)
-    elif display_name:
-        pid = project_id_from_display_name(display_name)
-    else:
-        return "⚠️ TOOL_ARG_ERROR (ensure_project_scope): provide project_name (to create/name a project) or project_id (an existing one)."
-    if not pid:
-        return "⚠️ TOOL_ARG_ERROR (ensure_project_scope): could not derive a project id from the given name."
-
-    tid = str(getattr(ctx, "task_id", "") or "")
-    # The DURABLE binding is the one truth about this task's project (owner decision
-    # B4=A): ctx.project_id is an in-memory copy a mid-run conversion never reaches,
-    # and reading it alone is how a task already bound to one project minted a second,
-    # empty one. An unreadable store is DISCLOSED, not fatal - the work continues as
-    # it did before this seam existed; what is refused is the measured incident, a
-    # readable binding whose project the caller wants to replace with a new one.
-    # The EXACT binding of this task, never its owner message's: a sibling task of the
-    # same message that explicitly asks for a differently named project gets it (the
-    # model's ceiling, P13), and the handler makes the same split - a request that
-    # names the project the message already has simply attaches to it.
-    from ouroboros.config import DATA_DIR
-    from ouroboros.projects_registry import project_id_for_task
-    try:
-        bound = sanitize_project_id(project_id_for_task(DATA_DIR, tid, strict=True))
-    except Exception:
-        bound = ""
-        log.warning("project_binding_unreadable: ensure_project_scope for task %s continues "
-                    "as unbound", tid, exc_info=True)
-    current = bound or sanitize_project_id(getattr(ctx, "project_id", "") or "")
-    # A scope this tool set optimistically for an UNCONFIRMED bind is not a
-    # binding: the retry the unconfirmed result asks for must read the durable
-    # outcome (or bind again), never report "already scoped" on its own word.
-    pending = str(getattr(ctx, "_scope_pending_project", "") or "")
-    if current == pid and (bound or pending != pid):
-        ctx.project_id = pid
-        return f"OK: this task is already scoped to project '{pid}' (no change)."
-    if current and not bound and current != pid:
-        # Project-SCOPED but not project-BOUND (headless/CLI, or a bind still
-        # pending confirmation): there is no durable project to rename, so the
-        # old refusal stands; the same project while its bind is pending falls
-        # through and binds again.
-        return (f"⚠️ TOOL_ERROR (ensure_project_scope): this task is already scoped to project "
-                f"'{current}'; it cannot be re-scoped to '{pid}'.")
-    # Bound elsewhere: the request becomes a RENAME of the project this task already
-    # belongs to (B4=A), never a second project; the event keeps the REQUESTED id
-    # because the supervisor handler reads the same binding and owns that turn.
-    # The REST of this task is scoped immediately (journal_write, project knowledge)
-    # while the act rides the receipt rail under its own synthetic id and the RESULT
-    # states only the durable outcome the supervisor recorded -- confirmed, refused
-    # or unconfirmed like every other routing verb, never "OK" before a bind exists.
     from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX
     from ouroboros.tools.control import _attach_origin_from_metadata, _emit_and_wait_for_routing
 
-    previous_scope = str(getattr(ctx, "project_id", "") or "")
-    ctx.project_id = bound or pid
-    ctx._scope_pending_project = "" if bound else pid
-    routing_token = uuid.uuid4().hex
-    evt = {
-        "type": "ensure_project_scope", "task_id": tid, "project_id": pid,
-        "project_name": display_name, "routing_token": routing_token,
-        "client_message_id": f"{AGENT_RECEIPT_ID_PREFIX}{routing_token}", "ts": utc_now_iso(),
-    }
-    # A direct-chat task carries its ingress-captured origin in task_metadata; a
-    # QUEUED task's handler falls back to the persisted record, so the durable bind
-    # keeps the project's start-message identity on this mid-run path too.
-    _attach_origin_from_metadata(ctx, evt)
-    mode, receipt = _emit_and_wait_for_routing(ctx, evt)
-    return _scope_outcome_text(ctx, receipt, mode=mode, tid=tid, pid=pid, bound=bound,
-                               display_name=display_name, previous_scope=previous_scope)
-
-
-def _durable_scope_sentence(tid: str) -> str:
-    """What the bindings store says NOW -- the one truth about this task's project."""
-    from ouroboros.config import DATA_DIR
-    from ouroboros.projects_registry import get_project, project_id_for_task
+    name = clean_model_title(project_name) or str(project_name or "").strip()
+    pid = str(project_id or "").strip()
+    if pid and not explicit_project_id_ok(pid):
+        return "⚠️ TOOL_ARG_ERROR (move_to_project): project_id must be filesystem-clean."
+    pid = pid or project_id_from_display_name(name)
+    if not name and not str(project_id or "").strip():
+        return "⚠️ TOOL_ARG_ERROR (move_to_project): provide project_name or project_id."
+    tid = str(getattr(ctx, "task_id", "") or "")
+    if not tid:
+        return "⚠️ TOOL_ERROR (move_to_project): this work has no task id."
+    from ouroboros.project_placement import placement_basis
+    from ouroboros.tool_access import canonical_data_root
 
     try:
-        current = str(project_id_for_task(DATA_DIR, tid, strict=True) or "")
-    except Exception:
-        return "its durable binding could not be read"
-    if not current:
-        return "it is durably bound to no project"
-    name = str((get_project(DATA_DIR, current) or {}).get("name") or "")
-    return f"it is durably bound to project '{current}'" + (f" ({name})" if name and name != current else "")
-
-
-def _scope_outcome_text(ctx: ToolContext, receipt: Dict[str, Any], *, mode: str, tid: str, pid: str,
-                        bound: str, display_name: str, previous_scope: str) -> str:
-    """Render the supervisor's ensure receipt; the transport mode names no success."""
-    from ouroboros.project_facts import sanitize_project_id
-
-    status, reason, detail = (str(receipt.get(k) or "") for k in ("status", "reason", "detail"))
+        basis = placement_basis(canonical_data_root(ctx), tid, pid)
+    except Exception as exc:
+        return f"⚠️ SCOPE_REJECTED: placement could not be prepared ({type(exc).__name__}: {exc})."
+    token = uuid.uuid4().hex
+    evt = {
+        "type": "ensure_project_scope", "task_id": tid, "project_id": pid,
+        "project_name": name, "routing_token": token, "_project_admission": basis,
+        "client_message_id": f"{AGENT_RECEIPT_ID_PREFIX}{token}", "ts": utc_now_iso(),
+    }
+    _attach_origin_from_metadata(ctx, evt)
+    mode, receipt = _emit_and_wait_for_routing(ctx, evt)
+    status = str(receipt.get("status") or "unconfirmed")
     if status == "delivered":
-        ctx._scope_pending_project = ""
-        how = {"created": "created", "adopted": "joined", "attached": "attached to"}.get(reason, "bound to")
-        return (f"OK: this task is now durably bound to project '{pid}'{f' ({display_name})' if display_name else ''} "
-                f"({how} it; {_durable_scope_sentence(tid)}). journal_write and project knowledge target it; "
-                "its live progress routes to the project thread.")
-    if status in {"rejected", "needs_manual_target"} and reason == "project_scope_conflict":
-        # The supervisor names the project this task is ACTUALLY bound to (a
-        # conversion may have won after this tool read the binding): the worker
-        # scope follows that target, and the rename status is rendered apart.
-        actual = sanitize_project_id(str(receipt.get("target") or "")) or bound
-        if actual:
-            ctx.project_id = actual
-        ctx._scope_pending_project = ""
-        rename = {"renamed": f"; the requested name '{display_name}' was applied to it as a rename",
-                  "rename_failed": f"; renaming it to '{display_name}' FAILED"}.get(detail, "")
-        return (f"OK: this task stays durably bound to project '{actual or 'it already had'}' and no second "
-                f"project was created{rename} ({_durable_scope_sentence(tid)}).")
+        actual = str(receipt.get("target") or pid)
+        return (f"OK: this work ({tid}) lives in project '{actual}'. "
+                "Its routing, journal and knowledge now use that room; folder and writer lease "
+                "change at its next execution boundary. Knowledge is not automatically reloaded.")
+    reason = str(receipt.get("reason") or "confirmation_pending")
     if status in {"rejected", "needs_manual_target"}:
-        ctx._scope_pending_project = ""
-        ctx.project_id = previous_scope
-        return (f"⚠️ SCOPE_REJECTED ({reason or 'refused'}): this task was NOT bound to project '{pid}'"
-                f"{f' -- {detail}' if detail else ''}; {_durable_scope_sentence(tid)} and its scope is unchanged.")
-    return (f"⚠️ SCOPE_UNCONFIRMED: binding this task to project '{pid}' was not confirmed "
-            f"({mode}, {reason or 'confirmation_timeout'}); do not report it as scoped. Right now "
-            f"{_durable_scope_sentence(tid)}. journal_write targets '{pid}' meanwhile; call "
-            "ensure_project_scope again with the same project to read the durable outcome.")
+        return f"⚠️ SCOPE_REJECTED ({reason}): {receipt.get('detail') or 'placement did not complete'}."
+    return (f"SCOPE_UNCONFIRMED: placement of this work in '{pid}' is pending ({mode}, {reason}). "
+            "Its durable binding remains the authority; move_to_project can reconcile it.")

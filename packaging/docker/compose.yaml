@@ -18,6 +18,14 @@ x-ouroboros: &ouroboros
   stop_grace_period: 30s
   ports:
     - "127.0.0.1:8765:8765"
+  # Healthy while the process lives and boot.phase is not "failed", including
+  # before the socket opens. start_period is 0s: a long boot is not a deadline.
+  healthcheck:
+    test: ["CMD", "/opt/python-standalone/bin/python3", "/app/packaging/docker/boot_health.py"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 0s
 
 services:
   # Immutable image: code and packages come from the image; Update means a new image.

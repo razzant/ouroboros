@@ -61,6 +61,10 @@ def is_external_workspace(ctx: Any) -> bool:
 
 
 def active_tool_profile(ctx: Any) -> ToolProfile:
+    metadata = getattr(ctx, "task_metadata", None) or {}
+    frozen = metadata.get("tool_profile")
+    if frozen == "local_readonly_subagent":
+        return "local_readonly_subagent"
     constraint = _tool_access().normalize_task_constraint(getattr(ctx, "task_constraint", None))
     mode = str(getattr(constraint, "mode", "") or "").strip()
     if mode == _tool_access().LOCAL_READONLY_SUBAGENT_MODE:
@@ -78,6 +82,9 @@ def active_tool_profile(ctx: Any) -> ToolProfile:
     # self_modification. The parent remains the sole local writer/committer.
     if _is_subagent_ctx(ctx):
         return "local_readonly_subagent"
+    if frozen in {"operator_control", "self_modification", "workspace_task",
+                  "external_workspace_task", "local_readonly_subagent", "acting_subagent"}:
+        return frozen
     if bool(getattr(ctx, "is_workspace_mode", lambda: False)()):
         # Keep distinct preset names for focus/path diagnostics. Both use the
         # shared ordinary principal; external host-scratch reach is a path fact.
@@ -87,6 +94,24 @@ def active_tool_profile(ctx: Any) -> ToolProfile:
     if bool(getattr(ctx, "is_direct_chat", False)):
         return "operator_control"
     return "self_modification"
+
+
+def freeze_tool_profile(task: dict) -> str:
+    """Bind admission authority once; moving execution never selects a new preset.
+
+    Delegated constraints still take precedence in active_tool_profile. Presence
+    and consciousness keep their separate binding/disabled-tool ceilings.
+    """
+    from types import SimpleNamespace
+
+    ctx = SimpleNamespace(
+        task_constraint=task.get("task_constraint"), task_contract=task.get("task_contract"),
+        task_metadata={**{key: value for key, value in (task.get("metadata") or {}).items() if key != "tool_profile"},
+                       **{key: task[key] for key in ("tool_profile", "delegation_role") if key in task}},
+        is_workspace_mode=lambda: bool(task.get("workspace_root") and str(task.get("workspace_mode") or "").strip()),
+        workspace_mode=task.get("workspace_mode"), is_direct_chat=bool(task.get("_is_direct_chat")))
+    task["tool_profile"] = active_tool_profile(ctx)
+    return task["tool_profile"]
 
 
 def predicted_subagent_profile(*, write_surface: str = "") -> ToolProfile:

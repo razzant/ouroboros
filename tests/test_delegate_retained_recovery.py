@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 
 import pytest
+
+from tests._delegate_capture_child import capture_child  # noqa: F401
 
 from ouroboros import delegate_collection as body
 from ouroboros import delegate_custody as custody
@@ -11,10 +14,12 @@ from ouroboros import delegate_custody_current as current
 from ouroboros.gateways.claudexor import ClaudexorUnavailable
 from ouroboros.tools.delegate_terminal_evidence import collect_and_deliver_terminal, retained_terminal_result
 from ouroboros.tools.registry import ToolContext
-from tests.test_delegate_body_collection import money, started, terminal  # noqa: F401
+from tests.test_delegate_body_collection import _until, money, started, terminal  # noqa: F401
 
 
 class AbsentGateway:
+    store_identity = "store-a"
+
     def __init__(self, *, handshake_error=False):
         self.reads = 0
         self.closed = False
@@ -45,6 +50,7 @@ def recover(root, entry, factory, surface):
 @pytest.mark.parametrize("pending", [False, True])
 def test_settled_local_capture_recovers_without_remote_run(tmp_path, monkeypatch, money, surface, transport, pending):  # noqa: F811
     from ouroboros import claudexor_daemon
+    from ouroboros import delegate_capture_job
     from ouroboros.subagent_worktrees import find_execution_snapshot
     from ouroboros.tools import delegate_integration
     from tests.test_delegated_run_isolation import TestCaptureAndIntegrate, _isolated_entry
@@ -66,7 +72,9 @@ def test_settled_local_capture_recovers_without_remote_run(tmp_path, monkeypatch
     if pending:
         _pending(root, task_id=entry.task_id)
     gateway = AbsentGateway(handshake_error=transport == "handshake")
+    connections = []
     def factory():
+        connections.append(True)
         if transport == "factory":
             raise ClaudexorUnavailable("daemon_unreachable", "controlled factory gap")
         return gateway
@@ -76,11 +84,27 @@ def test_settled_local_capture_recovers_without_remote_run(tmp_path, monkeypatch
     monkeypatch.setattr(gateway, "start_run",
                         lambda *a, **kw: pytest.fail("collection cannot replay a pending start"), raising=False)
     outcomes = recover(root, entry, None, surface)  # public default must attach only
-    assert outcomes
+    assert not current.run(root, entry.run_id).patch_captured
     if pending:
         assert _pending_ids(root, entry.task_id) == [INVOCATION]
         retained = [row for row in outcomes if row.get("action") == "invocation_retained"]
         assert bool(retained) == (surface == "orphan")
+    capture = delegate_capture_job._capture
+    entered, release = threading.Event(), threading.Event()
+    def gated_capture(*args, **kwargs):
+        entered.set()
+        assert release.wait(10), "child capture gate was not released"
+        return capture(*args, **kwargs)
+    monkeypatch.setattr(delegate_capture_job, "_capture", gated_capture)
+    runtime = body.start_body_runtime(root, gateway_factory=factory)
+    try:
+        _until(entered.is_set)
+        assert not current.run(root, entry.run_id).patch_captured
+        release.set()
+        _until(lambda: current.run(root, entry.run_id).patch_captured)
+    finally:
+        release.set()
+        runtime.close(wait=True)
     after = current.run(root, entry.run_id)
     assert after.patch_captured and not body.collection_pending(after)
     assert after.terminal_source == before.terminal_source
@@ -88,7 +112,7 @@ def test_settled_local_capture_recovers_without_remote_run(tmp_path, monkeypatch
     assert not after.patch_disposed and find_execution_snapshot(handle.snapshot_id)
     assert (target / "tracked.txt").read_text(encoding="utf-8") != "retained work\n"
     assert gateway.reads == 0 and len(money) == 1
-    assert gateway.closed == (transport != "factory")
+    assert not connections and not gateway.closed, "local capture neither opens nor closes an unused gateway"
     assert not any(row["type"] == custody.CLOSED_ABSENT for row in custody.custody_rows(root))
 
 
@@ -103,12 +127,12 @@ def test_unchanged_local_debt_emits_no_reconciliation_storm(tmp_path, monkeypatc
     body.collect_terminal(tmp_path, entry.run_id, detail=terminal())
     gateway = AbsentGateway()
     first = recover(tmp_path, entry, lambda: gateway, "orphan")
-    assert first[0]["collection"]["status"] == "pending"
+    assert first == []
     after_first = list(custody.custody_rows(tmp_path))
     for _ in range(3):
         result = recover(tmp_path, entry, lambda: gateway, "orphan")
-        assert result[0]["collection"]["status"] == "pending"
-    assert len(calls) == 5, "the existing recovery owner still attempts the owed local duty"
+        assert result == []
+    assert len(calls) == 1, "control reconciliation leaves local collection to the body"
     assert list(custody.custody_rows(tmp_path)) == after_first
     assert current.run(tmp_path, entry.run_id).settled and len(money) == 1
     assert body.collection_pending(current.run(tmp_path, entry.run_id))
@@ -117,11 +141,13 @@ def test_unchanged_local_debt_emits_no_reconciliation_storm(tmp_path, monkeypatc
 
 @pytest.mark.parametrize("review", [False, True])
 def test_unsettled_absence_keeps_existing_recovery_semantics(tmp_path, review):
-    entry = started(tmp_path, **({"source": "review_substrate:slot"} if review else {}))
+    entry = started(tmp_path, daemon_store_id="store-a",
+                    **({"source": "review_substrate:slot"} if review else {}))
     assert entry.review_owned == review
     gateway = AbsentGateway()
     result = recover(tmp_path, entry, lambda: gateway, "orphan")
     assert result[0]["action"] == "absent" and gateway.reads == 1
+    assert gateway.closed, "an acquired observation client is still closed"
     assert len([row for row in custody.custody_rows(tmp_path) if row["type"] == custody.CLOSED_ABSENT]) == 1
 
 

@@ -8,6 +8,7 @@ from ouroboros.owner_quiz import (
     reconcile_terminal, record_answered, record_asked, record_closed, record_publication,
 )
 from tests.test_quiz_answer import _decision_app, _post, _tool_ctx
+from tests import _dialogue as dialogue_test
 
 
 def ask(root, qid="q", task="t"):
@@ -88,6 +89,67 @@ def test_close_uses_validated_canonical_retry_lineage_not_root_equality(tmp_path
         assert result["error"] == "question_not_owned"
 
 
+@pytest.mark.parametrize("words", ["", "   "])
+def test_the_owner_closes_in_one_tap_while_a_model_still_explains(tmp_path, words):
+    from ouroboros.owner_quiz import OWNER_CLOSE_REASON
+
+    ask(tmp_path, "tapped")
+    ask(tmp_path, "typed")
+    assert record_closed(tmp_path, "t", quiz_id="tapped", reason=words, actor_task_id="t")["error"] == "close_reason_required"
+    assert current_question(quiz_states(tmp_path, "t")["tapped"])
+    tapped = record_closed(tmp_path, "t", quiz_id="tapped", reason=words, actor="owner", request_id="tap")["block"]
+    assert tapped["closed_reason"] == OWNER_CLOSE_REASON == "Closed by the owner without an answer."
+    assert tapped["closed_actor"] == "owner" and "closed_by_task_id" not in tapped
+    assert "answered_index" not in tapped and not current_question(tapped)
+    typed = record_closed(tmp_path, "t", quiz_id="typed", reason=" No longer needed ", actor="owner", request_id="typed")
+    assert typed["block"]["closed_reason"] == " No longer needed "  # the owner's own words stay verbatim
+    retry = record_closed(tmp_path, "t", quiz_id="tapped", reason="Different words", actor="owner", request_id="tap")
+    assert retry["duplicate"] and retry["block"]["closed_reason"] == OWNER_CLOSE_REASON
+
+
+@pytest.mark.parametrize("finished", [True, False])
+def test_a_model_closes_another_tasks_question_only_once_that_task_finished(tmp_path, finished):
+    ask(tmp_path, task="author")
+    if finished:
+        reconcile_terminal(tmp_path, "author")
+    outcome = record_closed(tmp_path, "author", quiz_id="q", reason="The shipped release settled it", actor_task_id="later")
+    block = quiz_states(tmp_path, "author")["q"]
+    if not finished:  # a live task's question stays its own line's or the owner's
+        assert outcome == {"ok": False, "error": "question_not_owned", "state": "open", "block": block}
+        assert current_question(block) and "closed_reason" not in block
+        return
+    assert outcome["ok"] and block["state"] == "closed" and block["closed_actor"] == "model"
+    assert block["closed_reason"] == "The shipped release settled it" and block["closed_by_task_id"] == "later"
+    retry = record_closed(tmp_path, "author", quiz_id="q", reason="Other words", actor_task_id="later")
+    assert retry["duplicate"] and retry["block"]["closed_reason"] == "The shipped release settled it"
+    assert record_closed(tmp_path, "author", quiz_id="q", reason="Mine too", actor_task_id="third")["error"] == "quiz_closed"
+
+
+@pytest.mark.parametrize("caller", ["root", "child"])
+def test_only_an_active_root_closes_a_finished_tasks_question_and_gains_no_material_authority(tmp_path, caller):
+    from ouroboros.artifacts import store_task_artifact_bytes
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.core_artifacts import _escalate
+
+    write_task_result(tmp_path, "finished", "completed", chat_id=1)
+    store_task_artifact_bytes(tmp_path, "finished", name="evidence.txt", data=b"Finished evidence")
+    ask(tmp_path, task="finished")
+    reconcile_terminal(tmp_path, "finished")
+    ctx = _tool_ctx(tmp_path, task_id="later", parent="" if caller == "root" else "root-1")
+    receipt = _escalate(ctx, action="close", quiz_id="q", question_task_id="finished", reason="The report answered it")
+    block = quiz_states(tmp_path, "finished")["q"]
+    if caller == "child":
+        assert "QUIZ_CLOSE_UNAVAILABLE" in receipt and block["state"] == "expired_terminal"
+        assert not ctx.pending_events
+        return
+    assert receipt.startswith("OK:") and block["closed_by_task_id"] == "later"
+    assert ctx.pending_events[0]["type"] == "send_quiz_state" and ctx.pending_events[0]["task_id"] == "finished"
+    # Closing that question is not a claim on the finished task's line: its files stay outside materials.
+    refused = _escalate(ctx, question="Proceed?", assumption="Research",
+                        materials=[{"task_id": "finished", "name": "evidence.txt"}])
+    assert "QUIZ_MATERIAL_INVALID" in refused and not quiz_states(tmp_path, "later")
+
+
 def test_explicit_close_in_same_tool_batch_cancels_only_its_pending_wait(tmp_path):
     from ouroboros.tools.core_artifacts import _escalate
 
@@ -112,7 +174,8 @@ def test_publication_address_precedes_exposure_and_wins_over_stale_retries(tmp_p
     def observe(frame):
         block = quiz_states(tmp_path, "t")["q"]
         assert block["publication_chat_id"] == frame["chat_id"] == 77
-        assert (tmp_path / "logs/chat.jsonl").exists()
+        row = dialogue_test.chat_rows(tmp_path)[-1]
+        assert row["chat_id"] == 77 and row["quiz"]["quiz_id"] == "q"
         observed.append(frame)
     bridge._broadcast_fn = observe
     for requested in (77, 1):

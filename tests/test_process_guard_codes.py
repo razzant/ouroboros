@@ -287,7 +287,7 @@ def test_both_git_receiver_branches_preserve_exact_text_and_stable_code(
         text=(
             "⚠️ GIT_VIA_SHELL_BLOCKED: `git commit` is blocked for acting self_worktree "
             "children (no commits; the parent integrates the returned patch and is the sole "
-            "committer). For read-only git: vcs_status, vcs_diff tools, or run_command with "
+            "committer). For read-only git: vcs_read tool, or run_command with "
             "git log/show/diff/status/rev-list/show-ref/for-each-ref/listing branch-tag forms."
         ),
     )
@@ -313,7 +313,7 @@ def test_both_git_receiver_branches_preserve_exact_text_and_stable_code(
             "may not target the Ouroboros runtime (system repo / data drives): self-repo "
             "changes go through commit_reviewed, which enforces pre-commit checks and review. "
             "Read-only git (status/log/diff/show/rev-parse/branch- and tag-listing, or the "
-            "vcs_status/vcs_diff tools) works everywhere, and mutating git is free in any "
+            "vcs_read tool) works everywhere, and mutating git is free in any "
             "tree OUTSIDE the runtime (e.g. ~/projects, /tmp, an attached project folder)."
         ),
     )

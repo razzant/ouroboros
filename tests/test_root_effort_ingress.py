@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import queue
+import threading
 import types
 
 import pytest
@@ -66,18 +67,33 @@ def _promoted(tmp_path, monkeypatch, **promote_kwargs):
     """Promote through the tool, the event, the supervisor admission and its receipt.
     A root Ouroboros creates itself takes an explicit effort in Cyber Pro only."""
     from ouroboros.task_results import load_task_result
-    from ouroboros.tools.control import _promote_chat_to_task
+    from ouroboros.tools.control import _start_task
 
     if "reasoning_effort" in promote_kwargs:
         monkeypatch.setattr("ouroboros.config._BOOT_RUNTIME_MODE", "cyber_pro")
     _q, _state, workers = _install_queue(tmp_path, monkeypatch)
     _pool_ready(monkeypatch, workers)
     sup = _supervisor_ctx(tmp_path, workers)
-    out = _promote_chat_to_task(_tool_ctx(tmp_path, sup), "Research the market", title="Market research",
-                                workspace="none", predecessor_task_id="", **promote_kwargs)
+    out = _start_task(_tool_ctx(tmp_path, sup), "Research the market", title="Market research",
+                                workspace="none",  **promote_kwargs)
     assert out.startswith("OK: task"), out
     [task] = workers.PENDING
     return task, load_task_result(tmp_path, task["id"]), workers
+
+
+_POST_TASK_WAIT_SEC = 60.0  # a bound for a stubbed post-task pass, not a judgment about its speed
+
+
+def _wait_for_post_task(started):
+    """Outside a worker process a root's post-task synthesis runs on a detached thread
+    (``agent_task_pipeline``). The round this test drove started it, so the test waits for it
+    instead of leaving it to the thread-hygiene grace, which a slow runner outlasts."""
+    from tests.conftest import _DETACHED_THREAD_NAME_PREFIXES
+
+    for thread in set(threading.enumerate()) - started:
+        if not thread.name.startswith(_DETACHED_THREAD_NAME_PREFIXES):
+            thread.join(_POST_TASK_WAIT_SEC)
+            assert not thread.is_alive(), f"{thread.name} still runs {_POST_TASK_WAIT_SEC}s after the round"
 
 
 def _first_round(tmp_path, monkeypatch, task, *, wire=False):
@@ -123,7 +139,9 @@ def _first_round(tmp_path, monkeypatch, task, *, wire=False):
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
     agent = agent_module.OuroborosAgent(agent_module.Env(repo_dir=repo, drive_root=tmp_path), event_queue=events)
+    started = set(threading.enumerate())
     agent._handle_task_scoped({**task, "drive_root": str(tmp_path)})
+    _wait_for_post_task(started)
     assert captured, "the real first round never reached the physical executor"
     first = captured[0]
     if not wire:
@@ -150,49 +168,6 @@ def test_omission_keeps_the_task_default_and_leaves_no_field(tmp_path, monkeypat
     task, row, _workers = _promoted(tmp_path, monkeypatch)
     assert "reasoning_effort" not in task and not row.get("reasoning_effort")
     assert _first_round(tmp_path, monkeypatch, task)[0] == "low"  # OUROBOROS_EFFORT_TASK
-
-
-@pytest.mark.parametrize("bad", ["", "  ", "turbo", 3, ["high"], {"tier": "high"}])
-def test_an_invalid_effort_is_refused_before_any_promote_or_route_effect(tmp_path, monkeypatch, bad):
-    from ouroboros.tools.control import _promote_chat_to_task, _route_to_project
-
-    _q, _state, workers = _install_queue(tmp_path, monkeypatch)
-    _pool_ready(monkeypatch, workers)
-    ctx = _tool_ctx(tmp_path, _supervisor_ctx(tmp_path, workers))
-    ctx.event_queue = types.SimpleNamespace(put_nowait=lambda evt: pytest.fail(f"emitted {evt}"))
-    out = _promote_chat_to_task(ctx, "x", predecessor_task_id="", reasoning_effort=bad)
-    assert out.startswith("⚠️ TOOL_ARG_ERROR (promote_chat_to_task): reasoning_effort must be one of")
-    routed = _route_to_project(ctx, project_id="racer", message="x", predecessor_task_id="", reasoning_effort=bad)
-    assert routed.startswith("⚠️ TOOL_ARG_ERROR (route_to_project): reasoning_effort must be one of")
-    assert workers.PENDING == [] and ctx.pending_events == []
-    assert not (tmp_path / "task_results").exists() or not list((tmp_path / "task_results").iterdir())
-
-
-def test_route_to_project_carries_it_and_the_picker_discloses_new_vs_existing_behavior(tmp_path, monkeypatch):
-    from ouroboros.projects_registry import create_project
-    from ouroboros.task_results import load_task_result
-    from ouroboros.tools.control import _route_to_project
-
-    monkeypatch.setattr("ouroboros.config._BOOT_RUNTIME_MODE", "cyber_pro")  # applied in Cyber Pro only
-    _q, _state, workers = _install_queue(tmp_path, monkeypatch)
-    _pool_ready(monkeypatch, workers)
-    create_project(tmp_path, "racer", name="Racer")
-    ctx = _tool_ctx(tmp_path, _supervisor_ctx(tmp_path, workers))
-    out = _route_to_project(ctx, project_id="racer", message="continue the racer", title="Project work", predecessor_task_id="",
-                            reasoning_effort="max")
-    assert out.startswith("✉️ Routed to project"), out
-    [task] = workers.PENDING
-    assert task["project_id"] == "racer" and task["reasoning_effort"] == "max"
-    assert load_task_result(tmp_path, task["id"])["reasoning_effort"] == "max"
-    # An owner turn with no resolvable project gets the owner's picker; a New task
-    # uses the request, while an existing-task steer leaves its effort unchanged.
-    monkeypatch.setattr("ouroboros.tools.control_routing._emit_and_wait_for_routing",
-                        lambda _ctx, evt: ("live", {"status": "needs_manual_target", "options": []}))
-    ctx.is_direct_chat = True
-    picker = _route_to_project(ctx, project_id="", message="which one?", predecessor_task_id="",
-                               reasoning_effort="max")
-    assert "A New task picked from it starts on reasoning_effort=max" in picker
-    assert "picking an existing task delivers the message there and leaves that task's effort unchanged" in picker
 
 
 def test_first_round_physical_wire_keeps_requested_submitted_clamped_and_observed_separate(tmp_path, monkeypatch):
@@ -464,8 +439,8 @@ def test_configured_children_keep_their_profile_and_ask_for_effort_through_their
     from ouroboros.tools.control import get_tools
 
     schemas = {entry.name: entry.schema for entry in get_tools()}
-    assert "reasoning_effort" in schemas["promote_chat_to_task"]["parameters"]["properties"]
-    assert "reasoning_effort" in schemas["route_to_project"]["parameters"]["properties"]
+    assert "reasoning_effort" in schemas["start_task"]["parameters"]["properties"]
+    assert "route_to_project" not in schemas
     child = schemas["schedule_subagent"]["parameters"]["properties"]
     assert "reasoning_effort" not in child and child["effort"]["default"] == "auto"
     assert "reasoning_effort" in LEGACY_SUBAGENT_FIELDS  # a pre-record stored child value stays ignored
@@ -473,6 +448,6 @@ def test_configured_children_keep_their_profile_and_ask_for_effort_through_their
 
     assert child["effort"]["enum"] == ["auto", *EFFORT_SCALE]
 
-    assert schemas["promote_chat_to_task"]["parameters"]["properties"]["reasoning_effort"]["enum"] == \
+    assert schemas["start_task"]["parameters"]["properties"]["reasoning_effort"]["enum"] == \
         list(EFFORT_SCALE)
-    assert json.dumps(schemas["promote_chat_to_task"])  # serializable as sent
+    assert json.dumps(schemas["start_task"])  # serializable as sent

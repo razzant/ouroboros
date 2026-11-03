@@ -13,32 +13,83 @@ import { ElementStub } from './chat_dom_fixture.js';
 
 const chatSource = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
 
-test('one history status stays in persistent chrome for gaps, failure and approximate restoration', () => {
+test('hidden hydration defers the document notice; a completed hidden window leaves no stale notice', () => {
+    const doc = { byId: new Map(), createElement: tag => new ElementStub(tag, doc) };
+    const messages = new ElementStub('div', doc);
+    messages.isConnected = true;
+    let visible = false;
+    const notices = [];
+    const controls = createHistoryControls(messages, null, {
+        isVisible: () => visible, onGapNotice: text => notices.push(text),
+    });
+    const snapshot = { initialized: true, canOlder: true };
+    visible = true;
+    controls.render({ initialized: false }, { gaps: true });
+    controls.showNotice();
+    assert.equal(notices.length, 0, 'unknown initial coverage is not a read gap');
+    visible = false;
+    controls.render(snapshot, { gaps: true });
+    assert.equal(notices.length, 0);
+    assert.match(messages.querySelector('.chat-load-older-note').textContent, /gaps/);
+    controls.render(snapshot, { complete: true });
+    visible = true;
+    controls.showNotice();
+    assert.equal(notices.length, 0, 'resolved coverage cannot leave a pending gap');
+    visible = false;
+    controls.render(snapshot, { gaps: true });
+    visible = true;
+    controls.showNotice();
+    controls.showNotice();
+    assert.equal(notices.length, 1);
+    controls.destroy();
+});
+
+test('gaps stay at the feed edge with a once-per-document notice while failure and approximate restoration use persistent chrome', () => {
     const doc = { byId: new Map(), createElement: tag => new ElementStub(tag, doc) };
     const messages = new ElementStub('div', doc), chrome = new ElementStub('div', doc);
     messages.isConnected = chrome.isConnected = true;
-    const controls = createHistoryControls(messages, chrome);
+    const notices = [];
+    const controls = createHistoryControls(messages, chrome, { onGapNotice: (text) => notices.push(text) });
     const snapshot = { initialized: true, canOlder: true };
+    controls.render(snapshot, { gaps: true }, false);
+    assert.equal(chrome.querySelector('.chat-history-status'), null);
+    const feedNote = messages.querySelector('.chat-load-older').querySelector('.chat-load-older-note');
+    assert.equal(feedNote.textContent, 'Some saved history is not loaded. Shown messages may have gaps.');
+    assert.deepEqual(notices, ['Some saved history is not loaded. Shown messages may have gaps.']);
+    const otherMessages = new ElementStub('div', doc), otherChrome = new ElementStub('div', doc);
+    otherMessages.isConnected = otherChrome.isConnected = true;
+    const otherControls = createHistoryControls(otherMessages, otherChrome, { onGapNotice: (text) => notices.push(text) });
+    otherControls.render(snapshot, { gaps: true }, false);
+    assert.equal(notices.length, 1, 'gap notice fires once per document across room switches and reopens');
     controls.render(snapshot, { gaps: true }, true);
     const note = chrome.querySelector('.chat-history-status');
-    assert.match(note.textContent, /Shown messages may have gaps.*could not be restored exactly/);
-    assert.equal(messages.querySelector('.chat-load-older').querySelector('.chat-load-older-note'), null);
+    assert.equal(note.textContent, 'Saved position could not be restored exactly.');
+    const gap = messages.querySelector('.chat-history-gap');
+    assert.equal(gap.hidden, false);
+    assert.equal(gap.textContent, 'Some saved history is not loaded. Shown messages may have gaps.');
+    controls.render({ ...snapshot, error: new Error('read failed') }, { gaps: true }, true);
+    assert.equal(gap.hidden, false, 'load failure must not erase the reading-edge gap explanation');
     controls.render({ ...snapshot, error: new Error('read failed') }, {}, true);
     assert.equal(chrome.querySelector('.chat-history-status'), note);
     assert.match(note.textContent, /could not be loaded.*could not be restored exactly/);
     controls.render(snapshot, { complete: true }, false);
+    assert.equal(gap.hidden, true);
     assert.equal(chrome.children.length, 0);
     assert.equal(messages.querySelector('.chat-load-older').querySelector('.chat-load-older-note'), note);
     assert.equal(note.textContent, 'Beginning of saved history');
 });
 
-test('a status moved into persistent chrome leaves no empty history control padding', () => {
+test('a status moved into persistent chrome leaves no empty history control padding while gaps stay at the feed edge', () => {
     const doc = { byId: new Map(), createElement: tag => new ElementStub(tag, doc) };
     const messages = new ElementStub('div', doc), chrome = new ElementStub('div', doc);
     messages.isConnected = chrome.isConnected = true;
-    const controls = createHistoryControls(messages, chrome);
+    const controls = createHistoryControls(messages, chrome, { onGapNotice() {} });
     controls.render({ initialized: true, canOlder: false, canNewer: false }, { gaps: true });
     assert.equal(controls.olderButton.hidden, true);
+    assert.equal(chrome.querySelector('.chat-history-status'), null);
+    assert.equal(messages.querySelector('.chat-load-older')?.hidden, false);
+    assert.equal(messages.querySelector('.chat-load-older')?.querySelector('.chat-load-older-note')?.hidden, false);
+    controls.render({ initialized: true, canOlder: false, canNewer: false }, {}, true);
     assert.equal(chrome.querySelector('.chat-history-status')?.hidden, false);
     assert.equal(messages.querySelector('.chat-load-older')?.hidden, true);
 });
@@ -63,6 +114,18 @@ test('history chrome shares one control and derives completeness from physical c
     assert.equal(messages.querySelector('.chat-load-older')
         .querySelector('.chat-load-older-note').textContent, 'Beginning of saved history');
     assert.equal(controls.olderButton.hidden, true);
+});
+
+test('at its older end a grown room offers the way on, a chain a navigation began does not', () => {
+    const doc = { byId: new Map(), createElement: (tag) => new ElementStub(tag, doc) };
+    const messages = new ElementStub('div', doc);
+    messages.isConnected = true;
+    const controls = createHistoryControls(messages);
+    const exhausted = { initialized: true, canOlder: false, canNewer: false, olderExhausted: true, loading: '', error: null };
+    controls.render(exhausted, { horizonGap: true });
+    assert.equal(controls.olderButton.hidden, false, 'a grown room re-anchors to the present from here');
+    controls.render({ ...exhausted, away: true }, { horizonGap: true });
+    assert.equal(controls.olderButton.hidden, true, 'a page around a task never sends Load more to the present');
 });
 
 test('the empty-Main greeting and the reconnect notice are chrome: a read over them still shows its loading and failure', () => {
@@ -97,19 +160,18 @@ test('the empty-Main greeting and the reconnect notice are chrome: a read over t
 test('sticky single-flight never swallows the post-completion resync', () => {
     // [GPT#12 + Fable#1] scheduleHistorySync (700ms debounce after task
     // completion) must do a REAL fetch — a lost task_done is healed only by
-    // refetching — so it calls syncHistory directly, never the sticky
-    // awaitInitialHydration shortcut.
+    // refetching — so it reads through the pager (what arrived since the newest
+    // read, else the newest page; chat_history_arrivals.test.js), never the
+    // sticky awaitInitialHydration shortcut.
     const fn = chatSource.slice(
         chatSource.indexOf('function scheduleHistorySync('),
         chatSource.indexOf('function applyLiveCardState('),
     );
-    assert.match(fn, /syncHistory\(\{ includeUser: false \}\)/);
+    assert.match(fn, /run: \(\) => historyPager\.read\(\)/);
     assert.doesNotMatch(fn, /awaitInitialHydration/);
-    // The reconnect branch of the open handler also always refetches.
-    assert.match(
-        chatSource,
-        /\? syncHistory\(\{ includeUser: !historyLoaded, fromReconnect: isReconnect \}\)/,
-    );
+    // The reconnect branch of the open handler reads the newest page whole (frames sent while away are lost),
+    // through the read that folds every reconnect arriving meanwhile into one more.
+    assert.match(chatSource, /\? syncHistory\(\{ fromReconnect: true \}\)/);
     // Every failed sync resets the sticky promise.
     assert.ok((chatSource.match(/initialHydrationPromise = null;/g) || []).length >= 3);
 });

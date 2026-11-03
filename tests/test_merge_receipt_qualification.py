@@ -1,13 +1,14 @@
 """Exercise merge uncertainty and publication through registered tool/delivery consumers."""
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+
 import asyncio
 import dataclasses
 import json
 import os
 import pathlib
 import shutil
-import subprocess
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
@@ -21,6 +22,7 @@ from tests import test_pr_merge_receipts as merge_fixture
 from tests.test_pr_merge_receipts import BASE, HEAD, MERGE, TREE, _receipts
 from tests._store_shared import delete_result, read_result, seed_result, unreadable_result
 from tests._cancel_intents_shared import DeliveryBus
+from tests.group_run import run_in_group
 
 world = merge_fixture.world
 
@@ -239,13 +241,134 @@ def test_concurrent_publication_through_outbox_dedup_and_history(world, monkeypa
     fixture.write_text(json.dumps({"live": chats, "history": rows}), encoding="utf-8")
     node = shutil.which("node")
     assert node, "node is required for the real live/replay projection qualification"
-    result = subprocess.run([node, "--test", "--test-name-pattern=canonical receipt revisions",
-                             "web/tests/chat_card_row_placement.test.js"],
-                            cwd=pathlib.Path(__file__).resolve().parents[1],
-                            env={**os.environ, "MERGE_RECEIPT_PROJECTION": str(fixture)},
-                            capture_output=True, text=True, timeout=30)
+    result = run_in_group([node, "--test", "--test-name-pattern=canonical receipt revisions",
+                           "web/tests/chat_card_row_placement.test.js"],
+                          cwd=pathlib.Path(__file__).resolve().parents[1],
+                          env={**os.environ, "MERGE_RECEIPT_PROJECTION": str(fixture)}, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     assert sum(c[:2] == ["pr", "merge"] for c in world.gh.calls) == 1
+
+
+def closed_receipt_projection(world, monkeypatch, act=None):
+    """Queued, then CLOSED twice (or ``act``'s calls), through the real outbox consumer and history endpoint."""
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from supervisor import events_chat_delivery as delivery
+    from supervisor import message_bus
+    from supervisor import terminal_delivery as td
+
+    monkeypatch.setattr(delivery, "_DELIVERED_MESSAGE_IDS", deque(maxlen=1000))
+    monkeypatch.setattr(message_bus, "DATA_DIR", world.root)
+    monkeypatch.setattr(message_bus, "publish_event", lambda *a, **k: None)
+    bridge = message_bus.LocalChatBridge({})
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 7})
+    frames = []
+    bridge._broadcast_fn = frames.append
+    ctx = SimpleNamespace(DRIVE_ROOT=world.root, task_registry={}, send_with_budget=message_bus.send_with_budget,
+                          append_jsonl=lambda *a: pytest.fail(f"delivery error {a}"))
+    if act is None:
+        world.gh.merge = "queued"
+        texts = [registered_merge(world)]
+        world.gh.pr.update(state="CLOSED", autoMergeRequest=None)
+        texts += [registered_merge(world), registered_merge(world)]
+    else:
+        texts = act()
+    for event in world.ctx.pending_events:
+        delivery._handle_send_message(event, ctx)
+    assert td.pending_deliveries(world.root) == []
+    payload = json.loads(asyncio.run(make_chat_history_endpoint(world.root)(
+        SimpleNamespace(query_params={"chat_id": "7"}))).body)
+    stored = _receipts(world)[0]
+    return SimpleNamespace(texts=texts, stored=stored, payload=payload,
+                           live=[row for row in frames if row.get("type") == "chat"],
+                           history=[row for row in payload["messages"] if row.get("card_row_id")])
+
+
+@pytest.mark.serial
+def test_a_closed_pr_reaches_the_card_through_outbox_history_and_the_consumer(world, monkeypatch):
+    seen = closed_receipt_projection(world, monkeypatch)
+    note = merge_fixture.QUEUED_CLOSED
+    assert note not in seen.texts[0] and all(note in text for text in seen.texts[1:])
+    assert sorted({row["card_row_revision"] for row in seen.live}) == [seen.stored["revision"] - 1, seen.stored["revision"]]
+    assert [row["text"] for row in seen.history] == [merge_receipts.card_row_text(seen.stored)] * len(seen.history)
+    assert {row["card_row_revision"] for row in seen.history} == {seen.stored["revision"]}
+    fixture = world.root / "closed-projection.json"
+    fixture.write_text(json.dumps({"live": seen.live, "history": seen.history, "expect": note}), encoding="utf-8")
+    result = run_in_group([shutil.which("node"), "--test", "--test-name-pattern=canonical receipt revisions",
+                           "web/tests/chat_card_row_placement.test.js"],
+                          cwd=pathlib.Path(__file__).resolve().parents[1],
+                          env={**os.environ, "MERGE_RECEIPT_PROJECTION": str(fixture)}, timeout=30)
+    if output := os.environ.get("OUROBOROS_UI_EVIDENCE_DIR"):
+        pathlib.Path(output).mkdir(parents=True, exist_ok=True)
+        shutil.copy(fixture, output)
+        (pathlib.Path(output) / "closed-projection-node.txt").write_text(result.stdout + result.stderr, encoding="utf-8")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert sum(c[:2] == ["pr", "merge"] for c in world.gh.calls) == 1
+
+
+@pytest.mark.serial
+@pytest.mark.parametrize("seen", ["at_readback", "by_observer_during_send"])
+def test_a_published_foreign_queue_switched_off_refreshes_to_refused_and_a_new_refusal_stays_unpublished(
+        world, monkeypatch, seen):
+    """#2455: GitHub refused our merge while another actor's auto-merge showed, so the queued block and card were
+    published (by our readback, or by an observer while the request was in flight). Once the queue is off, the same
+    receipt settles refused and that existing projection is refreshed, with no second send. A fresh request GitHub
+    refuses publishes nothing new."""
+    from tests.test_pr_merge_conflict_refusal import CONFLICT
+
+    gh, queued_blocks = world.gh, []
+
+    def send(args, *a, **kw):
+        if args[:2] != ["pr", "merge"]:
+            return gh(args, *a, **kw)
+        gh.calls.append(list(args))
+        if gh.pr["mergeStateStatus"] == "DIRTY":  # the earlier attempt: another actor queues meanwhile
+            gh.pr.update(autoMergeRequest={"enabledAt": "by another actor"})
+            if seen == "by_observer_during_send":
+                assert "merge: queued" in registered_merge(world)
+                queued_blocks.append(merge_receipts.public_block(_receipts(world)[0]))
+                gh.pr.update(autoMergeRequest=None)  # switched off before our own readback
+        return github.GhResult(False, "⚠️ GH_ERROR: " + CONFLICT.strip(), 1, None, "server_refused")
+
+    def act():
+        monkeypatch.setattr(github, "_gh_run", send)
+        gh.pr["mergeStateStatus"] = "DIRTY"
+        texts = [registered_merge(world)]
+        if seen == "at_readback":
+            queued_blocks.append(merge_receipts.public_block(_receipts(world)[0]))
+            assert "merge: queued (PR now OPEN, auto-merge on; request refused by GitHub)" in texts[0]
+            gh.pr.update(autoMergeRequest=None)
+            texts.append(registered_merge(world))
+        gh.pr["mergeStateStatus"] = "CLEAN"
+        texts.append(registered_merge(world))  # an explicit new request, refused on its own
+        return texts
+
+    seen_rows = closed_receipt_projection(world, monkeypatch, act)
+    first, fresh = _receipts(world)
+    assert (first["outcome"]["status"], fresh["outcome"]["status"]) == ("refused", "refused")
+    assert all(merge_receipts.effect_is_definite(r) for r in (first, fresh))
+    assert all(text.startswith("⚠️ PR_MERGE_REFUSED:") for text in seen_rows.texts[-2:])
+    assert seen == "by_observer_during_send" or "A new pr_merge call" in seen_rows.texts[-2]
+    body = gh.pr["body"]
+    assert merge_receipts.public_block(first) in body and "- Outcome: **refused** (by GitHub)" in body
+    assert queued_blocks and queued_blocks[0] not in body and "**queued**" not in body
+    assert fresh["receipt_id"] not in body and "publication" not in fresh
+    assert first["publication"]["body"] == {"status": "published"}
+    assert first["publication"]["card"]["status"] in ("owed", "delivered")
+    # The live frames and the history carry this receipt's queued then refused revisions, and nothing of the fresh one.
+    assert {row["card_row_id"] for row in seen_rows.live} == {f"merge-receipt:{first['receipt_id']}"}
+    assert max(row["card_row_revision"] for row in seen_rows.live) == first["revision"]
+    assert any("merge: queued" in row["content"] for row in seen_rows.live)
+    assert [row["text"] for row in seen_rows.history] == [merge_receipts.card_row_text(first)] * len(seen_rows.history)
+    fixture = world.root / "refused-projection.json"
+    fixture.write_text(json.dumps({"live": seen_rows.live, "history": seen_rows.history,
+                                   "expect": "merge: refused (by GitHub)"}), encoding="utf-8")
+    result = run_in_group([shutil.which("node"), "--test", "--test-name-pattern=canonical receipt revisions",
+                           "web/tests/chat_card_row_placement.test.js"],
+                          cwd=pathlib.Path(__file__).resolve().parents[1],
+                          env={**os.environ, "MERGE_RECEIPT_PROJECTION": str(fixture)}, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert sum(c[:2] == ["pr", "merge"] for c in gh.calls) == 2  # the earlier attempt and the explicit new one
 
 
 def test_legacy_ambiguous_refusal_keeps_observation_custody(world):
@@ -266,7 +389,8 @@ def test_proven_rejection_survives_unavailable_readback(world):
     gh = world.gh
     world.gh.merge = "refused"
     world.gh.fail_view_after_merge = True
-    assert "PR_MERGE_UNKNOWN" in registered_merge(world)
+    # Owner decision (#2455): a known refusal never reads as an unknown effect, even while GitHub is unreadable.
+    assert "PR_MERGE_REFUSED: ⚠️ PR #7 merge: unknown (PR unread; request refused before effect)" in registered_merge(world)
     world.gh.fail_view_after_merge = False
     assert "PR_MERGE_REFUSED" in registered_merge(world)
     assert sum(c[:2] == ["pr", "merge"] for c in gh.calls) == 1
@@ -304,19 +428,19 @@ def test_receipt_revision_is_canonical_and_idempotent_across_fact_enrichment(wor
 def bounded_receipt_history(world, monkeypatch):
     """Actual r3 delivery, late r2, deduped catch-up, then a default-quota read."""
     from ouroboros.gateway import history as history_api
-    from ouroboros.utils import append_jsonl
+    from ouroboros import dialogue_store as ds
 
     test_concurrent_publication_through_outbox_dedup_and_history(world, monkeypatch, "delivered_first")
     progress_path = world.root / "logs/progress.jsonl"
-    raw = [json.loads(line) for line in progress_path.read_text(encoding="utf-8").splitlines()]
+    raw = dialogue_test.log_rows(progress_path)
     receipt_events = [r for r in raw if r.get("card_row_id")]
     assert [r["card_row_revision"] for r in receipt_events] == [3, 2]
     for i in range(59):
-        append_jsonl(world.root / "logs/progress.jsonl", {
+        ds.append(world.root, "progress", {
             "type": "task_progress", "chat_id": 7, "task_id": "merge-task",
             "text": f"Ordinary activity {i}", "ts": f"2099-01-01T00:00:{i:02d}Z",
         })
-    sources = {progress_path: progress_path.read_bytes()}
+    sources = {progress_path: dialogue_test.log_bytes(progress_path)}
     selected = []
     annotate = history_api._annotate_terminal_task_truth
 
@@ -329,7 +453,8 @@ def bounded_receipt_history(world, monkeypatch):
     reads = []
 
     def read_result(data_dir, task_id, **kwargs):
-        assert kwargs == {"materialize_artifacts": False}
+        # A display read: no artifact materialization, through the page's batch reader.
+        assert kwargs.get("materialize_artifacts") is False and set(kwargs) <= {"materialize_artifacts", "reads"}
         reads.append(task_id)
         return load_result(data_dir, task_id, **kwargs)
 
@@ -345,7 +470,7 @@ def bounded_receipt_history(world, monkeypatch):
     assert stale["card_row_revision"] == 2 and "merge: queued" in stale["text"]
     (projected,) = [r for r in payload["messages"] if r.get("card_row_id")]
     assert all(projected[k] == stale[k] for k in ("history_id", "history_position", "ts", "card_row_id"))
-    assert {path: path.read_bytes() for path in sources} == sources
+    assert {path: dialogue_test.log_bytes(path) for path in sources} == sources
     evidence = json.dumps({"payload": payload, "selected": selected[0]})
     (world.root / "cold-history.json").write_text(evidence, encoding="utf-8")
     if output := os.environ.get("OUROBOROS_UI_EVIDENCE_DIR"):
@@ -361,10 +486,9 @@ def bounded_receipt_history(world, monkeypatch):
 def test_cold_bounded_history_supplies_current_receipt_to_new_chat(world, monkeypatch):
     payload = bounded_receipt_history(world, monkeypatch)
     fixture = world.root / "cold-history.json"
-    result = subprocess.run([shutil.which("node"), "--test", "--test-name-pattern=cold bounded receipt",
-                             "web/tests/chat_card_row_placement.test.js"],
-                            env={**os.environ, "COLD_RECEIPT_PROJECTION": str(fixture)},
-                            capture_output=True, text=True, timeout=30)
+    result = run_in_group([shutil.which("node"), "--test", "--test-name-pattern=cold bounded receipt",
+                           "web/tests/chat_card_row_placement.test.js"],
+                          env={**os.environ, "COLD_RECEIPT_PROJECTION": str(fixture)}, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     (receipt,) = [r for r in payload["messages"] if r.get("card_row_id")]
     assert receipt["card_row_revision"] == 3 and "merge: merged" in receipt["text"]
@@ -394,12 +518,12 @@ def test_bounded_history_discloses_unavailable_canonical_receipt(world, monkeypa
             record["merge_receipts"] = []
         seed_result(world.root, "merge-task", record)
     source = world.root / "logs/progress.jsonl"
-    before = source.read_bytes()
+    before = dialogue_test.log_bytes(source)
     response = asyncio.run(make_chat_history_endpoint(world.root)(SimpleNamespace(query_params={"chat_id": "7"})))
     (row,) = [r for r in json.loads(response.body)["messages"] if r.get("card_row_id")]
     assert "merge: queued" in row["text"] and "merge: merged" not in row["text"]
     assert "Current merge receipt unavailable; showing recorded event." in row["text"]
-    assert row["card_row_revision"] == 2 and source.read_bytes() == before
+    assert row["card_row_revision"] == 2 and dialogue_test.log_bytes(source) == before
 
 
 @pytest.mark.serial
@@ -491,7 +615,9 @@ def test_a_matching_review_record_covers_the_head_and_names_its_source(world, mo
     asked = install_ledger(monkeypatch, {RECORD_ID: record})
     out = record_merge(world, review_record_id=RECORD_ID, review_task_ids=["review-1"])
     assert asked == [(world.root.resolve(), RECORD_ID)]
-    assert ["pr", "merge", "7", "--squash", "--match-head-commit", HEAD] in world.gh.calls
+    call = next(c for c in world.gh.calls if c[:2] == ["pr", "merge"])
+    assert call[:6] == ["pr", "merge", "7", "--squash", "--match-head-commit", HEAD]
+    assert call[6:] == ["--body-file", "-"] and "Ouroboros-Qualification:" in world.gh.merge_inputs[0]
     (receipt,) = _receipts(world)
     assert receipt["coverage"]["status"] == "covers_head" and receipt["coverage"]["gaps"] == []
     review = receipt["review"]

@@ -23,6 +23,7 @@ def _reset_writer_admission(monkeypatch):
     from ouroboros import store_switch
 
     monkeypatch.setattr(retention, "_update_returns", {})
+    monkeypatch.setattr(control, "_index_lock_precondition", lambda: None)  # real Git matrix: test_update_preconditions
     # The synthetic SHAs here name no tree: the subject is the ordinary door, whose target
     # carries the store (the authority switch of a store-less target: test_store_activation).
     monkeypatch.setattr(store_switch, "switch_needs", lambda *_a: {"facts": False, "money": False, "handles": False})
@@ -61,6 +62,13 @@ class _Request:
 
 def _body(response):
     return json.loads(response.body)
+
+
+def _review_catalog(*routes):
+    """An owner catalog the real pool builder turns into ReviewSlots (#1881)."""
+    return json.dumps({"enabled": True, "items": [
+        {"subagent_id": f"critic-{index}", "recommended_use": "Reviews diffs.", "review_eligible": True,
+         "route": route} for index, route in enumerate(routes)]})
 
 
 def test_clean_plan_requires_real_zero_and_no_conflicts():
@@ -147,14 +155,15 @@ def test_repo_mutations_stay_blocked_for_the_full_durable_update(monkeypatch):
     assert released == [lock]
 
 
-def test_preflight_returns_only_merge_plan(monkeypatch):
+def test_preflight_returns_plan_and_target_bound_effects(monkeypatch):
     import supervisor.update_merge as update_merge
 
     monkeypatch.setattr(update_merge, "plan_managed_update_merge", lambda **_kwargs: _plan())
 
     payload = _body(asyncio.run(control.api_update_preflight(None)))
 
-    assert payload == {"merge_plan": _plan()}
+    assert payload["merge_plan"] == _plan()
+    assert payload["effects"]["target_sha"] == TARGET
 
 
 def test_fetching_update_endpoints_leave_the_event_loop(monkeypatch):
@@ -385,7 +394,6 @@ def test_assisted_update_money_preflight_decides_on_known_room_only(monkeypatch,
     is larger (that estimate is disclosed, never an earlier refusal); no known room
     refuses BEFORE any repo mutation (rescue included). Readiness, stash and rollback
     stay with their own owners."""
-    import ouroboros.reviewer_slot_config as reviewer_slot_config
     import ouroboros.usage_admission as usage_admission
     import supervisor.git_ops as git_ops
     import supervisor.state as state
@@ -398,12 +406,12 @@ def test_assisted_update_money_preflight_decides_on_known_room_only(monkeypatch,
     monkeypatch.setattr(control, "_respawn_workers_after_failed_update", lambda: None)
     monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path)
     (tmp_path / "logs").mkdir()
-    api_row = SimpleNamespace(model="openai/gpt-test", is_session=False)
-    monkeypatch.setattr(reviewer_slot_config, "review_pool_slots", lambda **_kw: [api_row, api_row])
+    api_row, priced = {"kind": "api_model", "target_id": "openai/gpt-test"}, []
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", _review_catalog(api_row, api_row))
     monkeypatch.setattr(
         usage_admission,
         "review_wave_admission",
-        lambda **kwargs: {
+        lambda **kwargs: priced.append(kwargs["models"]) or {
             "fits": kwargs.get("remaining_usd_override", 0) > 0,
             "estimated_wave_usd": 3.21,
             "remaining_usd": kwargs.get("remaining_usd_override"),
@@ -424,24 +432,45 @@ def test_assisted_update_money_preflight_decides_on_known_room_only(monkeypatch,
     events = [json.loads(line) for line in (tmp_path / "logs" / "supervisor.jsonl").read_text().splitlines()]
     estimate = [e for e in events if e["type"] == "managed_update_wave_estimate"]
     # ONE wave over the pool's paid seats, priced once: both parts of the brief ride each seat.
+    assert priced == [["openai/gpt-test", "openai/gpt-test"]]
     assert len(estimate) == 1 and estimate[0]["estimated_wave_usd"] == 3.21
     assert estimate[0]["exceeds_known_remaining"] is True and estimate[0]["remaining_usd"] == 0.4
     assert not [e for e in events if e["type"] == "managed_update_wave_floor_refused"]
 
 
+_PRICED_ROW = {"kind": "api_model", "target_id": "openai/gpt-test"}
+_UNPRICED_ROW = {"kind": "api_model", "target_id": "openai/gpt-unpriced"}
+_SESSION_ROW = {"kind": "agent_session", "target_id": "codex=gpt-5.6-sol"}
+
+
+@pytest.mark.parametrize(("pool", "wave"), [
+    ((_SESSION_ROW,), {"estimated_wave_usd": None, "unpriced_slots": 0, "session_slots": 1}),
+    # 920K input tokens under the OpenAI-family 1.10 envelope at $1/M + the 65,536-token reserve at $4/M.
+    ((_PRICED_ROW, _UNPRICED_ROW, _SESSION_ROW),
+     {"estimated_wave_usd": round(1_012_000 / 1e6 + 65_536 * 4 / 1e6, 6), "unpriced_slots": 1, "session_slots": 1}),
+])
 @pytest.mark.parametrize(("ready", "expected_status"), [(True, 200), (False, 409)])
 def test_assisted_resolver_boots_before_conflicts_reach_live_tree(
-    monkeypatch, ready, expected_status
+    monkeypatch, tmp_path, ready, expected_status, pool, wave
 ):
-    import ouroboros.reviewer_slot_config as reviewer_slot_config
+    import ouroboros.pricing as pricing
     import supervisor.git_ops as git_ops
     import supervisor.state as state
     import supervisor.update_merge as update_merge
     import supervisor.workers as workers
 
-    # No API reviewer rows -> the wave estimate prices nothing
-    # (agent-session rows ride subscriptions, not USD budget).
-    monkeypatch.setattr(reviewer_slot_config, "review_pool_slots", lambda **_kw: [])
+    # The owner's real review pool (#1881), priced offline: an api row on a fixed tariff,
+    # an api row with none (unknown, never zero), and an agent-session row counted, not
+    # priced (it rides a subscription, not USD budget). No live tariff read, no model call.
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", _review_catalog(*pool))
+    monkeypatch.delenv("OUROBOROS_REVIEW_MAX_TOKENS", raising=False)
+    for name in ("_cached_pricing", "_pricing_fetched_at", "_pricing_retry_after"):
+        monkeypatch.setattr(pricing, name, {})
+    tariffs = []
+    monkeypatch.setattr(pricing, "_fetch_live_rows", lambda provider, model="": tariffs.append((provider, model))
+                        or {"openai/gpt-test": (1.0, 0.1, None, 4.0)})
+    monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path)
+    (tmp_path / "logs").mkdir()
     calls = []
     monkeypatch.setattr(git_ops, "BRANCH_DEV", "ouroboros")
     monkeypatch.setattr(git_ops, "_create_rescue_snapshot", lambda *_a, **_k: None)
@@ -526,6 +555,11 @@ def test_assisted_resolver_boots_before_conflicts_reach_live_tree(
             "close_gate", f"resolver_ready:{BASE}",
             "kill_rejected_worker", "respawn_clean_pool",
         ]
+    events = [json.loads(line) for line in (tmp_path / "logs" / "supervisor.jsonl").read_text().splitlines()]
+    [estimate] = [e for e in events if str(e.get("type")).startswith("managed_update_wave_estimate")]
+    assert estimate == {"ts": estimate["ts"], "type": "managed_update_wave_estimate",
+                        "exceeds_known_remaining": False, "remaining_usd": 10.0, **wave}
+    assert tariffs == ([("openrouter", "")] if wave["estimated_wave_usd"] else [])
 
 
 def test_stash_lookup_unknown_keeps_the_durable_tx_for_boot(monkeypatch):

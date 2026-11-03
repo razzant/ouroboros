@@ -32,8 +32,7 @@ from ouroboros.server_control import dispatch_accepted_restart
 from ouroboros import chat_uploads
 from ouroboros.chat_uploads import store_upload
 from ouroboros.presence_delivery import (
-    DELIVERY_VERSION, PresenceDeliveryConflict, PresenceDeliveryRecorder,
-    delivery_reporting_version,
+    DELIVERY_VERSION, PresenceDeliveryRecorder,
 )
 from ouroboros.skill_loader import (
     find_skill,
@@ -41,7 +40,6 @@ from ouroboros.skill_loader import (
     load_enabled,
 )
 from ouroboros.utils import append_jsonl, atomic_write_json, read_json_dict, utc_now_iso
-from ouroboros import store
 
 log = logging.getLogger(__name__)
 _json_error = lambda message, status=500: JSONResponse({"ok": False, "error": message}, status_code=status)
@@ -49,13 +47,11 @@ _json_error = lambda message, status=500: JSONResponse({"ok": False, "error": me
 DEFAULT_HOST_SERVICE_HOST = "127.0.0.1"
 DEFAULT_HOST_SERVICE_PORT = 8767
 AUTH_TOKEN_FILENAME = "auth_token.json"
-# ``/identity`` advertises the owner-notice route (``POST /notify``, host_notify.py)
-# so a skill degrades on an older host without a side-effecting probe.
+# /identity advertises POST /notify for side-effect-free compatibility checks.
 NOTIFY_VERSION = 1
 
-# The out-of-process WS progress relay (``POST /ui/ws-message``) is the one token-bucket lane: a
-# 60-message burst reserve that refills one message per second (owner decision 2026-09-06: a burst
-# must not silence a widget for the rest of a minute). Every other lane keeps the sliding window.
+# Owner decision 2026-09-06: a burst must not silence a widget. WS relay alone
+# uses a 60-message token bucket refilling at 1/s; other lanes keep sliding windows.
 
 
 class HostServiceAuthError(Exception):
@@ -206,7 +202,7 @@ class HostServiceContext:
         self.bridge_getter = bridge_getter or self._default_bridge
         self.tool_schemas_getter = tool_schemas_getter or self._default_tool_schemas
         self.ws_broadcaster_getter = ws_broadcaster_getter or self._default_ws_broadcaster
-        self.presence_runner = presence_runner or self._default_presence_runner
+        self.presence_runner = presence_runner
         self.rate_limiter = _RateLimiter(on_burst_end=self._ws_relay_burst_ended)
         self._inflight: Dict[str, int] = defaultdict(int)
         self._inflight_lock = threading.Lock()
@@ -219,6 +215,21 @@ class HostServiceContext:
         from ouroboros.presence_runner import PresenceTurnExecutions
 
         self.presence_turns = PresenceTurnExecutions()
+
+    def _runner(self) -> Optional[Callable[..., Any]]:
+        return self._presence_runner
+
+    def _bind_runner(self, runner: Optional[Callable[..., Any]]) -> None:
+        from ouroboros.presence_carrier import set_presence_runner
+
+        self._presence_runner = runner
+        set_presence_runner(self.data_dir, runner)
+
+    # The runner a test injects for the carrier's body (``presence_carrier.carry_presence_turn`` reads it for this
+    # Host's root); the Host itself runs no turn body: every body is a conversation-lane carrier's (1A). An injected
+    # runner supplies its own repo/drive/factory, as the retired unarmed seam's runner did. Assigned at construction
+    # or later, it reaches the carrier the same way; None restores the module's own runner.
+    presence_runner = property(_runner, _bind_runner)
 
     def _ws_relay_burst_ended(self, key: str, dropped: int, duration_sec: float) -> None:
         """Report one aggregated WS relay refusal burst: a warning plus one
@@ -264,22 +275,11 @@ class HostServiceContext:
 
         return broadcast_ws_sync
 
-    def _default_presence_runner(self, **kwargs: Any) -> Any:
-        from ouroboros.presence_runner import run_presence_turn
-        from supervisor.workers import REPO_DIR, get_event_q
-
-        return run_presence_turn(
-            repo_dir=pathlib.Path(REPO_DIR),
-            drive_root=self.data_dir,
-            event_queue=get_event_q(),
-            **kwargs,
-        )
-
-    async def admit_presence_gate(self, conversation_key: str) -> Any:
+    async def admit_presence_gate(self, conversation_key: str, *, wait: bool = True) -> Any:
         """Coroutine admission into the configured presence gate; the lease the turn runs under."""
         from ouroboros.presence_runner import admit_configured_gate
 
-        return await admit_configured_gate(self.data_dir, conversation_key)
+        return await admit_configured_gate(self.data_dir, conversation_key, wait=wait)
 
     @property
     def skills_state_dir(self) -> pathlib.Path:
@@ -435,11 +435,27 @@ async def _api_identity(request: Request) -> JSONResponse:
     except HostServiceAuthError as exc:
         return _json_error(str(exc), 403)
     name, description = await asyncio.to_thread(_identity_facts, ctx)
-    from ouroboros.presence_continuation import CONTINUATION_VERSION
+    from ouroboros.places import WAKE_FACTS
+    from ouroboros.presence_continuation import CONTINUATION_VERSION, CONTINUATION_VERSIONS
+    from ouroboros.presence_history import HISTORY_IMPORT_VERSION, SOURCE_ORDER_VERSION
+    from ouroboros.presence_owner_contact import MAIN_CONTACT_VERSION
+    from ouroboros.presence_recovery import WORK_OUTPUT_VERSION
+    from ouroboros.place_guard import PLACE_BINDING_VERSION
 
     return JSONResponse({"ok": True, "name": name, "description": description,
-                         "presence_delivery_version": DELIVERY_VERSION,
+                         "presence_delivery_version": DELIVERY_VERSION, "places_version": 1,
                          "presence_continuation_version": CONTINUATION_VERSION,
+                         "presence_continuation_versions": list(CONTINUATION_VERSIONS),
+                         "presence_main_contact_version": MAIN_CONTACT_VERSION,
+                         "presence_work_output_version": WORK_OUTPUT_VERSION,
+                         "presence_history_import_version": HISTORY_IMPORT_VERSION,
+                         "presence_source_order_version": SOURCE_ORDER_VERSION,
+                         "presence_wake_facts": list(WAKE_FACTS),
+                         "presence_wake_signals": 1,
+                         "presence_explicit_completion": 1,
+                         "presence_reaction_context": 1,
+                         "presence_identity": 1,
+                         "presence_place_binding_version": PLACE_BINDING_VERSION,
                          "notify_version": NOTIFY_VERSION})
 
 
@@ -489,12 +505,18 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
         return _json_error(str(exc), 403)
     try:
         payload = await request.json()
-        panic = getattr(ctx.bridge_getter(), "panic", None)
-        if panic is not None and panic.request(
-            str(payload.get("text") or payload.get("image_caption") or ""), source=f"skill:{skill_name}",
+        panic_text = str(payload.get("text") or payload.get("image_caption") or "")
+        is_panic = panic_text.strip().lower().startswith("/panic")
+        from ouroboros.panic_source import source_evidence
+        from ouroboros.server_control import request_panic
+        if is_panic and request_panic(
+            ctx.bridge_getter(), panic_text, source=f"skill:{skill_name}",
             user_id=int(payload.get("user_id") or 0), chat_id=int(payload.get("chat_id") or 0),
+            evidence=source_evidence(request, "telegram" if skill_name == "telegram" else "host_service", skill_name=skill_name),
         ):
             return JSONResponse({"ok": True, "status": "accepted"}, status_code=202)
+        if is_panic:
+            return _json_error("Panic emergency owner unavailable or sender not authorized.", 503)
     except json.JSONDecodeError:
         return _json_error("invalid json", 400)
     except Exception as exc:
@@ -508,6 +530,8 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
     try:
         from ouroboros.task_status import SETTLED_STATUSES
 
+        if not isinstance(payload.get("reply_to", ""), str):
+            return _json_error("reply_to must be an address string", 400)
         text = str(payload.get("text") or "")
         image_caption = str(payload.get("image_caption") or "")
         client_message_id = str(payload.get("client_message_id") or "").strip()[:128]
@@ -529,8 +553,8 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
         correlated = {"operation_ref": operation_ref(chat_id, client_message_id)} if client_message_id else {}
         rejoined = False
         if client_message_id:
-            rows = await asyncio.to_thread(_chat_rows, ctx, chat_id)
-            inbound = _inbound_row(rows, client_message_id)
+            accepted = await asyncio.to_thread(_accepted_inbound, ctx, chat_id, client_message_id)
+            inbound = accepted.row if accepted is not None else None
             if inbound is not None:
                 if str(inbound.get("source") or "") != f"skill:{skill_name}":
                     return _json_error("client_message_id is already bound to another source", 409)
@@ -541,16 +565,21 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
                 # Reuse the accepted byte-proven kinds; same_message still checks every incoming digest/name.
                 logged = text.strip() or image_caption.strip() or chat_uploads.attachment_placeholder(
                     inline_image, {"chat_attachments": inbound.get("attachments"), "chat_attachment_uploads": incoming})
-                if not chat_uploads.same_message(inbound, logged, incoming):
+                if (not chat_uploads.same_message(inbound, logged, incoming)
+                        or (inbound.get("reply_to") or {}).get("address", "") != payload.get("reply_to", "")):
                     return _json_error("client_message_id was already used for a different message", 409)
-                state = _operation_state(ctx, rows, inbound)
+                state = await asyncio.to_thread(_operation_state, ctx, accepted)
                 if state["status"] in SETTLED_STATUSES:
                     return JSONResponse({
                         "ok": True, "response": str(state.get("text") or ""),
                         "status": state["status"], "rejoined": True, **correlated,
                     })
-                # Proven never dispatched by THIS process: the named ingress below hands it over, once.
-                rejoined = state.get("reason") != "acceptance_write_failed"
+                # A dispatch still owed (the acceptor died before the handoff): the named ingress below
+                # hands it over, once; anything else rejoins.
+                from supervisor.message_ingress import dispatch_facts
+
+                facts = dispatch_facts(inbound, ctx.data_dir)
+                rejoined = facts is None or facts["state"] != "pending"
         metadata: dict[str, Any] = {}
         inline, image_mime = "", ""
         if not rejoined:
@@ -565,6 +594,8 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
             inline = str(payload.get("image_base64") or "") if image_mime else ""
             metadata = {**({"chat_attachment_uploads": uploads} if uploads else {}),
                         **({"chat_attachments": refs} if refs else {})}
+        if payload.get("reply_to"):  # no reference adds nothing to a plain inject's kwargs
+            metadata["reply_to"] = payload["reply_to"]
         bridge = ctx.bridge_getter()
         response_event: asyncio.Event = asyncio.Event()
         response_holder: dict[str, str] = {}
@@ -784,275 +815,16 @@ def _presence_staged_files(
     return tuple(_skill_state_path(ctx, skill_name, raw, f"staged_files[{index}]") for index, raw in enumerate(value))
 
 
-async def _api_presence_delivery(request: Request) -> JSONResponse:
-    """Record exact provider receipts without sending or starting model work."""
-    ctx: HostServiceContext = request.app.state.host_service_context
-    try:
-        skill_name, _token_payload = await _authenticated(ctx, request.headers.get("x-skill-token", ""), "presence")
-    except HostServiceAuthError as exc:
-        return _presence_error(str(exc), 403, "presence_auth_blocked", "blocked")
-    except OSError:
-        return _presence_error("presence authentication unavailable", 500, "presence_auth_unavailable", "retry")
-    if not ctx.rate_limiter.allow(f"{skill_name}:presence_delivery"):
-        return _presence_error("rate limit exceeded", 429, "presence_rate_limited", "retry")
-    # Receipts, turns and inject have separate in-flight budgets: five long turns must
-    # not starve the receipts those turns' own sends produce.
-    if not ctx._enter_inflight(f"{skill_name}:delivery"):
-        return _presence_error("too many in-flight presence requests", 429, "presence_capacity_full", "retry")
-    try:
-        payload = await request.json()
-        result = await run_sync_to_completion(ctx.presence_deliveries.record, skill_name, payload)
-        return JSONResponse(result)
-    except PresenceDeliveryConflict as exc:
-        return _presence_error(str(exc), 409, "presence_receipt_conflict", "rejected")
-    except (ValueError, TypeError) as exc:
-        return _presence_error(str(exc), 400, "presence_receipt_invalid", "rejected")
-    except Exception:
-        log.warning("Presence delivery history write failed for skill %s", skill_name, exc_info=True)
-        return _presence_error("presence delivery history write failed; retry the same receipt", 503,
-                               "presence_receipt_unwritable", "retry")
-    finally:
-        ctx._leave_inflight(f"{skill_name}:delivery")
-
-
-def _presence_error(message: str, status: int, code: str, disposition: str, **facts: Any) -> JSONResponse:
-    """Add transport recovery facts without changing the legacy HTTP/error contract.
-
-    The producer chooses semantics, not the status class: a stale token is blocked,
-    an origin mismatch rejected, and a failed history write retryable.
-    """
-    return JSONResponse({"ok": False, "error": message, "code": code,
-                         "disposition": disposition, **facts}, status_code=status)
-
-
-def _presence_exception(exc: Exception, status: int) -> JSONResponse:
-    code = str(getattr(exc, "code", "presence_admission_failed"))
-    disposition = "blocked"
-    if code in {"chat_log_unwritable", "presence_result_missing", "presence_bindings_unreadable",
-                "presence_resources_unavailable", "presence_attempt_outcome_unknown",
-                "presence_result_unreadable", "presence_event_identity_unproven",
-                "presence_start_unwritable"}:
-        disposition = "retry"
-    elif code in {"presence_attachment_admission_rejected", "presence_binding_wrong_transport",
-                  "presence_conversation_key_required", "presence_admission_conversation_mismatch",
-                  "presence_event_identity_conflict"}:
-        disposition = "rejected"
-    if getattr(exc, "disposition", "") in {"retained", "retry"}:
-        disposition = exc.disposition  # the runner holds the durable attempt authority
-    facts = {"field": getattr(exc, "field", "presence")}
-    if getattr(exc, "turn_ref", ""):
-        facts["turn_ref"] = exc.turn_ref
-        facts["delivery_reporting_version"] = getattr(exc, "delivery_reporting_version", 0)
-    if getattr(exc, "work_ref", ""):
-        facts["work_ref"] = exc.work_ref
-    manifest = getattr(exc, "attachment_manifest", None)
-    if isinstance(manifest, list):
-        facts["attachment_manifest"] = [dict(row) for row in manifest if isinstance(row, dict)]
-    return _presence_error(str(exc), status, code, disposition, **facts)
-
-
-def _admit_presence(ctx: HostServiceContext, skill_name: str, binding_id: str) -> Any:
-    from ouroboros.loop import _resolve_loop_max_rounds
-    from ouroboros.presence_admission import admit_presence_turn
-
-    return admit_presence_turn(
-        drive_root=ctx.data_dir,
-        authenticated_transport_skill=skill_name,
-        binding_id=binding_id,
-        global_max_rounds=_resolve_loop_max_rounds(),
-    )
-
-
-async def _api_presence_turn(request: Request) -> JSONResponse:
-    """Run one non-owner event under a host-resolved reviewed profile ceiling.
-
-    Authentication, admission and file confinement run off the event loop. The turn is
-    host work this request only waits on (``presence_runner.PresenceTurnExecutions``): it
-    queues on the gate as a coroutine and runs on its own thread. Both versions release
-    the request reservation at a qualified park (or terminal settlement); version 1
-    returns the initial envelope while version 0's HTTP waiter stays open until the
-    terminal result. A retry of the same event joins the retained execution.
-    """
-
-    ctx: HostServiceContext = request.app.state.host_service_context
-    try:
-        skill_name, _token_payload = await _authenticated(ctx, request.headers.get("x-skill-token", ""), "presence")
-    except HostServiceAuthError as exc:
-        return _presence_error(str(exc), 403, "presence_auth_blocked", "blocked")
-    except OSError:
-        return _presence_error("presence authentication unavailable", 500, "presence_auth_unavailable", "retry")
-    if not ctx.rate_limiter.allow(f"{skill_name}:presence"):
-        return _presence_error("rate limit exceeded", 429, "presence_rate_limited", "retry")
-    if await _bounded_host_read(ctx, functools.partial(store.migrating, ctx.data_dir)):  # P1: the turn writes its result
-        return _presence_error("the task store is importing; retry shortly", 503, "migrating", "retry")
-    from ouroboros.presence_admission import PresenceAdmissionError
-    from ouroboros.presence_bindings import conversation_key
-    from ouroboros.presence_continuation import continuation_version, turn_response
-    from ouroboros.presence_runner import (
-        PresenceTurnError,
-        PresenceTurnEvent,
-        PresenceTurnNotStarted,
-        presence_turn_replay,
-        presence_turn_task_id,
-        presence_event_identity,
-    )
-
-    try:
-        payload = await request.json()
-        if not isinstance(payload, dict) or set(payload) - {
-            "binding_id", "event", "staged_files", "delivery_reporting_version", "continuation_version",
-        }:
-            return _presence_error("invalid presence payload", 400, "presence_payload_invalid", "rejected")
-        reporting_version = delivery_reporting_version(payload.get("delivery_reporting_version", 0))
-        continuing = continuation_version(payload.get("continuation_version", 0))
-        event_payload = payload.get("event")
-        expected = {
-            "source_event_id", "provider", "account_id", "conversation_id", "thread_id",
-            "conversation_key", "actor", "conversation", "message", "text",
-        }
-        if not isinstance(event_payload, dict) or set(event_payload) != expected:
-            return _presence_error("invalid presence event", 400, "presence_event_invalid", "rejected")
-
-        admission = await _bounded_host_read(
-            ctx, functools.partial(_admit_presence, ctx, skill_name, str(payload.get("binding_id") or "")))
-        provider = str(event_payload.get("provider") or "").strip()
-        account_id = str(event_payload.get("account_id") or "").strip()
-        conversation_id = str(event_payload.get("conversation_id") or "").strip()
-        thread_id = str(event_payload.get("thread_id") or "").strip()
-        if (
-            provider != admission.origin.transport
-            or account_id != admission.origin.account_id
-            or (
-                admission.origin.conversation_id != "*"
-                and conversation_id != admission.origin.conversation_id
-            )
-            or (admission.origin.thread_id and thread_id != admission.origin.thread_id)
-        ):
-            return _presence_error("presence event does not match its owner-created binding", 403,
-                                   "presence_origin_mismatch", "rejected")
-        event = PresenceTurnEvent(
-            source_event_id=str(event_payload["source_event_id"] or "").strip(),
-            provider=provider,
-            account_id=account_id,
-            conversation_id=conversation_id,
-            thread_id=thread_id,
-            # The transport authenticates provider facts, but it does not get
-            # to choose the concurrency/history identity. Derive that identity
-            # from the binding-checked origin facts above.
-            conversation_key=conversation_key(provider, account_id, conversation_id, thread_id),
-            actor=dict(event_payload["actor"]) if isinstance(event_payload["actor"], dict) else {},
-            conversation=(
-                dict(event_payload["conversation"])
-                if isinstance(event_payload["conversation"], dict)
-                else {}
-            ),
-            message=dict(event_payload["message"]) if isinstance(event_payload["message"], dict) else {},
-            text=str(event_payload["text"] or ""),
-            delivery_reporting_version=reporting_version,
-            continuation_version=continuing,
-        )
-        if not event.source_event_id or not event.conversation_key or not event.actor:
-            return _presence_error("presence event is missing identity facts", 400,
-                                   "presence_identity_missing", "rejected")
-        if "transport_queue" in event.conversation:
-            from ouroboros.presence_observations import validate_transport_queue
-
-            validate_transport_queue(event.conversation["transport_queue"], event.conversation_key,
-                                     event.source_event_id)
-        staged_files = await _bounded_host_read(
-            ctx, functools.partial(_presence_staged_files, ctx, skill_name, payload.get("staged_files")))
-        turn_id = presence_turn_task_id(admission.binding_id, event.source_event_id)
-        identity = presence_event_identity(admission.binding_id, event)
-        # A settled turn answers from its durable row without queueing behind its conversation.
-        result = await _bounded_host_read(ctx, functools.partial(
-            presence_turn_replay, ctx.data_dir, turn_id, event.conversation_key, identity, continuing))
-        if result is None:
-            budget = f"{skill_name}:presence"
-            execution, _started = ctx.presence_turns.start_or_join(
-                turn_id, identity=identity,
-                reserve=functools.partial(ctx._enter_inflight, budget),
-                release=functools.partial(ctx._leave_inflight, budget),
-                admit=functools.partial(ctx.admit_presence_gate, event.conversation_key),
-                run=lambda lease: ctx.presence_runner(
-                    admission=admission, event=event, staged_files=staged_files, admitted=lease,
-                ),
-            )
-            if execution is None:
-                return _presence_error("too many in-flight presence requests", 429, "presence_capacity_full", "retry")
-            # A version-1 consumer takes a continuing author's initial envelope; v0 waits for its terminal.
-            result = await asyncio.wrap_future(execution.initial if continuing else execution.result)
-        return JSONResponse(turn_response(result, continuing))
-    except json.JSONDecodeError:
-        return _presence_error("invalid json", 400, "presence_payload_invalid", "rejected")
-    except (PresenceAdmissionError, PresenceTurnError) as exc:
-        return _presence_exception(exc, 409)
-    except PresenceTurnNotStarted as exc:
-        return _presence_error(str(exc), 503, "presence_turn_not_started", "retry")
-    except OSError as exc:
-        return _presence_error(str(exc), 400, "presence_io_unavailable", "retry")
-    except ValueError as exc:
-        return _presence_error(str(exc), 400, "presence_payload_invalid", "rejected")
-    except Exception as exc:
-        log.debug("Host service presence turn failed", exc_info=True)
-        return _presence_error(str(exc), 500, "presence_turn_unavailable", "retry")
-
-
-def _presence_work_view(
-    ctx: HostServiceContext, skill_name: str, work_ref: str, binding_id: str,
-) -> tuple[int, Dict[str, Any]]:
-    from ouroboros.presence_bindings import load_presence_binding
-    from ouroboros.task_results import load_task_result
-
-    load_presence_binding(ctx.data_dir, skill_name, binding_id)
-    stored = load_task_result(ctx.data_dir, work_ref) or {}
-    metadata = stored.get("metadata") if isinstance(stored.get("metadata"), dict) else {}
-    presence = metadata.get("presence") if isinstance(metadata.get("presence"), dict) else {}
-    if str(presence.get("binding_id") or "") != binding_id:
-        return 404, {"ok": False, "error": "presence work reference not found",
-                     "code": "presence_work_not_found", "disposition": "rejected"}
-    from ouroboros.presence_recovery import retained_work_view
-
-    return retained_work_view(stored, work_ref)
-
-
-async def _api_presence_work(request: Request) -> JSONResponse:
-    """Read a correlated late result, or retain an attributed inbox observation."""
-    ctx: HostServiceContext = request.app.state.host_service_context
-    try:
-        skill_name, _token_payload = await _authenticated(ctx, request.headers.get("x-skill-token", ""), "presence")
-    except HostServiceAuthError as exc:
-        return _presence_error(str(exc), 403, "presence_auth_blocked", "blocked")
-    except OSError:
-        return _presence_error("presence authentication unavailable", 500, "presence_auth_unavailable", "retry")
-    work_ref = str(request.path_params.get("work_ref") or "").strip()
-    binding_id = str(request.query_params.get("binding_id") or "").strip()
-    try:
-        if request.method == "POST":
-            from ouroboros.presence_bindings import load_presence_binding
-            from ouroboros.presence_observations import record_transport_queue
-
-            payload = await request.json()
-            if not isinstance(payload, dict) or set(payload) != {"binding_id", "transport_queue"}:
-                raise ValueError("expected binding_id and transport_queue")
-            binding_id = str(payload["binding_id"] or "").strip()
-            await _bounded_host_read(ctx, functools.partial(load_presence_binding, ctx.data_dir, skill_name, binding_id))
-            body = await asyncio.to_thread(record_transport_queue, ctx.data_dir, work_ref, binding_id,
-                                            payload["transport_queue"])
-            return JSONResponse(body)
-        status, body = await asyncio.to_thread(_presence_work_view, ctx, skill_name, work_ref, binding_id)
-    except (ValueError, json.JSONDecodeError) as exc:
-        if getattr(exc, "code", ""):
-            return _presence_exception(exc, 404)
-        return _presence_error(str(exc), 400, "presence_observation_invalid", "rejected")
-    except store.StoreMigrating:
-        return _presence_error("the task store is importing; retry shortly", 503, "migrating", "retry")
-    except Exception as exc:
-        code = str(getattr(exc, "code", ""))
-        if code:
-            return _presence_exception(exc, 404)
-        log.debug("Host service presence work lookup failed", exc_info=True)
-        return _presence_error("presence work lookup failed", 500, "presence_work_unavailable", "retry")
-    return JSONResponse(body, status_code=status)
+# Compatibility import surface; implementation is owned by the places handler module.
+from ouroboros.gateway.host_service_places import (  # noqa: E402
+    _admit_presence as _admit_presence,
+    _api_presence_delivery as _api_presence_delivery,
+    _api_presence_history as _api_presence_history,
+    _api_presence_turn as _api_presence_turn,
+    _api_presence_work as _api_presence_work,
+    _api_presence_place as _api_presence_place,
+    _presence_work_view as _presence_work_view,
+)
 
 
 async def _api_chat_decision(request: Request) -> JSONResponse:
@@ -1188,14 +960,9 @@ async def _api_ws_message(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "type": full}, status_code=202)
 
 
-# --- A2A operation correlation (#667) ---------------------------------------
-#
-# An accepted inbound message is identified by the (chat_id, client_message_id)
-# pair the caller supplied; ``operation_ref`` is that pair spelled
-# ``"<chat_id>:<client_message_id>"``, so a caller can address the operation
-# before its own inject wait has returned. The host keeps NO new record: the
-# canonical inbound source, actual task origin and in-flight turn registry
-# are the authorities. Annotation/outbound ids only help discover candidates.
+# A2A operation_ref is caller-known "<chat_id>:<client_message_id>" (#667), the origin key the
+# dialogue and the task store index (``dialogue_store.origin_key``). Canonical inbound source, task
+# origin and in-flight registry remain authoritative; the keys only discover. No new record is kept.
 
 
 def operation_ref(chat_id: int, client_message_id: str) -> str:
@@ -1209,103 +976,133 @@ def _parse_operation_ref(value: Any) -> tuple[int, str]:
     return int(head), tail.strip()[:128]
 
 
-def _chat_rows(ctx: HostServiceContext, chat_id: int) -> list:
-    """Read retained canonical sources; a display tail cannot prove absence."""
-    from ouroboros.utils import iter_jsonl_objects, jsonl_chain_handles
+def _accepted_inbound(ctx: HostServiceContext, chat_id: int, client_message_id: str) -> Any:
+    """The canonical inbound row the id names: the ingress's own answer (``dialogue_store.accepted_row``,
+    the newest; a still-importing archive is searched, never answered absent; an unavailable store raises)."""
+    from ouroboros import dialogue_store
 
-    with jsonl_chain_handles(ctx.data_dir / "logs" / "chat.jsonl", strict=True) as handles:
-        return [row for path, handle in handles for row in iter_jsonl_objects(path, _handle=handle)
-                if row.get("chat_id") == chat_id]
-
-
-def _inbound_row(rows: list, client_message_id: str) -> Optional[Dict[str, Any]]:
-    return next(
-        (
-            row for row in rows
-            if str(row.get("direction") or "") == "in"
-            and str(row.get("client_message_id") or "") == client_message_id
-        ),
-        None,
-    )
+    return dialogue_store.accepted_row(ctx.data_dir, int(chat_id), client_message_id)
 
 
-def _operation_state(ctx: HostServiceContext, rows: list, inbound: Dict[str, Any]) -> Dict[str, Any]:
-    """Join the existing records into one typed view of an accepted message.
-
-    Authority is the task/turn's complete ingress origin matched to the skill's
-    canonical source, then that task's effective retry-aware status; otherwise
-    ``pending`` — or ``lost``
-    when the host process or session that accepted the message is gone, or this process
-    saw its acceptance write raise (the row landed, nothing was queued), and nothing else
-    answers. ``cancel_supported`` is true only for work THIS message started
-    that the cancellation owner can address: a promoted task or a live direct
-    turn; a message steered into a pre-existing task is disclosed, not cancelled.
-    """
-    from ouroboros.project_dialogue import latest_chat_annotations, entry_matches_source_ref, owner_message_ref_is_valid
-    from ouroboros.task_results import load_task_result
-    from ouroboros.task_status import SETTLED_STATUSES, load_effective_task_result
-    from supervisor.active_activity import get_direct_activity_registry
+def _task_view(state: Dict[str, Any], target: str, stored: Dict[str, Any], owner_matches: bool) -> Dict[str, Any]:
+    """The operation as the task TARGET answers it: its effective retry-aware ``stored`` result;
+    ``owner_matches``: this process's queue is the installation's cancellation owner."""
+    from ouroboros.task_status import SETTLED_STATUSES
     from supervisor import queue as task_queue
 
+    status = str(stored.get("status") or "")
+    state.update({"task_id": target, "phase": "managed_task", "status": status or "pending"})
+    if status in SETTLED_STATUSES:
+        state["text"] = str(stored.get("result") or "")
+        # A delivered result can precede post-task work or live descendants.
+        # Use the same ownership facts as the existing cancellation ingress.
+        state["cancel_supported"] = owner_matches and (
+            task_queue.task_has_live_ownership(target) or task_queue.task_subtree_is_live(target)
+        )
+    else:
+        state["cancel_supported"] = owner_matches
+        if not owner_matches:
+            state["reason"] = "cancel_owner_unavailable"
+        if stored.get("cancel_state"):
+            state["cancel_state"] = str(stored.get("cancel_state"))
+    return state
+
+
+def _operation_state(ctx: HostServiceContext, accepted: Any) -> Dict[str, Any]:
+    """Join the existing records into one typed view of an ``accepted`` inbound row.
+
+    Authority is a task/turn's complete top-level ingress origin matched to the skill's canonical
+    source (chat, id, time, text), then that work's effective retry-aware status. Discovery is
+    addressed by the message: the live queue, the tasks whose typed origin names it
+    (``task_store.origin_documents``, rows an older writer left underived included), the live
+    direct registry (a carried turn's lane row answers as that actor did) and the dialogue rows
+    indexed under that origin, a turn's own record told apart by its origin; no room history or routing
+    annotation is read. A managed root (a promoted or detached task) answers before the direct turn
+    that handed it off; children and retry successors fold into their root, unless a record its
+    retry-aware read went through cannot be read (``task_record_unreadable``). Otherwise ``pending``,
+    or ``lost`` when the host process or session that accepted the message is gone and nothing else
+    answers; a record linked to the message that cannot be read (``task_record_unreadable``) or a
+    dialogue range still importing after it (``history_importing``) keeps it ``pending`` with that
+    reason. ``cancel_supported`` is true only for work THIS message started that the cancellation
+    owner can address: a promoted task or a live direct turn; a message steered into a pre-existing
+    task is disclosed, not cancelled.
+    """
+    from ouroboros import dialogue_store
+    from ouroboros.project_dialogue import entry_matches_source_ref, owner_message_ref_is_valid
+    from ouroboros.task_carrier import conversation_origin
+    from ouroboros.task_status import SETTLED_STATUSES, load_effective_task_result
+    from ouroboros.task_store import origin_documents
+    from supervisor.active_activity import get_direct_activity_registry
+    from supervisor.conversation_lane import conversation_row
+    from supervisor import queue as task_queue
+
+    inbound = accepted.row
     chat_id = int(inbound.get("chat_id") or 0)
     client_message_id = str(inbound.get("client_message_id") or "")
+    key = operation_ref(chat_id, client_message_id)
     state: Dict[str, Any] = {
-        "operation_ref": operation_ref(chat_id, client_message_id),
+        "operation_ref": key,
         "chat_id": chat_id,
         "client_message_id": client_message_id,
         "accepted_at": str(inbound.get("ts") or ""),
         "status": "pending",
         "cancel_supported": False,
     }
+
     def owns(record: dict) -> bool:
         ref = record.get("origin_message_ref")
-        return bool(owner_message_ref_is_valid(ref) and entry_matches_source_ref(inbound, [ref]))
+        return bool(owner_message_ref_is_valid(ref) and ref["client_message_id"] == client_message_id
+                    and entry_matches_source_ref(inbound, [ref]))
 
-    # An annotation is only a discovery hint. The actual task's complete
-    # ingress origin, already scoped to the authenticated skill's row, is the
-    # authority. Live queue payloads cover tasks not yet persisted by a worker.
-    queued = {}
+    def root(record: dict) -> bool:
+        return not str(record.get("parent_task_id") or "").strip() and record.get("delegation_role") != "subagent"
+
+    # Live queue payloads cover tasks no worker has persisted yet: the current source. A conversation-lane row
+    # is the turn itself, live as the registry's actor was, never the managed root it may have promoted.
+    queued: Dict[str, Dict[str, Any]] = {}
+    turns: Dict[str, Dict[str, Any]] = {}
     cancel_owner_matches = (task_queue.DRIVE_ROOT is not None
                             and pathlib.Path(task_queue.DRIVE_ROOT).resolve() == ctx.data_dir.resolve())
     if cancel_owner_matches:
         with task_queue._queue_lock:
-            for task in [*task_queue.PENDING, *(meta.get("task") or {} for meta in task_queue.RUNNING.values())]:
-                if owns(task):
-                    queued[str(task.get("id") or "")] = dict(task)
-    receipt = latest_chat_annotations(ctx.data_dir).get(client_message_id) or {}
-    targets = dict.fromkeys([*queued, str(receipt.get("target") or ""), *(str(row.get("task_id") or "") for row in reversed(rows))])
-    for target in targets:
-        if not target:
-            continue
-        try:
-            raw = queued.get(target) or load_task_result(ctx.data_dir, target, strict=True) or {}
-        except (ValueError, store.StoreError):
-            continue  # An unreadable/disallowed discovery hint carries no authority.
-        if not owns(raw):
-            continue
+            rows = [*((task, False) for task in task_queue.PENDING),
+                    *((meta.get("task") or {}, conversation_row(meta)) for meta in task_queue.RUNNING.values())]
+            for task, lane in rows:
+                if str(task.get("id") or "") and owns(task) and root(task):
+                    (turns if lane else queued)[str(task["id"])] = dict(task)
+    documents, unreadable = origin_documents(ctx.data_dir, key)
+    owners = {tid: doc for tid, doc in documents.items() if owns(doc) and root(doc)}
+    for tid, doc in list(owners.items()):
+        if not (isinstance(doc.get("status"), str) and doc["status"].strip()):  # the strict reader's refusal
+            unreadable[tid] = "status_invalid"
+            del owners[tid]
+    successors = {str(doc.get(link) or "") for doc in owners.values() for link in ("superseded_by", "retry_task_id")}
+    heads = sorted((tid for tid in owners if tid not in successors and tid not in queued),
+                   key=lambda tid: (str(owners[tid].get("ts") or ""), tid), reverse=True)
+    direct = [tid for tid in heads if conversation_origin(owners[tid])]  # a turn's own record, whatever carried it
+    managed = [*queued, *(tid for tid in heads if tid not in direct)]
+    if managed:
+        target = managed[0]
         stored = load_effective_task_result(ctx.data_dir, target, materialize_artifacts=False) or {}
-        status = str(stored.get("status") or "")
-        state.update({
-            "task_id": target,
-            "phase": "managed_task",
-            "status": status or "pending",
-        })
-        if status in SETTLED_STATUSES:
-            state["text"] = str(stored.get("result") or "")
-            # A delivered result can precede post-task work or live descendants.
-            # Use the same ownership facts as the existing cancellation ingress.
-            state["cancel_supported"] = cancel_owner_matches and (
-                task_queue.task_has_live_ownership(target) or task_queue.task_subtree_is_live(target)
-            )
-        else:
-            state["cancel_supported"] = cancel_owner_matches
-            if not cancel_owner_matches:
-                state["reason"] = "cancel_owner_unavailable"
-            if stored.get("cancel_state"):
-                state["cancel_state"] = str(stored.get("cancel_state"))
-        return state
-    for entry in get_direct_activity_registry().snapshot(chat_id):
-        activity = get_direct_activity_registry().get(str(entry.get("activity_id") or ""))
+        # The rows the retry-aware read went through (its hops, their links, the row it answers from, a link it
+        # could not follow): a fault captured there leaves the answer unknown, never the damaged row's value
+        # or its predecessor's. Damage elsewhere hides nothing here.
+        hops = stored.get("retry_lineage") if isinstance(stored.get("retry_lineage"), list) else []
+        if unreadable.keys() & {str(row.get(link) or "") for row in (stored, *hops) if isinstance(row, dict)
+                                for link in ("task_id", "superseded_by", "retry_task_id")}:
+            state["reason"] = "task_record_unreadable"
+            return state
+        return _task_view(state, target, stored, cancel_owner_matches)
+    for tid, task in turns.items():  # live as the registry's actor was until its own record settles; then its
+        kind = "presence" if task.get("_presence_turn") else "direct_chat"  # final or record answers, below
+        if str((load_effective_task_result(ctx.data_dir, tid, materialize_artifacts=False) or {}).get("status")
+               or "") not in SETTLED_STATUSES:
+            state.update(status="running", phase=kind, task_id=tid, cancel_supported=kind == "direct_chat")
+            return state
+        direct += [] if tid in direct else [tid]
+    registry = get_direct_activity_registry()
+    for entry in registry.snapshot(chat_id):
+        activity = registry.get(str(entry.get("activity_id") or ""))
         if activity is not None and owns({"origin_message_ref": activity.origin_message_ref}):
             kind = str(entry.get("kind") or "direct_chat")
             state.update({
@@ -1317,21 +1114,36 @@ def _operation_state(ctx: HostServiceContext, rows: list, inbound: Dict[str, Any
             if kind == "direct_chat" and not cancel_owner_matches:
                 state["reason"] = "cancel_owner_unavailable"
             return state
-    for row in reversed(rows):
+    if unreadable:  # it may be the managed work this message started: no direct final or loss is proven
+        state["reason"] = "task_record_unreadable"
+        return state
+    for entry in dialogue_store.iter_probes(ctx.data_dir, "chat", [("origin", key)], newest_first=True):
+        row = entry.row
         terminal = str(row.get("task_terminal_status") or "")
         if row.get("direction") in {"out", "system"} and terminal in SETTLED_STATUSES and owns(row):
             state.update({"status": terminal, "text": str(row.get("text") or "")})
+            turn = str(row.get("task_id") or "")
+            if turn in direct:  # the turn's own record: its post-task work may still spend
+                state["task_id"] = turn
+                state["cancel_supported"] = cancel_owner_matches and (
+                    task_queue.task_has_live_ownership(turn) or task_queue.task_subtree_is_live(turn))
             return state
-    from supervisor.message_ingress import accepted_here, acceptance_undispatched
-
-    if acceptance_undispatched(chat_id, client_message_id):  # its write raised; nothing was queued
-        state.update({"status": "lost", "reason": "acceptance_write_failed"})
+    for target in direct:  # a settled turn whose final row is gone still answers from its own record
+        stored = load_effective_task_result(ctx.data_dir, target, materialize_artifacts=False) or {}
+        if str(stored.get("status") or "") in SETTLED_STATUSES:
+            return _task_view(state, target, stored, cancel_owner_matches)
+    if not dialogue_store.range_coverage(ctx.data_dir, "chat", lower=accepted.seq)["imported"]:
+        state["reason"] = "history_importing"  # an answer may sit in the rows still importing
         return state
+    from supervisor.message_ingress import dispatch_lost, dispatch_taken_over_here
+
     accepted_session = str(inbound.get("session_id") or "")
     live_session = str((read_json_dict(ctx.data_dir / "state" / "state.json") or {}).get("session_id") or "")
-    # A crash keeps the session: the row's process stamp names the ended process (and its queue).
-    ended = bool(inbound.get("ingress_process")) and not accepted_here(inbound)
-    if ended or (accepted_session and live_session and accepted_session != live_session):
+    # A crash keeps the session: the dispatch fact names the ended process (and its queue). A dispatch
+    # THIS process took over after the restart (an owed one, by a retry or the recovery) is live.
+    ended = dispatch_lost(inbound, ctx.data_dir)
+    restarted = accepted_session and live_session and accepted_session != live_session
+    if ended or (restarted and not dispatch_taken_over_here(inbound, ctx.data_dir)):
         state.update({"status": "lost", "reason": "host_restarted_before_answer"})
     return state
 
@@ -1340,11 +1152,10 @@ def _owned_operation_state(
     ctx: HostServiceContext, skill_name: str, chat_id: int, client_message_id: str,
 ) -> Optional[Dict[str, Any]]:
     """The operation view, or None unless THIS skill injected the message."""
-    rows = _chat_rows(ctx, chat_id)
-    inbound = _inbound_row(rows, client_message_id)
-    if inbound is None or str(inbound.get("source") or "") != f"skill:{skill_name}":
+    accepted = _accepted_inbound(ctx, chat_id, client_message_id)
+    if accepted is None or str(accepted.row.get("source") or "") != f"skill:{skill_name}":
         return None
-    return _operation_state(ctx, rows, inbound)
+    return _operation_state(ctx, accepted)
 
 
 def _cancel_owned_operation(
@@ -1544,9 +1355,11 @@ def create_host_service_app(
 ) -> Starlette:
     # host_notify imports this module's helpers; mounted here, imported lazily.
     from ouroboros.gateway.host_notify import _api_notify
+    from ouroboros.gateway.host_call import host_call_routes
 
     app = Starlette(
         routes=[
+            *host_call_routes(),
             Route("/identity", _api_identity, methods=["GET"]),
             Route("/tools/schemas", _api_tool_schemas, methods=["GET"]),
             Route("/chat/allocate-internal", _api_allocate_internal, methods=["POST"]),
@@ -1555,8 +1368,10 @@ def create_host_service_app(
             Route("/chat/cancel", _api_chat_cancel, methods=["POST"]),
             Route("/chat/decision", _api_chat_decision, methods=["POST"]),
             Route("/ui/language", _api_ui_language, methods=["POST"]),
+            Route("/presence/place", _api_presence_place, methods=["GET"]),
             Route("/presence/turn", _api_presence_turn, methods=["POST"]),
             Route("/presence/delivery", _api_presence_delivery, methods=["POST"]),
+            Route("/presence/history", _api_presence_history, methods=["POST"]),
             Route("/presence/work/{work_ref}", _api_presence_work, methods=["GET", "POST"]),
             Route("/ui/ws-message", _api_ws_message, methods=["POST"]),
             Route("/notify", _api_notify, methods=["POST"]),

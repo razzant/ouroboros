@@ -19,33 +19,15 @@ REPO = pathlib.Path(__file__).parents[1]
 _LEAVES = (review_evidence_sections,)
 
 _MOVED_NAMES = (
-    "collect_turn_diff",
-    "_ACCEPT_RESULT_CAP",
-    "_ACCEPT_ARGS_CAP",
+    # The acceptance packet's assembler, budget, trajectory, obligations and claim-support helpers
+    # left with the task-acceptance machine; these section helpers outlived it (the result review
+    # and the verification summary still read them through the historical facade).
     "_ACCEPT_NOTES_CAP",
-    "_ACCEPT_TRAJECTORY_MAX_CALLS",
-    "_ACCEPT_ARTIFACT_PREVIEW_CAP",
-    "_ACCEPT_ARTIFACT_PREVIEW_MAX_BYTES",
-    "_ACCEPT_TOTAL_BUDGET",
-    "_ACCEPT_OBLIGATIONS_MAX",
-    "_ACCEPT_RETRIEVAL_URLS_MAX",
-    "ACCEPTANCE_PROMPT_OVERHEAD_CHARS",
-    "_ACCEPT_DENSE_CHARS_PER_TOKEN",
-    "AcceptancePacketBudget",
-    "acceptance_packet_budget_chars",
-    "obligation_is_pending",
-    "_accept_obligation_row",
-    "task_acceptance_evidence_revision",
-    "_accept_redact_cap",
+    "_accept_cap",
     "_accept_task_contract",
-    "_accept_protected_set",
     "_accept_verification_summary",
     "_accept_receipt_exhibits",
     "_accept_effective_claims",
-    "_accept_claim_support_refs",
-    "_accept_trajectory",
-    "_accept_artifact_manifest",
-    "_accept_enforce_budget",
     "_owner_content_projection",
     "_accept_owner_directives",
 )
@@ -70,35 +52,24 @@ def test_review_evidence_leaf_is_a_non_catalog_owner_without_backedges():
                 ), module.__name__
 
 
-def test_review_evidence_keeps_the_packet_assembler_and_its_patchable_seams():
+def test_review_evidence_keeps_its_patchable_seams():
     """Host-owned seams are documented to be readable — and patchable — at
-    ``review_evidence.<name>``, so the packet assembler and the annotator stay
-    here. The commit-review status renderers no longer do: upstream 852ce967 cut
-    them into the ``review_status_projection`` leaf, so the pin follows their real
-    owner while the historical ``review_evidence.<name>`` read still resolves."""
-    for name in (
-        "build_task_acceptance_evidence",
-        "annotate_criteria_evidence_resolution",
-        "collect_review_evidence",
-    ):
-        assert getattr(review_evidence, name).__module__ == "ouroboros.review_evidence", name
+    ``review_evidence.<name>``, so the commit-review evidence collector stays here
+    (the acceptance packet assembler and its criteria annotator left with the
+    task-acceptance machine). The commit-review status renderers no longer do:
+    upstream 852ce967 cut them into the ``review_status_projection`` leaf, so the
+    pin follows their real owner while the historical read still resolves."""
+    assert review_evidence.collect_review_evidence.__module__ == "ouroboros.review_evidence"
     for name in ("build_review_projection", "build_review_status_payload"):
         assert name in vars(review_evidence), name
         assert getattr(review_evidence, name).__module__ == (
             "ouroboros.review_status_projection"
         ), name
-    for name in (
-        "collect_turn_diff",
-        "acceptance_evidence_ref_vocabulary",
-        "resolve_criteria_evidence_refs",
-    ):
-        assert name in vars(review_evidence), name
 
 
 def test_review_evidence_facade_reexports_every_moved_identity():
-    """``review_evidence`` keeps the exact objects, so the loop, the review tool,
-    the advisory surface, reflection and the acceptance tests see no identity
-    change at their historical import site."""
+    """``review_evidence`` keeps the exact objects, so the loop, the review tool
+    and reflection see no identity change at their historical import site."""
     for name in _MOVED_NAMES:
         assert hasattr(review_evidence, name), name
         assert getattr(review_evidence, name) is getattr(review_evidence_sections, name), name

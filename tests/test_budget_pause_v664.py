@@ -70,7 +70,8 @@ def test_resume_rejects_replay_unsafe_pause(tmp_path, monkeypatch, dispatch):
         },
     })
 
-    assert queue.resume_budget_paused_task("unsafe-task") == {
+    refused = queue.resume_budget_paused_task("unsafe-task")
+    assert {key: refused[key] for key in ("ok", "error", "action")} == {
         "ok": False,
         "error": "replay_unsafe" if dispatch == "none" else "dispatch_outcome_unknown",
         "action": "cancel_or_new_run",
@@ -248,7 +249,7 @@ def test_root_budget_resume_selects_one_task_and_keeps_tree_marker(tmp_path, mon
 
     assert result["ok"] and result["task_id"] == "safe-child" and result["same_generation"]
     assert "safe-root" in queue.BUDGET_ROOT_FENCES
-    assert workers.PENDING[0]["_budget_pause_hold"]["selected"]
+    assert "_resume_selection" in workers.PENDING[0]
 
 
 def test_root_budget_selection_leaves_unsafe_pending_sibling_held(tmp_path, monkeypatch):
@@ -274,5 +275,5 @@ def test_root_budget_selection_leaves_unsafe_pending_sibling_held(tmp_path, monk
 
     assert result["ok"] and result["task_id"] == "safe-child"
     assert "mixed-root" in queue.BUDGET_ROOT_FENCES
-    assert safe["_budget_pause_hold"]["selected"]
+    assert "_resume_selection" in safe
     assert queue.resume_budget_paused_task("retry-child")["error"] == "replay_unsafe"

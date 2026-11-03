@@ -80,11 +80,11 @@ test('a plan wave whose reviewers may still answer reads as work in progress', (
     assert.doesNotMatch(attempt.detailText, /Pending dispatch|triad_/);
 
     const html = expandedHtml(group);
-    assert.match(html, /chat-review-group working/);
-    assert.match(html, /chat-review-attempt working/);
+    // Live work: the moving status mark beside the words, on the group row and on the wave's own row.
+    assert.match(html, /class="review-check-head"[^>]*>[\s\S]*?class="review-state" data-tone="working"><span class="status-mark"[^>]*data-shape="moving"/);
     assert.equal(group.progress, 'in progress · 1 of 3 answered');
-    assert.match(html, /chat-review-group-meta">in progress · 1 of 3 answered/);
-    assert.match(html, /chat-review-attempt-meta">[^<]*· in progress · 1 of 3 answered/);
+    assert.match(html, /review-state-word">in progress · 1 of 3 answered</);
+    assert.match(html, /data-review-opinion="[^"]+"><div class="review-seat-head"><span class="review-seat-name">wave 1<\/span>[\s\S]*?class="review-state" data-tone="working">[\s\S]*?review-state-word">in progress · 1 of 3 answered</);
     assert.doesNotMatch(html, /DEGRADED|\d unavailable/);
 });
 
@@ -107,8 +107,7 @@ test('a settled wave without quorum reads no verdict in the neutral tone and nam
     assert.deepEqual(availabilityLines(attempt, ' · awaiting'), []);
 
     const html = expandedHtml(group);
-    assert.match(html, /chat-review-group neutral/);
-    assert.match(html, /chat-review-group-meta">no verdict · 0 of 2 answered · 2 unavailable/);
+    assert.match(html, /class="review-state ui-status" data-tone="neutral">no verdict · 0 of 2 answered · 2 unavailable</);
     assert.doesNotMatch(html, /in progress|DEGRADED|run_failed/);
 
     // A slot that settled after the wave closed is a terminal answer too: only
@@ -124,6 +123,17 @@ test('a settled wave without quorum reads no verdict in the neutral tone and nam
     const revise = planGroup({ custody_pending: false, aggregate: 'REVISE_PLAN', actors: [ANSWERED] });
     assert.equal(revise.attempts[0].progress, '');
     assert.match(revise.attempts[0].detailText, /^Verdict: REVISE_PLAN$/m);
+});
+
+test('an earlier-schema plan verdict reads in the shared words; the token stays in its facts', () => {
+    for (const [aggregate, word] of [['GREEN', 'passed'], ['REVISE_PLAN', 'plan revision asked'], ['REVIEW_REQUIRED', 'review required']]) {
+        const group = planGroup({ custody_pending: false, closed: aggregate === 'GREEN', aggregate, actors: [ANSWERED] }, 'completed');
+        const rows = expandedHtml(group).replace(/<details class="review-facts"[\s\S]*?<\/details>/g, '');
+        // The subject row and the wave row both say it; neither prints the token.
+        assert.equal(rows.split(`">${word}</span>`).length - 1, 2, `${aggregate}: ${rows}`);
+        assert.doesNotMatch(rows, new RegExp(aggregate));
+        assert.match(group.attempts[0].detailText, new RegExp(`^Verdict: ${aggregate}$`, 'm'));
+    }
 });
 
 test('a dead reviewer row quotes the reported sentence and never the code', () => {
@@ -167,8 +177,7 @@ test('an in-flight wave names its failed slot and its awaited slot separately', 
     assert.equal(group.progress, attempt.progress);
     assert.deepEqual([attempt.tone, group.tone], ['warn', 'warn']);
     const html = expandedHtml(group);
-    assert.match(html, /chat-review-group warn/);
-    assert.match(html, /chat-review-group-meta">in progress · 1 of 3 answered · 1 unavailable/);
+    assert.match(html, /class="review-state ui-status" data-tone="warn">in progress · 1 of 3 answered · 1 unavailable</);
 });
 
 test('a reviewer whose window expired stays unresolved instead of awaited', () => {
@@ -187,13 +196,13 @@ test('a reviewer whose window expired stays unresolved instead of awaited', () =
     assert.deepEqual(availabilityLines(attempt, ' · awaiting'), []);
     assert.equal(group.progress, 'unresolved · 1 of 2 answered · 1 unavailable');
     assert.deepEqual([attempt.tone, group.tone], ['warn', 'warn']);
-    assert.match(expandedHtml(group), /chat-review-group-meta">unresolved · 1 of 2 answered · 1 unavailable/);
+    assert.match(expandedHtml(group), /class="review-state ui-status" data-tone="warn">unresolved · 1 of 2 answered · 1 unavailable</);
 
     // One slot that is still merely awaited returns the wave to progress; the lost slot stays counted.
     const mixed = planGroup({ custody_pending: true, actors: [ANSWERED, lost, AWAITING] });
     assert.equal(mixed.progress, 'in progress · 1 of 3 answered · 1 unavailable');
     assert.equal(mixed.tone, 'warn');
-    assert.match(expandedHtml(mixed), /chat-review-group-meta">in progress · 1 of 3 answered · 1 unavailable/);
+    assert.match(expandedHtml(mixed), /class="review-state ui-status" data-tone="warn">in progress · 1 of 3 answered · 1 unavailable</);
 });
 
 test('a wave recorded without the typed custody fields reads the same plain family', () => {
@@ -211,7 +220,7 @@ test('a wave recorded without the typed custody fields reads the same plain fami
         'openai/gpt-5.6-sol · unavailable',
         'Cost unavailable',
     ].join('\n'));
-    assert.match(expandedHtml(group), /chat-review-group-meta">no verdict · 0 of 1 answered · 1 unavailable · 1</);
+    assert.match(expandedHtml(group), /data-tone="neutral">no verdict · 0 of 1 answered · 1 unavailable<\/span><svg class="review-chevron"[\s\S]*?<\/svg><span class="review-check-meta">[^<]*1 attempt<\/span>/);
 });
 
 test('a plan wave of a task that is not running is a recorded gap, never live work', () => {

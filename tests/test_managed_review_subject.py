@@ -248,6 +248,9 @@ def test_gate_subject_binding_mismatch_blocks_commit(tmp_path, monkeypatch):
         ctx._last_review_subject_trees = {recorded_tree["value"]}
         return None, None, "", []
 
+    # This scenario owns subject binding; release metadata has separate real-Git coverage.
+    monkeypatch.setattr("ouroboros.commit_admission.release_metadata_diagnostics", lambda *a, **kw: {
+        "status": "not_applicable", "findings": [], "unavailable": []})
     monkeypatch.setattr(git_mod, "_run_review_preflight_tests", lambda *a, **kw: None)
     monkeypatch.setattr(git_mod, "_run_parallel_review", _fake_parallel)
     monkeypatch.setattr(
@@ -727,7 +730,8 @@ def test_an_oversize_drop_never_promotes_an_added_critic_into_the_quorum(tmp_pat
         pool_seat("reading", "anthropic/claude-opus-4.1", delivery="native"),
         pool_seat("extra", "google/gemini-2.5-pro", delivery="native", marked=not additional),
     ))
-    panel = compose_panel(ReviewChangeRequest(root="system_repo", subject="index", reviewers=("extra",)), adds_only=True)
+    panel = compose_panel(ReviewChangeRequest(root="system_repo", subject="index", reviewers=("extra",)),
+                          body=True, strictness="blocking")
     with slots.composed_review_pool(panel.seats):
         plan = slots.commit_triad_delivery()
     assert plan["additional"] == [False, False, additional]

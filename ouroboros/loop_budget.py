@@ -47,6 +47,14 @@ def _loop():
     return loop
 
 
+def _server_web_allowed_by_task(ctx: Any) -> bool:
+    """Whether the task's contract leaves the network to the main loop (native server-side search)."""
+    contract = getattr(ctx, "task_contract", {}) if isinstance(getattr(ctx, "task_contract", {}), dict) else {}
+    resources = contract.get("allowed_resources") if isinstance(contract.get("allowed_resources"), dict) else {}
+    forbidden_names = {"web", "allow_web", "network", "allow_network", "internet", "external_network"}
+    return not any(resources.get(name) is False for name in forbidden_names)
+
+
 def _check_budget_limits(
     ctx: "_RoundLimitContext",
     budget_remaining_usd: Optional[float],
@@ -71,7 +79,7 @@ def _check_budget_limits(
             trace = ctx.llm_trace if isinstance(ctx.llm_trace, dict) else {}
             tool_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
             suffix = (
-                _loop()._force_plan_disclosure(tool_ctx, trace, forced_reason="budget_exhausted")
+                _loop()._plan_gate_disclosure(tool_ctx, trace, forced_reason="budget_exhausted")
                 if tool_ctx is not None else ""
             )
             _loop()._record_forced_finalization(
@@ -166,6 +174,9 @@ def _check_budget_limits(
             presence_arm = (getattr(tools_ctx, "_presence_forced_declaration", None),
                             getattr(tools_ctx, "_presence_forced_pending", None))
             priced_prompt = _loop()._prepare_forced_prompt(ctx, forced_prompt, trace)
+            from ouroboros.loop_forced_finalization import _deliver_forced_late_results
+
+            _deliver_forced_late_results(ctx, trace)  # priced with the candidate, never added after
             prospective_messages = [dict(message) for message in ctx.messages]
             _loop()._append_or_merge_user_message(prospective_messages, priced_prompt)
             wrapup_request, send_messages = task_pacing.prepared_wrapup_candidate(
@@ -364,6 +375,9 @@ def _soft_land_exhausted_ceiling(
     priced_prompt = _loop()._prepare_forced_prompt(
         limit_ctx, f"[BUDGET LIMIT] {soft_land_reason} {_loop()._FORCED_BEST_EFFORT_TAIL}", trace,
     )
+    from ouroboros.loop_forced_finalization import _deliver_forced_late_results
+
+    _deliver_forced_late_results(limit_ctx, trace)  # priced with the candidate, never added after
     prospective = [dict(message) for message in limit_ctx.messages]
     _loop()._append_or_merge_user_message(prospective, priced_prompt)
     request, send_messages = task_pacing.prepared_wrapup_candidate(
@@ -471,7 +485,8 @@ def _handle_budget_exceeded(
                 physical_calls = None
     except Exception:
         log.exception("Could not inspect task attempts after budget rail")
-    direct_chat = bool(getattr(ctx.tools._ctx, "is_direct_chat", False))
+    from ouroboros.task_carrier import conversation_origin
+    direct_chat = conversation_origin(ctx.tools._ctx)  # the owner's foreground turn, in whichever process
     replay_safe = physical_calls == 0 and not direct_chat
     scope = str(getattr(exc, "limit_scope", "global") or "global")
     resource_limit = {
@@ -679,6 +694,10 @@ def _cleanup_loop_resources(
             stateful_executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
             log.warning("Failed to shutdown stateful executor", exc_info=True)
+    # Task-session MCP servers end with their loop on every exit, a cold pause included (the
+    # early return below); a warm owner wait never leaves the loop. Never raises.
+    from ouroboros.mcp_task_session import close_context_sessions
+    close_context_sessions(ctx.tools._ctx)
     _loop()._finalize_task_services(ctx)
     # The full DeliveryCandidate is loop-local: only its compact
     # hash/revision projection remains in llm_trace after this cleanup. Clear
@@ -688,22 +707,7 @@ def _cleanup_loop_resources(
     ctx.tools._ctx._delivery_control_required = False
     if ctx.drive_root is None or not ctx.task_id:
         return
-    pausing = bool(getattr(ctx.tools._ctx, "_budget_pausing", False))
-    try:
-        from ouroboros.mcp_task_sessions import stop_task
-
-        # Here, not in pre-acceptance service finalization: a task sent back to
-        # work keeps its bridge. A serialized pause releases this worker, and no
-        # other worker can inherit its process-local session, so it closes without
-        # ending the retained attempt. Warm waits never reach this cleanup.
-        bridge_outcomes = stop_task(ctx.tools._ctx, end_attempt=not pausing)
-    except Exception as exc:
-        bridge_outcomes = [{"closure": f"unconfirmed: {type(exc).__name__}: {exc}"}]
-    if bridge_outcomes:
-        _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
-            "checkpoint_kind": "mcp_browser_bridges_stopped", "bridges": bridge_outcomes,
-        })
-    if pausing:
+    if getattr(ctx.tools._ctx, "_budget_pausing", False):
         # The task is NOT terminal: its delegated runs stay under its custody
         # (observed and stop-requested on the durable pause row); the periodic
         # sweep keeps covering them. A terminal reconciliation here would
@@ -754,6 +758,10 @@ def _service_identity_projection(service: Dict[str, Any]) -> Dict[str, Any]:
             value = truncate_within_limit(str(value), 2000)
         if value not in (None, "", [], {}):
             projected[key] = value
+    cleanup = service.get("process_cleanup")
+    if isinstance(cleanup, dict):  # what stayed unconfirmed (pid, birth, reason) and why a rest is unknown, whole
+        projected["process_cleanup"] = {key: cleanup[key] for key in (
+            "exit_confirmed", "census_failed", "residual", "survivors", "unverified", "custody") if key in cleanup}
     return projected
 
 

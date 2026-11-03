@@ -133,7 +133,7 @@ def test_full_start_http_contract_and_real_snapshot_capture(full_run):
     assert 'effective access is established by the run receipt' in request['instructions']
     assert 'private snapshot is not an OS sandbox' in request['instructions']
     assert result['execution_root'] in request['instructions']
-    assert 'sole writable execution root' in request['instructions']
+    assert f"the private execution root for this run is {result['execution_root']}:" in request['instructions']
     assert target in request['instructions']
     assert 'read-only identity/reference' in request['instructions']
     assert request['instructions'].count('this line governs native process access') == 1
@@ -329,7 +329,7 @@ def test_retry_preserves_recorded_binding_evidence(full_run, monkeypatch, histor
     with monkeypatch.context() as prior:
         if historical:
             prior.setattr(delegate, "execution_binding_fingerprint", lambda *args: "")
-            prior.setattr(delegate, "apply_execution_binding", lambda instructions, *args: instructions)
+            prior.setattr(delegate, "execution_binding_text", lambda *args, **kwargs: "")
         initial = delegate_payload(delegate._delegate_start(ctx, "Exact original assignment."))
     invocation = initial["pending_invocation_id"]
     drive = custody.custody_root(ctx)

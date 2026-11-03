@@ -5,7 +5,20 @@ from __future__ import annotations
 import pytest
 
 
-def test_keyed_terminal_api_error_is_replayed_while_sibling_is_late(tmp_path):
+def _freeze_slot_clock(monkeypatch, *slot_ids):
+    """Classification is the contract where this is used; the late cases pin expiry. Worker start
+    and custody-write latency is not a classification change, so the named slots (default all)
+    never reach their window (#1889)."""
+    import time
+
+    from ouroboros import review_custody
+
+    start, real = time.monotonic(), review_custody.monotonic_now
+    monkeypatch.setattr(review_custody, "monotonic_now",
+                        lambda slot: start if not slot_ids or slot in slot_ids else real(slot))
+
+
+def test_keyed_terminal_api_error_is_replayed_while_sibling_is_late(tmp_path, monkeypatch):
     """A settled API slot must not be bought twice while its cycle sibling settles."""
     import threading
     from types import SimpleNamespace
@@ -20,6 +33,7 @@ def test_keyed_terminal_api_error_is_replayed_while_sibling_is_late(tmp_path):
     late_finished = threading.Event()
     release_late = threading.Event()
     ctx = SimpleNamespace()
+    _freeze_slot_clock(monkeypatch, "fast")
     request = ReviewRequest(
         surface="plan_review", goal="review", task_id="mixed-cycle",
         retry_key="plan_review:mixed-cycle:1",
@@ -35,7 +49,7 @@ def test_keyed_terminal_api_error_is_replayed_while_sibling_is_late(tmp_path):
         calls.append(slot.slot_id)
         if slot.slot_id == "late":
             late_started.set()
-            release_late.wait(1.0)
+            assert release_late.wait(60), "late sibling was never released"
             late_finished.set()
         return ReviewActorRecord(
             slot_id=slot.slot_id, model=slot.model, status="error",
@@ -58,25 +72,26 @@ def test_keyed_terminal_api_error_is_replayed_while_sibling_is_late(tmp_path):
         usage_meta={}, review_usage_scope=UsageScope(drive_root=tmp_path, task_id=request.task_id),
         run_slot=run_slot, error_actor=error_actor,
     )
-    first = run_custodied_review_slots(**args)
-    assert {actor.slot_id: actor.operation_state for actor in first} == {
-        "fast": "settled", "late": "in_flight",
-    }
-    assert late_started.wait(1.0)
-    assert getattr(ctx, "_review_settled_attempts", {})
-    second = run_custodied_review_slots(**args)
-    # Both slots run on independent workers; custody guarantees one call each,
-    # not which worker the scheduler enters first.
-    assert sorted(calls) == ["fast", "late"]
-    assert {actor.slot_id: actor.operation_state for actor in second} == {
-        "fast": "settled", "late": "in_flight",
-    }
+    try:
+        first = run_custodied_review_slots(**args)
+        assert {actor.slot_id: actor.operation_state for actor in first} == {
+            "fast": "settled", "late": "in_flight",
+        }
+        assert late_started.wait(60), "late sibling never started"
+        assert getattr(ctx, "_review_settled_attempts", {})
+        second = run_custodied_review_slots(**args)
+        # Both slots run on independent workers; custody guarantees one call each,
+        # not which worker the scheduler enters first.
+        assert sorted(calls) == ["fast", "late"]
+        assert {actor.slot_id: actor.operation_state for actor in second} == {
+            "fast": "settled", "late": "in_flight",
+        }
+    finally:
+        release_late.set()
+        assert late_finished.wait(60), "late sibling did not finish"
 
-    release_late.set()
-    assert late_finished.wait(1.0)
 
-
-def test_unresolved_terminal_http_capture_is_replayed_without_second_dispatch(tmp_path):
+def test_unresolved_terminal_http_capture_is_replayed_without_second_dispatch(tmp_path, monkeypatch):
     """A typed provider response makes an unresolved ledger row known-terminal."""
     from types import SimpleNamespace
 
@@ -87,6 +102,7 @@ def test_unresolved_terminal_http_capture_is_replayed_without_second_dispatch(tm
 
     calls = []
     ctx = SimpleNamespace()
+    _freeze_slot_clock(monkeypatch)
     request = ReviewRequest(
         surface="plan_review", goal="review", task_id="terminal-capture",
         retry_key="plan_review:terminal-capture:1",
@@ -126,7 +142,7 @@ def test_unresolved_terminal_http_capture_is_replayed_without_second_dispatch(tm
     assert second[0].http_status == 503
 
 
-def test_unresolved_capture_without_terminal_status_is_no_resend_without_typed_code(tmp_path):
+def test_unresolved_capture_without_terminal_status_is_no_resend_without_typed_code(tmp_path, monkeypatch):
     """A legacy actor cannot turn an unknown physical outcome into a resend."""
     from types import SimpleNamespace
 
@@ -137,6 +153,7 @@ def test_unresolved_capture_without_terminal_status_is_no_resend_without_typed_c
 
     calls = []
     ctx = SimpleNamespace()
+    _freeze_slot_clock(monkeypatch)
     request = ReviewRequest(
         surface="plan_review", goal="review", task_id="unknown-capture",
         retry_key="plan_review:unknown-capture:1",
@@ -175,7 +192,7 @@ def test_unresolved_capture_without_terminal_status_is_no_resend_without_typed_c
     assert second[0].late_result_pending is True
 
 
-def test_unknown_physical_capture_state_is_no_resend_even_with_terminal_status(tmp_path):
+def test_unknown_physical_capture_state_is_no_resend_even_with_terminal_status(tmp_path, monkeypatch):
     """Malformed physical provenance must win over an otherwise typed status."""
     from types import SimpleNamespace
 
@@ -188,6 +205,7 @@ def test_unknown_physical_capture_state_is_no_resend_even_with_terminal_status(t
 
     calls = []
     ctx = SimpleNamespace()
+    _freeze_slot_clock(monkeypatch)
     request = ReviewRequest(
         surface="plan_review", goal="review", task_id="unknown-physical-state",
         retry_key="plan_review:unknown-physical-state:1",
@@ -380,6 +398,80 @@ def test_coordinator_propagates_terminal_capture_status_for_same_cycle_replay(
     assert second.actors[0]["operation_id"] == first.actors[0]["operation_id"]
 
 
+@pytest.mark.parametrize("capture_path", ["exception_only", "fresh_thread_local", "unrelated_incoming", "canonical"])
+def test_late_strict_paid_stamp_failure_keeps_the_send_failure_and_sends_once(tmp_path, monkeypatch, caplog,
+                                                                              capture_path):
+    """#1652 on the packet rail through the real API executor. A compatibility transport that sent
+    without the canonical marker, then failed, keeps ITS exception, capture and attempt id when the
+    strict paid stamp then fails: one send, no retry, the failed send observed, the stamp failure
+    logged. The capture rides on the exception alone, on a fresh thread-local too, or beside an
+    unrelated earlier one; a canonical transport is still refused before any send."""
+    from types import SimpleNamespace
+
+    from ouroboros import review_execution
+    from ouroboros import usage_accounting as ua
+    from ouroboros.review_dispatch import ReviewPaidStamp
+    from ouroboros.review_execution import ReviewRouteKind
+    from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
+
+    def capture(attempt_id, state):
+        return ua.PhysicalAttemptCapture(attempt_id=attempt_id, model="test/model", provider="test", state=state,
+                                         candidate_measurement_kind="opaque")
+
+    sends, errors, writes, observed = [], [], [], []
+    task_id = f"late-stamp-{capture_path}"  # custody replays a settled operation by its identity
+
+    class Transport:
+        def chat(self, **_kwargs):
+            if capture_path == "canonical":
+                return ua.execute_physical_attempt(ua.AttemptRequest(model="test/model", provider="test",
+                    reservation_usd=1.0, drive_root=tmp_path, task_id=task_id, root_task_id=task_id),
+                    lambda: sends.append("send"))
+            sends.append("send")
+            error = RuntimeError("socket reset after the request left")
+            error.physical_attempt_capture = capture("attempt-sent", "dispatched")
+            if capture_path == "fresh_thread_local":
+                ua.adopt_physical_attempt_capture(error.physical_attempt_capture)
+            errors.append(error)
+            raise error
+
+    def stamp_write():
+        writes.append("write")
+        raise RuntimeError("commit review paid write-ahead could not be verified")
+
+    real_observe = review_execution.observe_failed_review_send
+
+    def observe(observer, exc):
+        observed.append(exc)
+        real_observe(lambda row: (observed.append(row), observer(row)), exc)
+
+    monkeypatch.setattr(review_execution, "observe_failed_review_send", observe)
+    previous = ua.last_physical_attempt_capture()  # this thread's own receipt, restored below
+    ua.adopt_physical_attempt_capture(capture("attempt-earlier", "settled") if capture_path == "unrelated_incoming" else None)
+    try:
+        result = run_review_request(
+            ReviewRequest(surface="multi_model_review", goal="review", task_id=task_id,
+                          retry_key=f"commit_review:{task_id}:1"),
+            slots=[ReviewSlot(slot_id="only", model="test/model", route=ReviewRouteKind.API_CHAT)],
+            drive_root=tmp_path, llm=Transport(),
+            usage_ctx=SimpleNamespace(_review_paid_stamp=ReviewPaidStamp(stamp_write, fail_closed=True)))
+    finally:
+        ua.adopt_physical_attempt_capture(previous)
+    actor = result.actors[0]
+    if capture_path == "canonical":
+        assert sends == [] and writes == ["write"] and actor["operation_state"] == "not_dispatched"
+        assert "after a dispatched send" not in caplog.text
+        return
+    assert sends == ["send"] and writes == ["write"], "one physical send; the late stamp ran once"
+    assert observed[0] is errors[0], "the failed-send observer saw the send's own exception"
+    attempts = {attempt for row in observed[1:] for attempt in row.get("ledger_attempt_ids") or []}
+    assert attempts == {"attempt-sent"}
+    assert "socket reset after the request left" in actor["error"]
+    assert (actor["operation_state"], actor["failure_code"]) == ("custody_lost", "provider_outcome_unknown")
+    assert actor["usage"]["physical_attempt_state"] == "dispatched"
+    assert "commit review paid write-ahead could not be verified" in caplog.text
+
+
 def test_budget_exceeded_review_failure_remains_retryable(tmp_path, monkeypatch):
     """A budget refusal before reserve is a $0 row, never sticky custody."""
     from types import SimpleNamespace
@@ -430,7 +522,7 @@ def test_budget_exceeded_review_failure_remains_retryable(tmp_path, monkeypatch)
     assert not getattr(ctx, "_review_settled_attempts", {})
 
 
-def test_not_dispatched_error_remains_retryable_for_same_cycle(tmp_path):
+def test_not_dispatched_error_remains_retryable_for_same_cycle(tmp_path, monkeypatch):
     """A $0 admission refusal must not become a sticky replay actor."""
     from types import SimpleNamespace
 
@@ -441,6 +533,7 @@ def test_not_dispatched_error_remains_retryable_for_same_cycle(tmp_path):
 
     calls = []
     ctx = SimpleNamespace()
+    _freeze_slot_clock(monkeypatch)
     request = ReviewRequest(
         surface="plan_review", goal="review", task_id="retryable-refusal",
         retry_key="plan_review:retryable-refusal:1",
@@ -495,10 +588,7 @@ def test_pre_dispatch_capture_state_remains_retryable_for_same_cycle(
 
     calls = []
     ctx = SimpleNamespace()
-    # Classification and retry are this case's contract; the late cases pin
-    # expiry. Worker start/publication latency is not a classification change.
-    clock_start = time.monotonic()
-    monkeypatch.setattr("ouroboros.review_custody.monotonic_now", lambda _slot: clock_start)
+    _freeze_slot_clock(monkeypatch)
     request = ReviewRequest(
         surface="plan_review", goal="review", task_id=f"retryable-{physical_state}",
         retry_key=f"plan_review:retryable-{physical_state}:1",

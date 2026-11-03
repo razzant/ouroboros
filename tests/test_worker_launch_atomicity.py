@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import contextlib
 import copy
-import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -20,17 +19,26 @@ import pytest
 from ouroboros import store
 from ouroboros.task_results import load_task_result, write_task_result
 from supervisor import queue, queue_schedules as schedules, task_admission, worker_assignment
+from tests._store_journal_shared import exclusive_hold
 from tests.test_g1_followup_policy import _assignment_world, register, row, world as _world
 
 pytestmark = pytest.mark.serial
-world = _world  # requested by name: re-bound so the CI ruff gate sees no F811
+followup_world = _world  # fixture alias: injection does not shadow the import (F811)
+
+
+@pytest.fixture
+def world(followup_world, monkeypatch):
+    from supervisor import workers
+
+    # The real launch writes drive obligations through the pool, too.
+    monkeypatch.setattr(workers, "DRIVE_ROOT", followup_world[1])
+    return followup_world
 
 
 @contextlib.contextmanager
 def held_store(root):
     assert store.store_path(root).exists()
-    holder = sqlite3.connect(store.store_path(root), isolation_level=None, check_same_thread=False)
-    holder.execute("BEGIN EXCLUSIVE")
+    holder = exclusive_hold(store.store_path(root))  # its reads busy too, under WAL as well
     try:
         yield
     finally:
@@ -69,9 +77,8 @@ def restore(rows, **kwargs):
 
 
 def hold_reason(task):
-    from supervisor.events_budget import budget_hold_fact
-
-    return (budget_hold_fact(task) or {}).get("reason")
+    from ouroboros.work_stop import continuation_refusal, hold_fact
+    return ((hold_fact(task) or continuation_refusal(task)) or {}).get("reason")
 
 
 @pytest.mark.parametrize("zero_budget", [False, True])
@@ -184,7 +191,7 @@ def test_a_committed_mark_finishes_and_puts_once_in_the_same_generation(world, m
     _, root, pending = world
     registered, task = admitted(world)
     failures = []
-    real_rows, real_persist = schedules._write_scheduled_tasks, queue.persist_queue_snapshot
+    real_rows, real_persist = schedules._write_scheduled_tasks, queue.publish_queue_snapshot
 
     def rows(data, *args, **kwargs):
         if step == "row_write" and not failures and any(
@@ -210,7 +217,7 @@ def test_a_committed_mark_finishes_and_puts_once_in_the_same_generation(world, m
         return real_started(root_, candidate)
 
     monkeypatch.setattr(schedules, "_write_scheduled_tasks", rows)
-    monkeypatch.setattr(queue, "persist_queue_snapshot", persist)
+    monkeypatch.setattr(queue, "publish_queue_snapshot", persist)
     monkeypatch.setattr(obligations, "drive_started", started)
     workers.assign_tasks()
     assert failures == [step] and sent == [] and pending == [task]
@@ -232,8 +239,8 @@ def test_a_committed_mark_never_replays_after_a_crash(world, monkeypatch):
     """The witness is process memory: a crash leaves only the durable possible, held on restore."""
     _, root, pending = world
     _, task = admitted(world)
-    real_persist = queue.persist_queue_snapshot
-    monkeypatch.setattr(queue, "persist_queue_snapshot",
+    real_persist = queue.publish_queue_snapshot
+    monkeypatch.setattr(queue, "publish_queue_snapshot",
                         lambda **kw: False if kw.get("reason") == "worker_launch_claimed" else real_persist(**kw))
     assert claim(task, []) is False
     stale = snapshot_row(root, task["id"])
@@ -245,7 +252,7 @@ def test_a_committed_mark_never_replays_after_a_crash(world, monkeypatch):
 
 def test_project_rows_keep_their_project_custody_after_a_stale_commit(tmp_path, monkeypatch):
     from tests.test_schedule_occurrence import _project, _row
-    from supervisor import queue as queue_module, queue_schedules, state, workers
+    from supervisor import queue as queue_module, state, workers
     from supervisor.task_admission import revalidate_project_holds
 
     root = tmp_path / "data"
@@ -257,15 +264,14 @@ def test_project_rows_keep_their_project_custody_after_a_stale_commit(tmp_path, 
     queue_module.init_queue_refs(pending, {}, {"value": 0})
     monkeypatch.setattr(workers, "REPO_DIR", tmp_path / "repo")
     (tmp_path / "repo").mkdir()
-    monkeypatch.setattr(queue_schedules, "resync_skill_schedules", lambda *_a: {})
     q = SimpleNamespace(queue=queue_module, pending=pending, root=root)
     _project(q, "proj")
     _row(q, "s1", intent={"kind": "room_default"}, project_id="proj", chat_id=None)
     queue_module.check_scheduled_tasks()
     [task] = pending
     assert task.get("project_id") == "proj"
-    real_persist = queue_module.persist_queue_snapshot
-    monkeypatch.setattr(queue_module, "persist_queue_snapshot",
+    real_persist = queue_module.publish_queue_snapshot
+    monkeypatch.setattr(queue_module, "publish_queue_snapshot",
                         lambda **kw: False if kw.get("reason") == "worker_launch_claimed" else real_persist(**kw))
     assert claim(task, []) is False
     stale = snapshot_row(root, task["id"])
@@ -273,7 +279,7 @@ def test_project_rows_keep_their_project_custody_after_a_stale_commit(tmp_path, 
     [restored] = restore([stale])
     assert restored["_project_admission_restore_hold"]
     pending[:] = [restored]
-    monkeypatch.setattr(queue_module, "persist_queue_snapshot", real_persist)
+    monkeypatch.setattr(queue_module, "publish_queue_snapshot", real_persist)
     revalidate_project_holds()
     assert pending[0].get("_project_admission_restore_hold"), "a committed Project mark keeps its custody"
 
@@ -433,6 +439,8 @@ def test_a_receipt_busy_at_boot_is_rechecked_without_another_boot(world, monkeyp
     from supervisor import restart_retention, schedule_occurrence as occurrences
     from supervisor.events_budget import HOLD_OWNER_RESTART, HOLD_SAVED_WORK
     from supervisor.task_admission import revalidate_project_holds
+    from ouroboros import delegate_recovery
+    from ouroboros.work_stop import current_stop, stop_presentation
 
     _, root, pending = world
     _, task = admitted(world)
@@ -443,7 +451,9 @@ def test_a_receipt_busy_at_boot_is_rechecked_without_another_boot(world, monkeyp
     if stop == "returning":
         monkeypatch.setattr(restart_retention, "fresh_return_transaction", lambda _root: {"queue_ids": [task["id"]]})
     if stop == "owner_restart":
-        monkeypatch.setattr(restart_retention, "saved_sleep_hold_reason", lambda _root: HOLD_OWNER_RESTART)
+        transaction = delegate_recovery.prepare_owner_restart(root)
+        monkeypatch.setattr(delegate_recovery, "_PROCESS_GENERATION", transaction["generation"] + "-successor")
+        assert delegate_recovery.boot_door(root) == "owner_restart"
     stop_hold = {"returning": None, "app_stop": HOLD_SAVED_WORK, "owner_restart": HOLD_OWNER_RESTART}[stop]
     with held_store(root), store.acquisition_budget(0.2):  # contention reads the same, without a long wait
         assert occurrences.restore_verdict(copy.deepcopy(legacy)) == "busy"
@@ -454,6 +464,10 @@ def test_a_receipt_busy_at_boot_is_rechecked_without_another_boot(world, monkeyp
     queue.check_scheduled_tasks()  # the live row is the occurrence: never republished beside it
     [row_] = pending
     assert hold_reason(row_) == stop_hold, "the stop's own hold stays independent of the receipt check"
+    if stop == "owner_restart":
+        for stopped in (restored, row_):
+            assert current_stop(stopped)["door"] == "owner_restart"
+            assert stop_presentation(stopped)["reason"]["text"] == "Held after a restart"
     if truth == "unsent":
         assert row_["admitted_dispatch"] == "none" and not row_.get("_project_admission_restore_hold")
     else:
@@ -465,7 +479,7 @@ def unsent_launch(world, monkeypatch):
     world, workers, sent = _assignment_world(world, monkeypatch)
     _, root, pending = world
     _, task = admitted(world)
-    real_persist, failed = queue.persist_queue_snapshot, []
+    real_persist, failed = queue.publish_queue_snapshot, []
 
     def persist(**kwargs):
         if kwargs.get("reason") == "worker_launch_claimed" and not failed:
@@ -473,7 +487,7 @@ def unsent_launch(world, monkeypatch):
             return False
         return real_persist(**kwargs)
 
-    monkeypatch.setattr(queue, "persist_queue_snapshot", persist)
+    monkeypatch.setattr(queue, "publish_queue_snapshot", persist)
     workers.assign_tasks()
     assert failed and sent == [] and pending == [task] and task["admitted_dispatch"] == "possible"
     assert worker_assignment._unsent(task) is not None
@@ -515,8 +529,8 @@ def test_the_witness_carries_its_pre_commit_deadline_claim(world, monkeypatch):
     _, root, pending = world
     _, task = admitted(world)
     claim_ = {"task_id": task["id"], "claim": {"marker": "pre-commit"}}
-    real_persist = queue.persist_queue_snapshot
-    monkeypatch.setattr(queue, "persist_queue_snapshot",
+    real_persist = queue.publish_queue_snapshot
+    monkeypatch.setattr(queue, "publish_queue_snapshot",
                         lambda **kw: False if kw.get("reason") == "worker_launch_claimed" else real_persist(**kw))
     with queue._queue_lock:
         assert worker_assignment._commit_launch(queue, task, claim_) is None

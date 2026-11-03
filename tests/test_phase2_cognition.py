@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from tests import _dialogue as dialogue_test
+from tests._store_shared import remove_store_tree
+
 import json
 import pathlib
 from types import SimpleNamespace
@@ -7,9 +10,7 @@ from types import SimpleNamespace
 
 def _chat_rows(root):
     path = root / "logs" / "chat.jsonl"
-    if not path.is_file():
-        return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    return dialogue_test.log_rows(path)
 
 
 def test_split_project_root_facts_row_lands_canonically_once_before_child_gc(tmp_path):
@@ -69,7 +70,6 @@ def test_root_checkpoint_prevents_a_second_facts_row_and_buys_no_summary(tmp_pat
     llm = Llm()
     monkeypatch.setattr(llm_mod, "LLMClient", lambda: llm)
     monkeypatch.setattr(memory_mod, "Memory", lambda **_kwargs: object())
-    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *_a, **_k: None)
     monkeypatch.setattr(evolution, "maybe_promote", lambda *_a, **_k: None)
     env = SimpleNamespace(
         repo_dir=tmp_path / "repo", drive_root=tmp_path,
@@ -87,17 +87,12 @@ def test_root_checkpoint_prevents_a_second_facts_row_and_buys_no_summary(tmp_pat
         {"tool_calls": [{"tool": "read_file"}]}, tmp_path / "logs",
     )
     pipeline._run_post_task_processing_async(*args, blocking=True)
-    # Raw dialogue may rotate/compact after the checkpoint settles. Its absence
-    # must not authorize another paid synthesis.
-    archive = tmp_path / "archive"
-    archive.mkdir(exist_ok=True)
-    (tmp_path / "logs" / "chat.jsonl").replace(archive / "chat_rotated.jsonl")
+    # The settled checkpoint, not the dialogue, decides: a second pass buys no
+    # synthesis and writes no second facts row.
     pipeline._run_post_task_processing_async(*args, blocking=True)
 
     assert llm.calls == 0
-    assert not (tmp_path / "logs" / "chat.jsonl").exists()
-    rotated = [json.loads(line) for line in (archive / "chat_rotated.jsonl").read_text(encoding="utf-8").splitlines()]
-    kinds = [row.get("summary_kind") for row in rotated if row.get("task_id") == "root-llm"]
+    kinds = [row.get("summary_kind") for row in _chat_rows(tmp_path) if row.get("task_id") == "root-llm"]
     assert kinds.count("host_task_facts") == 1 and "authored_root_summary" not in kinds
 
 
@@ -156,7 +151,7 @@ def test_terminal_child_projection_is_idempotent_and_honest_for_all_outcomes(tmp
     cases = [
         ("ok", "completed", {"execution": {"status": "ok"}}, "Done"),
         ("failed", "failed", {"execution": {"status": "failed"}}, "Failed"),
-        ("cancelled", "cancelled", {"execution": {"status": "ok"}}, "Cancelled"),
+        ("cancelled", "cancelled", {"execution": {"status": "ok"}}, "Stopped"),
         ("degraded", "completed", {"execution": {"status": "best_effort"}}, "Done with warnings"),
     ]
     for suffix, status, axes, label in cases:
@@ -199,9 +194,9 @@ def test_terminal_child_projection_is_idempotent_and_honest_for_all_outcomes(tmp
 def test_terminal_projection_dedup_does_not_lose_concurrent_chat_append(tmp_path):
     from concurrent.futures import ThreadPoolExecutor
 
+    from ouroboros import dialogue_store
     from ouroboros.project_dialogue import append_terminal_task_projection
     from ouroboros.task_results import STATUS_COMPLETED, write_task_result
-    from ouroboros.utils import append_jsonl
 
     result = write_task_result(
         tmp_path, "concurrent-child", STATUS_COMPLETED,
@@ -220,10 +215,7 @@ def test_terminal_projection_dedup_does_not_lose_concurrent_chat_append(tmp_path
         )
 
     def noise(index):
-        return append_jsonl(
-            tmp_path / "logs" / "chat.jsonl",
-            {"type": "concurrent_noise", "index": index},
-        )
+        return dialogue_store.append(tmp_path, "chat", {"type": "concurrent_noise", "index": index})
 
     with ThreadPoolExecutor(max_workers=12) as pool:
         projection_results = list(pool.map(project, range(12)))
@@ -258,7 +250,7 @@ def test_terminal_root_fallback_covers_cancel_without_preempting_open_synthesis(
     )
     row = next(row for row in _chat_rows(tmp_path) if row.get("task_id") == "cancelled-root")
     assert row["summary_kind"] == "terminal_root_projection"
-    assert row["outcome"] == "Cancelled"
+    assert row["outcome"] == "Stopped"
 
     pending = write_task_result(
         tmp_path, "normal-root", STATUS_COMPLETED,
@@ -351,8 +343,6 @@ def test_facts_row_never_suppresses_final_artifact_failure_truth(tmp_path):
 
 
 def test_split_facts_row_keeps_only_canonical_result_ref_after_child_gc(tmp_path):
-    import shutil
-
     from ouroboros import agent_task_pipeline as pipeline
     from ouroboros.headless import copy_child_task_result
     from ouroboros.task_results import STATUS_COMPLETED, load_task_result, write_task_result
@@ -380,7 +370,7 @@ def test_split_facts_row_keeps_only_canonical_result_ref_after_child_gc(tmp_path
     )
     copied = copy_child_task_result(canonical, task)
     assert copied and load_task_result(canonical, "split-root")
-    shutil.rmtree(child)
+    remove_store_tree(child)
 
     row = next(row for row in _chat_rows(canonical) if row.get("task_id") == "split-root")
     assert row["result_ref"] == {
@@ -465,10 +455,12 @@ def test_child_projection_enters_main_cognition_and_project_lineage_not_main_ui(
     _a, _b, main_context, _cap = blocks(env, memory, {"id": "main-turn", "chat_id": 1})
     _a, _b, project_context, _cap = blocks(env, memory, {"id": "project-turn", "chat_id": project_chat})
     # The memory view: the child's terminal row is a host fact of its root task in the Project's
-    # room (lane 2, one line per root task); Main names that room in one line. The child's own
-    # answer is never repeated: it is a turn of its own, read by address.
-    assert f"### {room} — open" in section(main_context, "## Live rooms")
-    assert "task facts 1" in section(main_context, "## Live rooms")
+    # room (lane 2, one line per root task). A host fact alone does not keep a room live, so Main
+    # counts that room in the one aggregate line with its reader. The child's own answer is never
+    # repeated: it is a turn of its own, read by address.
+    live = section(main_context, "## Live rooms")
+    assert f"### {room} — open" not in live
+    assert "1 open rooms;" in live and "task facts 1" in live and "memory_read(room_id='*', start=0)" in live
     lane = section(project_context, f"## This room ({room})")
     assert "; host; task root] " in lane and "children 1 (completed 1)" in lane
     assert "Reviewed exact SHA" not in main_context and "Reviewed exact SHA" not in project_context

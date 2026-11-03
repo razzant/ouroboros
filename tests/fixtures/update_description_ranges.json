@@ -1,0 +1,647 @@
+{
+ "provenance": "Derived by /tmp/3fd8f08a_tools/make_fixture.py on 2026-10-28: ranges from the repository history, receipts parsed by update_letter.collect_range_material + update_qualification.range_qualification, post-merge runs copied from the retained live status read of 2026-10-28T07:59:30Z (newer merges listed as unobserved), texts from task 3fd8f08a's reader-copy examples.",
+ "large": {
+  "key": {
+   "base_sha": "1b5608b65165984bee49f63a173b0a8fe5043243",
+   "target_sha": "fcd6f8d8f121f11e6044d7bf6291110f0ad3877b",
+   "update_channel": "development",
+   "target_ref": "managed/ouroboros"
+  },
+  "version": "7.8.1",
+  "commits": 144,
+  "text": "Номер версии не меняется — 7.8.1 с обеих сторон: это семнадцать слияний ветки разработки, сделанных после последнего выпуска.\n\n## Что будет заметно сразу\n\n- **Telegram.** В тихом режиме каждый мой ответ остаётся отдельным сообщением, просто без звука; друг друга заменяют только технические строки о ходе работы. Карточка вопроса показывает, какой твой вариант и комментарий принят и доставлен ли он.\n- **Чат.** Квитанции о том, что твоё сообщение передано работе, стали короткими и называют работу её именем. Ответ исполнителя, пришедший по частям, собирается в один текст — там, где движок Claudexor передаёт связь между частями; для этого нужен его новый выпуск.\n- **Поле ввода.** Когда открываешь переключатель под полем ввода, ряд больше не подпрыгивает: пояснение появляется одной подсказкой над ним, и на телефоне тоже. Swarm в закрытом виде выглядит как Auto.\n- **Аккаунты.** Если движок Claudexor слишком старый для новой модели аккаунтов, экран Accounts прямо скажет, что его нужно обновить, вместо того чтобы выглядеть пустым. Квота именованного профиля больше не подменяется квотой чужого безымянного профиля или API-ключа.\n- **Dashboard.** Иконки мест обновляются после обновления коннектора, а не остаются старыми.\n- **Storage.** Видно, когда каждая уборка работала в последний раз и чем закончилась. Завершённые записи сжимаются на месте, устаревшие копии байткода удаляются.\n\n## Надёжность\n\n- Если команда не уложилась во время, её поздний результат больше не пропадает: я увижу его на следующем шаге, в том числе после Resume или Continue.\n- Вызов инструмента, на который уже пришёл ответ, не теряется. Resume может продолжить работу мимо вызовов с неизвестным исходом — они будут названы, а не скрыты.\n- Ревью, у которого потерялся ответ на запуск, восстанавливается, а не закрывается раньше времени.\n- Одна повреждённая старая запись больше не удерживает на паузе все остальные деревья задач; Pause и Resume называют эту неопределённость прямо.\n- Остановка дерева процессов больше не задевает группу процессов того, кто её вызвал, — из-за этого обрывались длинные прогоны тестов.\n- Наблюдение за делегированными запусками и чтение из SQLite стали легче, а запуск ревьюера укладывается в отведённое ему время.\n\n## Моя работа с контекстом и собой\n\n- Схемы инструментов MCP подгружаются, когда нужны, а сами подключения остаются у меня на виду: контекст легче, обзор прежний. Отжившие служебные записи хоста больше не копятся.\n- Формулировки BIBLE и системного промпта уточнены, повторы между ними убраны. Сессии, которые работают над моим телом, читают BIBLE до первого предложения.\n- В навыке управления компьютером ввод можно адресовать конкретному приложению, а квитанция честно говорит, было ли действие отправлено.\n\n## Насколько это проверено\n\nПолную батарею тестов ни одно из этих слияний не проходило: авторы запускали проверки затронутых частей и независимое ревью. Автоматическая проверка после слияния у большинства слияний красная, отменена или ещё не закончилась, поэтому назвать весь набор проверенным я не могу. Что именно и где — в проверках ниже.",
+  "qualification": {
+   "base_sha": "1b5608b65165984bee49f63a173b0a8fe5043243",
+   "target_sha": "fcd6f8d8f121f11e6044d7bf6291110f0ad3877b",
+   "commits": [
+    {
+     "sha": "fcd6f8d8f121f11e6044d7bf6291110f0ad3877b",
+     "subject": "Merge pull request #2365 from razzant/codex/bible-system-refinement-20261027-2313",
+     "date": "2026-10-28T10:57:48+03:00",
+     "receipt": null,
+     "body_read": true
+    },
+    {
+     "sha": "dd5a8b60631a4472d5886151bc0e18cef6d313a8",
+     "subject": "Merge pull request #2385 from ouroboros-agent/fix/ctl-latency-2341",
+     "date": "2026-10-28T10:31:10+03:00",
+     "receipt": null,
+     "body_read": true
+    },
+    {
+     "sha": "d7989582669939112df11a5f370261f15974ef2f",
+     "subject": "Merge pull request #2387 from razzant/t5/battery-killer-2353",
+     "date": "2026-10-28T10:18:52+03:00",
+     "receipt": null,
+     "body_read": true
+    },
+    {
+     "sha": "3fe88f06a791b276ce828bec2a8446429cb28b13",
+     "subject": "Merge pull request #2386 from ouroboros-agent/fix/resume-dialog-param",
+     "date": "2026-10-28T09:35:20+03:00",
+     "receipt": null,
+     "body_read": true
+    },
+    {
+     "sha": "bf6f4eb879a1cf0660e175f9e7604c1e1fe226a5",
+     "subject": "Merge pull request #2379 from ouroboros-agent/fix/tool-claim-custody",
+     "date": "2026-10-28T09:33:15+03:00",
+     "receipt": null,
+     "body_read": true
+    },
+    {
+     "sha": "fbcd2cc84a3b3d946b196ee62fd4c742c3cc0d02",
+     "subject": "Merge pull request #2384 from ouroboros-agent/fix/chat-speech-receipts-6250",
+     "date": "2026-10-28T08:09:53+03:00",
+     "receipt": {
+      "schema": 1,
+      "checks": [
+       {
+        "name": "full_battery",
+        "status": "not_run",
+        "detail": "Earlier broad Python/Node failures retained; no full/native/all-platform or live provider qualification.",
+        "source": "author_declared"
+       },
+       {
+        "name": "cost_contract",
+        "status": "not_run",
+        "detail": "No claim of a fresh standalone full cost-contract pass.",
+        "source": "author_declared"
+       },
+       {
+        "name": "final_consumers",
+        "status": "passed",
+        "detail": "270 parent Python cases on final storage composition and focused speech/receipt/storage Node tests passed. Real SPA and negative tests cover earlier immutable subjects; final Astra independently checked the omission repair in browser.",
+        "source": "author_declared"
+       },
+       {
+        "name": "author_composition",
+        "status": "passed",
+        "detail": "Astra whole-review tree397366ba on2ccc; joined c87bbf6e into reviewed98b0dca4. All35 non-overlapping owned paths unchanged; separate docs/CSS hunks merged and DATA_LAYOUT hash regenerated. Author accepts final tree349bce63, not a new panel verdict. #1698 remains open pending engine release/pin and joined-citations residual.",
+        "source": "author_declared"
+       }
+      ],
+      "review": {
+       "observed": "PASS",
+       "declared": "unknown"
+      },
+      "post_merge": {
+       "status": "not_run",
+       "detail": "The post-merge check follows this merge."
+      }
+     },
+     "body_read": true
+    },
+    {
+     "sha": "c87bbf6eedcf7b1228521ab8f2964bb62f024977",
+     "subject": "Merge pull request #2377 from ouroboros-agent/storage-retention-20261027",
+     "date": "2026-10-28T07:12:09+03:00",
+     "receipt": null,
+     "body_read": true
+    },
+    {
+     "sha": "2ccc5c3049079a81360e5147a89b682ecaaee023",
+     "subject": "Merge pull request #2345 from razzant/t6/leaf-bible-pointer",
+     "date": "2026-10-28T06:38:47+03:00",
+     "receipt": null,
+     "body_read": true
+    },
+    {
+     "sha": "3f5fdd8024eba6a040a03ffdc18cf0946b938b34",
+     "subject": "Merge pull request #2372 from ouroboros-agent/fix/telegram-truth-20261027",
+     "date": "2026-10-28T04:26:37+03:00",
+     "receipt": {
+      "schema": 1,
+      "checks": [
+       {
+        "name": "full_battery",
+        "status": "not_run",
+        "detail": "Bounded Telegram contribution; no full/native/live Telegram qualification. Earlier typing and ActiveChatActivity RED retained.",
+        "source": "author_declared"
+       },
+       {
+        "name": "cost_contract",
+        "status": "not_run",
+        "detail": "No provider/billing modification or paid canary; no total transport guarantee.",
+        "source": "author_declared"
+       },
+       {
+        "name": "independent_review",
+        "status": "passed",
+        "detail": "Whole Astra and Opus plus complete repair: Astra run27779 CODE/coupling PASS on db88c05c, independent Opus repair runfa0a PASS. Original FAIL and formal panel NOT_DISPATCHED retained. Later mechanical upstream composition and one generated hash are author accepted, not new whole-final panel.",
+        "source": "author_declared"
+       },
+       {
+        "name": "parent_consumer_checks",
+        "status": "passed",
+        "detail": "398 repaired decision/steering/bus/bridge cases passed. Postjoin565 passed/1generated-layout hash FAIL; canonical regeneration changed only sourcehash, then33inventory/progress checks passed. Counts overlap; original RED remains.",
+        "source": "author_declared"
+       },
+       {
+        "name": "visual_comparison",
+        "status": "passed",
+        "detail": "Approved A/A compared with recorded actual bridge requests; child1632Chromium/WebKit observations, parent inspected delivered wide/light+narrow/dark and40narrowcases. Fake Bot API, partially canned host responses, prejoin product binding disclosed.",
+        "source": "author_declared"
+       },
+       {
+        "name": "latest_composition",
+        "status": "passed",
+        "detail": "e7eb277a six-file mechanical join read and tested. New base4d26f57c changes DESIGN, unrelated gateway metadata, and same generated hash; parent read all three intersections. Computed merge tree cfe9478a864c4424398552b942636d8509c7544a. No new runtime test on that latter composition.",
+        "source": "author_declared"
+       }
+      ],
+      "review": {
+       "observed": "unknown",
+       "declared": "PASS"
+      },
+      "post_merge": {
+       "status": "not_run",
+       "detail": "The post-merge check follows this merge."
+      }
+     },
+     "body_read": true
+    },
+    {
+     "sha": "4d26f57c867783fbca59c8b26ccf50c0601da73c",
+     "subject": "Merge pull request #2356 from ouroboros-agent/feat/computer-use-app-targeting-20261027",
+     "date": "2026-10-28T04:14:10+03:00",
+     "receipt": null,
+     "body_read": true
+    },
+    {
+     "sha": "cee15bb3711ea1b9063faac948aaef29278eaa6a",
+     "subject": "Merge pull request #2371 from razzant/fix/history-census-1528-1849",
+     "date": "2026-10-28T04:06:26+03:00",
+     "receipt": {
+      "schema": 1,
+      "checks": [
+       {
+        "name": "full_battery",
+        "status": "not_run",
+        "detail": "No full Python/native battery on final composition. Earlier broad non-green and interrupted runs retained.",
+        "source": "author_declared"
+       },
+       {
+        "name": "cost_contract",
+        "status": "not_run",
+        "detail": "No dedicated cost-contract battery; monetary data and settings unchanged.",
+        "source": "author_declared"
+       },
+       {
+        "name": "independent_review",
+        "status": "passed",
+        "detail": "Whole Opus+Astra CODE/coupling at1164; repair delta Astra rl-20261028T003440-b776c62b4592 PASS/PASS, no findings. Subsequent mechanical joins and generated source-hash correction author accepted, not newly whole reviewed.",
+        "source": "author_declared"
+       },
+       {
+        "name": "parent_repaired_tree",
+        "status": "passed",
+        "detail": "148 passed/1Windows skip plus4size checks; actual WebKit Resume disclosures inspected.",
+        "source": "author_declared"
+       },
+       {
+        "name": "postjoin_targeted",
+        "status": "failed",
+        "detail": "One generated-inventory source-hash mismatch; remaining tests passed, oneWindows skip. Original failure retained.",
+        "source": "author_declared"
+       },
+       {
+        "name": "generated_repair",
+        "status": "passed",
+        "detail": "Standard generator changed exactly one source SHA; all22 inventory checks passed.",
+        "source": "author_declared"
+       },
+       {
+        "name": "latest_base_composition",
+        "status": "passed",
+        "detail": "Base90e7 compared againsta5df: sole own-file intersection non-overlapping composer CSS, read in full. Other files outside this contribution. Author accepts this mechanical composition with final full-tree readback still to follow.",
+        "source": "author_declared"
+       }
+      ],
+      "review": {
+       "observed": "PASS",
+       "declared": "unknown"
+      },
+      "post_merge": {
+       "status": "not_run",
+       "detail": "The post-merge check follows this merge."
+      }
+     },
+     "body_read": true
+    },
+    {
+     "sha": "90e7de814ffc698ebdca0f86f6e45a605332c3c4",
+     "subject": "Merge pull request #2370 from ouroboros-agent/feat/composer-hint",
+     "date": "2026-10-28T03:53:50+03:00",
+     "receipt": null,
+     "body_read": true
+    },
+    {
+     "sha": "e7eb277ad365e4c1c25314bd157a0517535eb287",
+     "subject": "Merge pull request #2369 from ouroboros-agent/campaign/27oct-legacy-accounts",
+     "date": "2026-10-28T03:47:56+03:00",
+     "receipt": {
+      "schema": 1,
+      "checks": [
+       {
+        "name": "full_battery",
+        "status": "not_run",
+        "detail": "Focused only; full/native/live-provider and ESLint not run.",
+        "source": "author_declared"
+       },
+       {
+        "name": "cost_contract",
+        "status": "not_run",
+        "detail": "No performance or whole-battery time claim.",
+        "source": "author_declared"
+       },
+       {
+        "name": "independent_review",
+        "status": "passed",
+        "detail": "Full Astra run-a19dc6a06c49 plus full Opus run-1b228e5776f8; repair Astra run-1ffeb2967044 covers final37-file subject 8793063c diff. Stock panel NOT_DISPATCHED and checkout failure remain. Accepted minor: last-known Accounts rows and controls after subsequent network failure, pins stay gated.",
+        "source": "author_declared"
+       },
+       {
+        "name": "focused_consumers",
+        "status": "passed",
+        "detail": "On tree58640274:248Python,209Node,3realWebKit cases; successful cleanup. Earlier setup failures remain unknown cause.",
+        "source": "author_declared"
+       },
+       {
+        "name": "mechanical_integration",
+        "status": "passed",
+        "detail": "Tested head4aba on8f1bb949; newer a5df6b1e composition cf572208 inspected,36of37 ownblobs identical; only separate Architecture paragraph changes. Author accepted join, no fresh whole-panel or runtime claim on newbase.",
+        "source": "author_declared"
+       }
+      ],
+      "review": {
+       "observed": "unknown",
+       "declared": "PASS with advisory"
+      },
+      "post_merge": {
+       "status": "not_run",
+       "detail": "The post-merge check follows this merge."
+      }
+     },
+     "body_read": true
+    },
+    {
+     "sha": "a5df6b1ed39d75bfda1c8391a3d8df6cf8eb0265",
+     "subject": "Merge pull request #2367 from ouroboros-agent/fix/places-icon-freshness-d0f8767f",
+     "date": "2026-10-28T03:32:29+03:00",
+     "receipt": {
+      "schema": 1,
+      "checks": [
+       {
+        "name": "full_battery",
+        "status": "not_run",
+        "detail": "No full suite or hermetic commit test-selection run; explicit Cyber skip retained.",
+        "source": "author_declared"
+       },
+       {
+        "name": "cost_contract",
+        "status": "not_run",
+        "detail": "No runtime/storage/read-policy changes.",
+        "source": "author_declared"
+       },
+       {
+        "name": "affected_client_consumers",
+        "status": "passed",
+        "detail": "140 tests in 12 parent-run JS suites on the reviewed candidate; real-module Chromium/WebKit baseline-negative and candidate freshness scenarios. Not full backend/native qualification.",
+        "source": "author_declared"
+       },
+       {
+        "name": "independent_review",
+        "status": "passed",
+        "detail": "Whole five-file Astra CODE and coupling PASS, record rl-20261028T000906-79128b9ad115; no findings. Author accepted unchanged bytes.",
+        "source": "author_declared"
+       },
+       {
+        "name": "mechanical_composition",
+        "status": "passed",
+        "detail": "Against e06e8024157ada6805c73ca2184b3f7cfbc5cdaf expected tree3e3a2d629abc0b4372a6ce35699bbed6817caa42, all five own blobs unchanged; upstream two-file MCP-settings delta read separately.",
+        "source": "author_declared"
+       },
+       {
+        "name": "full_server_browser",
+        "status": "not_run",
+        "detail": "Attempted isolated server failed during multiprocessing.Manager bootstrap with EOFError before render. Production-module browser harness used controlled API/socket input.",
+        "source": "author_declared"
+       }
+      ],
+      "review": {
+       "observed": "PASS",
+       "declared": ""
+      },
+      "post_merge": {
+       "status": "not_run",
+       "detail": "The post-merge check follows this merge."
+      }
+     },
+     "body_read": true
+    },
+    {
+     "sha": "e06e8024157ada6805c73ca2184b3f7cfbc5cdaf",
+     "subject": "Merge pull request #2366 from razzant/fix/1376-late-tool-results",
+     "date": "2026-10-28T03:13:02+03:00",
+     "receipt": {
+      "schema": 1,
+      "checks": [
+       {
+        "name": "full_battery",
+        "status": "not_run",
+        "detail": "No complete/native/live-provider suite. Historical broad-suite limitations remain.",
+        "source": "author_declared"
+       },
+       {
+        "name": "cost_contract",
+        "status": "not_run",
+        "detail": "No billing-contract change; targeted forced-candidate budget/price-refusal tests passed; not whole cost suite.",
+        "source": "author_declared"
+       },
+       {
+        "name": "final_consumer_checks",
+        "status": "passed",
+        "detail": "Parent227 postjoin and106 finaltwo-file repair cases (overlap), exact3negative controls; all reported phases passed.",
+        "source": "author_declared"
+       },
+       {
+        "name": "review_composition",
+        "status": "passed",
+        "detail": "WholeR4 AstraCODE/couplingPASS oncbeb plus finaltwo-file R5 rl-20261027T234941-5c52175b2eb0 PASS on57994, allfullresponsesread. R4formeradvisory repaired/R5confirmed; not new unanimousfinalpanel.",
+        "source": "author_declared"
+       },
+       {
+        "name": "mechanical_base_composition",
+        "status": "passed",
+        "detail": "Git merge-tree of current8f1bb949 and408d9a84 gives2e1e7a88; onlysharedpathArchitecture6, one review-custody paragraph preserved. No finalproductblobs intersect newbase; this is sourcecomposition, not freshwhole-runtimeQA.",
+        "source": "author_declared"
+       }
+      ],
+      "review": {
+       "observed": "PASS",
+       "declared": "unknown"
+      },
+      "post_merge": {
+       "status": "not_run",
+       "detail": "The post-merge check follows this merge."
+      }
+     },
+     "body_read": true
+    },
+    {
+     "sha": "8f1bb9496b71b49bd467bc1fdcbb52cb327da842",
+     "subject": "Merge pull request #2364 from razzant/fix/review-start-recovery-71ba5966",
+     "date": "2026-10-28T02:32:33+03:00",
+     "receipt": {
+      "schema": 1,
+      "checks": [
+       {
+        "name": "full_battery",
+        "status": "not_run",
+        "detail": "Focused qualification only; stock commit attribution refused baseline_surface_missing after Restart. Explicit Cyber author Git landing, original FAIL retained.",
+        "source": "author_declared"
+       },
+       {
+        "name": "cost_contract",
+        "status": "not_run",
+        "detail": "No complete scale suite; direct review collection and ledger consumers checked.",
+        "source": "author_declared"
+       },
+       {
+        "name": "postjoin_consumers",
+        "status": "passed",
+        "detail": "67 tests on exact head3ae491d58 composed with d699a518. Three code/test blobs identical to independently Astra-reviewed tree1c7558cd; exact doc paragraph replacement. Parent accepted mechanical composition.",
+        "source": "author_declared"
+       },
+       {
+        "name": "independent_review",
+        "status": "passed",
+        "detail": "Full mandatory independent Astra CODE/coupling PASS rl230625; 147 repo and2 independent process checks reported. Previous critical explicitly corrected, original review remains FAIL. Native/live-daemon NOT_RUN.",
+        "source": "author_declared"
+       }
+      ],
+      "review": {
+       "observed": "PASS",
+       "declared": "unknown"
+      },
+      "post_merge": {
+       "status": "not_run",
+       "detail": "The post-merge check follows this merge."
+      }
+     },
+     "body_read": true
+    },
+    {
+     "sha": "d699a518206450fac97485948cb20ba053b773ee",
+     "subject": "Merge pull request #2351 from razzant/t3/tools-context",
+     "date": "2026-10-28T01:03:45+03:00",
+     "receipt": null,
+     "body_read": true
+    }
+   ],
+   "github": {
+    "status": "partial",
+    "reason": "The retained live read (2026-10-28T07:59:30Z) predates these merges.",
+    "runs": [
+     {
+      "sha": "fbcd2cc84a3b3d946b196ee62fd4c742c3cc0d02",
+      "status": "in_progress",
+      "conclusion": null,
+      "url": "https://github.com/razzant/ouroboros/actions/runs/40636375158",
+      "run_id": 40636375158,
+      "attempt": 1
+     },
+     {
+      "sha": "c87bbf6eedcf7b1228521ab8f2964bb62f024977",
+      "status": "completed",
+      "conclusion": "failure",
+      "url": "https://github.com/razzant/ouroboros/actions/runs/40630983997",
+      "run_id": 40630983997,
+      "attempt": 1
+     },
+     {
+      "sha": "2ccc5c3049079a81360e5147a89b682ecaaee023",
+      "status": "completed",
+      "conclusion": "failure",
+      "url": "https://github.com/razzant/ouroboros/actions/runs/40627870446",
+      "run_id": 40627870446,
+      "attempt": 1
+     },
+     {
+      "sha": "3f5fdd8024eba6a040a03ffdc18cf0946b938b34",
+      "status": "completed",
+      "conclusion": "failure",
+      "url": "https://github.com/razzant/ouroboros/actions/runs/40615080288",
+      "run_id": 40615080288,
+      "attempt": 1,
+      "covered_shas": [
+       "4d26f57c867783fbca59c8b26ccf50c0601da73c",
+       "cee15bb3711ea1b9063faac948aaef29278eaa6a"
+      ]
+     },
+     {
+      "sha": "4d26f57c867783fbca59c8b26ccf50c0601da73c",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "url": "https://github.com/razzant/ouroboros/actions/runs/40613800945",
+      "run_id": 40613800945,
+      "attempt": 1
+     },
+     {
+      "sha": "cee15bb3711ea1b9063faac948aaef29278eaa6a",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "url": "https://github.com/razzant/ouroboros/actions/runs/40613007763",
+      "run_id": 40613007763,
+      "attempt": 1
+     },
+     {
+      "sha": "90e7de814ffc698ebdca0f86f6e45a605332c3c4",
+      "status": "completed",
+      "conclusion": "failure",
+      "url": "https://github.com/razzant/ouroboros/actions/runs/40611682176",
+      "run_id": 40611682176,
+      "attempt": 1
+     },
+     {
+      "sha": "e7eb277ad365e4c1c25314bd157a0517535eb287",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/razzant/ouroboros/actions/runs/40611058300",
+      "run_id": 40611058300,
+      "attempt": 1
+     },
+     {
+      "sha": "a5df6b1ed39d75bfda1c8391a3d8df6cf8eb0265",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/razzant/ouroboros/actions/runs/40609412994",
+      "run_id": 40609412994,
+      "attempt": 1
+     },
+     {
+      "sha": "e06e8024157ada6805c73ca2184b3f7cfbc5cdaf",
+      "status": "completed",
+      "conclusion": "failure",
+      "url": "https://github.com/razzant/ouroboros/actions/runs/40607331718",
+      "run_id": 40607331718,
+      "attempt": 1
+     },
+     {
+      "sha": "8f1bb9496b71b49bd467bc1fdcbb52cb327da842",
+      "status": "completed",
+      "conclusion": "failure",
+      "url": "https://github.com/razzant/ouroboros/actions/runs/40602836717",
+      "run_id": 40602836717,
+      "attempt": 1
+     },
+     {
+      "sha": "d699a518206450fac97485948cb20ba053b773ee",
+      "status": "completed",
+      "conclusion": "failure",
+      "url": "https://github.com/razzant/ouroboros/actions/runs/40591835909",
+      "run_id": 40591835909,
+      "attempt": 1
+     }
+    ],
+    "absent_shas": [],
+    "missing_shas": [
+     "3fe88f06a791b276ce828bec2a8446429cb28b13",
+     "bf6f4eb879a1cf0660e175f9e7604c1e1fe226a5",
+     "d7989582669939112df11a5f370261f15974ef2f",
+     "dd5a8b60631a4472d5886151bc0e18cef6d313a8",
+     "fcd6f8d8f121f11e6044d7bf6291110f0ad3877b"
+    ]
+   }
+  }
+ },
+ "small": {
+  "key": {
+   "base_sha": "e06e8024157ada6805c73ca2184b3f7cfbc5cdaf",
+   "target_sha": "a5df6b1ed39d75bfda1c8391a3d8df6cf8eb0265",
+   "update_channel": "development",
+   "target_ref": "managed/ouroboros"
+  },
+  "version": "7.8.1",
+  "commits": 2,
+  "text": "Небольшое исправление Dashboard. Иконки мест теперь перечитываются, когда открываешь вкладку Consciousness и когда заканчивается установка или обновление навыка. Раньше Dashboard держал самый первый ответ, и после обновления коннектора там могла остаться старая иконка — даже у выключенного коннектора, — хотя Settings уже показывали новую.\n\nСкрытая вкладка ничего не читает, пока её не откроют; нового фонового опроса нет. Одно осталось как было: уже открытый лист Settings › Connect сам не обновится — только при следующем показе.\n\nПолную батарею тестов автор не запускал; проверены затронутые части интерфейса в двух браузерных движках, независимое ревью прошло без замечаний.",
+  "qualification": {
+   "base_sha": "e06e8024157ada6805c73ca2184b3f7cfbc5cdaf",
+   "target_sha": "a5df6b1ed39d75bfda1c8391a3d8df6cf8eb0265",
+   "commits": [
+    {
+     "sha": "a5df6b1ed39d75bfda1c8391a3d8df6cf8eb0265",
+     "subject": "Merge pull request #2367 from ouroboros-agent/fix/places-icon-freshness-d0f8767f",
+     "date": "2026-10-28T03:32:29+03:00",
+     "receipt": {
+      "schema": 1,
+      "checks": [
+       {
+        "name": "full_battery",
+        "status": "not_run",
+        "detail": "No full suite or hermetic commit test-selection run; explicit Cyber skip retained.",
+        "source": "author_declared"
+       },
+       {
+        "name": "cost_contract",
+        "status": "not_run",
+        "detail": "No runtime/storage/read-policy changes.",
+        "source": "author_declared"
+       },
+       {
+        "name": "affected_client_consumers",
+        "status": "passed",
+        "detail": "140 tests in 12 parent-run JS suites on the reviewed candidate; real-module Chromium/WebKit baseline-negative and candidate freshness scenarios. Not full backend/native qualification.",
+        "source": "author_declared"
+       },
+       {
+        "name": "independent_review",
+        "status": "passed",
+        "detail": "Whole five-file Astra CODE and coupling PASS, record rl-20261028T000906-79128b9ad115; no findings. Author accepted unchanged bytes.",
+        "source": "author_declared"
+       },
+       {
+        "name": "mechanical_composition",
+        "status": "passed",
+        "detail": "Against e06e8024157ada6805c73ca2184b3f7cfbc5cdaf expected tree3e3a2d629abc0b4372a6ce35699bbed6817caa42, all five own blobs unchanged; upstream two-file MCP-settings delta read separately.",
+        "source": "author_declared"
+       },
+       {
+        "name": "full_server_browser",
+        "status": "not_run",
+        "detail": "Attempted isolated server failed during multiprocessing.Manager bootstrap with EOFError before render. Production-module browser harness used controlled API/socket input.",
+        "source": "author_declared"
+       }
+      ],
+      "review": {
+       "observed": "PASS",
+       "declared": ""
+      },
+      "post_merge": {
+       "status": "not_run",
+       "detail": "The post-merge check follows this merge."
+      }
+     },
+     "body_read": true
+    }
+   ],
+   "github": {
+    "status": "observed",
+    "reason": "No matching run is not a passing check.",
+    "runs": [
+     {
+      "sha": "a5df6b1ed39d75bfda1c8391a3d8df6cf8eb0265",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/razzant/ouroboros/actions/runs/40609412994",
+      "run_id": 40609412994,
+      "attempt": 1
+     }
+    ],
+    "absent_shas": [],
+    "missing_shas": []
+   }
+  }
+ }
+}

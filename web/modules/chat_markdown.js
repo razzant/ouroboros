@@ -1,6 +1,7 @@
 /** Rich, sanitized markdown rendering for assistant and system chat messages. */
 
 import { safeExternalUrl } from './utils.js';
+import { copyTextToClipboard } from './ui_helpers.js';
 import { tr } from './i18n.js';
 import { applyChartTheme, onThemeChange } from './theme_palette.js';
 
@@ -323,7 +324,7 @@ function createCodeBlock(source, language = '') {
     label.textContent = language || 'text';
     const copy = document.createElement('button');
     copy.type = 'button';
-    copy.className = 'md-code-copy';
+    copy.className = 'btn btn-ghost btn-sm md-code-copy';
     copy.dataset.codeCopy = '';
     copy.setAttribute('aria-label', tr('code.copy_code', 'Copy code'));
     copy.title = tr('code.copy_code', 'Copy code');
@@ -537,13 +538,13 @@ function initializeMermaid(api) {
         theme: 'base',
         themeVariables: {
             fontFamily: diagramToken('--diagram-font', 'Inter, system-ui, sans-serif'),
-            background: diagramToken('--diagram-bg', '#151318'),
-            primaryColor: diagramToken('--diagram-primary', '#25222c'),
-            primaryTextColor: diagramToken('--diagram-primary-text', '#f4eef7'),
-            primaryBorderColor: diagramToken('--diagram-border', '#6f6678'),
-            lineColor: diagramToken('--diagram-line', '#9b90a6'),
-            secondaryColor: diagramToken('--diagram-secondary', '#302b39'),
-            tertiaryColor: diagramToken('--diagram-tertiary', '#19171d'),
+            background: diagramToken('--diagram-bg', '#131415'),
+            primaryColor: diagramToken('--diagram-primary', '#212223'),
+            primaryTextColor: diagramToken('--diagram-primary-text', '#efeff2'),
+            primaryBorderColor: diagramToken('--diagram-border', '#717171'),
+            lineColor: diagramToken('--diagram-line', '#989898'),
+            secondaryColor: diagramToken('--diagram-secondary', '#28292a'),
+            tertiaryColor: diagramToken('--diagram-tertiary', '#151617'),
         },
     });
     mermaidInitialized = theme;
@@ -703,48 +704,32 @@ function renderChartNodes(root, state, onDomWrite) {
     }
 }
 
-async function copyCode(code) {
-    const text = code?.textContent || '';
-    if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-        return;
-    }
-    const textarea = document.createElement('textarea');
-    textarea.value = text;
-    textarea.setAttribute('readonly', '');
-    // Inside a modal dialog (the document reader) the rest of the page is inert:
-    // the selection is made within that dialog, and focus returns after.
-    const dialog = code.closest?.('dialog[open]') || null;
-    const focused = document.activeElement;
-    let copied = false;
-    try {
-        (dialog || document.body).appendChild(textarea);
-        if (dialog) textarea.focus({ preventScroll: true });
-        textarea.select();
-        copied = typeof document.execCommand === 'function' && document.execCommand('copy') === true;
-    } finally {
-        textarea.remove();
-        if (dialog && focused?.isConnected) focused.focus({ preventScroll: true });
-    }
-    if (!copied) throw new Error('copy command failed');
-}
-
 /* A table scrolls sideways only when its columns cannot fit even wrapped. Its
    edges follow the actually hidden columns, as `scroll_fade.js` does for the
    vertical scroll bodies, and only while it scrolls is its wrapper a named
    region the keyboard can focus and scroll. */
+function measureTableOverflow(wrap) {
+    if (!wrap || wrap.isConnected === false) return null;
+    return { wrap, hidden: wrap.scrollWidth - wrap.clientWidth, scrolled: Math.abs(wrap.scrollLeft) };
+}
 function markTableOverflow(wrap) {
-    if (!wrap || wrap.isConnected === false) return;
-    const hidden = wrap.scrollWidth - wrap.clientWidth;
-    const scrolled = Math.abs(wrap.scrollLeft);
+    const seen = measureTableOverflow(wrap);
+    if (seen) applyTableOverflow(seen);
+}
+// Measured apart from the marks: a batch measures every table, then marks every one, so a write never makes the next
+// table's read lay the page out again.
+function applyTableOverflow({ wrap, hidden, scrolled }) {
     const scrolls = hidden > 1;
     wrap.toggleAttribute('data-scroll-start', scrolls && scrolled > 1);
     wrap.toggleAttribute('data-scroll-end', scrolls && hidden - scrolled > 1);
-    if (scrolls === wrap.hasAttribute('tabindex')) return;
+    // A late resize/Markdown write must not make clipped Main text a keyboard stop.
+    // Keep the region semantics and selection; its Project reference opens the full table.
+    const tabIndex = wrap.closest('.project-answer.is-folded') ? -1 : 0;
+    if (scrolls && wrap.hasAttribute('tabindex') && wrap.tabIndex === tabIndex) return;
     if (scrolls) {
         wrap.setAttribute('role', 'region');
         wrap.setAttribute('aria-label', tr('code.scrollable_table', 'Scrollable table'));
-        wrap.tabIndex = 0;
+        wrap.tabIndex = tabIndex;
     } else {
         wrap.removeAttribute('role');
         wrap.removeAttribute('aria-label');
@@ -778,7 +763,8 @@ export function bindMarkdownTables(rootEl) {
     if (bound) return bound;
     // The wrapper resizes with its column; the table with its own content.
     const sizes = new ResizeObserver((entries) => {
-        for (const entry of entries) markTableOverflow(entry.target.closest('.md-table-wrap'));
+        const wraps = new Set(entries.map((entry) => entry.target.closest('.md-table-wrap')).filter(Boolean));
+        [...wraps].map(measureTableOverflow).filter(Boolean).forEach(applyTableOverflow);
     });
     const observe = (wrap) => {
         sizes.observe(wrap);
@@ -862,7 +848,8 @@ export function enhanceChatMarkdown(rootEl, { onDomWrite = writeDirectly, onThem
         const code = button.closest('.md-code-block')?.querySelector('pre > code');
         if (!code) return;
         try {
-            await copyCode(code);
+            // The code block is the anchor: inside the document reader's modal it names the dialog that owns the selection.
+            await copyTextToClipboard(code.textContent || '', { anchor: code });
             if (state.destroyed) return;
             button.classList.add('is-copied');
             button.textContent = tr('code.copied', 'Copied');

@@ -29,7 +29,7 @@ from ouroboros.task_results import (
     STATUS_SCHEDULED,  # noqa: F401 -- facade name tests read
     load_task_result,
 )
-from ouroboros.cost_projection import carry_cost_meta, live_root_cost_projection, with_cost_aliases  # noqa: F401
+from ouroboros.cost_projection import LIVE_ROOT_COSTS, carry_cost_meta, live_root_cost_projection, with_cost_aliases  # noqa: F401
 from ouroboros.subagent_messages import subagent_message_meta  # noqa: F401
 from supervisor.cognitive_operations import EVENT_HANDLERS as _CEH, _handle_cognitive_operation  # noqa: F401
 from supervisor.task_model_wait import EVENT_HANDLERS as _MWH
@@ -60,8 +60,12 @@ def _routing_attachments(value: Any) -> Optional[list]:
     return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else None
 
 
-def _parent_delegation_budget(ctx: Any, parent_task_id: Any, drive_root: Any) -> Dict[str, Any]:
-    """Read the parent's canonical budget for supervisor-side admission."""
+def _parent_delegation_budget(ctx: Any, parent_task_id: Any, drive_root: Any, *, strict: bool = False) -> Dict[str, Any]:
+    """Read the parent's canonical budget for supervisor-side admission.
+
+    ``{}`` is the omitted legacy budget. A ``strict`` caller freezing rights gets a
+    durable read failure raised instead, so unreadable authority never reads as it.
+    """
     parent = str(parent_task_id or "").strip()
     if not parent:
         return {}
@@ -80,8 +84,10 @@ def _parent_delegation_budget(ctx: Any, parent_task_id: Any, drive_root: Any) ->
         roots.append(canonical)
     for root in roots:
         try:
-            row = load_task_result(root, parent)
+            row = load_task_result(root, parent, strict=strict)
         except Exception:
+            if strict:
+                raise
             row = None
         if isinstance(row, dict):
             contract = row.get("task_contract")
@@ -133,6 +139,20 @@ def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
         return
     if task_attempt < 1 or call_attempt < 1:
         return
+    # The turn's observer stamps dispatch on this frame or an earlier one (a send observed, or an
+    # unobserved call finished), so any frame of the call publishes what is pending; nothing pending is free.
+    from ouroboros.update_generation_facts import publish_pending_dispatch
+
+    publish_pending_dispatch()
+    receipt = evt.get("direct_turn")
+    if isinstance(receipt, dict):  # the owner turn's receipt rides its first dispatch frame by value
+        from supervisor.active_activity import record_direct_turn
+
+        census = dict(receipt.get("census") or {})
+        for name, rows in (("running", getattr(ctx, "RUNNING", None)), ("pending", getattr(ctx, "PENDING", None))):
+            if hasattr(rows, "__len__"):
+                census[f"{name}_when_handled"] = len(rows)
+        record_direct_turn({**receipt, "census": census}, drive_root=getattr(ctx, "DRIVE_ROOT", None))
     running = getattr(ctx, "RUNNING", None)
     meta = running.get(task_id) if isinstance(running, dict) else None
     direct = None
@@ -161,6 +181,11 @@ def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
         "round_id": round_id,
         "call_attempt": call_attempt,
     }
+    if phase != "observed":
+        # A call opened (its reservation is an open ledger row) or closed: the root's live cost figure is
+        # read again at the next flush, so the card says "up to" while the call is in flight (RV_MAIN M7).
+        root_id = (meta.get("task") or {}).get("root_task_id") if isinstance(meta, dict) else None
+        LIVE_ROOT_COSTS.mark(getattr(ctx, "DRIVE_ROOT", None), root_id or evt.get("root_task_id") or task_id)
     if phase == "started":
         updated = {**identity, "started_at": time.time()}
     elif not isinstance(active, dict) or any(active.get(key) != value for key, value in identity.items()):
@@ -220,7 +245,6 @@ from supervisor.events_project_routing import (  # noqa: E402, F401 -- intention
     _handle_ensure_project_scope,
     _handle_project_digest,
     _handle_promote_chat_to_task,
-    _handle_routing_manual_target,
     _notify_host_initiated_refusal,
     _persist_promote_rejection,
     _prepare_promote_source_off_loop,
@@ -278,18 +302,43 @@ from supervisor.events_worker_reports import (  # noqa: E402, F401 -- intentiona
     _handle_task_focus_updated,
     _handle_task_heartbeat,
     _handle_task_metrics,
+    _handle_ui_i18n_updated,
+    _handle_update_progress_changed,
 )
 from supervisor.queue_transitions import (  # noqa: E402, F401 -- intentional public re-exports
     _close_campaign_after_owner_stop,
 )
 from supervisor.worker_owner_wait import handle_owner_wait  # noqa: E402
 from supervisor.worker_pool_lifecycle import handle_worker_quiescent  # noqa: E402
+from supervisor.conversation_lane import handle_direct_turn_bound, handle_direct_turn_phase, handle_task_named  # noqa: E402
+
+
+def handle_presence_turn_initial(evt: Dict[str, Any], ctx: Any) -> None:
+    """A carrier published a continuing author's initial envelope (lazy: the dispatcher does not import Presence)."""
+    from ouroboros.presence_carrier import handle_presence_turn_initial as handler
+
+    handler(evt, ctx)
+
+
+def handle_presence_turn_settled(evt: Dict[str, Any], ctx: Any) -> None:
+    """A carrier's Presence turn ended: its Host waiter, row and slot are released (lazy, as above)."""
+    from ouroboros.presence_carrier import handle_presence_turn_settled as handler
+
+    handler(evt, ctx)
+
+from supervisor.events_mind_controls import handle_mind_task_control
 
 EVENT_HANDLERS = {
     "llm_usage": _handle_llm_usage,
     "external_wait_lease": _handle_external_wait_lease,
     "owner_wait": handle_owner_wait,
     "worker_quiescent": handle_worker_quiescent,
+    # A conversation carrier's frames: its start phases for the census, its coined title.
+    "direct_turn_phase": handle_direct_turn_phase,
+    "direct_turn_bound": handle_direct_turn_bound,
+    "task_named": handle_task_named,
+    "presence_turn_initial": handle_presence_turn_initial,
+    "presence_turn_settled": handle_presence_turn_settled,
     **_CEH,
     **_MWH,
     **_CDE,
@@ -297,9 +346,12 @@ EVENT_HANDLERS = {
     "budget_pause": _handle_budget_pause,
     "budget_root_fence": _handle_budget_root_fence,
     "budget_resume_child": _handle_budget_resume_child,
+    "mind_task_control": handle_mind_task_control,
     "task_heartbeat": _handle_task_heartbeat,
     "task_dispatch_resolved": _handle_task_dispatch_resolved,
     "task_focus_updated": _handle_task_focus_updated,
+    "ui_i18n_updated": _handle_ui_i18n_updated,
+    "update_progress_changed": _handle_update_progress_changed,
     "typing_start": _handle_typing_start,
     "send_message": _handle_send_message,
     "task_done": _handle_task_done,
@@ -315,7 +367,6 @@ EVENT_HANDLERS = {
     "schedule_subagent": _handle_schedule_task,
     "promote_chat_to_task": _handle_promote_chat_to_task,
     "ensure_project_scope": _handle_ensure_project_scope,
-    "routing_manual_target": _handle_routing_manual_target,
     "steer_task": _handle_steer_task,
     "project_digest": _handle_project_digest,
     "cancel_task": _handle_cancel_task,

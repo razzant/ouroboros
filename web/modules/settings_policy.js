@@ -48,6 +48,8 @@ export function syncPolicyState(root, meta) {
         ? `Saved: ${policyValueLabel(item.configured)} · Current process: ${policyValueLabel(item.current_process || item.effective)} · Next task: ${policyValueLabel(item.next_task || item.configured)} · Current task keeps its start snapshot`
         : `Current process: ${policyValueLabel(item.current_process || item.effective)} · Next task: ${policyValueLabel(item.next_task || item.configured)}`;
     render('supervisor', suffix(state.supervisor || {}));
+    // The consciousness level's line, only where the server reports it (an older one has one level).
+    if (state.supervisor_consciousness) render('supervisor_consciousness', suffix(state.supervisor_consciousness));
     const cyber = cyberReviewNote(state, { enforcement: root?.querySelector('#s-review-enforcement')?.value,
         access: root?.querySelector('#s-runtime-mode')?.value });
     render('review', suffix(state.review || {}) + (cyber ? ` · ${cyber}` : ''));

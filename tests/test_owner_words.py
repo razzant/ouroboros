@@ -43,7 +43,10 @@ def _in_row(text, client_id, *, ts=TS, chat_id=1, **extra):
 
 
 def _chat(tmp_path, *rows):
-    _append(tmp_path / "logs" / "chat.jsonl", *rows)
+    from ouroboros import dialogue_store as ds
+
+    for row in rows:
+        ds.append(tmp_path, "chat", row)
 
 
 def _annotate(tmp_path, client_id, *, action="promote_chat_to_task", status="scheduled", target=ROOT, token="t1"):
@@ -129,23 +132,23 @@ def test_project_first_message_is_never_added_to_the_words(tmp_path):
     assert _texts(ow.governing_words_for_schedule(elsewhere)[ow.FIELD]) == ["Fix the quota bar"]
 
 
-def test_schedule_never_reads_the_chat_chain(tmp_path, monkeypatch):
-    import ouroboros.chat_chain as chat_chain
+def test_schedule_never_reads_dialogue(tmp_path, monkeypatch):
+    import ouroboros.dialogue_store as ds
     import ouroboros.project_dialogue as project_dialogue
 
     def refuse(*_args, **_kwargs):
-        raise AssertionError("the chat chain was read")
+        raise AssertionError("the dialogue store was read")
 
-    for module, name in ((chat_chain, "chat_chain_paths"), (chat_chain, "_ordered_chat_generation_paths"),
+    for module, name in ((ds, "iter_probes"),
                          (project_dialogue, "resolve_owner_message_source")):
         monkeypatch.setattr(module, name, refuse)
     ref = build_owner_message_ref(chat_id=1, client_message_id="msg-9", ts=TS, text="Go")
     ctx = _ctx(tmp_path, metadata={"origin_message_ref": ref},
                directives=[{"source": "initial_user", "content": "Go"}])
     assert _texts(ow.governing_words_for_schedule(ctx)[ow.FIELD]) == ["Go"]
-    # The substitution is live: the history resolver does read the chain, and trips it.
+    # The substitution is live: the history resolver does read the store, and trips it.
     _annotate(tmp_path, "msg-9")
-    with pytest.raises(AssertionError, match="chat chain was read"):
+    with pytest.raises(AssertionError, match="dialogue store was read"):
         ow.task_owner_words(tmp_path, ROOT, task={"id": ROOT})
 
 

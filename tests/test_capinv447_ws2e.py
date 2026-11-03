@@ -1,10 +1,9 @@
 """WS2-e (capinv-447) contract tests: one-author projections + honest results.
 
 Covers H2 (write-like typing across the two profile projections), H3 (module
-load failures reach the capability ledger and survive schemas() rebuilds), H4
-(typed preflight_blocked reason_kind), H5 (repo_commit_ready SSOT is
-enforcement-aware), D3 (search filter receipt), D4 (export member policy reuses
-the workspace-patch SSOT), G10 (attachment routes unified + rule-named
+load failures reach the capability ledger and survive schemas() rebuilds),
+D3 (search filter receipt), D4 (export member policy reuses the workspace-patch
+SSOT), G10 (attachment routes unified + rule-named
 reasons), G3 (npm version pins + manual-dependency disclosure), and E5 (MCP
 pagination, injective tool slugs, resource/structuredContent fidelity).
 """
@@ -114,21 +113,6 @@ def test_module_load_failure_recorded_and_survives_schema_rebuilds(tmp_path, mon
 # ---------------------------------------------------------------------------
 # H5 — the retired advisory gate (3A) projects no readiness axis anywhere
 # ---------------------------------------------------------------------------
-
-def test_the_retired_advisory_gate_has_no_readiness_projection_left():
-    """Decision 3A retired the advisory gate; its `repo_commit_ready` mirror said
-    "yes" on every surface and made the author chase a readiness that nothing
-    decides. Neither the function nor the context heading exists any more."""
-    import inspect
-
-    from ouroboros import agent_task_pipeline, review_state
-
-    assert not hasattr(review_state, "advisory_commit_ready")
-    source = inspect.getsource(agent_task_pipeline)
-    assert "Live repo gate" not in source
-    assert "Advisory readiness" not in source
-    assert "repo_commit_ready" not in source
-
 
 # ---------------------------------------------------------------------------
 # D3 — search filter receipt
@@ -414,7 +398,7 @@ def test_list_tools_follows_next_cursor(monkeypatch):
             )
 
     monkeypatch.setattr(mcp_client, "_MCP_SDK_AVAILABLE", True)
-    monkeypatch.setattr(mcp_client, "StdioServerParameters", lambda *, command, args: None)
+    monkeypatch.setattr(mcp_client, "StdioServerParameters", lambda *, command, args, env=None: None)
     monkeypatch.setattr(mcp_client, "stdio_client", fake_stdio)
     monkeypatch.setattr(mcp_client, "ClientSession", Session)
 

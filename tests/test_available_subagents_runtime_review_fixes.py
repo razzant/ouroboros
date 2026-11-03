@@ -119,10 +119,12 @@ def test_d24_adopts_unique_explicit_replacement_or_root_direct_holder(
         "status": "adopted",
         "run_id": "run-b",
         "cause": recovery.CAUSE_WORKER_CRASH,
+        "settled": False,
+        "terminal_state": "",
     }
 
 
-def test_d24_still_refuses_multiple_current_custody_holders(tmp_path):
+def test_d24_reserves_multiple_current_custody_holders_independently(tmp_path):
     from ouroboros import delegate_custody as custody
     import ouroboros.delegate_recovery as recovery
 
@@ -147,7 +149,7 @@ def test_d24_still_refuses_multiple_current_custody_holders(tmp_path):
                 work_order_fingerprint=suffix * 64,
             ),
         )
-    assert recovery.prepare_handoff(
+    handoff = recovery.prepare_handoff(
         tmp_path,
         task,
         cause=recovery.CAUSE_WORKER_CRASH,
@@ -155,7 +157,11 @@ def test_d24_still_refuses_multiple_current_custody_holders(tmp_path):
         new_attempt=2,
         worker_id=3,
         exitcode=1,
-    ) == {}
+    )
+    assert handoff["schema"] == 2
+    assert [(row["run_id"], row["selected_subagent_id"], row["status"])
+            for row in handoff["holders"]] == [
+                ("run-a", "session-a", "reserved"), ("run-b", "session-b", "reserved")]
 
 
 def test_d24_does_not_post_a_pending_replacement(monkeypatch, tmp_path):
@@ -192,7 +198,7 @@ def test_d24_does_not_post_a_pending_replacement(monkeypatch, tmp_path):
         "ouroboros.tools.delegate.exact_start",
         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not POST")),
     )
-    assert recovery.prepare_handoff(
+    handoff = recovery.prepare_handoff(
         tmp_path,
         task,
         cause=recovery.CAUSE_WORKER_CRASH,
@@ -200,105 +206,74 @@ def test_d24_does_not_post_a_pending_replacement(monkeypatch, tmp_path):
         new_attempt=2,
         worker_id=3,
         exitcode=1,
-    ) == {}
-
-
-def test_terminal_custody_outcome_reads_the_canonical_budget_root(tmp_path):
-    from ouroboros.agent_task_pipeline import _apply_terminal_custody_outcome
-    from ouroboros.task_results import STATUS_RUNNING, write_task_result
-
-    child_drive = tmp_path / "child-drive"
-    budget_root = tmp_path / "canonical-drive"
-    child_drive.mkdir()
-    write_task_result(
-        budget_root,
-        "child-1",
-        STATUS_RUNNING,
-        delegated_runs_unreconciled=["run-open"],
     )
-    original = {"reason_code": "completed", "outcome_axes": {}}
-    actual = _apply_terminal_custody_outcome(
-        SimpleNamespace(drive_root=child_drive),
-        {"id": "child-1", "budget_drive_root": str(budget_root)},
-        original,
-    )
-    assert actual["reason_code"] == "delegated_custody_unreconciled"
-    # An undisposed own patch is a DEBT, not an infrastructure failure: the debt
-    # is ADDED on the objective axis and the derived axes are left alone.
-    assert actual["outcome_axes"]["objective"]["warning"] == (
-        "delegated_custody_unreconciled")
-    assert actual["outcome_axes"].get("execution", {}).get("status") != "infra_failed"
+    assert len(handoff["holders"]) == 1
+    holder = handoff["holders"][0]
+    assert holder["pending_invocation_id"] == "invocation-b"
+    assert holder["selected_subagent_id"] == "session-b"
+    assert holder["work_order_fingerprint"] == "b" * 64
+    assert holder["status"] == "reserved"
 
 
-def test_custody_debt_overlay_preserves_the_paid_verdicts_and_is_idempotent(tmp_path):
-    from ouroboros.agent_task_pipeline import _apply_terminal_custody_outcome
-    from ouroboros.task_results import STATUS_RUNNING, write_task_result
-
-    write_task_result(tmp_path, "t-1", STATUS_RUNNING,
-                      delegated_runs_unreconciled=["run-open"])
-    env = SimpleNamespace(drive_root=tmp_path)
-    task = {"id": "t-1", "budget_drive_root": str(tmp_path)}
-    derived = {"reason_code": "completed", "outcome_axes": {
-        "execution": {"status": "ok", "reason_code": ""},
-        "objective": {"status": "degraded", "source": "review"},
-        "review": {"status": "changes_requested", "trigger": "acceptance"},
-        "artifacts": {"status": "present"},
-    }}
-    once = _apply_terminal_custody_outcome(env, task, derived)
-    axes = once["outcome_axes"]
-    assert axes["execution"] == {"status": "ok", "reason_code": ""}
-    assert axes["objective"]["status"] == "degraded"
-    assert axes["review"] == {"status": "changes_requested", "trigger": "acceptance"}
-    assert axes["artifacts"] == {"status": "present"}
-    assert axes["objective"]["warnings"] == ["delegated_custody_unreconciled"]
-    # The derived axes the caller passed in are NOT mutated in place.
-    assert "warning" not in derived["outcome_axes"]["objective"]
-    twice = _apply_terminal_custody_outcome(env, task, once)
-    assert twice["outcome_axes"]["objective"]["warnings"] == [
-        "delegated_custody_unreconciled"]
+_CHILD = {"parent_task_id": "root-1", "root_task_id": "root-1", "delegation_role": "subagent"}
+_OPEN_AUDIT = {"trigger": "loop_exit", "audit_status": "ok", "unreconciled": ["run-open"],
+               "open_run_ids": ["run-open"], "pending_invocation_ids": [], "undisposed_patch_run_ids": [],
+               "terminal_runs": []}
 
 
-def test_custody_debt_does_not_launder_a_derived_infra_failure(tmp_path):
-    from ouroboros.agent_task_pipeline import _apply_terminal_custody_outcome
-    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+@pytest.mark.parametrize(("reason", "execution", "headline", "healed"), [
+    ("completed", {"status": "ok", "reason_code": ""}, "Done with warnings", "Done"),
+    ("provider_unavailable", {"status": "infra_failed", "reason_code": "provider_unavailable"}, "Failed", "Failed"),
+    ("round_limit", {"status": "best_effort", "reason_code": "round_limit"}, "Done with warnings", "Done with warnings"),
+], ids=["ordinary", "provider-failure", "truncation-rail"])
+def test_an_open_custody_debt_stores_beside_the_cause_it_never_replaces(tmp_path, reason, execution, headline, healed):
+    """#1583: an unreconciled own run is a DEBT beside the task's cause, never its cause.
 
-    write_task_result(tmp_path, "t-2", STATUS_RUNNING,
-                      delegated_runs_unreconciled=["run-open"])
-    derived = {"reason_code": "provider_unavailable", "outcome_axes": {
-        "execution": {"status": "infra_failed", "reason_code": "provider_unavailable"},
-    }}
-    actual = _apply_terminal_custody_outcome(
-        SimpleNamespace(drive_root=tmp_path),
-        {"id": "t-2", "budget_drive_root": str(tmp_path)}, derived)
-    assert actual["outcome_axes"]["execution"]["status"] == "infra_failed"
-    assert actual["outcome_axes"]["objective"]["warning"] == (
-        "delegated_custody_unreconciled")
-    # Disclosed residual: the devtools-only infra codes are not in the runtime
-    # best-effort set, so the custody code still takes the one Reason line.
-    assert actual["reason_code"] == "delegated_custody_unreconciled"
+    Through the real store path, the row keeps the derived reason and every earned
+    axis byte-for-byte (no custody warning is added, nothing is laundered into an
+    infrastructure failure, a truncation rail keeps its code), while the current
+    audit lands as the row's own list and envelope, the facts that heal."""
+    import copy
 
+    from ouroboros.agent_task_pipeline import _store_task_result
+    from ouroboros.outcomes import normalize_outcome_axes
+    from ouroboros.project_dialogue import TASK_CAUSE_PHRASES, _completion_verdict, completion_status_label
+    from ouroboros.task_results import STATUS_RUNNING, load_task_result, write_task_result
 
-def test_custody_debt_preserves_a_truncation_rail_reason_code(tmp_path):
-    from ouroboros.agent_task_pipeline import _apply_terminal_custody_outcome
-    from ouroboros.task_results import STATUS_RUNNING, write_task_result
-
-    write_task_result(tmp_path, "t-3", STATUS_RUNNING,
-                      delegated_runs_unreconciled=["run-open"])
-    derived = {"reason_code": "round_limit", "outcome_axes": {
-        "execution": {"status": "ok", "reason_code": "round_limit"},
-    }}
-    actual = _apply_terminal_custody_outcome(
-        SimpleNamespace(drive_root=tmp_path),
-        {"id": "t-3", "budget_drive_root": str(tmp_path)}, derived)
-    assert actual["reason_code"] == "round_limit"
-    assert actual["outcome_axes"]["objective"]["warning"] == (
-        "delegated_custody_unreconciled")
+    write_task_result(tmp_path, "t-debt", STATUS_RUNNING)
+    derived = {"reason_code": reason, "outcome_axes": {
+        "execution": dict(execution), "objective": {"status": "met", "source": "review"},
+        "review": {"status": "changes_requested", "trigger": "acceptance"}, "artifacts": {"status": "present"}}}
+    before = copy.deepcopy(derived)
+    _store_task_result(SimpleNamespace(drive_root=tmp_path), {**_CHILD, "id": "t-debt", "budget_drive_root": str(tmp_path)},
+                       "the answer", {"delegate_terminal_reconciliation": dict(_OPEN_AUDIT)}, {}, loop_outcome=derived)
+    stored = load_task_result(tmp_path, "t-debt")
+    assert derived == before, "the caller's derived outcome is not mutated"
+    assert stored["reason_code"] == reason
+    axes = stored["outcome_axes"]
+    earned = normalize_outcome_axes({"outcome_axes": before["outcome_axes"]})
+    assert {key: axes[key] for key in ("objective", "review")} == {key: earned[key] for key in ("objective", "review")}
+    assert "warnings" not in axes["objective"], "no custody warning is added to what the task earned"
+    assert axes["execution"]["status"] == execution["status"]
+    assert axes["execution"].get("reason_code", "") == execution["reason_code"]
+    assert stored["delegated_runs_unreconciled"] == ["run-open"]
+    assert stored["delegate_terminal_reconciliation"]["open_run_ids"] == ["run-open"]
+    assert completion_status_label(stored, {}) == headline
+    assert _completion_verdict(stored, {}).endswith(TASK_CAUSE_PHRASES["delegated_custody_unreconciled"])
+    # The write-side heal rewrites only the list; the earned cause and axes then speak alone.
+    write_task_result(tmp_path, "t-debt", stored["status"], delegated_runs_unreconciled=[])
+    healed_row = load_task_result(tmp_path, "t-debt")
+    assert healed_row["reason_code"] == reason and healed_row["outcome_axes"] == axes
+    assert completion_status_label(healed_row, {}) == healed
+    assert TASK_CAUSE_PHRASES["delegated_custody_unreconciled"] not in _completion_verdict(healed_row, {})
 
 
 def test_custody_debt_task_stores_as_done_with_warnings(tmp_path):
-    """Owner-visible consequence: the card reads Done with warnings, and the
-    review mirror keeps the REAL review axis instead of a skipped stand-in."""
+    """Owner-visible consequence: the card reads Done with warnings from the row's
+    own list, the stored reason stays the loop's own, and the review mirror keeps
+    the REAL review axis instead of a skipped stand-in."""
     from ouroboros.agent_task_pipeline import _store_task_result
+    from ouroboros.project_dialogue import completion_status_label
     from ouroboros.task_results import (
         STATUS_COMPLETED, STATUS_RUNNING, load_task_result, write_task_result,
     )
@@ -313,25 +288,29 @@ def test_custody_debt_task_stores_as_done_with_warnings(tmp_path):
         "artifacts": {"status": "present"},
     }}
     _store_task_result(
-        env, {"id": "t-4", "budget_drive_root": str(tmp_path)},
+        env, {**_CHILD, "id": "t-4", "budget_drive_root": str(tmp_path)},
         "the answer", {}, {}, loop_outcome=loop_outcome,
     )
     stored = load_task_result(tmp_path, "t-4")
     assert stored["status"] == STATUS_COMPLETED
-    assert stored["reason_code"] == "delegated_custody_unreconciled"
+    assert stored["reason_code"] == "completed"
+    assert stored["delegated_runs_unreconciled"] == ["run-open"]
     axes = stored["outcome_axes"]
-    assert axes["objective"]["warning"] == "delegated_custody_unreconciled"
+    assert "warning" not in axes["objective"] and "warnings" not in axes["objective"]
+    assert completion_status_label(stored, {}) == "Done with warnings"
     assert axes["review"]["status"] == "approved"
     assert stored.get("review_status") == axes["review"]
 
 
 @pytest.mark.parametrize("mode", ["local_readonly_subagent", "acting_subagent"])
 def test_descendant_forwarding_is_visible_and_executable_for_both_subagent_profiles(
-    tmp_path, mode,
+    tmp_path, monkeypatch, mode,
 ):
     from ouroboros.contracts.task_constraint import TaskConstraint
     from ouroboros.task_results import STATUS_RUNNING, write_task_result
     from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
 
     repo = tmp_path / "repo"
     canonical = tmp_path / "canonical"
@@ -430,15 +409,16 @@ def test_api_actor_strips_only_the_canonical_local_marker():
 
 @pytest.mark.parametrize("route_kind", ["api_model", "agent_session"])
 def test_configured_actor_preserves_requested_effort_until_request_wire(
-    monkeypatch, route_kind,
+    monkeypatch, tmp_path, route_kind,
 ):
     import ouroboros.claudexor_daemon as daemon
     import ouroboros.subagents as subagents
-    from ouroboros.llm import LLMClient
     from ouroboros.subagent_runtime import resolve_configured_actor_dispatch
+    from tests._shared import write_legacy_capability_rows
 
     nanny_model = f"openai/review-fix-{route_kind}"
-    monkeypatch.setitem(LLMClient._EFFORT_CEILING_CACHE, nanny_model, "low")
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
+    write_legacy_capability_rows(tmp_path, effort_ceilings={nanny_model: "low"})
     if route_kind == "api_model":
         monkeypatch.setattr(
             "ouroboros.provider_models.model_has_credentials", lambda _model: True,
@@ -484,7 +464,7 @@ def test_delegate_start_recipes_match_the_fresh_start_schema():
     schema = next(
         entry.schema for entry in delegate.get_tools() if entry.name == "delegate_start"
     )["parameters"]
-    assert schema["required"] == ["prompt"]
+    assert schema["required"] == []  # retry_of may omit prompt (#1614); recipes below still name it
     assert not ({"anyOf", "oneOf", "allOf"} & schema.keys())
     assert "required for direct starts including continue_from" in schema["properties"]["subagent_id"]["description"]
     assert "Omit subagent_id or receive a typed conflict" in (
@@ -531,7 +511,7 @@ def test_delegate_start_recipes_match_the_fresh_start_schema():
             assert re.search(r"\bprompt\s*=", recipe), (relative, recipe)
             if not re.search(r"\bretry_of\s*=", recipe):
                 # continue_from is the schema's third start selector: a NEW run
-                # bound to a settled predecessor.
+                # bound to a finished predecessor.
                 assert "continue_from" in schema["properties"]
                 direct_selector = re.search(
                     r"\b(?:subagent_id|continue_from)\s*=", recipe)

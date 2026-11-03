@@ -18,7 +18,7 @@ The split has three parts:
    returns it, and a caller that deliberately saves what it loaded persists it.
    That is the owner's escape hatch and stays available.
 3. **...except for the keys that are disk-authored, where silence stays silence.**
-   `_DISK_AUTHORED_SETTINGS` (the two context-mode keys, the safety mode and the
+   `_DISK_AUTHORED_SETTINGS` (the two context-mode keys, both safety levels, checker, owner rules and the
    desktop keep-running consent) and `ENDPOINT_AUTHORED_SETTINGS` (the install-time
    facts) are ratchet, consent or provenance surfaces: an environment value there is
    not an owner decision, so it is neither
@@ -111,12 +111,15 @@ def test_a_stored_value_wins_over_the_environment_for_an_ordinary_key(
     ("OUROBOROS_CONTEXT_MODE", "low"),
     ("OUROBOROS_CONTEXT_MODE_AUTO_LOW", "false"),
     ("OUROBOROS_SAFETY_MODE", "off"),
+    ("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off"),
+    ("OUROBOROS_SAFETY_OWNER_RULES", "a subprocess cannot author owner rules"),
+    ("OUROBOROS_MODEL_SAFETY", "forwarded/checker"),
     # Consent: an absent key means the first window close still asks the owner.
     ("OUROBOROS_DESKTOP_KEEP_RUNNING", "true"),
 ])
 def test_a_disk_authored_key_is_never_read_out_of_the_environment(
         isolated_settings, monkeypatch, key, env_value):
-    """Three ratchets and one consent. An environment value is not authorship, so the
+    """Ratchets, owner rules and consent. An environment value is not authorship, so the
     document never picks one up — otherwise an ordinary load/save round-trip in a
     process whose environment says low/off/true would launder that value onto disk."""
     from ouroboros import config as cfg
@@ -222,10 +225,11 @@ def test_the_exemption_sets_are_exactly_the_declared_ones():
 
     assert cfg._DISK_AUTHORED_SETTINGS == (
         "OUROBOROS_CONTEXT_MODE", "OUROBOROS_CONTEXT_MODE_AUTO_LOW", "OUROBOROS_SAFETY_MODE",
-        "OUROBOROS_DESKTOP_KEEP_RUNNING")
+        "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "OUROBOROS_SAFETY_OWNER_RULES",
+        "OUROBOROS_MODEL_SAFETY", "OUROBOROS_DESKTOP_KEEP_RUNNING")
     assert cfg.ENDPOINT_AUTHORED_SETTINGS == frozenset(
         {"OUROBOROS_SUBSCRIPTION_PRESET_VERSION", "OUROBOROS_SUBAGENT_PRESET_RECEIPT",
-         "OUROBOROS_ONBOARDING_COMPLETED_AT"})
+         "OUROBOROS_ONBOARDING_COMPLETED_AT", "OUROBOROS_ONBOARDING_ATTEMPT_ID"})
     # One writer, but an ordinary runtime setting otherwise: exported to the environment like the rest.
     assert cfg.ENDPOINT_WRITTEN_SETTINGS == frozenset({"OUROBOROS_UI_LANGUAGE"})
     assert "OUROBOROS_UI_LANGUAGE" not in cfg.SETTINGS_KEYS_NOT_EXPORTED_TO_ENV

@@ -20,10 +20,11 @@ from supervisor.message_bus import send_with_budget
 from supervisor.message_bus import coerce_chat_identity  # noqa: F401 -- worker_health leaf reads it via the _pool() handle
 from ouroboros.config import DATA_DIR, REPO_DIR as CONFIG_REPO_DIR, WORKER_SPAWN_GRACE_SEC
 from ouroboros.depth_evidence import parse_task_depth
-from ouroboros.model_wait import stamp_execution_handoff
+from ouroboros.model_wait import record_execution_close, stamp_execution_handoff
 from ouroboros.review_owner_custody import (
     reconcile_confirmed_dead_review_owners as _reconcile_review_owners,
 )
+from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION, LANE_PROJECT
 from ouroboros.utils import utc_now_iso
 
 
@@ -98,6 +99,14 @@ class Worker:
     quiescence_confirmed: bool = False
     retiring: bool = False  # intentional, charged until observed dead; never crash recovery
     resume_hold: str = ""  # this tick's authorized warm Resume: held idle slot, or the parked author
+    # The pool slots this worker serves: ``project`` (queued work, counted against MAX_WORKERS,
+    # fenced by the crash storm and readiness exhaustion) or ``conversation`` (the lane that carries
+    # owner turns, wakes and Presence bodies; outside every project fence and count).
+    lane: str = LANE_PROJECT
+    # ``worker``: a custodied child process. The disclosed inline executors (``inline_degraded``,
+    # ``inline_call``) register a thread-backed pseudo-slot so the worker protocol (owner waits,
+    # task_done release) reaches them; such a slot has no pid, is never respawned or ledgered.
+    executor: str = EXECUTOR_WORKER
 
 
 _EVENT_Q = None
@@ -335,11 +344,9 @@ def _get_chat_agent():
         sys.path.insert(0, str(REPO_DIR))
     from ouroboros.agent import make_agent
     from ouroboros.owner_wait import direct_owner_wait
-    from supervisor.queue import transition_acceptance_fence
 
     agent = make_agent(repo_dir=str(REPO_DIR), drive_root=str(DRIVE_ROOT), event_queue=get_event_q())
-    agent.owner_wait_callback = direct_owner_wait
-    agent.fence_transition = transition_acceptance_fence  # in-process fence: no event, no ack file, no wait
+    agent.owner_wait_callback = direct_owner_wait  # the fence is in-process by the process fact, not a flag
     return agent
 
 
@@ -1124,7 +1131,7 @@ def _retry_terminalization_pending() -> Tuple[List[str], List[str]]:
         try:
             from supervisor import queue
 
-            if queue.persist_queue_snapshot(reason="terminalization_retry_state") is not True:
+            if queue.publish_queue_snapshot(reason="terminalization_retry_state") is not True:  # barrier (LB)
                 log.warning("Failed to persist terminalization retry state")
         except Exception:
             log.warning("Failed to persist terminalization retry state", exc_info=True)
@@ -1166,8 +1173,8 @@ def spawn_workers(n: int = 0) -> None:
     _CTX = mp.get_context(_WORKER_START_METHOD)
     event_q = get_event_q()
     events_cursor, spawned_at = events_log_cursor(), time.time()
-
-    count = n or 1
+    from supervisor.update_merge import RESOLVER_POOL, resolver_slot_owed  # a boot's start owes a resolver its slot
+    count = n or (RESOLVER_POOL if resolver_slot_owed() else 1)
     append_jsonl(
         DRIVE_ROOT / "logs" / "supervisor.jsonl",
         {
@@ -1186,8 +1193,13 @@ def spawn_workers(n: int = 0) -> None:
         for i in range(count):
             in_q = _CTX.Queue()
             proc = spawn_worker_process(_CTX, i, in_q, event_q, REPO_DIR, DRIVE_ROOT)
+            # Slot 0 is the conversation lane's reserved spare (owner decision 4A), the one worker a boot starts
+            # (beside an in-flight assisted update's resolver slot, ``update_merge.RESOLVER_POOL``); project
+            # workers grow on demand (``reconcile_worker_capacity``), an explicit count starts the rest now.
+            lane = LANE_CONVERSATION if i == 0 else LANE_PROJECT
             # Unassignable until the readiness seam observes this child's worker_ready row.
-            new_workers[i] = Worker(wid=i, proc=proc, in_q=in_q, busy_task_id=None, reaping=True, booting=True)
+            new_workers[i] = Worker(wid=i, proc=proc, in_q=in_q, busy_task_id=None, reaping=True, booting=True,
+                                    lane=lane)
     except Exception:
         for worker in new_workers.values():
             try:
@@ -1212,12 +1224,82 @@ def spawn_workers(n: int = 0) -> None:
         WORKERS.update(new_workers)
         _WORKER_POOL_DISABLED_REASON = ""
         _LAST_SPAWN_TIME = time.time()
+    from supervisor import conversation_lane
+
+    conversation_lane.arm(WORKERS)  # this generation keeps the lane's spare until a whole-table stop
     _record_worker_processes()
     # Readiness + SHA verification run off-loop so spawn does not block the supervisor loop.
     threading.Thread(target=_verify_worker_sha_after_spawn, args=(dict(new_workers), events_cursor, 1, spawned_at), daemon=True).start()
 
 
-@_serialized_worker_lifecycle
+def _partition_slots_for_stop(lanes: Optional[frozenset]) -> List[Worker]:
+    """Under the lifecycle serializer, then Q (``kill_workers``' order): the slots a stop owns, marked ``reaping``.
+
+    ``lanes`` None owns every slot and ends the generation (no carrier grows behind the stop).
+    """
+    doomed = [w for w in WORKERS.values() if lanes is None or getattr(w, "lane", LANE_PROJECT) in lanes]
+    if lanes is None:
+        from supervisor import conversation_lane
+
+        conversation_lane.arm(None)
+    for w in doomed:
+        # The timeout reaper's ownership mark: assignment, the health check
+        # and the crash detector skip the slot while it is torn down.
+        w.reaping = True
+    return doomed
+
+
+def _spare_rows_for_stop(lanes: Optional[frozenset], doomed: List[Worker]) -> Dict[str, Dict[str, Any]]:
+    """Under the SAME Q hold as the stop's terminalization: the RUNNING rows the stop spares, popped.
+
+    A project fence spares the rows of the slots it does not own and every conversation-lane row,
+    the ones awaiting a carrier and the ones admitted while the doomed slots were torn down outside
+    Q included: a lane turn is never failed by a project stop. ``kill_workers`` restores them at its end.
+    """
+    spared_ids = {w.busy_task_id for w in WORKERS.values() if w not in doomed and w.busy_task_id}
+    lane_spared = lanes is not None and LANE_CONVERSATION not in lanes
+    spared_rows = {tid: meta for tid, meta in RUNNING.items()
+                   if tid in spared_ids or (lane_spared and isinstance(meta, dict)
+                                            and meta.get("lane") == LANE_CONVERSATION)}
+    for tid in spared_rows:
+        RUNNING.pop(tid, None)
+    return spared_rows
+
+
+def _tear_down_slots(doomed: List[Worker]) -> None:
+    """Kill, join and close the doomed slots' processes (an inline executor's pseudo-slot: a cooperative stop)."""
+    for w in doomed:
+        if w.proc.pid:
+            kill_worker_tree(w.proc.pid)
+        elif w.proc.is_alive():
+            w.proc.terminate()
+    for w in doomed:
+        w.proc.join(timeout=3)
+    _kill_survivors(doomed)
+    from supervisor.worker_process import close_worker_stop_channel
+    for w in doomed:
+        close_worker_stop_channel(w.proc)
+
+
+def _confirm_dead_slots(doomed: List[Worker]) -> tuple:
+    """Under Q: the pids confirmed dead (their consumers retired) and those whose death is unconfirmed."""
+    dead_pids: set[int] = set()
+    unconfirmed_pids: list[int] = []
+    for w in doomed:
+        try:
+            if w.proc.pid and not w.proc.is_alive():
+                dead_pids.add(int(w.proc.pid))
+                from supervisor.worker_health import retire_confirmed_worker_consumers
+                retire_confirmed_worker_consumers(w, RUNNING.get(w.busy_task_id))
+            else:
+                unconfirmed_pids.append(int(w.proc.pid or 0))
+        except Exception:
+            unconfirmed_pids.append(int(getattr(w.proc, "pid", 0) or 0))
+            log.debug("Cannot confirm worker %s dead", w.wid, exc_info=True)
+    return dead_pids, unconfirmed_pids
+
+
+@_serialized_worker_lifecycle  # one global order, lifecycle before Q: every spawn holds them the same way
 def kill_workers(
     force: bool = True,
     *,
@@ -1232,7 +1314,16 @@ def kill_workers(
     hold_never_started: bool = False,
     stop_source: str = "",  # a stop door's typed cause (``_write_failure_result``)
     retain_saved_work: bool = False,  # an application stop: saved work survives it (#1563)
+    lanes: Optional[frozenset] = None,  # the slot lanes this stop owns; None = every slot (Panic, update)
 ) -> bool:
+    """Stop the pool's workers and settle the rows they carried.
+
+    ``lanes`` scopes a PROJECT fence (the crash storm, readiness exhaustion) to the
+    project slots: conversation carriers, and the rows they or an awaited carrier
+    own, are partitioned out of the sweep under Q and restored at its end, so a
+    project-pool fence never terminalises an owner's turn (owner decision 1A).
+    A stop without ``lanes`` owns every slot: Panic, Restart and a managed update.
+    """
     global _WORKER_POOL_DISABLED_REASON
     from supervisor import queue, restart_retention as retention  # every door retains saved pauses
     with _queue_lock:
@@ -1242,7 +1333,7 @@ def kill_workers(
             # concurrent ingress can refuse without starting project/workspace
             # side effects while workers are being joined.
             try:
-                fence_persisted = queue.persist_queue_snapshot(reason="worker_pool_disabling") is not False
+                fence_persisted = queue.publish_queue_snapshot(reason="worker_pool_disabling") is not False  # barrier (LB)
             except Exception:
                 fence_persisted = False
                 log.warning("Failed to persist worker-pool disable fence", exc_info=True)
@@ -1252,46 +1343,22 @@ def kill_workers(
                 _WORKER_POOL_DISABLED_REASON = previous_disable_reason
                 log.error("Worker shutdown blocked: disable fence was not durable")
                 return False
-        cleared_running = len(RUNNING)
-        doomed = list(WORKERS.values())
-        for w in doomed:
-            # The timeout reaper's ownership mark: assignment, the health check
-            # and the crash detector skip the slot while it is torn down below.
-            w.reaping = True
+        doomed = _partition_slots_for_stop(lanes)
     # Kill and join OUTSIDE the queue lock: the lifecycle serializer still
     # excludes pool starts and kills, and ingress/stop doors are not held.
-    for w in doomed:
-        if w.proc.pid:
-            kill_worker_tree(w.proc.pid)
-        elif w.proc.is_alive():
-            w.proc.terminate()
-    for w in doomed:
-        w.proc.join(timeout=3)
-    _kill_survivors()
-    from supervisor.worker_process import close_worker_stop_channel
-    for w in doomed:
-        close_worker_stop_channel(w.proc)
+    _tear_down_slots(doomed)
     with _queue_lock:
-        dead_pids: set[int] = set()
-        unconfirmed_pids: list[int] = []
+        # The spared rows are chosen under THIS hold, the one the terminalization below runs under:
+        # a lane turn admitted during the teardown is spared with the rest.
+        spared_rows = _spare_rows_for_stop(lanes, doomed)
+        cleared_running = len(RUNNING)
+        dead_pids, unconfirmed_pids = _confirm_dead_slots(doomed)
         for w in doomed:
-            try:
-                if w.proc.pid and not w.proc.is_alive():
-                    dead_pids.add(int(w.proc.pid))
-                    from supervisor.worker_health import retire_confirmed_worker_consumers
-                    retire_confirmed_worker_consumers(w, RUNNING.get(w.busy_task_id))
-                else:
-                    unconfirmed_pids.append(int(w.proc.pid or 0))
-            except Exception:
-                unconfirmed_pids.append(int(getattr(w.proc, "pid", 0) or 0))
-                log.debug("Cannot confirm worker %s dead", w.wid, exc_info=True)
-        WORKERS.clear()
-        orphaned_ids, drained_ids, terminalization_retry_ids = [], [], []
-        # #1196: an exact mid-run budget pause survives the physical epoch. Its
-        # PENDING carrier and its durable ``paused`` row are left exactly as they
-        # are — never cancelled here, never ``pending_parent_interrupted`` — so the
-        # next boot's ``restore_pending_from_snapshot`` re-validates the durable
-        # authority and parks the same task id again (or holds it, typed).
+            if WORKERS.get(w.wid) is w:
+                WORKERS.pop(w.wid)
+        orphaned_ids, drained_ids, terminalization_retry_ids, preserved_successors = [], [], [], []
+        # Exact pauses retain their queued marker and durable row across stops;
+        # restore revalidates the same task instead of cancelling it as interrupted.
         retained_paused_ids: list = []
         cleanup_ok = True
         try:
@@ -1335,10 +1402,7 @@ def kill_workers(
                     return None
                 task_id = str(task.get("id") or "").strip()
                 retry_claim = _prepare_retry_claim(task, task_id)
-                if retry_claim is None:
-                    terminalization_retry_ids.append(task_id or "<missing-task-id>")
-                    return False
-                if _settle_terminalization_retry_task(task, retry_claim):
+                if retry_claim is not None and _settle_terminalization_retry_task(task, retry_claim):
                     return True
                 terminalization_retry_ids.append(task_id or "<missing-task-id>")
                 return False
@@ -1368,6 +1432,8 @@ def kill_workers(
                     successor = dict(task)
                     continuing_wait = isinstance(successor.get("_owner_wait_resume"), dict)
                     successor["_attempt"] = int(meta.get("attempt") or task.get("_attempt") or 1) + (0 if continuing_wait else 1)
+                    retention.attach_preserved_successor_source(
+                        DRIVE_ROOT, str(task_id), successor, task, successor["_attempt"] - 1)
                     stamp_execution_handoff(successor, meta)  # #939: no fresh explicit time
                     try:
                         from ouroboros.owner_hurry import retry_reset
@@ -1380,8 +1446,10 @@ def kill_workers(
                     except Exception:
                         log.debug("Planned-restart retry reset failed for %s", task_id, exc_info=True)
                     PENDING.insert(0, successor)
+                    preserved_successors.append(str(task_id))
                     RUNNING.pop(str(task_id), None)
                     continue
+                record_execution_close(DRIVE_ROOT, str(task_id), task, meta)  # #939: this attempt ends here
                 if _settle_terminalization_task(
                     task,
                     reason=result_reason,
@@ -1470,7 +1538,7 @@ def kill_workers(
                     # custody, never a lost row or permission to run it again.
                     PENDING.append(_retain_killed_pending(task, reason=reason, status=status, trigger=trigger))
             if (orphaned_ids or drained_ids or terminalization_retry_ids or retained_paused_ids
-                    or retained_running_ids or retention.held_ids(PENDING)):
+                    or retained_running_ids or preserved_successors or retention.held_ids(PENDING)):
                 append_jsonl(
                     DRIVE_ROOT / "logs" / "supervisor.jsonl",
                     {
@@ -1479,6 +1547,7 @@ def kill_workers(
                         "orphaned_running": orphaned_ids,
                         "drained_pending": drained_ids,
                         "terminalization_retry": terminalization_retry_ids,
+                        **({"preserved_successors": preserved_successors} if preserved_successors else {}),
                         **({"retained_budget_paused": retained_paused_ids} if retained_paused_ids else {}),
                         **({"retained_saved_work": retained_running_ids} if retained_running_ids else {}),
                         **({"held_for_owner_restart": held} if (held := retention.held_ids(PENDING)) else {}),
@@ -1489,10 +1558,11 @@ def kill_workers(
             log.warning("Zombie prevention cleanup failed", exc_info=True)
         for terminal_id in orphaned_ids:
             RUNNING.pop(str(terminal_id), None)
+        RUNNING.update(spared_rows)  # the spared lanes' rows return before any reader sees the queue
     if reconcile_review_custody:
         _reconcile_review_owners(DRIVE_ROOT, dead_pids)
     try:
-        snapshot_ok = queue.persist_queue_snapshot(reason="kill_workers") is not False
+        snapshot_ok = queue.publish_queue_snapshot(reason=stop_source or "kill_workers") is not False  # barrier (LB): the door names the export
     except Exception:
         snapshot_ok = False
         log.warning("Failed to persist queue snapshot after worker shutdown", exc_info=True)
@@ -1535,9 +1605,23 @@ def last_worker_exit_census() -> Optional[dict]:
     return dict(_LAST_WORKER_EXIT_CENSUS) if _LAST_WORKER_EXIT_CENSUS else None
 
 
+# The retry custody last published: {task_id: its retry marker}. The assignment pass names the same
+# unresolved claims every tick; only a change of these facts is a new publication (cost law).
+_PUBLISHED_RETRY_CUSTODY: Dict[str, Any] = {}
+
+
 def _persist_pending_terminalization_retries(task_ids: List[str]) -> None:
-    """Record retained pending-terminal rows and make their custody restart-safe."""
+    """Record retained pending-terminal rows and make their custody restart-safe, once per change."""
     if not task_ids:
+        _PUBLISHED_RETRY_CUSTODY.clear()
+        return
+    wanted = {str(tid) for tid in task_ids}
+    facts: Dict[str, Any] = {tid: None for tid in wanted}
+    for row in PENDING:
+        if isinstance(row, dict) and str(row.get("id") or "") in wanted:
+            marker = row.get(_TERMINALIZATION_RETRY_FIELD)
+            facts[str(row.get("id") or "")] = dict(marker) if isinstance(marker, dict) else marker
+    if facts == _PUBLISHED_RETRY_CUSTODY:
         return
     append_jsonl(
         DRIVE_ROOT / "logs" / "supervisor.jsonl",
@@ -1546,8 +1630,11 @@ def _persist_pending_terminalization_retries(task_ids: List[str]) -> None:
     try:
         from supervisor import queue
 
-        if not queue.persist_queue_snapshot(reason="pending_terminal_event_retry"):
+        if not queue.publish_queue_snapshot(reason="pending_terminal_event_retry"):  # barrier (LB): restart-safe custody
             log.warning("Failed to persist pending terminal-event retry custody")
+        else:
+            _PUBLISHED_RETRY_CUSTODY.clear()
+            _PUBLISHED_RETRY_CUSTODY.update(facts)
     except Exception:
         log.warning(
             "Failed to persist pending terminal-event retry custody",
@@ -1730,11 +1817,14 @@ def _settle_cancelled_pending_row(
             "accounted_upper_bound_usd": None,
         }
     try:
+        from supervisor.cancel_publication import queued_address
         stored = write_task_result(
             DRIVE_ROOT, task_id, status_cancelled,
             strict_existing_dict=True,
-            result="Cancelled before start.", **cost_fields,
+            result=("Cancelled before this continuation started." if int(task.get("_attempt") or 1) > 1
+                    else "Cancelled before start."), **cost_fields,
             **intent_outcome_fields(intent),
+            _field_projector=lambda existing, patch: {**queued_address(task, existing), **patch},
         ) or {}
         stored_status = str(stored.get("status") or "").strip()
         if not stored_status:
@@ -1844,10 +1934,9 @@ def _drop_cancelled_pending() -> bool:
     if not PENDING:
         return True
     try:
-        from ouroboros.project_admission import hold_unreadable_result
+        from supervisor.restart_retention import conserve_unreadable_pending
         from ouroboros.task_results import (
-            STATUS_CANCEL_REQUESTED, STATUS_CANCELLED, _TRULY_TERMINAL_STATUSES,
-            load_task_result, write_task_result,
+            STATUS_CANCEL_REQUESTED, STATUS_CANCELLED, _TRULY_TERMINAL_STATUSES, write_task_result,
         )
     except Exception:
         log.error(
@@ -1860,7 +1949,9 @@ def _drop_cancelled_pending() -> bool:
         from ouroboros.cancel_intents import (
             active_intents, claim_intent, release_claim, settle_intent,
         )
-        if not isinstance(active_intents(DRIVE_ROOT, strict=True), dict):
+        # One projection read per pass; only this pass's own settlement moves it again.
+        current_intents = active_intents(DRIVE_ROOT, strict=True)
+        if not isinstance(current_intents, dict):
             raise TypeError("cancel-intent authority returned a non-object projection")
     except Exception:
         log.error(
@@ -1880,6 +1971,13 @@ def _drop_cancelled_pending() -> bool:
     terminalization_retry_ids: List[str] = []
     hold_state_changed = False
     pending_rows = list(PENDING)
+    # One status read per pass, never a task body per row per tick (Q held). A row a
+    # store failure leaves unknown keeps every branch the unreadable authority takes below.
+    from ouroboros.store_hot_facts import statuses
+
+    stored_status = statuses(DRIVE_ROOT, [str(row.get("id") or "") for row in pending_rows
+                                          if isinstance(row, dict) and row.get("id")])
+    intents_moved = False
     for index, t in enumerate(pending_rows):
         if not assignment["safe"]:
             survivors.extend(pending_rows[index:])
@@ -1896,14 +1994,9 @@ def _drop_cancelled_pending() -> bool:
         if marker is not None and not marker_trigger.startswith("pending_cancel"):
             survivors.append(t)
             continue
-        status = ""
-        authority_error = False
-        if tid:
-            try:
-                existing = load_task_result(DRIVE_ROOT, tid, strict=True)
-                status = str((existing or {}).get("status") or "")
-            except Exception:
-                authority_error = True
+        answer = stored_status.get(tid) if tid else None
+        authority_error = isinstance(answer, Exception)
+        status = "" if authority_error else str(answer or "")
         if authority_error:
             if t.get("_project_admission_restore_hold"):
                 # Project conservation is independent of result readability;
@@ -1919,9 +2012,9 @@ def _drop_cancelled_pending() -> bool:
                 )
                 survivors.extend(pending_rows[index:])
                 break
-            if marker is not None or not tid or hold_unreadable_result(t):
-                # Accepted Project work first losing its result keeps the same row;
-                # this pass's hold revalidation persists it (restore's rule).
+            if marker is not None or not tid or conserve_unreadable_pending(t):
+                # Saved pauses and accepted Project work keep their same row;
+                # each continuation's existing hold remains its authority.
                 survivors.append(t)
             else:
                 survivors.append(_make_terminalization_retry_task(
@@ -1932,13 +2025,15 @@ def _drop_cancelled_pending() -> bool:
                 ))
                 terminalization_retry_ids.append(tid)
             continue
-        current_intents = _read_pending_cancel_intents(active_intents, assignment)
-        if current_intents is None:
-            # Keep this row and every row not yet examined.  The caller will
-            # abort the assignment pass; no ordinary pending row may cross the
-            # dispatch boundary while cancellation authority is unknown.
-            survivors.extend(pending_rows[index:])
-            break
+        if intents_moved:
+            intents_moved = False
+            current_intents = _read_pending_cancel_intents(active_intents, assignment)
+            if current_intents is None:
+                # Keep this row and every row not yet examined.  The caller will
+                # abort the assignment pass; no ordinary pending row may cross the
+                # dispatch boundary while cancellation authority is unknown.
+                survivors.extend(pending_rows[index:])
+                break
         if authority_hold:
             if not tid:
                 assignment["safe"] = False
@@ -1982,6 +2077,7 @@ def _drop_cancelled_pending() -> bool:
             )
             if abort_assignment:
                 break
+            intents_moved = True
             continue
         if status in _TRULY_TERMINAL_STATUSES and marker is None:
             dropped.append(tid)
@@ -1992,7 +2088,7 @@ def _drop_cancelled_pending() -> bool:
         try:
             from supervisor import queue
 
-            persisted = queue.persist_queue_snapshot(
+            persisted = queue.publish_queue_snapshot(  # barrier (LB): durable before the row may dispatch
                 reason="cancel_intent_authority_hold_resolved",
             )
         except Exception:
@@ -2192,7 +2288,8 @@ def _worker_crash_storm_detected(
     *, busy_crashes: int, dead_detections: int, crashed_tasks: List[Dict[str, Any]]
 ) -> bool:
     now = time.time()
-    alive_now = sum(1 for worker in WORKERS.values() if worker.proc.is_alive())
+    alive_now = sum(1 for worker in WORKERS.values()
+                    if getattr(worker, "lane", LANE_PROJECT) != LANE_CONVERSATION and worker.proc.is_alive())
     if dead_detections:
         # Only count busy crashes or all-workers-dead as storm signals.
         if busy_crashes > 0 or alive_now == 0:
@@ -2204,7 +2301,7 @@ def _worker_crash_storm_detected(
     if len(CRASH_TS) < 3:
         return False
 
-    # Do not execv on crash storms; keep direct-chat mode alive.
+    # Do not execv on crash storms; the conversation lane stays open on its own slots.
     st = load_state()
     append_jsonl(
         DRIVE_ROOT / "logs" / "supervisor.jsonl",
@@ -2219,8 +2316,8 @@ def _worker_crash_storm_detected(
     if st.get("owner_chat_id"):
         send_with_budget(
             int(st["owner_chat_id"]),
-            "⚠️ Frequent worker crashes. Multiprocessing workers disabled, "
-            "continuing in direct-chat mode (threading).",
+            "⚠️ Frequent worker crashes. Project workers are disabled until Restart; "
+            "the conversation keeps its own lane.",
             is_progress=True,
             progress_meta={
                 "task_incident": "worker_crash_storm",
@@ -2239,8 +2336,6 @@ from supervisor.worker_assignment import (  # noqa: E402, F401 -- intentional pu
 )
 from supervisor.worker_chat_lane import (  # noqa: E402, F401 -- intentional public re-exports
     _broadcast_task_named,
-    _handle_chat_direct_locked,
-    _run_chat_task,
     auto_resume_after_restart,
     handle_chat_direct,
     handle_wake_direct,
@@ -2280,7 +2375,6 @@ from supervisor.worker_promotion import (  # noqa: E402, F401 -- intentional pub
     _origin_from_mapping,
     _origin_from_task_record,
     _promote_duplicate_reason,
-    _promoted_force_plan_metadata,
     _report_binding_failure,
     ensure_project_scope,
     promote_chat_to_task,

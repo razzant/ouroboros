@@ -227,12 +227,17 @@ test('the chat consumer shows the incident in the card Reviews group from a revi
         await fx.settle();
         assert.ok(fx.calls.some((url) => url.startsWith(`/api/tasks/${taskId}`)), 'the reference re-read the task detail');
         const host = card.querySelector('[data-live-reviews-host]');
-        assert.match(host.innerHTML, /chat-review-group warn/);
+        assert.match(host.innerHTML, /class="review-state ui-status" data-tone="warn"/);
         assert.match(host.innerHTML, /acceptance evidence · host attempt 1/);
         assert.equal(card.dataset.expanded, '0');
         const summary = card.querySelector('[data-live-review-summary]');
         assert.equal(summary.hidden, false);
-        assert.match(summary.textContent, /Acceptance unavailable: evidence preparation failed; no new reviewers/);
+        // The approved closed card has one quiet entry; warning and cause
+        // remain in its subject row and facts after opening Reviews.
+        assert.equal(summary.textContent, 'Reviews 1');
+        assert.match(host.innerHTML, /no new reviewer was dispatched for this attempt/);
+        // The active warning is one amber sentence inside the opened group, never on the closed door.
+        assert.match(host.innerHTML, /<p class="review-warning ui-status" data-tone="warn">Acceptance evidence could not be assembled locally/);
 
         // A replayed reference of the same publication changes nothing.
         fx.send(reference('a'));
@@ -244,7 +249,8 @@ test('the chat consumer shows the incident in the card Reviews group from a revi
             review_projection: { panels: [], acceptance_incident: { ...INCIDENT, status: 'resolved' } } };
         fx.send(reference('b'));
         await fx.settle();
-        assert.doesNotMatch(host.innerHTML, /chat-review-group warn/);
+        assert.doesNotMatch(host.innerHTML, /class="review-state ui-status" data-tone="warn"/);
+        assert.doesNotMatch(host.innerHTML, /review-warning/);
         assert.match(host.innerHTML, /assembled after 1 failed host attempt/);
         assert.equal((host.innerHTML.match(/acceptance evidence · host attempt 1/g) || []).length, 1);
     } finally { fx.destroy(); }
@@ -263,7 +269,7 @@ test('the chat consumer reads the same incident from a terminal record on replay
         });
         await fx.settle();
         const host = fx.card().querySelector('[data-live-reviews-host]');
-        assert.match(host.innerHTML, /chat-review-group warn/);
+        assert.match(host.innerHTML, /class="review-state ui-status" data-tone="warn"/);
         assert.match(host.innerHTML, /acceptance evidence · host attempt 1/);
     } finally { fx.destroy(); }
 });

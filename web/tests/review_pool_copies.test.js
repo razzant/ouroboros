@@ -24,8 +24,8 @@ test('copies of one model are grouped under the first pool row and priced as rep
     const twins = catalog([api('review-1', { minted_from: 'factory_default' }), api('review-2', { minted_from: 'factory_default' }),
         api('review-3', { minted_from: 'factory_default' })]);
     assert.deepEqual(reviewPoolCopies(twins), [{ keep: 0, copies: [1, 2] }]);
-    assert.equal(offer(twins.items), 'Subagents 1, 2 and 3 are copies of one model: each review pays for 3 runs of it and '
-        + 'gets no second opinion. With one kept, a single answer decides each review, so one flaky answer can block or pass it.');
+    assert.equal(offer(twins.items), 'Subagents 1, 2 and 3 are copies of one model: a review that asks all of them pays for '
+        + '3 runs of it and gets no second opinion. The pool has 1 independent seat, with or without the copies.');
     // What the former one-harness subscription wizard saved: the owner's own row marked plus two minted twins.
     assert.deepEqual(reviewPoolCopies(catalog([session('primary-builder'), session('review-claude', { minted_from: 'factory_default' }),
         session('review-claude-2', { minted_from: 'factory_default' })])), [{ keep: 0, copies: [1, 2] }]);
@@ -34,13 +34,25 @@ test('copies of one model are grouped under the first pool row and priced as rep
     assert.deepEqual(reviewPoolCopies(helper), [{ keep: 1, copies: [2] }]);
     // Copies beside a distinct reviewer: keeping one leaves two answers, not one.
     const mixed = [api('a'), api('b'), api('c', { route: { kind: ROUTE_KIND_API_MODEL, target_id: 'anthropic::claude-opus-5' } })];
-    assert.equal(offer(mixed), 'Subagents 1 and 2 are copies of one model: each review pays for 2 runs of it and gets no second '
-        + 'opinion. With one kept, 2 answers decide each review instead of 3.');
+    assert.equal(offer(mixed), 'Subagents 1 and 2 are copies of one model: a review that asks all of them pays for 2 runs of it '
+        + 'and gets no second opinion. The pool has 2 independent seats, with or without the copies.');
     const other = { route: { kind: ROUTE_KIND_API_MODEL, target_id: 'anthropic::claude-opus-5' } };
     const pairs = catalog([api('a'), api('b'), api('c', other), api('d', other)]);
     assert.deepEqual(reviewPoolCopies(pairs), [{ keep: 0, copies: [1] }, { keep: 2, copies: [3] }]);
-    assert.equal(offer(pairs.items), 'Subagents 1 and 2; Subagents 3 and 4 are copies of one model per group: each review pays '
-        + 'for every copy and gets no second opinion. With one of each kept, 2 answers decide each review instead of 4.');
+    assert.equal(offer(pairs.items), 'Subagents 1 and 2; Subagents 3 and 4 are copies of one model per group: a review that asks '
+        + 'every copy pays for each one and gets no second opinion. The pool has 2 independent seats, with or without the copies.');
+});
+
+test('the offer promises no count of answers per review: how many seats a review asks follows the strictness', () => {
+    // Advisory may ask one copy and Cyber Pro none (IMPL_SPEC §2): the line prices asking every copy and counts
+    // the pool's independent seats, never that every copy runs or that its answers decide or block each review.
+    const other = { route: { kind: ROUTE_KIND_API_MODEL, target_id: 'anthropic::claude-opus-5' } };
+    for (const items of [[api('a'), api('b'), api('c')], [api('a'), api('b'), api('c', other)], [api('a'), api('b'), api('c', other), api('d', other)]]) {
+        const text = offer(items);
+        assert.match(text, /a review that asks (all of them|every copy) pays for/);
+        assert.match(text, /The pool has \d independent seats?, with or without the copies\.$/);
+        assert.doesNotMatch(text, /each review pays|decides? each review|block or pass|answers decide/);
+    }
 });
 
 test('diverse rows, one row, unmarked or switched-off look-alikes and another effort are no copies', () => {
@@ -61,7 +73,7 @@ test('Keep one per model removes the copies from the draft only, and the offer f
     editor.load(catalog([api('helper', { review_eligible: undefined, effort: 'low' }), api('review-1', { minted_from: 'factory_default' }),
         api('review-2', { minted_from: 'factory_default' }), api('review-3', { minted_from: 'factory_default' })]));
     assert.equal(dom.pool.copies.hidden, false);
-    assert.match(dom.pool['copies-text'].textContent, /^Subagents 2, 3 and 4 are copies of one model: each review pays for 3 runs/);
+    assert.match(dom.pool['copies-text'].textContent, /^Subagents 2, 3 and 4 are copies of one model: a review that asks all of them pays for 3 runs/);
     assert.match(dom.html(), /<button type="button" class="btn btn-default" data-review-pool-keep-one>Keep one per model<\/button>/);
     assert.equal(editor.dirty, false, 'loading shows the offer and changes nothing');
 
@@ -69,7 +81,7 @@ test('Keep one per model removes the copies from the draft only, and the offer f
     const card = dom.row(3);
     card.querySelector('[data-subagent-field="review_eligible"]').toggle(false);
     assert.equal(dom.row(3), card);
-    assert.match(dom.pool['copies-text'].textContent, /^Subagents 2 and 3 are copies of one model: each review pays for 2 runs/);
+    assert.match(dom.pool['copies-text'].textContent, /^Subagents 2 and 3 are copies of one model: a review that asks all of them pays for 2 runs/);
     card.querySelector('[data-subagent-field="review_eligible"]').toggle(true);
 
     dom.toolbar.keepOne.emit('click');

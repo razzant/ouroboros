@@ -9,6 +9,7 @@ server is required.
 
 from __future__ import annotations
 
+
 import pytest
 
 from ouroboros import mcp_client
@@ -19,7 +20,13 @@ from ouroboros.tools.registry import ToolContext, ToolRegistry
 
 
 @pytest.fixture(autouse=True)
-def _isolate_manager():
+def _isolate_manager(monkeypatch):
+    from ouroboros import config
+    configure = mcp_client.reconfigure_from_settings
+    def configured(settings):
+        monkeypatch.setattr(config, "load_settings", lambda: settings)
+        configure(settings)
+    monkeypatch.setattr(mcp_client, "reconfigure_from_settings", configured)
     mcp_client.reset_manager_for_tests()
     yield
     mcp_client.reset_manager_for_tests()
@@ -160,7 +167,7 @@ def test_web_tool_restriction_preserves_mcp_discovery_and_dispatch(
     assert len(fake.call_calls) == 1
 
 
-def test_schemas_cold_worker_loads_settings_and_refreshes_once(registry, monkeypatch):
+def test_schemas_cold_worker_adopts_catalog_without_listing(registry, monkeypatch):
     fake = _FakeTransport(
         [{"name": "ping", "description": "Ping", "input_schema": {"type": "object", "properties": {}}}]
     )
@@ -174,11 +181,18 @@ def test_schemas_cold_worker_loads_settings_and_refreshes_once(registry, monkeyp
         lambda: _settings(_good_server(id="svc")),
     )
 
+    assert not any(row["function"]["name"].startswith("mcp_") for row in registry.schemas())
+    assert fake.list_calls == []
+    publisher = mcp_client.MCPManager()
+    publisher.reconfigure(_settings(_good_server(id="svc")))
+    publisher._async_list_tools = fake.list_tools
+    assert publisher.refresh_server("svc")["published"]
+    fake.list_calls.clear()
     names = {schema["function"]["name"] for schema in registry.schemas()}
     assert "mcp_svc__ping" in names
-    assert len(fake.list_calls) == 1
+    assert fake.list_calls == []
     registry.schemas()
-    assert len(fake.list_calls) == 1
+    assert fake.list_calls == []
 
     contract = build_task_contract({"allowed_resources": {"network": False}})
     registry.set_context(
@@ -193,7 +207,7 @@ def test_schemas_cold_worker_loads_settings_and_refreshes_once(registry, monkeyp
     names = {schema["function"]["name"] for schema in registry.schemas()}
     assert "mcp_svc__ping" not in names
     assert registry.get_schema_by_name("mcp_svc__ping") is None
-    assert len(fake.list_calls) == 1
+    assert fake.list_calls == []
     assert any(item.get("surface") == "mcp" and item.get("reason") == "resource_blocked" for item in registry.capability_omissions())
 
 
@@ -214,17 +228,17 @@ def test_enabled_server_with_no_tools_surfaces_capability_omission(registry):
     assert "svc" in server_ids
 
 
-def test_list_non_core_tools_empty_when_mcp_is_already_initial(registry):
+def test_list_non_core_tools_names_an_unpinned_server_and_not_a_pinned_one(registry):
     fake = _FakeTransport(
         [{"name": "ping", "description": "Ping", "input_schema": {"type": "object", "properties": {}}}]
     )
     _wire_singleton(fake)
     mcp_client.reconfigure_from_settings(_settings(_good_server(id="svc")))
     mcp_client.get_manager().refresh_server("svc")
+    assert "mcp_svc__ping" in [item["name"] for item in list_non_core_tools(registry)]  # on demand (#2332)
 
-    entries = list_non_core_tools(registry)
-    names = [item["name"] for item in entries]
-    assert "mcp_svc__ping" not in names
+    mcp_client.reconfigure_from_settings(_settings(_good_server(id="svc", schemas_at_start=True)))
+    assert "mcp_svc__ping" not in [item["name"] for item in list_non_core_tools(registry)]
 
 
 def test_get_schema_by_name_returns_mcp_tool(registry):
@@ -403,3 +417,9 @@ def test_direct_chat_exposes_and_executes_configured_mcp_tools(registry, monkeyp
     out = registry.execute("mcp_svc__ping", {})
     assert "echo(svc/ping)" not in out
     assert len(fake.call_calls) == 1
+
+
+@pytest.fixture(autouse=True)
+def _private_mcp_catalog_root(tmp_path, monkeypatch):
+    from ouroboros import config
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)

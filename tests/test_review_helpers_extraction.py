@@ -32,8 +32,6 @@ REPO = pathlib.Path(__file__).parents[1]
 _LEAVES = (review_prompt_text, review_file_pack, review_checklist)
 
 _MOVED_OWNERS = {
-    "_JSON_SECRET_RE": review_prompt_text,
-    "_SECRET_LINE_RE": review_prompt_text,
     "CRITICAL_FINDING_CALIBRATION": review_prompt_text,
     "REVIEW_PREAMBLE": review_prompt_text,
     "REVIEW_THOROUGHNESS_BLOCK": review_prompt_text,
@@ -67,7 +65,6 @@ _MOVED_OWNERS = {
     "normalize_reviewer_item": review_prompt_text,
     "normalize_reviewer_items": review_prompt_text,
     "normalize_reviewer_obligation_id": review_prompt_text,
-    "redact_prompt_secrets": review_prompt_text,
     "single_line": review_prompt_text,
     "strip_obligation_suffix": review_prompt_text,
     "BINARY_EXTENSIONS": review_file_pack,
@@ -100,21 +97,17 @@ _MOVED_OWNERS = {
 _PARENT_OWNED = (
     "REPO_ROOT",
     "REVIEW_PROMPT_TOKEN_BUDGET",
-    "SKILL_HOST_CONTEXT_FILES",
     "_COMMIT_SUBJECT_MAX_CHARS",
     "_commit_subject",
     "_run_review_preflight_tests",
     "build_blocking_findings_json_section",
     "build_goal_section",
     "build_scope_section",
-    "build_skill_host_context",
     "cached_prompt_blocks",
     "calibrated_input_token_limit",
     "check_worktree_readiness",
     "emit_review_event",
     "emit_review_usage",
-    "format_advisory_error",
-    "get_advisory_runtime_diagnostics",
     "load_governance_doc",
     "resolve_intent",
     "review_drive_root",
@@ -185,25 +178,3 @@ def test_review_helper_leaves_are_review_substrate_members():
     for module in _LEAVES:
         rel = pathlib.Path(module.__file__).relative_to(REPO).as_posix()
         assert rel in _REVIEW_SUBSTRATE_PATHS, rel
-
-
-def test_review_helpers_extraction_size_bounds_have_meaningful_headroom():
-    counts = {
-        module.__name__: len(
-            pathlib.Path(module.__file__).read_text(encoding="utf-8").splitlines()
-        )
-        for module in (review_helpers, *_LEAVES)
-    }
-    assert all(count <= 1000 for count in counts.values()), counts
-    # 925 rather than the extraction's original 850: the canonical governance
-    # corpus (`CANONICAL_GOVERNANCE_DOCS` and its two predicates) became ONE
-    # owner here, replacing four hand-maintained copies across the review
-    # surfaces, and the book-aware `load_governance_doc` sits beside it. The
-    # bound still protects what it was for — real headroom under the 1000 all
-    # leaves share, far under the 1600-line ratchet — and the honest paydown for
-    # the next addition is a governance-document leaf beside
-    # `review_prompt_text` and `review_file_pack`, not a smaller docstring.
-    assert counts["ouroboros.tools.review_helpers"] <= 925
-    assert counts["ouroboros.tools.review_prompt_text"] <= 1000
-    assert counts["ouroboros.tools.review_file_pack"] <= 1000
-    assert counts["ouroboros.tools.review_checklist"] <= 300

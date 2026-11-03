@@ -39,14 +39,12 @@ def test_all_pool_consumers_keep_rights_and_the_delivery_enum(monkeypatch, acces
     assert row_plan['session_accesses'] == [access, '', '']
     assert row_plan['retrieves'] == [True, True, False]
     assert plan_review_slots()[0].session_access == access
-    child, refusal = slots.child_acceptance_slots(slots.triad_delivery_slots(), 'session')
-    assert not refusal and child[0].session_access == access
     assert slots.catalog_review_row(None, 'session').access == access  # selected preflight/system row
     with slots.composed_review_pool([slots.PoolSeat(session, ('change', 'coupling'))]):
         assert slots.commit_triad_delivery()['session_accesses'] == [access]
 
 
-@pytest.mark.parametrize('surface', ['multi_model_review', 'review_change', 'preflight', 'skill_review', 'task_acceptance'])
+@pytest.mark.parametrize('surface', ['multi_model_review', 'review_change', 'preflight', 'skill_review'])
 @pytest.mark.parametrize('access', ['readonly', 'full'])
 def test_pool_rights_reach_actual_session_request_and_immutable_custody(
         monkeypatch, repo, tmp_path, writable_engine, surface, access):  # noqa: F811

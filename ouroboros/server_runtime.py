@@ -52,6 +52,9 @@ _SHIPPED_LEGACY_HEAVY_DEFAULTS = frozenset({
 })
 # The slots that take a provider proposal while nobody authored them.
 MODEL_SLOT_KEYS = _ALL_MODEL_SLOT_KEYS = tuple(_MODEL_ROLE_SETTING_KEYS.values())
+# The model roles whose saved value, blank included, beats an operator variable: those slots plus
+# Vision and Consciousness, whose blank is the owner's "use Main" and which take no proposal.
+SAVED_MODEL_ROLE_KEYS = (*MODEL_SLOT_KEYS, "OUROBOROS_MODEL_VISION", "OUROBOROS_MODEL_CONSCIOUSNESS")
 _SCOPE_REVIEW_LEGACY_DEFAULTS = frozenset({
     "",
     "anthropic/claude-opus-4.6",
@@ -125,36 +128,10 @@ def _provider_prefix(provider: str) -> str:
 
 
 def _exclusive_direct_remote_provider(settings: dict) -> str:
-    has_openrouter = bool(_setting_text(settings, "OPENROUTER_API_KEY"))
-    has_official_openai = bool(_setting_text(settings, "OPENAI_API_KEY"))
-    has_anthropic = bool(_setting_text(settings, "ANTHROPIC_API_KEY"))
-    has_minimax = bool(_setting_text(settings, "MINIMAX_API_KEY"))
-    has_deepseek = bool(_setting_text(settings, "DEEPSEEK_API_KEY"))
-    has_zai = bool(_setting_text(settings, "ZAI_API_KEY"))
-    has_legacy_openai_base = bool(_setting_text(settings, "OPENAI_BASE_URL"))
-    has_compatible = bool(_setting_text(settings, "OPENAI_COMPATIBLE_BASE_URL"))
-    has_cloudru = bool(_setting_text(settings, "CLOUDRU_FOUNDATION_MODELS_API_KEY"))
-    has_gigachat = bool(_setting_text(settings, "GIGACHAT_CREDENTIALS")) or (
-        bool(_setting_text(settings, "GIGACHAT_USER"))
-        and bool(_setting_text(settings, "GIGACHAT_PASSWORD"))
-    )
-    # Mirror config._exclusive_direct_remote_provider_env: OpenRouter / legacy
-    # base / compatible disqualify exclusivity; among the registered direct
-    # providers return one only when exactly one is set.
-    if has_openrouter or has_legacy_openai_base or has_compatible:
-        return ""
-    direct = [
-        name for name, present in (
-            ("openai", has_official_openai),
-            ("anthropic", has_anthropic),
-            ("minimax", has_minimax),
-            ("cloudru", has_cloudru),
-            ("gigachat", has_gigachat),
-            ("deepseek", has_deepseek),
-            ("zai", has_zai),
-        ) if present
-    ]
-    return direct[0] if len(direct) == 1 else ""
+    """The one direct provider the settings reach, else '' (``provider_models.exclusive_direct_kind``)."""
+    from ouroboros.provider_models import exclusive_direct_kind
+
+    return exclusive_direct_kind(settings or {})
 
 
 def _normalize_direct_review_models(settings: dict, provider: str) -> str:
@@ -235,11 +212,12 @@ def classify_runtime_provider_change(before: dict, after: dict) -> str:
       without making any changes, so this is pure housekeeping and should NOT
       produce a warning.
     """
+    from ouroboros.provider_models import configured_kinds
+
     provider_after = _exclusive_direct_remote_provider(after)
     if provider_after:
         return "direct_normalize"
-    has_openrouter_after = bool(_setting_text(after, "OPENROUTER_API_KEY"))
-    if has_openrouter_after:
+    if "openrouter" in configured_kinds(after or {}):
         return "reverse_migrate"
     return "none"
 
@@ -255,25 +233,9 @@ def has_remote_provider(settings: dict) -> bool:
             return True
         except ValueError:
             pass
-    if any(
-        str(settings.get(key, "") or "").strip()
-        for key in (
-            "OPENROUTER_API_KEY",
-            "OPENAI_API_KEY",
-            "ANTHROPIC_API_KEY",
-            "MINIMAX_API_KEY",
-            "DEEPSEEK_API_KEY",
-            "ZAI_API_KEY",
-            "OPENAI_COMPATIBLE_BASE_URL",
-            "CLOUDRU_FOUNDATION_MODELS_API_KEY",
-            "GIGACHAT_CREDENTIALS",
-        )
-    ):
-        return True
-    # GigaChat also supports user/password basic auth.
-    return bool(str(settings.get("GIGACHAT_USER", "") or "").strip()) and bool(
-        str(settings.get("GIGACHAT_PASSWORD", "") or "").strip()
-    )
+    from ouroboros.provider_models import any_api_connection_configured
+
+    return any_api_connection_configured(settings)
 
 
 def has_local_routing(settings: dict) -> bool:
@@ -366,9 +328,9 @@ def propose_unauthored_model_slots(settings: dict, authored) -> dict:
 
 def repropose_unedited_slots(settings: dict, document, written, shown) -> set[str]:
     """The Settings save's rule: the ``unedited_unauthored_slots`` are re-proposed in ``settings``
-    for the access the save now carries, and returned so the caller does not persist them. One an
-    operator's variable sets (``settings_integrity.operator_variables``) keeps that value, as the
-    next read takes it: in this process, its children and the next task."""
+    for the access the save now carries (Vision/Consciousness take none), and returned so the caller
+    does not persist them. One an operator's variable sets (``settings_integrity.operator_variables``)
+    keeps that value, as the next read takes it: in this process, its children and the next task."""
     from ouroboros.settings_integrity import operator_variables
 
     unauthored = unedited_unauthored_slots(document, written, shown)
@@ -379,12 +341,12 @@ def repropose_unedited_slots(settings: dict, document, written, shown) -> set[st
 
 
 def unedited_unauthored_slots(document, written, shown) -> set[str]:
-    """The slots a write leaves unauthored: absent from the ``document`` on disk and either not
-    ``written`` or written exactly as the writer read them (``shown``; for the Settings save, what
+    """The ``SAVED_MODEL_ROLE_KEYS`` a write leaves unauthored: absent from the ``document`` on disk and
+    either not ``written`` or written exactly as the writer read them (``shown``; for the Settings save, what
     GET showed, respelled onto the exclusive provider: an operator's ``openai/x`` reads ``openai::x``).
     Settings posts every model role and an owner endpoint writes back the whole document, so posting
     a proposal back unchanged is not a choice; the key stays absent and keeps following the configured access."""
-    return {key for key in _ALL_MODEL_SLOT_KEYS if key not in authored_model_slots(document)
+    return {key for key in SAVED_MODEL_ROLE_KEYS if key not in document
             and (key not in written or str(written[key]) == str(shown.get(key)))}
 
 

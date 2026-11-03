@@ -20,7 +20,17 @@ import pytest
 from ouroboros import owner_hurry as oh
 from tests._delivery_candidate_shared import write_child, write_confirmed_disposition_fixture
 from tests.test_delivery_forced_finalization import _forced_test_context
-from tests.test_owner_hurry_s3 import _acceptance_ctx, _plan_record
+from tests.test_owner_hurry_s3 import _plan_record
+
+
+def _acceptance_ctx(tmp_path, *, latched):
+    """A root's delivery context, latched by the owner's hurry when ``latched`` (the helper the deleted
+    acceptance tests of ``test_owner_hurry_s3`` shared)."""
+    ctx = SimpleNamespace(is_direct_chat=False, drive_root=str(tmp_path), budget_drive_root=str(tmp_path),
+                          task_metadata={}, task_contract={}, task_attempt=1, task_id="t-acc")
+    if latched:
+        ctx._owner_hurry_latch = {"msg_id": "hurry:x", "requested_at": "", "reason": oh.REASON_OWNER_HURRY}
+    return ctx
 
 OWNER_NOTICE = (
     "\n\n⚠️ Plan review: 1 open objection remains open — triad_a/o1 (ask a1, revision 1): no; "
@@ -33,7 +43,7 @@ def _held(ctx, *, content="answer"):
 
     trace = {"reasoning_notes": []}
     messages: list = []
-    held = loop_mod._enforce_swarm_actions(content, messages, SimpleNamespace(_ctx=ctx), trace, lambda _m: None)
+    held = loop_mod._enforce_plan_gate(content, messages, SimpleNamespace(_ctx=ctx), trace, lambda _m: None)
     return held, messages, trace
 
 
@@ -55,7 +65,7 @@ def test_an_open_advisory_gate_costs_no_extra_round_on_first_sight(tmp_path, mon
     ctx.task_metadata = {"force_plan": True}
     held, messages, trace = _held(ctx)
     assert held is False and messages == []
-    assert trace["force_plan_decision"]["allow"] is True
+    assert trace["plan_gate"]["allow"] is True
     assert not hasattr(ctx, "_plan_gate_told_identity")
 
 
@@ -114,8 +124,8 @@ def _round_limit_prompt(tmp_path, monkeypatch, decision, *, deferred_child):
     captured = []
     monkeypatch.setattr(loop, "call_llm_with_retry", lambda _llm, messages, *_a, **_k: (
         captured.append([dict(m) for m in messages]) or {"content": "Forced answer."}, 0.0))
-    monkeypatch.setattr(loop, "_force_plan_decision", lambda *_a, **_k: dict(decision))
-    monkeypatch.setattr(loop, "_force_plan_disclosure",
+    monkeypatch.setattr(loop, "_plan_gate_decision", lambda *_a, **_k: dict(decision))
+    monkeypatch.setattr(loop, "_plan_gate_disclosure",
                         lambda *_a, **_k: OWNER_NOTICE if decision.get("open_objections") else "")
     text, usage, _returned = loop._handle_round_limit(limit_ctx)
     assert text == "Forced answer." and len(captured) == 1

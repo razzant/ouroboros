@@ -277,8 +277,8 @@ def test_black_box_policy_preserves_concrete_operands_without_inline_code_guesse
     ):
         result = registry.execute("run_command", {"cmd": cmd, "cwd": str(repo)})
         assert "RESOURCE_POLICY_BLOCKED" in result, cmd
-    assert "RESOURCE_POLICY_BLOCKED" in registry.execute("vcs_diff", {"path": protected.name})
-    assert "RESOURCE_POLICY_BLOCKED" in registry.execute("vcs_diff", {})
+    assert "RESOURCE_POLICY_BLOCKED" in registry.execute("vcs_read", {"action": "diff", "path": protected.name})
+    assert "RESOURCE_POLICY_BLOCKED" in registry.execute("vcs_read", {"action": "diff"})
     import ouroboros.code_intelligence as code_intelligence
 
     original_file_fact = code_intelligence._file_fact
@@ -291,16 +291,24 @@ def test_black_box_policy_preserves_concrete_operands_without_inline_code_guesse
     digest = registry.execute("query_code", {"op": "digest"})
     assert protected.name not in digest
     assert generated.name in digest
-    run_output_export = registry.execute("run_command", {"cmd": direct_cmd, "outputs": [protected.name], "cwd": str(repo)})
-    assert "ARTIFACT_OUTPUT_ERROR" in run_output_export
-    assert "RESOURCE_POLICY_BLOCKED" in run_output_export
-    script_output_export = registry.execute(
+    # #1797: declaring the protected artifact as an output is refused before any launch
+    # (owner choice A), so no process or service runs and nothing is exported.
+    def refused_before_launch(result):
+        assert result.code == "RESOURCE_POLICY_BLOCKED", result.text
+        assert result.meta.get("operation_outcome") == "completed_no_effect"
+        assert "declared outputs refused before the process started; nothing ran" in result.text
+        assert "ARTIFACT_OUTPUT_ERROR" not in result.text
+
+    refused_before_launch(registry.execute_result(
+        "run_command", {"cmd": direct_cmd, "outputs": [protected.name], "cwd": str(repo)}))
+    refused_before_launch(registry.execute_result(
         "run_script",
-        {"interpreter": "python3", "script": "print('ok')", "outputs": [protected.name], "cwd": str(repo)},
-    )
-    assert "RESOURCE_POLICY_BLOCKED" in script_output_export
+        {"interpreter": "python3", "script": "open('ran.marker', 'w').write('ran')", "outputs": [protected.name],
+         "cwd": str(repo)},
+    ))
+    assert not (repo / "ran.marker").exists()
     service_cmd = ["cmd.exe", "/c", "ping", "127.0.0.1", "-n", "30"] if os.name == "nt" else ["sleep", "30"]
-    service_start = registry.execute(
+    refused_before_launch(registry.execute_result(
         "start_service",
         {
             "name": "protected-output",
@@ -308,11 +316,10 @@ def test_black_box_policy_preserves_concrete_operands_without_inline_code_guesse
             "cwd": str(repo),
             "outputs": [protected.name],
         },
-    )
-    assert "protected-output" in service_start
-    service_stop = registry.execute("stop_service", {"name": "protected-output"})
-    assert "ARTIFACT_OUTPUT_ERROR" in service_stop
-    assert "RESOURCE_POLICY_BLOCKED" in service_stop
+    ))
+    assert registry.execute("service_status", {"name": "protected-output"}).startswith("⚠️ SERVICE_NOT_FOUND")
+    assert registry.execute("stop_service", {"name": "protected-output"}).startswith("⚠️ SERVICE_NOT_FOUND")
+    assert not any((data / "task_results").rglob(protected.name)), "no artifact copy of the protected file"
     for cmd in (
         ["strings", str(protected)],
         ["objdump", "-d", str(protected)],

@@ -15,7 +15,10 @@ candidate payload at the last host-controlled pre-transport seam**. That seam
 already exists and is singular:
 `ouroboros/llm_attempt.py::_candidate_before_dispatch` — the closure that runs
 after the cache-marker finalizer produced the final send copy
-(`_physical_candidate`) and before the transport's `send`.
+(`_physical_candidate`) and before the transport's `send`. A funded realtime setup
+attempt has no such candidate: its pre-dispatch callback (`realtime_turn.py`) seals
+the exact provider wire plan through the same `persist_physical_candidate` owner and
+returns the same manifest reference, so both directions below apply to it unchanged.
 
 - **Forward (`sent ⟹ logged`)**: every physical attempt persists a sealed
   durable record of its exact send copy BEFORE dispatch.
@@ -196,7 +199,8 @@ from "our two copies agree" to "the durable record agrees with the wire".
 
 ## 7. Implementation owners
 
-- `llm_attempt.py` owns the pre-dispatch seam and its candidate identity gate.
+- `llm_attempt.py` owns the pre-dispatch seam and its candidate identity gate;
+  `realtime_turn.py` seals its funded wire plan through the same owner.
 - `model_send_seal.py` stamps the physical-candidate manifest, reads back the
   durable projection, writes typed mismatch facts and reconciles both join
   directions. The seal is an additive key under the existing manifest schema.

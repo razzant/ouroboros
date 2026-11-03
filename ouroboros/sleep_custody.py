@@ -203,9 +203,12 @@ def reconcile(q: Any = None, *, direct: Any = (), runtime: Any = None, stop_requ
     Call on startup before orphan handling and on the body's ordinary pass.
     ``direct`` contains current direct actors' task records; RUNNING requests
     are discovered even before the park event exists or when its hint is lost.
+    One read per addressed store selects the rows carrying a saved request or
+    receipt, so a pass costs what those rows cost, not one read per live actor.
     """
-    from ouroboros.budget_pause import budget_pause_row, BudgetPauseSuperseded
+    from ouroboros.budget_pause import BudgetPauseSuperseded
     from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.store_hot_facts import cold_custody_rows
 
     if q is None:
         from supervisor import queue as q
@@ -216,54 +219,64 @@ def reconcile(q: Any = None, *, direct: Any = (), runtime: Any = None, stop_requ
     # An unreadable current row must not turn an accepted parked owner into an
     # orphan. The canonical read still gates acceptance and every return grant.
     retained = {str(t["id"]) for t in tasks if t.get("id") and carrier_receipt(t)}
-    for task in {str(t.get("id") or ""): t for t in tasks if t.get("id")}.values():
+    by_store: dict = {}
+    for task in tasks:
+        if task.get("id"):
+            by_store.setdefault(pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT), set()).add(str(task["id"]))
+    for root, ids in by_store.items():
         if stop_requested is not None and stop_requested():
             break
-        root, tid = pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT), str(task["id"])
         try:
-            row = budget_pause_row(root, tid)
-            transfer = row.get("external_custody") or {}
-            accepted = accepted_receipt(tid, row)
-            if not accepted and not (row.get("reason") in RETAINED_REASONS and row.get("state") == "pausing"
-                                     and transfer.get("state") == "requested"):
-                continue
-            if transfer.get("binding") != _binding(tid, row) or not row.get("source_ref"):
-                continue
-            if accepted:
-                retained.add(tid)
-            else:
-                read_actor_source_bytes(root, tid, row["source_ref"])
-            owner = runtime if runtime is not None else _runtime(root)
-            ready = owner is not None and owner.ensure_runs(transfer["runs"], task_id=tid)
-            if accepted:
-                # An unavailable caretaker is not anonymous owner loss. Return
-                # separately requires current runtime responsibility.
-                retained.add(tid)
-                continue
-            if stop_requested is not None and stop_requested():
-                continue
-            if not ready:
-                _replace(root, tid, row, {**row, "external_custody": {
-                    **transfer, "state": "refused", "reason": "body_custody_unavailable"}})
-                continue
-            from ouroboros.owner_pause import member_fence
-            from ouroboros.cancel_intents import cancel_pending
-            from types import SimpleNamespace
-            # Authority custody preserves already-admitted runs; it grants no execution.
-            # The owner's fence still gates Resume and reaches these runs through this
-            # receipt. Sleep retains its stricter execution-fence prerequisite.
-            if cancel_pending(root, tid) or (row.get("reason") != "authority" and member_fence(
-                    SimpleNamespace(task_id=tid, root_task_id=row.get("root_task_id") or tid,
-                                    budget_drive_root=str(root)))):
-                continue
-            receipt = {**transfer, "state": "accepted", "accepted_at": time.time(),
-                       "runtime": owner.identity()}
-            _replace(root, tid, row, {**row, "external_custody": receipt})
-            retained.add(tid)
-        except BudgetPauseSuperseded:
-            continue
+            rows = cold_custody_rows(root, ids)
         except Exception:
-            log.warning("Cold custody observation unavailable for %s; no acceptance inferred", tid, exc_info=True)
+            log.warning("Cold custody observation unavailable for %s; no acceptance inferred", root, exc_info=True)
+            continue
+        for tid, row in rows.items():
+            if stop_requested is not None and stop_requested():
+                break
+            try:
+                transfer = row.get("external_custody") or {}
+                accepted = accepted_receipt(tid, row)
+                if not accepted and not (row.get("reason") in RETAINED_REASONS and row.get("state") == "pausing"
+                                         and transfer.get("state") == "requested"):
+                    continue
+                if transfer.get("binding") != _binding(tid, row) or not row.get("source_ref"):
+                    continue
+                if accepted:
+                    retained.add(tid)
+                else:
+                    read_actor_source_bytes(root, tid, row["source_ref"])
+                owner = runtime if runtime is not None else _runtime(root)
+                ready = owner is not None and owner.ensure_runs(transfer["runs"], task_id=tid)
+                if accepted:
+                    # An unavailable caretaker is not anonymous owner loss. Return
+                    # separately requires current runtime responsibility.
+                    retained.add(tid)
+                    continue
+                if stop_requested is not None and stop_requested():
+                    continue
+                if not ready:
+                    _replace(root, tid, row, {**row, "external_custody": {
+                        **transfer, "state": "refused", "reason": "body_custody_unavailable"}})
+                    continue
+                from ouroboros.owner_pause import member_fence
+                from ouroboros.cancel_intents import cancel_pending
+                from types import SimpleNamespace
+                # Authority custody preserves already-admitted runs; it grants no execution.
+                # The owner's fence still gates Resume and reaches these runs through this
+                # receipt. Sleep retains its stricter execution-fence prerequisite.
+                if cancel_pending(root, tid) or (row.get("reason") != "authority" and member_fence(
+                        SimpleNamespace(task_id=tid, root_task_id=row.get("root_task_id") or tid,
+                                        budget_drive_root=str(root)))):
+                    continue
+                receipt = {**transfer, "state": "accepted", "accepted_at": time.time(),
+                           "runtime": owner.identity()}
+                _replace(root, tid, row, {**row, "external_custody": receipt})
+                retained.add(tid)
+            except BudgetPauseSuperseded:
+                continue
+            except Exception:
+                log.warning("Cold custody observation unavailable for %s; no acceptance inferred", tid, exc_info=True)
     return retained
 
 

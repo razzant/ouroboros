@@ -14,9 +14,9 @@ from ouroboros.gateway.routing_decision import (
 )
 from ouroboros.project_dialogue import (
     append_chat_annotation,
-    build_owner_message_ref,
     chat_annotation_receipt,
 )
+from tests import _dialogue as dialogue_test
 
 OPTIONS = [
     {"action": "steer_task", "task_id": "t-live", "label": "Fix CI"},
@@ -32,14 +32,13 @@ def _seed_refusal(root, cmid="cm-1", token="tok-1", options=OPTIONS, **extra):
 
 
 def _seed_origin(root, cmid="cm-1", text="original owner words", chat_id=0):
-    path = root / "logs" / "chat.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({
-            "direction": "in", "client_message_id": cmid,
-            "text": text, "chat_id": chat_id,
-            "ts": "2026-10-06T12:00:00+00:00",
-        }) + "\n")
+    from ouroboros import dialogue_store as ds
+
+    ds.append(root, "chat", {
+        "direction": "in", "client_message_id": cmid,
+        "text": text, "chat_id": chat_id,
+        "ts": "2026-10-06T12:00:00+00:00",
+    })
 
 
 class _Queue:
@@ -127,8 +126,11 @@ def test_steer_click_dispatches_the_verbatim_message_and_settles(tmp_path, monke
     (evt,) = queue.events
     assert evt["type"] == "steer_task" and evt["target_task_id"] == "t-live"
     assert evt["routing_token"] == dispatch_token
-    assert evt["message"].startswith("please fix the CI flake")
-    assert "[Owner picker comment] prefer a revert" in evt["message"]
+    # His words travel verbatim as a verified quote of his retained row; the note is his comment.
+    [quote] = evt["quotes"]
+    assert quote["text"] == quote["owner_row"]["text"] == "please fix the CI flake"
+    assert quote["source"]["client_message_id"] == "cm-1"
+    assert evt["message"] == "[Owner picker comment] prefer a revert"
     assert evt["attachment_uploads"] == [{"path": "/up/a.png", "label": "a.png"}]
     # Origin provenance rides BY VALUE, same rail as the LLM promote path.
     assert evt["source_ref"]["client_message_id"] == "cm-1"
@@ -156,7 +158,6 @@ def _manual_picker(tmp_path, monkeypatch, **effort):
     from ouroboros.gateway.history import _user_annotation
     from ouroboros.project_dialogue import latest_chat_annotations
     from ouroboros.projects_registry import create_project
-    from ouroboros.tools.control import _route_to_project
     from supervisor import events, message_bus
     from tests.test_root_effort_ingress import (
         _install_queue, _pool_ready, _supervisor_ctx, _tool_ctx,
@@ -176,9 +177,11 @@ def _manual_picker(tmp_path, monkeypatch, **effort):
     sup.bridge._broadcast_fn = frames.append
     sup.bridge._chat_transports = {}
     monkeypatch.setattr(message_bus, "publish_event", lambda *a, **k: None)
-    monkeypatch.setattr(message_bus, "log_chat", lambda *a, **k: None)
+    # Best-effort rows stay quiet; a durable write (require_write) returns its stored row or raises.
+    real_log_chat = message_bus.log_chat
+    monkeypatch.setattr(message_bus, "log_chat",
+                        lambda *a, **k: real_log_chat(*a, **k) if k.get("require_write") else None)
     handlers = {
-        "routing_manual_target": events._handle_routing_manual_target,
         "promote_chat_to_task": events._handle_promote_chat_to_task,
         "steer_task": events._handle_steer_task,
     }
@@ -188,9 +191,17 @@ def _manual_picker(tmp_path, monkeypatch, **effort):
                     routing_contract={"manual_options": OPTIONS})
     ctx.is_direct_chat, ctx.event_queue = True, queue
     _seed_origin(tmp_path, chat_id=7)
-    result = _route_to_project(ctx, message="original owner words", predecessor_task_id="", **effort)
-    assert "NEEDS_MANUAL_TARGET" in result
-    [manual] = queue.events
+    # Historical card fixture: the producer tool is retired; its persisted cards still resolve.
+    manual = {"type": "routing_manual_target", "client_message_id": "cm-1", "routing_token": "legacy-token",
+              "chat_id": 7, "options": OPTIONS, "reason": "target_unspecified"}
+    if effort.get("reasoning_effort"):
+        manual["reasoning_effort"] = effort["reasoning_effort"].strip().lower()
+    from supervisor.events_project_routing import _emit_routing_receipt
+
+    queue.events.append(manual)
+    _emit_routing_receipt(sup, manual, action="route_decision", status="needs_manual_target",
+                          reason="target_unspecified", options=OPTIONS,
+                          reasoning_effort=str(manual.get("reasoning_effort") or ""))
     card = _user_annotation("user", "cm-1", latest_chat_annotations(tmp_path))
     assert card["routing_token"] == manual["routing_token"]
     [frame] = frames
@@ -278,8 +289,10 @@ def test_existing_task_picker_click_does_not_apply_or_report_new_root_effort(tmp
     assert load_task_result(tmp_path, "t-live") == before
     mailbox = _mailbox_path(tmp_path, "t-live")
     [mail] = [json.loads(line) for line in mailbox.read_text().splitlines()]
-    assert mail["text"] == "original owner words"
-    assert mail["kind"] == "owner_text"
+    # His own click delivers his retained words as a verified quote (owner force), not as context.
+    assert mail["kind"] == "relay_entry" and mail["text"] == ""
+    assert [row["text"] for row in mail["owner_rows"]] == ["original owner words"]
+    assert [quote["text"] for quote in mail["relay"]["quotes"]] == ["original owner words"]
     closing = chat_annotation_receipt(tmp_path, "cm-1", card["routing_token"])
     assert "reasoning_effort" not in closing
     assert frames[-1]["status"] == "delivered" and "reasoning_effort" not in frames[-1]
@@ -290,6 +303,9 @@ def test_existing_task_picker_click_does_not_apply_or_report_new_root_effort(tmp
     assert replay.status_code == 200 and replay.json()["duplicate"] is True
     assert "reasoning_effort" not in replay.json()
     assert len(queue.events) == 2 and len(mailbox.read_text().splitlines()) == 1
+    # One visible relay row in the work's room, even after the replay (K4).
+    [relay_row] = [row for row in dialogue_test.chat_rows(tmp_path) if row.get("type") == "relay_entry"]
+    assert relay_row["task_id"] == "t-live" and relay_row["relay"]["quotes"][0]["text"] == "original owner words"
 
 
 def test_dead_queue_returns_a_retriable_503(tmp_path, monkeypatch):
@@ -328,73 +344,6 @@ def test_ingress_routes_the_routing_family(tmp_path, monkeypatch):
     assert res.json()["state"] == "superseded"
 
 
-def test_manual_target_refusal_persists_the_attachment_manifest(tmp_path):
-    """The producer half: _handle_routing_manual_target must store the routing
-    turn's staged-attachment specs on the durable refusal row (#198)."""
-    from supervisor.events import _handle_routing_manual_target
-
-    class _Ctx:
-        DRIVE_ROOT = tmp_path
-
-        @staticmethod
-        def append_jsonl(path, row):
-            pass
-
-    evt = {
-        "type": "routing_manual_target", "routing_token": "tok-9",
-        "chat_id": 0, "client_message_id": "cm-9",
-        "reason": "target_unspecified", "options": OPTIONS,
-        "reasoning_effort": "high",
-        "attachment_uploads": [{"path": "/up/b.pdf", "label": "b.pdf"}],
-        "ts": "2026-08-31T00:00:00Z",
-    }
-    _handle_routing_manual_target(evt, _Ctx)
-    receipt = chat_annotation_receipt(tmp_path, "cm-9", "tok-9")
-    assert receipt["status"] == "needs_manual_target"
-    assert receipt["reasoning_effort"] == "high"
-    assert receipt["attachment_manifest"] == [{"path": "/up/b.pdf", "label": "b.pdf"}]
-    assert [row["action"] for row in receipt["options"]] == [
-        "steer_task", "new_task_in_project",
-    ]
-
-
-def test_route_to_project_candidates_reorder_is_host_validated(tmp_path, monkeypatch):
-    """Owner decision 2=B: `candidates` reorders the host-built option list —
-    named ids come first, unknown ids vanish, nothing new is invented."""
-    import types
-
-    from ouroboros.tools import control
-
-    captured = {}
-
-    def _capture(ctx, evt):
-        captured.update(evt)
-        return "wired", {"status": "needs_manual_target", "options": evt["options"]}
-
-    # Campaign owner: _route_to_project lives in control_routing, which froze
-    # its _emit_and_wait_for_routing binding at import time.
-    from ouroboros.tools import control_routing
-
-    monkeypatch.setattr(control_routing, "_emit_and_wait_for_routing", _capture)
-    manual = [
-        {"action": "steer_task", "task_id": "t-a", "label": "A"},
-        {"action": "steer_task", "task_id": "t-b", "label": "B"},
-        {"action": "new_task_in_project", "project_id": "p1", "label": "New in P1"},
-    ]
-    ctx = types.SimpleNamespace(
-        current_chat_id=1, drive_root=tmp_path, is_direct_chat=True,
-        task_metadata={"client_message_id": "cm-1",
-                       "origin_message_ref": build_owner_message_ref(
-                           chat_id=1, client_message_id="cm-1", ts="2026-09-24T00:00:00+00:00", text="route me"),
-                       "routing_contract": {"manual_options": manual}},
-    )
-    text = control._route_to_project(
-        ctx, "", "route me", predecessor_task_id="",
-        candidates=["p1", "ghost-id", "t-a"],
-    )
-    assert "NEEDS_MANUAL_TARGET" in text
-    ordered = [row.get("task_id") or row.get("project_id") for row in captured["options"]]
-    assert ordered == ["p1", "t-a", "t-b"]  # candidates first, rest kept, ghost ignored
 
 
 def test_click_identity_reaches_both_presentation_paths(monkeypatch):
@@ -653,7 +602,7 @@ def test_decision_turn_is_shown_the_existing_receipt_for_the_same_message(tmp_pa
     assert receipt["target_label"] == "MLConf deck"
     assert receipt["ts"]
     # Disclosure only: the model keeps every action it had.
-    assert "promote_chat_to_task" in metadata["routing_contract"]["valid_actions"]
+    assert "start_task" in metadata["routing_contract"]["valid_actions"]
     # The admission is the positive authority, read as the promote's own waiter reads it: the
     # annotation alone, or another attempt's admission, is not a scheduled task.
     assert receipt["status"] == "unconfirmed"
@@ -709,8 +658,9 @@ def test_decision_turn_reads_every_recorded_act_on_the_same_message_as_facts(tmp
     assert contract["message_routing_receipt"]["target"] == "root-b"  # the latest act, as before
     assert [(act["action"], act["target"], act["status"]) for act in contract["message_routing_acts"]] == [
         ("promote_chat_to_task", "root-a", "unconfirmed"), ("steer_task", "root-b", "delivered")]
-    assert "not a ban" in contract["message_routing_acts_note"]
-    assert set(contract["valid_actions"]) >= {"promote_chat_to_task", "steer_task"}
+    assert "Each receipt identifies the work" in contract["message_routing_acts_note"]
+    # The verbs are start_task/tell_task; the recorded acts keep their frozen receipt names.
+    assert set(contract["valid_actions"]) >= {"start_task", "tell_task"}
     single = _decision_turn_metadata(_decision_ctx(tmp_path), 1, "cm-other", {})["routing_contract"]
     assert "message_routing_acts" not in single and single["message_routing_receipt"]["target"] == "root-c"
 
@@ -745,7 +695,7 @@ def test_routing_acts_taken_during_the_turn_reach_its_next_model_boundary_as_app
     assert _append_routing_receipts(ctx) is True
     assert messages[:2] == before and len(messages) == 3
     note = messages[-1]["content"]
-    assert note.startswith(ROUTING_RECEIPTS_HEADER) and "facts, not a ban" in note
+    assert note.startswith(ROUTING_RECEIPTS_HEADER) and "recorded outcome" in note
     acts = [line for line in note.splitlines() if line.startswith("- ")]
     assert [line.split(":", 1)[0] for line in acts] == [
         "- promote_chat_to_task → Deck (root-a)", "- steer_task → Build (root-b)"]

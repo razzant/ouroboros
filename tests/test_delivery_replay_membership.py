@@ -6,7 +6,7 @@ LIVE_MEASURE Q6: 331 of 336 replays on 14 Oct were pure duplicates of originals 
 delivered later, and the one false ⚠️ came from attempts burned while the original was
 still queued. ``replay_pending_deliveries`` now puts a copy only through the bus's
 ``put_unless_outstanding``; a still-outstanding id or an unobservable bus admits nothing
-and counts nothing; attempts count only a copy that really entered the bus.
+and counts nothing; admitted copies only stamp backoff, never dispatch attempts.
 """
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def _owed(drive, tid: str = "root", text: str = "the answer") -> dict:
 
 def _attempts(drive, did: str) -> int:
     rows = {row["delivery_id"]: row for row in td.pending_deliveries(drive)}
-    return int(rows[did].get("replay_attempts") or 0)
+    return int(rows[did].get("dispatch_attempts") or 0)
 
 
 @pytest.mark.parametrize("bus_kind", ["capture", "fifo"])
@@ -67,22 +67,23 @@ def test_after_the_handler_finishes_without_a_receipt_exactly_one_replay_is_due(
     assert td.replay_pending_deliveries(tmp_path, event_queue=bus) == []
     bus.release_delivery(event["delivery_id"])  # the handler returned (its send failed), no receipt
     assert td.replay_pending_deliveries(tmp_path, event_queue=bus) == [event["delivery_id"]]
-    assert _attempts(tmp_path, event["delivery_id"]) == 1
+    assert _attempts(tmp_path, event["delivery_id"]) == 0
     assert len(bus.events) == 2 and bus.events[1]["text"] == "the answer"
     assert "registered_at" not in bus.events[1] and "replay_attempts" not in bus.events[1]
     # The replay copy is outstanding now: the next sweep (due or not) copies nothing more.
     _age(tmp_path)
     assert td.replay_pending_deliveries(tmp_path, event_queue=bus) == []
-    assert _attempts(tmp_path, event["delivery_id"]) == 1
+    assert _attempts(tmp_path, event["delivery_id"]) == 0
 
 
-def test_attempts_count_only_copies_that_really_entered_the_bus(tmp_path):
+def test_admitted_queue_copies_do_not_spend_dispatch_attempts(tmp_path):
     bus = _CaptureQueue()
     event = _owed(tmp_path)
-    for expected in (1, 2, 3):
+    for _ in range(3):
         _age(tmp_path)
         assert td.replay_pending_deliveries(tmp_path, event_queue=bus) == [event["delivery_id"]]
-        assert _attempts(tmp_path, event["delivery_id"]) == expected
+        assert _attempts(tmp_path, event["delivery_id"]) == 0
+        assert td.pending_deliveries(tmp_path)[0]["last_replay_at"]
         bus.release_all()
     assert len(bus.events) == 3
 
@@ -126,6 +127,7 @@ def test_exhaustion_after_the_cap_is_a_registry_transition_not_a_sixth_copy(tmp_
     for _ in range(td._PENDING_MAX_REPLAYS):
         _age(tmp_path)
         assert td.replay_pending_deliveries(tmp_path, event_queue=bus) == [event["delivery_id"]]
+        assert td.record_replay_dispatch(tmp_path, event["delivery_id"])
         bus.release_all()
     assert notices == []
     _age(tmp_path)

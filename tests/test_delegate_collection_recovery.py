@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._delegate_capture_child import capture_child  # noqa: F401
+
 from ouroboros import delegate_collection as body, delegate_custody as custody, delegate_custody_current as current
 from ouroboros.tools.delegate_terminal_evidence import collect_and_deliver_terminal
 from ouroboros.tools.registry import ToolContext
@@ -51,19 +53,20 @@ def test_real_directory_producer_recovers_owed_capture_under_each_existing_owner
     assert current.collection_pending is body.collection_pending and body.collection_pending(fresh)
     assert entry.run_id in current.runs(ctx.drive_root, "state=?", (current.HELD,))
     assert custody.open_runs(ctx.drive_root) == [], "financial open-runs semantics stay unchanged"
-    if owner == "body":
-        runtime = body.start_body_runtime(ctx.drive_root, gateway_factory=lambda: engine)
-        try:
-            _until(lambda: current.run(ctx.drive_root, entry.run_id).patch_captured)
-        finally:
-            runtime.close(wait=True)
-    elif owner == "task_exit":
-        assert custody.release_task_runs(ctx.drive_root, ctx.task_id, gateway_factory=lambda: engine)
-    else:
+    if owner == "task_exit":
+        assert custody.release_task_runs(ctx.drive_root, ctx.task_id, gateway_factory=lambda: engine) == []
+    elif owner == "orphan":
         assert custody.reconcile_orphaned_runs(ctx.drive_root, running_task_ids={ctx.task_id},
                                                gateway_factory=lambda: engine) == []
         assert custody.reconcile_orphaned_runs(ctx.drive_root, running_task_ids=set(),
-                                               gateway_factory=lambda: engine)
+                                               gateway_factory=lambda: engine) == []
+    assert not current.run(ctx.drive_root, entry.run_id).patch_captured
+    assert len(capture_reads) == 1, "control reconciliation leaves bulk collection to its owner"
+    runtime = body.start_body_runtime(ctx.drive_root, gateway_factory=lambda: engine)
+    try:
+        _until(lambda: current.run(ctx.drive_root, entry.run_id).patch_captured)
+    finally:
+        runtime.close(wait=True)
     fresh = current.run(ctx.drive_root, entry.run_id)
     assert fresh.patch_captured and not body.collection_pending(fresh)
     captured = body.capture_projection(ctx.drive_root, fresh)
@@ -133,6 +136,63 @@ def test_public_wait_still_reads_engine_when_full_local_source_is_unavailable(tm
     assert result["output_delivery"]["complete"]
 
 
+@pytest.mark.parametrize("kind", ["review", "ordinary", "retained_review"])
+def test_registered_wait_preserves_collection_outcome(tmp_path, monkeypatch, money, kind):  # noqa: F811
+    """The public string ABI must keep the native failure, not just wake the model."""
+    from ouroboros import delegate_supervision
+    from ouroboros.gateways import claudexor
+    from ouroboros.tools import delegate
+    from ouroboros.tools.tool_result import (
+        _install_tool_result_sidecar, _published_tool_result, _restore_tool_result_sidecar,
+    )
+
+    entry = started(tmp_path, source="review_substrate_commit" if kind != "ordinary" else "")
+    if kind == "retained_review":
+        assert body.collect_terminal(tmp_path, entry.run_id, detail=terminal(), allow_review=True)["status"] == "collected"
+    calls, closed = [], []
+
+    class Gateway:
+        engine_version = "99.0.0"
+        def agent_capabilities(self, **kwargs):
+            return {"harnesses": [{"id": "test", "liveInput": "none"}]}
+        def get_run(self, rid, **kwargs):
+            assert not calls, "the terminal collection result was silently retried"
+            calls.append(rid)
+            return terminal(rid)
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(claudexor, "ClaudexorGateway", Gateway)
+    monkeypatch.setattr(delegate_supervision, "_TICK_SEC", 0)
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=entry.task_id)
+    tool = next(item for item in delegate.get_tools() if item.name == "delegate_wait")
+    sentinel = object()
+    token = _install_tool_result_sidecar(ctx, sentinel)
+    try:
+        text = tool.handler(ctx, run_id=entry.run_id)
+        native = _published_tool_result(ctx, sentinel)
+    finally:
+        _restore_tool_result_sidecar(token)
+    assert native is not None and native.text == text
+    payload = json.loads(text)
+    fresh = current.run(tmp_path, entry.run_id)
+    assert not fresh.output_consumed and not fresh.patch_captured and not fresh.patch_disposed
+    assert fresh.review_owned == (kind != "ordinary")
+    assert calls == ([] if kind == "retained_review" else [entry.run_id])
+    assert bool(closed) == bool(calls)
+    if kind == "review":
+        assert native.code == "TOOL_REPORTED_FAILURE" and str(native.status) == "error"
+        assert payload["status"] == "refused" and payload["ok"] is False
+        assert payload["reason"] == "collection_owner_mismatch"
+        assert payload["collection"]["status"] == "unavailable"
+        assert "review" in payload["detail"].lower()
+        assert not money and not fresh.ledger_recorded and not fresh.output_source
+    else:
+        assert native.code == "OK"
+        assert payload["status"] == "terminal" and payload["primary_output"]["text"] == "complete answer"
+        assert payload["output_delivery"]["complete"] and len(money) == 1
+
+
 def test_ready_local_result_does_not_override_owner_control_or_foreign_authority(tmp_path, monkeypatch, money):  # noqa: F811
     from ouroboros import delegate_supervision
     from ouroboros.tools.delegate_terminal_evidence import retained_terminal_result
@@ -176,7 +236,7 @@ def test_owned_unrecorded_start_delivers_exact_terminal_instead_of_renewing_fore
 
 
 @pytest.fixture
-def driven_runtime(tmp_path, monkeypatch):
+def driven_runtime(tmp_path, monkeypatch, capture_child):  # noqa: F811
     """Keep the real driver parked while exercising its real tick and physical jobs on a controlled clock."""
     release, entered = threading.Event(), threading.Event()
     tick = body.BodyRuntime.tick
@@ -197,6 +257,10 @@ def driven_runtime(tmp_path, monkeypatch):
             jobs = list(runtime.collections.values()) + list(runtime.reads.values())
         for job in jobs:
             job.result(timeout=5)
+        if capture_child.drain(tmp_path):
+            tick(runtime)  # server publishes the child's result under its fresh owner check
+            for future in list(runtime.collections.values()):
+                future.result(timeout=5)
     try:
         yield runtime, clock, step
     finally:
@@ -205,7 +269,7 @@ def driven_runtime(tmp_path, monkeypatch):
         runtime.close(wait=True)
 
 
-def test_unchanged_money_debt_waits_for_maintenance_but_facts_and_explicit_request_are_immediate(
+def test_unchanged_money_debt_rests_but_facts_and_explicit_request_are_immediate(
         tmp_path, monkeypatch, driven_runtime, caplog):
     from ouroboros import usage_accounting, config
     runtime, clock, tick = driven_runtime
@@ -228,23 +292,24 @@ def test_unchanged_money_debt_waits_for_maintenance_but_facts_and_explicit_reque
     assert attempts == [0.0], "passive cold ownership checks do not force bookkeeping retries"
     clock[0] += config.BODY_MAINTENANCE_INTERVAL_SEC
     tick()
-    assert len(attempts) == 2
-    runtime.request(entry.run_id)
+    assert len(attempts) == 1, "elapsed time does not change retry eligibility"
+    runtime._collect(entry.run_id, recapture=True)
     tick()
-    assert len(attempts) == 3
+    assert len(attempts) == 2
     body.observe_run(tmp_path, entry, terminal(text="new exact result", seq=6))
     tick()
-    assert len(attempts) == 4
+    assert len(attempts) == 3
     failures = [r for r in custody.custody_rows(tmp_path) if r.get("type") == custody.SETTLE_FAILED]
     assert len(failures) == 2, "one durable report for each changed failed source, no unchanged failure storm"
     warnings = [r for r in caplog.records if "money remains owed" in r.message and r.levelno >= logging.WARNING]
     assert len(warnings) == 2
     monkeypatch.setattr(usage_accounting, "record_subscription_session", lambda *a, **kw: None)
-    runtime.request(entry.run_id)
+    runtime._collect(entry.run_id, recapture=True)
     tick()
     tick()
     assert current.run(tmp_path, entry.run_id).settled
-    assert entry.run_id not in runtime.collection_attempts and entry.run_id not in runtime.collection_failures
+    assert entry.run_id not in runtime.collection_failures
+    assert current.run(tmp_path, entry.run_id).collection_attempt["retry"] == ""
 
 
 def test_new_terminal_observation_is_independent_of_another_runs_paced_collection(tmp_path, monkeypatch, driven_runtime):
@@ -269,6 +334,7 @@ def test_incomplete_output_does_not_republish_identical_preview_on_each_retry(tm
     entry = started(tmp_path)
     detail = terminal()
     detail["primaryOutput"].update(truncated=True, bytes=1000)
+    runtime.gateway_factory = lambda: SimpleNamespace(get_run=lambda *a, **k: detail, close=lambda: None)
     body.collect_terminal(tmp_path, entry.run_id, detail=detail)
     before = [r for r in custody.custody_rows(tmp_path) if r.get("type") == custody.OUTPUT_SPILLED]
     tick()

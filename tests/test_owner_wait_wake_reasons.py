@@ -72,6 +72,18 @@ def test_classify_wake_speaks_the_closed_vocabulary():
     assert classify_wake([{**mail, "source_task_id": "peer-2"}, mail], "q1") == "mail:peer-2"
 
 
+def test_a_wait_knows_its_answer_under_the_asker_scoped_identity(tmp_path):
+    """Answers now arrive as ``quiz_answer:{asker}:{quiz}``; saved mail may keep ``quiz_answer:{quiz}``."""
+    for msg_id in ("quiz_answer:q1", "quiz_answer:task-1:q1"):
+        assert classify_wake([{"kind": KIND_QUIZ_ANSWER, "msg_id": msg_id}], "q1") == "answer"
+    for msg_id in ("quiz_answer:q0", "quiz_answer:task-1:q0", "quiz_answer:q1:q0"):
+        assert classify_wake([{"kind": KIND_QUIZ_ANSWER, "msg_id": msg_id}], "q1") == "owner_text"
+    ctx = native_context(tmp_path)
+    assert write_owner_message(tmp_path, "Owner chose a", ctx.task_id,
+                               msg_id=f"quiz_answer:{ctx.task_id}:q1", kind=KIND_QUIZ_ANSWER)
+    assert _fresh_wake(ctx, "q1", "timeout") == "answer"
+
+
 def test_fresh_wake_upgrades_only_on_owner_authority(tmp_path):
     ctx = native_context(tmp_path)
     assert _fresh_wake(ctx, "q1", "timeout") == "timeout"
@@ -328,7 +340,7 @@ def test_the_pool_grant_announces_every_non_control_wake(tmp_path, monkeypatch, 
                  chat_id=1, wait_for_answer=True)
     frames = _bridge(monkeypatch)
     set_owner_wait(tmp_path, "root-1", {**wait, "state": "waiting"})
-    worker = SimpleNamespace(in_q=queue.Queue(), busy_task_id="root-1",
+    worker = SimpleNamespace(wid=0, in_q=queue.Queue(), busy_task_id="root-1",
                              proc=SimpleNamespace(pid=7), reaping=False, active_capacity=False)
     meta = {"worker_id": 0, "attempt": 1, "owner_wait": {**wait, "state": "waiting"},
             "task": {"id": "root-1", "chat_id": 1}, "started_at": time.time()}
@@ -340,7 +352,8 @@ def test_the_pool_grant_announces_every_non_control_wake(tmp_path, monkeypatch, 
         pool,
     )
     monkeypatch.setattr(supervisor_wait, "_pool", lambda: pool, raising=False)
-    monkeypatch.setattr(supervisor_wait, "_resume_allowed", lambda *_: True)
+    monkeypatch.setattr(supervisor_wait, "_resume_memory_allowed", lambda *_: True)
+    monkeypatch.setattr(supervisor_wait, "_resume_authority_allowed", lambda *_: True)
     monkeypatch.setattr("supervisor.queue.persist_queue_snapshot", lambda **_kw: True)
     assert supervisor_wait._grant_resume("root-1", meta, worker) is True
     row = load_task_result(tmp_path, "root-1")["owner_wait"]
@@ -359,6 +372,7 @@ def test_a_cold_continuation_explains_a_non_answer_wake_like_warm(tmp_path, monk
     from ouroboros.owner_wait import checkpoint_owner_wait, load_owner_wait, resume_native_loop, set_owner_wait
     from ouroboros.task_pacing import CostCeiling
     from ouroboros.task_results import write_task_result
+    from ouroboros.tool_policy import format_capability_omissions, initial_tool_schemas
     from ouroboros.tools.registry import ToolRegistry
 
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
@@ -373,7 +387,9 @@ def test_a_cold_continuation_explains_a_non_answer_wake_like_warm(tmp_path, monk
     write_task_result(tmp_path, "cold", "running")
     record_asked(tmp_path, "cold", quiz_id="q1", question="?", options=["a", "b"],
                  wait_for_answer=True, assumption="a meanwhile")
-    wait = checkpoint_owner_wait(ctx, [{"role": "user", "content": "go"}], {}, {}, 1, [], set())
+    # Keep the catalog unchanged so these assertions isolate the wake notice.
+    wait = checkpoint_owner_wait(ctx, [{"role": "user", "content": "go"}], {}, {}, 1,
+                                 initial_tool_schemas(registry, context_mode="max"), set())
     set_owner_wait(tmp_path, "cold", {**wait, "state": "waiting"})
     ctx.owner_wait_resume = {**wait, "restart_transaction_id": "confirmed"}
     if outcome == "mail:peer-1":
@@ -386,6 +402,9 @@ def test_a_cold_continuation_explains_a_non_answer_wake_like_warm(tmp_path, monk
     monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda *a, **k: (None, "max"))
     messages = []
     resume_native_loop(registry, saved, messages, {}, {}, set())
+    notes = format_capability_omissions(registry.capability_omissions())
+    if notes:
+        assert messages.pop(1) == {"role": "user", "content": "[SYSTEM NOTICE]\n" + "\n".join(notes)}
     assert messages[0]["content"] == "go"
     assert "continued from its saved owner wait" in messages[1]["content"]
     if expects is None:

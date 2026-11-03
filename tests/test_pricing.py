@@ -249,6 +249,16 @@ def test_processing_prices_the_complete_eligible_endpoint_pool(endpoint_catalog,
     request.assert_called_once_with("https://openrouter.ai/api/v1/models/vendor/tier-model/endpoints", timeout=5.0)
 
 
+def test_a_dotted_router_id_reads_its_own_endpoints_not_its_shared_identity(endpoint_catalog):
+    """``anthropic/claude-opus-5.5`` shares its identity with direct ``claude-opus-5-5``, yet its
+    tariffs are OpenRouter's for the slug the route names."""
+    rows, request = endpoint_catalog
+    slug = "anthropic/claude-opus-5.5"
+    request.return_value.json.return_value = {"data": {"id": slug, "endpoints": [{**r, "model_id": slug} for r in rows]}}
+    assert estimate_cost_optional(slug, 1000, 500, processing_mode="fast") == pytest.approx(0.0115)
+    request.assert_called_once_with(f"https://openrouter.ai/api/v1/models/{slug}/endpoints", timeout=5.0)
+
+
 def test_priority_bound_includes_a_more_expensive_standard_fallback(endpoint_catalog):
     rows, _ = endpoint_catalog
     rows[3]["pricing"]["completion"] = "0.0001"

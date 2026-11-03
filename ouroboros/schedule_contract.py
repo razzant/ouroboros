@@ -10,6 +10,8 @@ from zoneinfo import ZoneInfo
 
 _SCHEDULE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,80}$")
 RESERVED_TEMPLATE_FIELDS = frozenset({
+    "work_diagnostic",
+    "work_kind", "owner_ingress", "schedule_writer_kind", "wake_cause", "focus", "consciousness_cause", "origin_wake_task_id",
     "workspace_root", "workspace_mode", "memory_mode", "drive_root",
     "child_drive_root", "budget_drive_root", "parent_task_id",
     "root_task_id", "delegation_role", "task_constraint",
@@ -21,14 +23,15 @@ RESERVED_TEMPLATE_FIELDS = frozenset({
     # persisted before this rule.
     "client_surface",
     # The owner door's stamp (``run_origin.owner_ingress``) is minted by owner
-    # routing for one accepted turn; a machine-fired template never carries it.
+    # routing for one accepted turn; a machine-fired template never carries it,
+    # nor ``start_task``'s recorded absence of one.
     "origin_message_ref",
-    "origin_suppressed",
+    "origin_suppressed", "origin_message_absent",
     "billing_group", "continuation", "followup_relation", "followup_origin",
-    "followup_hold", "followup_released", "followup_restart_seen", "followup_wait",
+    "followup_hold", "followup_released", "followup_wait",
     "continuation_of", "origin_task_id", "origin_root_task_id",
     # The occurrence identity is minted by the scheduler for one admission (#1315).
-    "schedule_occurrence",
+    "schedule_occurrence", "last_outcome", "previous_run_open",
 })
 
 

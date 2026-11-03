@@ -147,7 +147,7 @@ def _server_command(args: argparse.Namespace) -> int:
 
     try:
         sys.argv = [old_argv[0]]
-        return int(server.main())
+        return server.executable_main()
     finally:
         sys.argv = old_argv
 
@@ -475,26 +475,39 @@ def _skills_command(args: argparse.Namespace) -> int:
 def _marketplace_command(args: argparse.Namespace) -> int:
     client = _client(args)
     hub = args.hub
+    query, slug, name = (getattr(args, key, "") or "" for key in ("query", "slug", "name"))
     if hub == "clawhub":
         paths = {
-            "search": f"/api/marketplace/clawhub/search?q={urllib.parse.quote(args.query or '')}",
+            "search": f"/api/marketplace/clawhub/search?q={urllib.parse.quote(query)}",
             "installed": "/api/marketplace/clawhub/installed",
-            "preview": f"/api/marketplace/clawhub/preview/{urllib.parse.quote(args.slug)}",
+            "preview": f"/api/marketplace/clawhub/preview/{urllib.parse.quote(slug)}",
             "install": "/api/marketplace/clawhub/install",
-            "update": f"/api/marketplace/clawhub/update/{urllib.parse.quote(args.name)}",
-            "uninstall": f"/api/marketplace/clawhub/uninstall/{urllib.parse.quote(args.name)}",
+            "update": f"/api/marketplace/clawhub/update/{urllib.parse.quote(name)}",
+            "uninstall": f"/api/marketplace/clawhub/uninstall/{urllib.parse.quote(name)}",
         }
-    else:
+    else:  # ouroboroshub is the compatibility spelling of sources
+        if args.marketplace_command in {"install", "preview"} and "/" not in slug:
+            offered = client.request("GET", f"/api/skill-catalog/search?q={urllib.parse.quote(slug)}")
+            item = next((item for item in offered.get("items", []) if item.get("name") == slug and
+                         item.get("source_id") in {"ouroboros", "ouroboros-community"}), None)
+            if item is None:
+                raise CLIError(f"The public hub does not offer {slug!r}; use a catalog id <source>/<name>.")
+            slug = item["id"]
+        item = urllib.parse.quote(slug, safe="/")
         paths = {
-            "search": f"/api/marketplace/ouroboroshub/catalog?q={urllib.parse.quote(args.query or '')}",
-            "installed": "/api/marketplace/ouroboroshub/installed",
-            "preview": f"/api/marketplace/ouroboroshub/preview/{urllib.parse.quote(args.slug)}",
-            "install": "/api/marketplace/ouroboroshub/install",
-            "update": f"/api/marketplace/ouroboroshub/update/{urllib.parse.quote(args.name)}",
-            "uninstall": f"/api/marketplace/ouroboroshub/uninstall/{urllib.parse.quote(args.name)}",
+            "search": f"/api/skill-catalog/search?q={urllib.parse.quote(query)}",
+            "installed": "/api/marketplace/ouroboroshub/installed" if hub == "ouroboroshub" else "/api/extensions",
+            "preview": f"/api/skill-catalog/item/{item}",
+            "install": "/api/skill-catalog/install",
+            "update": f"/api/skills/{urllib.parse.quote(name)}/update",
+            "uninstall": f"/api/skills/{urllib.parse.quote(name)}/uninstall",
         }
     method = "GET" if args.marketplace_command in {"search", "installed", "preview"} else "POST"
-    body = {"slug": getattr(args, "slug", "")} if args.marketplace_command == "install" else {}
+    body: dict = {}
+    if args.marketplace_command == "install":
+        body = {"slug": slug} if hub == "clawhub" else {"id": slug}
+    elif args.marketplace_command == "update" and hub != "clawhub":
+        body = {"mode": "replace"}
     _print_json(client.request(method, paths[args.marketplace_command], body if method == "POST" else None))
     return 0
 
@@ -688,7 +701,7 @@ def _add_skills_parser(subparsers: argparse._SubParsersAction) -> None:
 
 def _add_marketplace_parser(subparsers: argparse._SubParsersAction) -> None:
     market = subparsers.add_parser("marketplace", help="marketplace wrappers")
-    market.add_argument("hub", choices=["clawhub", "ouroboroshub"])
+    market.add_argument("hub", choices=["clawhub", "sources", "ouroboroshub"], help="ouroboroshub is an alias of sources")
     sub = market.add_subparsers(dest="marketplace_command", required=True)
     search = sub.add_parser("search")
     search.add_argument("query", nargs="?")
@@ -738,9 +751,18 @@ def _add_mcp_parser(subparsers: argparse._SubParsersAction) -> None:
 
 def _client(args: argparse.Namespace, *, start: bool = False) -> OuroborosHTTPClient:
     client = OuroborosHTTPClient(getattr(args, "url", "") or "")
+    own = None  # --start with no URL named: only this data root's main server will do
+    if start and not (getattr(args, "url", "") or os.environ.get("OUROBOROS_URL", "").strip()):
+        from ouroboros.launch_roots import data_dir
+        from ouroboros.server_process import serves_data_root
+
+        own = data_dir()
+    answered = False
     try:
         client.request("GET", "/api/health")
-        return client
+        if own is None or serves_data_root(client.base_url, own):
+            return client
+        answered = True
     except ConnectionCLIError:
         if not start:
             raise
@@ -748,15 +770,51 @@ def _client(args: argparse.Namespace, *, start: bool = False) -> OuroborosHTTPCl
     host = (parsed.hostname or DEFAULT_HOST).lower()
     if host not in {"127.0.0.1", "localhost", "::1"}:
         raise CLIError("--start can only launch a local loopback Ouroboros server")
-    _start_local_server(client.base_url)
-    deadline = time.time() + 30
-    while time.time() < deadline:
+    proc = _start_local_server(client.base_url)
+    if answered:
+        print(f"the Ouroboros answering at {client.base_url} is not the one for {own}; starting its own "
+              "server (pass --url to use the one answering)", file=sys.stderr, flush=True)
+    return _wait_for_dialogue(client, proc, data_dir=own)
+
+
+def _wait_for_dialogue(client: OuroborosHTTPClient, proc, *, data_dir=None) -> OuroborosHTTPClient:
+    """Wait until the started server accepts owner messages (``/api/health`` answers and its
+    ``boot`` says ``dialogue_ready``; an older core without ``boot`` counts at its first answer),
+    or its boot is ``ready`` without them (no model provider configured yet).
+    No clock: the wait ends with readiness, with the boot's own ``failed`` verdict, or with the
+    server process's exit. Started for ``data_dir`` with no URL named, it follows the port that
+    root's server took (its port file; a busy port moves it to a fallback) and counts an answer
+    only from that server, never from another installation on the port it left."""
+    if data_dir is not None:
+        from ouroboros.server_process import serves_data_root
+    last_phase = ""
+    while proc.poll() is None:
+        if data_dir is not None:
+            url = _default_base_url().rstrip("/")
+            client = client if url == client.base_url else OuroborosHTTPClient(url)
+            if not serves_data_root(url, data_dir):
+                time.sleep(0.5)
+                continue
         try:
-            client.request("GET", "/api/health")
-            return client
+            health = client.request("GET", "/api/health")
         except CLIError:
             time.sleep(0.5)
-    raise CLIError(f"server did not become ready at {client.base_url}")
+            continue
+        boot = health.get("boot") if isinstance(health, dict) else None
+        if not isinstance(boot, dict) or boot.get("dialogue_ready") is True:
+            return client
+        if boot.get("phase") == "ready":  # no model provider yet, or the dialogue's opening failed
+            print("server ready, but its chat is not accepting messages yet: configure a model provider, "
+                  "or see the failed boot step in /api/health", file=sys.stderr, flush=True)
+            return client
+        if boot.get("phase") == "failed":
+            raise CLIError(f"server start failed at {client.base_url}: {boot.get('error') or 'unknown'}")
+        phase = str(boot.get("phase") or "")
+        if phase != last_phase:
+            print(f"server boot: {phase}", file=sys.stderr, flush=True)
+            last_phase = phase
+        time.sleep(0.5)
+    raise CLIError(f"server exited with code {proc.returncode} before it became ready at {client.base_url}")
 
 
 def _default_base_url() -> str:
@@ -775,16 +833,22 @@ def _default_base_url() -> str:
     return f"http://{DEFAULT_HOST}:{port}"
 
 
-def _start_local_server(base_url: str) -> None:
+def _start_local_server(base_url: str) -> subprocess.Popen:
     if os.environ.get("OUROBOROS_PACKAGED_CLI") == "1":
         raise CLIError("packaged CLI must launch the desktop app for --start, not source server.py")
+    from ouroboros.launch_roots import AmbiguousDataRoot, direct_data_dir
+
+    try:  # the server's own refusal would be lost with its discarded output
+        direct_data_dir()
+    except AmbiguousDataRoot as exc:
+        raise CLIError(f"server not started: {exc}") from None
     parsed = urllib.parse.urlparse(base_url)
     host = parsed.hostname or DEFAULT_HOST
     port = int(parsed.port or DEFAULT_PORT)
     cmd = [sys.executable, "-m", "ouroboros.cli", "server", "--host", host, "--port", str(port)]
     from ouroboros.platform_layer import subprocess_new_group_kwargs
 
-    subprocess.Popen(
+    return subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -1026,7 +1090,8 @@ def _await_cost_finality(
             )
         except CLIError:
             return result
-        if latest.get("cost_final") or latest.get("cost_with_children_partial") is False:
+        if (latest.get("cost_final") is not False and latest.get("cost_with_children_partial") is not True
+                and (latest.get("cost_final") or latest.get("cost_with_children_partial") is False)):
             return latest
     return latest
 

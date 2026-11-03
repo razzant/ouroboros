@@ -3,7 +3,7 @@ import test from 'node:test';
 import { createReviewHydrator } from '../modules/review_presentation.js';
 import { createChatReadingPosition } from '../modules/chat_reading_position.js';
 
-function fixture(t, exact = true) {
+function fixture(t, exact = true, restoreTo = 80) {
     const previous = globalThis.requestAnimationFrame;
     const frames = [];
     globalThis.requestAnimationFrame = callback => frames.push(callback);
@@ -22,7 +22,7 @@ function fixture(t, exact = true) {
     const bookmark = { scrollTop: 2400, stick: false, historyAnchor: { historyId: 'chat:old', offset: 80 } };
     const reading = createChatReadingPosition({ feed, visible: () => visible,
         alive: () => true, ready: () => ready, anchors: { serialize: () => bookmark.historyAnchor, capture: () => null,
-            restore: () => { restored++; feed.scrollTop = 80; return typeof exact === 'function' ? exact() : exact; } },
+            restore: () => { restored++; if (restoreTo !== null) feed.scrollTop = restoreTo; return typeof exact === 'function' ? exact() : exact; } },
         changed() { changes++; }, afterWrite() {}, activity() {}, updateButton() {},
     });
     // A reader away from the bottom whose place awaits data (a window shown again).
@@ -259,6 +259,7 @@ test('a feed scrollbar drag ends with its own last scroll: later scrolls do not 
         return trailing => {
             for (const top of trailing) { f.feed.scrollTop = top; f.reading.scroll(); }
             for (const event of end) f.gesture(event);
+            f.frame(); f.frame(); // a frame passes without another of the drag's scrolls
         };
     };
     // Chromium reports the release before the drag's last scroll; WebKit before any.
@@ -280,6 +281,97 @@ test('a feed scrollbar drag ends with its own last scroll: later scrolls do not 
     f.reading.stick = false; f.feed.scrollTop = 600;
     f.gesture({ type: 'pointerup', target: {} });
     assert.equal(f.reading.stick, false, 'a release without a feed drag decides nothing');
+});
+
+test('a resize clamp that reaches the feed before reflow is no part of a released drag', t => {
+    const f = fixture(t);
+    f.reading.bindGestures(() => {});
+    f.reading.cancel();
+    Object.assign(f.feed, { scrollHeight: 1000, scrollTop: 100, clientHeight: 400 });
+    f.reading.stick = true;
+    // WebKit can report the drag's last scroll and its scrollend while the thumb is still held:
+    // no scrollend follows the release.
+    f.gesture({ type: 'pointerdown', target: f.feed });
+    f.feed.scrollTop = 500; f.reading.scroll(); f.gesture({ type: 'scrollend' });
+    f.gesture({ type: 'pointerup', target: {} });
+    assert.equal(f.reading.stick, false, 'released 100px above the live edge');
+    // A taller window clamps the feed to its end; that scroll arrives before the resize's reflow.
+    Object.assign(f.feed, { clientHeight: 550, scrollTop: 450 }); f.reading.scroll();
+    assert.equal(f.reading.stick, false, 'the clamp to the end decides nothing');
+    const restored = f.restored();
+    f.reading.reflow();
+    assert.equal(f.restored(), restored + 1, 'reflow keeps the passage instead of writing the feed to its end');
+    assert.equal(f.reading.stick, false);
+    // In an unchanged box the drag's own last scroll, arriving after the release, still decides.
+    f.gesture({ type: 'pointerdown', target: f.feed });
+    f.feed.scrollTop = 200; f.reading.scroll();
+    f.gesture({ type: 'pointerup', target: {} });
+    f.feed.scrollTop = 450; f.reading.scroll();
+    assert.equal(f.reading.stick, true, 'released at the live edge: follow');
+});
+
+test('a released drag decides by its last scroll when WebKit ends each batch of them with a scrollend', t => {
+    const f = fixture(t);
+    f.reading.bindGestures(() => {});
+    f.reading.cancel();
+    Object.assign(f.feed, { scrollHeight: 1000, scrollTop: 100, clientHeight: 400 });
+    f.gesture({ type: 'pointerdown', target: f.feed });
+    f.gesture({ type: 'pointerup', target: {} });
+    // The drag's scrolls arrive after the release in two batches a frame apart, each ending in a scrollend.
+    f.feed.scrollTop = 450; f.reading.scroll(); f.gesture({ type: 'scrollend' }); f.frame();
+    f.feed.scrollTop = 600; f.reading.scroll(); f.gesture({ type: 'scrollend' });
+    assert.equal(f.reading.stick, true, 'its last batch reaches the live edge: follow');
+    f.frame(); f.frame();
+    f.feed.scrollTop = 520; f.reading.scroll();
+    assert.equal(f.reading.stick, true, 'once a frame passes without another of its scrolls, a scroll decides nothing');
+});
+
+test('the app\'s own write while a drag is released leaves following as the release decided', t => {
+    // An anchor that stays put: only the browser's clamp moves the feed.
+    const f = fixture(t, true, null);
+    f.reading.bindGestures(() => {});
+    f.reading.cancel();
+    const release = (scrollend) => {
+        Object.assign(f.feed, { scrollHeight: 1200, scrollTop: 100, clientHeight: 400 });
+        f.gesture({ type: 'pointerdown', target: f.feed });
+        f.feed.scrollTop = 720; f.reading.scroll(); // released 80px above the live edge
+        f.gesture({ type: 'pointerup', target: {} });
+        if (scrollend) f.gesture({ type: 'scrollend' });
+        assert.equal(f.reading.stick, false);
+    };
+    // A settled Main question copy below the passage retires (chat_decision.js removeMirror): the feed
+    // shrinks and the browser clamps it to its end; that clamp's scroll comes after the write.
+    const retire = () => f.reading.mutate(() => {
+        Object.assign(f.feed, { scrollHeight: 1000, scrollTop: Math.min(f.feed.scrollTop, 600) });
+        return true;
+    });
+    // Chromium: the drag's scrollend came; the retirement lands before its owed scrolls end a frame later.
+    release(true); retire(); f.reading.scroll();
+    assert.equal(f.reading.stick, false, 'the clamp a removal causes does not turn on following');
+    // WebKit: the drag's last scroll and scrollend came before the release; the drag stays released.
+    release(false); for (let i = 0; i < 5; i++) f.frame();
+    retire(); f.reading.scroll();
+    assert.equal(f.reading.stick, false, 'nor much later, while WebKit leaves the drag released');
+    // A scroll the released drag still owes moves the feed: it still decides, after the app's write too.
+    release(false); f.reading.mutate(() => { f.feed.scrollHeight = 1300; return true; });
+    f.feed.scrollTop = 880; f.reading.scroll();
+    assert.equal(f.reading.stick, true, 'its own last scroll at the live edge: follow');
+});
+
+test('a refresh that moves nothing before a released drag\'s queued scroll leaves that scroll deciding', t => {
+    const f = fixture(t, true, null);
+    f.reading.bindGestures(() => {});
+    f.reading.cancel();
+    Object.assign(f.feed, { scrollHeight: 1000, scrollTop: 100, clientHeight: 400 });
+    f.gesture({ type: 'pointerdown', target: f.feed });
+    f.gesture({ type: 'pointerup', target: {} });
+    assert.equal(f.reading.stick, false, 'the release still sees the feed where the drag began');
+    // WebKit moves the feed to where the drag left it before that scroll event comes; an ordinary
+    // census refresh (/api/state, a write that changes nothing here) runs in between.
+    f.feed.scrollTop = 600;
+    f.reading.mutate(() => false);
+    f.reading.scroll();
+    assert.equal(f.reading.stick, true, 'released at the live edge: follow');
 });
 
 test('an animated downward key or wheel follows where its own scrolls leave the feed', t => {
@@ -398,6 +490,62 @@ test('a resize that waited on the owed scrolls keeps where they end; at rest it 
     assert.equal(feed.scrollTop, 450, 'at rest a resize keeps the place read before it');
 });
 
+test('rows are lazy only while the width keeps moving; once it holds, every row is laid out and the place re-applied', t => {
+    const previous = globalThis.requestAnimationFrame, frames = [];
+    globalThis.requestAnimationFrame = callback => frames.push(callback);
+    t.after(() => { globalThis.requestAnimationFrame = previous; });
+    const frame = () => frames.splice(0).forEach(callback => callback());
+    const marks = new Set(), settled = [];
+    const feed = { scrollTop: 100, scrollHeight: 1000, clientHeight: 400, clientWidth: 385, offsetWidth: 400,
+        ownerDocument: {}, addEventListener() {}, removeEventListener() {}, contains: node => node === feed,
+        toggleAttribute: (name, on) => { if (on) marks.add(name); else marks.delete(name); return on; },
+        dispatchEvent: event => { settled.push([event.type, event.bubbles, feed.scrollTop]); return true; } };
+    const width = value => Object.assign(feed, { offsetWidth: value, clientWidth: value ? value - 15 : 0 });
+    // Laying the rows out again at the held width moves the passage; restoring the place puts it back.
+    let restores = 0;
+    const reading = createChatReadingPosition({ feed, visible: () => true, alive: () => true, ready: () => true,
+        anchors: { capture: () => ({ top: 100 }), restore: anchor => { restores++; feed.scrollTop = anchor.top; return true; },
+            serialize: () => null }, changed() {}, afterWrite() {}, activity() {}, updateButton() {} });
+    reading.stick = false; reading.remember(true);
+    const lazy = () => marks.has('data-resizing');
+    feed.clientWidth = 400; reading.reflow();
+    assert.equal(lazy(), false, 'a scrollbar coming or going changes only the content width: no move');
+    width(380); reading.reflow(); frame();
+    assert.equal(lazy(), false, 'one move (a window jump, a layout switch) is laid out at once');
+    for (let i = 0; i < 3; i++) frame();
+    assert.equal(frames.length, 0, 'and nothing keeps counting after it');
+    assert.deepEqual(settled, [], 'nothing was skipped, so nothing waits to be measured');
+    width(360); reading.reflow(); frame();
+    width(340); reading.reflow();
+    assert.equal(lazy(), true, 'the width keeps moving: rows off the screen keep their size');
+    for (let i = 0; i < 6; i++) frame();
+    width(320); reading.reflow(); // the drag goes on: the hold starts again
+    for (let i = 0; i < 11; i++) frame();
+    assert.equal(lazy(), true, 'still within the hold after the last move');
+    feed.scrollTop = 140; // the rows above the passage were laid out at the new width
+    const before = restores;
+    frame();
+    assert.equal(lazy(), false, 'the width held: every row is laid out again');
+    assert.deepEqual([restores - before, feed.scrollTop], [1, 100], 'and the place is re-applied in that same frame');
+    assert.deepEqual(settled, [['ouro:feed-width-settled', true, 100]],
+        'then the rows are announced as laid out, once, for whatever measures them (the answer folds)');
+    for (let i = 0; i < 20; i++) frame();
+    assert.equal(frames.length, 0, 'nothing keeps counting at rest');
+    // A feed hidden and shown again at another width (another room was open) is not a move.
+    width(0); reading.reflow(); frame();
+    width(300); reading.reflow(); frame();
+    assert.equal(lazy(), false);
+    // Following the newest message, the held width lands at the new bottom.
+    reading.stick = true;
+    width(310); reading.reflow(); frame();
+    width(320); reading.reflow();
+    assert.equal(lazy(), true);
+    for (let i = 0; i < 11; i++) frame();
+    feed.scrollHeight = 1300;
+    frame();
+    assert.deepEqual([lazy(), feed.scrollTop], [false, 1300]);
+});
+
 test('reading inside a box ends what an earlier feed gesture still owes, not a scrollbar still held', t => {
     const f = fixture(t);
     f.feed.ownerDocument.defaultView = { getComputedStyle: node => ({ overflowY: node.overflowY || 'visible' }) };
@@ -514,4 +662,28 @@ test('saved Review readiness distinguishes pending/error from confirmed absence 
     reads[1].resolve({});
     await unrelated;
     assert.equal(settled.some(([id]) => id === 'unrelated'), false, 'disposed requests cannot resume positioning');
+});
+
+test('a sideways finger (the drawer, a swipe to reply) is not reading; a vertical one past the slop is', t => {
+    const f = fixture(t), navigation = [];
+    f.reading.bindGestures(direction => navigation.push(direction));
+    Object.assign(f.feed, { scrollHeight: 1000, scrollTop: 600, clientHeight: 400 });
+    f.reading.stick = true;
+    // 80 px sideways with a thumb's 6 px of drift: the drawer's or the row swipe's, following stays on.
+    f.gesture({ type: 'touchstart', touches: [{ clientX: 40, clientY: 300 }] });
+    for (const [x, y] of [[44, 302], [60, 304], [90, 306], [120, 306]]) {
+        f.gesture({ type: 'touchmove', touches: [{ clientX: x, clientY: y }] }); f.frame();
+    }
+    assert.equal(f.reading.stick, true, 'a sideways drag keeps following the newest message');
+    // Decided sideways, it stays the drawer's even if the thumb then wanders down.
+    f.gesture({ type: 'touchmove', touches: [{ clientX: 130, clientY: 380 }] }); f.frame();
+    assert.equal(f.reading.stick, true);
+    assert.deepEqual(navigation, []);
+    // The same thumb moving down the feed past the slop reads back.
+    f.gesture({ type: 'touchstart', touches: [{ clientX: 200, clientY: 300 }] });
+    f.gesture({ type: 'touchmove', touches: [{ clientX: 202, clientY: 306 }] }); f.frame();
+    assert.equal(f.reading.stick, true, 'the drift before the axis is decided is no reading');
+    f.gesture({ type: 'touchmove', touches: [{ clientX: 203, clientY: 360 }] }); f.frame();
+    assert.equal(f.reading.stick, false, 'a vertical move past the slop is reading back: following ends');
+    assert.deepEqual(navigation, [-1]);
 });

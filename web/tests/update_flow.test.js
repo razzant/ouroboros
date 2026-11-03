@@ -3,7 +3,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 
 import { apiClient, updateStrategyForPlan } from '../modules/api_client.js';
-import { updatePillText, verifiedUpdatePlan } from '../modules/update_status.js';
+import { updatePillDetail, updatePillText, verifiedUpdatePlan } from '../modules/update_status.js';
 import {
     applyFailureText,
     updateVerdict,
@@ -81,7 +81,7 @@ test('ordinary update selects clean or assisted merge without recovery replaceme
     const pill = readFileSync(new URL('../modules/update_status.js', import.meta.url), 'utf8');
     assert.doesNotMatch(pill, /updateApply\(/);
     assert.doesNotMatch(pill, /updatePreflight\(/);
-    assert.match(pill, /openDashboardTab\?\.\('updates'\)/);
+    assert.match(pill, /openDashboardTab\('updates'\)/);
 });
 
 
@@ -139,13 +139,13 @@ test('detailed Updates UI makes destructive replacement an explicit recovery act
 });
 
 
-test('same-version QA updates show commit identity in the main pill', () => {
-    assert.equal(updatePillText({
-        current_version: '6.87.6',
-        latest_version: '6.87.6',
-        current_sha: 'aaaaaaaa00000000',
-        latest_sha: 'bbbbbbbb11111111',
-    }), 'Update aaaaaaaa → bbbbbbbb');
+test('the main pill says "Update available"; the commit identity is its title (owner Q6=A)', () => {
+    const qa = { current_version: '6.87.6', latest_version: '6.87.6', current_sha: 'aaaaaaaa00000000', latest_sha: 'bbbbbbbb11111111' };
+    assert.equal(updatePillText(qa), 'Update available');
+    assert.equal(updatePillDetail(qa), 'Update aaaaaaaa → bbbbbbbb');
+    assert.equal(updatePillText({ current_version: '7.6.0', latest_version: '7.6.1' }), 'Update available');
+    assert.equal(updatePillDetail({ current_version: '7.6.0', latest_version: '7.6.1' }), 'Update 7.6.0 → 7.6.1');
+    assert.equal(updatePillDetail({}), 'Update available');
 });
 
 

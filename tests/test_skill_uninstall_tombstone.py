@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 import ouroboros.skill_loader as skill_loader
-from ouroboros.marketplace import ouroboroshub
+from ouroboros.skill_source_install import uninstall_installed
 from ouroboros.marketplace.provenance import (
     PUBLICATION_FILENAME,
     merge_state_record,
@@ -73,24 +75,16 @@ def test_sweep_clears_dead_state_but_keeps_grants(tmp_path, monkeypatch):
 
 
 def _hub_install(monkeypatch, data_root):
-    """The real Hub installer with only the catalog read and download faked."""
-    hub_root = data_root / "skills" / "ouroboroshub"
-    monkeypatch.setattr(ouroboroshub, "get_ouroboroshub_skills_dir", lambda: hub_root)
-    summary = ouroboroshub.HubSkillSummary(
-        slug="demo", name="demo", version="1.0.0", files=[{"path": "SKILL.md", "sha256": "x", "size": 1}],
-    )
-    monkeypatch.setattr(ouroboroshub, "load_catalog", lambda *a, **kw: {
-        "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main"})
-    monkeypatch.setattr(ouroboroshub, "_summaries", lambda _catalog: [summary])
+    """A payload installed from a hub source: its files in the hub bucket plus its install record."""
+    from ouroboros.skill_install_record import write_install_record
 
-    def fake_download(_summary, _raw_base, staging_dir):
-        (staging_dir / "SKILL.md").write_text(_MANIFEST, encoding="utf-8")
-        (staging_dir / "scripts").mkdir()
-        (staging_dir / "scripts" / "check.py").write_text("print('fixture')\n", encoding="utf-8")
-
-    monkeypatch.setattr(ouroboroshub, "_download_skill_files", fake_download)
-    result = ouroboroshub.install("demo", overwrite=True)
-    assert result.ok, result.error
+    payload = data_root / "skills" / "ouroboroshub" / "demo"
+    (payload / "scripts").mkdir(parents=True, exist_ok=True)
+    (payload / "SKILL.md").write_text(_MANIFEST, encoding="utf-8")
+    (payload / "scripts" / "check.py").write_text("print('fixture')\n", encoding="utf-8")
+    write_install_record(data_root, "demo", {
+        "source": {"id": "ouroboros-community", "kind": "hub", "name": "Ouroboros Community"},
+        "release": {"version": "1.0.0", "digest": "0" * 64}, "basis": "review"})
     assert skill_loader.find_skill(data_root, "demo") is not None
 
 
@@ -106,7 +100,7 @@ def test_publication_receipt_survives_hub_uninstall_sweep_and_reinstall(tmp_path
     state = _seed_state(data, "demo")
     receipt_bytes = _seed_receipt(data)
 
-    assert ouroboroshub.uninstall("demo").ok
+    assert uninstall_installed(data, "demo")["ok"]
     report = sweep_uninstalled_skill_state(data)
 
     assert report["swept"] == ["demo"] and not report["errors"]
@@ -130,7 +124,7 @@ def test_publication_receipt_survives_reinstall_before_the_sweep(tmp_path, monke
     state = _seed_state(data, "demo")
     receipt_bytes = _seed_receipt(data)
 
-    assert ouroboroshub.uninstall("demo").ok
+    assert uninstall_installed(data, "demo")["ok"]
     _hub_install(monkeypatch, data)
     report = sweep_uninstalled_skill_state(data)
 
@@ -182,14 +176,28 @@ def test_sweep_fails_closed_when_payload_probe_fails(tmp_path, monkeypatch):
     assert (state / "review.json").exists()  # kept: cannot prove payload-gone
 
 
-def test_hub_uninstall_paths_write_the_tombstone():
-    import inspect
-
+@pytest.mark.parametrize("marketplace", ["clawhub", "ouroboroshub"])
+def test_hub_uninstall_paths_write_the_tombstone(tmp_path, monkeypatch, marketplace):
     import ouroboros.marketplace.install as install
-    import ouroboros.marketplace.ouroboroshub as hub
 
-    assert "write_uninstall_tombstone" in inspect.getsource(install.uninstall_skill)
-    assert "write_uninstall_tombstone" in inspect.getsource(hub.uninstall)
+    root = tmp_path / "skills" / marketplace
+    payload = root / "demo"
+    payload.mkdir(parents=True)
+    (payload / "SKILL.md").write_text(_MANIFEST, encoding="utf-8")
+    (payload / f".{marketplace}.json").write_text("{}", encoding="utf-8")
+    state = _seed_state(tmp_path, "demo")
+    grants = (state / "grants.json").read_bytes()
+
+    if marketplace == "clawhub":
+        assert install.uninstall_skill(tmp_path, sanitized_name="demo").ok
+    else:
+        monkeypatch.delenv("OUROBOROS_SKILLS_REPO_PATH", raising=False)
+        assert uninstall_installed(tmp_path, "demo")["ok"]
+
+    assert not payload.exists()
+    marker = json.loads((state / UNINSTALL_TOMBSTONE_FILENAME).read_text(encoding="utf-8"))
+    assert marker["source"] == marketplace and marker["uninstalled_at"]
+    assert (state / "grants.json").read_bytes() == grants
 
 
 def test_tombstone_filename_is_forgery_guarded():
@@ -202,9 +210,17 @@ def test_tombstone_filename_is_forgery_guarded():
     assert "uninstalled" in SKILL_OWNER_STATE_STEMS
 
 
-def test_startup_prune_sweeps_run_the_tombstone_sweep():
-    import inspect
-
+def test_every_reconcile_pass_runs_the_tombstone_sweep(tmp_path, monkeypatch):
     import ouroboros.server_maintenance as sm
 
-    assert "sweep_uninstalled_skill_state" in inspect.getsource(sm._run_deferred_startup_prunes)
+    state = _seed_state(tmp_path, "dead")
+    grants = (state / "grants.json").read_bytes()
+    write_uninstall_tombstone(tmp_path, "dead", source="clawhub")
+    monkeypatch.setattr(sm, "DATA_DIR", tmp_path)
+
+    sm._run_reconcile_prunes()
+    from ouroboros.maintenance import run_job
+    run_job(tmp_path, "runtime_retirement")
+
+    assert sorted(path.name for path in state.iterdir()) == ["grants.json", UNINSTALL_TOMBSTONE_FILENAME]
+    assert (state / "grants.json").read_bytes() == grants

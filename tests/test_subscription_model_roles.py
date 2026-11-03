@@ -11,7 +11,7 @@ setup = subscription_transport  # The imported live-wait fixture depends on this
 reviewer_wait = wait_fixture
 
 from ouroboros.model_slots import (
-    MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY,
+    MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, MODEL_PROCESSING_PREFERENCES_KEY,
     model_role_option, normalize_model_role_options,
 )
 from ouroboros.provider_models import (
@@ -83,6 +83,36 @@ def test_config_read_accepts_object_and_json_and_is_idempotent():
     assert normalized == normalize_settings_raw(normalized)
     assert json.loads(normalized[MODEL_ACCOUNTS_KEY]) == {"main": "profile"}
     assert json.loads(normalized[MODEL_CONTEXT_WINDOWS_KEY]) == {"light": 872000}
+
+
+@pytest.mark.parametrize("key, valid", [
+    (MODEL_ACCOUNTS_KEY, "private-account-value"),
+    (MODEL_CONTEXT_WINDOWS_KEY, 0),
+    (MODEL_PROCESSING_PREFERENCES_KEY, "economy"),
+])
+@pytest.mark.parametrize("encoded", [False, True])
+def test_unknown_role_diagnostic_names_keys_without_applying_or_disclosing_values(key, valid, encoded):
+    from ouroboros.config import normalize_settings_raw, prepare_settings_for_persist
+
+    options = {"safety": valid, "saftey\n\x1b[31m": "private-unused-value", "future_role": 0}
+    raw = json.dumps(options) if encoded else options
+    for consumer in (normalize_settings_raw, prepare_settings_for_persist):
+        with pytest.raises(ValueError) as error:
+            consumer({key: raw})
+        message = str(error.value)
+        assert key in message and "future_role" in message and "saftey\\n\\x1b[31m" in message
+        assert "\n" not in message and "\x1b" not in message
+        assert "private-unused-value" not in message and "private-account-value" not in message
+        assert "compatible application version" in message and "do not reset" in message
+    assert options == {"safety": valid, "saftey\n\x1b[31m": "private-unused-value", "future_role": 0}
+    parsed, canonical = normalize_model_role_options(key, {"safety": valid})
+    assert parsed == json.loads(canonical) == {"safety": valid}
+
+
+@pytest.mark.parametrize("raw", [[], "[]", 42, True])
+def test_role_map_shape_error_does_not_misdiagnose_an_unknown_role(raw):
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        normalize_model_role_options(MODEL_CONTEXT_WINDOWS_KEY, raw)
 
 
 def test_managed_selection_does_not_need_or_fabricate_an_api_key():

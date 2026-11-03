@@ -10,7 +10,12 @@ import pathlib
 
 import pytest
 
-from ouroboros.triad_review import parse_model_review_results
+from ouroboros.triad_review import parse_seat_answers
+
+
+def parse_model_review_results(result):
+    """Contract A through the one seat parser: an actor without a slot answers the change question."""
+    return parse_seat_answers(result, {})
 
 
 def _actor(text: str, model: str = "m1") -> dict:
@@ -99,24 +104,17 @@ class TestAdvisoryOverrideVisibility:
 
         projection = {
             "effective_status": "none",
-            "effective_hash": None,
             "stale_from_edit": False,
             "stale_from_edit_ts": None,
             "stale_reason": None,
             "filters": {},
-            "runs": [],
             "attempts": [],
             "selected_attempt": None,
             "open_obligations": [],
             "open_debts": [],
             "retry_anchor": None,
             "advisory_overrides": {"count": 3, "recent": [{"ts": "t", "block_reason": "x"}]},
-            "guidance_run": None,
             "state": None,
-            "current_hash": "",
-            "effective_is_fresh": False,
-            "latest_run": None,
-            "matching_run": None,
         }
         payload = build_review_status_payload(projection, next_step="n/a")
         assert payload["advisory_overrides_count"] == 3

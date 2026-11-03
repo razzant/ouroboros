@@ -1,6 +1,7 @@
 """Elasticity through actual assignment, readiness, snapshot and reaper consumers."""
 
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -102,11 +103,15 @@ def test_zero_budget_resumes_owner_wait_and_keeps_parked_evolution_across_foreca
     assert set(workers.RUNNING) == {"owner"} and not assigning.created
 
 
-def test_parked_authors_with_empty_queue_get_one_replacement(assigning, monkeypatch):
+def test_parked_authors_lend_capacity_but_buy_no_replacement_without_demand(assigning, monkeypatch):
+    """4A: the pool's quiescent spare is the conversation lane's; growth buys only demand."""
     monkeypatch.setattr(workers, "MAX_WORKERS", 10)
     park(assigning)
     workers.assign_tasks()
-    assert len(assigning.created) == 1 and not assigning.original.active_capacity
+    assert not assigning.created and not assigning.original.active_capacity
+    workers.PENDING.append(task("demanded"))
+    workers.assign_tasks()
+    assert len(assigning.created) == 1  # the lent capacity is spent on demanded work only
     workers.assign_tasks()
     assert len(assigning.created) == 1  # booting reservation is already charged
     assert workers.RUNNING["owner"] is assigning.meta
@@ -119,6 +124,7 @@ def test_one_exhausted_slot_keeps_budget_but_does_not_exhaust_unused_headroom(as
     slot.busy_task_id, slot.readiness_exhausted, slot.reaping = None, True, True
     slot.proc.alive = False
     assert workers.worker_pool_admission_state()["available"]
+    workers.PENDING.append(task("demanded"))  # growth buys demand, never a spare (4A)
     workers.assign_tasks()
     assert workers.WORKERS[0] is slot and slot.readiness_exhausted
     assert len(assigning.created) == 1
@@ -221,7 +227,7 @@ def test_pending_storm_stop_keeps_membership_and_still_runs(assigning, monkeypat
     stopped = []
     monkeypatch.setattr(workers, "kill_workers", lambda **kw: stopped.append(kw) or True)
     _stop_crashed_worker_pool(storm)
-    assert stopped == [{"disable_reason": "worker_crash_storm"}]
+    assert stopped == [{"disable_reason": "worker_crash_storm", "lanes": frozenset({"project"})}]
 
 
 @pytest.mark.parametrize("prior", ["", "worker_crash_storm"])
@@ -257,16 +263,17 @@ def test_failed_storm_snapshot_keeps_the_latch_so_growth_cannot_void_the_stop(as
     stopped = []
     monkeypatch.setattr(workers, "kill_workers", lambda **kw: stopped.append(kw) or True)
     _stop_crashed_worker_pool(storm)
-    assert stopped == [{"disable_reason": "worker_crash_storm"}]
+    assert stopped == [{"disable_reason": "worker_crash_storm", "lanes": frozenset({"project"})}]
 
 
-def test_active_work_keeps_existing_spare_without_buying_one(assigning, monkeypatch):
+def test_active_work_buys_no_spare_and_retires_an_acknowledged_idle_resident(assigning, monkeypatch):
+    """4A: the project pool keeps no spare of its own beside work; the lane holds the one spare."""
     monkeypatch.setattr(workers, "MAX_WORKERS", 3)
     spare = affirm_ready(workers.Worker(1, Process(43), InputQueue()))
     workers.WORKERS[1] = spare
     acknowledge(spare)
     workers.assign_tasks()
-    assert not spare.retiring and not assigning.created and queue._reap_queue.empty()
+    assert spare.retiring and not assigning.created and not queue._reap_queue.empty()
 
 
 def test_full_cap_resume_probes_all_idle_residents_and_uses_one_completed_owner(assigning, monkeypatch):
@@ -291,7 +298,7 @@ def test_full_cap_resume_probes_all_idle_residents_and_uses_one_completed_owner(
 def _resume_with_fresh_work(assigning):
     from supervisor import worker_owner_wait
     park(assigning)
-    workers.assign_tasks()  # one replacement for the parked author
+    lifecycle._spawn_worker_slot(1)  # a second project worker demand bought while the author parked (4A)
     replacement = ready(workers.WORKERS[1])
     worker_owner_wait.handle_owner_wait({**assigning.event, "phase": "resume"}, workers)
     workers.PENDING.append(task("fresh"))
@@ -377,7 +384,8 @@ def test_unauthorized_pending_resume_never_withholds_growth_from_admissible_work
     from ouroboros import owner_pause
     from ouroboros.cancel_intents import request_cancel
     from supervisor import worker_owner_wait
-    event = {**assigning.event, "checkpoint": {**assigning.wait, "reason": "owner_pause"}}
+    event = {**assigning.event, "checkpoint": {**assigning.wait, "reason": "owner_pause",
+             "budget_paused_sec": 0.0, "sleep_started_at": time.time()}}
     worker_owner_wait.handle_owner_wait(event, workers)
     assert assigning.original.in_q.get_nowait()["phase"] == "parked"
     worker_owner_wait.handle_owner_wait({**event, "phase": "resume", "resume_reason": "control:owner_resume"}, workers)
@@ -438,6 +446,7 @@ def test_late_current_ready_row_cannot_unreap_retiring_slot(assigning):
 def test_exhaustion_spends_each_materialized_reservation_only_once(assigning, monkeypatch):
     monkeypatch.setattr(workers, "MAX_WORKERS", 3)
     workers.RUNNING.clear()
+    workers.PENDING.append(task("demanded"))  # growth buys demand, never a spare (4A)
     for wid in range(3):
         slot = workers.WORKERS[wid]
         slot.busy_task_id, slot.reaping, slot.readiness_exhausted = None, True, True
@@ -477,7 +486,7 @@ def test_captured_timeout_after_a_storm_latch_starts_no_child_and_the_stop_keeps
     stopped = []
     monkeypatch.setattr(workers, "kill_workers", lambda **kw: stopped.append(kw) or True)
     task_reaper._stop_crashed_worker_pool(storm)
-    assert stopped == [{"disable_reason": "worker_crash_storm"}]
+    assert stopped == [{"disable_reason": "worker_crash_storm", "lanes": frozenset({"project"})}]
 
 
 def test_enabled_pool_still_replaces_a_captured_dead_slot(assigning):
@@ -603,7 +612,7 @@ def test_a_storm_latch_keeps_its_captured_membership_through_every_own_door(assi
     monkeypatch.setattr(workers, "kill_workers", lambda **kw: stopped.append(kw) or True)
     task_reaper._stop_crashed_worker_pool({"kind": "worker_crash_storm", "workers": tuple(captured.items()),
                                            "drive_root": str(assigning.root)})
-    assert stopped == [{"disable_reason": "worker_crash_storm"}]
+    assert stopped == [{"disable_reason": "worker_crash_storm", "lanes": frozenset({"project"})}]
 
 def test_growth_ledgers_each_fresh_child_once_off_the_loop_and_retirement_ledgers_nothing(assigning, monkeypatch):
     """Reviewer measurements: each spawn re-ledgered every worker, each retirement every survivor (A1);
@@ -724,7 +733,7 @@ def _resume_reserving_the_last_spare(assigning):
     """MAX 1: the warm Resume reserved its replacement's retirement; its reaper has not run."""
     from supervisor import worker_owner_wait
     park(assigning)
-    workers.assign_tasks()  # one replacement for the parked author
+    lifecycle._spawn_worker_slot(1)  # a second project worker demand bought while the author parked (4A)
     replacement = ready(workers.WORKERS[1])
     workers.PENDING.append(task("next-independent"))  # accepted while the pool is available
     worker_owner_wait.handle_owner_wait({**assigning.event, "phase": "resume"}, workers)
@@ -786,10 +795,11 @@ def test_owner_pause_resume_or_stop_at_cap_keeps_the_pool_dispatching(assigning,
     from ouroboros import owner_pause
     from supervisor import worker_owner_wait
     owner_pause.install_fence(assigning.root, "owner", request_id="pause-1")
-    event = {**assigning.event, "checkpoint": {**assigning.wait, "reason": "owner_pause"}}
+    event = {**assigning.event, "checkpoint": {**assigning.wait, "reason": "owner_pause",
+             "budget_paused_sec": 0.0, "sleep_started_at": time.time()}}
     worker_owner_wait.handle_owner_wait(event, workers)
     assert assigning.original.in_q.get_nowait()["phase"] == "parked"
-    workers.assign_tasks()  # the lent slot's replacement
+    lifecycle._spawn_worker_slot(1)  # a second project worker demand bought while the author parked (4A)
     replacement = ready(workers.WORKERS[1])
     if control == "stop":
         _stop_parked_author(assigning)
@@ -863,6 +873,27 @@ def test_an_ordinary_idle_exit_retires_in_one_reaper_pass_and_is_journaled(assig
     retired, = [row for row in rows if row["type"] == "worker_retired"]
     assert {k: retired[k] for k in ("worker_id", "pid", "process_birth", "token", "replaced")} == {
         "worker_id": 1, "pid": 43, "process_birth": "test-birth", "token": probe["token"], "replaced": False}
+
+
+@pytest.mark.parametrize("retained", [0, 2])
+def test_a_retired_idle_worker_journals_the_dialogue_rows_it_still_held(assigning, monkeypatch, retained):
+    import json
+    monkeypatch.setattr(workers, "MAX_WORKERS", 3)
+    workers.RUNNING.clear()
+    assigning.original.busy_task_id = None
+    surplus = affirm_ready(workers.Worker(1, _ReapedOnJoin(43), InputQueue()))
+    workers.WORKERS[1] = surplus
+    with queue._queue_lock:
+        lifecycle.request_worker_quiescence(surplus)
+    probe = surplus.in_q.get_nowait()
+    lifecycle.handle_worker_quiescent({**probe, "worker_id": 1, "pid": 43, "process_birth": surplus.process_birth,
+                                       "retained_rows": retained}, workers)
+    assert lifecycle.retire_quiescent_worker(surplus)
+    monkeypatch.setattr(lifecycle, "kill_worker_tree", lambda pid, **kw: setattr(surplus.proc, "killed", True))
+    lifecycle.reap_idle_worker(queue._reap_queue.get_nowait())
+    rows = [json.loads(line) for line in (assigning.root / "logs" / "supervisor.jsonl").read_text().splitlines()]
+    retired, = [row for row in rows if row["type"] == "worker_retired"]
+    assert retired.get("dialogue_rows_lost") == (retained or None)
 
 
 def test_an_unready_child_reaped_on_join_continues_its_bounded_step_in_one_pass(assigning, monkeypatch):

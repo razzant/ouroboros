@@ -156,6 +156,9 @@ def test_snapshot_continuation_preserves_source_coverage(
     assert custody.work_order_source_verification(custody.replay(tmp_path)[successor.run_id])["can_authorize"]
     assert custody.work_order_source_verification(custody.replay(tmp_path)[pred.run_id])["can_authorize"] is False
     _settle(tmp_path, successor.run_id, ctx.task_id)
+    from ouroboros.tools.delegate_integration import capture_terminal_patch_for_drive
+
+    capture_terminal_patch_for_drive(tmp_path, custody.replay(tmp_path)[successor.run_id])  # the body's (#1969)
     applied = _integrate_delegated_patch(ctx, successor.run_id, "apply")
     assert "Integrated delegated run" in applied, applied
     assert Path(successor.target_root, "retained.txt").read_text(encoding="utf-8") == "predecessor work\n"

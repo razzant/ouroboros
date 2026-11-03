@@ -58,8 +58,17 @@ def _fixture_spec(payload: bytes, archive: bytes) -> Any:
 
 @pytest.mark.skipif(cloudflare.IS_WINDOWS, reason="POSIX watchdog uses a pipe lifeline")
 def test_nested_watchdog_starts_with_exact_production_minimal_environment(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    real_wait_for = asyncio.wait_for
+
+    async def disarm_wait(awaitable, timeout):
+        # Test the stop protocol, not how quickly a loaded host starts Python.
+        # Production disarm still writes S, closes the pipe and awaits the live child.
+        return await real_wait_for(awaitable, timeout=60 if timeout == 1.0 else timeout)
+
+    monkeypatch.setattr(cloudflare.asyncio, "wait_for", disarm_wait)
+
     async def scenario() -> None:
         home = tmp_path / "home"
         home.mkdir()
@@ -69,10 +78,11 @@ def test_nested_watchdog_starts_with_exact_production_minimal_environment(
         assert "PYTHONPATH" not in environment
 
         await tunnel._start_watchdog(environment)
-        assert tunnel._watchdog_process is not None
-        assert tunnel._watchdog_process.returncode is None
-        await tunnel._disarm_watchdog()
-        assert tunnel._watchdog_process.returncode == 0
+        process = tunnel._watchdog_process
+        assert process is not None and process.returncode is None
+        await real_wait_for(tunnel._disarm_watchdog(), timeout=65)
+        assert process.returncode == 0 and tunnel._watchdog_write_fd is None
+        assert not tunnel._watchdog_failed
 
     asyncio.run(scenario())
 

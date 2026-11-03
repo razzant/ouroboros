@@ -25,6 +25,7 @@ pytestmark = pytest.mark.serial
 def proof_env(monkeypatch):
     monkeypatch.setenv("OUROBOROS_PRE_PUSH_TESTS", "1")
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "2")
+    monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "3")  # nested slots: the workers case compares two real workers with three
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", raising=False)
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
 
@@ -306,13 +307,22 @@ def test_nonproof_outcomes_never_mint_a_receipt(candidate, monkeypatch, outcome)
             web.mkdir(parents=True)
             (web / "test.test.js").write_text("// test\n")
             monkeypatch.setattr(pr, "run_node_tests", lambda *a: None)
-    result = pr.run_hermetic_pytest(ctx.repo_dir, ctx=ctx)
-    assert not getattr(ctx, "_preflight_test_proof", None)
-    assert _proof_events(ctx.drive_root) == []
-    if outcome in {"no_git", "no_suite"}:
-        assert result is None and not ctx._preflight_tests_passed
-    elif outcome != "node_missing":
-        assert result
+    from tests._shared import retire_synthetic_gate_hold
+    from tests.test_preflight_runner import _pin_preflight_root
+
+    temp_root = (ctx.drive_root.parent / "preflight-root").resolve()
+    temp_root.mkdir()
+    _pin_preflight_root(monkeypatch, temp_root)
+    try:
+        result = pr.run_hermetic_pytest(ctx.repo_dir, ctx=ctx)
+        assert not getattr(ctx, "_preflight_test_proof", None)
+        assert _proof_events(ctx.drive_root) == []
+        if outcome in {"no_git", "no_suite"}:
+            assert result is None and not ctx._preflight_tests_passed
+        elif outcome != "node_missing":
+            assert result
+    finally:
+        retire_synthetic_gate_hold(candidate.repo_dir, temp_root, "live descendant")  # the stubbed lane proved no process
 
 
 @pytest.mark.parametrize("change", ["tree", "index", "head", "args", "env", "python", "workers", "serial", "timeout"])
@@ -373,6 +383,18 @@ def test_scrubbed_owner_settings_do_not_change_test_workload(candidate, monkeypa
     monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "low")
     monkeypatch.setenv("OPENAI_COMPATIBLE_BASE_URL", "http://unused.invalid")
     monkeypatch.setenv("PYTEST_ADDOPTS", "-k nothing")
+    assert before.covers(capture_preflight_test_subject(candidate.repo_dir))
+
+
+def test_free_memory_does_not_change_test_workload(candidate, monkeypatch):
+    """Memory admits workers at run time; the workload names the requested count."""
+    from ouroboros import test_parallelism as budget
+
+    gib = 1024 ** 3
+    monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(64 * gib, 48 * gib))
+    before = capture_preflight_test_subject(candidate.repo_dir)
+    monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(64 * gib, 7 * gib))
+    assert budget.worker_budget(os.cpu_count()) == 1  # the tight sample really admits fewer workers
     assert before.covers(capture_preflight_test_subject(candidate.repo_dir))
 
 

@@ -3,11 +3,11 @@
 With the answer on the live bus BEFORE the result store (owner 1A(1)), a worker
 that dies or stalls inside the store leaves a task whose row is not terminal
 while the host already holds its answer (owed in the outbox, delivered with a
-receipt, or unreadable evidence). Both recovery owners — the timeout reaper's
-retry admission and dead-worker recovery — finalize that attempt from the
-outbox's bytes through the lifecycle-fault vocabulary instead of admitting a
-fresh model attempt over the original prompt. Without a registered answer the
-ordinary retry still proceeds (the guard is two-sided).
+receipt, or unreadable evidence). Both recovery owners — the hard-timeout reaper
+and dead-worker recovery — finalize that attempt from the outbox's bytes through
+the lifecycle-fault vocabulary instead of a fresh model attempt over the original
+prompt. Without a registered answer each keeps its ordinary path (the guard is
+two-sided): the reaper's timeout row and salvage, the crash retry.
 """
 from __future__ import annotations
 
@@ -52,36 +52,40 @@ def _register(drive, tid: str, state: str) -> dict:
     return evt
 
 
-def _reaper_retry(qenv, monkeypatch, tid: str):
-    from supervisor import task_reaper
-
-    monkeypatch.setattr("ouroboros.artifacts.handoff_task_attachments_for_retry", lambda *_a, **_kw: ({}, ""))
-    monkeypatch.setattr("ouroboros.owner_mailbox.copy_owner_mailbox_for_retry", lambda *_a, **_kw: True)
-    return task_reaper._enqueue_retry(qenv.q, _task(tid), task_id=tid, retry_task_id=tid + "-retry",
-                                      attempt=1, terminal_reason="idle_timeout", recon_fields={})
-
-
 @pytest.mark.parametrize("state", ["owed", "exhausted", "delivered", "unreadable"])
-def test_timeout_retry_finalizes_a_registered_answer_instead_of_rerunning_the_prompt(qenv, monkeypatch, state):
+def test_a_hard_timeout_finalizes_a_registered_answer_instead_of_rerunning_the_prompt(qenv, monkeypatch, state):
+    """The reaper's own hard-deadline job (``queue_timeouts`` shape) over an attempt whose answer the host holds."""
     from ouroboros.headless import prepare_terminal_task_files
     from ouroboros.working_checkpoint import REASON_FINALIZATION_INCOMPLETE, final_answer_registered
+    from supervisor import task_reaper as reaper, worker_health, workers
 
-    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *_a, **_kw: None)
     tid = "early-answer-crash"
     write_task_result(qenv.drive, tid, "running", result="working", task_attempt=1)
     evt = _register(qenv.drive, tid, state)
     assert final_answer_registered(qenv.drive, tid)
     assert prepare_terminal_task_files(qenv.drive, _task(tid))["terminal_source_present"] is False
+    monkeypatch.setattr(reaper, "_kill_and_confirm_worker_dead", lambda *a: True)
+    monkeypatch.setattr(workers, "_reconcile_confirmed_dead_review_owner", lambda *a: None)
+    monkeypatch.setattr(worker_health, "_retire_dead_model_consumers", lambda *a, **k: None)
+    monkeypatch.setattr("ouroboros.tools.services.archive_task_service_logs", lambda *a: None)
+    monkeypatch.setattr("supervisor.cancel_publication._audit_delegated_runs_on_kill", lambda *a, **k: {})
+    monkeypatch.setattr(qenv.q, "reconstruct_task_cost", lambda *a, **k: {})
+    monkeypatch.setattr(reaper, "send_with_budget", lambda *a, **k: pytest.fail("an adopted answer gets no stop notice"))
+    monkeypatch.setattr(reaper, "_deliver_reap_salvage", lambda *a: pytest.fail("no second salvage"))
+    monkeypatch.setattr(reaper, "_emit_reap_task_done", lambda *a, **k: pytest.fail("published as its own terminal"))
+    finished = []
+    monkeypatch.setattr(reaper, "_finish_self_finalized_task", lambda *a, **k: finished.append(a[5]))
 
-    result = _reaper_retry(qenv, monkeypatch, tid)
+    reaper.reap_timed_out_task({"worker_id": 0, "worker": None, "proc": SimpleNamespace(pid=0),
+                                "drive_root": str(qenv.drive), "task_id": tid, "task": _task(tid),
+                                "task_type": "task", "attempt": 1, "terminal_reason": "deadline",
+                                "runtime_sec": 300, "deadline_reached": True, "ceiling_reached": False})
 
-    assert result == (False, 1, "registered_answer_finalized",
-                      {"kind": "terminal_result", "target": tid, "status": "failed"})
-    assert qenv.q.PENDING == [], "the original prompt was placed in PENDING"
+    assert finished == ["failed"] and qenv.q.PENDING == [], "the original prompt was placed in PENDING"
     stored = load_task_result(qenv.drive, tid)
     assert stored["status"] == "failed" and stored["reason_code"] == REASON_FINALIZATION_INCOMPLETE
     assert stored["outcome_axes"]["execution"]["status"] == "infra_failed"
-    assert stored["finalization_recovery"] == {"cause": "idle_timeout", "answer": state,
+    assert stored["finalization_recovery"] == {"cause": "deadline", "answer": state,
                                                "delivery_id": "" if state == "unreadable" else evt["delivery_id"],
                                                "attempt": 1}
     assert "not run again" in stored["terminal_host_notice"]
@@ -97,18 +101,6 @@ def test_timeout_retry_finalizes_a_registered_answer_instead_of_rerunning_the_pr
             assert "outbox delivers" not in stored["terminal_host_notice"]
             assert "its copy is kept at" in stored["terminal_host_notice"]
     assert final_answer_registered(qenv.drive, tid), "finalizing never retires the answer's custody"
-
-
-def test_timeout_retry_without_a_registered_answer_still_admits_the_retry(qenv, monkeypatch):
-    tid = "no-answer-yet"
-    write_task_result(qenv.drive, tid, "running", result="working", task_attempt=1)
-    assert td.terminal_answer_receipts(qenv.drive, tid)["state"] == "unknown"
-
-    result = _reaper_retry(qenv, monkeypatch, tid)
-
-    assert result == (True, 2, "idle_timeout", {})
-    assert [row["id"] for row in qenv.q.PENDING] == [tid + "-retry"]
-    assert load_task_result(qenv.drive, tid)["status"] != "failed"
 
 
 @pytest.mark.parametrize("state", ["owed", "delivered", "unreadable"])
@@ -204,8 +196,9 @@ def test_registered_answer_reads_the_outbox_never_the_result_prose(tmp_path):
 
 @pytest.mark.parametrize("state", ["owed", "delivered", "none"])
 def test_a_final_timeout_without_retry_also_finalizes_a_registered_answer(qenv, monkeypatch, state):
-    """A hard deadline, ceiling or spent retry allowance (no retry) adopts the held answer the same
-    way; without a registered answer the ordinary timeout row and salvage still happen."""
+    """A hard deadline or ceiling adopts the held answer; without a registered answer the
+    ordinary timeout row and salvage still happen. Either way the dead attempt's consumers retire,
+    its controls reset, and nothing is queued after it."""
     from supervisor import task_reaper as reaper, worker_health, workers
 
     tid = "answer-at-deadline"
@@ -218,11 +211,13 @@ def test_a_final_timeout_without_retry_also_finalizes_a_registered_answer(qenv, 
             assert td.register_delivery(qenv.drive, evt["delivery_id"], emitted=evt)
     monkeypatch.setattr(reaper, "_kill_and_confirm_worker_dead", lambda *a: True)
     monkeypatch.setattr(workers, "_reconcile_confirmed_dead_review_owner", lambda *a: None)
-    monkeypatch.setattr(worker_health, "_retire_dead_model_consumers", lambda *a, **k: None)
+    retired, reset = [], []
+    monkeypatch.setattr(worker_health, "_retire_dead_model_consumers", lambda job: retired.append(job["task_id"]))
     monkeypatch.setattr("ouroboros.tools.services.archive_task_service_logs", lambda *a: None)
     monkeypatch.setattr("supervisor.cancel_publication._audit_delegated_runs_on_kill", lambda *a, **k: {})
     monkeypatch.setattr(qenv.q, "reconstruct_task_cost", lambda *a, **k: {})
-    monkeypatch.setattr("ouroboros.owner_hurry.retry_reset", lambda *a, **k: None)
+    monkeypatch.setattr("ouroboros.owner_hurry.retry_reset",
+                        lambda _drive, _root, task_id, **_k: reset.append(task_id))
     monkeypatch.setattr(reaper, "send_with_budget", lambda *a, **k: None)
     salvage, finished = [], []
     monkeypatch.setattr(reaper, "_deliver_reap_salvage", lambda *a: salvage.append(a))
@@ -231,14 +226,14 @@ def test_a_final_timeout_without_retry_also_finalizes_a_registered_answer(qenv, 
     reaper.reap_timed_out_task({"worker_id": 0, "worker": None, "proc": SimpleNamespace(pid=0),
                                 "drive_root": str(qenv.drive), "task_id": tid, "task": task, "task_type": "task",
                                 "attempt": 1, "terminal_reason": "hard_deadline", "runtime_sec": 300,
-                                "deadline_reached": True, "will_retry": False})
+                                "deadline_reached": True})
     stored = load_task_result(qenv.drive, tid)
+    assert retired == reset == [tid] and qenv.q.PENDING == [], "no successor follows a hard bound"
     if state == "none":
         assert stored["reason_code"] == "hard_deadline" and len(salvage) == 1 and finished == []
     else:
         assert (stored["result"], stored["reason_code"]) == ("complete authored answer", "finalization_incomplete")
         assert salvage == [] and finished == ["failed"], "published as a terminal, never a second salvage message"
-
 
 
 @pytest.mark.parametrize("answer_state", ["owed", "delivered"])
@@ -281,9 +276,8 @@ def test_an_unstamped_legacy_answer_claims_no_origin(tmp_path):
     assert stored["result"] == "old bytes" and "terminal_origin" not in stored
 
 
-@pytest.mark.parametrize("will_retry", [False, True], ids=["final-stop", "retry"])
 @pytest.mark.parametrize("answer_state", ["owed", "delivered"])
-def test_a_timeout_keeps_the_registered_host_salvage_not_a_later_intermediate(qenv, monkeypatch, answer_state, will_retry):
+def test_a_timeout_keeps_the_registered_host_salvage_not_a_later_intermediate(qenv, monkeypatch, answer_state):
     """The reaper adopts a held answer BEFORE its history salvage: a later long intermediate response
     must not replace the preserved copy a registered host salvage points at (both are salvaged/<task>.txt)."""
     from pathlib import Path
@@ -327,7 +321,7 @@ def test_a_timeout_keeps_the_registered_host_salvage_not_a_later_intermediate(qe
     reaper.reap_timed_out_task({"worker_id": 0, "worker": None, "proc": SimpleNamespace(pid=0),
                                 "drive_root": str(qenv.drive), "task_id": tid, "task": task, "task_type": "task",
                                 "attempt": 1, "terminal_reason": "hard_deadline", "runtime_sec": 300,
-                                "deadline_reached": True, "will_retry": will_retry, "retry_task_id": tid + "-retry"})
+                                "deadline_reached": True})
     stored = load_task_result(qenv.drive, tid)
     assert stored["terminal_origin"] == "host_salvage" and stored["reason_code"] == "finalization_incomplete"
     assert stored["result"] == answer, "the history salvage replaced the registered answer's preserved bytes"

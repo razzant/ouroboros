@@ -161,7 +161,9 @@ def test_media_tools_visible_to_workspace_tasks(tmp_path):
         workspace_root=workspace,
         workspace_mode="external",
     ))
-    assert registry.get_schema_by_name("ocr_pdf") is not None
+    assert registry.get_schema_by_name("extract_pdf_text") is not None
+    assert registry.get_schema_by_name("ocr_pdf") is None  # compatibility entry remains callable
+    assert registry._entries["ocr_pdf"].handler is registry._entries["extract_pdf_text"].handler
     assert registry.get_schema_by_name("youtube_transcript") is not None
 
 

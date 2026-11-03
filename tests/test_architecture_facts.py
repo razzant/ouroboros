@@ -46,11 +46,19 @@ def reexports(manifest):
     return facade_reexports(REPO, manifest)
 
 
+@pytest.fixture(scope="module")
+def add_usage_rows(reexports):
+    # The injected-map answer both add_usage tests read, computed once.
+    return facade_consumers(REPO, "add_usage", reexports=reexports)
+
+
 # ---------------------------------------------------------------------------
 # owner_of
 # ---------------------------------------------------------------------------
 
 def test_owner_of_resolves_a_module_path_a_dotted_module_and_a_symbol():
+    from ouroboros.code_intelligence import build_code_inventory
+
     (llm,) = owner_of(REPO, "ouroboros/llm.py")
     assert (llm.domain, llm.via) == ("D02", "module_path")
     assert llm.domain_title  # the human vocabulary rides along
@@ -60,7 +68,14 @@ def test_owner_of_resolves_a_module_path_a_dotted_module_and_a_symbol():
         "supervisor/state.py", "D08", "dotted_module",
     )
 
-    owners = owner_of(REPO, "protected_path_category")
+    # This oracle asks about one real definition, not every repository language.
+    # Keep the live carrier/parse witness without indexing tests, JS and fixtures;
+    # the tiny repository below exercises owner_of's default inventory path.
+    inventory = build_code_inventory(
+        REPO, scope="ouroboros/runtime_mode_policy.py", persist=False,
+    )
+    assert not inventory.enumeration_limits
+    owners = owner_of(REPO, "protected_path_category", inventory=inventory)
     assert any(
         (o.module, o.domain, o.via) == ("ouroboros/runtime_mode_policy.py", "D13", "symbol_definition")
         for o in owners
@@ -72,10 +87,14 @@ def test_owner_of_outside_the_population_is_ownerless_not_an_error():
     assert owner_of(REPO, "docs/ARCHITECTURE.md") == ()
 
 
-def test_owner_of_covers_every_manifest_module(manifest):
+def test_owner_of_covers_every_manifest_module(manifest, monkeypatch):
     """Completeness against the manifest: every population row answers with
     exactly its pinned domain."""
+    from ouroboros import code_intelligence_architecture
+
     assert len(manifest.modules) >= 400  # the whole runtime population, not a sample
+    # Reuse this test's real manifest; other tests keep the default loader.
+    monkeypatch.setattr(code_intelligence_architecture, "load_domain_manifest", lambda repo_root: manifest)
     for path, domain in manifest.modules.items():
         rows = owner_of(REPO, path)
         assert [(r.module, r.domain) for r in rows] == [(path, domain)], path
@@ -140,8 +159,8 @@ def test_facade_module_query_lists_its_import_consumers(reexports):
     assert all(r.facade == "ouroboros/llm.py" and r.line > 0 for r in rows)
 
 
-def test_facade_symbol_query_narrows_to_the_reexported_name(reexports):
-    rows = facade_consumers(REPO, "add_usage", reexports=reexports)
+def test_facade_symbol_query_narrows_to_the_reexported_name(reexports, add_usage_rows):
+    rows = add_usage_rows
     assert rows, "add_usage is a re-exported facade binding with real consumers"
     for row in rows:
         assert row.name == "add_usage"
@@ -149,11 +168,11 @@ def test_facade_symbol_query_narrows_to_the_reexported_name(reexports):
     assert "ouroboros/loop_llm_call.py" in {r.consumer for r in rows}
 
 
-def test_injected_reexports_answer_exactly_as_the_self_built_map(reexports):
+def test_injected_reexports_answer_exactly_as_the_self_built_map(add_usage_rows):
     """The kwarg is reuse, never a different question: an injected map answers with
     exactly the rows the query builds for itself. The two teaching refusals are pinned
     on the injected path by the test below."""
-    assert facade_consumers(REPO, "add_usage", reexports=reexports) == facade_consumers(REPO, "add_usage")
+    assert add_usage_rows == facade_consumers(REPO, "add_usage")  # cold: builds its own map
 
 
 def test_facade_query_on_a_non_facade_is_a_teaching_refusal(reexports):
@@ -342,6 +361,10 @@ def test_query_code_owner_of_qualifies_partial_symbol_coverage(tmp_path, monkeyp
     (repo / "ouroboros" / "a.py").write_text("def shared():\n    pass\n", encoding="utf-8")
     (repo / "ouroboros" / "z.py").write_text(
         "def shared():\n    pass\n\n\ndef late():\n    pass\n", encoding="utf-8")
+    assert [(row.module, row.via) for row in owner_of(repo, "shared")] == [
+        ("ouroboros/a.py", "symbol_definition"),
+        ("ouroboros/z.py", "symbol_definition"),
+    ]
     registry = ToolRegistry(repo_dir=repo, drive_root=tmp_path / "data")
 
     def owner(arg):

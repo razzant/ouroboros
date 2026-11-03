@@ -17,18 +17,18 @@ archive cache.
 DOES NOT PROVE — by default, that any vendor harness installs, logs in or runs:
 ``harness install`` is never invoked, a vendor package download is not a toolchain
 fact, and no account exists in CI. This is the Ouroboros half of that path — the
-managed toolchain ``claudexor_daemon.install_missing_harness_cli`` hands to the
+managed toolchain ``claudexor_harness_install.install_missing_harness_cli`` hands to the
 engine — and nothing more.
 
 ``--harness-install codex`` (the Windows consumer lane) then goes one step further,
 on the same isolated toolchain: the engine's side-effect-free ``--dry-run`` disclosure
 must be admitted (an unsupported platform refuses it typed), the
-production ``install_missing_harness_cli`` performs the real pinned install from the
-npm registry into the engine's HOME-anchored toolchain under the disposable home, and
-the idempotent re-install's receipt must name a ``release_verified`` executable
-there — on Windows a native image or the package-declared Node entry, never an npm
-shell shim. It must answer ``--version`` with the pin, using the managed Node for a
-Node entry. The production-started owned daemon's harness rows and ``claudexor
+production ``install_missing_harness_cli`` performs the real install of the exact
+version the engine selects from the npm registry into the engine's HOME-anchored
+toolchain under the disposable home, and the idempotent re-install's receipt must
+name that version and an executable there — on Windows a native image or the
+package-declared Node entry, never an npm shell shim. It must answer ``--version``
+with that version, using the managed Node for a Node entry. The production-started owned daemon's harness rows and ``claudexor
 doctor`` must launch the bare harness through the engine's resolver and identify
 that same entry and version; that daemon is always stopped. It
 still proves no login, OAuth, account or model task.
@@ -290,7 +290,7 @@ def _reports_version(text: str, version: str) -> bool:
 def verify_install_receipt(receipt: Dict[str, Any], harness: str, toolchain: pathlib.Path, *,
                            windows: bool = os.name == "nt") -> pathlib.Path:
     """The installed executable, once the receipt meets the embedding contract and more."""
-    from ouroboros.claudexor_daemon import _valid_install_success
+    from ouroboros.claudexor_harness_install import _valid_install_success
 
     if not _valid_install_success(receipt, harness):
         raise WitnessFailure("harness_receipt_invalid", f"not the embedding-host receipt: {receipt}")
@@ -301,9 +301,12 @@ def verify_install_receipt(receipt: Dict[str, Any], harness: str, toolchain: pat
         escapes = toolchain.resolve() not in binary.resolve().parents
     except (OSError, RuntimeError):  # a loop, or a path the OS will not resolve
         escapes = True
+    # Either npm evidence class passes, as in production: ``release_verified`` at the
+    # engine's release-tested baseline, ``deterministic_only`` for the newer exact npm
+    # release a fresh managed Codex install selects since Claudexor 4.4.0. The summary
+    # reports which one; a version-less script class fails the version check below.
     problems = [
         problem for problem, broken in (
-            ("verification is not release_verified", receipt["verification"] != "release_verified"),
             ("installedVersion differs from pinnedVersion",
              receipt["installedVersion"] != receipt["pinnedVersion"]),
             (f"it is not beneath the disposable engine toolchain {toolchain}",
@@ -397,7 +400,7 @@ def harness_install_witness(harness: str, node: pathlib.Path, command: List[str]
     toolchain = pathlib.Path(os.environ["HOME"]).joinpath(*ENGINE_TOOLCHAIN)
     if toolchain.exists():
         raise WitnessFailure("harness_preinstalled", f"{toolchain} exists before any install")
-    from ouroboros.claudexor_daemon import install_missing_harness_cli
+    from ouroboros.claudexor_harness_install import install_missing_harness_cli
     from ouroboros.config import get_claudexor_harness_install_timeout_sec
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
@@ -446,7 +449,6 @@ def run_witness(root: pathlib.Path, dropped_path: List[str],
     from ouroboros.claudexor_runtime import (
         ClaudexorRuntimeError,
         ClaudexorRuntimeManager,
-        managed_node_dir,
         managed_runtime_dir,
     )
     from ouroboros.config import DATA_DIR
@@ -466,10 +468,11 @@ def run_witness(root: pathlib.Path, dropped_path: List[str],
     except ClaudexorRuntimeError as exc:
         raise WitnessFailure(exc.code, str(exc)) from exc
     facts["node_archive"] = pin.node_artifacts[platform_key].archive_name
-    node_root = managed_node_dir(pin, platform_key)
-    node = embedded_node_candidates(node_root)[0]
-    if len(command) != 2 or pathlib.Path(command[0]) != node:
-        raise WitnessFailure("cli_command_unexpected", f"{command} does not run the managed Node {node}")
+    node = pathlib.Path(command[0])
+    node_root = next((path for path in manager._node_roots(pin.node_version, platform_key)
+                      if embedded_node_candidates(path)[0] == node), None)
+    if len(command) != 2 or node_root is None:
+        raise WitnessFailure("cli_command_unexpected", f"{command} does not run an admitted managed Node")
     cli, npm_cli = pathlib.Path(command[1]), official_npm_cli(node)
     metadata_path = node_root / "managed-node.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -503,11 +506,13 @@ def run_witness(root: pathlib.Path, dropped_path: List[str],
         repaired = ClaudexorRuntimeManager().ensure_cli_command()
     except ClaudexorRuntimeError as exc:
         raise WitnessFailure(exc.code, f"repair failed: {exc}") from exc
-    if repaired != command or _run([node, npm_cli, "--version"], "repair_failed") != npm_version:
-        raise WitnessFailure("repair_failed", "a deleted npm entrypoint was not restored")
-    facts["repair"] = "deleted npm-cli.js restored from the verified archive cache"
+    repaired_node = pathlib.Path(repaired[0])
+    if (repaired == command or npm_cli.exists()
+            or _run([repaired_node, official_npm_cli(repaired_node), "--version"], "repair_failed") != npm_version):
+        raise WitnessFailure("repair_failed", "npm repair did not preserve the old tree and select a complete new generation")
+    facts["repair"] = "complete replacement generation published from verified cache; damaged generation retained"
     if harness:
-        facts["harness_install"] = harness_install_witness(harness, node, command, cli_env)
+        facts["harness_install"] = harness_install_witness(harness, repaired_node, repaired, cli_env)
     return facts
 
 
@@ -530,6 +535,8 @@ HARNESS_LIMITS = (
     "can authenticate or run a task here.",
     "- The doctor's overall `{harness}` status is reported, not asserted: with no "
     "credentials it is expected to be not ready; only its `installed` check is required.",
+    "- The receipt's `verification` is reported, not asserted: `deterministic_only` means "
+    "the engine selected a release newer than the one it was verified against.",
     "- Only `{harness}` was installed; Claude and every other vendor were not attempted.",
 )
 

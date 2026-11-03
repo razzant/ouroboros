@@ -420,6 +420,45 @@ def test_journal_and_workpad_roundtrip(tmp_path, monkeypatch):
     assert "no project scope" in tools["journal_write"].handler(bare, kind="note", text="x")
 
 
+@pytest.mark.parametrize("failure", ["torn_temp_write", "failed_replace"])
+def test_a_failed_workpad_replacement_keeps_the_whole_previous_page(tmp_path, monkeypatch, failure):
+    """#1854: a replacement that dies mid-write or at the swap leaves the complete
+    previous page and says so; it never exposes an empty or torn page or a stray temp."""
+    import errno
+    import os
+    import types
+
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
+    from ouroboros.project_facts import project_workpad_path
+    from ouroboros.tools import project_journal as pj
+
+    ctx = types.SimpleNamespace(project_id="racer", task_id="t-9", drive_root=tmp_path)
+    assert pj._workpad_write(ctx, "## old plan\n- wheels\n").startswith("OK:")
+
+    real_write_bytes = pathlib.Path.write_bytes
+
+    def torn_write(self, data):
+        real_write_bytes(self, data[:5])  # the first bytes land, then the disk fills
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def failed_replace(src, dst):
+        raise OSError(errno.EIO, "I/O error")
+
+    with monkeypatch.context() as patched:
+        if failure == "torn_temp_write":
+            patched.setattr(pathlib.Path, "write_bytes", torn_write)
+        else:
+            patched.setattr(os, "replace", failed_replace)
+        failed = pj._workpad_write(ctx, "## new plan\n- engine\n")
+    assert failed.startswith("⚠️ TOOL_ERROR (workpad_write)")
+    assert pj._workpad_read(ctx) == "## old plan\n- wheels\n"
+    assert [p.name for p in project_workpad_path("racer").parent.iterdir()] == ["workpad.md"]
+
+    assert pj._workpad_write(ctx, "## new plan\n- engine\n").startswith("OK:")
+    assert pj._workpad_read(ctx) == "## new plan\n- engine\n"
+    assert [p.name for p in project_workpad_path("racer").parent.iterdir()] == ["workpad.md"]
+
+
 def test_stale_tombstone_marker_is_swept_by_the_next_reconcile_tick(tmp_path, monkeypatch):
     """Convergence: if the marker unlink at tombstone time failed (or predates it),
     the maintenance pass removes it on a later tick, so registry loss after that can

@@ -1,4 +1,6 @@
 """Recovery disposition is a producer fact, not a guess from an HTTP status."""
+
+from tests import _dialogue as dialogue_test
 import asyncio
 import json
 import queue
@@ -22,6 +24,7 @@ from ouroboros.tools.registry import ToolRegistry
 from tests.test_host_service_responsiveness import _answer, _event, _presence_app, _request, _turn
 from tests.test_presence_delivery import _payload
 from tests.test_transport_death_retry import _LedgerLLM, _events, _ledger, _no_chain
+from tests._shared import saved_settings
 
 
 def test_auth_block_and_origin_rejection_share_status_not_disposition(tmp_path):
@@ -70,7 +73,7 @@ def test_turn_refusals_keep_legacy_facts_and_semantic_disposition(tmp_path, code
 def test_admission_dispositions(tmp_path, monkeypatch, code, disposition):
     app, binding, _ctx = _presence_app(tmp_path, _answer)
 
-    def refuse(*args):
+    def refuse(*args, **kwargs):
         raise PresenceAdmissionError(code, "binding_id")
 
     monkeypatch.setattr(host_service, "_admit_presence", refuse)
@@ -99,6 +102,15 @@ def test_receipt_write_retry_and_conflict_do_not_share_disposition(tmp_path, mon
     assert unavailable.status_code == 503
     assert json.loads(unavailable.body)["disposition"] == "retry"
     assert json.loads(unavailable.body)["code"] == "presence_receipt_unwritable"
+
+    def importing(*args):
+        from ouroboros.store import StoreMigrating
+        raise StoreMigrating("Dialogue history is still importing")
+
+    monkeypatch.setattr(ctx.presence_deliveries, "record", importing)
+    waiting = asyncio.run(host_service._api_presence_delivery(_request(app, payload)))
+    assert waiting.status_code == 503 and json.loads(waiting.body)["disposition"] == "retry"
+    assert json.loads(waiting.body)["code"] == "presence_history_importing", "an import is not a failed write"
 
 
 def test_missing_work_is_rejected_without_losing_original_error(tmp_path):
@@ -154,7 +166,7 @@ def test_retained_turn_records_facts_without_forced_owner_or_correspondent_speec
     _notify_unresolved_turn(tmp_path, task_id)
     _notify_unresolved_turn(tmp_path, task_id)
     assert load_task_result(tmp_path, task_id)["status"] == "running"
-    rows = [json.loads(line) for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()]
+    rows = dialogue_test.chat_rows(tmp_path)
     facts = [row for row in rows if row.get("summary_id") == f"presence-retained:{task_id}"]
     assert len(facts) == 1 and facts[0]["summary_kind"] == "host_task_facts"
     assert facts[0]["text"] == "" and facts[0]["presence_recovery"]["turn_ref"] == task_id
@@ -318,7 +330,10 @@ def test_only_positive_first_round_not_started_proves_retry_eligibility():
         assert not presence_retry_proof(task, changed_usage, trace, changed_ctx)
 
 
-def test_terminal_pipeline_stamps_no_effect_certificate_only_on_typed_proof(tmp_path):
+@pytest.mark.parametrize("open_debt", [False, True], ids=["no-custody", "open-custody-debt"])
+def test_terminal_pipeline_stamps_no_effect_certificate_only_on_typed_proof(tmp_path, open_debt):
+    """An open own delegated run is a debt beside the no-resend cause (#1583): the reason the
+    Host guard and the retry proof read stays ``resource_refusal_no_resend``."""
     from ouroboros import agent_task_pipeline
     from tests.test_presence_runner import _admission as admitted, _event as incoming
     from ouroboros.presence_runner import _build_task
@@ -326,6 +341,13 @@ def test_terminal_pipeline_stamps_no_effect_certificate_only_on_typed_proof(tmp_
     event = incoming()
     admission = admitted()
     task = _build_task(admission, event, drive_root=tmp_path, staged_files=())
+    task["_skip_post_task_synthesis"] = True
+    if open_debt:
+        from ouroboros import delegate_custody_current as current, store
+
+        with store.open_store(task.get("budget_drive_root") or tmp_path, write=True) as txn:
+            txn.put_custody("leaf", {"run_id": "leaf", "task_id": task["id"], "source": "delegated_subagent"},
+                            state=current.HELD)
     reset = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
     usage = {"execution_status": "infra_failed", "reason_code": "resource_refusal_no_resend",
              "resource_refusal": {"temporary": True, "reset_at": reset},
@@ -338,6 +360,7 @@ def test_terminal_pipeline_stamps_no_effect_certificate_only_on_typed_proof(tmp_
     row = load_task_result(tmp_path, task["id"])
     assert row["reason_code"] == "resource_refusal_no_resend"
     assert row["metadata"]["presence_retry_proof"]["kind"] == "first_round_engine_not_started"
+    assert row.get("delegated_runs_unreconciled", []) == (["leaf"] if open_debt else [])
 
 
 def test_producer_records_only_terminal_engine_not_started_as_no_effect(tmp_path):
@@ -431,7 +454,7 @@ def test_host_retries_only_attested_no_effect_after_reset_with_new_physical_iden
     assert asyncio.run(_turn(app, binding, "event")).body == recovered.body
     assert json.loads(pointer.read_text(encoding="utf-8"))["task_id"] == second_id
     assert invoked == [first_id, second_id] and ctx.presence_turns.live() == []
-    rows = [json.loads(line) for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()]
+    rows = dialogue_test.chat_rows(tmp_path)
     assert len([row for row in rows if row.get("direction") == "in" and
                 row.get("client_message_id") == "event"]) == 1
 
@@ -462,7 +485,7 @@ def test_required_jsonl_boundary_read_error_refuses_append(tmp_path, monkeypatch
     from pathlib import Path
     from ouroboros.utils import append_jsonl
 
-    path = tmp_path / "logs" / "chat.jsonl"
+    path = tmp_path / "logs" / "events.jsonl"
     path.parent.mkdir()
     original_bytes = b'{"torn": 1}'
     path.write_bytes(original_bytes)
@@ -550,7 +573,8 @@ def test_unknown_outcome_fallback_terminal_never_acknowledges_the_event(tmp_path
         def handle_task(self, task):
             invoked.append(task["id"])
             task["_skip_post_task_synthesis"] = True
-            agent_ctx = SimpleNamespace(task_contract=task["task_contract"], task_metadata=task["metadata"])
+            agent_ctx = SimpleNamespace(task_contract=task["task_contract"], task_metadata=task["metadata"],
+                                        task_id=task["id"], drive_root=tmp_path)
             _finish_swarm_handoff(agent_ctx, {"task_id": child_id}, "Admission receipt", status="scheduled")
             pending = []
             pipeline.emit_task_results(
@@ -621,7 +645,7 @@ def test_inline_turn_recovers_lost_response_without_replaying_event(tmp_path, mo
     monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(tmp_path / "settings.json"))
     monkeypatch.setenv("TOTAL_BUDGET", "100")
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
-    monkeypatch.delenv("OUROBOROS_MODEL_FALLBACKS", raising=False)
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL_FALLBACKS="")  # a saved blank: no chain
     monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
     (tmp_path / "state").mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(loop, "_run_cross_model_fallback_chain", _no_chain)
@@ -632,19 +656,22 @@ def test_inline_turn_recovers_lost_response_without_replaying_event(tmp_path, mo
     monkeypatch.setattr(call_mod, "_sleep_within_deadline", lambda sec, _deadline, **_kw: (sleeps.append(sec), True)[1])
     monkeypatch.setattr("ouroboros.presence_runner._write_unresolved_notice",
                         lambda _root, task_id: notices.append(task_id))
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_kw: (True, ""))
 
     def spoken():
-        path = tmp_path / "logs" / "chat.jsonl"
-        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()] if path.exists() else []
+        rows = dialogue_test.chat_rows(tmp_path)
         return [row["text"] for row in rows if row.get("direction") == "out"]
 
     class ObservedLLM(_LedgerLLM):
         """Every send records the host state it left from: what ran and what was spoken before it."""
 
         def chat(self, **kwargs):
+            assert self.calls < 2, "the recovered author must select completion without another send"
             sends.append({"messages": [dict(row) for row in kwargs["messages"]],
                           "tools_executed": list(executed), "spoken": spoken()})
-            return super().chat(**kwargs)
+            response, usage = super().chat(**kwargs)
+            return {**response, "tool_calls": [{"id": "finish-recovered", "type": "function", "function": {
+                "name": "finish_task", "arguments": json.dumps({"action": "finish", "answer": "done"})}}]}, usage
 
     llm = ObservedLLM(tmp_path, lambda: httpx.ReadError("socket died after dispatch"), "ok")
     captured = {}
@@ -691,7 +718,7 @@ def test_inline_turn_recovers_lost_response_without_replaying_event(tmp_path, mo
     assert sends[1]["messages"][0] == sends[0]["messages"][0]
     recovery = [str(row.get("content") or "") for row in sends[1]["messages"] if "[Transport recovery]" in str(row.get("content"))]
     assert len(recovery) == 1 and attempts[0]["attempt_id"] in recovery[0]
-    assert [send["tools_executed"] for send in sends] == [[], []] and executed == []
+    assert [send["tools_executed"] for send in sends] == [[], []] and executed == ["finish_task"]
     assert [send["spoken"] for send in sends] == [[], []] and spoken() == ["done"]
     assert sleeps == []  # no Presence-only same-request paid repeat
     api_errors = _events(tmp_path / "logs", "llm_api_error")
@@ -774,3 +801,9 @@ def test_terminal_refusal_keys_on_provenance_not_on_the_infra_failed_axis(row, e
     from ouroboros.presence_runner import _terminal_refusal
 
     assert _terminal_refusal(row) == expected
+
+
+@pytest.fixture(autouse=True)
+def _focus_admission_enabled(monkeypatch):
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {"status": "available", "remaining_usd": 10})

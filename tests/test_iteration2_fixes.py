@@ -104,15 +104,13 @@ def test_timeout_resolver_env_equal_to_default_is_honored(monkeypatch):
     assert resolve(360) == 600  # was silently dropped to 360 (== default skipped)
 
 
-def test_timeout_resolver_ceiling_and_override(monkeypatch):
-    from ouroboros.config import get_per_call_timeout_ceiling_sec
+def test_timeout_resolver_honors_requests_past_the_retired_command_ceiling(monkeypatch):
     from ouroboros.tools.shell import _resolve_effective_timeout as resolve
 
-    ceiling = get_per_call_timeout_ceiling_sec()
     monkeypatch.setenv("OUROBOROS_TOOL_TIMEOUT_SEC", "999999")
-    assert resolve(360) == ceiling  # env clamped to ceiling
+    assert resolve(360) == 999999  # env honored as written
     assert resolve(360, None, 300) == 300  # per-call override honored
-    assert resolve(360, None, 999999) == ceiling  # override clamped to ceiling
+    assert resolve(360, None, 7200) == 7200  # override honored past the old 1800 s ceiling
 
 
 # ------------------------------- #3 view_image -------------------------------
@@ -120,6 +118,8 @@ def _ctx(drive_root, active_model="google/gemini-3.5-flash"):
     from ouroboros.tools.registry import ToolContext
 
     ctx = MagicMock(spec=ToolContext)
+    ctx.budget_drive_root = None
+    ctx.task_metadata = {}
     ctx.event_queue = None
     ctx.task_id = "t"
     ctx.current_task_type = "task"
@@ -128,6 +128,14 @@ def _ctx(drive_root, active_model="google/gemini-3.5-flash"):
     ctx.task_model_override = ""
     ctx.messages = []
     return ctx
+
+
+def _remove_drive(tmp):
+    """The tool opened this drive's store; its cached handles go first (Windows refuses to delete an open file)."""
+    from ouroboros import store
+
+    store.close_connections_under(pathlib.Path(tmp))
+    shutil.rmtree(tmp)
 
 
 def _img_under_uploads():
@@ -159,7 +167,7 @@ def test_view_image_injects_native_block_for_vision_model():
             for b in blocks
         ), "expected a native data:image/ block appended to the conversation"
     finally:
-        shutil.rmtree(tmp)
+        _remove_drive(tmp)
 
 
 def test_view_image_blind_model_still_attaches_for_send_time_routing():
@@ -173,7 +181,7 @@ def test_view_image_blind_model_still_attaches_for_send_time_routing():
         assert "local image block" in res.lower()
         assert ctx.messages  # send-time routing will caption or omit for blind routes
     finally:
-        shutil.rmtree(tmp)
+        _remove_drive(tmp)
 
 
 def test_view_image_non_image_fail_closed():
@@ -190,7 +198,7 @@ def test_view_image_non_image_fail_closed():
             res = _view_image(ctx, str(bad))
         assert "⚠️" in res and "supported image" in res.lower()
     finally:
-        shutil.rmtree(tmp)
+        _remove_drive(tmp)
 
 
 def test_view_image_path_outside_roots_rejected():
@@ -207,7 +215,7 @@ def test_view_image_path_outside_roots_rejected():
             res = _view_image(ctx, str(outside))
         assert "⚠️" in res and "workspace" in res.lower()
     finally:
-        shutil.rmtree(tmp)
+        _remove_drive(tmp)
 
 
 def test_view_image_is_not_web_gated():

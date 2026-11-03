@@ -1,4 +1,4 @@
-"""The checks reader behind ``get_github_checks``, driven through the registered tool over a fake ``gh``.
+"""The checks reader behind ``github_read(method="checks")``, driven through the registered tool over a fake ``gh``.
 
 Its report states GitHub's recorded facts and the sources it could not read, never a verdict.
 """
@@ -58,7 +58,9 @@ class FakeChecks:
 
 @pytest.fixture
 def checks(tmp_path, monkeypatch):
-    """Call the registered ``get_github_checks`` over a fake gh, a fixed observation time and a fake clock."""
+    """Call ``github_read(method="checks")`` over a fake gh, a fixed observation time and a fake clock.
+
+    ``number=`` and ``sha=`` of the retired reader both name the one ``target`` argument."""
     from ouroboros.tools.registry import ToolRegistry
 
     clock = SimpleNamespace(now=0.0, slept=[], request_cost=0.0)
@@ -77,7 +79,12 @@ def checks(tmp_path, monkeypatch):
             return fake(*a, **kw)
 
         monkeypatch.setattr(github_checks, "_gh_run", transport)
-        result = registry.execute_result("get_github_checks", args)
+        call = {"method": "checks", **{k: v for k, v in args.items() if k not in ("number", "sha")}}
+        if "number" in args:
+            call["target"] = args["number"]
+        elif "sha" in args:
+            call["target"] = args["sha"]
+        result = registry.execute_result("github_read", call)
         assert not any(word in result.text.lower() for word in ("passed", "failing")), result.text
         return result
 
@@ -457,8 +464,9 @@ def test_the_source_lines_name_every_source_and_the_other_header_lines_are_clipp
     assert len(counts) == 500 and counts.endswith("…")
 
 
-@pytest.mark.parametrize("args", [{"sha": "main"}, {"sha": SHA[:12]}, {"sha": SHA, "number": 7}, {}, {"number": -1}])
+@pytest.mark.parametrize("args", [{"sha": "main"}, {"sha": SHA[:12]}, {"sha": "seven"}, {"sha": "7.5"}, {}, {"number": -1}])
 def test_checks_target_is_one_pull_request_or_one_full_sha(checks, args):
+    """One ``target``: a number is a pull request, any other text is a commit SHA the reader validates."""
     fake = FakeChecks(polls=[[_run(11)]])
     result = checks(fake, **args)
     assert (result.status, result.code) == ("error", "TOOL_ARG_ERROR") and fake.calls == []
@@ -467,7 +475,7 @@ def test_checks_target_is_one_pull_request_or_one_full_sha(checks, args):
     assert checks(fake, sha=SHA).status == "ok" and checks(fake, number=7).status == "ok"
 
 
-@pytest.mark.parametrize("args", [{"number": True}, {"number": 7.5}, {"number": "7.5"}, {"number": "seven"}, {"number": [7]},
+@pytest.mark.parametrize("args", [{"number": True}, {"number": 7.5}, {"number": [7]},
                                   {"sha": SHA, "wait_seconds": True}, {"sha": SHA, "wait_seconds": 0.4},
                                   {"sha": SHA, "wait_seconds": "7.5"}, {"sha": SHA, "wait_seconds": "soon"}])
 def test_checks_number_and_wait_are_whole_numbers(checks, args):
@@ -490,7 +498,7 @@ def test_bounds_keep_the_header_and_every_run_id(checks):
                                  run_id=100 + index, steps=steps) for job in range(300)] for index in range(40)})
     text = checks(fake, sha=SHA).text
     lines = text.splitlines()
-    assert len(text) <= tool_result_limit("get_github_checks")
+    assert len(text) <= tool_result_limit("github_read")
     assert lines[:2] == _HEADER and "Workflow runs: 40 — failure 40" in lines and lines[-2:] == _SHA_TAIL
     assert all(str(100 + index) in text for index in range(40))
     assert "- 20 more runs — failure; ids: " + ", ".join(str(120 + index) for index in range(20)) in lines
@@ -807,7 +815,7 @@ def test_the_report_stays_inside_the_result_limit(checks, monkeypatch):
                for index in range(40)]
     result = checks(FakeChecks(polls=[runs], jobs=jobs, rollup=rollup), number=7)
     text, lines = result.text, result.text.splitlines()
-    assert result.status == "ok" and len(text) <= tool_result_limit("get_github_checks")
+    assert result.status == "ok" and len(text) <= tool_result_limit("github_read")
     assert lines[:3] == [f"GitHub checks for commit {SHA}", "Repository: " + host[len("https://"):],
                          _PR_LINE + "; head as read by this call"]
     assert lines[5:10] == [
@@ -847,16 +855,18 @@ def test_checks_reader_is_registered_read_only():
     from ouroboros.safety import POLICY_SKIP, TOOL_POLICY
     from ouroboros.tools.registry_guards import _GITHUB_TOKEN_TOOLS
 
-    entry = next(item for item in github.get_tools() if item.name == "get_github_checks")
-    assert TOOL_POLICY["get_github_checks"] == POLICY_SKIP and "get_github_checks" in _GITHUB_TOKEN_TOOLS
-    assert entry.schema["parameters"]["required"] == [] and not entry.mutates_worktree
-    assert set(entry.schema["parameters"]["properties"]) == {"number", "sha", "wait_seconds", "repo"}
+    entry = next(item for item in github.get_tools() if item.name == "github_read")
+    assert TOOL_POLICY["github_read"] == POLICY_SKIP and "github_read" in _GITHUB_TOKEN_TOOLS
+    assert entry.schema["parameters"]["required"] == ["method"] and not entry.mutates_worktree
+    assert "checks" in entry.schema["parameters"]["properties"]["method"]["enum"]
+    assert {"target", "wait_seconds", "repo"} <= set(entry.schema["parameters"]["properties"])
     assert github_checks._CHECKS_WAIT_CAP_SEC + github_checks._CHECKS_READ_BUDGET_SEC < entry.timeout_sec
-    assert "ends the call with that error" in entry.schema["parameters"]["properties"]["wait_seconds"]["description"]
-    for listing in (OBSERVE_DISABLED, tool_capabilities.OBSERVE_WORLD_MUTATION_TOOLS, tool_capabilities.READ_ONLY_PARALLEL_TOOLS,
-                    tool_capabilities.LOCAL_READONLY_SUBAGENT_TOOL_NAMES, tool_capabilities.ACTING_SUBAGENT_TOOL_NAMES):
-        assert "get_github_checks" not in listing
-    assert "comment_on_pr" in OBSERVE_DISABLED  # The same lists do carry the family's write verbs.
+    assert "max 240" in entry.schema["parameters"]["properties"]["wait_seconds"]["description"]
+    for listing in (OBSERVE_DISABLED, tool_capabilities.OBSERVE_WORLD_MUTATION_TOOLS, tool_capabilities.READ_ONLY_PARALLEL_TOOLS):
+        assert "github_read" not in listing
+    for children in (tool_capabilities.LOCAL_READONLY_SUBAGENT_TOOL_NAMES, tool_capabilities.ACTING_SUBAGENT_TOOL_NAMES):
+        assert "github_read" in children and "github_write" not in children
+    assert "github_write" in OBSERVE_DISABLED  # The same lists do carry the family's write tool.
     # The reader's module is a helper of the family: the family module registers the tool, in frozen builds too.
     from ouroboros.tools.registry import ToolRegistry
 

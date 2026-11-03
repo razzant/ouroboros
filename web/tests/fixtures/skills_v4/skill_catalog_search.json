@@ -1,0 +1,101 @@
+{
+  "items": [
+    {
+      "id": "ouroboros/weather",
+      "source_id": "ouroboros",
+      "source_name": "Ouroboros",
+      "name": "weather",
+      "description": "Wide polished weather widget — current conditions, compact forecast, astronomy, and resilient wttr.in cache (no API key).",
+      "category": [
+        "city"
+      ],
+      "version": "0.3.2",
+      "digest": "18a28b775e3f493d5323080c50523e2bec1356e37e76aa918f1fb298d9fd5d94",
+      "official": true,
+      "recommended": false,
+      "owner": "razzant",
+      "updated_at": "2026-10-15T09:12:00+00:00",
+      "signals": {
+        "votes": 25,
+        "comments": 3,
+        "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/1",
+        "author_repo_stars": null
+      },
+      "withdrawn": null,
+      "type": "extension",
+      "needs_keys": [],
+      "permissions": [
+        "net",
+        "widget",
+        "route"
+      ],
+      "installed": {
+        "state": "installed",
+        "version": "0.3.1",
+        "digest": "0305fd55a4c7786753043df9b26c2dbadcc35285daffe623e3dc72e5afc7dfea",
+        "modified": null,
+        "update_available": true
+      },
+      "trust": "trusted",
+      "repo_url": "https://github.com/razzant/OuroborosHub"
+    },
+    {
+      "source_id": "clawhub",
+      "source_name": "ClawHub",
+      "trust": "review",
+      "category": [],
+      "digest": "",
+      "official": false,
+      "recommended": false,
+      "owner": "steipete",
+      "updated_at": "2026-09-16T21:35:54.485000+00:00",
+      "signals": null,
+      "withdrawn": null,
+      "type": "",
+      "needs_keys": [],
+      "permissions": [],
+      "installed": null,
+      "id": "clawhub/steipete/weather",
+      "name": "weather",
+      "registry_slug": "steipete/weather",
+      "description": "Get current weather and forecasts (no API key required).",
+      "version": "1.0.4",
+      "registry_stats": {
+        "comments": 6,
+        "downloads": 171801,
+        "installs": 6520,
+        "stars": 429,
+        "versions": 1
+      }
+    },
+    {
+      "source_id": "clawhub",
+      "source_name": "ClawHub",
+      "trust": "review",
+      "category": [],
+      "digest": "",
+      "official": false,
+      "recommended": false,
+      "owner": "sdk-team",
+      "updated_at": "2026-08-02T07:15:10.120000+00:00",
+      "signals": null,
+      "withdrawn": null,
+      "type": "",
+      "needs_keys": [],
+      "permissions": [],
+      "installed": null,
+      "id": "clawhub/sdk-team/alibaba-weather",
+      "name": "alibaba-weather",
+      "registry_slug": "sdk-team/alibaba-weather",
+      "description": "7-day weather forecast query powered by Alibaba Cloud IQS web search and page reading.",
+      "version": "0.2.0",
+      "registry_stats": {
+        "comments": 0,
+        "downloads": 887,
+        "installs": 3,
+        "stars": 0,
+        "versions": 2
+      }
+    }
+  ]
+}

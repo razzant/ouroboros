@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 from ouroboros.llm_attempt import (
-    apply_processing_preference, attach_processing_receipt, openai_family_route,
+    _applied_payload_cache_ttl, apply_processing_preference, attach_processing_receipt, openai_family_route,
     supports_message_cache_control,
 )
 from ouroboros.llm_messages import project_declared_system_prefix
@@ -31,14 +31,19 @@ from ouroboros.llm_capability_policy import (
 )
 from ouroboros.reasoning_artifacts import transcript_has_sealed_reasoning
 from ouroboros.llm_routing import _resolve_or_provider
-from ouroboros.provider_models import normalize_deepseek_reasoning_effort, normalize_zai_reasoning_effort
+from ouroboros.provider_models import (
+    normalize_deepseek_reasoning_effort,
+    normalize_minimax_reasoning_effort,
+    normalize_zai_reasoning_effort,
+)
 from ouroboros.request_wire_recovery import (
+    current_wire_candidate,
     finalize_wire_response,
     note_provider_metadata_drop_fields,
 )
 from ouroboros.utils import sanitize_tool_result_for_log
 from ouroboros.config import runtime_setting
-from ouroboros._usage_response import observed_processing_mode, provider_cost_value
+from ouroboros._usage_response import observed_processing_mode, reported_price
 from ouroboros.event_usage import REPORTED_TOKENS_KEY
 
 
@@ -87,6 +92,20 @@ def _bounded_response_metadata_label(value: Any) -> Optional[str]:
     if sanitize_tool_result_for_log(label) != label:
         return None
     return label
+
+
+def _stage_effort_clamp_disclosure(
+    requested: str, applied: str, model: str, *, reason: str = "provider_wire_mapping",
+) -> None:
+    """Stage this call's requested/applied effort note for ``_pop_effort_clamp_disclosure``.
+
+    A tier the provider dialect changed is disclosed; an unchanged one stages ``None``, so a
+    stale note from an earlier call is never inherited.
+    """
+    _EFFORT_CLAMP_CVAR.set(
+        None if applied == requested
+        else {"requested": requested, "applied": applied, "reason": reason, "model": model}
+    )
 
 
 class _OpenAICompatibleLaneMixin:
@@ -145,13 +164,18 @@ class _OpenAICompatibleLaneMixin:
                 {k: v for k, v in tool.items() if k != "cache_control"}
                 for tool in self._sanitize_chat_completion_tools(tools)
             ]
+            # A generic compatible server gets the canonical cache hints (unknown is not
+            # no); one that refuses a hint is repaired and remembered by request-wire
+            # recovery on that exact route. The other direct lanes keep their strip.
+            compatible = provider == "openai-compatible"
             clean_messages = self._strip_openrouter_roundtrip_metadata(
                 self._copy_messages_with_cache_policy(
                     messages,
-                    allow_message_cache_control=False,
+                    allow_message_cache_control=compatible,
                     flatten_tool_content_blocks=True,
                     # DeepSeek accepts content arrays only on user turns.
                     flatten_non_user_content_blocks=provider == "deepseek",
+                    allow_cache_ttl=compatible,
                 ),
                 keep_reasoning_content=provider == "minimax" or bool(target.get("requires_reasoning_echo")),
                 keep_reasoning_details=bool(target.get("reasoning_split")),
@@ -178,7 +202,7 @@ class _OpenAICompatibleLaneMixin:
                 kwargs.setdefault("extra_body", {})["reasoning_split"] = True
             if stream:
                 kwargs.update(stream=True, stream_options={"include_usage": True})
-            if provider == "openai":
+            if direct_openai or compatible:
                 cache_identity = self._prompt_cache_identity(
                     str(target.get("usage_model") or resolved_model),
                     clean_messages,
@@ -192,15 +216,21 @@ class _OpenAICompatibleLaneMixin:
                     # its caller-declared affinity instead.
                     kwargs["prompt_cache_key"] = cache_identity
             requested_effort = normalize_reasoning_effort(reasoning_effort)
-            if provider not in {"deepseek", "zai"}:
+            if provider not in {"deepseek", "minimax", "zai"}:
                 # Every Chat Completions route carries the owner's effort in the
-                # standard field: direct OpenAI, MiniMax, Cloud.ru and any
+                # standard field: direct OpenAI, Cloud.ru and any
                 # OpenAI-compatible server alike. No provider or model list
                 # decides it — unknown is not no — so a route that refuses the
                 # field or a value is adapted by request-wire recovery on that
                 # exact route's own rejection, requested and sent kept apart.
-                # DeepSeek and Z.ai keep their measured projections below.
+                # DeepSeek, MiniMax and Z.ai keep their sourced projections below.
                 kwargs["reasoning_effort"] = requested_effort
+            elif provider == "minimax":
+                # Exact Flash only; omitting none would serve max. Reuse the
+                # requested/applied disclosure, including clearing a stale note.
+                applied = normalize_minimax_reasoning_effort(resolved_model, requested_effort)
+                kwargs["reasoning_effort"] = applied
+                _stage_effort_clamp_disclosure(requested_effort, applied, resolved_model)
             elif provider == "deepseek":
                 # Same carriage, projected onto DeepSeek's wire dialect
                 # (low/high/max; thinking is switched off by a toggle, not an
@@ -215,13 +245,10 @@ class _OpenAICompatibleLaneMixin:
                     kwargs.setdefault("extra_body", {})["thinking"] = {"type": "disabled"}
                 else:
                     kwargs["reasoning_effort"] = applied
-                _EFFORT_CLAMP_CVAR.set(None)  # never inherit a stale note
-                if applied != requested_effort:
-                    _EFFORT_CLAMP_CVAR.set({
-                        "requested": requested_effort, "applied": applied,
-                        "reason": "provider_forced_tool_choice" if forced_tool else "provider_wire_mapping",
-                        "model": resolved_model,
-                    })
+                _stage_effort_clamp_disclosure(
+                    requested_effort, applied, resolved_model,
+                    reason="provider_forced_tool_choice" if forced_tool else "provider_wire_mapping",
+                )
             elif provider == "zai":
                 # Same carriage family, Z.ai's OWN projection table (NOT
                 # DeepSeek's: medium does not exist at Z.ai and xhigh maps to
@@ -235,13 +262,7 @@ class _OpenAICompatibleLaneMixin:
                 # disclosed on usage as ``reasoning_effort_clamped``.
                 applied = normalize_zai_reasoning_effort(requested_effort)
                 kwargs["reasoning_effort"] = applied
-                _EFFORT_CLAMP_CVAR.set(None)  # never inherit a stale note
-                if applied != requested_effort:
-                    _EFFORT_CLAMP_CVAR.set({
-                        "requested": requested_effort, "applied": applied,
-                        "reason": "provider_wire_mapping",
-                        "model": resolved_model,
-                    })
+                _stage_effort_clamp_disclosure(requested_effort, applied, resolved_model)
             if temperature is not None:
                 kwargs["temperature"] = temperature
             if response_format:
@@ -316,12 +337,13 @@ class _OpenAICompatibleLaneMixin:
             provider_body = extra_body.setdefault("provider", {})
             if isinstance(provider_body, dict):
                 provider_body["allow_fallbacks"] = False
-        # Owner-configured OpenRouter provider routing (resilience/repro). Gap-merge:
+        # Owner-configured OpenRouter provider routing (resilience/repro): the global
+        # setting with this connection's own ``provider_routing`` merged over it. Gap-merge:
         # NEVER override the anthropic require_parameters pin or the (sealed-artifact)
         # reasoning-continuity allow_fallbacks=False pin set above. Affects same-model
         # provider routing only — it never changes the MODEL, so the P3 reviewer context
         # floor is untouched.
-        _or_provider = _resolve_or_provider()
+        _or_provider = _resolve_or_provider(target.get("provider_routing"))
         if _or_provider:
             provider_body = extra_body.setdefault("provider", {})
             if isinstance(provider_body, dict):
@@ -408,14 +430,13 @@ class _OpenAICompatibleLaneMixin:
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Normalize a reply without generation lookup; skip_cost_fetch also skips tariffs."""
         usage = dict(resp_dict.get("usage") or {})
-        price_candidates = (
-            usage.get("cost"), usage.get("total_cost"), resp_dict.get("total_cost_usd"),
-        )
-        usage["cost"] = next((cost for value in price_candidates
-                              if (cost := provider_cost_value(value)) is not None), None)
+        # What the reply consumed (a BYOK reply: gateway charge + provider-billed share).
+        usage["cost"], cost_invalid, cost_basis = reported_price(usage, resp_dict.get("total_cost_usd"))
         usage.pop("cost_invalid", None)  # Host fact, never a provider usage extension.
-        if usage["cost"] is None and any(value is not None for value in price_candidates):
+        if cost_invalid:
             usage["cost_invalid"] = True
+        if cost_basis:
+            usage["cost_basis"] = cost_basis
         if "service_tier" in resp_dict:
             usage["service_tier"] = resp_dict["service_tier"]
         attach_processing_receipt(target, usage)
@@ -552,6 +573,8 @@ class _OpenAICompatibleLaneMixin:
 
         usage["provider"] = str(target.get("provider") or "openrouter")
         usage["resolved_model"] = str(target.get("usage_model") or target.get("resolved_model") or "")
+        terminal = current_wire_candidate()  # the TTL the terminal candidate carried, after any hint repair
+        prompt_cache_ttl = _applied_payload_cache_ttl(terminal.physical_payload()) if terminal is not None else prompt_cache_ttl
         if prompt_cache_ttl and not usage.get("prompt_cache_ttl"):
             usage["prompt_cache_ttl"] = prompt_cache_ttl
         # Anthropic's per-tier write split, when the route passed it through.
@@ -589,8 +612,8 @@ class _OpenAICompatibleLaneMixin:
         usage["cost_final"] = bool(
             usage.get("cost") is not None and not usage.get("cost_estimated")
         )
-        # Preserve any legacy diagnostic disclosure already staged by a compatibility
-        # caller; normal dispatch adaptation is disclosed through usage.request_wire.
+        # Merge the tier note staged at build (DeepSeek/MiniMax/Z.ai projections); normal
+        # dispatch adaptation is disclosed through usage.request_wire.
         _clamp_note = self._pop_effort_clamp_disclosure()
         if _clamp_note:
             usage["reasoning_effort_clamped"] = _clamp_note
@@ -711,6 +734,8 @@ def openrouter_web_search_server_tool(
         }],
     )
     apply_processing_preference(target, payload)
+    if timeout is not None:
+        payload["timeout"] = float(timeout)  # the leg's own bound: each send narrows it, never replaces it (#572)
     scope = replace(accounting_scope or current_usage_scope() or UsageScope(), source="web_search.openrouter")
     with usage_scope(scope):
         return _recovery(client.chat.completions.create, payload, target)

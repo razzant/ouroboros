@@ -174,9 +174,10 @@ def _write_payload_patch_artifacts(
     reported as ``blocked_reserved_paths`` and refused whole at apply, with the
     candidate always preserved for the parent's decision.
     """
-    import hashlib
     import subprocess
 
+    from ouroboros.artifact_storage import compress_in_place
+    from ouroboros.artifacts import stream_artifact_file
     from ouroboros.headless import (
         ARTIFACT_STATUS_FAILED,
         ARTIFACT_STATUS_READY_NO_CHANGES,
@@ -346,7 +347,9 @@ def _write_payload_patch_artifacts(
             detail = (diff.stderr or diff.stdout or b"").decode("utf-8", errors="replace")
             return _manifest(ARTIFACT_STATUS_FAILED, note=f"patch emit failed: {detail.strip()[:300]}")
         patch_bytes = diff.stdout or b""
-        (cap_dir / "workspace.patch").write_bytes(patch_bytes)
+        patch_path = cap_dir / "workspace.patch"
+        patch_path.write_bytes(patch_bytes)
+        compress_in_place(patch_path)
         baseline_hash = str((entry.resource_ref or {}).get("payload_hash") or "")
         if baseline_hash and result_hash == baseline_hash:
             # Non-empty patch, result hash EQUAL to baseline: the change is
@@ -362,10 +365,11 @@ def _write_payload_patch_artifacts(
                      "e.g. symlink topology or file metadata). The snapshot and "
                      "the candidate patch are preserved for inspection.")
         stat = _git("diff", *diff_isolation, "--cached", "--shortstat", baseline)
+        measured = stream_artifact_file(patch_path)
         return _manifest(
             ARTIFACT_STATUS_READY_WITH_CHANGES,
-            sha256=hashlib.sha256(patch_bytes).hexdigest(),
-            patch_size=len(patch_bytes),
+            sha256=measured["sha256"],
+            patch_size=measured["size"],
             diffstat=(stat.stdout or b"").decode("utf-8", errors="replace").strip(),
             tracked_changed=changed,
             untracked_included=[],
@@ -471,7 +475,27 @@ def _candidate_symlink_escapes(
     return sorted(set(escapes)), ""
 
 
-def integrate_payload_patch(
+def integrate_payload_patch(ctx: ToolContext, **params: Any) -> str:
+    """Serialize the live target's CAS, mutation and disposition publication across captures."""
+    from hashlib import sha256
+    from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+
+    if params.get("decision") != "apply":
+        return _integrate_payload_patch(ctx, **params)
+    target = pathlib.Path(params["entry"].target_root).resolve()
+    key = sha256(str(target).encode("utf-8")).hexdigest()
+    path = pathlib.Path(params["drive"]) / "state" / "delegate_payload_mutations" / f"{key}.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = acquire_exclusive_file_lock(path, timeout_sec=20.0, owner_aware_stale=True)
+    if fd is None:
+        return "⚠️ INTEGRATE_DELEGATED_TARGET_BUSY: payload mutation lock unavailable; capture retained."
+    try:
+        return _integrate_payload_patch(ctx, **params)
+    finally:
+        release_exclusive_file_lock(path, fd)
+
+
+def _integrate_payload_patch(
     ctx: ToolContext, *, drive: pathlib.Path, entry: _RunCustody, rid: str,
     decision: str, reason: str, cap_dir: pathlib.Path,
     manifest: Dict[str, Any], patch_path: pathlib.Path,
@@ -710,7 +734,7 @@ def integrate_payload_patch(
             "integrate_delegated_patch(decision='reject') to release the snapshot "
             "while keeping the patch artifact. Finalizing your task while this run is "
             "neither applied nor rejected leaves your custody audit unreconciled (Done "
-            "with warnings, reason delegated_custody_unreconciled). "
+            "with warnings, the run listed in delegated_runs_unreconciled beside your own reason). "
             f"Verdict: {verdict_path or '(unwritten)'}.")
     if result_hash and live_after != result_hash:
         try:
@@ -762,8 +786,8 @@ def integrate_payload_patch(
             "to release the snapshot while keeping the patch artifact). The snapshot "
             "and the patch are preserved as forensic material. Finalizing your task "
             "while this run is neither applied nor rejected leaves your custody audit "
-            "unreconciled (the task completes as Done with warnings, reason "
-            f"delegated_custody_unreconciled). Verdict: {verdict_path or '(unwritten)'}.")
+            "unreconciled (the task completes as Done with warnings, the run listed in "
+            f"delegated_runs_unreconciled beside your own reason). Verdict: {verdict_path or '(unwritten)'}.")
     return _finalize_payload_apply(
         ctx, rid=rid, reason=reason, target=target, touched=touched,
         ordered=ordered, manifest=manifest, state_root=state_root,

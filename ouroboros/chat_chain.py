@@ -1,42 +1,29 @@
-"""The physical chat-log generation chain, index-free row addresses and source retention.
+"""Addressed dialogue reads over ``state/dialog.sqlite``.
 
-``logs/chat.jsonl`` rotates verbatim into ``archive/chat_<ts>.jsonl``; the
-ordered archives plus the live file are the whole conversation. These readers
-are shared by ``chat_history``, the generation-aware chat reader in ``memory``,
-the owner-message source lens in ``project_dialogue``, the
-consciousness wake and the one-time legacy import in ``chronicle_import``. Callers
-use ``chat_chain.retain_memory_source`` as a module attribute, so one
-substitution reaches every caller.
-
-A chat row's address is ``{chat_id, ts, row_sha256}`` (text form
-``row:<chat_id>@<ts>#<sha12>``) plus an optional ``hint`` that only speeds the
-lookup. It names no path, inode or byte offset, so it survives rotation and a
-copy of the data directory, and ``row_sha256`` turns a substituted row into a
-typed ``row_mismatch`` instead of a silent answer. Resolution needs no index:
-the hinted generation line first, then the archive rotated at or after the
-row's ``ts`` and onward to the live file. Rotation stamps the archive name
-from the same UTC clock that stamped the row, so that archive is the earliest
-one that can hold it. Stream positions count rows exactly as the legacy
-cursor does (JSON objects outside A2A, in chain order).
+A row keeps its content identity ``{chat_id, ts, row_sha256}``; imported rows also
+keep every legacy ``(gen, line)`` hint. SQL coordinates are optional hints for new
+rows. Stream positions count JSON objects outside A2A exactly as the old memory
+cursor did. Room reads probe room/task/origin indexes before applying the shared
+membership rule; the frozen JSONL archive belongs only to the importer.
 """
 from __future__ import annotations
 
 import datetime as _dt
 import hashlib
-import itertools
+import heapq
 import json
 import pathlib
 import re
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple
 
+from ouroboros import dialogue_store as ds, dialogue_positions as dp
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 from ouroboros.deadline_utils import parse_deadline_ts
-from ouroboros.utils import jsonl_generation_signature as _chat_log_signature
 
 _TEXT_ADDRESS = re.compile(r"row:(-?\d+)@(.*)#([0-9a-f]{12,64})")
 _DIGEST = re.compile(r"[0-9a-f]{12,64}")
-_ROTATED_AT = re.compile(r"chat_(\d{8}T\d{6})")
 _HINT_FIELDS = ("task_id", "client_message_id", "type")
+_ADDRESS_PAGE = 500  # rows whose ordinals and legacy hints one read looks up (``dp.ordinals_of`` pages at 500)
 _LINEAGE_FIELDS = ("task_id", "parent_task_id", "root_task_id")
 
 
@@ -51,80 +38,6 @@ def retain_memory_source(context: Any, source_id: str, data: bytes, extension: s
             "arguments": {"root": "runtime_data", "path": path.relative_to(root).as_posix(), "start_line": 1}}}
 
 
-def _ordered_chat_generation_paths(source_path: pathlib.Path) -> List[pathlib.Path]:
-    """Return the physical chat chain, oldest archive to live."""
-    archive_dir = source_path.parent.parent / "archive"
-    try:
-        archives = sorted(archive_dir.glob("chat_*.jsonl"), key=lambda p: p.name)
-    except OSError:
-        archives = []
-    return [*archives, source_path]
-
-
-def _resolve_generation_segments(
-    meta: Dict[str, Any], source_path: pathlib.Path,
-) -> Tuple[List[pathlib.Path], int, bool]:
-    """Generation-aware consolidation cursor (v6.73.0).
-
-    The cursor (``last_consolidated_offset`` + ``chat_log_signature``) points into
-    ONE log generation. Rotation moves that generation to ``archive/chat_<ts>.jsonl``
-    verbatim, so the stored first-line hash locates it in the ordered archive chain
-    and consolidation continues over ``archives[i:] + live`` — the pre-rotation
-    tail (and any number of intervening rotations) is consolidated, never dropped.
-    Returns ``(ordered segments, offset into their concatenation, gap_detected)``;
-    ``gap_detected`` is True only when the stored generation no longer exists
-    anywhere (manual deletion/corruption — archives are never auto-pruned).
-    """
-    last_offset = int(meta.get("last_consolidated_offset", 0) or 0)
-    stored_sig = meta.get("chat_log_signature") or {}
-    stored_first = str(stored_sig.get("first_line_sha256") or "") if isinstance(stored_sig, dict) else ""
-    live_sig = _chat_log_signature(source_path)
-    archives = _ordered_chat_generation_paths(source_path)[:-1]
-    if not stored_first:
-        # Uninitialized cursor. Any archives that already exist rotated BEFORE
-        # the first consolidation ever ran — they are unconsolidated by
-        # definition, so the whole ordered chain is the window (offset 0).
-        # A nonzero offset WITHOUT a signature is an ambiguous pre-signature
-        # legacy shape: keep the historical live-only behavior for it.
-        if last_offset == 0 and archives:
-            return [*archives, source_path], 0, False
-        return [source_path], last_offset, False
-    if stored_first == str(live_sig.get("first_line_sha256") or ""):
-        return [source_path], last_offset, False
-    for index, archive_path in enumerate(archives):
-        sig = _chat_log_signature(archive_path)
-        if str(sig.get("first_line_sha256") or "") == stored_first:
-            return [*archives[index:], source_path], last_offset, False
-    return [source_path], 0, True
-
-
-def _read_chat_entries(path: pathlib.Path) -> List[Dict[str, Any]]:
-    if not path.exists():
-        return []
-    # Full project awareness (v6.32.0): the one identity's consolidated dialogue
-    # (dialogue_blocks.json) is its WHOLE conversation — main + project threads —
-    # because Ouroboros is one awareness/biography across direct chat, project
-    # rooms, and background consciousness (BIBLE P1). Only A2A virtual-transport
-    # ids are excluded (machine-to-machine traffic, not the human dialogue). This
-    # MUST match memory.read_jsonl_tail_after_offset so the shared consolidation
-    # offset indexes the same stream.
-    entries = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if not is_a2a_chat_id(entry.get("chat_id", 1)):
-                entries.append(entry)
-    return entries
-
-
-# --- index-free row addresses ------------------------------------------------------------------
-
 class RowAddressError(LookupError):
     """A range bound that does not resolve; ``resolution`` carries the typed status."""
 
@@ -135,6 +48,9 @@ class RowAddressError(LookupError):
 
 def source_row_id(row: Dict[str, Any]) -> str:
     """Identity of an original raw chat row, before any room/view projection adds fields."""
+    from ouroboros.place_arrivals import SourceProjection
+    if isinstance(row, SourceProjection):
+        row = row.source_body
     payload = json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -146,24 +62,15 @@ def _row_chat_id(row: Dict[str, Any]) -> int:
         return 1  # The legacy missing-address convention of chat_history and room evidence.
 
 
-def chat_chain_paths(root: Any) -> List[pathlib.Path]:
-    return _ordered_chat_generation_paths(pathlib.Path(root) / "logs" / "chat.jsonl")
-
-
-def generation_signatures(root: Any) -> List[Tuple[pathlib.Path, str]]:
-    """Existing generations with their first-line sha256, the ``gen`` of an address hint."""
-    return [(path, str(_chat_log_signature(path).get("first_line_sha256") or ""))
-            for path in chat_chain_paths(root) if path.exists()]
-
-
-def row_address(row: Dict[str, Any], *, gen: Optional[str] = None, line: Optional[int] = None) -> Dict[str, Any]:
+def row_address(row: Dict[str, Any], *, gen: Optional[str] = None, line: Optional[int] = None,
+                sha: Optional[str] = None) -> Dict[str, Any]:
     hint = {key: str(row[key]) for key in _HINT_FIELDS if row.get(key)}
     if gen:
         hint["gen"] = gen
     if line:
         hint["line"] = int(line)
     return {"kind": "chat_row", "chat_id": _row_chat_id(row), "ts": str(row.get("ts") or ""),
-            "row_sha256": source_row_id(row), "hint": hint}
+            "row_sha256": source_row_id(row) if sha is None else sha, "hint": hint}
 
 
 def format_address(address: Dict[str, Any]) -> str:
@@ -190,192 +97,290 @@ def _normalized(address: Any) -> Dict[str, Any]:
     return wanted
 
 
-def _decoded(raw: bytes) -> Optional[Dict[str, Any]]:
-    if not raw.strip():
-        return None
-    try:
-        value = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        return None
-    return value if isinstance(value, dict) else None
+def stored_address(root: Any, entry: ds.Row) -> Dict[str, Any]:
+    """Content identity, with an imported physical hint or a new SQL coordinate."""
+    return address_at(entry.row, entry.seq, ds.legacy_address(root, entry.seq) if entry.stream == "chat" else None)
 
 
-def _stream_rows(sigs: List[Tuple[pathlib.Path, str]]) -> Iterator[Tuple[int, pathlib.Path, str, int, Dict[str, Any], int]]:
-    """``(generation index, path, gen, physical line, row, stream position)`` for every stream row.
+def address_at(row: Dict[str, Any], seq: int, legacy: Any, *, sha: Optional[str] = None) -> Dict[str, Any]:
+    """The stored address of the row at ``seq``: its legacy ``(gen, line)`` hint, else the coordinate. ``row`` may
+    be the row's ``memory_inventory.row_meta`` (it keeps every field an address reads) with its known ``sha``."""
+    address = row_address(row, gen=legacy[0], line=legacy[1], sha=sha) if legacy else row_address(row, sha=sha)
+    if legacy is None:
+        address["hint"]["seq"] = seq
+    return address
 
-    The stream is the legacy cursor's (``_read_chat_entries``): JSON objects outside
-    A2A, in chain order; blank and broken lines are not rows and take no position.
+
+def _resolved(root: Any, entry: ds.Row) -> Dict[str, Any]:
+    address = stored_address(root, entry)
+    hint = address["hint"]
+    generation = ds.legacy_generation(root, hint["gen"]) if hint.get("gen") else None
+    return {"status": "ok", "path": f"archive/{generation['name']}" if generation else "state/dialog.sqlite",
+            "line": hint.get("line"), "gen": hint.get("gen"), "seq": entry.seq, "address": address}
+
+
+def _same_row(row: Dict[str, Any], wanted: Dict[str, Any]) -> bool:
+    return _row_chat_id(row) == wanted["chat_id"] and str(row.get("ts") or "") == wanted["ts"]
+
+
+def _hint_answers(row: Dict[str, Any], wanted: Dict[str, Any]) -> bool:
+    """A row a hint names answers the address when it is the same row and its content identity is the digest."""
+    return _same_row(row, wanted) and source_row_id(row).startswith(wanted["row_sha256"])
+
+
+def resolve_row(root: Any, address: Any, *, stream: str = "chat") -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    """Resolve a content identity, checking hints and then indexed chat/time candidates.
+
+    Missing coverage raises the store's typed importing/failure outcome. A recorded
+    invalid interval is unreadable history, never proof that the row is absent.
     """
-    pos = 0
-    for index, (path, gen) in enumerate(sigs):
-        with path.open("rb") as handle:
-            for line, raw in enumerate(handle, 1):
-                row = _decoded(raw)
-                if row is None or is_a2a_chat_id(row.get("chat_id", 1)):
-                    continue
-                yield index, path, gen, line, row, pos
-                pos += 1
-
-
-def _relative(root: pathlib.Path, path: pathlib.Path) -> str:
-    try:
-        return path.relative_to(root).as_posix()
-    except ValueError:
-        return str(path)
-
-
-def _found(root: pathlib.Path, path: pathlib.Path, gen: str, line: int, row: Dict[str, Any]) -> Dict[str, Any]:
-    return {"status": "ok", "path": _relative(root, path), "line": line, "gen": gen,
-            "address": row_address(row, gen=gen, line=line)}
-
-
-def _same_row(row: Optional[Dict[str, Any]], wanted: Dict[str, Any]) -> bool:
-    return (row is not None and _row_chat_id(row) == wanted["chat_id"]
-            and str(row.get("ts") or "") == wanted["ts"])
-
-
-def _rotated_at(path: pathlib.Path) -> Optional[_dt.datetime]:
-    match = _ROTATED_AT.match(path.name)
-    if match is None:
-        return None  # The live file, or a name that carries no rotation time: always searched.
-    return _dt.datetime.strptime(match[1], "%Y%m%dT%H%M%S").replace(tzinfo=_dt.timezone.utc)
-
-
-def _search(root: pathlib.Path, sigs: List[Tuple[pathlib.Path, str]],
-            wanted: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
-    """Archive rotated at or after the row's second, then forward to the live file.
-
-    When that finds no row with this chat id and ts, the earlier archives are read too,
-    nearest first: a rotation stamps the archive name before it waits for the append
-    lock, so a row appended during that wait can carry a later second than its archive.
-    """
-    moment = parse_deadline_ts(wanted["ts"])
-    first = 0
-    if moment is not None:
-        second = moment.replace(microsecond=0)
-        first = next((i for i, (path, _gen) in enumerate(sigs)
-                      if (_rotated_at(path) or second) >= second), len(sigs))
-    ts = wanted["ts"]
-    # A JSON writer stores a plain ISO timestamp verbatim; only lines holding it are parsed.
-    needle = ts.encode("ascii") if ts and ts.isascii() and ts.isprintable() and not {'"', "\\"} & set(ts) else None
-    matches: List[Tuple[pathlib.Path, str, int, Dict[str, Any]]] = []
-    others: List[Dict[str, Any]] = []
-    unreadable: List[Dict[str, Any]] = []
-
-    def scan(generations: Iterable[Tuple[pathlib.Path, str]]) -> None:
-        for path, gen in generations:
-            try:
-                with path.open("rb") as handle:
-                    for line, raw in enumerate(handle, 1):
-                        if needle is not None and needle not in raw:
-                            continue
-                        row = _decoded(raw)
-                        if row is None:
-                            if raw.strip():
-                                unreadable.append({"path": _relative(root, path), "line": line})
-                            continue
-                        if not _same_row(row, wanted):
-                            continue
-                        if source_row_id(row).startswith(wanted["row_sha256"]):
-                            matches.append((path, gen, line, row))
-                        else:
-                            others.append(row_address(row, gen=gen, line=line))
-            except OSError as exc:
-                unreadable.append({"path": _relative(root, path), "error": type(exc).__name__})
-            if matches:
-                return  # The generation holding the first match closes the search.
-
-    scan(sigs[first:])
-    if not matches and not others:
-        scan(reversed(sigs[:first]))
-    distinct = {}
-    for path, gen, line, row in matches:
-        distinct.setdefault(source_row_id(row), row_address(row, gen=gen, line=line))
+    wanted = _normalized(address)
+    hint = wanted["hint"]
+    hinted = []
+    if type(hint.get("seq")) is int:
+        entry = ds.row_at(root, stream, hint["seq"])
+        hinted = [entry] if entry is not None else []
+    elif stream == "chat" and hint.get("gen") and type(hint.get("line")) is int:
+        hinted = ds.legacy_candidates(root, hint["gen"], hint["line"])
+    for entry in hinted:
+        if _hint_answers(entry.row, wanted):
+            return entry.row, _resolved(root, entry)
+    candidates = ds.rows_by_identity(root, wanted["chat_id"], wanted["ts"], stream=stream)
+    if wanted["chat_id"] == 1:
+        candidates += ds.rows_by_identity(root, None, wanted["ts"], stream=stream)
+    candidates.sort(key=lambda entry: entry.seq)
+    matches = [entry for entry in candidates if source_row_id(entry.row).startswith(wanted["row_sha256"])]
+    distinct = {source_row_id(entry.row): stored_address(root, entry) for entry in matches}
     if len(distinct) > 1:
         return None, {"status": "row_ambiguous", "candidates": list(distinct.values())}
     if matches:
-        path, gen, line, row = matches[0]
-        return row, _found(root, path, gen, line, row)
-    if others:
-        return None, {"status": "row_mismatch", "candidates": others}
-    if unreadable:
-        return None, {"status": "row_unreadable", "unreadable": unreadable}
+        return matches[0].row, _resolved(root, matches[0])
+    ds.require_imported(root, stream)
+    if candidates:
+        return None, {"status": "row_mismatch", "candidates": [stored_address(root, entry) for entry in candidates]}
+    gaps = dp.skipped_between(root, stream)
+    if gaps:
+        return None, {"status": "row_unreadable", "unreadable": [
+            {"path": "state/dialog.sqlite", "offset": gap.seq, "length": gap.length, "kind": gap.kind} for gap in gaps]}
     return None, {"status": "row_missing"}
 
 
-def resolve_row(root: Any, address: Any) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
-    """``(row, {"status": ok|row_missing|row_mismatch|row_ambiguous|row_unreadable, ...})``.
+def rows_by_address(root: Any, addresses: Iterable[Any], *, stream: str = "chat") -> Dict[str, Dict[str, Any]]:
+    """``resolve_row``'s row for each address, keyed by its ``row_sha256`` (as given, or as normalized from
+    the text form); the hinted ones are read together (by SQL coordinate, or by legacy ``(gen, line)``)
+    and accepted on the same identity check, an address its hint does not answer is resolved alone, as
+    ``resolve_row`` goes on to do, and the first address of a key that resolves answers for it."""
+    wanted: Dict[str, list] = {}
+    for address in addresses:
+        norm = _normalized(address)
+        key = str(address["row_sha256"]) if isinstance(address, dict) and "row_sha256" in address else norm["row_sha256"]
+        wanted.setdefault(key, []).append(norm)
+    norms = [norm for listed in wanted.values() for norm in listed]
+    coordinates = [norm["hint"]["seq"] for norm in norms if type(norm["hint"].get("seq")) is int]
+    pairs = [_legacy_hint(norm) for norm in norms if type(norm["hint"].get("seq")) is not int and stream == "chat"
+             and _legacy_hint(norm)]
+    at = ds.rows_at(root, stream, coordinates) if coordinates else {}
+    legacy = ds.legacy_candidates_of(root, pairs) if pairs else {}
+    found: Dict[str, Dict[str, Any]] = {}
+    for key, listed in wanted.items():
+        for norm in listed:
+            seq = norm["hint"].get("seq")
+            hinted = (([at[seq]] if seq in at else []) if type(seq) is int
+                      else legacy.get(_legacy_hint(norm), []) if stream == "chat" else [])
+            row = next((entry.row for entry in hinted if _hint_answers(entry.row, norm)), None)
+            if row is None:
+                row, _found = resolve_row(root, norm, stream=stream)
+            if row is not None:
+                found[key] = row
+                break
+    return found
 
-    The hint only speeds the lookup: a hinted line whose chat_id, ts or hash differ
-    is ignored and the search decides. A malformed address raises ``ValueError``.
-    """
-    root, wanted = pathlib.Path(root), _normalized(address)
-    sigs = generation_signatures(root)
-    gen, line = wanted["hint"].get("gen"), wanted["hint"].get("line")
-    if gen and isinstance(line, int) and line > 0:
-        for path, signature in sigs:
-            if signature != gen:
-                continue
-            try:
-                with path.open("rb") as handle:
-                    row = _decoded(next(itertools.islice(handle, line - 1, None), b""))
-            except OSError:
-                continue
-            if _same_row(row, wanted) and source_row_id(row).startswith(wanted["row_sha256"]):
-                return row, _found(root, path, signature, line, row)
-    return _search(root, sigs, wanted)
+
+def _legacy_hint(norm: Dict[str, Any]) -> Optional[Tuple[str, int]]:
+    hint = norm["hint"]
+    return (str(hint["gen"]), hint["line"]) if hint.get("gen") and type(hint.get("line")) is int else None
 
 
 def stream_position_of(root: Any, address: Any) -> Optional[int]:
-    """The row's position in the legacy cursor's stream; None when it does not resolve or is not a stream row."""
     row, found = resolve_row(root, address)
     if row is None:
         return None
-    for _index, _path, gen, line, _row, pos in _stream_rows(generation_signatures(root)):
-        if gen == found["gen"] and line == found["line"]:
-            return pos
-    return None
+    ordinal = dp.ordinal_at(root, "chat", found["seq"])
+    return None if ordinal is None else ordinal.pos
 
 
-def _bound(root: pathlib.Path, address: Any) -> Optional[Tuple[str, int]]:
+def _bound(root: Any, address: Any) -> Optional[int]:
     if address is None:
         return None
     row, found = resolve_row(root, address)
     if row is None:
         raise RowAddressError(found)
-    return found["gen"], found["line"]
+    return found["seq"]
 
 
-def _rows_between(root: pathlib.Path, start: Optional[Tuple[str, int]], stop: Optional[Tuple[str, int]],
-                  keep: Optional[Callable[[Dict[str, Any]], bool]] = None,
-                  ) -> Iterator[Tuple[Dict[str, Any], Dict[str, Any], int]]:
-    sigs = generation_signatures(root)
-    order: Dict[str, int] = {}
-    for index, (_path, gen) in enumerate(sigs):
-        order.setdefault(gen, index)
-    keys = []
-    for bound in (start, stop):
-        if bound is not None and bound[0] not in order:
-            raise RowAddressError({"status": "row_missing", "gen": bound[0]})
-        keys.append(None if bound is None else (order[bound[0]], bound[1]))
-    first, last = keys
-
-    def rows() -> Iterator[Tuple[Dict[str, Any], Dict[str, Any], int]]:
-        for index, _path, gen, line, row, pos in _stream_rows(sigs):
-            if last is not None and (index, line) > last:
-                return
-            if (first is None or (index, line) >= first) and (keep is None or keep(row)):
-                yield row_address(row, gen=gen, line=line), row, pos
-    return rows()
+def position_boundary(root: Any, position: int) -> int:
+    """A persisted stream ordinal as a byte boundary; the end when at/past EOF."""
+    if position <= 0:
+        return 0
+    if not ds.stream_end(root, "chat"):
+        ds.require_imported(root, "chat")
+        return 0
+    row = dp.row_at_position(root, position)
+    return row.seq if row is not None else ds.stream_end(root, "chat")
 
 
-def iter_rows(root: Any, *, from_addr: Any = None) -> Iterator[Tuple[Dict[str, Any], Dict[str, Any], int]]:
-    """``(address, row, pos)`` for every room in append order, from ``from_addr`` when given.
+def generation_cursor(root: Any, meta: Dict[str, Any]) -> Tuple[int, bool]:
+    """Legacy consolidation cursor -> absolute stream ordinal, and missing-generation fact.
 
-    One pass over the chain; an unresolved ``from_addr`` raises ``RowAddressError`` here.
+    The offset counts non-A2A objects, not bytes. A pre-signature nonzero
+    cursor meant the old live file, whose identity the import ledger does not
+    retain separately. That ambiguous cursor is a gap, never a guessed position.
+    No pending segment can be mistaken for a missing one.
     """
-    root = pathlib.Path(root)
-    return _rows_between(root, _bound(root, from_addr), None)
+    ds.require_imported(root, "chat")
+    signature = meta.get("chat_log_signature") or {}
+    gen = str(signature.get("first_line_sha256") or "") if isinstance(signature, dict) else ""
+    offset = int(meta.get("last_consolidated_offset", 0) or 0)
+    if gen == "dialogue:chat":
+        return offset, False
+    if gen:
+        unit = ds.legacy_generation(root, gen)
+        return (int(unit["pos_base"] or 0) + offset, False) if unit else (0, True)
+    if not offset:
+        return 0, False
+    return 0, True
+
+
+def _addressed(root: Any, entries: Iterable[ds.Row], keep: Optional[Callable[[ds.Row], bool]] = None,
+               ) -> Iterator[Tuple[Dict[str, Any], Dict[str, Any], int]]:
+    """``(address, row, pos)`` of each row ``_paged`` keeps."""
+    for entry, legacy, pos in _paged(root, entries, keep):
+        yield address_at(entry.row, entry.seq, legacy), entry.row, pos
+
+
+def _paged(root: Any, entries: Iterable[ds.Row], keep: Optional[Callable[[ds.Row], bool]] = None,
+           ) -> Iterator[Tuple[ds.Row, Optional[Tuple[str, int]], int]]:
+    """Each row ``keep`` takes (every one without it), outside A2A, with its legacy hint and stream
+    position, looked up a page at a time: the ordinals and the legacy hints of a page's rows in one read
+    each, never one per row (every room's open rows come through here, and Main's view reads them each
+    turn). A page is ``_ADDRESS_PAGE`` source rows examined, kept or not, so a filtered reader that stops
+    early reads at most a page beyond what it used. A source that fails mid-page (a busy store between
+    its own pages) still answers the rows it read first, then fails, as the one-row lookups did."""
+    page, examined, source = [], 0, iter(entries)
+    while True:
+        try:
+            entry = next(source)
+        except StopIteration:
+            break
+        except Exception:
+            yield from _page(root, page)
+            raise
+        examined += 1
+        if not is_a2a_chat_id(entry.row.get("chat_id", 1)) and (keep is None or keep(entry)):
+            page.append(entry)
+        if examined == _ADDRESS_PAGE:
+            yield from _page(root, page)
+            page, examined = [], 0
+    yield from _page(root, page)
+
+
+def _page(root: Any, page: list) -> Iterator[Tuple[ds.Row, Optional[Tuple[str, int]], int]]:
+    if not page:
+        return
+    legacy = ds.legacy_addresses(root, [entry.seq for entry in page if entry.stream == "chat"])
+    try:
+        ordinals = dp.ordinals_of(root, "chat", [entry.seq for entry in page])
+    except ds.StoreBusy:
+        raise
+    except ds.StoreError:
+        ordinals = None  # a unit's counts are unsettled (``dp._uncovered``): the rows before it still answer, one by one
+    for entry in page:
+        ordinal = ordinals.get(entry.seq) if ordinals is not None else dp.ordinal_at(root, "chat", entry.seq)
+        yield entry, legacy.get(entry.seq), ordinal.pos
+
+
+def iter_rows(root: Any, *, from_addr: Any = None, lower: int = 0,
+              upper: Optional[int] = None) -> Iterator[Tuple[Dict[str, Any], Dict[str, Any], int]]:
+    """The whole requested stream, in append order, with the persisted memory positions."""
+    start = _bound(root, from_addr)
+    lower = lower if start is None else start
+    upper = ds.stream_end(root, "chat") if upper is None else upper
+    ds.require_imported(root, "chat", lower=lower, upper=upper)
+    return _addressed(root, ds.iter_rows(root, "chat", lower=lower, upper=upper))
+
+
+def iter_stream(root: Any, *, lower: int, upper: int) -> Iterator[Tuple[ds.Row, Optional[Tuple[str, int]], int]]:
+    """``iter_rows`` keeping each row's stored coordinate: ``(entry, legacy hint, pos)`` for ``address_at``."""
+    ds.require_imported(root, "chat", lower=lower, upper=upper)
+    return _paged(root, ds.iter_rows(root, "chat", lower=lower, upper=upper))
+
+
+_REACH = ("WITH RECURSIVE reach(id) AS (SELECT value FROM json_each(?) UNION "
+          "SELECT task_id FROM tasks JOIN reach ON parent_task_id=reach.id UNION "
+          "SELECT task_id FROM tasks JOIN reach ON root_task_id=reach.id) SELECT json_group_array(id) FROM reach")
+
+
+def _reached(conn: Any, tasks: Iterable[str]) -> set:
+    """The tasks and every task under them (by parent or root), read in ONE step: each step releases the GIL."""
+    return {str(task) for task in json.loads(conn.execute(_REACH, (json.dumps(sorted(tasks)),)).fetchone()[0] or "[]")}
+
+
+def room_rows(root: Any, room_id: Any, *, stream: str = "chat", lower: int = 0,
+              upper: Optional[int] = None, gaps: Optional[set] = None) -> Iterator[ds.Row]:
+    """Indexed candidate union for the canonical room rule, including late task bindings. ``gaps`` collects
+    what a Project's chat rows read so may lack (``room_appearances.read_gaps``) once the read starts."""
+    from ouroboros.project_dialogue import room_membership, source_refs_for_project
+    from ouroboros.projects_registry import list_reserved_projects, RoomResolver
+    from ouroboros.store import open_store, store_path
+
+    chat = int(room_id)
+    projects = {int(project["chat_id"]) for project in list_reserved_projects(root)}
+    refs = source_refs_for_project(root, chat) if chat in projects else []
+    resolver = RoomResolver(root)
+    member = room_membership(chat, projects, refs, resolver)
+    keys = [("chat_id", chat)]
+    identities = {}
+    upper = ds.stream_end(root, stream) if upper is None else upper
+    if chat == 1 and chat not in projects:
+        keys = [("chat_id", room["chat_id"]) for room in ds.rooms(root)
+                if room["chat_id"] not in projects and room["chat_id"] >= 0]
+        keys.append(("chat_id", None))
+    if chat in projects:
+        tasks = {str(tid) for tid, binding in resolver.bindings.items()
+                 if int(binding.get("project_chat_id") or 0) == chat}
+        if tasks and store_path(root).exists():
+            with open_store(root, write=False) as txn:
+                tasks.update(_reached(txn.conn, tasks))
+        keys.extend((field, tid) for tid in sorted(tasks) for field in _LINEAGE_FIELDS)
+        if stream == "chat":  # rows written elsewhere this room also shows (``room_membership.appearance_keys``)
+            shown = [f"room:{chat}", *(f"task:{tid}" for tid in sorted(tasks))]
+            keys.extend(("appearance", key) for key in shown)
+            if gaps is not None:
+                from ouroboros.room_appearances import read_gaps
+
+                gaps.update(read_gaps(root, chat, shown, lower, upper))
+        for ref in refs:
+            if ref.get("client_message_id"):
+                keys.append(("client_message_id", ref["client_message_id"]))
+            elif ref.get("ts"):
+                source_chat = int(ref.get("chat_id") or 1)
+                for cid in ([source_chat, None] if source_chat == 1 else [source_chat]):
+                    for entry in ds.rows_by_identity(root, cid, str(ref["ts"]), stream=stream):
+                        if lower <= entry.seq < upper:
+                            identities[entry.seq] = entry
+            else:
+                # Hash-only legacy references still name a chat; membership checks their text.
+                keys.append(("chat_id", int(ref.get("chat_id") or 1)))
+                if int(ref.get("chat_id") or 1) == 1:
+                    keys.append(("chat_id", None))
+    candidates = ds.iter_probes(root, stream, keys, lower=lower, upper=upper)
+    previous = None
+    for entry in heapq.merge(candidates, sorted(identities.values(), key=lambda row: row.seq), key=lambda row: row.seq):
+        if entry.seq == previous:
+            continue
+        previous = entry.seq
+        if member(_row_chat_id(entry.row), entry.row):
+            yield entry
 
 
 def _period_bounds(period: Any) -> Tuple[Optional[_dt.datetime], Optional[_dt.datetime]]:
@@ -395,34 +400,24 @@ def _period_bounds(period: Any) -> Tuple[Optional[_dt.datetime], Optional[_dt.da
 
 def iter_room_rows(root: Any, room_id: Any, *, from_addr: Any = None, to_addr: Any = None,
                    task_ids: Optional[Iterable[str]] = None, period: Any = None,
+                   lower: int = 0, upper: Optional[int] = None, gaps: Optional[set] = None,
                    ) -> Iterator[Tuple[Dict[str, Any], Dict[str, Any], int]]:
-    """``(address, row, pos)`` of one room: the stream filtered by canonical room membership.
-
-    Membership is ``project_dialogue.room_membership`` with the same registry facts
-    as ``dialogue_evidence.read_room_source``. ``from_addr``/``to_addr`` bound the
-    stream inclusively; ``task_ids`` keeps rows whose task, parent or root task is
-    listed; ``period`` keeps rows whose ``ts`` lies within its inclusive bounds (a
-    row without a readable ``ts`` lies in no period). Every physical row keeps its
-    own address: a redelivered message is not folded into its first copy.
-    """
-    from ouroboros.project_dialogue import room_membership, source_refs_for_project
-    from ouroboros.projects_registry import list_reserved_projects, RoomResolver
-
-    root, chat = pathlib.Path(root), int(room_id)
-    projects = {int(project["chat_id"]) for project in list_reserved_projects(root)}
-    refs = source_refs_for_project(root, chat) if chat in projects else []
-    member = room_membership(chat, projects, refs, RoomResolver(root))
+    """One room's rows with inclusive content-address bounds and original stream positions (``gaps``: ``room_rows``)."""
+    first, last = _bound(root, from_addr), _bound(root, to_addr)
+    lower = lower if first is None else first
+    upper = (ds.stream_end(root, "chat") if upper is None else upper) if last is None else last + 1
+    ds.require_imported(root, "chat", lower=lower, upper=upper)
     tasks = None if task_ids is None else {str(task) for task in task_ids}
-    lower, upper = _period_bounds(period)
+    after, before = _period_bounds(period)
 
-    def keep(row: Dict[str, Any]) -> bool:
-        if not member(_row_chat_id(row), row):
+    def selected(entry: ds.Row) -> bool:
+        row = entry.row
+        if tasks is not None and not tasks.intersection(str(row.get(field) or "") for field in _LINEAGE_FIELDS):
             return False
-        if tasks is not None and not tasks & {str(row.get(field) or "") for field in _LINEAGE_FIELDS}:
-            return False
-        if lower is None and upper is None:
-            return True
-        moment = parse_deadline_ts(row.get("ts"))
-        return moment is not None and (lower is None or moment >= lower) and (upper is None or moment <= upper)
-
-    return _rows_between(root, _bound(root, from_addr), _bound(root, to_addr), keep)
+        if after is not None or before is not None:
+            moment = parse_deadline_ts(row.get("ts"))
+            if moment is None or (after is not None and moment < after) or (before is not None and moment > before):
+                return False
+        return True
+    filtered = tasks is not None or after is not None or before is not None
+    return _addressed(root, room_rows(root, room_id, lower=lower, upper=upper, gaps=gaps), selected if filtered else None)

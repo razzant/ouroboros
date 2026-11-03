@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
     createReviewHydrator,
+    createReviewPresentationController,
     mergeReviewGroup,
     renderReviewsSection,
     reviewReferenceFromRow,
@@ -26,10 +27,13 @@ test('the complete applied source uses the existing artifact download route', ()
     assert.equal(projected.attempts[0].detailRef.url,
         `/api/tasks/root/artifacts/acceptance-${hash}.json?source=${encodeURIComponent(panel().applied_source_ref.path)}`);
     const html = renderReviewsSection([projected]);
-    assert.match(html, /Download full applied review<\/a>/);
-    assert.match(html, / download>/);
-    assert.match(html, /<span>Review panel/);
-    assert.doesNotMatch(html, /Full applied review unavailable/);
+    // A opens the exact saved applied snapshot in the existing reader; its
+    // Download control is there, rather than a second card-level link.
+    assert.match(html, /data-review-read-url="\/api\/tasks\/root\/artifacts\/acceptance-/);
+    assert.match(html, />Read saved applied review<svg[^>]*>[\s\S]*?<\/svg><\/button>/);
+    // The exact applied record stays in the group's Record facts, one labelled line per fact.
+    assert.match(html, /<dt>Review panel panel_1<\/dt><dd>task_acceptance · authority=unspecified · verdict=FAIL/);
+    assert.doesNotMatch(html, /full applied review unavailable/i);
     assert.equal(projected.attempts[0].timestamp, '');
 });
 
@@ -44,9 +48,27 @@ test('legacy, unavailable and malformed sources remain explicitly unavailable', 
         { applied_source_ref: { ...panel().applied_source_ref, size: '75000' } },
     ]) {
         const html = renderReviewsSection([group(panel(overrides))]);
-        assert.match(html, /Full applied review unavailable\./);
-        assert.doesNotMatch(html, /Download full applied review|<a /);
+        assert.match(html, /<span class="review-seat-meta">full applied review unavailable<\/span>/);
+        assert.doesNotMatch(html, /data-review-read-url|<a /);
     }
+});
+
+test('the applied-source Read control hands the exact URL to the existing reader', () => {
+    let click;
+    const opened = [];
+    const controller = createReviewPresentationController({
+        host: { addEventListener(_event, handler) { click = handler; } },
+        onRead: (...args) => opened.push(args),
+    });
+    const url = group(panel()).attempts[0].detailRef.url;
+    const opener = { dataset: { reviewReadUrl: url, reviewReadName: 'Saved applied review' } };
+    click({ target: { closest: selector => selector === '[data-review-read-url]' ? opener : null } });
+    assert.equal(opened.length, 1);
+    assert.equal(opened[0][0].reader.url, url);
+    assert.equal(opened[0][0].source.durable, url);
+    assert.equal(opened[0][0].mime, 'text/plain');
+    assert.equal(opened[0][1], opener);
+    assert.equal(controller.groups.size, 0, 'reading dispatches no new review');
 });
 
 test('retry identity uses an actual task attempt without inventing one for legacy rows', () => {
@@ -107,7 +129,7 @@ test('source handles use the bound-source selector on the existing download rout
     const projected = group(panel({ applied_source_ref: ref }));
     assert.equal(projected.attempts[0].detailRef.url,
         `/api/tasks/root/artifacts/acceptance-${hash}.json?source=${encodeURIComponent(path)}`);
-    assert.match(renderReviewsSection([projected]), /Download full applied review/);
+    assert.match(renderReviewsSection([projected]), />Read saved applied review<svg/);
     for (const bad of [
         { ...ref, path: 'source_handles/context_checkpoints/../private.json' },
         { ...ref, path: 'source_handles/other/private.json' },

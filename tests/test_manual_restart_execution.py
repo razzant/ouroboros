@@ -1,6 +1,7 @@
 """The owner's Restart: the checkout gate first, then a clean stop of this generation's
 own work, then the re-exec — never deferred once the gate has passed."""
 
+import contextlib
 import inspect
 import json
 import logging
@@ -40,6 +41,12 @@ def _bridge():
     return Bridge()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_owner_stop_fact(monkeypatch):
+    """Each Restart here begins its own stop; that process-local fact never reaches another test."""
+    monkeypatch.setattr(server_restart, "_OWNER_STOP_BEGAN", threading.Event())
+
+
 @pytest.fixture
 def restart_root(tmp_path, monkeypatch):
     import server
@@ -73,7 +80,8 @@ def owners(restart_root, monkeypatch):
 
 def _ctx(calls, *, kill=None, checkout=None, running=None, messages=None):
     def default_kill(**kw):
-        flags = (server_restart.DATA_DIR / "state" / "owner_restart_no_resume.flag").exists()
+        from ouroboros.delegate_recovery import active_restart_transaction
+        flags = active_restart_transaction(server_restart.DATA_DIR).get("door") == "owner_restart"
         calls.append(("kill", kw, flags))
         return True
 
@@ -122,11 +130,43 @@ def test_restart_checks_out_first_then_stops_owned_work_in_order(owners, restart
     assert kill[1]["reconcile_delegate_custody"] is False, "kill-path reconcile would ensure (start) the daemon"
     assert kill[2] is True, "the durable no-resume intent precedes the stop"
     assert reconcile == ("reconcile", set(), owned.read_owned_gateway, None)
-    assert (restart_root / "state" / "owner_restart_no_resume.flag").read_text() == "owner_restart"
-    assert (restart_root / "state" / "panic_stop.flag").read_text() == "owner_restart_no_resume"
+    from ouroboros.delegate_recovery import active_restart_transaction
+    assert active_restart_transaction(restart_root)["door"] == "owner_restart"
+    assert not (restart_root / "state" / "panic_stop.flag").exists()
     assert messages == ["♻️ Restarting.", STOP_NOTICE]
     # Nothing to stop on the empty root: the daemon stop is quiet, not a diagnostic.
     assert _rows(restart_root) == [] and not [r for r in caplog.records if r.levelno >= logging.CRITICAL]
+
+
+def test_restart_pauses_admission_before_it_names_returns(owners, restart_root, monkeypatch):
+    """The stop's first step: a launch or Resume already writing its marks hands over to the still-running
+    pool (``pause_admission``) before the returns are named, the cancels recorded and the pool retired."""
+    from supervisor import workspace_preparation
+
+    from ouroboros.delegate_recovery import _active_restart_transaction_path
+    flag = _active_restart_transaction_path(restart_root)
+    monkeypatch.setattr(workspace_preparation, "pause_admission",
+                        lambda timeout=None: owners.calls.append(("pause", flag.exists())) or True)
+    real_returns = server_restart._prepare_owner_restart_returns
+    monkeypatch.setattr(server_restart, "_prepare_owner_restart_returns",
+                        lambda ctx: owners.calls.append(("returns",)) or real_returns(ctx))
+    assert _restart(_ctx(owners.calls), monkeypatch) == [True]
+    order = [c[0] for c in owners.calls]
+    assert order.index("checkout") < order.index("pause") < order.index("returns") < order.index("kill")
+    # Before the Restart's own follow-up restriction exists, which would refuse a committed launch's put.
+    assert ("pause", False) in owners.calls and order.count("pause") == 1
+
+
+def test_a_restart_whose_flag_cannot_be_written_reopens_admission(owners, restart_root, monkeypatch):
+    from supervisor import workspace_preparation
+
+    events = []
+    monkeypatch.setattr(workspace_preparation, "pause_admission", lambda timeout=None: events.append("pause") or True)
+    monkeypatch.setattr(workspace_preparation, "resume_admission", lambda: events.append("resume"))
+    monkeypatch.setattr("supervisor.queue_schedules.schedule_transaction",
+                        lambda _root: (_ for _ in ()).throw(OSError("read-only state")))
+    assert _restart(_ctx(owners.calls), monkeypatch) == []
+    assert events == ["pause", "resume"] and "kill" not in [c[0] for c in owners.calls]
 
 
 def test_assisted_update_refusal_still_refuses_before_any_stop(owners, restart_root, monkeypatch):
@@ -167,7 +207,8 @@ def test_unconfirmed_worker_shutdown_is_a_diagnostic_and_the_restart_proceeds(
         assert _restart(_ctx(owners.calls, kill=kill, messages=messages), monkeypatch) == [True]
     assert "worker shutdown" in caplog.text.lower()
     assert [c[0] for c in owners.calls][-2:] == ["reconcile", "daemon_stop"]
-    assert (restart_root / "state" / "owner_restart_no_resume.flag").exists()
+    from ouroboros.delegate_recovery import active_restart_transaction
+    assert active_restart_transaction(restart_root)["door"] == "owner_restart"
     assert messages == ["♻️ Restarting.", STOP_NOTICE]
 
 
@@ -184,6 +225,40 @@ def test_unconfirmed_daemon_stop_is_reported_and_the_restart_proceeds(owners, re
     assert rows[-1]["type"] == "process_stop_unconfirmed" and rows[-1]["purpose"] == owned.CUSTODY_PURPOSE
     assert owners.calls[-1] == ("daemon_stop",)
     assert messages == ["♻️ Restarting.", STOP_NOTICE], "one honest message; never 'deferred'"
+
+
+def test_restart_teardown_still_stops_a_newer_engine_after_an_unconfirmed_stop(owners, restart_root, monkeypatch):
+    """Planned doors keep a newer engine on a lower pin; the owner's Restart, whose own stop could not
+    confirm, still gets the teardown's attested stop (the fact its own stop sets tells the two apart)."""
+    owned._write_ownership_marker()
+    owned.owned_descriptor_path().parent.mkdir(parents=True, exist_ok=True)
+    owned.owned_descriptor_path().write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(owners.manager, "_classify_liveness", lambda **kw: (object(), "running", ""))
+    assert not server_restart._OWNER_STOP_BEGAN.is_set()
+    assert _restart(_ctx(owners.calls), monkeypatch) == [True]
+    assert server_restart._OWNER_STOP_BEGAN.is_set()
+    monkeypatch.setattr(claudexor_runtime, "load_runtime_pin",
+                        lambda path=None: SimpleNamespace(version="4.3.0", build_sha="a" * 40))
+    monkeypatch.setattr(owned, "read_owned_gateway", lambda: contextlib.nullcontext(
+        SimpleNamespace(engine_version="4.3.1", engine_build_sha="b" * 40)))
+    server_restart._stop_owned_daemon_for_new_pin()  # the lifespan teardown's check
+    assert [c[0] for c in owners.calls].count("daemon_stop") == 2
+
+
+def test_an_abandoned_restart_does_not_keep_its_stop_fact(owners, restart_root, monkeypatch):
+    """A BaseException inside the stop returns the queue and keeps this generation admitting: a later
+    planned door must then keep a newer engine again."""
+    reopened = []
+    monkeypatch.setattr("supervisor.queue.reopen_queue_returns", lambda door: reopened.append(door))
+    monkeypatch.setattr(server_restart, "_safe_restart_serialized", _gate)
+
+    def interrupted(**kw):
+        assert server_restart._OWNER_STOP_BEGAN.is_set()
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        server_restart._perform_owner_restart(_ctx(owners.calls, kill=interrupted))
+    assert reopened == ["owner_restart"] and not server_restart._OWNER_STOP_BEGAN.is_set()
 
 
 def test_raising_daemon_stop_is_recorded_like_panic_and_the_restart_proceeds(owners, restart_root, monkeypatch):
@@ -258,10 +333,14 @@ def test_warmup_is_one_background_ensure_for_a_provisioned_home_only(restart_roo
         assert owned.warm_owned_daemon() is True
         _join_warmup_thread()
     assert "warmup did not reach readiness" in caplog.text
-    # The lifespan makes exactly this call, guarded like every other real-data side effect.
+    # The boot coordinator's services step makes exactly this call, guarded like every other
+    # real-data side effect: the lifespan passes ``warm_daemon=live`` (``not pytest_default_real_data_dir``).
+    from ouroboros import server_boot
+
+    services = inspect.getsource(server_boot.start_background_services)
+    assert services.index("if warm_daemon:") < services.index("warm_owned_daemon()")
     lifespan = inspect.getsource(server.lifespan)
-    assert "warm_owned_daemon()" in lifespan
-    assert lifespan.index("if not pytest_default_real_data_dir:") < lifespan.index("warm_owned_daemon()")
+    assert "live = not pytest_default_real_data_dir" in lifespan and "warm_daemon=live" in lifespan
 
 
 @pytest.mark.serial

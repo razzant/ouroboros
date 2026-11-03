@@ -437,30 +437,6 @@ def custom_tool_error_continuation(
     return continuation
 
 
-def call_with_custom_validation_continuation(
-    call: Callable[[list[Dict[str, Any]]], Tuple[Mapping[str, Any], MutableMapping[str, Any]]],
-    messages: Sequence[Mapping[str, Any]],
-) -> Tuple[Dict[str, Any], Tuple[MutableMapping[str, Any], ...], bool]:
-    """Run one structured call plus at most one custom schema-error correction."""
-    request_messages = [copy.deepcopy(dict(item)) for item in messages]
-    observed_usage = []
-    message: Dict[str, Any] = {}
-    for correction in range(2):
-        raw_message, usage = call(request_messages)
-        message = dict(raw_message)
-        receipts = pop_custom_validation_receipts(
-            usage,
-            message.get("tool_calls") or [],
-        )
-        observed_usage.append(usage)
-        invalid = any(not receipt.allows_execution for receipt in receipts)
-        if not invalid:
-            return message, tuple(observed_usage), True
-        if correction == 0:
-            request_messages += custom_tool_error_continuation(message, receipts)
-    return message, tuple(observed_usage), False
-
-
 def direct_openai_context_projections(
     messages: Sequence[Mapping[str, Any]],
     tools: Optional[Sequence[Mapping[str, Any]]],
@@ -526,7 +502,6 @@ __all__ = (
     "custom_tool_argument_error",
     "custom_tool_error_continuation",
     "custom_validation_by_call_id",
-    "call_with_custom_validation_continuation",
     "direct_openai_context_projections",
     "exact_tool_dialect_rejection",
     "is_direct_openai_ladder_candidate",

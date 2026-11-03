@@ -12,7 +12,7 @@ import pytest
 from ouroboros import task_results
 from ouroboros.tools import plan_review_artifacts as artifacts, plan_spec
 from tests import _legacy_plan_shared as legacy
-from tests._store_shared import read_result
+from tests._store_shared import read_result, remove_store_tree
 
 
 def _spec(**fields):
@@ -73,8 +73,8 @@ def test_large_operative_values_persist_once_and_rehydrate_for_consumers(tmp_pat
 @pytest.mark.parametrize("damage", ["missing", "changed"])
 def test_unavailable_full_spec_preserves_paid_state_and_never_becomes_empty_claims(tmp_path, damage, source):
     from ouroboros.artifacts import task_artifact_dir_path
-    from ouroboros.owner_hurry import force_plan_decision
-    from ouroboros.review_evidence import build_task_acceptance_evidence
+    from ouroboros.owner_hurry import plan_gate_decision
+    from ouroboros.review_evidence_sections import _accept_effective_claims
 
     _, wave = _record(tmp_path, _spec(goal="Deliver", acceptance_claims=[_claim("required criterion")]))
     path = task_artifact_dir_path(tmp_path, "large-plan", create=False) / wave[source]["path"]
@@ -87,9 +87,10 @@ def test_unavailable_full_spec_preserves_paid_state_and_never_becomes_empty_clai
         task_results.load_plan_review_state(tmp_path, "large-plan")
     ctx = SimpleNamespace(task_id="large-plan", task_metadata={},
                           task_contract={"objective": "Deliver"}, drive_root=tmp_path)
+    # The claims binder the result review reads raises; it never answers with an empty bar.
     with pytest.raises(artifacts.PlanReviewSourceUnavailable):
-        build_task_acceptance_evidence(ctx, drive_root=tmp_path, task_id="large-plan")
-    assert force_plan_decision(ctx, {}, enforcement="blocking")["allow"] is False
+        _accept_effective_claims(ctx, ctx.task_contract, tmp_path, "large-plan")
+    assert plan_gate_decision(ctx, {}, enforcement="blocking")["allow"] is False
 
 
 def test_legacy_cut_without_source_keeps_its_gap(tmp_path):
@@ -119,7 +120,6 @@ def test_operative_example_text_keeps_its_reviewed_identity(tmp_path, example):
 
 @pytest.mark.parametrize("compact", [False, True])
 def test_spec_source_is_in_the_existing_child_promotion_closure(tmp_path, compact):
-    import shutil
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.observability import promote_child_task_refs
 
@@ -134,7 +134,7 @@ def test_spec_source_is_in_the_existing_child_promotion_closure(tmp_path, compac
     copied_wave = copied["plan_review_state"]["waves"][0]
     copied_ref = copied_wave["spec_source_ref"]
     assert copied_ref["sha256"] == ref["sha256"]
-    shutil.rmtree(child)
+    remove_store_tree(child)
     assert json.loads(read_actor_source_bytes(parent, "large-plan", copied_ref)) == spec
     assert artifacts.read_wave(parent, "large-plan", copied_wave["wave_artifact"])["spec"] == spec
 

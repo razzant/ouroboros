@@ -196,31 +196,6 @@ def test_lifecycle_queue_endpoint_does_not_reconcile_review_jobs(tmp_path, monke
     assert reconcile_calls == []
 
 
-def test_skill_reconcile_schedule_resync_runs_on_worker_thread(tmp_path, monkeypatch):
-    import ouroboros.extension_loader as extension_loader
-    import ouroboros.gateway.extensions as extensions_api
-    import supervisor.queue as supervisor_queue
-
-    (tmp_path / "drive").mkdir()
-    (tmp_path / "repo").mkdir()
-    loop_thread = threading.get_ident()
-    resync_threads = []
-
-    def reconcile_extension(*_args, **_kwargs):
-        return {"action": "extension_loaded", "reason": "ok", "live_loaded": True, "load_error": ""}
-
-    def resync_skill_schedules(*_args, **_kwargs):
-        resync_threads.append(threading.get_ident())
-
-    monkeypatch.setattr(extension_loader, "reconcile_extension", reconcile_extension)
-    monkeypatch.setattr(supervisor_queue, "resync_skill_schedules", resync_skill_schedules)
-
-    response = asyncio.run(extensions_api.api_skill_reconcile(_skill_request(tmp_path)))
-
-    assert _decode_response(response)["extension_action"] == "extension_loaded"
-    assert resync_threads and all(thread_id != loop_thread for thread_id in resync_threads)
-
-
 def test_dispatch_cost_disclosure_runs_on_worker_thread_and_still_refuses_with_502(tmp_path, monkeypatch):
     import ouroboros.extension_loader as extension_loader
     import ouroboros.extension_process_runner as extension_process_runner

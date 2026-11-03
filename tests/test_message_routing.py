@@ -5,6 +5,7 @@ per-task mailbox, and forward_to_worker tool.
 Run: pytest tests/test_message_routing.py -v
 """
 
+import contextlib
 import json
 import pathlib
 import sys
@@ -13,6 +14,23 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+from tests._store_shared import release_store_handles  # noqa: E402
+
+
+@contextlib.contextmanager
+def _temporary_drives():
+    """A temporary folder for the test's drives, removed after the store lets go of it.
+
+    The store keeps this thread's connection to each drive's ``state/current.sqlite`` open
+    (#1982) and Windows refuses to delete an open file (WinError 32), so the handles under the
+    folder are released first, as the product does before it moves or removes a drive.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            yield tmp
+        finally:
+            release_store_handles(tmp)
 
 
 class TestOwnerInjectPerTask(unittest.TestCase):
@@ -23,6 +41,7 @@ class TestOwnerInjectPerTask(unittest.TestCase):
         self.drive_root = pathlib.Path(self._tmpdir.name)
 
     def tearDown(self):
+        release_store_handles(self.drive_root)  # see _temporary_drives
         self._tmpdir.cleanup()
 
     def test_write_creates_per_task_file(self):
@@ -229,20 +248,23 @@ class TestForwardToWorkerTool(unittest.TestCase):
         from ouroboros.task_results import STATUS_RUNNING, STATUS_SCHEDULED, write_task_result
         from ouroboros.tools.core import _forward_to_worker
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temporary_drives() as tmp:
             parent_drive = pathlib.Path(tmp) / "parent"
             child_drive = pathlib.Path(tmp) / "child"
             queued_drive = pathlib.Path(tmp) / "queued-child"
             child_drive.mkdir(parents=True)
             write_task_result(parent_drive, "child1", STATUS_RUNNING, child_drive_root=str(child_drive), parent_task_id="parent1", root_task_id="parent1", result="running")
             write_task_result(parent_drive, "queued1", STATUS_SCHEDULED, child_drive_root=str(queued_drive), parent_task_id="parent1", root_task_id="parent1", result="queued")
-            write_task_result(parent_drive, "asked1", "requested", parent_task_id="parent1", root_task_id="parent1", result="requested")
+            asked_drive = pathlib.Path(tmp) / "asked-child"
+            write_task_result(parent_drive, "asked1", "requested", child_drive_root=str(asked_drive), parent_task_id="parent1", root_task_id="parent1", result="requested")
+            write_task_result(parent_drive, "ended1", "completed", child_drive_root=str(asked_drive), parent_task_id="parent1", root_task_id="parent1", result="done")
             write_task_result(parent_drive, "otherchild", STATUS_RUNNING, parent_task_id="otherparent", root_task_id="otherroot", result="running")
             ctx = SimpleNamespace(drive_root=parent_drive, task_id="parent1")
 
             output = _forward_to_worker(ctx, "child1", "continue")
             queued = _forward_to_worker(ctx, "queued1", "read this when you start")
-            blocked = _forward_to_worker(ctx, "asked1", "not admitted yet")
+            requested = _forward_to_worker(ctx, "asked1", "read this once admitted")
+            blocked = _forward_to_worker(ctx, "ended1", "too late")
             forbidden = _forward_to_worker(ctx, "otherchild", "wrong root")
 
             self.assertIn("Message forwarded", output)
@@ -251,7 +273,13 @@ class TestForwardToWorkerTool(unittest.TestCase):
             self.assertIn("has not started, so nothing has read it", queued)
             queued_mailbox = queued_drive / "memory" / "owner_mailbox" / "queued1.jsonl"
             self.assertIn("read this when you start", queued_mailbox.read_text(encoding="utf-8"))
+            # A requested child's mailbox already exists in its recorded drive: the message waits
+            # there for its start (never dropped); a settled task still refuses.
+            self.assertIn("(queued)", requested)
+            asked_mailbox = asked_drive / "memory" / "owner_mailbox" / "asked1.jsonl"
+            self.assertIn("read this once admitted", asked_mailbox.read_text(encoding="utf-8"))
             self.assertIn("TASK_NOT_ACTIVE", blocked)
+            self.assertFalse((asked_drive / "memory" / "owner_mailbox" / "ended1.jsonl").exists())
             self.assertIn("TASK_FORBIDDEN", forbidden)
             self.assertFalse((parent_drive / "memory" / "owner_mailbox" / "child1.jsonl").exists())
             mailbox = child_drive / "memory" / "owner_mailbox" / "child1.jsonl"
@@ -267,7 +295,7 @@ class TestForwardToWorkerTool(unittest.TestCase):
         from ouroboros.task_results import STATUS_RUNNING, write_task_result
         from ouroboros.tools.core import _forward_to_worker
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temporary_drives() as tmp:
             parent_drive = pathlib.Path(tmp) / "parent"
             write_task_result(
                 parent_drive, "child2", STATUS_RUNNING,
@@ -322,7 +350,7 @@ class TestForwardToWorkerTool(unittest.TestCase):
         from ouroboros.owner_mailbox import drain_owner_entries
         from ouroboros.tools.core import _forward_to_worker
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temporary_drives() as tmp:
             canonical, sib_drive = self._peer_tree(tmp)
             out = _forward_to_worker(self._caller(canonical), "sib", "my objection to your draft")
 
@@ -341,7 +369,7 @@ class TestForwardToWorkerTool(unittest.TestCase):
         from ouroboros.owner_mailbox import drain_owner_entries
         from ouroboros.tools.core import _forward_to_worker
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temporary_drives() as tmp:
             canonical, _ = self._peer_tree(tmp)
             out = _forward_to_worker(self._caller(canonical), "root1", "interim position, not my final")
 
@@ -360,7 +388,7 @@ class TestForwardToWorkerTool(unittest.TestCase):
         from ouroboros.owner_mailbox import drain_owner_entries
         from ouroboros.tools.core import _forward_to_worker
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temporary_drives() as tmp:
             canonical, _ = self._peer_tree(tmp)
             out = _forward_to_worker(self._caller(canonical), "me", "not a peer")
             self.assertIn("TASK_FORBIDDEN", out)
@@ -371,7 +399,7 @@ class TestForwardToWorkerTool(unittest.TestCase):
         from ouroboros.owner_mailbox import drain_owner_entries
         from ouroboros.tools.core import _forward_to_worker
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temporary_drives() as tmp:
             canonical, _ = self._peer_tree(tmp)
             write_task_result(canonical, "root1", STATUS_RUNNING,
                               root_task_id=None, _is_direct_chat=True)
@@ -384,7 +412,7 @@ class TestForwardToWorkerTool(unittest.TestCase):
         from ouroboros.owner_mailbox import drain_owner_entries
         from ouroboros.tools.core import _forward_to_worker
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temporary_drives() as tmp:
             canonical, sib_drive = self._peer_tree(tmp)
             ctx = self._caller(canonical, metadata=False)  # no task_metadata at all
 
@@ -401,7 +429,7 @@ class TestForwardToWorkerTool(unittest.TestCase):
         from ouroboros.owner_mailbox import drain_owner_entries
         from ouroboros.tools.core import _forward_to_worker
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temporary_drives() as tmp:
             canonical, _ = self._peer_tree(tmp)
             ctx = self._caller(canonical)
 
@@ -436,7 +464,7 @@ class TestForwardToWorkerTool(unittest.TestCase):
         from ouroboros.owner_mailbox import drain_owner_entries
         from ouroboros.tools.core import _forward_to_worker
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temporary_drives() as tmp:
             canonical, _ = self._peer_tree(tmp)
             out = _forward_to_worker(self._grandchild(canonical), "root1", "a grandchild's interim position")
 
@@ -464,7 +492,7 @@ class TestForwardToWorkerTool(unittest.TestCase):
         from ouroboros.task_results import STATUS_RUNNING, write_task_result
         from ouroboros.tools.core import _forward_to_worker
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temporary_drives() as tmp:
             canonical, sib_drive = self._peer_tree(tmp)
             write_task_result(canonical, "cont", STATUS_RUNNING, root_task_id="root1", result="running")
             ctx = SimpleNamespace(drive_root=canonical, task_id="cont",
@@ -486,7 +514,7 @@ class TestForwardToWorkerTool(unittest.TestCase):
         from ouroboros.task_results import STATUS_RUNNING, write_task_result
         from ouroboros.tools.core import _forward_to_worker
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temporary_drives() as tmp:
             canonical = pathlib.Path(tmp) / "canonical"
             write_task_result(canonical, "root0", STATUS_RUNNING, root_task_id=None, _is_direct_chat=True, result="running")
             write_task_result(canonical, "c0", STATUS_RUNNING, parent_task_id="root0", root_task_id="root0", result="running")
@@ -509,7 +537,7 @@ class TestForwardToWorkerTool(unittest.TestCase):
         from ouroboros.owner_mailbox import drain_owner_entries
         from ouroboros.tools.core import _forward_to_worker
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temporary_drives() as tmp:
             canonical, _ = self._peer_tree(tmp)
             refused = _forward_to_worker(self._caller(canonical), "nephew", "relayed", relayed_from_task_id="kid")
 
@@ -525,7 +553,7 @@ class TestForwardToWorkerTool(unittest.TestCase):
         from ouroboros.task_results import STATUS_RUNNING, write_task_result
         from ouroboros.tools.core import _forward_to_worker
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temporary_drives() as tmp:
             canonical, _ = self._peer_tree(tmp)
             # The observation is derived by the effective reader from the Presence record
             # (a direct-chat row whose metadata carries the presence binding), never stored.
@@ -548,7 +576,7 @@ class TestForwardToWorkerTool(unittest.TestCase):
         from ouroboros.owner_mailbox import drain_owner_entries
         from ouroboros.tools.core import _forward_to_worker
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temporary_drives() as tmp:
             canonical, sib_drive = self._peer_tree(tmp)
             ctx = self._caller(canonical)
 
@@ -568,7 +596,7 @@ class TestForwardToWorkerTool(unittest.TestCase):
         from ouroboros.owner_mailbox import drain_owner_entries
         from ouroboros.tools.core import _forward_to_worker
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temporary_drives() as tmp:
             canonical, _ = self._peer_tree(tmp)
             sender_drive = pathlib.Path(tmp) / "me-execution"
             sender_drive.mkdir()
@@ -588,7 +616,7 @@ class TestForwardToWorkerTool(unittest.TestCase):
         from ouroboros.owner_mailbox import TASK_MESSAGE_MAX_CHARS
         from ouroboros.tools.core import _forward_to_worker
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temporary_drives() as tmp:
             canonical, sib_drive = self._peer_tree(tmp)
             ctx = self._caller(canonical)
             self.assertEqual(TASK_MESSAGE_MAX_CHARS, 8000)
@@ -612,7 +640,7 @@ class TestForwardToWorkerTool(unittest.TestCase):
         from ouroboros.owner_mailbox import drain_owner_entries
         from ouroboros.tools.core import _forward_to_worker
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temporary_drives() as tmp:
             canonical, sib_drive = self._peer_tree(tmp)
             projection = canonical / "state" / "cancel_intents.json"
             projection.parent.mkdir(parents=True, exist_ok=True)
@@ -636,7 +664,7 @@ class TestForwardToWorkerTool(unittest.TestCase):
         from ouroboros.owner_mailbox import drain_owner_entries
         from ouroboros.tools.core import _forward_to_worker
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temporary_drives() as tmp:
             canonical, sib_drive = self._peer_tree(tmp)
             request_cancel(canonical, "sib", reason="tearing down")
 

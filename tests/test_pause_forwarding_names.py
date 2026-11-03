@@ -100,7 +100,7 @@ def test_argument_and_body_errors_keep_their_meaning(probe):
     assert len(calls) == 1  # the body ran once; nothing was retried
 
 
-def test_promote_chat_to_task_receives_its_public_source(tmp_path, probe, monkeypatch):
+def test_start_task_receives_its_public_source(tmp_path, probe, monkeypatch):
     from ouroboros.tools import control_routing
 
     registry, _calls = probe
@@ -109,8 +109,8 @@ def test_promote_chat_to_task_receives_its_public_source(tmp_path, probe, monkey
     monkeypatch.setattr(control_routing, "_emit_and_wait_for_routing",
                         lambda _ctx, evt: events.append(dict(evt)) or ("live", {"status": "scheduled"}))
 
-    result = registry.execute_result("promote_chat_to_task", {"objective": "Fix the clone", "title": "Clone fix",
-                                                             "source": GIT_URL, "predecessor_task_id": ""})
+    result = registry.execute_result("start_task", {"objective": "Fix the clone", "title": "Clone fix",
+                                                  "source": GIT_URL})
 
     assert "got multiple values" not in result.text, result.text
     assert "accepted and durably scheduled" in result.text, result.text

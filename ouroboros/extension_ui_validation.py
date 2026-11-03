@@ -35,6 +35,10 @@ _METRIC_TONES = {"neutral", "info", "success", "warning", "danger"}
 _CALLOUT_TONES = {"info", "success", "warning", "danger"}
 _TABLE_PRESENTATIONS = {"text", "number", "status", "link"}
 _SETTINGS_COMPONENTS = {"form", "action", "markdown", "json"}
+# A living-message card (``tools/cards.py``) has no skill route, live source or download.
+_CARD_FORBIDDEN_TYPES = {"poll", "stream", "subscription", "file"}
+_CARD_ROUTE_KEYS = ("route", "api_route", "route_prefix", "on_move")
+_CARD_ACTION_ID = re.compile(r"[a-z0-9_]{1,40}")
 _DECLARATIVE_MAX_DEPTH = 8
 _DECLARATIVE_MAX_NODES = 256
 _GRID_COLUMNS_MAX = 4
@@ -264,7 +268,9 @@ def _validate_component(
         raise ExtensionRegistrationError(
             f"{path}.on_move is not allowed inside subscription.render"
         )
-    if component_type in {"form", "action", "poll", "stream"} and not _text(component.get("route") or component.get("api_route")):
+    if state.get("card") is not None:
+        _validate_card_component(component, component_type, path=path, actions=state["card"])
+    elif component_type in {"form", "action", "poll", "stream"} and not _text(component.get("route") or component.get("api_route")):
         raise ExtensionRegistrationError(f"{path} requires route or api_route")
     if component_type == "subscription":
         event_name = _text(component.get("event") or component.get("message_type"))
@@ -415,12 +421,72 @@ def _validate_component(
             )
 
 
+def _validate_card_component(
+    component: Dict[str, Any], component_type: str, *, path: str, actions: Dict[str, Any],
+) -> None:
+    """CARD mode: a message has no skill route, so commit controls bind ``submit: {id, once?}``."""
+    if component_type in _CARD_FORBIDDEN_TYPES:
+        raise ExtensionRegistrationError(
+            f"{path} type {component_type!r} is not available in a card (no live source or download)"
+        )
+    items = component.get("items") if component_type == "gallery" and isinstance(component.get("items"), list) else []
+    for where, node in ((path, component), *((f"{path}.items[{i}]", item) for i, item in enumerate(items))):
+        for key in _CARD_ROUTE_KEYS:
+            if isinstance(node, dict) and key in node:
+                raise ExtensionRegistrationError(f"{where}.{key} is not available in a card: a card has no skill route")
+        if node is not component and isinstance(node, dict) and _text(node.get("type")) == "file":
+            raise ExtensionRegistrationError(f"{where}.type 'file' is not available in a card (no download)")
+    if component_type not in {"action", "form"}:
+        if "submit" in component:
+            raise ExtensionRegistrationError(f"{path}.submit binds only action and form components")
+        return
+    submit = component.get("submit")
+    action_id = submit.get("id") if isinstance(submit, dict) else None
+    if not isinstance(action_id, str) or not _CARD_ACTION_ID.fullmatch(action_id):
+        raise ExtensionRegistrationError(f"{path}.submit.id is required: [a-z0-9_]{{1,40}}, unique in the card")
+    if action_id in actions:
+        raise ExtensionRegistrationError(
+            f"{path}.submit.id duplicates {action_id!r} first used at {actions[action_id]['path']}"
+        )
+    if not isinstance(submit.get("once", False), bool):
+        raise ExtensionRegistrationError(f"{path}.submit.once must be boolean")
+    fields = component.get("fields") if isinstance(component.get("fields"), list) else []
+    actions[action_id] = {
+        "path": path, "kind": component_type, "once": submit.get("once", False),
+        # The label the renderer draws (widgets.js defaults), so a press is named as the owner saw it.
+        "label": str(component.get("label") or "Run") if component_type == "action"
+        else str(component.get("submit_label") or component.get("title") or component.get("label") or "Submit"),
+        **({"fields": [_text(f.get("name")) for f in fields if isinstance(f, dict)]} if component_type == "form" else {}),
+    }
+
+
+def validate_card_components(components: Any) -> Dict[str, Any]:
+    """Validate a living-message card's declarative tree and index its commit controls.
+
+    The widget catalog, depth and node bounds apply as for a declarative widget; a card
+    additionally has no ``poll``/``stream``/``subscription``/``file`` and no route anywhere,
+    and each ``action``/``form`` binds ``submit: {id, once?}`` instead. Returns
+    ``{"components": <clean copy>, "actions": {id: {kind, label, once, fields?}}}``; an
+    ``ExtensionRegistrationError`` names the exact path of the first problem.
+    """
+    if not isinstance(components, list) or not components:
+        raise ExtensionRegistrationError("components must be a non-empty list")
+    clean = copy.deepcopy(components)
+    actions: Dict[str, Any] = {}
+    _validate_components(clean, path="components", depth=1, passive=False,
+                         state={"nodes": 0, "ids": {}, "card": actions})
+    return {"components": clean,
+            "actions": {key: {k: v for k, v in row.items() if k != "path"} for key, row in actions.items()}}
+
+
 def validate_ui_render(render: Dict[str, Any]) -> Dict[str, Any]:
     """Validate the browser-hosted widget declaration surface."""
     if not isinstance(render, dict):
         raise ExtensionRegistrationError("ui render must be an object")
     clean = copy.deepcopy(render)
     kind = _text(clean.get("kind"))
+    if kind != "module" and ("entry_type" in clean or "assets" in clean):
+        raise ExtensionRegistrationError("entry_type/assets apply to module widgets only")
     if kind not in _UI_RENDER_KINDS:
         raise ExtensionRegistrationError(f"ui render kind {kind!r} is unsupported; expected one of {sorted(_UI_RENDER_KINDS - {''})}")
     _validate_start_mode(clean, kind=kind)
@@ -430,6 +496,11 @@ def validate_ui_render(render: Dict[str, Any]) -> Dict[str, Any]:
     if kind == "iframe" and not _text(clean.get("route")):
         raise ExtensionRegistrationError("iframe widget render requires route (the extension route the frame loads)")
     if kind == "module":
+        from ouroboros.extension_widget_assets import validate_widget_files
+
+        validate_widget_files(clean)
+        if clean.get("entry_type") == "module":
+            return clean
         entry = _text(clean.get("entry"))
         if not entry:
             raise ExtensionRegistrationError("module widget render requires entry filename (e.g. 'widget.js')")
@@ -516,6 +587,7 @@ __all__ = [
     "WIDGET_FRAME_MIN_HEIGHT",
     "WIDGET_APPEARANCE_MODES",
     "WIDGET_START_MODES",
+    "validate_card_components",
     "validate_runtime_ui_render",
     "read_module_sources",
     "validate_settings_schema",
@@ -561,3 +633,205 @@ def read_module_sources(skill_dir: pathlib.Path | None, *entries: str) -> Dict[s
         if entry not in sources:
             raise ExtensionRegistrationError(f"module widget entry {entry!r} is missing from the skill directory")
     return sources
+
+
+# Contribution catalog: the projection publishes icons so clients share this vocabulary.
+CONTRIBUTION_PLACEMENTS = ("composer.plus", "composer.chips", "message.action")
+CONTRIBUTION_PROVIDERS = ("stt", "tts", "conversation", "place")
+CONTRIBUTION_RUNTIMES = ("server", "client")
+CONTRIBUTION_DESTINATIONS = ("device", "host")  # or vendor:<nonblank name>
+CONTRIBUTION_VERBS = ("draft.insert", "skill.request", "open.tab", "notice")
+CONTRIBUTION_RENDER_KINDS = ("declarative", "host")
+from ouroboros.icon_geometry import HOST_ICON_NAMES, validate_icon
+
+CONTRIBUTION_ICONS = HOST_ICON_NAMES
+CONTRIBUTION_AUDIO_FORMATS = ("audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg", "audio/wav")
+
+
+def _contribution_text(value: Any, field: str, limit: int, *, empty: bool = False) -> str:
+    if not isinstance(value, str) or len(value) > limit or (not empty and not value.strip()):
+        raise ValueError(f"{field} must be {'possibly empty ' if empty else 'nonblank '}text of at most {limit} characters")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError(f"{field} must be valid Unicode") from None
+    return value
+
+
+def _contribution_path(value: Any, field: str, *, host: bool = False) -> str:
+    path = _contribution_text(value, field, 200)
+    if (any(c in path for c in "\\\0?#%:") or any(c.isspace() for c in path)
+            or any(part in {"", ".", ".."} or part.startswith(".") for part in path.split("/"))):
+        raise ValueError(f"{field} must be a plain relative path without traversal, query or fragment")
+    if host and (not path.startswith("ui/") or not path.endswith(".js")):
+        raise ValueError("render.entry must name a .js module under ui/")
+    return path
+
+
+def _contribution_object(value: Any, field: str, allowed: tuple[str, ...]) -> dict:
+    if not isinstance(value, dict) or any(key not in allowed for key in value):
+        raise ValueError(f"{field} must be a mapping using only {', '.join(allowed)}")
+    return dict(value)
+
+
+def _contribution_int(value: Any, field: str, lo: int, hi: int) -> int:
+    if type(value) is not int or not lo <= value <= hi:
+        raise ValueError(f"{field} must be an integer from {lo} to {hi}")
+    return value
+
+
+def _contribution_action(value: Any) -> dict:
+    action = _contribution_object(value, "action", ("verb", "text", "route", "with", "then"))
+    verb = action.get("verb")
+    if verb not in CONTRIBUTION_VERBS:
+        raise ValueError(f"action.verb must be one of {CONTRIBUTION_VERBS}")
+    allowed = {"verb"}
+    if verb in ("draft.insert", "notice"):
+        allowed.add("text")
+        action["text"] = _contribution_text(action.get("text"), "action.text", 4000 if verb == "draft.insert" else 300)
+    elif verb == "skill.request":
+        allowed.update(("route", "with", "then"))
+        action["route"] = _contribution_path(action.get("route"), "action.route")
+        action.setdefault("with", "none")
+        action.setdefault("then", "keep_draft")
+        if action["with"] not in ("none", "draft", "message") or action["then"] not in ("keep_draft", "clear_draft"):
+            raise ValueError("skill.request needs with: none|draft|message and then: keep_draft|clear_draft")
+    if set(action) - allowed:
+        raise ValueError(f"{verb} only accepts {', '.join(sorted(allowed))}")
+    return action
+
+
+def _contribution_source(value: Any) -> dict:
+    source = _contribution_object(value, "source", ("route", "refresh_s"))
+    source["route"] = _contribution_path(source.get("route"), "source.route")
+    source["refresh_s"] = _contribution_int(source.get("refresh_s"), "source.refresh_s", 15, 3600)
+    return source
+
+
+def _place_contribution(item: dict, manifest: Any) -> dict:
+    from ouroboros.places import WAKE_FACTS, is_wake_signal
+
+    if not manifest.is_extension() or "presence" not in manifest.permissions:
+        raise ValueError("place requires type: extension and permissions: [presence]")
+    destination = _contribution_text(item.get("destination"), "destination", 120)
+    if not destination.startswith("vendor:") or not destination[7:].strip():
+        raise ValueError("place destination must be vendor:<Name>")
+    item.setdefault("scope", "account")
+    if item["scope"] not in ("account", "conversation"):
+        raise ValueError("place scope must be account or conversation")
+    supported = set(WAKE_FACTS)
+    if "facts" in item:
+        if not isinstance(item["facts"], list):
+            raise ValueError("place facts must be a list of core facts or labelled kinds")
+        supported = set()
+        for fact in item["facts"]:
+            if isinstance(fact, dict):
+                if set(fact) != {"id", "label"} or not (fact.get("id") in WAKE_FACTS or is_wake_signal(fact.get("id"))):
+                    raise ValueError("place fact needs a core id or signal.<slug> and label")
+                fact["label"] = _contribution_text(fact["label"], "facts.label", 120)
+                name = fact["id"]
+            elif isinstance(fact, str) and fact in WAKE_FACTS:
+                name = fact
+            else:
+                raise ValueError("place facts must contain core fact names or labelled kinds")
+            if name in supported:
+                raise ValueError("place facts must have unique ids")
+            supported.add(name)
+    wakes = item.get("wakes", [])
+    if not isinstance(wakes, list) or any(not isinstance(wake, str) or wake not in supported for wake in wakes):
+        raise ValueError("place wakes must be a subset of declared facts (core facts when facts is absent)")
+    item["wakes"] = list(dict.fromkeys(wakes))
+    if "source" in item:
+        item["source"] = _contribution_source(item["source"])
+    if "settings" in item:
+        value = _contribution_text(item["settings"], "settings", 40)
+        if not all(char.isascii() and (char.isalnum() or char in "_-") for char in value):
+            raise ValueError("settings must name a settings section id")
+    if "read_only" in item and item["read_only"] != "provider":
+        raise ValueError("read_only must be provider when the provider can withhold writes")
+    return item
+
+
+def _validate_contribution(entry: dict, manifest: Any, skill_dir: pathlib.Path | None) -> dict:
+    common = ("id", "label", "title", "icon", "order", "render")
+    fields = (("placement", "action", "source") if "placement" in entry else
+              ("provides", "destination", "scope", "facts", "wakes", "source", "settings", "read_only") if entry.get("provides") == "place" else
+              ("provides", "runtime", "route", "destination", "languages", "formats", "install_size", "max_bytes", "max_seconds"))
+    item = _contribution_object(entry, "contribution", common + fields)
+    item["label"] = _contribution_text(item.get("label"), "label", 40)
+    item["title"] = _contribution_text(item.get("title", ""), "title", 200, empty=True)
+    try:
+        default_icon = validate_icon(getattr(manifest, "raw_extra", {}).get("icon", ""))
+    except ValueError:
+        # Staging reports the manifest icon problem; it must not hide every control/place.
+        default_icon = ""
+    item["icon"] = validate_icon(item.get("icon", default_icon))
+    if type(item.get("order", 0)) is not int:
+        raise ValueError("order must be an integer")
+    item.setdefault("order", 0)
+    render = _contribution_object(item.get("render", {}), "render", ("kind", "entry"))
+    render.setdefault("kind", "declarative")
+    if render["kind"] not in CONTRIBUTION_RENDER_KINDS:
+        raise ValueError(f"render.kind must be one of {CONTRIBUTION_RENDER_KINDS}")
+    if render["kind"] == "host":
+        render["entry"] = _contribution_path(render.get("entry"), "render.entry", host=True)
+        if skill_dir is not None:
+            target = pathlib.Path(skill_dir) / render["entry"]
+            if not target.is_file() or not target.resolve().is_relative_to(pathlib.Path(skill_dir).resolve()):
+                raise ValueError("render.entry must exist inside the reviewed skill directory")
+    elif "entry" in render:
+        raise ValueError("declarative render has no entry")
+    item["render"] = render
+    if render["kind"] == "host" or item.get("runtime") == "client":
+        if not manifest.is_extension() or "page_module" not in manifest.permissions:
+            raise ValueError("page code requires type: extension and permissions: [page_module]")
+    if item.get("provides") == "place":
+        return _place_contribution(item, manifest)
+    if "placement" in item:
+        if item["placement"] not in CONTRIBUTION_PLACEMENTS:
+            raise ValueError(f"placement must be one of {CONTRIBUTION_PLACEMENTS}")
+        item["action"] = _contribution_action(item.get("action"))
+        if item["placement"] == "composer.chips":
+            item["source"] = _contribution_source(item.get("source"))
+        elif "source" in item:
+            raise ValueError("source is only supported on composer.chips")
+        return item
+    if item.get("provides") not in CONTRIBUTION_PROVIDERS:
+        raise ValueError(f"provides must be one of {CONTRIBUTION_PROVIDERS}")
+    if item.get("runtime") not in CONTRIBUTION_RUNTIMES:
+        raise ValueError(f"runtime must be one of {CONTRIBUTION_RUNTIMES}")
+    destination = _contribution_text(item.get("destination"), "destination", 120)
+    if destination not in CONTRIBUTION_DESTINATIONS and not (destination.startswith("vendor:") and destination[7:].strip()):
+        raise ValueError("destination must be device, host or vendor:<Name>")
+    if item["runtime"] == "server":
+        item["route"] = _contribution_path(item.get("route"), "route")
+    elif render["kind"] != "host" or "route" in item:
+        raise ValueError("client providers need render.kind: host and no server route")
+    for field in ("languages", "formats"):
+        if field not in item:
+            continue
+        values = item[field]
+        if not isinstance(values, list) or len(values) > 64:
+            raise ValueError(f"{field} must be a list of at most 64 strings")
+        item[field] = list(dict.fromkeys(_contribution_text(v, field, 120) for v in values))
+        if field == "formats" and any(v not in CONTRIBUTION_AUDIO_FORMATS for v in item[field]):
+            raise ValueError(f"formats must be a subset of {CONTRIBUTION_AUDIO_FORMATS}")
+    if "install_size" in item:
+        item["install_size"] = _contribution_text(item["install_size"], "install_size", 120)
+    for field, maximum in (("max_bytes", 524288), ("max_seconds", 600)):
+        if field in item:
+            if item["provides"] != "stt":
+                raise ValueError(f"{field} is only supported by stt providers")
+            item[field] = _contribution_int(item[field], field, 1, maximum)
+    return item
+
+
+def validate_contributions(manifest: Any, *, skill_dir: pathlib.Path | None = None) -> tuple[list[dict], list[str]]:
+    """Drop only invalid entries; problems are author-facing manifest/preflight warnings."""
+    clean, problems = [], []
+    for entry in getattr(manifest, "contributes", []):
+        try:
+            clean.append(_validate_contribution(entry, manifest, skill_dir))
+        except ValueError as exc:
+            problems.append(f"contributes.{entry.get('id', '?')}: {exc}; fix this entry or remove it")
+    return clean, problems

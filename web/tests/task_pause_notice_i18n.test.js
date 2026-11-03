@@ -5,13 +5,18 @@ import { buildTimelineItemHtml, cardRowSummary } from '../modules/chat_activity.
 import { applyPayload, tx } from '../modules/i18n.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
-const ENGLISH = "The task paused because of the owner's Pause. Its work is retained. Use Resume on the task when available.";
-const TRANSLATED = 'Задача приостановлена владельцем. Работа сохранена. Продолжение доступно в карточке задачи.';
+// The owner's own press (ouroboros/pause_notices.notice_text); rows an earlier body wrote keep their bytes.
+const ENGLISH = 'You paused this task. Its work is retained; Resume continues it.';
+const TRANSLATED = 'Вы приостановили задачу. Работа сохранена; продолжение доступно по кнопке Resume.';
+const LEGACY = "The task paused because of the owner's Pause. Its work is retained. Use Resume on the task when available.";
+const LEGACY_TRANSLATED = 'Задача приостановлена владельцем. Работа сохранена. Продолжение доступно в карточке задачи.';
 const notice = { role: 'system', system_type: 'task_pause_notice', task_id: 'paused-root',
     card_row: 'timeline', card_row_id: 'pause:paused-root:one', narration: false,
     text: ENGLISH, content: ENGLISH, ts: '2026-10-04T12:00:00Z', chat_id: 1 };
+const legacy = { ...notice, card_row_id: 'pause:paused-root:old', text: LEGACY, content: LEGACY };
 const russian = () => applyPayload({ language: 'ru', english: false, entries: {
     [ENGLISH]: { text: TRANSLATED, provenance: 'imported' },
+    [LEGACY]: { text: LEGACY_TRANSLATED, provenance: 'imported' },
 } });
 
 test('typed System pause card rows translate through the installed memory without changing source bytes', () => {
@@ -19,8 +24,8 @@ test('typed System pause card rows translate through the installed memory withou
     try {
         russian();
         assert.equal(tx(ENGLISH), TRANSLATED, 'the exact sentence is in the translation memory');
-        for (const [row, expected] of [[notice, TRANSLATED], [{ ...notice, role: 'assistant' }, ENGLISH],
-            [{ ...notice, system_type: 'other_notice' }, ENGLISH]]) {
+        for (const [row, expected] of [[notice, TRANSLATED], [legacy, LEGACY_TRANSLATED],
+            [{ ...notice, role: 'assistant' }, ENGLISH], [{ ...notice, system_type: 'other_notice' }, ENGLISH]]) {
             const original = JSON.stringify(row);
             const summary = cardRowSummary(row, 'warn', row.ts);
             const html = buildTimelineItemHtml({ ...summary, lineKey: 'pause-one' },

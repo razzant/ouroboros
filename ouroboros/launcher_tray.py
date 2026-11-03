@@ -1,17 +1,19 @@
-"""Windows background indicator: a notification-area icon on its own STA thread.
+"""Windows' one notification-area icon, on its own STA thread, for the whole desktop run.
 
-Created only while background mode is on (``launcher_background``). A window close is
-decided in the form's own FormClosing handler, the one place that sees its CloseReason
-(pywebview's ``closing`` event does not): only the owner's close may hide the window or
-ask, while sign-out, shutdown and Task Manager closes always quit. The named auto-reset
-kernel event behind a manual second launch exists only while its owning launcher holds
-a handle; its name derives from the installation's PID-lock path, so it is not a
-persistent file and a crashed owner cannot leave a stale request. ``NotificationIcon`` shows
-system notifications (``desktop_notifications``) as balloons, each on an icon of its own
-until its click. Every balloon is handed to the shell directly (``show_balloon``) and its caller
-waits for the STA pump's ``Submission``: it learns the shell's own answer, not that a queue took
-it, and Sound off can ask for a silent balloon; WinForms' own call, the audible fallback,
-answers nothing, so its balloon stays unconfirmed. WinForms and Win32 load only on Windows.
+Background mode decides only what closing the window does (``launcher_background``). A window
+close is decided in the form's own FormClosing handler, the one place that sees its CloseReason
+(pywebview's ``closing`` event does not): only the owner's close may hide the window or ask,
+while sign-out, shutdown and Task Manager closes always quit. The named auto-reset kernel event
+behind a manual second launch exists only while its owning launcher holds a handle; its name
+derives from the installation's PID-lock path, so it is not a persistent file and a crashed owner
+cannot leave a stale request. System notifications (``desktop_notifications``) are balloons on
+this icon. A balloon click names no balloon, so it opens the source of the newest balloon the
+shell took (or may still show), or only the window when that one had none (owner decision 1A):
+an older entry in Windows' list opens that same newest source. Every balloon is handed to the
+shell directly (``show_balloon``) and its caller waits for the STA pump's ``Submission``: it
+learns the shell's own answer, not that a queue took it, and Sound off can ask for a silent
+balloon; WinForms' own call, the audible fallback, answers nothing, so its balloon stays
+unconfirmed. WinForms and Win32 load only on Windows.
 """
 
 import hashlib
@@ -27,15 +29,12 @@ from ouroboros.launcher_background import Indicator
 log = logging.getLogger("launcher.tray")
 # pywebview's WinForms confirmation is a fixed OK/Cancel box, so the text names the buttons.
 _CONSENT_BUTTONS = "\n\nOK keeps it running in the background. Cancel quits."
-SUBMIT_WAIT = 5.0  # seconds a caller waits for an STA pump to hand its balloon to the shell
-# Notification icons alive at once. Each stays after its balloon timed out or was dismissed, so the
-# notification stays in Windows' list, and leaves with its click; a newer one retires the oldest.
-_BALLOON_ICONS = 3
+SUBMIT_WAIT = 5.0  # seconds a caller waits for the STA pump to hand its balloon to the shell
 _NIM_MODIFY, _NIF_INFO, _NIIF_INFO, _NIIF_NOSOUND = 0x1, 0x10, 0x1, 0x10
 
 
 class Submission:
-    """One balloon handed to an STA pump, and what became of it.
+    """One balloon handed to the STA pump, and what became of it.
 
     ``wait`` answers the sound fact of a balloon the shell accepted (``show_balloon``: accepted is
     not proof that Windows showed it), False (never handed over, and now never will be: the pump
@@ -236,6 +235,7 @@ def listen_for_activation(lock_path, on_request, shutdown_event) -> bool:
 
 class WindowsTray(Indicator):
     decides_natively = True
+    carries_notifications = True
 
     def __init__(self, background):
         super().__init__(background)
@@ -244,6 +244,7 @@ class WindowsTray(Indicator):
         self._disposed = threading.Event()
         self._balloons = queue.SimpleQueue()
         self._status = "Ouroboros"
+        self._latest = ""  # what a balloon click opens: the newest balloon's token ("" only opens the window)
 
     def attach_native(self, window):
         from System.Windows.Forms import CloseReason  # pywebview's WinForms backend loaded the assembly
@@ -252,19 +253,26 @@ class WindowsTray(Indicator):
 
         def form_closing(sender, args):
             if args.CloseReason != CloseReason.UserClosing:
-                background.quit.set()  # sign-out, shutdown, Task Manager: never cancelled, never asked
-                background.exit_launcher()
+                background.quit.set()  # sign-out, shutdown, Task Manager: a quit never cancelled, never asked
+                if background.exit_launcher() is False:
+                    args.Cancel = True  # only the form's close: the quit's closer ends the process
             elif background.window_closed() is False:
                 args.Cancel = True
 
         window.native.FormClosing += form_closing
 
-    def notify(self, title, body, sound=True):
-        if not self.ready.is_set():
+    def balloon(self, title, body, sound, token=""):
+        """One balloon on this icon, ``Submission.wait``: its sound fact once the shell accepted it, None
+        (handed over, unanswered) or False (never shown). One the shell took, or may still show, becomes
+        what a balloon click opens; a refused or abandoned one never does."""
+        if not self.ready.is_set() or self._stop.is_set():
             return False
-        request = Submission(title, body, sound)
+        request = Submission(title, body, sound, token)
         self._balloons.put(request)  # handed to the shell by the STA tick; the OS plays the banner's sound
-        return request.wait() is not False  # unanswered: it may still show, so the caller adds no sound
+        return request.wait()
+
+    def notify(self, title, body, sound=True):
+        return self.balloon(title, body, sound) is not False  # unanswered: it may still show, so the caller adds no sound
 
     def set_status(self, text):
         self._status = text
@@ -305,16 +313,14 @@ class WindowsTray(Indicator):
             self._disposed.set()
 
         def quit_clicked(sender, args):
-            self._stop.set()
-            try:
-                dispose_icon()  # STA, before the launcher's os._exit (finally may never run)
-            except Exception:
-                log.warning("Tray icon removal failed before Quit.", exc_info=True)
+            # Returns at once: the icon, its Panic and this pump stay until the close body's terminal
+            # exit removes the icon (``stop_tray_before_exit``), which the tick below disposes.
             background.request_quit()
 
         def pump():
             timer = None
             owned_icon = None
+            window_loop_ended = False
             self._sta_id = threading.get_ident()
             try:
                 menu = ContextMenuStrip()
@@ -348,21 +354,30 @@ class WindowsTray(Indicator):
                     if args.Button == MouseButtons.Left:
                         restore()
 
+                def balloon_clicked(sender, args):  # off the STA thread: the page's hand-off may wait on the UI
+                    threading.Thread(target=background.open_notification, args=(self._latest,),
+                                     name="ouroboros-notification-click", daemon=True).start()
+
+                def submit(title, body, sound, token):
+                    answer = show_balloon(icon, title, body, sound)  # raises when the shell refused it
+                    self._latest = token
+                    return answer
+
                 icon.MouseClick += mouse_click
-                icon.BalloonTipClicked += restore
+                icon.BalloonTipClicked += balloon_clicked
                 context = ApplicationContext()
                 timer = Timer()
                 timer.Interval = 200
 
                 def tick(sender, args):
-                    if self._stop.is_set() or background.shutdown.is_set():
+                    if self._stop.is_set():  # Panic, or an exit's removal; an ordinary shutdown keeps Panic here
                         dispose_icon()
                         Application.ExitThread()
                         return
                     if state_item.Text != self._status:
                         state_item.Text = self._status
                         icon.Text = self._status[:63]  # the notification-area tooltip limit
-                    _drain(self._balloons, lambda title, body, sound: show_balloon(icon, title, body, sound))
+                    _drain(self._balloons, submit)
                     if icon.Visible:
                         self.ready.set()
 
@@ -370,6 +385,7 @@ class WindowsTray(Indicator):
                 timer.Start()
                 icon.Visible = True
                 Application.Run(context)
+                window_loop_ended = not self._stop.is_set() and not background.shutdown.is_set()
             except Exception:
                 log.warning("Tray pump failed; window close will quit.", exc_info=True)
             finally:
@@ -388,156 +404,15 @@ class WindowsTray(Indicator):
                         owned_icon.Dispose()
                     except Exception:
                         log.warning("Tray icon asset cleanup failed.", exc_info=True)
+                _drain(self._balloons, lambda *fields: False)  # never shown now: their callers fall back at once
                 self._stopped()
+                if window_loop_ended:
+                    # pywebview's setup window calls Application.Exit(), ending
+                    # other WinForms loops too. The launcher still owns one icon.
+                    threading.Thread(target=background._indicator_up, name="ouroboros-tray-reopen",
+                                     daemon=True).start()
 
         thread = Thread(ThreadStart(pump))
         thread.SetApartmentState(ApartmentState.STA)
         thread.Start()
         return True
-
-
-class NotificationIcon:
-    """System notifications as notification-area balloons, each on an icon of its own.
-
-    Windows 10/11 present a balloon as a system notification. A balloon's click event names no
-    balloon, so one icon per notification is what ties a click to its own source. The icon stays in the
-    notification area from its balloon until that balloon is clicked: a balloon that timed out or was
-    dismissed keeps its notification in Windows' list, which removing the icon would take with it.
-    At most ``_BALLOON_ICONS`` are; a newer one retires the oldest. Nothing is shown again. Its own STA
-    pump, like ``WindowsTray``; a click hands that balloon's token to ``on_click``. ``stop`` (the
-    launcher's exit, Panic) removes every icon and ends the pump: an icon left behind outlives the process."""
-
-    def __init__(self, on_click):
-        self._on_click = on_click
-        self._queue = queue.SimpleQueue()
-        self._lock = threading.Lock()
-        self._tried = False
-        self.alive = threading.Event()  # the pump runs: a queued balloon will be handed to the shell
-        self._stop = threading.Event()
-        self._disposed = threading.Event()  # set once the pump removed its icons and its timer
-        self._sta_id = None
-
-    def show(self, title, body, sound, token):
-        """``Submission.wait``: the balloon's sound fact once the shell accepted it, False or None."""
-        with self._lock:
-            if not self._tried and not self._stop.is_set():
-                self._tried = True
-                self._start()
-        if self._stop.is_set() or not self.alive.is_set():
-            return False
-        request = Submission(title, body, sound, token)
-        self._queue.put(request)
-        return request.wait()
-
-    def stop(self, wait: float = 0.0) -> None:
-        """Remove every icon and end the pump; ``wait`` bounds waiting for its STA tick to do so."""
-        self._stop.set()
-        if wait and self.alive.is_set() and self._sta_id != threading.get_ident() \
-                and not self._disposed.wait(wait):
-            log.warning("Notification icon removal unconfirmed before process exit.")
-
-    def _start(self) -> None:
-        if sys.platform != "win32":
-            return
-        try:
-            import clr
-
-            clr.AddReference("System.Windows.Forms")
-            clr.AddReference("System.Drawing")
-            from System.Drawing import Icon, SystemIcons
-            from System.Threading import ApartmentState, Thread, ThreadStart
-            from System.Windows.Forms import Application, ApplicationContext, NotifyIcon, Timer
-
-            from ouroboros.platform_layer import bundled_resource_bases
-        except Exception:
-            log.warning("Notification-area balloons are unavailable here.", exc_info=True)
-            return
-        settled = threading.Event()
-        live, gone, timers = [], [], []  # icons with a balloon, oldest first; retired ones; the pump's timer
-
-        def remove_all():
-            """On the STA thread: every icon, the timer, and any balloon still queued (never handed over)."""
-            for icon in [*live, *gone]:
-                try:
-                    icon.Visible = False
-                    icon.Dispose()
-                except Exception:
-                    log.warning("A notification icon could not be removed.", exc_info=True)
-            live.clear()
-            gone.clear()
-            while timers:
-                timer = timers.pop()
-                for operation in (timer.Stop, timer.Dispose):
-                    try:
-                        operation()
-                    except Exception:
-                        log.warning("Notification timer cleanup failed.", exc_info=True)
-            while not self._queue.empty():
-                request = self._queue.get_nowait()
-                if request.take():
-                    request.finish(False)
-            self._disposed.set()
-
-        def pump():
-            self._sta_id = threading.get_ident()
-            try:
-                image = SystemIcons.Application
-                for base in bundled_resource_bases():
-                    candidate = base / "assets" / "icon.ico"
-                    if candidate.is_file():
-                        try:
-                            image = Icon(str(candidate))
-                            break
-                        except Exception:
-                            log.warning("Notification icon asset unreadable: %s", candidate, exc_info=True)
-
-                def retire(icon):
-                    if any(other is icon for other in live):
-                        live[:] = [other for other in live if other is not icon]
-                        icon.Visible = False  # out of the notification area, and its balloon out of Windows' list
-                        gone.append(icon)
-
-                def submit(title, body, sound, token):
-                    icon = NotifyIcon()
-                    icon.Icon, icon.Text = image, "Ouroboros"
-                    icon.BalloonTipClicked += lambda sender, args: (retire(icon), self._on_click(token))
-                    live.append(icon)
-                    try:
-                        icon.Visible = True
-                        result = show_balloon(icon, title, body, sound)
-                    except Exception:
-                        retire(icon)
-                        raise
-                    while len(live) > _BALLOON_ICONS:
-                        retire(live[0])
-                    return result
-
-                def tick(sender, args):
-                    while gone:
-                        gone.pop().Dispose()  # never inside the icon's own event handler
-                    if self._stop.is_set():
-                        remove_all()
-                        Application.ExitThread()
-                        return
-                    _drain(self._queue, submit)
-
-                timer = Timer()
-                timers.append(timer)
-                timer.Interval = 200
-                timer.Tick += tick
-                timer.Start()
-                self.alive.set()
-                settled.set()
-                Application.Run(ApplicationContext())
-            except Exception:
-                log.warning("Notification-area balloon pump failed.", exc_info=True)
-            finally:
-                self.alive.clear()  # later notifications answer unavailable: the page falls back
-                remove_all()
-                settled.set()
-
-        thread = Thread(ThreadStart(pump))
-        thread.SetApartmentState(ApartmentState.STA)
-        thread.IsBackground = True  # never keeps the launcher alive
-        thread.Start()
-        settled.wait(3.0)

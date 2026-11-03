@@ -36,10 +36,10 @@ test('the awaited fact is the cause sentence of a clean card only', () => {
     const execution = { status: 'ok', reason_code: 'final_message', plan_review: 'awaiting' };
     const warned = done({ execution, objective: { status: 'not_evaluated', warning: 'residual_tool_errors_without_review' } });
     assert.equal(taskOutcomeSeverity(warned), 'warn');
-    assert.equal(taskReasonDetail(warned), '');
+    assert.equal(taskReasonDetail(warned), 'Tool errors remain in the record and the result has not been evaluated.');
     const failed = done({ execution, artifacts: { status: 'missing' } });
     assert.equal(taskOutcomeSeverity(failed), 'error');
-    assert.equal(taskReasonDetail(failed), '');
+    assert.equal(taskReasonDetail(failed), 'Some result files are missing or could not be preserved.');
 });
 
 test('a plan review that really stayed open keeps its warning, code and sentence', () => {
@@ -52,13 +52,13 @@ test('a plan review that really stayed open keeps its warning, code and sentence
     assert.equal(taskReasonDetail(record), ADVISORY_SENTENCE);
 });
 
-test('the awaited fact never outranks a decision sentence, a rail reason or an owner stop', () => {
+test('an independent awaited fact coexists with review provenance but not a rail or owner stop', () => {
     const awaited = { status: 'ok', plan_review: 'awaiting' };
     const decided = done({
         execution: awaited,
         review: { status: 'pass', acceptance_decision: { status: 'finalized_unaccepted', reason: 'capsule_spent' } },
     });
-    assert.equal(taskReasonDetail(decided), 'The one allowed improvement pass was already used.');
+    assert.equal(taskReasonDetail(decided), 'Not every plan reviewer had answered when the task ended · The one allowed improvement pass was already used.');
     const railed = { ...done({ execution: { ...awaited, status: 'best_effort' } }), reason_code: 'round_limit' };
     assert.equal(taskReasonDetail(railed), 'The task hit its round limit before it could finish cleanly');
     assert.equal(taskOutcomeSeverity(railed), 'warn');

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._dialogue import chat_rows
 from ouroboros.gateway import state as gateway_state
 from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.task_results import load_task_result, write_task_result
@@ -57,6 +58,26 @@ def test_live_census_keeps_known_outcome_separate_from_open_finalization(tmp_pat
     assert gateway_state._chat_activities_snapshot_safe(tmp_path, direct_turns=[]) == []
 
 
+@pytest.mark.parametrize("debt", [[], ["run-1"], None], ids=["healed", "open", "no-list"])
+def test_live_census_carries_the_rows_current_custody_debt(tmp_path, activity_queue, debt):
+    """#1583: the census row carries the row's current debt list (absent stays absent) beside the
+    raw stamp and axes, so its outcome heals with the list rather than with a rewrite."""
+    stamp = "delegated_custody_unreconciled"
+    activity_queue.RUNNING["root"] = {"task": {"id": "root", "root_task_id": "root", "chat_id": 1}, "started_at": 1}
+    write_task_result(
+        tmp_path, "root", "completed", result="answer", reason_code=stamp,
+        outcome_axes={"execution": {"status": "ok", "reason_code": "final_message"},
+                      "objective": {"status": "not_evaluated", "source": "none", "warning": stamp, "warnings": [stamp]}},
+        root_phase_checkpoint={"post_task_synthesis": "running"},
+        **({} if debt is None else {"delegated_runs_unreconciled": debt}))
+    row = gateway_state._chat_activities_snapshot_safe(tmp_path, direct_turns=[])[0]
+    assert row["reason_code"] == stamp and row["outcome_axes"]["objective"]["warning"] == stamp
+    if debt is None:
+        assert "delegated_runs_unreconciled" not in row
+    else:
+        assert row["delegated_runs_unreconciled"] == debt
+
+
 def test_census_result_memo_refreshes_without_inventing_a_missing_outcome(tmp_path, activity_queue, monkeypatch):
     from ouroboros import task_store
 
@@ -70,9 +91,9 @@ def test_census_result_memo_refreshes_without_inventing_a_missing_outcome(tmp_pa
     original = task_store.read_document
     reads = []
 
-    def counted(root, task_id):
+    def counted(root, task_id, **kwargs):  # the memo reads a signed document
         reads.append(str(task_id))
-        return original(root, task_id)
+        return original(root, task_id, **kwargs)
 
     monkeypatch.setattr(task_store, "read_document", counted)  # the memo's body read
     gateway_state._task_activity_facts(tmp_path, "root")
@@ -140,7 +161,7 @@ def test_project_work_name_survives_real_outbox_bus_live_and_history(tmp_path, m
     events._handle_send_message(event, ctx)
     events._handle_send_message(event, ctx)
     assert len(live) == 1  # delivery id and event provenance keep their original meaning
-    saved = json.loads((tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8"))
+    [saved] = chat_rows(tmp_path)
     history = next(row for row in _history(tmp_path) if row.get("system_type") == kind)
     for row in (live[0], saved, history):
         assert row["task_name"] == "Check › boundary"
@@ -182,4 +203,5 @@ def test_legacy_work_name_uses_cached_structured_result_and_preserves_recorded_n
     assert [row["task_name"] for row in history] == [expected, expected, "Name recorded at creation"]
     assert all(row["text"] == "Recorded event" for row in history)
     assert calls == ["root"]
-    assert path.read_bytes() == before
+    # Read, never rewritten: the cutover moved the chain file's exact bytes into the frozen archive.
+    assert b"".join(p.read_bytes() for p in sorted((tmp_path / "archive").glob("chat_*.jsonl"))) == before

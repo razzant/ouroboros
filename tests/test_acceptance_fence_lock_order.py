@@ -63,7 +63,7 @@ def _direct_agent(tmp_path, queue_mod, chat_id, violations):
     agent._current_task_metadata = {"project_id": "racer", "title": "Direct turn"}
     agent._current_task_text = "work in the project room"
     agent._task_started_ts = agent._last_activity_ts = 1000.0
-    agent.fence_transition = queue_mod.transition_acceptance_fence  # what ``_get_chat_agent`` injects
+    agent._fence_in_process = lambda: True  # a direct turn runs in the queue's process
     return agent
 
 

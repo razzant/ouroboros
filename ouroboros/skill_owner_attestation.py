@@ -1,10 +1,14 @@
-"""C1 (v6.39): skill owner-attestation.
+"""Owner attestation ("Skip review" / "Turn on anyway").
 
-The OWNER may explicitly skip the EXPENSIVE LLM skill-review for their OWN (external /
-self-authored) skill, or for a hash-verified official OuroborosHub payload, while the
-DETERMINISTIC preflight floor still gates it. Extracted from skill_review.py to keep that
-module under the size gate; it reuses skill_review's preflight + persistence machinery
-(referenced module-qualified so tests can monkeypatch).
+The OWNER may skip the LLM skill review for the exact current bytes of a skill from any
+origin (built-in, a hub source, ClawHub, a local folder, made here) while the
+DETERMINISTIC preflight floor still gates it. It is a local authorization fact of this
+install: a record for these bytes, never a critic PASS another install could reuse; the
+critic findings of earlier runs stay in the review history. Only the shared owner action
+(``skill_lifecycle_actions.run_skill_action``) reaches it, with a host-derived owner
+caller. Extracted from skill_review.py to keep that module under the size gate; it reuses
+skill_review's preflight + persistence machinery (referenced module-qualified so tests can
+monkeypatch).
 """
 
 from __future__ import annotations
@@ -13,12 +17,6 @@ import pathlib
 from typing import Any
 
 from ouroboros import skill_review as _sr
-from ouroboros.config import (
-    SKILL_SOURCE_CLAWHUB,
-    SKILL_SOURCE_EXTERNAL,
-    SKILL_SOURCE_NATIVE,
-    SKILL_SOURCE_OUROBOROSHUB,
-)
 from ouroboros.contracts.schema_versions import with_schema_version
 from ouroboros.skill_loader import (
     SKILL_OWNER_STATE_SCHEMA_VERSION,
@@ -35,11 +33,10 @@ from ouroboros.tool_access import canonical_data_root, load_bound_skill
 
 
 def run_owner_attestation(ctx: Any, drive_root: pathlib.Path, skill: Any, content_hash: str):
-    """Owner-attested skill review — skip the EXPENSIVE LLM review for an attestable skill.
+    """Owner-attested skill review — skip the EXPENSIVE LLM review for these exact bytes.
     The DETERMINISTIC preflight floor STILL runs (an invalid manifest / sensitive-shaped /
-    path-escaping payload can NEVER be attested); only the LLM phase is skipped. For
-    OuroborosHub payloads, review_skill_owner_attest first requires a fresh official-hub
-    hash/provenance check. On a clean preflight, persist a durable CLEAN verdict bound to the content_hash
+    path-escaping payload can NEVER be attested); only the LLM phase is skipped.
+    On a clean preflight, persist a durable CLEAN verdict bound to the content_hash
     (review_profile='owner_attested', reviewer_models=['owner_attestation'], one explicit
     PASS finding so the status serializes) and drop the owner-issued marker that
     load_review_state requires for the verdict to stay valid. The acting model
@@ -51,7 +48,7 @@ def run_owner_attestation(ctx: Any, drive_root: pathlib.Path, skill: Any, conten
     # persisting cannot clobber a FRESH valid verdict: review.json absent, or its recorded
     # content_hash stale for the current payload bytes. A stale CLEAN is knowingly
     # superseded by a FAIL at the current hash (the fact about the CURRENT bytes wins;
-    # the prior verdict stays in review_history.jsonl). With a fresh verdict on file the
+    # the prior verdict stays on its review ledger record). With a fresh verdict on file the
     # failure still surfaces only through the endpoint (409) and leaves state as-is.
     persist_failed_preflight = load_review_state(
         drive_root, skill.name, skill_dir=getattr(skill, "skill_dir", None),
@@ -125,11 +122,6 @@ def run_owner_attestation(ctx: Any, drive_root: pathlib.Path, skill: Any, conten
         review_profile="owner_attested",
     )
     save_review_state(drive_root, skill.name, review_state)
-    if not getattr(ctx, "_skill_review_lifecycle_guard", False):
-        _sr._append_skill_review_history(
-            drive_root, skill.name, status=_sr.STATUS_CLEAN,
-            content_hash=content_hash, findings=findings,
-        )
     marker_path = skill_state_dir(drive_root, skill.name) / "owner_attestation.json"
     atomic_write_json(marker_path, with_schema_version(
         {"attested_at": utc_now_iso(), "content_hash": content_hash},
@@ -174,30 +166,9 @@ def review_skill_owner_attest(ctx: Any, skill_name: str):
             skill_name=skill_name, status=_sr.STATUS_PENDING,
             error=f"Skill manifest could not be parsed: {skill.load_error}",
         )
-    # Owner-attestation is primarily for the owner's OWN skills: a locally-authored/installed
-    # `external` payload or anything the owner/agent self-authored. OuroborosHub has one
-    # explicit owner-approved exception: a payload that freshly verifies against the live
-    # official-hub catalog (sidecar hashes, catalog hashes, and no extra runtime files). Native
-    # and ClawHub marketplace payloads remain non-attestable, and a marketplace/native source
-    # mislabeled self-authored still cannot bypass the source gate.
-    source = str(getattr(skill, "source", "") or "")
-    verified_official_hub = (
-        source == SKILL_SOURCE_OUROBOROSHUB and _sr.is_official_hub_payload_verified(skill)
-    )
-    third_party = source in (SKILL_SOURCE_NATIVE, SKILL_SOURCE_CLAWHUB) or (
-        source == SKILL_SOURCE_OUROBOROSHUB and not verified_official_hub
-    )
-    attestable = verified_official_hub or (
-        not third_party and (source == SKILL_SOURCE_EXTERNAL or getattr(skill, "is_self_authored", False))
-    )
-    if not attestable:
-        return _sr.SkillReviewOutcome(
-            skill_name=skill.name, status=_sr.STATUS_PENDING,
-            error=(f"Skill {skill.name!r} is marketplace/native-managed "
-                   f"(source={source!r}); owner-attestation is only for "
-                   "the owner's own external/self-authored skills or hash-verified "
-                   "official OuroborosHub payloads — run the full review instead."),
-        )
+    # Every origin is attestable (built-in, hub, ClawHub, local, made here): the owner
+    # decides for this install. The caller already proved an owner actor and the exact
+    # selected revision; the deterministic floor below still refuses broken payloads.
     try:
         content_hash = compute_content_hash(
             skill.skill_dir,

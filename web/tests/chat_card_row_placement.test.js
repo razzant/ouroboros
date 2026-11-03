@@ -163,7 +163,7 @@ test('history replay places stamped rows on their cards and keeps unplaceable on
         assert.equal(bubbles.length, 1, 'only the row with no card in this page stayed a System row');
         assert.match(bubbles[0].innerHTML, /Open delegated execution: run-y\./);
         if (card.dataset.expanded !== '1') {
-            card.querySelector('[data-live-summary-button]').listeners.get('click')[0]({ detail: 0 });
+            card.querySelector('[data-live-disclosure]').listeners.get('click')[0]({ detail: 0 });
         }
         assert.equal(phasedLines(card, 'warn').length, 1,
             'the replayed custody row is a timeline item of its card');
@@ -222,7 +222,7 @@ const lifecycle = (event, ts, chatId) => ({ chat_id: chatId, role: 'assistant', 
     text: event, content: event, subagent_event: event, ts, ...CHILD });
 const expand = (card) => {
     if (card.dataset.expanded !== '1') {
-        card.querySelector('[data-live-summary-button]').listeners.get('click')[0]({ detail: 0 });
+        card.querySelector('[data-live-disclosure]').listeners.get('click')[0]({ detail: 0 });
     }
 };
 
@@ -315,9 +315,10 @@ test('a second history sync redraws a child System row whose old bubble it relea
 
 // Optional stdin fixture comes from the real Python outbox/dedup/history test.
 // The standalone node lane uses the same adversarial revision/timestamp shape.
-test('canonical receipt revisions keep one merged row through live and history replay', async () => {
+test('canonical receipt revisions keep one current row through live and history replay', async () => {
     const supplied = process.env.MERGE_RECEIPT_PROJECTION
         ? JSON.parse((await import('node:fs')).readFileSync(process.env.MERGE_RECEIPT_PROJECTION, 'utf8')) : null;
+    const current = supplied?.expect || 'merge: merged';
     const base = { chat_id: 7, task_id: 'merge-task', role: 'system', system_type: 'host_progress',
         is_progress: true, narration: false, card_row: 'reviews', card_row_id: 'merge-receipt:r' };
     const merged = { ...base, card_row_revision: 3, content: 'PR #7 merge: merged', ts: '2026-09-16T00:01:00Z' };
@@ -333,7 +334,7 @@ test('canonical receipt revisions keep one merged row through live and history r
         // Older unversioned rows (e.g. an old outbox) cannot overwrite a revision either.
         opened.handlers.get('chat')({ ...live[0], card_row_revision: undefined, chat_id: 2,
             content: 'PR #7 merge: queued', ts: '2099-01-01T00:00:00Z' });
-        assert.match(markup().at(-1), /merge: merged/);
+        assert.ok(markup().at(-1).includes(current), markup().at(-1));
         assert.equal(phasedLines(walkCard(opened.messages(), 'merge-task'), 'result').length, 1);
     } finally { opened.instance.destroy(); restoreDom(opened.prior); }
     for (const rows of [history, [...history].reverse()]) {
@@ -342,7 +343,7 @@ test('canonical receipt revisions keep one merged row through live and history r
         try {
             const markup = captureRenderedLines();
             await replay.instance.refreshHistory({ revision: 1 });
-            assert.match(markup().at(-1), /merge: merged/);
+            assert.ok(markup().at(-1).includes(current), markup().at(-1));
             assert.equal(phasedLines(walkCard(replay.messages(), 'merge-task'), 'result').length, 1);
         } finally { replay.instance.destroy(); restoreDom(replay.prior); }
     }
@@ -395,13 +396,17 @@ const childWords = () => {
         history_id: `${row.is_progress ? 'progress' : 'chat'}:${offset}`,
         history_position: { source: row.is_progress ? 'progress' : 'chat', offset } });
     const photo = { role: 'assistant', is_progress: false, system_type: 'photo', msg_type: 'photo', mime: 'image/png',
-        text: 'CHILD_PHOTO', caption: 'CHILD_PHOTO', download_url: '/api/tasks/kid-1/artifacts/chat-media-x',
+        text: 'CHILD_PHOTO', caption: 'CHILD_PHOTO', download_url: `/api/tasks/kid-1/artifacts/chat-media-${'a'.repeat(64)}.png`,
         task_id: 'kid-1', ...KID, ts: ts(live.length - 1), history_id: 'chat:99', history_position: { source: 'chat', offset: 99 } };
-    return { live, history: [...live.map(stored), photo], running_history: live.slice(0, -1).map(stored) };
+    const history = live.map(stored);
+    // Like the real producer, the photo precedes the final. A render failure
+    // there must not leave the rest of a reload silently untested.
+    history.splice(history.length - 1, 0, photo);
+    return { live, history, running_history: live.slice(0, -1).map(stored) };
 };
 const feedBubbles = (messages, text) => messages.children.filter((node) => node.classList.contains('chat-bubble')
     && String(node.innerHTML).includes(text));
-// The DOM stub mounts no media gallery; a photo is checked never to become a card line.
+// A photo stays outside the card; its item-owned controls must render before the final.
 const lineKeysOf = (history, test) => history.filter(test)
     .map((row) => `history-${row.history_id.replace(/[^A-Za-z0-9_-]/g, '-')}`);
 const isPhoto = (row) => row.msg_type === 'photo';
@@ -575,6 +580,11 @@ test('child words: a reload places the same rows the same way', async () => {
             words, 'each stored word is one line of the child\'s card');
         assert.equal(feedBubbles(messages(), 'CHILD_WORDS').length, 0, 'never a conversation bubble');
         assert.equal(kid.dataset.finished, '1', 'the stored final concludes the child');
+        const photos = feedBubbles(messages(), 'CHILD_PHOTO');
+        assert.equal(photos.length, 1, 'the photo before the final was rendered, not skipped');
+        const figure = photos[0].querySelector('.chat-gallery-item');
+        assert.ok(figure?.querySelector('summary'), 'the photo menu belongs to its figure');
+        assert.ok(figure.querySelector('[data-photo-action="open"]'));
         assert.equal(feedBubbles(messages(), 'Not delivered').length, 1, 'the notice stays a row of its own');
         assert.ok(systemBubbles(messages()).some((node) => node.innerHTML.includes('Not delivered')));
         const photo = lineKeysOf(history, isPhoto);

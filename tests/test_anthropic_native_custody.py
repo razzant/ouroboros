@@ -320,23 +320,8 @@ def test_real_checkpoint_cas_keeps_private_raw_and_projects_receipt_metadata(tmp
         reclaim_goal_tokens=1,
         allow_partial_shrink=True,
     )
-    selection, status = compaction._select_units(
-        messages,
-        request,
-        keep_recent=0,
-        trace_refs_by_tool_call_id={},
-        negative_memo=set(),
-        spec={
-            "model": "summary-model",
-            "resolved_model": "summary-model",
-            "provider": "test",
-            "route_fp": "summary-route",
-            "effort": "low",
-            "output_budget": 1024,
-            "use_local": False,
-        },
-    )
-    assert status == "applied" and selection is not None
+    selection = compaction._Selection(compaction._atomic_units(messages), "n" * 64, 0)
+    assert selection.units
     checkpoint_ref = compaction._persist_reclaim_checkpoint(
         messages,
         request,

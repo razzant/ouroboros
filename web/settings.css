@@ -1,5 +1,6 @@
 .settings-shell {
     flex: 1;
+    min-width: 0;
     min-height: 0;
     display: flex;
     flex-direction: column;
@@ -14,12 +15,9 @@
     backdrop-filter: none;
 }
 
-.settings-mobile-back {
-    display: none;
-}
-
 .settings-scroll {
     flex: 1;
+    min-width: 0;
     min-height: 0;
     overflow-y: auto;
     display: flex;
@@ -30,6 +28,8 @@
 
 .settings-panel {
     display: none;
+    min-width: 0;
+    overflow-wrap: anywhere;
     flex-direction: column;
     gap: 18px;
 }
@@ -45,6 +45,7 @@
     font-size: var(--type-body);
     line-height: var(--line-body);
     max-width: 900px;
+    overflow-wrap: anywhere;
 }
 
 .settings-shell .form-section,
@@ -87,19 +88,38 @@
     overflow: hidden;
 }
 
-.settings-provider-card summary {
-    list-style: none;
-    cursor: pointer;
+/* The card head: its disclosure (title and hint) and the card's own Add key, docked right
+   (docs/DESIGN.md §6: a section-level action belongs in its group's header). */
+.settings-provider-head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: 16px 18px;
+}
+
+.settings-provider-toggle {
+    flex: 1 1 auto;
+    min-width: 0;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 16px;
-    padding: 16px 18px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--text-primary);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
 }
 
-.settings-provider-card summary::-webkit-details-marker {
-    display: none;
+.settings-provider-toggle:focus-visible {
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: 4px;
+    border-radius: var(--radius-xs);
 }
+
+.settings-provider-head > .btn { flex: 0 0 auto; }
 
 .settings-provider-title {
     display: flex;
@@ -127,6 +147,36 @@
     flex-direction: column;
     gap: var(--space-3);
     padding: 0 18px 18px;
+}
+
+/* Key rows: the account-row anatomy (name and status, meta line, actions docked right) with the
+   key's own fields and quiet result lines under the two lines (docs/DESIGN.md §6). */
+.connection-rows {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+}
+
+.harness-account-row.connection-row {
+    grid-template-areas: "main actions" "meta actions" "fields fields";
+}
+
+.connection-fields {
+    grid-area: fields;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    min-width: 0;
+    margin-top: var(--space-2);
+}
+
+.connection-fields > .settings-inline-status:empty { display: none; }
+
+.connection-note {
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    overflow-wrap: anywhere;
 }
 
 /* Collapsed "More providers" wrapper: rarely used provider cards (Cloud.ru,
@@ -217,6 +267,18 @@
     gap: 10px;
 }
 
+/* Save, joined by Edit anyway while the stored values are unknown: one row that
+   wraps on a narrow card. A lone Save keeps the full width it always had. */
+.settings-extension-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.settings-extension-actions > .btn {
+    flex: 1 1 160px;
+}
+
 .settings-extension-checkbox {
     display: inline-flex;
     align-items: center;
@@ -226,9 +288,10 @@
     line-height: var(--line-body);
 }
 
-.settings-shell .form-row {
+.settings-shell .form-row,
+.connection-fields .form-row {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
     gap: 14px;
     margin-bottom: 0;
 }
@@ -239,11 +302,11 @@
 }
 
 .settings-shell .form-grid.two {
-    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
 }
 
 .settings-shell .form-grid.four {
-    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
 }
 
 .settings-shell .form-field {
@@ -286,6 +349,7 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+    min-width: 0;
 }
 
 .mcp-server-card-actions,
@@ -298,6 +362,9 @@
 
 .mcp-server-status {
     width: fit-content;
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
     padding: 3px 8px;
     font-size: var(--type-meta);
     line-height: var(--line-meta);
@@ -464,7 +531,6 @@
     min-width: 0;
 }
 
-.settings-secret-value,
 .settings-secret-source,
 .settings-secret-status {
     grid-column: 1 / -1;
@@ -472,11 +538,19 @@
     overflow-wrap: anywhere;
 }
 
+/* Show puts the value in the masked input's own cell (the input steps aside);
+   the buttons keep to its first line rather than stretching with a long value. */
 .settings-secret-value {
+    min-width: 0;
+    overflow-wrap: anywhere;
     white-space: pre-wrap;
     -webkit-user-select: text;
     user-select: text;
     cursor: text;
+}
+
+.settings-secret-value:not([hidden]) ~ .btn {
+    align-self: start;
 }
 
 .available-subagents-editor {
@@ -883,17 +957,6 @@
     transform: none;
 }
 
-
-/* The warn foreground, not the raw --amber: #f59e0b over the 12% amber wash is
-   ~2:1 on the light surface and unreadable when selected. --status-warn-fg is
-   the token that already carries a legible warn tint per theme. */
-[data-enforcement-group] .settings-effort-btn[data-effort-value="advisory"].active,
-[data-enforcement-group] .settings-effort-btn[data-effort-value="advisory"]:hover {
-    color: var(--status-warn-fg);
-    border-color: var(--status-warn-border);
-    background: var(--status-warn-bg);
-}
-
 [data-enforcement-group] .settings-effort-btn[data-effort-value="blocking"].active,
 [data-enforcement-group] .settings-effort-btn[data-effort-value="blocking"]:hover {
     color: var(--text-primary);
@@ -916,25 +979,71 @@
     line-height: var(--line-meta);
     color: var(--text-meta);
     cursor: pointer;
-    white-space: nowrap;
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
 }
 
 .local-toggle input[type="checkbox"] {
+    flex-shrink: 0;
     accent-color: var(--accent);
     width: var(--local-toggle-box);
     height: var(--local-toggle-box);
     cursor: pointer;
 }
 
-[data-autostart-settings] .local-toggle {
-    white-space: normal;
-    flex-wrap: nowrap;
+/* A slider row (Notifications: the soft app tone's level, under Sound; Appearance: the interface size). The label on
+   its own line, the slider and its value on one, then its action and the note across the row. */
+.notify-tone-volume,
+.interface-size-range {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-3);
+    padding-block: var(--space-2);
+}
+.interface-size-range[hidden] { display: none; }
+.notify-tone-volume > label,
+.notify-tone-volume > .settings-toolbar,
+.notify-tone-volume > .settings-inline-note,
+.interface-size-range > label,
+.interface-size-range > .settings-toolbar {
+    grid-column: 1 / -1;
+}
+.notify-tone-volume > .settings-toolbar,
+.interface-size-range > .settings-toolbar {
+    margin: 0;
+}
+.notify-tone-volume input[type="range"],
+.interface-size-range input[type="range"] {
+    min-width: 0;
+    width: 100%;
+    accent-color: var(--accent-light);
+}
+.notify-tone-volume input[type="range"]:disabled,
+.interface-size-range input[type="range"]:disabled {
+    opacity: var(--control-disabled-opacity);
+    cursor: not-allowed;
+}
+.notify-tone-volume input[type="range"]:focus-visible,
+.interface-size-range input[type="range"]:focus-visible {
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: 2px;
+}
+.notify-tone-volume output,
+.interface-size-range output {
+    min-width: 4ch;
+    text-align: right;
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-meta);
 }
 
 /* Startup & background: a row's note starts where its checkbox label's text starts, and a
    status dot hangs under the checkbox, so wrapped lines and both rows share one text edge. */
 [data-autostart-settings] {
-    --autostart-dot: 6px;   /* the status dot, ui.css */
+    --autostart-dot: var(--mark-fact);   /* the status sentence's dot, ui.css */
 }
 [data-autostart-settings] .settings-inline-status,
 [data-autostart-settings] .settings-inline-note {
@@ -974,13 +1083,22 @@
         padding: 0 14px 14px;
     }
 
+    .harness-account-row.connection-row {
+        grid-template-areas: "main" "meta" "fields" "actions";
+    }
+
     .settings-model-grid {
         grid-template-columns: 1fr;
     }
 }
 
 @media (max-width: 760px) {
-    .settings-provider-card summary,
+    .settings-provider-toggle {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: var(--space-1);
+    }
+
     .settings-footer {
         align-items: stretch;
         flex-direction: column;
@@ -1004,7 +1122,8 @@
     .secret-input-row {
         grid-template-columns: minmax(0, 1fr) auto auto;
     }
-    .secret-input-row > input { grid-column: 1 / -1; }
+    .secret-input-row > input,
+    .secret-input-row > .settings-secret-value { grid-column: 1 / -1; }
     .secret-input-row > button:first-of-type { grid-column: 2; }
 
     .settings-card-head,
@@ -1032,20 +1151,8 @@
 }
 
 @media (max-width: 640px) {
-    /* Mobile settings keep horizontal tab pills; back element remains hidden compat. */
     .settings-shell {
         padding: 0 10px 10px;
-    }
-
-    .settings-tabs-bar {
-        padding: 0;
-    }
-
-    .settings-tabs {
-        flex-wrap: nowrap;
-        gap: 8px;
-        padding: 8px 2px 10px;
-        overflow-x: auto;
     }
 
     .settings-tab {
@@ -1057,15 +1164,11 @@
         border-radius: 999px;
     }
 
-    .settings-mobile-back {
-        display: none !important;
-    }
-
     .settings-shell .form-section {
         padding: 14px;
     }
 
-    .settings-provider-card summary,
+    .settings-provider-head,
     .settings-more-providers > summary {
         padding: 14px 14px;
     }
@@ -1343,3 +1446,25 @@
     .mcp-header-row { grid-template-columns: minmax(0, 1fr); }
     .mcp-server-card-head { flex-wrap: wrap; }
 }
+
+/* ---- Airy dopamine (DESIGN.md design bible) -------------------------------------------------------------------
+   A segmented choice is the one capsule control: neutral options standing on the rest shadow, the chosen one in the
+   soft crimson and still standing, no outline. Hover and press change colour, never height. A setting's value is
+   never amber: Advisory reads like every other value. */
+:root[data-theme] .ui-segment {
+    border-color: transparent;
+    border-radius: var(--pill-radius);
+    background: var(--surface-capsule);
+    box-shadow: var(--elev-rest);
+    transition: var(--motion-tone);
+}
+:root[data-theme] .ui-segment:not(:disabled):not(.active):hover {
+    border-color: transparent; background: var(--surface-capsule-hover); color: var(--text-primary);
+}
+:root[data-theme] .ui-segment:not(:disabled):active { transform: none; filter: var(--press); }
+:root[data-theme] .settings-effort-btn.active,
+:root[data-theme] [data-enforcement-group] .settings-effort-btn[data-effort-value="blocking"].active {
+    border-color: transparent; background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink);
+}
+:root[data-theme] .ui-segment:disabled { box-shadow: none; }
+:root[data-theme] .settings-effort-btn:disabled:hover { border-color: transparent; background: var(--surface-capsule); }

@@ -1,0 +1,100 @@
+/* Living cards in the chat feed (docs/DESIGN.md "Living cards"; web/modules/chat_cards.js). A card is an object
+   Ouroboros made inside its own message: the bubble is the object, so the card adds no box of its own — its title,
+   its body (components drawn as on the Widgets board, a skill's widget, or an app frame), and a foot that says
+   "Ouroboros made this" beside what the owner can do with it. Born on tokens, both themes. */
+
+/* A card takes the width a task card takes: 760 px at most, the 80 % gutter only while 80 % is still 620 px or
+   more; a narrow column (620 px or less) gives it the whole width like every bubble. */
+.chat-bubble.chat-card-bubble {
+    width: min(100%, 760px);
+    max-width: max(80%, min(100%, 620px));
+    margin-inline-end: 0;
+}
+
+.chat-card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    min-width: 0;
+}
+
+.chat-card-title {
+    color: var(--text-primary);
+    font-size: var(--type-section);
+    font-weight: 600;
+    line-height: var(--line-title);
+}
+.chat-card-title:empty { display: none; }
+
+.chat-card-body,
+.chat-card-components,
+.chat-card-widget,
+.chat-card-frame-host { min-width: 0; }
+/* The host holds the frame's height before the frame arrives (card_frames.js sets it), so its arrival moves nothing;
+   a skill's declarative widget is capped the same way until Expand. */
+.chat-card-frame-host { height: var(--widget-frame-height); }
+.chat-card-widget {
+    max-height: var(--widget-frame-height);
+    overflow: hidden;
+}
+/* The renderer spaces components from each other; the first one starts at the card's own rhythm. */
+.chat-card-components > :first-child,
+.chat-card-widget > :first-child { margin-top: 0; }
+
+/* The plain words of the card: shown while the body loads, when it cannot be read, and on a frame's face. */
+.chat-card-fallback {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: var(--type-body);
+    line-height: var(--line-body);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.chat-card-status {
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+}
+.chat-card-status[hidden],
+.chat-card-expand[hidden] { display: none; }
+
+/* A frame not running now (far from view, or more than three live): its words and Open. */
+.chat-card-face {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-2);
+}
+
+/* A frame in a message is a tray inside the bubble and follows the message's size policy (card_frames.js): no
+   board floor, no outline. */
+.chat-card-frame-host .widgets-frame {
+    min-height: 0;
+    border: 0;
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
+}
+
+.chat-card-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+}
+.chat-card-made {
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+}
+.chat-card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    margin-inline-start: auto;
+}
+.chat-card-actions:empty { display: none; }
+.chat-card-action,
+.chat-card-expand { min-height: var(--touch-target-min); }
+.chat-card-expand { align-self: flex-start; }

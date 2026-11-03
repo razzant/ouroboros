@@ -468,12 +468,36 @@ def test_unconfirmed_group_death_is_unknown_not_timeout(tmp_path, monkeypatch):
     bench, claim = settled_attempt(tmp_path, monkeypatch)
     monkeypatch.setenv("FAKE_CHECKER_SLEEP", "60")
     monkeypatch.setattr(attempts, "TEARDOWN_GRACE_SEC", 0.2)
-    real_alive = attempts._group_alive
+    real_alive, real_stop = attempts._group_alive, attempts._stop_group
+    checker_ready = False
+
+    def stop_after_checker_ready(proc):
+        nonlocal checker_ready
+        # This classification test needs a running checker/grandchild to prove
+        # their death. Its 1 s diagnostic cap does not bound fixture readiness.
+        try:
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                try:
+                    if (tmp_path / "checker_pids.json.ready").exists():
+                        pids = json.loads((tmp_path / "checker_pids.json").read_text())
+                        if len(pids) == 2:
+                            checker_ready = True
+                            break
+                except (OSError, ValueError):
+                    pass
+                time.sleep(0.05)
+        finally:
+            stopped = real_stop(proc)  # Cleanup still runs on readiness expiry/error.
+        return stopped
+
+    monkeypatch.setattr(attempts, "_stop_group", stop_after_checker_ready)
     monkeypatch.setattr(attempts, "_group_alive", lambda pgid: True)
     try:
         receipt = attempts.run_residual_diagnostic(bench.dump, claim["attempt_id"], cap_sec=1)
     finally:
         monkeypatch.setattr(attempts, "_group_alive", real_alive)
+    assert checker_ready, "checker/grandchild fixture did not become ready before teardown"
     assert (receipt["outcome"], receipt["custody"]) == ("unknown", "unconfirmed")
     pids = json.loads((tmp_path / "checker_pids.json").read_text())
     deadline = time.monotonic() + 10

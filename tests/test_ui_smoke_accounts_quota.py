@@ -40,9 +40,14 @@ def test_accounts_partial_quota_cards(direct_server_with_data):
             "profile": {"harness_id": "claude", "profile_id": profile, "enabled": True},
             "status": {"verification": "passed", "verification_source": "vendor"},
         } for profile in profiles]},
+        # An agent's card takes the engine's verdict for the scope it answered (#1981); the account row reads the
+        # windows themselves. The engine names no verdict for a spent window with no reset, and a block it names
+        # carries the instant it ends: only a dated, still-future block refuses (docs/PASSIVE_QUOTA_READ.md).
         "quota": [{"subject": {"harness": "claude", "subject_id": profile},
-                   "freshness": "fresh", "constraints": [example["constraint"]]}
-                  for profile, example in zip(profiles, examples)],
+                   "freshness": "fresh", "constraints": [example["constraint"]],
+                   **({"availability": {"state": state, "resets_at": example["resetsAt"]}} if state else {})}
+                  for profile, example, state in zip(profiles, examples, ("", "exhausted", "cooldown"))],
+        "availability_scope": {"model": "fable", "requestKind": "text", "basis": "quota_block"},
         "quota_absences": [], "reads": {"catalog": "ok", "accounts": "ok", "quota": "ok"},
         "unified_accounts": True,
     }
@@ -78,6 +83,18 @@ def test_accounts_partial_quota_cards(direct_server_with_data):
             page.wait_for_function("""() => [...document.querySelectorAll('[data-subagent-status]')]
                 .map(el => el.textContent).join('|') === 'Not checked|Limit reached|Limit reached'""")
             page.locator("#available-subagents-editor").screenshot(path=str(evidence / "subagent-quota.png"))
+            # The same two verdicts with no valid reset are no live block: those cards fall back to Not checked
+            # instead of refusing on a verdict nothing can date.
+            for row in snapshot["quota"][1:]:
+                row["availability"].pop("resets_at")
+            page.reload(wait_until="domcontentloaded")
+            page.click('[data-nav-page="settings"]')
+            page.wait_for_selector(".settings-shell")
+            page.click('[data-settings-tab="agents"]')
+            page.locator("#available-subagents-editor").scroll_into_view_if_needed()
+            page.wait_for_function("""() => [...document.querySelectorAll('[data-subagent-status]')]
+                .map(el => el.textContent).join('|') === 'Not checked|Not checked|Not checked'""")
+            page.locator("#available-subagents-editor").screenshot(path=str(evidence / "subagent-quota-undated.png"))
             assert requests and set(requests) == {"GET"}
         finally:
             browser.close()

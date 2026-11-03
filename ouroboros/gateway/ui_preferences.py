@@ -1,13 +1,15 @@
 """Owner-local UI preference endpoints, stored in ``state/ui_preferences.json``.
 
-Keys: ``widget_order``, ``widget_size``, ``widget_start_mode`` (values from
+Keys: ``voice`` (``stt``, ``tts``, ``tts_voice``), ``contributions``, ``widget_order``, ``widget_size``, ``widget_start_mode`` (values from
 ``extension_ui_validation.WIDGET_START_MODES``), ``nested_subagents_expanded``, the
-empty-Main ``welcome`` copy, the two side-section widths and ``project_seen_revision``.
-A POST may carry any subset of keys; an unknown key answers 400.
+empty-Main ``welcome`` copy, the two side-section widths, the read cursors and
+``read_ahead_revisions``. A POST may carry any subset of keys; an unknown key answers 400.
+``shared_read`` (row addresses) is an input only: the host records it as read-ahead.
 """
 from __future__ import annotations
 
 import pathlib
+import copy
 from contextlib import contextmanager
 from typing import Any
 
@@ -15,11 +17,16 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ouroboros.extension_ui_validation import WIDGET_START_MODES
+from ouroboros.store import StoreError
 from ouroboros.gateway._helpers import json_error, request_drive_root, request_json_or
 from ouroboros.utils import atomic_write_json, read_json_dict
 
 DEFAULT_UI_PREFERENCES: dict[str, Any] = {
     "widget_order": [],
+    # Engine choices are contribution keys; tts_voice is the chosen provider's voice id
+    # (empty = the provider's own pick, a voice on this device).
+    "voice": {"stt": "", "tts": "", "tts_voice": ""},
+    "contributions": {"hidden": [], "order": []},
     # Owner override of a widget card's launch policy, keyed "<skill>:<tab_id>" with a
     # value from the validator's WIDGET_START_MODES. Bounds only: keys are never
     # checked against live widgets, so a temporarily disabled or removed skill keeps
@@ -43,6 +50,16 @@ DEFAULT_UI_PREFERENCES: dict[str, Any] = {
     # unknown-key 400, a stored legacy key is ignored on read and dropped on
     # the next write (``project_seen_revision`` is the replacement).
     "project_seen_revision": {},
+    # Main's read cursor, the same monotonic, server-clamped kind against the dialogue store's
+    # room revision of chat 1. None until a client first sets it to what Main holds then, as the
+    # per-window count this replaced started at zero (DESIGN "Unread").
+    "main_seen_revision": None,
+    # One message shown in two rooms is read once (DESIGN "Unread"): a client that showed the whole
+    # message posts its address (``shared_read``); the host records, per room it counted in (its
+    # ``room_revisions`` stamp), that revision as read without moving the cursor, as closed intervals
+    # {"<chat_id>": [[from, to], ...]}. Lossless: only that room's own cursor covering a range drops
+    # it. Host-owned: a POST naming this key answers 400.
+    "read_ahead_revisions": {},
     # Main's empty-state copy, a hidden install-wide preference (no Settings control):
     # never a model reply or a chat-history row.
     "welcome": {"mode": "default", "text": ""},
@@ -58,6 +75,7 @@ _PROJECT_PANEL_WIDTH_MIN, _PROJECT_PANEL_WIDTH_MAX = 320, 1100
 _MAX_PROJECT_CURSORS = 1000
 _MAX_PROJECT_ID_LENGTH = 64
 _MAX_WELCOME_CHARS = 500
+_MAX_SHARED_READS = 64  # addresses one POST may name; recorded facts are never capped
 
 
 @contextmanager
@@ -110,9 +128,32 @@ def _normalize_preferences(
     *,
     fill_defaults: bool = True,
 ) -> dict[str, Any]:
-    prefs = dict(DEFAULT_UI_PREFERENCES) if fill_defaults else {}
+    prefs = copy.deepcopy(DEFAULT_UI_PREFERENCES) if fill_defaults else {}
     if not isinstance(raw, dict):
         return prefs
+    for group, keys in (("voice", ("stt", "tts", "tts_voice")), ("contributions", ("hidden", "order"))):
+        if group not in raw:
+            continue
+        value = raw[group]
+        if not isinstance(value, dict) or any(key not in keys for key in value):
+            raise ValueError(f"{group} must be an object using only {', '.join(keys)}")
+        cleaned = dict(prefs.get(group, {}))
+        for key, item in value.items():
+            if group == "contributions":
+                if not isinstance(item, list) or len(item) > 64:
+                    raise ValueError(f"{group}.{key} must be a list of at most 64 keys")
+                values = item
+            else:
+                values = [item]
+            if any(not isinstance(v, str) or len(v) > 120 for v in values):
+                raise ValueError(f"{group}.{key} keys must be strings of at most 120 characters")
+            try:
+                for v in values:
+                    v.encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError(f"{group}.{key} keys must be valid Unicode") from None
+            cleaned[key] = list(dict.fromkeys(values)) if group == "contributions" else item
+        prefs[group] = cleaned
     if "widget_order" in raw:
         value = raw.get("widget_order")
         if value is None:
@@ -180,6 +221,17 @@ def _normalize_preferences(
                 except (TypeError, ValueError):
                     raise ValueError("project_seen_revision values must be integers")
             prefs["project_seen_revision"] = cleaned
+    if "main_seen_revision" in raw:
+        value = raw.get("main_seen_revision")
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+            raise ValueError("main_seen_revision must be an integer or null")
+        prefs["main_seen_revision"] = None if value is None else max(0, value)
+    if "read_ahead_revisions" in raw:  # stored state only: the POST handler refuses it as input
+        value = raw["read_ahead_revisions"]
+        if not isinstance(value, dict):
+            raise ValueError("read_ahead_revisions must be an object of {chat_id: [[from, to], ...]}")
+        prefs["read_ahead_revisions"] = {str(chat): spans for chat, item in value.items()
+                                         if str(chat).lstrip("-").isdigit() and (spans := _merged(item))}
     if "welcome" in raw:
         value = raw["welcome"]
         if not isinstance(value, dict) or set(value) != {"mode", "text"}:
@@ -199,6 +251,75 @@ def _normalize_preferences(
             raise ValueError("welcome text must be valid Unicode") from None
         prefs["welcome"] = {"mode": mode, "text": text}
     return prefs
+
+
+def _merged(intervals: Any) -> list[list[int]]:
+    """Closed revision intervals, sorted and merged (adjacent ones join); malformed entries drop."""
+    spans = sorted((int(lo), int(hi)) for lo, hi in (item for item in intervals or () if isinstance(item, (list, tuple))
+                                                      and len(item) == 2 and all(type(v) is int and v > 0 for v in item))
+                   if lo <= hi)
+    merged: list[list[int]] = []
+    for lo, hi in spans:
+        if merged and lo <= merged[-1][1] + 1:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+    return merged
+
+
+def _room_cursors(drive_root: Any, prefs: dict) -> dict[int, tuple[int, int]]:
+    """``{chat_id: (read cursor, room revision)}`` for Main and every reserved Project."""
+    from ouroboros import dialogue_store
+    from ouroboros.projects_registry import list_reserved_projects
+
+    revisions = {room["chat_id"]: int(room.get("revision") or 0) for room in dialogue_store.rooms(drive_root)}
+    seen = prefs.get("project_seen_revision") or {}
+    cursors = {1: (int(prefs.get("main_seen_revision") or 0), revisions.get(1, 0))}
+    for project in list_reserved_projects(drive_root):
+        chat = int(project.get("chat_id") or 0)
+        cursors[chat] = (int(seen.get(str(project.get("id") or "")) or 0), revisions.get(chat, 0))
+    return cursors
+
+
+def _record_shared_reads(drive_root: Any, prefs: dict, addresses: list[str]) -> None:
+    """Add each wholly shown message's room revisions above that room's cursor, then drop what
+    each room's own cursor now covers. A room the store or registry does not name keeps its facts."""
+    from ouroboros.chat_chain import resolve_row
+
+    cursors = _room_cursors(drive_root, prefs)
+    ahead = {key: _merged(value) for key, value in (prefs.get("read_ahead_revisions") or {}).items()}
+    for address in addresses:
+        row, _resolution = resolve_row(drive_root, address)  # a store that cannot answer raises: 503
+        stamp = (row or {}).get("room_revisions")
+        for chat, revision in (stamp.items() if isinstance(stamp, dict) else ()):
+            cursor, held = cursors.get(int(chat), (0, 0)) if str(chat).lstrip("-").isdigit() else (0, 0)
+            if type(revision) is int and cursor < revision <= held:
+                ahead[str(chat)] = _merged([*ahead.get(str(chat), []), [revision, revision]])
+    for chat, spans in list(ahead.items()):
+        cursor = cursors.get(int(chat), (0, 0))[0] if chat.lstrip("-").isdigit() else 0
+        ahead[chat] = [[max(lo, cursor + 1), hi] for lo, hi in spans if hi > cursor]
+        if not ahead[chat]:
+            del ahead[chat]
+    prefs["read_ahead_revisions"] = ahead
+
+
+def read_ahead_spans(drive_root: Any, chat_id: Any) -> list[list[int]]:
+    """One room's recorded read-ahead revisions (``read_ahead_revisions``); none when unreadable."""
+    try:
+        stored = _stored_preferences(pathlib.Path(drive_root) / "state" / "ui_preferences.json")
+    except Exception:
+        return []
+    return list(stored.get("read_ahead_revisions", {}).get(str(chat_id), []))
+
+
+def main_room_revision(drive_root: Any) -> int | None:
+    """Main's room revision in the dialogue store (its standalone messages), None while unreadable."""
+    try:
+        from ouroboros import dialogue_store
+
+        return max(0, int((dialogue_store.room(drive_root, 1) or {}).get("revision") or 0))
+    except Exception:
+        return None
 
 
 def _stored_preferences(path: pathlib.Path) -> dict[str, Any]:
@@ -228,15 +349,24 @@ async def api_ui_preferences_post(request: Request) -> JSONResponse:
     body = await request_json_or(request, None)
     if not isinstance(body, dict):
         return json_error("request body must be a JSON object", 400)
+    shared = body.pop("shared_read", None)
     unknown = sorted(set(body) - _KNOWN_KEYS)
     if unknown:
         return json_error(f"unknown ui preference key: {unknown[0]}", 400)
+    if "read_ahead_revisions" in body:
+        return json_error("read_ahead_revisions is recorded by the host; post shared_read addresses", 400)
+    if shared is not None and (not isinstance(shared, list) or len(shared) > _MAX_SHARED_READS
+                               or any(not isinstance(item, str) or not item.startswith("row:") for item in shared)):
+        return json_error(f"shared_read must be a list of at most {_MAX_SHARED_READS} row addresses", 400)
     drive_root = request_drive_root(request)
     path = pathlib.Path(drive_root) / "state" / "ui_preferences.json"
     try:
         with _preferences_lock(path):
             prefs = _stored_preferences(path)
             incoming = _normalize_preferences(body, fill_defaults=False)
+            for group in ("voice", "contributions"):
+                if group in incoming:
+                    prefs[group] = {**prefs[group], **incoming.pop(group)}
             if "project_seen_revision" in incoming:
                 from ouroboros.projects_registry import get_project
 
@@ -253,6 +383,13 @@ async def api_ui_preferences_post(request: Request) -> JSONResponse:
                     # ensure tombstones/unknown ids are not newly admitted here.
                     merged = dict(list(merged.items())[-_MAX_PROJECT_CURSORS:])
                 prefs["project_seen_revision"] = merged
+            if "main_seen_revision" in incoming:
+                requested = incoming.pop("main_seen_revision")
+                current = main_room_revision(drive_root) if requested is not None else None
+                if current is not None:
+                    # Never past what Main holds, never backwards; an unreadable store moves nothing.
+                    stored = prefs.get("main_seen_revision")
+                    prefs["main_seen_revision"] = max(int(stored or 0), min(requested, current))
             if "widget_size" in incoming:
                 # Merge by card: a write names only the cards it changes, a null value
                 # deletes one, a null map clears them all. A changed key moves last,
@@ -266,11 +403,20 @@ async def api_ui_preferences_post(request: Request) -> JSONResponse:
                         sizes[key] = size
                 prefs["widget_size"] = dict(list(sizes.items())[-_MAX_WIDGET_SIZE_ITEMS:])
             prefs.update(incoming)
+            if shared:
+                _record_shared_reads(drive_root, prefs, list(dict.fromkeys(shared)))
+            elif prefs.get("read_ahead_revisions") and ("project_seen_revision" in body or "main_seen_revision" in body):
+                try:  # a cursor ACK drops what it now covers; an unreadable store or registry keeps every read fact
+                    _record_shared_reads(drive_root, prefs, [])
+                except (StoreError, OSError, ValueError):
+                    pass
             atomic_write_json(path, prefs, trailing_newline=True)
     except ValueError as exc:
         return json_error(str(exc), 400)
     except TimeoutError as exc:
         return json_error(str(exc), 503)
+    except StoreError as exc:
+        return json_error(f"dialogue history unavailable: {exc}", 503)
     return JSONResponse({"ok": True, **prefs})
 
 
@@ -278,4 +424,5 @@ __all__ = [
     "DEFAULT_UI_PREFERENCES",
     "api_ui_preferences_get",
     "api_ui_preferences_post",
+    "main_room_revision",
 ]

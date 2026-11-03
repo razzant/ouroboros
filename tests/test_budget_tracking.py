@@ -210,48 +210,36 @@ class TestReviewUsageFallback:
 
 
 # ---------------------------------------------------------------------------
-# Consolidation cost tracking
+# Post-task memory stage cost tracking
 # ---------------------------------------------------------------------------
 
-class TestScratchpadConsolidationCostTracking:
-    """_run_scratchpad_consolidation must call update_budget_from_usage when cost > 0."""
+class TestFallbackDraftCostTracking:
+    """The paid post-task memory stage must call update_budget_from_usage when its draft spent
+    something. (The scratchpad consolidation stage this class used to pin is retired, #918; the
+    fallback draft stage is the remaining memory stage with the same accounting.)"""
 
-    def test_update_budget_called_after_scratchpad_consolidation(self, tmp_path):
-        """When consolidate_scratchpad() returns usage, update_budget_from_usage is called."""
-        from ouroboros.agent_task_pipeline import _run_scratchpad_consolidation
-        import ouroboros.consolidator as _cons
+    def test_update_budget_called_after_a_paid_fallback_draft(self, tmp_path):
+        from ouroboros.agent_task_pipeline import _run_memory_fallback_draft
+        from ouroboros import memory_fallback
 
         usage_dict = {"prompt_tokens": 200, "completion_tokens": 100, "cost": 0.02}
         env = MagicMock()
-        env.drive_path.return_value = tmp_path
-        memory = MagicMock()
-        llm = MagicMock()
+        env.drive_root = tmp_path
+        run = memory_fallback.FallbackRun("nothing", usage=usage_dict)
 
-        with patch.object(_cons, "should_consolidate_scratchpad_blocks", return_value=True, create=True), \
-             patch.object(_cons, "consolidate_scratchpad_blocks", return_value=usage_dict, create=True), \
-             patch.object(_cons, "should_consolidate_scratchpad", return_value=True, create=True), \
-             patch.object(_cons, "consolidate_scratchpad", return_value=usage_dict, create=True), \
+        with patch.object(memory_fallback, "run_fallback_draft", return_value=run), \
              patch("supervisor.state.update_budget_from_usage") as mock_budget:
-            import time
-            _run_scratchpad_consolidation(env, memory, llm)
-            time.sleep(0.3)
+            assert _run_memory_fallback_draft(env, {"id": "t"}, MagicMock(), tmp_path / "logs", {}) == ""
             mock_budget.assert_called_once_with(usage_dict)
 
-    def test_no_budget_call_when_consolidation_returns_none(self, tmp_path):
-        from ouroboros.agent_task_pipeline import _run_scratchpad_consolidation
-        import ouroboros.consolidator as _cons
+    def test_no_budget_call_when_the_draft_bought_nothing(self, tmp_path):
+        from ouroboros.agent_task_pipeline import _run_memory_fallback_draft
+        from ouroboros import memory_fallback
 
         env = MagicMock()
-        env.drive_path.return_value = tmp_path
-        memory = MagicMock()
-        llm = MagicMock()
+        env.drive_root = tmp_path
 
-        with patch.object(_cons, "should_consolidate_scratchpad_blocks", return_value=True, create=True), \
-             patch.object(_cons, "consolidate_scratchpad_blocks", return_value=None, create=True), \
-             patch.object(_cons, "should_consolidate_scratchpad", return_value=True, create=True), \
-             patch.object(_cons, "consolidate_scratchpad", return_value=None, create=True), \
+        with patch.object(memory_fallback, "run_fallback_draft", return_value=memory_fallback.FallbackRun("not_activated")), \
              patch("supervisor.state.update_budget_from_usage") as mock_budget:
-            import time
-            _run_scratchpad_consolidation(env, memory, llm)
-            time.sleep(0.3)
+            assert _run_memory_fallback_draft(env, {"id": "t"}, MagicMock(), tmp_path / "logs", {}) == ""
             mock_budget.assert_not_called()

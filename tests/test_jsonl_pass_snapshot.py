@@ -1,4 +1,4 @@
-"""A logical source pass reads chain metadata once and closes every read batch."""
+"""A logical source pass over a file log (tools) reads chain metadata once and closes every read batch."""
 
 import io
 import json
@@ -12,43 +12,6 @@ from ouroboros.gateway.task_events import _TaskEventCursorFollower
 from tests.test_task_event_cursor import append, content, seed
 
 
-@pytest.mark.parametrize("consumer", ["wake", "history"])
-def test_captured_consumer_horizon_survives_append_and_rotation(tmp_path, consumer):
-    """Sharing physical reads must not import history's selection policy into a wake."""
-    from ouroboros.consciousness_wake import _ChatChain
-    from ouroboros.gateway.history_paging import HistorySource
-
-    path = tmp_path / "logs" / "chat.jsonl"
-    path.parent.mkdir()
-    first = b'{"text":"first"}\n'
-    path.write_bytes(first + b'{"text":"next')
-    source = _ChatChain(path) if consumer == "wake" else HistorySource(path, "chat")
-    with path.open("ab") as handle:
-        handle.write(b'"}\n')
-    archive = tmp_path / "archive"
-    archive.mkdir()
-    path.rename(archive / "chat_20260101T000000.jsonl")
-    path.write_bytes(b'{"text":"new generation"}\n')
-
-    if consumer == "wake":
-        gaps = set()
-        rows, accepted = source.rows(0, 0, gaps)
-        assert [row["text"] for _, row in rows] == ["first"]
-        assert accepted == len(first) and not gaps
-        fresh = _ChatChain(path)
-        rows = [row for index in range(len(fresh.entries))
-                for _, row in fresh.rows(index, accepted, gaps)[0]]
-    else:
-        rows, _, gaps = source.replay(0, source.upper)
-        assert [row["text"] for row in rows] == ["first"]
-        # History discloses the line its writer had not finished when it froze.
-        assert source.upper == len(first) and gaps == {"incomplete_live_line"}
-        fresh = HistorySource(path, "chat")
-        rows, _, gaps = fresh.replay(source.upper, fresh.upper)
-    assert [row["text"] for row in rows] == ["next", "new generation"]
-    assert not gaps
-
-
 @pytest.mark.parametrize("archives,records", [(40, 1), (100, 1), (20, 4)])
 def test_cold_metadata_reads_are_linear_in_archives_and_not_multiplied_by_batches(tmp_path, monkeypatch, archives, records):
     root = seed(tmp_path / "root")
@@ -57,8 +20,8 @@ def test_cold_metadata_reads_are_linear_in_archives_and_not_multiplied_by_batche
     payload = "row" if records == 1 else "x" * 40000
     raw = (json.dumps({"task_id": "root", "content": payload}) + "\n").encode()
     for index in range(archives):
-        (directory / f"progress_20260101T{index:06d}.jsonl").write_bytes(raw * records)
-    append(root, "live")
+        (directory / f"tools_20260101T{index:06d}.jsonl").write_bytes(raw * records)
+    append(root, "live", source="tools")
     counts = {"stat": 0, "enumerate": 0}
     real_stat, real_segments = pathlib.Path.stat, utils.jsonl_archive_segments
     def stat(path, *args, **kwargs):
@@ -66,7 +29,7 @@ def test_cold_metadata_reads_are_linear_in_archives_and_not_multiplied_by_batche
             counts["stat"] += 1
         return real_stat(path, *args, **kwargs)
     def segments(path, **kwargs):
-        if path.name == "progress.jsonl":
+        if path.name == "tools.jsonl":
             counts["enumerate"] += 1
         return real_segments(path, **kwargs)
     monkeypatch.setattr(pathlib.Path, "stat", stat)
@@ -82,12 +45,12 @@ def test_original_live_rebinds_once_while_newer_generations_keep_rotating(tmp_pa
     directory = root / "archive"
     directory.mkdir()
     for index in range(6):
-        append(root, str(index) * 40000)
-    append(root, "tool", source="tools")
+        append(root, str(index) * 40000, source="tools")
+    append(root, "tool", source="supervisor")
     calls = []
     real = utils.jsonl_archive_segments
     def segments(path, **kwargs):
-        if path.name == "progress.jsonl":
+        if path.name == "tools.jsonl":
             calls.append(path)
         return real(path, **kwargs)
     monkeypatch.setattr(utils, "jsonl_archive_segments", segments)
@@ -96,11 +59,11 @@ def test_original_live_rebinds_once_while_newer_generations_keep_rotating(tmp_pa
     observed = []
     for index, row in enumerate(follower.read_events()):
         observed.append(row)
-        if row["source"] == "progress":
-            live = root / "logs" / "progress.jsonl"
-            os.replace(live, directory / f"progress_20260101T{index:06d}.jsonl")
+        if row["source"] == "tools":
+            live = root / "logs" / "tools.jsonl"
+            os.replace(live, directory / f"tools_20260101T{index:06d}.jsonl")
             live.touch()
-            append(root, "next-pass")
+            append(root, "next-pass", source="tools")
     assert content(observed) == [str(index) * 40000 for index in range(6)] + ["tool"]
     assert len(calls) == 2  # one snapshot and one original-generation rebind
     assert content(list(follower.read_events())) == ["next-pass"] * 6
@@ -112,7 +75,7 @@ def test_required_unread_segment_failure_never_advances_the_cursor(tmp_path, cha
     directory = root / "archive"
     directory.mkdir()
     raw = b'{"task_id":"root","content":"archived"}\n'
-    first, second = [directory / f"progress_20260101T00000{index}.jsonl" for index in (1, 2)]
+    first, second = [directory / f"tools_20260101T00000{index}.jsonl" for index in (1, 2)]
     first.write_bytes(raw)
     second.write_bytes(raw)
     follower = _TaskEventCursorFollower(root, "root", {"v": 2, "seq": 0, "view": "", "positions": {}})

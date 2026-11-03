@@ -22,6 +22,21 @@ def finish(answer=None, *, action='finish', **kw):
     }]}
 
 
+def hold_first_delivery(monkeypatch):
+    """Hold the first delivery once at the host's result-review step, then let it pass.
+
+    ``result_review_at_delivery`` is the delivery-time host step whose ``True`` holds
+    the answer for another turn; it records the content it was asked about."""
+    seen = []
+
+    def review(_ctx, content, _trace, _hold):
+        seen.append(content)
+        return len(seen) == 1
+
+    monkeypatch.setattr('ouroboros.tools.review_result.result_review_at_delivery', review)
+    return seen
+
+
 @pytest.fixture
 def turn(tmp_path, monkeypatch):
     monkeypatch.setenv('OUROBOROS_TASK_REVIEW_MODE', 'off')
@@ -49,13 +64,50 @@ def test_plain_reply_and_voluntary_selection_need_one_round(turn):
     assert 'task_completion' not in trace
 
 
+@pytest.mark.parametrize('statement', [None, 'Solo would have avoided coordination; parallel checks helped.'])
+def test_accepted_completion_retains_only_an_authored_swarm_comparison(turn, tmp_path, statement):
+    from ouroboros.swarm_receipt import publish
+    from ouroboros.task_results import write_task_result
+
+    registry, calls, notes, run = turn
+    write_task_result(tmp_path, 'author-task', 'running')
+    schema = registry.get_schema_by_name('finish_task')['function']['parameters']['properties']
+    assert schema['swarm_comparison']['type'] == 'string'
+    kwargs = {'swarm_comparison': statement} if statement is not None else {}
+    text, usage, trace = run([finish('Done.', **kwargs)])
+    assert text == 'Done.' and len(calls) == 1
+    comparison = publish(tmp_path, 'author-task')['mind_comparison']
+    if statement is None:
+        assert comparison['state'] == 'not_recorded'
+    else:
+        assert comparison == {'source': 'task.swarm_comparison', 'author': 'mind', 'value': statement}
+    assert registry.get_schema_by_name('finish_task')['function']['parameters']['properties'] == schema
+
+
+def test_held_completion_does_not_publish_its_swarm_comparison(turn, tmp_path, monkeypatch):
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    registry, calls, notes, run = turn
+    write_task_result(tmp_path, 'author-task', 'running')
+    hold_first_delivery(monkeypatch)
+    text, usage, trace = run([finish('Held answer', swarm_comparison='An unaccepted comparison'), finish('Done.')])
+    assert text == 'Done.' and len(calls) == 2
+    assert 'swarm_comparison' not in load_task_result(tmp_path, 'author-task')
+
+
+@pytest.mark.parametrize('statement, accepted', [('An authored comparison', True), (17, False)])
+def test_swarm_comparison_argument_is_text_without_deciding_completion(turn, statement, accepted):
+    from ouroboros.tools.control_runtime import _finish_task
+
+    registry, calls, notes, run = turn
+    result = _finish_task(registry._ctx, action='finish', answer='Done.', swarm_comparison=statement)
+    assert ('completion_requested' in result) is accepted
+    assert ('swarm_comparison must be text' in result) is not accepted
+
+
 def test_retained_report_interim_then_short_complete_selection(turn, monkeypatch):
     registry, calls, notes, run = turn
-    review_calls = []
-    def review(**kwargs):
-        review_calls.append(kwargs['content'])
-        return len(review_calls) == 1
-    monkeypatch.setattr(loop, '_run_task_acceptance_review_once', review)
+    review_calls = hold_first_delivery(monkeypatch)
     report = 'The retained report is intentionally much longer than the final correction.'
     text, usage, trace = run([{'content': report}, {'content': 'Checking.'},
         {'content': 'Checking.'}, finish('No.')])
@@ -69,11 +121,7 @@ def test_retained_report_interim_then_short_complete_selection(turn, monkeypatch
 
 def test_select_latest_whole_held_response_without_regeneration(turn, monkeypatch):
     registry, calls, notes, run = turn
-    seen = []
-    def review(**kwargs):
-        seen.append(kwargs['content'])
-        return len(seen) == 1
-    monkeypatch.setattr(loop, '_run_task_acceptance_review_once', review)
+    seen = hold_first_delivery(monkeypatch)
     replacement = 'Correction: yes.'
     text, _, _ = run([{'content': 'Original long report.'}, {'content': replacement},
         finish(answer_sha256=hashlib.sha256(replacement.encode()).hexdigest())])
@@ -112,9 +160,43 @@ def test_schema_bookkeeping_exempts_only_successful_results(turn, name, failure)
         assert not trace.get('completion_refusals')
 
 
+@pytest.mark.parametrize('name, arguments', [('chronicle_write', {'kind': 'page', 'text': 'What I did'}),
+                                             ('memory_mark', {}),
+                                             ('update_scratchpad', {'content': 'Next: the docs'})])
+@pytest.mark.parametrize('answer, held', [('written', False), ('⚠️ PARTIAL_WRITE: two decisions not recorded', True),
+                                          ('⚠️ TOOL_ERROR: write failed', True)])
+def test_a_receipt_write_rides_with_the_answer_unless_it_said_more(turn, name, arguments, answer, held):
+    """The page, a note or an addressed message written in the finishing response does not cost
+    the answer a round (owner decision 27.10); a warning or a failure from it is read first."""
+    registry, calls, notes, run = turn
+    registry.override_handler(name, lambda _ctx, **kw: answer)
+    response = finish('The asked fact')
+    response['tool_calls'].insert(0, {'id': 'receipt', 'type': 'function', 'function': {
+        'name': name, 'arguments': json.dumps(arguments)}})
+    text, _, trace = run([response, finish('Read it first')])
+    assert len(calls) == (2 if held else 1)
+    assert text == ('Read it first' if held else 'The asked fact')
+    assert bool(trace.get('completion_refusals')) is held
+
+
+def test_only_an_ok_receipt_write_skips_the_read_before_finish():
+    from ouroboros.tool_capabilities import COMPLETION_RECEIPT_TOOLS, completion_observation_calls
+
+    def call(tool, code='OK', is_error=False):
+        return {'tool': tool, 'tool_result_code': code, 'is_error': is_error}
+
+    assert completion_observation_calls([call(name) for name in sorted(COMPLETION_RECEIPT_TOOLS)]) == []
+    held = [call('tell_task', 'LEGACY_WARNING'), call('forward_to_worker', 'TOOL_ERROR', True),
+            call('update_identity'), call('update_world'), call('read_file'), call('verify_and_record'),
+            call('a_tool_added_later'), call('chronicle_write', None)]
+    assert completion_observation_calls(held) == held
+
+
 def test_stop_avoids_reviews_nudges_and_question_parking(turn, monkeypatch):
     registry, calls, notes, run = turn
-    for name in ('_run_task_acceptance_review_once', '_maybe_inject_finalization_nudges', 'wait_after_tools', '_finish_tool_round_budget'):
+    monkeypatch.setattr('ouroboros.tools.review_result.result_review_at_delivery',
+                        lambda *a, **kw: pytest.fail('stop purchased a review'))
+    for name in ('_maybe_inject_finalization_nudges', 'wait_after_tools', '_finish_tool_round_budget'):
         monkeypatch.setattr(loop, name, lambda *a, **kw: pytest.fail('stop purchased/parked/advanced'))
     text, _, trace = run([finish('Work remains.', action='stop', rationale='The child has not answered.')])
     assert text == 'Work remains.' and len(calls) == 1
@@ -134,6 +216,135 @@ def test_completion_conflict_preserves_sources_and_requires_reselection(turn):
     assert text == 'informed' and len(calls) == 2
     assert any(call['is_error'] for call in trace['tool_calls'])
     assert trace['completion_refusals'][0]['reason'].startswith('contradictory_completion_requests')
+
+
+class _WorkerDeath(BaseException):
+    """The worker process ends: nothing after this point runs, saves or acknowledges."""
+
+
+def _after_worker_death(tmp_path, monkeypatch, first, then, *, legacy=False, task_id='author-task', prepare=None):
+    """Attempt 1 answers ``first`` and its worker dies right after the batch's post-batch save. The rolling
+    state is frozen as a retry's source (``attach_recovery``) and continued as attempt 2 of ``task_id``
+    (the same task, or a new execution id) through the real loop, which answers ``then``. ``legacy`` drops
+    the conflict fact from the saved bytes, as a checkpoint written before that fact was carried."""
+    from ouroboros import working_checkpoint as wc
+    from ouroboros.task_results import write_task_result
+    from tests.test_working_checkpoint import _registry
+
+    asked = []
+
+    def attempt(number, answers, own_id, **facts):
+        registry = _registry(tmp_path, monkeypatch, own_id, number)  # a worker's start, with its fitted route
+        registry._ctx.is_direct_chat = True
+        for key, value in facts.items():
+            setattr(registry._ctx, key, value)
+        if prepare is not None:
+            prepare(registry)
+        replies = iter(answers)
+
+        def respond(*_a, **_kw):
+            asked.append(number)
+            return next(replies), 0.0
+
+        monkeypatch.setattr(loop, 'call_llm_with_retry', respond)
+        return loop.run_llm_loop([{'role': 'user', 'content': 'Please help'}], registry,
+            SimpleNamespace(default_model=lambda: 'test-model'), tmp_path / 'logs',
+            lambda text, **_kw: None, queue.Queue(), task_id=own_id, drive_root=tmp_path)
+
+    write_task_result(tmp_path, 'author-task', 'running')
+    saved = wc.save_or_log
+
+    def save_then_die(limit_ctx, boundary):
+        result = saved(limit_ctx, boundary)
+        if boundary == 'post_batch':
+            raise _WorkerDeath
+        return result
+
+    with monkeypatch.context() as dying:
+        dying.setattr(wc, 'save_or_log', save_then_die)
+        with pytest.raises(_WorkerDeath):
+            attempt(1, first, 'author-task')
+    path = wc.checkpoint_path(tmp_path, 'author-task', 1)
+    state = json.loads(path.read_bytes())
+    if legacy:
+        state['delivery'].pop('_completion_conflict', None)
+        path.write_text(json.dumps(state), encoding='utf-8')
+    task = {'id': 'author-task'}
+    assert wc.attach_recovery(tmp_path, task, source_task_id='author-task', from_attempt=1, cause='worker_crash')
+    if task_id != 'author-task':
+        write_task_result(tmp_path, task_id, 'running')
+    text, _usage, trace = attempt(2, then, task_id, working_recovery=task['_working_recovery'])
+    return text, trace, asked, state
+
+
+def _stop_then(sibling, *, answer='Stopped early.'):
+    response = finish(answer, action='stop', rationale='The child has not answered.')
+    response['tool_calls'].append({'id': 'second', 'type': 'function', 'function': sibling})
+    return response
+
+
+CONTRADICTING_FINISH = {'name': 'finish_task', 'arguments': json.dumps({'action': 'finish', 'answer': 'Finished.'})}
+FAILED_READ = {'name': 'chat_history', 'arguments': '{}'}
+
+
+def _failing_read(registry):
+    from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+
+    registry.override_handler('chat_history', lambda ctx: _publish_tool_result(ctx,
+        ToolResult(status='error', code='TOOL_ERROR', text='Read unavailable')))
+
+
+def test_a_stop_first_conflict_survives_a_same_id_recovery_of_its_post_batch_state(tmp_path, monkeypatch):
+    """Map seam 1: ``stop`` then a contradicting ``finish`` in ONE batch, the worker dying after the post-batch
+    save and before that batch's request was read. The live loop refuses the pair; the same task continued
+    from that state refuses it too, instead of publishing the first stop (the finish-only unread-result
+    check never covers a stop)."""
+    text, trace, asked, saved = _after_worker_death(
+        tmp_path, monkeypatch, [_stop_then(CONTRADICTING_FINISH)], [finish('Informed answer.')])
+    assert text == 'Informed answer.' and asked == [1, 2]
+    assert trace['completion_refusals'][-1]['reason'].startswith('contradictory_completion_requests')
+    assert 'task_completion' not in trace, 'the contradicted stop was never recorded'
+    assert saved['working']['boundary'] == 'post_batch'
+    assert saved['delivery']['_completion_request']['action'] == 'stop'
+    assert saved['delivery']['_completion_conflict'] is True, 'the conflict travels with its unread request'
+
+
+@pytest.mark.parametrize('sibling, viable', [(FAILED_READ, True), (CONTRADICTING_FINISH, False)])
+def test_a_legacy_post_batch_state_keeps_one_valid_stop_and_names_an_ambiguous_one_unknown(
+        tmp_path, monkeypatch, sibling, viable):
+    """A state saved before the conflict fact was carried proves neither its absence nor its presence.
+    The batch's own rows decide only what they can: a stop whose siblings include no failed completion request
+    is the one valid request (a failed read is no conflict) and still completes; beside a failed completion
+    request it may or may not have been contradicted, so it is held as UNKNOWN for a fresh selection, never
+    recorded as a conflict and never published on a guess."""
+    text, trace, asked, saved = _after_worker_death(
+        tmp_path, monkeypatch, [_stop_then(sibling)], [finish('Informed answer.')], legacy=True,
+        prepare=_failing_read)
+    assert '_completion_conflict' not in saved['delivery'] and saved['delivery']['_completion_request']
+    if viable:
+        assert text == 'Stopped early.' and asked == [1]
+        assert trace['task_completion']['action'] == 'stop' and not trace.get('completion_refusals')
+        return
+    assert text == 'Informed answer.' and asked == [1, 2]
+    [refusal] = trace['completion_refusals']
+    assert refusal['reason'].startswith('completion_conflict_unknown')
+    assert 'contradictory' not in refusal['reason'] and 'UNKNOWN' in refusal['reason']
+
+
+def test_a_new_execution_id_takes_the_answer_bytes_but_no_staged_request(tmp_path, monkeypatch):
+    """An idle retry continues the transcript and the retained answer (its bytes and its control episode)
+    but no request staged by the attempt it replaces: that stop is never published for the new execution,
+    which selects again over the same retained bytes."""
+    hold_first_delivery(monkeypatch)
+    draft = 'Draft answer.'
+    selector = hashlib.sha256(draft.encode()).hexdigest()
+    text, trace, asked, saved = _after_worker_death(
+        tmp_path, monkeypatch, [{'content': draft}, _stop_then(FAILED_READ, answer='Partial.')],
+        [{'content': 'Prose under armed control.'}, finish(answer_sha256=selector)], task_id='author-retry',
+        prepare=_failing_read)
+    assert saved['delivery_candidate']['full_text'] == draft and saved['delivery']['_completion_request']
+    assert text == draft and asked == [1, 1, 2, 2], 'prose is refused: the retained episode came along'
+    assert 'task_completion' not in trace and 'completion_refusals' not in trace, 'the old stop never ran here'
 
 
 def test_unavailable_held_selector_never_reconstructs_a_preview():
@@ -193,8 +404,9 @@ def test_reply_later_is_consumed_once_then_a_hold_needs_new_selection(turn, monk
     from tests.test_presence_runner import _admission
     registry, calls, notes, run = turn
     registry._ctx.task_contract = {'capability_ceiling': presence_ceiling_payload(_admission().capability_ceiling)}
-    checked = []
-    monkeypatch.setattr(loop, '_run_task_acceptance_review_once', lambda **kw: checked.append(kw['content']) or len(checked) == 1)
+    from tests.presence_legacy_helpers import register_legacy_completion
+    register_legacy_completion(registry)
+    checked = hold_first_delivery(monkeypatch)
     text, _, _ = run([_call('message', ''), {'content': 'Chosen reply-later'},
         {'content': 'Interim, unselected'}, _call('message', 'Deliberately selected')])
     assert text == 'Deliberately selected' and checked == ['Chosen reply-later', 'Deliberately selected']
@@ -247,23 +459,18 @@ def test_child_stop_never_seals_the_parent_root(turn):
 
 
 @pytest.mark.parametrize('refusal', ['unseen_work', 'invalid_subject', 'missing_answer', 'new_owner'])
-def test_refused_completion_cannot_install_a_preparation_choice(tmp_path, monkeypatch, refusal):
-    from copy import deepcopy
-    from ouroboros import loop_acceptance
-    from ouroboros.acceptance_preparation import begin_preparation
+def test_refused_completion_keeps_the_retained_answer_unselected(tmp_path, refusal):
     from ouroboros.loop_delivery import completion_observation, consume_completion_request
+    from ouroboros.loop_messages import capture_acceptance_observation
     from ouroboros.tools.control_runtime import _finish_task
-    from tests._acceptance_preparation_helpers import _expose, _fail
     from tests.test_acceptance_preparation_loop import _delivery_ctx
 
-    monkeypatch.setenv('OUROBOROS_TASK_REVIEW_MODE', 'auto')
     trace = {'tool_calls': [], 'reasoning_notes': []}
     registry, ctx = _delivery_ctx(tmp_path, trace)
     candidate = loop._replace_delivery_candidate(registry, ctx, trace, 'Retained work', control='candidate')
-    _expose(_fail(begin_preparation(trace, registry._ctx)))
-    observed = loop_acceptance.capture_acceptance_observation(registry._ctx, trace, None)
+    observed = capture_acceptance_observation(registry._ctx, trace, None)
     registry._ctx._completion_observation = completion_observation(registry._ctx, trace)
-    _finish_task(registry._ctx, action='finish', rationale='The local preparation gap remains.',
+    _finish_task(registry._ctx, action='finish', rationale='The retained work answers the request.',
         answer_sha256='unavailable' if refusal == 'missing_answer' else candidate.content_sha256,
         acceptance_subject={'owner_source_sha256': 'wrong' if refusal == 'invalid_subject'
                             else observed['owner_source_sha256']})
@@ -271,17 +478,8 @@ def test_refused_completion_cannot_install_a_preparation_choice(tmp_path, monkey
         trace['tool_calls'].append({'tool': 'chat_history', 'result': 'New result', 'is_error': False})
     elif refusal == 'new_owner':
         registry._ctx._owner_directives = [{'source': 'owner', 'content': 'A new requirement'}]
-    prior_decision = deepcopy(trace.get('acceptance_decision'))
-    merged = []
-    merge = loop_acceptance.merge_agent_acceptance_stance
-
-    def observe_merge(*args):
-        merged.append(1)
-        return merge(*args)
-
-    monkeypatch.setattr(loop_acceptance, 'merge_agent_acceptance_stance', observe_merge)
     assert consume_completion_request(registry, ctx, trace) is False
     assert trace['completion_refusals']
-    assert merged == [] and trace.get('acceptance_decision') == prior_decision
+    assert not getattr(registry._ctx, '_completion_selected', None)
     assert registry._ctx._delivery_candidate.full_text == 'Retained work'
     assert registry._ctx._delivery_candidate.acceptance_binding['authoritative'] is False

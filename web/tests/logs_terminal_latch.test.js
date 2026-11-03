@@ -125,6 +125,7 @@ function setup(t) {
         push: (evt) => ws.emit('log', { data: { ts: '2026-10-15T00:00:00+00:00', task_id: 't', ...evt } }),
         headline: () => card().querySelector('[data-task-headline]').textContent,
         phase: () => card().querySelector('[data-task-phase]').textContent,
+        tone: () => card().querySelector('[data-task-phase]').dataset.chipTone,
         timelineRows: () => card().querySelector('[data-task-timeline]').querySelectorAll('.log-task-event').length,
     };
 }
@@ -164,4 +165,24 @@ test('a failed task_done settles the headline; a late tool frame stays a timelin
     logs.push({ type: 'task_done', status: 'completed', ts: '2026-10-15T00:00:04+00:00' });
     assert.notEqual(logs.headline(), settled);
     assert.equal(logs.phase(), 'done');
+});
+
+// A settled headline is the task's outcome and takes the cards' tone (Stopped neutral, Done with warnings green,
+// Failed red); before it settles the headline is the latest event, and a warn-level event keeps its own amber.
+test('a settled headline takes the cards\' outcome tone; a warning before it keeps its level', async (t) => {
+    const logs = setup(t);
+    await logs.settled;
+    logs.push({ type: 'task_started', task_type: 'task', task_text: 'work' });
+    logs.push({ type: 'task_checkpoint', checkpoint_kind: 'context_fit_low_retry', ts: '2026-10-15T00:00:01+00:00' });
+    assert.equal(logs.phase(), 'warn');
+    assert.equal(logs.tone(), undefined, 'a warning worth reading is no outcome');
+    for (const [second, done, phase, tone] of [
+        [2, { status: 'cancelled' }, 'cancelled', 'neutral'],
+        [3, { status: 'completed', outcome_axes: { execution: { status: 'degraded' } } }, 'warn', 'ok'],
+        [4, { status: 'failed' }, 'error', 'failed'],
+        [5, { status: 'completed' }, 'done', 'ok'],
+    ]) {
+        logs.push({ type: 'task_done', ...done, ts: `2026-10-15T00:00:0${second}+00:00` });
+        assert.deepEqual([logs.phase(), logs.tone()], [phase, tone], JSON.stringify(done));
+    }
 });

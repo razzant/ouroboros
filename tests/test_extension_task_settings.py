@@ -32,7 +32,7 @@ from tests._extension_loader_shared import (
 )
 from tests._usage_store_testing import ledger_rows
 from tests.test_task_settings_snapshot import (
-    document, observe, save_owner,
+    ROUTE_OBSERVATIONS, document, observe, save_owner,
     isolated_runtime,  # noqa: F401 -- autouse isolated data root, no network
 )
 
@@ -132,8 +132,11 @@ def test_save_enable_and_use_inside_the_task_that_started_before_the_key(world, 
         disabled = json.loads(_toggle(world.ctx, "bridge", False, from_loop=from_loop))
         assert disabled["enabled"] is False
         assert extension_loader.get_tool(extension_surface_name("bridge", "read")) is None
-        # The task kept its own model, keys, account, reviewer, effort and budget.
-        assert observe() == before
+        # The task kept its reviewer, effort and budget; its model, keys and account read the saved document
+        # (route_choice), as the skill's keys do.
+        after = observe()
+        assert {k: v for k, v in after.items() if k not in ROUTE_OBSERVATIONS} == {k: v for k, v in before.items() if k not in ROUTE_OBSERVATIONS}
+        assert after["model"] == "openai::new" and after["key"] == "test-key-new"
         assert config.runtime_settings().get("SVC_TOKEN") is None
 
 
@@ -275,8 +278,8 @@ def test_a_key_saved_before_the_start_does_not_return_from_its_projection(world,
         assert world.call("reader")["DEEPSEEK_API_KEY"] == ""
         assert "DEEPSEEK_API_KEY" not in _script_env(world, "reader")
         assert world.disclosures() == funded + 1  # no funded key left to disclose
-        # The task's own model view keeps what it started with; the process env was not touched.
-        assert config.runtime_settings()["DEEPSEEK_API_KEY"] == "test-deepseek"
+        # The task's own route view reads the cleared key too (route_choice); the process env was not touched.
+        assert config.runtime_settings()["DEEPSEEK_API_KEY"] == "" and config.runtime_setting("DEEPSEEK_API_KEY") is None
         assert os.environ["DEEPSEEK_API_KEY"] == "test-deepseek"
         # A non-empty rotation still reaches the next read.
         world.save(SVC_TOKEN="token", DEEPSEEK_API_KEY="test-rotated")
@@ -380,8 +383,9 @@ def test_a_key_cleared_between_two_tasks_of_one_process_stays_cleared_for_the_sk
     with config.task_settings_scope(second):
         assert world.call("reader")["DEEPSEEK_API_KEY"] == ""
         assert "DEEPSEEK_API_KEY" not in _script_env(world, "reader")
-        # The task keeps whatever its own start captured; only the skill's read changed.
-        assert config.runtime_settings()["DEEPSEEK_API_KEY"] == second.settings["DEEPSEEK_API_KEY"]
+        # The start's loader still mirrors the first projection into its capture; a route read never uses it.
+        assert second.settings["DEEPSEEK_API_KEY"] == "test-deepseek"
+        assert config.runtime_settings()["DEEPSEEK_API_KEY"] == "" and config.runtime_setting("DEEPSEEK_API_KEY") is None
         # A context handed to another thread and a child environment carry the same answer.
         seen, context = [], contextvars.copy_context()
         carrier = threading.Thread(target=lambda: seen.append(context.run(skill_settings)["DEEPSEEK_API_KEY"]))

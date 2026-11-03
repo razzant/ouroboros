@@ -1,4 +1,7 @@
-"""C4 (BUG 3 Layer A): feed the CLOSED/DROPPED set + active objective into the chooser prompt."""
+"""C4 (BUG 3 Layer A): feed past attempt outcomes + the active objective into the chooser prompt.
+
+Past attempts are evidence the chooser weighs, not a permanent ban; no sentence pushes it to
+promote because a schedule fired, and it is not told to prefer the backlog."""
 import json
 
 from ouroboros.post_task_evolution import _DECISION_PROMPT, _closed_objectives_digest
@@ -7,9 +10,12 @@ from ouroboros.post_task_evolution import _DECISION_PROMPT, _closed_objectives_d
 def test_decision_prompt_has_closed_and_active_sections_and_formats():
     rendered = _DECISION_PROMPT.format(
         task_facts="f", backlog="b", capability="c",
-        closed="- [NO_OP] X", active_objective="Y", force_note="",
+        closed="- [NO_OP] X", active_objective="Y",
     )
-    assert "[CLOSED / DROPPED" in rendered
+    assert "[PAST ATTEMPTS" in rendered and "not a permanent verdict" in rendered
+    assert "needs a reason its earlier outcome does not cover" in rendered
+    assert "The cadence already decided" not in rendered and "Prefer items already in the backlog" not in rendered
+    assert "CLOSED / DROPPED" not in rendered
     assert "[ACTIVE CAMPAIGN OBJECTIVE" in rendered
     assert "- [NO_OP] X" in rendered and "Y" in rendered
     # the JSON example's escaped braces must survive .format()

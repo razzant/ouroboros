@@ -1,5 +1,7 @@
 """Task-local decisions and check evidence survive post-task fanout/recovery."""
 
+from tests import _dialogue as dialogue_test
+
 from types import SimpleNamespace
 
 import ouroboros.agent_task_pipeline as pipeline
@@ -99,7 +101,7 @@ def test_frozen_task_inputs_stay_whole_and_the_facts_row_buys_no_model_call(tmp_
              "reasoning_notes": []}
     (tmp_path / "logs").mkdir()
     pipeline._record_task_facts(None, task, {"rounds": 2}, trace, tmp_path / "logs")
-    [row] = [json.loads(line) for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()]
+    [row] = dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
     assert row["summary_kind"] == "host_task_facts"
 
 

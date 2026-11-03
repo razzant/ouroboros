@@ -111,8 +111,9 @@ def test_public_collection_keeps_paid_request_and_operation(
 
 
 @pytest.mark.parametrize("binding", ["recorded", "lost"])
+@pytest.mark.parametrize("collection", ["repeat", "reference"])
 def test_rejoin_keeps_the_paid_waves_history_binding_not_todays_heads(
-        staged_body, fake_route, tmp_path, monkeypatch, binding):  # noqa: F811
+        staged_body, fake_route, tmp_path, monkeypatch, binding, collection):  # noqa: F811
     """A late collection restores the history the paid wave was prepared with.
 
     A newer record of the same task and checkout exists by then; today's heads would
@@ -192,7 +193,11 @@ def test_rejoin_keeps_the_paid_waves_history_binding_not_todays_heads(
         starts = [body for gateway in FakeGateway.instances for body in gateway.start_requests]
         monkeypatch.setattr("ouroboros.claudexor_daemon.ensure_owned_gateway",
                             lambda: pytest.fail("collection created a new paid session"))
-        collected = call()
+        if collection == "reference":
+            from ouroboros.tools.review_collection import collect_change
+            collected = collect_change(ctx, {"record_id": original["record_id"]})
+        else:
+            collected = call()
         assert collected["record_id"] == original["record_id"] and collected["state"] == "settled", collected
         record = load_record(ctx.drive_root, original["record_id"])
         restored = record["brief"]["dispute_input"]

@@ -6,7 +6,7 @@
 // call, or the replay summary of a turn that ran only such calls) is not
 // content. Presence is the same live, on reload and on reconnect; a wait-only
 // block leaves with its wait and its resolved episode cannot reopen it; the
-// header keeps the census verdict beside a block.
+// header keeps the server room's word beside a block (a card never sets it).
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test, { after } from 'node:test';
@@ -16,7 +16,9 @@ import {
 } from '../modules/chat_activity.js';
 import { upsertToolFoldRow } from '../modules/chat_render_batch.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
+import { clock } from '../modules/work_status.js';
 import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { projection, room, work } from './work_fixture.js';
 
 // The folded row a sequence of observations produces, with no DOM in the way.
 const fold = (...observations) => {
@@ -89,17 +91,34 @@ function fixture(history = [], detail = { active_direct_turns: [] }, chatId = 1)
         card: (id = TASK) => walkCard(messages, id),
         rows: (id = TASK) => nodes(walkCard(messages, id)).filter((n) => n.classList?.contains('chat-live-line')),
         meta: (id = TASK) => walkCard(messages, id)?.querySelector('[data-live-meta]')?.innerHTML || '',
+        // The labelled facts beyond the compact line (tool calls, models, origin): the card's own details list.
+        facts: (id = TASK) => walkCard(messages, id)?.querySelector('[data-live-facts]')?.innerHTML || '',
         status: () => env.mount.querySelector('.status-badge')?.textContent,
         typingHidden: () => messages.children
             .find((node) => String(node.className || '').includes('typing-bubble'))?.style.display === 'none',
         emit: (type, row) => handlers.get(type)({ chat_id: chatId, ts: TS, ...row }),
         log: (row) => handlers.get('log')({ chat_id: chatId, data: { task_id: TASK, ts: TS, ...invocation(row), ...row } }),
-        census: (rows) => instance.hydrateStateSnapshot({
+        // The census rows (the cards' facts) beside the server's room and works for them. Plain thinking or working
+        // rows default to the room the server rolls up for them; any other state names its room and works.
+        census: (rows, serverRoom = plainRoom(rows), works = rows.map((row) => work(row))) => instance.hydrateStateSnapshot({
             active_chat_activities: rows, active_chat_activities_complete: true, supervisor_ready: true,
+            ...projection(chatId, works, serverRoom),
         }, Infinity, ++generation),
         close() { instance.destroy(); restoreDom(env.prior); },
     };
 }
+
+// The server's room for rows that only think or work: Working, or the one exact call they share.
+function plainRoom(rows) {
+    if (!rows.length || !rows.every((row) => ['thinking', 'working'].includes(row.phase) && !row.owner_wait
+        && !row.required_question && !row.required_question_unavailable)) return null;
+    const calls = new Set(rows.map((row) => row.phase));
+    return room('working', { call: calls.size === 1 ? [...calls][0] : '' });
+}
+const asked = (row, extra = {}) => work(row, { activity: 'waiting', release: 'owner',
+    because: [{ code: 'owner_answer', text: 'Waiting for your answer' }], turn: [{ kind: 'question', task_id: row.activity_id }], ...extra });
+const askedRoom = (row) => room('waiting', { turn: [{ kind: 'question', task_id: row.activity_id }] });
+const unconfirmed = (row) => work(row, { activity: 'unknown', confirmed: false });
 
 const toolCarrier = (evidence, extra = {}) => ({ task_id: TASK, role: 'system', system_type: 'task_evidence',
     text: '', ts: TS, narration: false, tool_evidence: evidence, ...extra });
@@ -131,6 +150,7 @@ test('empty incomplete tool evidence stays visible and never reads as zero calls
         const text = f.rows().map(row => row.innerHTML).join(' ');
         assert.match(text, /Tool history incomplete/);
         assert.doesNotMatch(text, /0 tool calls/);
+        assert.doesNotMatch(f.facts(), /<dt>Tool calls/);
         f.census([{ activity_id: TASK, chat_id: 1, kind: 'managed_task', phase: 'working' }]);
         assert.equal(f.historyReads(), 1, 'census updates never replay tool history');
     } finally { f.close(); }
@@ -167,16 +187,69 @@ for (const archives of [0, 3, 4, 12]) test(`global tool read bounds preserve set
     } finally { f.close(); }
 });
 
-test('positive per-task missing counts and actual read gaps remain visible independently of outcomes', () => {
-    const coverage = { source: 'logs/tools.jsonl', live_size: 10, live_window: 10, shown: 0, matched: 0, archives_bounded: true };
-    const empty = noteToolHostMetrics({}, { calls: 2, evidence: { coverage, observations: [] } });
-    assert.match(empty.headline, /2 tool calls.*outcome unknown/);
-    assert.match(empty.fullBody, /incomplete/);
-    for (const fact of ['started', 'wait_ended']) {
-        const view = noteToolHostMetrics({}, { evidence: { coverage,
-            observations: [{ key: fact, tool: 'read_file', fact, status: 'unknown' }] } });
-        assert.match(view.headline, /outcome unknown/);
+// #2400: counted calls with no record read are unread behind a bound, missing after a failed or
+// complete read; only an observed start, wait end or legacy start makes an outcome unknown.
+test('host-counted calls without records stay counted, never unknown outcomes (#2400)', () => {
+    const whole = { source: 'logs/tools.jsonl', live_size: 10, live_window: 10, archives: 0, archives_available: 0,
+        shown: 0, matched: 0 };
+    const view = (coverage, host = { calls: 14, errors: 0 }, observations = [], legacy) =>
+        noteToolHostMetrics({}, { ...host, evidence: { coverage: { ...whole, ...coverage }, observations, legacy } });
+    const archived = { archives_bounded: true, archives: 3, archives_available: 40 };
+    for (const bound of [archived, { archives: 3, archives_available: 40 }, { live_size: 2000, live_window: 500 }]) {
+        const row = view(bound);
+        assert.deepEqual([row.headline, row.phase], ['14 tool calls', 'result'], JSON.stringify(bound));
+        assert.match(row.fullBody, /^Only recent tool history was read\. Source: logs\/tools\.jsonl\./);
     }
+    const newest = Array.from({ length: 200 }, (_, n) => ({ key: `c${n}`, tool: 'read_file', fact: 'settled', status: 'ok' }));
+    const listed = view({ shown: 200, matched: 230 }, { calls: 230, errors: 0 }, newest);
+    assert.equal(listed.headline, '230 tool calls', 'the newest listed calls are a bound, not unknown ones');
+    assert.match(listed.fullBody, /^Only recent tool history was read\./);
+    assert.equal(view(archived, { calls: 14, errors: 2 }).headline, '14 tool calls · 2 errors', 'host errors stay');
+    const some = view(archived, { calls: 14, errors: 1 }, [{ key: 'one', tool: 'read_file', fact: 'settled', status: 'ok' }]);
+    assert.equal(some.headline, '14 tool calls · 1 error', 'a partial read never retires the frozen error');
+    for (const failed of [{ gaps: ['torn_archive_line'] }, { live_size: undefined }, {}]) {
+        const row = view(failed);
+        assert.equal(row.headline, '14 tool calls', `${JSON.stringify(failed)}: no outcome from the deficit`);
+        assert.match(row.fullBody, /^Invocation evidence is incomplete\./);
+    }
+    assert.match(view({ ...archived, gaps: ['malformed_jsonl'] }).fullBody, /^Invocation evidence is incomplete\./,
+        'a bound never hides a read failure');
+    for (const fact of ['started', 'wait_ended']) {
+        const row = view(archived, { calls: 14 }, [{ key: fact, tool: 'read_file', fact, status: 'unknown' }]);
+        assert.match(row.headline, /outcome unknown/, `${fact} observed behind a bound`);
+    }
+    assert.match(view(archived, { calls: 14 }, [], { calls: 1, unknown: true }).headline, /outcome unknown/);
+});
+
+// The same reading on a real history response (tests/test_history_tool_carriers.py produces it):
+// reload and a reconnect re-read both rebuild the finished card from host totals.
+test('reload and reconnect keep a bounded card counted while a seen start stays unknown (#2400)', async () => {
+    const produced = process.env.OURO_TEST_BOUNDED_TOOL_HISTORY;
+    const bounded = { source: 'logs/tools.jsonl', live_size: 300, live_window: 300, archives: 3, archives_available: 5,
+        archives_bounded: true, shown: 0, matched: 0, gaps: [] };
+    const seen = { key: 'tool:started-run:s1', tool: 'read_file', fact: 'started', status: 'unknown', live: false };
+    const history = produced ? JSON.parse(readFileSync(produced, 'utf8')).messages : [
+        { task_id: 'archived-run', role: 'assistant', text: 'Health check done.', ts: TS, chat_id: 1 },
+        { task_id: 'archived-run', role: 'system', system_type: 'task_summary', text: 'Checked.', ts: TS, chat_id: 1,
+            tool_calls: 14, tool_errors: 0, tool_call_counts: { read_file: 10, run_command: 4 },
+            tool_evidence: { observations: [], legacy: { calls: 0 }, coverage: bounded } },
+        { task_id: 'started-run', role: 'system', system_type: 'task_summary', text: 'Stopped.', ts: TS, chat_id: 1,
+            tool_calls: 1, tool_errors: 0,
+            tool_evidence: { observations: [seen], legacy: { calls: 0 }, coverage: { ...bounded, shown: 1, matched: 1 } } },
+    ];
+    const f = fixture(history);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        for (const reconnect of [false, true]) {
+            if (reconnect) { f.emit('open', { previouslyConnected: true }); await new Promise(setImmediate); }
+            const archived = f.rows('archived-run').map(row => row.innerHTML).join(' ');
+            assert.match(archived, /14 tool calls/);
+            assert.doesNotMatch(archived, /outcome unknown|error/);
+            assert.match(f.meta('archived-run'), /14 tool calls/);
+            assert.match(f.rows('started-run').map(row => row.innerHTML).join(' '), /1 tool call · outcome unknown/);
+        }
+        assert.ok(f.historyReads() >= 2, 'the real reconnect handler refetched history');
+    } finally { f.close(); }
 });
 
 for (const chatId of [1, 1234]) test(`canonical owner wait settles without a Project-pointer dependency in room ${chatId}`, async () => {
@@ -186,23 +259,28 @@ for (const chatId of [1, 1234]) test(`canonical owner wait settles without a Pro
         await f.instance.refreshHistory({ revision: 1 });
         const row = { activity_id: TASK, chat_id: chatId, kind: 'managed_task', phase: 'working',
             required_question_unavailable: true, owner_wait: { owner_wait_state: 'waiting', quiz_state: 'open' } };
-        f.census([row]);
+        f.census([row], askedRoom(row), [asked(row)]);
         assert.equal(f.card().querySelector('[data-live-phase]').textContent, 'Waiting for your answer');
         assert.equal(f.status(), 'Waiting for your answer');
         for (const owner_wait of [{ owner_wait_state: 'waiting', quiz_state: 'answered' },
             { owner_wait_state: 'resumed', quiz_state: 'open' }, { wait_ended_at: TS, quiz_state: 'open' }]) {
-            f.census([{ ...row, owner_wait }]);
+            f.census([{ ...row, owner_wait }], room('working', { call: 'working' }));
             assert.equal(f.card().querySelector('[data-live-phase]').textContent, 'Working');
-            assert.equal(f.status(), 'Working...');
+            assert.equal(f.status(), 'Working');
         }
-        f.census([{ ...row, owner_wait: undefined }]);
+        f.census([{ ...row, owner_wait: undefined }], room('unknown'), [unconfirmed(row)]);
         assert.equal(f.status(), 'Activity unconfirmed');
-        f.census([{ ...row, owner_wait: { quiz_state: 'unknown' }, required_question_unavailable: false }]);
+        f.census([{ ...row, owner_wait: { quiz_state: 'unknown' }, required_question_unavailable: false }], room('unknown'),
+            [unconfirmed(row)]);
         assert.equal(f.status(), 'Activity unconfirmed', 'unreadable wait facts do not imply resumed work');
-        f.census([{ ...row, phase: 'budget_paused', pause_cause: 'sleep' }]);
-        assert.equal(f.card().querySelector('[data-live-phase]').textContent, 'Paused · sleep');
-        f.census([{ ...row, owner_wait: undefined, required_question_unavailable: false }]);
-        assert.equal(f.status(), 'Working...', 'no quiz evidence invents no wait');
+        const sleeping = { ...row, phase: 'budget_paused', pause_cause: 'sleep' };
+        f.census([sleeping], room('waiting'), [work(sleeping, { activity: 'waiting',
+            because: [{ code: 'sleeping', text: 'Sleeping until it is woken' }] })]);
+        assert.equal(f.card().querySelector('[data-live-phase]').textContent, 'Waiting');
+        assert.equal(f.card().querySelector('[data-live-phase-secondary]').textContent, 'Sleeping until it is woken');
+        assert.equal(f.status(), 'Waiting', 'a cold sleep waits; its reason stays on the row');
+        f.census([{ ...row, owner_wait: undefined, required_question_unavailable: false }], room('working', { call: 'working' }));
+        assert.equal(f.status(), 'Working', 'no quiz evidence invents no wait');
     } finally { f.close(); }
 });
 
@@ -216,28 +294,37 @@ test('ordinary unfinished speech cannot settle the evidence card', async () => {
         await f.instance.refreshHistory({ revision: 1 });
         assert.equal(f.card().dataset.finished, '0');
         assert.equal(f.card().querySelector('[data-live-phase]').hidden, true);
-        f.census([{ activity_id: TASK, chat_id: 1, kind: 'managed_task', phase: 'queued' }]);
+        const queued = { activity_id: TASK, chat_id: 1, kind: 'managed_task', phase: 'queued' };
+        f.census([queued], room('queued'), [work(queued, { activity: 'queued' })]);
         assert.equal(f.card().querySelector('[data-live-phase]').textContent, 'Queued');
-        assert.equal(f.status(), 'Queued...');
+        assert.equal(f.status(), 'Queued');
     } finally { f.close(); }
 });
 
-test('current confirmed pause exposes direct Resume with its cause and keeps refusal visible', async () => {
+test('a work\'s Resume control exposes the card\'s Resume with its cause and keeps a refusal visible', async () => {
     const f = fixture([toolCarrier({ observations: [{ key: 'one', tool: 'read_file', fact: 'settled', status: 'ok' }] })]);
     try {
         document.body = new ElementStub('body', document);
         await f.instance.refreshHistory({ revision: 1 });
         const row = { activity_id: TASK, chat_id: 1, kind: 'direct_chat', phase: 'budget_paused', pause_cause: 'owner' };
-        f.census([row]);
+        const by = { actor: 'owner', text: '', at: TS };
+        const paused = (controls) => work(row, { activity: 'paused',
+            because: [{ code: 'paused_by_owner', text: 'You paused it', since: TS, by }], controls });
+        const said = () => [f.card().querySelector('[data-live-phase]').textContent,
+            f.card().querySelector('[data-live-phase-secondary]').textContent];
+        // The census alone (a paused phase) offers no Resume: only the work's own control does.
+        f.census([row], room('paused'), [paused([{ action: 'stop', target: TASK }])]);
+        assert.equal(f.card().querySelector('[data-resume-run]'), null, 'a paused phase without the work\'s Resume control');
+        f.census([row], room('paused'), [paused([{ action: 'resume', target: TASK }, { action: 'stop', target: TASK }])]);
         const button = f.card().querySelector('[data-resume-run]');
         assert.ok(button);
         assert.equal(button.textContent, 'Resume');
-        assert.equal(f.card().querySelector('[data-live-phase]').textContent, 'Paused · owner pause');
+        assert.deepEqual(said(), ['Paused', `You paused it · ${clock(TS)}`]);
         await button.listeners.get('click')[0]({ stopPropagation() {} });
         assert.equal(f.requests.filter(url => url.endsWith(`/tasks/${TASK}/resume`)).length, 1);
-        assert.equal(f.card().querySelector('[data-live-phase]').textContent, 'Paused · owner pause', 'a refusal invents no Running state');
+        assert.deepEqual(said(), ['Paused', `You paused it · ${clock(TS)}`], 'a refusal invents no Running state');
         for (const phase of ['budget_pausing', 'queued', 'working', 'unknown']) {
-            f.census([{ ...row, phase }]);
+            f.census([{ ...row, phase }], room('working'), [work({ ...row, phase }, { controls: [{ action: 'stop', target: TASK }] })]);
             assert.equal(f.card().querySelector('[data-resume-run]'), null, phase);
             assert.ok(f.card().querySelector('[data-cancel-run]'), `${phase}: positive current root remains stoppable`);
         }
@@ -254,12 +341,13 @@ test('required answer, unavailable wait, and parallel active work keep separate 
         await f.instance.refreshHistory({ revision: 1 });
         const row = { activity_id: TASK, chat_id: 1, kind: 'managed_task', phase: 'working',
             required_question: { owner_wait_state: 'waiting', quiz_state: 'open' } };
-        f.census([row]);
+        f.census([row], askedRoom(row), [asked(row)]);
         assert.equal(f.card().querySelector('[data-live-phase]').textContent, 'Waiting for your answer');
         assert.equal(f.status(), 'Waiting for your answer');
-        f.census([row, { activity_id: 'another', chat_id: 1, kind: 'managed_task', phase: 'working' }]);
-        assert.equal(f.status(), 'Working...', 'one waiting task cannot hide another task working');
-        f.census([{ ...row, required_question: null, required_question_unavailable: true }]);
+        const another = { activity_id: 'another', chat_id: 1, kind: 'managed_task', phase: 'working' };
+        f.census([row, another], room('working', { turn: [{ kind: 'question', task_id: TASK }] }), [asked(row), work(another)]);
+        assert.equal(f.status(), 'Working', 'one waiting task cannot hide another task working');
+        f.census([{ ...row, required_question: null, required_question_unavailable: true }], room('unknown'), [unconfirmed(row)]);
         assert.equal(f.card().querySelector('[data-live-phase]').textContent, 'Activity unconfirmed');
         assert.equal(f.status(), 'Activity unconfirmed');
     } finally { f.close(); }
@@ -274,7 +362,7 @@ const wait = (patch = {}) => ({ role: 'system', system_type: 'task_model_wait', 
     wait_id: 'wait-main', revision: 1, task_attempt: 1, role_name: 'main', model: 'openai::gpt-5.5',
     reason: 'quota', state: 'waiting', auto_continue: true, ...patch });
 
-test('a wait with zero tools opens a block with the controls and leaves with the wait; a stale revision cannot resurrect it', () => {
+test('a wait with zero tools opens a block with the controls and leaves with the wait; a stale revision cannot resurrect it', async () => {
     const f = fixture();
     try {
         f.census(direct());
@@ -283,7 +371,13 @@ test('a wait with zero tools opens a block with the controls and leaves with the
         assert.ok(card, 'the open wait is the block');
         assert.ok(card.querySelector('.model-waits'), 'the wait controls live inside it');
         assert.equal(card.dataset.modelWaiting, '1');
-        assert.equal(f.status(), 'Waiting for access');
+        // A card never sets the header: the wait frame asks for a fresh state, and the server's room says it.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.ok(f.requests.some((url) => url.startsWith('/api/state')), 'the model wait frame re-read the state');
+        assert.equal(f.status(), 'Thinking', 'until the server says otherwise the room keeps its word');
+        f.census(direct(), room('waiting'), direct().map((row) => work(row, { activity: 'waiting',
+            because: [{ code: 'model_wait', text: 'Waiting for the model to become available' }] })));
+        assert.equal(f.status(), 'Waiting');
         f.emit('chat', wait({ role: 'system', revision: 2, state: 'resolved', resolution: 'quota_restored' }));
         assert.equal(f.card(), null, 'no block remains once the wait resolved');
         f.emit('chat', wait({ role: 'system', revision: 1 }));
@@ -374,6 +468,115 @@ test('a direct turn with two successful tools is the task card: ONE evidence row
     } finally { g.close(); }
 });
 
+const orderTime = seconds => `2026-10-25T07:12:${String(seconds).padStart(2, '0')}Z`;
+const feedOrder = f => f.messages.children.filter(node => node.classList.contains('chat-live-card')
+    || (node.classList.contains('chat-bubble') && !node.classList.contains('typing-bubble')))
+    .map(node => [node === f.card() ? 'card' : node.classList.contains('user') ? 'owner' : 'answer', Number(node.dataset.ts)]);
+
+for (const [name, followUp, narration] of [
+    ['speechless with intervening owner', true, null],
+    ['speechless without intervening owner', false, null],
+    ['root with earlier narration', true, 7],
+    ['root with later narration', true, 16],
+]) {
+    test(`the whole work card keeps its earliest evidence anchor: ${name} (#949)`, async () => {
+        const user = seconds => ({ role: 'user', text: `Owner at ${seconds}`, content: `Owner at ${seconds}`,
+            ts: orderTime(seconds), history_id: `chat:${seconds}`, history_position: { source: 'chat', offset: seconds } });
+        const answer = { ...final, ts: orderTime(41), history_id: 'chat:41', history_position: { source: 'chat', offset: 41 } };
+        const progress = { task_id: TASK, role: 'assistant', is_progress: true, narration: true, text: 'Reading the logs.',
+            content: 'Reading the logs.', ts: orderTime(narration), history_id: 'progress:1',
+            history_position: { source: 'progress', offset: 1 } };
+        const evidence = { observations: [
+            { key: `tool:${TASK}:host-c1`, tool: 'read_file', fact: 'started', ts: orderTime(9) },
+            { key: `tool:${TASK}:host-c1`, tool: 'read_file', fact: 'settled', status: 'ok', ts: orderTime(10) },
+        ] };
+        const carrier = toolCarrier(evidence, { ts: answer.ts, task_terminal_status: 'completed',
+            _is_direct_chat: narration === null });
+        const history = [user(5), ...(narration === null ? [] : [{ ...progress, tool_evidence: evidence }]),
+            ...(followUp ? [user(21)] : []), answer, ...(narration === null ? [carrier] : [])];
+        const expected = [['owner', Date.parse(orderTime(5))], ['card', Date.parse(orderTime(Math.min(narration ?? 9, 9)))],
+            ...(followUp ? [['owner', Date.parse(orderTime(21))]] : []), ['answer', Date.parse(answer.ts)]];
+        const live = fixture();
+        try {
+            live.emit('chat', user(5));
+            if (narration !== null && narration < 9) live.emit('chat', progress);
+            live.log({ type: 'tool_call_started', tool: 'read_file', tool_call_id: 'c1', ts: orderTime(9) });
+            live.log({ type: 'tool_call_finished', tool: 'read_file', tool_call_id: 'c1', ts: orderTime(10) });
+            if (narration !== null && narration > 9) live.emit('chat', progress);
+            if (followUp) live.emit('chat', user(21));
+            live.emit('chat', answer);
+            assert.deepEqual(feedOrder(live), expected, 'live chronological position');
+        } finally { live.close(); }
+        const replay = fixture(history);
+        try {
+            await replay.instance.refreshHistory({ revision: 1 });
+            assert.deepEqual(feedOrder(replay), expected, 'saved history keeps the whole card before the follow-up');
+            const card = replay.card();
+            const physicalPositions = () => replay.messages.children.filter(node => node.dataset.historyId)
+                .map(node => [node.dataset.historyId, node.dataset.historySource, node.dataset.historyOffset]);
+            const positions = physicalPositions();
+            history.reverse();
+            history.push(...history.slice());
+            await replay.instance.refreshHistory({ revision: 2 });
+            assert.deepEqual(feedOrder(replay), expected, 'duplicate and reordered replay stays chronological');
+            assert.equal(replay.card(), card, 'replay retains the mounted card');
+            assert.deepEqual(physicalPositions(), positions, 'source rows retain their physical history positions');
+        } finally { replay.close(); }
+    });
+}
+
+test('timestamp-free current work keeps page-end placement when its history is outside the page (#949)', async () => {
+    const carrier = toolCarrier({ observations: [
+        { key: 'old-call', tool: 'read_file', fact: 'started', ts: '2026-10-25T07:01:00Z' },
+    ] }, { ts: '', task_terminal_status: '' });
+    const history = [
+        { role: 'user', text: 'A later question.', ts: orderTime(5) },
+        { role: 'assistant', text: 'A later answer.', ts: orderTime(41) }, carrier,
+    ];
+    const f = fixture(history);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        assert.deepEqual(feedOrder(f).map(([kind]) => kind), ['owner', 'answer', 'card']);
+        assert.equal(f.card().dataset.ts, undefined, 'no inferred history position for current work');
+        const card = f.card();
+        await f.instance.refreshHistory({ revision: 2 });
+        assert.equal(f.card(), card);
+        assert.deepEqual(feedOrder(f).map(([kind]) => kind), ['owner', 'answer', 'card']);
+    } finally { f.close(); }
+});
+
+for (const delivery of ['history', 'live']) {
+test(`late earlier tool evidence reanchors a finished card without replacing it: ${delivery} (#949)`, async () => {
+    const carrier = toolCarrier({ observations: [
+        { key: 'later', tool: 'read_file', fact: 'started', ts: orderTime(26) },
+    ] }, { ts: orderTime(41), task_terminal_status: 'completed' });
+    const history = [
+        { role: 'user', text: 'Read the logs.', ts: orderTime(5) },
+        { role: 'user', text: 'Read the older log too.', ts: orderTime(21) },
+        { ...final, ts: orderTime(41) }, carrier,
+    ];
+    const f = fixture(history);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        const card = f.card();
+        assert.equal(Number(card.dataset.ts), Date.parse(orderTime(26)));
+        assert.deepEqual(feedOrder(f).map(([kind]) => kind), ['owner', 'owner', 'card', 'answer']);
+        if (delivery === 'history') {
+            carrier.tool_evidence.observations.push({ key: 'earlier', tool: 'read_file', fact: 'started', ts: orderTime(9) });
+            await f.instance.refreshHistory({ revision: 2 });
+        } else {
+            f.log({ type: 'tool_call_started', tool: 'read_file', tool_call_id: 'earlier', ts: orderTime(9) });
+        }
+        assert.equal(f.card(), card);
+        assert.equal(card.dataset.finished, '1');
+        assert.equal(Number(card.dataset.ts), Date.parse(orderTime(9)));
+        assert.deepEqual(feedOrder(f).map(([kind]) => kind), ['owner', 'card', 'owner', 'answer']);
+        assert.equal(f.rows().length, 1, 'late evidence updates the single folded row');
+        assert.match(f.meta(), /2 tool calls/);
+    } finally { f.close(); }
+});
+}
+
 test('a greeting with zero tools shows nothing live and nothing on reload', async () => {
     const f = fixture();
     try {
@@ -406,7 +609,7 @@ test('a managed Swarm root keeps the task card with Turn into project; an origin
         f.emit('chat', { task_id: TASK, role: 'assistant', is_progress: true, content: 'Planning the swarm.' });
         assert.ok(f.card());
         assert.ok(f.card().querySelector('[data-turn-into-project]'));
-        assert.equal(f.status(), 'Working...');
+        assert.equal(f.status(), 'Working');
         globalThis.window.__ouroTaskBindings = { 'bound-root': { project_id: 'p1', chat_id: 7 } };
         f.census([...managed(), ...managed('bound-root')]);
         f.emit('chat', { task_id: 'bound-root', role: 'assistant', is_progress: true, content: 'Bound work.' });
@@ -497,7 +700,8 @@ for (const replay of [false, true]) {
                 assert.ok(card, `child ${id} is rendered`);
                 const title = role === 'Subagent' ? `${role} (${id.slice(0, 8)})` : role;
                 assert.equal(card.querySelector('[data-live-title]').textContent, title);
-                assert.match(f.meta(id), /Agent model: gpt-5\.6-sol/);
+                assert.match(f.meta(id), /gpt-5\.6-sol/, 'the compact line names the model');
+                assert.match(f.facts(id), /<dt>Agent model<\/dt><dd>gpt-5\.6-sol<\/dd>/);
                 assert.equal(card.dataset.parentTaskId, TASK);
             }
         } finally { f.close(); }
@@ -534,7 +738,7 @@ test('the header keeps the census verdict beside a block: Thinking… for a dire
         assert.equal(f.status(), 'Online');
         f.census(managed('root-m'));
         f.emit('chat', { task_id: 'root-m', role: 'assistant', is_progress: true, content: 'Working on it.' });
-        assert.equal(f.status(), 'Working...');
+        assert.equal(f.status(), 'Working');
         assert.equal(f.typingHidden(), true);
     } finally { f.close(); }
 });
@@ -876,13 +1080,74 @@ test('a timeout and a failure for one call are one error', () => {
 });
 
 test('a recycled card counts no invocation from the cycle before it', () => {
-    const record = {};
+    const record = { rounds: 8, toolCalls: 3 };
     noteToolCall(record, { key: 'a', status: 'ok', receipt: false, tool: 'read_file' });
     noteToolHostMetrics(record, { calls: 3, errors: 1, routing: 0, counts: { read_file: 3 } });
     clearStickyCardState(record);
     assert.equal(record.toolFold, null);
+    assert.equal(record.rounds, null);
     assert.deepEqual([toolEvidenceView(record.toolFold).headline, record.toolCalls, record.toolErrors],
         ['0 tool calls', null, null]);
+});
+
+for (const calls of [undefined, 0]) test(`rounds alone never manufacture tool evidence or a Done card: calls=${calls}`, async () => {
+    const metrics = { rounds: 4, ...(calls === undefined ? {} : { tool_calls: calls }) };
+    const f = fixture();
+    try {
+        f.log({ type: 'llm_round_finished', ...metrics });
+        assert.equal(Boolean(f.card()), false, 'rounds are not a row of tool evidence');
+        f.emit('chat', { ...final, ...metrics });
+        f.log({ type: 'task_done', ...final, status: 'completed', ...metrics });
+        assert.equal(Boolean(f.card()), false, 'a text-only Done leaves no card');
+    } finally { f.close(); }
+    const g = fixture([{ ...final, ...metrics, role: 'system', system_type: 'task_summary', ts: TS }]);
+    try {
+        await g.instance.refreshHistory({ revision: 1 });
+        assert.equal(Boolean(g.card()), false, 'cold text-only Done leaves no card');
+    } finally { g.close(); }
+});
+
+test('known zero stays in Details, missing counts stay absent, and replay cannot lower a current count', () => {
+    const f = fixture();
+    try {
+        f.emit('chat', { task_id: TASK, role: 'assistant', is_progress: true, content: 'Reading the complete source.' });
+        assert.doesNotMatch(f.facts(), /Tool calls|Rounds/);
+        f.log({ type: 'task_metrics_event', tool_calls: 0, rounds: 0 });
+        assert.doesNotMatch(f.meta(), /tool call|round/);
+        assert.match(f.facts(), /<dt>Tool calls<\/dt><dd>0<\/dd>/);
+        assert.match(f.facts(), /<dt>Rounds<\/dt><dd>0/);
+        assert.equal(f.rows().some(n => /0 tool calls/.test(n.innerHTML)), false);
+        f.log({ type: 'task_metrics_event', tool_calls: 31, rounds: 9 });
+        f.log({ type: 'task_metrics_event', tool_calls: 3, rounds: 2, ts: '2026-09-15T11:00:00Z' });
+        f.log({ ...final, type: 'task_done', status: 'completed', tool_calls: 2, rounds: 1 });
+        assert.match(f.meta(), /31 tool calls/);
+        assert.doesNotMatch(f.meta(), /round/);
+        assert.match(f.facts(), /<dt>Rounds<\/dt><dd>9/);
+        assert.doesNotMatch(f.facts(), /<dt>Tool calls/);
+        assert.equal(f.card().querySelector('[data-live-counters]'), null);
+    } finally { f.close(); }
+});
+
+for (const session of [false, true]) test(`a child's counts remain its own, session=${session}`, () => {
+    const f = fixture();
+    try {
+        f.log({ type: 'task_metrics_event', tool_calls: 2, rounds: 1 });
+        f.emit('chat', { role: 'assistant', is_progress: true, content: 'Checking the source.', task_id: 'counter-child',
+            subagent_task_id: 'counter-child', parent_task_id: TASK, root_task_id: TASK,
+            delegation_role: 'subagent', subagent_role: 'Reviewer', subagent_event: 'progress',
+            model: 'coordinator', ...(session ? { executor_route: 'claude' } : {}) });
+        f.log({ type: 'task_metrics_event', task_id: 'counter-child', tool_calls: 31, rounds: 9 });
+        assert.match(f.meta(), /2 tool calls/);
+        assert.doesNotMatch(f.meta(), /31 tool calls/);
+        if (session) {
+            assert.doesNotMatch(f.meta('counter-child'), /tool call|round/);
+            assert.match(f.facts('counter-child'), /<dt>Supervision<\/dt><dd>9 rounds · 31 tool calls/);
+            assert.doesNotMatch(f.facts('counter-child'), /<dt>Tool calls|<dt>Rounds/);
+        } else {
+            assert.match(f.meta('counter-child'), /31 tool calls/);
+            assert.match(f.facts('counter-child'), /<dt>Rounds<\/dt><dd>9/);
+        }
+    } finally { f.close(); }
 });
 
 // Stationary row (owner decision): the evidence stays at the first call's place
@@ -950,6 +1215,27 @@ test('a host note inside a child leaves the child\'s collapsed line and title al
     } finally { f.close(); }
 });
 
+// A helper's narration is activity: only its lifecycle frames re-read the state (its work's members changed).
+test('helper narration never re-reads the state; a helper lifecycle frame does', async () => {
+    const f = fixture();
+    try {
+        f.census(managed());
+        const reads = () => f.requests.filter((url) => url.startsWith('/api/state')).length;
+        // Its first frame mints a card for a member the last body did not list: that one asks once.
+        f.emit('chat', childNote({ content: 'Reading the spec.', narration: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const before = reads();
+        for (const line of ['Comparing two runs.', 'Writing the summary.', 'Checking the result.']) {
+            f.emit('chat', childNote({ content: line, narration: true }));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.equal(reads(), before, 'three more narration lines, no state read');
+        f.emit('chat', childNote({ subagent_event: 'completed', status: 'completed', result: 'Done.', narration: false }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.ok(reads() > before, 'the helper ended: its work changed members, so the state is read');
+    } finally { f.close(); }
+});
+
 // Child cards fold their own live calls and host counters. Canonical child
 // history is exercised separately below.
 test('a child folds its own live calls and host counters', () => {
@@ -962,7 +1248,7 @@ test('a child folds its own live calls and host counters', () => {
         f.log({ type: 'tool_call_finished', task_id: CHILD, tool: 'read_file', tool_call_id: 'k1', duration_sec: 0.2 });
         f.log({ type: 'tool_call_started', task_id: CHILD, tool: 'web_search', tool_call_id: 'k2' });
         // A child card renders its timeline only while it is open.
-        f.card(CHILD).querySelector('[data-live-summary-button]').listeners.get('click')[0]({ detail: 0 });
+        f.card(CHILD).querySelector('[data-live-disclosure]').listeners.get('click')[0]({ detail: 0 });
         const folded = () => f.rows(CHILD).filter((n) => /tool call/.test(n.innerHTML));
         assert.equal(folded().length, 1, 'three frames about two calls are the child\'s one evidence row');
         assert.match(folded()[0].innerHTML, /2 tool calls/);
@@ -983,7 +1269,7 @@ test('#931 a typed checkpoint is a real expanded row without stealing narration'
         const title = card.querySelector('[data-live-title]').textContent;
         f.log({ type: 'task_checkpoint', checkpoint_kind: 'context_view', round: 3 });
         if (card.dataset.expanded !== '1') {
-            card.querySelector('[data-live-summary-button]').listeners.get('click')[0]({ detail: 0 });
+            card.querySelector('[data-live-disclosure]').listeners.get('click')[0]({ detail: 0 });
         }
         assert.ok(f.rows().some((row) => row.innerHTML.includes('Context inspected')));
         assert.equal(card.querySelector('[data-live-title]').textContent, title);
@@ -1026,7 +1312,7 @@ for (const order of ['wait-first', 'settlement-first']) for (const failed of [fa
             const wait = { type: 'tool_call_timeout', ...identity };
             const result = { type: 'tool_call', ...identity, status: failed ? 'error' : 'ok', is_error: failed };
             for (const row of order === 'wait-first' ? [wait, result] : [result, wait]) f.log(row);
-            f.card('kid').querySelector('[data-live-summary-button]').listeners.get('click')[0]({ detail: 0 });
+            f.card('kid').querySelector('[data-live-disclosure]').listeners.get('click')[0]({ detail: 0 });
             const rows = f.rows('kid').map(row => row.innerHTML).join(' ');
             assert.match(rows, /1 tool call/);
             assert.match(rows, /wait ended/);
@@ -1047,7 +1333,7 @@ test('a terminal child drops a late non-tool frame while its late tool fact stil
         f.emit('chat', { role: 'assistant', is_progress: true, content: 'Child finished', subagent_event: 'completed', ...lineage });
         f.log({ type: 'llm_round_error', task_id: 'kid', error: 'late child noise' });
         f.log({ type: 'tool_call_timeout', task_id: 'kid', tool: 'read_file', invocation_id: 'kid-late' });
-        f.card('kid').querySelector('[data-live-summary-button]').listeners.get('click')[0]({ detail: 0 });
+        f.card('kid').querySelector('[data-live-disclosure]').listeners.get('click')[0]({ detail: 0 });
         const rows = f.rows('kid').map(row => row.innerHTML).join(' ');
         assert.doesNotMatch(rows, /late child noise|Thinking step failed/);
         assert.match(rows, /wait ended/);
@@ -1068,7 +1354,7 @@ for (const child of [false, true]) test(`cold Chat merges canonical settlement w
         ] } }]);
     try {
         await f.instance.refreshHistory({ revision: 1 });
-        if (child) f.card(id).querySelector('[data-live-summary-button]').listeners.get('click')[0]({ detail: 0 });
+        if (child) f.card(id).querySelector('[data-live-disclosure]').listeners.get('click')[0]({ detail: 0 });
         const rows = f.rows(id).map(row => row.innerHTML).join(' ');
         assert.match(rows, /1 tool call.*wait ended/);
         assert.doesNotMatch(rows, /1 error|operation may still settle/);

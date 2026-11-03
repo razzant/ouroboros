@@ -48,6 +48,40 @@ def changed_worktree_paths(
     return parse_changed_paths_from_porcelain(stdout)
 
 
+def _version_sync_due(repo_dir: pathlib.Path, paths: list[str] | None) -> bool:
+    """The staging sync's trigger: VERSION is selected or changed in the worktree."""
+    selected = set(str(p) for p in (paths or []) if str(p).strip())
+    return "VERSION" in selected or "VERSION" in set(changed_worktree_paths(repo_dir))
+
+
+def version_sync_refusal(repo_dir: pathlib.Path, paths: list[str], attribution: dict) -> str:
+    """The refusal owed before the sync due for this staging would carry work its selection does not take:
+    a carrier it would rewrite and stage whole, or VERSION when it would rewrite carriers from that value,
+    holding known foreign changes or uncertain ones the selection left out. Read only; "" lets the sync
+    run, clean and selected carriers included."""
+    from ouroboros.tools.release_sync import CARRIER_SPAN_PATHS, sync_release_metadata
+
+    foreign = set(attribution.get("excluded_preexisting_dirty") or [])
+    held = foreign | set((attribution.get("selection") or {}).get("left_out") or [])
+    if not held & CARRIER_SPAN_PATHS or not _version_sync_due(repo_dir, paths):
+        return ""
+    try:
+        writes = set(sync_release_metadata(str(repo_dir), write=False))
+    except Exception:  # the sync would stop at the same unreadable carrier, after rewriting those before it
+        writes = set(CARRIER_SPAN_PATHS) - {"VERSION"}
+    carried = sorted(held & (writes | ({"VERSION"} if writes else set())))
+    if not carried:
+        return ""
+    facts = "; ".join(f"{path} (" + ("already changed when this task's baseline was captured" if path in foreign
+                                     else "attribution uncertain, not in paths") + ")" for path in carried)
+    remedies = [text for text, owed in (
+        ("name an uncertain carrier in paths to review it with that gap disclosed", set(carried) - foreign),
+        ("retry known foreign work once it is committed or set aside", set(carried) & foreign)) if owed]
+    return ("⚠️ GIT_ATTRIBUTION_BLOCKED: this commit's VERSION sync would rewrite release carriers and stage them "
+            f"whole, with work this selection does not take: {facts}. Nothing was synced, staged or reviewed; "
+            f"{'; '.join(remedies)}.")
+
+
 def auto_sync_release_metadata_if_needed(
     ctx: ToolContext,
     repo_dir: pathlib.Path,
@@ -55,9 +89,7 @@ def auto_sync_release_metadata_if_needed(
     paths: list[str] | None,
 ) -> list[str]:
     """Sync VERSION-derived carriers before admission snapshot hashing."""
-    selected = set(str(p) for p in (paths or []) if str(p).strip())
-    touched = set(changed_worktree_paths(repo_dir))
-    if "VERSION" not in selected and "VERSION" not in touched:
+    if not _version_sync_due(repo_dir, paths):
         return []
     try:
         from ouroboros.tools.release_sync import sync_release_metadata
@@ -118,53 +150,22 @@ def release_metadata_diagnostics(
     findings. Optional carriers absent from older trees remain optional; VERSION
     and README are required when release checks apply. No review state is read.
 
-    Two explicit forms, told apart by the diff itself (``report["form"]``): a
+    Explicit forms, told apart by the diff itself (``report["form"]``): a
     ``numbered`` release touches VERSION and must sync every carrier in the same
-    diff; a ``neutral`` contribution (code with VERSION untouched) must leave every
+    diff; a ``development_marker`` commit opens a cycle the same way, but keeps the
+    published download links and takes no history row or tag, and later moves those
+    links and that history forward to a release published since, VERSION untouched;
+    a ``neutral`` contribution (VERSION untouched) must leave every
     version carrier span byte-identical to HEAD, and takes no tag. P9 admits the
     neutral form for a contribution to the official line (the prepared index lane)
-    and for a commit prepared in a body candidate (``neutral_allowed``, passed by
-    the caller that knows the bound candidate); a serving-checkout commit remains a
-    numbered release. A partial carrier change is neither form and is reported as
-    such. Doc-only changes need no release metadata (``doc_only``).
+    and for a body candidate or authorized managed update (``neutral_allowed``,
+    passed by the caller that knows that authority); an ordinary serving commit remains a
+    numbered release, including documentation-only changes. A partial carrier
+    change is neither form and is reported as such.
     """
-    from ouroboros.tools.release_sync import CARRIER_SPAN_PATHS, release_metadata_findings
+    from ouroboros.tools.release_sync import CARRIER_SPAN_PATHS, is_development_marker, release_metadata_findings
 
-    report = {"source": source, "status": "clean", "findings": [], "unavailable": []}
-    findings, unavailable = report["findings"], report["unavailable"]
-    if source not in ("worktree", "index"):
-        report.update(status="unavailable", unavailable=["source must be worktree or index"])
-        return report
-    touched = set(paths or []) if source == "worktree" or read_text else set()
-    try:
-        if source == "worktree":
-            touched.update(changed_worktree_paths(repo_dir, paths=paths, strict=True))
-        elif read_text is None:
-            result = subprocess.run(
-                ["git", "--no-optional-locks", "diff", "--cached", "--name-only", "--diff-filter=d", "-z"],
-                cwd=str(repo_dir),
-                capture_output=True, timeout=10, check=True,
-            )
-            touched.update(filter(None, result.stdout.decode("utf-8").split("\0")))
-    except Exception as exc:
-        unavailable.append(f"Changed {source} paths could not be read ({type(exc).__name__}).")
-
-    from ouroboros.tools.git_review_cycle import _diff_is_doc_only
-
-    version_in_scope = "VERSION" in touched
-    removed: set = set()
-    neutral_ok = neutral_allowed if neutral_allowed is not None else source == "index"
-    if not version_in_scope and (neutral_ok or not touched or _diff_is_doc_only(sorted(touched))):
-        # Discovery above lists surviving paths; a carrier the diff deletes or renames
-        # away is still a carrier change. Other deletions keep their release semantics.
-        # Surviving code already refuses the neutral form where it is not allowed.
-        removed = (set(deleted or ()) & CARRIER_SPAN_PATHS if read_text else
-                   _removed_carriers(repo_dir, source, paths if source == "worktree" else None, unavailable))
-        touched |= removed
-    if version_in_scope:
-        report["form"] = "numbered"
-        if source == "index" and version_in_scope and "README.md" not in touched:
-            findings.append("Missing from staged: README.md (badge + changelog). Stage all related files together.")
+    def carrier_texts() -> dict:
         texts = {}
         for path in sorted(CARRIER_SPAN_PATHS):
             try:
@@ -175,27 +176,72 @@ def release_metadata_diagnostics(
                     unavailable.append(f"{source}:{path} is missing; release checks require this source.")
             except Exception as exc:
                 unavailable.append(f"{source}:{path} could not be read ({type(exc).__name__}).")
+        return texts
+
+    report = {"source": source, "status": "clean", "findings": [], "unavailable": []}
+    findings, unavailable = report["findings"], report["unavailable"]
+    if source not in ("worktree", "index"):
+        report.update(status="unavailable", unavailable=["source must be worktree or index"])
+        return report
+    touched = set(paths or []) if source == "worktree" or read_text else set()
+    removed = set(deleted or ())
+    try:
+        if source == "worktree":
+            touched.update(changed_worktree_paths(repo_dir, paths=paths, strict=True))
+            if "VERSION" in touched and not (pathlib.Path(repo_dir) / "VERSION").exists():
+                removed.add("VERSION")
+        elif read_text is None:
+            result = subprocess.run(
+                ["git", "--no-optional-locks", "diff", "--cached", "--name-status", "--no-renames", "-z"],
+                cwd=str(repo_dir),
+                capture_output=True, timeout=10, check=True,
+            )
+            fields = result.stdout.decode("utf-8").split("\0")
+            for status, path in zip(fields[::2], fields[1::2]):
+                touched.add(path)
+                if status == "D":
+                    removed.add(path)
+        touched |= removed
+    except Exception as exc:
+        unavailable.append(f"Changed {source} paths could not be read ({type(exc).__name__}).")
+
+    version_in_scope = "VERSION" in touched - removed
+    neutral_ok = neutral_allowed if neutral_allowed is not None else source == "index"
+    if source == "worktree" and not version_in_scope and (neutral_ok or not touched):
+        # Worktree status may list only a rename destination; a carrier renamed
+        # away is still a carrier change. Index/read_text discovery includes deletions.
+        # Surviving changes already refuse the neutral form where it is not allowed.
+        removed |= _removed_carriers(repo_dir, source, paths, unavailable)
+        touched |= removed
+    if version_in_scope:
+        report["form"] = "numbered"
+        if source == "index" and version_in_scope and "README.md" not in touched - removed:
+            findings.append("Missing from staged: README.md (badge + changelog). Stage all related files together.")
+        texts = carrier_texts()
         findings.extend(release_metadata_findings(texts))
-    elif touched and not _diff_is_doc_only(sorted(touched)):
+        if is_development_marker(texts.get("VERSION", "")):
+            report["form"] = "development_marker"
+    elif touched:
         report["form"] = "neutral"
         if neutral_ok:
-            findings.extend(_neutral_carrier_findings(repo_dir, touched & set(CARRIER_SPAN_PATHS), source,
-                                                      read_text, unavailable, removed))
+            moved = _moved_carrier_spans(repo_dir, touched & set(CARRIER_SPAN_PATHS), source, read_text, unavailable,
+                                         removed)
+            if _publishes_release_under_marker(repo_dir, moved):
+                report["form"] = "development_marker"
+                findings.extend(release_metadata_findings(carrier_texts()))
+            else:
+                findings.extend(_neutral_carrier_findings(moved))
         else:
             findings.append(
                 "Changed files are present but VERSION is not in scope. "
                 "BIBLE.md P9 requires every commit on the serving checkout to bump VERSION and sync release "
                 "artifacts; the version-neutral form belongs to a contribution or a body candidate commit. "
                 f"Currently changed/in-scope: {', '.join(sorted(touched))}")
-        if not findings:
+        if not findings and report["form"] == "neutral":
             report["status"] = "not_applicable"
     else:
-        report["form"] = "doc_only" if touched else "none"
+        report["form"] = "none"
         report["status"] = "not_applicable"
-        # Documentation may carry release identity too. The prose exemption does
-        # not permit changing, introducing or removing a declared carrier span.
-        findings.extend(_neutral_carrier_findings(repo_dir, touched & set(CARRIER_SPAN_PATHS), source,
-                                                  read_text, unavailable, removed))
     if unavailable:
         report["status"] = "unavailable"
     elif findings:
@@ -231,9 +277,9 @@ def _head_text(repo_dir, path: str) -> str | None:
     return shown.stdout.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _neutral_carrier_findings(repo_dir, carriers: set, source: str, read_text, unavailable: list,
-                              removed: set = frozenset()) -> list:
-    """Carrier spans a version-neutral change moved away from HEAD's, as findings.
+def _moved_carrier_spans(repo_dir, carriers: set, source: str, read_text, unavailable: list,
+                         removed: set = frozenset()) -> dict:
+    """``{path: (moved span ids, text after, text at HEAD)}`` for what a change without VERSION moved.
 
     A ``removed`` carrier file has no span left, and a file HEAD's tree lacks had
     none, so each declared span present on one side only moved. An unreadable HEAD
@@ -241,7 +287,7 @@ def _neutral_carrier_findings(repo_dir, carriers: set, source: str, read_text, u
     """
     from ouroboros.tools.release_sync import carrier_spans_for, locate_carrier_span
 
-    findings = []
+    spans_moved = {}
     for path in sorted(carriers):
         try:
             after = None if path in removed else (
@@ -258,11 +304,35 @@ def _neutral_carrier_findings(repo_dir, carriers: set, source: str, read_text, u
                     loc_after and loc_before and after[slice(*loc_after)] != before[slice(*loc_before)]):
                 moved.append(span.carrier_id)
         if moved:
-            change = "removes" if after is None else "introduces" if before is None else "alters"
-            findings.append(
-                f"Version-neutral change {change} the version carrier(s) {', '.join(moved)} in {path} while "
-                "VERSION is unchanged. A neutral contribution keeps every carrier span byte-identical to HEAD; "
-                "a numbered release bumps VERSION and syncs all carriers in the same diff. Choose one form.")
+            spans_moved[path] = (moved, after, before)
+    return spans_moved
+
+
+def _publishes_release_under_marker(repo_dir, spans_moved: dict) -> bool:
+    """BIBLE P9's one carrier change without VERSION: a marker's links and history reach a newer release."""
+    from ouroboros.tools.release_sync import (
+        PUBLISHED_RELEASE_SPANS, is_development_marker, moves_published_release_forward,
+    )
+
+    if "README.md" not in spans_moved or any(set(moved) - PUBLISHED_RELEASE_SPANS for moved, *_ in spans_moved.values()):
+        return False
+    _moved, after, before = spans_moved["README.md"]
+    try:
+        marker = is_development_marker(_head_text(repo_dir, "VERSION"))
+    except Exception:  # an unreadable HEAD grants nothing; the neutral findings stand
+        return False
+    return marker and moves_published_release_forward(before or "", after or "")
+
+
+def _neutral_carrier_findings(spans_moved: dict) -> list:
+    """Carrier spans a version-neutral change moved away from HEAD's, as findings."""
+    findings = []
+    for path, (moved, after, before) in spans_moved.items():
+        change = "removes" if after is None else "introduces" if before is None else "alters"
+        findings.append(
+            f"Version-neutral change {change} the version carrier(s) {', '.join(moved)} in {path} while "
+            "VERSION is unchanged. A neutral contribution keeps every carrier span byte-identical to HEAD; "
+            "a numbered release bumps VERSION and syncs all carriers in the same diff. Choose one form.")
     return findings
 
 
@@ -354,6 +424,19 @@ class PreflightTestProof(NamedTuple):
     index_tree: str
     workload: tuple
     head: str
+    selection: object = None
+
+    @property
+    def tier(self) -> str:
+        if self.selection is not None:
+            return self.selection.tier
+        from ouroboros.preflight_runner import DEFAULT_PYTEST_ARGS
+
+        specs = self.workload[0]
+        complete = ([spec[0] for spec in specs] == ["parallel", "serial"]
+                    and all(spec[1][0] == "tests/" for spec in specs))
+        legacy = len(specs) == 1 and tuple(specs[0][1]) == tuple(DEFAULT_PYTEST_ARGS)
+        return "full" if complete or legacy else "selected"
 
     def covers(self, candidate: PreflightTestProof | None) -> bool:
         return candidate is not None and self == candidate
@@ -390,6 +473,7 @@ def log_preflight_test_proof(ctx, proof: PreflightTestProof, *, reused: bool, ph
     from a receipt keeps that receipt as its provenance; any other row lends nothing.
     """
     from ouroboros.preflight_receipts import canonical_data_root
+    from ouroboros.preflight_inventory import scope_record
 
     fingerprint = workload_fingerprint(proof.workload)
     prior = getattr(ctx, "_preflight_test_disclosure", None)
@@ -405,6 +489,8 @@ def log_preflight_test_proof(ctx, proof: PreflightTestProof, *, reused: bool, ph
         "pass_seconds": dict(passes or ()), "budget_sec": proof.workload[1],
         "head": proof.head, "tree": proof.tree, "index_tree": proof.index_tree,
         "workload_fingerprint": fingerprint,
+        "evidence": getattr(ctx, "_preflight_test_evidence", None),
+        **scope_record(proof, getattr(ctx, "_preflight_test_inventory", None)),
         **({"receipt": receipt} if receipt is not None else {}),
         **({"empty_lanes": list(empty_lanes)} if isinstance(empty_lanes, list) else {}),
     }
@@ -421,27 +507,35 @@ def log_preflight_test_proof(ctx, proof: PreflightTestProof, *, reused: bool, ph
 
 
 def preflight_test_workload(
-    repo, *, timeout=None, pytest_args=None, passes=None, agent_python=None, probe_module="",
+    repo, *, timeout=None, pytest_args=None, passes=None, agent_python=None, probe_module="", selection=None,
 ) -> tuple:
     """Effective runner inputs, with generated paths and probe names normalized."""
     import sys
-    import tempfile
     from ouroboros import preflight_runner as pr
     from ouroboros.preflight_node import candidate_node_tests, resolve_node
     from ouroboros.process_containment import CONTAINMENT_ENV_PREFIX
+    from ouroboros.test_environment import OUTPUT_LOCATION_KEYS, default_temp_parent
+    from ouroboros.preflight_inventory import MODULE, selection_passes
+    from ouroboros.test_parallelism import requested_workers
 
-    base = pathlib.Path(tempfile.gettempdir()) / "ouroboros-preflight-contract"
-    env = pr._preflight_env(base, base / "repo", create=False)
+    base = default_temp_parent() / "ouroboros-preflight-contract"
+    # The workload names the requested worker count. The count free memory admits
+    # is an execution fact frozen in the run's own probe, so a memory sample never
+    # changes what a proof covers, and naming the workload reads no memory at all.
+    env = pr._preflight_env(base, base / "repo", create=False, workers=requested_workers(os.cpu_count() or 1))
     # Containment membership stays in the child env (an outer reap must see the
-    # tree), but its keys are per-launch nonces, not test inputs.
+    # tree), but its keys are per-launch nonces, not test inputs. Evidence and
+    # diagnostic destinations are output locations, never part of what a proof covers.
     environment = hashlib.sha256(json.dumps({key: value for key, value in env.items()
-                                             if not key.startswith(CONTAINMENT_ENV_PREFIX)},
+                                             if not key.startswith(CONTAINMENT_ENV_PREFIX)
+                                             and key not in OUTPUT_LOCATION_KEYS},
                                             sort_keys=True).encode()).hexdigest()
     python = agent_python or os.environ.get("OUROBOROS_AGENT_PYTHON") or sys.executable or "python3"
-    specs = pr._preflight_pass_specs(pytest_args) if passes is None else passes
+    specs = passes if passes is not None else (selection_passes(selection) if selection else pr._preflight_pass_specs(pytest_args))
     node_tests = tuple(candidate_node_tests(repo))
     return (
-        tuple((p.label, tuple(pr._WORKER_PROBE_MODULE if probe_module and arg == probe_module else arg
+        tuple((p.label, tuple(pr._WORKER_PROBE_MODULE if probe_module and arg == probe_module else
+                             MODULE if arg.startswith(MODULE + "_") else arg
                              for arg in p.args), p.parallel) for p in specs),
         pr._resolve_preflight_timeout(pr._DEFAULT_PREFLIGHT_TIMEOUT_SEC if timeout is None else timeout),
         environment, _executable_identity(python),
@@ -451,7 +545,7 @@ def preflight_test_workload(
 
 
 def capture_preflight_test_subject(
-    repo, *, timeout=None, pytest_args=None, passes=None, agent_python=None, probe_module="",
+    repo, *, timeout=None, pytest_args=None, passes=None, agent_python=None, probe_module="", selection=None,
 ) -> PreflightTestProof | None:
     """Describe the actual checkout before execution, or decline reuse.
 
@@ -475,24 +569,41 @@ def capture_preflight_test_subject(
         head = head.stdout.strip()
         workload = preflight_test_workload(
             repo, timeout=timeout, pytest_args=pytest_args, passes=passes,
-            agent_python=agent_python, probe_module=probe_module,
+            agent_python=agent_python, probe_module=probe_module, selection=selection,
         )
-        return PreflightTestProof(tree, index_tree, workload, head)
+        return PreflightTestProof(tree, index_tree, workload, head, selection)
     except (OSError, RuntimeError, subprocess.SubprocessError, TypeError, ValueError):
         log.debug("test workload could not be bound; no proof reuse", exc_info=True)
         return None
 
 
-def preflight_test_proof_matches(ctx, repo) -> bool:
+def preflight_test_proof_matches(ctx, repo, *, require_full=True) -> bool:
     proof = getattr(ctx, "_preflight_test_proof", None)
-    return isinstance(proof, PreflightTestProof) and proof.covers(capture_preflight_test_subject(repo))
+    if not isinstance(proof, PreflightTestProof) or (require_full and proof.tier != "full"):
+        return False
+    from ouroboros.test_selection import refresh_selection
+
+    selection = refresh_selection(pathlib.Path(repo), proof.selection) if proof.selection else None
+    return proof.covers(capture_preflight_test_subject(repo, selection=selection))
 
 
 def preflight_test_workload_unchanged(proof, repo, *, timeout, pytest_args) -> bool:
     try:
-        return proof.workload == preflight_test_workload(repo, timeout=timeout, pytest_args=pytest_args)
+        return (pytest_args is not None or proof.tier == "full") and proof.workload == preflight_test_workload(
+            repo, timeout=timeout, pytest_args=pytest_args)
     except (OSError, RuntimeError, subprocess.SubprocessError, TypeError, ValueError):
         return False  # inability to bind reuse is not a failed test
+
+
+def selected_workload_unchanged(proof, repo, *, timeout, selection) -> bool:
+    """Selected proof reuse is separate from the full-only managed workload check."""
+    from ouroboros.test_selection import refresh_selection
+
+    try:
+        return selection == refresh_selection(pathlib.Path(repo), selection) and proof.workload == preflight_test_workload(
+            repo, timeout=timeout, selection=selection)
+    except (OSError, RuntimeError, subprocess.SubprocessError, TypeError, ValueError):
+        return False
 
 
 def run_tests_preflight_with_proof(ctx: ToolContext, *, runner) -> Optional[str]:

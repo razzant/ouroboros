@@ -108,6 +108,8 @@ def test_envelope_enable_parsing(monkeypatch):
 
 def test_v5_eligibility_and_canonical():
     assert pte._eligible({"type": "task"}) is True
+    # Failure is useful input to the opt-in chooser, not a success prerequisite.
+    assert pte._eligible({"type": "task", "status": "failed", "success": False}) is True
     assert pte._eligible({"type": "evolution"}) is False
     assert pte._eligible({"type": "deep_self_review"}) is False
     assert pte._eligible({"type": "task", "delegation_role": "subagent"}) is False
@@ -161,7 +163,7 @@ def test_v5_apply_pending_request_activates_gated_campaign(tmp_path, monkeypatch
     monkeypatch.setattr(
         lifecycle,
         "start_evolution_campaign",
-        lambda objective, source="": started.update(objective=objective, source=source) or {"id": "test"},
+        lambda objective, source="", **_kwargs: started.update(objective=objective, source=source) or {"id": "test"},
     )
     monkeypatch.setattr(st, "load_state", lambda: {"owner_chat_id": 7, "evolution_mode_enabled": False, "evolution_owner_stopped": False})
     monkeypatch.setattr(st, "save_state", lambda s: saved.update(s))
@@ -200,7 +202,7 @@ def test_evolution_owner_stopped_blocks_post_task_rearm(tmp_path, monkeypatch):
     import supervisor.state as st
     monkeypatch.setattr(lifecycle, "evolution_block_reason", lambda: "")
     monkeypatch.setattr(lifecycle, "start_evolution_campaign",
-                        lambda objective, source="": started.update(objective=objective, source=source))
+                        lambda objective, source="", **_kwargs: started.update(objective=objective, source=source))
     # Owner EXPLICITLY stopped: flag set, evolution disabled, owner present.
     monkeypatch.setattr(st, "load_state",
                         lambda: {"owner_chat_id": 7, "evolution_owner_stopped": True, "evolution_mode_enabled": False})
@@ -384,7 +386,7 @@ def test_toggle_evolution_on_clears_owner_stop(tmp_path, monkeypatch):
     monkeypatch.setattr(lifecycle, "complete_evolution_campaign",
                         lambda reason="", *, status="stopped": calls["complete"].append((reason, status)))
     monkeypatch.setattr(lifecycle, "start_evolution_campaign",
-                        lambda objective="", *, source="": calls["start"].append((objective, source)) or {"id": "test"})
+                        lambda objective="", *, source="", **_kwargs: calls["start"].append((objective, source)) or {"id": "test"})
 
     ctx = types.SimpleNamespace(
         load_state=lambda: {"owner_chat_id": 7, "evolution_mode_enabled": False, "evolution_owner_stopped": False},
@@ -431,7 +433,7 @@ def test_apply_pending_request_atomic_recheck_aborts_on_raced_owner_stop(tmp_pat
     calls = {"start": [], "complete": []}
     monkeypatch.setattr(lifecycle, "evolution_block_reason", lambda: "")
     monkeypatch.setattr(lifecycle, "start_evolution_campaign",
-                        lambda objective, source="": calls["start"].append((objective, source)) or {"id": "test"})
+                        lambda objective, source="", **_kwargs: calls["start"].append((objective, source)) or {"id": "test"})
     monkeypatch.setattr(lifecycle, "complete_evolution_campaign",
                         lambda reason="", *, status="stopped": calls["complete"].append((reason, status)))
     # Snapshot passes the chokepoint (flag False, not yet enabled)...
@@ -723,13 +725,13 @@ def test_project_global_promotion_uses_real_maybe_promote_without_project_scope(
     pipeline._run_global_backlog_promotion_only(
         env, {"id": "task-project", "type": "task", "project_id": "proj-1", "text": "Project-specific request",
               "workspace_root": "/tmp/project", "workspace_mode": "external",
-              "metadata": {"workspace_preflight": {"git": {"head": "abc"}}}},
+              "metadata": {"work_kind": "owner", "workspace_preflight": {"git": {"head": "abc"}}}},
         sealed, object())
 
     [(view, seen)] = decided
     assert seen == sealed  # the run's recorded facts, whole
     assert view == {"id": "task-project", "type": "task", "source": "project_scoped_global_improvement",
-                    "metadata": {"globalized_from_project_task": True}}
+                    "metadata": {"globalized_from_project_task": True, "work_kind": "owner"}}
     req = json.loads((tmp_path / "state" / "post_task_evolution_request.json").read_text(encoding="utf-8"))
     assert req["objective"] == "Improve Ouroboros workspace tool feedback" and req["origin_task_id"] == "task-project"
     assert not (tmp_path / "memory" / "knowledge").exists()
@@ -759,7 +761,7 @@ def test_promotion_chooser_uses_main_model_slot(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_MODEL", "test-provider/main-model")
 
     env = types.SimpleNamespace(drive_root=str(tmp_path))
-    pte._decide_promotion(env, {"id": "t1"}, None, object(), force=False)
+    pte._decide_promotion(env, {"id": "t1"}, None, object())
 
     assert calls.get("model") == "test-provider/main-model"
     assert calls.get("reasoning_effort") == "medium"
@@ -768,7 +770,7 @@ def test_promotion_chooser_uses_main_model_slot(tmp_path, monkeypatch):
     # Empty env falls back to the SETTINGS_DEFAULTS main-slot value.
     calls.clear()
     monkeypatch.setenv("OUROBOROS_MODEL", "")
-    pte._decide_promotion(env, {"id": "t2"}, None, object(), force=False)
+    pte._decide_promotion(env, {"id": "t2"}, None, object())
     assert calls.get("model") == config.SETTINGS_DEFAULTS["OUROBOROS_MODEL"]
 
 

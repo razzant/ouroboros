@@ -29,7 +29,11 @@ exit tail arms the handoff only on its own stop evidence, the re-executed proces
 package-init hook switches the serving checkout before its imports, and generation B
 settles the adoption on boot and verifies the restart on the serving SHA. The serving
 checkout is installation-shaped and CLEAN — the tree under test committed as the
-``ouroboros`` line — because a restart resets a real install to that line.
+``ouroboros`` line — because a restart resets a real install to that line. Adoption
+accepts exact-commit full or qualifying reviewed-local selected evidence; S37 tests
+the adoption mechanics, not qualification, so a TEST FIXTURE supplies that evidence as a
+labelled receipt (``_record_fixture_qualification``), and a refusal or any other dead end
+fails the scenario at once with its reason instead of waiting out the deadline.
 
 S38 — the server dies between an evolution cycle's candidate commit and its receipts.
 The supervisor mints the cycle, which commits in its candidate through the blocking
@@ -50,11 +54,14 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import urllib.request
+from datetime import datetime, timezone
 
 import pytest
 
 from devtools.benchmarks.common.server_runner import seed_owner_state
+from ouroboros.task_status import SETTLED_STATUSES
 from tests.candidate_checkout import SENTINEL_ROUTE, candidate_checkout
 from tests.system_e2e.harness import (
     LANE_MOCK,
@@ -113,9 +120,8 @@ def test_s36_body_candidate_on_a_real_server_keeps_the_serving_clone_and_types_i
             task_log = oracle.task_drive(task_id)
 
             # 1. One candidate, every spelling of the body path inside it.
-            registries = sorted(server.data_root.rglob("state/subagent_worktrees.json"))
-            rows = [row for path in registries for row in json.loads(path.read_text())["worktrees"]
-                    if row.get("kind") == "body_candidate"]
+            registries = _record_files(server.data_root)
+            rows = _candidate_rows(server.data_root)
             assert len(rows) == 1, registries
             candidate = pathlib.Path(rows[0]["path"])
             assert candidate.resolve().is_relative_to(worktrees.resolve()), candidate
@@ -151,37 +157,119 @@ S37_DOC_PATH = "docs/notes/system_e2e_s37_adopted.md"
 S37_DOC = "# system_e2e S37\n\nAdopted through a restart.\n"
 S37_COMMIT_MESSAGE = "docs: system_e2e S37 adopted candidate note"
 S37_REASON = "S37 adopt the reviewed candidate"
+# Every field of the fixture receipt S37 owns carries this label (see _record_fixture_qualification).
+S37_FIXTURE = "system_e2e-S37-test-fixture"
+# One monotonic budget for the whole adoption (submit -> closed -> verified): a healthy run
+# took 149 s on a heavily loaded developer Mac and 314 s with two more e2e lanes beside it
+# (2026-10-19); it stays inside the per-test ceiling with the scenario's setup, so its own
+# diagnostics print first. A dead end fails at once (_s37_dead_end), never by waiting it out.
+S37_DEADLINE_SEC = 540
 
 
 def _git(repo: pathlib.Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True, text=True).stdout.strip()
 
 
+def _record_files(data_root: pathlib.Path) -> list:
+    """Every private copy's record file (one per copy) under any data root of the scenario."""
+    return [path for path in sorted(pathlib.Path(data_root).rglob("state/private_copies/*.json"))
+            if not path.name.startswith(".")]
+
+
 def _candidate_rows(data_root: pathlib.Path) -> list:
-    return [row for path in sorted(pathlib.Path(data_root).rglob("state/subagent_worktrees.json"))
-            for row in json.loads(path.read_text(encoding="utf-8"))["worktrees"] if row.get("kind") == "body_candidate"]
+    return [row for path in _record_files(data_root)
+            for row in [json.loads(path.read_text(encoding="utf-8"))] if row.get("kind") == "body_candidate"]
 
 
-def _adopt_the_reviewed_commit(data_root: pathlib.Path):
-    """Dynamic step: the model names the exact commit its gate recorded on the candidate row."""
+def _record_fixture_qualification(data_root: pathlib.Path, candidate: pathlib.Path, commit: str) -> str:
+    """TEST FIXTURE: the durable receipt a complete full test run of exactly ``commit`` leaves.
+
+    Adoption accepts exact-commit full or qualifying reviewed-local selected evidence
+    (``ouroboros/preflight_qualification.py`` ``receipt_for_commit``); it never runs the
+    battery itself. S37 tests the adoption MECHANICS, not qualification: running the
+    whole battery inside a keyless scenario would test the battery, and qualification's
+    own acceptance and refusal stay pinned by ``tests/test_preflight_selection.py``. So
+    the scenario supplies that one prerequisite explicitly: a receipt in the schema the
+    gate reads, for exactly the candidate commit's head, tree and index tree, whose own
+    fields say that it is a fixture and that no test ran (zero pass seconds). Nothing
+    else the product checks is supplied: the review, the handoff, the stop evidence,
+    the switch and the restart verification are the product's own.
+
+    Returns the key the product's own reader accepted, or ``""`` when it refused it.
+    """
+    from ouroboros.preflight_qualification import receipt_for_commit
+    from ouroboros.preflight_receipts import RECEIPT_SCHEMA, RECEIPTS_DIR
+
+    tree = _git(candidate, "rev-parse", "--verify", f"{commit}^{{tree}}")
+    # The recipe the gate requires: the Node lane exactly when the commit carries web tests.
+    node = any(name.endswith(".test.js")
+               for name in _git(candidate, "ls-tree", "-r", "--name-only", commit, "--", "web/tests").split())
+    document = {
+        "schema": RECEIPT_SCHEMA,
+        "identity": {"schema": RECEIPT_SCHEMA, "head": commit, "tree": tree, "index_tree": tree,
+                     "workload": S37_FIXTURE, "installation": S37_FIXTURE, "source": S37_FIXTURE},
+        "result": "passed", "authenticity": "unsigned",
+        "lanes": {"node": "passed" if node else "absent", "parallel_workers": 2, "admitted_workers": 2,
+                  "serial": "passed"},
+        "pass_seconds": {"parallel": 0, "serial": 0},
+        "phase": S37_FIXTURE, "task_id": S37_FIXTURE,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "fixture": "system_e2e S37 test fixture: no test ran; the scenario tests adoption, not qualification",
+    }
+    path = pathlib.Path(data_root) / "state" / RECEIPTS_DIR / f"{S37_FIXTURE}-{commit[:12]}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document), encoding="utf-8")
+    accepted = receipt_for_commit(data_root, candidate, commit)
+    return str(accepted.get("key") or "") if accepted.get("key") == path.stem else ""
+
+
+def _adopt_the_reviewed_commit(data_root: pathlib.Path, fixture: dict):
+    """Dynamic step: record the qualification fixture for the exact commit the gate recorded
+    on the candidate row, then name that commit; a dead end is recorded for the waiter."""
     def step(_body):
         rows = _candidate_rows(data_root)
         reviewed = rows[0].get("reviewed_commits") if len(rows) == 1 else []
         if not reviewed:
-            return {"final": f"S37: no reviewed candidate commit to adopt ({rows})"}
+            fixture["error"] = f"no reviewed candidate commit to adopt ({rows})"
+            return {"final": f"S37: {fixture['error']}"}
+        fixture["commit"] = reviewed[-1]
+        fixture["key"] = _record_fixture_qualification(data_root, pathlib.Path(rows[0]["path"]), reviewed[-1])
+        if not fixture["key"]:
+            fixture["error"] = "receipt_for_commit refused the qualification fixture (receipt schema drift?)"
+            return {"final": f"S37: {fixture['error']}"}
         return {"tool": "request_restart", "arguments": {"reason": S37_REASON, "adopt_commit": reviewed[-1]}}
     return step
 
 
-def _s37_script(data_root: pathlib.Path) -> list:
+def _s37_script(data_root: pathlib.Path, fixture: dict) -> list:
     return [
         {"tool": "write_file", "arguments": {"root": "system_repo", "path": S37_DOC_PATH, "content": S37_DOC}},
         {"tool": "commit_reviewed", "arguments": {
             "commit_message": S37_COMMIT_MESSAGE, "paths": [S37_DOC_PATH],
             "skip_advisory_review": True, "skip_tests": True,
             "goal": "Land the S37 note through the blocking review organ.", "scope": f"{S37_DOC_PATH} only."}},
-        _adopt_the_reviewed_commit(data_root),
+        _adopt_the_reviewed_commit(data_root, fixture),
     ]
+
+
+def test_fixture_receipt_of_s37_is_accepted_for_exactly_its_commit(tmp_path):
+    """The S37 qualification fixture stays in the schema the adoption gate reads (a drift
+    would otherwise surface only in the manual/tag lane) and qualifies exactly one commit."""
+    from ouroboros.preflight_qualification import receipt_for_commit
+
+    repo, data_root = tmp_path / "repo", tmp_path / "data"
+    (repo / "web" / "tests").mkdir(parents=True)
+    (repo / "web" / "tests" / "probe.test.js").write_text("// node lane witness\n", encoding="utf-8")
+    ident = ("-c", "user.name=S37", "-c", "user.email=s37@e2e.invalid")
+    _git(repo, "init", "-q", "-b", "ouroboros")
+    _git(repo, "add", "-A")
+    _git(repo, *ident, "commit", "-q", "-m", "first")
+    first = _git(repo, "rev-parse", "HEAD")
+    _git(repo, *ident, "commit", "-q", "--allow-empty", "-m", "second")
+    second = _git(repo, "rev-parse", "HEAD")
+    key = _record_fixture_qualification(data_root, repo, first)
+    assert key.startswith(S37_FIXTURE) and receipt_for_commit(data_root, repo, first)["key"] == key
+    assert receipt_for_commit(data_root, repo, second) == {}  # another commit has no run on record
 
 
 def _committed_install(source: pathlib.Path, destination: pathlib.Path) -> pathlib.Path:
@@ -212,6 +300,106 @@ def _fetch(url: str) -> bytes:
         return response.read()
 
 
+def _s37_dead_end(server, data_root: pathlib.Path, task_id: str, fixture: dict) -> str:
+    """Why the adoption can no longer settle as S37 needs, or ``""`` while it still can.
+
+    Every branch is a durable fact the product already wrote (or the server's own exit),
+    so a refusal fails the scenario in the poll that sees it instead of after the budget.
+    """
+    if fixture.get("error"):
+        return "the scripted model hit a dead end: " + str(fixture["error"])
+    if server.proc.poll() is not None:
+        return f"the server process exited ({server.proc.returncode}) instead of re-executing in place"
+    logs = pathlib.Path(data_root) / "logs"
+    refused = [row for row in _jsonl(logs / "tools.jsonl", "tool_call")
+               if row.get("task_id") == task_id and row.get("tool") == "request_restart"
+               and "RESTART_BLOCKED" in json.dumps(row, ensure_ascii=False)]
+    if refused:
+        return "request_restart was refused: " + str(refused[-1].get("result_preview") or refused[-1])
+    unconfirmed = _jsonl(logs / "supervisor.jsonl", "body_adoption_unconfirmed")
+    if unconfirmed:
+        return "generation B left the adoption unconfirmed: " + json.dumps(unconfirmed[-1], ensure_ascii=False)
+    # A handoff closed without adopting (a refused restart abandons it) is final: no generation will
+    # verify the candidate, and the server keeps running on the old body.
+    outcomes = [str(row.get("outcome") or "") for row in _jsonl(logs / "supervisor.jsonl", "body_adoption_closed")]
+    if any(outcome != "adopted" for outcome in outcomes):
+        return "the adoption closed without adopting: " + json.dumps(outcomes, ensure_ascii=False)
+    if (not _jsonl(logs / "supervisor.jsonl", "body_adoption_authorized")
+            and str(ArtifactOracle(data_root).task_result(task_id).get("status") or "") in SETTLED_STATUSES):
+        return "the task ended without authorizing an adoption"
+    return ""
+
+
+def _s37_await(found, dead_end, deadline: float) -> tuple:
+    """``(rows, "")`` once ``found()`` holds rows, else ``([], why)`` at the first dead end or the deadline."""
+    while True:
+        rows = found()
+        if rows:
+            return rows, ""
+        why = dead_end()
+        if why:
+            return [], why
+        if time.monotonic() >= deadline:
+            return [], f"nothing settled within the {S37_DEADLINE_SEC}s scenario budget"
+        time.sleep(0.5)
+
+
+def _s37_settle(data_root: pathlib.Path, old_head: str, dead_end, deadline: float) -> tuple:
+    """``(closed, verified, why)``: the closed handoff, then generation B's restart verification.
+
+    The closure's outcome is read before the second wait: a close that did not adopt is a dead
+    end at once, never a wait for a verification that cannot come.
+    """
+    logs = pathlib.Path(data_root) / "logs"
+    closed, why = _s37_await(lambda: _jsonl(logs / "supervisor.jsonl", "body_adoption_closed"), dead_end, deadline)
+    why = why or dead_end()
+    if why:
+        return closed, [], why
+    verified, why = _s37_await(lambda: [row for row in _jsonl(logs / "events.jsonl", "restart_verify")
+                                        if row.get("expected_sha") != old_head], dead_end, deadline)
+    return closed, verified, why
+
+
+def test_adoption_wait_of_s37_ends_at_a_close_that_did_not_adopt(tmp_path):
+    """A refused restart closes the authorized handoff ``abandoned:…`` and leaves the server up: the
+    wait must end there, not run out the scenario budget waiting for a restart verification."""
+    server = type("Server", (), {"proc": type("Proc", (), {"poll": staticmethod(lambda: None)})()})()
+    logs = tmp_path / "logs"
+    logs.mkdir()
+
+    def journal(name: str, *rows: dict) -> None:
+        (logs / name).write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    def settle() -> tuple:
+        started = time.monotonic()
+        result = _s37_settle(tmp_path, "old", lambda: _s37_dead_end(server, tmp_path, "task", {}), started + 60)
+        return result, time.monotonic() - started
+
+    journal("supervisor.jsonl", {"type": "body_adoption_authorized"},
+            {"type": "body_adoption_closed", "outcome": "abandoned:restart_refused: the serving checkout moved"})
+    (closed, verified, why), elapsed = settle()
+    assert closed and verified == [] and "abandoned:restart_refused" in why and elapsed < 5, (why, elapsed)
+
+    journal("supervisor.jsonl", {"type": "body_adoption_authorized"},
+            {"type": "body_adoption_closed", "outcome": "adopted"})
+    journal("events.jsonl", {"type": "restart_verify", "ok": True, "expected_sha": "new", "observed_sha": "new"})
+    (closed, verified, why), elapsed = settle()
+    assert why == "" and [row["expected_sha"] for row in verified] == ["new"], (why, verified)
+
+
+def _s37_diagnostics(data_root: pathlib.Path, stub, fixture: dict) -> None:
+    supervisor_log, events_log = data_root / "logs" / "supervisor.jsonl", data_root / "logs" / "events.jsonl"
+    for name in ("body_adoption_authorized", "body_adoption_not_armed", "body_adoption_armed",
+                 "body_adoption_unconfirmed", "body_adoption_closed"):
+        print("S37 supervisor rows: " + json.dumps({name: _jsonl(supervisor_log, name)}))
+    print("S37 restart_verify: " + json.dumps(_jsonl(events_log, "restart_verify")))
+    print("S37 request_restart: " + json.dumps([row for row in _jsonl(data_root / "logs" / "tools.jsonl", "tool_call")
+                                                if row.get("tool") == "request_restart"], ensure_ascii=False))
+    print("S37 candidates: " + json.dumps(_candidate_rows(data_root)))
+    print("S37 qualification fixture: " + json.dumps(fixture))
+    print("S37 model calls: " + json.dumps(stub.kinds()))
+
+
 @pytest.mark.integration
 @pytest.mark.serial
 @pytest.mark.skipif(os.name == "nt", reason="a direct server re-executes in place only on POSIX; Windows "
@@ -220,8 +408,9 @@ def test_s37_restart_adopts_the_reviewed_candidate_commit_on_one_real_server(tmp
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s37")
     data_root = root / "data"
+    fixture: dict = {}  # the qualification fixture's record, written by the scripted model step
     with candidate_checkout(REPO_ROOT, root / "source" / "repo", origin_proof=True) as source, \
-            ScriptedStubModel(_s37_script(data_root)) as stub:
+            ScriptedStubModel(_s37_script(data_root, fixture)) as stub:
         install = _committed_install(source.path, root / "install" / "repo")
         old_head = _git(install, "rev-parse", "HEAD")
         settings = keyless_settings(stub, OUROBOROS_RUNTIME_MODE="advanced", OUROBOROS_REVIEW_ENFORCEMENT="blocking")
@@ -231,24 +420,23 @@ def test_s37_restart_adopts_the_reviewed_candidate_commit_on_one_real_server(tmp
             assert _fetch(server.base_url + SENTINEL_ROUTE) == source.sentinel_bytes
             assert json.loads(_fetch(server.base_url + "/api/health"))["runtime_version"] == source.version_text
             pid = server.proc.pid
+            started = time.monotonic()
+            deadline = started + S37_DEADLINE_SEC
             task_id = submit_running(server, "Write the S37 note, land it reviewed, then adopt it with a restart.")
-            supervisor_log, events_log = data_root / "logs" / "supervisor.jsonl", data_root / "logs" / "events.jsonl"
-            closed = wait_until(lambda: _jsonl(supervisor_log, "body_adoption_closed"), 600)
-            verified = wait_until(lambda: [row for row in _jsonl(events_log, "restart_verify")
-                                           if row.get("expected_sha") != old_head], 300)
-            if not (closed and verified):
-                for name in ("body_adoption_not_armed", "body_adoption_armed", "body_adoption_unconfirmed"):
-                    print("S37 supervisor rows: " + json.dumps({name: _jsonl(supervisor_log, name)}))
-                print("S37 restart_verify: " + json.dumps(_jsonl(events_log, "restart_verify")))
-                print("S37 candidates: " + json.dumps(_candidate_rows(data_root)))
-                print("S37 model calls: " + json.dumps(stub.kinds()))
-            assert closed and verified, (closed, verified)
+            events_log = data_root / "logs" / "events.jsonl"
+            closed, verified, why = _s37_settle(
+                data_root, old_head, lambda: _s37_dead_end(server, data_root, task_id, fixture), deadline)
+            if why:
+                _s37_diagnostics(data_root, stub, fixture)
+                pytest.fail(f"S37 {'restart verification' if closed else 'adoption'}: {why}", pytrace=False)
+            print(f"S37 adoption verified {time.monotonic() - started:.0f}s after submit (budget {S37_DEADLINE_SEC}s)")
 
             # The adoption of exactly the gate-recorded commit, armed by generation A's own stop
             # evidence and switched before generation B's imports, in the same server process.
             rows = _candidate_rows(data_root)
             assert len(rows) == 1 and rows[0]["task_id"] == task_id, rows
             cand = rows[0]["reviewed_commits"][-1]
+            assert fixture["commit"] == cand and fixture["key"].startswith(S37_FIXTURE), fixture
             assert _git(install, "rev-parse", f"{cand}^") == old_head  # built on the serving HEAD
             assert [(row["outcome"], str(row.get("adoption_id") or "")) for row in closed] == [
                 ("adopted", str(closed[0].get("adoption_id") or ""))], closed
@@ -327,6 +515,14 @@ def test_s38_boot_recovers_a_crashed_evolution_candidate_commit_without_absorbin
     data_root, state_dir = root / "data", root / "data" / "state"
     seed_owner_state(data_root, evolution_enabled=True)
     monkeypatch.setenv("OUROBOROS_EVOLUTION_AUTO_RESTART", "false")
+    # Evolution forces the full post-commit test battery even under skip_tests (tools/git.py:
+    # evolution publication requires a full run). S38's subject is the crash window between that
+    # commit and its receipts, not qualification, so the product's own lane budget ends the battery
+    # red at once on every host: a red post-commit run withholds only the push and keeps the commit
+    # and its provenance. Unbounded, the whole suite ran inside the scenario past its 600 s gate
+    # on a host where it could run (on CI the same forced run in S22 ended red after about two
+    # minutes, on its Node lane).
+    monkeypatch.setenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "5")
     settings_kwargs = dict(OUROBOROS_RUNTIME_MODE="advanced", OUROBOROS_REVIEW_ENFORCEMENT="blocking")
     gate = ModelGate(_after_the_commit, timeout=600)
     with candidate_checkout(REPO_ROOT, root / "source" / "repo", origin_proof=True) as source:
@@ -357,12 +553,11 @@ def test_s38_boot_recovers_a_crashed_evolution_candidate_commit_without_absorbin
             campaign["active_transaction"].pop(key, None)
         campaign["active_transaction"]["restart_required"] = False
         campaign_path.write_text(json.dumps(campaign), encoding="utf-8")
-        for registry in sorted(data_root.rglob("state/subagent_worktrees.json")):
-            stored = json.loads(registry.read_text(encoding="utf-8"))
-            for row in stored["worktrees"]:
-                if row.get("kind") == "body_candidate":
-                    row["reviewed_commits"] = []
-            registry.write_text(json.dumps(stored), encoding="utf-8")
+        for record in _record_files(data_root):
+            stored = json.loads(record.read_text(encoding="utf-8"))
+            if stored.get("kind") == "body_candidate":
+                stored["reviewed_commits"] = []
+                record.write_text(json.dumps(stored), encoding="utf-8")
         assert not list(state_dir.glob("pending_restart_verify*"))
         state_path = state_dir / "state.json"
         state_blob = json.loads(state_path.read_text(encoding="utf-8"))

@@ -133,7 +133,7 @@ def test_a_released_mark_is_a_change_that_names_who_released_it(tmp_path):
     assert observe(tmp_path, accepted).counts() == {}  # the marks stand before the accepted wake
     child = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="kid-1", current_chat_id=1,
                         task_metadata={"delegation_role": "subagent", "parent_task_id": "t1"})
-    released = json.loads(_memory_mark(child, release_id=answer["id"], reason="Looked settled to me"))
+    released = json.loads(_memory_mark(child, release_ids=[answer["id"]], reason="Looked settled to me"))
     assert released["ok"] and released["operation"] == "mark_release"  # the helper's right is unchanged
     release = next(record for record in store.records() if record["kind"] == "mark_release")
     after_child = observe(tmp_path, accepted)
@@ -190,7 +190,7 @@ def test_observe_seals_a_page_and_still_cannot_start_work(tmp_path, monkeypatch)
     from ouroboros.tools.registry import ToolContext, ToolRegistry
 
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    assert {"promote_chat_to_task", "run_command"} <= set(ca.disabled_tools_for("observe"))
+    assert {"start_task", "run_command"} <= set(ca.disabled_tools_for("observe"))
     shared.world(tmp_path)
     accepted = bind(tmp_path, observe(tmp_path), "wake-baseline")
     task = ca.apply_consciousness_authority({"id": "wake-1", "metadata": {
@@ -205,7 +205,8 @@ def test_observe_seals_a_page_and_still_cannot_start_work(tmp_path, monkeypatch)
         "covers": {"from": addresses[10], "to": addresses[12]}}))
     assert written["ok"], written
     assert ChronicleStore(tmp_path).get(written["node_id"])["author"]["kind"] == "mind"
-    for name, args in (("promote_chat_to_task", {"text": "start this"}), ("run_command", {"cmd": "touch x.py"})):
+    for name, args in (("start_task", {"objective": "start this", "title": "Start this"}),
+                       ("run_command", {"cmd": "touch x.py"})):
         result = registry.execute(name, args)
         assert "RESOURCE_CONSTRAINT_BLOCKED" in result and name in result, (name, result[:300])
     assert not (tmp_path / "x.py").exists()

@@ -1,0 +1,90 @@
+{
+  "item": {
+    "id": "ouroboros-community/scholion",
+    "source_id": "ouroboros-community",
+    "source_name": "Ouroboros Community",
+    "name": "scholion",
+    "description": "Local second-opinion layer over the owner's own medical data — genome (VCF), laboratory history, prescriptions, wearables. 35 tools; answers carry provenance and say what the data cannot support. Not a medical device.",
+    "category": [
+      "health"
+    ],
+    "version": "0.6.9",
+    "digest": "1fb0f1d624e3ef7e50b2b819b61708b669dfa436724d0b7098ca1613a36a0e92",
+    "official": false,
+    "recommended": false,
+    "owner": "l1nkberry",
+    "updated_at": "2026-10-07T14:00:00+00:00",
+    "repo_url": "https://github.com/razzant/OuroborosHub",
+    "author_repo": "https://github.com/CrossRead/scholion",
+    "signals": {
+      "votes": 16,
+      "comments": 4,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/6",
+      "author_repo_stars": 4
+    },
+    "withdrawn": null,
+    "type": "extension",
+    "needs_keys": [],
+    "permissions": [
+      "tool",
+      "fs",
+      "net",
+      "subprocess",
+      "widget",
+      "route"
+    ],
+    "installed": null,
+    "trust": "review"
+  },
+  "about": "Local second-opinion layer over the owner's own medical data — genome (VCF), laboratory history, prescriptions, wearables. 35 tools; answers carry provenance and say what the data cannot support. Not a medical device.",
+  "about_error": "",
+  "uses": [
+    {
+      "kind": "permission",
+      "id": "tool",
+      "label": "Adds tools Ouroboros can call"
+    },
+    {
+      "kind": "permission",
+      "id": "fs",
+      "label": "fs"
+    },
+    {
+      "kind": "permission",
+      "id": "net",
+      "label": "Uses the internet"
+    },
+    {
+      "kind": "permission",
+      "id": "subprocess",
+      "label": "Runs programs on this computer"
+    },
+    {
+      "kind": "permission",
+      "id": "widget",
+      "label": "Shows a widget"
+    },
+    {
+      "kind": "permission",
+      "id": "route",
+      "label": "Serves its own web routes"
+    },
+    {
+      "kind": "key",
+      "id": "OPENROUTER_API_KEY",
+      "label": "Uses your OPENROUTER_API_KEY"
+    }
+  ],
+  "versions": [
+    {
+      "version": "0.6.9",
+      "digest": "1fb0f1d624e3ef7e50b2b819b61708b669dfa436724d0b7098ca1613a36a0e92",
+      "current": true
+    }
+  ],
+  "links": {
+    "repo": "https://github.com/razzant/OuroborosHub",
+    "author_repo": "https://github.com/CrossRead/scholion",
+    "discussion": "https://github.com/razzant/OuroborosHub/discussions/6"
+  }
+}

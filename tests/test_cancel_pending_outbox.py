@@ -87,6 +87,7 @@ def test_pending_outbox_gives_up_loudly_instead_of_retrying_forever(tmp_path, mo
         assert td.replay_pending_deliveries(tmp_path, event_queue=queue) == [
             event["delivery_id"],
         ]
+        assert td.record_replay_dispatch(tmp_path, event["delivery_id"])
         queue.release_all()  # the handler returned without a receipt: the copy is no longer outstanding
     assert notices == [], "no give-up notice while attempts remain"
     _age_pending_rows(tmp_path)
@@ -114,9 +115,7 @@ def test_pending_outbox_gives_up_loudly_instead_of_retrying_forever(tmp_path, mo
     assert notice[2] == {"role": "system", "system_type": "terminal_incident"}
 
 def test_pending_outbox_spaces_replays_with_backoff(tmp_path):
-    """AR2-7: ``registered_at`` alone let all five attempts burn on consecutive
-    ticks. Each bump stamps ``last_replay_at`` and the next attempt waits an
-    exponentially longer min-age, so the cap covers a realistic outage window."""
+    """Queue admission dates backoff; dispatch entries increase its interval."""
     from supervisor import terminal_delivery as td
 
     event = {
@@ -129,12 +128,13 @@ def test_pending_outbox_spaces_replays_with_backoff(tmp_path):
     assert td.replay_pending_deliveries(tmp_path, event_queue=queue) == [
         event["delivery_id"],
     ]
-    # Immediately after a replay the row is NOT due again (fresh last_replay_at,
-    # and the min-age has doubled) — the next tick must not burn attempt 2.
+    # Queue admission only dates the base interval. Dispatch doubles it.
     assert td.replay_pending_deliveries(tmp_path, event_queue=queue) == []
+    assert td.pending_deliveries(tmp_path)[0]["dispatch_attempts"] == 0
+    assert td.record_replay_dispatch(tmp_path, event["delivery_id"])
     (row,) = td.pending_deliveries(tmp_path)
-    assert row["replay_attempts"] == 1
-    assert row.get("last_replay_at"), "each bump stamps the replay time"
+    assert row["dispatch_attempts"] == 1
+    assert row.get("last_replay_at"), "dispatch also stamps the replay time"
     assert td._replay_due(row) is False
     # The doubled min-age: attempt 2 is due only after 2 * base seconds.
     from datetime import datetime, timezone

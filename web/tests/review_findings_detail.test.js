@@ -215,7 +215,7 @@ test('the section renders hydration truth and the controller retries through onH
     ], { sectionExpanded: true, hydrateStatus: 'error' });
     assert.match(errorHtml, /data-review-hydrate-status/);
     assert.match(errorHtml, /role="alert"/);
-    assert.match(errorHtml, /<span>Review details failed to refresh/);
+    assert.match(errorHtml, /<span class="review-hydrate-text ui-status" data-tone="warn">Review details failed to refresh/);
     assert.match(errorHtml, /data-review-hydrate-retry/);
 
     const loadingHtml = renderReviewsSection([
@@ -259,7 +259,8 @@ test('a failed first hydration renders the section shell with no groups', () => 
     assert.match(errorShell, /data-review-section/);
     assert.match(errorShell, /Review details failed to refresh/);
     assert.match(errorShell, /data-review-hydrate-retry/);
-    assert.match(errorShell, /chat-review-section-count">—</);
+    assert.doesNotMatch(errorShell, /data-review-group-toggle/,
+        'a failed empty read exposes recovery without inventing a group/count');
 
     // The error must be readable on a COLLAPSED section too: the status node
     // sits outside the hidden groups container.

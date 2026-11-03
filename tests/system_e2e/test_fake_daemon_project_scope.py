@@ -68,11 +68,10 @@ def test_the_fake_engine_refuses_an_unregistered_root_unless_it_is_ephemeral(eng
 
 
 def test_a_registry_checkout_starts_ephemeral_with_no_project_request(engine, tmp_path):
-    from ouroboros.subagent_worktrees import _registry_path
+    from ouroboros.subagent_worktrees import _put_record
 
     ctx = _delegating_ctx(tmp_path, acting=False, task_id="t-minted")
-    _registry_path().parent.mkdir(parents=True, exist_ok=True)
-    _registry_path().write_text(json.dumps({"worktrees": [{"path": str(ctx.repo_dir)}]}), encoding="utf-8")
+    _put_record({"path": str(ctx.repo_dir)})  # the host's own copy record names the root
     row = _start(ctx)
     [start] = engine.run_start_posts()
     assert start["body"]["scope"] == {"kind": "project", "root": str(ctx.repo_dir), "ephemeral": True}
@@ -98,7 +97,7 @@ def test_a_writable_investigation_of_a_registry_checkout_starts_ephemeral_in_its
         engine, tmp_path, monkeypatch):
     """A minted scope root stays unregistered when the child investigates in a private copy:
     ``scope.ephemeral`` names the root, ``execution.workspaceRoot`` the copy it may write."""
-    from ouroboros.subagent_worktrees import _registry_path
+    from ouroboros.subagent_worktrees import _put_record
 
     _select_transport_access(monkeypatch, "workspace_write")
     ctx = _delegating_ctx(tmp_path, acting=False, task_id="t-investigation")
@@ -106,8 +105,7 @@ def test_a_writable_investigation_of_a_registry_checkout_starts_ephemeral_in_its
     (repo / "README.md").write_text("seed\n", encoding="utf-8")
     for argv in (["init"], ["add", "-A"], ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "seed"]):
         subprocess.run(["git", *argv], cwd=repo, capture_output=True, check=True)
-    _registry_path().parent.mkdir(parents=True, exist_ok=True)
-    _registry_path().write_text(json.dumps({"worktrees": [{"path": str(repo)}]}), encoding="utf-8")
+    _put_record({"path": str(repo)})  # the host's own copy record names the root
     row = _start(ctx)
     [start] = engine.run_start_posts()
     body = start["body"]

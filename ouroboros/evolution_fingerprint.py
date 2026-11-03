@@ -1,15 +1,16 @@
-"""Canonical fingerprint for evolution-campaign objectives (BUG 3 objective-repeat gate).
+"""Canonical fingerprint for evolution-campaign objectives (BUG 3 objective-repeat record).
 
 Leaf module by design: it imports nothing beyond the standard library, so every layer that
-needs the fingerprint — ``post_task_evolution`` (suffix append), ``supervisor.evolution_lifecycle``
-(per-cycle stamp + repeat counter), ``supervisor.queue`` (pause gate) and
+needs the fingerprint — ``post_task_evolution`` (suffix append, past-attempt dedupe),
+``supervisor.evolution_lifecycle`` (per-cycle stamp + repeat counter) and
 ``ouroboros.agent_startup_checks`` (absorb-clear) — can import it without re-introducing the
 documented ``evolution_lifecycle`` <-> ``queue`` import cycle.
 
-The single source of truth for the objective fingerprint. All sites that count, gate, or clear
+The single source of truth for the objective fingerprint. All sites that count, dedupe or clear
 objective repeats MUST key off :func:`canonical_objective_fingerprint`; mixing a raw hash on one
 side and a suffix-stripping hash on the other would make the counter accumulate under one key
-while the gate tests another (the post-task objective would then never trip the gate).
+while the absorb-clear tests another (the post-task objective's record would never clear).
+The counts are evidence; nothing pauses on them (owner decision 2026-11-02).
 """
 from __future__ import annotations
 
@@ -28,7 +29,7 @@ _PLAN_REVIEW_SUFFIX = (
 
 
 def canonical_objective_fingerprint(objective: str) -> str:
-    """Return the stable per-objective key used by the BUG 3 objective-repeat gate.
+    """Return the stable per-objective key of the BUG 3 objective-repeat record.
 
     Strips the plan-review suffix, collapses whitespace, lowercases, then sha256[:16].
     Returns ``""`` for an empty/whitespace-only objective so callers can skip bucketing

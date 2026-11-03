@@ -2,6 +2,7 @@
 import pytest
 
 from tests import test_subscription_role_routes_browser as roles
+from ouroboros.test_evidence import diagnostic_directory
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 subscription_ui = roles.subscription_ui
@@ -30,7 +31,7 @@ def test_reviewer_effort_auto_caption_and_saved_preference(role_ui, tmp_path, wi
     unset.locator('[data-subagent-field="effort"]').select_option('medium')
     unset.scroll_into_view_if_needed()
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-    page.screenshot(path=str(tmp_path / f"effort-reviewer-{width}.png"))
+    page.screenshot(path=str(diagnostic_directory(tmp_path, "effort-settings") / f"effort-reviewer-{width}.png"))
     with page.expect_response('**/api/settings'):
         page.locator('#btn-save-settings').click()
     saved = roles.saved_catalog(ui)["items"]
@@ -46,4 +47,4 @@ def test_reviewer_effort_auto_caption_and_saved_preference(role_ui, tmp_path, wi
     assert behavior.locator('h3', has_text="Reasoning Effort").count() == 0
     assert page.locator('[data-effort-range-summary]').count() == 0
     assert page.locator('[data-effort-target^="s-effort-"]').count() == 0, "Behavior has no effort controls left"
-    page.screenshot(path=str(tmp_path / f"effort-settings-{width}.png"))
+    page.screenshot(path=str(diagnostic_directory(tmp_path, "effort-settings") / f"effort-settings-{width}.png"))

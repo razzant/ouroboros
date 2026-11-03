@@ -53,7 +53,8 @@ def build_scheduled_task_payload(fields: Dict[str, Any]) -> Dict[str, Any]:
     task_group = fields.get("task_group") if isinstance(fields.get("task_group"), dict) else {}
     subagent_envelope = fields.get("subagent_envelope") if isinstance(fields.get("subagent_envelope"), dict) else {}
     configured_subagent = fields.get("configured_subagent") if isinstance(fields.get("configured_subagent"), dict) else {}
-    parent_cognitive_route = fields.get("parent_cognitive_route") if isinstance(fields.get("parent_cognitive_route"), dict) else {}
+    from ouroboros.supervisor_route import validate_cognitive_route
+    parent_cognitive_route = validate_cognitive_route(fields.get("parent_cognitive_route"))
     # The inherited execution allowance (#939) rides with the other admission-time options.
     directory_options = {key: fields[key] for key in ("directory_strategy", "scope_paths", "execution_timeout_sec")
                          if key in fields}

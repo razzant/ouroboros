@@ -384,3 +384,125 @@ test('disposed view retains late acceptance without rendering or refreshing unre
     assert.equal(intents.get('fixture').operation.state, 'succeeded');
     assert.equal(calls.filter(([kind]) => kind === 'inventory').length, 1);
 });
+
+
+function preparationError(status = 409) {
+    return Object.assign(new Error('Environment preparation complete; CLI update not started. Use Restart in the chat header, then repeat Update.'), {
+        status, body: { error: { code: 'maintenance_restart_required', context: {
+            acceptance: 'not_submitted', scope: 'this_attempt', preparation: 'ready', restartRequired: true,
+        } } },
+    });
+}
+
+test('preparation-only result enables a later explicit Update and never claims an operation or unknown install', async () => {
+    let ready = false;
+    const { controller, calls } = setup({ startHarnessMaintenance: async () => {
+        if (!ready) throw preparationError();
+        return operation();
+    } });
+    await controller.refresh();
+    await controller.start('fixture', { kind: 'latest' });
+    const view = controller.view('fixture');
+    assert.equal(view.request, null);
+    assert.equal(view.operation, null);
+    assert.notEqual(view.unknownCurrent, true);
+    assert.match(harnessMaintenanceMarkup(entry(), view), /preparation complete.*Use Restart in the chat header/);
+    assert.match(harnessMaintenanceMarkup(entry(), view), />Update</);
+    assert.doesNotMatch(harnessMaintenanceMarkup(entry(), view), /Cancel update|Operation completed|acceptance unconfirmed/);
+    assert.equal(calls.filter(([kind]) => kind === 'read' || kind === 'cancel').length, 0);
+    ready = true;
+    await controller.start('fixture', { kind: 'latest' });
+    assert.equal(controller.view('fixture').operation.id, 'operation-1');
+});
+
+test('a local pre-submit response cannot clear an earlier lost POST or change its key/body', async () => {
+    const sent = [];
+    const { controller, intents, api } = setup({ startHarnessMaintenance: async (body, key) => {
+        sent.push({ body, key });
+        if (sent.length === 1) throw new Error('Lost POST');
+        if (sent.length === 2) throw preparationError();
+        return operation();
+    } });
+    await controller.refresh();
+    await controller.start('fixture', { kind: 'latest' });
+    await controller.act('fixture', 'rejoin');
+    assert.ok(controller.view('fixture').request);
+    assert.match(controller.view('fixture').operationError, /acceptance unconfirmed/);
+    controller.dispose();
+    const resumed = createHarnessMaintenanceController({ api, intents, newKey: () => { throw new Error('must retain'); } });
+    await resumed.refresh();
+    await resumed.act('fixture', 'rejoin');
+    assert.deepEqual(sent, [sent[0], sent[0], sent[0]]);
+    assert.equal(resumed.view('fixture').operation.id, 'operation-1');
+});
+
+test('a host-observed pre-submit transport failure is not unknown acceptance on a first press', async () => {
+    const { controller } = setup({ startHarnessMaintenance: async () => { throw preparationError(503); } });
+    await controller.refresh();
+    await controller.start('fixture', { kind: 'latest' });
+    assert.equal(controller.view('fixture').request, null);
+    assert.notEqual(controller.view('fixture').unknownCurrent, true);
+});
+
+for (const code of ['daemon_spawn_failed', 'daemon_starting', 'foreign_daemon_home', 'attach_only_engine']) {
+    for (const lostPost of [false, true]) {
+        test(`${code}: acquisition refusal names no update, but preserves an earlier unknown POST`, async () => {
+            const sent = [];
+            const { controller } = setup({ startHarnessMaintenance: async (body, key) => {
+                sent.push({ body, key });
+                if (lostPost && sent.length === 1) throw new Error('Lost POST');
+                throw Object.assign(new Error('cannot acquire gateway'), { status: 503, body: { error: {
+                    code, context: { acceptance: 'not_submitted', scope: 'this_attempt' },
+                } } });
+            } });
+            await controller.refresh();
+            await controller.start('fixture', { kind: 'latest' });
+            if (lostPost) await controller.act('fixture', 'rejoin');
+            const view = controller.view('fixture');
+            if (lostPost) {
+                assert.ok(view.request);
+                assert.match(view.operationError, /^Update acceptance unconfirmed:/);
+                assert.deepEqual(sent[1], sent[0], 'rejoin keeps the unknown POST key and body');
+            } else {
+                assert.equal(view.request, null);
+                assert.notEqual(view.unknownCurrent, true);
+                assert.match(view.operationError, /^Update not started: cannot acquire gateway$/);
+                assert.match(harnessMaintenanceMarkup(entry(), view), /Update not started: cannot acquire gateway/);
+            }
+        });
+    }
+}
+// Refined A (owner 21.10): the program row says its state concisely — the operation status, a short cause only where
+// a typed source names it, and this view's own actionable sentence — while the engine's exact text, what an update
+// does and the version facts sit under one Details toggle whose open state the controller keeps across rebuilds.
+test('the state row is concise; exact engine text, the update note and version facts wait under Details', () => {
+    const failed = harnessMaintenanceMarkup(entry(), {
+        operation: operation({ state: 'failed', phase: 'settled', mutation: 'none', termination: 'confirmed',
+            problem: { message: 'the registry did not answer one exact latest version for @openai/codex (npm exit 1)' } }),
+    });
+    const state = failed.slice(failed.indexOf('harness-maintenance-state'), failed.indexOf('harness-maintenance-details"'));
+    assert.match(state, /role="status">Update failed</);
+    assert.doesNotMatch(state, /registry did not answer/, 'the exact engine text is not on the row');
+    assert.doesNotMatch(state, /harness-maintenance-cause/, 'an operation problem has no typed cause to paraphrase');
+    assert.match(state, /<button type="button" class="settings-disclosure ui-hit-area" data-maintenance-details aria-expanded="false" aria-controls="harness-maintenance-details-fixture">Details/);
+    const panel = failed.slice(failed.indexOf('harness-maintenance-details"'));
+    assert.match(panel, /^harness-maintenance-details" id="harness-maintenance-details-fixture" hidden>/);
+    assert.match(panel, /Exact message: <code>the registry did not answer one exact latest version for @openai\/codex \(npm exit 1\)<\/code>/);
+    assert.match(panel, /Program updates replace files in place and may interrupt new starts\./);
+    assert.match(panel, /Bundled baseline<\/dt><dd>1\.0\.0/);
+    assert.match(panel, /Install exact version…/, 'the rarer actions stay under Details');
+    // Only the inventory's problem with the latest version is a typed cause; its exact text still waits under Details.
+    const latest = harnessMaintenanceMarkup(entry({ availableProblem: { message: 'npm view exited 1' } }));
+    assert.match(latest, /<span class="harness-maintenance-cause">Latest version not determined<\/span>/);
+    assert.match(latest, /Exact message: <code>npm view exited 1<\/code>/);
+    // This view's own sentence says what to do next, so it stays on the row.
+    const unconfirmed = harnessMaintenanceMarkup(entry(), { request: { key: 'k', body: {} },
+        operationError: 'Update acceptance unconfirmed: offline. Retry the same request to recover its result.' });
+    const unconfirmedRow = unconfirmed.slice(0, unconfirmed.indexOf('harness-maintenance-details"'));
+    assert.match(unconfirmedRow, /Update acceptance unconfirmed: offline\. Retry the same request/);
+    assert.match(unconfirmedRow, /Retry same request/);
+    // Opened, the panel renders open, and the toggle says so.
+    const open = harnessMaintenanceMarkup(entry(), { expanded: true });
+    assert.match(open, /aria-expanded="true"/);
+    assert.match(open, /id="harness-maintenance-details-fixture">/);
+});

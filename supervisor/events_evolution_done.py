@@ -41,7 +41,15 @@ def _handle_evolution_task_done(
     rounds: Any,
 ) -> None:
     """Project one evolution terminal through the existing campaign authority."""
+    from copy import deepcopy
+    from functools import partial
+    from ouroboros.server_restart import defer_evolution_restart, release_agent_restart
 
+    request_id = defer_evolution_restart({"task_id": str(task_id or "")},
+        task_attempt=int(task.get("_attempt") or task.get("task_attempt") or evt.get("task_attempt") or 1),
+        terminal_retry=partial(_handle_evolution_task_done, ctx, evt=deepcopy(evt), task_id=task_id,
+            task=deepcopy(task), task_done_event=deepcopy(task_done_event), outcome_axes=deepcopy(outcome_axes),
+            cost=cost, rounds=rounds))
     try:
         from supervisor.evolution_lifecycle import (
             _read_evolution_campaign,
@@ -74,6 +82,10 @@ def _handle_evolution_task_done(
                 "Evolution terminal rejected for %s: %s",
                 task_id, lifecycle_result.get("reason") or "not_persisted",
             )
+            if request_id and lifecycle_result.get("reason") in {
+                "campaign_not_active", "transaction_missing", "transaction_mismatch",
+            }:
+                release_agent_restart(request_id, "evolution_" + lifecycle_result["reason"])
             return
         if lifecycle_result.get("replay"):
             return
@@ -98,7 +110,7 @@ def _handle_evolution_task_done(
         except Exception:
             log.debug("Failed to append evolution checkpoint", exc_info=True)
     except Exception:
-        log.debug("Failed to update evolution campaign state", exc_info=True)
+        log.warning("Evolution terminal remains unconfirmed for %s", task_id, exc_info=True)
         return
     finally:
         # GR3-3: runs on EVERY evolution terminal — including rejected/replay

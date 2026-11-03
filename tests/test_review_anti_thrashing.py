@@ -179,13 +179,12 @@ def test_format_obligation_excerpt_sanitizes_newlines():
     assert "second line" in out
 
 
-def test_format_obligation_excerpt_redacts_secrets_before_collapsing():
-    """Secrets must be redacted BEFORE newline collapsing so line-anchored patterns work."""
-    # A multiline reason where the secret sits on its own line (line-anchored _SECRET_LINE_RE).
-    reason_with_secret = "some issue was found\nAPI_KEY=supersecret123\nplease review"
-    out = format_obligation_excerpt(reason_with_secret, max_chars=300)
-    assert "supersecret123" not in out, "Secret value must not appear in excerpt"
-    assert "***REDACTED***" in out or "REDACTED" in out, "Redaction marker must be present"
+def test_format_obligation_excerpt_keeps_the_reviewers_words():
+    """The excerpt collapses whitespace and names its cut, never rewrites a variable-bearing line."""
+    reason = 'API_KEY=process.env.API_KEY is read twice\n{"token": "abcd1234"} leaks in the test'
+    out = format_obligation_excerpt(reason, max_chars=300)
+    assert out == 'API_KEY=process.env.API_KEY is read twice {"token": "abcd1234"} leaks in the test'
+    assert "REDACTED" not in out
 
 
 # ---------------------------------------------------------------------------

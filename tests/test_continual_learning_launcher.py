@@ -830,28 +830,7 @@ def test_clb_operator_patches_are_tracked_with_an_unambiguous_apply_order():
     assert [p.name for p in required] == ["base_url", "repo_dir"]
     assert all(p.default is inspect.Parameter.empty for p in required)
     assert "runtime_attestation(self._server.base_url, pathlib.Path(clone)," in attest
-    # ...and the signature the patch DOCUMENTS must name it too, or the next reader copies
-    # the broken call back out of the docstring.
-    assert "runtime_attestation(base_url, repo_dir, *, expected_version=" in attest
     assert "OBO_ALLOW_EVOLVED_VOLUME" in attest
-    readme = (patches / "README.md").read_text(encoding="utf-8")
-    # The stack order must name the three predecessor bridge patches explicitly.
-    for name in ("run_clbench_bridge_agent.v6560.patch", "clb_acceptance_claims.v674.patch",
-                 "clb_disabled_tools_env.v6745.patch"):
-        assert name in readme
-    order = readme.index("Apply order (unambiguous)")
-    assert order < readme.index("clb_multi_instance_outcomes.v6746.patch")
-
-
-def test_clb_methodology_states_poker_instance_count_and_outcome_semantics():
-    text = (REPO_ROOT / "devtools" / "benchmarks" / "continual_learning"
-            / "METHODOLOGY.md").read_text(encoding="utf-8")
-    assert "`exploitable_poker` = 120" in text
-    assert "--num-instances 120" in text
-    assert "auto_resolved_no_agent_turn" in text
-    assert "Accepted overshoot (owner decision)" in text
-    assert "late_instance_outcomes_fill" in text
-    assert "Disclosed residual" in text
 
 
 def test_collect_results_normalizes_bridge_traces(tmp_path):

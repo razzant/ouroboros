@@ -20,9 +20,9 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from ouroboros.betterleaks_runtime import resolve_betterleaks
-from ouroboros.config import get_ouroboroshub_catalog_url, get_runtime_mode, get_skills_repo_path
+from ouroboros.config import get_runtime_mode, get_skills_repo_path
 from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
-from ouroboros.gateway._helpers import request_drive_root
+from ouroboros.gateway._helpers import request_drive_root, request_json_or
 from ouroboros.gateway.contracts import SkillPublishPreflightResponse
 from ouroboros.skill_loader import (
     _sanitize_skill_name,
@@ -311,6 +311,7 @@ def build_skill_publish_preflight(
     catalog_url: str | None = None,
     github_token_configured: bool | None = None,
     admission_problem: tuple[int, str, str] | None = None,
+    destination: Any = None,
 ) -> SkillPublishPreflightOutcome:
     """Resolve, capture, scan, cache, and classify one selected skill."""
 
@@ -318,17 +319,23 @@ def build_skill_publish_preflight(
     raw_skill = str(skill_name or "").strip()
     safe_skill = _sanitize_skill_name(raw_skill)
     try:
-        owner, repo, _base_branch = parse_skill_publish_destination(
-            catalog_url if catalog_url is not None else get_ouroboroshub_catalog_url()
-        )
-        repository = f"{owner}/{repo}"
+        if catalog_url is not None:  # an explicit hub catalog address (the destination before sources)
+            owner, repo, _base_branch = parse_skill_publish_destination(catalog_url)
+            repository = f"{owner}/{repo}"
+        else:
+            from ouroboros.skill_publish_destination import resolve_publish_destination
+
+            repository = resolve_publish_destination(drive_root, safe_skill, destination).repository
     except SkillPublishDestinationError as exc:
+        explained = str(exc) != exc.reason_code  # a refusal that names its cause (a hub in a folder, a pinned view)
         return _hard_block(
             skill=safe_skill if safe_skill != "_unnamed" else "",
             repository="",
             reason_code=exc.reason_code,
-            summary="The configured Hub destination is invalid.",
-            repair_hint="Repair the configured OuroborosHub catalog URL, then retry.",
+            summary=str(exc) if explained
+            else "The publication destination is not a GitHub repository this install can publish to.",
+            repair_hint="Choose the hub or a GitHub git source in Skills → Sources as the destination, then retry."
+            if explained else "Connect the hub or a GitHub git source in Skills → Sources, then retry.",
             status_code=409,
         )
     if not raw_skill or safe_skill == "_unnamed" or safe_skill != raw_skill:
@@ -578,11 +585,19 @@ async def api_skill_publish_preflight(request: Request) -> JSONResponse:
     """POST selected-skill preflight without creating a task or remote effect."""
 
     skill_name = str(request.path_params.get("skill") or "")
+    body = await request_json_or(request, {})
+    if not isinstance(body, dict):  # an unreadable body names no destination: never answer for the default one
+        outcome = _hard_block(skill=skill_name, repository="", reason_code="request_invalid", status_code=400,
+                              summary="The request body is not a JSON object.",
+                              repair_hint="Send {} or {\"destination\": ...}, then retry.")
+        return JSONResponse(outcome.payload, status_code=outcome.status_code)
+    destination = body.get("destination")
     outcome = await asyncio.to_thread(
         build_skill_publish_preflight,
         request_drive_root(request),
         skill_name,
         admission_problem=_task_admission_problem(request),
+        destination=destination if isinstance(destination, (dict, str)) else None,
     )
     return JSONResponse(outcome.payload, status_code=outcome.status_code)
 

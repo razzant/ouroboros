@@ -2,19 +2,21 @@
 
 Every proof runs against the PRODUCTION seams — ``gateway.tasks.api_task_hurry``
 (re-export of ``gateway/task_hurry.py``), ``loop._drain_incoming_messages``,
-``loop._no_tool_final_answer``, ``loop._run_task_acceptance_review_once``,
-``task_pacing.improvement_pass_allowed`` + the rails line,
-``loop._enforce_swarm_actions``, the dedicated locked projection writer, and the
-one shared retry-reset invoked by the ``supervisor/workers.py`` crash-requeue.
+``loop._no_tool_final_answer``, ``loop._enforce_plan_gate``, the dedicated
+locked projection writer, and the one shared retry-reset invoked by the
+``supervisor/workers.py`` crash-requeue.
 
 The HQ1 contract under test: hurry is a typed task-local control (owner-mailbox
 ``kind=hurry``) that NEVER creates a chat message, owner directive, outbox row,
-or bubble; its effects are host rails only (acceptance skip, zero remaining
-improvement passes, task-local advisory force-plan projection); P3/commit/
-safety never consult it; retry attempts start with no executable latch.
+or bubble; its one effect is a host rail (the task-local advisory force-plan
+projection); P3/commit/safety never consult it; retry attempts start with no
+executable latch. Hurry no longer skips a review of the task's result and has no
+improvement passes to zero: both left with the task-acceptance machine.
 """
 
 from __future__ import annotations
+
+from tests import _dialogue as dialogue_test
 
 import json
 import pathlib
@@ -76,7 +78,7 @@ def _hurry_rows(drive_root, task_id):
 
 def _chat_log_snapshot(drive_root):
     path = pathlib.Path(drive_root) / "logs" / "chat.jsonl"
-    return path.read_text(encoding="utf-8") if path.exists() else None
+    return dialogue_test.log_text(path) if bool(dialogue_test.log_rows(path)) else None
 
 
 # ---------------------------------------------------------------------------
@@ -273,12 +275,10 @@ def test_drain_routes_hurry_structurally_and_never_as_owner_prose(tmp_path, monk
     latch = oh.latched(ctx)
     assert latch["msg_id"] == "hurry:rq"
     assert latch["requested_at"]                       # drained ts survives
-    # The worker-side projection went to APPLIED with the three named effects.
+    # The worker-side projection went to APPLIED with its one named effect.
     block = load_task_result(tmp_path, "t-drain")["owner_hurry"]
     assert block["state"] == oh.STATE_APPLIED
     assert block["effects"] == {
-        "improvement_passes": "zeroed_for_attempt",
-        "task_acceptance": "skip_next_panel",
         "plan_review": "task_local_advisory",
     }
     # The applied event rides the log_event envelope (task-detail observability
@@ -316,21 +316,21 @@ def test_restart_re_drain_restores_exactly_one_latch(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_post_pass_hurry_drain_never_supersedes_acceptance(tmp_path, monkeypatch):
+def test_post_answer_hurry_drain_never_reopens_a_sealed_root(tmp_path, monkeypatch):
     from tests.test_delivery_forced_finalization import _forced_test_context
 
     loop, registry, ctx, trace = _forced_test_context(tmp_path)
     monkeypatch.setattr(loop, "_compute_subagent_handoff", lambda *_a, **_k: None)
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a, **_k: False)
-    monkeypatch.setattr(loop, "_run_task_acceptance_review_once", lambda **_k: False)
-    superseded = []
+    monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", lambda *_a, **_k: False)
+    released = []
     monkeypatch.setattr(
-        loop, "_supersede_task_acceptance_for_owner_followup",
-        lambda *a, **k: superseded.append((a, k)),
+        loop, "_release_for_owner_followup",
+        lambda *a, **k: released.append((a, k)),
     )
-    # Acceptance already terminal; the post-answer admission drain finds a
-    # freshly delivered hurry control.
-    registry._ctx._task_acceptance_reviewed = True
+    # The root's admission is sealed (an owner follow-up would release it); the
+    # post-answer admission drain finds a freshly delivered hurry control.
+    registry._ctx._task_acceptance_sealed_fence_token = "sealed-root"
     registry._ctx.owner_message_admission_lock = threading.Lock()
     registry._ctx.owner_message_admission_agent = SimpleNamespace(
         _accepting_owner_messages=True, _busy=True, _current_task_id="parent1",
@@ -343,21 +343,21 @@ def test_post_pass_hurry_drain_never_supersedes_acceptance(tmp_path, monkeypatch
     result = loop._no_tool_final_answer(
         "Final answer.", ctx, trace, registry, _q.Queue(), set(), lambda _m: None,
     )
-    # The final answer went through: hurry never re-opened acceptance.
+    # The final answer went through: hurry never reopened the sealed root.
     assert result is not None
-    assert superseded == []
+    assert released == []
     assert getattr(registry._ctx, "_owner_directives", []) == []
     assert oh.latched(registry._ctx) is not None       # ...but the latch IS armed
 
 
 # ---------------------------------------------------------------------------
-# §19.7.4 bullet 4 — production acceptance seam: typed skip, zero reviewer calls
+# §19.7.4 bullets 4+5 — the acceptance skip and the improvement-pass overlay left
+# with the task-acceptance machine; the stored reason keeps its vocabulary
 # ---------------------------------------------------------------------------
 
 
-def _acceptance_ctx(tmp_path, *, latched):
+def _task_ctx(tmp_path, *, latched):
     ctx = SimpleNamespace(
-        _task_acceptance_reviewed=False,
         is_direct_chat=False,
         drive_root=str(tmp_path),
         budget_drive_root=str(tmp_path),
@@ -371,119 +371,18 @@ def _acceptance_ctx(tmp_path, *, latched):
     return ctx
 
 
-def test_acceptance_panel_skips_with_typed_reason_and_zero_reviewer_calls(tmp_path, monkeypatch):
-    import ouroboros.loop as loop_mod
-    import ouroboros.review_substrate as rs
-
-    monkeypatch.setattr(loop_mod, "get_task_review_mode", lambda: "required")
-    reviewer_calls = []
-    monkeypatch.setattr(
-        rs, "triad_delivery_slots",
-        lambda **kw: reviewer_calls.append(kw) or [object()],
-    )
-    oh.record_requested(tmp_path, "t-acc", request_id="rq", attempt=1)
-    ctx = _acceptance_ctx(tmp_path, latched=True)
-    trace = {"tool_calls": [{"tool": "write_file", "args": {"path": "x.py"}, "is_error": False}]}
-    assert loop_mod._run_task_acceptance_review_once(
-        tools=SimpleNamespace(_ctx=ctx), content="done", task_id="t-acc", task_type="task",
-        llm_trace=trace, drive_root=None,
-        messages=[{"role": "user", "content": "goal"}], emit_progress=lambda _m, *, incident=None: None,
-    ) is False
-    # Exact typed vocabulary (§19.7.2 item 8).
-    assert trace["review_decision"] == {
-        "eligibility": "eligible", "trigger": "owner_hurry", "skipped": "owner_hurry",
-    }
-    decision = trace["acceptance_decision"]
-    assert decision["status"] == "finalized_unaccepted"
-    assert decision["reason"] == oh.REASON_OWNER_HURRY == "owner_hurry"
-    assert decision["source"] == "owner_hurry"
-    # ZERO reviewer calls; the host panel is complete for this attempt.
-    assert reviewer_calls == []
-    assert ctx._task_acceptance_reviewed is True
-    # The named effect landed in the durable projection.
-    block = load_task_result(tmp_path, "t-acc")["owner_hurry"]
-    assert block["effects"]["task_acceptance"] == "skipped_owner_hurry"
-    # owner_hurry stays OUT of the forced-rail bypass vocabulary.
+def test_the_hurry_reason_stays_out_of_the_forced_rail_and_best_effort_vocabulary():
+    """Old task records carry ``owner_hurry`` as an acceptance-skip reason: an owner-approved
+    detail fact, never a forced-rail bypass or a best-effort reason the objective reader counts."""
     from ouroboros.outcomes import ACCEPTANCE_BYPASS_REASON_BY_RAIL, BEST_EFFORT_REASON_CODES
 
+    assert oh.REASON_OWNER_HURRY == "owner_hurry"
     assert "owner_hurry" not in ACCEPTANCE_BYPASS_REASON_BY_RAIL.values()
     assert "owner_hurry" not in BEST_EFFORT_REASON_CODES
 
 
-def test_unlatched_task_reaches_the_normal_acceptance_machinery(tmp_path, monkeypatch):
-    """Control group: without the latch, the same context proceeds past the
-    hurry seam (here: to the acceptance fence/pacing machinery, observed via
-    the pacing profile resolve)."""
-    import ouroboros.loop as loop_mod
-    from ouroboros import task_pacing
-
-    monkeypatch.setattr(loop_mod, "get_task_review_mode", lambda: "required")
-    resolved = []
-    real = task_pacing.resolve_budget_profile
-    monkeypatch.setattr(
-        task_pacing, "resolve_budget_profile",
-        lambda c: resolved.append(True) or real(c),
-    )
-    monkeypatch.setattr(loop_mod, "get_review_enforcement", lambda: "advisory")
-    # This control proves pacing is reached, not reviewer metadata/network discovery.
-    monkeypatch.setattr(task_pacing, "review_launch_allowed",
-                        lambda snapshot: (False, "review_skipped_deadline_reserve"))
-    ctx = _acceptance_ctx(tmp_path, latched=False)
-    trace = {"tool_calls": [{"tool": "write_file", "args": {"path": "x.py"}, "is_error": False}]}
-    loop_mod._run_task_acceptance_review_once(
-        tools=SimpleNamespace(_ctx=ctx), content="done", task_id="t-acc", task_type="task",
-        llm_trace=trace, drive_root=None,
-        messages=[{"role": "user", "content": "goal"}], emit_progress=lambda _m, *, incident=None: None,
-    )
-    # Same eligible context as the latched case, so only the latch differs.
-    assert trace["review_decision"]["eligibility"] == "eligible"
-    assert trace["review_decision"].get("skipped") != "owner_hurry"
-    assert resolved, "the unlatched path must reach the real pacing machinery"
-
-
 # ---------------------------------------------------------------------------
-# §19.7.4 bullet 5 — real improvement_pass_allowed under Required+Blocking +
-# the rails display consume the same effective zero cap
-# ---------------------------------------------------------------------------
-
-
-def test_required_blocking_unbounded_loop_collapses_to_zero_under_hurry(tmp_path, monkeypatch):
-    from ouroboros import task_pacing
-
-    ctx = _acceptance_ctx(tmp_path, latched=True)
-    base_profile = task_pacing.resolve_budget_profile(ctx)
-    assert base_profile.get("max_improvement_passes") is None
-    # WITHOUT hurry, Required+Blocking has NO local count cap while the shared
-    # review-cycle cap is unlimited (D10/D20: the shared cap otherwise binds).
-    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "unlimited")
-    assert task_pacing.effective_max_improvement_passes(
-        base_profile, required_blocking=True,
-    ) is None
-    effective = oh.effective_budget_profile(ctx, base_profile)
-    assert effective["max_improvement_passes"] == 0
-    # The IMMUTABLE input profile object was never mutated.
-    assert base_profile.get("max_improvement_passes") is None
-    snapshot = task_pacing.build_budget_snapshot(ctx, profile=effective)
-    allowed, reason = task_pacing.improvement_pass_allowed(
-        snapshot, 0, effective, required_blocking=True,
-    )
-    assert allowed is False
-    assert reason == "improvement_passes_exhausted"
-    # The rails/display consumer observes the SAME effective zero cap.
-    from ouroboros import task_pacing as tp_mod
-
-    rails = tp_mod.acceptance_rails_line(
-        snapshot, effective, 0, None, required_blocking=True,
-    )
-    assert "author passes: 0/0" in rails
-    assert "no local count cap" not in rails
-    # An unlatched ctx passes the profile through UNCHANGED (identity).
-    unlatched = _acceptance_ctx(tmp_path, latched=False)
-    assert oh.effective_budget_profile(unlatched, base_profile) is base_profile
-
-
-# ---------------------------------------------------------------------------
-# §19.7.4 bullet 6 — production _enforce_swarm_actions force-plan projection
+# §19.7.4 bullet 6 — production _enforce_plan_gate force-plan projection
 # ---------------------------------------------------------------------------
 
 
@@ -512,10 +411,10 @@ def _plan_record(kind: str) -> dict:
     [
         ("held", True), ("awaiting", True),        # locally advisory / proceed
         ("unsent", True),                          # an ask that reached nobody: attempted, disclosed, never held (scope R1 F1)
-        ("absent", False),                         # no plan at all: the Swarm admitted the task to write one — held
+        ("absent", True),                          # no plan creates no obligation
     ],
 )
-def test_enforce_swarm_actions_task_local_advisory_matrix(tmp_path, monkeypatch, kind, hurry_allows):
+def test_enforce_plan_gate_task_local_advisory_matrix(tmp_path, monkeypatch, kind, hurry_allows):
     import ouroboros.loop as loop_mod
 
     monkeypatch.setattr(loop_mod, "get_review_enforcement", lambda: "blocking")
@@ -524,25 +423,25 @@ def test_enforce_swarm_actions_task_local_advisory_matrix(tmp_path, monkeypatch,
     def _swarm_held(ctx):
         trace = {"reasoning_notes": []}
         tools = SimpleNamespace(_ctx=ctx)
-        held = loop_mod._enforce_swarm_actions("answer", [], tools, trace, lambda _m: None)
+        held = loop_mod._enforce_plan_gate("answer", [], tools, trace, lambda _m: None)
         return held, trace
 
-    latched_ctx = _acceptance_ctx(tmp_path, latched=True)
+    latched_ctx = _task_ctx(tmp_path, latched=True)
     latched_ctx.task_metadata = {"force_plan": True}
     held, trace = _swarm_held(latched_ctx)
     assert held is (not hurry_allows)
-    decision = trace["force_plan_decision"]
-    if hurry_allows:
+    decision = trace.get("plan_gate", {})
+    if hurry_allows and kind != "absent":
         # Attribution rides the decision for the task detail.
         assert decision["owner_hurry_local_advisory"] is True
         assert decision["configured_enforcement"] == "blocking"
     # WITHOUT the latch the same blocking install holds the held state and the plan never
     # written; an ask whose answers are merely awaited never held (silence holds nothing), and
     # an ask every seat refused before dispatch is attempted — disclosed, not held (outages never hold).
-    unlatched_ctx = _acceptance_ctx(tmp_path, latched=False)
+    unlatched_ctx = _task_ctx(tmp_path, latched=False)
     unlatched_ctx.task_metadata = {"force_plan": True}
     held_unlatched, _t = _swarm_held(unlatched_ctx)
-    assert held_unlatched is (kind in ("held", "absent"))
+    assert held_unlatched is (kind == "held")
     # Durable review state was never touched (the monkeypatched loader is the
     # only read; nothing wrote a plan record).
     assert not (tmp_path / "task_results").exists() or "plan_record" not in json.dumps(
@@ -563,7 +462,7 @@ def test_projection_survives_concurrent_terminal_writes_and_omission_is_not_eras
     assert stored["status"] == "completed"
     assert stored["owner_hurry"]["request_id"] == "r1"
     # The hurry writer mutates ONLY its two keys around the terminal result.
-    oh.record_applied(tmp_path, "t-dur", attempt=1, effects={"task_acceptance": "x"})
+    oh.record_applied(tmp_path, "t-dur", attempt=1, effects={"plan_review": "x"})
     stored = load_task_result(tmp_path, "t-dur")
     assert stored["status"] == "completed" and stored["result"] == "done"
     assert stored["owner_hurry"]["state"] == oh.STATE_APPLIED
@@ -740,6 +639,7 @@ def test_fresh_attempt_replays_exact_owner_text_until_terminal(
                 event_queue=None, accumulated_usage={}, task_type="task",
                 active_use_local=False, tools=SimpleNamespace(_ctx=first_ctx),
                 drive_root=tmp_path, context_fit_plan=None, active_context_mode="max",
+                physical_send_claim=None,
             ),
             None,
             attempt_cap=1,
@@ -806,6 +706,7 @@ def test_fresh_attempt_replays_exact_owner_text_until_terminal(
             event_queue=None, accumulated_usage={}, task_type="task",
             active_use_local=False, tools=SimpleNamespace(_ctx=successor_ctx),
             drive_root=tmp_path, context_fit_plan=None, active_context_mode="max",
+            physical_send_claim=None,
         ),
         None,
         attempt_cap=1,
@@ -926,7 +827,7 @@ def test_p3_commit_and_safety_surfaces_never_consult_hurry(monkeypatch, tmp_path
     ctx = _drain_ctx(tmp_path, task_id="t-env", attempt=1)
     oh.record_requested(tmp_path, "t-env", request_id="r", attempt=1)
     oh.apply_latch(ctx, {"msg_id": "hurry:r", "ts": "2026-08-15T00:00:00Z"})
-    assert oh.acceptance_skip_decision(ctx) is not None
+    assert oh.latched(ctx) is not None
     assert dict(os.environ) == env_before
     assert get_review_enforcement() == enforcement_before
     assert get_task_review_mode() == mode_before

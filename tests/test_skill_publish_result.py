@@ -543,7 +543,7 @@ def test_absent_partial_or_wrong_target_receipt_demotes_only_success(objective_s
         assert returned is outcome
         objective = outcome["outcome_axes"]["objective"]
         assert objective["status"] == "fail"
-        assert objective["source"] == "task_acceptance_review"
+        assert objective["source"] == "result_review"
         assert objective["outcome_tier"] == "blocked_with_evidence"
         assert objective["receipt_veto"]["reason"] == objective["reason"]
         normalized = normalize_outcome_axes({"outcome_axes": outcome["outcome_axes"]})

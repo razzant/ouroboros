@@ -2,8 +2,8 @@
 
 A repair is admitted AGAINST one exact payload state: ``base_content_hash``,
 captured immutably at admission (the promoted managed-task seam canonicalizes
-every skill_repair constraint, so both the marketplace auto-repair prompt and a
-manual repair pass through it). Every payload write by the ADMITTED repair task
+every skill_repair constraint, so every repair passes through it, whoever asked
+for it). Every payload write by the ADMITTED repair task
 then checks the payload against its last known revision
 (``expected_content_hash``). File-tool effects retain their attribution; after
 opaque process work the record advances to an OBSERVED revision, without claiming
@@ -19,6 +19,11 @@ Other writers (the owner's own light-mode edit lane, another task) are NOT
 blocked here — the repair verifies its known frontier, and later drift surfaces
 on its next check instead of gating everyone else's authority
 (AGENTS.md proportionality).
+
+This is also the owner-edit seam (``skill_acceptance``): when the admitted task's
+run was started by the owner's own door (``owner_request``, captured at admission),
+each observed revision is recorded as an owner edit of those exact bytes, so the
+skill keeps running as Modified. Edits from anywhere else leave it unreviewed.
 """
 
 from __future__ import annotations
@@ -55,8 +60,13 @@ def _payload_hash(payload_dir: pathlib.Path) -> str:
 
 
 def record_repair_admission(drive_root: Any, skill_name: str, *,
-                            task_id: str, base_content_hash: str) -> None:
+                            task_id: str, base_content_hash: str,
+                            owner_request: bool = False) -> None:
     """Bind one repair task to the exact payload state it was admitted against.
+
+    ``owner_request`` is the host's owner-ingress fact of the promoted run
+    (``dialogue_provenance.run_origin``): only then do this task's observed
+    revisions become owner edits.
 
     The newest admission owns the record: a fresh repair for the same skill
     replaces a stale predecessor's binding (its writes then fail the ownership
@@ -76,6 +86,7 @@ def record_repair_admission(drive_root: Any, skill_name: str, *,
         "base_content_hash": str(base_content_hash or ""),
         "expected_content_hash": str(base_content_hash or ""),
         "status": STATUS_ADMITTED,
+        "owner_request": bool(owner_request),
         "admitted_at": now,
         "updated_at": now,
     }, trailing_newline=True)
@@ -186,7 +197,8 @@ def advance_repair_expected_hash(
     if not task_id or not owner or owner != str(task_id):
         return
     try:
-        record["expected_content_hash"] = _payload_hash(_payload_dir(drive_root, constraint))
+        payload_dir = _payload_dir(drive_root, constraint)
+        record["expected_content_hash"] = _payload_hash(payload_dir)
         record["revision_attribution"] = attribution
     except Exception:
         log.warning("Failed to advance repair hash chain for %s", skill_name, exc_info=True)
@@ -195,6 +207,10 @@ def advance_repair_expected_hash(
         _save(drive_root, skill_name, record)
     except Exception:
         log.warning("Failed to persist repair hash chain for %s", skill_name, exc_info=True)
+    if record.get("owner_request") is True:
+        from ouroboros.skill_acceptance import record_owner_edit
+
+        record_owner_edit(pathlib.Path(drive_root), payload_dir, task_id=str(task_id), attribution=attribution)
 
 
 __all__ = [

@@ -95,6 +95,8 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
         "supervisor.events_worker_reports", "ouroboros/agent.py"),
     "budget_pause": _handled(
         "supervisor.events_budget", "ouroboros/agent.py", idle_input=True),
+    "mind_task_control": _handled(
+        "supervisor.events_mind_controls", "ouroboros/tools/control_mind.py", idle_input=True),
     "budget_resume_child": _handled(
         # #1196 (owner Q9): the resumed root's model selects one paused child.
         "supervisor.events_budget", "ouroboros/tools/join_ledger.py", idle_input=True),
@@ -114,8 +116,10 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
     "llm_usage": _handled(
         "supervisor.events_budget", "ouroboros/agent.py",
         "ouroboros/pricing.py", "ouroboros/tools/search.py", "ouroboros/tools/vision.py",
-        "ouroboros/tools/skill_publish.py", idle_input=True, lane=TELEMETRY_LANE,
-        note="the producer's per-task endpoint stamps lineage and chat by value; "
+        "ouroboros/tools/skill_publish.py", "ouroboros/tools/review_helpers.py", idle_input=True,
+        lane=TELEMETRY_LANE,
+        note="the producer's per-task endpoint stamps lineage and chat by value (a queue-less server "
+             "review's row, put on the bus directly, carries its usage scope and its carrier's chat); "
              "the handler fills a missing field from RUNNING only as a fallback"),
     "log_event": _handled(
         "supervisor.events_worker_reports", "ouroboros/utils.py", lane=TELEMETRY_LANE,
@@ -138,8 +142,6 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
         "supervisor.events_runtime_controls", "ouroboros/tools/control_runtime.py"),
     "review_late_result": _handled(
         "supervisor.cognitive_operations", "ouroboros/review_custody.py"),
-    "routing_manual_target": _handled(
-        "supervisor.events_project_routing", "ouroboros/tools/control_routing.py"),
     "schedule_subagent": _handled(
         "supervisor.events_schedule_task", "ouroboros/tools/control_scheduling.py",
         idle_input=True, note="the only producer of the schedule handler; the schedule_task key "
@@ -148,6 +150,9 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
         "supervisor.events_chat_delivery", "ouroboros/tools/core_artifacts.py"),
     "send_links": _handled(
         "supervisor.events_chat_delivery", "ouroboros/tools/core_artifacts.py"),
+    "send_card": _handled(
+        "supervisor.events_chat_delivery", "ouroboros/tools/cards.py",
+        note="the card is stored before the event; the row carries its identity, the body stays in the store"),
     "send_message": _handled(
         "supervisor.events_chat_delivery", "ouroboros/agent.py",
         "supervisor/task_reaper.py", "supervisor/terminal_delivery.py", idle_input=True),
@@ -167,12 +172,30 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
     "skill_exec_finished": _handled(
         "supervisor.events_worker_reports", "ouroboros/tools/skill_exec.py"),
     "steer_task": _handled(
-        "supervisor.steering", "ouroboros/tools/control_routing.py",
+        "supervisor.steering", "ouroboros/tools/control_relay.py",
         "ouroboros/gateway/routing_decision.py"),
     "task_dispatch_resolved": _handled(
         "supervisor.events_worker_reports", "ouroboros/agent_dispatch.py"),
     "task_focus_updated": _handled(
         "supervisor.events_worker_reports", "ouroboros/tools/project_journal.py"),
+    # --- the conversation lane's carrier frames (a carrier's start facts, bound facts and title) --
+    "direct_turn_phase": _handled(
+        "supervisor.conversation_lane", "supervisor/worker_chat_lane.py",
+        note="a carrier's start phase lands on its RUNNING row for the census"),
+    "direct_turn_bound": _handled(
+        "supervisor.conversation_lane", "supervisor/worker_chat_lane.py",
+        note="the Project basis the carrier bound lands on its RUNNING row (snapshot, park, restore)"),
+    "task_named": _handled(
+        "supervisor.conversation_lane", "supervisor/worker_chat_lane.py",
+        note="a carrier coined a title: the bridge broadcasts it as the server's own namer did"),
+    # --- a Host-admitted Presence turn's body in a carrier: its envelope and its settlement --
+    "presence_turn_initial": _handled(
+        "supervisor.events", "ouroboros/presence_carrier.py",
+        note="a continuing author's initial envelope resolves the Host's initial future (a lazy wrapper: the "
+             "dispatcher never imports Presence at module level)"),
+    "presence_turn_settled": _handled(
+        "supervisor.events", "ouroboros/presence_carrier.py",
+        note="the body's result or error by value resolves the Host's future and frees the row (lazy wrapper)"),
     "task_done": _handled(
         "supervisor.events_task_done", "ouroboros/agent_task_pipeline.py",
         "supervisor/queue.py", "supervisor/task_reaper.py", "supervisor/worker_health.py", idle_input=True),
@@ -188,12 +211,19 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
     "toggle_evolution": _handled(
         "supervisor.events_runtime_controls", "ouroboros/tools/control_runtime.py"),
     "typing_start": _handled(
-        "supervisor.events_chat_delivery", "ouroboros/agent.py"),
+        "supervisor.events_chat_delivery", "ouroboros/agent.py", "ouroboros/model_sleep.py",
+        note="a start, or the same attempt running again after a wait (``announce_resumed``)"),
+    "ui_i18n_updated": _handled(
+        "supervisor.events_worker_reports", "ouroboros/tools/control_ui_translation.py",
+        note="the memory file is already written; the host broadcasts the same-named frame to its windows"),
+    "update_progress_changed": _handled(
+        "supervisor.events_worker_reports", "ouroboros/tools/control_update_description.py",
+        note="the update description is already saved; the host broadcasts the same-named frame to its windows"),
 
     # --- telemetry_only: recorded in the ledger, no runtime action follows -----
     "plan_task_deadline_skip": _telemetry(
         "ouroboros/tools/plan_review_runtime.py",
-        note="the fact that a deadline left no useful planning window"),
+        note="the fact that a spent deadline (less the finalization reserve) left a plan ask no dispatch"),
     "quiz_answer_injected": _telemetry(
         "ouroboros/owner_mailbox.py"),
     "review_density_probe": _telemetry(
@@ -219,7 +249,7 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
     # --- server_intercept -----------------------------------------------------
     "restart_request": EventDisposition(
         SERVER_INTERCEPT, "ouroboros.server_liveness",
-        ("ouroboros/agent_task_pipeline.py", "supervisor/evolution_lifecycle.py"),
+        ("ouroboros/tools/control_events.py", "ouroboros/agent_task_pipeline.py", "supervisor/evolution_lifecycle.py"),
         "restarting the process is not something the supervisor thread can do to "
         "itself, so the loop's bounded drain routes this one to the server's restart "
         "handler before dispatch",

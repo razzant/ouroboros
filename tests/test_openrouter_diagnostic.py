@@ -188,6 +188,17 @@ def test_request_uses_the_captured_key_even_if_settings_change_before_http(sampl
     assert result["budget_drift_pct"] is None
 
 
+def test_ground_truth_counts_the_keys_byok_consumption_like_the_ledger(monkeypatch):
+    """The ledger books a BYOK reply at gateway charge + provider-billed share, so the key's
+    side of the comparison is its credit usage plus its separately kept ``byok_usage``."""
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_a, **_k: io.BytesIO(
+        b'{"data": {"usage": 1.5, "usage_daily": 0.5, "byok_usage": 3.25, "byok_usage_daily": 1.25}}'))
+    assert state.check_openrouter_ground_truth("test-key-A") == {"total_usd": 4.75, "daily_usd": 1.75}
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_a, **_k: io.BytesIO(
+        b'{"data": {"usage": 1.5, "usage_daily": 0.5, "byok_usage": null}}'))
+    assert state.check_openrouter_ground_truth("test-key-A") == {"total_usd": 1.5, "daily_usd": 0.5}
+
+
 @pytest.mark.parametrize("changed", [
     {"session_total_snapshot": 2000.0},
     {"session_openrouter_settled_snapshot": 30.0},

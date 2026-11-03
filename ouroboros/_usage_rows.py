@@ -15,7 +15,7 @@ from __future__ import annotations
 import datetime as _dt
 import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 from decimal import Decimal, InvalidOperation
 
 from ouroboros.usage_ledger import _number
@@ -428,6 +428,11 @@ def summary_delta(row: Dict[str, Any]) -> Bucket:
             delta.priced = weight
             if not bool(row.get("cost_final")):
                 delta.non_final = delta.tracked_nonfinal = delta.accounting_open = weight
+            if row.get("cost_partial") is True:
+                delta.unknown = delta.non_final = delta.accounting_open = weight
+                # This row carries a known subtotal and an unpriced remainder.
+                # Exact subtotal is still exact; it never bounds the entire run.
+                delta.tracked_nonfinal = weight if row.get("cost_estimated") else 0
     elif state in {"reserved", "dispatched", "unresolved"}:
         delta.non_final = delta.accounting_open = weight
         if bound is None or pricing_unknown:
@@ -509,49 +514,12 @@ _SKILL_ATTEMPT_FIELDS = (
 )
 
 
-def _skill_review_usage_bucket(
-    rows: Sequence[Dict[str, Any]], *, review_skill: str, review_wave_id: str,
-    integrity_degraded: bool,
-) -> Dict[str, Any]:
-    """Project one exact Skill Review wave from canonical final attempt rows."""
-    selected = sorted(
-        (
-            row for row in rows
-            if str(row.get("review_skill") or "") == review_skill
-            and str(row.get("review_wave_id") or "") == review_wave_id
-        ),
-        key=lambda row: str(row.get("attempt_id") or ""),
-    )
-    grouped: Dict[str, list[Dict[str, Any]]] = {}
-    for row in selected:
-        grouped.setdefault(str(row.get("review_slot_id") or "(unattributed)"), []).append(row)
-    by_slot = {
-        slot: _with_integrity(_breakdown_bucket(grouped[slot]), integrity_degraded)
-        for slot in sorted(grouped)
-    }
-    result = _with_integrity(_breakdown_bucket(selected), integrity_degraded)
-    result.update({
-        "review_skill": review_skill,
-        "review_wave_id": review_wave_id,
-        "attempt_ids": [str(row.get("attempt_id") or "") for row in selected],
-        "attempts": [
-            {key: row.get(key) for key in _SKILL_ATTEMPT_FIELDS if key in row}
-            for row in selected
-        ],
-        "by_slot": by_slot,
-        "attribution_complete": bool(selected) and all(
-            str(row.get("review_slot_id") or "") for row in selected
-        ),
-    })
-    return result
-
-
 _VIEW_AXES = ("model", "provider", "category")
 _VIEW_LEGACY_UNATTRIBUTED = frozenset({"legacy_metadata", "legacy_delta"})
 
 
 # ---- read views: the historical projection/breakdown shapes from summary rows
-# (``txn`` is a usage-store transaction: ``bucket``/``buckets``/``attempts``) ----
+# (``txn``: a usage-store transaction, or the rows it captured: ``bucket``/``buckets``/``attempts``) ----
 
 def _rendered(bucket: Bucket, degraded: bool, *, decorate: bool) -> Dict[str, Any]:
     rendered = bucket.render_breakdown()
@@ -562,7 +530,11 @@ def breakdown_view(txn: Any, *, root_task_id: str = "", task_id: str = "", inclu
                    degraded: bool = False) -> Dict[str, Any]:
     """``usage_breakdown``'s shape for the global scope, one root or one task,
     from summary rows only. The global per-task/per-root maps enumerate every
-    owner, so they are rendered only on request (``include_owners``)."""
+    owner, so they are rendered only on request (``include_owners``).
+
+    Precondition ``breakdown_read`` relies on: which rows this view asks ``txn``
+    for depends only on the scope arguments, never on the values of rows already
+    read, so a dry run over ``_Reads`` names exactly the rows a real run needs."""
     if root_task_id and task_id:
         return breakdown_of_rows(txn.attempts("root_task_id=? AND task_id=?", (root_task_id, task_id)), degraded)
     empty = Bucket()
@@ -594,6 +566,38 @@ def breakdown_view(txn: Any, *, root_task_id: str = "", task_id: str = "", inclu
     result["unattributed"] = {axis: _rendered(axes[axis].get("") or empty, degraded, decorate=False)
                               for axis in ("model", "provider", "category", "task", "root")}
     return result
+
+
+class _Reads:
+    """A dry run's ``txn``: it records which summary rows ``breakdown_view`` asks for and reads nothing."""
+
+    def __init__(self) -> None:
+        self.reads: list = []
+
+    def bucket(self, scope: str, key: str = "") -> Bucket:
+        self.reads.append((scope, str(key), "key"))
+        return Bucket()
+
+    def buckets(self, scope: str, prefix: Optional[str] = None) -> Dict[str, Bucket]:
+        self.reads.append((scope, "" if prefix is None else str(prefix), "scope" if prefix is None else "prefix"))
+        return {}
+
+
+def breakdown_read(txn: Any, *, root_task_id: str = "", task_id: str = "",
+                   include_owners: bool = False) -> Callable[[bool], Dict[str, Any]]:
+    """``breakdown_view``'s rows captured inside the caller's read in one step (``store_capture``); the returned
+    ``render(degraded)`` decodes and renders after that read closed. The summary rows captured are the ones a
+    dry run of the view asks for, so the capture and the view cannot disagree."""
+    from ouroboros import usage_store
+
+    if root_task_id and task_id:
+        rows = txn.attempt_rows("root_task_id=? AND task_id=?", (root_task_id, task_id))
+        return lambda degraded: breakdown_of_rows(usage_store.decode_attempts(rows), degraded)
+    shape = {"root_task_id": root_task_id, "task_id": task_id, "include_owners": include_owners}
+    wanted = _Reads()
+    breakdown_view(wanted, **shape)
+    captured = txn.summary_rows(wanted.reads)
+    return lambda degraded: breakdown_view(usage_store.SummaryRows(captured), degraded=degraded, **shape)
 
 
 def breakdown_of_rows(rows: Sequence[Dict[str, Any]], degraded: bool) -> Dict[str, Any]:

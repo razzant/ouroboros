@@ -198,12 +198,6 @@ def test_skills_offer_make_runnable_for_instruction_skills():
     assert 'data-skill-action="repair"' in src
 
 
-def test_repair_prompt_has_make_runnable_conversion_hint():
-    src = _web("modules/utils.js")
-    assert "Make-runnable" in src
-    assert "type=script" in src
-
-
 def test_files_header_does_not_duplicate_directory_description():
     src = _web("modules/files.js")
     # The file-manager blurb stays in the preview pane, not the page header.

@@ -232,11 +232,11 @@ def test_control_cache_never_pairs_old_body_with_new_pause_signature(tmp_path, m
         write_task_result(tmp_path, "child", "running", root_task_id="root")
         registry._ctx.task_id = "child"
     target = "child" if member else "root"
-    from ouroboros import task_results
-    read, captured = task_results.load_task_result, []
+    from ouroboros import store_hot_facts
+    read, captured = store_hot_facts.controls, []
 
-    def interleaved(root, task_id, **kwargs):
-        snapshot = read(root, task_id, **kwargs)
+    def interleaved(root, task_id):
+        snapshot = read(root, task_id)
         if task_id == target and not captured:
             captured.append(True)
             if member:
@@ -246,32 +246,29 @@ def test_control_cache_never_pairs_old_body_with_new_pause_signature(tmp_path, m
                 owner_pause.install_fence(root, "root", request_id="snapshot-interleave")
         return snapshot
 
-    monkeypatch.setattr(task_results, "load_task_result", interleaved)
-    owner_pause._control_projection(tmp_path, target)  # writer commits after this body snapshot
+    monkeypatch.setattr(store_hot_facts, "controls", interleaved)
+    owner_pause._control_projection(tmp_path, target)  # writer commits after this control snapshot
     with pytest.raises(owner_pause.OwnerPauseRefused):
         with owner_pause.launch_admission(registry._ctx):
             pytest.fail("stale open control was admitted")
     assert captured == [True]
 
 
-def test_handoff_touch_invalidates_small_admission_memo(tmp_path, monkeypatch):
+def test_admission_reads_current_controls_by_address_never_a_body(tmp_path, monkeypatch):
+    """Nothing is memoized across admissions: each reads the typed control columns by address, so a
+    write to the row (here a handoff touch) can never leave a stale projection, and no body is decoded."""
     registry, _, _ = _registry(tmp_path, monkeypatch)
-    from ouroboros import task_results
-    read, reads = task_results.load_task_result, []
-    def counted(*args, **kwargs):
-        reads.append(args[1])
-        return read(*args, **kwargs)
-    monkeypatch.setattr(task_results, "load_task_result", counted)
+    from ouroboros import store_hot_facts, task_results
+    read_body, read_controls, bodies, addressed = task_results.load_task_result, store_hot_facts.controls, [], []
+    monkeypatch.setattr(task_results, "load_task_result", lambda *a, **k: bodies.append(a[1]) or read_body(*a, **k))
+    monkeypatch.setattr(store_hot_facts, "controls", lambda root, task_id: addressed.append(task_id) or read_controls(root, task_id))
     with owner_pause.launch_admission(registry._ctx):
         pass
-    reads.clear()
-    with owner_pause.launch_admission(registry._ctx):
-        pass
-    assert reads == []
+    per_admission = list(addressed)
     task_store.patch_handoff(tmp_path, "root", "model_waits", "wait", lambda _old: {"state": "waiting"})
     with owner_pause.launch_admission(registry._ctx):
         pass
-    assert reads == ["root"]
+    assert per_admission and addressed == per_admission * 2 and bodies == []
 
 
 def test_external_process_is_custodied_before_both_publication_failures(tmp_path, monkeypatch):

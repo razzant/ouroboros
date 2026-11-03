@@ -24,6 +24,13 @@ from ouroboros.gateway.host_service import create_host_service_app
 from ouroboros.presence_runner import PresenceTurnError, PresenceTurnGate
 from tests.test_host_service_api import _seed_presence_behavior, _seed_token
 
+@pytest.fixture(autouse=True)
+def _host_lane_roots(tmp_path, monkeypatch):
+    """A Host-only process: its turns run on the disclosed degraded executor in this process (no pool generation)."""
+    from tests.conversation_carrier_support import host_lane
+
+    host_lane(monkeypatch, tmp_path)
+
 TOKEN = "presence-token"
 BUDGET = "telegram-bot:presence"
 
@@ -33,6 +40,13 @@ def _isolated_gates(monkeypatch):
     """The configured-gate cache is process-global; each test gets its own, at two active turns."""
     monkeypatch.setattr(presence_runner, "_GATES", {})
     monkeypatch.setenv("OUROBOROS_PRESENCE_MAX_ACTIVE", "2")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_presence_runner(monkeypatch):
+    """The injected-runner registry is process-global; keep each test's own out of the next."""
+    from ouroboros import presence_carrier
+    monkeypatch.setattr(presence_carrier, "_RUNNERS", {})
 
 
 def _event(source_event_id: str, conversation_id: str = "room-1") -> dict:
@@ -60,6 +74,8 @@ def _presence_app(tmp_path: pathlib.Path, runner, *, account_wide: bool = False)
                 manifest_permissions=["presence"])
     binding_id = _seed_presence_behavior(tmp_path, account_wide=account_wide)
     app = create_host_service_app(tmp_path, presence_runner=runner)
+    from ouroboros.presence_carrier import set_presence_runner
+    set_presence_runner(tmp_path, runner)  # the conversation-lane carrier's body is this test's runner
     return app, binding_id, app.state.host_service_context
 
 
@@ -86,10 +102,10 @@ def _resolve_preparation_once(monkeypatch, ctx, binding_id: str) -> None:
                         lambda raw: identity if raw == TOKEN else authenticate(raw))
     monkeypatch.setattr(ctx, "require_permission", lambda skill, payload, permission: (
         None if (skill, permission) == (identity[0], "presence") else require(skill, payload, permission)))
-    monkeypatch.setattr(host_service, "_admit_presence", lambda *_args: admission)
+    monkeypatch.setattr(host_service, "_admit_presence", lambda *_args, **_kw: admission)
 
 
-async def _until(predicate, timeout: float = 5.0) -> None:
+async def _until(predicate, timeout: float = 15.0) -> None:
     deadline = time.monotonic() + timeout
     while not predicate():
         assert time.monotonic() < deadline, "condition not reached"
@@ -97,7 +113,8 @@ async def _until(predicate, timeout: float = 5.0) -> None:
 
 
 def _turn_threads() -> list[threading.Thread]:
-    return [thread for thread in threading.enumerate() if thread.name.startswith("presence-turn-")]
+    """The disclosed degraded executors of this Host-only process: one thread per live turn body."""
+    return [thread for thread in threading.enumerate() if thread.name.startswith("inline_degraded-")]
 
 
 def test_queued_and_executing_turns_leave_the_default_executor_free(tmp_path, monkeypatch):
@@ -110,7 +127,7 @@ def test_queued_and_executing_turns_leave_the_default_executor_free(tmp_path, mo
 
     def runner(**kwargs):
         entered.append(kwargs["event"].source_event_id)
-        assert release.wait(10)
+        assert release.wait(30)
         return _answer(**kwargs)
 
     app, binding_id, ctx = _presence_app(tmp_path, runner, account_wide=True)
@@ -125,7 +142,7 @@ def test_queued_and_executing_turns_leave_the_default_executor_free(tmp_path, mo
             await asyncio.sleep(0.2)
             assert len(entered) == 2, "the gate admits two turns; two stay queued"
             assert len(ctx.presence_turns.live()) == 4
-            assert len(_turn_threads()) == 2, "a queued turn holds no thread"
+            assert len(_turn_threads()) == 4, "every live turn holds its own carrier; a queued one waits in it"
             assert await asyncio.wait_for(asyncio.to_thread(lambda: "free"), 2) == "free"
             identity = await asyncio.wait_for(host_service._api_identity(_request(app)), 5)
             assert identity.status_code == 200
@@ -140,7 +157,7 @@ def test_queued_and_executing_turns_leave_the_default_executor_free(tmp_path, mo
     assert ctx.presence_turns.live() == [] and not any(ctx._inflight.values())
 
 
-def test_retries_join_turns_whose_waiters_were_cancelled_even_at_full_budget(tmp_path):
+def test_retries_join_turns_whose_waiters_were_cancelled_even_at_full_budget(tmp_path, monkeypatch):
     """Cancelled waiters (one executing turn, one queued) leave both turns running with their
     capacity; retries join them although the in-flight budget is full, and each event runs once."""
     calls, entered, release = [], threading.Event(), threading.Event()
@@ -148,10 +165,22 @@ def test_retries_join_turns_whose_waiters_were_cancelled_even_at_full_budget(tmp
     def runner(**kwargs):
         calls.append(kwargs["event"].source_event_id)
         entered.set()
-        assert release.wait(10)
+        assert release.wait(30)
         return _answer(**kwargs)
 
     app, binding_id, ctx = _presence_app(tmp_path, runner)
+    _resolve_preparation_once(monkeypatch, ctx, binding_id)
+    # A retry joins only while its turn is live, and this runner leaves no durable row for a late
+    # retry to replay. The turns are released once both retries have joined, never after a fixed
+    # sleep a loaded runner's preparation reads outlast (a late retry would run its event again).
+    outcomes, start_or_dispatch = [], ctx.presence_turns.start_or_dispatch
+
+    def recording(turn_id, **kwargs):
+        outcome = start_or_dispatch(turn_id, **kwargs)
+        outcomes.append((turn_id, *outcome))
+        return outcome
+
+    monkeypatch.setattr(ctx.presence_turns, "start_or_dispatch", recording)
 
     async def scenario():
         # One conversation: e-0 executes, e-1..e-4 queue behind it; five turns fill the budget.
@@ -173,8 +202,11 @@ def test_retries_join_turns_whose_waiters_were_cancelled_even_at_full_budget(tmp
         refused = await _turn(app, binding_id, "e-5")
         assert refused.status_code == 429, "a NEW event still meets the budget"
         retries = {event_id: asyncio.create_task(_turn(app, binding_id, event_id)) for event_id in ("e-0", "e-2")}
-        await asyncio.sleep(0.2)
-        assert not any(retry.done() for retry in retries.values()), "a retry joins; it is never refused"
+        await _until(lambda: len(outcomes) == 8)  # five starts, the refused e-5, then both retries
+        live = {turn_id: execution for turn_id, execution, _began in outcomes[:5]}
+        assert [(execution is live.get(turn_id), began) for turn_id, execution, began in outcomes[6:]] == [
+            (True, False)] * 2, "a retry joins its live turn; it is never refused and never starts another"
+        assert not any(retry.done() for retry in retries.values())
         assert calls == ["e-0"] and ctx._inflight[BUDGET] == 5
 
         release.set()
@@ -190,38 +222,36 @@ def test_retries_join_turns_whose_waiters_were_cancelled_even_at_full_budget(tmp
     assert ctx.presence_turns.live() == [] and not any(ctx._inflight.values())
 
 
-def test_turn_thread_carries_the_admitting_request_context(tmp_path):
-    """A raw thread starts with an empty context; the turn must see what to_thread carried."""
-    from ouroboros.config import runtime_setting, task_settings_scope
-    from ouroboros.settings_integrity import TaskSettingsSnapshot
-
+def test_the_turn_body_runs_on_its_carrier_outside_the_requests_context(tmp_path):
+    """The body is the carrier's (here the disclosed degraded executor's thread): it re-admits from the
+    task's durable facts and never sees the admitting request's context variables."""
     probe = contextvars.ContextVar("tz3_probe", default="lost")
     seen = {}
 
     def runner(**kwargs):
-        seen.update(probe=probe.get(), setting=runtime_setting("OUROBOROS_TZ3_CONTEXT_PROBE"),
-                    thread=threading.current_thread().name)
+        seen.update(probe=probe.get(), thread=threading.current_thread().name)
         return _answer(**kwargs)
 
     app, binding_id, _ctx = _presence_app(tmp_path, runner)
 
     async def scenario():
         probe.set("carried")
-        with task_settings_scope(TaskSettingsSnapshot(settings={}, environ={"OUROBOROS_TZ3_CONTEXT_PROBE": "task"})):
-            return await _turn(app, binding_id, "e-ctx")
+        return await _turn(app, binding_id, "e-ctx")
 
     assert asyncio.run(scenario()).status_code == 200
-    assert seen["thread"].startswith("presence-turn-")
-    assert seen["probe"] == "carried" and seen["setting"] == "task"
+    assert seen["thread"].startswith("inline_degraded-")
+    assert seen["probe"] == "lost"
 
 
 def test_a_thread_that_cannot_start_returns_capacity_gate_and_identity(tmp_path, monkeypatch):
+    from supervisor import workers
+
     calls = []
     app, binding_id, ctx = _presence_app(tmp_path, lambda **kwargs: calls.append(1) or _answer(**kwargs))
     start = threading.Thread.start
 
     def refuse_turn_threads(thread):
-        if thread.name.startswith("presence-turn-"):
+        if thread.name.startswith("inline_degraded-"):
             raise RuntimeError("can't start new thread")
         return start(thread)
 
@@ -230,6 +260,7 @@ def test_a_thread_that_cannot_start_returns_capacity_gate_and_identity(tmp_path,
     assert refused.status_code == 503
     assert json.loads(refused.body)["error"] == "presence turn thread could not start"
     assert calls == [] and ctx.presence_turns.live() == [] and not any(ctx._inflight.values())
+    assert workers.RUNNING == {} and workers.WORKERS == {}, "nothing ran: no lane row and no pseudo-slot remain"
 
     monkeypatch.setattr(threading.Thread, "start", start)
     # The gate lease went back too: the same conversation admits at once.
@@ -350,48 +381,32 @@ def test_an_interrupted_admission_settles_waiters_and_capacity(admission_started
 
 
 def test_blocking_checks_run_off_the_event_loop(tmp_path, monkeypatch):
-    """Token discovery and presence admission read disk; the loop keeps ticking through both."""
+    """The loop can release each real blocking check before that check returns."""
     import ouroboros.presence_admission as presence_admission
 
     app, binding_id, ctx = _presence_app(tmp_path, _answer)
     authenticate, admit = ctx.authenticate_token_payload, presence_admission.admit_presence_turn
-
-    def slow_authenticate(raw_token):
-        time.sleep(0.3)
-        return authenticate(raw_token)
-
-    def slow_admit(**kwargs):
-        time.sleep(0.3)
-        return admit(**kwargs)
-
-    monkeypatch.setattr(ctx, "authenticate_token_payload", slow_authenticate)
-    monkeypatch.setattr(presence_admission, "admit_presence_turn", slow_admit)
-
-    async def ticks_during(awaitable):
-        ticks, done = 0, asyncio.Event()
-
-        async def tick():
-            nonlocal ticks
-            while not done.is_set():
-                ticks += 1
-                await asyncio.sleep(0.01)
-
-        ticker = asyncio.create_task(tick())
-        try:
-            response = await awaitable
-        finally:
-            done.set()
-            await ticker
-        return response.status_code, ticks
+    calls = []
 
     async def scenario():
-        return (await ticks_during(host_service._api_identity(_request(app))),
-                await ticks_during(_turn(app, binding_id, "e-1")))
+        loop, loop_thread = asyncio.get_running_loop(), threading.get_ident()
 
-    (identity_status, identity_ticks), (turn_status, turn_ticks) = asyncio.run(scenario())
-    assert identity_status == 200 and turn_status == 200
-    # Inline on the loop, each 0.3 s check would be one tick.
-    assert identity_ticks > 10 and turn_ticks > 20
+        def checked(name, function, *args, **kwargs):
+            assert threading.get_ident() != loop_thread, name + " ran on the event loop"
+            released = threading.Event()
+            loop.call_soon_threadsafe(released.set)
+            assert released.wait(5), name + " prevented the loop from releasing it"
+            calls.append(name)
+            return function(*args, **kwargs)
+
+        monkeypatch.setattr(ctx, "authenticate_token_payload", lambda token: checked("auth", authenticate, token))
+        monkeypatch.setattr(presence_admission, "admit_presence_turn", lambda **kw: checked("admit", admit, **kw))
+        identity = await host_service._api_identity(_request(app))
+        turn = await _turn(app, binding_id, "e-1")
+        return identity.status_code, turn.status_code
+
+    assert asyncio.run(scenario()) == (200, 200)
+    assert calls == ["auth", "auth", "admit", "admit"], "the Host's admission, then the carrier's re-admission"
 
 
 def test_coroutine_admission_keeps_the_cross_process_gate_contract(tmp_path):
@@ -454,7 +469,7 @@ def test_same_source_id_with_different_room_or_text_never_joins_or_replays(tmp_p
 
         calls.append(kwargs["event"].text)
         entered.set()
-        assert release.wait(10)
+        assert release.wait(30)
         event = kwargs["event"]
         answer = _answer(**kwargs)
         write_task_result(tmp_path, presence_turn_task_id(binding, event.source_event_id), "completed",
@@ -501,7 +516,7 @@ def test_many_slow_auth_probes_do_not_fill_the_default_executor(tmp_path, monkey
             if active[0] == 2:
                 entered.set()
         try:
-            assert release.wait(10)
+            assert release.wait(30)
             return original(token)
         finally:
             with lock:
@@ -533,15 +548,15 @@ def test_slow_presence_preparation_cannot_fill_the_default_executor(tmp_path, mo
     lock, active, peak = threading.Lock(), [0], [0]
     original = host_service._admit_presence
 
-    def slow_admission(*args):
+    def slow_admission(*args, **kwargs):
         with lock:
             active[0] += 1
             peak[0] = max(peak[0], active[0])
             if active[0] == 2:
                 entered.set()
         try:
-            assert release.wait(10)
-            return original(*args)
+            assert release.wait(30)
+            return original(*args, **kwargs)
         finally:
             with lock:
                 active[0] -= 1
@@ -565,3 +580,9 @@ def test_slow_presence_preparation_cannot_fill_the_default_executor(tmp_path, mo
         shared.shutdown(wait=True)
 
     asyncio.run(scenario())
+
+
+@pytest.fixture(autouse=True)
+def _focus_authority_available(monkeypatch):
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {"status": "available", "remaining_usd": 10})

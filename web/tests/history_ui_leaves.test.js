@@ -90,20 +90,31 @@ test('compact Chat removes internal write/status metadata while preserving execu
     assert.equal(view.terminal, true);
     assert.equal(view.headline, 'Researcher');
     assert.equal(view.body, event.result);
-    assert.equal(view.fullBody, `[RESULT]\n${event.result}`);
+    // A completed child's result is its report to its parent: the label replaces [RESULT] and leads the preview.
+    assert.equal(view.fullBody, `## Report to parent\n${event.result}`);
+    assert.equal(view.activityLead, 'Report to parent');
     assert.equal(view.model, event.model);
     assert.equal(view.executorChip.label, 'Cursor');
     assert.ok(summarizeLogEvent(event).meta.includes('write=workspace'));
     assert.equal(prettyLogEvent(event), JSON.stringify(event, null, 2));
     assert.equal(JSON.stringify(event), before);
-    const record = { groupId: 'child-1', metaEl: { innerHTML: '', isConnected: true },
+    // The card's own details block holds the labelled facts beyond the compact line.
+    const factsEl = { dataset: { liveFacts: '' }, innerHTML: '', hidden: true };
+    const details = { classList: { contains: (name) => name === 'chat-live-details' }, children: [factsEl] };
+    const record = { groupId: 'child-1', isSubagent: true, metaEl: { innerHTML: '', isConnected: true }, root: { children: [details] },
         executorChip: view.executorChip, agentModel: view.model, modelExecution: view.modelExecution,
         _lastFrameMeta: view.meta, costMeta: view.costProjection, latestActivityTs: '12:34:56' };
     renderLiveCardMeta(record);
-    for (const fact of ['Cursor', 'Coordinator: coordinator-model', 'Last solve response: coordinator-model', '$3', 'updated 12:34:56']) {
+    for (const fact of ['Cursor', '$3', 'updated 12:34:56']) {
         assert.ok(record.metaEl.innerHTML.includes(fact), fact);
     }
-    assert.doesNotMatch(record.metaEl.innerHTML, /write=workspace|status=completed/);
+    // The coordinator and its solve evidence are the details' rows, never the executor's compact facts.
+    assert.doesNotMatch(record.metaEl.innerHTML, /coordinator-model/);
+    for (const fact of ['<dt>Coordinator</dt><dd>coordinator-model</dd>', '<dt>Last solve response</dt><dd>coordinator-model</dd>']) {
+        assert.ok(factsEl.innerHTML.includes(fact), fact);
+    }
+    assert.equal(factsEl.hidden, false);
+    assert.doesNotMatch(record.metaEl.innerHTML + factsEl.innerHTML, /write=workspace|status=completed/);
     record.costMeta = withTaskCostMeta(view, { cost_accounting_status: 'unavailable' }).costProjection;
     renderLiveCardMeta(record);
     assert.match(record.metaEl.innerHTML, /cost unavailable/);

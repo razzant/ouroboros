@@ -3,7 +3,6 @@
 import asyncio
 from dataclasses import replace
 import json
-import math
 import socket
 import threading
 from types import SimpleNamespace
@@ -11,7 +10,6 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import context, loop, task_pacing, usage_accounting as accounting
-from ouroboros.context_budget import RECLAIM_LOW_WATER_DIVISOR
 from ouroboros.contracts.task_contract import normalize_budget_profile
 from ouroboros.owner_wait import checkpoint_owner_wait, set_owner_wait
 from ouroboros.task_results import write_task_result
@@ -65,6 +63,7 @@ def cold_registry(tmp_path, monkeypatch, ceiling=None, contract=None):
         ctx.task_contract = dict(contract)
     ctx.active_model, ctx.active_effort = "same-model", "high"
     ctx.active_use_local, ctx.active_context_mode = False, "max"
+    ctx.route_choice = {"kind": "explicit", "source": "switch_model"}  # the mind's own route rides the checkpoint
     ctx._owner_wait_requested = "quiz"
     ctx._cost_ceiling = ceiling or task_pacing.CostCeiling(state="disabled")
     messages = _plan().messages_for("max") + [
@@ -88,17 +87,18 @@ def cold_registry(tmp_path, monkeypatch, ceiling=None, contract=None):
     return registry
 
 
-def test_cold_switched_model_keeps_actual_overflow_reclaim_and_retry(tmp_path, monkeypatch):
-    registry = cold_registry(tmp_path, monkeypatch)
-    sends, reclaimed = [], []
+def test_cold_switched_model_keeps_actual_overflow_recovery_and_retry(tmp_path, monkeypatch):
+    from ouroboros import loop_model_call
 
-    def reclaim(call, disposition, **kwargs):
-        # An actual overflow requests a low-water-sized pass (an eighth of the
-        # 500K route), never a token-sized one, before its single strict-shrink retry.
-        assert kwargs["minimum_goal_tokens"] == math.ceil(500_000 / RECLAIM_LOW_WATER_DIVISOR)
-        reclaimed.append(call.active_model)
-        loop._context_reclaim_passes(call.tools._ctx).add(
-            (disposition.measurement.route_fp, disposition.measurement.round_id))
+    registry = cold_registry(tmp_path, monkeypatch)
+    sends, steps = [], []
+
+    def apply(call, step, fit, target, slack=None):
+        # A cold first request measures no target: the first pass takes its whole categories
+        # and earns the single strict-shrink retry on the same model.
+        assert target is None and call.active_model == "same-model"
+        steps.append(step)
+        return True
 
     def dispatch(call, disposition, *, candidate_predicate=None, **kwargs):
         assert call.active_model == call.context_fit_plan.model == "same-model"
@@ -112,13 +112,13 @@ def test_cold_switched_model_keeps_actual_overflow_reclaim_and_retry(tmp_path, m
         sends.append("smaller retry")
         return {"role": "assistant", "content": "Continued saved work", "tool_calls": []}, 0.0
 
-    monkeypatch.setattr(loop, "_run_main_reclaim", reclaim)
+    monkeypatch.setattr(loop_model_call, "_apply_refusal_step", apply)
     monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
     monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
     result, usage, _ = loop.run_llm_loop(**_loop_kwargs(tmp_path, registry, []))
     assert result == "Continued saved work"
-    assert sends == ["overflow", "smaller retry"] and reclaimed == ["same-model"]
-    assert registry._ctx.active_context_mode == "low"
+    assert sends == ["overflow", "smaller retry"] and steps == ["host_copies", "bodies"]
+    assert registry._ctx.active_context_mode == "max"  # the first pass fit: the floor never lowered Max
     assert registry._ctx.owner_wait_resume is None
     assert usage["cost"] == 10.0  # recorded spend is retained, never re-emitted
 

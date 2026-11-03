@@ -228,6 +228,7 @@ def test_all_telegram_consumers_succeed_through_real_transport(tmp_path, monkeyp
                     await poller
             for factory, event in _bridge_events():
                 await getattr(plugin, factory)(api)(event)
+            await plugin._typing_cue(api)._send(42)  # the typing refresher's own sends
             assert await notifier._push_notification(api, 42, "done", trust_env=False) == ("sent", None)
             client = plugin._telegram_client(api)
             await client.send_audio(42, b"audio", "sample.mp3")

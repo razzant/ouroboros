@@ -23,8 +23,8 @@ def _isolated_request_capabilities(monkeypatch, tmp_path):
     from ouroboros import request_wire_contract
     from ouroboros.llm import LLMClient
 
-    # A successful retry persists a drop-field action. Clearing the legacy
-    # rejected-params cache cannot reset that evidence, and a warm /models
+    # A successful retry persists a drop-field action as exact-route wire
+    # evidence, so each test gets its own evidence root; a warm /models
     # cache can also strip temperature before the fake's first rejection.
     monkeypatch.setattr(request_wire_contract, "canonical_wire_evidence_root", lambda: tmp_path)
     monkeypatch.setattr(LLMClient, "_SUPPORTED_PARAMS_CACHE", {})

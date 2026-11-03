@@ -8,15 +8,16 @@ left to the maintainer.)
 
 from __future__ import annotations
 
-import pathlib
-
-REPO = pathlib.Path(__file__).resolve().parents[1]
-
 
 def test_backoff_doubled_with_cap():
     """Backoff stays exponential (x4 base) and per-class capped: 30s for
-    generic retryable errors, 60s for transient provider classes (v6.28.0)."""
-    src = (REPO / "ouroboros" / "loop_llm_call.py").read_text(encoding="utf-8")
-    assert "2.0 ** attempt * 4" in src             # doubled per-attempt backoff
-    assert "min(2 ** attempt * 2, 30)" not in src  # old value gone
-    assert "_TRANSIENT_BACKOFF_CAP_SEC if is_transient else 30.0" in src
+    generic retryable errors, the transient cap for provider classes."""
+    from ouroboros.loop_llm_call import _TRANSIENT_BACKOFF_CAP_SEC, _retry_backoff_sec
+
+    assert _retry_backoff_sec(0, False) == 4.0
+    assert _retry_backoff_sec(1, False) == 8.0
+    assert _retry_backoff_sec(2, False) == 16.0
+    assert _retry_backoff_sec(3, False) == 30.0
+    assert _retry_backoff_sec(4, False) == 30.0
+    assert _retry_backoff_sec(0, True) == min(4.0, _TRANSIENT_BACKOFF_CAP_SEC)
+    assert _retry_backoff_sec(10, True) == float(_TRANSIENT_BACKOFF_CAP_SEC)

@@ -1,4 +1,4 @@
-"""Import failures retain source facts and recover through the next boot."""
+"""Import/reconcile failures retain source facts and durable recovery progress."""
 import errno
 import pathlib
 
@@ -7,12 +7,47 @@ import pytest
 from ouroboros import store, store_import
 from ouroboros.utils import atomic_write_json
 from ouroboros.task_results import load_task_result, write_task_result
-from tests.test_store_import import add_set_member, load, meta, result, write_result
+from tests.test_store_import import add_set_member, load, meta, reconcile_legacy, result, write_result
 
 
 def set_rows(root):
     with store.open_store(root, write=False) as txn:
         return txn.set_rows("local_custody_witnesses")
+
+
+@pytest.mark.parametrize("returning", [False, True], ids=["first_import", "completed_export"])
+def test_child_import_interruption_resumes_after_published_root(tmp_path, monkeypatch, returning):
+    from ouroboros import maintenance_jobs
+
+    drives = [tmp_path, tmp_path / "task_drives/a", tmp_path / "task_drives/b"]
+    for drive in drives:
+        write_result(drive, result("task", note="before"))
+    if returning:
+        store_import.ensure_current_store(tmp_path)
+        for drive in drives:
+            with store.open_store(drive, write=True) as txn:
+                txn.set_meta("phase", store.RETIRED)
+                txn.set_meta("export", {"status": "completed"})
+            write_result(drive, result("task", note="after export"))
+    build, built = store_import._build_and_publish, []
+    def interrupt(root, *args, **kwargs):
+        if root == drives[-1]:
+            raise KeyboardInterrupt("interrupted the last child import")
+        built.append(root)
+        return build(root, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(store_import, "_build_and_publish", interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            store_import.ensure_current_store(tmp_path)
+    row = maintenance_jobs.job(tmp_path, "current_store_import")
+    assert row["state"] == "pending" and row["cursor"] == "task_drives/a" and row["done"] == 2
+    assert built == drives[:2]
+    assert store_import.ensure_current_store(tmp_path)["drives"] == {str(drives[-1]): "completed"}
+    row = maintenance_jobs.job(tmp_path, "current_store_import")
+    assert row["state"] == "done" and row["done"] == row["total"] == 3
+    assert all(load(drive, "task")["note"] == ("after export" if returning else "before") for drive in drives)
+    monkeypatch.setattr(store_import, "descendant_drives", lambda *_: pytest.fail("repeated the finished import"))
+    assert store_import.ensure_current_store(tmp_path)["drives"] == {}
 
 
 @pytest.mark.parametrize("published", [False, True], ids=["initial", "p6"])
@@ -26,6 +61,7 @@ def test_set_read_error_aborts_and_retry_keeps_facts(tmp_path, monkeypatch, publ
     if published:
         store_import.ensure_current_store(root)
         before = meta(root, "sets_baseline")
+    import_or_reconcile = reconcile_legacy if published else store_import.ensure_current_store
     # P6' is triggered by a result change; set-only edits remain outside its contract.
     write_result(root, result("task1", "failed"))
     add_set_member(root, "local_custody_witnesses", "new", facts)
@@ -51,7 +87,7 @@ def test_set_read_error_aborts_and_retry_keeps_facts(tmp_path, monkeypatch, publ
     monkeypatch.setattr(store_import.os, "scandir", scan)
     kind = store.StoreBusy if error in (errno.EMFILE, errno.ENFILE) else store.StoreError
     with pytest.raises(kind, match="obligation sets? not readable"):
-        store_import.ensure_current_store(root)
+        import_or_reconcile(root)
     assert failed and path.read_bytes() == original
     if published:
         assert set_rows(root) == {"held": facts}
@@ -61,7 +97,7 @@ def test_set_read_error_aborts_and_retry_keeps_facts(tmp_path, monkeypatch, publ
         assert store.probe(root) == ("absent", None)
         assert not store.generation_stamped(root)
         assert not list((root / "state").glob("current.sqlite.import-*"))
-    assert store_import.ensure_current_store(root)["status"] == ("reconciled" if published else "completed")
+    assert import_or_reconcile(root)["status"] == ("reconciled" if published else "completed")
     assert set_rows(root) == {"held": facts, "new": facts}
     assert load(root, "task1")["status"] == "failed"
 
@@ -98,10 +134,11 @@ def test_malformed_set_refused_in_place_without_losing_rows(tmp_path, published,
     if published:
         store_import.ensure_current_store(root)
     path = store_import.set_file_path(root, "local_custody_witnesses")
+    import_or_reconcile = reconcile_legacy if published else store_import.ensure_current_store
     path.write_text(malformed, encoding="utf-8")
     write_result(root, result("task1", "failed"))
     with pytest.raises(store.StoreError, match="obligation set malformed"):
-        store_import.ensure_current_store(root)
+        import_or_reconcile(root)
     assert path.read_text(encoding="utf-8") == malformed
     if published:
         assert set_rows(root) == {"held": facts}
@@ -110,13 +147,13 @@ def test_malformed_set_refused_in_place_without_losing_rows(tmp_path, published,
         assert store.probe(root) == ("absent", None)
         assert not store.generation_stamped(root)
     atomic_write_json(path, {"held": facts})
-    store_import.ensure_current_store(root)
+    import_or_reconcile(root)
     assert set_rows(root) == {"held": facts}
     assert load(root, "task1")["status"] == "failed"
     # A real deletion still retires the file-held row when the old body changes a result.
     path.unlink()
     write_result(root, result("task1", "completed"))
-    store_import.ensure_current_store(root)
+    reconcile_legacy(root)
     assert set_rows(root) == {}
 
 
@@ -180,15 +217,15 @@ def test_interrupted_p6_quarantine_keeps_identity_occupied(tmp_path, monkeypatch
 
     monkeypatch.setattr(store_import, "_apply_legacy_custody", crash)
     with pytest.raises(KeyboardInterrupt):
-        store_import.ensure_current_store(root)
+        reconcile_legacy(root)
     assert (root / "task_results" / "quarantine" / "legacy.json").exists()
     assert bool(load(root, "legacy")) is existing  # the transaction rolled back
     monkeypatch.setattr(store_import, "_apply_legacy_custody", apply_chain)
-    store_import.ensure_current_store(root)
+    reconcile_legacy(root)
     with pytest.raises(ValueError, match="unreadable or invalid"):
         load_task_result(root, "legacy", strict=True)
     with pytest.raises(ValueError, match="unreadable or invalid"):
         write_task_result(root, "legacy", "running", create_only=True)
     write_result(root, result("legacy"))
-    store_import.ensure_current_store(root)
+    reconcile_legacy(root)
     assert load_task_result(root, "legacy", strict=True)["status"] == "completed"

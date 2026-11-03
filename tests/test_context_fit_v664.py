@@ -45,23 +45,21 @@ def _plan(*, preferred: str = "max", window: int = 0, known: bool = False):
 
 
 def _measure(monkeypatch, tmp_path, *, plan, profile, mode, messages, used=False, density=1.0):
-    from ouroboros import capability_evidence
+    from ouroboros.context_anchor import InputAnchor
     from ouroboros.context_fit import measure_main_fit
 
-    monkeypatch.setattr(
-        capability_evidence,
-        "resolve_main_token_density",
-        lambda *_a, **_kw: (density, "fresh_route_usage" if density != 1.0 else "cold_estimate"),
-    )
+    # This conversation's own anchor carries the density; 1.0 is a cold estimate without one.
+    anchor = (None if density == 1.0 else
+              InputAnchor(input_tokens=round(density * 1_000_000), estimate_tokens=1_000_000, round=1))
     return measure_main_fit(
         plan,
         messages,
         [],
-        drive_root=tmp_path,
         profile=profile,
         rendered_mode=mode,
         round_id="exec:round:1",
         automatic_pass_used=used,
+        anchor=anchor,
     )
 
 
@@ -92,7 +90,7 @@ def test_known_owner_max_miss_reclaims_without_predicted_low(monkeypatch, tmp_pa
         messages=plan.messages_for("max") + [{"role": "user", "content": "x" * 40_000}],
     )
     assert plan.initial_mode == "max"
-    assert disposition.action == "reclaim_once"
+    assert disposition.action == "send"  # the predicted miss is a fact; only a refusal recovers (owner 7A)
     assert disposition.predicted_capacity_miss is True
     assert disposition.measurement.capacity_deficit_tokens > 0
     assert disposition.measurement.target_deficit_tokens is None
@@ -108,7 +106,7 @@ def test_owner_low_uses_elastic_target_then_target_miss(monkeypatch, tmp_path):
         monkeypatch, tmp_path, plan=plan, profile="owner_low", mode="low", messages=messages,
         used=True,
     )
-    assert first.action == "reclaim_once"
+    assert first.action == "send_target_miss"
     assert first.measurement.target_deficit_tokens > 0
     assert first.measurement.capacity_deficit_tokens == 0
     assert after.action == "send_target_miss"
@@ -134,7 +132,7 @@ def test_confirmed_window_below_target_wins_even_when_target_fits(monkeypatch, t
     assert measurement.reclaim_goal_tokens == (
         measurement.capacity_deficit_tokens + measurement.low_water_margin_tokens
     )
-    assert disposition.action == "reclaim_once"
+    assert disposition.action == "send" and disposition.predicted_capacity_miss
 
 
 @pytest.mark.parametrize("profile,preferred,window,known,boundary", [
@@ -157,13 +155,13 @@ def test_low_water_margin_follows_the_binding_boundary(
     assert deficit > 0
     assert measurement.low_water_margin_tokens == math.ceil(boundary / RECLAIM_LOW_WATER_DIVISOR)
     assert measurement.reclaim_goal_tokens == deficit + measurement.low_water_margin_tokens
-    assert disposition.action == "reclaim_once"
+    assert disposition.action == ("send_target_miss" if measurement.target_deficit_tokens else "send")
     # The margin sizes the pass; it never re-arms the route+round latch.
     after = _measure(
         monkeypatch, tmp_path, plan=plan, profile=profile, mode=preferred, messages=messages,
         used=True,
     )
-    assert after.action != "reclaim_once"
+    assert after.action == disposition.action  # a used pass never changes what the facts say
     assert after.measurement.low_water_margin_tokens == measurement.low_water_margin_tokens
 
 

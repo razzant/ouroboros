@@ -24,8 +24,8 @@ export OUROBOROS_BENCH_RUNS_ROOT=<workspace>/bench_runs
 # template; add the real provider key yourself, never commit it).
 #
 # settings_base decisions:
-# - OUROBOROS_TASK_REVIEW_MODE=required so adaptive multi-pass improvement after
-#   task_acceptance_review actually runs on headless bench tasks.
+# - OUROBOROS_TASK_REVIEW_MODE=required so the host's result review runs at delivery on
+#   headless bench tasks and its findings reach the agent before the answer is delivered.
 # - OUROBOROS_RUNTIME_MODE=pro (container bench), OUROBOROS_MAX_WORKERS=4,
 #   OUROBOROS_SAFETY_MODE=light.
 # - The solve task itself disables claude_code_edit (house rule: benches measure
@@ -81,7 +81,8 @@ The task body carries `metadata.budget_profile` (see `schemas.programbench_budge
 `POST /api/tasks` normalizes it additively into `task_contract.budget_profile`
 (there is deliberately no top-level `task_contract` field on the gateway):
 
-- `improvement_policy=fixed`, `max_improvement_passes=6` (the explicit cap is authoritative under every policy;
+- `improvement_policy=fixed`, `max_improvement_passes=6` (accepted by the contract and inert: the result review
+  reads no task-local pass count and the run pins `OUROBOROS_REVIEW_MAX_CYCLES=unlimited`;
   the legacy `until_deadline` alias and `stall_rounds_threshold` knob were removed in ABI 7.0, Q10=A),
   `reserve_finalization_pct=15` (0–100 pct).
 - The 6h official budget flows through the body's `timeout_sec` (gateway →

@@ -97,8 +97,8 @@ def _recovery(root: pathlib.Path, problem: str, *, modified: bool = False) -> Ru
 
 
 def prepare_runtime_venv(path: "pathlib.Path | str", *, run: Callable[..., Any] = subprocess.run,
-                         log: Any = None) -> RuntimeVenv:
-    """Return the venv at ``path``, creating it only where nothing would be overwritten."""
+                         log: Any = None, base_python: str | None = None) -> RuntimeVenv:
+    """Prepare a venv without overwrites; ``base_python`` must share the running launcher's ABI."""
     root = pathlib.Path(path)
     if not root.is_absolute():
         raise RuntimeVenvRefused(f"--runtime-venv must be an absolute path, got {path!r}")
@@ -139,7 +139,9 @@ def prepare_runtime_venv(path: "pathlib.Path | str", *, run: Callable[..., Any] 
         # bin/python can exist before ensurepip completes. Re-run venv without
         # --clear: ensurepip repairs missing pip while installed packages stay.
         try:
-            created = run([sys.executable, "-m", "venv", str(root)], capture_output=True, text=True, timeout=600)
+            # An embedded shell's sys.executable may be the macOS app entry.
+            created = run([base_python or sys.executable, "-m", "venv", str(root)],
+                          capture_output=True, text=True, timeout=600)
         except (OSError, subprocess.SubprocessError) as exc:
             raise _recovery(root, f"preparation failed: {exc}", modified=True) from exc
         if getattr(created, "returncode", 1) != 0:

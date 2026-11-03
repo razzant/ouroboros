@@ -27,7 +27,6 @@ def host(tmp_path, monkeypatch):
     monkeypatch.setattr(workers, "get_event_q", lambda **kwargs: bus)
     monkeypatch.setattr(queue, "load_state", lambda: {})
     monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 900.0)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 1800.0)
     monkeypatch.setattr(queue, "get_task_abs_ceiling_sec", lambda: None)
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 120)
     monkeypatch.setattr(queue, "persist_queue_snapshot", lambda **kwargs: True)
@@ -122,7 +121,7 @@ def test_time_bound_keeps_pending_task_input_visible(host, monkeypatch):
     assert host.bus.qsize() == 1 and _controls(host) == []
 
 
-def test_foreign_backlog_and_own_heartbeat_do_not_disable_real_idle(host):
+def test_foreign_backlog_and_own_heartbeat_do_not_hide_silence(host):
     for phase in ("initial", "grace_elapsed"):
         for _ in range(101):
             host.bus.put({"type": "llm_usage", "task_id": "foreign"})
@@ -131,10 +130,10 @@ def test_foreign_backlog_and_own_heartbeat_do_not_disable_real_idle(host):
                            "host_narration": True})
         host.tick()
         if phase == "initial":
-            assert _controls(host)[0]["text"] == "idle_timeout"
+            assert host.meta["silence_attention"]["state"] == "pending_attention"
             host.clock[0] += 121
-    assert queue._reap_queue.get_nowait()["terminal_reason"] == "idle_timeout"
-    assert "root" not in host.running
+    assert _controls(host) == [] and queue._reap_queue.empty()
+    assert "root" in host.running
 
 
 @pytest.mark.parametrize("descendant", [True, False])
@@ -145,7 +144,7 @@ def test_pending_child_progress_affects_only_its_current_ancestors(host, descend
     # No parent/root stamp on this event: membership comes from current RUNNING.
     host.bus.put({"type": "llm_usage", "task_id": "child", "usage": {}})
     host.tick()
-    assert bool(_controls(host)) is not descendant
+    assert bool(host.meta.get("silence_attention")) is not descendant
 
 
 @pytest.mark.parametrize("rail", ["deadline", "absolute_ceiling"])
@@ -160,27 +159,41 @@ def test_pending_or_unreadable_observation_never_spares_hard_axes(host, monkeypa
     assert _controls(host)[0]["text"] == rail
 
 
-def test_pending_observation_suspends_idle_reap_but_only_folded_progress_withdraws(host, monkeypatch):
+def test_pending_observation_defers_attention_but_only_folded_progress_resolves(host, monkeypatch):
     host.tick()
-    assert len(_controls(host)) == 1
+    episode = host.meta["silence_attention"]["episode_id"]
     host.clock[0] += 121
     host.bus.put({"type": "send_message", "task_id": "root", "chat_id": 7, "text": "Made progress",
                    "is_progress": True})
     host.tick()
-    assert queue._reap_queue.empty() and len(_controls(host)) == 1
+    assert queue._reap_queue.empty() and _controls(host) == []
+    assert host.meta["silence_attention"]["episode_id"] == episode
+    assert host.meta["silence_attention"]["state"] == "pending_attention"
     assert host.meta["last_progress_at"] == 1000.0
     monkeypatch.setattr("supervisor.events_chat_delivery.time", SimpleNamespace(time=lambda: host.clock[0]))
     host.drain()
     host.tick()
     assert host.meta["last_progress_at"] == host.clock[0]
     assert _controls(host) == [] and "finalization_requested_at" not in host.meta
+    assert host.meta["silence_attention"]["state"] == "progress_observed"
+
+
+@pytest.mark.parametrize("silent_sec, dated", [(899.0, False), (901.0, True)])
+def test_the_configured_window_itself_dates_silence(host, silent_sec, dated):
+    """Owner 30 Oct (A): the silence window is Idle Timeout itself (900 s here), no longer floored at
+    the retired per-call ceiling plus 120 s (1920 s by default). Attention is a fact: nothing
+    finalizes, reaps or leaves the pool."""
+    host.meta["last_progress_at"] = host.clock[0] - silent_sec
+    host.tick()
+    assert bool(host.meta.get("silence_attention")) is dated
+    assert _controls(host) == [] and queue._reap_queue.empty() and host.running["root"] is host.meta
 
 
 def test_unknown_observation_does_not_invent_progress(host):
     queue.enforce_task_timeouts(pending_events=None)
     assert _controls(host) == [] and host.meta["last_progress_at"] == 1000.0
     host.tick()
-    assert _controls(host)[0]["text"] == "idle_timeout"
+    assert host.meta["silence_attention"]["state"] == "pending_attention" and _controls(host) == []
 
 
 def test_old_attempt_input_defers_only_until_its_existing_reducer_rejects_it(host):
@@ -189,4 +202,5 @@ def test_old_attempt_input_defers_only_until_its_existing_reducer_rejects_it(hos
     assert _controls(host) == []
     host.drain()
     host.tick()
-    assert "active_llm_call" not in host.meta and _controls(host)[0]["text"] == "idle_timeout"
+    assert "active_llm_call" not in host.meta and _controls(host) == []
+    assert host.meta["silence_attention"]["state"] == "pending_attention"

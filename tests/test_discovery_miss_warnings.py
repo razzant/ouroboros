@@ -4,7 +4,7 @@
 the host's auto-attach) publish ``ok/LEGACY_WARNING`` for a well-formed request to an
 absent path only after every admission guard. A denial, an escape, an invalid query
 and a bad image keep their error meaning, and a miss creates no image, copy or VLM call.
-Relative image paths keep their process-working-directory meaning.
+What a relative image path means: ``tests/test_relative_image_paths.py``.
 """
 from __future__ import annotations
 
@@ -192,23 +192,6 @@ def test_an_image_symlink_escape_precedes_the_miss(tmp_path, monkeypatch, target
     assert registry._ctx.messages == []
 
 
-def test_relative_image_paths_keep_the_process_working_directory(tmp_path, monkeypatch):
-    registry, uploads = _vision_registry(tmp_path, monkeypatch)
-    (uploads / "chart.png").write_bytes(_real_png_bytes())
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-
-    monkeypatch.chdir(uploads)
-    assert registry.execute_result("view_image", {"path": "chart.png"}).status == "ok"
-    assert len(_blocks(registry)) == 1
-    miss = registry.execute_result("view_image", {"path": "missing.png"})
-    assert miss.code == "LEGACY_WARNING" and f"(resolved: {(uploads / 'missing.png').resolve()})" in miss.text
-    monkeypatch.chdir(elsewhere)  # outside every admitted root: a refusal, never a quiet miss
-    refused = registry.execute_result("view_image", {"path": "missing.png"})
-    assert (refused.status, refused.code) == ("error", "TOOL_ARG_ERROR"), refused
-    assert len(_blocks(registry)) == 1
-
-
 def test_host_auto_attach_of_an_absent_image_attaches_nothing(tmp_path, monkeypatch):
     from ouroboros.loop_tool_execution import _maybe_auto_attach_image
 
@@ -216,9 +199,12 @@ def test_host_auto_attach_of_an_absent_image_attaches_nothing(tmp_path, monkeypa
     exec_result = {"fn_name": "ext_demo_screenshot", "is_error": False,
                    "result": json.dumps({"ok": True, "auto_attach_image": str(uploads / "missing.png")})}
 
-    assert _maybe_auto_attach_image(exec_result, registry) == {"status": "unavailable"}
+    observation = _maybe_auto_attach_image(exec_result, registry)
+    assert observation["status"] == "unavailable" and "FILE_NOT_FOUND" in observation["reason"]
     assert registry._ctx.messages == [] and not (tmp_path / "uploads" / "views").exists()
     (uploads / "shot.png").write_bytes(_real_png_bytes())
     exec_result["result"] = json.dumps({"ok": True, "auto_attach_image": str(pathlib.Path(uploads / "shot.png"))})
-    assert _maybe_auto_attach_image(exec_result, registry) == {"status": "attached"}
+    observation = _maybe_auto_attach_image(exec_result, registry)
+    assert observation["status"] == "attached" and "reason" not in observation
+    assert pathlib.Path(observation["source_path"]).read_bytes() == _real_png_bytes()
     assert len(_blocks(registry)) == 1

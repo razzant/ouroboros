@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import {
     classifyShellUrl,
+    copyTextToClipboard,
     copyTextWithToast,
     downloadViaHostBridge,
     downloadBlobViaHostBridge,
@@ -361,8 +362,13 @@ test('the parent pywebviewready listener is released when the framed document un
 function toastDocument() {
     const toasts = [];
     const node = () => ({
-        classList: { add() {} },
+        classList: { add() {}, contains: () => false },
+        style: { setProperty() {} },
+        children: [],
+        offsetTop: 0, offsetWidth: 0, offsetHeight: 0,
         setAttribute() {},
+        removeAttribute() {},
+        hasAttribute: () => false,
         appendChild() {},
         addEventListener() {},
         remove() {},
@@ -475,6 +481,164 @@ test('copyTextWithToast falls back to the textarea path and always reports', asy
         false,
     );
     assert.equal(toasts[0].tone, 'error');
+});
+
+// A page double for the selection path. The throwaway field records how it was placed, focused and selected;
+// `execCommand` sees what the engine would copy (the focused field's selection) and answers as told.
+function copyPage({ exec = true, modals = [], active = null } = {}) {
+    const doc = {
+        activeElement: active,
+        areas: [],
+        seen: [],
+        execCalls: 0,
+        body: { appended: [], appendChild(node) { this.appended.push(node); } },
+        querySelectorAll: (selector) => (selector === 'dialog[open]' ? modals : []),
+        createElement() {
+            const area = {
+                value: '', attrs: {}, owner: null, removed: false, range: null,
+                setAttribute(name, value) { this.attrs[name] = value; },
+                focus() { doc.activeElement = this; },
+                select() { this.range = [0, this.value.length]; },
+                setSelectionRange(start, end) { this.range = [start, end]; },
+                remove() { this.removed = true; if (doc.activeElement === this) doc.activeElement = doc.body; },
+            };
+            doc.areas.push(area);
+            return area;
+        },
+        execCommand(command) {
+            doc.execCalls += 1;
+            const node = doc.activeElement;
+            doc.seen.push({ command, tag: node === doc.areas.at(-1) ? 'area' : 'other',
+                text: node?.value?.slice(...node.range) ?? '' });
+            if (typeof exec === 'function') return exec();
+            return exec;
+        },
+    };
+    return doc;
+}
+// A dialog: `modal` decides what `:modal` answers; `holds` are the nodes inside it besides the fields it receives.
+function dialogOf({ modal = true, holds = [] } = {}) {
+    const dialog = {
+        fields: [], holds,
+        matches: (selector) => modal && selector === ':modal',
+        contains(node) { return Boolean(node) && (this.holds.includes(node) || this.fields.includes(node)); },
+        appendChild(node) { this.fields.push(node); node.owner = 'dialog'; },
+    };
+    return dialog;
+}
+function fieldOf(doc, [start, end, direction] = [0, 8, 'forward']) {
+    return {
+        selectionStart: start, selectionEnd: end, selectionDirection: direction, isConnected: true, restored: [],
+        focus() { doc.activeElement = this; },
+        setSelectionRange(...args) { this.restored.push(args); },
+    };
+}
+const PAYLOAD = 'neutral copy payload';
+
+test('the shared copy succeeds only after the async write settled or the engine accepted the selection', async () => {
+    // A write still in flight is no copy yet; once it settles the selection path is never touched.
+    let release;
+    const doc = copyPage();
+    const win = { navigator: { clipboard: { writeText: () => new Promise((resolve) => { release = resolve; }) } } };
+    let settled = false;
+    const copying = copyTextToClipboard(PAYLOAD, { win, doc }).then(() => { settled = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(settled, false, 'a pending write is not reported as a copy');
+    release();
+    await copying;
+    assert.deepEqual([doc.areas.length, doc.execCalls], [0, 0], 'a settled async write leaves the page alone');
+
+    // Refused or missing: the engine's answer decides, and only `true` is a copy.
+    const refusing = { navigator: { clipboard: { writeText: async () => { throw new Error('Synthetic denial'); } } } };
+    const missing = { navigator: {} };
+    const throwingSync = { navigator: { clipboard: { writeText: () => { throw new Error('Synthetic denial'); } } } };
+    for (const [label, engineWin] of [['refused', refusing], ['missing', missing], ['throws at once', throwingSync]]) {
+        const accepted = copyPage({ exec: true });
+        await copyTextToClipboard(PAYLOAD, { win: engineWin, doc: accepted });
+        assert.deepEqual(accepted.seen, [{ command: 'copy', tag: 'area', text: PAYLOAD }], `${label}: the payload was what got selected`);
+        assert.equal(accepted.areas[0].removed, true, `${label}: the field is gone`);
+        for (const exec of [false, () => { throw new Error('blocked'); }, undefined]) {
+            const refused = copyPage({ exec });
+            if (exec === undefined) refused.execCommand = undefined;
+            await assert.rejects(() => copyTextToClipboard(PAYLOAD, { win: engineWin, doc: refused }), /Clipboard access is unavailable/,
+                `${label}: a false, throwing or absent execCommand is a failure`);
+            assert.equal(refused.areas[0].removed, true, `${label}: a failed copy still removes its field`);
+        }
+    }
+
+    // The public wrapper keeps its words: success only after the write, the error as the shared host reports it.
+    const toasts = [];
+    const toast = (message, tone) => toasts.push([message, tone]);
+    assert.equal(await copyTextWithToast(PAYLOAD, { win: refusing, doc: copyPage({ exec: false }), toast, okMessage: 'Copied now.' }), false);
+    assert.equal(await copyTextWithToast(PAYLOAD, { win: refusing, doc: copyPage({ exec: true }), toast, okMessage: 'Copied now.' }), true);
+    assert.deepEqual(toasts, [['Could not copy: Clipboard access is unavailable', 'error'], ['Copied now.', 'ok']]);
+});
+
+test('inside an open modal dialog the field joins the dialog, and focus and selection are given back', async () => {
+    const doc = copyPage();
+    const field = fieldOf(doc);  // the dialog's own text field, focused with "original" selected
+    const dialog = dialogOf({ holds: [field] });
+    doc.querySelectorAll = (selector) => (selector === 'dialog[open]' ? [dialog] : []);
+    doc.activeElement = field;
+    const win = { navigator: {} };
+    await copyTextToClipboard(PAYLOAD, { win, doc });
+    assert.equal(doc.areas[0].owner, 'dialog', 'a body field would be inert under the modal');
+    assert.deepEqual(doc.body.appended, [], 'nothing was appended to the inert page');
+    assert.deepEqual(doc.seen, [{ command: 'copy', tag: 'area', text: PAYLOAD }],
+        'the payload, not the dialog field\'s own selection, was what the engine copied');
+    assert.equal(doc.areas[0].attrs.readonly, '');
+    assert.equal(doc.areas[0].removed, true);
+    assert.equal(doc.activeElement, field, 'focus went back to the field');
+    assert.deepEqual(field.restored, [[0, 8, 'forward']], 'and so did its selection');
+});
+
+test('the owner of the field is the topmost modal; a plain dialog and a missing anchor fall back to the page', async () => {
+    const win = { navigator: {} };
+    const copyWith = async ({ dialogs, active = null, anchor = null }) => {
+        const doc = copyPage({ active });
+        doc.querySelectorAll = (selector) => (selector === 'dialog[open]' ? dialogs : []);
+        await copyTextToClipboard(PAYLOAD, { win, doc, anchor });
+        return doc;
+    };
+    // Focus lives only in the topmost modal, so it names the owner among two.
+    const upperField = {};
+    let lower = dialogOf();
+    let upper = dialogOf({ holds: [upperField] });
+    let doc = await copyWith({ dialogs: [lower, upper], active: upperField });
+    assert.deepEqual([lower.fields.length, upper.fields.length, doc.body.appended.length], [0, 1, 0]);
+    // A click that moved no focus (a WebKit button) is named by its anchor...
+    const lowerButton = {};
+    lower = dialogOf({ holds: [lowerButton] });
+    upper = dialogOf();
+    await copyWith({ dialogs: [lower, upper], anchor: lowerButton });
+    assert.deepEqual([lower.fields.length, upper.fields.length], [1, 0]);
+    // ...and with neither, the last modal in the document is the guess.
+    lower = dialogOf();
+    upper = dialogOf();
+    await copyWith({ dialogs: [lower, upper] });
+    assert.deepEqual([lower.fields.length, upper.fields.length], [0, 1]);
+    // A dialog that is not modal leaves the rest of the page live: the field stays on the page.
+    lower = dialogOf({ modal: false });
+    doc = await copyWith({ dialogs: [lower] });
+    assert.deepEqual([lower.fields.length, doc.body.appended.length], [0, 1]);
+});
+
+test('the page selection a copy disturbed is restored after focus returns, and a focused control stays focused', async () => {
+    const doc = copyPage();
+    // A stateful selection that, like WebKit's, is dropped when a control takes focus: the order of the two restores matters.
+    const selection = {
+        held: [{ cloneRange: () => 'first-range' }, { cloneRange: () => 'second-range' }],
+        get rangeCount() { return this.held.length; },
+        getRangeAt(index) { return this.held[index]; },
+        removeAllRanges() { this.held = []; },
+        addRange(range) { this.held.push(range); },
+    };
+    const button = { isConnected: true, focuses: 0, focus() { this.focuses += 1; doc.activeElement = this; selection.held = []; } };
+    doc.activeElement = button;
+    await copyTextToClipboard(PAYLOAD, { win: { navigator: {}, getSelection: () => selection }, doc });
+    assert.deepEqual(selection.held, ['first-range', 'second-range'], 'the reader\'s selected words are selected again, after the focus');
+    assert.equal(doc.activeElement, button);
+    assert.equal(button.focuses, 1, 'a keyboard owner stays on the control that asked');
 });
 
 test('the agent login card never writes to the clipboard without a fallback', () => {

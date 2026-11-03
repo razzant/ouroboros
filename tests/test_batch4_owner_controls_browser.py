@@ -1,8 +1,8 @@
 """Batch4 owner controls through the REAL server, worker pool and SPA (browser consumers).
 
 Each test runs the shared ``direct_server_with_data`` fixture (a copied candidate
-checkout, a disposable data root, the in-process mock model) with ONE worker and
-managed roots seeded as a queued snapshot, the way a previous server generation
+checkout, a disposable data root, the in-process mock model) with ONE project worker
+(beside the conversation lane's ready spare, #2654) and managed roots seeded as a queued snapshot, the way a previous server generation
 leaves them when the application was quit. Accepted work survives that stop
 under its own id and waits for the owner's explicit Resume (owner S1, quiz
 a524d73f), so each test first resumes the roots it drives. The mock model is
@@ -21,7 +21,7 @@ never written as a result:
   under its own id and CHARLIE is admitted as ordinary queued work, both to
   completion without a click, while ALPHA is STILL paused (not cancelled, not
   auto-resumed) until the owner's Resume runs it to completion. Its card says
-  ``Paused · owner pause`` once saved, including after Restart.
+  ``Paused`` once saved, including after Restart (who paused is its line), and the room says ``Paused``.
 
 ``test_owner_restart_returns_running_work_under_its_own_id``
   The owner Restart stops a running root whose working state is saved; the
@@ -59,6 +59,8 @@ import time
 
 import pytest
 
+from ouroboros import dialogue_store
+from ouroboros.test_evidence import keep_startup_log
 from tests import test_ui_smoke_playwright as smoke
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 
@@ -179,7 +181,6 @@ def _seed_roots(data_dir, task_ids, children=None, workspace=None):
 
     now = _dt.datetime.now(_dt.timezone.utc)
     (data_dir / "state").mkdir(parents=True, exist_ok=True)
-    (data_dir / "logs").mkdir(parents=True, exist_ok=True)
     pending, progress, chat = [], [], []
     for seq, task_id in enumerate(task_ids, start=1):
         text = _TEXT[task_id]
@@ -217,9 +218,9 @@ def _seed_roots(data_dir, task_ids, children=None, workspace=None):
         "pending_count": len(pending), "running_count": 0, "reaping_count": 0,
         "acceptance_fences": [], "budget_root_fences": [], "pending": pending, "running": [],
     }), encoding="utf-8")
-    (data_dir / "logs" / "chat.jsonl").write_text("".join(json.dumps(row) + "\n" for row in chat), encoding="utf-8")
-    (data_dir / "logs" / "progress.jsonl").write_text(
-        "".join(json.dumps(row) + "\n" for row in progress), encoding="utf-8")
+    for stream, rows in (("chat", chat), ("progress", progress)):
+        for row in rows:
+            dialogue_store.append(data_dir, stream, row)
 
 
 def _http(url, method, path):
@@ -286,6 +287,19 @@ def _tool_names(data_dir, task_id):
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()] \
         if path.exists() else []
     return [str(row.get("tool") or "") for row in rows if row.get("task_id") == task_id]
+
+
+def _carriers(data_dir):
+    """``[(task id, pid)]`` for every published RUNNING row a worker slot holds: the slot
+    (``worker_id``) named in the supervisor's own process ledger. A pool also keeps the
+    conversation lane's ready spare (#2654), so the live worker set is not the task's."""
+    from ouroboros.queue_observation import load_queue_document
+    from tests._shared import live_worker_slots
+
+    slots = live_worker_slots(data_dir)
+    rows = load_queue_document(data_dir, fresh=True).get("running") or []
+    return [(str(row.get("id")), slots.get(int(row["worker_id"]))) for row in rows
+            if isinstance(row, dict) and row.get("worker_id") is not None]
 
 
 def _fence(data_dir, task_id):
@@ -370,14 +384,17 @@ def _evidence_dir(data_dir, name):
 
 
 def _owner_restart(page, url, data_dir):
-    """Confirm the header Restart and wait for the re-executed generation to serve."""
+    """Confirm the header Restart and wait for the re-executed generation to serve.
+
+    This wait bypasses the fixture's start_server, so on failure it keeps the server's own log itself."""
     boots = len(_events(data_dir, "startup_verification"))
-    page.locator(".confirm-dialog [data-confirm-ok]").click()
-    page.wait_for_function("window.__restartSends === 1", timeout=10_000)
-    _wait(lambda: len(_events(data_dir, "startup_verification")) > boots, 120, "the restarted generation")
-    smoke._wait_health(url, 60)
-    smoke._wait_supervisor_ready(url, 60)
-    page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === 1)", timeout=60_000)
+    with keep_startup_log(data_dir.parent, "server-stdio.log"):
+        page.locator(".confirm-dialog [data-confirm-ok]").click()
+        page.wait_for_function("window.__restartSends === 1", timeout=10_000)
+        _wait(lambda: len(_events(data_dir, "startup_verification")) > boots, 120, "the restarted generation")
+        smoke._wait_health(url, 60)
+        smoke._wait_supervisor_ready(url, 60)
+        page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === 1)", timeout=60_000)
 
 
 def _launch(pw):
@@ -429,7 +446,7 @@ def test_pause_restart_retention_and_resume(direct_server_with_data, monkeypatch
                 assert model.bravo_sent.wait(60), "BRAVO never started after ALPHA parked"
                 _wait(lambda: _phase(page, url, ALPHA) == "budget_paused", 30, "ALPHA paused")
                 assert _phase(page, url, CHARLIE) == "queued"
-                expect(_chip(page, ALPHA)).to_have_text("Paused · owner pause", timeout=30_000)
+                expect(_chip(page, ALPHA)).to_have_text("Paused", timeout=30_000)
                 expect(_card(page, ALPHA).locator("[data-resume-run]")).to_be_visible()
                 expect(_card(page, BRAVO).locator("[data-live-phase]")).to_have_text("Working", timeout=30_000)
                 shot("01-paused-while-its-call-was-sent")
@@ -488,11 +505,12 @@ def test_pause_restart_retention_and_resume(direct_server_with_data, monkeypatch
                     "BRAVO returns under its own id, never as a Continue successor"
                 assert model.main_calls("CHARLIE") == 1
                 assert not _events(data_dir, "owner_continue_admitted")
-                expect(_chip(page, ALPHA)).to_have_text("Paused · owner pause", timeout=60_000)
+                expect(_chip(page, ALPHA)).to_have_text("Paused", timeout=60_000)
                 expect(_card(page, ALPHA).locator("[data-resume-run]")).to_be_visible()
                 for task_id in (BRAVO, CHARLIE):
                     expect(_chip(page, task_id)).to_have_text("Done", timeout=60_000)
-                expect(page.locator("#chat-status")).to_have_text("Paused · owner pause", timeout=30_000)
+                # The room's word; who paused is said on its card and its row, never in the header.
+                expect(page.locator("#chat-status")).to_have_text("Paused", timeout=30_000)
                 shot("06-after-restart-chat")
                 panel = _open_activity(page)
                 expect(panel.locator(".activity-row", has_text="Batch4 Alpha")).to_contain_text("paused", timeout=30_000)
@@ -644,7 +662,7 @@ def test_continue_after_a_crash_rejoins_a_lost_answer_and_survives_reload(direct
                 shot("01-held-after-crash")
                 # Activity names the same hold as held after the stop, never as a money pause.
                 held_row = _open_activity(page).locator(".activity-row", has_text="Batch4 Delta")
-                expect(held_row).to_contain_text("held after Restart", timeout=30_000)
+                expect(held_row).to_contain_text("Paused · Saved when the app stopped", timeout=30_000)
                 expect(held_row).not_to_contain_text("budget")
                 shot("01b-held-after-crash-activity")
                 page.locator('[data-nav-page="chat"]').click()
@@ -656,10 +674,18 @@ def test_continue_after_a_crash_rejoins_a_lost_answer_and_survives_reload(direct
 
                 # Its worker process dies (SIGKILL) while the application stays up: the
                 # existing policy keeps a signal death terminal, so Continue is its manual path.
+                # The pool's other live worker is the conversation lane's ready spare (#2654):
+                # the kill names DELTA's own carrier, never "the" worker of the pool.
                 from tests._shared import live_worker_pids
+                carriers = _wait(lambda: (lambda rows: rows if any(task == DELTA and pid for task, pid in rows)
+                                          else None)(_carriers(data_dir)), 30, "DELTA's carrier in its RUNNING row")
                 workers = live_worker_pids(data_dir)
-                assert len(workers) == 1, workers
-                os.kill(next(iter(workers)), signal.SIGKILL)
+                record["workers"] = {"carriers": carriers, "live": sorted(workers)}
+                # One row, one live carrier: never a second actor for DELTA, nothing else running.
+                assert [task for task, _pid in carriers] == [DELTA], record["workers"]
+                carrier = carriers[0][1]
+                assert carrier in workers, record["workers"]
+                os.kill(carrier, signal.SIGKILL)
                 delta = _wait(lambda: (lambda t: t if t["status"] == "failed" else None)(_task(page, url, DELTA)),
                               120, "DELTA settled by its worker's death")
                 record["delta"] = {key: delta.get(key) for key in ("status", "reason_code", "cancel_origin",
@@ -715,7 +741,7 @@ def test_continue_after_a_crash_rejoins_a_lost_answer_and_survives_reload(direct
                 expect(button).to_have_text("Continued", timeout=30_000)
                 expect(button).to_have_attribute("data-continue-successor", successor)
                 expect(button).to_be_disabled()
-                assert card.locator(":scope > [data-live-summary-button]").get_attribute("aria-expanded") != "true"
+                assert card.locator(":scope > [data-live-summary-button] [data-live-disclosure]").get_attribute("aria-expanded") != "true"
                 assert page.evaluate(f"localStorage.getItem('ouro_continue_nonce:{DELTA}')") == nonce
                 shot("05-continue-after-reload")
                 admitted = [row["task_id"] for row in _events(data_dir, "owner_continue_admitted")

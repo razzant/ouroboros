@@ -68,9 +68,6 @@ def test_commit_finish_requires_received_outcome(candidate, monkeypatch, basis):
     assert retained.triad_raw_results == row.triad_raw_results and retained.late_result_pending
 
 
-from types import SimpleNamespace
-
-
 def test_unavailable_triad_requires_author_handback(candidate, monkeypatch):  # noqa: F811
     ctx = candidate
     monkeypatch.setenv('OUROBOROS_RUNTIME_MODE','pro')
@@ -114,17 +111,6 @@ def test_received_outcome_keeps_live_custody_distinct(rows, terminal, expected):
     assert rows == before
 
 
-def test_invalid_task_author_action_publishes_typed_error(tmp_path, monkeypatch):
-    from ouroboros.tools.registry import ToolRegistry
-    from ouroboros.tools.tool_result import ToolResult
-    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **kw: (True, ""))
-    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    result = registry.execute_result("task_acceptance_review", {"author_action": "finish", "rationale": ""})
-    assert isinstance(result, ToolResult)
-    assert result.code == "TOOL_ARG_ERROR" and result.status == "error"
-    assert "author_action requires" in result.text
-
-
 @pytest.mark.parametrize("kind", ["clean", "advisory"])
 def test_clean_commit_path_and_structured_advice_are_distinct(candidate, monkeypatch, kind):  # noqa: F811
     ctx = candidate
@@ -145,56 +131,6 @@ def test_clean_commit_path_and_structured_advice_are_distinct(candidate, monkeyp
     assert row.phase == "review_only" and bool(row.advisory_findings or ctx._last_review_advisory_findings) is (kind == "advisory")
     # Every dispatched wave leaves one durable review ledger record the result names.
     assert result["review_reference"]["review_record_id"]
-
-
-@pytest.mark.parametrize("prior_feedback", [False, True])
-def test_repeated_exposed_host_failure_does_not_pump_author_rounds(tmp_path, monkeypatch, prior_feedback):
-    import ouroboros.loop as loop
-    import ouroboros.loop_acceptance_review as acceptance
-    import ouroboros.review_substrate as substrate
-    from ouroboros.acceptance_settlement import expose_acceptance_feedback
-    from ouroboros.contracts.task_contract import build_task_contract
-    from tests.test_acceptance_publication import _context
-    from tests.test_loop_acceptance_gate import _nominate_acceptance
-    ctx = _context(tmp_path)
-    ctx.task_contract = build_task_contract({"id": "applied", "root_task_id": "applied"})
-    ctx._task_acceptance_reviewed = False
-    ctx.is_direct_chat = False
-    write_task_result(tmp_path, "applied", "running", task_contract=ctx.task_contract)
-    monkeypatch.setattr(loop, "get_task_review_mode", lambda: "required")
-    monkeypatch.setattr(substrate, "triad_delivery_slots", lambda **kw: [])
-    panels, applications = [], []
-    result = substrate.ReviewRunResult(request={"surface": "task_acceptance"}, aggregate_signal="PASS",
-        actors=[{"status": "ok", "signal": "PASS", "slot_id": "s1", "parsed": {"verdict": "PASS"}}], parsed_findings=[])
-    def review(context):
-        panels.append(context)
-        return result
-    def fail_apply(*args, **kwargs):
-        applications.append(args)
-        raise RuntimeError("persistent host application failure")
-    monkeypatch.setattr(loop, "_execute_task_acceptance_panel", review)
-    monkeypatch.setattr(acceptance, "_apply_task_acceptance_result", fail_apply)
-    trace = {"tool_calls": []}
-    _nominate_acceptance(trace, task_id="applied", subject="Unchanged complete answer")
-    if prior_feedback:
-        trace["review_runs"] = [{"authority": "host_root", "binding_hash": "earlier", "feedback_delivered": True}]
-    messages = []
-    kwargs = dict(tools=SimpleNamespace(_ctx=ctx), content="Unchanged complete answer", task_id="applied", task_type="task",
-                  llm_trace=trace, drive_root=tmp_path, messages=messages, emit_progress=lambda *a, **kw: None)
-    assert acceptance._run_task_acceptance_review_once(**kwargs) is True
-    assert len(applications) == len(panels) == 1
-    assert trace["acceptance_decision"]["status"] == "revision_requested"
-    run_count = len(trace["review_runs"])
-    expose_acceptance_feedback(trace, messages, "applied")
-    assert trace["acceptance_review_outcome"]["feedback_delivered"]
-    assert acceptance._run_task_acceptance_review_once(**kwargs) is False
-    assert len(panels) == 1 and len(applications) == 2
-    assert len(trace["review_runs"]) == run_count
-    assert trace["acceptance_decision"]["reason"] == "review_degraded"
-    failures = [run for run in trace["review_runs"] if run.get("aggregate_signal") == "DEGRADED"]
-    assert failures == []  # Host failure stays beside the real PASS, not a fake panel.
-    assert "persistent host application failure" in trace["review_decision"]["host_failure"]["detail"]
-    assert trace["acceptance_decision"]["origin"] == "host_acceptance_processing"
 
 
 # --- the five aggregate branches of the one wave (§1.7), tabular ------------------

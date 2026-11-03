@@ -12,9 +12,10 @@ import threading
 
 import pytest
 
-from ouroboros import budget_pause, cancel_intents, owner_pause, store
+from ouroboros import budget_pause, cancel_intents, owner_pause
 from supervisor import queue
 from supervisor.owner_pause_control import request_owner_pause
+from tests._store_journal_shared import exclusive_hold
 from tests.test_execution_clock_resume_handover import clock  # noqa: F401
 from tests.test_retry_pause_generations import _park, _running_actor
 from tests.test_retry_pause_identity import _assign, _fresh_plan, _loop_once, reaper  # noqa: F401
@@ -54,9 +55,8 @@ def test_one_identity_read_refuses_unknown_then_resumes_the_tree(
                 entered, release = threading.Event(), threading.Event()
 
                 def writer():  # Original Astra probe: real second SQLite writer, no mocked StoreBusy.
-                    with contextlib.closing(store.connect(host.root / "state/current.sqlite", store.TIER_ENFORCED)) as conn:
-                        conn.execute("BEGIN EXCLUSIVE")
-                        entered.set()
+                    with contextlib.closing(exclusive_hold(host.root / "state/current.sqlite")) as conn:
+                        entered.set()  # the lineage read is busy, under WAL as under the rollback journal
                         release.wait(30)
                         conn.execute("ROLLBACK")
 
@@ -77,7 +77,8 @@ def test_one_identity_read_refuses_unknown_then_resumes_the_tree(
         first = queue.resume_budget_paused_task(running["id"])
     assert reads == ["held"], "one root classification per grant, never a second fence classification"
     if fault != "readable":
-        assert first == {"ok": False, "error": "owner_pause_custody_unreadable"}, first
+        assert first == {"ok": False, "error": "owner_pause_custody_unreadable",
+                         "message": "Resume refused: owner pause custody unreadable"}, first
         assert budget_pause.budget_pause_row(host.root, running["id"]) == before
         assert queue.BUDGET_ROOT_FENCES == latch_before
         assert not _assign(host, monkeypatch), "neither the root nor unselected child dispatches"

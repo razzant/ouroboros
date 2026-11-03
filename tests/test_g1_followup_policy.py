@@ -14,7 +14,7 @@ from ouroboros.usage_admission import task_billing_fields
 from supervisor import queue, queue_schedules as schedules
 from supervisor.followup_policy import observed_store, record_restart
 from tests.test_schedule_followup import _ctx
-from tests._store_shared import delete_result
+from tests._store_shared import delete_result, unreadable_result
 
 pytestmark = pytest.mark.serial
 ORIGIN = 'root-1'
@@ -33,7 +33,6 @@ def world(tmp_path, monkeypatch):
     pending = []
     queue.init_queue_refs(pending, {}, {'value': 0})
     monkeypatch.setenv('TOTAL_BUDGET', '1000')
-    monkeypatch.setattr(schedules, '_last_skill_schedule_sync', float('inf'))
     write_task_result(root, ORIGIN, 'running', root_task_id=ORIGIN,
                       billing_group=BINDING, deadline_at=DEADLINE)
     return ctx, root, pending
@@ -178,6 +177,7 @@ def test_stale_restore_never_clears_new_stop_or_enables_independent_disable(worl
     stop(root)
     outcome = restore(root, registered['id'], old)
     assert outcome['status'] == 'stale_hold'
+    assert outcome['changed'] is True  # no tick ran since the Stop: this refusal persisted the new hold
     new = row(root, registered['id'])['followup_hold']['hold_id']
     assert new != old
     assert restore(root, registered['id'], new)['ok']
@@ -201,19 +201,65 @@ def test_pause_is_transient_wait_and_resume_preserves_eligibility(world):
     assert len(pending) == 2
 
 
-def test_restart_marker_blocks_before_restriction_write_and_new_generation_invalidates_restore(world):
+def test_restart_marker_temporarily_fences_but_does_not_hold_healthy_schedules(world):
     _, root, pending = world
     related = register(world)
-    marker = root / 'state/owner_restart_no_resume.flag'
-    marker.write_text('owner_restart')  # crash before restriction persistence
+    from ouroboros.delegate_recovery import prepare_owner_restart, consume_owner_restart
+    door = prepare_owner_restart(root, legacy=True)
     queue.check_scheduled_tasks()
     assert pending == []
     record_restart(root)
-    marker.unlink()
+    consume_owner_restart(root, door)
     queue.check_scheduled_tasks()
-    held = row(root, related['id'])['followup_hold']['hold_id']
+    assert [task['metadata']['schedule_id'] for task in pending] == [related['id']]
+    assert not row(root, related['id']).get('followup_hold')
     record_restart(root, new=True)
-    assert restore(root, related['id'], held)['status'] == 'stale_hold'
+    assert not observed_store(root, schedules.load_schedule_store(root))['tasks'][0].get('followup_hold')
+
+
+def test_legacy_restart_hold_clears_once_through_audited_refresh(world):
+    from supervisor.followup_policy import refresh_policy
+    _, root, _ = world
+    related = register(world)
+    with schedules.schedule_transaction(root):
+        data = schedules.load_schedule_store(root)
+        record = next(r for r in data['tasks'] if r['id'] == related['id'])
+        record['followup_hold'] = {'hold_id': 'old', 'reason': 'origin_stopped', 'controls': {'restart': 'old'}}
+        claim = {'token': 'owed', 'task_id': 'not-admitted', 'phase': 'claimed'}
+        record['occurrence'] = copy.deepcopy(claim)
+        schedules._write_scheduled_tasks(data, root)
+        refresh_policy(root, data, record)
+        assert not record.get('followup_hold')
+        assert record['occurrence'] == claim
+        before = copy.deepcopy(record)
+        refresh_policy(root, data, record)
+        assert record == before
+
+
+@pytest.mark.parametrize('wait', ['origin_owner_paused', 'work_deadline_passed',
+                                  'followup_authority_unavailable', 'pending_binding_unavailable'])
+@pytest.mark.parametrize('controls', [{}, {'restart': 'old'}, {'restart': 'old', 'stop:root-1': 'stop'}])
+def test_refresh_audit_names_restart_only_when_retiring_its_hold(tmp_path, monkeypatch, wait, controls):
+    from supervisor.followup_policy import refresh_policy
+
+    record = {'id': 'schedule', 'followup_wait': wait, 'followup_relation': {'kind': 'related'}}
+    if controls:
+        record['followup_hold'] = {'hold_id': 'old', 'reason': 'origin_stopped', 'controls': controls}
+    audits, writes = [], []
+    monkeypatch.setattr(schedules, '_audit_schedule_mutation', lambda **kw: audits.append(kw) or True)
+    monkeypatch.setattr(schedules, '_write_scheduled_tasks', lambda *a: writes.append(copy.deepcopy(record)))
+    data = {'tasks': [record]}
+    view = {'hold': None, 'wait': ''}
+    refresh_policy(tmp_path, data, record, observed=view)
+    reason = 'origin_stopped' if 'stop:root-1' in controls else 'restart_history' if controls else ''
+    assert [(a['phase'], a['reason']) for a in audits] == [('intent', reason), ('outcome', reason)]
+    assert len(writes) == 1 and record['followup_wait'] == ''
+    if 'stop:root-1' in controls:
+        assert record['followup_hold']['controls'] == {'stop:root-1': 'stop'}
+    else:
+        assert not record.get('followup_hold')
+    refresh_policy(tmp_path, data, record, observed=view)
+    assert len(audits) == 2 and len(writes) == 1, 'no repeated retirement audit'
 
 
 def test_template_forgery_and_edit_cannot_replace_host_binding(world):
@@ -446,7 +492,7 @@ def test_followup_disable_is_an_ordinary_disable_and_restore_lifts_only_it(world
     registered = register(world)
     queue.mutate_scheduled_task('disable', registered['id'], reason='Independent owner disable', actor='owner:test', drive_root=root)
     current = row(root, registered['id'])
-    # Only skill-manifest rows keep a resync-proof suppression marker.
+    # Disabling changes future dispatch without adding a legacy skill marker.
     assert current['enabled'] is False and 'manual_override' not in current
     assert schedules.schedule_lifecycle_status(current) == 'disabled'
     queue.check_scheduled_tasks()
@@ -459,16 +505,17 @@ def test_followup_disable_is_an_ordinary_disable_and_restore_lifts_only_it(world
 
 
 def test_context_and_continue_expose_held_obligations_without_auto_release(world):
-    from ouroboros.context import _scheduled_tasks_digest
+    from supervisor.schedule_view import digest
+    from datetime import datetime, timezone
     from ouroboros.owner_continue import work_order_text
     _, root, _ = world
     registered = register(world)
     queue.check_scheduled_tasks()
     stop(root)
     queue.check_scheduled_tasks()
-    digest = _scheduled_tasks_digest(SimpleNamespace(drive_path=lambda rel: root / rel))
-    assert not digest['active'] and digest['held'][0]['id'] == registered['id']
-    assert digest['held'][0]['status'] == 'consumed' and digest['held'][0]['hold_persisted']
+    view = digest(schedules.load_schedule_store(root)['tasks'], datetime.now(timezone.utc))
+    assert not view['one_shots'] and view['attention'][0]['id'] == registered['id']
+    assert view['attention'][0]['status'] == 'consumed' and view['attention'][0]['hold_persisted']
     text = work_order_text(ORIGIN, 'owner_restart', {}, deadline_at=DEADLINE)
     assert 'manage_schedules' in text and 'does not release their holds' in text and DEADLINE in text
 
@@ -496,24 +543,15 @@ def test_exact_restore_replay_cannot_lift_separate_suppression(world, suppressio
         if not later:
             first = action(suppression)
             assert first['changed']
-            if suppression == 'delete':
-                # Never fired: Delete really removes it; nothing restorable remains.
-                assert first['status'] == 'deleted' and first['schedule'] is None
-                assert action('restore', expected_hold_id=held)['status'] == 'not_found'
-                return
         assert action('restore', expected_hold_id=held)['status'] == 'hold_released'
         if later:
             outcome = action(suppression)
             assert outcome['changed']
-            if suppression == 'delete':
-                assert outcome['status'] == 'deleted'
-                replay = action('restore', expected_hold_id=held)
-                assert replay['status'] == 'not_found' and not replay['changed']
-                return
         before = row(root, sid)
         replay = action('restore', expected_hold_id=held)
         assert not replay['changed'], replay
         assert row(root, sid) == before and not before['enabled']
+        assert bool(before.get('delete_requested_at')) is (suppression == 'delete')
         # The separate, explicitly generic Restore remains available.
         assert action('restore')['ok']
         assert row(root, sid)['enabled']
@@ -560,7 +598,6 @@ def test_consumed_row_retained_until_actual_work_settles(world, monkeypatch, sta
     data = schedules.load_schedule_store(root)
     data['tasks'][0]['completed_at'] = '2000-01-01T00:00:00+00:00'
     schedules._write_scheduled_tasks(data, root)
-    path = root / 'task_results' / (task['id'] + '.json')
     if state != 'pending':
         pending.clear()
     if state in {'running', 'settled_live'}:
@@ -572,10 +609,15 @@ def test_consumed_row_retained_until_actual_work_settles(world, monkeypatch, sta
     elif state == 'missing':
         delete_result(root, task['id'])
     elif state == 'unreadable':
-        path.write_text('{torn')
+        unreadable_result(monkeypatch, task['id'], root=root)
     queue.check_scheduled_tasks()
     kept = schedules.load_schedule_store(root)['tasks']
     assert bool(kept) is (state != 'settled')
+    if state == 'unreadable':  # the store's own failure reached the receipt read, never an absence
+        from ouroboros.store import StoreError
+        from supervisor.schedule_occurrence import prepare_receipts
+        error = prepare_receipts(kept, drive_root=root).errors[task['id']]
+        assert isinstance(error, StoreError) and 'simulated unreadable row' in str(error)
     if state == 'pending':
         assert pending == [frozen]
         workers.assign_tasks()

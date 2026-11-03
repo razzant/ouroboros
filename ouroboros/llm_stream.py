@@ -57,6 +57,9 @@ class ProviderStreamError(IncompleteProviderStream):
     A provider fact, not an unknown outcome: no ``code``; the body's numeric
     ``error.code`` becomes ``status_code`` so the classifier files it through
     its ordinary status ladder, and a frame without one is ``stream_rejected``.
+    ``explicit_timeout`` is read from typed fields only, never the message: an
+    HTTP-shaped 408/504, OpenRouter's ``metadata.error_type=timeout``, or
+    Anthropic's documented ``error.type=timeout_error`` (API errors contract).
     """
 
     code = ""
@@ -68,6 +71,9 @@ class ProviderStreamError(IncompleteProviderStream):
         code = error.get("code")
         numeric = isinstance(code, int) and not isinstance(code, bool) and 100 <= code <= 599
         self.status_code = code if numeric else 200
+        metadata = error.get("metadata") if isinstance(error.get("metadata"), dict) else {}
+        self.explicit_timeout = ((numeric and code in (408, 504)) or metadata.get("error_type") == "timeout"
+                                 or error.get("type") == "timeout_error")
         # Without an HTTP-shaped code the frame is the provider's own terminal
         # verdict on this stream (an overload/api_error shape, a finish_reason of
         # "error"): filed like a rejected body — provider_error, no same-request
@@ -75,6 +81,10 @@ class ProviderStreamError(IncompleteProviderStream):
         self.stream_rejected = not numeric
         self.type = str(error.get("type") or error.get("code") or "provider_stream_error")
         self.provider_message = str(error.get("message") or "")
+        # OpenRouter's opt-in routing receipt (``X-OpenRouter-Metadata``) rides beside
+        # ``error``: each upstream attempt's provider, model and status, never its text.
+        receipt = body.get("openrouter_metadata")
+        self.openrouter_metadata = copy.deepcopy(receipt) if isinstance(receipt, dict) else None
         self.stream_usage = copy.deepcopy(usage) if isinstance(usage, dict) and usage else None
         # Keep producer facts in body/private evidence. Text-only pre-routing
         # classifiers must not turn an HTTP-200 SSE failure into a free rejection.
@@ -111,14 +121,29 @@ def _index(value: Any) -> int:
 def _adjacent(last: Any, item: dict) -> bool:
     """Continuation of the last record: ``type`` and ``id`` absent on either side or equal.
 
-    Discreteness of opaque payloads (``reasoning.encrypted`` data, signatures)
-    rides on the provider's ``id``: two id-less records of one type would fuse.
-    Every recorded encrypted record carries an id; text records must stay
-    id-less-mergeable, which is the #856 fix itself.
+    Unsigned text records must stay id-less-mergeable (the #856 fix itself); a signed
+    record is closed by its signature (``_closed_by_signature``). Opaque
+    ``reasoning.encrypted`` data stays discrete only by the provider's ``id``: it
+    usually carries one, and two id-less encrypted records in a row would fuse
+    (recorded without an id, never yet two in a row).
     """
     return isinstance(last, dict) and all(
         last.get(key) is None or item.get(key) is None or last.get(key) == item.get(key)
         for key in ("type", "id"))
+
+
+def _closed_by_signature(last: dict, item: dict) -> bool:
+    """A signature is the last fact of the record it signs: content after it opens the next one.
+
+    OpenRouter streams the thinking blocks of one Anthropic answer id-less, each ending
+    in a signature-only delta (a signature arrives whole, in one delta), and their
+    ``index`` is a block ordinal there while Gemini repeats 0, so ``index`` cannot be
+    the boundary; a delta that adds nothing still joins the signed record. A record
+    fused from two blocks is refused on replay; OpenRouter's own SDK fuses them too
+    (keeping the first signature), so it is no reference for this boundary.
+    """
+    return (isinstance(last.get("signature"), str) and bool(last["signature"])
+            and any(item.get(field) for field in ("text", "summary", "data", "signature")))
 
 
 def _snapshot(target: dict, update: dict) -> None:
@@ -188,9 +213,9 @@ def _delta(target: dict, update: dict, note: Callable[[str], None], *,
 def _merge_list_item(key: str, current: list, item: Any, note: Callable[[str], None], *,
                      chat_path: tuple | None = None) -> None:
     """List identity is a property of the wire field: ``reasoning_details`` records are
-    reassembled by type transition (every delta repeats a frame-local ``index`` that is
-    not a record key, as the wire's own reference client documents); every other list
-    keys on ``index``, and an index-less tool-call fragment continues the last call."""
+    reassembled by type transition and closed by their signature (the ``index`` they
+    carry is no record key on every route); every other list keys on ``index``, and an
+    index-less tool-call fragment continues the last call."""
     if not isinstance(item, dict):
         current.append(copy.deepcopy(item))
         return
@@ -198,7 +223,7 @@ def _merge_list_item(key: str, current: list, item: Any, note: Callable[[str], N
     if key == "reasoning_details":
         if "type" not in item:
             note(f"{key}: item without type")
-        if current and _adjacent(current[-1], item):
+        if current and _adjacent(current[-1], item) and not _closed_by_signature(current[-1], item):
             match = current[-1]
     else:
         index = item.get("index")
@@ -219,6 +244,10 @@ def _merge_list_item(key: str, current: list, item: Any, note: Callable[[str], N
     else:
         _delta(match, item, note,
                chat_path=(*chat_path, match.get("index", "last")) if chat_path is not None else None)
+
+
+def _has_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _tool_call_problem(call: Any) -> str:
@@ -379,6 +408,26 @@ class ChatAccumulator(_Accumulator):
         raise RejectedProviderStream(f"Stream rejected after terminal framing: {detail}",
                                      usage=self.body.get("usage"), anomalies=self.anomalies)
 
+    def output_received(self) -> bool:
+        """Whether a typed model-output field carried non-blank text before the stream ended.
+
+        Content, reasoning text or summary, encrypted reasoning data and tool-call argument
+        text count; a role, an id, a name-only call start, usage and keep-alives do not.
+        """
+        for choice in self.choices.values():
+            message = choice["message"]
+            details = message.get("reasoning_details")
+            calls = message.get("tool_calls")
+            payloads = [call.get(kind) for call in (calls if isinstance(calls, list) else [])
+                        if isinstance(call, dict) for kind in ("function", "custom")]
+            if (any(_has_text(message.get(key)) for key in ("content", "reasoning", "reasoning_content"))
+                    or any(isinstance(row, dict) and any(_has_text(row.get(key)) for key in ("text", "summary", "data"))
+                           for row in (details if isinstance(details, list) else []))
+                    or any(isinstance(payload, dict) and (_has_text(payload.get("arguments")) or _has_text(payload.get("input")))
+                           for payload in (*payloads, message.get("function_call")))):
+                return True
+        return False
+
     def partial(self) -> dict:
         body = copy.deepcopy(self.body)
         body["choices"] = [copy.deepcopy(self.choices[key]) for key in sorted(self.choices)]
@@ -504,6 +553,12 @@ class AnthropicAccumulator(_Accumulator):
         raise RejectedProviderStream(f"Native stream rejected after message_stop: {detail}",
                                      usage=self.body.get("usage") if self.usage_final else None,
                                      anomalies=self.anomalies)
+
+    def output_received(self) -> bool:
+        """Text, thinking or redacted-thinking data, or tool input text (``ChatAccumulator`` rule)."""
+        return (any(isinstance(block, dict) and any(_has_text(block.get(key)) for key in ("text", "thinking", "data"))
+                    for block in self.blocks.values())
+                or any(_has_text(fragment) for fragment in self.inputs.values()))
 
     def partial(self) -> dict:
         return {**copy.deepcopy(self.body), "content": [copy.deepcopy(self.blocks[key]) for key in sorted(self.blocks)]}
@@ -641,6 +696,8 @@ class _StreamAssembly:
         facts = {"attempt_id": attempt_id, "complete": complete,
                  "generation_id": self.generation_id or self.accumulator.body.get("id", ""),
                  "anomalies": self.accumulator.anomaly_facts()}
+        if error is not None:  # a failed reply's typed shape, never its text
+            facts["model_output_received"] = self.accumulator.output_received()
         if self.generation_conflict:
             facts["generation_conflict"] = True
             facts["conflicting_generation_id"] = self.conflicting_generation_id

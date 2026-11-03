@@ -21,10 +21,12 @@ async def api_settings_secret(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         body = None
-    if not isinstance(body, dict) or set(body) not in ({"key"}, {"mcp_server_id"}, {"mcp_server_id", "header_name"}):
-        return JSONResponse({"error": "Select one key or MCP server.", "code": "invalid_secret_selector"},
+    if not isinstance(body, dict) or set(body) not in (
+        {"key"}, {"mcp_server_id"}, {"mcp_server_id", "header_name"}, {"connection", "field"},
+    ):
+        return JSONResponse({"error": "Select one key, added API key or MCP server.", "code": "invalid_secret_selector"},
                             status_code=400, headers=headers)
-    selector = body.get("key", body.get("mcp_server_id"))
+    selector = body.get("key", body.get("mcp_server_id", body.get("connection")))
     if any(not isinstance(value, str) or not value.strip() for value in body.values()):
         return JSONResponse({"error": "The secret selector must be a nonempty string.",
                              "code": "invalid_secret_selector"}, status_code=400, headers=headers)
@@ -37,6 +39,18 @@ async def api_settings_secret(request: Request) -> JSONResponse:
             return JSONResponse({"error": "That Settings secret is not available.",
                                  "code": "secret_not_found"}, status_code=404, headers=headers)
         value = settings.get(selector)
+    elif "connection" in body:
+        from ouroboros.provider_connections import connection_rows, find_row
+        from ouroboros.provider_models import CONNECTIONS_KEY, PROVIDER_KINDS, parse_model_route
+
+        # An added key of a provider card (``kind@name``); a built-in key is read by its ``key``.
+        route = parse_model_route(f"{selector.strip()}::_")
+        spec = PROVIDER_KINDS.get(route.kind) if route.valid and route.connection else None
+        row = find_row(connection_rows(settings.get(CONNECTIONS_KEY)), route.kind, route.connection) if spec else None
+        if row is None or body["field"] not in {field for field, _flat, secret in spec.fields if secret}:
+            return JSONResponse({"error": "That added API key is not saved.", "code": "secret_not_found"},
+                                status_code=404, headers=headers)
+        value = row.get(body["field"])
     else:
         from ouroboros.mcp_client import canonical_server_id, raw_server_id
 

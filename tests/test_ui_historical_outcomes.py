@@ -4,9 +4,11 @@ import json
 from types import SimpleNamespace
 
 
+from ouroboros import dialogue_store
 from ouroboros.gateway.history import make_chat_history_endpoint, _load_terminal_result
 from ouroboros.project_dialogue import append_terminal_task_projection
 from ouroboros.task_results import write_task_result
+from tests import _dialogue as dialogue_test
 from tests._store_shared import delete_result, read_result, result_exists, unreadable_result
 
 
@@ -20,11 +22,10 @@ def test_retained_terminal_is_history_only_until_client_checks_current_activity(
         tmp_path, task["id"], "cancelled", result="Preserved work",
         model_execution=model_execution, **{k: v for k, v in task.items() if k != "id"},
     )
-    (tmp_path / "logs").mkdir(exist_ok=True)
-    (tmp_path / "logs" / "progress.jsonl").write_text(json.dumps({
+    dialogue_store.append(tmp_path, "progress", {
         "task_id": task["id"], "chat_id": 1, "content": "Inspecting the source",
         "ts": "2026-09-06T00:00:00Z",
-    }) + "\n")
+    })
     assert append_terminal_task_projection(tmp_path, task["id"], task, result, {"chat_id": 1})
     delete_result(tmp_path, "past-root")  # the row is gone; the history alone carries the evidence
     response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"chat_id": "1"})))
@@ -43,22 +44,23 @@ def test_terminal_evidence_survives_when_its_narration_is_on_an_older_page(tmp_p
     task = {"id": "archived-root", "chat_id": 1, "root_task_id": "archived-root", "delegation_role": "root"}
     result = write_task_result(tmp_path, task["id"], "cancelled", result="Preserved work",
                                **{key: value for key, value in task.items() if key != "id"})
-    assert append_terminal_task_projection(tmp_path, task["id"], task, result, {"chat_id": 1})
-    delete_result(tmp_path, "archived-root")
-    archive = tmp_path / "archive"
-    archive.mkdir()
+    archives = {}
     for index in range(5):
-        (archive / f"progress_2026090{index + 1}T000000.jsonl").write_text(json.dumps({
+        archives[f"progress_2026090{index + 1}T000000.jsonl"] = [{
             "task_id": task["id"] if index == 0 else f"newer-{index}", "chat_id": 1,
             "content": "First saved narration" if index == 0 else f"Later work {index}",
             "ts": f"2026-09-0{index + 1}T00:00:00Z",
-        }) + "\n")
+        }]
         # Older pages follow the conversation, so the room has older dialogue to page
         # through while its narration pages alongside (owner decision 2026-10-05).
-        (archive / f"chat_2026090{index + 1}T000000.jsonl").write_text(json.dumps({
+        archives[f"chat_2026090{index + 1}T000000.jsonl"] = [{
             "direction": "in", "chat_id": 1, "text": f"Older dialogue {index}",
             "ts": f"2026-09-0{index + 1}T00:00:00Z",
-        }) + "\n")
+        }]
+    dialogue_test.seed(tmp_path, archives=archives)
+    dialogue_test.import_all(tmp_path)
+    assert append_terminal_task_projection(tmp_path, task["id"], task, result, {"chat_id": 1})
+    delete_result(tmp_path, "archived-root")
     endpoint = make_chat_history_endpoint(tmp_path)
 
     def read(cursor=None):

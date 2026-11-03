@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Independent sign-in example</title>
+  <link rel="stylesheet" href="/auth/style.css">
+  <script type="module" src="/auth/login.js"></script>
+</head>
+<body data-client-view="login">
+  <main>
+    <p class="eyebrow">Independent client example</p>
+    <h1>Welcome to your client</h1>
+    <p>The core checks the password. This page owns only the form.</p>
+    <form action="/auth/login" method="post" id="login">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <input id="next" name="next" type="hidden" value="/">
+      <button>Sign in</button>
+    </form>
+    <p id="error" role="alert"></p>
+    <p><a id="recovery" href="/auth/login?builtin=1">Use built-in sign-in</a></p>
+  </main>
+</body>
+</html>

@@ -1,0 +1,5 @@
+body { margin: 0; padding: 16px; font: 15px/1.5 system-ui, sans-serif; background: #ffffff; color: #1c2230; }
+.hero { height: 80px; padding: 8px 16px; background: #eef1f6 url(dot.svg) no-repeat right 16px center; }
+.hero h1 { margin: 0; font-size: 22px; }
+.list { height: 96px; width: 240px; overflow: auto; border: 1px solid #c5cad3; margin-top: 12px; }
+.mark { width: 20px; height: 20px; margin-top: 8px; background: url(marks/dot.svg); }

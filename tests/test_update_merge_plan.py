@@ -20,7 +20,8 @@ def _init_repo(tmp_path):
     (repo / "a.txt").write_text("base\n")
     (repo / "BIBLE.md").write_text("constitution\n")
     (repo / "ouroboros").mkdir()
-    for name in ("store.py", "usage_store.py"):  # a store-bearing tree: the ordinary rollback resets at once
+    # A tree bearing every store a current release carries: the ordinary rollback resets at once.
+    for name in ("store.py", "usage_store.py", "dialogue_store.py"):
         (repo / "ouroboros" / name).write_text("# store\n", encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "base")

@@ -8,8 +8,14 @@ from ouroboros.tools.release_sync import (
     RELEASE_ASSET_TEMPLATES,
     DESKTOP_DOWNLOAD_IDS,
     check_history_limit,
+    check_worktree_version_sync,
     detect_numeric_claims,
+    is_development_marker,
+    is_release_version,
+    next_cycle_problem,
     normalize_linux_package_version,
+    normalize_release_tag,
+    published_download_version,
     release_asset_download_url,
     run_release_preflight,
     sync_release_metadata,
@@ -799,3 +805,117 @@ class TestBadgeAndArchRegexAcceptRc:
     def test_arch_header_regex_still_matches_stable(self):
         header = "# Ouroboros v4.50.0 — Three-layer refactor\n"
         assert _ARCH_HEADER_RE.search(header) is not None
+
+
+# ---------------------------------------------------------------------------
+# The development-cycle marker (BIBLE P9); the whole cycle: tests/test_development_cycle.py
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("version", ["7.10.0-alpha.0", "7.10.0a0", "7.10.0-ALPHA.0", "7.10.0alpha0", "7.10.0-a.0"])
+def test_alpha_zero_is_the_marker_in_every_spelling_of_the_grammar(version):
+    assert is_development_marker(version) and is_development_marker(f" {version}\n")
+    assert is_release_version(version)  # its carriers keep the shared grammar...
+    assert normalize_release_tag(f"v{version}") == ""  # ...but it never names a release tag
+
+
+@pytest.mark.parametrize("version", ["7.10.0", "7.10.0-alpha.1", "7.10.0a1", "7.10.0-alpha.10", "7.10.0-beta.0",
+                                     "7.10.0-rc.0", "7.10.0-test", "", None])
+def test_nothing_else_is_the_marker(version):
+    assert not is_development_marker(version)
+
+
+def test_the_marker_keeps_its_package_spellings():
+    assert _normalize_pep440("7.10.0-alpha.0") == "7.10.0a0"
+    assert normalize_linux_package_version("7.10.0-alpha.0") == "7.10.0~a0"
+    assert _shields_escape("7.10.0-alpha.0") == "7.10.0--alpha.0"
+
+
+@pytest.mark.parametrize("released,development,problem", [
+    ("7.9.0", "7.10.0-alpha.0", ""),  # numeric: as text 7.10 sorts below 7.9
+    ("7.10.0", "7.10.1-alpha.0", ""),
+    ("7.10.0", "7.11.0-alpha.0", ""),
+    ("7.10.3", "8.0.0-alpha.0", ""),
+    ("7.10.0-rc.1", "7.10.0-alpha.0", ""),  # a prerelease belongs to its own base's cycle
+    ("7.10.0", "7.10.0-alpha.0", "does not sort above"),
+    ("7.10.0", "7.9.9-alpha.0", "does not sort above"),
+    ("7.10.0", "7.10.0", "is not a development marker"),
+    ("7.10.0", "7.10.1", "is not a development marker"),
+    ("7.10.0", "7.10.1-alpha.1", "is not a development marker"),
+    ("7.10.0", "", "an empty VERSION"),
+])
+def test_next_cycle_problem(released, development, problem):
+    answer = next_cycle_problem(released, development)
+    assert (problem in answer and bool(answer)) if problem else answer == ""
+
+
+def test_a_marker_syncs_every_carrier_but_leaves_links_and_history_alone(tmp_path):
+    repo = _make_repo(tmp_path, "7.9.0")
+    sync_release_metadata(str(repo))
+    before = {rel: (repo / rel).read_text(encoding="utf-8")
+              for rel in ("site/install/index.html", "docs/install/index.html")}
+    readme_before = (repo / "README.md").read_text(encoding="utf-8")
+
+    (repo / "VERSION").write_text("7.10.0-alpha.0\n", encoding="utf-8")
+    would_write = sync_release_metadata(str(repo), write=False)
+    assert sync_release_metadata(str(repo)) == would_write
+    assert sync_release_metadata(str(repo)) == []  # idempotent
+    assert not {"site/install/index.html", "docs/install/index.html"} & set(would_write)
+    readme = (repo / "README.md").read_text(encoding="utf-8")
+    assert _download_references("7.9.0") in readme and "| 7.9.0 | 2026-01-01 | New release |" in readme
+    assert "7.10.0-alpha.0/" not in readme and "| 7.10.0-alpha.0 |" not in readme
+    assert readme.replace("Version 7.10.0-alpha.0", "Version 7.9.0").replace("version-7.10.0--alpha.0-", "version-7.9.0-") \
+        == readme_before
+    for rel, text in before.items():
+        assert (repo / rel).read_text(encoding="utf-8") == text
+    assert check_worktree_version_sync(repo) == ""
+
+
+def test_a_marker_projects_links_only_to_the_release_its_caller_names(tmp_path):
+    repo = _make_repo(tmp_path, "7.9.0")
+    sync_release_metadata(str(repo))
+    (repo / "VERSION").write_text("7.10.0-alpha.0\n", encoding="utf-8")
+    sync_release_metadata(str(repo))
+    assert sync_release_metadata(str(repo), published_version="7.9.1") == [
+        "README.md", "site/install/index.html", "docs/install/index.html"]
+    assert _download_references("7.9.1") in (repo / "README.md").read_text(encoding="utf-8")
+    assert (repo / "docs/install/index.html").read_text(encoding="utf-8") == _download_page("7.9.1")
+    # A release derives its links from VERSION; the argument cannot move them.
+    (repo / "VERSION").write_text("7.10.0\n", encoding="utf-8")
+    sync_release_metadata(str(repo), published_version="7.9.1")
+    assert _download_references("7.10.0") in (repo / "README.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("readme,site,docs,labelled", [
+    ("7.9.0", "7.9.0", "7.9.0", False),
+    ("7.10.0-alpha.0", "7.10.0-alpha.0", "7.10.0-alpha.0", True),  # the dead links an old sync writes
+    ("7.10.0", "7.10.0", "7.10.0", True),  # the cycle's own, unpublished base
+    ("7.11.0", "7.11.0", "7.11.0", True),
+    ("7.9.0-rc.1", "7.9.0-rc.1", "7.9.0-rc.1", True),
+    ("7.9.0", "7.8.0", "7.9.0", True),  # mixed
+    ("7.9.0", "7.9.0", "7.10.0-alpha.0", True),
+])
+def test_a_marker_checks_one_published_plain_release_below_it(readme, site, docs, labelled):
+    desync = version_carrier_desyncs(
+        "7.10.0-alpha.0", download_readme_text=_download_references(readme),
+        site_install_text=_download_page(site), docs_install_text=_download_page(docs), detailed=True)
+    assert bool(desync) is labelled, desync
+    if labelled:
+        assert "expected one published plain release below 7.10.0-alpha.0" in desync[0]
+
+
+def test_a_marker_catches_one_inexact_link_of_its_published_release():
+    references = _download_references("7.9.0").replace("Ouroboros-7.9.0.dmg", "Other-7.9.0.dmg")
+    desync = version_carrier_desyncs("7.10.0-alpha.0", download_readme_text=references)
+    assert desync == ["README.md download macos-arm64"]
+
+
+def test_a_marker_needs_no_projection_where_a_tree_has_none():
+    assert version_carrier_desyncs("7.10.0-alpha.0", download_readme_text="# no links here\n") == []
+
+
+def test_published_download_version_reads_only_the_projection():
+    historic = "See https://github.com/razzant/ouroboros/releases/download/v6.0.0/old.dmg\n"
+    assert published_download_version(historic + _download_references("7.9.0")) == "7.9.0"
+    assert published_download_version(_download_page("7.9.0")) == "7.9.0"
+    assert published_download_version(_download_references("7.9.0"), _download_page("7.8.0")) == ""
+    assert published_download_version(historic) == "" and published_download_version() == ""

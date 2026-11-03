@@ -291,6 +291,9 @@ def tree_ledger_append(
         row["payload"] = payload_out
     try:
         written = append_jsonl(path, row)
+        if written:
+            from ouroboros.maintenance_retirement import artifact_changed
+            artifact_changed(path.parent.parent.parent)
     except Exception:
         log.warning("Failed to append task-tree ledger row for %s", rid, exc_info=True)
         written = False
@@ -361,7 +364,11 @@ def record_subscription_window_exhausted(
     try:
         path = tree_ledger_path(rid, data_root=data_root)
         path.parent.mkdir(parents=True, exist_ok=True)
-        return bool(append_jsonl(path, row))
+        written = bool(append_jsonl(path, row))
+        if written:
+            from ouroboros.maintenance_retirement import artifact_changed
+            artifact_changed(path.parent.parent.parent)
+        return written
     except Exception:
         log.debug("Failed to append subscription-window-exhausted beacon for %s", rid, exc_info=True)
         return False

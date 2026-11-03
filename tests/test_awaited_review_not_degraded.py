@@ -1,11 +1,13 @@
 """A review that was merely AWAITED when its task ended is a gap, never a degradation.
 
-A plan ask whose participants had simply not answered yet, or an acceptance panel whose
-slots were still working, leaves the task's own outcome clean: the loud final-message
+A plan ask whose participants had simply not answered yet, or a review run whose slots
+were still working, leaves the task's own outcome clean: the loud final-message
 disclosure stays and a typed fact is recorded (``execution.plan_review`` /
 ``review.status`` = ``awaiting``). Every real outcome — an open objection, no quorum,
 unresolved custody, a refused or failed slot, a critic verdict beneath the placeholder,
-FAIL, a rail — keeps exactly the status, reason code and sentence it had.
+FAIL, a rail — keeps exactly the status, reason code and sentence it had. The review runs
+here are the stored host panels (``review_runs`` rows with actors) the outcome axes read,
+old task-acceptance panels included.
 """
 from __future__ import annotations
 
@@ -16,9 +18,9 @@ import pytest
 from ouroboros import _outcome_receipts, loop
 from ouroboros.outcomes import _objective_axis, _review_axis, derive_loop_outcome, public_task_result
 from ouroboros.project_dialogue import TASK_CAUSE_PHRASES, _completion_verdict, completion_status_label
-from tests.test_acceptance_async_loop import ANSWER, call, full_loop, keep  # noqa: F401
 from tests.test_delivery_forced_finalization import _forced_test_context
 
+ANSWER = "The complete report includes the requested budget."
 AWAITED_NOTICE = ("\n\n⚠️ Plan review: the answers of ask(s) a1 had not arrived when the task ended; "
                   "silence holds nothing and is not agreement.")
 OBJECTIONS_NOTICE = ("\n\n⚠️ Plan review: 1 open objection remains open — triad_a/o1 (ask a1, revision 1): the bar is low; "
@@ -49,7 +51,7 @@ def _finalize(tmp_path, monkeypatch, decision):
     _loop, tools, ctx, trace = _forced_test_context(tmp_path)
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a, **_kw: False)
-    monkeypatch.setattr(loop, "_force_plan_decision", lambda *_a, **_kw: dict(decision))
+    monkeypatch.setattr(loop, "_plan_gate_decision", lambda *_a, **_kw: dict(decision))
     loop._replace_delivery_candidate(tools, ctx, trace, ANSWER, control="candidate")
     text, usage, trace = loop._no_tool_final_answer(
         ANSWER, ctx, trace, tools, queue.Queue(), set(), lambda _t: None)
@@ -78,9 +80,11 @@ def test_a_task_that_finished_over_an_awaited_plan_ask_is_not_degraded(tmp_path,
     # The fact is the cause sentence of a CLEAN card only: an amber or red card owes its colour to something else.
     warned = {**record, "outcome_axes": {**record["outcome_axes"], "objective": {
         "status": "not_evaluated", "warning": "residual_tool_errors_without_review"}}}
-    assert completion_status_label(warned, {}) == "Done with warnings" and _completion_verdict(warned, {}) == ""
+    assert completion_status_label(warned, {}) == "Done with warnings"
+    assert _completion_verdict(warned, {}) == TASK_CAUSE_PHRASES["residual_tool_errors_without_review"]
     failed = {**record, "outcome_axes": {**record["outcome_axes"], "artifacts": {"status": "missing"}}}
-    assert completion_status_label(failed, {}) == "Failed" and _completion_verdict(failed, {}) == ""
+    assert completion_status_label(failed, {}) == "Failed"
+    assert _completion_verdict(failed, {}) == TASK_CAUSE_PHRASES["artifacts_unavailable"]
 
 
 def test_an_open_objection_at_delivery_keeps_the_advisory_degradation_and_its_sentence(tmp_path, monkeypatch):
@@ -118,17 +122,17 @@ def test_a_clean_plan_leaves_no_notice_and_no_fact(tmp_path, monkeypatch):
 
 def test_the_typed_fact_never_rides_a_non_clean_execution():
     """A rail owns its own reason: a stale projected decision cannot mark a forced terminal."""
-    trace = {"force_plan_decision": _awaiting(), "tool_calls": [],
+    trace = {"plan_gate": _awaiting(), "tool_calls": [],
              "delivery_candidate": {"degraded": True, "degraded_reason": "round_limit"}}
     forced = derive_loop_outcome(ANSWER, {"execution_status": "failed", "reason_code": "round_limit",
                                           "_best_effort_extracted": True}, trace)
     assert forced["outcome_axes"]["execution"]["status"] == "best_effort"
     assert "plan_review" not in forced["outcome_axes"]["execution"]
-    clean = derive_loop_outcome(ANSWER, {}, {"force_plan_decision": _decision(), "tool_calls": []})
+    clean = derive_loop_outcome(ANSWER, {}, {"plan_gate": _decision(), "tool_calls": []})
     assert "plan_review" not in clean["outcome_axes"]["execution"]
 
 
-# ------------------------------------------------------------------ acceptance: the typed predicate
+# ------------------------------------------------------------------ review runs: the typed predicate
 
 def _actor(slot, state="settled", *, status="ok", signal="PASS", parsed=True, raw="{}"):
     return {"slot_id": slot, "status": status, "signal": signal, "operation_state": state,
@@ -170,7 +174,7 @@ REAL_RUNS = {
 
 
 @pytest.mark.parametrize("name", sorted(AWAITED_RUNS))
-def test_an_acceptance_panel_that_was_only_awaited_is_awaiting_not_degraded(name):
+def test_a_review_run_that_was_only_awaited_is_awaiting_not_degraded(name):
     axis = _review_axis({"review_runs": [AWAITED_RUNS[name]]})
     assert axis["status"] == "awaiting" and axis["aggregate_signals"] == ["DEGRADED"]
     assert "outcome_tier" not in axis  # a minority answer is not the panel's tier
@@ -181,7 +185,7 @@ def test_an_acceptance_panel_that_was_only_awaited_is_awaiting_not_degraded(name
 
 
 @pytest.mark.parametrize("name", sorted(REAL_RUNS))
-def test_every_real_acceptance_degradation_keeps_the_degraded_axis(name):
+def test_every_real_review_degradation_keeps_the_degraded_axis(name):
     axis = _review_axis({"review_runs": [REAL_RUNS[name]]})
     assert axis["status"] == "degraded"
     assert _objective_axis(axis)["status"] == "degraded"
@@ -240,92 +244,8 @@ def test_the_verification_ledger_does_not_call_an_awaited_panel_a_failed_verific
 
 
 def test_a_blocking_unaccepted_terminal_is_unchanged_by_an_awaited_panel():
+    # An acceptance decision stored before the result review replaced that machine still reads.
     trace = {"review_runs": [AWAITED_RUNS["nobody answered yet"]], "acceptance_decision": {
         "status": "finalized_unaccepted", "reason": "review_degraded", "enforcement": "blocking"}}
     objective = _objective_axis(_review_axis(trace))
     assert (objective["status"], objective["outcome_tier"]) == ("fail", "blocked_with_evidence")
-
-
-# ------------------------------------------------------------------ acceptance: the real loop
-
-@pytest.mark.parametrize("mode", ["advisory_finish", "cyber_pro"])
-def test_a_real_answer_released_over_a_running_panel_is_not_a_degraded_review(full_loop, monkeypatch, mode):  # noqa: F811
-    f = full_loop
-    if mode == "cyber_pro":
-        monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "cyber_pro")
-    else:
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
-    f.ctx.owner_wait_callback = lambda *_a, **_kw: pytest.fail("a released answer must not park")
-
-    def main(_llm, messages, *_a, **_kw):
-        f.model_inputs.append(list(messages))
-        f.model_step += 1
-        if f.model_step == 1:
-            return {"content": "", "tool_calls": [call("task_acceptance_review", {"claim": ANSWER}, "nominate")]}, 0.0
-        assert f.entered.wait(5) and not f.release.is_set()
-        return keep(f, pending_review="finish"), 0.0
-
-    monkeypatch.setattr(loop, "call_llm_with_retry", main)
-    result, usage, trace = f.run()
-    assert result == ANSWER and not f.release.is_set()
-    run = trace["review_runs"][-1]
-    # The stored panel is the same fail-closed placeholder it always was.
-    assert run["aggregate_signal"] == "DEGRADED" and run["degraded"] is True
-    assert run["actors"][0]["operation_state"] == "pending_dispatch" and run["actors"][0]["status"] != "ok"
-    assert trace["acceptance_decision"]["reason"] == "author_finish"
-    axes = derive_loop_outcome(result, usage, trace)["outcome_axes"]
-    assert axes["review"]["status"] == "awaiting" and axes["review"]["eligibility"] == "review_in_flight"
-    assert axes["objective"]["status"] == "pass" and axes["objective"]["source"] == "author_acceptance"
-    assert axes["objective"]["review_status"] == "awaiting"
-    # What the owner reads: the host's decision sentence still says no reviewer signed the answer off.
-    card = {"status": "completed", "reason_code": "final_message", "outcome_axes": axes}
-    assert completion_status_label(card, {}) == "Done"
-    assert _completion_verdict(card, {}) == TASK_CAUSE_PHRASES["author_finish"]
-
-
-@pytest.mark.parametrize("mode", ["advisory", "cyber_pro"])
-@pytest.mark.parametrize("choice", ["prose", "default", "wait"])
-def test_plain_or_waiting_answer_keeps_the_same_panel_until_feedback(full_loop, monkeypatch, mode, choice):  # noqa: F811
-    f = full_loop
-    if mode == "cyber_pro":
-        monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "cyber_pro")
-    else:
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
-    f.reviewer_verdict = "FAIL"
-    paid = {}
-    def park(ctx, checkpoint):
-        run = ctx._execution_trace["review_runs"][0]
-        paid.update(binding=run["binding_hash"], identity=run["paid_identity"], request=run["request"].copy())
-        assert not ctx._execution_trace.get("acceptance_decision", {}).get("author_disposition")
-        assert not run.get("settled_feedback_delivered")
-        f.park(ctx, checkpoint)
-    f.ctx.owner_wait_callback = park
-    def main(_llm, messages, *_a, **_kw):
-        f.model_inputs.append(list(messages))
-        f.model_step += 1
-        if f.model_step == 1:
-            return {"content": "", "tool_calls": [call("task_acceptance_review", {"claim": ANSWER}, "nominate")]}, 0.0
-        if f.model_step == 2:
-            assert f.entered.wait(5) and not f.release.is_set()
-            if choice == "prose":
-                return {"content": ANSWER}, 0.0
-            return keep(f, **({"pending_review": "wait"} if choice == "wait" else {})), 0.0
-        assert f.model_step <= 4
-        settled = any(source.get("settled") and source.get("binding_hash") == paid["binding"]
-                      for row in messages for source in row.get("review_feedback", []))
-        if not settled:
-            # Prose made no selection. Select the retained answer to collect
-            # the paid result, then respond to the exposed feedback next round.
-            assert choice == "prose" and f.model_step == 3
-            return keep(f), 0.0
-        assert "Independent review" in str(messages) and "FAIL" in str(messages)
-        return keep(f, rationale="I read the failed independent review and retain this complete answer."), 0.0
-    monkeypatch.setattr(loop, "call_llm_with_retry", main)
-    result, _usage, trace = f.run()
-    assert result == ANSWER and len(f.waits) == 1 and len(f.review_sends) == 1
-    run, = trace["review_runs"]
-    assert (run["binding_hash"], run["paid_identity"], run["request"]) == (paid["binding"], paid["identity"], paid["request"])
-    assert run["aggregate_signal"] == "FAIL" and run["settled_feedback_delivered"]
-    assert "Add independent verification" in run["actors"][0]["raw_text"]
-    assert trace["acceptance_decision"]["reason"] == "author_finish"
-    assert trace["acceptance_decision"]["author_disposition"]["source"] != "author_final_response"

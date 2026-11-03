@@ -50,7 +50,7 @@ def _codebase_health(ctx: ToolContext) -> str:
 
         books = book_balances(repo_dir)
         if books:
-            lines.append("\n### Reference books (information; official CI enforces)")
+            lines.append("\n### Text growth (information; contribution-base measurement)")
             lines.extend(f"  {render_book_balance(balance)}" for balance in books)
             lines.append(f"  {BOOK_GROWTH_RULE}")
 
@@ -164,7 +164,7 @@ def get_tools():
             "codebase_health",
             {
                 "name": "codebase_health",
-                "description": "Get codebase complexity metrics: file sizes, longest functions, modules exceeding limits. Useful for self-assessment per Bible Principle 7 (Minimalism).",
+                "description": "Measure the complexity of Ouroboros's own checkout: file sizes, longest functions, modules exceeding limits. Useful for self-assessment per Bible Principle 7 (Minimalism).",
                 "parameters": {"type": "object", "properties": {}, "required": []},
             },
             _codebase_health,

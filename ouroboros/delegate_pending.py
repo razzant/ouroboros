@@ -7,8 +7,15 @@ import pathlib
 from typing import Any, Dict, List, Optional
 
 
+def request_shape(body):
+    """Bounded no-write evidence, never an envelope that could authorize replay."""
+    body = body if isinstance(body, dict) else {}
+    return {"access": str(body.get("access") or ""), "mode": str(body.get("mode") or ""),
+            "execution": bool(body.get("execution"))}
+
+
 def pending_invocations(
-    drive_root: Any, rows: Optional[List[Dict[str, Any]]] = None,
+    drive_root: Any, rows: Optional[List[Dict[str, Any]]] = None, *, materialize: bool = True,
 ) -> List[Dict[str, Any]]:
     """Return request rows with no bound run and no definite refusal.
 
@@ -37,6 +44,8 @@ def pending_invocations(
                 "operation_id": str(row.get("operation_id") or ""),
                 "request": row.get("request") if isinstance(row.get("request"), dict) else None,
                 "request_ref": row.get("request_ref"),
+                **({"request_shape": copy.deepcopy(row["request_shape"])} if "request_shape" in row else
+                   {"request_shape": request_shape(row["request"])} if isinstance(row.get("request"), dict) else {}),
                 "route": str(row.get("route") or ""),
                 "project_id": str(row.get("project_id") or ""),
                 "project_owned": bool(row.get("project_owned")),
@@ -57,6 +66,7 @@ def pending_invocations(
                 "authority_source": str(row.get("authority_source") or ""),
                 # A pending continuation names the run whose snapshot it takes over.
                 **{key: str(row.get(key) or "") for key in ("continuation_of", "capture_id", "snapshot_task_id")},
+                **{key: copy.deepcopy(row[key]) for key in ("execution_mode", "effective_access", "thread_id", "authority_ceiling", "promotion") if key in row},
                 # Copies: the source rows are the caller's snapshot.
                 "resource_ref": copy.deepcopy(row.get("resource_ref")) if isinstance(row.get("resource_ref"), dict) else {},
                 "selected_subagent_id": str(row.get("selected_subagent_id") or ""),
@@ -82,13 +92,68 @@ def pending_invocations(
         if state.get(invocation_id, "pending") != "pending":
             continue
         # Resolve only survivors, not every historical start on each sweep.
-        body = request_body(drive_root, record)
+        body = request_body(drive_root, record) if materialize else record.get("request")
         ref = record.pop("request_ref")
         # An unreadable stored body does not discharge the pending start.
         if body or ref is not None:
             record["request"] = body
+            if body is None and ref is not None:
+                record["request_ref"] = ref  # an addressed replay can retry an unavailable source
             pending.append(record)
     return pending
+
+
+def current_rows(root, rows):
+    """Typed open facts only. Legacy gaps keep their identity until the child backfills them."""
+    pending = []
+    for facts in rows:
+        projected = (copy.deepcopy(facts["pending"]) if "pending" in facts else
+                     pending_invocations(root, [facts["request"]], materialize=False))
+        source = facts["request"]
+        if source.get("request_ref") is not None and not (isinstance(source.get("request"), dict) and source["request"]):
+            for record in projected:
+                # Older projections cached a body without its ref. The source row
+                # keeps replay addressed even after that blob is lost or packed.
+                record.update(request=None, request_ref=copy.deepcopy(source["request_ref"]))
+        pending.extend(projected)
+    return pending
+
+
+JOB = "pending_invocations"
+
+
+def backfill_due(root, row, facts, child):
+    return row.get("state") != "done" or not row.get("request_shapes")
+
+
+def backfill(root, should_stop):
+    """One addressed pass over already-open requests, CAS against start/refusal races."""
+    from ouroboros import maintenance_jobs, store
+
+    with store.open_store(root, write=False) as txn:
+        request = txn.meta("job:" + JOB)
+        rows = txn.set_rows("custody_open")
+    done = 0
+    for key, facts in rows.items():
+        if should_stop():
+            return {"state": "pending", "items": done}
+        if not key.startswith("invocation:") or ("pending" in facts and
+                all("request_shape" in record for record in facts["pending"])):
+            continue
+        source = facts["request"]
+        shape = source.get("request_shape")
+        if shape is None:
+            shape = request_shape(request_body(root, source))
+        projected = pending_invocations(root, [{**source, "request_shape": shape}], materialize=False)
+        with store.open_store(root, write=True) as txn:
+            if txn.get_row("custody_open", key) == facts:
+                txn.put_row("custody_open", key, {**facts, "pending": projected})
+        done += 1
+    with store.open_store(root, write=True) as txn:
+        if txn.meta("job:" + JOB) != request:
+            return {"state": "pending", "items": done}  # an import/repair added open rows meanwhile
+        maintenance_jobs.record_in(txn, JOB, state="done", items=done, request_shapes=True)
+    return {"state": "done", "items": done}
 
 
 def request_body(drive_root: Any, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:

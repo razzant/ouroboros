@@ -2,6 +2,8 @@
 
 The host retains complete immutable artifact bytes and ordinary run custody. It
 does not make a second execution copy, invent a Git baseline, or apply files itself.
+An explicit ``workspace="in_place"`` Git writer, which works in its starter's own
+folder and so has nothing to capture, is recognized and projected here too.
 """
 from __future__ import annotations
 
@@ -28,6 +30,88 @@ DIRECTORY_OPTIONS_NEED_WRITE = (
 def is_directory_run(entry) -> bool:
     return bool(entry and isinstance(entry.resource_ref, dict)
                 and entry.resource_ref.get("workspace_kind") == "directory")
+
+
+IN_PLACE = "in_place"  # a Git writer its starter put directly in its own write root (owner 25.10, Q2-A)
+
+
+def in_place_ref():
+    return {"workspace_kind": "git", "strategy": IN_PLACE}
+
+
+def is_in_place_run(record) -> bool:
+    """A custody entry, request row or invocation record of an explicitly in-place Git writer."""
+    ref = record.get("resource_ref") if isinstance(record, dict) else getattr(record, "resource_ref", None)
+    return isinstance(ref, dict) and ref.get("workspace_kind") == "git" and ref.get("strategy") == IN_PLACE
+
+
+def in_place_refusal(authority, selector_root, workspace, mode, strategy, scope_paths):
+    """The shape rule for ``workspace``: only a Git writer may work in place."""
+    from ouroboros.delegate_shared import _fail
+
+    if workspace in (None, "", "copy"):
+        return None
+    reason = ("workspace must be 'copy' or 'in_place'" if workspace != IN_PLACE else
+              "a skill payload is always edited in its private snapshot" if selector_root else
+              "an evidence-only investigation or a read-only run never writes your folder"
+              if authority.investigation or authority.access == "readonly" or mode in ("ask", "plan") else
+              "directory options apply to ordinary folders; use directory_strategy='direct' there"
+              if not default_shaped_directory_options(strategy, scope_paths) else "")
+    return _fail("delegate_start", "workspace_in_place_unavailable",
+                 f"workspace='in_place' was refused: {reason}. Nothing was started.", definitely_unrun=True) if reason else None
+
+
+def in_place_start(adopted_copy, target_root, service=None):
+    """(snapshot, refusal, resource_ref, binding) for an in-place Git writer: no copy is made.
+    ``service`` makes its disposable scratch (``subagent_work_order.session_service_directories``),
+    called only once the start is accepted, so a refusal leaves nothing behind."""
+    from ouroboros.delegate_shared import _fail
+    from ouroboros.delegate_start_instructions import in_place_binding_instruction
+
+    if adopted_copy is not None or not (Path(target_root) / ".git").exists():
+        detail = ("this continuation resumes an undisposed private copy; continue it there (omit workspace)"
+                  if adopted_copy is not None else "the write root is not a Git working tree; ordinary folders "
+                  "use directory_strategy='direct'")
+        return None, _fail("delegate_start", "workspace_in_place_unavailable",
+                           f"workspace='in_place' was refused: {detail}. Nothing was started.", definitely_unrun=True), {}, ""
+    return None, "", in_place_ref(), in_place_binding_instruction(target_root, service() if service else None)
+
+
+def in_place_block(entry):
+    """The terminal projection of an in-place run: nothing was captured and nothing is owed."""
+    target = str(entry.target_root or entry.execution_root or "")
+    return {"status": IN_PLACE, "capture_kind": IN_PLACE, "disposition": IN_PLACE, "execution_root": target,
+            "authority_target_root": target, "patch_artifact": None, "manifest_artifact": None,
+            "note": (f"This run worked directly in {target} by its starter's choice (workspace='in_place'): its edits "
+                     "are already there. There is nothing to apply or reject; inspect them with vcs_read diff and undo "
+                     "through git, which also reverts any uncommitted edit of your own there.")}
+
+
+def started_receipt(payload, resource_ref, target_root, *, durable, investigation):
+    """Receipt facts and note of a folder or in-place start (delegate_start's started result)."""
+    lead = "CUSTODY IS NOT DURABLE. " if not durable else ""
+    if is_in_place_run({"resource_ref": resource_ref}):
+        payload.update(workspace=IN_PLACE, authority_target_root=target_root, execution_root=target_root)
+        payload["note"] = (lead + f"This run works DIRECTLY in your write root {target_root}, as you chose "
+                           "(workspace='in_place'): its edits land there as it makes them. Nothing is captured for apply "
+                           "or reject (integrate_delegated_patch refuses); undo through git. Do not edit the same files "
+                           "meanwhile and do not start a second in-place writer in this folder: their edits would mix. "
+                           "When this folder is the Ouroboros body, its protected paths are not checked for this writer "
+                           "(the commit gate still checks them). Use delegate_wait for its result.")
+        return
+    direct = resource_ref.get("strategy") == "direct"
+    payload.update(authority_target_root=target_root,
+                   execution_root=target_root if direct else None,
+                   directory_strategy=resource_ref["strategy"], scope_paths=resource_ref["scopePaths"])
+    payload["note"] = (
+        lead
+        + ("This run writes directly in the selected folder; effects are already on site, without a full rollback promise. "
+           if direct else "The engine prepares a separate copy of the selected inputs; its actual execution directory is not yet observed. ")
+        + "Use delegate_wait for its complete file manifest and result. "
+        + ("This evidence-only investigation's results are kept as evidence, never applied "
+           "(integrate_delegated_patch refuses); never let it commit." if investigation
+           else "Copy results use integrate_delegated_patch for apply or reject.")
+    )
 
 
 def default_shaped_directory_options(strategy, scope_paths) -> bool:
@@ -146,6 +230,10 @@ def prepare_directory_execution(ctx, gateway, target_root, authority, strategy, 
     from dataclasses import replace
     from ouroboros.workspace_admission import validate_workspace_root
 
+    if authority.mode == "plan":
+        if not default_shaped_directory_options(strategy, scope_paths):
+            raise ValueError("Plan turns read the selected folder; choose directory geometry when starting an executor.")
+        return authority, {}, {"plan_workspace_kind": "directory"}
     investigation = getattr(authority, "investigation", False)
     if not staged:
         try:
@@ -181,12 +269,15 @@ def _download(gateway, run_id, source, destination, expected=None):
         temporary.unlink(missing_ok=True)
 
 
-def capture_directory_result(drive, entry, gateway):
+def capture_directory_result(drive, entry, gateway, *, publish=True):
     """Capture observed terminal work independently of its pending money record.
 
     A finished run whose engine reports no file work product is captured ready, never retried
     on later sweeps: as ``no_changes`` after success, otherwise as an absent work product whose
     changes, if any, were not captured (Apply applies nothing; Reject releases the copy).
+    One capture fetches each content identity (digest and size) once: every file side keeps
+    its own row, and a later side with the same identity names the first verified file.
+    Modes stay in the exact engine manifest; no retained file is chmodded.
     """
     if not entry.settled and entry.terminal_state not in custody.TERMINAL_STATES:
         raise ValueError("the directory run has not completed")
@@ -217,8 +308,9 @@ def capture_directory_result(drive, entry, gateway):
         }
         cap_dir.mkdir(parents=True, exist_ok=True)
         atomic_write_json(manifest_path, manifest, trailing_newline=True)
-        custody.record_patch_captured(drive, entry, status="ready", sha256="", capture_dir=str(cap_dir),
-                                     execution_root="", no_changes=succeeded)
+        if publish:
+            custody.record_patch_captured(drive, entry, status="ready", sha256="", capture_dir=str(cap_dir),
+                                         execution_root="", no_changes=succeeded)
         return manifest
     source = (product.get("files") or {}).get("manifest")
     digest = str((product.get("meta") or {}).get("manifest_sha256") or "").removeprefix("sha256:")
@@ -237,7 +329,7 @@ def capture_directory_result(drive, entry, gateway):
         raise ValueError("engine directory strategy differs from the recorded request")
     if not direct and original.get("complete") is not True:
         raise ValueError("the selected execution copy was not completely captured")
-    records = [raw]
+    records, retained = [raw], {}  # retained: this capture's verified file per content identity
     for index, row in enumerate(original["entries"]):
         for side in ("before", "after"):
             state = row.get(side)
@@ -247,9 +339,11 @@ def capture_directory_result(drive, entry, gateway):
                 if direct and side == "before":
                     continue
                 raise ValueError(f"file {side} has no complete reference: {row.get('path')}")
-            record = _download(gateway, entry.run_id, state["artifactPath"],
-                               cap_dir / f"{side}-{index}", state)
-            records.append({**record, "source_path": row["path"], "side": side})
+            identity = (state.get("sha256"), state.get("sizeBytes"))
+            if identity not in retained:
+                retained[identity] = _download(gateway, entry.run_id, state["artifactPath"],
+                                               cap_dir / f"{side}-{index}", state)
+            records.append({**retained[identity], "source_path": row["path"], "side": side})
     manifest = {
         "schema_version": 1, "capture_kind": "engine_directory", "status": "ready",
         "workspace_root": original["executionRoot"], "authority_target_root": entry.target_root,
@@ -261,27 +355,42 @@ def capture_directory_result(drive, entry, gateway):
                  if direct else "The engine copy is not applied. Inspect the complete manifest and files before disposition."),
     }
     atomic_write_json(manifest_path, manifest, trailing_newline=True)
-    custody.record_patch_captured(drive, entry, status="ready", sha256=digest,
-                                 capture_dir=str(cap_dir), execution_root=original["executionRoot"])
+    if publish:
+        custody.record_patch_captured(drive, entry, status="ready", sha256=digest,
+                                     capture_dir=str(cap_dir), execution_root=original["executionRoot"])
     return manifest
 
 
 def directory_capture_block(drive, entry, manifest):
+    from ouroboros.delegate_registration_policy import INVESTIGATION_NOTE, evidence_only
+
     cap_dir = custody.delegated_capture_dir(drive, entry.task_id, entry.run_id)
     return {"status": manifest["status"], "capture_kind": "engine_directory",
+            "sha256": manifest.get("engine_manifest_sha256", ""),
+            **({"no_changes": manifest["no_changes"]} if "no_changes" in manifest else {}),
             "execution_root": manifest["workspace_root"], "authority_target_root": entry.target_root,
             "manifest_artifact": str(cap_dir / "workspace_patch.json"),
             "manifest_read": {"root": "artifact_store", "path": f"delegated_runs/{cap_dir.name}/workspace_patch.json"},
             "file_outputs": manifest["file_outputs"], "patch_artifact": None,
             "complete": manifest["complete"], "scope_paths": manifest["scope_paths"],
-            "strategy": manifest["strategy"], "note": manifest["note"]}
+            "strategy": manifest["strategy"],
+            "note": INVESTIGATION_NOTE if evidence_only(entry) else manifest["note"]}
 
 
 def integrate_directory_result(ctx, entry, decision, reason, gateway, *, acknowledge_ambiguous=False,
-                               paths=None, orphan=False, admission_check=None):
+                               paths=None, orphan=False, admission_check=None, prepared=None):
     """Use engine CAS/disposition, retaining unknown effects under the same host intent."""
     drive = custody.custody_root(ctx)
-    manifest = capture_directory_result(drive, entry, gateway)
+    prepared = not entry.patch_captured if prepared is None else prepared
+    try:
+        manifest = capture_directory_result(drive, entry, gateway)
+        original = None
+        if decision == "apply" and manifest.get("engine_manifest") and manifest["strategy"] != "direct":
+            cap_dir = custody.delegated_capture_dir(drive, entry.task_id, entry.run_id)
+            original = json.loads((cap_dir / manifest["engine_manifest"]["name"]).read_text())
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return (f"⚠️ INTEGRATE_MANIFEST_UNREADABLE: {type(exc).__name__}: {exc}. "
+                "No request was submitted by this call; retained work and any earlier apply intent remain unresolved.")
     from ouroboros.delegate_shared import orphan_apply_target_ok
     active, target = Path(ctx.active_repo_dir()).resolve(), Path(entry.target_root).resolve()
     if decision == "apply" and not (orphan_apply_target_ok(target, active) if orphan else active == target):
@@ -290,6 +399,14 @@ def integrate_directory_result(ctx, entry, decision, reason, gateway, *, acknowl
         return "⚠️ TOOL_ARG_ERROR (integrate_delegated_patch): paths must be a nonempty list of captured file paths."
     if admission_check and (refusal := admission_check()):
         return refusal
+    from ouroboros.tools.subagent_integration_delegated import prepared_capture_inspection
+    from ouroboros.delegate_collection import capture_projection
+
+    copies = not manifest.get("no_changes") and manifest.get("work_product") != "absent" and manifest["strategy"] != "direct"
+    if inspection := prepared_capture_inspection(entry.run_id, decision, copies,
+                                                 lambda: capture_projection(drive, entry, reader_task_id=ctx.task_id),
+                                                 prepared=prepared):
+        return inspection
     receipt: dict = {}
     absent = manifest.get("work_product") == "absent" and not manifest.get("no_changes")
     if absent and decision == "apply":
@@ -319,6 +436,12 @@ def integrate_directory_result(ctx, entry, decision, reason, gateway, *, acknowl
         receipt = {"source": "engine_work_product", "apply_state": manifest["apply_state"]}
         disposition = "applied"
     else:
+        from ouroboros.workspace_copies import copy_apply_refusal, target_write_refusal
+
+        touched = [row["path"] for row in original["entries"]
+                   if paths is None or row["path"] in paths]
+        if refusal := copy_apply_refusal(ctx, target, touched):
+            return target_write_refusal(target, refusal)
         if entry.patch_apply_pending and not acknowledge_ambiguous:
             return "⚠️ INTEGRATE_DELEGATED_APPLY_AMBIGUOUS: an earlier apply awaits reconciliation; inspect it before retrying."
         request = {"target": {"kind": "original_project"}, "mode": "apply"}
@@ -331,7 +454,10 @@ def integrate_directory_result(ctx, entry, decision, reason, gateway, *, acknowl
         if not custody.record_patch_apply_started(drive, entry, target_root=entry.target_root,
                                                   apply_idempotency_key=key):
             return "⚠️ INTEGRATE_INTENT_UNWRITTEN: the apply intent could not be saved; nothing was submitted."
-        if admission_check and (refusal := admission_check()):
+        refusal = admission_check() if admission_check else ""
+        if not refusal and (write_refusal := copy_apply_refusal(ctx, target, touched)):
+            refusal = target_write_refusal(target, write_refusal)
+        if refusal:
             if not replaying_intent:
                 custody.record_patch_apply_resolved(drive, entry, reason="authority_changed")
             return refusal

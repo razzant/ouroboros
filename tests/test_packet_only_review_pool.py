@@ -108,6 +108,40 @@ def _post(monkeypatch, body: dict, stored: dict | None = None, mode: str = "adva
     return response.status_code, json.loads(response.body), saved
 
 
+@pytest.mark.parametrize("saved, warned", [({}, True), ({"OUROBOROS_REVIEW_ENFORCEMENT": "advisory"}, False)],
+                         ids=["environment-only Blocking", "saved Advisory over environment Blocking"])
+def test_the_save_warning_judges_the_enforcement_the_real_loader_makes_effective(tmp_path, monkeypatch, saved, warned):
+    """Blocking set only in the environment warns on a save that never names it; the owner's saved Advisory wins over
+    it and does not. Real document, real ``load_settings`` and real write: the helper's own blank-enforcement branch
+    is unreachable from this caller, because the merged settings always carry the key."""
+    import asyncio
+
+    from starlette.requests import Request
+
+    import ouroboros.config as cfg
+    import ouroboros.gateway.settings as gws
+
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    for attribute, value in (("SETTINGS_PATH", path), ("DATA_DIR", tmp_path), ("_BOOT_RUNTIME_MODE", None)):
+        monkeypatch.setattr(cfg, attribute, value)
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setattr(gws, "_unrecognised_review_models", lambda models: [])
+    monkeypatch.setattr(gws, "_apply_settings_to_env", lambda *a, **k: None)
+    body = {SUBAGENTS_SETTING: PACKET_ONLY["two Packet reviewers"]}
+
+    async def _receive():
+        return {"type": "http.request", "body": json.dumps(body).encode()}
+
+    request = Request({"type": "http", "method": "POST", "path": "/api/settings", "headers": [("content-type", "application/json")],
+                       "query_string": b"", "app": None}, receive=_receive)
+    response = asyncio.run(gws.api_settings_post(request))
+    answer = json.loads(response.body)
+    assert response.status_code == 200 and answer["status"] == "saved", answer
+    assert (WARNING in answer.get("warnings", [])) is warned
+
+
 @pytest.mark.parametrize("catalog", list(PACKET_ONLY.values()), ids=list(PACKET_ONLY))
 def test_a_blocking_save_of_a_pool_with_no_reading_row_warns_and_still_saves(monkeypatch, catalog):
     status, body, saved = _post(monkeypatch, {SUBAGENTS_SETTING: catalog, "OUROBOROS_REVIEW_ENFORCEMENT": "blocking"})
@@ -158,9 +192,16 @@ def test_review_block_states_an_unanswerable_coupling_part_and_keeps_it_above_fo
 
     five = _catalog(*[_api(f"packet-{index}", f"openai/model-{index}", packet=True) for index in range(5)])
     block = _review_block(monkeypatch, five)
-    assert block["omitted"] == {"rows": 5}
-    assert all(set(row) == {"seat_id", "model"} for row in block["pool"]), "the rows shrank"
-    assert block["coupling_unanswerable"] is True, "the shrink must not lose the fact"
+    assert block["omitted"] == {"rows": 0}
+    assert [row["seat_id"] for row in block["pool"]] == [f"packet-{index}" for index in range(5)]
+    assert all({"seat_id", "model", "effort", "delivery"} <= row.keys() and row["delivery"] == "packet"
+               for row in block["pool"])
+    activity: list = []
+    review_facts_block(activity_out=activity)
+    seats = json.loads(activity[0].split("\n\n", 1)[1])["seats"]
+    assert [seat["seat_id"] for seat in seats] == [row["seat_id"] for row in block["pool"]]
+    assert all({"cost_hint", "cost_usd", "cost_kind", "last_review"} <= seat.keys() for seat in seats)
+    assert block["coupling_unanswerable"] is True, "larger pools must keep the coupling fact and full rows"
 
 
 @pytest.mark.parametrize("catalog", [*READING.values(), _catalog(_api("helper", "x-ai/grok-4.6", marked=False))],

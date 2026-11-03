@@ -110,31 +110,17 @@ def test_task_acceptance_public_actors_carry_only_actual_executions():
     assert not ({"cost", "profile", "raw"} & set(actors[0]["executions"][0]))
 
 
-def test_skill_execution_projection_uses_exact_physical_attempts(monkeypatch, tmp_path):
+def test_skill_execution_projection_uses_the_records_own_seat_rows(tmp_path):
+    """The executions of one skill wave are proved by its review ledger record's rows (rendered as actor
+    records with their usage facts), never by a separate usage projection."""
     from ouroboros import skill_review_runner
-    from ouroboros import usage_accounting
 
-    monkeypatch.setattr(usage_accounting, "skill_review_usage", lambda *_a, **_k: {
-        "attempts": [
-            {
-                "attempt_id": "session-1", "state": "settled",
-                "kind": "subscription_session", "subscription_route": "cursor",
-                "model": "cursor-grok-4.6-high", "credential_profile_id": "private",
-                "cost_usd": 4.0,
-            },
-            {
-                "attempt_id": "api-1", "state": "unresolved", "kind": "attempt",
-                "provider": "openai", "model": "gpt-5.6-sol", "cost_usd": 2.0,
-            },
-            {
-                "attempt_id": "legacy", "state": "settled", "kind": "legacy_metadata",
-                "model": "must-not-project",
-            },
-        ],
-    })
-    result = SimpleNamespace(
-        paid=True, wave_id="wave-1", replayed_from_ts="", raw_actor_records=[],
-    )
+    result = SimpleNamespace(paid=True, reused=False, replayed_from_ts="", raw_actor_records=[
+        {"model_id": "cursor-grok-4.6-high", "status": "responded",
+         "usage": {"delegated_route": "cursor", "resolved_model": "cursor-grok-4.6-high", "applied_profile": "private"}},
+        {"model_id": "gpt-5.6-sol", "status": "responded", "usage": {"provider": "openai", "resolved_model": "gpt-5.6-sol"}},
+        {"model_id": "never-started", "status": "error", "usage": {}},
+    ])
 
     assert skill_review_runner._skill_review_executions(tmp_path, "alpha", result) == [
         {"kind": "harness", "harness_id": "cursor", "model": "cursor-grok-4.6-high"},
@@ -142,19 +128,13 @@ def test_skill_execution_projection_uses_exact_physical_attempts(monkeypatch, tm
     ]
 
 
-def test_skill_replay_never_claims_a_new_physical_execution(monkeypatch, tmp_path):
+def test_skill_reuse_never_claims_a_new_physical_execution(tmp_path):
     from ouroboros import skill_review_runner
-    from ouroboros import usage_accounting
 
-    monkeypatch.setattr(
-        usage_accounting, "skill_review_usage",
-        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("replay must not query physical rows")),
-    )
-    replay = SimpleNamespace(
-        paid=True, wave_id="old-wave", replayed_from_ts="2026-08-25T00:00:00Z",
-        raw_actor_records=[],
-    )
-    assert skill_review_runner._skill_review_executions(tmp_path, "alpha", replay) == []
+    reused = SimpleNamespace(paid=False, reused=True, replayed_from_ts="", raw_actor_records=[
+        {"model_id": "gpt-5.6-sol", "usage": {"provider": "openai", "resolved_model": "gpt-5.6-sol"}}])
+    assert skill_review_runner._skill_review_executions(tmp_path, "alpha", reused) == []
+    assert skill_review_runner._skill_review_executions(tmp_path, "alpha", None) == []
 
 
 def test_skill_ui_projection_revalidates_the_public_execution_wire():

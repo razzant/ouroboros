@@ -119,7 +119,10 @@ def test_continue_of_a_converted_task_admits_its_new_root_in_the_converted_room(
     worker_task = _start(host, chat_id=raw_chat, project_id=raw_project)
     project = _convert(host)
     pid, chat = project["id"], project["chat_id"]
-    assert host.workers.RUNNING["pred-1"]["task"]["project_id"] == pid, "the conversion moved the live lane"
+    # Placement is the durable binding; the executing lane keeps its lease until its next
+    # execution boundary (D5: no relabelling of an executing lease).
+    assert project_binding_for_task(host.root, "pred-1")["project_id"] == pid
+    assert host.workers.RUNNING["pred-1"]["task"]["project_id"] == raw_project, "the conversion relabelled the live lane"
     # The room's folder may be (re)attached later; Continue keeps the prepared one.
     elsewhere = host.root / "room-folder"
     elsewhere.mkdir()

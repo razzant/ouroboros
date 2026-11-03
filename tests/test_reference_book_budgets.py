@@ -1,17 +1,17 @@
-"""A change does not make a reference book larger (the official line's rule).
+"""A change does not make a reference book, BIBLE.md or the prompts larger (the official line's rule).
 
 Each book is measured as the UTF-8 length of its COMPOSED text (the entrypoint and every
-listed chapter, ``reference_books.compose_book``) at this change's tip and at its event base.
+listed chapter, ``reference_books.compose_book``) at this change's tip and at its event base;
+BIBLE.md, and the prompt files together, as their UTF-8 bytes (``reference_books.RULED_TEXTS``).
 The rule is pairwise: there is no stored number and no reserve, so text a change adds to a
 book is paid by shortening the same book in the same change.
 
-Official-CI ``size_ratchet`` lane only: local runs exclude the marker and every local surface
-reports the same balance as a fact (BIBLE P3 c5). The workflow sets ``OURO_BOOK_GROWTH_MODE``:
-``block`` for the official repository's owner/member/collaborator pull requests and pushes to
-``ouroboros``, ``warn`` for outside contributors and any fork's own CI. ``approved`` requires
-the owner's ``book-growth`` label; pushes bind it to the exact landed PR
-(``scripts/book_growth_mode.py``). Unset mode means ``block`` when
-``OURO_SIZE_RATCHET_BASE_REF`` resolves; without a base the book comparison skips.
+The opt-in ``size_ratchet`` lane is excluded from default local runs. Manual/tag CI
+has no per-change base, so this comparison skips there. Local qualification supplies
+``OURO_SIZE_RATCHET_BASE_REF``; unset ``OURO_BOOK_GROWTH_MODE`` then means ``block``.
+``scripts/book_growth_mode.py`` retains event-specific block/warn/approved semantics
+for explicit callers; an owner's ``book-growth`` label can approve an exception.
+Every local information surface reports the balance without blocking (BIBLE P3 c5).
 """
 from __future__ import annotations
 
@@ -21,7 +21,9 @@ import subprocess
 
 import pytest
 
-from ouroboros.reference_books import BOOK_ENTRYPOINTS, compose_book, load_reference_book
+from ouroboros.reference_books import (
+    BOOK_ENTRYPOINTS, RULED_TEXTS, compose_book, load_reference_book, ruled_text_sizes, text_name,
+)
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 BASE_REF_ENV = "OURO_SIZE_RATCHET_BASE_REF"
@@ -65,23 +67,29 @@ def composed_bytes(repo: pathlib.Path, book_id: str, ref: str = "") -> int | Non
         return None
 
 
+def ruled_text_bytes(repo: pathlib.Path, text_id: str, ref: str = "") -> int | None:
+    """The ruled text's UTF-8 bytes in the checkout, or at ``ref``; ``None`` when absent there."""
+    sizes = ruled_text_sizes(repo, text_id, ref)
+    return None if sizes is None else sum(sizes.values())
+
+
 def book_growth_verdict(book_id: str, base: int | None, tip: int, mode: str) -> tuple[bool, str]:
-    """``(passes, message)`` for one book; the message is empty when the book did not grow."""
+    """``(passes, message)`` for one book or ruled text; the message is empty when it did not grow."""
     if base is None or tip <= base:
         return True, ""
-    name = f"the {book_id.title()} book"
+    name = f"the {text_name(book_id)}" if book_id in BOOK_ENTRYPOINTS else text_name(book_id)
     if mode == "approved":
         return True, f"{name} grows by {tip - base} bytes; the repository owner approved it (book-growth label)."
     if mode == "warn":
         return True, (f"{name} grows by {tip - base} bytes; advisory for outside contributors and forks. "
                       "Official maintainers will make room at integration.")
-    return False, (f"{name} grew by {tip - base} bytes ({base} -> {tip}); a change ends each book no larger "
-                   "than at its base, so shorten the same book in this change (the owner's book-growth "
-                   "label on the PR is the only exception).")
+    return False, (f"{name} grew by {tip - base} bytes ({base} -> {tip}); a change ends each book, BIBLE.md "
+                   "and the prompts no larger than at its base, so shorten the same text in this change "
+                   "(the owner's book-growth label on the PR is the only exception).")
 
 
-@pytest.mark.size_ratchet
-def test_a_change_does_not_grow_a_reference_book(capsys):
+def _assert_no_unapproved_growth(capsys, measured) -> None:
+    """``measured``: ``(id, annotated file, measure(ref))`` per text; growth fails unless approved or advisory."""
     if not measures_one_change(os.environ):
         pytest.skip("a push to a release branch spans many changes; the rule measures one")
     base = growth_base(REPO, os.environ.get(BASE_REF_ENV))
@@ -89,15 +97,28 @@ def test_a_change_does_not_grow_a_reference_book(capsys):
         pytest.skip(f"{BASE_REF_ENV} names no base commit this clone holds, so this change cannot be measured")
     mode = (os.environ.get(MODE_ENV) or "block").strip()
     faults: list[str] = []
-    for book_id, entrypoint in BOOK_ENTRYPOINTS.items():
-        passes, message = book_growth_verdict(book_id, composed_bytes(REPO, book_id, base),
-                                              composed_bytes(REPO, book_id), mode)
+    for text_id, path, measure in measured:
+        passes, message = book_growth_verdict(text_id, measure(base), measure("") or 0, mode)
         if message and passes:  # an annotation in the job log; a captured print would never reach it
             with capsys.disabled():
-                print(f"::{'notice' if mode == 'approved' else 'warning'} file={entrypoint}::{message}")
+                print(f"::{'notice' if mode == 'approved' else 'warning'} file={path}::{message}")
         elif message:
             faults.append(message)
-    assert not faults, f"Reference-book growth since {base[:12]}:\n" + "\n".join(faults)
+    assert not faults, f"Text growth since {base[:12]}:\n" + "\n".join(faults)
+
+
+@pytest.mark.size_ratchet
+def test_a_change_does_not_grow_a_reference_book(capsys):
+    _assert_no_unapproved_growth(capsys, [
+        (book_id, entrypoint, lambda ref, book_id=book_id: composed_bytes(REPO, book_id, ref))
+        for book_id, entrypoint in BOOK_ENTRYPOINTS.items()])
+
+
+@pytest.mark.size_ratchet
+def test_a_change_does_not_grow_bible_or_the_prompts(capsys):
+    _assert_no_unapproved_growth(capsys, [
+        (text_id, path, lambda ref, text_id=text_id: ruled_text_bytes(REPO, text_id, ref))
+        for text_id, path in RULED_TEXTS.items()])
 
 
 # ---------------------------------------------------------------- the decision, unmarked
@@ -228,7 +249,8 @@ def test_both_ci_jobs_feed_the_size_lane_the_decided_mode(job):
     assert mode["env"]["REF"] == "${{ github.ref }}"
     assert steps.index(mode) < steps.index(size)
     assert size["env"][MODE_ENV] == "${{ steps.book_mode.outputs.mode }}"
-    assert workflow["jobs"][job]["permissions"] == {"contents": "read", "pull-requests": "read"}
+    # PR label events for this mode; issue label events for the accepted-failure check.
+    assert workflow["jobs"][job]["permissions"] == {"contents": "read", "pull-requests": "read", "issues": "read"}
 
 
 PUSH_SHA = "a" * 40
@@ -431,3 +453,31 @@ def test_push_mode_reaches_the_size_lane_and_only_growth_fails(monkeypatch, caps
     else:
         with pytest.raises(AssertionError, match="grew by 1 bytes"):
             test_a_change_does_not_grow_a_reference_book(capsys)
+
+
+@pytest.mark.parametrize("text_id,name", [("constitution", "BIBLE.md"), ("prompts", "Prompts")])
+@pytest.mark.parametrize("mode,tip,passes", [
+    ("block", 101, False), ("", 101, False), ("approved", 101, True), ("warn", 101, True),
+    ("block", 100, True), ("block", 99, True),
+])
+def test_bible_and_prompt_growth_fails_unless_the_owner_approved(monkeypatch, capsys, text_id, name, mode, tip, passes):
+    import sys
+
+    consumer = sys.modules[__name__]
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
+    monkeypatch.setenv(MODE_ENV, mode)
+    monkeypatch.setattr(consumer, "growth_base", lambda repo, ref: "base")
+    monkeypatch.setattr(consumer, "ruled_text_bytes",
+                        lambda repo, measured, ref="": tip if measured == text_id and not ref else 100)
+    if passes:
+        test_a_change_does_not_grow_bible_or_the_prompts(capsys)
+    else:
+        with pytest.raises(AssertionError, match=f"{name} grew by 1 bytes"):
+            test_a_change_does_not_grow_bible_or_the_prompts(capsys)
+
+
+def test_the_verdict_names_bible_and_the_prompts():
+    assert book_growth_verdict("prompts", 10, 15, "approved") == (
+        True, "Prompts grows by 5 bytes; the repository owner approved it (book-growth label).")
+    passes, said = book_growth_verdict("constitution", 10, 11, "block")
+    assert not passes and said.startswith("BIBLE.md grew by 1 bytes (10 -> 11)") and "same text" in said

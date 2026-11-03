@@ -2,6 +2,7 @@ import asyncio, importlib.util, json, sys, types
 from pathlib import Path
 
 import pytest
+from ouroboros import dialogue_store as ds
 
 
 def _load():
@@ -94,7 +95,7 @@ def test_budget_notification_is_silent_without_bounded_accounting(tmp_path, monk
     assert "budget_threshold" not in state
 
 
-# A root finish in Main: the one audience both the floor and the toggle push to.
+# A root finish in Main: the audience of opt-in completion notifications.
 _OWNER_ROOT = {"summary_kind": "terminal_root_projection", "chat_id": 1}
 
 
@@ -104,16 +105,28 @@ def _root(tid, phase, **fields):
 
 
 def _write_rows(data, rows):
-    with open(data / "logs" / "chat.jsonl", "w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    for row in rows:
+        ds.append(data, "chat", row)
 
 
-def test_non_clean_root_finish_reaches_the_owner_with_the_toggle_off(tmp_path, monkeypatch):
-    """The whole audience and phase contract in one table (owner Q8, astra A-F6):
-    exactly the warn/error/cancelled ROOTS in owner-facing chats push, in row order;
-    the clean root, a child, the hidden partition, an A2A room, a chat-less row and
-    a kind-less row send nothing; and every id is consumed."""
+def test_effectively_quiet_runs_skip_push_but_notice_bearing_runs_notify(tmp_path, monkeypatch):
+    nt = _load(); api, data = _api(tmp_path); _Rec.sent = []
+    monkeypatch.setattr(nt, "TelegramClient", _Rec)
+    _write_rows(data, [
+        _root("quiet", "done", wake_silent=True, quiet_effective=True),
+        _root("notice", "warn", wake_silent=True, quiet_effective=False,
+              completion_notice={"neutral": False, "detail": "A tool failed.", "phase": "warn"}),
+        _root("ordinary", "done", wake_silent=False, quiet_effective=False),
+    ])
+    state = {"notified_task_ids": []}
+    asyncio.run(nt._check_tasks_notify(api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, state, "en"))
+    assert len(_Rec.sent) == 2
+    assert "A tool failed." in _Rec.sent[0][1] and "ordinary" in _Rec.sent[1][1]
+    assert state["notified_task_ids"] == ["quiet", "notice", "ordinary"]
+
+
+def test_off_suppresses_every_phase_and_consumes_every_id(tmp_path, monkeypatch):
+    """OFF includes failures/cancellations; seen IDs prevent a backlog on enable."""
     nt = _load(); api, data = _api(tmp_path); _Rec.sent = []
     monkeypatch.setattr(nt, "TelegramClient", _Rec)
     _write_rows(data, [
@@ -125,15 +138,15 @@ def test_non_clean_root_finish_reaches_the_owner_with_the_toggle_off(tmp_path, m
     ])
     state = {"notified_task_ids": []}
     asyncio.run(nt._check_tasks_notify(api, {}, 42, state, "en"))
-    assert [text for _chat, text in _Rec.sent] == [
-        "⚠️ Task warn1 done with warnings", "❌ Task err1 failed", "🚫 Task stop1 cancelled",
-    ]
+    assert _Rec.sent == []
     assert state["notified_task_ids"] == [
         "done1", "warn1", "err1", "stop1", "child1", "hidden1", "a2a1", "nochat1", "nokind1"]
+    asyncio.run(nt._check_tasks_notify(api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, state, "en"))
+    assert _Rec.sent == []
 
 
-def test_the_toggle_adds_clean_root_finishes_and_never_widens_the_audience(tmp_path, monkeypatch):
-    """With task notifications on, a clean ROOT finish in an owner room joins the floor; a
+def test_enabled_notices_never_widen_the_audience(tmp_path, monkeypatch):
+    """With task notifications on, a ROOT finish in an owner room is announced; a
     child, the hidden partition, an A2A room and a chat-less or kind-less row still send
     nothing (the toggle once pushed every finish, children included), and all are seen."""
     nt = _load(); api, data = _api(tmp_path); _Rec.sent = []
@@ -151,7 +164,7 @@ def test_the_toggle_adds_clean_root_finishes_and_never_widens_the_audience(tmp_p
     assert state["notified_task_ids"] == ["done1", "warn1", "child1", "hidden1", "a2a1", "nochat1", "nokind1"]
 
 
-def test_the_floor_and_the_toggle_are_one_producer_and_never_double(tmp_path, monkeypatch):
+def test_enabled_notices_are_one_producer_and_never_double(tmp_path, monkeypatch):
     nt = _load(); api, data = _api(tmp_path); _Rec.sent = []
     monkeypatch.setattr(nt, "TelegramClient", _Rec)
     _write_rows(data, [_root("warn1", "warn")])
@@ -172,7 +185,7 @@ def test_task_line_carries_the_card_reason_sentence(tmp_path, monkeypatch):
         _root("adv1", "warn", reason_detail=TASK_CAUSE_PHRASES["plan_review_advisory"]),
         _root("plain1", "warn"),
     ])
-    asyncio.run(nt._check_tasks_notify(api, {}, 42, {"notified_task_ids": []}, "en"))
+    asyncio.run(nt._check_tasks_notify(api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, {"notified_task_ids": []}, "en"))
     assert [text for _chat, text in _Rec.sent] == [
         f"⚠️ Task adv1 done with warnings\n{TASK_CAUSE_PHRASES['plan_review_advisory']}",
         "⚠️ Task plain1 done with warnings",
@@ -200,7 +213,7 @@ def test_enabling_task_notifications_later_never_blasts_the_backlog(tmp_path, mo
     asyncio.run(nt._check_tasks_notify(api, {}, 42, state, "en"))  # toggle off: seen, unsent
     asyncio.run(nt._check_tasks_notify(api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, state, "en"))
     assert _Rec.sent == [] and set(state["notified_task_ids"]) == {"ok1", "ok2", "ok3"}
-    _write_rows(data, [_root("ok1", "done"), _root("ok2", "done"), _root("ok3", "done"), _root("ok4", "done")])
+    _write_rows(data, [_root("ok4", "done")])
     asyncio.run(nt._check_tasks_notify(api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, state, "en"))
     assert [text for _chat, text in _Rec.sent] == ["✅ Task ok4 done"]
 
@@ -216,7 +229,7 @@ def test_notifier_never_edits_the_silent_mode_tracked_message():
 
 
 def test_the_notifier_loop_runs_the_tasks_lane_with_both_toggles_off(tmp_path, monkeypatch):
-    """The floor is not opt-in: a pinned chat alone runs the tasks check."""
+    """The disabled lane still observes IDs, but must not send anything."""
     nt = _load(); api, data = _api(tmp_path); _Rec.sent = []
     monkeypatch.setattr(nt, "TelegramClient", _Rec)
     monkeypatch.setattr(nt, "_load_settings", lambda _api: {"TELEGRAM_CHAT_ID": "42"})
@@ -231,7 +244,8 @@ def test_the_notifier_loop_runs_the_tasks_lane_with_both_toggles_off(tmp_path, m
     monkeypatch.setattr(nt.asyncio, "sleep", sleep)
     with pytest.raises(RuntimeError):
         asyncio.run(nt._make_notifier(api)())
-    assert [text for _chat, text in _Rec.sent] == ["⚠️ Task warn1 done with warnings"]
+    assert _Rec.sent == []
+    assert nt._load_notif_state(api)["notified_task_ids"] == ["warn1"]
     assert sleeps == [30]
 
 
@@ -244,9 +258,8 @@ def test_tasks_notify_primes_then_fires(tmp_path, monkeypatch):
     settings = {"TELEGRAM_NOTIFY_TASKS": "on"}; state = {}
     asyncio.run(nt._check_tasks_notify(api, settings, 42, state, "en"))   # primes, no send
     assert _Rec.sent == [] and "old1" in state["notified_task_ids"]
-    with open(chat, "a", encoding="utf-8") as f:
-        f.write(json.dumps({"type": "task_summary", **_OWNER_ROOT, "task_id": "new1", "rounds": 5,
-                            "outcome_axes": {"lifecycle": "completed"}}) + "\n")
+    ds.append(data, "chat", {"type": "task_summary", **_OWNER_ROOT, "task_id": "new1", "rounds": 5,
+                             "outcome_axes": {"lifecycle": "completed"}})
     asyncio.run(nt._check_tasks_notify(api, settings, 42, state, "en"))
     assert len(_Rec.sent) == 1 and "new1" in _Rec.sent[0][1] and "5r" in _Rec.sent[0][1]
 
@@ -265,6 +278,33 @@ def test_task_summary_scan_uses_bounded_live_tail(tmp_path, monkeypatch):
 
     assert rows == [("bounded", {"type": "task_summary", "task_id": "bounded"})]
     assert seen == {"path": path, "max_entries": 123, "tail_bytes": 256 * 1024}
+
+
+@pytest.mark.parametrize("problem", ["pending", "mismatch", "invalid"])
+def test_unknown_dialogue_coverage_never_advances_notified_ids(tmp_path, problem):
+    from ouroboros import dialogue_import as di
+    from tests._dialogue import seed
+
+    nt = _load()
+    api, data = _api(tmp_path)
+    row = _root("older", "done")
+    if problem == "invalid":
+        seed(data, live={"chat": [row, "{invalid\n"]})
+    else:
+        seed(data, archives={"chat_20261016T000000.jsonl": [row]})
+    ds.ensure(data)
+    if problem == "mismatch":
+        (data / "archive/chat_20261016T000000.jsonl").write_text("changed\n", encoding="utf-8")
+        di.run_dialogue_import(data)
+    state = {}
+    error, delivered = asyncio.run(nt._check_tasks_notify(api, {}, 42, state, "en"))
+    assert isinstance(error, ds.StoreError) and not delivered and state == {}
+    assert {"pending": "still importing", "mismatch": "could not be imported",
+            "invalid": "invalid intervals"}[problem] in str(error)
+    if problem == "pending":
+        di.run_dialogue_import(data)
+        assert asyncio.run(nt._check_tasks_notify(api, {}, 42, state, "en")) == (None, False)
+        assert state == {"notified_task_ids": ["older"]}
 
 
 def test_tasks_notify_waits_for_latest_final_summary_for_each_task(tmp_path, monkeypatch):
@@ -292,8 +332,7 @@ def test_tasks_notify_waits_for_latest_final_summary_for_each_task(tmp_path, mon
                          "execution": {"status": "ok"},
                          "review": {"status": "degraded"}},
     }
-    with open(chat, "a", encoding="utf-8") as f:
-        f.write(json.dumps(terminal) + "\n")
+    ds.append(data, "chat", terminal)
 
     asyncio.run(nt._check_tasks_notify(
         api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, state, "en",
@@ -782,7 +821,7 @@ def test_tasks_notify_word_and_icon_follow_the_host_phase(tmp_path, monkeypatch)
     asyncio.run(nt._check_tasks_notify(api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, {"notified_task_ids": []}, "en"))
     assert [text for _chat, text in _Rec.sent] == [
         "❌ Task fail1 failed · 3r",
-        "🚫 Task stop1 cancelled",
+        "🚫 Task stop1 stopped",
         "⚠️ Task warn1 done with warnings",
         "✅ Task ok1 done",
         "⚠️ Task odd1 done · failed",  # unknown phase: the legacy axes rule
@@ -796,14 +835,70 @@ def test_tasks_notify_word_and_icon_follow_the_host_phase(tmp_path, monkeypatch)
     monkeypatch.setenv("OUROBOROS_UI_LANGUAGE", "ru")
     memory.update_memory(data, "ru", lambda doc: (memory.apply_generated(doc, {
         "code:tg.notify.task_finished": {"text": "{icon} Задача {id} {word}{tail}"},
-        "code:task.headline.error": {"text": "Ошибка"}, "code:task.headline.cancelled": {"text": "Отменена"},
+        "code:task.headline.error": {"text": "Ошибка"}, "code:task.headline.cancelled": {"text": "Остановлена"},
         "code:task.headline.warn": {"text": "Готова с предупреждениями"}, "code:task.headline.done": {"text": "Готова"},
     }, model="test"), doc)[1], create=True)
     asyncio.run(nt._check_tasks_notify(api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, {"notified_task_ids": []}, "ru"))
     assert [text for _chat, text in _Rec.sent] == [
         "❌ Задача fail1 ошибка · 3r",
-        "🚫 Задача stop1 отменена",
+        "🚫 Задача stop1 остановлена",
         "⚠️ Задача warn1 готова с предупреждениями",
         "✅ Задача ok1 готова",
         "⚠️ Задача odd1 готова · failed",
     ]
+
+
+def _tree_cost(amount, *, final=True, unpriced=False, open_=False, rows=True, scope="root_tree"):
+    return {"scope": scope, "tracked_amount": amount, "has_unpriced": unpriced, "tracked_final": final,
+            "accounting_open": open_, "has_rows": rows}
+
+
+def _notify_one_root(nt, api, data, monkeypatch, result):
+    _Rec.sent = []
+    monkeypatch.setattr(nt, "TelegramClient", _Rec)
+    monkeypatch.setattr("ouroboros.task_results.load_task_result", lambda _root, _tid: result)
+    row = {"type": "task_summary", **_OWNER_ROOT, "task_id": "cost1",
+           "outcome_axes": {"lifecycle": {"status": "completed"}}}
+    (data / "logs" / "chat.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    asyncio.run(nt._check_tasks_notify(api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, {"notified_task_ids": []}, "en"))
+    return [text for _chat, text in _Rec.sent]
+
+
+@pytest.mark.parametrize(("result", "line"), [
+    ({"cost_presentation": _tree_cost(3.42)}, "✅ Task cost1 done · $3.42"),
+    ({"cost_presentation": _tree_cost(3.42, final=False, open_=True)}, "✅ Task cost1 done · up to $3.42"),
+    ({"cost_presentation": _tree_cost(3.42, final=False, unpriced=True)}, "✅ Task cost1 done · Tracked: up to $3.42"),
+    ({"cost_presentation": _tree_cost(3.42, unpriced=True)}, "✅ Task cost1 done · Tracked: $3.42"),
+    ({"cost_presentation": _tree_cost(0.125)}, "✅ Task cost1 done · $0.13"),  # toFixed(2) rounds a tie up
+    ({"cost_presentation": _tree_cost(0.0)}, "✅ Task cost1 done · $0.00"),  # a priced zero is a real zero
+])
+def test_task_notify_shows_the_cost_in_the_cards_words(tmp_path, monkeypatch, result, line):
+    """#971: the phone line carries the card's cost words for the root's whole tree."""
+    nt = _load(); api, data = _api(tmp_path)
+    assert _notify_one_root(nt, api, data, monkeypatch, result) == [line]
+
+
+@pytest.mark.parametrize("result", [
+    {"cost_presentation": _tree_cost(None, final=False, open_=True, rows=False)},  # the card's "Cost unknown"
+    {"cost_presentation": _tree_cost(None, final=False, unpriced=True)},  # only unpriced rows: no measured zero
+    {"cost_presentation": None, "cost_accounting_status": "unavailable"},
+    {"cost_presentation": _tree_cost(1.5, scope="own")},  # a root's own share is not the tree's cost
+    {"cost_usd": 7.98},  # the retired alias is not a current price
+    {"accounted_upper_bound_usd": 7.98, "cost_usd": 7.98},
+])
+def test_task_notify_says_nothing_about_money_it_does_not_know(tmp_path, monkeypatch, result):
+    nt = _load(); api, data = _api(tmp_path)
+    assert _notify_one_root(nt, api, data, monkeypatch, result) == ["✅ Task cost1 done"]
+
+
+def test_task_notify_reads_the_cost_the_task_result_store_keeps(tmp_path, monkeypatch):
+    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
+
+    nt = _load(); api, data = _api(tmp_path); _Rec.sent = []
+    monkeypatch.setattr(nt, "TelegramClient", _Rec)
+    write_task_result(data, "cost2", STATUS_COMPLETED, cost_presentation=_tree_cost(12.5, final=False))
+    row = {"type": "task_summary", **_OWNER_ROOT, "task_id": "cost2",
+           "outcome_axes": {"lifecycle": {"status": "completed"}}}
+    (data / "logs" / "chat.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    asyncio.run(nt._check_tasks_notify(api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, {"notified_task_ids": []}, "en"))
+    assert [text for _chat, text in _Rec.sent] == ["✅ Task cost2 done · up to $12.50"]

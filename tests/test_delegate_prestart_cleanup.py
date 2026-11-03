@@ -18,6 +18,7 @@ from tests._delegated_transport_shared import (
 from tests._review_session_route_shared import (
     FakeGateway, _run_session_directly, fake_route as _fake_route,
 )
+from tests._store_journal_shared import use_journal
 from tests.test_delegated_start_contention import hold_request
 
 _owned_gateway_uses_each_test_transport = _owned_gateway_fixture
@@ -87,8 +88,10 @@ def failures(root):
             if line.strip() and (row := json.loads(line)).get("type") == custody.START_FAILED]
 
 
+@pytest.mark.parametrize("journal", ["PERSIST", "WAL"])
 @pytest.mark.parametrize("control", ["stop", "deadline", "closed"])
-def test_interrupted_unsent_claim_retires_fresh_registration(start_case, tmp_path, monkeypatch, control):
+def test_interrupted_unsent_claim_retires_fresh_registration(start_case, tmp_path, monkeypatch, control, journal):
+    use_journal(monkeypatch, journal)  # a held write fails its COMMIT (rollback journal), its BEGIN (WAL)
     start, gateway, _shared, _fail, _state = start_case
     cancelled = []
     with task_model_wait_scope(task={"id": "t-b", "_attempt": 1}, drive_root=tmp_path,
@@ -177,10 +180,12 @@ def test_cleanup_failure_keeps_typed_pause_refusal(start_case, monkeypatch):
     assert gateway().start_requests == []
 
 
-def test_unowned_claim_wait_expiry_retires_without_post(start_case, tmp_path, monkeypatch):
+@pytest.mark.parametrize("journal", ["PERSIST", "WAL"])
+def test_unowned_claim_wait_expiry_retires_without_post(start_case, tmp_path, monkeypatch, journal):
     from ouroboros import _usage_wait, delegate_custody_current, store
     from tests.test_admission_contention import database_reader
 
+    use_journal(monkeypatch, journal)  # a held write fails its COMMIT (rollback journal), its BEGIN (WAL)
     start, gateway, _shared, _fail, _state = start_case
     original = delegate_custody_current.publish
     events = []
@@ -189,8 +194,8 @@ def test_unowned_claim_wait_expiry_retires_without_post(start_case, tmp_path, mo
         if event["type"] != custody.START_REQUESTED:
             return original(root, event, **kwargs)
         events.append(event)
-        # End the real read before cleanup; only the failed COMMIT is contended.
-        with database_reader(tmp_path):
+        # Held through the claim's write only and released before cleanup.
+        with database_reader(tmp_path, write=True):
             return original(root, event, **kwargs)
 
     monkeypatch.setattr(delegate_custody_current, "publish", held)
@@ -204,6 +209,8 @@ def test_unowned_claim_wait_expiry_retires_without_post(start_case, tmp_path, mo
 
 
 def test_untyped_transport_failure_keeps_possible_run_registration(start_case, tmp_path):
+    from ouroboros.delegate_pending import request_body
+
     start, gateway, _shared, fail, _state = start_case
     error = MemoryError("POST outcome unknown")
     fail(error)
@@ -212,7 +219,11 @@ def test_untyped_transport_failure_keeps_possible_run_registration(start_case, t
     assert caught.value is error
     assert len(gateway().start_requests) == 1 and gateway().removals == []
     pending = custody.pending_invocations(tmp_path)
-    assert len(pending) == 1 and pending[0]["request"]
+    assert len(pending) == 1 and pending[0]["request"] is None and pending[0]["request_ref"]
+    sent = gateway().start_requests[0]
+    body, key = (sent, gateway().start_keys[0]) if isinstance(sent, dict) else sent
+    assert request_body(tmp_path, pending[0]) == body
+    assert pending[0]["invocation_id"] == key
 
 
 def test_successful_start_keeps_its_registration(start_case):

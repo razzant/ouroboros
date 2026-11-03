@@ -41,6 +41,8 @@ def test_checkout_and_reset_retries_an_old_index_lock_without_removing_it(monkey
     calls = {"checkout": 0}
 
     def fake_run(cmd, cwd=None, capture_output=False, text=False, check=False, env=None):
+        if cmd == ["git", "rev-parse", "--path-format=absolute", "--git-path", "index"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=str(git_dir / "index"), stderr="")
         if cmd[:3] == ["git", "rev-parse", "--verify"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[:2] == ["git", "checkout"]:

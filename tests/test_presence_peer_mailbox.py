@@ -60,9 +60,10 @@ print(json.dumps({'forward': _forward_to_worker(ctx, tid, 'A peer found the miss
 '''
 
 
-def test_cross_process_peer_reaches_real_presence_drain_without_owner_authority(tmp_path):
+def test_cross_process_peer_reaches_real_presence_drain_without_owner_authority(tmp_path, monkeypatch):
     """A real producer is live while a fresh interpreter writes/reads its result."""
     repo, data, sender = (tmp_path / name for name in ("repo", "data", "sender-private"))
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(data))  # Parent and child share one install.
     for path in (repo, data, sender):
         path.mkdir()
     seen = {}
@@ -182,7 +183,7 @@ def test_cancellation_and_missing_sender_context_still_refuse(tmp_path, monkeypa
 @pytest.mark.parametrize("foreign", [True, False])
 def test_presence_sender_ceiling_and_binding_are_not_widened(tmp_path, foreign):
     from tests.test_presence_own_work import BINDING, OTHER, _ceiling, _registry
-    from ouroboros.presence_capabilities import PresenceToolTarget
+    from tests.frozen_presence_capabilities import PresenceToolTarget
 
     tid = _inline(tmp_path, metadata={"presence": {"binding_id": OTHER if foreign else BINDING},
                                      "presence_event_identity": "event-identity"})

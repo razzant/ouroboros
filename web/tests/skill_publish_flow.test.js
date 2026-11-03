@@ -40,7 +40,7 @@ function preflight(state = 'ready', overrides = {}) {
 
 test('the browser renders all five backend-authored states without reclassifying reason_code', () => {
     const expected = {
-        ready: { canStart: true, label: 'Publish to OuroborosHub' },
+        ready: { canStart: true, label: 'Publish' },
         warnings: { canStart: true, label: 'Publish with warnings' },
         needs_attention: { canStart: true, label: 'Ask Ouroboros to fix and publish' },
         repairable: { canStart: true, label: 'Ask Ouroboros to fix and publish' },
@@ -55,6 +55,38 @@ test('the browser renders all five backend-authored states without reclassifying
         assert.equal(model.dialog.confirmLabel, want.label);
         assert.equal(model.dialog.alert, !want.canStart);
         assert.match(model.dialog.body, new RegExp(`${state} summary`));
+    }
+});
+
+test('publication confirmation and task preserve public, private and unknown visibility', async () => {
+    for (const privateRepository of [true, false, undefined, null]) {
+        const disclosure = privateRepository === true
+            ? "Everything in the skill's folder goes to your private repository."
+            : privateRepository === false ? "Everything in the skill's folder becomes public."
+                : "Everything in the skill's folder goes to Owner/Configured-Hub; whoever can read that repository can see it.";
+        const result = await runSkillPublishFlow('demo', {
+            privateRepository,
+            destination: { source_id: 'my-skills', mode: 'entry' },
+            preflightImpl: async () => preflight(),
+            dialogImpl: async (model) => { assert.ok(model.body.includes(disclosure), model.body); return true; },
+            createTaskImpl: async () => ({ ok: true }),
+        });
+        assert.equal(result.started, true);
+        for (const field of ['description', 'constraints', 'context']) {
+            assert.ok(result.payload[field].includes(disclosure), `${field}: ${result.payload[field]}`);
+            assert.equal(result.payload[field].includes('becomes public'), privateRepository === false);
+            assert.equal(result.payload[field].includes('private repository'), privateRepository === true);
+        }
+        assert.deepEqual(result.payload.metadata.skill_publish_target.destination, { source_id: 'my-skills', mode: 'entry' },
+            'visibility copy adds no fields to the shared destination contract');
+    }
+});
+
+test('the known public hub is disclosed as public without guessing visibility for other repositories', () => {
+    for (const repository of ['razzant/OuroborosHub', 'https://github.com/razzant/OuroborosHub.git/', 'owner/private-hub']) {
+        const model = skillPublishDialogModel(preflight('ready', { repository }));
+        assert.equal(model.dialog.body.includes('becomes public'), repository !== 'owner/private-hub');
+        assert.equal(model.dialog.body.includes('whoever can read that repository'), repository === 'owner/private-hub');
     }
 });
 
@@ -76,7 +108,7 @@ test('a typed hard block renders and starts no task even without a canonical tar
     assert.equal(result.started, false);
     assert.equal(creates, 0);
     assert.equal(dialogs.length, 1);
-    assert.equal(dialogs[0].title, 'Publishing is unavailable');
+    assert.equal(dialogs[0].title, 'Can’t publish');
     assert.equal(dialogs[0].alert, true);
 });
 
@@ -121,7 +153,7 @@ test('explicit confirmation creates exactly one ordinary skill_publish task from
     assert.match(payload.constraints, /python -m ouroboros\.betterleaks_runtime install/);
     assert.match(payload.constraints, /No account or authentication change is authorized/);
     assert.match(payload.constraints, /missing or corrupt/);
-    assert.match(payload.context, /explicitly confirmed public submission/);
+    assert.match(payload.context, /explicitly confirmed publication/);
     assert.match(payload.context, /evidence for the next LLM turn/);
     assert.match(payload.context, /"state":"needs_attention"/);
     assert.match(payload.context, /"reason_code":"review_blockers"/);
@@ -292,4 +324,42 @@ test('named API functions use the encoded selected route and ordinary task route
     assert.equal(calls[1].url, '/api/tasks');
     assert.equal(calls[0].init.method, 'POST');
     assert.equal(calls[1].init.method, 'POST');
+});
+
+test('the destination the owner chose reaches the preflight and the task, and is absent when none was chosen', async () => {
+    const destination = { source_id: 'ouroboros-community', mode: 'new_entry' };  // SkillPublishDestinationChoice
+    const calls = { preflight: [], create: [] };
+    const result = await runSkillPublishFlow('demo', {
+        destination,
+        preflightImpl: async (...args) => { calls.preflight.push(args); return preflight('ready', { skill: 'demo', repository: 'razzant/OuroborosHub' }); },
+        dialogImpl: async () => true,
+        createTaskImpl: async (payload) => { calls.create.push(payload); return { task_id: 't1' }; },
+    });
+    assert.equal(result.started, true);
+    assert.deepEqual(calls.preflight, [['demo', destination]]);
+    assert.deepEqual(calls.create[0].metadata.skill_publish_target, { skill: 'demo', repository: 'razzant/OuroborosHub', destination });
+    // The publish tool reads the owner's choice from the task's target; the prose names only skill and repository.
+    assert.doesNotMatch(calls.create[0].context, /destination/);
+
+    const plain = { preflight: [] };
+    await runSkillPublishFlow('demo', {
+        preflightImpl: async (...args) => { plain.preflight.push(args); return preflight('ready', { skill: 'demo', repository: 'r/r' }); },
+        dialogImpl: async () => false,
+        createTaskImpl: async () => { throw new Error('cancelled flows start nothing'); },
+    });
+    assert.deepEqual(plain.preflight, [['demo']], 'without a chosen destination the request is unchanged');
+
+    const originalFetch = globalThis.fetch;
+    const bodies = [];
+    globalThis.fetch = async (url, init) => { bodies.push([url, init.body]); return { ok: true, status: 200, json: async () => ({ ok: true }) }; };
+    try {
+        await skillPublishPreflight('demo', destination);
+        await skillPublishPreflight('demo');
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+    assert.deepEqual(bodies, [
+        ['/api/skills/demo/publish-preflight', JSON.stringify({ destination })],
+        ['/api/skills/demo/publish-preflight', '{}'],
+    ]);
 });

@@ -45,6 +45,7 @@ def test_service_scope_uses_identity_not_its_display_fallback(tmp_path, monkeypa
     cfg.reset_runtime_mode_baseline_for_tests()
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.delenv(cfg.BOOT_RUNTIME_MODE_ENV_KEY, raising=False)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     workspace, drive = tmp_path / "workspace", tmp_path / "data"
     workspace.mkdir()
     drive.mkdir()

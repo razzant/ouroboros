@@ -274,10 +274,10 @@ def _mp4(tmp_path: pathlib.Path) -> pathlib.Path:
          "⚠️ No screenshot stored. Take one first with browse_page(output='screenshot')."),
         ("video_no_chat", "send_video", "LEGACY_UNAVAILABLE", "⚠️ No active chat — cannot send video."),
         ("video_no_path", "send_video", "LEGACY_TOOL_ERROR", "⚠️ Provide a file_path."),
-        ("video_missing", "send_video", "LEGACY_TOOL_ERROR", "⚠️ File not found: /nonexistent/clip.mp4"),
+        ("video_missing", "send_video", "LEGACY_TOOL_ERROR", "⚠️ File not found: {missing_video}"),
         ("file_no_chat", "send_file", "LEGACY_UNAVAILABLE", "⚠️ No active chat — cannot send file."),
         ("file_no_path", "send_file", "LEGACY_TOOL_ERROR", "⚠️ Provide a file_path."),
-        ("file_missing", "send_file", "LEGACY_TOOL_ERROR", "⚠️ File not found: /nonexistent/report.md"),
+        ("file_missing", "send_file", "LEGACY_TOOL_ERROR", "⚠️ File not found: {missing_file}"),
         ("photo_ok", "send_photo", "OK", "OK: photo queued for delivery to owner."),
         ("video_ok", "send_video", "OK", "OK: video queued for delivery to owner."),
         ("file_ok", "send_file", "OK", "OK: file 'shot.png' queued for delivery to owner."),
@@ -294,6 +294,9 @@ def test_owner_chat_delivery_terminals_are_native(tmp_path, label, tool, code, t
     """
     chatty = _media_ctx()
     chatless = _media_ctx(chat_id=None)
+    missing_video = str(tmp_path / "missing" / "clip.mp4")
+    missing_file = str(tmp_path / "missing" / "report.md")
+    text = text.format(missing_video=missing_video, missing_file=missing_file)
     calls = {
         "photo_no_chat": (chatless, lambda: core_artifacts._send_photo(chatless, file_path=str(_png(tmp_path)))),
         "photo_no_source": (chatty, lambda: core_artifacts._send_photo(chatty)),
@@ -301,10 +304,10 @@ def test_owner_chat_delivery_terminals_are_native(tmp_path, label, tool, code, t
         "photo_no_screenshot": (chatty, lambda: core_artifacts._send_photo(chatty, image_base64="__last_screenshot__")),
         "video_no_chat": (chatless, lambda: core_artifacts._send_video(chatless, file_path=str(_mp4(tmp_path)))),
         "video_no_path": (chatty, lambda: core_artifacts._send_video(chatty)),
-        "video_missing": (chatty, lambda: core_artifacts._send_video(chatty, file_path="/nonexistent/clip.mp4")),
+        "video_missing": (chatty, lambda: core_artifacts._send_video(chatty, file_path=missing_video)),
         "file_no_chat": (chatless, lambda: core_artifacts._send_file(chatless, file_path=str(_png(tmp_path)))),
         "file_no_path": (chatty, lambda: core_artifacts._send_file(chatty)),
-        "file_missing": (chatty, lambda: core_artifacts._send_file(chatty, file_path="/nonexistent/report.md")),
+        "file_missing": (chatty, lambda: core_artifacts._send_file(chatty, file_path=missing_file)),
         "photo_ok": (chatty, lambda: core_artifacts._send_photo(chatty, file_path=str(_png(tmp_path)))),
         "video_ok": (chatty, lambda: core_artifacts._send_video(chatty, file_path=str(_mp4(tmp_path)))),
         "file_ok": (chatty, lambda: core_artifacts._send_file(chatty, file_path=str(_png(tmp_path)))),
@@ -356,8 +359,8 @@ def test_owner_chat_delivery_terminals_are_native(tmp_path, label, tool, code, t
             "LEGACY_BLOCKED",
             "⚠️ WRITE_BLOCKED: new content for 'notes.txt' is 9% of original "
             "(11 -> 1 chars). This looks like accidental truncation. "
-            "Use edit_text for surgical edits, or pass force=true to confirm an "
-            "intentional rewrite.",
+            "If the removal is intended, repeat the same call with force=true; "
+            "this confirms shrinking every file in the call.",
         ),
         ("search_code", {"query": ""}, "LEGACY_TOOL_ERROR", "⚠️ SEARCH_ERROR: query is required."),
         (
@@ -381,7 +384,9 @@ def test_owner_chat_delivery_terminals_are_native(tmp_path, label, tool, code, t
         ),
     ],
 )
-def test_write_edit_search_and_forward_terminals_are_native(tmp_path, tool, args, code, text):
+def test_write_edit_search_and_forward_terminals_are_native(tmp_path, monkeypatch, tool, args, code, text):
+    monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     repo, drive = _tree(tmp_path)
     (drive / "notes.txt").write_text("alpha\nbeta\n", encoding="utf-8")
     tools = ToolRegistry(repo_dir=repo, drive_root=drive)

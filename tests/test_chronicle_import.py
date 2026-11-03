@@ -24,6 +24,7 @@ from ouroboros import chronicle_import as ci
 from ouroboros.artifacts import read_actor_source_bytes
 from ouroboros.chronicle_store import ChronicleStore
 from ouroboros.utils import jsonl_generation_signature
+from tests._dialogue import import_all
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 MIND = {"kind": "mind", "task_id": "t1", "focus": {"role": "root", "task_id": "t1"}}
@@ -80,6 +81,7 @@ def _world(root, *, blocks=None, meta=None, lineage_at=None, live=3):
         (memory / "dialogue_meta.json").write_bytes(meta_value)
     else:
         (memory / "dialogue_meta.json").write_text(json.dumps(meta_value), encoding="utf-8")
+    import_all(root)
     return rows
 
 
@@ -344,6 +346,7 @@ def test_a_missing_cursor_beside_legacy_blocks_is_unknown_and_an_empty_install_i
     assert ci.legacy_frontier(store)["status"] == "unknown" and _by_type(store, "cursor_gap")
     empty = tmp_path / "empty"
     _chat(empty)
+    import_all(empty)
     empty_store = ChronicleStore(empty)
     receipt = empty_store.ensure_activated()
     assert receipt["kind"] == "activation" and receipt["metadata"]["imported_records"] == 0

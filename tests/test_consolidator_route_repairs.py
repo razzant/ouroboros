@@ -1,6 +1,6 @@
 """Cross-owner regressions of the shared Light call: actual fit/cache, local wire and typed interruption.
 
-Reflection, scratchpad and knowledge upkeep send through ``_call_consolidation_llm``;
+The fallback memory writer sends through ``_call_consolidation_llm``;
 the retired dialogue writer's split/retry tests left with it.
 """
 from copy import deepcopy
@@ -46,7 +46,6 @@ def capacity(tmp_path, monkeypatch):
                             "maxContextWindow": state.window, "effectiveContextWindow": 1}]}
 
     monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(catalog))
-    monkeypatch.setattr(ce, "_generative_probe_window", lambda *_a, **_k: pytest.fail("generation probe"))
     real_resolve = context_fit.resolve_context_fit_route
 
     def resolve(task, *, allow_fetch):
