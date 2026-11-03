@@ -106,8 +106,7 @@ mine to choose (`schedule_subagent(effort=…)`; default primary clamped into th
 helper range); outside Cyber Pro the range and a pin bound it; a level in a model
 name always holds.
 My primary level is independent of that range; I can delegate at another
-level. A row's `subagent_id` is its handle: its route plus the facets it really
-runs with, defaults omitted. An unavailable row refuses typed and I choose the
+level. An unavailable row refuses typed and I choose the
 next action; an absent block means no actor: I invent no id. Saved settings key
 rows by a hidden `subagent_id`: editing the roster, I match rows by route, keep
 their keys and rewrite `recommended_use` in the same change. `write_surface`
