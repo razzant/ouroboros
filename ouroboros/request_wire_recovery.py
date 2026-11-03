@@ -837,6 +837,12 @@ def _value_evidence(message: str) -> bool:
     )
 
 
+def _value_implicated(evidence: "_WireRejection", low: str) -> bool:
+    """The refusal concerns a value (a typed constraint, value wording or a value code), not the field."""
+    return bool(evidence.value_constraint or _value_evidence(low)
+                or evidence.code in {"invalid_value", "invalid_enum_value", "invalid_option"})
+
+
 def _field_drop(*fields: str) -> Dict[str, Any]:
     return {"kind": "drop_field", "fields": list(fields), "reason_code": "provider_unsupported_field"}
 
@@ -901,7 +907,7 @@ def _classify_action(
     if effort_implicated and evidence.rejected_value is not None and evidence.rejected_value != current_effort:
         return None
     named_effort_value = _names_exact_effort_value(low, current_effort)
-    value_implicated = evidence.value_constraint or _value_evidence(low) or evidence.code in {"invalid_value", "invalid_enum_value", "invalid_option"}
+    value_implicated = _value_implicated(evidence, low)
     if (
         profile.provider == "anthropic"
         and profile.reasoning_carrier == "anthropic.disabled"
@@ -1054,8 +1060,10 @@ def _allowed_temperatures(evidence: _WireRejection) -> Optional[Tuple[Tuple[floa
 
 def _refuses_hint(target: Mapping[str, Any], payload: Mapping[str, Any], evidence: _WireRejection) -> bool:
     """A validation refusal allows temperatures excluding the host's hint this payload carries, or refuses the
-    field itself beside a value statement it cannot read: that holds back an explicit value's field repair,
-    never the optional hint's withdrawal."""
+    field itself beside a value statement it cannot read. That second case is the legacy field refusal (the
+    field named beside capability wording, without value evidence): it holds back an explicit value's field
+    repair, never the optional hint's withdrawal. An unreadable statement worded as a value refusal withdraws
+    nothing, exactly as the legacy repair declines it."""
     if (evidence.status not in {400, 422} or any(token in evidence.code for token in _NON_COMPATIBILITY_CODE_TOKENS)
             or not _carries_temperature_hint(target, payload)):
         return False
@@ -1063,7 +1071,8 @@ def _refuses_hint(target: Mapping[str, Any], payload: Mapping[str, Any], evidenc
     if spans == ():
         text = evidence.message.lower()
         named = evidence.param == "temperature" if evidence.param else "temperature" in text
-        return named and any(marker in text for marker in _CAPABILITY_REJECTION_MARKERS)
+        return (named and not _value_implicated(evidence, text)
+                and any(marker in text for marker in _CAPABILITY_REJECTION_MARKERS))
     return bool(spans) and not any(low <= payload["temperature"] <= high for low, high in spans)
 
 

@@ -590,6 +590,17 @@ def test_a_statement_of_values_it_cannot_use_keeps_an_explicit_value_and_withdra
         assert retry is None
 
 
+@pytest.mark.parametrize("hint", [True, False], ids=["hint", "explicit"])
+@pytest.mark.parametrize("error", [
+    _Refused("unsupported value: temperature must be one of [0, 1"),
+    _Refused("invalid parameter: temperature must be one of [0, 1; 0.2]"),
+    _Refused("invalid parameter: temperature", allowed_values=[0, 1, "2e-1"]),
+], ids=["unclosed-list", "semicolon-list", "typed-unreadable-member"])
+def test_an_unreadable_value_refusal_beside_capability_wording_repairs_nothing(error, hint):
+    # Value wording keeps it a refusal of a value: neither the hint nor the field goes, as the legacy repair declines.
+    assert _plan(error, hint=hint)[0] is None
+
+
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
 @pytest.mark.parametrize("refusal,origin", [
     ("temperature rejected, only 3 attempts are allowed", "default_temperature"),
@@ -597,10 +608,11 @@ def test_a_statement_of_values_it_cannot_use_keeps_an_explicit_value_and_withdra
     ((KIMI_REFUSAL, {"code": "insufficient_quota"}), "default_temperature"),
     ("unsupported temperature: only 1 or less is allowed", "temperature"),
     ("invalid max_tokens: only 1 is allowed for temperature-less models", "default_temperature"),
-], ids=["a-count", "read-parameter", "quota-code", "explicit-bound", "a-compound"])
+    ("unsupported value: temperature must be one of [0, 1", "default_temperature"),
+], ids=["a-count", "read-parameter", "quota-code", "explicit-bound", "a-compound", "unreadable-value-list"])
 def test_a_refusal_that_authorizes_nothing_reaches_the_caller_unrepaired(api, refusal, origin, asynchronous):
     api.rule = lambda _payload: refusal
-    with pytest.raises(Exception, match="attempts|custom_field|only 1"):
+    with pytest.raises(Exception, match="attempts|custom_field|only 1|must be one of"):
         _caller(PROVIDER_DRIVERS["openai-compatible"].model, asynchronous=asynchronous)(**{origin: 0.2})
     assert api.temperatures() == [0.2] and _records(api.root) == []
 
