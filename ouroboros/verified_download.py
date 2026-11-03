@@ -11,8 +11,6 @@ import pathlib
 from typing import Any
 import uuid
 
-from ouroboros.utils import replace_atomic
-
 
 class VerifiedDownloadError(RuntimeError):
     """An exact file was absent, damaged or could not be downloaded."""
@@ -76,6 +74,10 @@ def fetch_exact_file(
     error_type: type[RuntimeError] = VerifiedDownloadError,
 ) -> pathlib.Path:
     """Atomically fetch one exact file; an existing verified cache wins."""
+    # Imported here so ``verify_exact_file`` needs only the standard library (a
+    # Docker build stage verifies the pinned Chromium archive with this module alone).
+    from ouroboros.utils import replace_atomic
+
     target = pathlib.Path(destination)
     try:
         return verify(target)
