@@ -330,7 +330,7 @@ def test_panic_adds_no_prerequisite_before_the_kill(tmp_path, monkeypatch):
     monkeypatch.setattr(restart_retention, "park_saved_pause",
                         lambda *a, **k: order.append("park") or real_park(*a, **k))
     monkeypatch.setattr(workers, "kill_worker_tree", lambda pid, **_k: order.append("kill"))
-    monkeypatch.setattr(workers, "_kill_survivors", lambda: None)
+    monkeypatch.setattr(workers, "_kill_survivors", lambda *_slots: None)
     proc = SimpleNamespace(pid=4242, is_alive=lambda: False, join=lambda timeout=None: None,
                            terminate=lambda: None)
     workers.WORKERS[0] = SimpleNamespace(wid=0, proc=proc, busy_task_id="t-run")

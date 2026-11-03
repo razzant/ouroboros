@@ -1,10 +1,11 @@
 """An owner turn leaves one ``direct_turn`` receipt: its wait from the canonical acceptance, each
 start phase's seconds, the dispatch basis and its own store counts.
 
-The receipt rides the turn's first dispatch frame by value; the supervisor's events consumer writes
-the one journal row off the turn thread and keeps it in the serving process's bounded ring. A turn
-that never dispatches writes ``dispatch: not_observed`` from its unregister. Two concurrent turns
-keep their own meters."""
+The receipt rides the turn's first dispatch frame by value (the carrier's ``CarrierTurn`` seeds it
+from the admission's clock); the supervisor's events consumer writes the one journal row off the
+carrier and keeps it in the serving process's bounded ring. An inline executor's turn that never
+dispatches writes ``dispatch: not_observed`` from its unregister. Two concurrent turns, each in its
+own carrier, keep their own meters."""
 from __future__ import annotations
 
 import datetime
@@ -163,14 +164,16 @@ def test_the_ring_keeps_the_newest_hundred_by_value(monkeypatch):
 
 
 def test_two_concurrent_owner_turns_keep_their_own_meters(monkeypatch, tmp_path):
-    """Through the real direct lane: each turn's thread meters its own store reads inside the
-    scope the lane opens; the receipts on their dispatch frames carry different counts."""
-    from ouroboros import agent as agent_module
+    """Through the real lane: the server admits each owner turn to its own carrier (the two lane spares),
+    each carrier's thread meters its own store reads inside the scope the worker body opens, and the
+    receipts on their dispatch frames carry different counts."""
     from ouroboros.task_results import load_task_result, write_task_result
-    from supervisor import workers
+    from supervisor import worker_chat_lane, workers
+    from tests.conversation_carrier_support import carry, isolate_lane_pool
     from tests.test_direct_turn_phase_stall import _Actor, _lane
 
     out = _lane(monkeypatch, tmp_path)
+    spares = isolate_lane_pool(monkeypatch, tmp_path, spares=2, event_q=out.bus)
     write_task_result(tmp_path, "seed", "running")
     both_inside = threading.Barrier(2, timeout=10)
 
@@ -188,27 +191,30 @@ def test_two_concurrent_owner_turns_keep_their_own_meters(monkeypatch, tmp_path)
             return [{"type": "send_message", "chat_id": task["chat_id"], "text": "the answer", "task_id": task["id"]}]
         return behave
 
-    actors = [_Actor(reading()), _Actor(reading())]
-    monkeypatch.setattr(agent_module, "make_agent", lambda **kwargs: actors.pop(0))
     stamp = _iso(time.time())
 
     def origin(chat_id: int) -> dict:
         return {"client_message_id": f"m-{chat_id}", "origin_message_ref": {
             "chat_id": chat_id, "client_message_id": f"m-{chat_id}", "ts": stamp, "text_sha256": "0" * 64}}
 
-    threads = [threading.Thread(target=workers.handle_chat_direct, args=(chat_id, "hello"),
-                                kwargs={"task_metadata": origin(chat_id)}, daemon=True) for chat_id in (1, 2)]
-    for thread in threads:
+    for chat_id in (1, 2):
+        worker_chat_lane.handle_chat_direct(chat_id, "hello", task_metadata=origin(chat_id))
+    assert all(slot.busy_task_id for slot in spares), "each turn holds its own carrier"
+    carriers = [threading.Thread(target=carry, args=(workers, slot, _Actor(reading())), kwargs={"out_q": out.bus},
+                                 daemon=True) for slot in spares]
+    for thread in carriers:
         thread.start()
-    for thread in threads:
+    for thread in carriers:
         thread.join(timeout=15)
-    assert not any(thread.is_alive() for thread in threads)
+    assert not any(thread.is_alive() for thread in carriers)
     frames = []
     while not out.bus.empty():
         frames.append(out.bus.get_nowait())
     receipts = {frame["chat_id"]: frame["direct_turn"] for frame in frames if "direct_turn" in frame}
     assert set(receipts) == {1, 2}
-    assert receipts[1]["meter"]["current.read"] == 1 and receipts[2]["meter"]["current.read"] == 4
+    # The carrier's first step reads the same for both; the bodies differ by three reads.
+    first_step = receipts[1]["meter"]["current.read"] - 1
+    assert first_step >= 0 and receipts[2]["meter"]["current.read"] == first_step + 4
     assert all(receipt["accepted_at"] == stamp and receipt["dispatch"] == "observed_send" for receipt in receipts.values())
     ctx = SimpleNamespace(RUNNING={}, PENDING=[], DRIVE_ROOT=tmp_path)
     for frame in frames:

@@ -3,6 +3,8 @@
 
 /**
  * One source with its read state (`kind`: builtin | hub | git | local | registry; `trust`: trusted | review).
+ * A repository row reads `ref` (branch or tag) or a pinned `commit` (neither: the default branch) from its
+ * folder `path`; a local row's `path` is the folder.
  * @typedef {Object} SkillSourceRow
  * @property {string} id
  * @property {string} name
@@ -17,8 +19,21 @@
  * @property {string=} state  // ready | reading | error | search
  * @property {string=} last_read_at
  * @property {string=} error
+ * @property {string[]=} problems  // what the last read could not offer, and why
  * @property {boolean=} refreshing
  * @property {boolean=} managed  // a build's settings supplied this row; it stays editable
+ */
+
+/**
+ * A repository the build suggests; nothing is connected and no trust chosen until the owner adds it.
+ * @typedef {Object} SkillSourceSuggestion
+ * @property {string} name
+ * @property {string} url
+ * @property {string=} ref
+ * @property {string=} commit
+ * @property {string=} path
+ * @property {string=} about
+ * @property {boolean} connected  // a row already reads it
  */
 
 /**
@@ -27,12 +42,15 @@
  * @property {SkillSourceRow[]} sources
  * @property {boolean} materialized
  * @property {string} problem
+ * @property {SkillSourceSuggestion[]} suggestions  // empty unless the build offers some
  */
 
 /**
- * `POST /api/skill-sources/probe`.
+ * `POST /api/skill-sources/probe`: an address with an optional revision and subfolder, or a folder.
  * @typedef {Object} SkillSourceProbeRequest
  * @property {string=} url
+ * @property {string=} revision  // branch, tag or full commit id; absent: the default branch
+ * @property {string=} subfolder
  * @property {string=} path
  */
 
@@ -42,6 +60,8 @@
  * @property {string=} suggested_name
  * @property {string=} owner  // the hub's maintainer, else the account the address names
  * @property {string[]=} found
+ * @property {string[]=} problems  // what it could not offer, and why
+ * @property {string=} commit  // the exact commit a repository was read at
  * @property {string=} warning  // not_encrypted: accepted plain-HTTP address
  * @property {string=} error
  */
@@ -50,6 +70,8 @@
  * `POST /api/skill-sources`.
  * @typedef {Object} SkillSourceAddRequest
  * @property {string=} url
+ * @property {string=} revision
+ * @property {string=} subfolder
  * @property {string=} path
  * @property {string} name
  * @property {string} trust

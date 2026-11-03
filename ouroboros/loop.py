@@ -262,7 +262,9 @@ def _provider_unavailable_result(
             control_reason=control_reason, wait_cause=wait_cause,
         )
     if is_context_overflow:
-        reason = "context_overflow" if ctx.accumulated_usage.get("reason_code") == "context_overflow" else "llm_api_error"
+        from ouroboros.context_view_facts import size_refusal_cause  # a required handbook's known unfit keeps its cause
+
+        reason = size_refusal_cause(ctx.accumulated_usage)
         # Stamped before composing, as every rail is: the composer may end it on the owner's Stop now.
         ctx.accumulated_usage.update(
             execution_status=RESULT_INFRA_FAILED,
@@ -427,8 +429,8 @@ def _reset_turn_state(ctx: Any) -> None:
     ctx._presence_forced_declaration = ctx._presence_forced_pending = ctx._forced_completion = None
     ctx._completion_request = ctx._completion_selected = ctx._completion_observation = None
     ctx._completion_conflict, ctx._completion_held_sha256, ctx._acceptance_pending_review_choice = False, "", ""
-    ctx._result_review_pending, ctx._result_review_shown, ctx._result_review_refused = "", set(), {}  # this turn's result review step
-    ctx._result_review_request_asked = set()
+    ctx._result_review_pending, ctx._result_review_shown, ctx._result_review_refused = "", [], {}  # this turn's result review step
+    ctx._result_review_request_asked = []
     ctx._owner_reply_revision = None  # no live reply of an earlier turn answers this turn's owner rows
     ctx._delivery_candidate, ctx._delivery_candidate_revision, ctx._delivery_control_required = None, 0, False
     ctx._delivery_evidence_revision, ctx._delivery_evidence_fingerprint = 0, ""
@@ -474,9 +476,12 @@ def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dic
     pending_no_tool_budget, free_redial)``: a cold owner wait rejoins its tool
     tail; an exact pause, or its Resume handover, its saved budget tail; a
     working checkpoint its tool tail after a batch, else the same logical round
-    (#1563).
+    (#1563). A moved Presence turn's saved work first takes its conversation and slot
+    (``presence_carrier.reenter``), and reads the facts since its park once restored.
     """
-    saved, saved_pause, saved_working = carriers
+    from ouroboros.presence_carrier import reenter
+
+    carried, (saved, saved_pause, saved_working) = reenter(tools._ctx), carriers
     if saved:
         resumed = (*resume_native_loop(tools, saved, messages, trace, usage, seen), cost_ceiling, True, False, False)
     elif saved_pause:
@@ -490,6 +495,8 @@ def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dic
         resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), tool_tail, no_tool, not tool_tail)
     else:
         resumed = (*route, cost_ceiling, False, False, False)
+    if carried is not None:
+        carried.reentered(tools._ctx, messages)
     from ouroboros.subagent_bootstrap import append_startup_receipt
     append_startup_receipt(tools._ctx, messages, getattr(tools._ctx, "_configured_startup_wake", ""), seen)
     return resumed
@@ -584,8 +591,7 @@ def run_llm_loop(
     )
     _owner_msg_seen: set = set()
     MAX_ROUNDS = _resolve_loop_max_rounds(ctx)
-    round_idx, free_redial = 0, False
-    transport_wait = None
+    round_idx, free_redial, transport_wait = 0, False, None
     limit_ctx: Optional[_RoundLimitContext] = None
     ctx._execution_trace = llm_trace
     try:
@@ -656,6 +662,7 @@ def run_llm_loop(
                 text, accumulated_usage, forced_trace = _early_final
                 _merge_finalization_trace(llm_trace, forced_trace)
                 return text, accumulated_usage, llm_trace
+            cost_ceiling = _resolve_task_cost_ceiling(ctx, budget_remaining_usd)  # a warm Resume may lift it (#2566)
 
             if pending_tool_budget:
                 pending_tool_budget = False

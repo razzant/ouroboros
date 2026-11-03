@@ -13,6 +13,8 @@ pending, and every obligation the drive still holds is in canonical custody:
   registration records inside the child store (derived FIRST, then checked
   against the store: an absent store or file is a missing source, never
   permission), plus every unrecorded file the store lists;
+* the raw QA its store keeps at ``source_handles/test-evidence``, at its exact
+  relative paths (``history_retention.carry_raw_evidence``);
 * the input closure of the mail addressed to the task (attachments and their
   manifest sources) and of its task contract;
 * the child's verification receipts, unioned into the canonical stream;
@@ -1095,9 +1097,10 @@ def _receipts_identity(drive: pathlib.Path, task_id: str) -> Optional[tuple]:
 def _secure_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Dict[str, Any],
                      closed: Callable[[], bool]) -> int:
     """Phase A, under the occupant's custody lock: re-check the row, union receipts, carry the
-    input closure, publish, write once from the row-locked CURRENT and verify the re-read
-    row; ``closed()`` is re-asked before each of those effects. Records the revision Phase B
-    must still see. Returns files published."""
+    input closure and raw QA, publish, write once from the row-locked CURRENT and verify the
+    re-read row; ``closed()`` is re-asked before each of those effects. Records the revision
+    Phase B must still see. Returns files published."""
+    from ouroboros.history_retention import raw_evidence_custodied
     from ouroboros.outcome_receipt_store import publish_verification_receipt_union
 
     def fence() -> None:
@@ -1123,6 +1126,10 @@ def _secure_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Dic
     fence()
     prepared["input_fields"], prepared["inputs"] = _input_closure(canonical, drive, task_id, current, rows)
     fence()
+    carried = raw_evidence_custodied(canonical, drive, task_id, current)
+    if carried is None:
+        raise _Retained("raw_evidence_uncustodied")  # the gap is on the row, the retry owner's now
+    fence()
     source = drive / _ARTIFACTS_DIR / task_id
     published = _publish(canonical, task_id, prepared["plan"])
 
@@ -1143,7 +1150,7 @@ def _secure_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Dic
     if _pending_refs_under(readback, drive):
         raise _Retained("child_refs_pending")
     prepared["revision_after"] = custody_revision(readback)
-    return sum(1 for item in prepared["plan"] if item.get("staged") is not None)
+    return carried + sum(1 for item in prepared["plan"] if item.get("staged") is not None)
 
 
 def _recheck_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Dict[str, Any]) -> None:
@@ -1399,15 +1406,18 @@ def _remove_entry(entry: pathlib.Path) -> None:
 
 def sweep_custody_leftovers(canonical_root: Any, *, min_age_sec: float = 3600.0) -> None:
     """Remove the staging a crashed settlement left behind (older than ``min_age_sec``, so a
-    running settlement keeps its own); staging is a private copy, unserved and unreferenced."""
+    running settlement keeps its own); staging is a private copy, unserved and unreferenced. A scratch
+    release's entry holds its record, the only one: the next release pass publishes it instead."""
     import time
+
+    from ouroboros.workspace_preflight import _RELEASE_MARK
 
     root = pathlib.Path(canonical_root) / _STAGING_DIR
     if not root.is_dir() or root.is_symlink():
         return
     for entry in root.iterdir():
         try:
-            if time.time() - entry.lstat().st_mtime >= min_age_sec:
+            if _RELEASE_MARK not in entry.name and time.time() - entry.lstat().st_mtime >= min_age_sec:
                 _remove_entry(entry)
         except OSError:
             continue
@@ -1433,9 +1443,10 @@ def custody_trash_entries(canonical_root: Any) -> List[Tuple[str, List[int]]]:
 def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
     """Delete the drives settlements moved aside: each was fully custodied before its move, and
     nothing serves or references it, so no age or liveness applies. The maintenance child runs this,
-    off the serving process. Returns the count removed and each entry that survived its removal
-    (``name -> identity``; the child retries it at its next run, a changed identity makes the job due)."""
-    report: Dict[str, Any] = {"removed": 0, "stuck": {}}
+    off the serving process. Returns the count removed, each entry that survived its removal
+    (``name -> identity``; the child retries it at its next run, a changed identity makes the job due)
+    and the session scratch its producer retained, left in place (``release_session_scratch``)."""
+    report: Dict[str, Any] = {"removed": 0, "stuck": {}, "retained": []}
     root = pathlib.Path(canonical_root) / _TRASH_DIR
     try:
         entries = [] if root.is_symlink() else list(root.iterdir())
@@ -1448,9 +1459,9 @@ def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], boo
             if entry.is_dir() and not entry.is_symlink():
                 from ouroboros.workspace_preflight import release_session_scratch
 
-                release_session_scratch(entry)
+                report["retained"] += release_session_scratch(entry)
                 if (entry / "data").is_dir() and not (entry / "data").is_symlink():
-                    release_session_scratch(entry / "data")
+                    report["retained"] += release_session_scratch(entry / "data")
             _remove_entry(entry)
         try:
             stat = entry.lstat()

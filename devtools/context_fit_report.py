@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Measure an ordinary room projection without starting a task or a provider."""
+"""Measure one caller's initial context in a room, offline: no task, no provider, no write under the data root.
+
+The measuring task carries its caller kind (`--caller direct`, one chat turn, the default; `root`, a queued
+integrating task with two start work rooms; wake, Presence and helper callers are not modeled) and the room's
+registered folder; `--session-provider` hands the same task and tool selection to the call host. Tools are
+`initial_tool_schemas(mode)` of a standalone registry: built-in tools plus published MCP catalogs, never the live
+extension-skill tools of a server, so the set may be smaller or larger than a real task's. The tools summary is the
+list the plan measured (Nano's when the plan falls to Nano; a call's own tools counted apart), the requested list only
+where they differ. `--reserve` is the route's reply ceiling (a call route's working reserve under `--session-provider`);
+each mode applies its own reserve (Nano keeps its 8,192 floor). Figures are chars/4 estimates at density 1.0 over the
+serialized request, never provider tokens; the assignment text is empty and unmeasured.
+"""
 from __future__ import annotations
 
 import argparse
@@ -20,8 +31,12 @@ if str(REPO) not in sys.path:
 
 
 def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=None, fit=None,
-                 route=None, route_facts=None, response_limit=None):
-    """Observe the existing fitter, including the last frame of a typed refusal."""
+                 route=None, route_facts=None, response_limit=None, task=None):
+    """Observe the existing fitter, including the last frame of a typed refusal.
+
+    ``task`` is the task ``core`` was captured for: its caller kind sets the role and the start work room, so the
+    plan reads the same one (default: a direct chat turn in the captured room). Without ``route_facts``, ``reserve``
+    is a declared working reserve in every mode (a call route's geometry); ``ordinary_route`` declares a Main route."""
     from ouroboros import context_budget, context_fit as cf, memory_floor as mf, memory_view as mv
     from ouroboros.section_floor import section_views
     from ouroboros.tool_policy import select_tool_schemas
@@ -49,13 +64,14 @@ def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=N
             cf, '_system_blocks', capture_system), patch.object(mf, 'render_view_for_mode', capture_memory):
         try:
             if plan is None:
-                plan = cf.build_context_fit_plan(SimpleNamespace(drive_root=root), core,
-                    {'id': core.section_task_id or 'context-fit-report', 'chat_id': int(snapshot.spec.room_id), '_is_direct_chat': True},
-                    preferred_mode=mode, tool_schemas=schemas,
+                plan = cf.build_context_fit_plan(SimpleNamespace(drive_root=root), core, task or {
+                    'id': core.section_task_id or 'context-fit-report', 'chat_id': int(snapshot.spec.room_id),
+                    '_is_direct_chat': True}, preferred_mode=mode, tool_schemas=schemas,
                     route_resolver=lambda *a, **kw: (route, evidence))
         except cf.MinimumViewUnfit as exc:
             failure = exc
     selected = plan.initial_mode if plan else frames[-1][0]
+    sent = schemas if prepared is not None else list(select_tool_schemas(schemas, context_mode=selected).schemas)
     projection = plan.projection(selected) if plan else None
     book_mode = 'low' if selected == 'nano' else selected
     governance = cf._governance_blocks(None, core, mode=book_mode)
@@ -64,7 +80,6 @@ def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=N
         level = mf.kept_level(snapshot, facts)
         addressed = section_views((*core.semi_stable_sections, *core.dynamic_head_sections, *core.dynamic_sections, *governance[0]),
                                   facts.get('host_sections_addressed', ()))
-        sent = schemas if prepared is not None else list(select_tool_schemas(schemas, context_mode=selected).schemas)
         if fit is None:
             with cold_density():
                 fit = physical_fit(plan, plan.messages_for(selected), sent, root=root)
@@ -86,8 +101,8 @@ def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=N
     for part in governance[0][2:]:
         add(part.section_id, addressed.get(part.section_id, part.full_text),
             'operative' if part.section_id in addressed else 'orientation' if book_mode == 'low' else 'whole')
-    if governance[1]:  # Max without the whole handbook carries its chapter map here
-        add('DEVELOPMENT', governance[1], 'whole' if core.docs_need_development else 'orientation')
+    if governance[1]:  # the whole handbook (its subject's in Max, or the task's own requirement in any mode), else Max's map
+        add('DEVELOPMENT', governance[1], 'whole' if core.docs_need_development or core.development_required else 'orientation')
     for parts, fallback, label in ((core.semi_stable_sections, core.semi_stable_text, 'stable'),
                                    (core.dynamic_head_sections, core.dynamic_head_text, 'knowledge'),
                                    (core.dynamic_sections, core.dynamic_text, 'host')):
@@ -136,9 +151,11 @@ def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=N
         forms[form] = forms.get(form, 0) + 1
     add('story', mv.render_story(snapshot, level), '+'.join(forms) or 'whole', len(visible))
     blocks[-1]['forms'] = forms
+    add('connections', core.connections[selected == 'nano'], 'by namespace' if selected == 'nano' else 'mcp servers')
     add('marks', mv._marks_text(list(snapshot.marks)) if snapshot.marks else '', count=len(snapshot.marks))
-    sent = schemas if prepared is not None else list(select_tool_schemas(schemas, context_mode=selected).schemas)
-    blocks.append(dict(block='tools', form='selected', tokens=cf.tool_schema_tokens(sent), count=len(sent)))
+    blocks.append(dict(block='tools', form='selected', count=len(sent),  # a refusal's bound is plan-side, a candidate's physical
+                       tokens=serialized_tool_tokens(plan.messages_for(selected), sent, plan.provider) if fit
+                       else cf.tool_schema_tokens(sent)))
     blocks.append(dict(block='headings, floor note and envelope', form='framing',
                        tokens=input_tokens - sum(row['tokens'] for row in blocks)))
     actual_reserve = failure.response_reserve_tokens if failure else fit['measurement']['response_reserve_tokens']
@@ -167,11 +184,19 @@ def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=N
                     'start_input_allowance_tokens': budget['with_margin_tokens'],
                     'room_above_start_tokens': margin - requested_room,
                     'start_room_shortfall_tokens': max(0, requested_room - margin)},
-        window_record=asdict(record), fit=fit,
+        window_record=asdict(record), fit=fit, tools={'count': len(sent), 'by_surface': surface_counts(sent)},
         phase='prepared_candidate' if prepared is not None else 'task_preparation',
         input_basis='minimum_bound_not_a_candidate' if failure else 'measured_candidate',
+        estimator=('estimate_context_prompt_tokens over the serialized messages and tools, chars/4' if fit else
+                   'plan-side minimum bound (_request_tokens + tool_schema_tokens), chars/4'),
         diagnostic_notes=['No live host: feature tools/instructions, dynamic tool notices and provider wire are absent.',
-                          'Density is fixed at 1.0; no account-scoped window observations are inferred.'])
+                          'Density is fixed at 1.0; no account-scoped window observations are inferred.',
+                          'Figures are chars/4 estimates, never provider tokens: the input is the serialized request, section rows '
+                          'are per-text estimates and the framing row is their signed remainder; the assignment text is empty.',
+                          f"Reserve: {reserve} is declared as "
+                          f"{'a working reserve' if 'working_reserve_tokens' in evidence.route_facts else 'the reply ceiling'}; "
+                          f"the rendered {selected} mode applies {actual_reserve} "
+                          "(Main's reply cap, then context_budget.context_mode_limits)."])
     if fit:
         result['density'] = fit['measurement']['measurement_density']
         result['reply_allowance'] = fit['measurement']['reply_allowance_tokens']
@@ -181,13 +206,111 @@ def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=N
     return result
 
 
-def report(root, room, window, reserve, mode='max', snapshot=False, session_provider=None):
+CALLERS = ('direct', 'root')
+
+
+def ordinary_route(reply_ceiling):
+    """``(route facts, response limit)`` of an ordinary Main route: its reply ceiling is declared and no working
+    reserve (only a call provider declares one), so each mode takes its own reserve from the production owner."""
+    return ({'basis': 'provider', 'acceptance_can_raise': False, 'source': 'diagnostic declaration'},
+            {'max_output_tokens': reply_ceiling, 'status': 'asserted', 'source': 'diagnostic declaration'})
+
+
+class Unmeasurable(ValueError):
+    """A content-free reason this room cannot be measured offline, safe to print."""
+
+
+def measuring_task(root, room, caller):
+    """The facts production reads for this caller kind in this room; the assignment text is empty.
+
+    A project room's registered folder travels as production carries it: the room lens of a direct turn, the
+    workspace of a queued root. Folderless rooms can need scratch creation; unavailable attached folders keep
+    their address and an availability note in production. This offline report models neither case.
+    """
+    from ouroboros.project_admission import reserved_project_for_chat
+    from ouroboros.workspace_admission import room_chat_lens_dir, room_lens_applies
+
+    if caller not in CALLERS:
+        raise ValueError(f'caller is one of {", ".join(CALLERS)}')
+    task = {'id': 'context-fit-report', 'chat_id': int(room), 'type': 'task', 'text': '',
+            '_is_direct_chat': caller == 'direct'}
+    project = reserved_project_for_chat(root, int(room))
+    if project:
+        task['project_id'] = project['id']
+        folder, note = room_chat_lens_dir(root, project['id'])
+        if not folder or note:
+            raise Unmeasurable('This project room has no usable registered folder; '
+                               'this read-only report cannot model its folder context')
+        if room_lens_applies(task):
+            task['metadata'] = {'_project_room_dir': folder}
+        else:
+            task.update(workspace_root=folder, workspace_mode='external')
+    return task
+
+
+def tool_context(drive_root, task):
+    """The tool context a task of this shape runs under, so credential and project filters select as in production."""
+    from ouroboros.tools.tool_context import ToolContext
+
+    workspace = task.get('workspace_root')
+    return ToolContext(repo_dir=REPO, drive_root=drive_root, system_repo_dir=REPO, task_id=task['id'],
+                       current_chat_id=task['chat_id'], is_direct_chat=task['_is_direct_chat'],
+                       project_id=task.get('project_id', ''), task_metadata=dict(task.get('metadata') or {}),
+                       workspace_root=Path(workspace) if workspace else None, workspace_mode=task.get('workspace_mode', ''))
+
+
+def serialized_tool_tokens(messages, tools, provider=''):
+    """The tools member of the request on the fit's own physical estimator: the serialization it measures."""
+    from ouroboros import context_fit as cf
+
+    return (cf.estimate_context_prompt_tokens(messages, tools, provider=provider)
+            - cf.estimate_context_prompt_tokens(messages, None, provider=provider))
+
+
+def surface_counts(schemas, own=()):
+    """Schemas by origin: built-in, extension and MCP namespaces; ``own`` names (a call's own tools) are counted apart."""
+    from ouroboros.tool_policy import tool_namespace
+
+    counts = dict.fromkeys(('builtin', 'extension', 'mcp'), 0)
+    for schema in schemas:
+        name = schema['function']['name']
+        space = tool_namespace(name)
+        key = 'call' if name in own else 'mcp' if space.startswith('mcp_') else 'extension' if space.startswith('ext_') else 'builtin'
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def tool_facts(registry, result, *, requested_mode, requested_count):
+    """The measured tools (``result['tools']``: the one list ``measure_core`` sent) with where they came from and what
+    this process cannot see; no direction of error is implied. The requested-mode list is named only where the plan
+    narrowed it."""
+    measured, rendered = result['tools'], result['mode']
+    if result['phase'] == 'session_candidate':  # the call host chose its own list, from its initial mode
+        narrowed = False
+        selector = (f'the call host: ouroboros.tool_policy.initial_tool_schemas(context_mode={rendered!r}, '
+                    'schema_names=INITIAL_TOOLS) on a standalone ToolRegistry, plus the call tools')
+    else:
+        narrowed = requested_count != measured['count']
+        frame = 'the refusal\'s last frame' if result['verdict'] == 'MinimumViewUnfit' else 'the plan'
+        selector = (f'ouroboros.tool_policy.initial_tool_schemas(context_mode={requested_mode!r}) on a standalone ToolRegistry'
+                    + (f'; {frame} is {rendered!r}, so the measured list is its select_tool_schemas' if narrowed else ''))
+    return {**measured, 'selector': selector,
+            **({'requested_mode': requested_mode, 'requested_count': requested_count} if narrowed else {}),
+            'on_demand_withheld': len(registry.on_demand_schema_names()),
+            'registry_omissions': [{'surface': row.get('surface'), 'reason': row.get('reason'),
+                                    'count': len(row.get('tools') or ())} for row in registry.capability_omissions()],
+            'verified_complete': False, 'absent': ['live extension-skill tools (a running server loads them)',
+                                                   'MCP schemas of servers with no published catalog under the data root']}
+
+
+def report(root, room, window, reserve, mode='max', snapshot=False, session_provider=None, caller='direct'):
     from devtools._context_fit_readonly import readonly_inputs, server_alive, snapshot_root
+    from ouroboros.test_environment import default_temp_parent
     root = Path(root).resolve(strict=True)
     source_root = root
-    if server_alive(root) and not snapshot:
+    if not snapshot and server_alive(root):  # --snapshot measures a private copy and never probes liveness
         raise ValueError('The data root has a live server or uncertain admission; use --snapshot')
-    with tempfile.TemporaryDirectory(prefix='context-fit-', dir='/tmp') as directory:
+    with tempfile.TemporaryDirectory(prefix='context-fit-', dir=default_temp_parent()) as directory:
         scratch = Path(directory)
         if snapshot:
             copied = scratch / 'data'
@@ -198,22 +321,33 @@ def report(root, room, window, reserve, mode='max', snapshot=False, session_prov
             with readonly_inputs(root, source_root=source_root, scratch_root=scratch / 'observability'):
                 from ouroboros import context
                 from ouroboros.memory import Memory
+                from ouroboros.memory_view import view_role
+                from ouroboros.tool_policy import initial_tool_schemas
                 from ouroboros.tools.registry import ToolRegistry
-                from ouroboros.project_admission import reserved_project_for_chat
                 env = SimpleNamespace(repo_dir=REPO, drive_root=root, repo_path=lambda path: REPO / path)
-                task = {'id': 'context-fit-report', 'chat_id': int(room), '_is_direct_chat': True, 'type': 'task', 'text': ''}
-                project = reserved_project_for_chat(root, int(room))
-                if project:
-                    task['project_id'] = project['id']
-                core = context._capture_context_core(env, Memory(drive_root=root, repo_dir=REPO), task, None, None)
-                core = replace(core, section_root=str(scratch / 'captures'), section_task_id='context-fit-report')
+                task = measuring_task(root, room, caller)
                 tools = ToolRegistry(REPO, root)
+                tools.set_context(tool_context(root, task))
+                core = context._capture_context_core(env, Memory(drive_root=root, repo_dir=REPO), task, None, None, tools)
+                core = replace(core, section_root=str(scratch / 'captures'), section_task_id='context-fit-report')
+                schemas = initial_tool_schemas(tools, context_mode=mode)
                 if session_provider:
+                    if caller != 'direct':
+                        raise ValueError('A live call is a direct caller; --session-provider measures no other kind')
                     from devtools._context_fit_session import report_session
-                    result = report_session(core, tools, root=root, scratch=scratch, window=window,
-                                            reserve=reserve, mode=mode, provider=session_provider)
+                    result = report_session(core, tools, root=root, scratch=scratch, window=window, reserve=reserve,
+                                            mode=mode, provider=session_provider, task=task, schemas=schemas)
                 else:
-                    result = measure_core(core, tools.schemas(), root=root, window=window, reserve=reserve, mode=mode)
+                    facts, limit = ordinary_route(reserve)
+                    result = measure_core(core, schemas, root=root, window=window, reserve=reserve, mode=mode, task=task,
+                                          route_facts=facts, response_limit=limit)
+                result['caller'] = {'kind': caller, 'role': view_role(task), 'task_fields': sorted(
+                    {*task, *(f'metadata.{key}' for key in task.get('metadata', ()))}
+                    - {'id', 'chat_id', 'type', 'text', 'metadata'})}
+                result['tools'] = tool_facts(tools, result, requested_mode=mode, requested_count=len(schemas))
+                result['diagnostic_notes'].append(
+                    'Tools come from this process, not a running server: the set can be smaller (extension skills absent) '
+                    'or larger (a real task\'s contract, profile or credentials may withhold more).')
                 result['snapshot'] = snapshot
                 result['diagnostic_notes'].append('Live process scanning is unavailable; no scan notice enters the measured input.')
                 return result
@@ -224,8 +358,12 @@ def main(argv=None):
     parser.add_argument('--data', type=Path, required=True)
     parser.add_argument('--room', required=True, type=int)
     parser.add_argument('--window', type=int, required=True)
-    parser.add_argument('--reserve', type=int, required=True)
+    parser.add_argument('--reserve', type=int, required=True,
+                        help="the route's reply ceiling in tokens (Main's own cap is 65536; a call's working reserve with "
+                        "--session-provider); each mode applies its own")
     parser.add_argument('--mode', choices=('max', 'low', 'nano'), default='max')
+    parser.add_argument('--caller', choices=CALLERS, default='direct',
+                        help='direct: one chat turn (default); root: a queued integrating task, which keeps two start work rooms')
     parser.add_argument('--json', action='store_true')
     parser.add_argument('--snapshot', action='store_true')
     parser.add_argument('--session-provider', choices=('gemini_live', 'grok_realtime', 'openai_realtime'),
@@ -233,12 +371,18 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.window <= 0 or args.reserve <= 0:
         parser.error('window and reserve must be positive')
+    if args.session_provider and args.caller != 'direct':
+        parser.error('--session-provider measures a live call, which is a direct caller')
     previous_logging = logging.root.manager.disable
     previous_bytecode = sys.dont_write_bytecode
     sys.dont_write_bytecode = True
     logging.disable(logging.CRITICAL)  # Never echo private source text or settings through capture warnings.
     try:
-        result = report(args.data, args.room, args.window, args.reserve, args.mode, args.snapshot, args.session_provider)
+        result = report(args.data, args.room, args.window, args.reserve, args.mode, args.snapshot, args.session_provider,
+                        args.caller)
+    except Unmeasurable as exc:
+        print(f'Context measurement unavailable: {exc}', file=sys.stderr)
+        return 2
     except (OSError, ValueError, sqlite3.Error) as exc:
         print(f'Context measurement unavailable ({type(exc).__name__}). Check offline stores or use --snapshot.', file=sys.stderr)
         return 2
@@ -255,6 +399,12 @@ def main(argv=None):
               f"{result['verdict']}, margin {result['margin_tokens']}, work-room deficit {result['work_room_deficit_tokens']}")
         print('Ladder (' + result['ladder_basis'] + '): ' + json.dumps(result['ladder']))
         print(f"Phase: {result['phase']}; profile: {result['profile']}; work-room levels: {result['work_room_levels']}")
+        if 'caller' in result:
+            tools = result['tools']
+            narrowed = (f" in {result['mode']} (the requested {tools['requested_mode']} selection has {tools['requested_count']})"
+                        if 'requested_count' in tools else '')
+            print(f"Caller: {result['caller']['kind']} (role {result['caller']['role']}); tools: {tools['count']}{narrowed} "
+                  f"({', '.join(f'{key} {value}' for key, value in tools['by_surface'].items())})")
         math = result['arithmetic']
         print(f"Room: {math['capacity_tokens']} - input {math['input_tokens']} - reserve {math['response_reserve_tokens']} "
               f"= {math['room_after_reserve_tokens']}; start room {math['start_work_room_tokens']}; "

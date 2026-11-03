@@ -13,6 +13,9 @@ from ouroboros.storage import (  # noqa: F401 -- public re-exports
     StorageVolume, StorageRemover,
 )
 from ouroboros.owner_keep import OwnerKeepRequest, OwnerKeepResponse  # noqa: F401 -- public re-exports
+from ouroboros.storage_deleted import (  # noqa: F401 -- public re-exports
+    StorageActiveProject, StorageDeletedFolder, StorageDeletedProject, StorageDeletedProjects, StorageFolderPart,
+)
 from ouroboros.storage_free import (  # noqa: F401 -- public re-exports
     StorageFree, StorageFreeEntry, StorageFreeGroup, StorageFreeItem, StorageFreeItemsResponse, StorageFreeKept, StorageFreePool,
     StorageFreeRequest, StorageFreeRun,
@@ -32,7 +35,10 @@ from ouroboros.gateway.widgets import (
     ExtensionLiveSnapshot, WidgetFaultRequest, WidgetFaultResponse, WidgetTab, WidgetsResponse,
     WidgetAssetLeaseRequest, WidgetAssetTokenRequest, WidgetAssetLeaseResponse, WidgetAssetRevokeResponse,
 )
-from ouroboros.gateway.decision_contracts import DecisionRequest, DecisionResponse  # noqa: F401 -- public re-exports
+from ouroboros.gateway.decision_contracts import (  # noqa: F401 -- public re-exports
+    DecisionRequest, DecisionResponse, SecretDecisionRequest, SecretDecisionResponse, SecretEvent, SecretOutcome,
+    SecretConsumer, SecretKeyState, SecretRequestField, SecretRequestMeta,
+)
 from ouroboros.gateway.card_contracts import CardOutbound, CardStateOutbound  # noqa: F401 -- public re-exports
 from ouroboros.gateway.update_contracts import (  # noqa: F401 -- public re-exports
     UpdateApplyErrorResponse, UpdateApplyRequest, UpdateApplySuccessResponse, UpdateDescriptionErrorResponse,
@@ -174,6 +180,10 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     closed_request_id: NotRequired[str]
     materials: NotRequired[List[Dict[str, Any]]]  # validated existing task artifact references
     question_delivery: NotRequired[Dict[str, Any]]  # canonical kind/state; pending stays current
+    # A mirrored secret request: its protected form, outcome and unconfirmed-save facts (no value).
+    secret_request: NotRequired[SecretRequestMeta]
+    secret_outcome: NotRequired[SecretOutcome]
+    secret_save: NotRequired[Dict[str, Any]]
     task_incident: NotRequired[str]
     # Historical rows only: the retired cancellation-fault notice named the PHYSICAL task it could not
     # settle when that differed from the logical id. Declared so stored rows keep their shape.
@@ -432,6 +442,7 @@ class QuizOutbound(ChatReferenceFields, SharedRowFrame):
     task_id: NotRequired[str]
     project_thread: NotRequired[bool]
     transport: NotRequired[TransportMetadata]
+    secret_request: NotRequired[SecretRequestMeta]  # an integration-secret request: answered only by its form
 
 
 class QuizStateOutbound(TypedDict):
@@ -459,6 +470,7 @@ class QuizStateOutbound(TypedDict):
     closed_by_task_id: NotRequired[str]
     closed_actor: NotRequired[str]
     closed_request_id: NotRequired[str]
+    secret_outcome: NotRequired[SecretOutcome]  # a secret request's typed completion, metadata only
 
 
 class TypingOutbound(TypedDict):
@@ -666,7 +678,7 @@ class EvolutionStateSnapshot(TypedDict):
     # None when the remaining budget is infinite (unbudgeted): inf is not JSON
     # compliant, so the snapshot serializes it as null.
     budget_remaining_usd: Optional[float]
-    budget_reserve_usd: float
+    budget_reserve_usd: float  # always 0.0: Evolution keeps no reserve of its own (owner, 2026-11-02)
     pending_count: int
     running_count: int
     queued_task_id: str
@@ -675,11 +687,12 @@ class EvolutionStateSnapshot(TypedDict):
 
 
 class ActiveDirectTurn(TypedDict):
-    """An active in-process direct chat or ephemeral decision turn.
+    """An active owner turn: a conversation-lane row or an inline executor's actor.
 
-    Rows of ``StateResponse.active_direct_turns``: ``DirectActivityRegistry.snapshot()``
-    always emits the seven identity/activity fields (empty string for absent values),
-    so the mirror marks them required; ``model_waits`` comes only from its live owner.
+    Rows of ``StateResponse.active_direct_turns`` (``conversation_lane.lane_turn_rows`` and
+    ``DirectActivityRegistry.snapshot()``) always emit the seven identity/activity fields
+    (empty string for absent values), so the mirror marks them required; ``model_waits``
+    comes only from its live owner.
     """
 
     activity_id: str
@@ -693,9 +706,11 @@ class ActiveDirectTurn(TypedDict):
     model_activity: NotRequired[Dict[str, Any]]  # content-free observation bound to the active Main call
     task_attempt: NotRequired[int]
     turn_phase: NotRequired[str]  # the last start fact its execution passed (TURN_PHASES); display only
+    executor: NotRequired[str]  # where the turn runs: worker, inline_call or inline_degraded (task_carrier.EXECUTORS)
+    carrier: NotRequired[str]  # a lane row: awaiting (no carrier holds it yet) or worker
 
 
-class ActiveChatActivity(ActiveDirectTurn):  # global root census; phase and control facts keep their own authority
+class ActiveChatActivity(ActiveDirectTurn):  # global root census (kind also presence); phase and control facts keep their own authority
     last_line: NotRequired[str]  # visible model narration, never host notes or display reasoning
     last_line_at: NotRequired[str]
     tool_calls: NotRequired[int]
@@ -718,6 +733,7 @@ class ActiveChatActivity(ActiveDirectTurn):  # global root census; phase and con
     late_work: NotRequired[Dict[str, Any]]  # answered root whose late work remains: title, answered_at; display only
     can_resume: NotRequired[bool]
     cancelable: NotRequired[bool]
+    presence_pause: NotRequired[bool]  # a live Presence turn moved to a Project as text (never a live call): Pause saves it, Restart returns it
 
 class EffortRange(TypedDict):  # helper min ≤ max; primary recommended is independent
     min: str
@@ -791,7 +807,7 @@ class StateResponse(WorkStateFields):
     task_bindings_revision: str
     task_bindings_unchanged: bool
     active_direct_turns: NotRequired[List[ActiveDirectTurn]]
-    # Combined activity snapshot (direct/ephemeral turns + root managed queue tasks). Additive beside
+    # Combined activity snapshot (direct, root managed and live inline Presence turns). Additive beside
     # active_direct_turns, which stays unchanged for compatibility; new clients hydrate from this field.
     active_chat_activities: NotRequired[List[ActiveChatActivity]]
     active_chat_activities_complete: NotRequired[bool]
@@ -1034,6 +1050,8 @@ class ProviderTestRequest(TypedDict):
     provider_id: str
     overrides: NotRequired[Dict[str, str]]  # flat keys; with ``connection``, that row's field names
     connection: NotRequired[str]  # a named connection of ``provider_id``; absent = the built-in one
+    # The built-in compatible pair under test; absent = the historical resolution (its Clear blanks both addresses).
+    api_key_setting: NotRequired[Literal["OPENAI_COMPATIBLE_API_KEY", "OPENAI_API_KEY"]]
 
 
 class ProviderTestResponse(TypedDict):
@@ -1505,6 +1523,8 @@ __all__ = [
     "QuizOption", "QuizOutbound", "QuizStateOutbound",
     "CardOutbound", "CardStateOutbound",
     "DecisionRequest", "DecisionResponse",
+    "SecretConsumer", "SecretDecisionRequest", "SecretDecisionResponse", "SecretEvent", "SecretKeyState",
+    "SecretOutcome", "SecretRequestField", "SecretRequestMeta",
     "TypingOutbound", "LogOutbound", "HeartbeatOutbound", "ExtensionLifecycleOutbound",
     "ProjectsChangedOutbound", "MessageAnnotationOutbound",
     "UpdateMergePlan", "UpdatePreflightRequest", "UpdatePreflightResponse", "UpdateApplyRequest",
@@ -1572,6 +1592,7 @@ __all__ = [
     "EffortRange", "OwnerEffortRangeResponse", "OwnerSubagentsModeResponse", "LogTailResponse",
     "StorageCount", "StorageCounting", "StorageError", "StoragePart", "StoragePlace", "StorageResponse",
     "StorageRest", "StorageVolume", "StorageRemover",
+    "StorageActiveProject", "StorageDeletedFolder", "StorageDeletedProject", "StorageDeletedProjects", "StorageFolderPart",
     "StorageFree", "StorageFreeEntry", "StorageFreeGroup", "StorageFreeItem", "StorageFreeItemsResponse", "StorageFreeKept",
     "StorageFreePool", "StorageFreeRequest", "StorageFreeRun", "OwnerKeepRequest", "OwnerKeepResponse",
     "HTTP_ENDPOINTS",

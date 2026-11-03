@@ -482,6 +482,9 @@ def watch_left_review(ctx: Any, *, surface: str, retry_key: str, reissue: str, a
     if (wait.get("selection") or {}).get("reviewers"):
         wait["selection"]["record_id"] = str(record_id or "")
     wait["review_reference"] = {"record_id": str(record_id), "surface": surface, "task_id": task_id}
+    from ouroboros.review_continuation import continued_operations
+
+    wait["continued"] = continued_operations(canonical_data_root(ctx), str(record_id or ""))
     wait["duty_id"] = _left_mark_id(wait)
     if record_id:
         saved = save_wait(ctx, record_id, wait)
@@ -490,7 +493,7 @@ def watch_left_review(ctx: Any, *, surface: str, retry_key: str, reissue: str, a
     ctx._left_review_wait = wait
     named = f"attempt #{wait['attempt']}" if wait["attempt"] else f"record {wait['record_id'] or retry_key[-12:]}"
     record = {key: wait[key] for key in ("surface", "task_id", "attempt", "record_id", "retry_key", "msg_id",
-                                         "selection", "seen_helpers", "seen_outcomes", "review_reference") if key in wait}
+                                         "selection", "seen_helpers", "seen_outcomes", "review_reference", "continued") if key in wait}
     # The late mark's root and the author's drive, bound by value; the duty lands before this call returns.
     record.update(unknown_seats=0, drive_root=str(drive_root), canonical_root=str(canonical_data_root(ctx)))
     _owe_left_review(record)
@@ -591,9 +594,14 @@ _SEAT_FACTS = ("model", "status", "operation_id", "operation_state", "late_resul
 def _left_mark_id(record: Dict[str, Any]) -> str:
     from ouroboros.late_review_marks import late_review_mark_id  # D06->D15 is lazy-only
 
-    surface, attempt_no = str(record["surface"]), int(record.get("attempt") or 0)
-    return late_review_mark_id(_LEFT_SURFACES.get(surface, surface), str(record["task_id"]),
-                               f"{surface}-late:{record.get('record_id') or record['retry_key']}:{attempt_no}")
+    surface = str(record["surface"])
+    return late_review_mark_id(_LEFT_SURFACES.get(surface, surface), str(record["task_id"]), _left_publication_id(record))
+
+
+def _left_publication_id(record: Dict[str, Any]) -> str:
+    """One left wave's mark: its record and attempt, and each operation an explicit continuation made current."""
+    continued = "".join(f":{operation}" for operation in record.get("continued") or [])
+    return f"{record['surface']}-late:{record.get('record_id') or record['retry_key']}:{int(record.get('attempt') or 0)}{continued}"
 
 
 def _owe_left_review(record: Dict[str, Any]) -> bool:
@@ -788,6 +796,10 @@ def _settle_left_record(record: Dict[str, Any], seats: List[Dict[str, Any]], *, 
     record_id = str(record.get("record_id") or "")
     if not record_id:
         return None
+    if final:  # an explicit choice its author never sent is a typed refusal, never sent by maintenance
+        from ouroboros.review_continuation import unsent_decisions
+
+        seats = [*seats, *unsent_decisions(record.get("canonical_root") or record["drive_root"], record_id, seats)]
     results, row_parts = [], {}
     for seat in seats:
         slot = str(seat.get("slot_id") or "")
@@ -871,7 +883,7 @@ def _left_review_mark(record: Dict[str, Any], attempt: Any, seats: List[Dict[str
     if unknown:
         head += f" {len(unknown)} seat(s) have no retained outcome and stay unknown; nothing is sent again."
     return {"surface": _LEFT_SURFACES.get(surface, surface), "task_id": task_id, "source_ref": ref,
-            "publication_id": f"{surface}-late:{record.get('record_id') or retry_key}:{attempt_no}",
+            "publication_id": _left_publication_id(record),
             "lines": [head, *(f"- {seat.get('model') or 'reviewer'} (seat {seat['slot_id']}): {_seat_words(seat)}"
                               for seat in seats)],
             "subject": {"retry_key": retry_key, "attempt": attempt_no, "record_id": str(record.get("record_id") or ""),

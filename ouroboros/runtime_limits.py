@@ -33,6 +33,9 @@ ARTIFACT_COMPRESSION_TIMEOUT_SEC = 120.0
 # Kill-and-reap bound for one captured local Git read (vcs_read history/identity); it sits
 # inside the default ToolEntry envelope so the reader reports and reaps before the loop abandons.
 GIT_READ_CAPTURE_TIMEOUT_SEC = 300.0
+# Read bound for one Claudexor answer the engine gives only after re-hashing every byte it names (a thread export
+# item, a thread retirement or its abandon); expiry leaves the outcome unknown, never refused.
+CLAUDEXOR_WHOLE_BYTES_READ_SEC = 900.0
 
 
 EXTENSION_STREAM_CHUNK_BYTES = 64 * 1024
@@ -67,6 +70,23 @@ EXTENSION_STREAM_METADATA_BYTES = 512 * 1024
 # Only the out-of-process WS relay is limited: the existing reserve refills gradually.
 WS_RELAY_BURST = 60
 WS_RELAY_REFILL_PER_SEC = 1.0
+# MCP task sessions (mcp_task_session) and their browser-policy callback (mcp_browser_guard): structural
+# bounds, not cognition timeouts. A caller waits CLOSE_WAIT for a session's end (inside the loop's MCP timeout
+# + 3 s outer margin; the SDK's own shutdown continues on the worker) and RETURN_WAIT for an answered call's end
+# record; an idle session notices a departed server within IDLE_POLL. One policy question must arrive within
+# GUARD_READ of its acceptance and fit GUARD_LINE_BYTES (the asker sends a larger body as unavailable);
+# GUARD_WORKERS decide at once and GUARD_PENDING questions (deciding or waiting) are held, more are refused.
+# A stdio server's stderr is logged at its transport's end as at most STDERR_TAIL_BYTES of whole last lines. That
+# bounds only the read and the log record, not the file: the server writes its temporary stderr file directly, so
+# a task session's file grows on disk with whatever its server writes until the loop ends (no ring buffer).
+MCP_TASK_SESSION_CLOSE_WAIT_SEC = 2.0
+MCP_TASK_SESSION_RETURN_WAIT_SEC = 1.0
+MCP_TASK_SESSION_IDLE_POLL_SEC = 0.25
+MCP_BROWSER_GUARD_READ_SEC = 10.0
+MCP_BROWSER_GUARD_LINE_BYTES = 32 * 1024 * 1024
+MCP_BROWSER_GUARD_WORKERS = 16
+MCP_BROWSER_GUARD_PENDING = 64
+MCP_STDIO_STDERR_TAIL_BYTES = 64 * 1024
 
 
 # Worker-pool spawn bounds (structural constants, not env knobs). Grace after a full-pool spawn before the crash
@@ -183,6 +203,12 @@ def resolve_task_execution_timeout_sec(task: dict, *, global_ceiling=_CURRENT_TA
     """
     if global_ceiling is _CURRENT_TASK_CEILING:
         global_ceiling = get_task_abs_ceiling_sec()
+    owner = task.get("_execution_owner") if isinstance(task.get("_execution_owner"), dict) else {}
+    if owner.get("lane") == "conversation" and owner.get("kind") in {"direct", "presence"}:
+        # An owner's or a correspondent's turn carried by the conversation lane has no
+        # project ceiling: it runs as long as its dialogue lives (#1959, "the bubble is the
+        # work"), as it did in the server process; Stop and its own deadline bound it.
+        global_ceiling = None
     bounds = [float(value) for value in (explicit_execution_timeout_sec(task), global_ceiling) if value is not None]
     return min(bounds) if bounds else None
 
@@ -308,8 +334,9 @@ def get_supervisor_liveness_deadline_sec(settings: Optional[dict] = None) -> int
 
 
 def get_post_task_evolution_budget_usd() -> float:
-    """Optional per-window USD budget for post-task evolution (0 = use the
-    existing EVOLUTION_BUDGET_RESERVE / TOTAL_BUDGET gating only)."""
+    """Start floor of a post-task promotion: below this remaining global budget (USD) a pending
+    request is dropped instead of starting its campaign. 0 (default) adds no floor beyond the
+    ordinary TOTAL_BUDGET admission; it is no per-cycle or per-window budget and caps no cycle."""
     return _clamped_number_setting("OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD", low=0.0)
 
 

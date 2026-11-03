@@ -1,12 +1,30 @@
-"""Read queue projections against the last successfully published generation."""
+"""Read queue projections against the last successfully published generation.
 
+The publisher (``supervisor/queue_publication.py``) writes large task values once per
+document, by content address under ``$shared``; ``load_queue_document`` expands them, so
+every reader sees whole rows, and keeps the parsed document of one file identity
+(mtime, size, inode) so repeated readers do not parse the same bytes again.
+"""
+
+import os
 import pathlib
+import threading
 import time
+from typing import Any, Dict, Optional
 
 from ouroboros.utils import read_json_dict
 
 _sleep = time.sleep  # the in-flight re-read's pause, kept apart from frozen test clocks
 _monotonic = time.monotonic
+
+#: The publisher's table of shared task values and the key of a row's reference into it.
+SHARED_KEY = "$shared"
+#: A ``queue.alive`` stamp older than this proves no live supervisor to its readers (``task_status``);
+#: the publisher refreshes it well inside this bound.
+QUEUE_ALIVE_FRESH_SEC = 10.0
+
+_CACHE: Dict[pathlib.Path, tuple] = {}  # path -> (identity, expanded document)
+_CACHE_LOCK = threading.Lock()
 
 
 def queue_stamp(document: dict, *, boot: bool = False) -> dict:
@@ -17,11 +35,93 @@ def queue_stamp(document: dict, *, boot: bool = False) -> dict:
     return stamp if document.get("generation") and document["generation"] == stamp.get("generation") else {}
 
 
-def load_queue_document(drive_root, name="queue_snapshot.json") -> dict:
-    path = pathlib.Path(drive_root) / "state" / name
+def expand_shared(document: dict) -> dict:
+    """Resolve every ``{"$shared": address}`` in the rows from the document's own table, in place.
+
+    A reference the table does not answer is a malformed document (``ValueError``): a row
+    with a hole is never handed to a reader as the task it names.
+    """
+    shared = document.pop(SHARED_KEY, None)
+    if not isinstance(shared, dict):
+        return document
+
+    def value_of(item: Any) -> Any:
+        if isinstance(item, dict) and len(item) == 1 and SHARED_KEY in item:
+            try:
+                return shared[item[SHARED_KEY]]
+            except (KeyError, TypeError):
+                raise ValueError(f"queue document names a shared value it does not carry: {item[SHARED_KEY]!r}")
+        return item
+
+    for lane in ("pending", "running"):
+        for row in document.get(lane) or []:
+            task = row.get("task") if isinstance(row, dict) else None
+            if not isinstance(task, dict):
+                continue
+            for key, item in list(task.items()):
+                if key == "metadata" and isinstance(item, dict):
+                    task[key] = {name: value_of(nested) for name, nested in item.items()}
+                else:
+                    task[key] = value_of(item)
+    return document
+
+
+def _parsed(path: pathlib.Path, *, fresh: bool) -> Optional[dict]:
+    """The expanded document of ``path``: the cached one while the file identity holds, else re-read.
+
+    ``fresh`` returns an unshared copy (a restore mutates what it reads) and caches nothing.
+    """
+    try:
+        stat = os.stat(path)
+        identity = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+    except OSError:
+        identity = None
+    if not fresh and identity is not None:
+        with _CACHE_LOCK:
+            cached = _CACHE.get(path)
+        if cached is not None and cached[0] == identity:
+            return cached[1]
     document = read_json_dict(path)
     if document is None:
+        return None
+    try:
+        expand_shared(document)
+    except ValueError:
+        return None
+    if fresh:
+        return document
+    if identity is not None:
+        with _CACHE_LOCK:
+            _CACHE[path] = (identity, document)
+    return document
+
+
+def _view(document: dict) -> dict:
+    """A reader's own copy of the row structure; the task values below stay shared with the cache."""
+    view = dict(document)
+    for lane in ("pending", "running"):
+        rows = document.get(lane)
+        if isinstance(rows, list):
+            view[lane] = [{**row, "task": dict(row["task"])} if isinstance(row, dict) and isinstance(row.get("task"), dict)
+                          else (dict(row) if isinstance(row, dict) else row) for row in rows]
+    for key in ("acceptance_fences", "budget_root_fences", "roots"):
+        if isinstance(document.get(key), list):
+            view[key] = [dict(row) if isinstance(row, dict) else row for row in document[key]]
+    return view
+
+
+def load_queue_document(drive_root, name="queue_snapshot.json", *, fresh: bool = False) -> dict:
+    """The published document with its matching liveness stamp and derived run-time facts.
+
+    Shared task values are expanded; the returned structure is the caller's to annotate
+    (rows and task dicts are copies; the values below them are shared with the reader
+    cache unless ``fresh``, which parses an unshared copy for a reader that mutates deeply).
+    """
+    path = pathlib.Path(drive_root) / "state" / name
+    document = _parsed(path, fresh=fresh)
+    if document is None:
         return {"_snapshot_invalid" if path.exists() else "_snapshot_missing": True}
+    document = document if fresh else _view(document)
     document["_queue_alive"] = read_json_dict(path.parent / "queue.alive") or {}
     if name == "queue_snapshot.json":
         from ouroboros.model_wait import execution_elapsed_seconds, quota_waited_seconds

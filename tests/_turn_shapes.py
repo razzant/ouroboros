@@ -14,7 +14,7 @@ import json
 import os
 import pathlib
 import time
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 SEALED_ROWS = 12  # per unit of k: rows of a room after the frontier, all sealed by one page
 OPEN_ROWS = 3  # per breadth room: rows no page seals
@@ -173,23 +173,29 @@ def turn_history(root: pathlib.Path, k: int) -> Dict[str, Any]:
             "rotated_logs": _rotated_logs(root)}
 
 
-def steady_state(root: pathlib.Path) -> Dict[str, Any]:
+def steady_state(root: pathlib.Path, *, refused: Callable[[Any], List[str]]) -> Dict[str, Any]:
     """A long-lived install between the owner's turns: the maintenance child has run the jobs it owed since the
     chronicle became active (``memory_tail`` stores the facts of the rows after the frontier, so a capture reads
     them and only the rows appended since, not every row live), and the boot has observed the OpenRouter
     catalogue (``boot_catalogue``) and listed ``archive/`` for the logs a first owner turn reads
-    (``boot_listings``). An install that does not reach it fails the driver: no law reads a fill."""
+    (``boot_listings``). An install that does not reach it fails the driver: no law reads a fill.
+    ``refused`` is the driver's judge of a maintenance pass's report (tests/_cost_driver.py ``refused``), handed
+    in because that module runs as ``__main__`` in the driver's interpreter and a named import would load it twice."""
     from ouroboros import maintenance
     from ouroboros.chronicle_store import ChronicleStore
 
     jobs: Dict[str, Any] = {}
+    refusals: List[str] = []
     for _attempt in range(3):
         if not maintenance.due(root):
             break
-        jobs.update(maintenance.run(root, should_stop=lambda: False)["jobs"])
+        report = maintenance.run(root, should_stop=lambda: False)
+        jobs.update(report["jobs"])
+        refusals += refused(report)  # a refused job left nothing done: no steady state follows from it
     tail, due = ChronicleStore(root).tail_state() or {}, maintenance.due(root)
-    if not tail.get("complete") or due:
-        raise RuntimeError(f"the install did not reach its steady state: tail {tail}, still due {due}, ran {jobs}")
+    if not tail.get("complete") or due or refusals:
+        raise RuntimeError(f"the install did not reach its steady state: tail {tail}, still due {due}, "
+                           f"refused {refusals}, ran {jobs}")
     return {"child_jobs": jobs, "catalogue": boot_catalogue(), "listings": boot_listings(root)}
 
 

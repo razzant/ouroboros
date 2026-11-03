@@ -1,6 +1,9 @@
 """Durable custody of in-flight review invocations and attempt-history hygiene.
 
 The checkpoint that records a pending review invocation before dispatch, the
+paid fact merged onto a reserved attempt at its first physical send, what a new
+call of a round owes its completed earlier wave (collect a usable verdict, or
+retire the process-local replays of a wave without one), the
 roster-row predicates that decide whether an attempt still holds active review
 custody, the eviction rule that keeps settled attempts from starving the
 bounded history, and the heavy-payload stripper applied on eviction. This is
@@ -11,12 +14,15 @@ MIGRATION_v7 row names these symbols; review_state.py re-exports every name.
 
 from __future__ import annotations
 
+import logging
 import pathlib
 from typing import Any, Dict, List, TYPE_CHECKING
 
 if TYPE_CHECKING:  # annotation-only names; lazy under future annotations, never imported at runtime
     from ouroboros.review_state_model import AdvisoryReviewState
     from ouroboros.review_state_records import CommitAttemptRecord
+
+log = logging.getLogger(__name__)
 
 
 def _rs():
@@ -173,6 +179,76 @@ def checkpoint_pending_review_invocation(
         current.updated_ts = _rs()._utc_now()
 
     _rs().update_state(pathlib.Path(drive_root), _mutate, lock_timeout_sec=SEAT_LAUNCH_LOCK_WAIT_SEC)
+
+
+def mark_review_attempt_paid(
+    drive_root: pathlib.Path, *, repo_key: str, tool_name: str, task_id: str, attempt: int, review_retry_key: str,
+) -> None:
+    """Merge the write-ahead paid fact onto one reserved attempt row at its wave's first physical send.
+
+    The reservation already wrote the roster and its owner before any worker started; this narrow locked
+    patch adds only ``paid``, never a status, roster or late-result change, so a first send after its
+    author left still stamps the wave's own row. A missing row or another round refuses the send.
+    """
+    from ouroboros.review_owner_custody import stamp_paid_review_owner
+
+    def _mutate(state: AdvisoryReviewState) -> Any:
+        current = state.latest_attempt_for(repo_key=repo_key, tool_name=tool_name, task_id=task_id,
+                                           attempt=int(attempt or 0))
+        if current is None or current.review_retry_key != str(review_retry_key or ""):
+            raise ReservedReviewSlotRefused("reserved review attempt is unavailable for its paid dispatch")
+        if current.paid:
+            return _rs().ReviewStateMutation(None, changed=False)
+        current.paid = True
+        stamp_paid_review_owner(current, paid=True)
+        current.updated_ts = _rs()._utc_now()
+
+    _rs().update_state(pathlib.Path(drive_root), _mutate, lock_timeout_sec=SEAT_LAUNCH_LOCK_WAIT_SEC)
+
+
+def settle_completed_round(
+    usage_ctx: Any, drive_root: pathlib.Path, *, repo_key: str, tool_name: str, task_id: str, review_retry_key: str,
+    exclude_attempt: int = 0,
+) -> "CommitAttemptRecord | None":
+    """What a new explicit call of a review round owes the newest earlier attempt of that round (#2410).
+
+    Only a closed attempt whose every seat settled is decided, by ONE exact read of its own ledger record
+    (``review_record_id``): a settled usable verdict (PASS/FAIL) is returned, for the caller to collect with
+    that attempt's own roster instead of reserving a new wave; a settled wave without one has its process-local
+    replays (``review_custody``'s ``_review_settled_attempts``) retired, so the explicit call is a new physical
+    attempt rather than a replay of old operations under a fresh roster. An open, lost or unknown seat, or an
+    unreadable state or record, keeps every replay and returns nothing; ``_NO_RESEND`` and live workers are never
+    touched. ``exclude_attempt`` is the caller's own row. Custody's lock is taken after the reads, never inside."""
+    from ouroboros.review_custody import _ACTIVE, _ACTIVE_LOCK, _NO_RESEND, _row_is_pending
+    from ouroboros.review_ledger import STATE_SETTLED, VERDICT_FAIL, VERDICT_PASS, ledger_root, load_record
+
+    try:
+        attempts = [item for item in _rs().load_state(pathlib.Path(drive_root)).filter_attempts(
+                        repo_key=repo_key, tool_name=tool_name, task_id=task_id)
+                    if review_retry_key and item.review_retry_key == review_retry_key
+                    and int(item.attempt or 0) != int(exclude_attempt or 0)]
+        attempt = max(attempts, key=lambda item: int(item.attempt or 0), default=None)
+        rows = _attempt_review_roster_rows(attempt) if attempt is not None else []
+        if not rows or _attempt_has_active_review_custody(attempt) or any(
+                _row_is_pending(row) or row.get("pending_invocation_id") for row in rows):
+            return None
+        record = load_record(ledger_root(usage_ctx), attempt.review_record_id) if attempt.review_record_id else None
+    except Exception:
+        log.warning("the round's earlier review attempt is unreadable; its settled replays stay", exc_info=True)
+        return None
+    if not record or record.get("state") != STATE_SETTLED:
+        return None
+    if (record.get("verdict") or {}).get("aggregate") in (VERDICT_PASS, VERDICT_FAIL):
+        return attempt
+    operations = {str(row.get("operation_id") or "") for row in rows} - {""}
+    settled = getattr(usage_ctx, "_review_settled_attempts", None)
+    with _ACTIVE_LOCK:
+        if not isinstance(settled, dict) or operations & (
+                {entry.operation_id for entry in _ACTIVE.values()} | set(_NO_RESEND.values())):
+            return None
+        for key in [key for key, actor in settled.items() if str(getattr(actor, "operation_id", "")) in operations]:
+            settled.pop(key, None)
+    return None
 
 
 def _left_before_launch_still_sends(operation_id: str) -> bool:

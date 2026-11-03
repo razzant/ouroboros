@@ -233,13 +233,15 @@ def _str_match_replace(
 
 
 def _check_data_shrink_guard(
-    target: pathlib.Path, new_content: str, force: bool = False
+    target: pathlib.Path, new_content: str, force: bool = False, *, recovery: str = ""
 ) -> "str | None":
     """Block likely accidental truncation of an EXISTING data-plane file on OVERWRITE,
     unless force=True (deferral 5). Mirrors the repo shrink-guard
     (``git._check_shrink_guard``) but WITHOUT the ``git ls-files`` tracking check — the
     data plane is not a git tree. Skips a non-existent target (a fresh create is any
-    size) and appends (the caller only invokes this on overwrite). Never raises."""
+    size) and appends (the caller only invokes this on overwrite). ``recovery``
+    replaces the full-write next step; exact editors pass
+    ``edit_ops.EXACT_EDIT_SHRINK_RECOVERY``. Never raises."""
     from ouroboros.config import get_runtime_mode
     from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
 
@@ -255,8 +257,8 @@ def _check_data_shrink_guard(
             return (
                 f"⚠️ WRITE_BLOCKED: new content for '{target.name}' is {pct}% of original "
                 f"({old_len} -> {new_len} chars). This looks like accidental truncation. "
-                f"Use edit_text for surgical edits, or pass force=true to confirm an "
-                f"intentional rewrite."
+                + (recovery or "Use edit_text for surgical edits, or pass force=true to confirm an "
+                   "intentional rewrite.")
             )
     except Exception:
         return None
@@ -1401,7 +1403,7 @@ def get_tools() -> List[ToolEntry]:
                 "Use after browse_page(output='screenshot') or browser_action(action='screenshot')."
             ),
             "parameters": {"type": "object", "properties": {
-                "file_path": {"type": "string", "description": "Local file path to image (preferred)"},
+                "file_path": {"type": "string", "description": "Local image path (preferred): relative to the active workspace, or absolute."},
                 "image_base64": {"type": "string", "description": "Base64-encoded image data or __last_screenshot__"},
                 "caption": {"type": "string", "description": "Optional caption for the photo"},
             }, "required": []},
@@ -1410,7 +1412,7 @@ def get_tools() -> List[ToolEntry]:
             "name": "send_video",
             "description": "Send a local video file to the owner's chat, with an optional caption. Requires file_path.",
             "parameters": {"type": "object", "properties": {
-                "file_path": {"type": "string", "description": "Local file path to the video."},
+                "file_path": {"type": "string", "description": "Local video path: relative to the active workspace, or absolute."},
                 "caption": {"type": "string", "description": "Optional caption for the video"},
             }, "required": ["file_path"]},
         }, _send_video),
@@ -1423,7 +1425,7 @@ def get_tools() -> List[ToolEntry]:
                 "the owner can download, rather than only describing it or sending a screenshot."
             ),
             "parameters": {"type": "object", "properties": {
-                "file_path": {"type": "string", "description": "Local file path to the document/file"},
+                "file_path": {"type": "string", "description": "Local file path: relative to the active workspace, or absolute."},
                 "caption": {"type": "string", "description": "Optional caption for the file"},
             }, "required": ["file_path"]},
         }, _send_file),

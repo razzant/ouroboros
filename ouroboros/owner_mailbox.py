@@ -95,32 +95,54 @@ def mailbox_lines(content: str) -> List[str]:
     return [line for line in content.split("\n") if line.strip()]
 
 
+def _mail_text(path: pathlib.Path) -> str:
+    """A mailbox's text for the readers that skip a row they cannot parse: a torn append may have split a multibyte
+    character (rows are unescaped UTF-8), and those bytes must cost only their own row, never every row beside them."""
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
 def _ack_path(drive_root: pathlib.Path, task_id: str) -> pathlib.Path:
     return pathlib.Path(drive_root) / _MAILBOX_DIR / f"{validate_task_id(task_id)}.acks.jsonl"
 
 
-def _append_mail(drive_root: pathlib.Path, task_id: str, path: pathlib.Path, entry: Dict[str, Any]) -> bool:
+def _append_mail(drive_root: pathlib.Path, task_id: str, path: pathlib.Path, entry: Dict[str, Any],
+                 admit: Optional[Any] = None) -> bool:
     """Append one mailbox row under the task's mail lock (``task_custody.task_mail_lock``,
     on the canonical side), so a row can never land between a settlement's custody read and
     the unlink or drive move it permits (a sender after that recreates the mailbox, which
     the next settlement holds). Never held across a copy: a publisher's custody lock is a
-    different lock, so a long copy-back never blocks a sender."""
+    different lock, so a long copy-back never blocks a sender. ``admit`` is a check run
+    INSIDE the lock before the write (a remote author's intake fact): False writes nothing.
+    A False from the append itself is NOT write-free: bytes of a torn row may have landed. They stay
+    as they are, and the record boundary keeps the next row from being glued onto them."""
     from ouroboros.task_custody import task_mail_lock
 
     with task_mail_lock(drive_root, task_id) as locked:
         if locked and entry.get("provenance") == "place_event" and _holds(path, entry["msg_id"]):
             return True
-        return bool(locked and append_jsonl(path, entry))
+        if locked and admit is not None and not admit():
+            return False
+        return bool(locked and append_jsonl(path, entry, ensure_record_boundary=True))
 
 
 def _holds(path: pathlib.Path, msg_id: str) -> bool:
-    return path.exists() and any(json.loads(line).get("msg_id") == msg_id
-                                 for line in mailbox_lines(path.read_text(encoding="utf-8")))
+    """A whole row of this id, the only form a drain can deliver. False is not proof its append wrote nothing:
+    a torn row of it may lie among the rows skipped here, as the drain skips them."""
+    if not path.exists():
+        return False
+    for line in mailbox_lines(_mail_text(path)):
+        try:
+            if json.loads(line).get("msg_id") == msg_id:
+                return True
+        except (ValueError, AttributeError):
+            continue
+    return False
 
 
 def place_event_retained(drive_root: pathlib.Path, task_id: str, msg_id: str) -> bool:
     """Whether this author already holds a place arrival: its append outlived a lost settlement.
-    An entry is appended only while its author accepts intake, so its final drain reads it."""
+    An entry proves mailbox retention, not model reading after a terminal drain.
+    Absence proves no non-delivery: terminal cleanup may already have retired the consumed mailbox."""
     from ouroboros.task_custody import task_mail_lock
 
     with task_mail_lock(drive_root, task_id) as locked:
@@ -166,7 +188,7 @@ def acknowledged_task_message_ids(
     legacy_owner_ids: set[str] = set()
     if attempt_key is not None:
         try:
-            content = _mailbox_path(drive_root, task_id).read_text(encoding="utf-8")
+            content = _mail_text(_mailbox_path(drive_root, task_id))
             complete = not content or content.endswith("\n")
             for line in mailbox_lines(content):
                 try:
@@ -297,6 +319,7 @@ def write_owner_message(
     quiz_delivery: Optional[Dict[str, Any]] = None,
     card_delivery: Optional[Dict[str, Any]] = None,
     card_press: Optional[Dict[str, Any]] = None,
+    admit: Optional[Any] = None,
 ) -> bool:
     """Write an owner message or typed control entry to a task's mailbox.
 
@@ -310,7 +333,8 @@ def write_owner_message(
     valid): the drain rebuilds the card's frame for the model from it, while
     ``text`` stays the owner's own words; ``card_press`` is the same for a press on a
     finished author's card. ``card_delivery`` names the living-card press
-    ``{card_id, request_id, canonical_root}`` its read settles.
+    ``{card_id, request_id, canonical_root}`` its read settles. ``admit``: a check run under the
+    mail lock before the append (a carried Presence author's intake), False writes nothing.
     """
     from ouroboros.install_identity import StoreForeign, require_owned_root
 
@@ -346,8 +370,8 @@ def write_owner_message(
         if isinstance(attachment_manifest, list):
             from ouroboros.artifacts import attachment_manifest_projection
             entry.update(attachment_manifest_projection(drive_root, task_id, attachment_manifest))
-        if not _append_mail(drive_root, task_id, path, entry):
-            log.warning("Failed to durably append owner message for task %s", task_id)
+        if not _append_mail(drive_root, task_id, path, entry, admit=admit):
+            log.warning("Owner message for task %s not appended (refused by its admission or not durable)", task_id)
             return False
         return True
     except StoreForeign:
@@ -372,6 +396,7 @@ def write_task_message(
     sender_origin: Optional[Dict[str, Any]] = None,
     reply_to: Optional[Dict[str, Any]] = None,
     place_arrival: Optional[Dict[str, Any]] = None,
+    admit: Optional[Any] = None,
 ) -> bool:
     """Write an addressed task-tree message without forging owner provenance.
 
@@ -415,7 +440,7 @@ def write_task_message(
     if provenance == "system" and isinstance(work_attention, dict):
         entry["work_attention"] = dict(work_attention)
     try:
-        return _append_mail(drive_root, task_id, path, entry)
+        return _append_mail(drive_root, task_id, path, entry, admit=admit)
     except StoreForeign:
         raise
     except Exception:
@@ -611,7 +636,7 @@ def reset_attempt_controls_for_retry(
     try:
         rows: List[dict] = []
         revoked: set[str] = set()
-        for line in mailbox_lines(path.read_text(encoding="utf-8")):
+        for line in mailbox_lines(_mail_text(path)):
             try:
                 row = json.loads(line)
             except (TypeError, ValueError):
@@ -677,7 +702,7 @@ def drain_owner_entries(
             )
         )
     try:
-        content = path.read_text(encoding="utf-8")
+        content = _mail_text(path)
         complete = ack_status.get("complete", False) and (not content or content.endswith("\n"))
         if not content.strip():
             if _read_status is not None:
@@ -880,7 +905,7 @@ def mail_write_receipt(recipient_status: str, *, drain_ended: bool = False) -> D
 def mailbox_holds(drive_root: pathlib.Path, task_id: str, msg_id: str) -> bool:
     """True while TASK_ID's mailbox still carries MSG_ID: written and not yet drained away."""
     try:
-        content = _mailbox_path(drive_root, task_id).read_text(encoding="utf-8")
+        content = _mail_text(_mailbox_path(drive_root, task_id))
     except (OSError, ValueError):
         return False
     for line in mailbox_lines(content):

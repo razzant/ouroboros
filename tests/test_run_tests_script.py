@@ -11,6 +11,7 @@ from ouroboros.preflight_inventory import SELECT
 from ouroboros.preflight_runner import LANE_EXCLUSION_EXPR, PARALLEL_PASS_FLAGS, SERIAL_PASS_FLAGS
 from ouroboros.safe_test_supervisor import _GRACE_SEC as SAFE_TEST_INT_WINDOW_SEC
 from tests import conftest
+from tests.test_selected_test_cli import plugin_scope
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -251,7 +252,9 @@ def test_a_deferred_full_escalation_runs_the_floor_and_says_so(run_tests, monkey
     assert ran[0] == "node" and ran[1][0] == "parallel"  # the leg still runs the Node lane and a pytest pass
     if tier == "full":  # the PR minimum runs here; the rest goes to the landed shards
         assert record["deferred_full"] is True and record["files"] == sorted(test_selection.FLOOR_TESTS)
-        assert all(f"{SELECT}={path}" in ran[1][1] for path in test_selection.FLOOR_TESTS)
+        # The pass is started with exactly the floor in its inventory plugin, not on its command line.
+        assert plugin_scope(ran[1][1], tmp_path / "evidence" / "probe") == sorted(test_selection.FLOOR_TESTS)
+        assert not [arg for arg in ran[1][1] if arg.startswith(SELECT)]
         assert "tests/conftest.py: verification apparatus changed" in summary.read_text(encoding="utf-8")
     else:
         assert "deferred_full" not in record and record["files"] == ["tests/test_floor.py"]

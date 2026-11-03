@@ -23,6 +23,20 @@
       "exact_clause": true
     },
     {
+      "name": "what an evolution cleanup moved keeps Done and states the host's words",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "evolution_cleanup": {"status": "stashed_dirty", "line": "Evolution cleanup moved local changes to a Git stash", "stash_oids": ["abc123"]}}}},
+      "phase": "done", "headline": "Done",
+      "acceptance_clause": "Evolution cleanup moved local changes to a Git stash.",
+      "exact_clause": true
+    },
+    {
+      "name": "a late cleanup after a campaign Stop keeps Stopped beside its cancel cause",
+      "record": {"status": "cancelled", "reason_code": "cancelled", "cancel_origin": {"source": "evolution_stop", "reason": "disabled via owner chat"}, "outcome_axes": {"execution": {"status": "cancelled", "evolution_cleanup": {"status": "reset_failed", "line": "Evolution cleanup moved local changes to a Git stash, but the reset to the cycle's starting commit failed", "stash_oids": ["abc123"]}}}},
+      "phase": "cancelled", "headline": "Stopped",
+      "acceptance_clause": "evolution_stop · disabled via owner chat · Evolution cleanup moved local changes to a Git stash, but the reset to the cycle's starting commit failed.",
+      "exact_clause": true
+    },
+    {
       "name": "zero remainder adds no cause",
       "record": {"status": "completed", "outcome_axes": {"execution": {"status": "ok", "mutation_attribution": {"uncommitted_remainder": {"state": "known", "count": 0, "paths_omitted": 0}}}}},
       "phase": "done", "headline": "Done", "acceptance_clause": "", "exact_clause": true
@@ -758,6 +772,34 @@
       "acceptance_clause": "The plan review was never closed; the work went on with what the reviewers said."
     },
     {
+      "name": "an author's stop over a held plan objection names the stop and the review still open, never work that went on",
+      "record": {"status": "completed", "reason_code": "plan_review_advisory", "terminal_plan_review_open": true, "outcome_axes": {"execution": {"status": "degraded", "reason_code": "plan_review_advisory", "plan_review": "objections_open", "task_completion": {"action": "stop", "rationale": "The objection stands; stopping with the draft."}}, "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}, "review": {"status": "skipped"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "Ouroboros stopped with unfinished work; no review approval was granted · The objection stands; stopping with the draft · The plan review was still open when this answer was delivered."
+    },
+    {
+      "name": "an author's stop over an unreadable plan record names the stop and keeps the plan review's state unknown",
+      "record": {"status": "completed", "reason_code": "plan_review_advisory", "terminal_plan_review_open": true, "outcome_axes": {"execution": {"status": "degraded", "reason_code": "plan_review_advisory", "plan_review": "unreadable", "task_completion": {"action": "stop", "rationale": "The plan record cannot be read; stopping with the draft."}}, "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}, "review": {"status": "skipped"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "Ouroboros stopped with unfinished work; no review approval was granted · The plan record cannot be read; stopping with the draft · The plan record could not be read, so the state of the plan review is unknown."
+    },
+    {
+      "name": "a rail over an unreadable plan record keeps its own cause and the plan review's state unknown",
+      "record": {"status": "completed", "reason_code": "round_limit", "terminal_plan_review_open": true, "outcome_axes": {"execution": {"status": "best_effort", "reason_code": "round_limit", "plan_review": "unreadable"}, "review": {"status": "skipped"}}},
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "The task hit its round limit before it could finish cleanly · The plan record could not be read, so the state of the plan review is unknown."
+    },
+    {
+      "name": "a clean finish over an unreadable plan record (Cyber Pro) is Done and keeps the plan review's state unknown",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "plan_review": "unreadable"}, "review": {"status": "skipped"}}},
+      "phase": "done",
+      "headline": "Done",
+      "acceptance_clause": "The plan record could not be read, so the state of the plan review is unknown."
+    },
+    {
       "name": "an open plan review is stated beside the deferred children that ended the task",
       "record": {"status": "completed", "reason_code": "child_results_deferred", "terminal_plan_review_open": true, "outcome_axes": {"execution": {"status": "degraded", "reason_code": "child_results_deferred"}, "objective": {"status": "best_effort", "source": "child_result_disposition", "deferred_count": 2}}},
       "phase": "warn",
@@ -854,6 +896,20 @@
       "phase": "error",
       "headline": "Failed",
       "acceptance_clause": "The task outgrew its context before it could finish cleanly."
+    },
+    {
+      "name": "a window that cannot hold the task's context says its own sentence",
+      "record": {"status": "failed", "reason_code": "context_capacity", "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "context_capacity"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "This route's window cannot hold the task's context."
+    },
+    {
+      "name": "an unreadable handbook the task itself requires says its own sentence",
+      "record": {"status": "failed", "reason_code": "required_reference_unavailable", "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "required_reference_unavailable"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "The handbook this task requires could not be read."
     },
     {
       "name": "a reaped task names its absolute ceiling in owner words",

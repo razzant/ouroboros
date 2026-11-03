@@ -399,7 +399,7 @@ def test_commit_reviewed_compares_with_a_named_review_and_refuses_the_name_where
                                      since_review=earlier["record_id"])
     assert "since_review shapes a new wave's brief" in continued
     collected = git._commit_reviewed(ctx, "fix: proposal", review_reference=reference, since_review=earlier["record_id"])
-    assert "cannot change its commit message, brief or panel" in collected
+    assert "cannot change its commit message, brief, panel or author disposition" in collected
     assert shared.git(repo, "rev-parse", "HEAD") == head  # no commit: Cyber Pro hands every outcome back first
 
 

@@ -22,7 +22,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.utils import append_jsonl, utc_now_iso
@@ -40,6 +39,7 @@ from supervisor.update_candidate import (  # noqa: F401
     stash_local_changes_for_update, lookup_update_stash,
     destructive_apply_guard, project_version_carriers,
     quarantine_corrupt_update_tx_marker, StashRestoreResult,
+    RESOLVER_POOL, ensure_assisted_resolver_ready, refuse_unready_boot_resolver, resolver_slot_owed,
 )
 # The planner, the clean-plan commit builder and the live materializer — the
 # carrier engine's three insertion points — live in supervisor.update_merge_plan
@@ -600,42 +600,6 @@ def _finish_rollback(
     return True, message
 
 
-def ensure_assisted_resolver_ready(expected_sha: str, timeout_sec: float = 90.0) -> bool:
-    """Prove a fresh resolver imported the exact clean tree before conflicts go live."""
-    from supervisor import workers
-    from supervisor.queue import _queue_lock
-
-    with _queue_lock:
-        if workers.WORKERS:
-            return False  # update quiescence must leave no ambiguous prior generation
-    events_cursor = workers.events_log_cursor()
-    try:
-        if not workers.ensure_worker_pool_started(n=1, allow_disabled_restart=True):
-            return False
-    except Exception:
-        _g.log.warning("assisted resolver worker start failed", exc_info=True)
-        return False
-    deadline = time.monotonic() + max(float(timeout_sec), 0.1)
-    while time.monotonic() < deadline:
-        with _queue_lock:
-            live_pids = {
-                int(worker.proc.pid)
-                for worker in workers.WORKERS.values()
-                if worker.proc.pid and worker.proc.is_alive()
-            }
-        if not live_pids:
-            return False
-        boot = workers._first_worker_event_since(events_cursor, "worker_ready")
-        try:
-            boot_pid = int((boot or {}).get("pid") or 0)
-        except (TypeError, ValueError):
-            boot_pid = 0
-        if boot_pid in live_pids and str((boot or {}).get("git_sha") or "") == expected_sha:
-            return True
-        time.sleep(0.05)
-    return False
-
-
 def enqueue_assisted_resolution_task(tx: Dict[str, Any]) -> str:
     """Enqueue (front) the single authorized resolution task for an assisted merge and start a
     worker for it. Used by both the apply orchestration and boot recovery so the objective +
@@ -1074,6 +1038,9 @@ def _recover_assisted_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dic
                 tx["conflict_paths"] = refreshed_conflicts
         rescue_info: Dict[str, Any] = {}
         if not has_progress:
+            refused = refuse_unready_boot_resolver()  # no child imports the markers below, else unwound for the owner
+            if refused:
+                return refused
             # The server's owner-control path must be resident before the
             # re-materialized conflict markers land in the live tree (#283); it imports
             # the first-party ``ouroboros`` and ``supervisor`` packages.

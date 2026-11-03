@@ -128,14 +128,15 @@ def test_a_warm_workers_next_task_does_not_relabel_the_previous_tasks_late_frame
     ({"initiator": "consciousness", "wake_cause": "own_clock"}, False),
     ({"initiator": "consciousness", "wake_cause": "focus"}, False),
     ({"initiator": "consciousness", "usage_category": "consciousness_task"}, True)])
-def test_the_direct_lane_endpoint_keeps_its_turn_stamps(monkeypatch, tmp_path, metadata, named):
-    """The lane names working Main turns, while a wake supplies its own title at finish."""
+def test_the_conversation_carrier_endpoint_keeps_its_turn_stamps(monkeypatch, tmp_path, metadata, named):
+    """The carrier names working Main turns, while a wake supplies its own title at finish."""
     from ouroboros import project_naming
-    from supervisor import worker_chat_lane as lane
+    from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
+    from supervisor.worker_process import run_worker_task
 
+    (tmp_path / "logs").mkdir()
     captured, inner = _capture()
     fired = []
-    monkeypatch.setattr(lane, "_pool", lambda: SimpleNamespace(DRIVE_ROOT=tmp_path, get_event_q=lambda: inner))
     monkeypatch.setattr(project_naming, "spawn_turn_namer", lambda *a, **kw: fired.append(1))
     agent = SimpleNamespace()
 
@@ -148,21 +149,23 @@ def test_the_direct_lane_endpoint_keeps_its_turn_stamps(monkeypatch, tmp_path, m
         return []
 
     agent.handle_task = handle_task
-    assert lane._execute_chat_task({"task": {"id": "turn-1", "text": "Work", "metadata": metadata},
-        "agent": agent, "chat_id": 42, "task_metadata": metadata,
-        "registry": SimpleNamespace(unregister=lambda tid: None)})
+    # The admitted seed as the lane dispatches it: the carrier facts and the first-step facts.
+    task = {"id": "turn-1", "chat_id": 42, "text": "Work", "metadata": dict(metadata), "_is_direct_chat": True,
+            "_execution_owner": {"kind": "direct", "lane": LANE_CONVERSATION, "executor": EXECUTOR_WORKER},
+            "_conversation_prepare": {"quiet": False, "reply_expected": True}}
+    run_worker_task(agent, task, wid=0, out_q=inner, repo_dir=str(tmp_path), drive_root=str(tmp_path))
     assert captured[-1]["data"]["cancelable"] is True and fired == ([1] if named else [])
     assert "root_task_id" not in captured[-1]["data"], "a turn without lineage stamps none"
 
 
-def test_the_pooled_worker_installs_the_endpoint_around_handle_task_and_the_sink_stamps_by_task():
-    from supervisor.worker_process import worker_main
+def test_the_worker_body_installs_the_endpoint_around_handle_task_and_the_sink_stamps_by_task():
+    from supervisor.worker_process import run_worker_task, worker_main
 
-    src = inspect.getsource(worker_main)
-    assert "task_queue = task_event_queue(out_q, task)" in src
-    assert "runner._event_queue = task_queue" in src and "runner._event_queue = pool_queue" in src
-    assert "task_queue.put(stamp_finalization_enqueue(e2))" in src
-    assert "stamp_recorded_row(dict(obj))" in src
+    body = inspect.getsource(run_worker_task)
+    assert "task_queue = task_event_queue(out_q, task" in body
+    assert "runner._event_queue = task_queue" in body and "runner._event_queue = pool_queue" in body
+    assert "task_queue.put(stamp_finalization_enqueue(e2))" in body
+    assert "stamp_recorded_row(dict(obj))" in inspect.getsource(worker_main)
 
 
 @pytest.fixture

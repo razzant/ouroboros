@@ -319,6 +319,8 @@ def park_saved_pause(task: Dict[str, Any], attempt: int, result_root: Any, *,
     parked.pop("_budget_pause_resume", None)
     parked.pop("_owner_wait_resume", None)
     parked["_budget_pause"] = exact_pause_marker(pause, default_root=str(task.get("root_task_id") or task_id))
+    from ouroboros.model_detach import detached_fields
+    parked.update(detached_fields(parked, pause))  # a detach a lane carrier saved rides the durable pause row
     if retention == RETAIN_SLEEP:
         hold_after_stop(parked, result_root, sleep_hold_reason)
     if held_reason:
@@ -530,6 +532,21 @@ def held_ids(pending: Iterable[Any]) -> List[str]:
 # explicit Resume, at any age. Neither lifts an earlier Pause, Stop, budget,
 # sleep or deadline hold; a row without saved work keeps its old path.
 
+def presence_turn(task: Any, root: Any = None) -> bool:
+    """A correspondent's Presence turn (its conversation-lane row): its place's, never the owner's saved work.
+    Nothing saves its stack and its re-entry refuses (``presence_attempt_outcome_unknown``), so a stop
+    door neither returns, retains, holds nor fences it, as base, whose queue never held one, never did.
+    A turn the owner moved to a Project as text (``presence_carrier.moved_text_turn``, its binding read
+    under ``root``) is that Project's work (#2566): its saved stack is returned and held like any."""
+    from ouroboros.presence_carrier import moved_text_turn
+    from ouroboros.task_carrier import execution_kind
+
+    if not (isinstance(task, dict) and execution_kind(task) == "presence"):
+        return False
+    root = root or task.get("drive_root") or task.get("budget_drive_root")
+    return not (root and moved_text_turn(root, str(task.get("id") or task.get("task_id") or ""), task.get("metadata")))
+
+
 def working_saved(root: Any, task_id: str, attempt: int, *, task: Optional[Dict[str, Any]] = None) -> bool:
     """Whether the attempt left a working checkpoint (a stat; validity is checked at freeze),
     or is parked on a question/review wait whose own source is this attempt's saved state."""
@@ -685,7 +702,7 @@ def recover_aborted_update(drive_root: Any, running: Dict[str, Any], pending: Li
                                             pid=getattr(batch["rows"][task_id]["proc"], "pid", None),
                                             paused_roots=queue.BUDGET_ROOT_FENCES)
     # None: the saved queue this process never took into custody stays on disk as it is (durable).
-    if queue.persist_queue_snapshot(reason="update_abort_handoff") is False:
+    if queue.publish_queue_snapshot(reason="update_abort_handoff") is False:
         return False
     _update_returns = {}
     return True
@@ -700,7 +717,8 @@ def retain_saved_running(running: Dict[str, Any], preserve: Iterable[str], drive
     for task_id, meta in dict(running or {}).items():
         task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else {}
         root = pathlib.Path(task.get("budget_drive_root") or drive_root)
-        if (task and task_id not in preserved and not _cancel_intent_active(root, task_id)
+        if (task and task_id not in preserved and not presence_turn(task, drive_root)
+                and not _cancel_intent_active(root, task_id)
                 and working_saved(root, task_id, int(meta.get("attempt") or task.get("_attempt") or 1), task=task)):
             kept.append(str(task_id))
             lineage[str(task_id)] = {str(task.get("parent_task_id") or ""), str(task.get("root_task_id") or "")}
@@ -741,7 +759,8 @@ def prepare_restart_returns(drive_root: Any, running: Dict[str, Any], pending: L
         task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else {}
         attempt = int(meta.get("attempt") or task.get("_attempt") or 1) if task else 0
         root = pathlib.Path(task.get("budget_drive_root") or drive_root)
-        if (task and task_id not in set(owner_wait_ids) and working_saved(root, task_id, attempt, task=task)
+        if (task and task_id not in set(owner_wait_ids) and not presence_turn(task, drive_root)
+                and working_saved(root, task_id, attempt, task=task)
                 and pause_retention(root, task_id, attempt) not in {RETAIN_SAVED, RETAIN_UNUSED_GRANT, RETAIN_SLEEP,
                                                                     RETAIN_OWNER_PAUSE}):
             returns.add(str(task_id))
@@ -749,7 +768,8 @@ def prepare_restart_returns(drive_root: Any, running: Dict[str, Any], pending: L
         task_id = str((record or {}).get("id") or "")
         attempt = int((record or {}).get("_attempt") or 1)
         root = pathlib.Path((record or {}).get("budget_drive_root") or drive_root)
-        if (task_id and task_id not in set(owner_wait_ids) and working_saved(root, task_id, attempt, task=record)
+        if (task_id and task_id not in set(owner_wait_ids) and not presence_turn(record, drive_root)
+                and working_saved(root, task_id, attempt, task=record)
                 and pause_retention(root, task_id, attempt) not in {RETAIN_SAVED, RETAIN_UNUSED_GRANT, RETAIN_SLEEP,
                                                                     RETAIN_OWNER_PAUSE}):
             returns.add(task_id)
@@ -875,6 +895,8 @@ def recover_saved_running(rows: Iterable[Dict[str, Any]], drive_root: Any, *,
             stored = load_task_result(root, task_id, strict=True) or {}
             refused[task_id] = ("no_result" if not task_id or not stored
                                 else "terminal" if stored.get("status") in _TRULY_TERMINAL_STATUSES
+                                else "presence_turn" if (presence_turn(task, drive_root)
+                                                         or presence_turn(stored, drive_root))
                                 else "stopped" if _cancel_intent_active(root, task_id) else "")
             if refused[task_id]:
                 continue
@@ -888,6 +910,9 @@ def recover_saved_running(rows: Iterable[Dict[str, Any]], drive_root: Any, *,
             fold_consumed_resume(row, root)  # a consumption whose notification died with the process
             fold_running_clock(task, row)  # confirmed waits newer than the saved source (#939)
             stamp_execution_handoff(task, row)
+            from ouroboros.budget_pause import budget_pause_row
+            from ouroboros.model_detach import detached_fields
+            task.update(detached_fields(task, budget_pause_row(root, task_id) or {}))  # the durable detach, if any
             if auto:
                 retain_consumed_selection(task, stored.get("budget_pause") or {})
         except Exception:

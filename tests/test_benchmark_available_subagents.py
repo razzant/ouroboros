@@ -152,6 +152,34 @@ def test_pin_single_model_replaces_legacy_heavy_and_prior_actor_list():
     assert snapshot["review_pool"][0]["delivery"] == "packet"
 
 
+def test_a_blank_web_search_model_is_a_second_actor_unless_ddgs_is_the_source():
+    """A blank Model plans each source's recommended model (the mapping's own resolver), so a target server left
+    on its default fails the fixed-model gate as the old shipped default did. The compiled pin and a ddgs Source
+    (which takes no model) still pass, and a Source no transport serves is not said to send a model."""
+    from devtools.benchmarks.common.model_slots import runtime_actor_snapshot
+    from ouroboros.search_routes import SEARCH_MODELS
+
+    model = "openai/gpt-5.5"
+    pinned = _fixed_actor_settings(model)
+    assert pinned["OUROBOROS_WEBSEARCH_MODEL"] == model
+    assert runtime_actor_snapshot(pinned, expected_model=model)["mismatches"] == []
+    absent = {key: value for key, value in pinned.items() if key != "OUROBOROS_WEBSEARCH_MODEL"}
+
+    def search_mismatches(settings):
+        return [item for item in runtime_actor_snapshot(settings, expected_model=model)["mismatches"]
+                if item.startswith("OUROBOROS_WEBSEARCH_MODEL:")]
+
+    recommended = {source: f"{source}::{SEARCH_MODELS[source]}" for source in ("openai", "openrouter", "anthropic")}
+    # These mappings carry no key, so every planned leg is unavailable there; it is still planned.
+    for unpinned in (absent, {**pinned, "OUROBOROS_WEBSEARCH_MODEL": ""}):
+        [said] = search_mismatches(unpinned)
+        assert "'auto'" in said and all(leg in said for leg in recommended.values()), said
+    [said] = search_mismatches({**absent, "OUROBOROS_WEBSEARCH_BACKEND": "anthropic"})
+    assert recommended["anthropic"] in said and recommended["openai"] not in said and recommended["openrouter"] not in said
+    assert search_mismatches({**absent, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}) == []
+    assert search_mismatches({**absent, "OUROBOROS_WEBSEARCH_BACKEND": "no-such-source"}) == []
+
+
 def test_pin_single_model_preserves_canonical_local_route_semantics():
     model = "owner/model (local)"
     target = _fixed_actor_settings(model, review_slots=2)

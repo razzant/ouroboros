@@ -1,9 +1,11 @@
 """Read-only diagnostic over real synthetic stores, with no provider or server."""
+import errno
 import hashlib
 import json
 import os
 import sqlite3
 from contextlib import closing
+from urllib.parse import unquote, urlsplit
 
 import pytest
 
@@ -24,6 +26,18 @@ def offline_fixture(root):
             assert db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0] == 0
 
 
+def opens_inside(database, root):
+    """Whether a sqlite3.connect name lands in ``root``, by path components under the root's own rules, so ``data2``
+    stays outside ``data``. A file URI is read as SQLite reads it: percent-decoded, a Windows drive after the path's
+    leading slash (file:///D:/a is D:\\a). Searching for the root's text would miss what as_uri rewrites: a Windows
+    root's backslashes, any space or non-ASCII letter."""
+    name = os.fsdecode(database)
+    if name.startswith('file:'):
+        name = unquote(urlsplit(name).path)
+        name = name.lstrip('/') if root.drive else name
+    return type(root)(name).is_relative_to(root)
+
+
 def test_measurement_uses_ordinary_scale_fitter_and_composition(tmp_path, monkeypatch):
     from ouroboros import memory_floor as floor
     with monkeypatch.context() as old:
@@ -36,6 +50,22 @@ def test_measurement_uses_ordinary_scale_fitter_and_composition(tmp_path, monkey
     assert result['ladder'].get('F7a') and result['ladder'].get('F5a')
     assert result['input_tokens'] + 10000 <= 92000
     print('SCALE_COMPARISON ' + json.dumps({'before': before, 'after': result}, sort_keys=True))
+
+
+@pytest.mark.parametrize('mode', ['low', 'max'])
+def test_a_directly_required_handbook_is_reported_whole_in_every_mode(tmp_path, mode):
+    """A task's own requirement puts the whole handbook in the block Max otherwise fills with its chapter map."""
+    from dataclasses import replace
+
+    core = replace(scale.core(tmp_path), development_md='# Development\n\n## Review\n\n' + 'practice ' * 400)
+
+    def development(required):
+        result = measure_core(replace(core, development_required=required), scale.tools(), root=tmp_path,
+                              window=1_000_000, reserve=10000, mode=mode)
+        return [row['form'] for row in result['blocks'] if row['block'] == 'DEVELOPMENT']
+
+    assert development(True) == ['whole']
+    assert development(False) == (['orientation'] if mode == 'max' else [])
 
 
 @pytest.mark.parametrize('stored_tail', [False, True])
@@ -65,8 +95,9 @@ def test_real_scale_root_read_only_report(tmp_path, monkeypatch, capsys, stored_
     before = fingerprint(root)
     connected = []
     original = sqlite3.connect
+    source = root.resolve()
     def connect(database, *args, **kwargs):
-        if str(root) in str(database):
+        if opens_inside(database, source):
             connected.append(str(database))
             assert 'mode=ro&immutable=1' in str(database)
         return original(database, *args, **kwargs)
@@ -110,7 +141,7 @@ def test_readonly_tail_reads_new_rows_without_extending_the_stored_cache(tmp_pat
 
 
 def test_live_pid_and_kernel_lock_refuse_without_snapshot(tmp_path):
-    import fcntl
+    from ouroboros import platform_layer
     (tmp_path / 'state').mkdir()
     pid = tmp_path / 'state/server_process.json'
     pid.write_text(json.dumps({'pid': os.getpid()}))
@@ -119,9 +150,204 @@ def test_live_pid_and_kernel_lock_refuse_without_snapshot(tmp_path):
         report(tmp_path, 1, 92000, 10000)
     pid.unlink()
     with (tmp_path / 'state/server.lock').open('w') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        platform_layer.file_lock_exclusive_nb(lock.fileno())  # held as admit_data_root holds it
         assert server_alive(tmp_path)
+        with pytest.raises(ValueError, match='live server'):
+            report(tmp_path, 1, 92000, 10000)
+        platform_layer.file_unlock(lock.fileno())  # a Windows lock goes before its handle
     assert not server_alive(tmp_path)
+
+
+@pytest.mark.parametrize('state, live', [('error', True), ('no_such_pid', False)])
+def test_windows_liveness_never_signals_and_an_unexplained_state_stays_live(tmp_path, monkeypatch, state, live):
+    """Windows rules on any host, not a native run: os.kill(pid, 0) there is CTRL_C_EVENT to the pid's console
+    group, so a recorded pid is read through its process state, and only absence proven there clears it."""
+    from ouroboros import platform_layer
+    monkeypatch.setattr(platform_layer, 'IS_WINDOWS', True)
+    monkeypatch.setattr(platform_layer, '_windows_process_state', lambda pid: state)
+    monkeypatch.setattr(os, 'kill', lambda *args: pytest.fail(f'a liveness read signalled {args}'))
+    (tmp_path / 'state').mkdir()
+    (tmp_path / 'state/server_process.json').write_text(json.dumps({'pid': 4242}), encoding='utf-8')
+    assert server_alive(tmp_path) is live
+
+
+def test_the_launchers_utf8_record_is_read_as_utf8_under_a_windows_default_encoding(tmp_path, monkeypatch):
+    """Windows Python reads text in the ANSI code page by default (emulated here); the launcher writes its record
+    as UTF-8, so a non-ASCII profile path must not make a provably gone server an unknown one."""
+    import io
+
+    from ouroboros import platform_layer
+    from ouroboros.utils import atomic_write_json
+    monkeypatch.setattr(io, 'text_encoding', lambda encoding, stacklevel=2: encoding or 'cp1252')
+    monkeypatch.setattr(platform_layer, 'pid_provably_gone', lambda pid: True)
+    (tmp_path / 'state').mkdir()
+    atomic_write_json(tmp_path / 'state/server_process.json', {'pid': 4242, 'repo_dir': 'C:\\Users\\Антон\\Ouroboros'})
+    assert not server_alive(tmp_path)
+
+
+@pytest.mark.parametrize('answer', ['held on Windows', 'unknown Windows error', 'no POSIX locks', 'unreadable'])
+def test_only_a_granted_lock_proves_the_root_offline(tmp_path, monkeypatch, answer):
+    """The lock is tried through the server's own descriptor lock on the existing file. A missing lock is no
+    evidence and stays missing; held, refused or unreadable all leave the root possibly served."""
+    from ouroboros import platform_layer
+    lock = tmp_path / 'state/server.lock'
+    assert not server_alive(tmp_path) and not lock.exists()
+    lock.parent.mkdir()
+    original = platform_layer._file_lock
+    def shared_probe(fd, *, exclusive, blocking):
+        assert not exclusive and not blocking  # a read-only NFS descriptor cannot take an exclusive lock
+        return original(fd, exclusive=exclusive, blocking=blocking)
+    monkeypatch.setattr(platform_layer, '_file_lock', shared_probe)
+    if answer == 'unreadable':
+        lock.mkdir()
+    else:
+        lock.write_bytes(b'pid=4242\n')
+        assert not server_alive(tmp_path)  # present, and nobody holds it
+        refusal = {'held on Windows': platform_layer._win32_lock_error(33),
+                   'unknown Windows error': platform_layer._win32_lock_error(6),
+                   'no POSIX locks': OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))}[answer]
+
+        def refuse(fd, *, blocking=True):
+            assert blocking is False
+            raise refusal
+        monkeypatch.setattr(platform_layer, 'file_lock_shared', refuse)
+    assert server_alive(tmp_path)
+
+
+def test_snapshot_measures_a_held_root_and_its_wal_without_probing_liveness(tmp_path, monkeypatch):
+    """An owned live server pid refuses a direct read and outlives it. With that server's admission held and
+    frames committed only to the WAL, --snapshot asks no liveness, opens nothing in the source, recovers the WAL
+    in a private copy under the platform temp parent and leaves the source, its lock and its server as found."""
+    import subprocess
+    import sys
+
+    from devtools import _context_fit_readonly as readonly
+    from ouroboros import dialogue_store, platform_layer, test_environment
+    from tests._store_journal_shared import use_journal
+
+    use_journal(monkeypatch, 'WAL')  # this scenario needs committed WAL frames even when the host defaults to PERSIST
+    root = scale.write_root(tmp_path / 'data')
+    offline_fixture(root)
+    platform_temp = tmp_path / 'platform-temp'  # what Windows has instead of /tmp
+    platform_temp.mkdir()
+    monkeypatch.setattr(test_environment, 'default_temp_parent', lambda: platform_temp)
+    server = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(900)'])
+    lock = os.open(root / 'state/server.lock', os.O_RDWR | os.O_CREAT | getattr(os, 'O_BINARY', 0), 0o644)
+    writer = sqlite3.connect(dialogue_store.path(root))  # an open reader keeps the appended frames in the WAL
+    try:
+        (root / 'state/server_process.json').write_text(json.dumps({'pid': server.pid}), encoding='utf-8')
+        with pytest.raises(ValueError, match='live server'):
+            report(root, 1, 92000, 10000)
+        platform_layer.file_lock_exclusive_nb(lock)  # held as admit_data_root holds it
+        writer.execute('SELECT count(*) FROM dialogue').fetchone()
+        dialogue_store.append(root, 'chat', {'chat_id': 1, 'direction': 'in', 'text': 'Committed to the WAL only.',
+                                             'ts': '2026-10-23T02:00:00+00:00', 'client_message_id': 'wal-only'},
+                              emit_live=False)
+        assert (root / 'state/dialog.sqlite-wal').stat().st_size, 'premise: committed frames not yet checkpointed'
+        alive, snapshot, copies, opened = readonly.server_alive, readonly.snapshot_root, [], []
+
+        def copy_then_read(source, destination):
+            snapshot(source, destination)
+            assert not (destination / 'state/dialog.sqlite-wal').exists()
+            uri = dialogue_store.path(destination).as_uri() + '?mode=ro&immutable=1'
+            with closing(sqlite3.connect(uri, uri=True)) as db:
+                copies.append((destination, db.execute(
+                    "SELECT count(*) FROM dialogue WHERE client_message_id = 'wal-only'").fetchone()[0]))
+        connect = sqlite3.connect
+
+        def recorded(database, *args, **kwargs):
+            opened.append(os.fsdecode(database))
+            return connect(database, *args, **kwargs)
+        monkeypatch.setattr(readonly, 'server_alive', lambda path: pytest.fail('--snapshot probed liveness'))
+        monkeypatch.setattr(readonly, 'snapshot_root', copy_then_read)
+        monkeypatch.setattr(sqlite3, 'connect', recorded)
+        before = fingerprint(root)
+        result = report(root, 1, 92000, 10000, snapshot=True)
+        assert result['snapshot'] and result['verdict'] == 'fits', result
+        assert fingerprint(root) == before
+        source = root.resolve()
+        stored = dialogue_store.path(source)
+        assert opens_inside(stored, source) and opens_inside(stored.as_uri() + '?mode=ro&immutable=1', source), \
+            'premise: this observer sees a source database in both spellings, on this platform'
+        assert opened and not [database for database in opened if opens_inside(database, source)]
+        [(copied, rows)] = copies
+        assert rows == 1 and copied.is_relative_to(platform_temp) and not copied.is_relative_to(root)
+        assert server.poll() is None
+        (root / 'state/server_process.json').unlink()
+        assert alive(root)  # the admission alone still holds: the snapshot neither took nor broke it
+    finally:
+        platform_layer.file_unlock(lock)
+        os.close(lock)
+        writer.close()
+        server.kill()
+        server.wait()
+
+
+def test_source_observers_place_each_spelling_by_path_components():
+    """Each platform's rules on any host, not a native run: a plain path or a file URI lands in its root whatever
+    as_uri encoded on the way; a sibling root, another drive and SQLite's in-memory name do not."""
+    from pathlib import PurePosixPath, PureWindowsPath
+
+    encoded = '%D0%90%D0%BD%D1%82%D0%BE%D0%BD%20%D0%A0'  # as_uri's spelling of 'Антон Р'
+    windows, posix = PureWindowsPath('D:/a/Антон Р/data'), PurePosixPath('/a/Антон Р/data')
+    for root, name, inside in (
+        (windows, f'file:///D:/a/{encoded}/data/state/dialog.sqlite?mode=ro&immutable=1', True),
+        (windows, f'file://localhost/d:/a/{encoded}/data/state/dialog.sqlite?mode=rw', True),
+        (windows, (windows / 'state/dialog.sqlite').as_uri(), True),
+        (windows, 'D:\\a\\Антон Р\\data\\state\\dialog.sqlite', True),
+        (windows, f'file:///D:/a/{encoded}/data2/state/dialog.sqlite?mode=ro', False),
+        (windows, 'D:\\a\\Антон Р\\data2\\state\\dialog.sqlite', False),
+        (windows, f'file:///E:/a/{encoded}/data/state/dialog.sqlite', False),
+        (windows, ':memory:', False),
+        (posix, f'file:///a/{encoded}/data/state/dialog.sqlite?mode=ro&immutable=1', True),
+        (posix, f'file:/a/{encoded}/data?mode=rw', True),
+        (posix, (posix / 'state/dialog.sqlite').as_uri(), True),
+        (posix, '/a/Антон Р/data/state/dialog.sqlite', True),
+        (posix, posix / 'state/dialog.sqlite', True),
+        (posix, os.fsencode('/a/Антон Р/data/state/dialog.sqlite'), True),
+        (posix, f'file:///a/{encoded}/data2/state/dialog.sqlite?mode=ro', False),
+        (posix, '/a/Антон Р/data2/state/dialog.sqlite', False),
+        (posix, f'file:///b/{encoded}/data/state/dialog.sqlite', False),
+        (posix, ':memory:', False),
+    ):
+        assert opens_inside(name, root) is inside, (root, name)
+
+
+def test_store_writes_by_file_uri_are_refused_where_the_platform_places_them(tmp_path, monkeypatch):
+    """The product's store writer opens SQLite by file URI (store.connect: path.as_uri() + '?mode=rw[c]'). It is
+    refused here; then its Windows URIs, built and mapped by Windows rules on any host (not a native run), must
+    land inside the guarded root as SQLite opens them there: file:///C:/... is C:\\..., not \\C:\\..."""
+    import nturl2path
+    from pathlib import PureWindowsPath
+
+    from devtools import _context_fit_readonly as readonly
+    from ouroboros import store
+
+    (tmp_path / 'state').mkdir()
+    before = fingerprint(tmp_path)
+    with readonly_inputs(tmp_path), pytest.raises(PermissionError):
+        store.connect(tmp_path / 'state/forbidden.sqlite', store.TIER_ENFORCED, create=True)
+    assert fingerprint(tmp_path) == before and not list((tmp_path / 'state').iterdir())
+
+    class WindowsRules(PureWindowsPath):
+        def resolve(self):  # these names are absolute already
+            return self
+    root = WindowsRules('C:/Users/Антон Р/Ouroboros/data')
+    monkeypatch.setattr(readonly, 'Path', WindowsRules)
+    def map_windows_uri(path):
+        if path == '/C:/no:place/x.sqlite':  # exercise a conversion failure, independent of the Python version
+            raise OSError('scripted URI conversion failure')
+        return nturl2path.url2pathname(path)
+    monkeypatch.setattr(readonly, 'url2pathname', map_windows_uri)
+    monkeypatch.setattr(readonly, '_GUARDED', {root})
+    stored = root / 'state' / 'dialog.sqlite'
+    for refused in (stored.as_uri() + '?mode=rw', stored.as_uri() + '?mode=rwc', stored.as_uri() + '?mode=ro',
+                    'file://localhost/' + stored.as_posix() + '?mode=rw', str(stored),
+                    'file:///C:/no:place/x.sqlite?mode=rw'):
+        with pytest.raises(PermissionError):
+            readonly._check_database(refused)
+    readonly._check_database(stored.as_uri() + '?mode=ro&immutable=1')
+    readonly._check_database(WindowsRules('D:/scratch/x.sqlite').as_uri() + '?mode=rwc')
 
 
 def test_snapshot_includes_committed_wal_without_changing_original(tmp_path):

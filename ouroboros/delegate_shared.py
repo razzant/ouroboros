@@ -68,6 +68,8 @@ _AGENT_FAULT_REASONS = frozenset({
     # The engine's typed rejection of a live message whose message_id was
     # replayed with DIFFERENT text: the caller reused an invocation identity.
     "idempotency_conflict",
+    "input_files_invalid",
+    "input_files_readonly_only",
     "message_text_required",
     "message_frame_conflict",
     "reply_to_mismatch",
@@ -149,7 +151,7 @@ def _fail(tool: str, code: str, detail: str, **extra: Any) -> ToolResult:
 
 # The typed facts a refused snapshot provision may carry; the same keys ride the
 # refusal payload, the $0 terminal, the availability row and the START_FAILED row.
-REFUSAL_FACT_KEYS = ("cause", "holder", "waited_sec", "retryable", "retry_hint")
+REFUSAL_FACT_KEYS = ("cause", "holder", "waited_sec", "retryable", "retry_hint", "input_files")
 
 
 def _emit(ctx: ToolContext, kind: str, payload: Dict[str, Any]) -> bool:

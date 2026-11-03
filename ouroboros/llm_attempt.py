@@ -122,6 +122,27 @@ def require_physical_dispatch_window() -> Optional[float]:
     return remaining
 
 
+def refused_by_own_window(error: BaseException, *, own_window_spent: bool) -> bool:
+    """Whether a caller's own spent window explains this unsent refusal, so the caller reports its own result.
+
+    Asked at the caller's seam, after its bound's scope closed: nothing of the call was dispatched, its window
+    (its deadline less its reserve) is spent, and nothing beyond the windows callers imposed refuses a send:
+    no Stop, Pause, finalize request, task deadline or ceiling. A tool window is clamped to that same deadline.
+    Anything else, a dispatched or unknown attempt above all, keeps its own rail."""
+    from ouroboros.model_wait import ModelWaitInterrupted, owner_control_reason
+    from ouroboros.transport_custody import outcome_unknown_on_chain
+
+    capture = getattr(error, "physical_attempt_capture", None)
+    if (not own_window_spent or not isinstance(error, (PhysicalDispatchInterrupted, ModelWaitInterrupted))
+            or getattr(error, "control_reason", "") not in {"deadline", "execution_deadline"}
+            or outcome_unknown_on_chain(error) or getattr(capture, "state", "released") != "released"):
+        return False
+    try:
+        return owner_control_reason() is None
+    except Exception:  # an unreadable control is no evidence that none is set
+        return False
+
+
 def preserve_prior_dispatch(error: BaseException, prior: Any) -> None:
     """Raise with paid custody instead of a ladder-wide no-dispatch assertion."""
     if (isinstance(error, PhysicalDispatchInterrupted)
@@ -526,6 +547,8 @@ def main_context_fit_refusal(request: AttemptRequest) -> Optional[Dict[str, Any]
         physical.rendered_mode, "", request.max_completion_tokens,
         working_reserve_tokens=request.working_reserve_tokens)[1]
     reserve = max(reserve, request.working_reserve_tokens or 0)
+    if getattr(physical, "required_book_tokens", 0) and physical.rendered_mode == "nano":
+        reserve = max(reserve, int(request.max_completion_tokens or 0))  # the reply the view without the book keeps
     exact = request.prompt_tokens_exact is not None
     size = request.prompt_tokens_exact if exact else math.ceil(
         request.prompt_tokens_bounded_estimate * (physical.measurement_density or 1.0))
@@ -697,8 +720,12 @@ def bound_reply_allowance(target: Dict[str, Any], payload: Dict[str, Any]) -> Di
             {key: source[key] for key in ("system", "messages", "tools", "functions") if key in source}, 0)
         input_tokens = math.ceil(raw * float(getattr(context, "measurement_density", None) or 1.0))
     frame = dict(caller_max_tokens=int(payload[field]), nano=True, input_tokens=input_tokens, window_tokens=window)
-    candidate = {**payload, field: reply_allowance_tokens(
-        owner_nano=context.profile == "owner_nano", raw_input_tokens=raw, exact=exact, **frame)}
+    # A directly required handbook keeps the reply this candidate without it gets; the admission charges both.
+    book = int(getattr(context, "required_book_tokens", 0) or 0)
+    density = 1.0 if exact else float(getattr(context, "measurement_density", None) or 1.0)
+    candidate = {**payload, field: reply_allowance_tokens(owner_nano=context.profile == "owner_nano", exact=exact,
+                                                          **{**frame, "input_tokens": input_tokens - book},
+                                                          raw_input_tokens=raw - book / density)}
     if exact and exact_reply_shortfall(**frame):
         request = _attempt_request(target, candidate)
         error = LocalContextTooLargeError(

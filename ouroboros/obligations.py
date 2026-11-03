@@ -219,15 +219,20 @@ def drive_finished(root: Any, task: dict, row: dict | None = None) -> None:
 
 
 def result_rows(root: Any, name: str, *, exclude=(), ids: Iterable[str] | None = None):
-    """Read only addressed candidates (``ids``: a pass's own selection of NAME's members);
-    unreadable members remain repair gaps."""
+    """Read only addressed candidates (``ids``: a pass's own selection of NAME's members), their
+    documents in ONE read (``task_results.admitted_results``); a member that read leaves out (absent,
+    refused) or a batch the store could not answer whole is read on its own, strictly, so unreadable
+    members remain repair gaps exactly as before and one damaged body never hides the others."""
     import logging
-    from ouroboros.task_results import load_task_result
-    for tid in members(root, name) if ids is None else ids:
-        if tid in exclude:
-            continue
+    from ouroboros.task_results import admitted_results, load_task_result
+    wanted = [tid for tid in (members(root, name) if ids is None else ids) if tid not in exclude]
+    try:
+        batch = admitted_results(root, wanted)
+    except Exception:  # the batch proves nothing about any one member: each is read on its own below
+        batch = {}
+    for tid in wanted:
         try:
-            row = load_task_result(root, tid, strict=True)
+            row = batch.get(tid) or load_task_result(root, tid, strict=True)
             if row:
                 yield row
             else:

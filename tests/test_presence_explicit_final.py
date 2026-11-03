@@ -533,7 +533,7 @@ def test_an_inline_turn_whose_work_lives_in_a_project_answers_there_once(room, m
 
     project = create_project(room.data, "report", name="Report")
     bus = queue.Queue()
-    if case == "live":  # the Host's own runner passes the supervisor bus (``host_service._default_presence_runner``)
+    if case == "live":  # the Host's registered runner builds the turn's agent on the supervisor bus (``presence_carrier.set_presence_runner``)
         made = room.h.factory
         monkeypatch.setattr(room.h, "factory", lambda **kwargs: made(**{**kwargs, "event_queue": bus}))
 

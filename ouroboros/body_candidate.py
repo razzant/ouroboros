@@ -235,12 +235,13 @@ def _update_row(row: Dict[str, Any], change, data_dir: Optional[Any] = None) -> 
 
 
 def _recorded_terminal(task_id: str, results_root: Any) -> bool:
-    """Positive lifecycle evidence only: an unreadable or missing record is not terminal."""
+    """Positive lifecycle evidence only: an unreadable or missing record is not terminal (a missing one by its typed row)."""
     try:
         from ouroboros.task_status import FINAL_STATUSES, load_effective_task_result
-
-        record = load_effective_task_result(_wt._data_dir(results_root), task_id, materialize_artifacts=False) or {}
-        return record.get("status") in FINAL_STATUSES
+        from ouroboros.task_store import exists
+        root = _wt._data_dir(results_root)  # a recurring GC asking about an owner with no record reads no document
+        record = load_effective_task_result(root, task_id, materialize_artifacts=False) if exists(root, task_id) else {}
+        return (record or {}).get("status") in FINAL_STATUSES
     except Exception:
         log.debug("candidate owner status unavailable for %s", task_id, exc_info=True)
         return False
@@ -261,11 +262,17 @@ def live_lineage_processes(results_root: Any, task_id: str) -> List[int]:
     The installation's indexed ownership set is the bounded address, not a disk walk.
     A terminal task can still own a kept service. Unknown ownership/exit evidence
     on a matching record retains its checkout; unrelated records do not block it.
+    A ledgered launch (a local executor service is one too) comes from the one selection of all
+    custody stores (``launch_custody.read_custody``) and is read by its whole recorded reach, in
+    one census for all of them: an owed or marker-only member outlives its leader, and a reused
+    leader pid is not the launch.
     """
     try:
-        from ouroboros.owned_shutdown import owned_records
+        from ouroboros.launch_custody import read_custody, unsettled_selection
         from ouroboros.platform_layer import pid_provably_gone
-        from ouroboros.process_custody import _fingerprint_matches, _service_group_survives_leader
+        from ouroboros.process_custody import (
+            _fingerprint_matches, _owned_service_row, _service_group_survives_leader, custody_record_id,
+        )
         from ouroboros.task_status import load_effective_task_result
         from ouroboros import workspace_executor as executor
 
@@ -275,24 +282,31 @@ def live_lineage_processes(results_root: Any, task_id: str) -> List[int]:
         owners.update(str(row.get("task_id") or "") for row in effective.get("retry_lineage", []))
         owners.discard("")
         lineage: Dict[str, str] = {}
-        active: List[int] = []
-        for entry in owned_records(root, strict=True):
-            member = str(entry.get("owner_task") or entry.get("task_id") or "")
+
+        def ours(member: str, attributed_root: str = "") -> bool:
             if not member:
-                continue  # no known task attribution to this candidate
-            if member not in owners and str(entry.get("root_task_id") or "") not in owners:
-                if member not in lineage:
-                    lineage[member] = str(load_effective_task_result(
-                        root, member, materialize_artifacts=False).get("root_task_id") or "")
-                if lineage[member] not in owners:
-                    continue
+                return False  # no known task attribution to this candidate
+            if member in owners or attributed_root in owners:
+                return True
+            if member not in lineage:
+                lineage[member] = str(load_effective_task_result(
+                    root, member, materialize_artifacts=False).get("root_task_id") or "")
+            return lineage[member] in owners
+
+        custody = read_custody(root, every_drive=True)
+        active: List[int] = [-1] if custody.blind or not custody.readable else []
+        stamped = set()
+        for entry in custody.records:
+            if not ours(str(entry.get("owner_task") or entry.get("task_id") or ""), str(entry.get("root_task_id") or "")):
+                continue
             pid = int(entry.get("host_pid") or 0)
             if entry.get("unconfirmed_since"):
                 active.append(pid or -1)
+                stamped.add(entry.get("record_id"))
                 continue
             ledger = entry.get("ledger_entry")
             if isinstance(ledger, dict):
-                if _fingerprint_matches(ledger) or _service_group_survives_leader(ledger):
+                if not _owned_service_row(ledger) and (_fingerprint_matches(ledger) or _service_group_survives_leader(ledger)):
                     active.append(pid or -1)
                 continue
             if entry.get("kind") not in {"foreground", "service"}:
@@ -314,6 +328,10 @@ def live_lineage_processes(results_root: Any, task_id: str) -> List[int]:
                 continue
             else:
                 active.append(pid or -1)  # Docker backend may live despite host_pid=0
+        launches = [row for row in custody.rows if _owned_service_row(row) and ours(str(row.get("owner_task") or ""))
+                    and custody_record_id(row) not in stamped]
+        active += [(int(row.get("pid") or 0) or -1) if state == "live" else -1
+                   for row, state in (unsettled_selection(root, launches, custody) if launches else ())]
         return active
     except Exception:
         log.debug("ownership set unavailable for %s", task_id, exc_info=True)
@@ -361,7 +379,7 @@ def _transfer(ctx: Any, row: Dict[str, Any], owner: str, *, via: str) -> Dict[st
     return moved
 
 
-def bind(ctx: Any, row: Dict[str, Any]) -> Dict[str, Any]:
+def bind(ctx: Any, row: Dict[str, Any], *, fresh: bool = False) -> Dict[str, Any]:
     """Make the candidate this context's body root; the serving root stays addressable."""
     if getattr(ctx, "serving_repo_dir", None) is None:
         ctx.serving_repo_dir = pathlib.Path(row.get("repo_dir") or serving_repo_dir_for(ctx))
@@ -370,44 +388,148 @@ def bind(ctx: Any, row: Dict[str, Any]) -> Dict[str, Any]:
     ctx.branch_dev = str(row.get("branch") or getattr(ctx, "branch_dev", ""))
     bound = {key: row.get(key) for key in ("candidate_id", "path", "branch", "base_sha", "repo_dir")}
     _metadata(ctx)["body_candidate"] = bound
-    _attribute_surface(ctx, candidate, row)
+    attribution = _attribute_surface(ctx, candidate, row, fresh=fresh)
     if time.time() - float(row.get("used_at") or 0) > 3600:
         # Retention counts from last use, so a long-lived owner keeps a clean candidate.
         try:
             _update_row(row, lambda entry: entry.__setitem__("used_at", time.time()))
         except Exception:
             log.debug("candidate last-use stamp failed", exc_info=True)
-    return bound
+    return {**bound, "attribution": attribution}
 
 
-def _attribute_surface(ctx: Any, candidate: pathlib.Path, row: Dict[str, Any]) -> None:
-    """Append the candidate to this lineage's mutation baseline as a late surface (evidence only).
+def _identity(row: Dict[str, Any]) -> Dict[str, Any]:
+    """What makes a checkout this candidate: a path or branch name reused after a loss is another copy."""
+    return {key: row.get(key) for key in ("candidate_id", "branch", "base_sha", "created_at")}
 
-    The commit gate stages what the task's own baseline attributes to it, on the
-    candidate exactly as on the serving checkout; a candidate taken over from an
-    ended owner names that owner as the predecessor whose quiescent changes this
-    lineage adopts. Without a host baseline (a direct turn, a manual context) the
-    legacy explicit/whole-tree staging contract applies, as it does unbound.
+
+def _recorded_surface(results_root: Any, task_id: str, candidate: pathlib.Path) -> Dict[str, Any]:
+    from ouroboros.task_results import load_task_result
+
+    evidence = (load_task_result(results_root, task_id) or {}).get("mutation_evidence") or {}
+    root = str(candidate.expanduser().resolve(strict=False))
+    return next((dict(row) for row in (evidence.get("baseline") or {}).get("surfaces") or []
+                 if isinstance(row, dict) and row.get("canonical_root") == root and isinstance(row.get("git"), dict)), {})
+
+
+def _carried_basis(results_root: Any, row: Dict[str, Any], lineage: str, candidate: pathlib.Path) -> Dict[str, Any]:
+    """The previous owner's positively established row for this copy, copied into this lineage's own baseline."""
+    from ouroboros.mutation_attribution import ESTABLISHED_BASES, attribution_task_id
+
+    owners = [str(entry) for entry in (row.get("owners") or []) if str(entry)]
+    source = attribution_task_id(results_root, (owners[-2],)) if owners[-1:] == [lineage] and len(owners) > 1 else ""
+    surface = _recorded_surface(results_root, source, candidate) if source else {}
+    git, basis = surface.get("git") or {}, surface.get("basis") or {}
+    stamped = surface.get("candidate") == _identity(row) and basis.get("kind") in ESTABLISHED_BASES
+    # An earlier row (no basis) that later joined this copy's identity is still that legacy observation.
+    clean_legacy = (not basis and surface.get("candidate") in (None, _identity(row)) and not git.get("dirty_paths")
+                    and git.get("base_commit")
+                    and git["base_commit"] in {row.get("base_sha"), *(row.get("reviewed_commits") or [])})
+    if not (stamped or clean_legacy) or git.get("dirty_overflow"):
+        return {}
+    return {"git": dict(git), "basis": {"kind": "carried", "source": f"task {source}", "task_id": source,
+                                         "from_basis": str(basis.get("kind") or "unrecorded")}}
+
+
+def _creation_basis(row: Dict[str, Any], candidate: pathlib.Path) -> Dict[str, Any]:
+    """``_provision``/``_populate`` hand a copy out only clean at ``base_sha``: that creation is a clean basis."""
+    base = str(row.get("base_sha") or "")
+    try:
+        tree = _git(candidate, "rev-parse", "--verify", f"{base}^{{tree}}").stdout.strip() if row.get("ready") else ""
+    except Exception:
+        tree = ""
+    return {"base_commit": base, "base_tree": tree, "dirty_paths": [], "dirty_fingerprints": {}} if base and tree else {}
+
+
+def _attribute_surface(ctx: Any, candidate: pathlib.Path, row: Dict[str, Any], *, fresh: bool = False) -> Dict[str, Any]:
+    """Record the candidate in this lineage's mutation baseline (evidence only) and say what was established.
+
+    A freshly prepared copy is observed clean before its first edit (``original``). A lineage attaching it
+    later — a direct turn continued in a worker, a retry, a transfer from an interrupted owner — records
+    the previous owner's established row (``carried``), else the copy's clean creation (``derived``), never
+    today's files as its start: changes made in the copy since then are this continued work, which does
+    not prove who wrote each line. A dirty row recorded later for the same creation base is superseded (it
+    stays whole in history); any other recorded row is kept, its dirt uncertain for an explicit selection,
+    and joins this copy's identity when it lacks one.
+    Without a host baseline (a direct turn, a manual context) the explicit/whole-tree contract applies.
     """
     task_id = str(getattr(ctx, "task_id", "") or "").strip()
     if not task_id or str(_metadata(ctx).get("delegation_role") or "").lower() == "subagent":
-        return
+        return {}
     try:
-        from ouroboros.mutation_attribution import attribution_task_id, capture_mutation_baseline
+        from ouroboros.mutation_attribution import ESTABLISHED_BASES, attribution_task_id, capture_mutation_baseline
 
-        results_root = _results_root(ctx)
-        evidence_task_id = attribution_task_id(results_root, (owner_id(ctx), task_id))
+        results_root, lineage = _results_root(ctx), owner_id(ctx)
+        evidence_task_id = attribution_task_id(results_root, (lineage, task_id))
         if not evidence_task_id:
-            return
+            return {"state": "no_baseline"}
+        existing = _recorded_surface(results_root, evidence_task_id, candidate)
+        recorded = existing.get("candidate")
+        kept_dirt = list((existing.get("git") or {}).get("dirty_paths") or [])
+        if existing and not fresh and (recorded == _identity(row) if recorded else (
+                not kept_dirt or existing["git"].get("base_commit") != row.get("base_sha"))):
+            if not recorded:  # it names this copy from now on, so no reader mistakes it for the serving checkout
+                capture_mutation_baseline(results_root, evidence_task_id, [{
+                    "surface_type": "system_repo", "host_root": str(candidate), "candidate": _identity(row)}],
+                    owner_kind="task_root", owner_id=lineage)
+            basis = existing.get("basis") or {"kind": "unrecorded"}
+            return {"state": "attached", "basis": basis,
+                    "uncertain": 0 if basis.get("kind") in ESTABLISHED_BASES else len(kept_dirt)}
+        surface: Dict[str, Any] = {"surface_type": "system_repo", "host_root": str(candidate),
+                                   "candidate": _identity(row), "supersede": bool(existing)}
         owners = [str(entry) for entry in (row.get("owners") or []) if str(entry)]
-        predecessor = owners[-2] if len(owners) >= 2 and owners[-1] == owner_id(ctx) else ""
-        capture_mutation_baseline(
-            results_root, evidence_task_id,
-            [{"surface_type": "system_repo", "host_root": str(candidate)}],
-            owner_kind="task_root", owner_id=owner_id(ctx),
-            predecessor_source={"task_id": predecessor} if predecessor else None)
-    except Exception:
+        predecessor = owners[-2] if len(owners) >= 2 and owners[-1] == lineage else ""
+        if fresh:
+            surface["basis"] = {"kind": "original", "source": "preparation"}
+        elif carried := _carried_basis(results_root, row, lineage, candidate):
+            surface.update(carried)
+        elif created := _creation_basis(row, candidate):
+            surface.update(git=created, basis={"kind": "derived", "source": f"its clean creation at {created['base_commit'][:12]}"})
+        else:
+            surface["basis"] = {"kind": "observed", "source": "a later observation; its clean creation is not established"}
+        evidence = capture_mutation_baseline(
+            results_root, evidence_task_id, [surface], owner_kind="task_root", owner_id=lineage,
+            predecessor_source={"task_id": predecessor} if predecessor and surface["basis"]["kind"] == "observed" else None)
+        written = next((entry for entry in evidence["baseline"]["surfaces"] if entry.get("candidate") == _identity(row)), {})
+        uncertain = 0 if surface["basis"]["kind"] in ESTABLISHED_BASES else len((written.get("git") or {}).get("dirty_paths") or [])
+        return {"state": surface["basis"]["kind"], "basis": surface["basis"], "superseded": bool(existing), "uncertain": uncertain}
+    except Exception as exc:
         log.warning("candidate %s was not added to the mutation baseline", row.get("candidate_id"), exc_info=True)
+        return {"state": "failed", "error": f"{type(exc).__name__}: {exc}"}
+
+
+def attach_attribution(ctx: Any) -> Dict[str, Any]:
+    """Re-establish the bound candidate's surface before a commit consumer reads it (idempotent)."""
+    bound = descriptor(ctx)
+    if not bound or not is_bound(ctx):
+        return {}
+    try:
+        row = find(owner_id(ctx))
+    except Exception as exc:
+        return {"state": "failed", "error": f"{type(exc).__name__}: {exc}"}
+    if not row or row.get("path") != bound.get("path"):
+        return {"state": "failed", "error": "this context's candidate record is not owned by its lineage"}
+    return _attribute_surface(ctx, pathlib.Path(str(bound["path"])), row)
+
+
+def attribution_note(attribution: Optional[Dict[str, Any]]) -> str:
+    """The prepare receipt's sentence about commit attribution: a typed fact, not a log line."""
+    state, basis = str((attribution or {}).get("state") or ""), (attribution or {}).get("basis") or {}
+    uncertain = int((attribution or {}).get("uncertain") or 0)
+    if state == "no_baseline":
+        return " This task has no host mutation baseline, so commit_reviewed keeps the explicit/whole-tree staging contract."
+    if state == "failed":
+        return (f" Commit attribution was not recorded ({attribution.get('error')}); commit_reviewed "
+                "records it again before staging.")
+    if uncertain:
+        return (f" Commit attribution: {uncertain} changed path(s) of this copy were recorded by a later observation "
+                "and stay out of automatic staging; name them in commit_reviewed(paths=...) to send them to review "
+                "with that gap disclosed.")
+    if basis.get("kind") in {"derived", "carried"}:
+        return (f" Commit attribution: this lineage's baseline records the copy as {basis['kind']} from "
+                f"{basis.get('source')}; changes made in it since then count as this continued work, which does "
+                "not prove that each line was written by this task.")
+    return " Its clean start is recorded for commit attribution." if state == "original" else ""
 
 
 def restore(ctx: Any) -> Dict[str, Any]:
@@ -479,7 +601,7 @@ def _forget_missing(row: Dict[str, Any]) -> None:
 
 def _prepare_locked(ctx: Any, resume: str) -> Dict[str, Any]:
     if is_bound(ctx) and not resume:
-        return {**descriptor(ctx), "state": "bound"}
+        return {**descriptor(ctx), "state": "bound", "attribution": attach_attribution(ctx)}
     refusal = _refusal_before_prepare(ctx)
     if refusal is not None:
         raise refusal
@@ -518,8 +640,8 @@ def _prepare_locked(ctx: Any, resume: str) -> Dict[str, Any]:
         if row is None:
             row, state = _provision(serving, owner, None), "new"
         if lost_branch:
-            return {**bind(ctx, row), "state": state, "previous_branch": lost_branch}
-    return {**bind(ctx, _populate(row)), "state": state}
+            return {**bind(ctx, row, fresh=True), "state": state, "previous_branch": lost_branch}
+    return {**bind(ctx, _populate(row), fresh=state == "new"), "state": state}
 
 
 def choose_in_place(ctx: Any) -> None:

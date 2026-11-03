@@ -42,7 +42,8 @@ from ouroboros.effort_evidence import validated_effort_resolution, validated_pro
 from ouroboros.gateways import claudexor_metadata as metadata
 from ouroboros.gateways.claudexor_identity import validated_catalog_match
 from ouroboros.gateways.claudexor_maintenance import ClaudexorMaintenanceGateway
-from ouroboros.gateways.claudexor_observation import ClaudexorObservationGateway
+from ouroboros.gateways.claudexor_observation import ClaudexorObservationGateway, tag_absent_run_read
+from ouroboros.gateways.claudexor_threads import ClaudexorThreadGateway
 from ouroboros.gateways.claudexor_uploads import ClaudexorUploadGateway
 from ouroboros.observability import timed_phase
 
@@ -95,8 +96,7 @@ DAEMON_BUSY_CODES = frozenset({"daemon_busy", "daemon_unavailable", "daemon_reco
 
 def _observation_reason(exc: BaseException) -> str:
     """The typed reason for a read-only observation hole."""
-    return (_OBSERVATION_READ_TIMEOUT if isinstance(exc, httpx.ReadTimeout)
-            else "daemon_unreachable")
+    return _OBSERVATION_READ_TIMEOUT if isinstance(exc, httpx.ReadTimeout) else "daemon_unreachable"
 
 
 def _request_timeout(timeout_sec: Optional[float]) -> Dict[str, Any]:
@@ -431,7 +431,8 @@ def run_message_supported(operations: list[dict]) -> bool:
     )
 
 
-class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, ClaudexorObservationGateway):
+class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, ClaudexorObservationGateway,
+                       ClaudexorThreadGateway):
     """Thin typed client over the Claudexor ``/v2`` control API."""
 
     def __init__(self, endpoint: Optional[DaemonEndpoint] = None, *, home: Optional[pathlib.Path] = None):
@@ -579,6 +580,7 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
         if isinstance(context.get("cause"), dict):
             facts = {key: context[key] for key in ("stage", "cause", "preflight") if key in context}
             error.reported_cause = run_failure_cause({"safeMessage": json.dumps(facts, ensure_ascii=False)})
+        tag_absent_run_read(response, error)  # a 404 run read names its caller; it proves nothing about the run
         return error
 
     # -- operations ------------------------------------------------------------
@@ -956,37 +958,6 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
         if not isinstance(body, dict):
             raise ClaudexorUnavailable("malformed_response", "run start returned no handle")
         return body
-
-    def create_thread(self, request: Dict[str, Any], *, idempotency_key: str) -> Dict[str, Any]:
-        """Create one durable v3 conversation thread.
-
-        Claudexor owns continuity and profile routing. This client only carries
-        the strict request and the caller's stable idempotency identity.
-        """
-        body = self._request(
-            "POST", "/v2/threads", json_body=dict(request),
-            headers={"Idempotency-Key": str(idempotency_key)},
-        )
-        if not isinstance(body, dict) or not str(body.get("id") or ""):
-            raise ClaudexorUnavailable("malformed_response", "thread create returned no id")
-        return body
-
-    def start_thread_turn(
-        self, thread_id: str, request: Dict[str, Any], *, idempotency_key: str,
-    ) -> Dict[str, Any]:
-        """Append one turn through the public v3 thread pipeline."""
-        body = self._request(
-            "POST", f"/v2/threads/{quote(str(thread_id), safe='')}/turns",
-            json_body=dict(request), headers={"Idempotency-Key": str(idempotency_key)},
-        )
-        if not isinstance(body, dict):
-            raise ClaudexorUnavailable("malformed_response", "thread turn returned no handle")
-        return body
-
-    def get_thread(self, thread_id: str) -> Dict[str, Any]:
-        """Read turns, native-session bindings, and continuity receipts."""
-        body = self._request("GET", f"/v2/threads/{quote(str(thread_id), safe='')}")
-        return body if isinstance(body, dict) else {}
 
     def get_run(self, run_id: str, *, timeout_sec: Optional[float] = None) -> Dict[str, Any]:
         body = self._request("GET", f"/v2/runs/{run_id}", timeout_sec=timeout_sec)

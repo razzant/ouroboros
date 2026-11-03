@@ -103,7 +103,8 @@ scripts:                            # type=script only
     description: Fetch and render
 permissions: [net, tool, route, widget, read_settings, companion_process, supervised_task] # see "Permissions"
 conflicts: [legacy-weather]            # optional incompatible installed skill names
-env_from_settings: [OPENROUTER_API_KEY]                  # core keys require an owner grant
+env_from_settings: [OPENROUTER_API_KEY, WEATHER_API_KEY] # core keys require an owner grant
+secret_fields: {apiKey: WEATHER_API_KEY}  # optional: form field id -> a custom key listed above ("Asking the owner for a secret")
 when_to_use: User asks for the weather forecast.
 model_experience:                   # optional prose (CPL-7); a bare string is also accepted
   what_model_sees: One weather tool joins the tool list; results come back as compact JSON.
@@ -180,11 +181,11 @@ automatically disabling, deleting, or moving either payload.
 model's point of view: `what_model_sees` (what the skill adds to the model's
 context — tools, sections, attachments) and `token_effect` (roughly what that
 costs and when it is loaded). A bare string is shorthand for
-`what_model_sees`. The prose travels to the model-visible surfaces — bounded in
-the `list_skills` index and the "Installed Skills" context section, whole in
-`list_skills(name=...)`, which also returns the `read_file` call for this
-manifest — so write it for the model, not for the human reviewer. Unknown keys or
-non-string values are refused at parse time.
+`what_model_sees`. Its prose is bounded in the `list_skills` index and full context catalogue;
+the compact catalogue keeps status, description and trigger.
+`list_skills(name=...)` returns it whole with the manifest's `read_file` call.
+Write for the model, not the reviewer. Unknown keys or non-string values are
+refused at parse time.
 
 ### Always-in-context instructions
 
@@ -853,6 +854,39 @@ A missing permission causes the matching `register_*` call to raise
 `ExtensionRegistrationError`, surfaced as a skill load error in the
 Skills UI.
 
+## Asking the owner for a secret (`secret_fields`)
+
+A skill that needs a credential the owner creates elsewhere (a bot token, a service API key) can let setup ask
+for it in a protected form instead of the chat. It declares which form field writes which key:
+
+```yaml
+env_from_settings: [TELEGRAM_BOT_TOKEN]
+secret_fields:
+  botToken: TELEGRAM_BOT_TOKEN   # field id (a letter, then letters/digits/_) -> a key listed in env_from_settings
+```
+
+The parser checks the shape and that each key is listed in `env_from_settings`; the host admits only an
+owner-defined custom Settings secret (uppercase, not a built-in setting, no `OUROBOROS_` prefix), so a skill can
+never front a provider, network or core credential. `env_from_settings` alone opts nothing in: it also lists keys
+that are not secrets (a host name, a site URL). The declaration is part of the reviewed manifest, so changing it
+changes the release digest.
+
+During setup a root task calls `showSecretHitl(pluginName, fields)`, for example
+`showSecretHitl('telegram', ['botToken'])`, and waits. The owner sees one card in the chat, opens its form, sees
+whether each key already has a value (never the value itself) and which installed skills read it, and chooses
+Save, or Replace for a key that is set. The value goes from that form to Settings (`POST /api/decisions/secret`);
+the task learns only `secret_filled` or `secret_replaced {pluginName, fields}`, or `secret_cancelled`. The value
+never enters a tool result, the chat, history, logs or an event. The form stays usable after the task ends; a
+later save is recorded in the chat and resumes no work. A request saves only while the skill still maps its fields
+to the same keys.
+
+Saving is not a connection and grants nothing. The outcome names what each skill that reads the key can read now:
+a newly saved key needs the owner's grant in Skills. Replacing a key while a skill that reads it is enabled is
+allowed; the skill may read the new value on its next call, while code that copied the value at start (a poller,
+a companion's environment) keeps the old one until it restarts, so say in your SKILL.md what your skill needs
+(Telegram: disable and re-enable it). Chat transports receive such a request as a note saying where to enter it;
+a transport must not offer a reply as an answer to it.
+
 ## Grants for protected keys and host permissions
 
 Some settings keys are protected: `OPENROUTER_API_KEY`,
@@ -861,7 +895,8 @@ Some settings keys are protected: `OPENROUTER_API_KEY`,
 `GITHUB_TOKEN`, `OUROBOROS_NETWORK_PASSWORD`. These keys are NEVER
 forwarded to a skill by default, even when listed in
 `env_from_settings`. Custom secret keys stored in Settings → Secrets
-are treated the same way. A granted key is read as currently saved: each
+are treated the same way; such a key joins a skill's request once it is saved, so a newly saved key is missing
+until the owner grants it, while the skill keeps its other approvals for the same release. A granted key is read as currently saved: each
 `api.get_settings` call, script run, out-of-process call and companion start sees a
 value the owner saved, rotated or deleted during a running task, while that task keeps
 its own model, account and review settings; a value your code already copied or cached,
@@ -1147,21 +1182,36 @@ An exhausted or unknown allowance returns `consciousness_allowance_exhausted`,
 `disposition: retry` and `retry_after` seconds. Physical capacity keeps the existing
 `presence_capacity_full` retry response. A matching event focuses consciousness in
 that room under the owner's autonomy level and allowance, independently of its own
-clock. Before allowance, rate or capacity is consulted, the conversation's current author
-receives later arrivals as typed context-only mail, whether or not they match a wake fact;
+clock. Before allowance, rate or capacity is consulted, the conversation's current author, else its
+sole reader (a promoted or follow-up root of this place and conversation whose loop reads mail or
+is in an unheld cold sleep, or an author parked for its review or private question, whose wait
+wakes and retakes the conversation before any model call), receives later arrivals as typed
+context-only mail, whether or not they match a wake fact; they never answer its question. An untagged message in the same thread, topic or direct message is a
+wake: it ends an ordinary wait and reopens an unsent final. Other untagged group messages reach a
+current author as background and a root not at all; they stay readable in the room. Several
+readers receive nothing: the arrival takes an ordinary focus under the allowance, whose
+context lists them all, and it may hand this exact message to one (`tell_task(arrival=true)`, or
+`arrival="<source_event_id>"` for a later message of that conversation delivered to it). So does
+living work that is not reading at that moment (preparing, past its final close): its waking
+message is never only heard. Queued, held, cancelling,
+owner-paused and money-paused work receives nothing and is not resumed. Each arrival has one
+holder, recorded on its room row before any mail is written: a retry after a lost answer goes to
+that holder alone, and one whose effect there cannot be proven goes to a focus that is told so,
+never to another work.
 Paused, Off/Panic and a bot event without a bot wake item stay heard only. The mail carries the
 arrival's text, source event id, exact `message` and `conversation` facts, observed `facts` and
 attachments. An attached `transport_queue` keeps every fact but its `events` there, completeness
 included. The mail's `context_source_ref` then names the arrival's retained exact facts:
 `memory_read(source_ref=…)` returns them, the whole snapshot included, and the arrival's room row
 shows the same reference in `chat_history` and `memory_read` rows. The host
-acknowledges this handoff (`completed`, `silent`) only while that author accepts intake under
+acknowledges this handoff (`completed`, `silent`) only while that recipient accepts intake under
 its final-drain lock, or when a retry finds the arrival already held by it after the earlier
-answer was lost; a closed or ended author leaves the event eligible for ordinary admission. If the
-Host process dies between that handoff and its answer, a retry reaches ordinary admission: the
-handoff is not exactly-once across a Host crash. A
+answer was lost; a closed or ended one leaves the event eligible for ordinary admission. A retry
+after a Host crash or a torn write returns to its recorded holder, but the handoff is not
+exactly-once: a write whose effect cannot be proven stays unknown, as above. A
 wake arrival its model has not seen when it finishes reopens it for another round; background
-arrivals alone never do.
+arrivals alone never do. An author's own explicit `action="stop"` stands: an arrival drained at
+its close is acknowledged in its transcript, never read by its model, and starts no round.
 
 A focus, or a root promoted or scheduled from it, uses ordinary `finish_task`, including
 `silent=true`; receipts never choose its outcome. An answer after any send, file or
@@ -1191,8 +1241,11 @@ identical contact needs a new key. Questions use the normal canonical quiz and
 answer ingress. An answer reaches a live inline author through its mailbox and
 final-drain admission lock. After that author ends, normal late-answer intake
 starts an unrestricted Main owner turn with the source snapshot, current child
-work and exact owner words. Roots that turn starts inherit the source binding
-as related work, without an automatic external-final route. Inline `wait_for_answer=true`
+work and exact owner words. Roots that turn starts, and their Continue, are the
+owner's ordinary work related to the source binding: they keep the owner's tools and
+admission, and the place lists, reads, tells and cancels them. A place's `tell_task`
+arrives as a task's words, context the work judges, never an owner directive; nothing
+gives this work an automatic external-final route. Inline `wait_for_answer=true`
 uses the narrow Presence continuation park: idle custody lends conversation and
 active slot, then reacquires both before reentry; otherwise it waits holding
 custody. Pooled roots retain their normal owner wait. Stop/deadlines still apply;
@@ -1206,8 +1259,9 @@ carrier and ordinary resource/control semantics. A scheduled root explicitly
 uses connector tools to deliver later; it is not discovered by polling the old
 event, its finish reaches no one by itself, and it reads the conversation's
 current previous turn rather than the copy taken when it was scheduled. Any turn
-of the place lists, reads and withdraws the follow-ups that place scheduled
-(`manage_schedules` `list`/`get`/`delete`); withdrawal stops future runs only, and
+of the place lists, reads and withdraws the follow-ups related to it, its own and
+those of the owner's work a late answer began (`manage_schedules`
+`list`/`get`/`delete`); withdrawal stops future runs only, and
 `cancel_task` stops work one already started. `notify=true` and the owner-wide
 schedule table remain separate capabilities.
 
@@ -1306,6 +1360,11 @@ deduplicate by `output_ref`, never by text, since an identical correction is new
   its FIFO, retry it unchanged after `retry_after` seconds (1 for `conversation`, 5 for
   `capacity`; back off as you see fit), and serve other conversations meanwhile. Versions 0 and 1
   keep waiting in the gate.
+- **Interrupted turn.** A turn whose carrier ended before it answered (a Stop's kill, a crash, a
+  pool stop) answers HTTP 503 `{ok: false, error, code: "presence_turn_interrupted", disposition:
+  "retry"}`; one that could not start at all answers 503 `presence_turn_not_started`, also
+  `retry`. Resend the same event unchanged: the Host answers it from the turn's durable record (a
+  replay, or the retained refusal), never by regenerating an ended attempt.
 - **Polls.** A version-2 turn's poll echoes `continuation_version: 2`; turns admitted at other
   versions keep `1`. Its terminal adds `reply_anchor: {source_event_id, message}`, where `message`
   is the exact captured `event.message` of the last input the selected answer covers. Covered
@@ -1320,6 +1379,18 @@ deduplicate by `output_ref`, never by text, since an identical correction is new
   - Reply to the anchored message in the turn's conversation and thread.
   - Promoted children and retained refusals keep their own references and carry no anchor.
   - A turn answered within the request (`status: "completed"`) carries the same anchor.
+
+**Saved work of a moved turn.** When the owner has moved a text turn to a Project, the owner's Pause,
+spent money or a technical stop saves it instead of ending it: the server's queue keeps its work under
+the same task id until the owner resumes it or a restart returns it. Once that custody is durable the
+request answers at every version: 1 and 2 take the `continuing` envelope; a request without
+`continuation_version` answers HTTP 409 `{ok: false, code: "presence_turn_parked", disposition:
+"retained", custody: "queued", turn_ref}` instead of waiting. A resend of the same event gets the same
+answer, never a rerun. While the server's queue is unrestored or unreadable, a resend of a turn it
+may keep answers 409 `presence_turn_custody_unknown` (`custody: "unknown"`, `retained`): neither
+lost nor running; resend later. Its poll answers 202 `pending` while the queue keeps or may keep the
+work and the terminal once it ends; the resumed author reacquires the conversation and receives the
+facts since it was saved before it speaks again. Live calls and turns not moved keep the behaviour above.
 
 Before speaking again, the same author reacquires the conversation and active slot and receives
 observed conversation and delivery facts since its yield. Reentry retains the exact observed text,
@@ -1387,8 +1458,10 @@ status notices stay in the owner task; an empty deferred body sends nothing but
 still requires polling. Cached and late results preserve that empty body rather
 than substituting the task diagnostic. This does not turn failure into success.
 Ordinary implicit replies and genuine authored best-effort answers remain valid.
-A forced final separates the task record from the reply: only an answer the mind
-authored is spoken, so a host-authored record sends nothing new.
+A forced final speaks only the mind's answer; a host-authored record sends nothing
+new. Its committed call closes Presence intake, including inline steering (pooled
+owner routing is unchanged). A no-call terminal or explicit author Stop may
+acknowledge transcript input without another model reading it.
 
 `GET /identity` advertises `presence_delivery_version: 1` on supporting hosts.
 Only then request `delivery_reporting_version: 1` alongside `binding_id` and
@@ -2457,15 +2530,43 @@ every marked reviewer; under Advisory Ouroboros may name `reviewers` (one or mor
 pool rows) and must state why when it narrows the panel; a review the owner starts
 uses the whole pool. Unmarked rows it adds are advisers: heard, never counted.
 
-A git repository is a source in one of two shapes:
+Add source takes any Git address (`https://`, `ssh://`, `git@host:path`,
+`file://`) or a folder on the computer running Ouroboros. A repository is read at
+an optional revision (a branch or tag it follows, or a full commit id it stays at;
+empty follows the default branch) from an optional folder, and installs record that
+view: another branch or folder of the same repository is another source. A folder
+on this computer is read as it is, always as plain skills; a hub is read only from a
+repository. The folder read from a repository is a source in one of two shapes:
 
-- **A plain skills repository**: every folder (or the root) holding a
-  `SKILL.md` or `skill.json` is a skill, described by its manifest.
-- **A hub**: `hub.json` at the root, one `entries/<name>.json` per skill
+- **Plain skills**: every folder (or the folder itself) holding a `SKILL.md` or
+  `skill.json`, up to two levels down, and every skill in `.agents/skills/`. When a
+  name appears twice, the first folder is offered and the other is listed among the
+  source's problems with both paths; choose the other folder to read it instead.
+- **A hub**: `hub.json` in that folder, one `entries/<name>.json` per skill
   (description, one or two categories, owner, version, `source` hosted at
-  `skills/<name>` or pointing at the author's repository at an exact commit,
-  release `digest`, `withdrawn`), the maintainer's `official.json`
-  (endorsements bound to digests) and `categories.json`.
+  `skills/<name>` in the hub's folder or pointing at the author's repository at an
+  exact commit, release `digest`, `withdrawn`), the maintainer's `official.json`
+  (endorsements bound to digests) and `categories.json`. A hub in a repository's
+  folder is read and installed from like any hub, but is not a publication
+  destination.
+
+A connected folder loads its skills in place, those in `.agents/skills/` too, and
+inside it the first folder of a name wins in the same way. A name that another
+location already uses (an installed skill, another connected folder) is a name
+collision like any other: neither copy runs until one is renamed or removed.
+
+A catalog in another format is converted outside the app into such a hub:
+`devtools/skill_hubs/` converts the GitVerse marketplace into pointer entries at the
+commits and digests it observes in the authors' repositories, never running the
+catalog's install commands. Each run writes a new folder, so an earlier hub never
+changes; the operator reviews the report, copies the accepted files into the Git
+repository of the hub, commits them and adds that repository's address (`file://`
+for one on this computer). Its README has the steps. A build (a fork or an
+organization's edition) can offer repositories in Add source with
+`OUROBOROS_SKILL_SOURCE_SUGGESTIONS` (`[{name, url, ref|commit, path, about}]`); a
+suggestion connects nothing and sets no trust, and the open-source build offers none.
+A build that wants a source connected from the start ships it in
+`OUROBOROS_SKILL_SOURCES` instead, marked `managed: true`.
 
 Private github.com HTTPS sources use the configured GitHub token after a read
 without it (this computer's git credentials still apply) is refused for
@@ -2514,10 +2615,17 @@ hub, unless the owner picks another:
   owner changes and Official skills wait for the maintainer. A new entry names
   one or two category ids from the hub's `categories.json`. A hub without
   `hub.json` (an older one) gets its `catalog.json` row instead.
-- **A git source of the owner's**: the skill's folder in that repository. When
+- **A git source of the owner's**: the skill's folder in that repository (one
+  pinned to a commit is not offered: it would never read the publication). When
   the GitHub account may push there, the pull request is merged at once and
   the skill is published; otherwise it waits for that repository's
   maintainers.
+
+A source's branch may be named in full (`refs/heads/main`). A source that reads
+a tag is refused by name (`destination_tag`), even for a skill that came from
+it: a tag never moves, so it would never read the publication, and no other
+branch is chosen instead. The hub chosen by default passes over hubs pinned to a
+commit or a tag, or read from a folder.
 
 **My skills** is optional: `<login>/ouroboros-skills` carries skills between
 your Ouroboros installations. When you choose it, your configured GitHub token

@@ -26,9 +26,10 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from ouroboros import working_checkpoint
 from ouroboros.config import get_context_mode
+from ouroboros.conversation_lease import follow_loop_admission
 from ouroboros.observability import timed_phase
 from ouroboros.outcomes import reviewable_effect_projection
-from ouroboros.task_finalization import set_terminal_host_notice
+from ouroboros.task_finalization import set_terminal_host_notice, set_terminal_plan_review_open
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.task_carrier import execution_kind
 
@@ -90,6 +91,8 @@ _DELIVERY_HOLD_CONTROLS = frozenset({
     _CHILD_ABSORPTION_HOLD_CONTROL,
     _AUTHORING_HANDOVER_HOLD_CONTROL,
 })
+# The candidate degradations a normal exit derives from its own host suffixes (an unsettled child, an open plan).
+_SUFFIX_MARKS = frozenset({"host_child_status_suffix", "plan_review_advisory"})
 # Header of the host's own rendered control block; identifies the transcript's
 # control history the way ``acceptance_observation`` marks the observation rows.
 _DELIVERY_CONTROL_MARKER = "[DELIVERY_FINALIZATION_CONTROL]"
@@ -761,11 +764,17 @@ def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, conte
     text, error = selected_completion_text(request, candidate, ctx.messages, getattr(tool_ctx, "_completion_held_sha256", ""))
     if request.get("wake_silent") and owner_reply_owed(tool_ctx):
         error = OWNER_REPLY_OWED_REFUSAL
-    if getattr(tool_ctx, "_completion_conflict", False):
+    calls = (trace.get("tool_calls") or [])[int(observation.get("tool_count") or 0):]
+    conflict = getattr(tool_ctx, "_completion_conflict", False)
+    if conflict:
         error = "contradictory_completion_requests: select again after reading the completed batch"
+    elif conflict is None and any(call.get("tool") == "finish_task" and call.get("is_error") for call in calls):
+        # Restored from a source that never recorded the fact: a failed sibling request may have contradicted
+        # this one or failed on its own arguments. A batch with none failed had one valid request.
+        error = ("completion_conflict_unknown: whether a failed completion request of this batch contradicted "
+                 "this one is UNKNOWN (not recorded); select again after reading the completed batch")
     if observation.get("owner_source_sha256") != owner_source_sha256(tool_ctx):
         error = "owner_input_changed: consider the new owner input before selecting completion"
-    calls = (trace.get("tool_calls") or [])[int(observation.get("tool_count") or 0):]
     unseen = completion_observation_calls(calls)
     # Delivery-only Presence composition relies on actual delivery receipts downstream.
     delivered = (getattr(tool_ctx, "_presence_completion", None) or {}).get("outcome") == "tool_delivered"
@@ -1148,6 +1157,7 @@ def _seal_admission_before_delivery(tools: ToolRegistry, limit_ctx: Any, llm_tra
         if admission_lock is not None and admission_agent is not None:
             with admission_lock:
                 admission_agent._accepting_owner_messages = True
+                follow_loop_admission(tool_ctx, True)
         _loop()._arm_delivery_control(tools, limit_ctx, llm_trace, control="owner_revision_required")
         return False
     if not answer and not own_seal:
@@ -1305,22 +1315,23 @@ def _no_tool_final_answer(
             return held("service_evidence_changed")
 
     _loop()._project_child_result_dispositions(limit_ctx, llm_trace)
-    plan_suffix = _loop()._plan_gate_disclosure(tools._ctx, llm_trace)
+    # No plan gate decided a stop: its disclosure reads the plan now, never an earlier hold's view.
+    plan_suffix = (_loop()._plan_gate_disclosure(tools._ctx, llm_trace, author_stop=True) if stopping
+                   else _loop()._plan_gate_disclosure(tools._ctx, llm_trace))
     # The forced rails already type this fact; the single degraded_reason slot below
     # cannot hold it beside an unsettled child, so the normal rail types it too.
-    if plan_suffix:  # absent = not open: a clean result carries no key (pinned usage shapes)
-        limit_ctx.accumulated_usage["terminal_plan_review_open"] = True
+    set_terminal_plan_review_open(limit_ctx.accumulated_usage, plan_suffix)
     orphan_suffix = _loop()._forced_orphan_note(limit_ctx, include_terminal=False)
     set_terminal_host_notice(limit_ctx.accumulated_usage, plan_suffix, orphan_suffix)
     candidate = getattr(tools._ctx, "_delivery_candidate", None)
     if isinstance(candidate, _loop().DeliveryCandidate):
-        if orphan_suffix:
-            candidate.degraded = True
-            candidate.degraded_reason = "host_child_status_suffix"
-            _loop()._publish_delivery_candidate(tools, candidate, llm_trace)
-        elif plan_suffix and not _plan_review_only_awaited(llm_trace):
-            candidate.degraded = True
-            candidate.degraded_reason = "plan_review_advisory"
+        mark = ("host_child_status_suffix" if orphan_suffix else
+                "plan_review_advisory" if plan_suffix and not _plan_review_only_awaited(llm_trace) else "")
+        # Each mark states a suffix of THIS exit: a held answer kept for a later exit drops one whose cause has
+        # gone. Another owner's degradation of the candidate is neither written over nor cleared here.
+        own = not candidate.degraded or candidate.degraded_reason in _SUFFIX_MARKS
+        if own and (mark or candidate.degraded):
+            candidate.degraded, candidate.degraded_reason = bool(mark), mark
             _loop()._publish_delivery_candidate(tools, candidate, llm_trace)
         content = candidate.full_text
 
@@ -1342,6 +1353,17 @@ def _no_tool_final_answer(
     # either forces another round or is rejected after the fence, never stranded.
     admission_lock = getattr(tools._ctx, "owner_message_admission_lock", None)
     admission_agent = getattr(tools._ctx, "owner_message_admission_agent", None)
+
+    def solving_again() -> None:
+        """A hold after this close returns the author to its loop, whose mail it reads again: what it reads,
+        it accepts, locally and in a remote Host's view, until its next final closes."""
+        if admission_lock is not None and admission_agent is not None:
+            with admission_lock:
+                if (getattr(admission_agent, "_busy", False)
+                        and str(getattr(admission_agent, "_current_task_id", "") or "") == limit_ctx.task_id):
+                    admission_agent._accepting_owner_messages = True
+                    follow_loop_admission(tools._ctx, True)
+
     if admission_lock is not None and admission_agent is not None:
         before_directives = len(getattr(tools._ctx, "_owner_directives", []) or [])
         sealed = bool(getattr(tools._ctx, "_task_acceptance_sealed_fence_token", None))
@@ -1352,6 +1374,7 @@ def _no_tool_final_answer(
             acquired()
             with timed_phase("admission_close"):
                 admission_agent._accepting_owner_messages = False
+                follow_loop_admission(tools._ctx, False)  # a remote Host's view closes before the drain reads
                 post_controls = _loop()._drain_incoming_messages(
                     messages, incoming_messages, limit_ctx.drive_root, limit_ctx.task_id,
                     limit_ctx.event_queue, owner_msg_seen, owner_ctx=tools._ctx, defer_content_ack=True,
@@ -1365,6 +1388,7 @@ def _no_tool_final_answer(
                     and str(getattr(admission_agent, "_current_task_id", "") or "") == limit_ctx.task_id
                 ):
                     admission_agent._accepting_owner_messages = True
+                    follow_loop_admission(tools._ctx, True)
             if sealed:
                 emit_progress("An owner follow-up reopened the sealed task; Main decides about the retained answer.")
             if isinstance(candidate, _loop().DeliveryCandidate):
@@ -1410,6 +1434,7 @@ def _no_tool_final_answer(
             "Delivery evidence can no longer be verified; the complete answer must be restated and is retained over unknown evidence."
         )
         _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
+        solving_again()
         return held("evidence_changed", "" if evidence_fingerprint else "unverifiable")
     if isinstance(candidate, _loop().DeliveryCandidate):
         _loop()._publish_delivery_candidate(tools, candidate, llm_trace)
@@ -1424,6 +1449,7 @@ def _no_tool_final_answer(
     if not allowed:
         messages.append({"role": "user", "content": refusal})
         _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
+        solving_again()
         return held("focus_reply_refused")
     if isinstance(getattr(tools._ctx, "_presence_completion", None), dict):  # Accept only at this common exit.
         tools._ctx._presence_completion_accepted = True

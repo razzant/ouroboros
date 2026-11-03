@@ -105,16 +105,19 @@ _SQL_ONLY = "db, query, max_rows, snapshot and timeout_sec are op=sql only"
 # as emitted before these prose-only edits. A deliberate parameter change updates its pin.
 # delegate_start: + attachment_paths (string array) and attachment_import (reuse|new), C505;
 # without those two the structure is the earlier c4263da7232644b1 / 1aa885fc9a0c37ff.
+# delegate_start and schedule_subagent: + input_files (the same typed {path, root} items; schedule_subagent's
+# lead pays its custom-tool budget), #2593; before them
+# delegate_start 5e25716838978044 / 1326e91ef42b3cea, schedule_subagent e17e74235ea913fd / ec6b3c08c33ac3fa.
 # query_data: + kind "update_material" (the offered update range); before it f790f964764d75b7.
 # wait_tasks: + view, sleep_mode, wake_after_sec, wake_at and no timeout_sec default (an omitted
 # window stays distinguishable, PR1696 native task wait); before it c806a86311a0a965.
 _STRUCTURE = {
-    "query_data": {"full": "1408c97acc31b0f7", "readonly": "1408c97acc31b0f7", "acting": "1408c97acc31b0f7"},
-    "delegate_start": {"full": "5e25716838978044", "readonly": "1326e91ef42b3cea", "acting": "1326e91ef42b3cea"},
+    "query_data": {"full": "afe57ddd5ee0c17c", "readonly": "afe57ddd5ee0c17c", "acting": "afe57ddd5ee0c17c"},
+    "delegate_start": {"full": "a2f6fdb7a8bf6822", "readonly": "e7dcf92431326bc5", "acting": "e7dcf92431326bc5"},
     "delegate_wait": {"full": "60ab2c0f421da812", "readonly": "60ab2c0f421da812", "acting": "60ab2c0f421da812"},
     "wait_tasks": {"full": "50667317e4bef21f", "readonly": "50667317e4bef21f", "acting": "50667317e4bef21f"},
     # readonly prunes write_surface, write_root, protected_paths_grant and external_tool_grants.
-    "schedule_subagent": {"full": "e17e74235ea913fd", "readonly": "ec6b3c08c33ac3fa", "acting": "e17e74235ea913fd"},
+    "schedule_subagent": {"full": "3d5b8e7b8e317503", "readonly": "2e04edea50ceb1b6", "acting": "3d5b8e7b8e317503"},
 }
 
 
@@ -169,6 +172,8 @@ _SCHEDULE_REMOVALS_CARRIED_BY = (
     ("integrate_subagent_patch", "Genesis is a standalone directory, not a repo patch", {"full", "acting"}),
     ("integrate_subagent_patch", "This never commits", {"full", "acting"}),
     ("integrate_subagent_patch", "For best-of-N pick a child and integrate it", {"full", "acting"}),
+    ("integrate_subagent_patch", "native external_workspace verifies files already in the shared tree WITHOUT "
+                                 "reapplying", {"full", "acting"}),  # #2593 paid input_files with these words
 )
 
 
@@ -197,6 +202,10 @@ _SCHEDULE_REMOVALS_IN_SYSTEM = (
     "`root=\"skill_payload\"`",
     "a child cannot open the payload lane",
     "chronicle page and part drafts in their own name",
+    # #2593 paid schedule_subagent's typed input_files with these three lead clauses.
+    "`start_task` begins only separate new work",
+    "without candidate write authority its changes remain evidence and create no apply duty",
+    "I verify the files and its recorded verdict instead of re-applying its patch",
 )
 
 

@@ -142,7 +142,9 @@ def readmit_placement(drive_root: Any, task: dict, *, repo_dir: Any, running: An
         if not pinned:
             folder = validate_workspace_root(project.get("working_dir"), system_repo_dir=repo_dir, drive_root=drive_root)
             workspace = {"root": str(folder or ""), "mode": "external" if folder else ""}
-        task.update(project_id=binding["project_id"], chat_id=project.get("chat_id"),
+        # A Presence turn keeps its source conversation's chat id: every room reader resolves its binding first.
+        task.update(project_id=binding["project_id"], chat_id=task.get("chat_id") if metadata.get(
+                        "presence_event_identity") else project.get("chat_id"),
                     workspace_root=workspace["root"], workspace_mode=workspace["mode"],
                     _project_admission=project_admission_basis(binding["project_id"], project, frozen=True),
                     placement_applied_at=binding["bound_at"])

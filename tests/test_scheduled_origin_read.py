@@ -106,12 +106,12 @@ def test_a_folderless_helper_start_stages_the_origin_materials_as_copies(host, o
     copies of every permitted lineage file, the origin's whole drive and artifacts included."""
     import json
 
-    from ouroboros.delegate_readonly_inputs import prepare_folderless_inputs
+    from ouroboros.delegate_readonly_inputs import prepare_readonly_inputs
 
     task = _fire(host, origin, "independent")
     _registry, ctx = _started_registry(host, task, monkeypatch)
     ctx.task_metadata["resource_intent"] = {"kind": "explicit_none"}  # folderless: no workspace
-    staged, _note = prepare_folderless_inputs(ctx, "inv-origin")
+    staged, _note = prepare_readonly_inputs(ctx, "inv-origin")[:2]
     manifest = json.loads((pathlib.Path(staged) / "inputs.json").read_text(encoding="utf-8"))
     copied = {pathlib.Path(row["source"]).name: (pathlib.Path(staged) / row["local"]).read_text()
               for row in manifest}
@@ -123,7 +123,7 @@ def test_folderless_origin_fifo_is_refused_before_open_and_regular_reads_survive
     import json
     import os
     from ouroboros import store
-    from ouroboros.delegate_readonly_inputs import prepare_folderless_inputs
+    from ouroboros.delegate_readonly_inputs import prepare_readonly_inputs
 
     if not hasattr(os, "mkfifo"):
         pytest.skip("real FIFO requires POSIX")
@@ -142,12 +142,12 @@ def test_folderless_origin_fifo_is_refused_before_open_and_regular_reads_survive
     monkeypatch.setattr(store, "open_for_read", no_nonregular_open)
     try:
         with pytest.raises(OSError, match="not a regular file"):
-            prepare_folderless_inputs(ctx, "inv-fifo")
+            prepare_readonly_inputs(ctx, "inv-fifo")[:2]
         assert fifo not in opened
         assert "ORIGIN_DRIVE" in _read(registry, "task_drive", fifo.parent / "report.md")
     finally:
         fifo.unlink()
-    staged, _note = prepare_folderless_inputs(ctx, "inv-readable")
+    staged, _note = prepare_readonly_inputs(ctx, "inv-readable")[:2]
     manifest = json.loads((pathlib.Path(staged) / "inputs.json").read_text())
     assert {pathlib.Path(row["source"]).name for row in manifest} == {"report.md", "report.txt"}
     assert all(row["sha256"] == row["source_sha256"] for row in manifest)

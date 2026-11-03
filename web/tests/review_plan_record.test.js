@@ -199,3 +199,53 @@ test('a detail without the host fold never claims "no open objection", and an un
         plan_objections: fold({}, [], { legacy_unreadable: { source: 'plan_review_state', error: 'ValueError: PLAN_REVIEW_STATE_INVALID' } }) }, 'root');
     assert.match(named.attempts[0].detailText, /earlier plan-review state unreadable \(plan_review_state\): ValueError: PLAN_REVIEW_STATE_INVALID/);
 });
+
+test('pending room preparation stays qualified before a dispatch outcome, including a known pending seat', () => {
+    const inline = { conversation_rows: 2, conversation_inline_rows: 2, other_rows: 1 };
+    for (const unresolved of [false, true]) {
+        const participant = { ...answered('pending', 'm/a', {}), status: 'pending', unresolved, room_delivery: inline };
+        const record = { schema_version: 3, revisions: RECORD.revisions, asks: [
+            { ask_id: 'a1', revision: 2, host_added: [], participants: [participant] },
+        ] };
+        const group = planReviewGroupFromTaskDetail({ task_id: 'root', status: 'running', plan_record: record, plan_objections: fold() }, 'root');
+        assert.match(group.attempts.at(-1).detailText, /counted for a delivery that may not have been sent/);
+    }
+});
+
+test('Record facts say what the room gave each seat and what its file reads covered, apart and without a judgement', () => {
+    const inline = { conversation_rows: 19, conversation_inline_rows: 19, other_rows: 481 };
+    const record = { schema_version: 3, revisions: RECORD.revisions, asks: [
+        { ask_id: 'a1', ts: '2026-10-15T02:05:00+00:00', revision: 2, message: '', host_added: [], participants: [
+            answered('unread', 'm/a', {}, { retrieves: true, room_delivery: inline, host_file_read_attestation: 'host_observed',
+                room_read_coverage: { status: 'incomplete', covered_chars: 0, complete_chars: 52340, provenance: 'host_observed' } }),
+            answered('part', 'm/b', {}, { retrieves: true, room_delivery: { ...inline, conversation_inline_rows: 7 },
+                room_read_coverage: { status: 'incomplete', covered_chars: 12000, complete_chars: 52340, provenance: 'host_observed' } }),
+            answered('session', 'm/c', {}, { retrieves: true, room_delivery: inline,
+                room_read_coverage: { status: 'complete', covered_chars: 52340, complete_chars: 52340, provenance: 'harness_observed' } }),
+            answered('unobserved', 'm/d', {}, { retrieves: true, room_delivery: inline, host_file_read_attestation: 'unobserved' }),
+            answered('packet', 'm/e', {}, { retrieves: false, room_delivery: { conversation_rows: 2, conversation_inline_rows: 2, other_rows: 0 } }),
+            answered('older', 'm/f', {}),
+            // What an older projector could store: a blank 0 of N, and a paged brief's numbers with no provenance.
+            answered('blank', 'm/g', {}, { room_read_coverage: { status: '', covered_chars: 0, complete_chars: 1234, provenance: '' } }),
+            answered('brief', 'm/h', {}, { room_read_coverage: { status: 'incomplete', covered_chars: 10, complete_chars: 900000, provenance: '' } }),
+        ] },
+    ] };
+    const group = planReviewGroupFromTaskDetail({ task_id: 'root', status: 'done', plan_record: record, plan_objections: fold() }, 'root');
+    const facts = group.attempts.at(-1).detailText.split('\n');
+    assert.ok(facts.includes('Participant unread room: 19 of 19 conversation rows inline, 481 other rows only in the snapshot file · file reads covered 0 of 52,340 characters · observed by the host'));
+    assert.ok(facts.includes('Participant part room: 7 of 19 conversation rows inline, 481 other rows only in the snapshot file · file reads covered 12,000 of 52,340 characters · observed by the host'));
+    assert.ok(facts.includes('Participant session room: 19 of 19 conversation rows inline, 481 other rows only in the snapshot file · file reads covered 52,340 of 52,340 characters · inferred from the harness journal'));
+    // What nothing measured says nothing: never 0 of N, and an older record gains no line.
+    assert.ok(facts.includes('Participant unobserved room: 19 of 19 conversation rows inline, 481 other rows only in the snapshot file'));
+    assert.ok(facts.includes('Participant packet room: 2 of 2 conversation rows inline'));
+    for (const seat of ['older', 'blank', 'brief']) assert.ok(!facts.some((line) => line.startsWith(`Participant ${seat} room`)), seat);
+    assert.ok(!facts.join('\n').includes('%'));
+    // These facts move no state, tone or verdict, and a read of nothing is no objection.
+    assert.equal(group.verdict, 'no open objection');
+    assert.equal(group.tone, 'done');
+    assert.equal(group.attempts.at(-1).tone, 'done');
+    assert.equal(group.attempts.at(-1).verdict, 'no objection');
+    const html = renderReviewsSection([group], { sectionExpanded: true, expandedGroups: new Set([group.id]),
+        expandedAttempts: new Set(group.attempts.map((a) => `${group.id}:${a.id}`)) });
+    assert.match(html, /<dt>Participant unread room<\/dt><dd>19 of 19 conversation rows inline, 481 other rows only in the snapshot file · file reads covered 0 of 52,340 characters · observed by the host<\/dd>/);
+});

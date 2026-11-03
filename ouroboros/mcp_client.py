@@ -2,8 +2,10 @@
 
 Configured servers are hot-reloaded from settings, listed tools are exposed
 through ToolRegistry as provider-safe ``mcp_<server>__<tool>`` names, and each
-call opens a fresh session. Secrets, server descriptions/results, and obvious
-metadata SSRF targets are handled defensively because MCP servers are external.
+call opens a fresh session unless an owner opted a stdio server into one session
+per task loop (``task_session``, owned by ``mcp_task_session``). Secrets, server
+descriptions/results, and obvious metadata SSRF targets are handled defensively
+because MCP servers are external.
 
 For ``stdio``, ``command`` is an executable and ``args`` is passed as an exact
 list without a shell. Optional cwd, literal and settings-backed environment selections
@@ -34,18 +36,22 @@ from ouroboros.secret_masking import (
 from ouroboros.secret_masking import (
     MCP_RESPONSE_ONLY_FIELDS,
 )
+from ouroboros.mcp_browser_guard import GUARD_ENV_NAMES
 from ouroboros.mcp_headers import validate_headers
 from ouroboros.mcp_schema import filter_schema_literals, redact_metadata, tool_metadata
-from ouroboros.tools.tool_result import ToolResult
+from ouroboros.tools.tool_result import ToolResult, _replace_tool_result
 from ouroboros.platform_layer import IS_WINDOWS
-from ouroboros.config import get_runtime_mode
+from ouroboros.config import MCP_STDIO_STDERR_TAIL_BYTES, get_runtime_mode
 from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
 from ouroboros.workspace_executor import resolve_process_env, validate_process_env
 
 from ouroboros import mcp_catalog
 from ouroboros.mcp_schema import (
     _redact_error_text as _redact_error_text,
-    _exception_text, _model_facing_description, _model_facing_result, _normalize_input_schema,
+    _content_part_text as _content_part_text,
+    _serialize_content_part as _serialize_content_part,
+    _stringify_call_result as _stringify_call_result,
+    _exception_text, _model_facing_description, _model_facing_result, _normalize_input_schema, _stderr_diagnostic,
 )
 
 log = logging.getLogger(__name__)
@@ -114,6 +120,10 @@ class MCPServerConfig:
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
     # Owner pin: call schemas from task start in every request; otherwise loaded on demand (the map lists it).
     schemas_at_start: bool = False
+    # stdio only: a task loop's calls share one session (mcp_task_session); listings stay per call.
+    task_session: bool = False
+    # Requires task_session: that session's process may ask browser_policy about each request (mcp_browser_guard).
+    browser_policy: bool = False
 
     def has_auth(self) -> bool:
         return bool(self.auth_token.strip())
@@ -406,6 +416,14 @@ def _validate_stdio_args(value: Any) -> List[str]:
     return list(value)
 
 
+def _validate_call_lifetime(transport: str, task_session: bool, browser_policy: bool) -> None:
+    """The rule on a server's call-lifetime choices, shared by the loader and the import preview."""
+    if (task_session or browser_policy) and transport != "stdio":
+        raise ValueError("task_session and browser_policy apply only to stdio servers")
+    if browser_policy and not task_session:
+        raise ValueError("browser_policy requires task_session (its callback lives with the task's session)")
+
+
 def _coerce_str_list(value: Any) -> List[str]:
     if value in (None, "", [], ()):
         return []
@@ -438,10 +456,14 @@ def normalize_server_config(
     if transport not in SUPPORTED_TRANSPORTS:
         return invalid("unsupported transport; use streamable_http, sse, or stdio")
 
+    def flag(key: str) -> bool:
+        value = raw.get(key, False)
+        return value if isinstance(value, bool) else str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
     try:
         known = {"id", "slug", "name", "label", "enabled", "transport", "url", "command",
                  "args", "auth_header", "auth_token", "allowed_tools", "cwd", "env", "env_from_settings", "headers",
-                 "schemas_at_start"}
+                 "schemas_at_start", "task_session", "browser_policy"}
         unknown = set(raw) - known
         warnings = ("Fields retained but not applied: " + ", ".join(sorted(map(str, unknown))),) if unknown else ()
         cwd = raw.get("cwd", "")
@@ -454,6 +476,9 @@ def normalize_server_config(
             raise ValueError("fields unsupported by this transport: " + ", ".join(key for key in unused if raw.get(key)))
         if transport == "stdio" and raw.get("auth_header", "Authorization") not in (None, "", "Authorization"):
             raise ValueError("auth_header is unsupported for stdio")
+        _validate_call_lifetime(transport, flag("task_session"), flag("browser_policy"))
+        if reserved := sorted(key for key in env if key.upper() in GUARD_ENV_NAMES):
+            raise ValueError("env names reserved for the host's browser guard: " + ", ".join(reserved))
         if transport == "stdio":
             url = ""
             command = _validate_stdio_command(raw.get("command"))
@@ -477,11 +502,6 @@ def normalize_server_config(
         return invalid(str(exc))
 
     name = str(raw.get("name") or raw.get("label") or server_slug).strip() or server_slug
-
-    def flag(key: str) -> bool:
-        value = raw.get(key, False)
-        return value if isinstance(value, bool) else str(value or "").strip().lower() in {"1", "true", "yes", "on"}
-
     enabled = flag("enabled")
     allowed_tools = _coerce_str_list(raw.get("allowed_tools"))
 
@@ -503,6 +523,8 @@ def normalize_server_config(
         configuration_warnings=warnings,
         headers=headers,
         schemas_at_start=flag("schemas_at_start"),
+        task_session=flag("task_session"),
+        browser_policy=flag("browser_policy"),
     )
 
 
@@ -594,9 +616,8 @@ async def _stdio_with_diagnostics(params: Any, cfg: MCPServerConfig):
             try:
                 async with stdio_client(params, errlog=stderr) as streams:
                     yield streams
-            finally:
-                stderr.seek(0)
-                diagnostic = _redact_error_text(stderr.read(), cfg)
+            finally:  # a task session's file spans its task loop: a bounded tail, never the whole file
+                diagnostic = _stderr_diagnostic(stderr, cfg, MCP_STDIO_STDERR_TAIL_BYTES)
                 if diagnostic:
                     log.warning("MCP stdio stderr (%s): %s", cfg.id, diagnostic)
 
@@ -688,7 +709,7 @@ async def _http_with_guards(cfg: MCPServerConfig):
             raise MCPRedirectRefused(str(guard.refusal)) from None
 
 
-def _transport_factory(cfg: MCPServerConfig):
+def _transport_factory(cfg: MCPServerConfig, host_env: Optional[Dict[str, str]] = None):
     if cfg.transport in ("streamable_http", "sse"):
         return _http_with_guards(cfg)
     if cfg.transport == "stdio":
@@ -699,14 +720,15 @@ def _transport_factory(cfg: MCPServerConfig):
         from ouroboros.process_scope import installation_scope_entries
 
         # The installation scope marker rides every stdio server (a long-lived shared
-        # helper belongs to the installation, never to the task that first touched it).
+        # helper belongs to the installation, never to the task that first touched it);
+        # a task session's ``host_env`` adds that task's scope marker and guard address last.
         env = {**installation_scope_entries(),
-               **{key.upper() if IS_WINDOWS else key: value for key, value in cfg.env.items()}}
+               **{key.upper() if IS_WINDOWS else key: value for key, value in {**cfg.env, **(host_env or {})}.items()}}
         selected = {"env": env} if env else {}
         if cfg.cwd:
             selected["cwd"] = cfg.cwd
         params = StdioServerParameters(command=cfg.command, args=list(cfg.args), **selected)
-        return _stdio_with_diagnostics(params, cfg) if cfg.env else stdio_client(params)
+        return _stdio_with_diagnostics(params, cfg) if cfg.env or host_env else stdio_client(params)
     raise RuntimeError(f"Unsupported transport: {cfg.transport!r}")
 
 
@@ -780,6 +802,7 @@ async def _call_tool_async(
     from ouroboros.model_wait import ModelWaitInterrupted
     from ouroboros.usage_accounting import UsageAccountingError
     from ouroboros.store import StoreError
+    from ouroboros.mcp_result_images import with_returned
     unsent_joined = False
 
     async def _do() -> ToolResult:
@@ -807,7 +830,7 @@ async def _call_tool_async(
                 active[2]["settled"] = True
             refusal.mcp_unsent_joined = True
             raise refusal
-        return _tool_result_from_call_result(result)
+        return with_returned(_tool_result_from_call_result(result), result)
 
     # Launch admission precedes transport entry: a stdio server starts there.
     try:
@@ -825,36 +848,6 @@ async def _call_tool_async(
         raise
 
 
-def _stringify_call_result(result: Any) -> str:
-    """Stringify MCP content parts without inventing fields."""
-    parts: List[str] = []
-    is_error = bool(getattr(result, "isError", False) or getattr(result, "is_error", False))
-    for item in getattr(result, "content", []) or []:
-        text = getattr(item, "text", None)
-        if isinstance(text, str):
-            parts.append(text)
-            continue
-        # Best-effort JSON dump for non-text parts.
-        try:
-            parts.append(json.dumps(_serialize_content_part(item), ensure_ascii=False))
-        except Exception:
-            parts.append(repr(item))
-    # structuredContent is protocol data in its own right (E5, capinv-447):
-    # carry it even when text/content parts exist, unless it duplicates one.
-    structured = getattr(result, "structuredContent", None)
-    if structured is not None:
-        try:
-            dumped = json.dumps(structured, ensure_ascii=False)
-        except Exception:
-            dumped = repr(structured)
-        if dumped not in parts:
-            parts.append(f"structuredContent: {dumped}" if parts else dumped)
-    body = "\n\n".join(parts).strip() or "(empty result)"
-    if is_error:
-        return f"⚠️ MCP_TOOL_ERROR: {body}"
-    return body
-
-
 def _tool_result_from_call_result(result: Any) -> ToolResult:
     """Preserve the SDK error bit without trusting result-body markers."""
     is_error = bool(
@@ -867,29 +860,6 @@ def _tool_result_from_call_result(result: Any) -> ToolResult:
         text=_stringify_call_result(result),
         meta={"mcp_is_error": is_error},
     )
-
-
-def _serialize_content_part(item: Any) -> Dict[str, Any]:
-    """Best-effort conversion of an MCP content part into a JSON-safe dict."""
-    out: Dict[str, Any] = {}
-    for attr in ("type", "uri", "mimeType", "data", "annotations"):
-        value = getattr(item, attr, None)
-        if value is not None and not callable(value):
-            out[attr] = value
-    # EmbeddedResource carries its payload in a NESTED resource object (E5,
-    # capinv-447): omitting it dropped the text/blob of every embedded resource.
-    resource = getattr(item, "resource", None)
-    if resource is not None and not callable(resource):
-        nested: Dict[str, Any] = {}
-        for attr in ("uri", "mimeType", "text", "blob"):
-            value = getattr(resource, attr, None)
-            if value is not None and not callable(value):
-                nested[attr] = str(value) if attr == "uri" else value
-        if nested:
-            out["resource"] = nested
-    if "uri" in out:
-        out["uri"] = str(out["uri"])  # AnyUrl is not JSON-serializable
-    return out
 
 
 # Sync wrapper.
@@ -1092,6 +1062,8 @@ class MCPManager:
                 else:
                     new_servers[cfg.id] = MCPServerRuntime(config=cfg)
             self._servers = new_servers
+            from ouroboros.mcp_task_session import retire_changed  # a changed or disabled server ends its sessions
+            retire_changed(new_configs if self._enabled else [])
             self._catalog_reader.retain(new_configs)
             self.reload_catalogs()
             return True
@@ -1259,6 +1231,8 @@ class MCPManager:
                         "cwd": cfg.cwd,
                         "env_from_settings": dict(cfg.env_from_settings),
                         "schemas_at_start": cfg.schemas_at_start,
+                        "task_session": cfg.task_session,
+                        "browser_policy": cfg.browser_policy,
                         "instructions": _redact_error_text((runtime.catalog or {}).get("instructions", ""), cfg),
                         "configuration_warnings": list(cfg.configuration_warnings),
                         "tool_count": len(runtime.tools),
@@ -1457,10 +1431,24 @@ class MCPManager:
         with self._lock:
             return self._resolve_locked(prefixed_name)[0]
 
+    def _task_session_live(self, cfg: MCPServerConfig, register: Optional[Callable[[], None]] = None) -> bool:
+        """Whether ``cfg`` is still this manager's task-session configuration; ``register`` runs under the lock
+        ``reconfigure`` retires sessions under, so every later retirement sees what it registers."""
+        from ouroboros.mcp_task_session import session_identity
+
+        with self._lock:
+            runtime = self._servers.get(cfg.id) if self._enabled else None
+            if runtime is None or session_identity(runtime.config) != session_identity(cfg):
+                return False
+            if register is not None:
+                register()
+            return True
+
     def _call_tool_result(
-        self, prefixed_name: str, arguments: Dict[str, Any]
+        self, prefixed_name: str, arguments: Dict[str, Any], ctx: Any = None,
     ) -> ToolResult:
-        """Invoke one MCP tool while retaining host-attested provider facts."""
+        """Invoke one MCP tool while retaining host-attested provider facts; the calling
+        task's ``ctx`` lets ``mcp_result_images`` keep and project returned protocol images."""
         with self._lock:
             resolution, cfg, tool = self._resolve_locked(prefixed_name)
             timeout = self._tool_timeout_sec
@@ -1480,50 +1468,56 @@ class MCPManager:
             # This invocation's local call is over, whatever its outcome. Only a final response
             # or a proven no-send ends the remote duty too; nothing is ever resent.
             record_mcp_call_returned(prefixed_name)
-            if isinstance(value, ToolResult) or unsent(error):
+            if (error is None and value is not None) or unsent(error):
                 confirmed()
+        restarted = ""  # a task session's one host note: this call ran on a new process (mcp_task_session)
         try:
-            result = _run_async(lambda: self._async_call_tool(cfg, tool.raw_name, arguments or {}, timeout),
-                                join_timeout=timeout + 3, exited=exited)
+            if cfg.task_session:  # the calling task loop's own session; adapted exactly as a per-call raw result
+                from ouroboros.mcp_result_images import with_returned
+                from ouroboros.mcp_task_session import call_tool as session_call
+                returned, restarted = session_call(cfg, tool.raw_name, arguments or {}, timeout, exited, ctx,
+                                                   live=self._task_session_live)
+                result = with_returned(_tool_result_from_call_result(returned), returned)  # as the per-call _do()
+            else:
+                result = _run_async(lambda: self._async_call_tool(cfg, tool.raw_name, arguments or {}, timeout),
+                                    join_timeout=timeout + 3, exited=exited)
             if not isinstance(result, ToolResult):
                 raise TypeError("MCP transport returned a non-ToolResult outcome")
         # Two classes before Python 3.11. A runner the join outlived keeps its own outcome.
         except (asyncio.TimeoutError, TimeoutError) as exc:
-            not_sent = unsent(exc)
+            # A task session's own close may still be ending (mcp_task_session): the call stays unsent.
+            not_sent, closing = unsent(exc), getattr(exc, "mcp_unsent_closing", False) is True
             text = (
                 f"⚠️ MCP_TOOL_TIMEOUT: server {cfg.id!r} did not respond in {timeout}s. "
                 + ("The tool call was not submitted; its session and transport have closed."
-                   if not_sent else "The remote outcome is unknown: side effects may already have happened, "
+                   if not_sent else "The tool call was not submitted; its session is closing and its server's "
+                   "exit is not confirmed yet." if closing
+                   else "The remote outcome is unknown: side effects may already have happened, "
                    "and remote cancellation is not confirmed. Use the server-specific status/read "
                    "tool, if available, to reconcile the operation before retrying.")
             )
             return ToolResult(status="timeout", code="MCP_TIMEOUT", text=text,
-                              meta={"mcp_call_not_sent": not_sent})
+                              meta={"mcp_call_not_sent": not_sent or closing})
         except BaseException as exc:  # noqa: BLE001 - any failure is reported
             not_sent = unsent(exc)
             if not_sent and isinstance(exc, (OwnerPauseRefused, StoreError)):
-                from ouroboros.tools.tool_result import launch_refusal_result, _replace_tool_result
+                from ouroboros.tools.tool_result import launch_refusal_result
                 return _replace_tool_result(launch_refusal_result(exc),
                                             meta_updates={"mcp_call_not_sent": True})
             body = f"⚠️ MCP_TOOL_ERROR: {_exception_text(exc, cfg)}"
-            text = _model_facing_result(cfg, tool.raw_name, body)
-            return ToolResult(
-                status="error",
-                code="MCP_ERROR",
-                text=text,
-                meta={"dynamic_provider": True, "mcp_call_not_sent": not_sent},
-            )
-        text = _model_facing_result(
-            cfg,
-            tool.raw_name,
-            _redact_error_text(result.text, cfg),
-        )
-        return ToolResult(
-            status=result.status,
-            code=result.code,
-            text=text,
-            meta={**dict(result.meta), "dynamic_provider": True},
-        )
+            return ToolResult(status="error", code="MCP_ERROR", text=_model_facing_result(cfg, tool.raw_name, body),
+                              meta={"dynamic_provider": True, "mcp_call_not_sent": not_sent})
+        # The remote call is complete here; projecting it never turns it into a failure.
+        from ouroboros.mcp_result_images import project_returned
+        projected = project_returned(result, getattr(result, "returned", None), ctx, cfg, tool.raw_name)
+        if projected is None:
+            projected = _replace_tool_result(result, text=_model_facing_result(
+                cfg, tool.raw_name, _redact_error_text(result.text, cfg)))
+        final = _replace_tool_result(projected, meta_updates={"dynamic_provider": True})
+        return final if not restarted else ToolResult(  # host text after either projection, outside the server's frame
+            status=final.status, code=final.code, text=f"{final.text}\n\n{restarted}", meta=final.meta,
+            producer_text=final.text if final.producer_text is None else final.producer_text,
+            host_annotations=(*final.host_annotations, restarted))
 
     def call_tool(self, prefixed_name: str, arguments: Dict[str, Any]) -> str:
         """Synchronously invoke an MCP tool and return its text projection."""
@@ -1586,6 +1580,6 @@ def call_mcp_tool(name: str, arguments: Dict[str, Any]) -> str:
     return get_manager().call_tool(name, arguments or {})
 
 
-def _call_mcp_tool_result(name: str, arguments: Dict[str, Any]) -> ToolResult:
-    """Internal typed ToolRegistry call helper."""
-    return get_manager()._call_tool_result(name, arguments or {})
+def _call_mcp_tool_result(name: str, arguments: Dict[str, Any], ctx: Any = None) -> ToolResult:
+    """Internal typed ToolRegistry call helper; ``ctx`` is the calling task's context."""
+    return get_manager()._call_tool_result(name, arguments or {}, ctx)

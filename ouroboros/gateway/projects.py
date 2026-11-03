@@ -32,13 +32,9 @@ def _task_from_live_queue(drive_root: object, task_id: str) -> dict:
     persists every PENDING/RUNNING task (title/objective/description) at
     assignment, so it is the reliable in-flight source. Never raises."""
     try:
-        import json
-        import pathlib
+        from ouroboros.queue_observation import load_queue_document
 
-        snap = pathlib.Path(str(drive_root)) / "state" / "queue_snapshot.json"
-        if not snap.exists():
-            return {}
-        data = json.loads(snap.read_text(encoding="utf-8"))
+        data = load_queue_document(drive_root)  # shared task values expanded, parsed once per publication
         for bucket in ("running", "pending"):
             for row in (data.get(bucket) or []):
                 if not isinstance(row, dict):

@@ -39,7 +39,9 @@ from ouroboros.context_input_selection import (
     _capture_declared_context_core,
     _explicit_self_body_docs_flag as _explicit_self_body_docs_flag,
     _validate_declared_input_task,
+    development_required,
     development_resident,
+    required_book_unavailable,
 )
 from ouroboros.context_health import (
     _iter_recent_jsonl as _iter_recent_jsonl,
@@ -235,15 +237,13 @@ def _build_attachment_image_blocks(task: Dict[str, Any]) -> List[Dict[str, Any]]
 def _scheduled_tasks_digest(env: Any, task: Optional[Dict[str, Any]] = None, *, limit: int = 8) -> Optional[Dict[str, Any]]:
     """The schedule digest; a Presence caller's (the tool's own caller rule) holds only its own follow-ups (#1589)."""
     from datetime import datetime, timezone
-    from types import SimpleNamespace
-    from ouroboros.dialogue_provenance import presence_caller_binding
+    from ouroboros.dialogue_provenance import presence_task_binding
     from supervisor.queue_schedules import presence_promise_store
     from supervisor.schedule_view import digest
     data = schedule_store_fact(env)
     if "unavailable" in data:
         return data
-    binding = presence_caller_binding(SimpleNamespace(task_metadata=(task or {}).get("metadata"),
-                                                      task_contract=(task or {}).get("task_contract")))
+    binding = presence_task_binding(task or {})
     return digest((data if binding is None else presence_promise_store(data, binding))["tasks"],
                   datetime.now(timezone.utc), limit=limit)
 
@@ -634,7 +634,7 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
 
 
 from ouroboros.context_sections import (  # noqa: E402,F401 — existing public builder surface
-    build_knowledge_sections, knowledge_navigation_sections, _build_registry_digest, _registry_row,
+    build_knowledge_sections, knowledge_navigation_sections, _build_registry_section,
     _build_installed_skills_section, _drive_state_section, runtime_host_section,
     _SHARED_UNDERSTANDING_GAP,
 )
@@ -868,7 +868,9 @@ def _capture_context_core(
     # folder changes tools' default target, not the mind's knowledge of its body.
     # Its handbook follows the subject of the work (BIBLE P1); Low/Nano and children
     # receive both books' authored orientation through the same captured-source projection.
-    docs_need_development = development_resident(task, design_ctx)
+    # A direct requirement is not a subject: fitting reads the subject's default, then adds the book (section_floor).
+    required = development_required(task)
+    docs_need_development = development_resident(task, design_ctx, subject_only=required)
 
     semi_stable_parts, subagent_catalog = [], None
     try:
@@ -930,9 +932,9 @@ def _capture_context_core(
     dynamic_parts.extend(build_memory_sections(context_memory, partition="volatile", include_scratchpad=not is_child,
                                                ctx=ctx))
 
-    registry_digest = _build_registry_digest(context_env)
-    if registry_digest:
-        dynamic_parts.append(registry_digest)
+    registry = _build_registry_section(context_env)
+    if registry:
+        dynamic_parts.append(registry)
     installed_skills = _build_installed_skills_section(context_env, skills=skills)
     if installed_skills:
         dynamic_parts.append(installed_skills)
@@ -994,14 +996,20 @@ def _capture_context_core(
                          if isinstance(section, HostSection) else snapshot_labelled(section, captured_at)
                          for section in recent)
     try:
+        from ouroboros.consciousness_authority import is_focus_wake
+        from ouroboros.place_reply import reply_carrier
         from ouroboros.presence_context import build_presence_context_section
 
+        inline = bool(task.get("_presence_turn")) or is_focus_wake(task_metadata)
+        scheduled = bool(task_metadata.get("schedule_occurrence")) and not task.get("_presence_turn")
         presence_section = build_presence_context_section(
             pathlib.Path(env.drive_root),
             task_metadata.get("presence"),
             str(task.get("id") or ""),
             status_root=canonical_root,  # a forked promoted root finds its binding's work canonically
-            scheduled=bool(task_metadata.get("schedule_occurrence")) and not task.get("_presence_turn"),
+            scheduled=scheduled,
+            # The same carrier that speaks this root's final names its audience (FOCUS does inline).
+            answers_conversation=not inline and not scheduled and bool(reply_carrier(task_metadata)),
         )
         if presence_section:
             dynamic_parts.append(presence_section)
@@ -1022,7 +1030,7 @@ def _capture_context_core(
         user_content_json=json.dumps(
             _first_user_content(task, env), ensure_ascii=False, sort_keys=True,
         ),
-        docs_need_development=docs_need_development,
+        docs_need_development=docs_need_development, development_required=required,
         reference_books=tuple(books),
         reference_book_errors=tuple(book_errors),
         compact_reference_docs=is_child,
@@ -1176,4 +1184,6 @@ def build_llm_messages(
     view_facts = _record_memory_view(env, memory, task, ctx, plan)
     if view_facts:
         cap_info["memory_view"] = view_facts
+    if refusal := required_book_unavailable(plan.core):  # the task's own requirement, not its view, decides
+        cap_info["authority_source_unavailable"] = refusal
     return messages, cap_info

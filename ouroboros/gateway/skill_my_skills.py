@@ -13,7 +13,7 @@ from starlette.routing import Route
 from ouroboros.gateway._helpers import run_sync_to_completion
 from ouroboros.gateway.owner_settings import owner_audit
 from ouroboros.skill_publish_client import GitHubError, MISSING_TOKEN_MESSAGE, request as github_request
-from ouroboros.skill_sources import load_sources, save_sources, with_added_source
+from ouroboros.skill_sources import load_sources, save_sources, source_view, with_added_source
 
 
 def _connect_my_skills(request: Request) -> JSONResponse:
@@ -43,7 +43,9 @@ def _connect_my_skills(request: Request) -> JSONResponse:
             created = True
         url = f"https://github.com/{repository}"
         rows = load_sources()
-        existing = next((row for row in rows if row["kind"] == "git" and row.get("url") == url), None)
+        # Only a row reading the repository's default branch from its top folder is My skills, not another view.
+        existing = next((row for row in rows if row["kind"] == "git" and row.get("url") == url
+                         and source_view(row) == ("", "")), None)
         if existing is None:
             rows, source = with_added_source(rows, kind="git", url=url, name="My skills", trust="trusted")
         else:

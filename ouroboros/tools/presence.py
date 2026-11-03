@@ -88,9 +88,10 @@ def get_tools() -> list[ToolEntry]:
                 "name": "presence_cancel_work",
                 "description": (
                     "Request cancellation of independent work started from this "
-                    "place, in this or another of its conversations (or of this turn's own "
-                    "children). The result is a request receipt, not proof the work stopped; "
-                    "work of another place or the owner's own tasks is refused."
+                    "place, in this or another of its conversations, of the owner's work begun "
+                    "by answering one of its questions, or of this turn's own children. The result "
+                    "is a request receipt, not proof the work stopped; work of another place or "
+                    "the owner's other tasks is refused."
                 ),
                 "parameters": {
                     "type": "object",

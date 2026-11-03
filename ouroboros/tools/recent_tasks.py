@@ -9,9 +9,10 @@ from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
-from ouroboros.outcomes import normalize_outcome_axes
+from ouroboros.outcomes import normalize_outcome_axes, verification_ledger_view
 from ouroboros.tool_capabilities import tool_result_limit
-from ouroboros.task_status import effective_task_result
+from ouroboros.task_carrier import execution_kind
+from ouroboros.task_status import SETTLED_STATUSES, effective_task_result
 from ouroboros.dialogue_provenance import (
     PRESENCE_OWN_WORK_SCOPE,
     is_presence_task,
@@ -155,16 +156,8 @@ def _task_record(
         focus = compact_focus(data.get("focus"))
         if focus is not None:
             record["focus"] = focus
-    ledger = data.get("verification_ledger") if isinstance(data.get("verification_ledger"), dict) else {}
-    if ledger:
-        # An omitted-to-artifact stub carries no entries; its summary is the
-        # count authority, and for a full ledger the two always agree.
-        ledger_summary = ledger.get("summary") if isinstance(ledger.get("summary"), dict) else {}
-        record["verification_ledger"] = {
-            "schema_version": ledger.get("schema_version"),
-            "summary": ledger_summary,
-            "entry_count": ledger_summary.get("entry_count", len(ledger.get("entries") or []) if isinstance(ledger.get("entries"), list) else 0),
-        }
+    if ledger := verification_ledger_view(data.get("verification_ledger")):
+        record["verification_ledger"] = ledger  # dated beside the current artifact_bundle
     if include_results:
         record["result"] = result
     if include_traces:
@@ -187,18 +180,12 @@ def _queue_snapshot(drive_root: pathlib.Path) -> tuple[Dict[str, Any], bool]:
     Never written means nothing was ever queued; a written snapshot that cannot be
     read, or lists its rows in a shape this reader cannot walk, proves no absence.
     """
-    path = drive_root / "state" / "queue_snapshot.json"
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    from ouroboros.queue_observation import load_queue_document
+
+    data = load_queue_document(drive_root)  # shared task values expanded, parsed once per publication
+    if data.get("_snapshot_missing"):
         return {}, False
-    except (OSError, UnicodeDecodeError):
-        return {}, True
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return {}, True
-    if not isinstance(data, dict) or any(not isinstance(data.get(key, []), list) for key in ("running", "pending")):
+    if data.get("_snapshot_invalid") or any(not isinstance(data.get(key, []), list) for key in ("running", "pending")):
         return {}, True
     return data, False
 
@@ -213,15 +200,33 @@ def _owner_record(row: Dict[str, Any] | None, queued: Dict[str, Any]) -> Dict[st
     return queued
 
 
+def _scoped_work(drive_root: pathlib.Path, binding: str, row: Dict[str, Any] | None, queued: Dict[str, Any]) -> bool:
+    """Whether a scoped page lists one task: the typed facts decide, with no body read, except for one shape.
+
+    A live row of exactly this binding naming no role and no parent may be a Continue admitted before its record kept
+    its role, a root only by the validated admission its own body holds (``presence_related_work``), so that one row
+    is read by key. A settled row with no role may also be an older Continue: the inventory reports that gap instead
+    of decoding every past conversation's body merely to distinguish it.
+    """
+    if presence_related_work(binding, _owner_record(row, queued)):
+        return True
+    if (not row or row.get("presence_binding_id") != binding or row.get("delegation_role") or row.get("parent_task_id")
+            or row.get("status") in SETTLED_STATUSES):
+        return False
+    from ouroboros.task_store import read_document
+
+    return presence_related_work(binding, read_document(drive_root, row["task_id"]))
+
+
 def _running_tasks(drive_root: pathlib.Path, binding: str | None = None) -> List[Dict[str, Any]]:
-    snapshot, _error = _read_json(drive_root / "state" / "queue_snapshot.json")
-    snapshot = snapshot or {}
+    from ouroboros.store import StoreError
+
+    snapshot, _error = _queue_snapshot(drive_root)
     running = snapshot.get("running")
     if not isinstance(running, list):
         return []
     facts: Dict[str, Dict[str, Any]] = {}
     if binding is not None:
-        from ouroboros.store import StoreError
         from ouroboros.task_store import task_facts
 
         try:
@@ -234,8 +239,13 @@ def _running_tasks(drive_root: pathlib.Path, binding: str | None = None) -> List
             continue
         task = item.get("task") if isinstance(item.get("task"), dict) else {}
         task_id = str(item.get("id") or item.get("task_id") or "")
-        if binding is not None and not presence_related_work(binding, _owner_record(facts.get(task_id), task)):
-            continue  # a scoped page lists no foreign running work, whatever a stale queue row claims
+        try:
+            if binding is not None and not _scoped_work(drive_root, binding, facts.get(task_id), task):
+                continue  # a scoped page lists no foreign running work, whatever a stale queue row claims
+        except StoreError:
+            continue  # unread proves nothing here: the page's inventory says so as its gap
+        if binding is None and execution_kind(task) == "presence":
+            continue  # a correspondent's turn is its place's (live works says so), never the owner's running task
         rows.append({
             "task_id": task_id,
             "status": "running",
@@ -279,9 +289,15 @@ def _presence_scope_inventory(
                 queued[task_id] = (status, task)
     selected: set[str] = set()
     for task_id, row in facts.items():
-        record = _owner_record(row, queued.get(task_id, ("", {}))[1])
-        if task_id != exclude and presence_related_work(binding, record):
-            selected.add(task_id)
+        if (task_id != exclude and row.get("presence_binding_id") == binding
+                and not row.get("delegation_role") and not row.get("parent_task_id")
+                and row.get("status") in SETTLED_STATUSES):
+            gap["settled_kind_unclassified"] = gap.get("settled_kind_unclassified", 0) + 1
+        try:
+            if task_id != exclude and _scoped_work(drive_root, binding, row, queued.get(task_id, ("", {}))[1]):
+                selected.add(task_id)
+        except StoreError:
+            gap["result_root"] = "unreadable"  # this row's body could not be read: that is not absence
     queue_only = [
         {"queue_task_id": task_id, "status": status,
          "description": str(task.get("description") or task.get("text") or "")}
@@ -578,7 +594,8 @@ def get_tools() -> List[ToolEntry]:
                         "enum": ["own_binding"],
                         "description": (
                             "Presence tasks only: list just the independent work started from this "
-                            "Presence binding in any of its conversations, pending and running included."
+                            "Presence binding in any of its conversations and the owner's work begun by "
+                            "answering one of its questions, pending and running included."
                         ),
                     },
                 },

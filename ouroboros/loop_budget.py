@@ -485,8 +485,8 @@ def _handle_budget_exceeded(
                 physical_calls = None
     except Exception:
         log.exception("Could not inspect task attempts after budget rail")
-    from ouroboros.task_carrier import inline_execution
-    direct_chat = inline_execution(ctx.tools._ctx)
+    from ouroboros.task_carrier import conversation_origin
+    direct_chat = conversation_origin(ctx.tools._ctx)  # the owner's foreground turn, in whichever process
     replay_safe = physical_calls == 0 and not direct_chat
     scope = str(getattr(exc, "limit_scope", "global") or "global")
     resource_limit = {
@@ -694,6 +694,10 @@ def _cleanup_loop_resources(
             stateful_executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
             log.warning("Failed to shutdown stateful executor", exc_info=True)
+    # Task-session MCP servers end with their loop on every exit, a cold pause included (the
+    # early return below); a warm owner wait never leaves the loop. Never raises.
+    from ouroboros.mcp_task_session import close_context_sessions
+    close_context_sessions(ctx.tools._ctx)
     _loop()._finalize_task_services(ctx)
     # The full DeliveryCandidate is loop-local: only its compact
     # hash/revision projection remains in llm_trace after this cleanup. Clear
@@ -754,6 +758,10 @@ def _service_identity_projection(service: Dict[str, Any]) -> Dict[str, Any]:
             value = truncate_within_limit(str(value), 2000)
         if value not in (None, "", [], {}):
             projected[key] = value
+    cleanup = service.get("process_cleanup")
+    if isinstance(cleanup, dict):  # what stayed unconfirmed (pid, birth, reason) and why a rest is unknown, whole
+        projected["process_cleanup"] = {key: cleanup[key] for key in (
+            "exit_confirmed", "census_failed", "residual", "survivors", "unverified", "custody") if key in cleanup}
     return projected
 
 

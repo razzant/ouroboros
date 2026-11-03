@@ -176,10 +176,9 @@ def _owner_wait_fact(ctx: Any) -> str:
     message was accepted and how much later this request comes, so far, with the slowest phase; once
     the first dispatch was observed, when it went out and on which basis. Elapsed only, never a
     dispatch that has not happened; "" for a turn nobody awaits or a process that serves none."""
-    from supervisor.active_activity import get_direct_activity_registry
+    from supervisor.active_activity import turn_execution
 
-    entry = get_direct_activity_registry().get(str(getattr(ctx, "task_id", "") or ""))
-    execution = getattr(entry, "execution", None)
+    execution = turn_execution(str(getattr(ctx, "task_id", "") or ""))  # inline (registry) or carried
     if execution is None or not execution.owner_turn:
         return ""
     receipt = execution.receipt()
@@ -234,11 +233,15 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
             "max_active_subagents_per_root": int(get_max_active_subagents_per_root())}
     if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
         return {**fact, "note": "Queue observation unavailable; current capacity is unknown."}
-    for key in ("running", "pending"):
+    from ouroboros.task_carrier import execution_kind
+
+    for key in ("running", "pending"):  # a correspondent's Presence turn is its place's, never counted as the owner's
         rows = snapshot.get(key)
-        fact[key + "_count"] = sum(isinstance(row, dict) for row in rows) if isinstance(rows, list) else None
+        fact[key + "_count"] = sum(isinstance(row, dict) and execution_kind(row.get("task") or {}) != "presence"
+                                   for row in rows) if isinstance(rows, list) else None
     fact["reaping_count"] = snapshot.get("reaping_count")
-    fact["worker_total"] = snapshot.get("worker_total")
+    fact["worker_total"] = snapshot.get("worker_total")  # project slots: what max_workers bounds; idle is 0
+    fact["lane_carrier_total"] = snapshot.get("lane_carrier_total")  # the conversation lane's carriers, apart
     assignable = snapshot.get("assignable_idle_workers")
     if assignable is not None:
         fact["free_worker_slots"] = max(0, int(assignable))
@@ -472,6 +475,8 @@ def _supervisor_tail(root: pathlib.Path) -> Dict[str, Any]:
             found["load"] = row
         elif kind == "direct_turn":
             found["turns"] = [*found["turns"], row][-_OWNER_TURNS_SHOWN:]
+        elif kind == "conversation_inline_executor":  # a turn that ran on a thread of the server (2A)
+            found["inline"] = [*found.get("inline", []), row][-_OWNER_TURNS_SHOWN:]
         elif kind in _STALL_ENDS:
             found["open"][(kind, _stall_key(row))] = row
         elif kind in _STALL_ENDS.values():
@@ -537,6 +542,21 @@ def _busy_minute(row: Dict[str, Any], today: Any) -> str:
     queue = row.get("queue_lock")
     if isinstance(queue, dict) and queue.get("count"):
         text += f"; queue {queue.get('count')}/{float(queue.get('hold_total_sec') or 0.0):.1f} s"
+    return text
+
+
+def _carriers(row: Dict[str, Any], today: Any) -> str:
+    """The conversation lane's carriers in the newest ``supervisor_load`` row (owner decision 4A: no number
+    bounds them, the vitals show them): how many, how many idle, each one's last own RSS ("?" before its
+    first turn's beat), the peak named as such. "" for a row without the section."""
+    lane = row.get("conversation_lane")
+    if not isinstance(lane, dict) or type(lane.get("carriers")) is not int:
+        return ""
+    text = f"{_clock(row.get('ts'), today)}: carriers {lane['carriers']}, idle {lane.get('idle')}"
+    sizes = lane.get("rss_mib") if isinstance(lane.get("rss_mib"), list) else []
+    if any(size is not None for size in sizes):
+        text += "; rss " + " · ".join("?" if size is None else str(size) for size in sizes) + " MiB"
+        text += " (peak)" if "peak" in (lane.get("rss_measure") or ()) else ""
     return text
 
 
@@ -651,7 +671,8 @@ def vitals_fact(data_root: Any, *, observed_at: str, captured_at: Optional[str] 
     basis when unobserved, own transactions; the top frame of a stall episode whose end row is still in
     the tail), stall onsets whose end was not observed in the journal's bounded tail (never «current»),
     the last busy minute (counts and summed seconds per store and side, the longest hold's site, never a
-    percentage), the engine's per-route failure shares (the newest ``claudexor_route_health`` row, kept
+    percentage) and the conversation lane's carriers in that row (count, idle, each one's own last RSS),
+    the engine's per-route failure shares (the newest ``claudexor_route_health`` row, kept
     in its own file, which the custody sweep replaces only when they change: failed/runs and the top
     cause per route, most failed first, or a window without runs; no row, no key),
     the runtime (CPython, SQLite, journal per store, the WAL gate while a store runs a
@@ -681,6 +702,14 @@ def vitals_fact(data_root: Any, *, observed_at: str, captured_at: Optional[str] 
             fact[_STALLS_KEY] = stalls
         if isinstance(tail.get("load"), dict):
             fact["busy_minute"] = _busy_minute(tail["load"], observed_at)
+            if carriers := _carriers(tail["load"], observed_at):
+                fact["conversation_carriers"] = carriers
+        if tail.get("inline"):
+            # Owner decision 2A: the turns the body ran on a thread of the server instead of a carrier, newest
+            # last — the degraded executor's reason (a refused spawn, a marker window) or a live call.
+            fact["inline_executors"] = [
+                f"{_clock(row.get('ts'), observed_at)} {row.get('executor')} turn {row.get('task_id')}"
+                + (f" ({row.get('reason')})" if row.get("reason") else "") for row in tail["inline"]]
         routes = _route_health_line(root, observed_at)
         if routes:
             fact["route_health"] = routes
@@ -714,8 +743,8 @@ def vitals_line(fact: Optional[Dict[str, Any]]) -> str:
     if not isinstance(fact, dict):
         return ""
     parts = [f"body as of {fact['observed_at']}" if fact.get("observed_at") else "body"]
-    for key in ("owner_turns", "owner_turns_note", _STALLS_KEY, "busy_minute", "route_health", "runtime", "wal_gate",
-                "last_update", "boot"):
+    for key in ("owner_turns", "owner_turns_note", _STALLS_KEY, "busy_minute", "conversation_carriers",
+                "inline_executors", "route_health", "runtime", "wal_gate", "last_update", "boot"):
         value = fact.get(key)
         if isinstance(value, list) and value:
             parts.append(f"{key.replace('_', ' ')} " + " | ".join(str(item) for item in value))

@@ -147,6 +147,7 @@
  * @typedef {Object} PlaceHistoryAttention
  * @property {'heard'|'focus_started'} decision
  * @property {string=} reason
+ * @property {string=} recipient  // the work or author holding a heard message; its model read is unknown
  */
 
 /**

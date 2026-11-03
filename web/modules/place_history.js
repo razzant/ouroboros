@@ -50,7 +50,7 @@ export function historyFactWords(row) {
     const heard = { paused: 'Heard while Paused', off: 'Heard while consciousness was off',
         no_wake_match: 'Heard; no wake matched', reaction_context_only: 'Heard as context', current_author: 'Passed to the current author', disconnected: 'Heard after disconnection' };
     return [attention?.decision === 'focus_started' ? 'Focus started' : attention?.decision === 'heard'
-        ? heard[attention.reason] || 'Heard' : '',
+        ? (attention.reason === 'conversation_work' ? `Passed to work ${attention.recipient || 'in this conversation'}` : heard[attention.reason] || 'Heard') : '',
     { authored: 'Delivery not confirmed', accepted: 'Accepted by service; delivery not confirmed',
         delivered: 'Delivered', failed: 'Delivery failed', uncertain: 'Delivery outcome unknown' }[facts.delivery_state] || ''].filter(Boolean);
 }

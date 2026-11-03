@@ -597,21 +597,24 @@ def test_stop_now_hardening_wrap_up_while_its_final_call_is_out_keeps_the_summar
     _kept_unsent(r, h, stopped, stop, SUMMARY)
 
 
-def test_wrap_up_landing_between_a_reply_and_its_tool_starts_nothing_new(owner_stop, monkeypatch):
-    """The shared loop's existing ending, now reached by a Presence turn too: the tool the model
-    asked for is not started, and the turn ends without a further model call, saying so."""
+def test_wrap_up_landing_between_a_reply_and_its_tool_starts_no_tool_and_still_answers_once(owner_stop, monkeypatch):
+    """The shared loop's ending, reached by a Presence turn too: the tool the model asked for is not
+    started, and the Wrap up still owes its one tool-less final turn (ARCHITECTURE §5 "Stop policy";
+    the shared rail is ``tests/test_wrap_up_refused_tool_admission.py``, E10 its system twin). Its
+    answer is the turn's ordinary reply, exactly as when the Wrap up lands while the tool runs."""
     from supervisor.owner_stop import owner_stop_ending
 
     r, press = owner_stop
-    h, generated, _inputs, presses, listed = _wrap_up(monkeypatch, r, press, during="call")
+    h, generated, inputs, presses, listed = _wrap_up(monkeypatch, r, press, during="call")
     result = start(r, h).result.result(timeout=90)
     tid = result.task_id
-    assert presses["wrap"].status_code == 202 and generated == [1] and listed == []
+    assert presses["wrap"].status_code == 202 and listed == [] and generated == [1, 2]
+    assert "[OWNER_STOP]" in json.dumps(inputs[1], ensure_ascii=False)
     row = load_task_result(r.root, tid)
-    assert row["status"] == "failed" and row["reason_code"] == "owner_requested_finalization"
-    assert row["cancel_origin"]["stop_policy"] == "finalize_then_cancel" and result.text == ""
-    assert owner_stop_ending(row) == ("wrap_up", "stop")
-    assert not _outbound(r.root, tid)
+    assert row["status"] == "completed" and row["reason_code"] == "owner_requested_finalization"
+    assert row["cancel_origin"]["stop_policy"] == "finalize_then_cancel" and result.text == SUMMARY
+    assert owner_stop_ending(row) == ("wrap_up", "summary")
+    assert [(out["direction"], out["text"]) for out in _outbound(r.root, tid)] == [("out", SUMMARY)]
 
 
 def test_an_unreadable_author_census_is_unknown_never_a_witness(tmp_path, monkeypatch, caplog):

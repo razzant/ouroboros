@@ -5,8 +5,7 @@ self-improvement into the EXISTING gated evolution campaign. The worker writes a
 durable request file on the canonical drive; the supervisor's idle tick applies
 it via ``start_evolution_campaign`` + enabling evolution, after which the normal
 ``enqueue_evolution_task_if_needed`` runs the cycle through EVERY safety gate
-(idle, restart-verify, 3-fail breaker, budget reserve, advanced/pro,
-owner_chat_id).
+(idle, restart-verify, budget limit, advanced/pro, owner_chat_id).
 
 Invariants (red-team guards — keep intact):
 - The worker NEVER enqueues or enables evolution itself; it only writes a durable
@@ -469,8 +468,8 @@ def apply_pending_request(drive_root: Any) -> bool:
             # promotion). Activating another would hijack its objective and
             # clear its failure counter; leave the request for a later tick.
             return False
-        # Per-window budget floor (V4 envelope): if configured, do not start a
-        # post-task cycle unless at least that much budget remains.
+        # Start floor (V4 envelope): if configured, start no post-task campaign unless at
+        # least that much global budget remains; below it the request is dropped.
         from ouroboros.config import get_post_task_evolution_budget_usd
 
         budget_floor = get_post_task_evolution_budget_usd()

@@ -24,7 +24,6 @@ except ImportError:
     _HAS_STEALTH = False
 
 from ouroboros import browser_policy
-from ouroboros.tool_access import active_tool_profile
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import (
     LegacyTextResultAdapter, ToolResult, _compose_execute_result, _publish_tool_result,
@@ -77,15 +76,7 @@ def _bound_browser_call(fn):
     return bound
 
 
-def _runtime_mode_for_browser(ctx: Any) -> str:
-    """Read the effective mode for owner-control browser operations."""
-    try:
-        from ouroboros.config import get_runtime_mode
-        from ouroboros.consciousness_authority import effective_runtime_mode
-
-        return effective_runtime_mode(get_runtime_mode(), getattr(ctx, "task_metadata", None))
-    except Exception:
-        return "advanced"
+_runtime_mode_for_browser = browser_policy.browser_runtime_mode  # one owner for every browser surface
 
 
 def _normalize_browser_engine(engine: str = "") -> str:
@@ -1045,20 +1036,10 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
                     engine: str = "", device: str = "", state: str = "visible") -> str:
     normalized_action = str(action or "").strip().lower()
     readonly_subagent = _readonly_subagent(ctx)
-    # Keep the broad restricted-subagent predicate for URL/install and
-    # secret/control protections, but do not make it a browser-JavaScript
-    # capability predicate: acting children already have an isolated write
-    # surface and may inspect the pages involved in their own work.  Invalid
-    # or missing delegated constraints still resolve to local-readonly through
-    # active_tool_profile and therefore remain blocked here.  Keeping the
-    # restricted-profile predicate in this condition also fails closed if a
-    # future restricted profile is added without an explicit acting contract.
-    if (
-        readonly_subagent
-        and active_tool_profile(ctx) != "acting_subagent"
-        and normalized_action == "evaluate"
-    ):
-        return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: local-readonly subagents cannot run arbitrary browser JavaScript."
+    # The JavaScript rule's owner (and its rationale) is browser_policy, shared with MCP task sessions.
+    if normalized_action == "evaluate" and (script_block := browser_policy.browser_script_block_reason(ctx)):
+        return _publish_tool_result(ctx, ToolResult(
+            status="blocked", code="ACCESS_BLOCKED", text=f"⚠️ {script_block}"))
 
     call = _browser_call.get()
     generation_cell = [call.generation]

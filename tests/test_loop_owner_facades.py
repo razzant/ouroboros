@@ -68,7 +68,7 @@ LOOP_LEAF_OWNERS: dict[str, str] = {
         "_compose_delivery_suffix _no_tool_final_answer"
     ),
     "loop_forced_finalization": (
-        "_load_direct_child_results _direct_child_results _child_disposition_state "
+        "_direct_child_results "
         "_project_child_result_dispositions _record_forced_finalization "
         "_forced_orphan_note _claimed_child_dispositions _undispositioned_children "
         "_maybe_enforce_child_absorption_gate "
@@ -81,6 +81,12 @@ LOOP_LEAF_OWNERS: dict[str, str] = {
     ),
 }
 
+# leaf module -> (owner outside the loop family, members the leaf re-exports from it):
+# the leaf keeps the names for its ``_loop()`` readers, and every binding is the owner's object.
+LOOP_LEAF_REEXPORTS: dict[str, tuple[str, str]] = {
+    "loop_forced_finalization": ("ouroboros.tools.join_ledger", "_load_direct_child_results _child_disposition_state"),
+}
+
 
 def test_loop_owner_facades_preserve_identity():
     import ouroboros.loop as loop
@@ -91,6 +97,15 @@ def test_loop_owner_facades_preserve_identity():
             assert getattr(loop, name) is getattr(module, name), f"{leaf}.{name}"
 
 
+def test_loop_leaf_reexports_bind_their_owners_object():
+    import ouroboros.loop as loop
+
+    for leaf, (owner, names) in LOOP_LEAF_REEXPORTS.items():
+        module, source = importlib.import_module(f"ouroboros.{leaf}"), importlib.import_module(owner)
+        for name in names.split():
+            assert getattr(loop, name) is getattr(module, name) is getattr(source, name), f"{leaf}.{name}"
+
+
 def test_loop_leaves_keep_the_hot_code_label():
     """Managed-update conflict labelling names ``ouroboros/loop.py``; the split
     must not silently downgrade the label for code that merely moved."""
@@ -99,3 +114,5 @@ def test_loop_leaves_keep_the_hot_code_label():
     assert "ouroboros/loop.py" in HOT_CODE_PATHS
     for leaf in LOOP_LEAF_OWNERS:
         assert f"ouroboros/{leaf}.py" in HOT_CODE_PATHS, leaf
+    for owner, _names in LOOP_LEAF_REEXPORTS.values():  # the label follows a moved body to its owner
+        assert owner.replace(".", "/") + ".py" in HOT_CODE_PATHS, owner

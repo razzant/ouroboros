@@ -11,6 +11,7 @@ import logging
 import pathlib
 import queue as _stdqueue
 import threading
+import time
 import uuid
 from typing import Any, Dict, Optional
 
@@ -167,12 +168,17 @@ def _stop_crashed_worker_pool(job: dict) -> None:
     from supervisor import queue as q, workers
     from supervisor.worker_pool_lifecycle import _WORKER_LIFECYCLE_LOCK
 
+    from ouroboros.task_carrier import LANE_PROJECT
+    from supervisor.worker_pool_lifecycle import is_project_slot
+
     captured = dict(job["workers"])
     with _WORKER_LIFECYCLE_LOCK:
         with q._queue_lock:
+            # The storm captured the PROJECT membership; the conversation lane's slots are not its.
+            project = {wid: worker for wid, worker in workers.WORKERS.items() if is_project_slot(worker)}
             if (pathlib.Path(job["drive_root"]) != pathlib.Path(workers.DRIVE_ROOT)
-                    or set(workers.WORKERS) != set(captured)
-                    or any(workers.WORKERS[wid] is not worker for wid, worker in captured.items())):
+                    or set(project) != set(captured)
+                    or any(project[wid] is not worker for wid, worker in captured.items())):
                 return
             for worker in captured.values():
                 meta = workers.RUNNING.get(worker.busy_task_id)
@@ -180,7 +186,7 @@ def _stop_crashed_worker_pool(job: dict) -> None:
                     meta.get("_terminal_file_recovery") or not worker.proc.is_alive()
                 ):
                     raise TerminalFileRecoveryPending("captured terminal task has not settled")
-        if not workers.kill_workers(disable_reason="worker_crash_storm"):
+        if not workers.kill_workers(disable_reason="worker_crash_storm", lanes=frozenset({LANE_PROJECT})):
             raise TerminalFileRecoveryPending("crash-storm terminalization was not durable")
         workers.CRASH_TS.clear()
 
@@ -640,25 +646,45 @@ def _load_post_kill_terminal_result(
         raise TerminalFileRecoveryPending("terminal files have not been published")
     return "", existing
 
+# Per slot id: the respawn its spawn keeps refusing (the dead slot, since when, how often, the last cause). The
+# health tick hands that slot back every tick while the refusal stands, so the refusal is logged with its traceback
+# once per change of its cause and once when it ends, never once per tick: the log grows with change, not time.
+_RESPAWN_REFUSALS: Dict[int, Dict[str, Any]] = {}
+
+
+def _respawn_refused(worker_id: int, slot: Any, exc: BaseException) -> None:
+    cause = f"{type(exc).__name__}: {exc}"
+    refusal = _RESPAWN_REFUSALS.get(worker_id)
+    if refusal is None or refusal["slot"] is not slot:  # a new dead slot opens its own episode
+        refusal = _RESPAWN_REFUSALS[worker_id] = {"slot": slot, "since": time.time(), "refusals": 0, "cause": ""}
+    refusal["refusals"] += 1
+    if refusal["cause"] == cause:
+        log.debug("Reaper: respawn of worker %d still refused (%s), refusal %d", worker_id, cause, refusal["refusals"])
+        return
+    refusal["cause"] = cause
+    log.warning("Reaper: respawn failed for worker %d; clearing reaping for recovery (refusal %d of this slot: %s; "
+                "the same refusal is logged again only when it ends)", worker_id, refusal["refusals"], cause,
+                exc_info=True)
+
+
 def _respawn_after_reap(
     q: Any, workers_mod: Any, worker_id: int, *, expected_worker: Any = None,
 ) -> None:
-    """Reopen a reaped slot, leaving crash recovery available on failure."""
+    """Reopen a reaped slot, leaving crash recovery available on failure (a refusal that stands is logged once per
+    change of its cause and once when it ends: ``_RESPAWN_REFUSALS``)."""
     # The lifecycle serializer guards replacement; process start stays outside queue lock.
     from supervisor.worker_pool_lifecycle import _WORKER_LIFECYCLE_LOCK
 
+    slot = None
     try:
         with _WORKER_LIFECYCLE_LOCK:
             with q._queue_lock:
-                if expected_worker is not None and workers_mod.WORKERS.get(worker_id) is not expected_worker:
+                slot = workers_mod.WORKERS.get(worker_id)
+                if expected_worker is not None and slot is not expected_worker:
                     return
             workers_mod.respawn_worker(worker_id)
-    except Exception:
-        log.warning(
-            "Reaper: respawn failed for worker %d; clearing reaping for recovery",
-            worker_id,
-            exc_info=True,
-        )
+    except Exception as exc:
+        _respawn_refused(worker_id, slot, exc)
         try:
             with q._queue_lock:
                 worker = workers_mod.WORKERS.get(worker_id)
@@ -666,6 +692,11 @@ def _respawn_after_reap(
                     worker.reaping = False
         except Exception:
             pass
+    else:
+        ended = _RESPAWN_REFUSALS.pop(worker_id, None)
+        if ended is not None:
+            log.info("Reaper: worker %d respawn refusals ended after %d refusal(s) over %.0fs (last: %s)", worker_id,
+                     ended["refusals"], time.time() - ended["since"], ended["cause"])
     try:
         q.persist_queue_snapshot(reason="worker_respawn_after_reap")
     except Exception:

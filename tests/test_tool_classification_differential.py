@@ -358,6 +358,12 @@ def _golden() -> dict[str, dict]:
 # unavailable. Keep the historical corpus intact and assert the new observed
 # outcome explicitly rather than manufacture old evidence (04-AGENCY S1/S3).
 CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's size notice rides a successful update_world
+    # A readable diff with escaped Git output is still successful; the original Git failure, if any, keeps its own code.
+    "OUTPUT_NOT_UTF8": (False, "ok"),
+    # Staging was refused before any effect; the producer must publish that refusal, not a successful warning.
+    "GIT_INDEX_OUTSIDE_SELECTION_BLOCKED": (True, "blocked"),
+    # The new retained-review selection guard refuses a changed subject before dispatch or Git; no old answer exists.
+    "REVIEW_SELECTION_CHANGED_BLOCKED": (True, "blocked"),
     # tools/tool_discovery.py `enable_tools`: a load none of which fits the route's schema ceiling;
     # the retired pair never saw it. A physical resource refusal: nothing loaded, every tool stays callable.
     "TOOL_SCHEMA_LIMIT": (True, "resource_constraint_blocked"),
@@ -385,6 +391,12 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # #1657: only missing logs are unavailable; status/stop retain warnings.
     "SERVICE_NOT_FOUND": (False, "ok"),
     "native:LEGACY_UNAVAILABLE:SERVICE_NOT_FOUND": (True, "unavailable"),
+    # services `_start_service` over an exited record: a restart refused because the previous start's processes are
+    # not confirmed ended, or another call still holds the name, publishes native LEGACY_BLOCKED with
+    # process_not_started (the retire may already have signalled processes, so no operation_outcome). The bare text
+    # keeps the recorded identifier row's answer (delta A.1657); only the native pair is new to the harvest.
+    "SERVICE_ALREADY_RUNNING": (True, "blocked"),
+    "native:LEGACY_BLOCKED:SERVICE_ALREADY_RUNNING": (True, "blocked"),
     # #1657: containment failure is already an error through the legacy adapter
     # (LEGACY_TOOL_ERROR). Its new native TOOL_ERROR publication preserves that
     # outcome when wrapped by an authority-refusal message after a local commit.

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros.utils import utc_now_iso
 from ouroboros import agent_task_pipeline as pipeline, headless, owner_mailbox
 from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.utils import append_jsonl
@@ -104,7 +105,7 @@ def test_worker_saves_once_after_prior_frames_and_before_done(worker, monkeypatc
             RUNNING={"other": {"task": {"id": "other", "chat_id": 1}}},
             bridge=SimpleNamespace(push_log=pushed.append),
         )
-        dispatch_event({"type": "task_heartbeat", "task_id": "other", "phase": "working"}, ctx)
+        dispatch_event({"type": "task_heartbeat", "task_id": "other", "phase": "working", "ts": utc_now_iso()}, ctx)
         assert ctx.RUNNING["other"]["last_heartbeat_at"] > 0
         assert pushed[-1]["task_id"] == "other"
         assert busy.busy_task_id == "file-root"
@@ -336,7 +337,7 @@ def test_legacy_completion_uses_one_off_drain_job(file_recovery, monkeypatch):
         task_reaper.retry_terminal_file_recoveries()
         assert jobs.empty() and not pushed and worker.busy_task_id == "prepared"
         ctx.RUNNING["other"] = {"task": {"id": "other", "chat_id": 1}}
-        events.dispatch_event({"type": "task_heartbeat", "task_id": "other"}, ctx)
+        events.dispatch_event({"type": "task_heartbeat", "task_id": "other", "ts": utc_now_iso()}, ctx)  # a beat carries its own time
         assert ctx.RUNNING["other"]["last_heartbeat_at"] > 0
     finally:
         release.set()

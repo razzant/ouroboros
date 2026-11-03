@@ -125,8 +125,10 @@ function seatRow({ key, identity = '', name, note = '', role = '', state, said =
 }
 
 // One reviewer's line: the critical finding first (or that it is only in the full answer), else the first
-// note, else why there is no answer, in the engine's own words when it reported them.
-function ledgerSaid(actor, state) {
+// note, else why there is no answer, in the engine's own words when it reported them. In a review Ouroboros
+// itself stopped (`stopped`), a seat it never sent or whose outcome it lost adds no line of its own: the
+// review's line says why. A seat that failed by itself still says what it recorded.
+function ledgerSaid(actor, state, stopped = false) {
     const findings = list(actor.findings);
     const critical = findings.find(finding => text(finding.severity).toLowerCase() === 'critical');
     const criticalTotal = Object.values(actor.answers && typeof actor.answers === 'object' ? actor.answers : {})
@@ -143,13 +145,27 @@ function ledgerSaid(actor, state) {
     }
     if (state.owed) return '';
     const cause = seatCauseText(actor);
-    return cause ? line({ by: cause.by, words: cause.text, wrap: true }) : line({ quiet: true, words: 'No cause was recorded.' });
+    if (cause) return line({ by: cause.by, words: cause.text, wrap: true });
+    const unreached = ['not_dispatched', 'custody_lost'].includes(text(actor.operation_state)) || text(actor.transport_status) === 'not_dispatched';
+    return stopped && unreached ? '' : line({ quiet: true, words: 'No cause was recorded.' });
+}
+
+// A review Ouroboros itself could not complete (the record's `wave_failures`): one sentence in the owner's words
+// leads the seats, Read opens the saved note whole with secrets masked; its code and words stay in Record facts.
+function waveFailureLines(view, attempt) {
+    const panel = attempt.panel;
+    return list(panel.wave_failures).map((note, index) => `<div class="review-seat-line" data-review-wave-failure="${escape(`${attempt.id}:${index}`)}">`
+        + line({ words: 'Ouroboros could not complete this review; its note says which step failed.', wrap: true })
+        + readButtons(list([note.source]), { owner: view.presentationOwnerTaskId, recordId: text(panel.record_id),
+            seatId: text(note.source?.seat_id), name: 'Ouroboros', domain: 'ledger' })
+        + '</div>').join('');
 }
 
 function ledgerRows(view, attempt, format) {
     const panel = attempt.panel;
     const live = attempt.live === true && text(panel.record_state) === 'pending';
-    return list(panel.actors).map((actor) => {
+    const stopped = list(panel.wave_failures).length > 0;
+    return waveFailureLines(view, attempt) + (list(panel.actors).map((actor) => {
         const state = seatStateView(actor, panel, { live });
         const observed = text(actor.observed_model || actor.model);
         const requested = text(actor.requested_model);
@@ -162,10 +178,10 @@ function ledgerRows(view, attempt, format) {
             key: `${attempt.id}:${text(actor.slot_id)}`, identity: format.executions?.(actor, { showModel: false }) || '',
             name, note: observed ? '' : (requested ? 'requested · not reported' : 'model not reported'),
             role: text(panel.surface) === 'preflight' ? 'informational' : (seatAdviser(actor) ? 'adviser, not counted' : 'counted'),
-            state, said: ledgerSaid(actor, state), meta,
+            state, said: ledgerSaid(actor, state, stopped), meta,
             read: readButtons(sources, { owner: view.presentationOwnerTaskId, recordId: text(panel.record_id), seatId: text(actor.slot_id), name, domain: 'ledger' }),
         });
-    }).join('') || '<p class="review-line review-line-quiet">No reviewer answer is saved in this record.</p>';
+    }).join('') || '<p class="review-line review-line-quiet">No reviewer answer is saved in this record.</p>');
 }
 
 // A Plan participant's standing comes from the host's fold of objections (`objections` on the ask); nobody votes.
@@ -283,6 +299,10 @@ function ledgerFacts(attempt) {
         ['Author reason', text(decided.rationale)]);
     }
     rows.push(...factRows(attempt.detailText));
+    for (const note of list(panel.wave_failures)) {
+        const source = note.source && typeof note.source === 'object' ? note.source : {};
+        rows.push(['Saved wave failure note', describe({ status: source.status, sha256: source.sha256, size: source.size, chars: source.chars })]);
+    }
     // A pool-era record prints each seat's cost in its reviewer line; an earlier one says it here.
     const pooled = text(panel.surface) !== 'preflight' && panelPoolRecorded(panel.panel_facts);
     for (const actor of list(panel.actors)) {

@@ -680,6 +680,8 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None,
                + f"round {anchor_round} accepted {int(anchor):,}, {int(estimate) - int(anchor):+,} since")
         if anchor is None and usage.get("_context_measurement_basis") in {"fresh_route_usage", "fresh_model_usage"}:
             how = "fresh same-model measurement at comparable input size"
+        if usage.get("_context_measurement_basis") == "refused_input":  # a changed candidate is counted, not stated
+            how = "host estimate at the density of the size-refused request: its provider-stated input over its estimate"
         floor = int(usage.get("_context_response_reserve_tokens") or reserve or 0)
         parts.append(f"input ~{int(estimate):,} before this line ({how}) + reply reservation {int(reserve or 0):,}")
         # Known-window admission acts on this prediction; a reservation is no provider observation.
@@ -687,8 +689,9 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None,
                      + (f" (reply floor {floor:,})" if floor != int(reserve or 0) else "")
                      if capacity is not None and refused is None else
                      "free unknown (acceptance established no reply room)")
-        if target is not None:
-            excess = int(estimate) + floor - int(target)
+        book = int(usage.get("_context_required_book_tokens") or 0)
+        if target is not None:  # a directly required handbook stands beside the target, never inside it
+            excess = int(estimate) + floor - int(target) - book
             parts.append((f"over target {excess:,}" if excess > 0 else f"target room {-excess:,}")
                          + (f" (reply floor {floor:,})" if floor != int(reserve or 0) else ""))
     components = _context_components(ctx, measured=measured)

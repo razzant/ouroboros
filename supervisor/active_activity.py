@@ -470,6 +470,29 @@ def get_direct_activity_registry() -> DirectActivityRegistry:
     return _DIRECT_ACTIVITY_REGISTRY
 
 
+# The turns this process CARRIES (a conversation-lane worker's own turn, with no registry entry here): their
+# executions, so the turn's own round facts read its wait in its carrier as an inline executor's registry gives it.
+_CARRIED: Dict[str, "TurnExecution"] = {}
+
+
+def carry_turn_execution(task_id: str, execution: Optional["TurnExecution"]) -> None:
+    """Bind (``execution``) or release (None) the execution of a turn this process carries."""
+    with _RING_LOCK:
+        if execution is None:
+            _CARRIED.pop(str(task_id), None)
+        else:
+            _CARRIED[str(task_id)] = execution
+
+
+def turn_execution(task_id: str) -> Optional["TurnExecution"]:
+    """This process's execution of ``task_id``: an inline executor's registry entry, else a carried turn's."""
+    entry = _DIRECT_ACTIVITY_REGISTRY.get(str(task_id))
+    if entry is not None and getattr(entry, "execution", None) is not None:
+        return entry.execution
+    with _RING_LOCK:
+        return _CARRIED.get(str(task_id))
+
+
 def _undispatched_receipt(execution: Optional[TurnExecution]) -> None:
     """An owner turn that ended without an observed dispatch records its receipt here, on the
     thread that ended it (the turn is over: nothing waits on this), ``dispatch: not_observed``."""

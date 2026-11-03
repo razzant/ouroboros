@@ -1085,8 +1085,9 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         # host-fallback prefix table below already assigns to this exact
         # terminal text; calling it a provider failure made the two paths of
         # this one function contradict each other.
-        failure = {"kind": "runtime" if reason_code in {REASON_TASK_EXCEPTION, "context_overflow"} else "provider",
-                   "reason_code": reason_code}
+        failure = {"kind": "runtime" if reason_code in {
+            REASON_TASK_EXCEPTION, "context_overflow", "context_capacity", "required_reference_unavailable",
+        } else "provider", "reason_code": reason_code}
         # Forecasts use context_overflow; actual/legacy provider failures keep llm_api_error.
         # A waited-out outage or unknown outcome keeps its own terminal cause.
         if reason_code in {"llm_api_error", "context_overflow"} and str(usage.get("_last_llm_error_kind") or "") == "context_overflow":
@@ -1212,8 +1213,8 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
             "reason_code": reason_code,
             "failure": failure,
             **({"resource_limit": resource_limit} if resource_limit else {}),
-            # The durable fact of a clean finish over a plan review that was only awaited.
-            **({"plan_review": AWAITING_PROJECTION} if execution_status == EXECUTION_OK and plan_gate.get("review_only_awaited") is True else ({"plan_review": plan_gate["plan_review_class"]} if plan_gate.get("plan_review_class") else {})),
+            # The durable fact of a clean finish over a plan review only awaited (an unreadable record stays unknown).
+            **({"plan_review": AWAITING_PROJECTION} if execution_status == EXECUTION_OK and plan_gate.get("review_only_awaited") is True and not plan_gate.get("unreadable") else ({"plan_review": plan_gate["plan_review_class"]} if plan_gate.get("plan_review_class") else {})),
             "recoveries": recovered_tool_errors[:20],
             "cosmetic_tool_errors": cosmetic_tool_errors[:20],
             "ignored_tool_errors": ignored_tool_errors[:20],
@@ -1388,7 +1389,13 @@ def refresh_verification_ledger_artifacts(
         artifact_axis["status"] = artifact_status
         axes["artifacts"] = artifact_axis
     updated["outcome_axes"] = axes
-    updated["summary"] = {
+    updated["summary"] = _ledger_summary(entries)
+    return updated
+
+
+def _ledger_summary(entries: List[Any]) -> Dict[str, Any]:
+    """Entry count and failure flag; a recorded or draft task contract is no failure."""
+    return {
         "entry_count": len(entries),
         "has_failures": any(
             str(item.get("status") or "").lower() not in _LEDGER_NON_FAILURE_STATUSES
@@ -1397,7 +1404,6 @@ def refresh_verification_ledger_artifacts(
             if isinstance(item, dict)
         ),
     }
-    return updated
 
 
 def build_verification_ledger(
@@ -1517,15 +1523,7 @@ def build_verification_ledger(
         "task_contract": task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {},
         "outcome_axes": axes,
         "entries": entries,
-        "summary": {
-            "entry_count": len(entries),
-            "has_failures": any(
-                str(item.get("status") or "").lower() not in _LEDGER_NON_FAILURE_STATUSES
-                and not (str(item.get("kind") or "") == "task_contract" and str(item.get("status") or "").lower() in {"draft", "recorded"})
-                for item in entries
-                if isinstance(item, dict)
-            ),
-        },
+        "summary": _ledger_summary(entries),
     }
 
 
@@ -1536,7 +1534,7 @@ def maybe_write_verification_artifact(
     *,
     threshold_chars: int = 12_000,
 ) -> Dict[str, Any]:
-    """Inline small ledgers; write large ledgers as task artifacts."""
+    """Inline small ledgers; write a large one as a task artifact: a dated capture finalization never rewrites."""
     raw = json.dumps(ledger, ensure_ascii=False, sort_keys=True, default=str)
     if len(raw) <= threshold_chars:
         return {"inline": ledger, "artifact": None}
@@ -1563,4 +1561,25 @@ def maybe_write_verification_artifact(
             "status": ARTIFACT_STATUS_READY,
             "errors": [],
         },
+    }
+
+
+# What a reader shows beside the summary: the capture date (a published ledger file keeps those
+# bytes) and, once the host recomputed the summary with current artifact status, when and from
+# which complete file.
+_LEDGER_VIEW_FACTS = ("created_at", "omitted_to_artifact", "summary_refreshed_at", "summary_source_sha256")
+
+
+def verification_ledger_view(ledger: Any) -> Dict[str, Any]:
+    """The bounded ledger projection of parent and list readers; {} without a ledger. A stub
+    has no entries, so its summary is the count authority; for a full ledger the two agree."""
+    if not isinstance(ledger, dict) or not ledger:
+        return {}
+    summary = ledger.get("summary") if isinstance(ledger.get("summary"), dict) else {}
+    entries = ledger.get("entries")
+    return {
+        "schema_version": ledger.get("schema_version"),
+        "summary": summary,
+        "entry_count": summary.get("entry_count", len(entries) if isinstance(entries, list) else 0),
+        **{key: ledger[key] for key in _LEDGER_VIEW_FACTS if ledger.get(key)},
     }

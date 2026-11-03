@@ -272,11 +272,12 @@ def test_frozen_hub_installed_endpoint_includes_hub_records_and_legacy_bucket(en
 
 def test_http_source_probe_exposes_the_encryption_warning(env, monkeypatch):
     client, _drive, _hub, _tmp = env
-    monkeypatch.setattr("ouroboros.skill_source_git.fetch_tree", lambda target, *_a: write_skill(target, "sample"))
+    monkeypatch.setattr("ouroboros.skill_source_git.fetch_tree",
+                        lambda target, *_a: write_skill(target, "sample") and "c" * 40)
     response = client.post("/api/skill-sources/probe", json={"url": "http://git.example.invalid/team/skills"})
     assert response.status_code == 200
     assert assert_bound("POST /api/skill-sources/probe", response) == "SkillSourceProbeResponse"
-    assert response.json()["warning"] == "not_encrypted"
+    assert (response.json()["warning"], response.json()["commit"]) == ("not_encrypted", "c" * 40)
 
 
 def test_update_without_review_is_owner_http_replace_only(env, monkeypatch):
@@ -293,3 +294,42 @@ def test_update_without_review_is_owner_http_replace_only(env, monkeypatch):
     assert result.status_code == 200 and assert_bound("POST /api/skills/{skill}/update", result)
     assert _wait(lambda: (read_install_record(drive, "notes") or {}).get("basis") == "owner_skip")
     assert not reviews
+
+
+def test_probe_and_add_carry_a_revision_and_folder_and_the_list_offers_suggestions(env, monkeypatch):
+    from tests._skill_source_fixtures import commit_all, git
+
+    client, _drive, _hub, tmp_path = env
+    work, bare = tmp_path / "team", tmp_path / "team.git"
+    work.mkdir()
+    git("init", "-q", cwd=work)
+    write_skill(work / "pack", "gamma")
+    commit_all(work, "first")
+    git("checkout", "-q", "-b", "stable", cwd=work)
+    write_skill(work / "pack", "delta")
+    commit = commit_all(work, "stable")
+    git("init", "-q", "--bare", str(bare), cwd=tmp_path)
+    git("push", "-q", str(bare), "HEAD:refs/heads/stable", cwd=work)
+    view = {"url": str(bare), "revision": "stable", "subfolder": "pack"}
+    probe = client.post("/api/skill-sources/probe", json=view)
+    assert assert_bound("POST /api/skill-sources/probe", probe) == "SkillSourceProbeResponse"
+    assert probe.json()["commit"] == commit and sorted(probe.json()["found"]) == ["delta", "gamma"]
+    missing = client.post("/api/skill-sources/probe", json={**view, "subfolder": "nowhere"}).json()
+    assert missing["error"] == f"{bare} has no folder nowhere at stable."
+    added = client.post("/api/skill-sources", json={**view, "name": "Team", "trust": "review"})
+    assert assert_bound("POST /api/skill-sources", added) == "SkillSourceChangeResponse"
+    assert {key: added.json()["source"].get(key) for key in ("ref", "path")} == {"ref": "stable", "path": "pack"}
+    folder = client.post("/api/skill-sources", json={"path": str(work), "revision": "stable", "name": "W",
+                                                     "trust": "review"})
+    assert folder.status_code == 400 and folder.json()["code"] == "unreadable_source"
+    listed = client.get("/api/skill-sources")
+    assert assert_bound("GET /api/skill-sources", listed) == "SkillSourcesResponse"
+    assert listed.json()["suggestions"] == []
+    monkeypatch.setenv("OUROBOROS_SKILL_SOURCE_SUGGESTIONS", json.dumps([
+        {"name": "Team", "url": str(bare), "ref": "stable", "path": "pack"},
+        {"name": "Team next", "url": str(bare), "ref": "next", "about": "Unreleased"}]))
+    before = (tmp_path / "settings.json").read_text(encoding="utf-8")
+    listed = client.get("/api/skill-sources")
+    assert assert_bound("GET /api/skill-sources", listed) == "SkillSourcesResponse"
+    assert [(s["name"], s["connected"]) for s in listed.json()["suggestions"]] == [("Team", True), ("Team next", False)]
+    assert (tmp_path / "settings.json").read_text(encoding="utf-8") == before, "a suggestion connects nothing"

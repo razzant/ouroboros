@@ -573,6 +573,36 @@ def test_final_caption_writer_failure_does_not_leave_teardown_waiting():
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize('speaker', ['owner', 'ouroboros'])
+def test_malformed_final_cannot_poison_valid_teardown_words(speaker):
+    from ouroboros.call_peers import LiveCallHub
+    from skills.live_conversation.driver import _Call
+
+    async def scenario():
+        host = Host()
+        host.hub = LiveCallHub(cp.CallSpec('malformed-caption', 1, 'synthetic', 'synthetic'))
+        async def store_caption(**row):
+            # Like the dialogue store, persistence cannot carry an unpaired surrogate.
+            row['text'].encode('utf-8')
+            host.captions.append(row)
+        host.caption = store_caption
+        call, session = _Call(host), Session()
+        session.final_captions = lambda: [LiveEvent('caption', {
+            'speaker': 'ouroboros', 'item_id': 'valid', 'text': 'Valid teardown words.', 'final': True})]
+        call.last_session = session
+        call.writer = asyncio.create_task(call.save_rows())
+        try:
+            with pytest.raises(UnicodeEncodeError):
+                await call.caption({'speaker': speaker, 'item_id': 'malformed', 'text': '\ud800', 'final': True})
+            await asyncio.wait_for(call.finalize(), 2)
+            assert [(row['speaker'], row['text'], row['item_id']) for row in host.captions] == [
+                ('ouroboros', 'Valid teardown words.', 'valid')]
+        finally:
+            call.writer.cancel()
+            await asyncio.gather(call.writer, return_exceptions=True)
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('source', ['host', 'provider'])
 @pytest.mark.parametrize('barrier', ['response', 'input', 'tools', 'playback', 'caption', 'native'])
 def test_fresh_renewal_waits_for_every_quiet_barrier(source, barrier):
@@ -1155,8 +1185,11 @@ def test_a_silent_batch_that_finds_renewal_due_after_speech_asks_nothing_more(tm
             session.emit('ready', input_rate=24000, output_rate=24000)
             session.emit('audio', item_id='greeting', rate=24000, pcm=b'\0' * 4800)
             session.emit('response_done', response_id='greeting', usage={}, raw_usage={}, status='completed', continues=True)
+            # A page reports playback only of audio it was sent: wait for the driver to take the item, then for it to
+            # consume the receipt (a receipt that comes first is clamped to 0 ms and the item is never heard).
+            await until(lambda: host.hub.audio)
             host.hub.events.append(cp.PeerControl('peer', cp.PEER_OWNER, {'type': 'played', 'item_id': 'greeting', 'played_ms': 100}))
-            await asyncio.sleep(.05)
+            await until(lambda: not host.hub.events)
             host.due = True  # capacity: the batch takes the renewal branch
             session.emit('tool_call', call_id='lang', name='set_call_languages', arguments='{"languages":["ru-RU"]}')
             await until(lambda: len(host.sessions) == 2)

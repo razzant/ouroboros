@@ -131,57 +131,54 @@ def knowledge_navigation_sections(root: Any, project_id: str = "", *, overview: 
 
 
 @timed_section("registry")
-def _build_registry_digest(env: Any) -> str:
+def _build_registry_section(env: Any) -> str:
+    """The hand-written source registry, whole in every mode (owner 2.11.2026).
+
+    Only the physical window may choose its outline (``context_layout.TIER0_WHOLE_OR_OUTLINE``):
+    every heading with its line range in the retained full text, numbered as ``read_file`` numbers
+    that capture. Nothing recorded, nothing shown.
+    """
+    from bisect import bisect_right
+    from itertools import accumulate
+
+    from ouroboros.markdown_source import MarkdownSourceError, parse_markdown_source
+
     reg_path = env.drive_path("memory/registry.md")
     if not reg_path.exists():
         return ""
-    try:
-        text = reg_path.read_text(encoding="utf-8")
-    except Exception:
-        return ""
-
-    rows: list = []
-    names: list = []
-    current_id = ""
-    fields: dict = {}
-    for line in text.split("\n"):
-        if line.startswith("### "):
-            if current_id:
-                rows.append(_registry_row(current_id, fields))
-                names.append(f"- {current_id}: updated={fields.get('updated', '?')}")
-            current_id = line[4:].strip()
-            fields = {}
-        elif current_id and line.startswith("- **"):
-            m = re.match(r'^- \*\*(\w+):\*\*\s*(.*)', line)
-            if m:
-                fields[m.group(1).lower()] = m.group(2).strip()
-    if current_id:
-        rows.append(_registry_row(current_id, fields))
-        names.append(f"- {current_id}: updated={fields.get('updated', '?')}")
-
-    if not rows:
-        return ""
-
-    header = "| source | path | updated | gaps |\n|---|---|---|---|"
-    table = header + "\n" + "\n".join(rows)
-    if len(table) > 3000:
-        table = table[:2950] + "\n| ... | (truncated) | | |"
     heading = "## Memory Registry (what I know / don't know)\n\n"
-    return HostSection("registry", heading + table, heading + "\n".join(names),
-                       "read_file(root='runtime_data', path='memory/registry.md')")
-
-
-def _registry_row(source_id: str, fields: dict) -> str:
-    path = fields.get("path", "?")
-    updated = fields.get("updated", "?")
-    gaps = fields.get("gaps", "—")
-    if len(gaps) > 60:
-        gaps = gaps[:57] + f"... [{len(gaps) - 57} chars omitted]"
-    return f"| {source_id} | {path} | {updated} | {gaps} |"
+    try:
+        text = reg_path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return f"{heading}Source unreadable here ({type(exc).__name__}): memory/registry.md."
+    if not text.strip():
+        return ""
+    if len(text) > _LARGE_CONTEXT_SECTION_CHARS:
+        log.warning("context: memory registry is large (%d chars)", len(text))
+    full = heading + text
+    try:
+        headings = parse_markdown_source(full.encode("utf-8"), "memory/registry.md").headings
+    except MarkdownSourceError:
+        # An unavailable grammar supplies no complete outline; keep the source whole.
+        log.warning("context: registry navigation unavailable; retaining whole text", exc_info=True)
+        return HostSection("registry", full, reader="read_file(root='runtime_data', path='memory/registry.md')")
+    # The parser's spans are bytes on LF lines; read_file numbers the capture by str.splitlines of its
+    # universal-newline text, the same breaks as splitlines of these exact bytes (CR, CRLF, VT, FF, FS,
+    # GS, RS, NEL, U+2028/9 too). The end byte of each such line places every span in the reader's lines.
+    ends = list(accumulate(len(row.encode("utf-8")) for row in full.splitlines(keepends=True)))
+    line = lambda byte: bisect_right(ends, byte) + 1  # noqa: E731 — the reader's line holding this byte
+    outline = "\n".join(f"{'  ' * max(0, item.level - 2)}- {item.title} — lines {line(item.section.start_byte)}-"
+                        f"{line(max(item.section.start_byte, item.section.end_byte - 1))}" for item in headings)
+    return HostSection("registry", full, heading + "Every heading with its line range in the retained full text "
+                       "named below:\n" + outline, "read_file(root='runtime_data', path='memory/registry.md')")
 
 
 @timed_section("installed_skills")
-def _build_installed_skills_section(env: Any, *, max_lines: int = 100, skills: Optional[List[Any]] = None) -> str:
+def _build_installed_skills_section(env: Any, *, skills: Optional[List[Any]] = None) -> str:
+    """Every enabled, admitted skill in both forms: the compact one keeps its status, description and
+    trigger (owner 2.11.2026); tools, schedules and model experience are the full form's. A long field
+    is a labelled prefix naming its manifest's ``read_file`` address, which the root and both child tool
+    profiles open; a capability ceiling that withholds that read (a Presence binding's) still decides."""
     try:  # ``skills``: the context build's own discovery, so this catalog and its always-on block agree
         from ouroboros.skill_catalogue import always_in_context_skills, discover_context_skills
         from ouroboros.skill_loader import summarize_skills
@@ -192,12 +189,12 @@ def _build_installed_skills_section(env: Any, *, max_lines: int = 100, skills: O
         log.debug("Failed to build installed skills section", exc_info=True)
         return ""
     def _field(value: object, limit: int = 220) -> str:
+        from ouroboros.utils import truncate_review_artifact
+
         text = re.sub(r"\s+", " ", str(value or "")).strip()
         text = text.replace("|", "\\|")
         text = text.replace("#", "＃")
-        if len(text) > limit:
-            return text[:limit] + f" [... {len(text) - limit} chars omitted]"
-        return text
+        return truncate_review_artifact(text, limit).replace("\n", " ")
 
     lines = [
         "## Installed Skills (enabled and reviewed)",
@@ -215,6 +212,9 @@ def _build_installed_skills_section(env: Any, *, max_lines: int = 100, skills: O
         name = _field(skill.get("name"), 80)
         if not name:
             continue
+        manifest = (f"read_file(root='skill_payload', bucket={str(skill['location'])!r}, "
+                    f"skill_name={str(skill['name'])!r}, path={str(skill['manifest_file'])!r})"
+                    if skill.get("location") and skill.get("manifest_file") else "")
         kind = _field(skill.get("type") or "skill", 40)
         version = _field(skill.get("version"), 40)
         review_status = _field(skill.get("review_status"), 40)
@@ -224,12 +224,14 @@ def _build_installed_skills_section(env: Any, *, max_lines: int = 100, skills: O
                     if isinstance(item, dict) and item.get("name")]
         meta = f"{kind}{', v' + version if version else ''}{', ' + review_status if review_status else ''}"
         lines.append(f"- {name} ({meta}): {description or 'No description.'}")
-        operative.append(f"- {name} ({meta}); enabled; executable review")
+        operative.append(lines[-1])
         if skill.get("review_gate", {}).get("author_accepted"):
             lines.append("  author_accepted=true")
             operative.append(lines[-1])
-        if when:
-            lines.append(f"  Trigger: {when}")
+        lines.append(f"  Trigger: {when or 'Not specified.'}")
+        operative.append(lines[-1])
+        lines.append(f"  Instructions: {manifest or 'source address unavailable.'}")
+        operative.append(lines[-1])
         if skill.get("name") in always_on:
             lines.append("  Context: always; its text is in the Always-in-context skills section.")
             operative.append(lines[-1])
@@ -241,7 +243,7 @@ def _build_installed_skills_section(env: Any, *, max_lines: int = 100, skills: O
                          f"{_field(suggestion.get('description'), 260)}. Not scheduled unless adopted.")
         if suggestions:
             omitted = skill.get("suggested_schedules_omitted_count", 0)
-            lines.append(f"  Schedule source: list_skills(name={name!r}) supplies manifest.read"
+            lines.append(f"  Schedule source: {manifest or 'its manifest (no read address recorded)'}"
                          + (f"; {omitted} more suggestions omitted." if omitted else "."))
             operative.append(lines[-1])
         # CPL-7 Model Experience: bounded prose; absent section renders nothing.
@@ -265,10 +267,6 @@ def _build_installed_skills_section(env: Any, *, max_lines: int = 100, skills: O
             lines.append(f"  Live ({_field(skill.get('process') or 'unknown', 20)}): no ({_field(skill.get('live_reason') or 'unknown', 60)})")
             operative.append(lines[-1])
         count += 1
-        if len(lines) >= max_lines:
-            lines.append("- ... (truncated; list_skills pages every skill; list_skills(name=...) gives one in full)")
-            operative.append(lines[-1])
-            break
     if count == 0:
         return ""
     return HostSection("installed_skills", "\n".join(lines), "\n".join(operative), "list_skills")
@@ -356,16 +354,17 @@ def runtime_host_section(data: dict, coordination: str = "") -> HostSection:
 
 # The review-continuity host section (moved from review_state, which keeps its extraction bound).
 def continuity_status_lines(state: Any, repo_dir: pathlib.Path,
-                            stale_status: tuple[bool, str] = (False, "")) -> List[str]:
-    """Current debts and uncertainty once, whole; historical executions have a reader."""
+                            stale_status: tuple[dict, str] = ({}, "")) -> List[str]:
+    """Current debts and uncertainty once, whole; historical executions have a reader.
+    ``stale_status`` is ``review_state.stale_marker_status`` for this checkout."""
     from ouroboros.review_state import make_repo_key
 
     repo_key = make_repo_key(repo_dir)
     lines = ["## Review Continuity", f"- repo_key={repo_key}"]
-    marker_current, look_unreadable = stale_status
-    if marker_current:
-        lines += [f"- stale_marker={state.last_stale_from_edit_ts}: {state.last_stale_reason}",
-                  f"  invalidated_by={state.stale_marker_attribution_note()}"]
+    marker, look_unreadable = stale_status
+    if marker:
+        lines += [f"- stale_marker={marker['ts']}: {marker['reason']}",
+                  f"  invalidated_by={state.stale_marker_attribution_note(marker=marker)}"]
         if look_unreadable:
             lines.append(f"  preflight_unreadable={look_unreadable} (marker unverified)")
     debts = state.get_open_commit_readiness_debts(repo_key=repo_key)

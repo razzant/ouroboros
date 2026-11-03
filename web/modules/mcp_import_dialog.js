@@ -67,6 +67,8 @@ function renderEntry(entry, number, { checked, draftUrl }) {
         ${detail(summary)}
         ${headerLines(entry).map(detail).join('')}
         ${detail(entry.env_names?.length ? `Environment: ${entry.env_names.join(', ')}` : '')}
+        ${detail(entry.patch?.task_session === true ? 'task_session: a task’s calls share one running server process until its tool loop ends, instead of one process per call.' : '')}
+        ${detail(entry.patch?.browser_policy === true ? 'browser_policy: that process gets a private local address and token to ask Ouroboros’s browser rules about its requests. It does not limit the process otherwise.' : '')}
         ${detail(entry.action === 'update' ? `Fields supplied: ${Object.keys(entry.patch || {}).filter((key) => !['auth_header', 'auth_token'].includes(key)).join(', ')}` : '')}
         ${detail(entry.unsupported_keys?.length ? `Not imported: ${entry.unsupported_keys.join(', ')}` : '')}
         ${change ? lines([`Address ${change.sameOrigin ? `changes on ${change.to}` : `changes from ${change.from} to ${change.to}`}.${

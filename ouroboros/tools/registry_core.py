@@ -174,17 +174,20 @@ def _presence_tool_allowed(ctx: Any, name: str) -> bool:
     return ceiling is None or presence_ceiling_allows_tool(ceiling, name)
 
 
+PRESENCE_RESOURCE_BLOCKED = "⚠️ PRESENCE_RESOURCE_BLOCKED: the resolved target is outside this presence task's positive resource ceiling."
+
+
 def _presence_binding_allowed(ctx: Any, binding: Any) -> bool:
-    from ouroboros.presence_authority import (
-        presence_ceiling_allows_binding,
-        presence_ceiling_from_context,
-    )
+    """The ceiling, or a read of exactly a retained ``input_files`` copy handed to this task (#2593)."""
+    from ouroboros.delegate_readonly_inputs import prepared_copy_read
+    from ouroboros.presence_authority import presence_ceiling_allows_binding, presence_ceiling_from_context
 
     ceiling = presence_ceiling_from_context(ctx)
     if ceiling is None or binding is None:
         return True
     items = binding if isinstance(binding, tuple) else (binding,)
-    return bool(items) and all(presence_ceiling_allows_binding(ceiling, item) for item in items)
+    return bool(items) and all(presence_ceiling_allows_binding(ceiling, item) or prepared_copy_read(ctx, item)
+                               for item in items)
 
 
 def _presence_bound_args(ctx: Any, name: str, args: Any) -> tuple[dict[str, Any], str]:
@@ -329,9 +332,9 @@ class ToolRegistry:
         "health", "imagegen", "join_ledger", "knowledge", "media", "memory_tools", "plan_review", "preflight_review",
         "project_journal", "presence",
         "recent_tasks",
-        "query_code", "query_data", "review", "review_change", "search", "services", "shell", "skill_exec", "skill_publish",
-        "skill_preflight", "skill_source_tools", "subagent_integration", "task_retention", "task_tree", "tool_discovery",
-        "vcs_read", "verify", "vision",
+        "query_code", "query_data", "review", "review_change", "search", "secret_hitl", "services", "shell", "skill_exec",
+        "skill_publish", "skill_preflight", "skill_source_tools", "subagent_integration", "task_retention", "task_tree",
+        "tool_discovery", "vcs_read", "verify", "vision",
     ]
 
     def _load_modules(self) -> _ToolCatalog:
@@ -1296,10 +1299,7 @@ class ToolRegistry:
             _binding_set_targets_system_repo(self._ctx, resolved_binding) or acting_system_worktree
         )
         if not _presence_binding_allowed(self._ctx, resolved_binding):
-            return (
-                "⚠️ PRESENCE_RESOURCE_BLOCKED: the resolved target is outside "
-                "this presence task's positive resource ceiling."
-            )
+            return PRESENCE_RESOURCE_BLOCKED
         # Fail-closed: an acting child WITHOUT a resolved isolated workspace would
         # have active_workspace/system_repo fall back to the LIVE repo. Confine it
         # to data roots and block shell/coding/service (whose default target is the repo).

@@ -15,7 +15,7 @@ import json
 import logging
 import pathlib
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Dict, NamedTuple, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Tuple
 
 from ouroboros import delegate_custody as custody
 from ouroboros.delegate_custody import RunCustody as _RunCustody
@@ -255,6 +255,7 @@ class _RetryBinding(NamedTuple):
     max_seconds_basis: str
     continuation: Any   # delegate_continuation.ContinuationStart: the recorded lineage
     prompt_cache_ttl: Dict[str, Any]
+    input_files: Optional[List[Dict[str, Any]]]  # the original selection receipt, never reread or recopied
 
 
 def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token: str, text: str, *,
@@ -388,6 +389,7 @@ def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token
         max_seconds_basis=str(record.get("max_seconds_basis") or ""),
         continuation=replayed_custody(record),
         prompt_cache_ttl=deepcopy(record.get("prompt_cache_ttl") if isinstance(record.get("prompt_cache_ttl"), dict) else {}),
+        input_files=deepcopy(record["input_files"]) if isinstance(record.get("input_files"), list) else None,
     ), None
 
 

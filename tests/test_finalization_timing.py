@@ -467,7 +467,7 @@ def test_release_counts_actual_runs_and_daemon_requests(tmp_path, failed_read):
 def test_buffered_worker_handoff_stamps_a_value_snapshot(tmp_path, monkeypatch, pooled):
     import sys
     from ouroboros import observability as obs
-    from supervisor import worker_chat_lane, worker_process, workers
+    from supervisor import worker_process
 
     with obs.task_timing_scope():
         usage = {}
@@ -495,11 +495,14 @@ def test_buffered_worker_handoff_stamps_a_value_snapshot(tmp_path, monkeypatch, 
         incoming.put(None)
         worker_process.worker_main(1, incoming, outgoing, str(tmp_path), str(tmp_path))
     else:
-        monkeypatch.setattr(workers, "get_event_q", lambda: outgoing)
-        released = []
-        assert worker_chat_lane._execute_chat_task({"task": task, "agent": agent, "chat_id": 1,
-                                                   "registry": SimpleNamespace(unregister=released.append)})
-        assert released == ["buffered"]
+        # The conversation carrier runs the same body (``run_worker_task``) with the lane's facts.
+        from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
+
+        lane_task = {**task, "_is_direct_chat": True,
+                     "_execution_owner": {"kind": "direct", "lane": LANE_CONVERSATION, "executor": EXECUTOR_WORKER},
+                     "_conversation_prepare": {"quiet": False, "reply_expected": True}}
+        worker_process.run_worker_task(agent, lane_task, wid=1, out_q=outgoing, repo_dir=str(tmp_path),
+                                       drive_root=str(tmp_path))
     emitted, = [row for row in list(outgoing.queue) if row["type"] == "send_message"]
     assert emitted["text"] == event["text"]
     assert emitted["_finalization_timing"]["enqueued_sec"] >= 0

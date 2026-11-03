@@ -222,3 +222,45 @@ def test_real_sdk_call_failure_names_the_closed_connection_and_stays_an_unknown_
     body = result.text.split("\n\n", 1)[1]
     assert body.startswith("⚠️ MCP_TOOL_ERROR: ExceptionGroup: unhandled errors in a TaskGroup"), body
     assert "McpError: Connection closed" in body and "no running event loop" not in body, body
+
+
+def test_a_long_running_servers_stderr_is_logged_as_a_bounded_tail_with_every_secret_masked(monkeypatch, caplog):
+    """A task session keeps one stderr file for its whole task loop: the record is a bounded tail that names
+    the omission, never the file read whole, and a secret the cut would split is masked like any other."""
+    import asyncio
+    import dataclasses
+    import logging
+    import tempfile
+
+    from mcp.client.stdio import StdioServerParameters
+
+    from ouroboros import mcp_schema
+
+    secret = "synthetic-tail-secret\nsecond-line"
+    cfg = dataclasses.replace(mcp_client.normalize_server_config({"id": "fx", "transport": "stdio", "command": "x"}),
+                              secret_values=(secret,))
+    pieces = [secret[i:i + 5] for i in range(len(secret) - 4) if "\n" not in secret[i:i + 5]]
+
+    def logged(text):
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as stderr:
+            stderr.write(text)
+            stderr.flush()
+            return mcp_schema._stderr_diagnostic(stderr, cfg, 1000)
+
+    assert logged(f"BOOT {secret} READY\n") == "BOOT *** READY\n"  # within the bound: whole, as before
+    for at in range(0, 3000, 7):  # the secret before, across and after every cut point
+        text = "Z" * at + secret + "\n" + "Y\n" * ((3500 - at) // 2) + "END\n"
+        record = logged(text)
+        assert record.startswith(f"[{len(text.encode())} bytes of stderr;") and record.endswith("Y\nEND\n"), record[:90]
+        assert len(record.encode()) < 1200 and not any(piece in record for piece in pieces), (at, record[:200])
+
+    async def chatty_child():  # the real wrapper around an owned child that writes past the bound and exits
+        params = StdioServerParameters(command=sys.executable, args=[
+            "-c", "import sys; sys.stderr.write('Z' * 5000 + '\\nLAST\\n'); sys.stderr.flush()"])
+        async with mcp_client._stdio_with_diagnostics(params, cfg):
+            pass
+    monkeypatch.setattr(mcp_client, "MCP_STDIO_STDERR_TAIL_BYTES", 1000)
+    with caplog.at_level(logging.WARNING, logger="ouroboros.mcp_client"):
+        asyncio.run(chatty_child())
+    [record] = [row.getMessage() for row in caplog.records if "MCP stdio stderr (fx)" in row.getMessage()]
+    assert record.endswith("[5006 bytes of stderr; only its last whole lines, within 1000 bytes, follow]\nLAST\n")

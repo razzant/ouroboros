@@ -320,3 +320,19 @@ def test_tools_record_self_check_without_starting_panel(ctx, cyber_pro):
     schemas = {e.name: e.schema["parameters"]["properties"] for e in tools.get_tools()}
     assert schemas["skill_install"]["check"]["enum"] == schemas["skill_update"]["check"]["enum"] == ["review", "self"]
     assert "skip_review" not in schemas["skill_update"]
+
+
+def test_sources_tool_adds_a_view_and_lists_only_suggestions_not_yet_connected(ctx, monkeypatch):
+    context, _drive, _reviews, hub = ctx
+    monkeypatch.setattr(tools, "_cyber", lambda: True)
+    monkeypatch.setenv("OUROBOROS_SKILL_SOURCE_SUGGESTIONS", json.dumps([
+        {"name": "Hub skills folder", "url": str(hub.bare), "ref": "main", "path": "skills"}]))
+    listed = json.loads(_call("skill_sources", context))
+    assert [item["name"] for item in listed["suggestions"]] == ["Hub skills folder"]
+    added = json.loads(_call("skill_sources", context, action="add", url=str(hub.bare), revision="main",
+                             subfolder="skills", name="Hub folder", trust="review"))
+    row = added["sources"][-1]
+    assert (row["id"], row["kind"], row["ref"], row["path"]) == ("hub-folder", "git", "main", "skills")
+    assert "suggestions" not in added, "a connected suggestion is no longer offered"
+    refused = _call("skill_sources", context, action="add", path=str(hub.work), subfolder="skills", name="X")
+    assert refused.startswith("⚠️ SKILL_SOURCES_ERROR") and "read as it is" in refused

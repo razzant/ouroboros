@@ -171,8 +171,7 @@ def _ledger_lock(drive_root: Any) -> Iterator[None]:
     try:
         yield
     finally:
-        if fd is not None:
-            release_exclusive_file_lock(lock_path, fd)
+        release_exclusive_file_lock(lock_path, fd)
 
 
 def _task_for_sources(task_id: Any) -> str:
@@ -220,14 +219,17 @@ class ReviewSourceChanged(ValueError):
 
 def read_selected_source(drive_root: Any, task_id: str, record_id: str, seat_id: str, *,
                          role: str, part: str, sha256: str) -> bytes:
-    """Resolve an exact owned seat source, including an earlier selection after settlement."""
+    """Resolve an exact owned seat source, including an earlier selection after settlement, or a wave
+    failure note, which the record keeps as the panel's source (``verdict.wave_failures``), no seat's."""
     record = load_record(drive_root, record_id)
     if not record or record.get("task_id") != task_id:
         raise LookupError("Review does not belong to this task.")
     seats = [row for row in record.get("rows") or [] if isinstance(row, dict) and row.get("seat_id") == seat_id]
-    if len(seats) != 1:
+    notes = [note["source_ref"] for note in (record.get("verdict") or {}).get("wave_failures") or []
+             if isinstance(note, dict) and isinstance(note.get("source_ref"), dict) and note["source_ref"].get("seat_id") == seat_id]
+    if len(seats) > 1 or not (seats or notes):
         raise LookupError("Saved reviewer seat is unavailable.")
-    sources = [*seats[0].get("source_refs", []), *seats[0].get("historical_source_refs", [])]
+    sources = [*notes, *(ref for seat in seats for ref in (*seat.get("source_refs", []), *seat.get("historical_source_refs", [])))]
     selected = next((s for s in sources if isinstance(s, dict) and s.get("role") == role
                      and str(s.get("part") or "") == part and s.get("status") == "retained"
                      and isinstance(s.get("ref"), dict) and s["ref"].get("sha256") == sha256), None)
@@ -266,6 +268,8 @@ def record_sources_resolvable(drive_root: Any, payload: Dict[str, Any]) -> bool:
             for ref in (row or {}).get(key) or []]
     refs.extend([((payload.get("brief") or {}).get("dispute_input") or {}).get("rebuttal"),
                  (payload.get("author_decision") or {}).get("source_ref")])
+    refs.extend(note.get("source_ref") for note in (payload.get("verdict") or {}).get("wave_failures") or []
+                if isinstance(note, dict))
     return all(source_ref_resolvable(drive_root, task_id, ref) for ref in refs if isinstance(ref, dict) and "role" in ref)
 
 
@@ -317,14 +321,22 @@ def write_record(drive_root: Any, record: Any) -> Dict[str, Any]:
     return payload
 
 
+class RecordUnchanged(Exception):
+    """Raised by a ``revise_record`` mutation that finds nothing to change: no write, no new revision."""
+
+
 def revise_record(drive_root: Any, record_id: str, mutate: Callable[[Dict[str, Any]], Any]) -> Optional[Dict[str, Any]]:
-    """Locked read-modify-write that raises ``revision`` by one; ``None`` when absent."""
+    """Locked read-modify-write that raises ``revision`` by one; ``None`` when absent. A mutation that
+    raises ``RecordUnchanged`` (a rejoin, an already settled record) returns the record as it is."""
     path = record_path(drive_root, record_id)
     with _ledger_lock(drive_root):
         current = _read_json(path)
         if current is None:
             return None
-        updated = mutate(dict(current))
+        try:
+            updated = mutate(dict(current))
+        except RecordUnchanged:
+            return current
         payload = _payload(updated if isinstance(updated, dict) else current)
         payload.update(revision=int(current.get("revision") or 1) + 1, ts=utc_now_iso())
         _write_and_index(drive_root, path, payload)
@@ -432,7 +444,7 @@ def index_row(drive_root: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
         "heavy_stripped": resolvable,
     }
     if not resolvable:
-        row["verdict"].update({k: verdict.get(k) for k in HEAVY_VERDICT_FIELDS})
+        row["verdict"].update({k: verdict.get(k) for k in (*HEAVY_VERDICT_FIELDS, "wave_failures")})
         row["rows"] = payload.get("rows")
     return row
 
@@ -1258,7 +1270,6 @@ def build_wave_record(facts: Dict[str, Any], *, surface: str, record_id: str = "
     if facts.get("blocked") and facts.get("block_reason") and verdict["aggregate"] != VERDICT_FAIL:
         degraded.append(f"gate_block:{facts.get('block_reason')}")
     verdict.update({k: list(facts.get(k) or []) for k in HEAVY_VERDICT_FIELDS}, degraded_reasons=degraded)
-    known_costs = [float(s["usd"]) for s in rows if isinstance(s.get("usd"), (int, float))]
     for seat in rows:
         seat.pop("raw_text", None)  # retained as a source above; the row names it, never copies it
     frozen = facts.get("subject") or structured.get("subject") or {}
@@ -1308,7 +1319,7 @@ def build_wave_record(facts: Dict[str, Any], *, surface: str, record_id: str = "
         preflight=dict(facts.get("preflight") or {"status": "not_performed", "record_id": ""}),
         preflight_execution=dict(facts.get("preflight_execution") or {"status": "unobserved"}),
         dispatch_refusal=dict(refusal) if isinstance(refusal, dict) else None,
-        cost={"usd": round(sum(known_costs), 6), "unknown": len(known_costs) < len(rows)},
+        cost=record_cost(rows),
         fingerprints={"review_contract": contract_fp, "binding": str(facts.get("binding_fingerprint") or ""),
                       "reuse_key": reuse_key, "retry_key": str(facts.get("retry_key") or structured.get("retry_key") or "")},
     )
@@ -1375,8 +1386,10 @@ def settle_pending_payload(prior: Dict[str, Any], fresh: Dict[str, Any]) -> Dict
             rows.append(row if kept is None else kept)
             continue
         # A drain can return an old PENDING snapshot after another collector saved an answer.
-        # An operation identity is immutable; a different producer cannot replace this seat.
-        conflict = kept.get("operation_id") and row.get("operation_id") and kept["operation_id"] != row["operation_id"]
+        # An operation identity is immutable; a different producer cannot replace this seat, and a
+        # seat an explicit continuation reopened takes only its own successor's row.
+        conflict = (kept.get("operation_id") and row.get("operation_id") and kept["operation_id"] != row["operation_id"]
+                    or bool(kept.get("superseded_operation_ids")) and not row.get("operation_id"))
         if conflict or (not seat_open(kept) and seat_open(row)):
             rows.append(kept)
             continue
@@ -1394,13 +1407,12 @@ def settle_pending_payload(prior: Dict[str, Any], fresh: Dict[str, Any]) -> Dict
                              gate_reason=gate_reason.removeprefix("gate_block:"), dispatch_refusal=settled.get("dispatch_refusal"),
                              pending=any(seat_open(row) for row in counted))
     verdict["per_row"].update({str(row.get("seat_id") or ""): row_verdict(row) for row in rows})
-    for name in (*HEAVY_VERDICT_FIELDS, "degraded_reasons"):
+    for name in (*HEAVY_VERDICT_FIELDS, "degraded_reasons", "wave_failures"):
         values = [*((prior.get("verdict") or {}).get(name) or []), *((fresh.get("verdict") or {}).get(name) or [])]
         verdict[name] = _merge_evidence(values)
     settled.update(verdict=verdict, state=STATE_PENDING if still_open else STATE_SETTLED,
                    panel={**settled.get("panel", {}), "not_reached": panel_not_reached(rows, lost_is_terminal=not still_open)})
-    known = [float(row["usd"]) for row in rows if isinstance(row.get("usd"), (int, float))]
-    settled["cost"] = {"usd": round(sum(known), 6), "unknown": len(known) < len(rows)}
+    settled["cost"] = record_cost(rows)
     return settled
 
 
@@ -1410,10 +1422,6 @@ def seat_findings(triad_raw: Iterable[Dict[str, Any]],
     and the PART it answered (``answers`` by part; a record without ``answers``
     is a packet seat whose ``parsed_items`` are the change's)."""
     critical, advisory, extra = [], [], []
-
-    def _severity(item: Dict[str, Any]) -> str:
-        return "critical" if str(item.get("severity") or "").lower() == "critical" else "advisory"
-
     for raw in triad_raw:
         seat = str(raw.get("slot_id") or "")
         answers = raw.get("answers") if isinstance(raw.get("answers"), dict) else None
@@ -1424,13 +1432,21 @@ def seat_findings(triad_raw: Iterable[Dict[str, Any]],
             items = [(PART_CHANGE, item) for item in raw.get("parsed_items") or []
                      if isinstance(item, dict) and str(item.get("verdict") or "FAIL").upper() == "FAIL"]
         for part, item in items:
-            severity = _severity(item)
+            severity = "critical" if str(item.get("severity") or "").lower() == "critical" else "advisory"
             finding = {**item, "seat_id": seat, "part": part, "severity": severity}
             (extra if seat in additional else critical if severity == "critical" else advisory).append(finding)
     return critical, advisory, extra
 
 
 _OPEN_SEAT_STATES = frozenset({"in_flight", "pending_dispatch"})
+
+
+def record_cost(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+    """Each distinct physical operation's money once: every seat's current operation and the operations an
+    explicit continuation superseded (``prior_operations``); one missing amount keeps the total unknown."""
+    amounts = [usd for row in rows for usd in (row.get("usd"), *(p.get("usd") for p in row.get("prior_operations") or []))]
+    known = [float(usd) for usd in amounts if isinstance(usd, (int, float))]
+    return {"usd": round(sum(known), 6), "unknown": len(known) < len(amounts)}
 
 
 def seat_open(seat: Dict[str, Any]) -> bool:
@@ -1448,17 +1464,11 @@ def settle_from_collected(drive_root: Any, record_id: str, raws: Iterable[Dict[s
     take an answer, the dispatch provenance stays, their FAIL items (``seat_findings``) join
     the ones already recorded, and the verdict is reduced over the assigned seats. A seat still in flight keeps the record pending. ``None`` when no
     such record exists; a settled record is returned as it is."""
-    try:
-        prior = load_record(drive_root, record_id)
-    except ValueError:
-        return None
-    if prior is None or prior.get("state") != STATE_PENDING:
-        return prior
     by_slot = {str(raw.get("slot_id") or ""): raw for raw in raws if isinstance(raw, dict)}
 
     def _mutate(prior: Dict[str, Any]) -> Dict[str, Any]:
         if prior.get("state") != STATE_PENDING:
-            return prior
+            raise RecordUnchanged()
         task_id = str(prior.get("task_id") or "")
         # The record's own severity policy (a skill wave's checklist rule) decides a late answer's
         # critical findings exactly as it decided the dispatching attempt's.
@@ -1467,8 +1477,8 @@ def settle_from_collected(drive_root: Any, record_id: str, raws: Iterable[Dict[s
         for row in prior.get("rows") or []:
             seat = json.loads(json.dumps(row, default=str))
             raw = by_slot.get(str(seat.get("seat_id") or ""))
-            if (raw is not None and seat_open(seat) and (not seat.get("operation_id")
-                    or not raw.get("operation_id") or seat["operation_id"] == raw["operation_id"])):
+            if (raw is not None and seat_open(seat) and (not seat.get("operation_id") or seat["operation_id"] == raw.get("operation_id")
+                    or not raw.get("operation_id") and not seat.get("superseded_operation_ids"))):
                 if not raw.get("outcome") and isinstance(policy, dict) and isinstance(raw.get("answers"), dict):
                     raw = {**raw, "answers": {part: apply_severity_policy(answer, policy)
                                               for part, answer in raw["answers"].items()}}
@@ -1487,10 +1497,9 @@ def settle_from_collected(drive_root: Any, record_id: str, raws: Iterable[Dict[s
         found = dict(zip(HEAVY_VERDICT_FIELDS, seat_findings(
             applied, {str(seat.get("seat_id") or "") for seat in rows if seat.get("additional")})))
         verdict.update({key: _merge_evidence(before.get(key) or [], found[key]) for key in HEAVY_VERDICT_FIELDS},
-                       degraded_reasons=list(before.get("degraded_reasons") or []))
-        known = [float(seat["usd"]) for seat in rows if isinstance(seat.get("usd"), (int, float))]
+                       **{key: list(before.get(key) or []) for key in ("degraded_reasons", "wave_failures")})
         settled = {"rows": rows, "verdict": verdict, "state": STATE_PENDING if still_open else STATE_SETTLED,
-                   "cost": {"usd": round(sum(known), 6), "unknown": len(known) < len(rows)}}
+                   "cost": record_cost(rows)}
 
         return {**prior, **settled, "panel": {**dict(prior.get("panel") or {}),
                                             "not_reached": panel_not_reached(rows, lost_is_terminal=not still_open)}}
@@ -1552,9 +1561,7 @@ class CouplingOutcome:
     seats: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"verdict": self.verdict, "status": self.status, "blocked": self.blocked,
-                "critical_findings": list(self.critical_findings), "advisory_findings": list(self.advisory_findings),
-                "seats": list(self.seats)}
+        return asdict(self)
 
 
 def coupling_outcome(verdict: dict, rows: list) -> CouplingOutcome:
@@ -1581,9 +1588,8 @@ def coupling_outcome(verdict: dict, rows: list) -> CouplingOutcome:
 
 __all__ = [
     "ALL_PARTS", "PART_RESULT", "PART_SKILL", "REVIEW_LEDGER_SCHEMA_VERSION", "SINGLE_QUESTION_PARTS", "ReviewLedgerRecord",
-    "answer_keys", "apply_severity_policy", "build_commit_gate_record",
-    "newest_rotation_ts", "index_stamp", "surface_records",
-    "build_rows", "build_wave_record",
+    "answer_keys", "apply_severity_policy", "build_commit_gate_record", "newest_rotation_ts", "index_stamp",
+    "surface_records", "build_rows", "build_wave_record", "RecordUnchanged", "record_cost",
     "distinct_model_facts", "find_reusable", "index_path", "index_row", "ledger_dir", "ledger_root", "load_record",
     "mark_provenance_unknown", "new_record_id", "normalize_model_name", "note_author_decision",
     "note_commit_landing", "panel_facts", "read_source", "read_selected_source", "task_record_page",

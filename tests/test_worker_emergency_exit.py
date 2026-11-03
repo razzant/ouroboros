@@ -24,7 +24,7 @@ from tests._shared import stop_socket_sharer, wait_test_child_stop
 pytestmark = pytest.mark.serial
 
 
-def _faulted_entry(mode, incoming, outgoing, repo_dir, drive_root, session_id, stop_socket):
+def _faulted_entry(mode, incoming, outgoing, repo_dir, drive_root, session_id, stop_socket, transport_no_proxy=None):
     from ouroboros import process_custody, utils
 
     platform.create_new_session()
@@ -38,7 +38,8 @@ def _faulted_entry(mode, incoming, outgoing, repo_dir, drive_root, session_id, s
             return original(path, value, *args, **kwargs)
 
         utils.append_jsonl = blocked_entry_log
-        worker_process.worker_main(mode, incoming, outgoing, repo_dir, drive_root, session_id, stop_socket)
+        worker_process.worker_main(mode, incoming, outgoing, repo_dir, drive_root, session_id, stop_socket,
+                                   transport_no_proxy)
         return
 
     def callback():
@@ -170,7 +171,8 @@ def _assert_frozen_child_stop(verdict, diagnose, **context):
     assert stopped, trace
 
 
-def _ordinary_close_entry(wid, incoming, outgoing, repo_dir, drive_root, session_id, stop_socket):
+def _ordinary_close_entry(wid, incoming, outgoing, repo_dir, drive_root, session_id, stop_socket,
+                          transport_no_proxy=None):
     import subprocess
     import sys
 

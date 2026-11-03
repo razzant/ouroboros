@@ -156,9 +156,22 @@ def ensure_workers_healthy() -> None:
         _WORKER_LIFECYCLE_LOCK.release()
 
 
+# Per slot id: the dead process whose death this process journaled. While its replacement's spawn stays refused the
+# reaper hands that slot back to every tick (``reaping`` cleared for recovery): one death is one row, not one a tick.
+_DEATHS_RECORDED: Dict[int, Any] = {}
+
+
 def _ensure_workers_healthy_locked(queue: Any) -> tuple[List[int], bool]:
-    """Capture exact task/slot ownership before handing off any dead worker."""
+    """Capture exact task/slot ownership before handing off any dead worker.
+
+    Every slot's death is recovered alike; only PROJECT deaths feed the crash-storm
+    clock and the storm's captured membership (owner decision 1A: the conversation
+    lane is outside the project pool's crash fuse, so an owner's turn is admitted
+    and dispatched while the project pool is fenced)."""
+    from supervisor.worker_pool_lifecycle import is_project_slot
+
     busy_crashes = 0
+    project_deaths = 0
     crashed_tasks = []
     jobs = []
     for wid, w in list(_pool().WORKERS.items()):
@@ -173,17 +186,22 @@ def _ensure_workers_healthy_locked(queue: Any) -> tuple[List[int], bool]:
         task = dict(meta.get("task") or {}) if isinstance(meta, dict) else {}
         attempt = int((meta or {}).get("attempt") or task.get("_attempt") or 1)
         exitcode = w.proc.exitcode
-        busy_crashes += int(w.busy_task_id is not None)
-        _pool().append_jsonl(_pool().DRIVE_ROOT / "logs" / "supervisor.jsonl", {
-            "ts": _pool().utc_now_iso(), "type": "worker_dead_detected", "worker_id": wid,
-            "exitcode": exitcode, "busy_task_id": w.busy_task_id,
-            "task_type": task.get("type"), "task_description": str(task.get("description") or "")[:200],
-            "uptime_sec": round(time.time() - meta["started_at"]) if meta and meta.get("started_at") else None,
-            "attempt": (meta or {}).get("attempt"),
-            "signal": -exitcode if isinstance(exitcode, int) and exitcode < 0 else None,
-        })
-        if task:
+        project = is_project_slot(w)
+        project_deaths += int(project)
+        busy_crashes += int(project and w.busy_task_id is not None)
+        recorded, _DEATHS_RECORDED[wid] = _DEATHS_RECORDED.get(wid) is w.proc, w.proc
+        if not recorded:
+            _pool().append_jsonl(_pool().DRIVE_ROOT / "logs" / "supervisor.jsonl", {
+                "ts": _pool().utc_now_iso(), "type": "worker_dead_detected", "worker_id": wid,
+                "exitcode": exitcode, "busy_task_id": w.busy_task_id,
+                "task_type": task.get("type"), "task_description": str(task.get("description") or "")[:200],
+                "uptime_sec": round(time.time() - meta["started_at"]) if meta and meta.get("started_at") else None,
+                "attempt": (meta or {}).get("attempt"),
+                "signal": -exitcode if isinstance(exitcode, int) and exitcode < 0 else None,
+            })
+        if task and project:
             crashed_tasks.append({"task_id": w.busy_task_id, "task_type": task.get("type")})
+        if task and project and not recorded:
             _pool().append_jsonl(_pool().DRIVE_ROOT / "logs" / "supervisor.jsonl", {
                 "ts": _pool().utc_now_iso(), "type": "worker_crash_task_dump", "worker_id": wid,
                 "task": task, "started_at": meta.get("started_at"),
@@ -194,17 +212,18 @@ def _ensure_workers_healthy_locked(queue: Any) -> tuple[List[int], bool]:
             "task_id": str(w.busy_task_id or ""), "meta": meta, "task": task,
             "attempt": attempt, "exitcode": exitcode, "drive_root": str(_pool().DRIVE_ROOT),
         })
-    disable_pool = bool(jobs) and _pool()._worker_crash_storm_detected(
-        busy_crashes=busy_crashes, dead_detections=len(jobs), crashed_tasks=crashed_tasks,
+    disable_pool = bool(project_deaths) and _pool()._worker_crash_storm_detected(
+        busy_crashes=busy_crashes, dead_detections=project_deaths, crashed_tasks=crashed_tasks,
     )
     for job in jobs:
-        job["skip_respawn"] = disable_pool
+        job["skip_respawn"] = disable_pool and is_project_slot(job["worker"])
     if disable_pool:
-        # Freeze the exact captured membership for its stop: under this latch no slot
-        # starts or is forgotten (``respawn_worker``), so only a generation change,
-        # whose own stop or start then owns the fence, can make the stop a no-op.
+        # Freeze the exact captured PROJECT membership for its stop: under this latch no
+        # project slot starts or is forgotten (``respawn_worker``), so only a generation
+        # change, whose own stop or start then owns the fence, can make the stop a no-op.
         _pool()._WORKER_POOL_DISABLED_REASON = "worker_crash_storm"
-        jobs.append({"kind": "worker_crash_storm", "workers": tuple(_pool().WORKERS.items()),
+        jobs.append({"kind": "worker_crash_storm",
+                     "workers": tuple((wid, w) for wid, w in _pool().WORKERS.items() if is_project_slot(w)),
                      "drive_root": str(_pool().DRIVE_ROOT)})
     for index, job in enumerate(jobs):
         try:
@@ -266,6 +285,16 @@ def recover_confirmed_dead_worker(job: dict) -> None:
     w, task_id, task = job["worker"], job["task_id"], job["task"]
     root = pathlib.Path(job["drive_root"])
     _pool()._reconcile_confirmed_dead_review_owner(int(getattr(w.proc, "pid", 0) or 0))
+    if task_id and not task:  # no row of its own: a moved Presence turn's carrier died holding its park (#2566)
+        from ouroboros.presence_carrier import settle_ended_turn
+        settle_ended_turn(task_id)  # its Host waiter, already answered from the queue's custody, settles now
+    if task_id and isinstance(task, dict) and task.get("_presence_turn"):
+        try:  # the dead carrier was a Presence author: its intake fact dies with it
+            from ouroboros.conversation_lease import close_author_intake
+
+            close_author_intake(root, task_id)
+        except Exception:
+            log.debug("author intake of %s not closed after its carrier died", task_id, exc_info=True)
     if task_id and task:
         try:
             from ouroboros.tools.services import archive_task_service_logs
@@ -449,7 +478,7 @@ def _complete_exact_budget_pause_after_death(job: dict, root: pathlib.Path, task
                 queue.sort_pending()
                 hold["snapshot_persisted"] = False
                 try:
-                    hold["snapshot_persisted"] = bool(queue.persist_queue_snapshot(reason="dead_worker_budget_hold"))
+                    hold["snapshot_persisted"] = queue.publish_queue_snapshot(reason="dead_worker_budget_hold") is True  # barrier (LB)
                 except Exception:
                     log.error("Budget hold snapshot failed for %s", task_id, exc_info=True)
                 log.warning("Dead worker %s retained in nonterminal hold; snapshot persisted=%s",
@@ -593,7 +622,7 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
             )
             reason_code = "worker_crash_retry_exhausted"
         try:
-            from ouroboros.task_results import STATUS_FAILED, write_task_result
+            from ouroboros.task_results import STATUS_FAILED, STATUS_RUNNING, write_task_result
             write_task_result(
                 root, task_id, STATUS_FAILED,
                 result=result_text,
@@ -601,6 +630,9 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
                 outcome_axes=terminal_outcome_axes(lifecycle=STATUS_FAILED, execution=EXECUTION_INFRA_FAILED, reason_code=reason_code, review_trigger="worker_terminal"),
                 crash_signal=crash_signal,
                 crash_exitcode=exitcode if isinstance(exitcode, int) else None,
+                # The host reconciled a running attempt whose executor ended without its own terminal: a
+                # Presence turn reads this as a settled loss (unknown outcome, retained), never a recorded answer.
+                status_reconciled_from=STATUS_RUNNING,
                 **r_cost_fields, **execution_close(task, meta),  # the dead attempt's #939 clock
             )
         except Exception as exc:
@@ -702,20 +734,9 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
             )
         except Exception:
             log.debug("Crash-requeue retry reset failed for %s", task_id, exc_info=True)
-        with queue.prepared_root_billing(task), _queue_lock:  # the ledger read happens before the lock
-            if not _dead_job_is_current(job):
-                return
-            # #1183: the dead attempt's own active fence must not refuse its retry
-            # (an unknown pid proves no exact owner, so its fence stays).
-            from supervisor.queue_transitions import clear_acceptance_fence_for_attempt
-            if isinstance(getattr(w.proc, "pid", None), int):
-                clear_acceptance_fence_for_attempt(task_id, task_attempt=attempt, pid=w.proc.pid)
-            _pool().RUNNING.pop(task_id)
-            try:
-                admitted = queue.enqueue_task(task, front=True)
-            except Exception:
-                _pool().RUNNING[task_id] = meta
-                raise
+        admitted = _readmit_crash_retry(job, queue, task, attempt)
+        if admitted is None:
+            return
         admission_block = (
             str(admitted.get("_admission_blocked") or "")
             if isinstance(admitted, dict) else ""
@@ -769,6 +790,34 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
             task, task_id, terminal_event[0],
             reason_code=terminal_event[1], cost_fields=r_cost_fields,
         )
+
+
+def _readmit_crash_retry(job: dict, queue: Any, task: dict, attempt: int) -> Optional[dict]:
+    """The crash retry's admission, one Q transaction; None when the job is no longer current (nothing touched).
+
+    A conversation-lane turn returns to its lane (``conversation_lane.readmit_after_crash``): its recovery
+    never waits on the project pool's capacity or crash fuse. Project work re-enters PENDING at the front,
+    its billing binding read before Q.
+    """
+    from contextlib import nullcontext
+    from supervisor.conversation_lane import conversation_row, readmit_after_crash
+    from supervisor.queue_transitions import clear_acceptance_fence_for_attempt
+
+    w, task_id, meta = job["worker"], job["task_id"], job["meta"]
+    lane_turn = conversation_row(meta)
+    with (nullcontext() if lane_turn else queue.prepared_root_billing(task)), _queue_lock:
+        if not _dead_job_is_current(job):
+            return None
+        # #1183: the dead attempt's own active fence must not refuse its retry
+        # (an unknown pid proves no exact owner, so its fence stays).
+        if isinstance(getattr(w.proc, "pid", None), int):
+            clear_acceptance_fence_for_attempt(task_id, task_attempt=attempt, pid=w.proc.pid)
+        _pool().RUNNING.pop(task_id)
+        try:
+            return readmit_after_crash(task, meta) if lane_turn else queue.enqueue_task(task, front=True)
+        except Exception:
+            _pool().RUNNING[task_id] = meta
+            raise
 
 
 def _reaper():

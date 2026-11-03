@@ -52,6 +52,9 @@ _LIVE = {
     "OUROBOROS_MODEL_HEAVY": "claude-opus-4.8",
     "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.6",
     "OUROBOROS_MODEL_FALLBACKS": "openai/gpt-5.5",
+    # Saved like every slot: an OpenRouter catalog id, so the search is pinned there too. A blank
+    # search Model plans its recommended legs instead (tests/test_search_routes.py).
+    "OUROBOROS_WEBSEARCH_MODEL": "openai/gpt-5.5",
     "OUROBOROS_REVIEW_MODELS": "anthropic/claude-fable-5,openai/gpt-5.6-sol",
     "OPENROUTER_API_KEY": "or-value",
     "OPENAI_API_KEY": "oa-value",
@@ -111,6 +114,7 @@ def test_legacy_claude_sdk_settings_are_inert_state():
     manifests replay; it is a documented no-op)."""
     live = {
         "OUROBOROS_MODEL": "openrouter/model",
+        "OUROBOROS_WEBSEARCH_MODEL": "openrouter/model",  # pinned with Main: only the retired slots are in question
         "CLAUDE_CODE_MODEL": "claude-explicit",
         "CLAUDE_AGENT_SDK_MODEL": "opus",
         "OPENROUTER_API_KEY": "or-value",
@@ -216,9 +220,9 @@ def test_a_settings_mapping_with_no_slots_fails_OPEN_and_discloses_it(monkeypatc
     plan = provider_credential_plan({"OUROBOROS_MODEL": "", "CLAUDE_CODE_MODEL": ""})
     assert plan["fail_open"] is False and plan["planned_keys"]
 
-    # Degenerate case: nothing resolvable at all.
+    # Degenerate case: nothing resolvable at all (a ddgs web search needs no credential).
     monkeypatch.setattr(pm, "declared_model_settings", lambda _settings: {})
-    degenerate = provider_credential_plan({})
+    degenerate = provider_credential_plan({"OUROBOROS_WEBSEARCH_BACKEND": "ddgs"})
     assert degenerate["fail_open"] is True
     assert degenerate["planned_keys"] == sorted(pm.ALL_PROVIDER_CREDENTIAL_KEYS)
 
@@ -278,6 +282,7 @@ def test_initial_manifest_uses_disabled_claude_projection(tmp_path, monkeypatch)
     settings_path.write_text(
         json.dumps({
             "OUROBOROS_MODEL": "openrouter/model",
+            "OUROBOROS_WEBSEARCH_MODEL": "openrouter/model",  # pinned with Main: only the retired slots are in question
             "CLAUDE_CODE_MODEL": "",
             "CLAUDE_AGENT_SDK_MODEL": "",
             "OPENROUTER_API_KEY": "",
@@ -567,6 +572,8 @@ def test_task_result_row_publishes_the_runtime_reason_alongside_the_adapter_stag
 # enforces — a new runtime code with no row here fails the suite, which is the only thing
 # that stops the vocabulary from being hand-copied beside the check again.
 _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
+    "request_invalid": (False, "gateway/skill_publish.py: unreadable publish-preflight body; HTTP 400 before any action, not a task terminal"),
+    "secret_request_form_only": (False, "protected secret-form policy refuses an ordinary quiz answer; no execution or source is truncated"),
     "project_routing_fence_lookup_failed": (False, "gateway/tasks.py: Project authority unreadable before admission; HTTP 409, no running attempt truncated"),
     "input_source_selection_unsupported": (False, "HTTP 400 before root-task admission; no execution was truncated"),
     "task_source_invalid": (False, "gateway/task_archive.py: source selector basename differs from the requested artifact; HTTP 400, not a task terminal or trial truncation"),
@@ -623,6 +630,8 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "children_unabsorbed": (True, "historical forced terminal; retained for old benchmark records, no longer emitted"),
     "llm_api_error": (True, "loop_llm_call.py:630 transport death; never a fair shot"),
     "context_overflow": (True, "loop_model_call.py: known-window admission exhausted size recovery; host-stopped, not a capability result"),
+    "context_capacity": (True, "agent_dispatch.py pooled start / context_renewal.py growth: the known window cannot hold the "
+                               "task's context; host-stopped before or during execution, not a capability result"),
     "output_recovery_exhausted": (True, "loop_output_exhaustion.py: empty-answer recovery exhausted; incomplete provider outcome, not task completion"),
     # S3 owner graceful stop ("Wrap up"): the owner ended the attempt, so
     # reward 0 is an owner decision, never a fair-shot capability fact (CF-02:
@@ -656,6 +665,18 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "provider_outcome_unknown": (
         False,
         "tools/search.py recoverable ambiguous paid-call result returned to the LLM; the root task remains live",
+    ),
+    # tell_task: both are one-call tool results for the model's next turn, never the root task's terminal reason.
+    "argument_invalid": (
+        False,
+        "tools/control_relay.py tell_task argument refusal (TOOL_ARG_ERROR, published as completed_no_effect before "
+        "any write) returned to the LLM; the root task remains live",
+    ),
+    "arrival_effect_unknown": (
+        False,
+        "tools/control_relay.py tell_task arrival hand-over whose write may or may not have landed (TELL_UNCONFIRMED: "
+        "retry the same arrival; place_intake's `arrival_effect_unknown:<task>` refusal is the same fact) returned to "
+        "the LLM; the root task remains live",
     ),
     "finalize_control_pending": (
         False,
@@ -703,6 +724,9 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
         False,
         "agent.py pre-context canonical-authority refusal; no substantive task attempt",
     ),
+    # The same terminal under its own cause: a handbook the task's own contract requires (start_task alone authors
+    # it) could not be read, so no model round ran and no execution was cut short.
+    "required_reference_unavailable": (False, "context_input_selection.py pre-model source refusal; no task attempt ran"),
     # Phase-A AR2-1: the HTTP cancel ingress refuses (503) when the durable
     # cancel-intent write fails — an ingress refusal about a CANCEL request; the
     # task itself keeps running untouched, so no trial ever terminalizes with it.
@@ -952,6 +976,10 @@ def test_context_admission_terminal_is_truncated_without_claiming_provider_failu
     assert outcome["failure"]["kind"] == "runtime"
     assert runtime_terminal_disclosure(outcome)["truncated"] is True
     assert runtime_terminal_disclosure({"status": "completed", "reason_code": ""})["truncated"] is False
+    # A window that cannot hold the task, at its start or beside its own required handbook, stopped it too.
+    capacity = derive_loop_outcome("", {**usage, "reason_code": "context_capacity"}, {})
+    assert capacity["failure"] == {"kind": "runtime", "reason_code": "context_capacity"}
+    assert runtime_terminal_disclosure(capacity)["truncated"] is True
 
 
 def test_the_two_out_of_tree_mirrors_stay_pinned_to_the_derived_vocabulary():

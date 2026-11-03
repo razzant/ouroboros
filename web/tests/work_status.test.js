@@ -16,8 +16,8 @@ import { markView } from '../modules/status_mark.js';
 import { summarizeRoom } from '../modules/project_activity.js';
 import {
     OUTCOME_TONES, activityWord, applyCardWorkViews, cardControls, cardMenuActions, cardWorkView, clock, emptyWorkState,
-    memberState, ownStopPress, reasonText, reconcileWorkState, resumeTargets, roomStatusView, workControls, workLine,
-    workMenuActions, workQuestion, workRowView,
+    memberState, ownStopPress, reasonText, reconcileWorkState, resumeAttemptClause, resumeAttemptWords, resumeTargets,
+    roomStatusView, workControls, workLine, workMenuActions, workQuestion, workRowView,
 } from '../modules/work_status.js';
 import { SERVER_REASONS, room, serverMark, work as builtWork } from './work_fixture.js';
 
@@ -671,4 +671,76 @@ test('the line\'s clock: the time today, the date as well on another day; second
     // The owner's press is said with its time; no other reason gets one.
     assert.equal(workLine(work('paused_by_owner')), `You paused it · ${clock(work('paused_by_owner').because[0].since)}`);
     assert.equal(workLine(work('spending_limit')), 'Spending limit reached');
+});
+
+test('a recorded Stop says itself on the row and the card of a press no card saw, beside the word it still is', () => {
+    const work = { activity: 'working', transition: 'none', call: '', confirmed: true, mark: 'moving', turn: [], tails: [],
+        episode: { task_id: 'turn', live: true },
+        because: [{ code: 'stop_requested', text: 'Stop requested: it ends at its next step' }] };
+    const row = workRowView(work);
+    assert.equal(row.word, 'Working');
+    assert.equal(row.secondary, 'Stop requested: it ends at its next step');
+    assert.equal(cardWorkView(work).secondary, 'Stop requested: it ends at its next step');
+    // The owner's own press on a loaded card keeps its immediate word, and says nothing twice.
+    assert.equal(workRowView(work, { stopping: 'immediate' }).word, 'Cancelling…');
+    assert.equal(workRowView(work, { stopping: 'immediate' }).secondary, '');
+    // Without the fact a working work's card keeps its own chip: nothing invents a Stop.
+    assert.equal(cardWorkView({ ...work, because: [] }), null);
+});
+
+// #2380/#2411: a held work's latest refused Resume about the control holding it now, as the server sends it
+// (work_stop.last_resume), rides last on its line, dated and naming who asked; its words explain the word in the
+// card's details. It is never a control or the owner's turn, and a work an incomplete body omitted drops it with its
+// line. The host's own refused start of a Continue whose earlier work settled is that Continue's reason instead.
+test('a refused Resume is dated history at the end of the line, its words in the card\'s details', () => {
+    const REFUSED = clock('2026-10-17T15:05:00Z');
+    const owner = work('paused_resume_refused');
+    const words = `Resume refused at ${REFUSED}: task h1 is queued to run; task h2 is queued to run`;
+    assert.equal(workLine(owner), `You paused it · ${PRESSED} · Resume refused at ${REFUSED}`);
+    assert.equal(resumeAttemptWords(owner.last_resume), words);
+    const card = cardWorkView(owner);
+    assert.deepEqual([card.text, card.secondary, card.note], ['Paused', workLine(owner), words]);
+    const chip = taskActivityPresentation({ workView: card, work: { mark: owner.mark, owner: false } });
+    assert.deepEqual([chip.text, chip.secondary, chip.note], ['Paused', workLine(owner), words]);
+    assert.deepEqual(workControls(owner).resume, 'rr', 'the door\'s own Resume, unchanged');
+    // Ouroboros's own refused Resume is said as its own, beside the app stop that still holds the work.
+    const mind = work('saved_resume_refused');
+    assert.equal(workLine(mind), `Saved when the app stopped · Resume by Ouroboros refused at ${REFUSED}`);
+    assert.equal(workControls(mind).resume, 'sr');
+    // A refusal about another, earlier Pause is no fact of this one: the server sends none.
+    const earlier = work('paused_resume_refused_earlier');
+    assert.deepEqual([earlier.last_resume, workLine(earlier), cardWorkView(earlier).note],
+        [undefined, `You paused it · ${PRESSED}`, undefined]);
+    for (const nothing of [null, {}, { at: 'not a time' }]) assert.equal(resumeAttemptClause(nothing), '');
+    // An incomplete body that omits the work keeps it unconfirmed: no line, so no history on it either.
+    const kept = reconcileWorkState(stateOf('paused_resume_refused'),
+        { supervisor_ready: true, works: [], works_complete: false, rooms: {} }, 42);
+    assert.deepEqual([kept.works[0].activity, workLine(kept.works[0]), cardWorkView(kept.works[0])], ['unknown', '', null]);
+});
+
+test('a refused Resume\'s words read in the install language by their exact text; a sentence the memory lacks stays English', () => {
+    const REFUSED = clock('2026-10-17T15:05:00Z');
+    const prior = currentPayload();
+    const attempt = (text) => ({ at: '2026-10-17T15:05:00Z', by: { actor: 'owner' }, error: 'e', text });
+    try {
+        applyPayload({ language: 'ru', english: false, entries: {
+            'Resume refused at {time}': { text: 'Resume отклонён в {time}' },
+            'task h1 is queued to run': { text: 'задача h1 ждёт запуска' },
+        } });
+        assert.equal(resumeAttemptWords(attempt('task h1 is queued to run')), `Resume отклонён в ${REFUSED}: задача h1 ждёт запуска`);
+        assert.equal(resumeAttemptWords(attempt('  task h2 is queued to run ')), `Resume отклонён в ${REFUSED}: task h2 is queued to run`);
+        assert.equal(resumeAttemptWords(attempt('')), `Resume отклонён в ${REFUSED}`);
+        assert.equal(resumeAttemptWords({ text: 'task h1 is queued to run' }), '', 'no dated clause: nothing is said');
+    } finally { applyPayload(prior); }
+});
+
+test('a Continue whose own start was refused after its earlier work settled says so, waiting, with no Resume', () => {
+    const REFUSED = clock('2026-10-17T15:05:00Z');
+    const held = work('continue_start_refused');
+    assert.equal(workRowView(held).word, 'Waiting');
+    assert.equal(workLine(held), `Continue tries to start again by itself · Start refused at ${REFUSED}`);
+    assert.equal(resumeAttemptWords(held.last_resume), `Start refused at ${REFUSED}: accounting unavailable`);
+    assert.equal(cardWorkView(held).note, `Start refused at ${REFUSED}: accounting unavailable`);
+    assert.equal(workControls(held).resume, '', 'it tries again by itself: no Resume is offered');
+    assert.ok(!/earlier attempt's work is confirmed finished/.test(workLine(held)), 'never the stale wait');
 });

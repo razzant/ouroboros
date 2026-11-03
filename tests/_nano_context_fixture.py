@@ -66,7 +66,10 @@ def runtime_data():
 def skills_section(root, monkeypatch):
     rows = [dict(name=f'skill-{n}', enabled=True, executable_review=True, type='behavior', version='1',
                  review_status='advisory', review_gate={'author_accepted': True},
-                 description='Skill capability description.', when_to_use='When requested.') for n in range(8)]
+                 description='Skill capability description.', when_to_use='When requested.',
+                 tool_surfaces=[{'name': f'ext_skill_{n}_tool_{k}'} for k in range(3)],
+                 model_experience={'what_model_sees': 'One bounded block.', 'token_effect': 'About 300 tokens.'})
+            for n in range(8)]
     monkeypatch.setattr('ouroboros.skill_loader.summarize_skills', lambda *_: {'skills': rows})
     return _build_installed_skills_section(SimpleNamespace(drive_root=root), skills=[])
 

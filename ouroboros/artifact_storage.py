@@ -144,9 +144,10 @@ def compression_outcome(path: pathlib.Path, *, owned: Optional[Callable[[], bool
     cannot shrink by one allocation block is ``incompressible``; free space below the file's size is
     ``low_space``. macOS hashes, writes a ``ditto --hfsCompression`` sibling (``compression_sibling``;
     BACKGROUND, the ``record_compression`` job's, runs it at the utility disk tier through ``taskpolicy``),
-    verifies it, asks OWNED (else ``not_owned``), then re-stats the original right before the replace
-    (device, inode, size, mtime: else ``changed``); NTFS asks OWNED, compresses in place through its
-    file control and verifies the bytes after. Anything else is ``failed``."""
+    verifies and fsyncs it, asks OWNED (else ``not_owned``), then re-stats the original right before the
+    replace (device, inode, size, mtime: else ``changed``) and syncs the folder (``store.fsync_directory``); NTFS
+    asks OWNED, compresses in place through its file control and verifies the bytes after. Anything else is
+    ``failed``, the original untouched."""
     path = pathlib.Path(path)
     if not compression_supported():
         return "unsupported"
@@ -220,6 +221,7 @@ def _compress_macos(path: pathlib.Path, before: os.stat_result, owned: Optional[
                     background: bool = False) -> str:
     from ouroboros.artifacts import stream_artifact_file
     from ouroboros.config import ARTIFACT_COMPRESSION_TIMEOUT_SEC
+    from ouroboros.store import fsync_directory
 
     expected = stream_artifact_file(path)
     temporary = compression_sibling(path)  # a hard kill's leftover is reaped (own tag), never a deliverable
@@ -232,6 +234,13 @@ def _compress_macos(path: pathlib.Path, before: os.stat_result, owned: Optional[
         stream_artifact_file(temporary, expected=expected)
         if not getattr(os.lstat(temporary), "st_flags", 0) & stat.UF_COMPRESSED:
             return "incompressible"
+        # A record may already be someone's synced copy (an archive whose original was let go): its verified
+        # replacement reaches the disk before it takes the name, as the record's own writer synced it.
+        reader = os.open(temporary, os.O_RDONLY)
+        try:
+            os.fsync(reader)
+        finally:
+            os.close(reader)
         if owned is not None and not owned():  # it may wait on the store: before the last look, never after
             return "not_owned"
         now = os.lstat(path)
@@ -239,6 +248,7 @@ def _compress_macos(path: pathlib.Path, before: os.stat_result, owned: Optional[
                 before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
             return "changed"  # a writer touched it since: its bytes win
         os.replace(temporary, path)
+        fsync_directory(path.parent)  # and its new entry, where the platform syncs a directory
         return "compressed"
     finally:
         try:

@@ -6,7 +6,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import {
     API_PROVIDER_CREDENTIAL_KEYS, API_PROVIDER_ORDER, API_ROUTE_CHOICE, apiProviderLabel,
-    changeRouteChoice, configuredApiProviders, decodeRouteChoice, encodeRouteChoice,
+    changeRouteChoice, compatibleEndpoint, configuredApiProviders, decodeRouteChoice, encodeRouteChoice,
     routeChoiceGroups, routeModelFields, routeModelInputHtml, routeModelSuggestions,
     routeTargetFromModel, sourceIdentityLabel,
 } from '../modules/route_editor_primitives.js';
@@ -43,11 +43,28 @@ test('a provider with more than one credential shape accepts either of them', ()
     assert.deepEqual(ids({ GIGACHAT_PASSWORD: '***set***' }), []);
     assert.deepEqual(ids({ GIGACHAT_USER: 'owner', GIGACHAT_PASSWORD: '***set***' }), ['gigachat']);
     assert.deepEqual(ids({ OPENAI_COMPATIBLE_BASE_URL: 'http://localhost:1234/v1' }), ['openai-compatible']);
-    // The legacy pair still reaches an OpenAI-compatible endpoint at runtime.
-    assert.deepEqual(ids({ OPENAI_BASE_URL: 'http://localhost:1234/v1' }), ['openai-compatible']);
-    // …and the key it shares with direct OpenAI does not make the endpoint usable.
+    // The legacy address reaches an endpoint only with the OpenAI key it travels with, exactly as
+    // provider_models.compatible_endpoint_configured reads it; that key still offers official OpenAI.
+    assert.deepEqual(ids({ OPENAI_BASE_URL: 'http://localhost:1234/v1' }), []);
+    assert.deepEqual(ids({ OPENAI_BASE_URL: 'http://localhost:1234/v1', OPENAI_API_KEY: '***set***' }),
+        ['openai', 'openai-compatible']);
+    // …and the key alone does not make an endpoint usable.
     assert.deepEqual(ids({ OPENAI_API_KEY: 'sk' }), ['openai']);
     for (const key of API_PROVIDER_CREDENTIAL_KEYS) assert.ok(configuredApiProviders({ [key]: 'x' }).length <= 1, key);
+});
+
+test('the built-in compatible source sends one pair, never borrowing the other pair\'s key', () => {
+    const legacy = { OPENAI_BASE_URL: ' http://127.0.0.1:8080/v1 ', OPENAI_API_KEY: '***set***' };
+    assert.deepEqual(compatibleEndpoint(legacy), { baseUrl: 'http://127.0.0.1:8080/v1', apiKey: '***set***', apiKeySetting: 'OPENAI_API_KEY', legacy: true });
+    // A dedicated address wins and travels with its own key, blank meaning no auth.
+    assert.deepEqual(compatibleEndpoint({ ...legacy, OPENAI_COMPATIBLE_BASE_URL: 'http://127.0.0.1:9090/v1' }),
+        { baseUrl: 'http://127.0.0.1:9090/v1', apiKey: '', apiKeySetting: 'OPENAI_COMPATIBLE_API_KEY', legacy: false });
+    assert.deepEqual(compatibleEndpoint({ ...legacy, OPENAI_COMPATIBLE_BASE_URL: 'http://127.0.0.1:9090/v1',
+        OPENAI_COMPATIBLE_API_KEY: 'dedicated' }), { baseUrl: 'http://127.0.0.1:9090/v1', apiKey: 'dedicated', apiKeySetting: 'OPENAI_COMPATIBLE_API_KEY', legacy: false });
+    // A dedicated key without its address configures nothing and never reaches the legacy address.
+    assert.deepEqual(compatibleEndpoint({ OPENAI_BASE_URL: 'http://127.0.0.1:8080/v1', OPENAI_COMPATIBLE_API_KEY: 'dedicated' }),
+        { baseUrl: 'http://127.0.0.1:8080/v1', apiKey: '', apiKeySetting: 'OPENAI_API_KEY', legacy: true });
+    assert.deepEqual(compatibleEndpoint({}), { baseUrl: '', apiKey: '', apiKeySetting: 'OPENAI_API_KEY', legacy: true });
 });
 
 test('provider names come from the setup contract, with a name for the ones it omits', () => {

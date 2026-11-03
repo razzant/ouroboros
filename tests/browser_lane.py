@@ -39,6 +39,8 @@ from tests.ci_verdicts import durations_table
 # an entry is a diff-time decision, like a reference-book byte budget. Every
 # match is reported as UI_BROWSER_PLATFORM_SKIP with the reason the test gave.
 PLATFORM_SKIPS = (
+    ("tests/test_process_temp_consumers.py::test_a_long_named_cases_real_server_listens_in_its_own_process_temp",
+     r"a Windows manager listens on a named pipe"),
     ("tests/test_settings_restart_browser.py", r"POSIX test launcher"),
     # The same POSIX launcher, for exactly this case: its `[direct]` sibling runs everywhere.
     ("tests/test_ui_candidate_server.py::"

@@ -282,13 +282,19 @@ def test_anthropic_preserves_the_message_seal_and_gives_schemas_only_a_free_slot
 
 
 def test_the_view_fact_reaches_the_cap_info_the_task_context_and_one_event(tmp_path):
+    from types import SimpleNamespace
+
     from ouroboros.memory_inventory import VIEW_TRACE_KEY
     from ouroboros.tools.tool_context import ToolContext
 
     env, memory, _rooms = world(tmp_path)
     ctx = ToolContext(repo_dir=env.repo_dir, drive_root=memory.drive_root, task_id="tmain", task_metadata={},
                       current_chat_id=1)
-    _messages_out, cap = _messages(env, memory, MAIN, ctx=ctx)
+    # A known window, pinned as the sibling max_room tests do: the default route's catalogue answer is
+    # session-shared state, and an unknown window carries no max_room by contract (test_memory_max_room).
+    evidence = SimpleNamespace(route_fp="r", status="asserted", stale=False, window_tokens=1_000_000)
+    _messages_out, cap = _messages(env, memory, MAIN, ctx=ctx,
+                                   route_resolver=lambda *_a, **_kw: ({"model": "m", "provider": "p"}, evidence))
     facts = cap["memory_view"]
     assert facts["role"] == "integrator" and facts["room_id"] == "1"
     assert facts["store_status"] == {"state": "active", "tail_facts": "filling"}  # open rows read live, no fill yet
@@ -377,7 +383,7 @@ def test_a_nano_floor_names_only_the_path_its_own_request_sends(tmp_path, monkey
 
     from ouroboros import context
     from ouroboros.contracts.task_constraint import TaskConstraint
-    from ouroboros.memory_floor import minimal_view_tokens
+    from ouroboros.memory_floor import render_view_for_mode, view_tokens
     from ouroboros.memory_view import snapshot_from_json
     from ouroboros.tool_policy import initial_tool_schemas, select_tool_schemas
     from ouroboros.tools.registry import ToolRegistry
@@ -402,8 +408,12 @@ def test_a_nano_floor_names_only_the_path_its_own_request_sends(tmp_path, monkey
                                                route_resolver=lambda *_a, **_kw: ({"model": "m", "provider": "p"}, evidence))
 
     roomy = plan(10_000_000)  # Nano's fixed part and reserve, read off a roomy plan; then a window only Nano fits
+    shortest = render_view_for_mode(snapshot_from_json(core.memory_view_json), mode="nano", owner_mode=owner,
+        window_tokens=10_000_000, known_window=True, output_reserve=roomy.output_reserve_tokens, ratio=1.0,
+        non_memory_tokens=10_000_000, lowered_from=None if owner == "nano" else owner,  # no room: its last view
+        tool_names=select_tool_schemas(schemas, context_mode="nano").chosen)
     window = (10_000_000 - roomy.projection("nano").memory_facts["floor"]["physical_allowance_tokens"]
-              + minimal_view_tokens(snapshot_from_json(core.memory_view_json), window_tokens=10_000_000) + 50)
+              + view_tokens(shortest[0]) + view_tokens(shortest[1]) + 50)
     start = plan(window)
     from ouroboros.context_budget import context_mode_limits
     from ouroboros.context_fit import tool_schema_tokens

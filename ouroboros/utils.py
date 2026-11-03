@@ -44,16 +44,26 @@ WORKER_PROCESS_ENV = "OUROBOROS_IN_WORKER"
 
 
 def in_worker_process() -> bool:
-    """Return True inside a supervisor worker process.
-
-    Worker processes disable system proxy resolution (``trust_env=False`` /
-    ``ProxyHandler({})``) on every HTTP client they create. This is the central
-    network-transport policy that keeps workers fork-safe: the macOS
-    ``_scproxy.get_proxies`` -> ``SCDynamicStoreCopyProxies`` lookup crashes
-    (SIGSEGV) on the child side of a multi-threaded fork. It is also a clean,
-    proxy-free default for spawned workers on every platform.
-    """
+    """Return True inside a supervisor worker process (a process fact: ownership, lifelines, custody)."""
     return os.environ.get(WORKER_PROCESS_ENV) == "1"
+
+
+# The spawner's transport policy for a child: "1" forbids OS proxy resolution (``trust_env=False`` /
+# ``ProxyHandler({})``) on every HTTP client the child creates. It is the fork-safety rule — the macOS
+# ``_scproxy.get_proxies`` -> ``SCDynamicStoreCopyProxies`` lookup crashes (SIGSEGV) on the child side
+# of a multi-threaded fork — stated by the parent for the start method it used; a spawned or
+# forkserver child keeps the server's own policy, so a conversation carried by a worker reaches the
+# model the way the server would (owner decision 1A, trap 1).
+TRANSPORT_NO_PROXY_ENV = "OUROBOROS_TRANSPORT_NO_PROXY"
+
+
+def transport_no_proxy() -> bool:
+    """Whether this process must avoid OS proxy lookup: the spawner's explicit fact, else the legacy
+    worker default for a child that received none."""
+    stated = os.environ.get(TRANSPORT_NO_PROXY_ENV)
+    if stated in ("0", "1"):
+        return stated == "1"
+    return in_worker_process()
 
 
 def emit_log_event(
@@ -521,7 +531,7 @@ def assert_test_data_path(path: pathlib.Path) -> None:
 
 def append_jsonl(
     path: pathlib.Path, obj: Dict[str, Any], *, ensure_record_boundary: bool = False,
-    require_lock: bool = False, lock_timeout_sec: float = 2.0, live: bool = True,
+    require_lock: bool = False, lock_timeout_sec: float = 2.0, live: bool = True, lock_held: bool = False,
 ) -> bool:
     """Append a JSON object as a line to a JSONL file (concurrent-safe).
 
@@ -533,6 +543,8 @@ def append_jsonl(
     shared owner-aware lock primitive, so a live holder is never displaced.
     ``lock_timeout_sec=0`` takes one attempt without a contention wait, for
     shutdown callers whose grace has expired; unlocked fallback is unchanged.
+    ``lock_held``: the caller already holds this file's append lock (a read of
+    the stream and this append under one hold), so none is taken again.
     Runtime ``logs/*.jsonl`` rows are streamed to the ``set_log_sink`` sink, minus
     types with a dedicated live owner (``WORKER_LOG_SINK_SUPPRESSED_TYPES``, server
     superset ``SERVER_LOG_SINK_SUPPRESSED_TYPES``): one event, one live frame, so a
@@ -565,7 +577,7 @@ def append_jsonl(
     try:
         # Both lanes wait out a live lock holder, never displacing it;
         # the non-required lane then appends unlocked.
-        lock_fd = acquire_exclusive_file_lock(
+        lock_fd = None if lock_held else acquire_exclusive_file_lock(
             lock_path,
             timeout_sec=lock_timeout_sec,
             stale_sec=10.0,
@@ -573,7 +585,7 @@ def append_jsonl(
             owner_aware_stale=True,
         )
 
-        if require_lock and lock_fd is None:
+        if require_lock and lock_fd is None and not lock_held:
             log.warning("append_jsonl: required lock unavailable for %s", path)
             return False
 

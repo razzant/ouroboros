@@ -272,6 +272,50 @@ def test_no_declared_manifest_at_all_stays_unobserved(tmp_path):
     assert "native_incomplete" not in result.usage
 
 
+@pytest.mark.parametrize("required", ["absent", "empty", "unread"])
+def test_the_required_key_decides_the_fold_and_an_observed_source_stays_apart(tmp_path, required):
+    """As a session chooses: a required manifest's key, an empty one included, decides what `native_read_coverage`
+    folds; without the key it is the observed sources. Only a required source can owe a capability delta, and a read
+    of an observed source is measured either way. The answer and the sends are the same in all three."""
+    repo, data = tmp_path / "repo", tmp_path / "data"
+    repo.mkdir()
+    (repo / "owed.txt").write_text("owed body\n", encoding="utf-8")
+    (repo / "room.txt").write_text("first\nsecond\n", encoding="utf-8")
+    llm = _ScriptedLLM([{"tool_calls": [_tool_call("read_file", {"path": "room.txt", "max_lines": 1})]}, {"content": "[]"}])
+    assignment = dataclasses.replace(_assignment(repo, llm), custody_root=data)
+    assignment.request.policy["observed_sources"] = [_source(repo / "room.txt")]
+    if required != "absent":
+        assignment.request.policy["native_required_sources"] = [] if required == "empty" else [_source(repo / "owed.txt")]
+    result = native.NativeToolRoundReviewExecutor(assignment, llm=llm).execute()
+    coverage = result.usage["native_read_coverage"]
+    observed = coverage if required == "absent" else result.usage["observed_read_coverage"]
+    assert [(row["path"], row["status"], row["covered_chars"]) for row in observed["sources"]] == [("room.txt", "incomplete", 6)]
+    if required == "absent":
+        assert "observed_read_coverage" not in result.usage and "native_incomplete" not in result.usage
+    elif required == "empty":
+        assert (coverage["status"], coverage["reason"]) == ("complete", "declared_empty") and "native_incomplete" not in result.usage
+    else:
+        assert coverage["sources"][0]["path"] == "owed.txt" and result.usage["native_incomplete"] == "required_source_coverage_incomplete"
+    assert bool(result.usage.get("capability_delta")) is (required == "unread")
+    assert result.raw_text == "[]" and len(llm.calls) == 2
+    history = json.loads(read_actor_source_bytes(data, "t-native", result.usage["native_history_source"]))
+    assert history["observed_sources"][0]["path"] == "room.txt" and history["read_receipts"]
+
+
+def test_a_required_row_with_no_inspection_context_implies_no_measurement(tmp_path):
+    """Nothing was measured: the fold says so, the row holds no count and it is still listed as not covered."""
+    from ouroboros.tools.scope_required_sources import coverage_state, uncovered_sources
+
+    repo, data = tmp_path / "repo", tmp_path / "data"
+    repo.mkdir()
+    (repo / "owed.txt").write_text("owed body\n", encoding="utf-8")
+    executor = _native(repo, data, _ScriptedLLM([]), [_source(repo / "owed.txt")])
+    coverage = executor._read_coverage()
+    assert coverage["reason"] == "native_inspection_unavailable" and coverage_state(coverage) == "unobserved"
+    assert "covered_chars" not in coverage["sources"][0]
+    assert uncovered_sources(coverage) == ["owed.txt"]
+
+
 @pytest.mark.parametrize("inline", [False, True])
 def test_source_delivered_inline_needs_no_second_read(tmp_path, inline):
     repo, data = tmp_path / "repo", tmp_path / "data"

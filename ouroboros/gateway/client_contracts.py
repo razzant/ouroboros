@@ -137,6 +137,7 @@ class SetupInitialState(TypedDict):
     never the secret), per ``contract.budgetFields[].stateKey`` and per ``contract.modelSlots[].stateKey``."""
 
     connections: List[Dict[str, Any]]  # masked OUROBOROS_CONNECTIONS rows, keyed by kind/name
+    legacyCompatibleBaseUrl: str  # saved OPENAI_BASE_URL, display only: completion never writes it
     safetyModel: str
     providerProfile: str
     reviewEnforcement: str
@@ -736,6 +737,10 @@ class TaskResumeResponse(TypedDict, total=False):
     held_siblings: List[str]
     rebound_held_siblings: List[str]
     released_hold: str
+    # A Continue whose earlier attempt's writers all still run returned to its own writer hold: it starts by itself
+    # once ``blockers`` (that census) settle, unless a newer Pause, Stop or Panic replaces the wait.
+    held: bool
+    blockers: List[Dict[str, Any]]
     # The still-closed Pause's census settled without these unreadable rows nothing ties to the task:
     # {"rows": [{"task_id", "reason"}] (at most 20), "count"}; ``message`` words them.
     membership_gaps: Dict[str, Any]

@@ -18,9 +18,12 @@ KIND_RELAY = "relay_entry"
 
 
 def _owner_row(row) -> bool:
+    from ouroboros.owner_quiz import secret_outcome_block
     from ouroboros.owner_words import _owner_row as attested
+    # A secret request's answer row is the host's outcome frame: never a quotable owner row.
     return attested(row) or bool(row and row.get("type") == "quiz_answer"
-        and row.get("source") == "owner_quiz_answer" and (row.get("quiz") or {}).get("state") == "answered")
+        and row.get("source") == "owner_quiz_answer" and (row.get("quiz") or {}).get("state") == "answered"
+        and secret_outcome_block(row) is None)
 
 
 def owner_text(row) -> str:

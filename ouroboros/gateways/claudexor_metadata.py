@@ -50,6 +50,15 @@ def remember_handshake(gateway, body):
             _handshake = copy.deepcopy(body) if body.get("servingMode") != "recovery_only" else None
 
 
+def remembered_engine(gateway):
+    """``(version, build sha)`` a remembered handshake proved for THIS gateway's descriptor
+    generation (one daemon process, one engine build), or ``None``: no new request is made."""
+    key = endpoint_generation(getattr(gateway, "_endpoint", None))
+    with _lock:
+        engine = (_handshake or {}).get("engine") if key is not None and key == _key else None
+    return (str(engine.get("version") or ""), str(engine.get("sha") or "")) if isinstance(engine, dict) else None
+
+
 def model_gateway(factory):
     """Use a proven generation, or let the existing owner ensure/probe it."""
     from ouroboros.claudexor_daemon import attach_home, attached_endpoint, get_owned_daemon, owned_config_dir

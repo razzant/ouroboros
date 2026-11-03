@@ -28,21 +28,73 @@ def is_presence_task(task: Mapping[str, Any]) -> bool:
 
 # A Presence binding's own work is reached through this scope (owner Q1/Q2).
 PRESENCE_OWN_WORK_SCOPE = "own_binding"
-# Work acting for a binding without speaking: delegated descendants and related
-# roots started by a late owner answer. Never stamp the owner turn itself or copy
-# the speaker's ``metadata.presence`` (which arms the external final and context).
+# Work acting for a binding without speaking: delegated descendants and the roots
+# they start. Never copy the speaker's ``metadata.presence`` (which arms the
+# external final and context).
 PRESENCE_BINDING_AUTHORITY_KEY = "presence_binding_authority"
+# The owner's own work related to a binding (#2482, owner choice of 1 November 2026): a
+# root a private late answer to its question started, the roots and follow-ups that work
+# starts, and its Continue. The binding's turns read and stop it (``presence_related_work``);
+# it keeps the owner's authority and never speaks there. The answering turn is not stamped.
+PRESENCE_BINDING_RELATION_KEY = "presence_binding_relation"
+_PRESENCE_CARRIER_KEYS = ("presence", PRESENCE_BINDING_AUTHORITY_KEY, PRESENCE_BINDING_RELATION_KEY)
+
+
+def _presence_carrier(metadata: Any) -> tuple[str, str] | None:
+    """``(key, binding)`` of the first carrier, speaker before authority before relation (several never
+    widen), else ``None``. A malformed carrier keeps its kind with an empty binding."""
+    if not isinstance(metadata, Mapping):
+        return None
+    for key in _PRESENCE_CARRIER_KEYS:
+        if key in metadata:
+            carrier = metadata[key]
+            value = carrier.get("binding_id") if isinstance(carrier, Mapping) else None
+            return key, value.strip() if isinstance(value, str) else ""
+    return None
+
+
+def _owner_relation(metadata: Any) -> str:
+    """The nonempty binding the owner's own work in ``metadata`` is related to, else ``""``.
+
+    The typed relation, or a root's binding authority beside the owner door's own stamp: so
+    admission recorded late-answer roots before the relation existed, and the live context
+    carries the door's ref in its metadata (``run_origin``). A speaker, a child, an
+    unstamped authority and a malformed carrier relate nothing.
+    """
+    found = _presence_carrier(metadata)
+    if found is None or not found[1]:
+        return ""
+    key, binding = found
+    if key == PRESENCE_BINDING_RELATION_KEY:
+        return binding
+    if (key == PRESENCE_BINDING_AUTHORITY_KEY and run_origin({"metadata": metadata})["owner_ingress"]
+            and not str(metadata.get("parent_task_id") or "").strip()
+            and str(metadata.get("delegation_role") or "root").strip() == "root"):
+        return binding
+    return ""
+
+
+def presence_metadata_relation(metadata: Any) -> str | None:
+    """``None`` without Presence provenance; otherwise the binding whose work this is (may be empty).
+
+    Every carrier relates its record: a speaker, work acting for it and the owner's related
+    work. Whose work a record is (read, cancel, steer target, listing) is this; what its run
+    may do is ``presence_metadata_binding``.
+    """
+    found = _presence_carrier(metadata)
+    return None if found is None else found[1]
 
 
 def presence_record_binding(record: Any) -> str:
     """The nonempty host binding id one task/queue record carries, else ``""``.
 
-    The one reader of both carriers: a speaker's ``metadata.presence`` and the
-    ``metadata.presence_binding_authority`` of related work without a speaker route.
+    The one reader of every carrier: a speaker's ``metadata.presence``, the
+    ``metadata.presence_binding_authority`` of work acting for it without a speaker
+    route, and the ``metadata.presence_binding_relation`` of the owner's related work.
     """
 
     metadata = record.get("metadata") if isinstance(record, Mapping) else None
-    return presence_metadata_binding(metadata) or ""
+    return presence_metadata_relation(metadata) or ""
 
 
 def presence_related_work(binding_id: str, record: Any) -> bool:
@@ -59,29 +111,41 @@ def presence_related_work(binding_id: str, record: Any) -> bool:
         binding
         and isinstance(record, Mapping)
         and presence_record_binding(record) == binding
-        and str(record.get("delegation_role") or "") == "root"
+        and _root_record(record)
         and not str(record.get("parent_task_id") or "").strip()
     )
 
 
-def presence_metadata_binding(metadata: Any) -> str | None:
-    """``None`` for a non-Presence task's metadata; otherwise the binding it acts for (may be empty).
+def _root_record(record: Mapping[str, Any]) -> bool:
+    """A record's recorded role; a Continue admitted before its record kept one is a root by its own validated admission."""
+    role = str(record.get("delegation_role") or "")
+    return role == "root" if role else presence_continue_record(record)
 
-    A Presence speaker carries ``metadata.presence``; a descendant or related root
-    without a speaker route holds only the host-inherited binding authority. A
-    malformed authority carrier is still a Presence one: it narrows to nothing.
+
+def presence_continue_record(record: Mapping[str, Any]) -> bool:
+    """Whether this record's own host admission, hash-valid, names this very record as a Continue's successor."""
+    admission = _mapping(record.get("continuation_admission"))
+    binding = _mapping(admission.get("binding"))
+    successor = binding.get("successor_task_id")
+    if not successor or successor != record.get("task_id"):
+        return False
+    from ouroboros.owner_continue import binding_sha
+
+    return admission.get("binding_sha256") == binding_sha(dict(binding))
+
+
+def presence_metadata_binding(metadata: Any) -> str | None:
+    """``None`` unless the run of ``metadata`` acts for a Presence binding; otherwise that binding (may be empty).
+
+    A Presence speaker carries ``metadata.presence``; a descendant, or a root it started,
+    without a speaker route holds only the host-inherited binding authority. A malformed
+    carrier is still a Presence one: it narrows to nothing. The owner's own work related
+    to a binding (``_owner_relation``) acts for none; ``presence_metadata_relation``
+    names whose work it is.
     """
 
-    if not isinstance(metadata, Mapping):
-        return None
-    if "presence" in metadata:
-        carrier = metadata["presence"]
-    elif PRESENCE_BINDING_AUTHORITY_KEY in metadata:
-        carrier = metadata[PRESENCE_BINDING_AUTHORITY_KEY]
-    else:
-        return None
-    value = carrier.get("binding_id") if isinstance(carrier, Mapping) else None
-    return value.strip() if isinstance(value, str) else ""
+    found = _presence_carrier(metadata)
+    return None if found is None or _owner_relation(metadata) else found[1]
 
 
 def presence_caller_binding(ctx: Any) -> str | None:
@@ -92,8 +156,29 @@ def presence_caller_binding(ctx: Any) -> str | None:
     return "" if binding is None and isinstance(contract, Mapping) and "capability_ceiling" in contract else binding
 
 
+def presence_record_metadata(task: Any) -> dict[str, Any]:
+    """A task or queue record's metadata as its own run reads it: with the owner door's ref and the
+    lineage the record keeps at top level, which the live context copies in (``agent.py``)."""
+    record = _mapping(task)
+    metadata = dict(_mapping(record.get("metadata")))
+    for key in ("origin_message_ref", "parent_task_id", "delegation_role"):
+        if key not in metadata and record.get(key) not in (None, ""):
+            metadata[key] = record[key]
+    return metadata
+
+
+def presence_task_binding(task: Any) -> str | None:
+    """``presence_caller_binding`` of a task or queue record's own run (``presence_record_metadata``)."""
+    from types import SimpleNamespace
+
+    record = _mapping(task)
+    return presence_caller_binding(SimpleNamespace(task_metadata=presence_record_metadata(record),
+                                                   task_contract=record.get("task_contract")))
+
+
 def presence_binding_authority_metadata(parent_metadata: Any, *, task_contract: Any = None) -> dict[str, Any]:
-    """What a child delegated by this task inherits: its binding authority only, or nothing."""
+    """What a child delegated by this task inherits: its binding authority only, or nothing (so
+    nothing from the owner's related work, which acts for no binding)."""
 
     binding = presence_metadata_binding(parent_metadata)
     if binding is None and isinstance(task_contract, Mapping) and "capability_ceiling" in task_contract:
@@ -102,31 +187,49 @@ def presence_binding_authority_metadata(parent_metadata: Any, *, task_contract: 
 
 
 def presence_root_carrier(source: Any, *, task_contract: Any = None) -> dict[str, Any]:
-    """The Presence carrier an independent root started from ``source`` keeps, or ``{}``.
+    """The Presence authority an independent root started from ``source`` keeps, or ``{}``.
 
     ``source`` is the starting task's metadata or its promote event. A Presence
     turn or root hands on its speaker metadata: the new root answers the same
     conversation. A delegated descendant hands on only the binding it acts for:
     its root is that binding's related work, never a speaker. A malformed or lost
     carrier under a ceiling narrows to an empty binding. Producer and admission
-    both read this; ``presence_record_binding`` reads what it writes.
+    both read this; ``presence_record_binding`` reads what it writes. The owner's
+    own related work keeps no authority: ``presence_root_relation``.
     """
 
     presence = source.get("presence") if isinstance(source, Mapping) else None
     if isinstance(presence, Mapping) and presence:
         return {"presence": dict(presence)}
-    # A private late answer is an ordinary owner turn. Only work it STARTS
-    # inherits the retained source binding, never the external speaker/final.
-    authority = presence_binding_authority_metadata(source, task_contract=task_contract)
-    if not authority and isinstance(source, Mapping):
-        from ouroboros.owner_quiz import late_answer_ref
-        from ouroboros.presence_owner_contact import private_main_contact
+    return presence_binding_authority_metadata(source, task_contract=task_contract)
 
-        late = late_answer_ref(source.get("late_answer")) or {}
-        block = _mapping(_mapping(late.get("answer_snapshot")).get("quiz"))
-        if private_main_contact(block, late.get("task_id")):
-            return {PRESENCE_BINDING_AUTHORITY_KEY: {"binding_id": block["presence_contact"]["binding_id"]}}
-    return authority
+
+def presence_relation_metadata(metadata: Any) -> dict[str, Any]:
+    """The relation the same work keeps across Continue: the owner's related work's, or ``{}``."""
+
+    binding = _owner_relation(metadata)
+    return {PRESENCE_BINDING_RELATION_KEY: {"binding_id": binding}} if binding else {}
+
+
+def presence_root_relation(source: Any) -> dict[str, Any]:
+    """The relation a new root started from ``source`` (a run's metadata or its promote event) keeps, or ``{}``.
+
+    The owner's related work hands its relation on. A private late answer is an ordinary
+    owner turn relating nothing itself; work it STARTS is the owner's own work related to
+    the binding it answered (the host's accepted answer snapshot), never that binding's
+    authority, speaker or external final, and is admitted like any owner start.
+    """
+    relation = presence_relation_metadata(source)
+    if relation or not isinstance(source, Mapping):
+        return relation
+    from ouroboros.owner_quiz import late_answer_ref
+    from ouroboros.presence_owner_contact import private_main_contact
+
+    late = late_answer_ref(source.get("late_answer")) or {}
+    block = _mapping(_mapping(late.get("answer_snapshot")).get("quiz"))
+    if private_main_contact(block, late.get("task_id")):
+        return {PRESENCE_BINDING_RELATION_KEY: {"binding_id": block["presence_contact"]["binding_id"]}}
+    return {}
 
 
 def presence_sender_origin(ctx: Any) -> dict[str, str]:
@@ -142,9 +245,9 @@ def presence_sender_origin(ctx: Any) -> dict[str, str]:
 def presence_queue_task(drive_root: Any, task_id: str) -> dict[str, Any] | None:
     """The persisted queue row of one pending/running task, if the snapshot lists it."""
 
-    from ouroboros.utils import read_json_dict
+    from ouroboros.queue_observation import load_queue_document
 
-    snapshot = read_json_dict(Path(drive_root) / "state" / "queue_snapshot.json") or {}
+    snapshot = load_queue_document(drive_root)  # shared task values expanded, parsed once per publication
     for key in ("pending", "running"):
         for item in snapshot.get(key) or []:
             task = item.get("task") if isinstance(item, Mapping) else None
@@ -174,7 +277,7 @@ def presence_target_record(drive_root: Any, task_id: str, *,
     record = stored if isinstance(stored, Mapping) and stored else None
     contract = record.get("task_contract") if isinstance(record, Mapping) else None
     has_ceiling = isinstance(contract, Mapping) and "capability_ceiling" in contract
-    if record is None or (presence_metadata_binding(record.get("metadata")) is None and not has_ceiling):
+    if record is None or (presence_metadata_relation(record.get("metadata")) is None and not has_ceiling):
         queued = {**dict(queue_row), "id": target} if isinstance(queue_row, Mapping) else (
             presence_queue_task(drive_root, target))
         record = queued or record
@@ -642,6 +745,8 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
     """
     if _mapping(row.get("host_fact")).get("kind") == "call_open":
         return {"kind": "host", "label": "host", "type": "call_open"}
+    if row.get("type") in {"quiz_answer", "quiz_closed"} and (quiz := _mapping(row.get("quiz"))).get("secret_request") and isinstance(quiz.get("secret_outcome"), Mapping):
+        return {"kind": "host", "label": _with_transport("host", row), "type": row["type"], "via": "secret_request"}  # its form outcome, never anyone's words
     if row.get("type") == "quiz_answer" or (row.get("type") == "quiz_closed"
             and (row.get("quiz") or {}).get("closed_actor") == "owner"):
         return {"kind": "human", "label": "Owner", "via": "quiz"}

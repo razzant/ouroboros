@@ -12,6 +12,7 @@ is meeting if any contributor is a meeting. Mixing never invents owner provenanc
 
 from __future__ import annotations
 
+import json
 import sys
 import threading
 import time
@@ -25,7 +26,8 @@ from ouroboros import call_protocol as cp
 # Physical transport bounds: one second of capture per track; ten minutes of
 # outbound PCM, because a provider sends a whole answer many times faster than it
 # plays and a slow socket drains it over the answer's length (held only while
-# queued, under 60 MiB per peer at 48 kHz); bounded controls and peer/track sets.
+# queued, under 60 MiB per peer at 48 kHz); a bounded count of outgoing controls,
+# each as long as its words; bounded peer/track sets.
 AUDIO_QUEUE_FRAMES = 50
 OUTPUT_QUEUE_FRAMES = 30_000
 CONTROL_QUEUE_MESSAGES = 128
@@ -497,8 +499,9 @@ class LiveCallHub(cp.CallHub):
         with self._condition:
             self._epoch = (self._epoch + 1) & 0xFFFF
             for peer in self._peers.values():
+                # The queue holds only this hub's own encoded messages, never peer input.
                 peer.outgoing = deque(m for m in peer.outgoing if isinstance(m, str)
-                                      and cp.decode_control(m)["type"] != "flush")
+                                      and json.loads(m)["type"] != "flush")
                 peer.converter = LinearResampler(self._output_rate, peer.rate)
                 peer.outgoing.appendleft(cp.encode_control({"type": "flush", "epoch": self._epoch}))
                 peer.queued_audio, peer.queued_controls = 0, len(peer.outgoing)
@@ -506,8 +509,9 @@ class LiveCallHub(cp.CallHub):
 
     def _broadcast(self, message: dict) -> None:
         text = cp.encode_control(message)
-        if len(text.encode("utf-8")) > cp.MAX_CONTROL_BYTES:
-            raise CallPeerError("control_too_large")
+        # A text frame is UTF-8. Words it cannot carry (an unpaired surrogate) fail their
+        # sender here, before any peer queues them, never inside one peer's socket.
+        text.encode("utf-8")
         for peer in self._peers.values():
             self._send(peer, text)
 

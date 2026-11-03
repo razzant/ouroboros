@@ -658,7 +658,7 @@ def test_unreadable_requested_rows_settle_nothing(env, monkeypatch):
     write_task_result(env.data, "unread1", STATUS_REQUESTED, workspace_preparation={
         "token": "t", "phase": "queued", "owner": {"pid": 1, "birth": "x"}})
     with monkeypatch.context() as patch:
-        patch.setattr(task_store, "list_documents", _unwritable)
+        patch.setattr(task_store, "owing_documents", _unwritable)
         report = prep.recover_interrupted_preparations(env.data)
     assert report["errors"] and not report["settled"]
     assert env.row("unread1")["status"] == STATUS_REQUESTED

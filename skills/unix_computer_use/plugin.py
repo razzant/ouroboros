@@ -42,8 +42,8 @@ from typing import Any
 
 from .place import PlaceMixin
 from .remote import (  # noqa: F401 - re-exported names the tests and the key/hold_key remote branches use
-    _MAX_REMOTE_SHOT_BYTES, _OSWORLD_PKGS_PREFIX, _PYAUTOGUI_BASE_ALIASES, _PYAUTOGUI_MODS, RemoteBackends,
-    _osworld_result_ok, cliclick_point, cliclick_keys,
+    _MAX_REMOTE_SHOT_BYTES, _OSWORLD_PKGS_PREFIX, _PYAUTOGUI_BASE_ALIASES, _PYAUTOGUI_MODS, PASTE_CHORD_ARGV,
+    RemoteBackends, _osworld_result_ok, cliclick_point, cliclick_keys, PBCOPY_LOCALE,
 )
 
 _TIMEOUT_SEC = 10
@@ -128,13 +128,16 @@ def _helper_python() -> str:
 
 
 def _pipe(cmd: list[str], text: str, *, timeout: int = _TIMEOUT_SEC) -> tuple[int, str, str]:
-    """Run a command with ``text`` on its stdin (the clipboard writer)."""
-    proc = subprocess.run(cmd, input=text, text=True, capture_output=True, timeout=timeout)
+    """Run the clipboard writer with ``text`` on its stdin as UTF-8 bytes, told so by LC_ALL as over SSH: pbcopy decodes
+    with the locale it inherits, so a start with LC_ALL=C or a legacy locale would store other characters (#2589)."""
+    proc = subprocess.run(cmd, input=text, encoding="utf-8", capture_output=True, timeout=timeout,
+                          env={**os.environ, "LC_ALL": PBCOPY_LOCALE})
     return int(proc.returncode), proc.stdout or "", proc.stderr or ""
 
 
 def _json(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+    """Every tool result (local, place and remote paths) as compact JSON: exactly the payload, without layout."""
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def _which(name: str) -> str:
@@ -910,8 +913,10 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
     def _capture_display(self, app: str = "") -> dict[str, Any]:
         """The display to capture: the main one, or the one holding ``app``'s front window (bounds from CoreGraphics).
 
-        The answer says how the display was chosen (``selected_by``: default, app, or fallback when the app's window
-        could not be located) so a main-display capture is never presented as the named app's display."""
+        The answer says how the display was chosen (``selected_by``: default, app, or fallback when the RESOLVED app's
+        window could not be located) so a main-display capture is never presented as the named app's display. With a
+        display list, an app not resolved (refused, or no answer naming its ``target``) is an ``error``, uncaptured;
+        without one the app is not looked up (``app_display_unread``): the default capture stays capture-only."""
         res = self._native("displays", timeout=10)
         displays = res.get("displays") if res.get("ok") else None
         query = str(app or "").strip()
@@ -920,11 +925,10 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
             return {"display_unread": reason, **({"app_display_unread": reason} if query else {})}
         chosen = {**next((d for d in displays if d.get("main")), displays[0]), "selected_by": "default"}
         if query:
-            found = self._native("resolve", query, timeout=15)
-            if not found.get("ok"):
-                return {"error": self._target_error(query, found)}
-            target = found["candidates"][0]
-            tree = self._native("tree", target["pid"], 1, 1500, timeout=8)
+            tree = self._native("observe", json.dumps({"app": query, "max_nodes": 1, "timeout_ms": 1500}), timeout=15)
+            target = tree.get("target")
+            if tree.get("stage") == "resolve" or not isinstance(target, dict):  # unresolved or unknown: never a fallback
+                return {"error": self._target_error(query, tree)}
             node = (tree.get("nodes") or [{}])[0] if tree.get("ok") else {}
             if "x" in node and "w" in node:
                 cx, cy = node["x"] + node["w"] // 2, node["y"] + node["h"] // 2
@@ -1161,12 +1165,14 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
         if via == "paste":
             # The model's choice for long or non-ASCII text (cliclick types ~70 chars/s and hit the 18 s cap on
             # 1,281 characters): write the clipboard, then paste. The clipboard is replaced, and said so; it is
-            # written only after the target was verified in front, so a refusal leaves the clipboard alone.
-            if plat == "macos" and _which("cliclick") and _which("pbcopy"):
+            # written only after the target was verified in front, so a refusal leaves the clipboard alone. The
+            # chord is Command + the key that gives V under Command in the active layout (paste_chord.js, the same
+            # program over SSH), never the layout's typed "v".
+            if plat == "macos" and _which("osascript") and _which("pbcopy"):
                 def copy() -> str:
                     rc, _out, err = _pipe(["pbcopy"], text)
                     return "" if rc == 0 else f"pbcopy failed: {err.strip() or rc}"
-                return self._exec_input(["cliclick", "kd:cmd", "t:v", "ku:cmd"], app=app, before=copy,
+                return self._exec_input(list(PASTE_CHORD_ARGV), app=app, before=copy,
                                         raise_policy=raise_policy, connection=connection,
                                         extra={"method": "paste", "clipboard_replaced": True, "chars": len(text)})
             return _json({"ok": False, "error": f"via=paste is supported on local and SSH macOS only (platform={plat})"})
@@ -1441,7 +1447,10 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
             return _run(cmd, timeout=timeout)
         except OSError as exc:  # the process was never created (binary missing, not executable, exec failure)
             return _NOT_LAUNCHED, "", f"{type(exc).__name__}: {exc}"
-        except Exception as exc:  # noqa: BLE001 - it ran and did not finish well (a timeout): outcome unknown
+        except subprocess.TimeoutExpired as exc:  # it ran and was cut off: outcome unknown; what it printed stays (a receipt line)
+            partial = exc.stdout or b""
+            return 1, partial.decode("utf-8", "replace") if isinstance(partial, bytes) else str(partial), f"{type(exc).__name__}: {exc}"
+        except Exception as exc:  # noqa: BLE001 - it ran and did not finish well: outcome unknown
             return 1, "", f"{type(exc).__name__}: {exc}"
 
     def _exec_input(self, cmd: list[str], *, timeout: int = _TIMEOUT_SEC, extra: dict[str, Any] | None = None,
@@ -1585,6 +1594,6 @@ def register(api: Any) -> None:
     api.register_tool("wait", impl.wait, description="Sleep up to 10s so the UI can settle before the next observation.", schema={"type": "object", "properties": {"ms": {"type": "integer", "default": 500}}}, timeout_sec=12)
     api.register_tool("activate_app", impl.activate_app, description="Bring a running application to the front (name, bundle id / WM_CLASS, or pid:<n> from window_list; resolved from the running list, never launched) and report who is in front afterwards. Inputs with app= do this themselves; use this to switch before several inputs or to check that a switch works.", schema={"type": "object", "properties": {"app": {"type": "string"}, "wait_ms": {"type": "integer", "default": 2000}}, "required": ["app"]}, timeout_sec=90)
     api.register_tool("window_list", impl.window_list, description="Running applications with their windows: who is in front, titles, bounds, pid, and on macOS whether the app has its own scripting commands (scriptable). app= filters; limit caps the rows (truncated says so).", schema={"type": "object", "properties": {**_app, "limit": {"type": "integer", "default": 50}}}, timeout_sec=60)
-    api.register_tool("ax_tree", impl.ax_tree, description="Read one window as text through the Accessibility API (macOS), bounded: the frontmost app's window or app='s (without bringing it forward). Nodes with role/label/value/bounds plus numbered marks (positions to click with raw=true; a mark is not proof the element reacts); truncated_by names every cut. An OSWorld remote returns the guest's whole tree; Linux reports unsupported with the window rows, SSH Macs unsupported.", schema={"type": "object", "properties": {**_app, "max_nodes": {"type": "integer", "default": 150}, "timeout_ms": {"type": "integer", "default": 3000}, "root": {"type": "string", "default": "window"}, "include_web": {"type": "boolean", "default": False}}}, timeout_sec=45)
-    api.register_tool("element_act", impl.element_act, description="Act on ONE element of app= through the element's own Accessibility action (local macOS only): do=press (AXPress: a button, checkbox, menu item, link) or do=set_value (the text of a field; text='' clears, text is required for set_value). Name the element by identity, never by a mark or node id of an earlier read: select={role, label (exact title or description), identifier (AXIdentifier), nth (1-based, among the matches in ax_tree order)}; window= a window_id or exact title as window_list prints it (default: the focused window). No pointer and no switch: the app is NOT brought forward, front_before/front_after only report who is in front. Several matches without nth, an incomplete window walk even with nth, unread window/element identity, a disabled element or one without the action is a refusal (nothing done). action_outcome is completed (the mark), unknown (the app did not answer in time and may still act: do not retry blindly) or failed; element/element_after show the before/after read; whether the goal was achieved is yours to judge.", schema={"type": "object", "properties": {"app": {"type": "string"}, "do": {"type": "string", "enum": ["press", "set_value"]}, "select": {"type": "object", "properties": {"role": {"type": "string"}, "label": {"type": "string"}, "identifier": {"type": "string"}, "nth": {"type": "integer"}}, "additionalProperties": False}, "text": {"type": "string"}, "window": {"type": ["integer", "string"], "default": ""}, "max_nodes": {"type": "integer", "default": 600}, "timeout_ms": {"type": "integer", "default": 3000}, "include_web": {"type": "boolean", "default": False}}, "required": ["app", "do", "select"]}, timeout_sec=60)
+    api.register_tool("ax_tree", impl.ax_tree, description="Read one window as text through the Accessibility API (macOS), bounded: the frontmost app's window or app='s (without bringing it forward). Nodes with role/label/value/bounds and parent_id (title, description, url, enabled:false, focused:true when present) plus numbered marks (positions to click with raw=true; a mark is not proof the element reacts); truncated_by names every cut. text_limit (1-100000) is the characters kept per title/description/value/url; a cut one of those gives its whole length as <field>_len, so a larger text_limit reads the rest (label stays the 200-character legacy field, without a length). window= reads that window (window_id or exact title as window_list prints it) instead of the focused one. An OSWorld remote returns the guest's whole tree; Linux reports unsupported with the window rows, SSH Macs unsupported.", schema={"type": "object", "properties": {**_app, "max_nodes": {"type": "integer", "default": 150}, "timeout_ms": {"type": "integer", "default": 3000}, "root": {"type": "string", "default": "window"}, "include_web": {"type": "boolean", "default": False}, "text_limit": {"type": "integer", "default": 200}, "window": {"type": ["integer", "string"], "default": ""}}}, timeout_sec=45)
+    api.register_tool("element_act", impl.element_act, description="Act on ONE element of app= through the element's own Accessibility action (local macOS only): do=press (AXPress: a button, checkbox, menu item, link) or do=set_value (the text of a field; text='' clears, text is required for set_value). Name the element by identity, never by a mark or node id of an earlier read: select={role, label (exact title or description), identifier (AXIdentifier), nth (1-based, among the matches in ax_tree order)}; window= a window_id or exact title as window_list prints it (default: the focused window). No pointer and no switch: the app is NOT brought forward, front_before/front_after only report who is in front. Several matches without nth, an incomplete window walk even with nth, unread window/element identity, a disabled element or one without the action is a refusal (nothing done). action_outcome is completed (the mark), unknown (the app did not answer in time and may still act: do not retry blindly) or failed; element/element_after show the before/after read; whether the goal was achieved is yours to judge. timeout_ms is one budget counted from the helper's start of the operation (resolution included, interpreter startup not) and checked between steps, so a call can outlast it: once it is spent no action is made (budget_exhausted). observe=true adds observation: the same window read again after the action (ax_tree's node shape, text_limit as there) with what is left of timeout_ms; its failure never changes the action's receipt.", schema={"type": "object", "properties": {"app": {"type": "string"}, "do": {"type": "string", "enum": ["press", "set_value"]}, "select": {"type": "object", "properties": {"role": {"type": "string"}, "label": {"type": "string"}, "identifier": {"type": "string"}, "nth": {"type": "integer"}}, "additionalProperties": False}, "text": {"type": "string"}, "window": {"type": ["integer", "string"], "default": ""}, "max_nodes": {"type": "integer", "default": 600}, "timeout_ms": {"type": "integer", "default": 3000}, "include_web": {"type": "boolean", "default": False}, "observe": {"type": "boolean", "default": False}, "text_limit": {"type": "integer", "default": 200}}, "required": ["app", "do", "select"]}, timeout_sec=60)
     api.register_tool("remote_exec", impl.remote_exec, description="Run a shell command on the active remote connection only; refuses on local backend. OSWorld/Linux guest: each call is a FRESH `bash -lc` starting in $HOME. SSH Mac: each call runs through the remote account's login shell via ssh. Either way this is NOT the visible desktop terminal: it does not inherit that terminal's working directory and leaves nothing in its shell history.", schema={"type": "object", "properties": {"command": {"type": "string"}, "timeout": {"type": "integer", "default": 60}}, "required": ["command"]}, timeout_sec=120)

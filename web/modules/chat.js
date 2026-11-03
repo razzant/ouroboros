@@ -839,7 +839,7 @@ export function createChatInstance({
     // card exists, so it lives beside the card records rather than on them.
     const cancelableTaskIds = new Set();
 
-    function queueTaskLiveUpdate(summary, taskId, ts, dedupeKey = '', rawTs = '') {
+    function queueTaskLiveUpdate(summary, taskId, rawTs) {
         return withStableViewport(() => {
             // Explicit task/review identity owns a card; viewport position never does.
             if (!taskId) return false;
@@ -852,7 +852,7 @@ export function createChatInstance({
                 changed = Boolean(record.root?.isConnected);
                 disposeLiveCard(taskId);
             }
-            return Boolean(applyLiveCardState(summary, taskId, ts, dedupeKey, { rawTs }) || changed);
+            return Boolean(applyLiveCardState(summary, taskId, rawTs) || changed);
         });
     }
 
@@ -1187,8 +1187,9 @@ export function createChatInstance({
             updateLiveCardCount(record);
             reanchorTaskCard(record, rawTs, { suppressDomInsert });
             ensureLiveCardVisible(record, { suppressDomInsert });
-            // Only new review rows trigger a read.
+            // Only new review rows trigger a read; a live receipt on a settled card re-reads its stored line.
             if (fresh && placement === 'reviews') hydrateCardReviews(taskId);
+            if (fresh && !msg.history_id && record.finished && msg.terminal_receipt) scheduleHistorySync();
             return Boolean(changed || liveCardProjectionChanged(before, record));
         });
     }
@@ -1634,10 +1635,8 @@ export function createChatInstance({
         }),
     });
 
-    function applyLiveCardState(summary, groupId, ts, dedupeKey = '', options = {}) {
-        return withStableViewport(() => applyLiveCardStateMutation(
-            summary, groupId, ts, dedupeKey, options,
-        ));
+    function applyLiveCardState(summary, groupId, rawTs, options) {
+        return withStableViewport(() => applyLiveCardStateMutation(summary, groupId, rawTs, options));
     }
 
     // Authored naming has its own clock: newer execution or a terminal outcome
@@ -1657,7 +1656,8 @@ export function createChatInstance({
         return true;
     }
 
-    function applyLiveCardStateMutation(summary, groupId, ts, dedupeKey = '', { suppressDomInsert = false, rawTs = '' } = {}) {
+    function applyLiveCardStateMutation(summary, groupId, rawTs, { suppressDomInsert = false } = {}) {
+        const ts = normalizeLogTs(rawTs);
         const nextGroupId = groupId || activeLiveGroupId || 'active';
         const record = getLiveCardRecord(nextGroupId);
         const before = captureLiveCardProjection(record);
@@ -1714,7 +1714,7 @@ export function createChatInstance({
         if (summary.terminal && typeof summary.quietEffective === 'boolean') record.quietEffective = summary.quietEffective;
         // Empty frames name nothing (#1369).
         const headline = summary.headline || record.lastHumanHeadline || '';
-        const syntheticKey = summary.dedupeKey || dedupeKey || `${summary.phase || 'working'}|${headline}|${summary.body || ''}`;
+        const syntheticKey = summary.dedupeKey || `${summary.phase || 'working'}|${headline}|${summary.body || ''}`;
         const isLegacyParentSubagentKey = syntheticKey.startsWith('parent-subagent:');
         // Failure/timeout update one row; success feeds the fold.
         const inPlaceByKey = isLegacyParentSubagentKey
@@ -1855,7 +1855,7 @@ export function createChatInstance({
         if (finalizing && !record.finished) record.finalizingHold = true;
         changed = applyLiveCardState(
             { ...summary, costProjection: taskCostProjection(msg, rawTs) },
-            taskId, normalizeLogTs(rawTs), summary.dedupeKey, { suppressDomInsert, rawTs },
+            taskId, rawTs, { suppressDomInsert },
         ) || changed;
         if (finalizing) return changed;
         changed = finishLiveCard(taskId, summary.phase) || changed;
@@ -1970,10 +1970,7 @@ export function createChatInstance({
             role: msg.role, system_type: msg.system_type, narration: msg.narration,
         });
         if (!summary) return changed;
-        const presented = withTaskCostMeta(summary, msg, { rawTs });
-        changed = queueTaskLiveUpdate(
-            presented, taskId, normalizeLogTs(rawTs), presented.dedupeKey || '', rawTs,
-        ) || changed;
+        changed = queueTaskLiveUpdate(withTaskCostMeta(summary, msg, { rawTs }), taskId, rawTs) || changed;
         // History carries task_named's title.
         if (msg.suggested_name) changed = applySuggestedName(taskId, msg.suggested_name) || changed;
         // Outcome survives a lost summary even while post-work keeps controls live.
@@ -2010,13 +2007,7 @@ export function createChatInstance({
         if (summary.terminal) subagentTerminalChildren.add(childId);
         stampNodeTimestamp(getSubagentCardRecord(childId, parentId, role, rawTs)?.root, rawTs, { anchor: true });
         const reviewsChanged = attachTaskDetailReviews(childId, evt);
-        const updated = queueTaskLiveUpdate(
-            summary,
-            childId,
-            normalizeLogTs(rawTs),
-            summary.dedupeKey,
-            rawTs,
-        );
+        const updated = queueTaskLiveUpdate(summary, childId, rawTs);
         return Boolean(reviewsChanged || updated);
     }
 
@@ -2051,7 +2042,7 @@ export function createChatInstance({
             summary.phase = String(record.phaseEl?.dataset?.phase || 'done');
             summary.terminal = true;
         }
-        return queueTaskLiveUpdate(summary, childId, normalizeLogTs(rawTs), summary.dedupeKey, rawTs);
+        return queueTaskLiveUpdate(summary, childId, rawTs);
     }
 
     function routeSubagentFinalMessageToCard(taskId, msg) {
@@ -2075,9 +2066,7 @@ export function createChatInstance({
             summary.phase = priorTerminalPhase;
             summary.terminal = true;
         }
-        return queueTaskLiveUpdate(
-            summary, childId, normalizeLogTs(rawTs), summary.dedupeKey, rawTs,
-        );
+        return queueTaskLiveUpdate(summary, childId, rawTs);
     }
 
     // Resolve a child's card from the child's terminal task_done
@@ -2147,9 +2136,7 @@ export function createChatInstance({
             replace: eventType === 'task_done' || eventType === 'task_cost_finalized',
             rawTs,
         });
-        const queued = queueTaskLiveUpdate(
-            presented, taskId, normalizeLogTs(rawTs), presented.dedupeKey || '', rawTs,
-        );
+        const queued = queueTaskLiveUpdate(presented, taskId, rawTs);
         if (childInfo) return Boolean(changed || queued);
         const subagentChanged = updateSubagentCardFromEvent(evt, rawTs);
         // Host-attested Stop facts also travel on tool-only turns.

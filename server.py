@@ -669,9 +669,9 @@ def _run_supervisor(settings: dict) -> None:
         note_current_stamp(DATA_DIR)  # the stamp the bootstrap just wrote: the legacy detector's observation
 
         from supervisor.queue import (
-            enqueue_task, enforce_task_timeouts, enqueue_evolution_task_if_needed,
-            persist_queue_snapshot, restore_pending_from_snapshot,
-            queue_deep_self_review_task, sort_pending,
+            enqueue_task, enforce_due_task_timeouts, enqueue_evolution_task_if_needed,
+            persist_queue_snapshot, publish_queue_changes, publish_queue_snapshot, restore_pending_from_snapshot,
+            queue_deep_self_review_task, sort_pending, tick_publisher_started,
         )
         from supervisor.workers import (
             init as workers_init, get_event_q, WORKERS, PENDING, RUNNING,
@@ -770,7 +770,7 @@ def _run_supervisor(settings: dict) -> None:
             update_budget_from_usage=update_budget_from_usage, append_jsonl=append_jsonl,
             enqueue_task=enqueue_task,
             queue_deep_self_review_task=queue_deep_self_review_task, persist_queue_snapshot=persist_queue_snapshot,
-            safe_restart=safe_restart, kill_workers=kill_workers, spawn_workers=spawn_workers,
+            publish_queue_snapshot=publish_queue_snapshot, safe_restart=safe_restart, kill_workers=kill_workers, spawn_workers=spawn_workers,
             sort_pending=sort_pending, consciousness=_consciousness,
             handle_chat_direct=handle_chat_direct,
             request_restart=_request_restart_exit,
@@ -812,7 +812,7 @@ def _run_supervisor(settings: dict) -> None:
     _last_custody_reap = [0.0]  # recovered checking copies become eligible off-loop after readiness
     _last_review_job_reconcile = [time.time()]
     # The watchdog was started before startup recovery; never start another here.
-
+    tick_publisher_started()  # queue marks publish on this loop's tick while it lives (queue_publication)
     while not _restart_requested.is_set() and not _supervisor_stop.is_set() and not _exit_signalled.is_set():
         try:
             _loop_liveness[1], _loop_liveness[0] = loop_phase_facts(_loop_liveness, "events", new_tick=True), time.monotonic()
@@ -847,7 +847,7 @@ def _run_supervisor(settings: dict) -> None:
             flush_budget_projection(_event_ctx)
 
             _loop_liveness[1], _loop_liveness[0] = loop_phase_facts(_loop_liveness, "maintenance"), time.monotonic()
-            enforce_task_timeouts(pending_events=pending_idle_observations(get_event_q()))
+            enforce_due_task_timeouts(lambda: pending_idle_observations(get_event_q()))
             _periodic_supervisor_maintenance(  # includes the off-loop schedule duty
                 _last_custody_reap, _last_review_job_reconcile, stop_event=_watchdog_stop,
             )
@@ -867,7 +867,7 @@ def _run_supervisor(settings: dict) -> None:
             if _restart_requested.is_set():
                 break  # restart just triggered (drain done) — exit without assigning new work (bridge intake already ran early this iteration)
             assign_tasks()
-            if persist_queue_snapshot(reason="main_loop") is False:  # None: a saved queue kept as it is
+            if publish_queue_changes() is False:  # the one publisher, outside Q; None: a saved queue kept as it is
                 raise RuntimeError("queue publication failed")
             if _consciousness is not None and not draining and not _restart_lifecycle.agent_restart_pending():
                 try:

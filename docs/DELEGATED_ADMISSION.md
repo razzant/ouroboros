@@ -80,11 +80,17 @@ this turn's host facts, at the harness's starting directory; quoted ones are his
 Each ordinary continuation's prompt restates its access and binding (else its directory). The binding, the `workspace_write`
 access line and the unproven-boundary sentence state one write rule, because
 verification needs writes no copy may hold: disposable process state (test
-scratch, package-manager temporaries) goes outside every Git working tree, the
+scratch, package-manager temporaries, build or dependency output that only serves
+checks) goes outside every Git working tree, the
 binding naming safe_test's default parent through the launcher's own predicate,
 so its ancestor guard stays intact (only a body copy's facts name safe_test itself);
+output a tool must keep in the project tree stays only in new files Git ignores: generated
+build/dependency output is not automatically excluded from the result-commit capture, Git
+ignore rules keep new untracked files out, and tracking overrides them;
 durable package downloads go only to the shared download cache the environment facts
-name; evidence goes under the copy's `.review-evidence/`. Where the route's catalog row
+name; evidence (reports, logs, sources, repro scripts, intended binaries of any size) goes
+under the copy's `.review-evidence/`, whose retention applies no cache, binary, size or
+ignore filter. Where the route's catalog row
 negotiates `accessControl.auxiliaryWritableRoots` (never a guess from a harness name or
 write mechanism) and the start is an Agent `workspace_write` one, the host makes the run's
 exact short scratch under `test_environment.default_temp_parent()` (`/tmp/obs-<random>` on
@@ -97,7 +103,8 @@ name that scratch instead of the default parent (`workspace_preflight.session_se
 A `full` Agent start, whose rights already reach such a folder, gets the same owned scratch with nothing
 sent: a private copy's (keyed by its snapshot), an in-place run's (`in-place-<invocation>`) and a reviewer seat's.
 Every naming declares it disposable before use (`delegate_start_instructions.DISPOSABLE_SCRATCH`): never
-captured, retired with the starting task's drive, nothing reinstalled for a later session. That is a purpose and an owner, not a promise of byte-for-byte reproduction.
+captured, released once the starting task is over (`workspace_preflight.release_finished_scratch`), nothing
+reinstalled for a later session. That is a purpose and an owner, not a promise of byte-for-byte reproduction.
 The native profile's existing temporary-directory permissions are unchanged. Directory grants do
 not grant IPC or process inspection: a blocked check stays unverified, with its command and
 diagnostics retained. After inspecting the candidate, the integrating mind may run it through
@@ -150,7 +157,8 @@ inputs (`delegate_readonly_inputs`, `resource_ref.source_root`), never from the
 live scratch. Folderless readonly and investigation starts stage every permitted
 lineage file, a scheduled origin's whole `task_drive`/`artifact_store` included
 (`tool_access_reads.scheduled_origin`): the copy grows with that scratch, and one
-unreadable or nonregular file refuses the start before opening it (`readonly_inputs_unavailable`). A folder no private copy serves (a data-drive subfolder, an
+unreadable or nonregular file refuses the start before opening it (`readonly_inputs_unavailable`);
+explicit `input_files` are separate (3b). A folder no private copy serves (a data-drive subfolder, an
 ignored starting folder) refuses typed, naming `access='readonly'`. A read-only child
 (an explicit `readonly` lowering, Observe, or a Presence ceiling without a
 delegated write grant) defaults to `mode: ask`, `access: readonly`. Explicit
@@ -275,6 +283,67 @@ inherit no documents: a successor selects again. New stagings get the same Markd
 DOCX labels on every interpreter; rows recorded earlier with an unprovable MIME (for example
 Markdown staged as `application/octet-stream`) keep their label and refuse on routes that do
 not declare it.
+
+## 3b. Selected input files (#2593)
+
+Owner: `ouroboros/delegate_readonly_inputs.py`. `input_files` on `delegate_start` and on a
+read-only `schedule_subagent` (API or agent-session child) names ordinary files the caller can
+already read, each `{path, root?}`. `root` is one of `active_workspace`, `system_repo`,
+`runtime_data`, `task_drive`, `artifact_store`, `user_files`, `subagent_projects`,
+`deliverables`; omitted, it is inferred from an absolute path as `read_file` infers it, else
+`active_workspace`. `skill_payload` (which needs a bucket and skill name) and unknown labels
+refuse per entry as `unsupported_root`. A path written only in the prompt is never a selection,
+and these are not engine documents (`attachment_paths`, 3a). Every entry is mandatory. Before
+anything is sent, each entry passes `read_file`'s own admission (`core_file_tools.read_admission`:
+root access, the Presence ceiling, runtime-data and protected-artifact policy), then packed-checkpoint
+read-back and a regular-file check, for BOTH the caller and the receiving read-only reader; a
+scheduled child adds its own resource policy on each contract carrier. One entry that is denied,
+missing, not a file, on an unsupported root, or changed or failed while copied refuses the whole
+start (`input_files_unavailable`, `definitely_unrun`, from the pre-check or the start alike) with one
+result row per entry; no failed row reads `prepared`. Only a nonempty selection refuses a writable start
+(`input_files_readonly_only`) or an acting `write_surface`. Omitted, null and `[]` send the same
+request as before, and only `[]` reports an empty receipt (`input_files: []`). There is no count
+or size cap. Retention and folderless restaging stream and hash each file. Preparation may
+outlive the ordinary tool wait and finish as a late start result; a tool timeout proves no
+non-dispatch, so inspect that start before requesting another.
+
+The exact bytes are retained first (`artifacts.copy_artifact_file`), named by content, in the
+selecting task's canonical artifact store:
+`source_handles/delegated_readonly_inputs/<invocation|scheduled-<child>>/inputs/selected/<sha256[:16]>/<name>`
+beside an `inputs.json` source map; the receipt keeps the whole digest, and an address already
+holding other bytes refuses rather than being overwritten. The short folder leaves room under
+Windows' 260-character path limit (not probed natively): a deep data root and a long name can
+still refuse typed `copy_failed`. This is the `source_handles/review_inputs` snapshot pattern:
+no deliverable (`collect_task_artifact_records` skips `source_handles`), kept with the task's
+artifacts past drive retirement, pruned by name from automatic lineage staging at any depth, while an
+explicit entry may still select an earlier copy.
+
+A folderless start also restages the bytes once into its per-invocation scope
+(`carrier: scope`; its `inputs.json` rows carry `selected_path`). A start in a repository or folder
+keeps it as `scope.root` and cwd; `readonly_root` is not reused and no task-drive copy
+is made. It names the retained copies by absolute path outside its folder
+(`carrier: outside_scope_path`): the engine has no readable-root field, so reaching them is the
+harness's native read reach, which the instruction says without promising it. The receipt
+(`input_files` in the started result and on the durable START_REQUESTED row, read back by
+`invocation_record`) lists exactly the selected entries with source, local copy, retained copy,
+sha256 and size, never the automatic lineage inputs. Preparation is not reading. `retry_of` refuses
+a new selection, replays the recorded body and paths without rereading or recopying, and returns
+the recorded receipt. `continue_from` retains only its own new selection and restates its map in
+the continuation prompt, even an empty one. A plan-thread turn keeps its thread's original folder (the
+engine drops a new scope), so its copies are named outside it (`outside_scope_path`).
+
+`schedule_subagent` retains before queueing under `scheduled-<child>` and saves the receipt as
+`prepared_input_files`, scheduling intent (`SUBAGENT_INTENT_FIELDS`) that crosses admission, the
+queue snapshot and the worker payload. Admission freezes a host `[SELECTED INPUT FILES]` block into
+the child's task text, outside the parent's reference context, so an API child's first input
+names each retained copy for `read_file(path=<copy>)`. Its parent's `artifact_store` is lineage, so
+this adds no read root and changes no read boundary (the runtime-data read alias reaches the same
+path). Under an inherited Presence ceiling, the registry admits a read of exactly one listed copy
+whose bytes still match (`prepared_copy_read`): its source passed that ceiling when selected; the
+rest of the store stays outside it. `read_file` reads UTF-8 text and reports a binary copy as an error. A session child's work
+order lists the selection (`SELECTED INPUT FILES`), and the first start of that work order verifies
+the bytes against the receipt: restaged once into a folderless scope, named in place otherwise.
+A later start, continuation or replacement selects its own.
 
 ## 4. Compatibility floors and applied evidence
 

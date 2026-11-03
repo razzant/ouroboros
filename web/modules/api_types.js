@@ -52,7 +52,7 @@
  * @property {boolean} task_bindings_unchanged  // the request's bindings_since names this revision: keep the held map
  * @property {ActiveDirectTurn[]=} active_direct_turns  // active direct/ephemeral chat turns snapshot
  * @property {boolean=} active_chat_activities_complete
- * @property {ActiveChatActivity[]=} active_chat_activities  // combined snapshot: direct/ephemeral turns + root managed queue tasks
+ * @property {ActiveChatActivity[]=} active_chat_activities  // combined snapshot: direct/ephemeral turns + root managed queue tasks + live inline Presence turns (kind presence)
  * @property {Array<Object>=} current_questions Canonical unanswered questions (Project forms and Main's own, by identity), independent of bounded history.
  * @property {boolean=} current_questions_complete False retains previously observed questions its gaps name.
  * @property {Array<{reason:string,task_id?:string,quiz_id?:string}>=} current_questions_gaps Canonical source availability diagnostics.
@@ -111,15 +111,19 @@
  * @property {string} app_version
  * @property {string=} abi_version  // gateway ABI carrier; absent on cores older than GET /api/contract
  * @property {BootDocument=} boot  // the serving generation's phases; answered while the boot runs
+ * @property {Object=} inline_executors  // turns this process ran on its own threads (degraded carrier, live call): degraded_total, live, recent
  */
 /** @typedef {Object} OpenAICompatibleModelsResponse
  * @property {string[]} models
  * @property {string=} error
  */
-/** @typedef {Object} ProviderTestRequest
+/** `api_key_setting` names the built-in compatible pair under test (its address may then be overridden too);
+ * omitted keeps the historical resolution.
+ * @typedef {Object} ProviderTestRequest
  * @property {string} provider_id
  * @property {Object<string, string>=} overrides
  * @property {string=} connection
+ * @property {('OPENAI_COMPATIBLE_API_KEY'|'OPENAI_API_KEY')=} api_key_setting
  */
 /** @typedef {Object} ProviderTestResponse
  * @property {boolean} ok
@@ -245,6 +249,9 @@
  * @property {string=} closed_actor
  * @property {string=} closed_request_id
  * @property {Array<Object>=} materials Validated existing artifact references with task_id, name, sha256, size and download_url.
+ * @property {import('./decision_types.js').SecretRequestMeta=} secret_request A mirrored secret request's metadata.
+ * @property {import('./decision_types.js').SecretOutcome=} secret_outcome
+ * @property {Object=} secret_save An attempt's claim; state "writing" is an unconfirmed save.
  * @property {string=} quiz_id
  * @property {string=} quiz_state
  * @property {number=} project_chat_id
@@ -435,6 +442,9 @@
  *   keeps failure_details as an object, and names current sources[] by
  *   {role, part, status, sha256, size, chars}. Pending/displaced sources remain
  *   historical in the record; existing exact selections remain readable.
+ *   panels[].wave_failures (absent when none) is a wave Ouroboros itself stopped:
+ *   [{block_reason, reported_cause (masked, bounded), source}], source naming the
+ *   panel's failure note by {seat_id: "panel", role, part, status, sha256, size, chars}.
  *   v6.74.0 additive keys: panels[].dialogue ({status, votes} — the reviewer-authored
  *   dialogue-status reduction), panels[].single_reviewer_no_diversity (boolean label),
  *   and actors[].dialogue_status ("continue_actionable"|"unreachable_here"|"stable_disagreement"|"").
@@ -635,6 +645,7 @@
  * @property {string=} kind
  * @property {Object.<string,number>=} room_revisions
  * @property {number[]=} also_rooms  // a private Main question: its work's Project shows the same row, one frame
+ * @property {import('./decision_types.js').SecretRequestMeta=} secret_request An integration-secret request: answered only by its protected form.
  */
 
 /**
@@ -659,6 +670,7 @@
  * @property {boolean=} wait_for_answer
  *   False once a bounded wait closed and the task resumed; the card stays open and answerable.
  * @property {number=} chat_id
+ * @property {import('./decision_types.js').SecretOutcome=} secret_outcome A secret request's typed completion, metadata only.
  */
 
 /** @typedef {import('./decision_types.js').DecisionRequest} DecisionRequest */
@@ -1468,11 +1480,12 @@
  * @typedef {Object} OwnerKeepResponse
  * @property {string} task_id
  * @property {boolean} keep  // the fact as it now stands
- * @property {('kept'|'released'|'partly_retired'|'already_retired'|'inflight'|'refused')} status
+ * @property {('kept'|'released'|'partly_retired'|'already_retired'|'release_unconfirmed'|'inflight'|'refused')} status
  * @property {string} reason
- * @property {string[]} retained  // material on disk now: paths, and `pins:<snapshot>` for result pins
- * @property {string[]} retired  // material a record names that is gone or accepted for deletion
+ * @property {string[]} retained  // material on disk now: paths, `pins:<snapshot>` for result pins, `review_thread:<id>` no recorded release let go
+ * @property {string[]} retired  // material a record names as gone OR accepted for deletion: acceptance alone is no removal
  * @property {string[]} unknown  // material classes that could not be read: nothing is claimed about them
+ * @property {Object<string, string>} releases  // `review_thread:<id>` -> release_unconfirmed | accepted_pending_removal | removed | purged | not_found | held | refused | abandoned | unrecorded, as last observed
  */
 /**
  * @typedef {Object} LogTailResponse
@@ -1565,7 +1578,7 @@ export const MAX_QUIZ_OPTIONS = 6;
 // Mirror task_decision._COMMENT_MAX: ingress refuses longer comments, never
 // truncates; cards must offer only comments the ingress can deliver verbatim.
 export const MAX_DECISION_COMMENT = 2000;
-export const GATEWAY_CONTRACT_VERSION = '7.9.0';
+export const GATEWAY_CONTRACT_VERSION = '7.10.0-alpha.0';
 /** @typedef {import('./client_contract_types.js').ChatHistoryPosition} ChatHistoryPosition */
 /** @typedef {import('./client_contract_types.js').ChatHistoryResponse} ChatHistoryResponse */
 

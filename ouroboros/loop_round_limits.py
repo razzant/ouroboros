@@ -238,6 +238,17 @@ def _drain_incoming_messages(
                     messages[-1].setdefault("review_feedback", []).append(dict(entry["review_feedback"]))
                 ack_content(entry)
                 continue
+            if kind in (KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED):
+                from ouroboros.owner_quiz import SECRET_OUTCOME_ROW_KIND, secret_outcome_block
+
+                if secret_outcome_block(entry) is not None:
+                    # The host reports a form outcome, not words or a new directive. The actual
+                    # cancel action remains in the canonical question with its owner attribution.
+                    deliver_quiz_answer(entry, task_id, event_queue if kind == KIND_QUIZ_ANSWER else None,
+                        lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx,
+                                                                           kind=SECRET_OUTCOME_ROW_KIND))
+                    ack_content(entry)
+                    continue
             if kind in (KIND_QUIZ_CLOSED, KIND_CARD_INPUT):  # host frames around the owner's own act
                 _loop()._record_owner_directive(owner_ctx, source="owner_mailbox",
                     content=dmsg, msg_id=str(entry.get("msg_id") or ""))
@@ -880,7 +891,8 @@ def _handle_model_wait_control(
     root = ctx.status_drive_root or ctx.drive_root
     intent = active_intent(root, ctx.task_id) if root is not None else None
     hard_stop = isinstance(intent, dict) and stop_policy(intent) == STOP_POLICY_IMMEDIATE
-    if hard_stop and owner is not None and owner.worker_slot_held:
+    from supervisor.owner_stop import runner_reads_stop  # a carried Presence author ends on its own Stop rail (#2012)
+    if hard_stop and owner is not None and owner.worker_slot_held and not runner_reads_stop(owner):
         final = ModelWaitInterrupted("cancelled", role=error.model_role, cause=error)
         final.control_rails_seen = True
         raise final from error
@@ -909,12 +921,18 @@ def _handle_model_wait_control(
         # A revoked control cannot stop a still-unstarted call. A provider
         # already interrupted in flight keeps the ordinary unknown no-resend rail.
         return _handle_provider_unavailable(ctx, error_kind="provider_outcome_unknown") if unknown else None
-    if (reason == "finalize_requested" and first_line == REASON_OWNER_REQUESTED_FINALIZATION
-            and getattr(error, "previous_error", None) is None and capture is None):
+    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+
+    previous = getattr(error, "previous_error", None)
+    if (reason == "finalize_requested" and first_line == REASON_OWNER_REQUESTED_FINALIZATION and capture is None
+            and (previous is None or isinstance(previous, PhysicalDispatchInterrupted))):
         # A fresh Wrap up can arrive after this round's mailbox drain but before
         # the model call. Rejoin its existing bounded finalizer; no provider wait
-        # was interrupted, and the real drain above consumed this control. Older
-        # transport episodes and unresolved wire attempts keep their no-call rails.
+        # was interrupted, and the real drain above consumed this control. So does
+        # a refusal at an admission before any request bytes (a tool the Wrap up
+        # kept from starting, an unsent call), unless it carries a sent capture
+        # (``preserve_prior_dispatch``). Older transport episodes and unresolved
+        # wire attempts keep their no-call rails.
         no_call_source, _ = _loop().provider_no_call_source(ctx.accumulated_usage, False)
         if (no_call_source == "provider_outcome_unknown_no_resend"
                 and not isinstance(ctx.accumulated_usage.get(TRANSPORT_DEATHS_KEY), dict)):

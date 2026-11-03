@@ -626,35 +626,6 @@ def test_the_saved_row_decoder_reads_the_outer_queue_time_first(outer, nested, e
     assert retry["queued_at"] == expected, "a shutdown-custody row keeps the saved time or its unknown"
 
 
-def test_a_direct_hold_keeps_its_numeric_queue_time_through_snapshot_and_restore(tmp_path, monkeypatch):
-    """R1 #1805: ``direct_pause.retain_direct_hold`` stamps a numeric epoch; the snapshot keeps it on
-    the outer row and restore returns that known time to the queue and its readers, never unknown."""
-    import datetime
-
-    from ouroboros import server_routing_context as routing
-    from ouroboros.gateway.state import _chat_activities_snapshot_safe
-    from supervisor.direct_pause import retain_direct_hold
-    from tests.test_project_routing_v664 import _ctx
-
-    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
-    _pool_events(workers, monkeypatch)
-    write_task_result(tmp_path, "direct-held", STATUS_RUNNING, chat_id=0, _is_direct_chat=True,
-                      root_task_id="direct-held")
-    before = time.time()
-    retain_direct_hold({"id": "direct-held", "type": "task", "chat_id": 0, "root_task_id": "direct-held",
-                        "_attempt": 1, "text": "direct work"}, unsaved=True)
-    [held] = workers.PENDING
-    stamped = held["queued_at"]
-    assert isinstance(stamped, float) and before <= stamped <= time.time(), "the producer's own numeric epoch"
-    snap = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text())
-    assert [row["queued_at"] for row in snap["pending"]] == [stamped], "serialized on the outer row"
-    workers.PENDING[:] = []
-    queue.restore_pending_from_snapshot()
-    [restored] = [row for row in workers.PENDING if row["id"] == "direct-held"]
-    assert restored["queued_at"] == stamped
-    census = {row["activity_id"]: row["started_at"] for row in _chat_activities_snapshot_safe(tmp_path, direct_turns=[])}
-    assert census["direct-held"] == stamped
-    roots = {row["task_id"]: row["started_at"] for row in routing.addressable_roots(
-        _ctx(tmp_path, pending=list(workers.PENDING))).rows()}
-    assert roots["direct-held"] == stamped
-    assert datetime.datetime.fromtimestamp(stamped, datetime.timezone.utc).year >= 2026
+# R1 #1805 (``direct_pause.retain_direct_hold`` stamping a numeric ``queued_at`` on a failed inline park's
+# hold) is retired with the in-process park: a direct turn is a conversation-lane RUNNING row whose pause
+# the supervisor parks like any carried task's, so no hold of that kind is minted here any more.

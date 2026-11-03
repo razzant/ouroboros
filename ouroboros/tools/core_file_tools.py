@@ -82,26 +82,12 @@ def _runtime_data_read_block(ctx: ToolContext, target: pathlib.Path, *, listing:
     return _runtime_data_read_check(ctx, listing=listing, root=root)(target)
 
 
-def _direct_resource_binding(
-    ctx: ToolContext,
-    supplied: Any,
-    *,
-    root: str,
-    operation: str,
-    path: str,
-    bucket: str = "",
-    skill_name: str = "",
-) -> ResolvedResourceBinding:
+def _direct_resource_binding(ctx: ToolContext, supplied: Any, *, root: str, operation: str, path: str,
+                             bucket: str = "", skill_name: str = "") -> ResolvedResourceBinding:
     if supplied is not None:
         return supplied
-    return build_resolved_resource_binding(
-        ctx,
-        root=root,
-        operation=operation,  # type: ignore[arg-type]
-        path=path or ".",
-        bucket=bucket,
-        skill_name=skill_name,
-    )
+    return build_resolved_resource_binding(ctx, root=root, operation=operation,  # type: ignore[arg-type]
+                                           path=path or ".", bucket=bucket, skill_name=skill_name)
 
 
 def _render_line_slice(path: str, content: str, max_lines: int = 2000, start_line: int = 1,
@@ -738,24 +724,48 @@ def _profile_roots_hint(ctx: ToolContext, operation: str) -> str:
         return ""
 
 
-def _access_or_block(ctx: ToolContext, root: str, operation: str) -> tuple[str, str]:
+def _access_refusal(ctx: ToolContext, root: str, operation: str) -> tuple[str, Optional[ToolResult]]:
     try:
         normalized = normalize_root(root)
     except ValueError as exc:
-        return "", _publish_tool_result(ctx, ToolResult(
-            status="error",
-            code="TOOL_ARG_ERROR",
-            text=f"⚠️ TOOL_ARG_ERROR: {exc}{_profile_roots_hint(ctx, operation)}",
-        ))
-    profile = active_tool_profile(ctx)
-    decision = decide_tool_access(profile=profile, root=normalized, operation=operation)  # type: ignore[arg-type]
+        return "", ToolResult(status="error", code="TOOL_ARG_ERROR",
+                              text=f"⚠️ TOOL_ARG_ERROR: {exc}{_profile_roots_hint(ctx, operation)}")
+    decision = decide_tool_access(profile=active_tool_profile(ctx), root=normalized, operation=operation)  # type: ignore[arg-type]
     if not decision.allow:
-        return "", _publish_tool_result(ctx, ToolResult(
-            status="blocked",
-            code="ACCESS_BLOCKED",
-            text=f"⚠️ TOOL_ACCESS_BLOCKED: {str(decision.reason).rstrip('.')}.",
-        ))
-    return normalized, ""
+        return "", ToolResult(status="blocked", code="ACCESS_BLOCKED",
+                              text=f"⚠️ TOOL_ACCESS_BLOCKED: {str(decision.reason).rstrip('.')}.")
+    return normalized, None
+
+
+def _access_or_block(ctx: ToolContext, root: str, operation: str) -> tuple[str, str]:
+    normalized, refusal = _access_refusal(ctx, root, operation)  # one decision, published by each tool
+    return (normalized, "") if refusal is None else ("", _publish_tool_result(ctx, refusal))
+
+
+def read_admission(ctx: ToolContext, root: str, path: str, *, bucket: str = "", skill_name: str = "",
+                   resolved_binding: Any = None) -> tuple[str, Optional[ResolvedResourceBinding], Any]:
+    """``read_file``'s whole admission of one target, unpublished: ``(root, binding, refusal)``.
+
+    ``refusal`` is None when admitted, else the ToolResult to publish (a protected path's is final
+    text). The one sequence for read_file and delegated ``input_files`` (#2593): profile, binding,
+    Presence ceiling (as the registry applies it), runtime-data rules, protected paths."""
+    from ouroboros.tools.registry_core import PRESENCE_RESOURCE_BLOCKED, _presence_binding_allowed
+
+    normalized, refusal = _access_refusal(ctx, root, "read")
+    try:
+        binding = None if refusal else _direct_resource_binding(
+            ctx, resolved_binding, root=normalized, operation="read", path=path, bucket=bucket, skill_name=skill_name)
+    except UserFilesPathBlockedError as exc:
+        refusal = ToolResult(status="blocked", code="USER_FILES_PATH_BLOCKED", text=f"⚠️ USER_FILES_PATH_BLOCKED: {exc}")
+    except Exception as exc:
+        refusal = ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ READ_FILE_ERROR: {type(exc).__name__}: {exc}")
+    if refusal is not None:
+        return normalized, None, refusal
+    if not _presence_binding_allowed(ctx, binding):
+        return normalized, binding, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=PRESENCE_RESOURCE_BLOCKED)
+    if runtime_block := _runtime_data_read_block(ctx, binding.target_path, root=binding.root):
+        return normalized, binding, ToolResult(status="blocked", code="DATA_BLOCKED", text=runtime_block)
+    return normalized, binding, block_reason_for_path(ctx, binding.target_path, "read_bytes", binding) or None
 
 
 def _root_display_path(root: str, path: str) -> str:
@@ -857,31 +867,16 @@ def _read_file(
         from ouroboros.tools.tool_resolution import _root_containing_absolute_path
 
         root = _root_containing_absolute_path(ctx, "read_file", path) or "active_workspace"
-    normalized, block = _access_or_block(ctx, root, "read")
-    if block:
-        return block
-    try:
-        binding = _direct_resource_binding(
-            ctx, _resolved_binding, root=normalized, operation="read", path=path,
-            bucket=bucket, skill_name=skill_name,
-        )
-    except UserFilesPathBlockedError as exc:
-        return _publish_tool_result(ctx, ToolResult(
-            status="blocked", code="USER_FILES_PATH_BLOCKED", text=f"⚠️ USER_FILES_PATH_BLOCKED: {exc}"))
-    except Exception as exc:
-        return _publish_tool_result(ctx, ToolResult(
-            status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ READ_FILE_ERROR: {type(exc).__name__}: {exc}"))
+    normalized, binding, refusal = read_admission(ctx, root, path, bucket=bucket, skill_name=skill_name,
+                                                  resolved_binding=_resolved_binding)
+    if refusal is not None:
+        return _publish_tool_result(ctx, refusal) if isinstance(refusal, ToolResult) else refusal
     target = binding.target_path
     try:
         opened = target.relative_to(binding.base_path).as_posix()  # what is read, relative to its root
     except ValueError:
         opened = str(target)
     opened_root = str(binding.root)  # the NORMALIZED root the binding used, not the model's spelling
-    if runtime_block := _runtime_data_read_block(ctx, target, root=binding.root):
-        return _publish_tool_result(ctx, ToolResult(status="blocked", code="DATA_BLOCKED", text=runtime_block))
-    protected_block = block_reason_for_path(ctx, target, "read_bytes", binding)
-    if protected_block:
-        return protected_block
     if target.is_dir():  # admitted, but no file here: the read becomes the listing call to make
         call = f"list_files(root={json.dumps(normalized)}, path={json.dumps(str(target))}" + (  # preserve canonical/physical identity
             f", bucket={json.dumps(bucket or binding.source)}, skill_name={json.dumps(skill_name or binding.skill_name)}"

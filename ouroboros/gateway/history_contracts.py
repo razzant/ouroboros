@@ -83,6 +83,7 @@ class ChatHistoryCard(TypedDict):
 class PlaceHistoryAttention(TypedDict, total=False):
     decision: Required[Literal['heard', 'focus_started']]
     reason: str  # retained heard reason; no inferred matched wake
+    recipient: str  # the work or author holding a heard message (``place_intake``); whether its model read it is unknown
 
 
 class PlaceHistoryImport(TypedDict):

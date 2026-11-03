@@ -69,6 +69,10 @@ TERMINAL_WRITERS = {
     # its recovered admission cannot originate a new terminal transition.
     ('supervisor/continuation_admission.py::_replay', 'stored.get("status") or "scheduled"'): 'dynamic',
     ('ouroboros/agent.py::_task_exception_terminal', 'STATUS_FAILED'): 'terminal',
+    # A conversation turn's before-start Stop (cancelled) or exhausted budget (failed) is the
+    # turn's own typed terminal, recorded in its carrier before the exception unwinds; its
+    # projector never replaces a row that is already truly terminal.
+    ('supervisor/worker_chat_lane.py::conversation_exception_terminal', 'STATUS_CANCELLED if stopped else STATUS_FAILED'): 'terminal',
     ('ouroboros/agent_task_pipeline.py::_store_task_result', 'status'): 'dynamic',
     ('ouroboros/delegate_terminal.py::record_terminal_reconciliation', 'str(existing.get("status") or STATUS_RUNNING)'): 'dynamic',
     # Foreign-root disclosure preserves CURRENT status and pointers under the
@@ -101,12 +105,19 @@ TERMINAL_WRITERS = {
     # Existing task custody/projection enrichment only: its locked field
     # projector preserves CURRENT lifecycle status rather than ending a task.
     ('ouroboros/history_retention.py::call_inventory_custodied', 'current["status"]'): 'dynamic',
+    # Settlement's raw-QA carry arms only missing-evidence facts on the same
+    # attempt; its locked projector returns the row's own status unchanged.
+    ('ouroboros/history_retention.py::raw_evidence_custodied', 'current["status"]'): 'dynamic',
     ('ouroboros/headless.py::_finalize_task_artifacts_locked', 'status'): 'dynamic',
     ('ouroboros/headless.py::_finalize_task_artifacts_locked', 'str(existing.get("status") or status or "completed")'): 'terminal',
     ('ouroboros/mutation_attribution.py::advance_mutation_baseline', 'status'): 'dynamic',
     ('ouroboros/mutation_attribution.py::capture_mutation_baseline', 'status'): 'dynamic',
     ('ouroboros/mutation_attribution.py::record_terminal_mutation_candidates', 'status'): 'dynamic',
     ('ouroboros/post_task_checkpoint.py::set_root_post_task_checkpoint', 'str(existing.get("status") or task.get("status") or STATUS_COMPLETED)'): 'terminal',
+    # #2566: a moved Presence turn's saved continuation nothing authorized (a crash retry) ends its attempt before
+    # the attempt leaves RUNNING and its slot: the orphan reconciler's unknown-outcome presence_attempt_lost failure,
+    # and its projector keeps a terminal already there. No answer exists; its task_done follows.
+    ('ouroboros/presence_carrier.py::_end_refused_attempt', 'STATUS_FAILED'): 'terminal',
     # Presence recovery records an observation of an existing unresolved turn.
     # Its field projector preserves CURRENT status, even after a late terminal;
     # the receipt cannot terminalize or regenerate the lost attempt.

@@ -805,7 +805,10 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
         ctx._commit_review_evidence = task_evidence
     task_evidence_compact = False
     owner_words, execution = owner_words_text(ctx), dict(getattr(ctx, "_preflight_execution", None) or {})
-    pulse = review_subject_pulse(target_repo, layer, subject)  # the same line on every seat's brief
+    # The same subject lines on every seat's brief: its growth, then the selected composition's attribution gap.
+    from ouroboros.mutation_attribution import selection_disclosure
+    pulse = "\n\n".join(line for line in (review_subject_pulse(target_repo, layer, subject),
+                                          selection_disclosure(getattr(ctx, "_commit_attribution", None))) if line)
     goal_section = build_goal_section(goal, scope, commit_message, owner_words, execution_section(execution), pulse)
     scope_section = build_scope_section(scope)
 

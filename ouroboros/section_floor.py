@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
 from ouroboros.context_layout import TIER0_ALWAYS_FULL
 
@@ -52,9 +52,13 @@ def labelled_section(section: str, label: Callable[[str], str]) -> str:
                    operative_view=None if section.operative_view is None else label(section.operative_view))
 
 
-def relocated_text(section: HostSection, reader: str) -> str:
+def relocated_text(section: HostSection, reader: str, *, start_room: Union[bool, str] = False) -> str:
+    """``start_room``: the step paid this start's allowance while the physical window held the whole request;
+    a mode name says the owner's budget for that mode framed it, ``True`` the start's own room."""
+    soft = f"the owner's {start_room.capitalize()} mode budget" if isinstance(start_room, str) else "this start's room"
+    bound = f"{soft}, not for the physical window" if start_room else "the physical window"
     return (section.operative_view + "\n\n"
-            + f"[Host section details omitted for the physical window; retained full text: {reader}.]")
+            + f"[Host section details omitted for {bound}; retained full text: {reader}.]")
 
 
 def retain_section(section: HostSection, *, root: str, task_id: str) -> dict:
@@ -69,9 +73,10 @@ def retain_section(section: HostSection, *, root: str, task_id: str) -> dict:
 
 
 def section_views(sections: Iterable[HostSection], receipts: Iterable[Mapping]) -> dict[str, str]:
-    readers = {row["section_id"]: row["reader"] for row in receipts}
-    return {part.section_id: relocated_text(part, readers[part.section_id]) for part in sections
-            if part.section_id in readers and part.operative_view is not None}
+    rows = {row["section_id"]: row for row in receipts}  # a receipt without the flag renders as recorded before it
+    return {part.section_id: relocated_text(part, rows[part.section_id]["reader"],
+                                            start_room=rows[part.section_id].get("start_room", False))
+            for part in sections if part.section_id in rows and part.operative_view is not None}
 
 
 def render_sections(sections: Iterable[HostSection], fallback: str, addressed: Mapping[str, str]) -> str:
@@ -122,7 +127,8 @@ def _governance_blocks(env: Any, core: Any, *, mode: str, reference_docs: Callab
     sections, development = reference_docs(
         env,
         context_mode="low" if core.compact_reference_docs else mode,
-        include_development=core.docs_need_development,
+        include_development=core.docs_need_development or core.development_required,
+        required_book=core.development_required,
         architecture_text=core.architecture_md,
         development_text=core.development_md,
         books=core.reference_books,
@@ -141,14 +147,15 @@ def render_governance(governance: Tuple[Any, ...], addressed: Optional[Mapping[s
 def _system_blocks(core: Any, governance: Tuple[Any, ...], story: str = "", room: str = "",
                    mode: str = "", addressed: Optional[Mapping[str, str]] = None) -> List[Dict[str, Any]]:
     # All stable items precede C; D is its own block only for the full handbook: Max without it carries the
-    # handbook's chapter map at the head of B, spending no breakpoint. The mode picks the connections map's
-    # form in B. Never create an empty cache boundary.
+    # handbook's chapter map at the head of B, spending no breakpoint; a compact mode's D is a direct requirement
+    # (A' keeps its map). The mode picks the connections map's form in B. Never create an empty cache boundary.
     addressed = addressed or {}
     common, *handbook = render_governance(governance, addressed)
     semi = render_sections(core.semi_stable_sections, core.semi_stable_text, addressed)
     dynamic = render_sections(core.dynamic_sections, core.dynamic_text, addressed)
-    stable = (common, *(handbook if core.docs_need_development else ()), "\n\n".join(part for part in (
-        *(() if core.docs_need_development else handbook), semi, core.connections[mode == "nano"], story) if part))
+    own_block = core.docs_need_development or core.development_required
+    stable = (common, *(handbook if own_block else ()), "\n\n".join(part for part in (
+        *(() if own_block else handbook), semi, core.connections[mode == "nano"], story) if part))
     head = render_sections(core.dynamic_head_sections, core.dynamic_head_text, addressed)
     return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}
             for text in stable if text.strip()] + [

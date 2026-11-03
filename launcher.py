@@ -81,9 +81,8 @@ from ouroboros.launcher_onboarding import (
 )
 from ouroboros.launcher_background import (Background, DesktopApi, activate_running_instance, background_env, other_copy_line,
                                            request_tray_cleanup, restore_tray_after_handoff, stop_tray_before_exit)
-from ouroboros.launcher_server_reaper import (
-    reap_same_install_strays as _reap_same_install_strays_impl,
-)
+from ouroboros.launcher_server_reaper import reap_same_install_strays as _reap_same_install_strays_impl
+from ouroboros.launcher_context_menu import attach_every_window
 from ouroboros.launcher_readiness import wait_for_server as _wait_for_server
 from ouroboros.launcher_window_chrome import paint_room
 from ouroboros.standalone_page import themed_page
@@ -1160,6 +1159,7 @@ def main(argv=()):
 
     if not _headless:
         import webview
+        attach_every_window(webview)
 
     if not acquire_pid_lock():
         log.error("Another instance already running.")

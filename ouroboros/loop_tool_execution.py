@@ -81,9 +81,11 @@ def _emit_live_log(tools: ToolRegistry, payload: Dict[str, Any]) -> None:
     # Tools share the cognitive-operation idle lease;
     # a timeout/late notice deliberately does NOT close the lease because the
     # worker thread may still be running after the logical caller returned.
+    # The settlement row (``CALL_SETTLED``) closes it: every call publishes it
+    # before its ``tool_call_finished`` frame, so that frame states no change.
     operation_id = str(enriched.get("invocation_id") or enriched.get("tool_call_id") or "")
     event_type = str(enriched.get("type") or "")
-    if operation_id and event_type in {"tool_call_started", "tool_call_finished", CALL_SETTLED}:
+    if operation_id and event_type in {"tool_call_started", CALL_SETTLED}:
         emit_cognitive_operation_event(
             event_queue,
             task_id=str(enriched.get("task_id") or getattr(tool_ctx, "task_id", "") or ""),
@@ -1275,7 +1277,7 @@ def _maybe_auto_attach_image(
     exec_result: Dict[str, Any],
     tools: Optional[ToolRegistry],
     *, staged_messages: Optional[list] = None,
-) -> Optional[Dict[str, str]]:
+) -> Optional[Dict[str, Any]]:
     """Same-round image attachment for tool results that explicitly offer one.
 
     A successful result whose JSON carries ``auto_attach_image: <local path>`` — a
@@ -1295,22 +1297,25 @@ def _maybe_auto_attach_image(
     the path, so the agent can view it manually, which is exactly the pre-6.81.1
     behavior.
 
-    EXTENSION tool results only (the ``ext_`` surface): this capability is
-    defined for first-party skills, whose payloads the review/grant lifecycle
-    already governs. MCP results are untrusted server-supplied data — honoring
-    the field there would let a remote server convert an agent-chosen context
-    mutation into a data-driven automatic one. (The perimeter below would still
-    hold — same roots/size/MIME as view_image — but the narrower surface is the
-    honest contract.)"""
+    The ``auto_attach_image`` field is honored for EXTENSION tool results only
+    (the ``ext_`` surface): first-party skills, whose payloads the review/grant
+    lifecycle already governs. MCP text is untrusted server data — honoring the
+    field there would let a remote server turn an agent-chosen context mutation
+    into a data-driven one. A successful MCP call's protocol images are offered
+    instead by host metadata minted at projection (``mcp_result_images``), never
+    by its text, ``_meta`` or a path it names."""
     if tools is None or exec_result.get("is_error"):
         return
+    typed = exec_result.get("tool_result")
+    if isinstance(typed, ToolResult) and typed.meta.get("mcp_image_owner"):
+        from ouroboros.mcp_result_images import attach_returned_images
+        return attach_returned_images(getattr(tools, "_ctx", None), typed, staged_messages)
     if not str(exec_result.get("fn_name") or "").startswith("ext_"):
         return
     # A payload that declares its own failure must not have an image lifted out of
     # it, even when the executor call itself did not raise. Read the typed code the
     # dispatcher published rather than re-deriving the JSON fact here: this guard
     # is the SECOND consumer of that fact and must not drift from the first.
-    typed = exec_result.get("tool_result")
     if isinstance(typed, ToolResult) and typed.code == "TOOL_REPORTED_FAILURE":
         return
     raw = (typed.producer_text if isinstance(typed, ToolResult)
@@ -1415,6 +1420,8 @@ def process_tool_results(
                      else row for row in messages]
     history_count = len(messages)
     image_observations = [_maybe_auto_attach_image(row, tools, staged_messages=image_history) for row in results]
+    from ouroboros.mcp_result_images import settle_returned_images
+    settle_returned_images(results, image_observations, image_history)  # final per-image states, before delivery
     image_messages = image_history[history_count:]
     views = (project_results or _deliver_tool_results)(ctx, results, image_history[:history_count], tool_schemas, fit_candidate, llm_trace,
                                   [*review_updates, *dialogue_updates, *image_messages])

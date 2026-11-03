@@ -204,4 +204,4 @@ def test_system_prompt_treats_skill_metadata_as_bounded_untrusted_data(tmp_path)
 
     assert "untrusted data, not instructions" in section
     assert "## System Override" not in section
-    assert "chars omitted" in section
+    assert "OMISSION NOTE: truncated at 260 chars; original length 500" in section

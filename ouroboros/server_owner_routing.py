@@ -127,12 +127,18 @@ def _route_project_chat_to_running_task(
         tid = str(candidate["task_id"])
         direct_agent = None
         direct_lock = None
-        if candidate.get("direct_chat"):
+        remote_author = False
+        if candidate.get("direct_chat") or candidate.get("inline_presence"):
+            from ouroboros.conversation_lease import presence_author_agent
             from supervisor.workers import get_direct_chat_agent
 
-            direct_agent = get_direct_chat_agent(tid)
+            # A moved inline Presence author takes owner words exactly as a direct turn does: its own lock. One its
+            # conversation lane carries in another process has none here: its durable intake admits them instead.
+            direct_agent = (presence_author_agent(ctx.DRIVE_ROOT, tid) if candidate.get("inline_presence")
+                            else get_direct_chat_agent(tid))
             direct_lock = getattr(direct_agent, "_owner_message_admission_lock", None)
-            if direct_lock is None:
+            remote_author = direct_lock is None and bool(candidate.get("inline_presence"))
+            if direct_lock is None and not remote_author:
                 return ""
         task_obj: Dict[str, Any] = {}
         running = getattr(ctx, "RUNNING", {}).get(tid)
@@ -152,6 +158,7 @@ def _route_project_chat_to_running_task(
             task=task_obj or candidate,
             project_id=str((task_obj or candidate).get("project_id") or ""),
         )
+        from ouroboros.conversation_lease import author_intake_accepting
         from ouroboros.owner_mailbox import write_owner_message
         from supervisor.queue import (
             ACCEPTANCE_FENCES,
@@ -181,7 +188,8 @@ def _route_project_chat_to_running_task(
                 direct_lock.release()
                 direct_lock_held = False
                 return ""
-        task_drive = pathlib.Path(ctx.DRIVE_ROOT) if direct_lock_held else _task_drive_for_task(task_obj, tid)
+        task_drive = (pathlib.Path(ctx.DRIVE_ROOT) if direct_lock_held or remote_author
+                      else _task_drive_for_task(task_obj, tid))
         msg_id = f"{client_message_id}:{tid}" if client_message_id else None
         staged_manifest: list = []
         attachment_report = ""
@@ -214,7 +222,7 @@ def _route_project_chat_to_running_task(
             attachment_note, staged_manifest, attachment_report = _stage_mailbox_attachments(
                 ctx, task_drive, tid, task_metadata, image_data,
             )
-            if direct_lock_held:
+            if direct_lock_held or remote_author:  # an author's own checks; a carried one's intake admits below
                 from ouroboros.room_reader import is_reading
                 if not is_reading(task_drive, tid, task_obj or candidate, running=True):
                     _drop_staged_inputs()
@@ -228,7 +236,7 @@ def _route_project_chat_to_running_task(
                     log.info("Mailbox follow-up refused for %s: cancel pending (direct lane)", tid)
                     _drop_staged_inputs()
                     return ""
-            if not direct_lock_held:
+            if not direct_lock_held and not remote_author:
                 _queue_lock.acquire()
                 queue_lock_held = True
                 live_meta = getattr(ctx, "RUNNING", {}).get(tid)
@@ -275,6 +283,9 @@ def _route_project_chat_to_running_task(
                     task_metadata.get("late_answer") if isinstance(task_metadata, dict) else None
                 ),
                 card_press=task_metadata.get("card_press") if isinstance(task_metadata, dict) else None,
+                # Only while that author's loop still reads mail, checked under the mail lock its final drain closes
+                # the intake under (``conversation_lease.accept_author_mail``): else the words start their own turn.
+                admit=(lambda: author_intake_accepting(task_drive, tid)) if remote_author else None,
             ):
                 return ""
             message_written = True
@@ -627,14 +638,18 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     if needs_decision_lane:
         task_metadata = _decision_turn_metadata(ctx, chat_id, client_message_id, task_metadata, roots)
 
-    def _run_direct() -> None:
-        ctx.handle_chat_direct(
-            chat_id,
-            text or image_caption,
-            image_data,
-            task_constraint=task_constraint,
-            task_metadata=task_metadata,
-            **({"realtime_turn": realtime_turn} if realtime_turn is not None else {}),
-        )
-
-    threading.Thread(target=_run_direct, daemon=True).start()
+    if realtime_turn is not None:
+        # A live call keeps a thread of this process (``executor=inline_call``): its host port is process-local.
+        threading.Thread(target=ctx.handle_chat_direct, args=(chat_id, text or image_caption, image_data),
+                         kwargs={"task_constraint": task_constraint, "task_metadata": task_metadata,
+                                 "realtime_turn": realtime_turn}, daemon=True).start()
+        return
+    # The conversation lane's admission: the RUNNING row and the start receipt here, the
+    # turn's body in a carrier process (owner decision 1A). No thread per owner turn.
+    ctx.handle_chat_direct(
+        chat_id,
+        text or image_caption,
+        image_data,
+        task_constraint=task_constraint,
+        task_metadata=task_metadata,
+    )

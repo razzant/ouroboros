@@ -134,6 +134,15 @@ _ADDED_OWNERS = {
     "_CURRENT_TASK_CEILING": runtime_limits,
     "explicit_execution_timeout_sec": runtime_limits,
     "resolve_task_execution_timeout_sec": runtime_limits,
+    # MCP task sessions and their browser-policy callback: fixed structural bounds.
+    "MCP_TASK_SESSION_CLOSE_WAIT_SEC": runtime_limits,
+    "MCP_TASK_SESSION_RETURN_WAIT_SEC": runtime_limits,
+    "MCP_TASK_SESSION_IDLE_POLL_SEC": runtime_limits,
+    "MCP_BROWSER_GUARD_READ_SEC": runtime_limits,
+    "MCP_BROWSER_GUARD_LINE_BYTES": runtime_limits,
+    "MCP_BROWSER_GUARD_WORKERS": runtime_limits,
+    "MCP_BROWSER_GUARD_PENDING": runtime_limits,
+    "MCP_STDIO_STDERR_TAIL_BYTES": runtime_limits,
 }
 
 _MOVED_OWNERS = {
@@ -392,5 +401,6 @@ def test_settings_extraction_size_bounds_have_meaningful_headroom():
     # saved-choice precedence the config read and persist seams share.
     # +7: independent Consciousness level, Supervisor model, owner rules and disk ownership.
     # +1: Main's Subagents mode (OUROBOROS_SUBAGENTS_MODE, default auto).
-    assert counts["ouroboros.settings_defaults"] <= 568
+    # +1: a build's suggested skill sources (OUROBOROS_SKILL_SOURCE_SUGGESTIONS, default none), one commented row.
+    assert counts["ouroboros.settings_defaults"] <= 569
     assert (PACKAGE / "config.py").is_file()

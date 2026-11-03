@@ -40,6 +40,7 @@ with sync_playwright() as pw:
     # To freeze a live page as a comparison frame instead, open its URL and run:
     #   frozen = page.evaluate(call("freeze.js", {}))
     #   pathlib.Path("frame.html").write_text(frozen["html"])
+    #   frozen["missing"] names what the frame lacks or could not confirm: fix it or say so, and look at the frame beside the live page.
     print(json.dumps(report, ensure_ascii=False, indent=1), failed)
     browser.close()
 shutil.rmtree(tmp, ignore_errors=True)

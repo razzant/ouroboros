@@ -171,8 +171,9 @@ HOST_ROW_CLASSES = {
     "consciousness_notice": ("runtime_state", 1),
     "deep_self_review_queued": ("owner_act_receipt", 1),
     "deep_self_review_unavailable": ("not_started", 2),
+    "evolution_cleanup": ("card_row", 1),  # what a cycle's cleanup moved; alone only on a page without its card
     "evolution_cycle_outcome": ("runtime_state", 1),
-    "evolution_notice": ("runtime_state", 10),
+    "evolution_notice": ("runtime_state", 7),  # lifecycle x4, toggle, light-mode queue drop, /evolve off report; the failure, repeat and reserve stops are gone (owner, 2026-11-02)
     "finalization_notice": ("card_row", 2),
     "host_progress": ("card_row", 1),
     "initialization_notice": ("not_started", 1),
@@ -203,15 +204,15 @@ HOST_ROW_CLASSES = {
     "subagent_terminal_notice": ("card_row", 1),
     "supervisor_failure": ("no_mind", 1),
     "task_admission_notice": ("not_started", 1),  # the one-shot Swarm admission's two sites are gone
-    "task_error": ("no_mind", 1),
-    "task_not_started": ("not_started", 5),  # also the two worker_chat_lane Restart-intake refusals
+    "task_error": ("no_mind", 2),  # + the carrier's exception terminal frame (worker_chat_lane.conversation_exception_terminal)
+    "task_not_started": ("not_started", 6),  # also the two worker_chat_lane Restart-intake refusals and the carrier's typed terminal frame
     "task_pause_notice": ("card_row", 1),
     "task_reaper_notice": ("card_row", 2),  # wedged hold and stop; the two idle-retry notices are gone
     "task_scheduled": ("card_row", 1),
     "task_start_unconfirmed": ("not_started", 1),
     "terminal_incident": ("no_mind", 2),
     "ui_hold": ("runtime_state", 1),
-    "worker_failure": ("no_mind", 2),
+    "worker_failure": ("no_mind", 3),  # + the degraded executor's disclosure (inline_carrier._disclose)
     "worker_readiness_notice": ("runtime_state", 2),
 }
 # The closed classes; none is "the success of a landed act" (its receipt or card already says it).

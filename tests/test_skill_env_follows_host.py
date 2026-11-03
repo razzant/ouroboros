@@ -57,10 +57,16 @@ def skill(tmp_path):
     return SimpleNamespace(drive=drive, loaded=loaded, venv=venv, bin=bin_dir, gone=tmp_path / "Old.app" / "bin")
 
 
+def _set_home(cfg, home):
+    """Rewrite ``pyvenv.cfg``'s ``home``; the replacement is a function because a string one reads
+    the ``\\o`` of a Windows path as a regex escape."""
+    cfg.write_text(re.sub(r"(?m)^home = .*$", lambda _match: f"home = {home}", cfg.read_text(encoding="utf-8")),
+                   encoding="utf-8")
+
+
 def _move_host(skill, *, copied=False):
     """The app that made the venv is gone: its ``home`` and (POSIX) its interpreter entry name a dead path."""
-    cfg = skill.venv / "pyvenv.cfg"
-    cfg.write_text(re.sub(r"(?m)^home = .*$", f"home = {skill.gone}", cfg.read_text(encoding="utf-8")), encoding="utf-8")
+    _set_home(skill.venv / "pyvenv.cfg", skill.gone)
     if WINDOWS:
         return
     for name in ("python", "python3", "python{}.{}".format(*sys.version_info[:2])):
@@ -172,9 +178,8 @@ def test_a_half_repaired_env_is_not_current_and_only_package_skills_are_refused(
 
     assert unusable_python_env(skill.drive, skill.loaded) == ""
     _move_host(skill)
-    cfg = skill.venv / "pyvenv.cfg"  # home rewritten to this host, the interpreter entry still dead
     base = os.path.dirname(os.path.abspath(getattr(sys, "_base_executable", "") or sys.executable))
-    cfg.write_text(re.sub(r"(?m)^home = .*$", f"home = {base}", cfg.read_text(encoding="utf-8")), encoding="utf-8")
+    _set_home(skill.venv / "pyvenv.cfg", base)  # home rewritten to this host, the interpreter entry still dead
     expected = "current" if WINDOWS else "moved"  # Windows: home and version decide; POSIX: the entry must resolve too
     assert isolated_deps.python_env_binding(skill.loaded.skill_dir) == expected
     assert unusable_python_env(skill.drive, skill.loaded) == ("" if WINDOWS else "moved")

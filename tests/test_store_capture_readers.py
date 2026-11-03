@@ -215,6 +215,10 @@ def test_task_readers_answer_what_the_pre_change_readers_answered(tmp_path, monk
         str(tid): (str(status or ""), str(drive or "")) for tid, status, drive in _old_scalar(
             tmp_path, "SELECT task_id, status, COALESCE(child_drive_root, headless_child_drive_root, drive_root) "
             "FROM tasks")}
+    assert task_store.collection_flags(tmp_path, ids) == {
+        str(tid): (None if review is None else bool(review), None if plan is None else bool(plan))
+        for tid, review, plan in _old_scalar(
+            tmp_path, "SELECT task_id, review_collection_pending, plan_collection_pending FROM tasks")}
     with store.open_store(tmp_path, write=False) as txn:
         assert task_store.task_ids(tmp_path) == txn.task_ids()
     newest = [tid for (tid,) in _old_scalar(tmp_path, f"SELECT task_id FROM tasks {task_store._NEWEST_ORDER}")]
@@ -416,6 +420,7 @@ def test_captured_readers_hand_python_rows_by_statement_not_by_row(tmp_path):
         "task_facts": lambda root, ids: task_store.task_facts(root),
         "task_versions": lambda root, ids: task_store.task_versions(root, ids),
         "task_drive_status": lambda root, ids: task_store.task_drive_status(root, ids),
+        "collection_flags": lambda root, ids: task_store.collection_flags(root, ids),
         "task_ids": lambda root, ids: task_store.task_ids(root),
         "newest_ids": lambda root, ids: task_store.newest_ids(root),
         "terminal_writes_since": lambda root, ids: task_store.terminal_writes_since(root, 0),

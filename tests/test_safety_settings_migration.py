@@ -51,16 +51,23 @@ def test_owner_raw_read_does_not_author_absent_coverage(install, document):
 
 
 @pytest.mark.parametrize("document", [["x"], "text", 5])
-def test_owner_safety_decision_replaces_non_object_settings(install, document):
+def test_owner_safety_decision_refuses_a_non_object_settings_document(install, document):
+    """A present document that is not an object is never a new one: the decision is refused typed and
+    the bytes stay; only an absent document is created (``owner_settings.SettingsDocumentUnreadable``)."""
     from starlette.applications import Starlette
     from starlette.routing import Route
     from starlette.testclient import TestClient
     from ouroboros.gateway.safety_settings import api_owner_safety_mode
 
     install.SETTINGS_PATH.write_text(json.dumps(document))
+    before = install.SETTINGS_PATH.read_bytes()
     app = Starlette(routes=[Route("/api/owner/safety-mode", api_owner_safety_mode, methods=["POST"])])
     app.state.drive_root = install.DATA_DIR
     with TestClient(app) as client:
+        refused = client.post("/api/owner/safety-mode", json={"kind": "consciousness", "mode": "light"})
+        assert refused.status_code == 409 and refused.json()["code"] == "settings_unreadable"
+        assert refused.json()["saved"] is False and install.SETTINGS_PATH.read_bytes() == before
+        install.SETTINGS_PATH.unlink()
         response = client.post("/api/owner/safety-mode", json={"kind": "consciousness", "mode": "light"})
     assert response.status_code == 200 and response.json() == {"ok": True, "safety_mode": "light"}
     assert json.loads(install.SETTINGS_PATH.read_text())["OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"] == "light"

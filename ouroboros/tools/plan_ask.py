@@ -64,7 +64,8 @@ log = logging.getLogger(__name__)
 _PARTICIPANT_FACT_KEYS = ("recovery_binding", "operation_id", "operation_state", "late_result_pending",
                           "awaiting_since", "pending_invocation_id", "delegated_run_id",
                           # B1 typed failure facts and the substrate's disclosures travel with the seat
-                          "failure_code", "reset_at", "http_status", "transport_status", "reported_cause", "capability_delta")
+                          "failure_code", "reset_at", "http_status", "transport_status", "reported_cause", "failure_details",
+                          "capability_delta")
 # Receipts the substrate produced for this seat (absent when it produced none): the applied
 # account, the engine's resolved model, the room-read coverage and the host's read attestation.
 _PARTICIPANT_RECEIPT_KEYS = ("resolved_model", "applied_profile", "profile_continuity_receipt", "auth_route_receipt",
@@ -94,10 +95,16 @@ class Participant:
 # ------------------------------------------------------------------ roots and body
 
 def planning_roots(ctx: Any) -> tuple[pathlib.Path, pathlib.Path]:
-    """``(system_root, active_root)``; a ValueError is the caller's typed refusal."""
+    """``(system_root, active_root)``; a ValueError is the caller's typed refusal. ``review_repo_dirs_for``
+    with the task's own folder first: a task's explicit workspace or its room's selected folder (as
+    ``active_repo_dir_for`` resolves it) stays the subject when ``prepare_self_change`` binds a separate
+    candidate: relative paths, attachments and retrieving seats keep reading it, an unavailable one is
+    refused, never replaced, and the candidate's checkout is not required; native seats READ the candidate
+    beside it at the address ``prepare_ask`` freezes in the request (``policy["native_candidate_root"]``,
+    #2431). Without such a folder a bound candidate is the subject."""
     from ouroboros.review_substrate import review_repo_dirs_for
 
-    return review_repo_dirs_for(ctx)
+    return review_repo_dirs_for(ctx, task_folder_first=True)
 
 
 def state_location(ctx: Any) -> tuple[pathlib.Path, str]:
@@ -110,8 +117,10 @@ def state_location(ctx: Any) -> tuple[pathlib.Path, str]:
 
 def plan_is_body(ctx: Any, affected_paths: List[str], *, system_root: pathlib.Path, active_root: pathlib.Path) -> tuple[bool, str]:
     """Body plan = the declared paths change the installed body (``resolve_constitutional``),
-    or a recognized body copy at the active root (``review_body_fact``), or own-body research
-    the task declared (``context_requires_self_body_docs`` with a recognized body source)."""
+    or a recognized body copy (``review_body_fact``) — the active root or a bound candidate,
+    whichever spelling, relative or absolute, reaches it — or own-body research the task
+    declared (``context_requires_self_body_docs`` with a recognized body source)."""
+    from ouroboros import body_candidate
     from ouroboros.review_body_fact import BODY_TRUE, body_fact
     from ouroboros.tools import plan_spec
 
@@ -121,12 +130,17 @@ def plan_is_body(ctx: Any, affected_paths: List[str], *, system_root: pathlib.Pa
         payload_roots=payload_roots)
     if constitutional:
         return True, note
-    if affected_paths and pathlib.Path(active_root) != pathlib.Path(system_root):
+    copies = [pathlib.Path(active_root)]
+    if body_candidate.is_bound(ctx):
+        copies.append(pathlib.Path(body_candidate.descriptor(ctx)["path"]).resolve(strict=False))
+    for root in dict.fromkeys(copies):
+        if not affected_paths or root == pathlib.Path(system_root):
+            continue
         under_root, _ = plan_spec.resolve_constitutional(
-            active_root=active_root, system_repo_root=active_root, affected_paths=affected_paths, evidence=(),
+            active_root=active_root, system_repo_root=root, affected_paths=affected_paths, evidence=(),
             payload_roots=payload_roots)
-        if under_root and body_fact(active_root, system_repo=system_root, data_dir=ctx.drive_root).body == BODY_TRUE:
-            return True, f"body: the declared paths change a recognized copy of Ouroboros's own body ({active_root})"
+        if under_root and body_fact(root, system_repo=system_root, data_dir=ctx.drive_root).body == BODY_TRUE:
+            return True, f"body: the declared paths change a recognized copy of Ouroboros's own body ({root})"
     if not affected_paths:
         from ouroboros.context_input_selection import _explicit_self_body_docs_flag
         from ouroboros.context_layout import task_design_source
@@ -362,6 +376,7 @@ def prepare_ask(ctx: Any, *, record: Mapping[str, Any], revision: Optional[Mappi
     participant's delivery, fit and lane health, the budget admission (``legacy``: the imported v2 state).
     ``revision=None`` is a reading of the request before any plan: no paths are declared, so its body
     fact is the task's own declaration (``plan_is_body`` with no paths)."""
+    from ouroboros import body_candidate
     from ouroboros.config import get_review_enforcement
     from ouroboros.owner_words import objective_author_text
     from ouroboros.tools.plan_dialogue import attach_own_dialogue, dialogue_slot_inputs, render_dialogue, session_input_limits
@@ -433,6 +448,9 @@ def prepare_ask(ctx: Any, *, record: Mapping[str, Any], revision: Optional[Mappi
         for key in ("slot_messages", "slot_session_tasks", "slot_prompt_chars", "dialogue_delivery", "continuation_restarted"):
             merged[key].update(one.get(key) or {})
         merged["request_policy"] = one.get("request_policy") or merged["request_policy"]
+    bound = pathlib.Path(body_candidate.descriptor(ctx)["path"]).resolve(strict=False) if body_candidate.is_bound(ctx) else None
+    if bound is not None and bound != pathlib.Path(active_root):  # native seats read it from the request, not the live binding
+        merged["request_policy"]["native_candidate_root"] = str(bound)
     for sid in merged["continuation_restarted"]:
         continued.pop(sid, None)
     fanout = plan_fanout_inputs(slots, prompt_chars=max([len(system_prompt) + len(c) for c in contents.values()] or [0]),
@@ -570,6 +588,7 @@ def dispatch_ask(ctx: Any, prepared: PreparedAsk, *, revision: Optional[Mapping[
             "host_added": bool(participant.host_added), "dispatched": sid in base_facts and base_facts[sid]["status"] == "pending",
             "continued": bool(prepared.continued.get(sid)), "slot": frozen_seat(participant.slot),
             "delivery_ref": delivery_refs.get(sid), **base_facts[sid],
+            **(_room_delivery(prepared.delivery.get("dialogue_delivery", {}).get(sid)) if base_facts[sid]["status"] == "pending" else {}),
         })
     record = plan_record.append_ask(state_root, task_id, {
         "ask_id": prepared.ask_id, "ts": utc_now_iso(), "revision": number, "message": prepared.message,
@@ -629,6 +648,13 @@ def dispatch_ask(ctx: Any, prepared: PreparedAsk, *, revision: Optional[Mapping[
 
 # ------------------------------------------------------------------ settlement
 
+def _room_delivery(facts: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """The room this seat's delivery carries inline, counted at the barrier before any send and never revised. Whether it
+    went is the seat's own dispatch outcome, which its readers join to it; what file reads cover is a fact apart."""
+    keys = ("conversation_rows", "conversation_inline_rows", "other_rows")
+    return {"room_delivery": {key: int(facts.get(key) or 0) for key in keys}} if facts and facts.get("snapshot_lines") else {}
+
+
 def _dialogue_carrier(manifest: Mapping[str, Any]) -> Dict[str, Any]:
     """The ask row's carrier of the own-room snapshot every participant saw: the exact source
     the ``chat:<id>@<sha256>`` locator in their delivery resolves to (``plan_chat_reader``) and
@@ -674,6 +700,9 @@ def record_reply(ctx: Any, *, state_root: pathlib.Path, task_id: str, ask_id: st
     if ask is None or participant is None:
         return None
     facts = reply_facts_from_row(row)
+    if (participant.get("superseded_operation_ids")
+            and str(facts.get("operation_id") or "") != str(participant.get("operation_id") or "")):
+        return record  # a reopened seat takes only its successor's reply; a row naming no operation is not one
     if facts.get("status") == "pending" and participant.get("status") != "pending":
         return record  # a settled seat is never re-opened by a late pending echo
     if facts.get("status") == "pending" and all(participant.get(key) == value for key, value in facts.items()):
@@ -682,7 +711,8 @@ def record_reply(ctx: Any, *, state_root: pathlib.Path, task_id: str, ask_id: st
     if facts.get("status") != "pending" and ask.get("record_id"):
         reply_ref = settle_ledger_seat(state_root, task_id, str(ask["record_id"]), seat_id, facts, raw_text=str(row.get("text") or ""))
         if reply_ref:
-            record = plan_record.update_participant(state_root, task_id, ask_id=ask_id, seat_id=seat_id, facts={"reply_ref": reply_ref})
+            record = plan_record.update_participant(state_root, task_id, ask_id=ask_id, seat_id=seat_id, facts={
+                "reply_ref": reply_ref, **({"operation_id": facts["operation_id"]} if facts.get("operation_id") else {})})
             if participant.get("status") == "pending":  # it settles now
                 _keep_late_reply_in_view(state_root, task_id, ask, participant, facts, reply_ref)
     if ctx is not None:
@@ -712,7 +742,8 @@ def _keep_late_reply_in_view(state_root: pathlib.Path, task_id: str, ask: Mappin
     lines += [f"Prose: {' '.join(str(reply['prose']).split())}"] if str(reply.get("prose") or "").strip() else []
     lines += [f"- objection {o.get('id')}: {' '.join(str(o.get('text') or '').split())}" for o in reply.get("objections") or []]
     late_review_marks.publish_late_review(state_root, {
-        "surface": "plan_review", "task_id": task_id, "publication_id": f"plan-late:{ask.get('ask_id')}:{seat}",
+        "surface": "plan_review", "task_id": task_id, "publication_id": f"plan-late:{ask.get('ask_id')}:{seat}"
+        + (f":{facts['operation_id']}" if participant.get("superseded_operation_ids") else ""),
         "chat_id": ended.get("chat_id"), "lines": lines,
         "settled_at": str(facts.get("answered_at") or ""), "source_ref": {**source, "task_id": str(reply_ref.get("task_id") or task_id)},
         "subject": {"ask_id": str(ask.get("ask_id") or ""), "seat_id": seat, "plan_revision": ask.get("revision"),
@@ -789,8 +820,11 @@ def settle_released_reply(usage_ctx: Any, *, request: Any, task_id: str, actor: 
 
     delivered = False
     try:
+        # A completion after an explicit continuation is its own frame, never the earlier one's.
+        continued = sorted(str(p.get("operation_id") or "") for p in participants if p.get("superseded_operation_ids"))
         delivered = write_task_message(pathlib.Path(str(usage_ctx.drive_root)), plan_packet.settled_frame(ask_id, participants, objections, custody=settled_wave),
-                                       task_id, source_task_id=task_id, provenance="system", msg_id=f"plan-complete:{task_id}:{ask_id}")
+                                       task_id, source_task_id=task_id, provenance="system",
+                                       msg_id=f"plan-complete:{task_id}:{ask_id}" + "".join(f":{op}" for op in continued))
     except Exception:
         log.warning("plan ask %s settled-wave frame failed for %s", ask_id, task_id, exc_info=True)
     finally:
@@ -799,6 +833,99 @@ def settle_released_reply(usage_ctx: Any, *, request: Any, task_id: str, actor: 
                 plan_record.release_ask_completion(state_root, task_id, ask_id)
             except Exception:
                 log.warning("plan ask %s: undelivered completion claim could not be released", ask_id, exc_info=True)
+
+
+def continuation_offers(state_root: pathlib.Path, record: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """Each ask's stopped session participants an explicit ``continue_seats`` may name (its ledger record's offer)."""
+    from ouroboros import review_ledger as ledger
+    from ouroboros.review_continuation import continuable_seats
+
+    offers = []
+    for ask in record.get("asks") or []:
+        if ask.get("record_id") and any(p.get("status") in ("failed", "not_dispatched") and p.get("route") == "agent_session"
+                                        for p in ask.get("participants") or []):
+            try:
+                offers += [{**offer, "ask_id": ask.get("ask_id")} for offer in continuable_seats(
+                    ledger.load_record(state_root, str(ask["record_id"])))]
+            except ValueError:
+                log.warning("plan ask %s: its ledger record is unreadable; no continuation offer", ask.get("ask_id"))
+    return offers
+
+
+def continue_participants(ctx: Any, record: Mapping[str, Any], selections: Any, *, state_root: pathlib.Path,
+                          task_id: str) -> Dict[str, Any]:
+    """Continue chosen stopped session participants of ONE earlier ask: the same ask, revision and seat.
+
+    The ask's ledger record holds the choice (``review_continuation.arm``), the participant reopens under the
+    successor operation, and this call sends the recorded body as a new turn of the participant's own thread
+    (``continueFrom`` never applies to a thread turn), released at the dispatch barrier: the reply settles
+    through the custody hook into the same ask. No ``prepare_ask``, no new ask id, no new paid wave."""
+    import time
+
+    from ouroboros import review_ledger as ledger
+    from ouroboros.delegate_custody import custody_root
+    from ouroboros.review_continuation import ContinuationRefused, Roster, arm, parse_selections
+
+    chosen, found = parse_selections(selections), {}
+    for ask in record.get("asks") or []:
+        for participant in ask.get("participants") or []:
+            ops = {str(participant.get("operation_id") or ""), *(str(op) for op in participant.get("superseded_operation_ids") or [])}
+            found.update({seat: (ask, participant) for seat, op in chosen if seat == participant.get("seat_id") and op in ops})
+    if len(found) != len(chosen) or len({str(ask.get("ask_id")) for ask, _ in found.values()}) != 1:
+        raise ContinuationRefused("unknown_seat", "each choice names a participant operation of one earlier ask",
+                                  continuation_offers(state_root, record))
+    ask = next(iter(found.values()))[0]
+    held = ledger.load_record(state_root, str(ask.get("record_id") or "")) if ask.get("record_id") else None
+    if not held:
+        raise ContinuationRefused("ledger_unavailable", f"ask {ask.get('ask_id')} has no review ledger record to hold the choice")
+
+    def carried(seat: str) -> Dict[str, Any]:
+        _now, participant = _ask_and_participant(plan_record.load_plan_record(state_root, task_id), str(ask.get("ask_id") or ""), seat)
+        return dict(participant or {})
+
+    def transition(seat: str, decision: Dict[str, Any], build: Any) -> Dict[str, Any]:
+        """The participant's compare-and-swap is ``plan_record.reopen_participant`` (the plan record's own lock)."""
+        built = build(carried(seat))
+        facts = {key: value for key, value in built.items()
+                 if key in ("operation_id", "operation_state", "pending_invocation_id", "late_result_pending", "recovery_binding",
+                            "superseded_operation_ids", "failure_code", "reported_cause", "not_dispatched_reason")}
+        facts["status"] = "not_dispatched" if built.get("operation_state") == "not_dispatched" else "pending"
+        record = plan_record.reopen_participant(state_root, task_id, ask_id=str(ask.get("ask_id") or ""), seat_id=seat,
+                                                supersedes=str(decision["supersedes"]), facts=facts)
+        return dict(_ask_and_participant(record, str(ask.get("ask_id") or ""), seat)[1] or {})
+
+    custody = custody_root(ctx)
+    rows = {seat: ("plan_review", {**participant, "slot_id": seat}) for seat, (_ask, participant) in found.items()}
+    outcome = arm(ctx, held, Roster(task_id=task_id, retry_key=str(ask.get("retry_key") or ""), rows=rows,
+                                    transition=transition, carried=carried), selections, drive=state_root, custody=custody)
+    from ouroboros.llm import LLMClient
+    from ouroboros.review_custody import _attempt_key
+    from ouroboros.review_operation import recorded_review_assignment
+    from ouroboros.review_substrate import run_review_request
+
+    decided = {str(row.get("seat_id") or ""): row for row in outcome["record"].get("rows") or []}
+    current = plan_record.load_plan_record(state_root, task_id)
+    for item in outcome["continued"]:  # an open successor is sent under its recorded token; UNKNOWN replays the same bytes
+        _ask, participant = _ask_and_participant(current, str(ask.get("ask_id") or ""), item["seat_id"])
+        if (participant or {}).get("status") != "pending" or participant.get("operation_id") != item["operation_id"]:
+            continue  # a rejoined successor that already settled is read, never sent again
+        request, slot = recorded_review_assignment(custody, task_id=task_id, surface="plan_review",
+                                                   row={"operation_id": item["operation_id"], "slot_id": item["seat_id"]},
+                                                   retry_key=str(ask.get("retry_key") or ""))
+        request = replace(request, reconcile_only=True, drain_deadline=time.monotonic())
+        decision = next(entry for entry in decided[item["seat_id"]]["continuations"]
+                        if entry["operation_id"] == item["operation_id"])
+        pending = getattr(ctx, "_review_pending_invocations", None)
+        if not isinstance(pending, dict):
+            pending = ctx._review_pending_invocations = {}
+        pending[_attempt_key(request, slot)] = {"pending_invocation_id": decision["invocation_id"],
+                                                "operation_id": decision["operation_id"]}
+        result = run_review_request(request, slots=[slot], drive_root=pathlib.Path(ctx.drive_root), llm=LLMClient(), usage_ctx=ctx)
+        for actor in result.actors:
+            record_reply(ctx, state_root=state_root, task_id=task_id, ask_id=str(ask.get("ask_id") or ""),
+                         seat_id=item["seat_id"], row=_actor_row(actor, slot))
+    return {"record": plan_record.load_plan_record(state_root, task_id), "continued": outcome["continued"],
+            "ask_id": ask.get("ask_id")}
 
 
 def collect_pending(ctx: Any, record: Mapping[str, Any], *, state_root: pathlib.Path, task_id: str) -> Dict[str, Any]:

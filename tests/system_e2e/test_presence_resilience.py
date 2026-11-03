@@ -30,7 +30,9 @@ HOW THE WAITS ARE BUILT (event-gated, never a timed race):
   without starting a focus;
 * e00's HTTP client DISCONNECTS while its turn is at the model and a
   transport-style retry of the SAME event follows (the 13th request). The hook
-  records all 13 at ``PresenceTurnExecutions.start_or_join`` before probing:
+  records all 13 at the Host's turn registry before probing:
+  ``PresenceTurnExecutions.start_or_dispatch``, which since #2654 admits a Host
+  turn's body to a conversation-lane carrier (the gate wait runs there);
   authentication alone precedes the place preparation and cannot prove a wait;
 * the slow authentication is the same hook: it reports every
   ``HostServiceContext.authenticate_token_payload`` to the test's loopback
@@ -198,24 +200,27 @@ if _GATE:
 
     def _patch_turns(module):
         executions = getattr(module, "PresenceTurnExecutions", None)
-        original = getattr(executions, "start_or_join", None)
-        if original is None:
-            return
+        # The Host's /presence/turn admits through start_or_dispatch (the body runs in a
+        # conversation-lane carrier, #2654); start_or_join keeps the in-process form.
+        for seam in ("start_or_dispatch", "start_or_join"):
+            original = getattr(executions, seam, None)
+            if original is None:
+                continue
 
-        def start_or_join(self, turn_id, **kwargs):
-            result = original(self, turn_id, **kwargs)
-            log_path = os.environ.get("S33_TURN_LOG", "").strip()
-            if log_path:
-                import json
-                try:
-                    with open(log_path, "a", encoding="utf-8") as fh:
-                        fh.write(json.dumps({"pid": os.getpid(), "turn_id": turn_id,
-                                             "accepted": result[0] is not None}) + "\n")
-                except OSError:
-                    pass
-            return result
+            def recorded(self, turn_id, _original=original, _seam=seam, **kwargs):
+                result = _original(self, turn_id, **kwargs)
+                log_path = os.environ.get("S33_TURN_LOG", "").strip()
+                if log_path:
+                    import json
+                    try:
+                        with open(log_path, "a", encoding="utf-8") as fh:
+                            fh.write(json.dumps({"pid": os.getpid(), "turn_id": turn_id, "seam": _seam,
+                                                 "accepted": result[0] is not None}) + "\n")
+                    except OSError:
+                        pass
+                return result
 
-        executions.start_or_join = start_or_join
+            setattr(executions, seam, recorded)
 
     class _Finder(importlib.abc.MetaPathFinder):
         def find_spec(self, name, path=None, target=None):
@@ -906,7 +911,11 @@ def test_presence_resilience_fixture_seams_still_exist():
     assert "class HostServiceContext" in source
     assert "def authenticate_token_payload(self, raw_token" in source
     from ouroboros.presence_runner import PresenceTurnExecutions
-    assert callable(PresenceTurnExecutions.start_or_join)
+    assert callable(PresenceTurnExecutions.start_or_join) and callable(PresenceTurnExecutions.start_or_dispatch)
+    # The turn log counts the Host's admissions where the Host makes them: a seam that still
+    # exists but is no longer called would leave the scenario's turn log silently empty.
+    places = (REPO_ROOT / "ouroboros" / "gateway" / "host_service_places.py").read_text(encoding="utf-8")
+    assert "ctx.presence_turns.start_or_dispatch" in places, "the Host's turn registry seam moved: re-aim S33_TURN_LOG"
     run = "0123abcd"
     body = _event_body(_Transport("t", "a", "b"), _event_id(run, "e00"), "room", "hello")
     quoted = f"{_FOCUS_MESSAGE_PREFIX}[S33-EVENT:{_event_id(run, 'e01')}]"

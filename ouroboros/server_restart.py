@@ -102,7 +102,7 @@ def release_agent_restart(request_id: str, reason: str) -> None:
     with queue._queue_lock:
         if _AGENT_RESTART.get("request_id") == request_id and agent_restart_pending():
             _AGENT_RESTART.update(status="released", refusal=reason)
-            queue.persist_queue_snapshot(reason="agent_restart_released")
+            queue.publish_queue_snapshot(reason="agent_restart_released")  # the receipt the requester polls
 
 
 def defer_evolution_restart(tx: dict, *, terminal_retry=None, task_attempt=None) -> str:
@@ -176,7 +176,7 @@ def _accept_agent_restart(ctx) -> bool:
                 _AGENT_RESTART.update(status="refused", refusal="requester_not_active_or_intake_closed")
             else:
                 _AGENT_RESTART.update(status="accepted", started=_started_restart_work())
-            queue.persist_queue_snapshot(reason="agent_restart_intent")
+            queue.publish_queue_snapshot(reason="agent_restart_intent")  # the receipt the requester polls
             return _AGENT_RESTART.get("status") == "accepted"
         finally:
             queue._queue_lock.release()
@@ -282,14 +282,17 @@ def _owned_live_task_ids(ctx: Any) -> list:
     in-process direct/ephemeral activities and running post-task synthesis —
     minus every saved pause (``restart_retention``): a task whose checkpoint
     is already stored survives the Restart as the same paused task, and a
-    cancel intent minted for it here would outrank that pause at restore."""
-    from supervisor.restart_retention import census_without_saved_pauses
+    cancel intent minted for it here would outrank that pause at restore. A correspondent's Presence turn
+    is never the owner's to stop here (``restart_retention.presence_turn``): the stop's custody ends it."""
+    from supervisor.restart_retention import census_without_saved_pauses, presence_turn
 
     from ouroboros.post_task_checkpoint import POST_TASK_SYNTHESIS_INFLIGHT, POST_TASK_SYNTHESIS_LOCK
     from supervisor.active_activity import get_direct_activity_registry
 
-    task_ids = list(dict(ctx.RUNNING or {}))
-    task_ids.extend(str(row.get("activity_id") or "") for row in get_direct_activity_registry().snapshot())
+    task_ids = [tid for tid, meta in dict(ctx.RUNNING or {}).items()
+                if not presence_turn(meta.get("task") if isinstance(meta, dict) else None, DATA_DIR)]
+    task_ids.extend(str(row.get("activity_id") or "") for row in get_direct_activity_registry().snapshot()
+                    if row.get("kind") != "presence")
     root = str(pathlib.Path(DATA_DIR).resolve(strict=False))
     with POST_TASK_SYNTHESIS_LOCK:
         task_ids.extend(task_id for (path, task_id) in POST_TASK_SYNTHESIS_INFLIGHT if path == root)
@@ -512,14 +515,16 @@ def _live_running_task_ids(ctx: Any) -> list:
 
     Heartbeat staleness belongs to the generic supervisor queue, not to the
     planning-scout wait policy.  The latter intentionally waits until terminal
-    state or its shared cutoff even when a scout heartbeat is stale.
+    state or its shared cutoff even when a scout heartbeat is stale. A correspondent's
+    Presence turn is not the owner's work to wait for (``restart_retention.presence_turn``).
     """
     from supervisor.queue import HEARTBEAT_STALE_SEC
+    from supervisor.restart_retention import presence_turn
 
     now = time.time()
     live = []
     for tid, meta in dict(ctx.RUNNING or {}).items():
-        if not isinstance(meta, dict):
+        if not isinstance(meta, dict) or presence_turn(meta.get("task"), DATA_DIR):
             continue
         try:
             hb = float(meta.get("last_heartbeat_at") or 0.0)
@@ -538,7 +543,7 @@ def _live_running_task_ids(ctx: Any) -> list:
     # owner-wait handoff, exactly as the update fence treats it (#2191).
     return list(dict.fromkeys(live + [
         entry.activity_id for entry in get_direct_activity_registry().actors()
-        if not is_parked_direct_entry(entry)
+        if not is_parked_direct_entry(entry) and entry.kind != "presence"
     ]))
 
 
@@ -727,7 +732,7 @@ def _handle_restart_in_supervisor(server, evt: Dict[str, Any], ctx: Any) -> None
                 if agent_restart_pending():
                     _AGENT_RESTART_REPLY.clear()
                     _AGENT_RESTART_REPLY.update(request_id=request_id, status="refused", refusal="restart_already_pending")
-                    queue.persist_queue_snapshot(reason="agent_restart_refused")
+                    queue.publish_queue_snapshot(reason="agent_restart_refused")
                     return
                 _AGENT_RESTART.clear()
                 _AGENT_RESTART.update({**evt, "status": "awaiting", "started": {}})
@@ -964,7 +969,9 @@ def _perform_supervisor_restart(server,
             ctx.update_state(lambda live: live.__setitem__("session_id", server.uuid.uuid4().hex))
         except Exception:
             server.log.warning("Restart session id not rotated: runtime state unavailable", exc_info=True)
-        ctx.persist_queue_snapshot(reason="pre_restart_exit")
+        from supervisor.queue import publish_queue_snapshot
+
+        publish_queue_snapshot(reason="pre_restart_exit")  # embedded rows: an older body restores it after a rollback
     except BaseException:
         from supervisor.queue import reopen_queue_returns
 

@@ -100,9 +100,38 @@ def _pending(root, *, child=False):
     return current.held_runs(root, pending, tuple(params))
 
 
+# What this process's last child look offered its capture pass: (root, ``ready_requests`` keys). A maintenance child
+# runs one pass, so this is that pass's opportunity: process memory, never an installation fact or an attempt claim.
+_offered = ("", frozenset())
+
+
+def _keys(pending):
+    return frozenset((run_id, str(entry.capture_job.get("id") or "")) for run_id, entry in pending.items())
+
+
+def _child_look(root):
+    """``_pending(child=True)`` as the child's capture pass is offered it (its due look, then its run)."""
+    global _offered
+    pending = _pending(root, child=True)
+    _offered = (str(root), _keys(pending))
+    return pending
+
+
 def due(root, row, facts, child):
     # A transient does not spawn a child; another real child generation may retry it.
-    return bool(_pending(root, child=child))
+    return bool(_child_look(root) if child else _pending(root))
+
+
+def ready_requests(root):
+    """The requests a maintenance child would take up now (``_pending(child=True)``), as ``(run_id, request id)``."""
+    return _keys(_pending(root, child=True))
+
+
+def offered(root):
+    """What the capture pass of this process's child was offered at ROOT (``_child_look``). A later job of that child
+    yields only to a ready request outside it: one the pass was offered but could not take up (its disposition lock
+    held) is the next child's anyway. Without such a look, every ready request is one the pass never had."""
+    return _offered[1] if _offered[0] == str(root) else frozenset()
 
 
 def _capture(root, entry, should_stop):
@@ -158,7 +187,7 @@ def run(root, should_stop):
     from ouroboros import maintenance_jobs
 
     done = 0
-    for entry in _pending(root, child=True).values():
+    for entry in _child_look(root).values():
         if should_stop():
             break
         done += int(_capture(root, entry, should_stop))

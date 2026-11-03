@@ -282,6 +282,49 @@ def test_prepare_onboarding_settings_preserves_non_wizard_provider_fields():
     assert prepared["OPENAI_COMPATIBLE_API_KEY"] == "compat-secret-xyz"
 
 
+_LEGACY_PAIR = {"OPENAI_BASE_URL": "http://127.0.0.1:8080/v1", "OPENAI_API_KEY": "sk-legacy-pair-0123456789"}
+
+
+@pytest.mark.parametrize("saved, profile, dedicated, legacy", [
+    # The legacy pair alone: its address arrives read-only, never in the dedicated field.
+    (_LEGACY_PAIR, "openai-compatible", "", "http://127.0.0.1:8080/v1"),
+    # Both pairs: the dedicated one is the endpoint (compatible_endpoint); the saved legacy address is still a fact.
+    ({**_LEGACY_PAIR, "OPENAI_COMPATIBLE_BASE_URL": "http://127.0.0.1:9090/v1"},
+     "openai-compatible", "http://127.0.0.1:9090/v1", "http://127.0.0.1:8080/v1"),
+    # An address without its key configures nothing.
+    ({"OPENAI_BASE_URL": "http://127.0.0.1:8080/v1"}, "openrouter", "", "http://127.0.0.1:8080/v1"),
+    ({"OPENAI_API_KEY": "sk-official-0123456789"}, "openai", "", ""),
+    ({}, "openrouter", "", ""),
+])
+def test_the_bootstrap_carries_a_legacy_address_without_moving_it(saved, profile, dedicated, legacy):
+    state = build_setup_bootstrap(saved, "web")["initialState"]
+    assert state["providerProfile"] == profile
+    assert (state["compatibleBaseUrl"], state["legacyCompatibleBaseUrl"]) == (dedicated, legacy)
+    # No key is copied into another pair's field, and none leaves the server.
+    assert state["compatibleApiKey"] == ""
+    assert state["openaiKey"] == ("***set***" if saved.get("OPENAI_API_KEY") else "")
+
+
+def test_a_finish_that_edits_nothing_keeps_the_legacy_pair_exactly():
+    """CLIENT_CONTRACT §4's mapping, by a client that does not know the additive field, and the
+    builtin draft that also carries the address: completion keeps the saved pair as saved, whatever
+    address a body names, and manufactures no dedicated pair."""
+    saved = {**_LEGACY_PAIR, "OUROBOROS_MODEL": "openai-compatible::legacy-model"}
+    bootstrap = build_setup_bootstrap(saved, "web")
+    contract, state = bootstrap["contract"], bootstrap["initialState"]
+    body = {row["settingKey"]: state[row["stateKey"]]
+            for name in ("providerFields", "modelSlots", "budgetFields") for row in contract[name]}
+    body.update(OUROBOROS_REVIEW_ENFORCEMENT=state["reviewEnforcement"], OUROBOROS_RUNTIME_MODE=state["runtimeMode"])
+    assert "OPENAI_BASE_URL" not in body
+    for payload in (body, {**body, "OPENAI_BASE_URL": state["legacyCompatibleBaseUrl"]},
+                    {**body, "OPENAI_BASE_URL": "http://127.0.0.1:1/v1"}):
+        prepared, error = prepare_onboarding_settings(payload, saved)
+        assert error is None
+        assert {key: prepared[key] for key in _LEGACY_PAIR} == _LEGACY_PAIR
+        assert prepared["OPENAI_COMPATIBLE_BASE_URL"] == prepared["OPENAI_COMPATIBLE_API_KEY"] == ""
+        assert prepared["OUROBOROS_MODEL"] == "openai-compatible::legacy-model"
+
+
 def test_prepare_onboarding_settings_accepts_openai_compatible_setup():
     """An OpenAI-compatible base URL alone (no key) is a valid remote provider."""
     payload = _base_payload()
@@ -466,7 +509,6 @@ def test_agents_step_is_skippable_and_cannot_block_completion():
 
     validator = source.split("function validateCurrentStep()")[1].split("}")[0]
     assert "state.currentStep === 'agents'" not in validator
-    assert "renderAgentsStep()" in source
     # Nothing on the step is a form control the shared validator would see.
     step_source = (REPO / "web/modules/onboarding_agents_step.js").read_text(encoding="utf-8")
     assert "<input" not in step_source

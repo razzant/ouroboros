@@ -139,6 +139,7 @@ def test_an_unreadable_document_makes_credentials_unavailable_never_stale(monkey
         assert config.runtime_setting("OPENAI_API_KEY") is None and _targets()["openai"]["api_key"] == ""
         assert "OPENAI_API_KEY" not in config.runtime_settings() and "OPENAI_API_KEY" not in config.runtime_environ()
         assert config.runtime_setting("OUROBOROS_MODEL") == "openai::old"  # a model name is not a credential: the entry view
+        config.SETTINGS_PATH.unlink()  # repaired by moving it aside: a save never writes over an unreadable document
         save_owner(_document("new"))  # the failure is never memoised: the repaired document answers at once
         assert config.runtime_setting("OPENAI_API_KEY") == "key-new" and config.runtime_setting("OUROBOROS_MODEL") == "openai::new"
 
@@ -171,3 +172,22 @@ def test_the_live_view_is_the_same_object_until_the_document_or_operator_variabl
     assert second[0] is not first[0] and second[1]["OPENROUTER_API_KEY"] == "router-old"  # the saved key still wins
     save_owner(_document("new"))
     assert route_choice.route_settings_view()[1]["OPENROUTER_API_KEY"] == "router-new"
+
+
+def test_the_web_search_source_moves_with_its_model_within_a_task(monkeypatch):
+    """Source and Model are one choice: a save during a task reaches its next search together, never the
+    new Model under the Source the task started with."""
+    from ouroboros.search_routes import resolve_web_search_route
+
+    search = {"ANTHROPIC_API_KEY": "anthropic-key"}
+    save_owner(_document("old", OUROBOROS_WEBSEARCH_BACKEND="anthropic", OUROBOROS_WEBSEARCH_MODEL="anthropic::old-search", **search))
+    task = subagent_runtime.apply_task_start_settings()
+    with config.task_settings_scope(task):
+        first = resolve_web_search_route()
+        assert first["source"] == "anthropic"
+        assert [leg["model"] for leg in first["legs"] + first["unavailable"]] == ["old-search"]
+        save_owner(_document("old", OUROBOROS_WEBSEARCH_BACKEND="openai", OUROBOROS_WEBSEARCH_MODEL="gpt-new", **search))
+        second = resolve_web_search_route()
+        assert second["source"] == "openai" and "error" not in second and "ignored_legacy_model" not in second
+        assert [(leg["source"], leg["model"]) for leg in second["legs"]] == [("openai", "gpt-new")]
+        assert task.environ["OUROBOROS_WEBSEARCH_BACKEND"] == "anthropic"  # the entry snapshot itself is untouched

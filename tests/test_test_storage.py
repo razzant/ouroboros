@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import time
@@ -355,6 +356,92 @@ def test_hard_interruption_retains_scratch_and_partial_evidence(tmp_path, stage)
         # outside it and its own measured container has now proven teardown.
         if root is not None:
             shutil.rmtree(root)
+
+
+# A Ctrl-C consumer shaped like scripts/run_tests.py: its final line comes only after its own cleanup.
+_INT_CONSUMER = '''import os, signal, sys, time
+from pathlib import Path
+def stop(_signum, _frame):
+    print("CONSUMER_INTERRUPTED", flush=True)
+    time.sleep(float(sys.argv[2]))
+    print("=== consumer: exit 130", flush=True)
+    sys.exit(130)
+signal.signal(signal.SIGINT, stop)
+ready = Path(sys.argv[1])
+ready.with_suffix(".pending").write_text(str(os.getpid()))
+ready.with_suffix(".pending").replace(ready)
+time.sleep(120)
+'''
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX INT export window; Windows keeps Job teardown')
+@pytest.mark.parametrize('cleanup', [0, 60])  # inside the owner's 10 s INT window, or far beyond it
+def test_ctrl_c_window_records_an_outer_cut_and_never_a_completion(tmp_path, cleanup):
+    from ouroboros import platform_layer as pl
+    from ouroboros.process_containment import ProcessContainer
+    evidence_parent = diagnostic_directory(tmp_path / 'evidence', f'int-window-{cleanup}')
+    ready = evidence_parent / 'ready'
+    container = ProcessContainer()
+    with (evidence_parent / 'launcher.log').open('wb') as output:
+        proc = container.spawn([sys.executable, '-I', '-S', str(REPO / 'scripts/safe_test.py'), '--temp-parent', '/tmp',
+                                '--evidence-dir', str(evidence_parent), '--', sys.executable, '-c', _INT_CONSUMER,
+                                str(ready), str(cleanup)], cwd=REPO, stdout=output, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 60
+            while not ready.exists() and proc.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            assert ready.exists(), (evidence_parent / 'launcher.log').read_text()
+            assert pl.signal_pid(proc.pid, signal.SIGINT)
+            code = proc.wait(timeout=60)
+        finally:
+            assert container.reap() == ''
+            container.close()
+    [run] = [path for path in evidence_parent.glob('run-*') if (path / 'result.json').exists()]
+    record = json.loads((run / 'result.json').read_bytes())
+    command = json.loads(next(run.glob('command-*/result.json')).read_bytes())
+    raw = next(run.glob('command-*/stdout.bin')).read_bytes()
+    log = (evidence_parent / 'launcher.log').read_text()
+    # Interrupted is never a success, whether or not the consumer finished its own cleanup.
+    assert (code, record['returncode'], record['stopped']) == (130, 130, 'signal 2'), log
+    assert b'CONSUMER_INTERRUPTED' in raw and command['interrupt_escalation'] == record['interrupt_escalation']
+    if cleanup:
+        assert record['interrupt_escalation'].endswith('its own completion is unconfirmed'), record
+        assert 'SAFE_TEST_INTERRUPT_ESCALATED' in log and command['returncode'] == -signal.SIGTERM
+        assert b'=== consumer: exit 130' not in raw, 'this case must really cut the completion'
+    else:
+        # A consumer that completed inside the window is never reported as cut.
+        assert record['interrupt_escalation'] == '' and 'SAFE_TEST_INTERRUPT_ESCALATED' not in log, log
+        assert command['returncode'] == 130 and b'=== consumer: exit 130' in raw
+    assert record['containment_error'] == '' and not Path(record['scratch']).exists(), record
+
+
+def test_a_lost_final_record_leaves_every_observed_fact_in_the_pending_one(tmp_path, monkeypatch, capsys):
+    from ouroboros import safe_test_supervisor as owner
+    repo = _repo(tmp_path / 'repo', 'def test_ok():\n    assert True\n')
+    root = tmp_path / 'scratch'
+    root.mkdir()
+    real, written = owner.write_record, []
+
+    def final_lost(path, value):
+        if Path(path).name == 'result.json':
+            written.append(dict(value))
+            if value['cleanup'] != 'pending':
+                raise OSError('controlled loss of the final record')
+        return real(path, value)
+    monkeypatch.setattr(owner, 'write_record', final_lost)
+    assert owner.main(root, repo, [sys.executable, '-c', 'raise SystemExit(3)'],
+                      evidence_parent=diagnostic_directory(tmp_path / 'evidence', 'pending-record')) == 3
+    err = capsys.readouterr().err
+    run = Path(next(line.split(' ', 1)[1] for line in err.splitlines() if line.startswith('SAFE_TEST_EVIDENCE ')))
+    pending, final = written
+    assert 'SAFE_TEST_EVIDENCE_INCOMPLETE controlled loss of the final record' in err
+    assert json.loads((run / 'result.json').read_bytes()) == pending and pending['cleanup'] == 'pending'
+    # Only cleanup and retention move on; the INT-window observation and every other fact are already there.
+    moving = {'cleanup', 'retention_reason'}
+    assert {key: value for key, value in final.items() if key not in moving} == {
+        key: value for key, value in pending.items() if key not in moving}
+    assert (pending['returncode'], pending['execution'], pending['stopped'], pending['interrupt_escalation']) == (
+        3, 'executed', '', '')
 
 
 def test_unwritable_default_evidence_falls_back_but_an_explicit_destination_never_moves(tmp_path, monkeypatch, capsys):

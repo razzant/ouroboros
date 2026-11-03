@@ -760,7 +760,9 @@ def test_large_input_manifest_survives_real_queue_snapshot_restore(tmp_path, mon
     task_id = response.json()["task_id"]
     assert len(queue.PENDING) == 1
     expected = queue.PENDING[0]["task_contract"]["attachment_manifest_ref"]
-    snapshot = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text())
+    from ouroboros.queue_observation import load_queue_document
+
+    snapshot = load_queue_document(data)  # the contract is published once (shared); the reader expands it
     assert snapshot["pending"][0]["task"]["task_contract"]["attachment_manifest_ref"] == expected
     queue.PENDING.clear()
     assert queue.restore_pending_from_snapshot() == 1

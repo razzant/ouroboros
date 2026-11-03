@@ -310,11 +310,11 @@ def _commit_launch(queue, candidate, unsubmitted=None):
         prior = candidate.get("admitted_dispatch")
         if not projections:
             candidate["admitted_dispatch"] = "possible"
-            if queue.persist_queue_snapshot(reason="worker_launch_claimed") is not True:
+            if queue.publish_queue_snapshot(reason="worker_launch_claimed") is not True:  # durable before the put
                 candidate["admitted_dispatch"] = prior
                 return None
             return []
-        if queue.persist_queue_snapshot(reason="worker_launch_locator") is not True:
+        if queue.publish_queue_snapshot(reason="worker_launch_locator") is not True:
             return None
         committed = commit_dispatch_marks(candidate, projections)
         if committed is False:
@@ -323,7 +323,7 @@ def _commit_launch(queue, candidate, unsubmitted=None):
         witness = _COMMITTED_UNSENT[task_id] = {"row": candidate, "attempt": candidate.get("_attempt"),
                                                 "projections": projections, "unsubmitted": unsubmitted}
         if committed is None:  # it may have landed: never replayable, retried here before any put
-            queue.persist_queue_snapshot(reason="worker_launch_unknown")
+            queue.publish_queue_snapshot(reason="worker_launch_unknown")
             return None
     else:
         from ouroboros.task_results import load_task_result
@@ -333,7 +333,7 @@ def _commit_launch(queue, candidate, unsubmitted=None):
             recommitted = commit_dispatch_marks(candidate, witness["projections"])
             if recommitted is not True:  # refused now (terminal, Stop, owner hold) or unresolved: no put;
                 return recommitted       # the row stays in custody
-    if queue.persist_queue_snapshot(reason="worker_launch_claimed") is not True:
+    if queue.publish_queue_snapshot(reason="worker_launch_claimed") is not True:  # durable before the put
         return None
     return witness["projections"]
 
@@ -651,7 +651,6 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
     from ouroboros.project_placement import refresh_pending_placement
     from ouroboros.config import get_max_active_subagents_per_root
     from supervisor.events_budget import budget_resume_dispatch_allowed
-    from supervisor.state import EVOLUTION_BUDGET_RESERVE
     from supervisor.task_lifecycle import root_cancellation_fenced
     from supervisor.consciousness_carriers import autonomous_work_enabled
 
@@ -680,6 +679,10 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
         # The direct actor that parked this id has not released its registry entry yet:
         # no second live actor for one id.
         return True
+    if candidate.get("_presence_turn") and not claim and any(
+            w.busy_task_id == task_id for w in _pool().WORKERS.values()):
+        # The carrier that parked this Presence turn still holds its slot until its own settlement (#2566).
+        return True
     if root_cancellation_fenced(candidate, root_task_id or task_id):
         return True
     if budget_resume_dispatch_allowed(queue, candidate) is not True:
@@ -689,8 +692,6 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
             and not candidate.get("_budget_pause_resume")
             # One member explicitly selected against THIS fence is admitted; the latch stays up for the rest (Q9).
             and not budget_fence_selected(candidate, queue.BUDGET_ROOT_FENCES.get(root_task_id))):
-        return True
-    if str(candidate.get("type") or "") == "evolution" and remaining < EVOLUTION_BUDGET_RESERVE:
         return True
     if not refresh_pending_placement(_pool().DRIVE_ROOT, candidate):
         return True
@@ -712,7 +713,6 @@ def _choose_candidate(queue, remaining, unresolved_invalid_id_set, refused_this_
     Selection never claims dispatch, consumes a grant, or creates RUNNING custody.
     """
     from ouroboros.project_lease import cold_project_holders, running_project_ids
-    from supervisor.state import EVOLUTION_BUDGET_RESERVE
 
     leased = running_project_ids(running)
     while True:
@@ -761,12 +761,7 @@ def _choose_candidate(queue, remaining, unresolved_invalid_id_set, refused_this_
             chosen_idx = i
             break
         if chosen_idx is None:
-            # Project-leased rows wait; evolution rows below the reserve are cleaned.
-            # At zero the pause block already parked or settled each row: keep it.
-            if 0 < remaining < EVOLUTION_BUDGET_RESERVE:
-                dropped_ids = _pool()._drop_assignable_evolution_tasks(unresolved_invalid_id_set)
-                if dropped_ids:
-                    queue.persist_queue_snapshot(reason="evolution_dropped_budget")
+            # Ineligible rows wait in custody; at zero the pause block parked or settled each.
             return None, False
         task = _pool().PENDING[chosen_idx]
         depth_error = _pool()._normalize_pending_task_depth(task)
@@ -793,10 +788,12 @@ def _choose_candidate(queue, remaining, unresolved_invalid_id_set, refused_this_
 
 def assign_tasks() -> None:
     from supervisor import queue
-    from supervisor.state import budget_remaining, EVOLUTION_BUDGET_RESERVE
+    from supervisor.state import budget_remaining
     from supervisor.worker_owner_wait import maintain_owner_wait_capacity
-
-    from supervisor.worker_pool_lifecycle import _WORKER_LIFECYCLE_LOCK, reconcile_worker_capacity, worker_ready
+    from supervisor.conversation_lane import reconcile_under_project_fence
+    from supervisor.worker_pool_lifecycle import (
+        _WORKER_LIFECYCLE_LOCK, is_project_slot, reconcile_worker_capacity, worker_ready,
+    )
 
     # The loop never waits behind an off-loop respawn or generation stop holding the lifecycle
     # serializer (teardowns kill and join outside it): the whole turn defers to the next tick, so
@@ -805,6 +802,8 @@ def assign_tasks() -> None:
         return
     try:
         maintain_owner_wait_capacity()
+        if _pool()._WORKER_POOL_DISABLED_REASON:
+            reconcile_under_project_fence()
     finally:
         _WORKER_LIFECYCLE_LOCK.release()
     _tick_parked_work(queue)  # custody observation may wait on a remote operation
@@ -833,10 +832,7 @@ def assign_tasks() -> None:
         if _pool()._WORKER_POOL_DISABLED_REASON:
             return
         try:  # every loop tick: ride the snapshot; a refusal re-reads exactly, reserve_attempt is the gate
-            evolution_queued = any(str(row.get("type") or "") == "evolution" for row in _pool().PENDING)
-            remaining = budget_remaining(  # this tick refuses at zero AND, for evolution, at its reserve
-                st, strict=True, allow_stale=True,
-                refuse_below=EVOLUTION_BUDGET_RESERVE if evolution_queued else 0.0)
+            remaining = budget_remaining(st, strict=True, allow_stale=True)  # this tick refuses at zero
         except Exception:
             log.error("Task assignment blocked: monetary authority unavailable")
             return
@@ -964,7 +960,9 @@ def assign_tasks() -> None:
         refused_this_pass = set()  # failed physical claims are not residual demand,
         deferred_this_pass = set()  # unless contention deferred them: the same work retries
         for w in _pool().WORKERS.values():
-            while (w.busy_task_id is None and worker_ready(w) and not getattr(w, "resume_hold", "")
+            # Queued work goes to project slots only; routing admits the conversation lane's carriers.
+            while (is_project_slot(w) and w.busy_task_id is None and worker_ready(w)
+                    and not getattr(w, "resume_hold", "")
                     and getattr(w, "active_capacity", True) and _pool().PENDING):
                 chosen_idx, blocked = _choose_candidate(
                     queue, remaining, unresolved_invalid_id_set, refused_this_pass, _started_projection(), set())

@@ -43,6 +43,7 @@ export const TASK_CAUSE_PHRASES = {
     plan_review_answered_open: "The plan reviewers answered, but the review was never closed; the work went on with their notes.",
     plan_review_quorum_unreachable: "Too few plan reviewers could answer, so the work was held.",
     plan_review_objections_open: "Objections to the plan were still open when this answer was delivered; the work went on with them disclosed.",
+    plan_review_unreadable: "The plan record could not be read, so the state of the plan review is unknown.",
     host_child_status_suffix: "A child task had not settled when the answer was delivered",
     invalid_delivery_control_after_repair: "Ouroboros's final delivery instruction could not be read even after repair, so the answer stands as delivered.",
     budget_exhausted: "The task ran out of budget before it could finish cleanly",
@@ -54,6 +55,8 @@ export const TASK_CAUSE_PHRASES = {
     finalization_grace: "The task hit a time limit and had to wrap up before it could finish cleanly",
     deadline_local: "The task reached its deadline before it could finish cleanly",
     context_overflow: "The task outgrew its context before it could finish cleanly",
+    context_capacity: "This route's window cannot hold the task's context",
+    required_reference_unavailable: "The handbook this task requires could not be read",
     output_recovery_exhausted: "Empty length-limited replies exhausted recovery; saved work remains available",
     children_unabsorbed: "Some sub-task results were never folded in, so the task had to wrap up",
     // The supervisor's timeout rails (queue_timeouts.TIMEOUT_TERMINAL_REASONS): the reaper's task_done reason_code.

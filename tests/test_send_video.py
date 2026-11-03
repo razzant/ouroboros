@@ -48,9 +48,10 @@ class TestSendVideoFilePath:
         assert "no active chat" in result.lower()
         assert ctx.pending_events == []
 
-    def test_file_not_found(self):
+    def test_file_not_found(self, tmp_path):
         ctx = _make_ctx()
-        result = _send_video(ctx, file_path="/nonexistent/video.mp4")
+        # Absolute on every OS: a drive-less "/nonexistent/..." is workspace-relative on Windows.
+        result = _send_video(ctx, file_path=str(tmp_path / "nonexistent" / "video.mp4"))
         assert "not found" in result.lower()
 
     def test_file_too_large(self, tmp_path):

@@ -407,8 +407,12 @@ const PAUSING_PHASES = new Set(['budget_pausing', 'pausing']);
  * the server's owner Restart actually does to running, paused, queued and
  * still-pausing work (supervisor/restart_retention.py). ``activities`` is the
  * live census; ``null`` means it could not be read, and the body says so
- * instead of promising there is nothing still pausing.
- * @param {Array<{phase?: string}>|null} activities
+ * instead of promising there is nothing still pausing. A live inline Presence
+ * turn (`kind` presence) has no saved return: the restart ends its stack;
+ * a new event in its place can start another (architecture §12). One moved
+ * to a Project as text (`presence_pause`, never a live call) is the
+ * exception: the restart saves and returns it.
+ * @param {Array<{phase?: string, kind?: string, presence_pause?: boolean}>|null} activities
  * @returns {string}
  */
 export function restartConfirmBody(activities) {
@@ -426,25 +430,30 @@ export function restartConfirmBody(activities) {
         lines.push(`${pausing} task${pausing === 1 ? ' is' : 's are'} still pausing: a pause not saved when the restart `
             + 'stops it is interrupted instead of staying paused.');
     }
+    const inline = activities.filter((row) => row?.kind === 'presence' && row.presence_pause !== true).length;
+    if (inline) {
+        lines.push(`${inline === 1 ? '1 place conversation is' : `${inline} place conversations are`} mid-turn: the restart `
+            + `interrupts ${inline === 1 ? 'it and it does not resume by itself' : 'them and they do not resume by themselves'}; `
+            + 'a new message can start another turn.');
+    }
     return lines.join('\n');
 }
 
 async function readLiveActivities() {
     const { state: data } = await readState();  // a refusal, an unparsable body or no answer is unknown, never "none"
-    if (!Array.isArray(data?.active_chat_activities) || data.active_chat_activities_complete !== true
-        || data.works_complete === false) {
-        throw new Error('census unavailable');
-    }
+    if (!Array.isArray(data?.active_chat_activities)) throw new Error('census unavailable');
     // The frozen census lists roots. A parked root can still have a child
     // saving its Pause: Restart must warn about that member too, once per id.
     const activities = new Map(data.active_chat_activities.map((row) => [row.activity_id, row]));
     for (const work of data.works || []) {
         for (const [id, state] of Object.entries(work.members?.states || {})) {
-            if (state.confirmed === false) activities.set(id, { phase: 'unknown' });
-            else if (state.transition === 'pausing') activities.set(id, { phase: 'pausing' });
+            if (state.confirmed === false) activities.set(id, { ...activities.get(id), phase: 'unknown' });
+            else if (state.transition === 'pausing') activities.set(id, { ...activities.get(id), phase: 'pausing' });
         }
     }
-    return [...activities.values()];
+    // An incomplete body keeps what it did see, and says the rest is unread.
+    const whole = data.active_chat_activities_complete === true && data.works_complete !== false;
+    return whole ? [...activities.values()] : [...activities.values(), { phase: 'unknown' }];
 }
 
 /**

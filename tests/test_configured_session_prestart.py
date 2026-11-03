@@ -75,6 +75,9 @@ def test_definite_configured_session_start_refusal_terminalizes_before_llm(
      "pending_invocation_id": "inv-1"},
     # An unknown refusal code errs toward the episode, not the terminal.
     {"status": "refused", "reason": "some_future_code"},
+    # Explicit file delivery must not turn existing document-selection faults into route unavailability.
+    {"status": "refused", "reason": "attachment_path_unknown"},
+    {"status": "refused", "reason": "attachment_manifest_unavailable"},
     # An uncustodied start IS a live run somewhere.
     {"status": "started_uncustodied", "run_id": ""},
     # Unparseable output proves nothing about the run's absence.

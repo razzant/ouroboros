@@ -13,7 +13,7 @@ import contextvars
 import json
 import os
 import uuid
-from dataclasses import dataclass, replace as dataclass_replace
+from dataclasses import dataclass, field, replace as dataclass_replace
 from typing import Any, Mapping, Optional
 
 from ouroboros.configured_subagents import (
@@ -69,6 +69,7 @@ class SubagentSelectionError(ValueError):
 
     code: str
     detail: str
+    facts: Mapping[str, Any] = field(default_factory=dict)  # typed refusal facts, e.g. per-entry results
 
     def __str__(self) -> str:
         return f"{self.code}: {self.detail}"
@@ -1200,7 +1201,7 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
             selected_id or selected_snapshot is not None or access is not None
             or options.get("mode") is not None or options.get("override_plan_readiness") is not None
             or options.get("workspace") is not None or options.get("attachment_paths") is not None
-            or options.get("attachment_import") is not None
+            or options.get("attachment_import") is not None or options.get("input_files") is not None
         ):
             raise SubagentSelectionError(
                 "retry_selector_conflict",
@@ -1250,14 +1251,22 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
                 task_inputs(ctx, options["attachment_paths"])
         except DocumentSelectionError as exc:
             raise SubagentSelectionError(exc.code, exc.detail) from exc
+        from ouroboros.delegate_readonly_inputs import InputSelectionError, resolve_selection, selection_entries
+
+        try:  # every selected file is checked as read_file checks it, before the daemon is touched
+            if entries := selection_entries(options.get("input_files")):
+                resolve_selection(ctx, entries)
+        except InputSelectionError as exc:
+            raise SubagentSelectionError(exc.code, exc.detail, {"input_files": exc.results}) from exc
     except SubagentSelectionError as exc:
         from ouroboros.delegate_shared import _fail
 
-        # Selector validation has not entered the physical-start producer yet.
+        # New explicit-file refusals are definite; preserve other selectors' existing startup handling.
         from ouroboros.delegate_evidence import record_start_blocked
 
         record_start_blocked(ctx, str(getattr(ctx, "task_id", "") or ""), exc.code)
-        return _replace_tool_result(_fail("delegate_start", exc.code, exc.detail),
+        facts = {**exc.facts, **({"definitely_unrun": True} if "input_files" in exc.facts else {})}
+        return _replace_tool_result(_fail("delegate_start", exc.code, exc.detail, **facts),
                                     meta_updates={"operation_outcome": "completed_no_effect"})
 
     token = _EXACT_START_SELECTION.set({
@@ -1280,7 +1289,7 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
             **{key: options.pop(key) for key in (
                 "directory_strategy", "scope_paths", "continue_from", "continue_carrier", "mode",
                 "override_plan_readiness", "_plan_answers", "workspace", "attachment_paths", "_document_intent",
-                "_document_first_start") if key in options},
+                "_document_first_start", "input_files", "_prepared_inputs") if key in options},
         )
         # Every configured-session start lands here — the host's pre-start
         # (charter, owner 2026-08-28/29) and any model-issued retry/replacement
@@ -1431,6 +1440,10 @@ def delegate_start_entry(ctx: Any, prompt: str = "", _resolved_binding: Any = No
             saved = first_start_selection(bootstrap)
             bound.update(saved if bound.get("attachment_import") is None else
                          {key: value for key, value in saved.items() if key == "attachment_paths"})
+        if not bootstrap.get("physical_started") and not bootstrap.get("initial_invocation_id") \
+                and bound.get("input_files") is None and bootstrap.get("prepared_input_files"):
+            # The parent's schedule-time copies, verified by the work order's first start unless it selects its own.
+            bound["_prepared_inputs"] = list(bootstrap["prepared_input_files"])
         bound.update({
             "snapshot": dict(bootstrap.get("snapshot") or {}),
             "compiled_work_order": True,

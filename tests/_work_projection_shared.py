@@ -4,16 +4,24 @@ Tests that answer ``/api/state`` themselves (browser transports, the web fixture
 ``works``/``rooms`` fields ``gateway/work_projection.works_snapshot`` builds from the same
 census rows, so the page never reads a shape the server does not send. The projection's
 stored reads (task results, owner fences, retained delegated runs, answer upkeep) are
-answered from the given maps instead of a data directory.
+answered from the given maps instead of a data directory. What the projection still reads from its
+private data root (a paused tree's model recipients) is the real read, and its store handles go back
+before that root does.
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import pathlib
 import tempfile
 from types import SimpleNamespace
 from unittest import mock
 
+from ouroboros import store
 from ouroboros.gateway import work_projection as wp
+
+# Names the private data roots ``work_fields`` owns, so a guard can tell the handles left under them from any other's.
+ROOT_PREFIX = "work-fields-"
 
 
 def _custody(root_id, run):
@@ -23,14 +31,16 @@ def _custody(root_id, run):
                            source=run.get("source", "delegated_subagent"), terminal_state=run.get("terminal_state", ""))
 
 
-def work_fields(owners, raw=None, *, results=None, fences=None, held=None, stops=None, models=None, complete=True):
+def work_fields(owners, raw=None, *, results=None, fences=None, held=None, stops=None, models=None, attempts=None,
+                complete=True):
     """``works``, ``rooms``, ``work_summary``, ``works_complete`` and ``works_gaps`` for these rows, as JSON.
 
     ``held`` maps a tree root to its open runs: run ids, or ``{run_id, task_id, source}`` rows; ``stops`` maps a
-    task to the runs whose stop its live Pause could not confirm."""
-    results, fences, stops = dict(results or {}), dict(fences or {}), dict(stops or {})
+    task to the runs whose stop its live Pause could not confirm; ``attempts`` maps a task to the latest Resume
+    attempt its stored record keeps (``work_stop.ATTEMPT_KEY``), which the server reads for held members only."""
+    results, fences, stops, attempts = dict(results or {}), dict(fences or {}), dict(stops or {}), dict(attempts or {})
     held = {root: [_custody(root, run) for run in runs] for root, runs in dict(held or {}).items()}
-    with tempfile.TemporaryDirectory() as root, \
+    with tempfile.TemporaryDirectory(prefix=ROOT_PREFIX) as root, contextlib.ExitStack() as release, \
             mock.patch.object(wp._Observations, "result", lambda self, task_id: results.get(task_id)), \
             mock.patch.object(wp._Observations, "fence", lambda self, root_id, drive_root=None: fences.get(root_id, {})), \
             mock.patch.object(wp._Observations, "model_handoffs",
@@ -38,7 +48,12 @@ def work_fields(owners, raw=None, *, results=None, fences=None, held=None, stops
             mock.patch.object(wp._Observations, "stop_unknown",
                               lambda self, task_id, drive_root=None, owner=None: frozenset(stops.get(task_id, ()))), \
             mock.patch.object(wp, "_open_runs", lambda drive_root: held), \
+            mock.patch.object(wp._Observations, "resume_attempt",
+                              lambda self, task_id, drive_root=None: attempts.get(task_id, {})), \
             mock.patch.object(wp, "_inflight_upkeep", lambda drive_root, known: []):
+        # The projection's real reads cache this root's stores per thread; Windows removes no open file, so hand
+        # them back before the root goes (this root's only: never another root's, never the installation's).
+        release.callback(store.close_connections_under, pathlib.Path(root))
         snapshot = wp.works_snapshot(root, [dict(row) for row in owners], dict(raw or {}), complete=complete)
     return json.loads(json.dumps(snapshot))
 
@@ -65,5 +80,5 @@ def state_fields(drive_root, task_bindings=None, **census):
     owners, facts = [], {}
     rows = gateway_state._chat_activities_snapshot_safe(drive_root, task_bindings, availability=availability,
                                                         decision_owners=owners, work_facts=facts, **census)
-    projection = wp.works_snapshot(drive_root, owners, facts, complete=availability["complete"])
+    projection = wp.works_snapshot(drive_root, owners, facts, complete=availability["complete"], bindings=task_bindings)
     return json.loads(json.dumps({"active_chat_activities": rows, **projection}))

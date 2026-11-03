@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from ouroboros.utils import write_bytes_atomic
@@ -32,8 +33,8 @@ def evidence_directory(repo, *, parent=None, ctx=None) -> Path:
         if drive and task:
             from ouroboros.task_custody import canonical_owner_root
             # Raw gate inputs/logs are sources, not thousands of deliverables.
-            # Place them with the durable owner immediately: an unregistered
-            # input subtree in the execution drive is not generic copyback work.
+            # Place them with the durable owner immediately: a standalone destination in
+            # the execution drive's store waits for ``history_retention.carry_raw_evidence``.
             parent = canonical_owner_root(drive) / "task_results" / "artifacts" / str(task) / "source_handles" / "test-evidence"
             outer = os.environ.get("OUROBOROS_TEST_TEMP_ROOT")
             if outer and parent.resolve().is_relative_to(Path(outer).resolve()):
@@ -285,6 +286,31 @@ def diagnostics_incomplete(reason, source=None) -> None:
     root = os.environ.get("OUROBOROS_TEST_TEMP_ROOT")
     if root:
         retain_tree(root, f"test diagnostics incomplete: {reason}")
+
+
+@contextmanager
+def keep_startup_log(root, name):
+    """A real server that never became ready keeps why, past its case's scratch.
+
+    Its own stdio (``root/name``: a failed manager child's traceback lands nowhere else) and its data
+    logs go to the run's evidence, for a launcher releases the case's tree on red too. The failure goes on.
+    """
+    try:
+        yield
+    except Exception:
+        root, logs = Path(root), Path(root) / "data" / "logs"
+        try:
+            kept = diagnostic_directory(root / "startup-diagnostics", "server-startup")
+            for path in (root / name, *logs.glob("*.log"), *logs.glob("*.jsonl")):
+                if path.is_file():
+                    target = kept / path.relative_to(root)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(path, target)
+            shown = preview_file(root / name, 8000) if (root / name).is_file() else ""
+            report_diagnostic(f"SERVER_STARTUP_LOG {kept}\n{shown}")
+        except OSError as exc:
+            diagnostics_incomplete(str(exc), root)
+        raise
 
 
 def preview_file(path, limit=200_000) -> str:

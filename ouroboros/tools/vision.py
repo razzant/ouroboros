@@ -168,14 +168,17 @@ def _vision_query_with_timeout(client: Any, *, model_role: str = "vision",
                                processing_preference: Optional[str] = None, **kwargs: Any) -> tuple[str, dict]:
     """Wait around one image call while keeping inference in a tracked child."""
     from ouroboros.provider_models import provider_for_model
-    from ouroboros.deadline_utils import dispatch_window_remaining_sec
+    from ouroboros.deadline_utils import dispatch_window_end_ts, dispatch_window_remaining_sec
     from ouroboros.tools.vision_process import run_vision_child
 
     subscription = not kwargs.get("use_local") and provider_for_model(kwargs.get("model", "")) == "claudexor"
     provider_timeout = float(kwargs.get("timeout") or get_vision_caption_timeout_sec())
-    remaining = dispatch_window_remaining_sec(deadline_at=kwargs.pop("_deadline_at", None),
-                                              deadline_ts=kwargs.pop("_deadline_ts", None),
-                                              reserve_sec=2 * NESTED_SETTLEMENT_MARGIN_SEC + float(kwargs.pop("_finalization_reserve", 0) or 0))
+    # The deadline less both margins and the reserve, as an instant: the parent's remaining time and the child's
+    # send window both come from it, so time spent here cannot extend the window (#572).
+    reserve = 2 * NESTED_SETTLEMENT_MARGIN_SEC + float(kwargs.pop("_finalization_reserve", 0) or 0)
+    end = dispatch_window_end_ts(deadline_at=kwargs.pop("_deadline_at", None),
+                                 deadline_ts=kwargs.pop("_deadline_ts", None), reserve_sec=reserve)
+    remaining = None if end is None else dispatch_window_remaining_sec(deadline_ts=end)
     # A subscription call waits on its task's clocks only; ``None`` = none exists, and the
     # child then has no timeout (its control watcher still ends it on Stop).
     operation_timeout = _vision_execution_window() if subscription else provider_timeout
@@ -183,6 +186,10 @@ def _vision_query_with_timeout(client: Any, *, model_role: str = "vision",
         operation_timeout = remaining if operation_timeout is None else min(operation_timeout, remaining)
     if operation_timeout is not None and operation_timeout <= 0:
         raise TimeoutError("VLM task execution window exhausted before child dispatch")
+    if end is not None:
+        # ``vision_query``'s send window: the child's sends re-check it after its start-up, image preparation and
+        # recording, reserve already taken.
+        kwargs["caller_dispatch_deadline_ts"] = end
     child_timeout = None if operation_timeout is None else operation_timeout + NESTED_SETTLEMENT_MARGIN_SEC
     return run_vision_child(child_timeout=child_timeout, subscription=subscription,
                             model_role=model_role, processing_preference=processing_preference, **kwargs)
@@ -483,6 +490,19 @@ def _read_file_parity_block(ctx: Any, fp: "pathlib.Path") -> str:
     return _runtime_data_read_block(ctx, fp)
 
 
+def _canonical_task_source(ctx: Any, fp: "pathlib.Path", raw: bytes) -> bool:
+    """Whether ``fp`` is a digest-named source in a task's canonical store: write-once, it outlives
+    execution drives and the age sweep of ``uploads/views``, so it stays its own lasting address."""
+    from ouroboros.tool_access import canonical_data_root
+
+    try:
+        parts = fp.relative_to(canonical_data_root(ctx) / "task_results" / "artifacts").parts
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return (len(parts) == 4 and parts[1] == "source_handles"
+            and f"-{hashlib.sha256(raw).hexdigest()}." in parts[3])
+
+
 def _load_local_image_payload(ctx: ToolContext, file_path: str, *, retain_original: bool = False) -> Tuple[Optional[Dict[str, str]], str]:
     """Validate a LOCAL image path against the SAME trust boundary the agent already
     holds via read_file/run_command (allowed roots + protected-artifact read_bytes
@@ -540,7 +560,7 @@ def _load_local_image_payload(ctx: ToolContext, file_path: str, *, retain_origin
     except Exception as e:
         return None, _refuse(ctx, f"⚠️ Failed to read image file: {e}")
     source_path = str(fp)
-    if retain_original:
+    if retain_original and not _canonical_task_source(ctx, fp, raw):
         # Retain the admitted bytes BEFORE decoding/conversion, even on refusal.
         from ouroboros.image_preparation import retain_original as retain
         from ouroboros.tool_access import canonical_data_root

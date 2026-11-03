@@ -92,25 +92,36 @@ function lateWorkHtml(a, late) {
     return { name: esc(late.title || 'Answered task'), sub: `Remaining work ${state} · answer delivered${when}` };
 }
 
-/** A census-only live root (a direct turn, or an answered root whose late work remains):
+/** The name of the work a Presence turn's id belongs to ('' when no work names it): its correspondent's words never are. */
+function presenceWorkName(census, taskId) {
+    const works = Array.isArray(census?.works) ? census.works : [];
+    return String(works.find((work) => String(work?.episode?.task_id || '') === taskId)?.name || '');
+}
+
+/** A census-only live root (a direct turn, a live inline Presence turn, or an answered root whose late work remains):
  * its state in the chip's own words (never the census code), and the shared control —
  * Resume only where its work's Resume control targets it (`resume`, work_status.resumeTargets).
- * `slot` marks where the caller paints a known outcome (`ownOutcomePhase`). */
-export function liveActivityRowHtml(a, nowMs = Date.now(), slot = null, resume = false) {
+ * `slot` marks where the caller paints a known outcome (`ownOutcomePhase`). A Presence turn says its `work`'s name and
+ * line (a recorded Stop, what runs beside it) and offers no control before its first durable write (`cancelable`
+ * false: no door takes it yet). */
+export function liveActivityRowHtml(a, nowMs = Date.now(), slot = null, resume = false, work = null) {
     const names = { direct_chat: 'Direct turn', managed_task: 'Managed task' };
     const started = Number(a.started_at) || 0;
     const spent = started > 0 ? elapsedWords(nowMs / 1000 - started) : '';
     const elapsed = spent ? ` · ${spent}` : '';
     const late = a.late_work && typeof a.late_work === 'object' ? lateWorkHtml(a, a.late_work) : null;
     const outcome = !late && slot && ownOutcomePhase(a);
+    const presence = a.kind === 'presence';
+    const named = !late && presence && work?.name;
+    const line = presence && work ? workLine(work) : '';
     return `<div class="activity-row">
                 <div class="activity-row-main">
-                    <span class="activity-name">${late ? late.name : esc(names[a.kind] || 'Live turn')}</span>
+                    <span class="activity-name"${named ? ' data-i18n-authored' : ''}>${late ? late.name : esc(named || names[a.kind] || 'Live turn')}</span>
                     <span class="activity-sub">${late ? late.sub : `${outcome ? slot(outcome)
-                        : `<span data-i18n-skip>${esc(censusWords(a))}</span>`}${elapsed}`}</span>
+                        : `<span data-i18n-skip>${esc([censusWords(a), line].filter(Boolean).join(' · '))}</span>`}${elapsed}`}</span>
                 </div>
                 <div class="activity-row-actions">
-                    <button type="button" class="btn btn-xs btn-default" data-act="task-control" data-id="${esc(a.activity_id || '')}" data-root="1"${a.phase === 'budget_paused' ? ' data-budget-paused="1"' : ''}${resume ? ' data-resume="1"' : ''}>${esc(TASK_CONTROL_TRIGGER_LABEL)}</button>
+                    ${presence && a.cancelable === false ? '' : `<button type="button" class="btn btn-xs btn-default" data-act="task-control" data-id="${esc(a.activity_id || '')}" data-root="1"${a.phase === 'budget_paused' ? ' data-budget-paused="1"' : ''}${resume ? ' data-resume="1"' : ''}>${esc(TASK_CONTROL_TRIGGER_LABEL)}</button>`}
                 </div>
             </div>`;
 }
@@ -331,7 +342,9 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         const row = (q, kind) => {
             const t = (q && q.task) || {};
             const id = esc(q.id || t.id || '');
-            const label = esc(t.title || t.objective || t.text || q.type || id || 'task');
+            // A Presence turn's words are its correspondent's, never its name: its saved work says its work's name.
+            const named = t._presence_turn ? presenceWorkName(census, String(q.id || t.id || '')) : '';
+            const label = esc(t._presence_turn ? named || 'Live turn' : t.title || t.objective || t.text || q.type || id || 'task');
             const spent = kind === 'running' ? elapsedWords(q.runtime_sec) : '';
             const rt = spent ? ` · ${spent}` : '';
             const ownId = String(q.id || t.id || '');
@@ -363,11 +376,15 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             </div>`;
         };
         // Queue facts keep their runtime/budget controls. The census adds only
-        // missing identities; queued direct turns can appear in both sources.
-        const known = new Set([...running, ...pending].map((q) => String(q.id || q.task?.id || '')));
+        // missing identities; queued direct turns can appear in both sources. A live Presence turn its
+        // conversation lane carries (the Host's admission facts, `_presence_run`) is its place's conversation:
+        // only the census lists it, by its work, and a published queue row it already left never stands for it.
+        const queued = running.filter((q) => !q?.task?._presence_run);
+        const known = new Set([...queued, ...pending].map((q) => String(q.id || q.task?.id || '')));
         const live = activities.filter((a) => a && !known.has(String(a.activity_id || '')));
-        const parts = [...running.map((q) => row(q, 'running')), ...pending.map((q) => row(q, 'pending')),
-            ...live.map((a) => liveActivityRowHtml(a, Date.now(), phaseSlot, resumable.has(String(a.activity_id || ''))))];
+        const parts = [...queued.map((q) => row(q, 'running')), ...pending.map((q) => row(q, 'pending')),
+            ...live.map((a) => liveActivityRowHtml(a, Date.now(), phaseSlot, resumable.has(String(a.activity_id || '')),
+                workOfEpisode(census, a.activity_id)))];
         if (parts.length) return parts.join('');
         return census?.active_chat_activities_complete === true
             ? '<div class="activity-empty">Nothing running or queued.</div>'

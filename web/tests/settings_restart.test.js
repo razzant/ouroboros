@@ -112,3 +112,38 @@ test('task_start_settings_reload_failed renders a visible warning row in chat', 
 test('a per-task unknown pause is disclosed even in a returned census array', () => {
     assert.match(restartConfirmBody([{ phase: 'unknown' }]), /Pause status could not be read/);
 });
+
+const QUIET_RESTART_LINES = 3;  // the three lines every confirmation says
+
+test('Restart counts live inline Presence turns as interrupted, promising no return; nothing else adds the line', () => {
+    const quiet = restartConfirmBody([]);
+    assert.equal(quiet.split('\n').length, QUIET_RESTART_LINES);
+    assert.doesNotMatch(quiet, /place conversation/);
+    // Ordinary work reads as before: only a Presence row names this behaviour.
+    for (const row of [{ phase: 'working', kind: 'direct_chat' }, { phase: 'working', kind: 'managed_task' }]) {
+        assert.equal(restartConfirmBody([row]), quiet);
+    }
+    const one = restartConfirmBody([{ phase: 'working', kind: 'presence' }]);
+    assert.notEqual(one, quiet);
+    assert.ok(one.startsWith(quiet));
+    assert.match(one, /^1 place conversation is mid-turn: the restart interrupts it and it does not resume by itself; a new message can start another turn\.$/m);
+    // A turn still preparing is as live, and a second turn is counted, never a second line.
+    const two = restartConfirmBody([{ phase: 'preparing', kind: 'presence' }, { phase: 'working', kind: 'presence' }]);
+    assert.match(two, /^2 place conversations are mid-turn: the restart interrupts them and they do not resume by themselves;/m);
+    assert.equal(two.split('\n').length, QUIET_RESTART_LINES + 1);
+    // An unreadable census claims no count at all.
+    assert.doesNotMatch(restartConfirmBody(null), /place conversation/);
+    // Unknown and pausing work keep their own warnings beside it.
+    const mixed = restartConfirmBody([{ phase: 'unknown', kind: 'presence' }, { phase: 'budget_pausing' }]);
+    assert.match(mixed, /Pause status could not be read/);
+    assert.match(mixed, /1 task is still pausing/);
+    assert.match(mixed, /1 place conversation is mid-turn/);
+    // A turn moved to a Project as text is saved and returned by the restart: no interruption warning for it,
+    // while an unmoved one beside it is still counted.
+    assert.equal(restartConfirmBody([{ phase: 'working', kind: 'presence', presence_pause: true }]), quiet);
+    const beside = restartConfirmBody([{ phase: 'working', kind: 'presence', presence_pause: true },
+        { phase: 'working', kind: 'presence' }]);
+    assert.match(beside, /^1 place conversation is mid-turn/m);
+    // Paused warm it stays that same work: its saved pause survives the restart, and no interruption is claimed.
+    assert.equal(restartConfirmBody([{ phase: 'budget_paused', kind: 'presence', presence_pause: true }]), quiet);
+});

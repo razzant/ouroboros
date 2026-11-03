@@ -28,12 +28,22 @@ def capture_terminal_rows(root, records):
     (``memory_inventory.terminal_rows``): a page's writer ran after the chronicle's activation, so its later
     terminal rows lie after the frontier. Each is ``(address, {"type", "status", <the finality facts it
     stored>}, pos)``."""
+    return writer_terminal_rows(root, terminal_starts(records))
+
+
+def terminal_starts(records):
+    """``{(room, writer task): the stream position after which its terminal rows are later}`` of the pages."""
     starts = {}
     for record in records:
         task_id = _terminal_writer(record)
         if task_id:
             key = (str(record["room_id"]), task_id)
             starts[key] = min(starts.get(key, _terminal_after(record)), _terminal_after(record))
+    return starts
+
+
+def writer_terminal_rows(root, starts):
+    """``capture_terminal_rows`` for the writers' ``terminal_starts``: all it reads besides the pages."""
     if not starts:
         return {}
     tasks, first = {task_id for _room, task_id in starts}, min(starts.values())
