@@ -2,10 +2,12 @@
 
 A keyless real server runs the committed checkout (``e2e_clone``). The owner creates a
 Project and writes into its room over the SAME /ws the SPA opens, so the turn is the
-direct lane's own. Its first round writes a file in the room; its second model round is
-held by a ``ModelGate`` while the application stops (SIGTERM to the whole tree). The next
-server on the same data root restores the saved turn, the owner presses Resume over
-HTTP, and the same task id continues its saved loop on a worker and persists its answer.
+owner's own: since #2654 a conversation-lane carrier process holds its published RUNNING
+row. Its first round writes a file in the room; its second model round is held by a
+``ModelGate`` while the application stops (SIGTERM to the whole tree). The next server on
+the same data root restores the saved turn under exactly ONE queue row, the owner
+presses Resume over HTTP, and the same task id continues its saved loop on a worker and
+persists its answer.
 
 Doubled, and only these: the model is the loopback stub and its held round. The stop,
 restore, Resume, Project-hold revalidation, assignment and result persistence are the
@@ -15,6 +17,7 @@ shipped ones. Before #2547 Resume answered ``ok`` and the row stayed pending und
 
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
 import uuid
@@ -28,6 +31,7 @@ from tests.system_e2e.harness import (
     ModelGate,
     ScriptedStubModel,
     body_text,
+    conversation_turn_row,
     keyless_settings,
     require_lane,
     start_server,
@@ -76,6 +80,29 @@ def _pending(oracle: ArtifactOracle, task_id: str) -> dict:
     return next((dict(row.get("task") or {}) for row in rows if isinstance(row, dict) and row.get("id") == task_id), {})
 
 
+def _restored_once(oracle: ArtifactOracle, task_id: str) -> dict:
+    """The restored turn's one PENDING row. The stop published the lane turn's RUNNING row and
+    the next boot recovers its saved work from it; a second successor of the same id is a
+    duplicate custody owner, which leaves recovery closed for both ("Another queue owner
+    holds this task id") and Resume answering ok over a turn that never runs."""
+    rows = oracle.pending_rows(task_id)
+    assert len(rows) == 1, {"pending_rows_for_one_task": len(rows), "rows": [
+        {key: (row.get("task") or {}).get(key) for key in (
+            "_attempt", "_working_recovery", "_project_admission_restore_hold")} for row in rows]}
+    return dict(rows[0].get("task") or {})
+
+
+@contextlib.contextmanager
+def _released(gate: ModelGate):
+    """Release the held round on every exit path. A stub request thread blocked in the gate is
+    the scenario's own thread: a failure before the final release must not leave it alive past
+    the test (conftest thread hygiene named ``process_request_thread`` after such a failure)."""
+    try:
+        yield gate
+    finally:
+        gate.release.set()
+
+
 def _saved(data_root, task_id: str) -> list:
     from ouroboros.working_checkpoint import _working_dir
 
@@ -92,7 +119,7 @@ def test_s42_direct_project_turn_continues_after_stop_restart_and_owner_resume(e
     subprocess.run(["git", "init", "-q", str(room)], check=True, capture_output=True)
     gate = ModelGate(_worked, timeout=900)
     root = tmp_path / "server"
-    with _RoomStub(gate) as stub:
+    with _RoomStub(gate) as stub, _released(gate):
         settings = keyless_settings(stub, OUROBOROS_MAX_WORKERS=1)
         server = start_server(e2e_clone, root, settings)
         try:
@@ -113,7 +140,9 @@ def test_s42_direct_project_turn_continues_after_stop_restart_and_owner_resume(e
                 assert gate.arrived.wait(240), "the room turn never reached its second round"
             assert (room / "s2547-progress.txt").read_text(encoding="utf-8") == "written before the stop"
             assert wait_until(lambda: _saved(server.data_root, task_id), 60), "no working state was saved"
-            assert task_id not in oracle.running_ids(), "the direct turn acquired a pool worker"
+            # #2654: the room turn runs on a conversation-lane carrier, outside the
+            # MAX_WORKERS=1 project pool, its RUNNING row published (never PENDING).
+            conversation_turn_row(oracle, task_id)
             before_stop = oracle.task_result(task_id)
             assert before_stop.get("status") == "running" and before_stop.get("_is_direct_chat") is True
         finally:
@@ -122,8 +151,9 @@ def test_s42_direct_project_turn_continues_after_stop_restart_and_owner_resume(e
         server = start_server(e2e_clone, root, settings)
         try:
             oracle = ArtifactOracle(server.data_root)
-            restored = wait_until(lambda: _pending(oracle, task_id), 60)
-            assert restored and restored.get("project_id") == project["id"], restored
+            assert wait_until(lambda: _pending(oracle, task_id), 60), "the saved turn was not restored"
+            restored = _restored_once(oracle, task_id)
+            assert restored.get("project_id") == project["id"], restored
             assert restored.get("_working_recovery"), restored
             resumed = _api_status(server.base_url, "POST", f"/api/tasks/{task_id}/resume", {}, timeout=60)
             body = resumed.get("body") or {}
@@ -211,7 +241,7 @@ def test_s42_resumed_folderless_work_keeps_its_task_drive_after_a_sibling_gives_
     folder.mkdir()
     gate = ModelGate(_turn_a_second_round, timeout=900)
     root = tmp_path / "server"
-    with _FolderStub(gate, folder) as stub:
+    with _FolderStub(gate, folder) as stub, _released(gate):
         settings = keyless_settings(stub, OUROBOROS_MAX_WORKERS=1)
         server = start_server(e2e_clone, root, settings)
         try:
@@ -227,6 +257,7 @@ def test_s42_resumed_folderless_work_keeps_its_task_drive_after_a_sibling_gives_
             drive = server.data_root / "task_drives" / task_id
             assert (drive / PROOF).read_text(encoding="utf-8") == "before stop"
             assert wait_until(lambda: _saved(server.data_root, task_id), 60), "no working state was saved"
+            conversation_turn_row(oracle, task_id)  # held by a conversation-lane carrier when the stop lands
         finally:
             server.stop()
 
@@ -234,6 +265,7 @@ def test_s42_resumed_folderless_work_keeps_its_task_drive_after_a_sibling_gives_
         try:
             oracle = ArtifactOracle(server.data_root)
             assert wait_until(lambda: _pending(oracle, task_id), 60), "turn A was not restored"
+            _restored_once(oracle, task_id)
             _send(server, project, f"{TURN_B}: start the sibling task in its explicit folder.")
             room = wait_until(lambda: next((p for p in _api(server.base_url, "GET", "/api/projects", timeout=30)
                                             .get("projects") or [] if p.get("id") == project["id"]

@@ -507,16 +507,21 @@ def test_panic_after_the_restart_exit_rescue_refuses_the_final_reset(registry, s
 
 def test_panic_never_waits_for_an_unbounded_git_start_and_its_starter_ends_it(registry, monkeypatch, tmp_path):
     """``git_capture`` without a timeout still starts through ``tracked_start``: Panic while that Git is
-    admitted but inside its Popen takes no lock or wait, and the late publication hands the tree to the kill."""
+    admitted but inside its Popen takes no lock or wait, and the late publication hands the tree to the kill. The
+    alias's shell already runs when Panic comes, so only a kill of the whole tree releases the capture's pipes.
+
+    UNRESOLVED on Windows, a product failure rather than a fixture's (CI 41634598146, job 125912568384): without a Job
+    the request ends the published root alone, its settle pass addresses a root already gone, and the capture waits."""
     marker = "ob-late-panic-git"
     hold, seen, results = threading.Event(), [], []
     _held_popen(monkeypatch, marker, hold, seen)
     monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)
     capture = threading.Thread(target=lambda: results.append(git_ops.git_capture(
-        ["git", "-c", f"alias.{marker}=!sleep 60", marker])), name="unbounded-git", daemon=True)
+        ["git", "-c", f"alias.{marker}=!touch tree.ready; sleep 60", marker])), name="unbounded-git", daemon=True)
     capture.start()
     try:
         _wait(lambda: seen)
+        _wait(lambda: (tmp_path / "tree.ready").exists(), timeout=120.0)  # Git's own start, not the bound under test
         child = seen[0]
         registry.started.append(child)
         assert shell_process._spawning_subprocesses == 1, "the unbounded Git start is admitted and counted"

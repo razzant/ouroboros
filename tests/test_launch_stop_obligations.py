@@ -293,13 +293,16 @@ def test_identity_reads_that_never_answer_at_shutdown_keep_the_one_grace(tmp_pat
     """The table answers but every identity read (``ps -p``) blocks until its bound. A held service whose leader
     birth was recorded then has no identity to signal by: nothing is signalled and it keeps its custody for the
     next start. One whose birth was never recorded is unmeasured, so it gets its native group kill, inside the
-    one grace: its birth read takes only the grace's share. Either way the exit leaves inside that grace."""
+    one grace: its birth read takes only the grace's share. Either way the exit leaves inside that grace. This is
+    the ``ps`` reader's contract, selected on every POSIX host (``_read_through_ps``); a stall in Linux's active
+    ``/proc`` reader has no such bound and is NOT covered here."""
     import subprocess
 
     from ouroboros import owned_shutdown, process_census
     from ouroboros.tools import services
-    from tests._launch_stop_shared import _end, _registry, _same_process_alive, _server, _start
+    from tests._launch_stop_shared import _end, _read_through_ps, _registry, _same_process_alive, _server, _start
 
+    _read_through_ps(monkeypatch)
     registry = _registry(tmp_path, monkeypatch)
     leader_pid = _start(registry, scripts, tmp_path / "held.port", "held", mode="same")["pid"]
     _port, pid, birth = _server(tmp_path / "held.port")

@@ -556,7 +556,12 @@ def prepare_conversation_task(agent: Any, task: Dict[str, Any], drive_root: Any,
     # room basis the turn then carries like queued work, so restore and Resume
     # readmit it on that basis (#2547).
     pid = str(task.get("project_id") or "").strip()
-    if pid:
+    from ouroboros.project_admission import admitted_folder
+
+    # A basis the turn already carries (an earlier attempt's bind, restored with its saved work) is its
+    # admission authority: a resumed or retried first step never recaptures it from the room's current
+    # row (#2547: a sibling's later folder must not move folderless work). Placement replaces the basis.
+    if pid and admitted_folder(task.get("_project_admission"), pid) is None:
         try:
             from ouroboros.project_admission import direct_turn_basis
             from ouroboros.projects_registry import bind_task_to_project

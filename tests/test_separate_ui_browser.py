@@ -800,21 +800,26 @@ def test_widgets_and_the_author_kit_run_through_the_proxy_under_the_password(sta
     # the one TLS origin the page was served from, never the core's own address and never the skill's un-leased route.
     leased = re.fullmatch(rf"{re.escape(stack.url)}(/api/widget-resources/[A-Za-z0-9_-]{{43}}/)page", frame_src)
     assert leased, frame_src
+    lease_uri = f"{leased.group(1)}page"
     routed = stack.routed()
     prefixes = ("/api/extensions/", "/api/widget-resources/", "/api/widgets/")
     statuses = {(r["uri"], r["status"]) for r in routed if r["uri"].startswith(prefixes)}
     for expected in ((f"/api/extensions/{PROBE}/data", 200), (f"/api/extensions/{PROBE}/lib", 200),
                      (f"/api/extensions/{PROBE}/logo", 200), (f"/api/extensions/{PROBE}/disposed", 200),
                      ("/api/extensions/author_ui_kit/author-kit", 200), (f"/api/extensions/{PROBE}/module/widget.js", 200),
-                     ("/api/widgets/asset-leases", 200), (f"{leased.group(1)}page", 200)):
+                     ("/api/widgets/asset-leases", 200), (lease_uri, 200)):
         assert expected in statuses, (expected, sorted(statuses))
+    # The page was asked for only after the signed-in session minted its lease through the proxy.
+    asked = next(i for i, r in enumerate(routed) if r["uri"] == lease_uri)
+    assert any(r["method"] == "POST" and r["uri"] == "/api/widgets/asset-leases" and r["status"] == 200
+               for r in routed[:asked])
     # Everything that bypasses the bridge and the lease is refused by the frame's own policy before it is sent (WebKit
     # too): the passive image of the skill's raw route and the route page's raw address never reach the proxy.
     assert passive == "refused", passive
     assert blocked_text.startswith("Widget blocked by frame policy: "), blocked_text
     assert blocked_text.endswith(f"/api/extensions/{PROBE}/logo?passive=1"), blocked_text
-    bypassing = [r["uri"] for r in routed if r["uri"] in (f"/api/extensions/{PROBE}/logo?passive=1",
-                                                          "/api/extensions/author_ui_kit/page")]
+    bypassing = [r["uri"] for r in routed if r["uri"].startswith(f"/api/extensions/{PROBE}/logo?")
+                 or r["uri"] == "/api/extensions/author_ui_kit/page"]
     assert not bypassing, bypassing
     assert {r["role"] for r in routed if r["uri"].startswith(prefixes)} == {"core"}
     assert not [p for p in stack.interface_paths() if p.startswith(("/api", "/auth", "/ws", "/onboarding"))]

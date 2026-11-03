@@ -785,10 +785,14 @@ html[data-layout="stack"] .resize-handle { display: none; }
     overflow-wrap: anywhere;
 }
 
+/* The list's column is 280–360px while the page has room for it beside a file, and never wider than the page itself:
+   below 700px one pane takes the whole page (the `files` container query below), so a floor above the page's own width
+   only pushes that pane's header, location and actions out past the column that holds them (DESIGN "Page header":
+   folder names fit and actions wrap). */
 .files-layout {
     position: relative;
     display: grid;
-    grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+    grid-template-columns: minmax(min(280px, 100%), 360px) minmax(0, 1fr);
     grid-template-areas: "sidebar preview";
     flex: 1;
     height: auto;

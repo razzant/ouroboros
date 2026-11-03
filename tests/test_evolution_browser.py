@@ -22,6 +22,14 @@ STATE = {"sha": "evolution-browser-fixture", "supervisor_ready": True, "active_c
          "bg_consciousness_enabled": True, "bg_consciousness_state": {"status": "sleeping", "spent_24h_usd": 1.25, "daily_usd": 10}}
 
 
+# Where the installation's newest identity record sits, as a stretch after the last tag. The axis breaks at the quiet
+# months only while they are over three times the next-longest stretch (web/modules/evolution.js `timeAxis`), and that
+# record is one end of such a stretch: the fixture's 102-day silence stands out only while the tail is under 34 days. It
+# belongs to the fixture's own calendar, not the suite's clock: stamped "now" it lapsed on 2026-10-31 and the quiet
+# months stopped being drawn as a gap.
+RECORD_AFTER_LAST_TAG = timedelta(days=25)
+
+
 def history(*, refresh="idle", versions=True, error=""):
     """60 versions: twelve in three February days (4.0.0–6.3.0), then 6.10.0–7.9.2 from June to October; four MAJOR
     releases, 24 MINOR ones and one row its author titled (7.6.0): 28 milestones, the server's rule (owner 21.10, A)."""
@@ -51,7 +59,7 @@ def history(*, refresh="idle", versions=True, error=""):
     return {"versions": rows if versions else [], "saved_at": datetime.now(timezone.utc).isoformat(),
             "refresh": {"state": refresh, "started_at": "", "finished_at": "", "error": error, "unmeasured": 0},
             "install": {"identity": {"at_versions": identity if versions else [], "first_at": dates[14].isoformat(),
-                                     "latest": {"at": datetime.now(timezone.utc).isoformat(), "chars": 26500}},
+                                     "latest": {"at": (dates[-1] + RECORD_AFTER_LAST_TAG).isoformat(), "chars": 26500}},
                         "scratchpad": {"at_versions": [None] * len(rows) if versions else [], "first_at": "", "latest": None}},
             "checkpoints": [], "generated_at": datetime.now(timezone.utc).isoformat()}
 

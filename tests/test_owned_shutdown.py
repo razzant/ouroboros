@@ -816,7 +816,12 @@ def test_set_file_is_one_document_under_the_canonical_state(tmp_path):
 # --------------------------------------------------------------------------- contended copies of one launch
 # A pending registration can be older than what the set already stores for the same launch: written while the
 # custody lock was held, folded or replayed after a newer row of that launch was recorded. Controlled identities
-# (``_launch_stop_shared``): launch A's leader is gone and its owed child lives, outside its group and marker.
+# (``_launch_stop_shared``): launch A's leader is gone and its owed child lives, outside its group and marker. What
+# custody merges holds on every host, over its real files and file locks; only what a measured stop or a custody
+# reader then judges of a process is POSIX's (Windows' ``end_scope`` and ``observe_owned_processes`` measure nothing).
+posix_measured_stop = pytest.mark.skipif(os.name == "nt",
+                                         reason="the measured stop is POSIX; Windows keeps its native kill")
+
 
 def _held_custody_lock(root):
     from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
@@ -856,11 +861,13 @@ def _a_owes(root):
     return [item["pid"] for item in record["ledger_entry"].get("known_members") or []], record["stop_requested_at"]
 
 
-def test_a_reader_never_replays_an_older_pending_copy_of_a_launch_over_its_newer_record(tmp_path, monkeypatch):
+@pytest.mark.parametrize("reader", ["custody selection", pytest.param("body candidate", marks=posix_measured_stop)])
+def test_a_reader_never_replays_an_older_pending_copy_of_a_launch_over_its_newer_record(tmp_path, monkeypatch, reader):
     """A lock-free reader lists A's contended registration; before it reads the document, another writer folds and
-    deletes that file and A's stop records the child A still owes (``note_owed``). The body candidate's custody
-    read must still hold A for that child."""
+    deletes that file and A's stop records the child A still owes (``note_owed``). The one selection every custody
+    reader starts from must still name that child beside A's older row, and the body candidate's read must hold A."""
     from ouroboros import body_candidate, owned_shutdown, process_custody
+    from ouroboros.launch_custody import read_custody
     from tests._launch_stop_shared import _CHILD, _PID
 
     world, rows, a, owed = _launch_owing_a_child(tmp_path, monkeypatch)
@@ -878,14 +885,21 @@ def test_a_reader_never_replays_an_older_pending_copy_of_a_launch_over_its_newer
         return found
 
     monkeypatch.setattr(owned_shutdown, "_pending_files", listed_then_raced)
-    live = body_candidate.live_lineage_processes(tmp_path, "t-a")
+    if reader == "custody selection":
+        custody = read_custody(tmp_path, every_drive=True)
+        [row] = custody.rows
+        assert not row.get("known_members") and not custody.blind and not custody.unknown, "only the set names it yet"
+        assert [item["pid"] for item in custody.copies.get(id(row), ())] == [_CHILD], "the older copy replaced nothing"
+    else:
+        assert body_candidate.live_lineage_processes(tmp_path, "t-a") == [_PID], "its custody is not released"
 
-    assert raced and _CHILD in rows and world.signals == []
-    assert (live, _a_owes(tmp_path)[0]) == ([_PID], [_CHILD]), "A's owed child lives: its custody is not released"
+    assert raced and _CHILD in rows and (world.signals, world.kills, world.native) == ([], [], [])
+    assert _a_owes(tmp_path)[0] == [_CHILD]
 
 
+@pytest.mark.parametrize("then", ["fold", pytest.param("exit stop", marks=posix_measured_stop)])
 @pytest.mark.parametrize("order", ["older-name-first", "newer-name-first"])
-def test_two_pending_copies_of_a_launch_keep_what_it_owes_in_either_name_order(tmp_path, monkeypatch, order):
+def test_two_pending_copies_of_a_launch_keep_what_it_owes_in_either_name_order(tmp_path, monkeypatch, order, then):
     """A's registration and its later owed row both meet a held custody lock (another writer takes it between
     ``note_owed``'s ledger append and its publication), so both wait as pending files whose random names decide the
     fold order. Either order keeps A's owed child in the set, and the exit stop then ends it."""
@@ -916,13 +930,16 @@ def test_two_pending_copies_of_a_launch_keep_what_it_owes_in_either_name_order(t
         path.rename(path.with_name(f"{path.name.split('.')[0]}.{('0' if first else 'f') * 32}.json"))
 
     assert owned_shutdown._update(tmp_path, lambda document: False)  # the next locked update folds both
-    owes = _a_owes(tmp_path)[0]
-    owned_shutdown._stop_records(tmp_path, owned_shutdown.owned_records(tmp_path), time.monotonic() + 5)
+    assert not list((tmp_path / "state" / owned_shutdown.PENDING_DIRNAME).glob("*.json"))
+    assert _a_owes(tmp_path)[0] == [_CHILD], "the set keeps what A owes"
+    assert (world.signals, world.kills, world.native) == ([], [], [])
+    if then == "exit stop":
+        owned_shutdown._stop_records(tmp_path, owned_shutdown.owned_records(tmp_path), time.monotonic() + 5)
+        assert _CHILD not in rows and world.native == [], "the exit stop ends it"
 
-    assert (owes, _CHILD in rows) == ([_CHILD], False), "the set keeps what A owes and the exit stop ends it"
 
-
-def test_a_contended_stop_request_never_overwrites_a_launchs_newer_owed_row(tmp_path, monkeypatch):
+@pytest.mark.parametrize("then", ["fold", pytest.param("next start", marks=posix_measured_stop)])
+def test_a_contended_stop_request_never_overwrites_a_launchs_newer_owed_row(tmp_path, monkeypatch, then):
     """The first shutdown door meets a held lock, so it stamps each target from a lock-free read through the pending
     protocol (``_stamp``). Between that read and its pending write, A's stop records the child A still owes. The
     folded stamp keeps the child and its stop request, and the next start's retry ends it."""
@@ -947,6 +964,8 @@ def test_a_contended_stop_request_never_overwrites_a_launchs_newer_owed_row(tmp_
     assert owned_shutdown._update(tmp_path, lambda document: False)
 
     owes, requested = _a_owes(tmp_path)
-    owned_shutdown.finish_unconfirmed_stops(tmp_path)
-
-    assert requested and (owes, _CHILD in rows) == ([_CHILD], False), "the next start's retry ends what A owes"
+    assert requested and owes == [_CHILD], "the folded stamp keeps the child and its stop request"
+    assert (world.signals, world.kills, world.native) == ([], [], [])
+    if then == "next start":
+        owned_shutdown.finish_unconfirmed_stops(tmp_path)
+        assert _CHILD not in rows and world.native == [], "the next start's retry ends what A owes"

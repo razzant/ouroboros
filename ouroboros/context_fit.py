@@ -715,8 +715,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     original_reserve = context_budget.context_mode_limits(mode, preferred, output_reserve, working_reserve_tokens=working_reserve_tokens)[1]
     def owed(fixed, reserve):  # what a frame still owes of it once its books, host forms and reserve paid their part
         return max(0, asked - (original_fixed - fixed) - math.floor((original_reserve - reserve) / max(ratio, 0.01)))
-    def view(selected, sent, addressed, window, boundary, **walk):  # one frame's memory beside these host forms
-        fixed = measure(selected, sent, addressed)
+    def view(selected, sent, addressed, window, boundary, fixed=None, **walk):  # one frame's memory beside host forms
+        fixed = measure(selected, sent, addressed) if fixed is None else fixed
         return floor.render_view_for_mode(snapshot, mode=selected, owner_mode=preferred, window_tokens=window, **walk,
             known_window=known_window, output_reserve=output_reserve, ratio=ratio, non_memory_tokens=fixed,
             lowered_from=preferred if selected != preferred else None, max_room=room_fact, start_work=start_work,
@@ -742,7 +742,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             shortest=shortest if snapshot and kept is None else None,  # a held view was sent: it keeps its steps
             window=window if known_window else None, reserve=reserve, ratio=ratio, slack=slack,
             saving=owed(measure(selected, sent, section_views(sections[selected], previous)), reserve) if asked else 0,
-            root=core.section_root, task_id=core.section_task_id,
+            root=core.section_root, task_id=core.section_task_id, bare=lambda forms: measure(selected, sent, forms),
             allowance=host_allowances["margin" if kept is None or start_work else "physical"],
             budget_mode=selected if kept is None and target and target < window else None)
         fixed = measure(selected, sent, section_views(sections[selected], receipts))
@@ -769,7 +769,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
 
     def render():  # this frame's own completed memory view, its floor receipt included
         return view(mode, sent, section_views(sections[mode], receipts), window, boundary, saving=owed(fixed, reserve),
-                    kept=None if kept is None else kept.get(start or preferred)) if snapshot else ("", "", {})
+                    fixed=fixed, kept=None if kept is None else kept.get(start or preferred)) if snapshot else ("", "", {})
 
     def overflows(story="", room=""):  # the known window cannot hold this frame's request beside this memory view
         memory = floor.view_tokens(story) + floor.view_tokens(room)

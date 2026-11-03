@@ -340,11 +340,8 @@ def test_close_waits_for_a_save_in_flight_and_its_refusal_leaves_a_live_form(eng
 
 
 def test_a_held_save_releases_the_owner_after_the_wait_and_its_late_reply_settles(engine_ui, backend):
-    """One real held response over the default 15 s wait (Chromium only: the transition, not a repeat):
-    the page stops holding Close, offers Check status and resends nothing; the server's late reply
-    then settles the card."""
-    if os.environ.get("OUROBOROS_UI_BROWSER_ENGINE") != "chromium":
-        pytest.skip("one engine proves the held-response transition")
+    """One real held response over the default 15 s wait, in both engines: the page stops holding Close,
+    offers Check status and resends nothing; the server's late reply then settles the card."""
     ui = engine_ui
     page = ui["page"]
     push, seen, held, forward, console = _load(ui, page, backend)

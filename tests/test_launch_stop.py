@@ -35,6 +35,7 @@ from tests._launch_stop_shared import (
     _order_spy,
     _payload,
     _pid_from,
+    _read_through_ps,
     _registry,
     _runner_cmd,
     _same_process_alive,
@@ -528,16 +529,20 @@ def test_an_unreadable_daemon_ledger_holds_chain_only_members_owed_until_it_read
 
 def test_local_executor_stop_confirms_every_member_keeps_owed_identities_durably_and_refuses_overlap(
         tmp_path, monkeypatch, scripts):
-    from ouroboros import owned_shutdown, process_custody, workspace_executor
+    from ouroboros import owned_shutdown, process_census, process_custody, workspace_executor
     from ouroboros.tools import services
 
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     ctx, workspace = _executor_ctx(tmp_path)
-    _executor_start(ctx, workspace, scripts, tmp_path / "demo.port", "demo")
+    # Its server sheds the launch marker (``hidden``): only the runner's parent chain reaches it on every reader. A
+    # marker the table can read (Linux reads each environment) names the server later, so it would owe no write first.
+    _executor_start(ctx, workspace, scripts, tmp_path / "demo.port", "demo", options=("hidden=1",))
     port, pid, birth = _server(tmp_path / "demo.port")
     record = workspace_executor._SERVICES["exec-task:demo"]
     durable = record.durable_record_path
     try:
+        table = process_census.census([record.scope_marker])
+        assert record.scope_marker not in (table[pid].markers or set()), "chain-only"
         _deny_signals_to(monkeypatch, {pid})
         with monkeypatch.context() as write:  # every custody write refuses once: nothing could name the chain-only child
             write.setattr(process_custody, "append_jsonl", lambda *_a, **_k: False)
@@ -769,9 +774,13 @@ open(sys.argv[1], "w").write(str(child.pid))
 print("READY", flush=True)
 '''
 
+# The sleeper sheds every scope marker (the RUNNER's ``hidden``): what SIP's ``ps -E`` shows of Apple's ``/bin/sleep``
+# on a developer Mac, and on a host that shows its environment (a SIP-off runner, Linux ``/proc``) all the same.
 CHAIN_ONLY_RUNNER = r'''
-import pathlib, subprocess, sys, time
-child = subprocess.Popen(["/bin/sleep", "120"], start_new_session=True)
+import os, pathlib, re, subprocess, sys, time
+shed = {key: value for key, value in os.environ.items()
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*_SCOPE_[0-9a-f]{32}", key)}
+child = subprocess.Popen(["/bin/sleep", "120"], start_new_session=True, env=shed)
 pathlib.Path(sys.argv[1]).write_text(str(child.pid))
 print("READY", flush=True)
 while True:
@@ -825,13 +834,12 @@ def test_a_gone_leader_discloses_the_orphan_its_marker_cannot_name(tmp_path, mon
         _end(leaf, birth)
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="a macOS platform binary hides the marker its environment holds")
 @pytest.mark.parametrize("executor", [False, True], ids=["host-service", "local-executor"])
 def test_a_child_held_on_one_failed_daemon_ledger_read_stays_owed_and_the_retry_ends_it(
         tmp_path, monkeypatch, scripts, executor):
     """The reviewers' native shape: a separately grouped ``/bin/sleep`` the census reaches only through its parent
-    chain. One daemon-ledger read fails: the stop ends its runner and holds it, owed by pid and birth; the next
-    stop, with the ledger readable, ends it instead of forgetting it."""
+    chain (it carries no launch marker: ``CHAIN_ONLY_RUNNER``). One daemon-ledger read fails: the stop ends its runner
+    and holds it, owed by pid and birth; the next stop, with the ledger readable, ends it instead of forgetting it."""
     from ouroboros import process_custody, workspace_executor
     from ouroboros.process_census import census
     from ouroboros.tools import services
@@ -882,9 +890,11 @@ def test_a_process_table_that_never_answers_at_shutdown_still_gets_the_native_ki
     """A deterministic stalled reader: every table read (``ps -A``) blocks until its bound, or 6 s. The exit
     stop's measured pass takes half of what is left of the one grace, then the held service gets its native group
     kill inside that grace; nothing waits per service. Emergency Stop reads no table before its first signal
-    (the caller-order test above)."""
+    (the caller-order test above). This is the ``ps`` reader's contract, selected on every POSIX host
+    (``_read_through_ps``); a stall in Linux's active ``/proc`` reader has no such bound and is NOT covered here."""
     from ouroboros import owned_shutdown, process_census
 
+    _read_through_ps(monkeypatch)
     registry = _registry(tmp_path, monkeypatch)
     leader = _start(registry, scripts, tmp_path / "held.port", "held", mode="same")["pid"]
     port, pid, birth = _server(tmp_path / "held.port")
