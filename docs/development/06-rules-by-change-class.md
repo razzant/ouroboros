@@ -183,13 +183,13 @@ Enforcement: `tests/test_owner_settings_write_seam.py` and `tests/test_settings_
 
 ### Transport and late-result custody
 
-- `LLMClient.chat` and `chat_async` accept optional `stream`, `caller_deadline_ts` and `caller_execution_deadline`; Main opts into streaming. Subtract the finalization reserve once at the caller; every physical recovery send re-checks the inherited bounds.
+- `LLMClient.chat`/`chat_async`: Main streams; callers subtract reserve once. `caller_deadline_ts` ends sends and accepted-operation waits; helpers use `caller_dispatch_deadline_ts` for send windows. `caller_execution_deadline` carries execution time. Socket phases narrow to the remaining bounds; they do not bound wall time.
 - Stream consumption completes inside physical accounting (ARCHITECTURE §6 "Caller-owned subscription model calls"): an EOF, error or cancellation retains private wire evidence and yields no usable partial answer; only a structural parameter rejection uses wire recovery; a retry is never inferred from missing stream text or ping cadence. Local, GigaChat and Claudexor keep separate wire contracts.
 - Late reviewer reuse resolves the exact operation's complete producer receipt from the existing CAS (ARCHITECTURE §6 "Late completion and typed refusals"); paid settlement is recorded once; missing, partial or mismatched custody never buys another same-operation dispatch.
 - Unknown-outcome recovery is typed (`loop_transport.new_generation_after_unknown`): configured routes, then transport-wait observations. The old outcome and cost stay unknown; new attempts get their own identity and facts-only input; a control-link or read failure only rejoins (`same_operation_recoverable`). No scheduler, pass counter or paid probe.
 - `delegate_wait` supervision's observation beat is separate from its HTTP read allowance; a typed read-only-retryable transport failure is a quiet observation hole, not a wake; no durable counter or outage latch (ARCHITECTURE §6 "Delegated subagents (Claudexor transport + the nanny)"). After terminal cleanup the custody host notice accompanies the original answer; builtin refusals publish typed non-success at their producer; acceptance JSON validity and completion cleanliness remain separate decisions.
 
-Enforcement: `tests/test_transport_b_stream_deadlines.py` (deadlines and streams), `tests/test_review_late_cas_recovery.py` (late reuse), `tests/test_transport_unknown_continuation.py` (typed recovery), `tests/test_delegate_observation_transport.py` (observation beat). Use the ordinary isolated preflight runner; full provider/renderer smoke stays separate from local fake-provider evidence.
+Enforcement: `tests/test_transport_b_stream_deadlines.py`, `tests/test_light_call_deadlines.py`, `tests/test_review_late_cas_recovery.py`, `tests/test_transport_unknown_continuation.py`, `tests/test_delegate_observation_transport.py`. Use isolated preflight; fake-provider checks do not qualify live providers/renderers.
 
 ### LLM call rules
 

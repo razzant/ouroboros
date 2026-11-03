@@ -684,9 +684,8 @@ def _caption_for_block(
             log.warning("vision caption request receipt failed", exc_info=True)
     try:
         reserve = _vision_finalization_reserve()
-        if owner_deadline_exhausted(
-            deadline_ts=getattr(ctx, "deadline_ts", None), reserve_sec=reserve,
-        ):
+        deadline_ts = getattr(ctx, "deadline_ts", None)
+        if owner_deadline_exhausted(deadline_ts=deadline_ts, reserve_sec=reserve):
             raise TimeoutError("owner deadline leaves no window for a vision caption")
         text, usage = llm.vision_query(
             _CAPTION_PROMPT,
@@ -694,11 +693,11 @@ def _caption_for_block(
             model=model,
             reasoning_effort=resolve_effort("task"),
             timeout=transport_timeout_with_deadline(
-                get_vision_caption_timeout_sec(),
-                deadline_ts=getattr(ctx, "deadline_ts", None),
-                reserve_sec=reserve,
-            ),
+                get_vision_caption_timeout_sec(), deadline_ts=deadline_ts, reserve_sec=reserve),
             purpose="caption",
+            # The same window bounds the send after image preparation and the slot wait (#572).
+            **({"caller_dispatch_deadline_ts": deadline_ts - reserve}
+               if isinstance(deadline_ts, (int, float)) and not isinstance(deadline_ts, bool) else {}),
         )
     except Exception as exc:
         from ouroboros.llm_claudexor import propagate_model_error

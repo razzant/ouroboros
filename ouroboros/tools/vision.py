@@ -168,14 +168,17 @@ def _vision_query_with_timeout(client: Any, *, model_role: str = "vision",
                                processing_preference: Optional[str] = None, **kwargs: Any) -> tuple[str, dict]:
     """Wait around one image call while keeping inference in a tracked child."""
     from ouroboros.provider_models import provider_for_model
-    from ouroboros.deadline_utils import dispatch_window_remaining_sec
+    from ouroboros.deadline_utils import dispatch_window_end_ts, dispatch_window_remaining_sec
     from ouroboros.tools.vision_process import run_vision_child
 
     subscription = not kwargs.get("use_local") and provider_for_model(kwargs.get("model", "")) == "claudexor"
     provider_timeout = float(kwargs.get("timeout") or get_vision_caption_timeout_sec())
-    remaining = dispatch_window_remaining_sec(deadline_at=kwargs.pop("_deadline_at", None),
-                                              deadline_ts=kwargs.pop("_deadline_ts", None),
-                                              reserve_sec=2 * NESTED_SETTLEMENT_MARGIN_SEC + float(kwargs.pop("_finalization_reserve", 0) or 0))
+    # The deadline less both margins and the reserve, as an instant: the parent's remaining time and the child's
+    # send window both come from it, so time spent here cannot extend the window (#572).
+    reserve = 2 * NESTED_SETTLEMENT_MARGIN_SEC + float(kwargs.pop("_finalization_reserve", 0) or 0)
+    end = dispatch_window_end_ts(deadline_at=kwargs.pop("_deadline_at", None),
+                                 deadline_ts=kwargs.pop("_deadline_ts", None), reserve_sec=reserve)
+    remaining = None if end is None else dispatch_window_remaining_sec(deadline_ts=end)
     # A subscription call waits on its task's clocks only; ``None`` = none exists, and the
     # child then has no timeout (its control watcher still ends it on Stop).
     operation_timeout = _vision_execution_window() if subscription else provider_timeout
@@ -183,6 +186,10 @@ def _vision_query_with_timeout(client: Any, *, model_role: str = "vision",
         operation_timeout = remaining if operation_timeout is None else min(operation_timeout, remaining)
     if operation_timeout is not None and operation_timeout <= 0:
         raise TimeoutError("VLM task execution window exhausted before child dispatch")
+    if end is not None:
+        # ``vision_query``'s send window: the child's sends re-check it after its start-up, image preparation and
+        # recording, reserve already taken.
+        kwargs["caller_dispatch_deadline_ts"] = end
     child_timeout = None if operation_timeout is None else operation_timeout + NESTED_SETTLEMENT_MARGIN_SEC
     return run_vision_child(child_timeout=child_timeout, subscription=subscription,
                             model_role=model_role, processing_preference=processing_preference, **kwargs)
