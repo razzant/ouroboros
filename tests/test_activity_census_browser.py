@@ -62,15 +62,23 @@ def test_activity_direct_turn_reaches_shared_control_endpoint(direct_server_with
                 assert actor and entered.is_set(), state
                 task_id = actor["activity_id"]
                 queue = page.request.get(url + "/api/tasks?queue_only=1").json()["queue"]
-                assert all((q.get("id") or q.get("task", {}).get("id")) != task_id
-                           for q in queue["running"] + queue["pending"])
+                # ARCHITECTURE "Conversation lane": an owner turn is admitted by routing with its RUNNING row
+                # published first, never PENDING, so the queue names it once, as a direct turn of the lane.
+                rows = {part: [q for q in queue[part] if (q.get("id") or q.get("task", {}).get("id")) == task_id]
+                        for part in ("running", "pending")}
+                assert len(rows["running"]) == 1 and not rows["pending"], (rows, queue)
+                owner = rows["running"][0]["task"]["_execution_owner"]
+                assert (owner["kind"], owner["lane"]) == ("direct", "conversation"), owner
                 page.click('[data-nav-page="dashboard"]')
                 page.click('[data-dashboard-tab="activity"]')
                 button = page.locator(f'[data-activity-section="queue"] [data-id="{task_id}"]')
                 button.wait_for(state="visible")
                 assert button.count() == 1
                 row = button.locator("xpath=../..")
-                assert "Direct turn" in row.inner_text()
+                text = row.inner_text()
+                # The queue names this turn (the census adds only identities the queue lacks): by the owner's own
+                # request, as a live row of the lane, never queued.
+                assert "Respond with exactly OK" in text and "Queued" not in text, text
                 assert "Nothing running" not in page.locator('[data-activity-section="queue"]').inner_text()
                 button.click()
                 menu = page.locator('body > .task-control-menu')

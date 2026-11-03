@@ -64,6 +64,26 @@ def test_host_steps_measure_once_then_only_after_each_new_address(monkeypatch, w
     assert calls == [tuple(part.section_id for part in sections[:n]) for n in range(steps + 1)]
 
 
+@pytest.mark.parametrize("least", [11_809, 11_808], ids=["least-request-over-the-window", "least-request-fits"])
+def test_a_frame_whose_least_request_overflows_takes_every_step_for_the_window_unpriced(monkeypatch, least):
+    """Every section at its shorter form and no memory at all (``bare``) already past the window (physical 11,808 here):
+    no price can fit, so each section steps for the window and neither the held request nor memory's shortest view is
+    measured. A least request the window holds is priced as before and, here, takes the same steps."""
+    monkeypatch.setattr(memory_floor, "retain_section",
+                        lambda part, **_kw: {"section_id": part.section_id, "reader": "test-reader"})
+    sections = [HostSection(name, "whole " * 1000, "operative") for name in ("runtime", "installed_skills", "registry")]
+    priced, bare = [], []
+    receipts, _ = memory_floor._host_steps(sections, [], window=20_000, reserve=RESERVE, ratio=1.0, saving=0,
+        root="test-root", task_id="test-task", allowance=10_000,
+        bare=lambda forms: bare.append(dict(forms)) or least,
+        measure=lambda addressed: priced.append("held") or 30_000 - 2_000 * len(addressed),
+        shortest=lambda addressed: priced.append("shortest") or 20_000)
+    assert bare == [{"runtime": "operative", "installed_skills": "operative", "registry": "operative"}]
+    assert [(row["section_id"], row.get("start_room", False)) for row in receipts] == [
+        ("runtime", False), ("installed_skills", False), ("registry", False)]
+    assert priced == ([] if least > 11_808 else ["held", "shortest"] * 3 + ["held"])
+
+
 @pytest.fixture(autouse=True)
 def capacity_facts(monkeypatch):
     monkeypatch.setattr(fit, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)

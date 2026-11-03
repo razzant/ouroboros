@@ -588,12 +588,15 @@ def _start_service(
         # different environment (or switch to an executor backend); never start beside its
         # processes while their end is unconfirmed, nor over a log another stop is finalizing.
         retired = _stop_service(ctx, name=service_name)
+        owed = isinstance(retired, _UnconfirmedStopText)  # the stop's own answer about its processes, not its text
         with _LOCK:
             taken = _SERVICES.get(key) is not None
-        if retired.startswith("⚠️ SERVICE_STOP_ERROR") or taken:
+        if owed or taken:
             cause = ("processes of its previous start are not confirmed ended, so nothing new starts beside them; "
-                     "stop_service retries their stop" if retired.startswith("⚠️ SERVICE_STOP_ERROR")
+                     "stop_service retries their stop" if owed
                      else "another call still holds this name (a stop finishing its log and outputs, or a newer start)")
+            # Only that no new process started is claimed: the retire above may already have signalled processes,
+            # so no operation_outcome says the call changed nothing.
             return _publish_tool_result(ctx, ToolResult(
                 status="blocked", code="LEGACY_BLOCKED", meta={"process_not_started": True},
                 text=f"⚠️ SERVICE_ALREADY_RUNNING: {service_name}: {cause}.\n\n" + retired.partition("\n\n")[2]))
@@ -873,6 +876,16 @@ def _service_logs(ctx: ToolContext, name: str = "service", tail: int = 8000) -> 
         text=f"⚠️ SERVICE_NOT_FOUND: {name}"))
 
 
+class _UnconfirmedStopText(str):
+    """The text of a stop that could not confirm every process of the service ended.
+
+    Still the text ``stop_service`` has always returned, and still a ``str`` to the registry and every string caller,
+    so its string contract and its classification do not change. Its type is the stop's own answer for the one
+    internal caller that needs it: a start retiring an exited record must not launch beside processes still owed.
+    That caller reads the value it was handed, so the answer holds outside a registry invocation and no published
+    result and no part of the text is consulted."""
+
+
 def _stop_service(ctx: ToolContext, name: str = "service") -> str:
     service_name, name_error = _sanitize_service_name(name)
     if name_error:
@@ -884,9 +897,10 @@ def _stop_service(ctx: ToolContext, name: str = "service") -> str:
     if record is not None and payload is None:  # another stop retired the launch this call selected: nothing is left
         return f"⚠️ SERVICE_NOT_FOUND: {name}"  # for it, and whatever took its name since (an executor too) is not it
     if payload is not None and not confirmed:
-        return ("⚠️ SERVICE_STOP_ERROR (stop_service): not every process of this service is confirmed ended; "
-                "its record, log and declared outputs are kept, and stop_service retries the identities still owed.\n\n"
-                + json.dumps(payload, ensure_ascii=False, indent=2))
+        return _UnconfirmedStopText(
+            "⚠️ SERVICE_STOP_ERROR (stop_service): not every process of this service is confirmed ended; "
+            "its record, log and declared outputs are kept, and stop_service retries the identities still owed.\n\n"
+            + json.dumps(payload, ensure_ascii=False, indent=2))
     if payload is not None:
         try:
             return _finalize_host_stop(ctx, record, payload)
@@ -896,7 +910,9 @@ def _stop_service(ctx: ToolContext, name: str = "service") -> str:
     payload = executor_stop_service(ctx, service_name, lambda done: registered.append(_finalize_executor_service_outputs(ctx, done)))
     if payload is not None:
         if payload.get("stop_failed"):
-            return "⚠️ SERVICE_STOP_ERROR (stop_service): executor backend did not confirm service termination.\n\n" + json.dumps(payload, ensure_ascii=False, indent=2)
+            return _UnconfirmedStopText(
+                "⚠️ SERVICE_STOP_ERROR (stop_service): executor backend did not confirm service termination.\n\n"
+                + json.dumps(payload, ensure_ascii=False, indent=2))
         artifact_registered = any(registered)
         rendered = json.dumps(payload, ensure_ascii=False, indent=2)
         if payload["artifact_output_failed"]:

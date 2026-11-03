@@ -10,8 +10,10 @@ at the end stand in for that boundary where a host cannot stage the case: a dead
 
 from __future__ import annotations
 
+import errno
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -20,6 +22,8 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 _PATIENCE = 120.0  # a bound on causal waits (an interpreter starting on a loaded host), never a pacing sleep
 
@@ -230,6 +234,24 @@ def _order_spy(monkeypatch, by_thread: dict | None = None) -> list:
     return events
 
 
+def _read_through_ps(monkeypatch) -> None:
+    """Select ``process_census``'s ``ps`` reader on any POSIX host, for a test of THAT reader's own bound: only this
+    module stops seeing ``/proc``. It proves nothing about ``/proc``, Linux's active reader: those reads are in-process
+    and honour no ``timeout``, so a read that stalls there holds a shutdown's measured pass (unresolved, not asserted)."""
+    from ouroboros import process_census
+
+    if shutil.which("ps") is None:
+        pytest.skip("no ps on this host (the documented Docker image ships none): it has no such reader")
+
+    class Host:
+        path = SimpleNamespace(isdir=lambda path: path != "/proc" and os.path.isdir(path))
+
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+    monkeypatch.setattr(process_census, "os", Host())
+
+
 def _deny_signals_to(monkeypatch, pids: set):
     """An EPERM for these pids at the one OS call the measured stop signals through; returns the undo."""
     from ouroboros import platform_layer
@@ -309,6 +331,7 @@ def _settle(leader, *procs, identities=()) -> None:
 # --------------------------------------------------------------------------- controlled identities
 # Table-and-signal doubles for launches whose leader pid is reused: no OS process is signalled.
 
+_CONTROLLED_PIDS = 880000  # from here up, a pid is this table's own
 _PID, _CHILD, _CARRIER, _OTHER = 880201, 880202, 880203, 880299
 _OLD_BIRTH, _NEW_BIRTH = "Mon Nov 2 12:00:00 2026", "Mon Nov 2 13:00:00 2026"
 _HEX_A, _HEX_B = "b" * 32, "c" * 32
@@ -326,11 +349,14 @@ def _controlled(tmp_path, monkeypatch, rows):
     """Controlled identity readers, signals and kills over the pid table ``rows`` (no OS process is signalled,
     files stay in ``tmp_path``). A row's own leader is the live pid with its recorded launch birth; an unmarked row
     records none, so any live process on its pid is its leader. ``world.unknown`` makes the census unreadable and
-    ``world.unreadable`` the identity of the pids it names."""
+    ``world.unreadable`` the identity of the pids it names. It relabels no platform: custody files and file locks stay
+    this host's own (Windows' too), and a Windows ``end_scope`` still answers ``unsupported``, so only a test of what
+    custody merges runs there. A controlled pid that reaches an OS kill past these doubles is refused and named in
+    ``world.native``, on every host."""
     from ouroboros import owned_shutdown, platform_layer, process_census, process_custody, process_scope
     from ouroboros.utils import append_jsonl
 
-    world = SimpleNamespace(signals=[], kills=[], denied=set(), unknown=False, censuses=[], unreadable=set())
+    world = SimpleNamespace(signals=[], kills=[], native=[], denied=set(), unknown=False, censuses=[], unreadable=set())
 
     def census(*args, **kwargs):  # one process table per call, unreadable while ``world.unknown``
         world.censuses.append(args)
@@ -362,9 +388,26 @@ def _controlled(tmp_path, monkeypatch, rows):
         live = rows.get(int(row["pid"]))
         return live is not None and live.birth == str(row.get("scope_birth") or live.birth)
 
+    def refusing(name, real):  # a pid no process holds, whatever the OS would find there; signal 0 only probes POSIX
+        def call(target, sig):
+            if abs(int(target)) >= _CONTROLLED_PIDS and (sig or os.name == "nt"):  # negative: its group
+                world.native.append((name, abs(int(target))))
+                raise ProcessLookupError(errno.ESRCH, f"controlled pid {target} has no process")
+            return real(target, sig)
+        return call
+
+    def hidden_run(command, *args, _real=platform_layer._hidden_run, **kwargs):  # Windows' one tree and pid kill
+        named = [int(word) for word in command[1:] if str(word).isdigit() and int(word) >= _CONTROLLED_PIDS]
+        if command[0] == "taskkill" and named:
+            world.native.append(("taskkill", named[0]))
+            return subprocess.CompletedProcess(command, 128)
+        return _real(command, *args, **kwargs)
+
+    for name in ("kill", "killpg"):  # Windows has no killpg
+        if hasattr(os, name):
+            monkeypatch.setattr(os, name, refusing(name, getattr(os, name)))
+    monkeypatch.setattr(platform_layer, "_hidden_run", hidden_run)
     alive = platform_layer.pid_is_alive
-    monkeypatch.setattr(process_custody, "IS_WINDOWS", False)
-    monkeypatch.setattr(platform_layer, "IS_WINDOWS", False)
     monkeypatch.setattr(process_custody, "_fingerprint_matches", lambda row, **kw: same(row))
     monkeypatch.setattr(process_custody, "_service_group_survives_leader", lambda row: False)
     monkeypatch.setattr(process_custody, "measured_identity_mismatch", lambda row: (
@@ -375,7 +418,7 @@ def _controlled(tmp_path, monkeypatch, rows):
     monkeypatch.setattr(process_custody, "kill_process_group_id", kill)
     monkeypatch.setattr(platform_layer, "kill_process_group_id", kill)
     monkeypatch.setattr(platform_layer, "kill_pid_tree", kill)
-    monkeypatch.setattr(platform_layer, "pid_is_alive", lambda target: target in rows if target >= 880000 else alive(target))
+    monkeypatch.setattr(platform_layer, "pid_is_alive", lambda target: target in rows if target >= _CONTROLLED_PIDS else alive(target))
     monkeypatch.setattr(process_custody, "pid_is_alive", lambda target: target in rows)
     monkeypatch.setattr(process_scope, "census", census)
     monkeypatch.setattr(process_scope, "read_identities", identities)

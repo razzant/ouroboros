@@ -718,6 +718,88 @@ def test_e10_graceful_stop_keeps_the_intent_open_and_finalizes(e2e_clone, tmp_pa
             server.stop()
 
 
+# Each stub answer waits this long, so a stop sent as a call reaches the stub lands while that
+# call is provably on the wire (E10's own timing lands it wherever the loop happens to be).
+E10_ON_THE_WIRE_SEC = 4.0
+
+
+def _stop_while_a_call_is_on_the_wire(server, stub, **stop) -> tuple[str, int, dict]:
+    """Start the keepalive task, catch its next model call at the stub, and stop it right then.
+
+    Returns ``(task_id, calls_at_stop, answer)``: ``calls_at_stop`` counts the held call."""
+    task_id = submit_running(server, "List the repository files and keep watching them.")
+    assert wait_until(lambda: len(stub.calls) >= 2, 240), "the keepalive loop never reached its second round"
+    seen = len(stub.calls)
+    assert wait_until(lambda: len(stub.calls) > seen, 240), "no further model call reached the stub"
+    calls_at_stop = len(stub.calls)
+    return task_id, calls_at_stop, server.cancel_task(task_id, **stop)
+
+
+@pytest.mark.serial
+@_SCENARIO_CEILING
+def test_e10_wrap_up_landing_while_a_call_is_on_the_wire_still_gets_its_one_final_turn(e2e_clone, tmp_path_factory):
+    """E10, deterministically mid-call. The held call completes and the Wrap up keeps the round's
+    next tool from starting (its admission refuses: ``PhysicalDispatchInterrupted``, nothing sent).
+    That refusal is no interrupted provider wait, so the finalize_then_cancel contract holds:
+    exactly ONE further model call — the tool-less ``[OWNER_STOP]`` final turn — and E10's own
+    terminal (``completed``, ``owner_requested_finalization``, ``model_final``). Before the repair
+    the refused tool start ended the task ``failed``/``host_notice`` with no final turn (CI
+    2026-11-03, E10 twice)."""
+    require_lane(LANE_MOCK)
+    root_dir = tmp_path_factory.mktemp("e2e_graceful_on_the_wire")
+    with StubModelServer(latency_sec=E10_ON_THE_WIRE_SEC) as stub:
+        server = start_server(e2e_clone, root_dir, isolated_settings(stub=stub))
+        try:
+            data_root = server.data_root
+            task_id, calls_at_stop, answer = _stop_while_a_call_is_on_the_wire(
+                server, stub, stop_policy="finalize_then_cancel")
+            assert answer["status"] == 202, answer
+            assert answer["body"]["cancel_state"] == "pending", answer
+            assert (intents(data_root).get(task_id) or {}).get("stop_policy") == "finalize_then_cancel"
+
+            final = server.wait_task(task_id, timeout=300)
+            assert final.get("status") == "completed", {
+                key: final.get(key) for key in ("status", "reason_code", "terminal_origin", "result")}
+            reason = wait_until(lambda: task_result(data_root, task_id).get("reason_code"), 60)
+            stored = task_result(data_root, task_id)
+            assert reason == "owner_requested_finalization", stored.get("reason_code")
+            assert stored.get("terminal_origin") == "model_final", stored.get("terminal_origin")
+            assert stored.get("result") == "Final answer: the repository root was listed; stopping as asked."
+            after = stub.calls[calls_at_stop:]
+            assert [StubModelServer._is_finalization_turn(body) for body in after] == [True], (
+                f"{len(after)} model call(s) after the Wrap up; exactly the one final turn is owed")
+        finally:
+            server.stop()
+
+
+@pytest.mark.serial
+@_SCENARIO_CEILING
+def test_e10_stop_now_landing_while_a_call_is_on_the_wire_cancels_with_no_final_turn(e2e_clone, tmp_path_factory):
+    """The hard twin of the above, unchanged by the Wrap up repair: an immediate Stop landing while
+    a call is on the wire tears the worker down (200 once torn down), settles ``cancelled`` through
+    the one custody (requested -> claimed -> settled) and buys NO further model call."""
+    require_lane(LANE_MOCK)
+    root_dir = tmp_path_factory.mktemp("e2e_stop_now_on_the_wire")
+    with StubModelServer(latency_sec=E10_ON_THE_WIRE_SEC) as stub:
+        server = start_server(e2e_clone, root_dir, isolated_settings(stub=stub))
+        try:
+            data_root = server.data_root
+            task_id, calls_at_stop, answer = _stop_while_a_call_is_on_the_wire(server, stub)
+            assert answer["status"] == 200 and answer["body"] == {"ok": True, "task_id": task_id}, answer
+            assert server.wait_task(task_id, timeout=180).get("status") == "cancelled"
+            stored = task_result(data_root, task_id)
+            assert stored.get("status") == "cancelled", stored.get("status")
+            assert stored.get("reason_code") != "owner_requested_finalization", stored.get("reason_code")
+            rows = forensics(data_root, task_id=task_id)
+            assert [row.get("event") for row in rows][:3] == ["requested", "claimed", "settled"], rows
+            assert next(row for row in rows if row.get("event") == "settled").get("outcome") == "cancelled"
+            time.sleep(E10_ON_THE_WIRE_SEC + 1)  # the held answer would have arrived by now
+            assert stub.calls[calls_at_stop:] == [], "an immediate Stop bought a further model call"
+            assert not any(StubModelServer._is_finalization_turn(body) for body in stub.calls)
+        finally:
+            server.stop()
+
+
 @pytest.mark.serial
 @_SCENARIO_CEILING
 def test_e11_stop_now_hardens_the_same_intent_without_minting_a_second(e2e_clone, tmp_path_factory):

@@ -316,6 +316,25 @@ def live_worker_pids(data_root):
             if str(row.get("purpose") or "").startswith("worker:") and _fingerprint_matches(row)}
 
 
+def live_worker_slots(data_root):
+    """``{slot id: pid}`` of the ledger's live workers (``purpose="worker:<wid>"``).
+
+    A RUNNING row's ``worker_id`` names its slot, so this maps a task to the one
+    process carrying it; the pool's other live workers (the conversation lane's
+    ready spare among them) stay apart."""
+    from ouroboros.process_custody import _fingerprint_matches, _read_ledger_strict
+
+    readable, entries = _read_ledger_strict(data_root)
+    assert readable, "worker custody is unreadable"
+    slots = {}
+    for row in entries:
+        purpose = str(row.get("purpose") or "")
+        slot = purpose.removeprefix("worker:")
+        if purpose.startswith("worker:") and slot.isdigit() and _fingerprint_matches(row):
+            slots[int(slot)] = int(row["pid"])
+    return slots
+
+
 def write_queue_document(path, payload):
     """Publish a fixture document and its matching liveness stamp; retain its date."""
     from ouroboros.utils import atomic_write_json

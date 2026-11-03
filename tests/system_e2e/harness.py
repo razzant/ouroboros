@@ -1434,6 +1434,16 @@ class ArtifactOracle:
             if isinstance(row, dict)
         }
 
+    def running_row(self, task_id: str) -> dict:
+        """The published RUNNING row of ``task_id``, or ``{}`` when the snapshot names none."""
+        return next((row for row in (self.queue_snapshot().get("running") or [])
+                     if isinstance(row, dict) and str(row.get("id") or "") == str(task_id)), {})
+
+    def pending_rows(self, task_id: str) -> list:
+        """Every published PENDING row of ``task_id``: a task id owns at most one queue row."""
+        return [row for row in (self.queue_snapshot().get("pending") or [])
+                if isinstance(row, dict) and str(row.get("id") or "") == str(task_id)]
+
     # -- boot surface ---------------------------------------------------------
 
     def server_port(self) -> int:
@@ -1483,6 +1493,38 @@ def submit_running(server: IsolatedServer, description: str, *,
     running = wait_until(lambda: task_id in oracle.running_ids(), timeout)
     assert running, f"task {task_id} never reached the RUNNING set"
     return task_id
+
+
+def conversation_turn_row(oracle: ArtifactOracle, task_id: str, *, timeout: float = 30) -> dict:
+    """The RUNNING row of an owner Main/room turn, held by a conversation-lane worker carrier.
+
+    Since #2654 an owner turn is not an in-process actor without a queue row: routing
+    admits it to a ``WORKERS`` slot with ``lane="conversation"``
+    (``supervisor/conversation_lane.py``), publishing its RUNNING row first and never
+    PENDING, outside ``MAX_WORKERS`` and the project leases, with ``_execution_owner``
+    naming its origin (``direct``) and carrier (``worker``); a ready carrier process
+    holds it. Fails by name on a missing row (the retired in-process actor), a PENDING
+    row, a project-lane or pooled row, a disclosed inline executor, or a slot no live
+    custodied worker process backs. Returns the row with ``carrier_pid`` added.
+    """
+    from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
+    from tests._shared import live_worker_slots
+
+    def held() -> dict:
+        row = oracle.running_row(task_id)
+        return row if row.get("worker_id") is not None else {}
+
+    row = wait_until(held, timeout) or oracle.running_row(task_id)
+    assert row, f"the turn {task_id} has no RUNNING row: {oracle.queue_snapshot().get('running')}"
+    assert not oracle.pending_rows(task_id), f"the turn {task_id} is also PENDING: {oracle.pending_rows(task_id)}"
+    owner = (row.get("task") or {}).get("_execution_owner") or {}
+    assert (owner.get("kind"), owner.get("lane"), owner.get("executor")) == (
+        "direct", LANE_CONVERSATION, EXECUTOR_WORKER), f"not a conversation-lane worker turn: {row}"
+    assert row.get("worker_id") is not None, f"no carrier holds the turn {task_id}: {row}"
+    slots = live_worker_slots(oracle.data_root)
+    carrier = slots.get(int(row["worker_id"]))
+    assert carrier, f"slot {row['worker_id']} of {task_id} has no live custodied worker process: {slots}"
+    return {**row, "carrier_pid": carrier}
 
 
 def wait_durable_result(oracle: ArtifactOracle, task_id: str, *, timeout: float = 180) -> dict:

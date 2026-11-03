@@ -391,6 +391,12 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # #1657: only missing logs are unavailable; status/stop retain warnings.
     "SERVICE_NOT_FOUND": (False, "ok"),
     "native:LEGACY_UNAVAILABLE:SERVICE_NOT_FOUND": (True, "unavailable"),
+    # services `_start_service` over an exited record: a restart refused because the previous start's processes are
+    # not confirmed ended, or another call still holds the name, publishes native LEGACY_BLOCKED with
+    # process_not_started (the retire may already have signalled processes, so no operation_outcome). The bare text
+    # keeps the recorded identifier row's answer (delta A.1657); only the native pair is new to the harvest.
+    "SERVICE_ALREADY_RUNNING": (True, "blocked"),
+    "native:LEGACY_BLOCKED:SERVICE_ALREADY_RUNNING": (True, "blocked"),
     # #1657: containment failure is already an error through the legacy adapter
     # (LEGACY_TOOL_ERROR). Its new native TOOL_ERROR publication preserves that
     # outcome when wrapped by an authority-refusal message after a local commit.

@@ -755,8 +755,10 @@ def _direct_turn_id(oracle: ArtifactOracle, client_message_id: str) -> str:
 def test_s31_direct_chat_turn_pauses_under_its_own_id_and_owner_resume_completes_in_chat(
         e2e_clone, tmp_path_factory):
     """The owner's DIRECT chat turn meets a monetary rail mid-turn and pauses the
-    SAME way, under the SAME task id (#1196): the live in-process actor ends, the
-    turn's own task record is parked inline as the PENDING ``_budget_pause`` carrier
+    SAME way, under the SAME task id (#1196): its conversation-lane carrier (a
+    worker process since #2654, never the server's own thread) reports the park as
+    any pooled worker does (``pause_source=worker_event``), its RUNNING row ends and
+    the turn's own task record is parked as the PENDING ``_budget_pause`` carrier
     with its ``_is_direct_chat`` lane fact (never a second live actor, never a
     terminal, never a paid wrap-up), the census reports it as ``direct_chat`` in
     phase ``budget_paused``; a budget increase alone wakes nothing; the existing
@@ -808,7 +810,9 @@ def test_s31_direct_chat_turn_pauses_under_its_own_id_and_owner_resume_completes
                 assert paused.get("rail") == RAIL_DISPATCH_REFUSED, paused
                 assert paused.get("exact_continuation") is True and paused.get("replay_safe") is False, paused
                 assert paused.get("resume_policy") == RESUME_POLICY, paused
-                assert paused.get("pause_source") == "direct_turn_inline_park", paused
+                # The carrier's own pause event parked it: the retired in-process park
+                # (``direct_turn_inline_park``, supervisor/direct_pause.py) is gone with #2654.
+                assert paused.get("pause_source") == "worker_event", paused
                 assert int(paused.get("physical_calls") or 0) >= 2, paused
                 assert (paused.get("resume_point") or {}).get("phase") == "boundary", paused.get("resume_point")
                 assert "grant" not in paused, paused
@@ -834,15 +838,18 @@ def test_s31_direct_chat_turn_pauses_under_its_own_id_and_owner_resume_completes
                 ledger_at_pause = _ledger_bucket(budget_root, task_id)
                 assert ledger_at_pause["physical_calls"] == int(paused.get("physical_calls") or 0) >= 2, (
                     ledger_at_pause, paused.get("physical_calls"))
-                # The park's own receipts: the inline supervisor row and the owner event.
-                parked = [r for r in oracle.supervisor_rows("direct_turn_budget_pause_parked_inline")
-                          if str(r.get("task_id") or "") == task_id]
-                assert parked and parked[-1].get("pause_id") == pause_id, parked
+                # The park's own receipt is the owner event of the carrier's pause; no
+                # disclosed inline executor ran the turn (``conversation_inline_executor``
+                # names every execution on a server thread), so the actor that parked
+                # it was the lane's worker process.
                 park_events = wait_until(
                     lambda: [r for r in _events_for(oracle, "budget_scope_paused", task_id)
                              if r.get("pause_id") == pause_id] or None, 30)
-                assert park_events and park_events[-1].get("pause_source") == "direct_turn_inline_park", park_events
+                assert park_events and park_events[-1].get("pause_source") == "worker_event", park_events
                 assert park_events[-1].get("park_state") == STATE_PAUSED, park_events[-1]
+                inline = [r for r in oracle.supervisor_rows("conversation_inline_executor")
+                          if str(r.get("task_id") or "") == task_id]
+                assert inline == [], inline
                 # No second live actor, no terminal, no paid wrap-up.
                 assert wait_until(lambda: not _direct_activities(server, client_message_id), 30), (
                     "the live direct actor is still registered after the pause")
