@@ -2724,7 +2724,7 @@ export function createChatInstance({
         // stand between reopening and the last saved text on this device.
         await Promise.resolve();
         if (destroyed) return;
-        if (preview.show()) { updateMessagesPadding(); reading.reflow(); }
+        if (preview.show()) { updateMessagesPadding(); reading.followAfterLayout(); }
         await loadUiPreferences();
         // Main waits for hydration; Projects pass through. History reads share one flight.
         await waitForHydrationWindow();

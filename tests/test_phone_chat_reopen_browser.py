@@ -257,3 +257,37 @@ def test_phone_keyboard_dismisses_only_on_deliberate_older_reading(shell_ui, pro
     assert field.input_value()=='This unsent draft must stay.'
     shot(page,f'phone-dismiss-{project_room}-{shell_ui["engine"]}')
     page.close()
+
+
+@pytest.mark.parametrize('read_older', [False, True], ids=['follow-latest', 'keep-older'])
+def test_long_warm_preview_lands_before_canonical_handover(shell_ui, read_older):
+    """Padding/layout must not turn an initial preview into older-reading intent."""
+    page = seed_page(shell_ui, 390, 844, telegram=True)
+    saved = history([f'Line {i} ' + 'Long conversation text wraps. ' * 18 for i in range(50)])
+    page.route('**/api/chat/history**', lambda route: route.fulfill(json=saved))
+    page.goto(shell_ui['url'])
+    page.locator('#chat-messages[data-history-hydrated="true"]').wait_for()
+    page.wait_for_function("localStorage.getItem('ouroboros.chat-preview.v1')?.includes('Line 49')")
+    pending = []
+    page.route('**/api/chat/history**', lambda route: pending.append(route))
+    page.reload()
+    page.locator('[data-saved-preview]').wait_for()
+    def gap():
+        return page.locator('#chat-messages').evaluate('f => f.scrollHeight - f.clientHeight - f.scrollTop')
+    page.wait_for_function('''() => {const f = document.querySelector('#chat-messages');
+        return f.scrollHeight - f.clientHeight - f.scrollTop <= 1;}''')
+    if read_older:
+        page.locator('[data-saved-preview] .message').last.dispatch_event('wheel', {'deltaY': -200, 'bubbles': True})
+        page.locator('#chat-messages').evaluate('f => {f.scrollTop = 1000; f.dispatchEvent(new Event("scroll"));}')
+    from time import monotonic
+    until = monotonic() + 10
+    while not pending and monotonic() < until:
+        page.wait_for_timeout(20)
+    assert pending
+    while pending:
+        pending.pop(0).fulfill(json=saved)
+    page.locator('#chat-messages[data-history-hydrated="true"]').wait_for()
+    settle(page)
+    assert gap() > 1000 if read_older else gap() <= 1
+    shot(page, f'phone-long-warm-{read_older}-{shell_ui["engine"]}')
+    page.close()
