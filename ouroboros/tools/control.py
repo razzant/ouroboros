@@ -354,12 +354,11 @@ def get_tools() -> List[ToolEntry]:
         }, _update_scratchpad),
         ToolEntry("send_user_message", {
             "name": "send_user_message",
-            "description": "Send a separate reply to the owner while work continues: the first "
-                           "line of longer work (what I am about to do and why), or a mid-work "
-                           "insight, a question, or an invitation to collaborate. It appears in "
-                           "the conversation as a normal reply and leaves the work running; later "
-                           "progress stays in the card and the final answer is delivered "
-                           "automatically.",
+            "description": "Send a separate reply to the owner while work continues: the first line of longer work "
+                           "(what I am about to do and why), a question, an invitation to collaborate, or anything "
+                           "else that needs the owner now. It appears in the conversation as a normal reply, calls "
+                           "the owner back and leaves the work running; work news goes on update_focus, later "
+                           "progress stays in the card and the final answer is delivered automatically.",
             "parameters": {"type": "object", "properties": {
                 "text": {"type": "string", "description": "Message text"},
                 "reason": {"type": "string", "description": "Why you're reaching out (logged, not sent)"},

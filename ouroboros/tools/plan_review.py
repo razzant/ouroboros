@@ -128,7 +128,7 @@ _SCHEMA = {
             "reason": {"type": "string", "description": "Why these reviewers: required when an Advisory first ask about your own code names fewer than all ticked reviewers. Blocking adds missing ticked reviewers; later asks name any enabled rows. Advisers are heard, not counted."},
             "message": {"type": "string", "description": "What you want from the asked participants now (what changed, what you decided and why, what to look at)."},
             "attach": {"type": "array", "items": {"type": "string"},
-                       "description": "Evidence locators for the asked participants (paths with optional ::lines=A-B, task:<id>, chat:<id>); attached bounded, every absence named."},
+                       "description": "Evidence locators for the asked participants (paths with optional ::lines=A-B, task:<id>, chat:<id>); attached bounded, every absence named. Runtime data and the live settings file are not attachable: use task:<id> for a helper's saved result."},
             "reviewer_effort": {**_REVIEWER_EFFORT_SCHEMA, "description": "Optional panel strength for THIS ask (Auto rows, clamped into the owner's effort range)."},
             "continue_seats": {**CONTINUE_SEATS_SCHEMA, "description": (
                 "Alone: continue stopped session participants of an EARLIER ask, each named as the read's continuable "
