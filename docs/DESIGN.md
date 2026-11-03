@@ -171,16 +171,16 @@ under System. In full screen the bar hides until the pointer reveals it; the set
 and error windows and a UI that does not declare it keep the ordinary title bar. A
 browser, another OS or an older desktop app reserves nothing.
 
-A screen that cannot read the choice follows its host (owner 26.10, #1111 A). The main
-window opens at once in the room colour of the Mac's appearance or Windows' app mode; when
-its page reads a different choice, the window changes once to that palette without
-waiting to be shown; setup opens the same way, then its page paints the saved choice.
-The pre-server windows (already running, Git required, startup failed) follow the device. A Windows contrast theme keeps the main window dark, others white. Hosted frames cover
-Windows' light host; GTK's web view opens in its theme's room, unqualified. The login page follows this browser's saved choice, else the device; the
-Telegram connecting page the Mini App's, else Telegram's light or dark. Login and pre-server
-pages inline `theme.js` and `ui.css`; Telegram's restates only room and ink. Older frozen
-launchers need a new desktop app for this; source-handoff shells take source updates. Login
-and Telegram change with an ordinary update.
+A screen that cannot read the choice follows its host (owner 26.10, #1111 A). Main and
+setup open at once: the Mac's room colour, Windows' app mode, or GTK's theme until its
+WebView takes the matching room. The page then paints its saved choice; showing waits
+for no page. Pre-server windows (already running, Git required, startup failed) keep the
+host. A Windows contrast theme keeps main dark, others white. Native samples cover
+Windows 2025/WebView2 and Jammy GTK/X11; Windows' dark held-canvas provenance and packaged
+startup remain unqualified. Login uses this browser's saved choice, else the device;
+Telegram connecting uses the Mini App's, else Telegram's palette. Login/pre-server pages
+inline `theme.js` and `ui.css`; Telegram restates room and ink. Frozen launchers need a new
+app; source-handoff shells take source updates. Login/Telegram take an ordinary update.
 
 **Interface size** (Settings → Appearance, under Theme) is one slider that makes
 everything larger or smaller, per device (owner 23.10). Whoever
