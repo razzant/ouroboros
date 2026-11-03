@@ -779,6 +779,7 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "provider_metadata_constraint": (False, "request-wire candidate adjustment; never a task terminal"),
     "provider_prescribed_value": (False, "request-wire exact-value repair; never a task terminal"),
     "provider_recovery_succeeded": (False, "request-wire successful repair; never a task terminal"),
+    "provider_refused_hint_value": (False, "request-wire hint withdrawal; never a task terminal"),
     "provider_rejected_tool_dialect": (False, "request-wire dialect fallback; never a task terminal"),
     "provider_required_reasoning": (False, "request-wire mandatory-reasoning floor; never a task terminal"),
     "provider_unsupported_field": (False, "request-wire unsupported-field repair; never a task terminal"),

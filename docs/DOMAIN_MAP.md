@@ -9,7 +9,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | domain | name | modules | proposed |
 |---|---|---:|---:|
 | D01 | Agent core & main loop | 63 | 0 |
-| D02 | LLM client, routing & providers | 47 | 0 |
+| D02 | LLM client, routing & providers | 48 | 0 |
 | D03 | Context assembly, fit & compaction | 33 | 0 |
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
 | D05 | Tool surfaces: files, code, shell, media, external | 50 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 38 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 24 | 0 |
-| **total** | | **985** | **0** |
+| **total** | | **986** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -310,6 +310,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/request_wire_receipts.py`
 - `ouroboros/request_wire_recovery.py`
 - `ouroboros/request_wire_resolution.py`
+- `ouroboros/request_wire_temperature.py`
 - `ouroboros/route_spec.py`
 - `ouroboros/send_clock.py`
 - `ouroboros/transport_custody.py`
