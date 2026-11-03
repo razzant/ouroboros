@@ -1,6 +1,6 @@
 /** Same-origin saved text for a warm opening, never history coverage or work authority.
  * One bounded browser record holds the most recently read rooms. Only successful
- * newest history reads replace it; live echoes, cursors, controls and credentials
+ * newest reads replace it and accepted canonical deltas merge; live echoes, controls and credentials
  * never enter it. A new origin or refused storage simply opens cold.
  */
 export const PREVIEW_KEY = 'ouroboros.chat-preview.v1';
@@ -75,14 +75,22 @@ export function createChatPreview({ feed, room, scope = '', labelForRow, mutate,
             return true;
         },
         failed() { if (root) root.firstElementChild.textContent = 'Saved text preview · not current'; },
-        save(data) {
+        save(data, append = false) {
             if (disposed || data?.reason_code || !Array.isArray(data?.messages) || !data.page_cursor) return;
-            const rows = data.messages.filter(row => row.history_id && typeof row.text === 'string' && row.text
+            if (append && !data.messages.length) return;
+            const incoming = data.messages.filter(row => row.history_id && typeof row.text === 'string' && row.text
                 && ['user', 'assistant', 'system'].includes(row.role) && !row.is_progress
                 && !['task_evidence', 'task_summary', 'quiz', 'card'].includes(row.system_type))
                 .slice(-MAX_ROWS).map(row => ({ id: row.history_id, role: row.role, text: row.text,
                     // Freeze the canonical presentation, not its source/session or controls.
                     speaker: labelForRow(row) }));
+            const prior = append ? read().find(entry => entry?.key === key)?.rows : [];
+            const merged = new Map((Array.isArray(prior) ? prior : []).filter(row =>
+                row && typeof row.id === 'string' && typeof row.text === 'string'
+                && typeof row.speaker === 'string' && ['user', 'assistant', 'system'].includes(row.role))
+                .map(row => [row.id, row]));
+            for (const row of incoming) merged.set(row.id, row);
+            const rows = [...merged.values()].slice(-MAX_ROWS);
             let rooms = [{ key, rows }, ...read().filter(entry => entry?.key !== key)].slice(0, MAX_ROOMS);
             // Drop oldest rooms, then oldest rows: never cut a person's text.
             const encode = () => JSON.stringify({ v: 2, rooms });

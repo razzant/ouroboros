@@ -92,3 +92,24 @@ test('canonical speaker labels are plain text, bounded with rows, and legacy unl
     f.values.set(PREVIEW_KEY, JSON.stringify(saved));
     assert.equal(f.make().show(), false);
 });
+
+
+test('accepted canonical deltas extend empty or existing previews, deduplicate and respect newest/error resets', t => {
+    const f = fixture(t), preview = f.make();
+    preview.save({ page_cursor: 'empty', messages: [] });
+    const delta = data('Arrived since opening');
+    preview.save(delta, true); preview.save(delta, true);
+    let rows = JSON.parse(f.values.get(PREVIEW_KEY)).rooms[0].rows;
+    assert.equal(rows.length, 1); assert.equal(rows[0].text, 'Arrived since opening');
+    const update = data('Updated canonical text');
+    preview.save(update, true);
+    preview.save({ page_cursor: 'delta', messages: [{ role: 'user', sender_label: 'Mira', text: 'Next', history_id: 'chat:2' }] }, true);
+    rows = JSON.parse(f.values.get(PREVIEW_KEY)).rooms[0].rows;
+    assert.deepEqual(rows.map(row => row.text), ['Updated canonical text', 'Next']);
+    assert.equal(rows[1].speaker, 'Mira');
+    const saved = f.values.get(PREVIEW_KEY);
+    preview.save({ ...data('Rejected'), reason_code: 'unavailable' }, true);
+    assert.equal(f.values.get(PREVIEW_KEY), saved);
+    preview.save({ page_cursor: 'reset', messages: [] });
+    assert.equal(f.make().show(), false);
+});

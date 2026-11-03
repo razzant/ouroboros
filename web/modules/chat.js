@@ -3074,6 +3074,7 @@ export function createChatInstance({
         },
         // Rows stored since the newest read join its window.
         applyArrivals: (messages, { window, fromReconnect }) => {
+            preview.save({ messages, page_cursor: true }, true);
             for (const id of messages.flatMap(historyRowIds)) recentHistoryIds.add(id);
             applyHistoryMessages(messages, { fromReconnect });
             readReceipt.arrived(window);

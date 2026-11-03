@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -88,7 +89,7 @@ def test_short_phone_composer_fits_and_keeps_assistance(shell_ui, theme, project
     page.close()
 
 
-@pytest.mark.parametrize('mode', ['newest', 'reference', 'selected-empty', 'authorship'])
+@pytest.mark.parametrize('mode', ['newest', 'reference', 'selected-empty', 'authorship', 'delta'])
 def test_new_document_shows_saved_text_before_history_and_reconciles(shell_ui, mode):
     ui = shell_ui
     page = seed_page(ui, 390, 844, telegram=True)
@@ -98,9 +99,40 @@ def test_new_document_shows_saved_text_before_history_and_reconciles(shell_ui, m
         initial['messages'][0].update(role='user', source='telegram', sender_label='Mira')
         initial['messages'][1].update(role='user', source='web', sender_session_id='another-window-private')
         initial['messages'][2].update(initiator='consciousness')
-    page.route('**/api/chat/history**', lambda route: route.fulfill(json=initial))
+    deltas = []
+    delta_ready = False
+    if mode == 'delta':
+        initial = history([])
+    def first_history(route):
+        if mode == 'delta' and delta_ready and parse_qs(urlsplit(route.request.url).query).get('cursor') == ['after:recent']:
+            deltas.append(route.request.url)
+            route.fulfill(json={**history(['Saved answer']), 'after_cursor': 'after:delta'})
+        else:
+            route.fulfill(json=initial)
+    page.route('**/api/chat/history**', first_history)
     page.goto(ui['url'])
-    page.locator('#chat-messages .chat-bubble').filter(has_text='Saved answer').wait_for()
+    if mode == 'delta':
+        page.locator('#chat-messages[data-history-hydrated="true"]').wait_for()
+        # Drive the production chat instance's public read consumer, not preview.save.
+        # A quiet main SPA remains mounted; this instance uses the same room/storage.
+        page.evaluate("""async () => {
+            const {createChatInstance} = await import('/static/modules/chat.js');
+            const mount = document.createElement('section'); document.body.append(mount);
+            let generation = 0;
+            window.__deltaChat = createChatInstance({mountEl: mount, chatId: 1, idPrefix: 'delta',
+                ws: {on: () => () => {}, isConnected: () => true, send() {}},
+                state: {activePage: 'chat', projectChatIds: new Set(), unreadCount: 0}, updateUnreadBadge() {},
+                stateSnapshots: {begin: () => ({generation: ++generation, requestedAt: Date.now()}),
+                    gate() {return Promise.resolve(this.begin());}, isCurrent: () => true, apply() {}}});
+            await window.__deltaChat.refreshHistory({revision: 1});
+        }""")
+        delta_ready = True
+        page.evaluate('window.__deltaChat.refreshHistory({revision: 2})')
+        page.locator('#delta-messages .chat-bubble').filter(has_text='Saved answer').wait_for()
+        assert deltas, 'production read must use accepted canonical delta, not a populated newest fixture'
+        page.evaluate('window.__deltaChat.destroy()')
+    else:
+        page.locator('#chat-messages .chat-bubble').filter(has_text='Saved answer').wait_for()
     page.wait_for_function("localStorage.getItem('ouroboros.chat-preview.v1')?.includes('Saved answer')")
     # A recreated browser context retains the same origin's persistent store,
     # not sessionStorage. Telegram itself may discard storage; that case opens cold.
