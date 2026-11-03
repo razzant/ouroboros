@@ -1,0 +1,3 @@
+/* Not an @import, not a </style>, not url(nowhere.svg): a comment never reaches the frame. */
+.pad { --pad-y: 6px; --pad-x: 13px; padding: var(--pad-y) var(--pad-x); padding-left: 2px; margin-top: 8px;
+       background: #dfe7f5 URL(pic.svg) no-repeat right 4px center / 12px 12px; }
