@@ -114,20 +114,29 @@ const COUNTED_REASONS = {
         : fmt('{count} helpers it waits for are paused', { count: n, n })),
 };
 
-// What a sleep waits for, by the kind the server named (gateway/work_status.py SLEEP_TEXT; the web fixture pins both):
-// a task's name stays as written, a count stays a parameter and a chosen time reads in the viewer's clock.
-const SLEEP_TEXT = {
-    task: ({ name }) => fmt('Sleeping until {name} finishes', { name }),
-    tasks: ({ count: n }) => (n === 1 ? tr('work.sleep.task', 'Sleeping until the task it chose finishes')
-        : fmt('Sleeping until one of {count} tasks finishes', { count: n, n })),
-    all_tasks: ({ count: n }) => fmt('Sleeping until all {count} tasks it chose finish', { count: n, n }),
-    runs: ({ count: n }) => (n === 1 ? tr('work.sleep.run', 'Sleeping until its external run finishes')
-        : fmt('Sleeping until one of {count} external runs finishes', { count: n, n })),
-    service: () => tr('work.sleep.service', 'Sleeping until a service it started stops'),
-    reviewer: () => tr('work.sleep.reviewer', 'Sleeping until a reviewer answers'),
-    mail: () => tr('work.sleep.mail', 'Sleeping until a message arrives'),
-    time: ({ at }) => (clock(at) ? fmt('Sleeping until {time}', { time: clock(at) }) : ''),
+// What a sleep waits for, one clause per kind the server named (gateway/work_status.py SLEEP_CLAUSES; the web fixture
+// pins both), joined by "or" in its order, its time last: a name stays as written, a count stays a parameter and a
+// chosen time reads in the viewer's clock.
+const SLEEP_CLAUSES = {
+    task: ({ name }) => fmt('{name} finishes', { name }),
+    tasks: ({ count: n }) => (n === 1 ? tr('work.sleep.task', 'the task it chose finishes')
+        : fmt('one of {count} tasks finishes', { count: n, n })),
+    all_tasks: ({ count: n }) => fmt('all {count} tasks it chose finish', { count: n, n }),
+    runs: ({ count: n }) => (n === 1 ? tr('work.sleep.run', 'its external run finishes')
+        : fmt('one of {count} external runs finishes', { count: n, n })),
+    service: () => tr('work.sleep.service', 'a service it started stops'),
+    reviewer: () => tr('work.sleep.reviewer', 'a reviewer answers'),
+    sender: ({ name }) => fmt('{name} writes', { name }),
+    mail: () => tr('work.sleep.mail', 'a message arrives'),
+    time: ({ at }) => clock(at),
 };
+
+/** A sleep's clauses in one sentence; '' when one is a kind this client does not know or a time it cannot read. */
+function sleepText(wake) {
+    const said = wake.map((clause) => (Object.hasOwn(SLEEP_CLAUSES, clause?.kind) ? SLEEP_CLAUSES[clause.kind](clause) : ''));
+    if (!said.length || said.some((clause) => !clause)) return '';
+    return fmt('Sleeping until {what}', { what: said.reduce((a, b) => fmt('{a} or {b}', { a, b })) });
+}
 
 // Helpers and external runs still working side by side are said in one sentence, so the line never says it twice.
 function tailWords(tails) {
@@ -156,7 +165,7 @@ export function reasonText(reason) {
     if (!code || !text) return text;
     if (Number.isInteger(reason.count)) return COUNTED_REASONS[code] ? COUNTED_REASONS[code](reason.count) : text;
     if (reason.by?.text) return `${tr(`work.because.${code}`, text)}: ${String(reason.by.text)}`;
-    if (code === 'sleeping' && Object.hasOwn(SLEEP_TEXT, reason.wake?.kind)) return SLEEP_TEXT[reason.wake.kind](reason.wake) || text;
+    if (code === 'sleeping' && Array.isArray(reason.wake)) return sleepText(reason.wake) || text;
     return tr(`work.because.${code}`, text);
 }
 

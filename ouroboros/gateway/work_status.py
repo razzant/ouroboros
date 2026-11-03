@@ -76,39 +76,54 @@ _TURN_STEPS = ("admitted", "started", "context_building", "context_built")
 _CALL_STEPS = ("requested", "dispatched")  # its Main call started (supervisor.active_activity.CALL_PHASES)
 
 
-# What a sleep waits for, one sentence per kind of its own selection (``model_sleep.selectors``): the first kind it
-# chose in this order, its chosen time only when it chose nothing else; a record that saved no selection keeps
-# STOP_TEXT's "until it is woken". Browser twin: work_status.js SLEEP_TEXT (the web fixture pins both).
-SLEEP_TEXT = {
-    "task": "Sleeping until {name} finishes",
-    "tasks": ("Sleeping until the task it chose finishes", "Sleeping until one of {count} tasks finishes"),
-    "all_tasks": "Sleeping until all {count} tasks it chose finish",
-    "runs": ("Sleeping until its external run finishes", "Sleeping until one of {count} external runs finishes"),
-    "service": "Sleeping until a service it started stops",
-    "reviewer": "Sleeping until a reviewer answers",
-    "mail": "Sleeping until a message arrives",
-    "time": "Sleeping until {time}",
+# What a sleep waits for: one short clause per kind of its own selection (``model_sleep.selectors``), in this order and
+# joined by "or" after "Sleeping until", its chosen time last; a sleep that chose only a time also wakes on any message
+# and says so. A record that saved no selection keeps STOP_TEXT's "until it is woken". Browser twin: work_status.js
+# SLEEP_CLAUSES (the web fixture pins both).
+SLEEP_CLAUSES = {
+    "task": "{name} finishes",
+    "tasks": ("the task it chose finishes", "one of {count} tasks finishes"),
+    "all_tasks": "all {count} tasks it chose finish",
+    "runs": ("its external run finishes", "one of {count} external runs finishes"),
+    "service": "a service it started stops",
+    "reviewer": "a reviewer answers",
+    "sender": "{name} writes",
+    "mail": "a message arrives",
+    "time": "{time}",
 }
 
 
-def sleep_wake(sleep: Any, names: Mapping[str, str]) -> Optional[Dict[str, Any]]:
-    """The one clause a saved sleep is said by: ``{kind, name|count|at}``, or None when it saved no selection.
+def sleep_wake(sleep: Any, names: Mapping[str, str]) -> List[Dict[str, Any]]:
+    """The clauses a saved sleep is said by, ``{kind, name|count|at}`` per kind it chose; ``[]`` when it saved none.
 
-    A chosen task is named only by the census row the projection already holds (``names``), never by its id; one
-    it cannot name, or several, read as a count. A sender is mail from that task."""
+    A chosen task or sender is named only by the census row the projection already holds (``names``), never by its
+    id, and only once: a task it cannot name, or several, read as a count; such a sender, or one the task clause
+    already named, as a message."""
     sleep = sleep if isinstance(sleep, Mapping) else {}
     tasks = [str(task) for task in sleep.get("tasks") or () if task]
+    senders = [str(task) for task in sleep.get("senders") or () if task]
+    wake: List[Dict[str, Any]] = []
     if len(tasks) > 1 and (sleep.get("task_wait") or {}).get("mode") == "all_terminal":
-        return {"kind": "all_tasks", "count": len(tasks)}
-    if tasks:
+        wake.append({"kind": "all_tasks", "count": len(tasks)})
+    elif tasks:
         name = names.get(tasks[0]) if len(tasks) == 1 else ""
-        return {"kind": "task", "name": name} if name else {"kind": "tasks", "count": len(tasks)}
-    for key, kind in (("runs", "runs"), ("services", "service"), ("reviewer_slots", "reviewer"), ("senders", "mail")):
+        wake.append({"kind": "task", "name": name} if name else {"kind": "tasks", "count": len(tasks)})
+    for key, kind in (("runs", "runs"), ("services", "service"), ("reviewer_slots", "reviewer")):
         if sleep.get(key):
-            return {"kind": kind, "count": len(sleep["runs"])} if kind == "runs" else {"kind": kind}
+            wake.append({"kind": kind, "count": len(sleep["runs"])} if kind == "runs" else {"kind": kind})
+    sender = names.get(senders[0]) if len(senders) == 1 and senders != tasks else ""  # the one task said it
+    if senders or sleep.get("any_mail") is True:
+        wake.append({"kind": "sender", "name": sender} if sender else {"kind": "mail"})
     if sleep.get("wake_at"):
-        return {"kind": "time", "at": str(sleep["wake_at"])}
-    return {"kind": "mail"} if sleep.get("any_mail") is True else None
+        wake.append({"kind": "time", "at": str(sleep["wake_at"])})
+    return wake
+
+
+def _clause(wake: Mapping[str, Any]) -> str:
+    phrase = SLEEP_CLAUSES[wake["kind"]]
+    if isinstance(phrase, tuple):
+        phrase = phrase[0] if wake["count"] == 1 else phrase[1]
+    return phrase.format(name=wake.get("name"), count=wake.get("count"), time=wake.get("at"))
 
 
 def sleep_reason(sleep: Any, names: Mapping[str, str], **base: Any) -> Dict[str, Any]:
@@ -116,10 +131,7 @@ def sleep_reason(sleep: Any, names: Mapping[str, str], **base: Any) -> Dict[str,
     entry = {**reason("sleeping"), **base}
     wake = sleep_wake(sleep, names)
     if wake:
-        phrase = SLEEP_TEXT[wake["kind"]]
-        if isinstance(phrase, tuple):
-            phrase = phrase[0] if wake["count"] == 1 else phrase[1]
-        entry.update(text=phrase.format(name=wake.get("name"), count=wake.get("count"), time=wake.get("at")), wake=wake)
+        entry.update(text="Sleeping until " + " or ".join(map(_clause, wake)), wake=wake)
     return entry
 
 

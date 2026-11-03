@@ -190,14 +190,20 @@ def reason_sentences():
             for code, phrase in work_status.REASON_TEXT.items()}
 
 
-# One saved sleep per kind the server says (gateway/work_status.py SLEEP_TEXT), named by a census name where it has one.
+# One saved sleep per clause the server says (gateway/work_status.py SLEEP_CLAUSES), named by a census name where it has
+# one, and sleeps that chose several sources: each is said, joined by "or", its time last.
+_AT = "2026-10-17T18:05:00+00:00"
 SLEEPS = {
     "task": {"tasks": ["named"]}, "task_unnamed": {"tasks": ["elsewhere"]}, "tasks": {"tasks": ["a", "b", "c"]},
     "all_tasks": {"tasks": ["a", "b"], "task_wait": {"mode": "all_terminal"}},
     "run": {"runs": ["r1"]}, "runs": {"runs": ["r1", "r2", "r3"]}, "service": {"services": [{"name": "preview"}]},
     "reviewer": {"reviewer_slots": ["s1"], "any_mail": False}, "sender": {"senders": ["named"]},
-    "mail": {"any_mail": True}, "time": {"wake_at": "2026-10-17T18:05:00+00:00", "any_mail": True},
-    "task_and_time": {"tasks": ["named"], "wake_at": "2026-10-17T18:05:00+00:00"}, "unrecorded": {},
+    "sender_unnamed": {"senders": ["elsewhere"]}, "mail": {"any_mail": True}, "time_only": {"wake_at": _AT},
+    "time": {"wake_at": _AT, "any_mail": True}, "task_and_time": {"tasks": ["named"], "wake_at": _AT},
+    "task_and_sender": {"tasks": ["named"], "senders": ["named"]},
+    "every_kind": {"tasks": ["a", "b"], "task_wait": {"mode": "all_terminal"}, "runs": ["r1"],
+                   "services": [{"name": "preview"}], "reviewer_slots": ["s1"], "senders": ["named"], "wake_at": _AT},
+    "unrecorded": {},
 }
 
 

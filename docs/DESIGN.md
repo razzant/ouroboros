@@ -1397,8 +1397,9 @@ running, such as the review a Pause lets finish, a run nobody can confirm); a wo
 beside it, and the sidebar's name says both. An outcome stays beside `Finalizing…`; `Paused` stays until Resume, its
 line saying who or what paused it (the owner's press with its time, Ouroboros, nobody when a press declared no one),
 the words the declaring press recorded following its head verbatim whoever declared it (`You paused it: …`);
-`Waiting` says what it waits for and goes on by itself when that happens (a sleep: the helper it chose by its name,
-else how many, its external run, a reviewer, a message, else the time it chose in the viewer's clock; a record
+`Waiting` says what it waits for and goes on by itself when that happens (a sleep: each source it chose, joined by
+`or` — the helper by its name, else how many, its external run, a service, a reviewer, a sender by its name, else a
+message — and its time last, in the viewer's clock, a time alone also waking on a message; a record
 that saved no choice reads `until it is woken`), unless a helper its sleep chose is paused: the line then says so and who resumes
 that helper (`… until Ouroboros resumes it` only when this episode may ask for it,
 or `until you resume it` after Panic; a Continue's earlier helper is just

@@ -216,7 +216,7 @@ test('a sleep whose chosen helper still awaits its own Resume says so beside Wai
     const state = stateOf('sleeping_on_paused_helper');
     const row = workRowView(state.works[0]);
     assert.deepEqual(row, { word: 'Waiting', tone: 'held', mark: 'still', owner: false, outcome: '', focus: '',
-        secondary: 'Sleeping until the task it chose finishes · 1 helper it waits for is paused until Ouroboros resumes it' });
+        secondary: 'Sleeping until the task it chose finishes or a message arrives · 1 helper it waits for is paused until Ouroboros resumes it' });
     // The sleeping root keeps exactly its own controls; the helper's Resume stays Ouroboros's selection.
     const grouped = workControls(state.works[0]);
     assert.deepEqual(grouped, { stop: ['sw'], stopEarlier: [], pause: 'sw', resume: '', hurry: 'sw', wrapUp: 'sw' });
@@ -360,26 +360,41 @@ test('the focus line is the work\'s own update_focus text under its state, led b
     assert.equal(workRowView({ ...work('working_call'), focus: { text: '   ', at } }).focus, '');
 });
 
-test('a sleep says what it waits for in the server\'s sentence, a chosen time in the viewer\'s clock', () => {
-    assert.ok(Object.keys(SERVER_SLEEPS).length >= 12);
+test('a sleep says every source it chose in the server\'s words, joined by "or", a chosen time last in the viewer\'s clock', () => {
+    assert.ok(Object.keys(SERVER_SLEEPS).length >= 16);
     for (const [name, reason] of Object.entries(SERVER_SLEEPS)) {
-        const said = reason.wake?.kind === 'time' ? `Sleeping until ${clock(reason.wake.at)}` : reason.text;
-        assert.equal(reasonText(reason), said, name);
+        const at = (reason.wake || []).find((clause) => clause.kind === 'time')?.at;
+        assert.equal(reasonText(reason), at ? reason.text.replace(at, clock(at)) : reason.text, name);
     }
     assert.equal(reasonText(SERVER_SLEEPS.unrecorded), 'Sleeping until it is woken', 'a record without a selection');
+    const at = '2026-10-17T18:05:00+00:00';
+    assert.equal(reasonText(SERVER_SLEEPS.every_kind), 'Sleeping until all 2 tasks it chose finish or its external run '
+        + `finishes or a service it started stops or a reviewer answers or Draft the release notes writes or ${clock(at)}`);
+    // A time alone also wakes on any message; a sender the task clause named is said as a message, never twice.
+    assert.equal(reasonText(SERVER_SLEEPS.time), `Sleeping until a message arrives or ${clock(at)}`);
+    assert.equal(reasonText(SERVER_SLEEPS.time_only), `Sleeping until ${clock(at)}`);
+    assert.equal(reasonText(SERVER_SLEEPS.task_and_sender), 'Sleeping until Draft the release notes finishes or a message arrives');
     // The chosen helper by its census name, never its id; what still runs beside it stays its own fact.
-    assert.equal(workLine(work('sleeping_on_named_helper')), 'Sleeping until Draft the release notes finishes · 1 helper still working');
-    assert.equal(workLine(work('sleeping_until_time')), `Sleeping until ${clock('2026-10-17T18:05:00+00:00')}`);
+    assert.equal(workLine(work('sleeping_on_named_helper')),
+        'Sleeping until Draft the release notes finishes or a message arrives · 1 helper still working');
+    assert.equal(workLine(work('sleeping_until_time')), `Sleeping until a message arrives or ${clock(at)}`);
     assert.ok(!workLine(work('sleeping_on_named_helper')).includes('sn-c'));
+    // A clause this client does not know, or a time it cannot read, keeps the server's sentence whole.
+    for (const wake of [[{ kind: 'mail' }, { kind: 'later' }], [{ kind: 'time', at: 'soon' }], []]) {
+        assert.equal(reasonText({ code: 'sleeping', text: 'Sleeping until x', wake }), 'Sleeping until x');
+    }
     const prior = currentPayload();
     try {
         applyPayload({ language: 'ru', english: false, entries: {
-            'Sleeping until {name} finishes': { text: 'Спит, пока не закончится {name}' },
-            [CODE_PREFIX + 'work.sleep.reviewer']: { text: 'Спит до ответа ревьюера' } } });
-        // A translation keeps the name as written; a kind it lacks stays the server's English.
+            'Sleeping until {what}': { text: 'Спит, пока {what}' },
+            '{name} finishes': { text: 'не закончится {name}' },
+            '{a} or {b}': { text: '{a} или {b}' },
+            [CODE_PREFIX + 'work.sleep.reviewer']: { text: 'не ответит ревьюер' } } });
+        // A translation keeps the name as written; a clause it lacks stays the server's English until translated.
         assert.equal(reasonText(SERVER_SLEEPS.task), 'Спит, пока не закончится Draft the release notes');
-        assert.equal(reasonText(SERVER_SLEEPS.reviewer), 'Спит до ответа ревьюера');
-        assert.equal(reasonText(SERVER_SLEEPS.mail), 'Sleeping until a message arrives');
+        assert.equal(reasonText(SERVER_SLEEPS.reviewer), 'Спит, пока не ответит ревьюер');
+        assert.equal(reasonText(SERVER_SLEEPS.task_and_sender),
+            'Спит, пока не закончится Draft the release notes или a message arrives');
     } finally { applyPayload(prior); }
 });
 

@@ -181,22 +181,39 @@ def test_a_warm_sleep_names_only_the_helpers_it_chose_that_a_stop_holds_and_who_
     assert ws.roll_up_work("root", [selected], episode={"task_id": "root"})["tails"] == []
 
 
+_AT = "2026-11-03T18:05:00+00:00"
+_NAMED, _TIME = {"kind": "task", "name": "Draft the notes"}, {"kind": "time", "at": _AT}
+
+
 @pytest.mark.parametrize(("sleep", "text", "wake"), [
-    ({"tasks": ["kid"], "senders": ["kid"]}, "Sleeping until Draft the notes finishes", {"kind": "task", "name": "Draft the notes"}),
-    ({"tasks": ["gone"]}, "Sleeping until the task it chose finishes", {"kind": "tasks", "count": 1}),
-    ({"tasks": ["kid", "gone", "x"]}, "Sleeping until one of 3 tasks finishes", {"kind": "tasks", "count": 3}),
+    ({"tasks": ["kid"]}, "Sleeping until Draft the notes finishes", [_NAMED]),
+    ({"tasks": ["gone"]}, "Sleeping until the task it chose finishes", [{"kind": "tasks", "count": 1}]),
+    ({"tasks": ["kid", "gone", "x"]}, "Sleeping until one of 3 tasks finishes", [{"kind": "tasks", "count": 3}]),
     ({"tasks": ["kid", "x"], "task_wait": {"mode": "all_terminal"}}, "Sleeping until all 2 tasks it chose finish",
-     {"kind": "all_tasks", "count": 2}),
-    ({"runs": ["r1"]}, "Sleeping until its external run finishes", {"kind": "runs", "count": 1}),
-    ({"services": [{"name": "preview"}]}, "Sleeping until a service it started stops", {"kind": "service"}),
-    ({"reviewer_slots": ["s1"], "any_mail": False}, "Sleeping until a reviewer answers", {"kind": "reviewer"}),
-    ({"senders": ["kid"]}, "Sleeping until a message arrives", {"kind": "mail"}),
-    ({"any_mail": True}, "Sleeping until a message arrives", {"kind": "mail"}),
-    ({"wake_at": "2026-11-03T18:05:00+00:00", "any_mail": True}, "Sleeping until 2026-11-03T18:05:00+00:00",
-     {"kind": "time", "at": "2026-11-03T18:05:00+00:00"}),
-    # A chosen source is what it waits for; its time is only the bound beside it.
-    ({"tasks": ["kid"], "wake_at": "2026-11-03T18:05:00+00:00"}, "Sleeping until Draft the notes finishes",
-     {"kind": "task", "name": "Draft the notes"}),
+     [{"kind": "all_tasks", "count": 2}]),
+    ({"runs": ["r1"]}, "Sleeping until its external run finishes", [{"kind": "runs", "count": 1}]),
+    ({"services": [{"name": "preview"}]}, "Sleeping until a service it started stops", [{"kind": "service"}]),
+    ({"reviewer_slots": ["s1"], "any_mail": False}, "Sleeping until a reviewer answers", [{"kind": "reviewer"}]),
+    ({"senders": ["kid"]}, "Sleeping until Draft the notes writes", [{"kind": "sender", "name": "Draft the notes"}]),
+    ({"senders": ["gone"]}, "Sleeping until a message arrives", [{"kind": "mail"}]),
+    ({"senders": ["kid", "gone"]}, "Sleeping until a message arrives", [{"kind": "mail"}]),
+    ({"any_mail": True}, "Sleeping until a message arrives", [{"kind": "mail"}]),
+    # Every source it chose is said, joined by "or", its time last: a time alone also wakes on any message.
+    ({"wake_at": _AT, "any_mail": True}, f"Sleeping until a message arrives or {_AT}", [{"kind": "mail"}, _TIME]),
+    ({"wake_at": _AT}, f"Sleeping until {_AT}", [_TIME]),
+    ({"tasks": ["kid"], "wake_at": _AT}, f"Sleeping until Draft the notes finishes or {_AT}", [_NAMED, _TIME]),
+    # A sender the task clause already named is said as a message, not named twice.
+    ({"tasks": ["kid"], "senders": ["kid"]}, "Sleeping until Draft the notes finishes or a message arrives",
+     [_NAMED, {"kind": "mail"}]),
+    ({"tasks": ["kid", "gone"], "senders": ["kid"], "task_wait": {"mode": "all_terminal"}},
+     "Sleeping until all 2 tasks it chose finish or Draft the notes writes",
+     [{"kind": "all_tasks", "count": 2}, {"kind": "sender", "name": "Draft the notes"}]),
+    ({"tasks": ["gone", "x"], "runs": ["r1", "r2"], "senders": ["kid"], "wake_at": _AT},
+     f"Sleeping until one of 2 tasks finishes or one of 2 external runs finishes or Draft the notes writes or {_AT}",
+     [{"kind": "tasks", "count": 2}, {"kind": "runs", "count": 2}, {"kind": "sender", "name": "Draft the notes"},
+      _TIME]),
+    ({"services": [{"name": "preview"}], "wake_at": _AT}, f"Sleeping until a service it started stops or {_AT}",
+     [{"kind": "service"}, _TIME]),
     ({"mode": "warm"}, "Sleeping until it is woken", None),
 ])
 def test_a_sleep_says_what_it_chose_to_wait_for(sleep, text, wake):
@@ -222,11 +239,11 @@ def test_the_projection_names_a_sleeps_helper_from_its_own_census_row():
                                                     "sleep": sleep}},
            "kid": {"running": True, "suggested_name": "Continue: Draft the notes"}}
     (work,) = work_fields(owners, raw)["works"]
-    assert work["because"] == [{"code": "sleeping", "text": "Sleeping until Draft the notes finishes",
-                                "wake": {"kind": "task", "name": "Draft the notes"}}]
+    assert work["because"] == [{"code": "sleeping", "text": "Sleeping until Draft the notes finishes or a message arrives",
+                                "wake": [{"kind": "task", "name": "Draft the notes"}, {"kind": "mail"}]}]
     # A helper the census does not hold is counted, never named by its id.
     (work,) = work_fields(owners[:1], {"root": raw["root"]})["works"]
-    assert work["because"][0]["text"] == "Sleeping until the task it chose finishes"
+    assert work["because"][0]["text"] == "Sleeping until the task it chose finishes or a message arrives"
 
 
 def test_under_a_settling_pause_only_running_helpers_are_said_still_working():

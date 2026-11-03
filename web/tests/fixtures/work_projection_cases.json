@@ -1978,11 +1978,16 @@
      "because": [
       {
        "code": "sleeping",
-       "text": "Sleeping until the task it chose finishes",
-       "wake": {
-        "kind": "tasks",
-        "count": 1
-       }
+       "text": "Sleeping until the task it chose finishes or a message arrives",
+       "wake": [
+        {
+         "kind": "tasks",
+         "count": 1
+        },
+        {
+         "kind": "mail"
+        }
+       ]
       }
      ],
      "tails": [
@@ -2019,11 +2024,16 @@
         "because": [
          {
           "code": "sleeping",
-          "text": "Sleeping until the task it chose finishes",
-          "wake": {
-           "kind": "tasks",
-           "count": 1
-          }
+          "text": "Sleeping until the task it chose finishes or a message arrives",
+          "wake": [
+           {
+            "kind": "tasks",
+            "count": 1
+           },
+           {
+            "kind": "mail"
+           }
+          ]
          }
         ],
         "tails": []
@@ -2116,11 +2126,16 @@
      "because": [
       {
        "code": "sleeping",
-       "text": "Sleeping until Draft the release notes finishes",
-       "wake": {
-        "kind": "task",
-        "name": "Draft the release notes"
-       }
+       "text": "Sleeping until Draft the release notes finishes or a message arrives",
+       "wake": [
+        {
+         "kind": "task",
+         "name": "Draft the release notes"
+        },
+        {
+         "kind": "mail"
+        }
+       ]
       }
      ],
      "tails": [
@@ -2157,11 +2172,16 @@
         "because": [
          {
           "code": "sleeping",
-          "text": "Sleeping until Draft the release notes finishes",
-          "wake": {
-           "kind": "task",
-           "name": "Draft the release notes"
-          }
+          "text": "Sleeping until Draft the release notes finishes or a message arrives",
+          "wake": [
+           {
+            "kind": "task",
+            "name": "Draft the release notes"
+           },
+           {
+            "kind": "mail"
+           }
+          ]
          }
         ],
         "tails": []
@@ -2249,11 +2269,16 @@
      "because": [
       {
        "code": "sleeping",
-       "text": "Sleeping until 2026-10-17T18:05:00+00:00",
-       "wake": {
-        "kind": "time",
-        "at": "2026-10-17T18:05:00+00:00"
-       }
+       "text": "Sleeping until a message arrives or 2026-10-17T18:05:00+00:00",
+       "wake": [
+        {
+         "kind": "mail"
+        },
+        {
+         "kind": "time",
+         "at": "2026-10-17T18:05:00+00:00"
+        }
+       ]
       }
      ],
      "tails": [],
@@ -2278,11 +2303,16 @@
         "because": [
          {
           "code": "sleeping",
-          "text": "Sleeping until 2026-10-17T18:05:00+00:00",
-          "wake": {
-           "kind": "time",
-           "at": "2026-10-17T18:05:00+00:00"
-          }
+          "text": "Sleeping until a message arrives or 2026-10-17T18:05:00+00:00",
+          "wake": [
+           {
+            "kind": "mail"
+           },
+           {
+            "kind": "time",
+            "at": "2026-10-17T18:05:00+00:00"
+           }
+          ]
          }
         ],
         "tails": []
@@ -3144,94 +3174,186 @@
   "task": {
    "code": "sleeping",
    "text": "Sleeping until Draft the release notes finishes",
-   "wake": {
-    "kind": "task",
-    "name": "Draft the release notes"
-   }
+   "wake": [
+    {
+     "kind": "task",
+     "name": "Draft the release notes"
+    }
+   ]
   },
   "task_unnamed": {
    "code": "sleeping",
    "text": "Sleeping until the task it chose finishes",
-   "wake": {
-    "kind": "tasks",
-    "count": 1
-   }
+   "wake": [
+    {
+     "kind": "tasks",
+     "count": 1
+    }
+   ]
   },
   "tasks": {
    "code": "sleeping",
    "text": "Sleeping until one of 3 tasks finishes",
-   "wake": {
-    "kind": "tasks",
-    "count": 3
-   }
+   "wake": [
+    {
+     "kind": "tasks",
+     "count": 3
+    }
+   ]
   },
   "all_tasks": {
    "code": "sleeping",
    "text": "Sleeping until all 2 tasks it chose finish",
-   "wake": {
-    "kind": "all_tasks",
-    "count": 2
-   }
+   "wake": [
+    {
+     "kind": "all_tasks",
+     "count": 2
+    }
+   ]
   },
   "run": {
    "code": "sleeping",
    "text": "Sleeping until its external run finishes",
-   "wake": {
-    "kind": "runs",
-    "count": 1
-   }
+   "wake": [
+    {
+     "kind": "runs",
+     "count": 1
+    }
+   ]
   },
   "runs": {
    "code": "sleeping",
    "text": "Sleeping until one of 3 external runs finishes",
-   "wake": {
-    "kind": "runs",
-    "count": 3
-   }
+   "wake": [
+    {
+     "kind": "runs",
+     "count": 3
+    }
+   ]
   },
   "service": {
    "code": "sleeping",
    "text": "Sleeping until a service it started stops",
-   "wake": {
-    "kind": "service"
-   }
+   "wake": [
+    {
+     "kind": "service"
+    }
+   ]
   },
   "reviewer": {
    "code": "sleeping",
    "text": "Sleeping until a reviewer answers",
-   "wake": {
-    "kind": "reviewer"
-   }
+   "wake": [
+    {
+     "kind": "reviewer"
+    }
+   ]
   },
   "sender": {
    "code": "sleeping",
+   "text": "Sleeping until Draft the release notes writes",
+   "wake": [
+    {
+     "kind": "sender",
+     "name": "Draft the release notes"
+    }
+   ]
+  },
+  "sender_unnamed": {
+   "code": "sleeping",
    "text": "Sleeping until a message arrives",
-   "wake": {
-    "kind": "mail"
-   }
+   "wake": [
+    {
+     "kind": "mail"
+    }
+   ]
   },
   "mail": {
    "code": "sleeping",
    "text": "Sleeping until a message arrives",
-   "wake": {
-    "kind": "mail"
-   }
+   "wake": [
+    {
+     "kind": "mail"
+    }
+   ]
+  },
+  "time_only": {
+   "code": "sleeping",
+   "text": "Sleeping until 2026-10-17T18:05:00+00:00",
+   "wake": [
+    {
+     "kind": "time",
+     "at": "2026-10-17T18:05:00+00:00"
+    }
+   ]
   },
   "time": {
    "code": "sleeping",
-   "text": "Sleeping until 2026-10-17T18:05:00+00:00",
-   "wake": {
-    "kind": "time",
-    "at": "2026-10-17T18:05:00+00:00"
-   }
+   "text": "Sleeping until a message arrives or 2026-10-17T18:05:00+00:00",
+   "wake": [
+    {
+     "kind": "mail"
+    },
+    {
+     "kind": "time",
+     "at": "2026-10-17T18:05:00+00:00"
+    }
+   ]
   },
   "task_and_time": {
    "code": "sleeping",
-   "text": "Sleeping until Draft the release notes finishes",
-   "wake": {
-    "kind": "task",
-    "name": "Draft the release notes"
-   }
+   "text": "Sleeping until Draft the release notes finishes or 2026-10-17T18:05:00+00:00",
+   "wake": [
+    {
+     "kind": "task",
+     "name": "Draft the release notes"
+    },
+    {
+     "kind": "time",
+     "at": "2026-10-17T18:05:00+00:00"
+    }
+   ]
+  },
+  "task_and_sender": {
+   "code": "sleeping",
+   "text": "Sleeping until Draft the release notes finishes or a message arrives",
+   "wake": [
+    {
+     "kind": "task",
+     "name": "Draft the release notes"
+    },
+    {
+     "kind": "mail"
+    }
+   ]
+  },
+  "every_kind": {
+   "code": "sleeping",
+   "text": "Sleeping until all 2 tasks it chose finish or its external run finishes or a service it started stops or a reviewer answers or Draft the release notes writes or 2026-10-17T18:05:00+00:00",
+   "wake": [
+    {
+     "kind": "all_tasks",
+     "count": 2
+    },
+    {
+     "kind": "runs",
+     "count": 1
+    },
+    {
+     "kind": "service"
+    },
+    {
+     "kind": "reviewer"
+    },
+    {
+     "kind": "sender",
+     "name": "Draft the release notes"
+    },
+    {
+     "kind": "time",
+     "at": "2026-10-17T18:05:00+00:00"
+    }
+   ]
   },
   "unrecorded": {
    "code": "sleeping",
