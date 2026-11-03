@@ -50,6 +50,12 @@ class FakeAX:
     def set_timeout(self, elem, seconds):
         self.timeouts.append(seconds)
 
+    # Ordinary AppKit applications need no opt-in. Cold Electron cases exercise the real method
+    # at the ctypes boundary in test_unix_computer_use_ax_exposure.py.
+    def request_manual_accessibility(self, app):
+        return {"attribute": "AXManualAccessibility", "requested": True, "code": -25205,
+                "status": "unsupported", "result": "AttributeUnsupported"}
+
     def CFRetain(self, ref):
         self.retained[ref] = self.retained.get(ref, 0) + 1
         return ref

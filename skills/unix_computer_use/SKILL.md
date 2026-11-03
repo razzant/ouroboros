@@ -1,7 +1,7 @@
 ---
 name: unix_computer_use
 description: Local and remote desktop observation and input, with macOS semantic actions, explicit foreground control, screenshot-bound coordinates and honest outcome receipts.
-version: 0.7.0
+version: 0.7.1
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -117,6 +117,17 @@ cut off by the helper's timeout (`helper_stopped`) leaves the action's receipt
 as it was: the top-level outcome is always the action's. A call carries one
 action at most. Several independent calls in one response are admitted one by
 one; a step that depends on an earlier step's outcome belongs to the next round.
+
+On local macOS, `ax_tree` and `element_act` first request app-local accessibility
+exposure with Electron's documented `AXManualAccessibility=true` attribute. The
+one attempt runs under the AX messaging timeout before window selection, and
+spends the action's existing time budget. `ax_exposure` records its status and
+AX error code: `accepted` confirms the request only, `unsupported` is ordinary
+for other applications, `unknown` means a timeout, and `failed` retains other
+errors. Reads and actions still use their normal selection and verification;
+there is no retry, readiness assumption, activation or input fallback. This
+changes the target's accessibility exposure, not macOS accessibility settings.
+See [Electron's client-side documentation](https://www.electronjs.org/docs/latest/tutorial/accessibility#macos).
 
 The receipt separates `dispatched`, `action_outcome` and `element_after` from
 `front_before`/`front_after`. A completed AX call is not proof of the goal;

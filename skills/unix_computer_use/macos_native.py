@@ -8,7 +8,7 @@ which the long-lived server does not turn). Pure ``ctypes`` against ApplicationS
 CoreGraphics: no pyobjc wrapper is required (the packaged interpreter carries AppKit and
 Quartz but not the Accessibility API, and source installs carry none).
 
-Operations (all read-only except ``activate``, ``act`` and ``element``):
+Operations (``tree``/``observe`` also request app-local AX exposure; no activation):
 
 - ``apps [limit]``                running regular applications with their windows, ``frontmost`` and ``scriptable``
 - ``resolve <query>``             which running application a name, bundle id or ``pid:<n>`` means (0, 1 or many)
@@ -255,6 +255,20 @@ class _AX:
         if system_wide:
             self.AXUIElementSetMessagingTimeout(system_wide, seconds)
             self.CFRelease(system_wide)
+
+    def request_manual_accessibility(self, app) -> dict[str, Any]:
+        """Electron's documented client-side opt-in, before the first window/element read.
+
+        https://www.electronjs.org/docs/latest/tutorial/accessibility#macos
+        One bounded attempt per call, without app-name heuristics or a preliminary attribute query:
+        a cold Electron tree may not expose the attribute through ordinary reads. Other apps may
+        reject it. Acceptance is not proof that a renderer is ready; the actual walk still decides.
+        This changes app-local accessibility exposure, never AXFrontmost/AXFocused or system settings.
+        """
+        code = int(self.AXUIElementSetAttributeValue(app, self.cfs("AXManualAccessibility"), self.kCFBooleanTrue))
+        return {"attribute": "AXManualAccessibility", "requested": True, "code": code,
+                "status": "accepted" if code == 0 else "unsupported" if code in (-25205, -25208) else "unknown" if code == -25204 else "failed",
+                "result": AX_ERR.get(code, str(code))}
 
     def is_array(self, ref) -> bool:
         return bool(ref) and self.CFGetTypeID(ref) == self.T_ARR
@@ -1086,6 +1100,7 @@ def op_act(pid: int, action: str, selector: Any, max_nodes: int = ACT_DEFAULTS["
     ax.set_timeout(app, min(1.0, timeout_ms / 1000.0))
     kept = None  # observe: a second retain on the window, for the read after the action
     try:
+        out["ax_exposure"] = ax.request_manual_accessibility(app)
         win, window, refusal = pick_window(ax, app, sel.get("window"))
         if refusal:
             out.update({"ok": False, "dispatched": False, "note": "no action was made", **refusal})
@@ -1344,10 +1359,11 @@ def op_tree(pid: int, max_nodes: int = 150, timeout_ms: int = 3000, root: str = 
     root_ref = None
     root_from = None
     try:
+        exposure = ax.request_manual_accessibility(app)
         if want:
             root_ref, _facts, refusal = pick_window(ax, app, want)
             if refusal:
-                return {"ok": False, "pid": pid, **refusal}
+                return {"ok": False, "pid": pid, "ax_exposure": exposure, **refusal}
             root_from = "AXWindows"
         else:
             for name in (("AXFocusedUIElement",) if root == "focused" else ()) + ("AXFocusedWindow", "AXMainWindow"):
@@ -1363,7 +1379,8 @@ def op_tree(pid: int, max_nodes: int = 150, timeout_ms: int = 3000, root: str = 
                     root_ref, root_from = ax.CFRetain(ax.CFArrayGetValueAtIndex(arr, 0)), "AXWindows[0]"
                 ax.CFRelease(arr)
             if root_ref is None:
-                return {"ok": False, "reason": "no_window" if err in (0, -25212) else AX_ERR.get(err, str(err)), "pid": pid}
+                return {"ok": False, "reason": "no_window" if err in (0, -25212) else AX_ERR.get(err, str(err)), "pid": pid,
+                        "ax_exposure": exposure}
         title, _e = ax.attr(root_ref, "AXTitle")
         window_id = ax.window_id(root_ref) if root_from != "AXFocusedUIElement" else None
         ref, root_ref = root_ref, None  # the walk owns the root from here and releases it on every exit
@@ -1374,7 +1391,7 @@ def op_tree(pid: int, max_nodes: int = 150, timeout_ms: int = 3000, root: str = 
         if root_ref is not None:
             ax.CFRelease(root_ref)
         ax.CFRelease(app)
-    result.update({"pid": pid, "root": root_from, "window": title if isinstance(title, str) else None,
+    result.update({"pid": pid, "root": root_from, "window": title if isinstance(title, str) else None, "ax_exposure": exposure,
                    "limits": {"max_nodes": max_nodes, "timeout_ms": timeout_ms, "text_limit": text_limit, "ceilings": TREE_CEILINGS}})
     if window_id is not None:
         result["window_id"] = window_id

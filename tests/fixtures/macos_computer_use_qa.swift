@@ -5,7 +5,7 @@
 //
 // stdin, one command per line: "mark <label>" (log a state snapshot), "replace" (target: swap Commit for a
 // fresh instance), "type <interval_ms> <letters>" (front: post the letters as keystrokes while it stays the
-// active app), "quit". EOF quits too, so a fixture never outlives its test.
+// active app), "second" (target: show a second window without activation), "quit". EOF quits too.
 //
 // Every observation is one JSON line in the log, stamped with ProcessInfo.systemUptime (one clock for both
 // processes). Both roles log their own activation, key-window changes and every application activation the
@@ -43,6 +43,23 @@ func log(_ event: String, _ fields: [String: Any] = [:]) {
     }
 }
 
+var rawInputCount = 0
+// Before AppKit dispatch, independently of whether a view accepts first mouse or acts on the event.
+// Keep these counts separate from Commit and text changes. No acceptsFirstMouse override/primer.
+final class QAApplication: NSApplication {
+    override func sendEvent(_ event: NSEvent) {
+        if [.leftMouseDown, .leftMouseUp, .keyDown, .keyUp].contains(event.type) {
+            rawInputCount += 1
+            log("raw_input", ["index": rawInputCount, "type": Int(event.type.rawValue),
+                              "window_number": event.windowNumber,
+                              "source_pid": event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? -1,
+                              "tag": event.cgEvent?.getIntegerValueField(.eventSourceUserData) ?? 0,
+                              "chars": event.type == .keyDown || event.type == .keyUp ? event.characters ?? "" : ""])
+        }
+        super.sendEvent(event)
+    }
+}
+
 final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTextViewDelegate {
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: role == "target" ? 460 : 240),
                           styleMask: [.titled], backing: .buffered, defer: false)
@@ -61,6 +78,11 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
     var typer: Timer?
     var input = ""
     var monitors: [Any] = []
+    var secondWindow: NSWindow?
+    let secondField = NSTextField(string: "")
+    var secondCommit: NSButton?
+    var secondCount = 0
+    var secondStatus = "idle"
 
     func button(_ title: String, _ identifier: String, _ action: Selector, _ frame: NSRect, tag: Int = 0) -> NSButton {
         let button = NSButton(title: title, target: self, action: action)
@@ -147,7 +169,7 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
             let data = handle.availableData
             DispatchQueue.main.async { self.receive(data) }
         }
-        log("ready", state())
+        log("ready", state().merging(["application_class": String(describing: type(of: NSApp!))]) { _, new in new })
     }
 
     func state() -> [String: Any] {
@@ -158,6 +180,8 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
             "first_responder": responder(),
             "front_pid": Int(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1),
             "mouse": [mouse.x.rounded(), mouse.y.rounded()],
+            "window_id": window.windowNumber,
+            "raw_input_count": rawInputCount,
         ]
         if role == "target" {
             out["field"] = field.stringValue
@@ -171,6 +195,12 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
                 out["commit_frame"] = [frame.minX, primary.frame.maxY - frame.maxY, frame.width, frame.height]
                     .map { $0.rounded() }
             }
+            if let second = secondWindow, let commit = secondCommit {
+                out["secondary"] = ["window_id": second.windowNumber, "title": second.title,
+                                    "key_window": second.isKeyWindow, "first_responder": responder(second),
+                                    "field": secondField.stringValue, "count": secondCount, "status": secondStatus,
+                                    "commit_frame": globalFrame(commit, second), "field_frame": globalFrame(secondField, second)]
+            }
         } else {
             out["text"] = typed.string
             out["pasteboard_change_count"] = NSPasteboard.general.changeCount  // a counter, not the contents
@@ -178,12 +208,45 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
         return out
     }
 
-    func responder() -> String {
-        let first = window.firstResponder
+    func responder(_ selected: NSWindow? = nil) -> String {
+        let first = (selected ?? window).firstResponder
         if first === typed { return "qa.typing" }
         if field.currentEditor() != nil && first === field.currentEditor() { return "qa.field" }
+        if secondField.currentEditor() != nil && first === secondField.currentEditor() { return "qa.second.field" }
         if let view = first as? NSView, !view.accessibilityIdentifier().isEmpty { return view.accessibilityIdentifier() }
         return first.map { String(describing: type(of: $0)) } ?? "none"
+    }
+
+    func globalFrame(_ view: NSView, _ owner: NSWindow) -> [CGFloat] {
+        let frame = owner.convertToScreen(view.convert(view.bounds, to: nil))
+        return [frame.minX, (NSScreen.screens.first?.frame.maxY ?? 0) - frame.maxY, frame.width, frame.height]
+    }
+
+    func showSecond() {
+        guard secondWindow == nil else { return }
+        let second = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 240),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        second.title = title + "-second"
+        second.setFrameTopLeftPoint(NSPoint(x: window.frame.minX, y: window.frame.minY - 20))
+        secondField.frame = NSRect(x: 20, y: 150, width: 200, height: 24)
+        secondField.setAccessibilityIdentifier("qa.second.field")
+        secondField.delegate = self
+        second.contentView!.addSubview(secondField)
+        let commit = NSButton(title: "Commit", target: self, action: #selector(secondPressed(_:)))
+        commit.frame = NSRect(x: 240, y: 146, width: 100, height: 32)
+        commit.setAccessibilityIdentifier("qa.second.commit")
+        second.contentView!.addSubview(commit)
+        secondCommit = commit
+        secondWindow = second
+        second.orderFrontRegardless()
+        log("second_ready", state())
+    }
+
+    @objc func secondPressed(_ sender: NSButton) {
+        secondCount += 1
+        secondStatus = "committed:" + secondField.stringValue
+        log("second_commit", ["count": secondCount, "field": secondField.stringValue,
+                              "window_number": secondWindow?.windowNumber ?? -1])
     }
 
     func pointer(_ event: NSEvent, _ scope: String) {
@@ -214,7 +277,10 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
     func controlTextDidChange(_ note: Notification) {
         // Every edit through the field editor lands here: keystrokes, and also a value set through Accessibility
         // while the field holds the field editor (seen natively); key_down rows tell keystrokes apart.
-        log("field_typed", ["field": field.stringValue])
+        let changed = note.object as? NSTextField
+        log("field_typed", ["field": changed?.stringValue ?? field.stringValue,
+                            "identifier": changed?.accessibilityIdentifier() ?? "qa.field",
+                            "window_number": changed?.window?.windowNumber ?? -1])
     }
 
     func textDidChange(_ note: Notification) {
@@ -244,6 +310,8 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
             commit.removeFromSuperview()
             commit = fresh
             log("commit_replaced", ["instance": fresh.tag])
+        case "second" where role == "target":
+            showSecond()
         case "type" where role == "front" && words.count == 3:
             startTyping(Int(words[1]) ?? 60, words[2])
         case "quit":
@@ -280,6 +348,7 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
         for down in [true, false] {
             guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down) else { continue }
             event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
+            event.setIntegerValueField(.eventSourceUserData, value: 42002)  // ordinary foreground-route decoy
             event.post(tap: .cghidEventTap)
         }
     }
@@ -299,7 +368,7 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
     }
 }
 
-let app = NSApplication.shared
+let app = QAApplication.shared
 let fixture = Fixture()
 app.delegate = fixture
 app.setActivationPolicy(.regular)

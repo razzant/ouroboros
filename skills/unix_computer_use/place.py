@@ -606,7 +606,7 @@ class PlaceMixin:
             if not tree.get("ok"):
                 failed = {"ok": False, "platform": plat, "app": target, "reason": tree.get("reason") or "ax_unavailable",
                           "error": tree.get("error") or f"the accessibility read failed ({tree.get('reason')})"}
-                for key in ("errors", "windows"):
+                for key in ("errors", "windows", "ax_exposure"):
                     if tree.get(key):
                         failed[key] = tree[key]
                 return self._json_text(failed)
