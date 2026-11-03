@@ -339,10 +339,15 @@ class BackgroundConsciousness:
         sooner than MIN after that skip and after boot, and admits or skips again under the new limit. The
         skip's own fact changed, no event moved the schedule. The check reads only the settings; it adds no
         ledger or state read to a tick (#2654)."""
+        return now >= self._due_at() < self._next_wake_at
+
+    def _due_at(self) -> float:
+        """When the next check can come: the stored time, or, after a changed limit turned a money skip's wait into
+        any skip's retry (``_limit_reopens_skip``), MIN after that skip and after boot. The status shows this time."""
         basis = self._skip_basis
-        return (basis is not None and basis[0] == self._next_wake_at
-                and now >= max(basis[2], self._booted_at) + self.floor
-                and basis[1] != float(get_consciousness_daily_usd()))
+        if basis is None or basis[0] != self._next_wake_at or basis[1] == float(get_consciousness_daily_usd()):
+            return self._next_wake_at
+        return min(self._next_wake_at, max(basis[2], self._booted_at) + self.floor)
 
     def _launch(self, now: float, chat_id: int, window: Dict[str, Any]) -> str:
         from supervisor import workers
@@ -574,7 +579,7 @@ class BackgroundConsciousness:
         wake = self.live_wake()
         window = self._allowance_view(time.time())
         context = self._context_facts(window)
-        values = (self._enabled, get_consciousness_autonomy(), _iso(self._next_wake_at),
+        values = (self._enabled, get_consciousness_autonomy(), _iso(self._due_at()),
                   _iso(self._last_wake_at), self._last_wake_task_id, self._last_wake_outcome, self._last_error,
                   window.get("settled_usd"), window.get("limit_usd"), str(window.get("resets_at") or ""),
                   len(context["counted_roots"]), int(get_consciousness_max_tasks()), wake,
