@@ -1,5 +1,5 @@
 import { formatUsd2 } from './utils.js';
-import { apiFetch } from './api_client.js';
+import { APP_SETTINGS_ORIGIN, apiFetch } from './api_client.js';
 
 const COST_BUDGET_INPUTS = {
     TOTAL_BUDGET: 's-budget',
@@ -280,7 +280,7 @@ export function initCosts({ state, mount }) {
         try {
             const resp = await apiFetch('/api/settings', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', ...APP_SETTINGS_ORIGIN },
                 body: JSON.stringify({ TOTAL_BUDGET: budget, OUROBOROS_PER_TASK_COST_USD: perTask }),
             });
             const data = await resp.json().catch(() => ({}));

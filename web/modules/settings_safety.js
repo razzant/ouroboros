@@ -5,7 +5,7 @@
 // and each changed level and the rules through their audited owner endpoints after it (consciousness_api.js).
 import { renderSegmentedField } from './page_header.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
-import { apiClient } from './api_client.js';
+import { APP_SETTINGS_ORIGIN, apiClient } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { settingsWriteFailure, syncEffortSegments } from './settings_controls.js';
 import { parseModelSource } from './route_editor_primitives.js';
@@ -203,7 +203,8 @@ export function safetyOwnerDraft(root, body = {}, current = {}) {
 /** Save's first write: the checker's changes in one owner transaction; a refusal throws the server's sentence. */
 export async function saveSafetyChecker(draft) {
     if (!draft?.checker) return false;
-    await saveCheckerSettings(draft.checker.settings, { allowEmptyReviewPool: draft.checker.allowEmptyReviewPool });
+    await saveCheckerSettings(draft.checker.settings, {
+        allowEmptyReviewPool: draft.checker.allowEmptyReviewPool, headers: APP_SETTINGS_ORIGIN });
     return true;
 }
 
@@ -261,12 +262,15 @@ export async function saveSafetyOwnerChanges(draft, current = {}, { askOwner = o
         const kindLabel = SAFETY_KINDS[kind];
         await run(`Safety for ${kindLabel.toLowerCase()}`, async () => {
             if ((SAFETY_RANK[next] ?? 2) < (SAFETY_RANK[now] ?? 2)) await confirmLowering(kindLabel, now, next, askOwner);
-            await saveSafetyLevel(next, kind);
+            await saveSafetyLevel(next, kind, { headers: APP_SETTINGS_ORIGIN });
             return `Safety for ${kindLabel.toLowerCase()} saved as ${levelLabel(next)}.`;
         });
     }
     if (draft.rules !== null && SAFETY_RULES_KEY in current && draft.rules !== String(current[SAFETY_RULES_KEY] ?? '')) {
-        await run('Your rules', async () => { await saveSafetyRules(draft.rules); return 'Your rules saved.'; });
+        await run('Your rules', async () => {
+            await saveSafetyRules(draft.rules, { headers: APP_SETTINGS_ORIGIN });
+            return 'Your rules saved.';
+        });
     }
     return { saved: saved.join(' '), error: errors.join(' '), unknown };
 }
@@ -311,7 +315,7 @@ export function bindSafetySettings(root, { save = saveSafetyLevel } = {}) {
         const note = root.querySelector('[data-policy-state="supervisor_consciousness"]');
         button.disabled = true;
         try {
-            await save('full', 'consciousness');
+            await save('full', 'consciousness', { headers: APP_SETTINGS_ORIGIN });
             const input = root.querySelector('#s-consciousness-safety-mode');
             if (input) input.value = 'full';
             syncEffortSegments(root);

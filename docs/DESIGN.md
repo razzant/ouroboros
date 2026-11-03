@@ -1020,8 +1020,11 @@ row of its card, a fact about the owner's message is the typed annotation on tha
 message, and a landed act publishes no row (its receipt or card already says it).
 A standalone System row exists only where nothing else can carry the fact: no mind
 can speak, no mind will read the message, the owner's own direct act, the
-runtime's state, Main's Project lifecycle, or words signed by their author (a
-reminder, a skill notice). It is one short typed mark in owner words, never a
+runtime's state (a settings change saved outside the app: one
+`settings_changed` row per save, `Main model: {old} → {new}. Changed via
+{surface}; declared actor: {actor}.`; the app's own Save publishes none),
+Main's Project lifecycle, or words signed by their author (a reminder, a
+skill notice). It is one short typed mark in owner words, never a
 paragraph or text written for a model. `tests/test_host_message_voice.py` keeps
 every host type stamped as a literal at its send site in one of these classes, with
 its counted producer sites. Room status carries connection loss; reconnecting adds
@@ -2496,7 +2499,9 @@ instead, and let the status text carry the claim.
 Accounts is the common connection surface for subscriptions and API keys. An API key is a row of its provider's card (the built-in Default, then the keys added with the card's Add key) in the account-row anatomy: name and status, a meta line naming the roles that use it, Test, Disable/Enable and Remove (on Default it clears the key). A role names the key it uses; keys never rotate. Open sign-in link hands off to the current desktop, browser or Telegram host while retaining the wizard; Copy is separate. An unavailable host opener reports a retryable failure; a copy fallback says it copied, never an open.
 Models and Agents edit assignments; a new connection adds choices without
 replacing them. A model role uses one compact
-Source / Model / Account row. The account is a property of that role: Auto
+Source / Model / Account row. Under Main, Settings (not the wizard or a wait
+picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; it forecasts no tokens
+or cost. The account is a property of that role: Auto
 rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned
 independently. Fallbacks use the same row in their saved order, with adjacent

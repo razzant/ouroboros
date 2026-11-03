@@ -148,6 +148,10 @@ export async function fetchJson(url, init = {}, options = {}) {
     return data;
 }
 
+/** What the app's own pages declare on a settings write (CLIENT_CONTRACT "Declared settings origin"): the server
+ *  records it and posts no Main row for the owner's own Save. Never a default of the shared fetch helpers. */
+export const APP_SETTINGS_ORIGIN = Object.freeze({ 'X-Ouroboros-Surface': 'app', 'X-Ouroboros-Actor': 'owner' });
+
 export function jsonPost(url, payload = {}, options = {}) {
     return fetchJson(url, {
         method: 'POST',
@@ -567,9 +571,10 @@ export const apiClient = {
     desktopBackground: () => fetchJson('/api/desktop/background', { cache: 'no-store' }),
     /** @returns {Promise<import('./api_types.js').DesktopAutostartResponse>} */
     setDesktopBackground: (enabled) => jsonPost('/api/desktop/background', { enabled: Boolean(enabled) }),
-    saveSettings: (payload) => fetchJson('/api/settings', {
+    /** `headers`: the caller's declared origin (`APP_SETTINGS_ORIGIN` from the app's own pages). */
+    saveSettings: (payload, { headers = {} } = {}) => fetchJson('/api/settings', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...headers },
         body: JSON.stringify(payload),
     }),
     /**

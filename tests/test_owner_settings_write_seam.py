@@ -160,11 +160,14 @@ def test_cyber_generic_post_saves_controls_and_preserves_fact_provenance(cyber_s
     assert later.status_code == 200, later.text
     assert json.loads(cyber_settings.read_text())["OUROBOROS_RUNTIME_MODE"] == "pro"
     events = [json.loads(line) for line in (cyber_settings.parent / "logs/events.jsonl").read_text().splitlines()]
-    change = next(event for event in events if event.get("action") == "settings_controls")
+    change, later_change = (event for event in events if event.get("action") == "settings_changed")
     assert change["changes"]["OUROBOROS_SAFETY_MODE"] == {"old": "full", "new": "off"}
     assert change["changes"]["OUROBOROS_CONTEXT_MODE"] == {"old": "max", "new": "low"}
     assert change["changes"]["OUROBOROS_REVIEW_ENFORCEMENT"] == {"old": "blocking", "new": "advisory"}
+    assert change["changes"]["OUROBOROS_RUNTIME_MODE"] == {"old": "cyber_pro", "new": "pro"}
+    assert change["changes"]["SERVICE_API_KEY"] == {"withheld": "secret"}
     assert "owner-test-key" not in json.dumps(change)
+    assert later_change["changes"] == {"TOTAL_BUDGET": {"old": 200.0, "new": 25.0}}
 
 
 @pytest.mark.parametrize("mode,status", [("cyber_pro", 200), ("pro", 200)])

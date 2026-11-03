@@ -191,6 +191,7 @@ HOST_ROW_CLASSES = {
     "retired_settings_notice": ("runtime_state", 2),
     "review_pool_migration_notice": ("runtime_state", 1),
     "runtime_liveness_notice": ("runtime_state", 1),
+    "settings_changed": ("runtime_state", 1),  # a saved change the app did not declare (owner, 2026-11-03)
     "skill_lifecycle": ("card_row", 2),
     "skill_lifecycle_pointer": ("owner_act_receipt", 1),
     "skill_notice": ("signed_words", 1),

@@ -38,6 +38,7 @@ from ouroboros.gateway.owner_settings import (
     settings_document_mutation,
     owner_write_guard,
     post_commit_failure_response,
+    record_settings_change,
     settings_document_digest,
     unsaved_error,
 )
@@ -1287,17 +1288,8 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
         authored_keys += tuple(key for key in body if key in SAVED_CHOICE_SETTINGS)
         if runtime_mode_at_least(current_runtime_mode, "cyber_pro") and "OUROBOROS_CONTEXT_MODE" in body:
             authored_keys += tuple(_CONTEXT_MODE_KEYS)
-        _owner_write_settings(
-            settings_to_save,
-            authored_keys=authored_keys,
-            boundary=boundary)
-        control_changes = {key: {"old": raw_old_settings.get(key), "new": settings_to_save.get(key)}
-                           for key in ("OUROBOROS_RUNTIME_MODE", "OUROBOROS_SAFETY_MODE",
-                                       "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS",
-                                       "OUROBOROS_CONTEXT_MODE", "OUROBOROS_REVIEW_ENFORCEMENT")
-                           if key in all_changed}
-        if control_changes:
-            _owner_audit(request, "settings_controls", {"changes": control_changes})
+        record_settings_change(request, _owner_write_settings(
+            settings_to_save, authored_keys=authored_keys, boundary=boundary))
         from ouroboros.gateway.safety_settings import audit_safety_change
         audit_safety_change(request, old_effective_settings, current)
         boundary.at("environment projection")

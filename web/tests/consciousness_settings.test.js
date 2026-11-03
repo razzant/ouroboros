@@ -32,7 +32,7 @@ function stubFetch(reply) {
     const previous = globalThis.fetch;
     globalThis.fetch = async (url, init = {}) => {
         const body = init.body ? JSON.parse(init.body) : null;
-        calls.push({ url: String(url), method: init.method || 'GET', body });
+        calls.push({ url: String(url), method: init.method || 'GET', body, headers: init.headers || {} });
         const answer = reply(String(url), body, init);
         return { ok: answer.status ? answer.status < 400 : true, status: answer.status || 200, json: async () => answer.json ?? answer };
     };
@@ -211,6 +211,18 @@ test('Save writes only what changed: the checker first, the levels and rules aft
     ]);
     assert.equal(result.error, '');
     assert.equal(result.saved, 'Safety Supervisor model saved as claude-opus-5.5. Safety for your work saved as Light.');
+    // Settings declares itself on every owner write, so the server records the change without a row in Main.
+    assert.ok(stub.calls.every(({ headers }) => headers['X-Ouroboros-Surface'] === 'app' && headers['X-Ouroboros-Actor'] === 'owner'));
+});
+
+test('the shared safety helpers declare no origin unless their caller does', async () => {
+    const stub = stubFetch(() => ({ ok: true }));
+    try {
+        await saveSafetyLevel('full');
+        await saveSafetyRules('Ask first.');
+        await saveCheckerSettings({ OUROBOROS_MODEL: 'openai::main' });
+    } finally { stub.restore(); }
+    assert.deepEqual(stub.calls.map(({ headers }) => headers), Array(3).fill({ 'Content-Type': 'application/json' }));
 });
 
 test('a refused lowering keeps the level and still saves the rest; an unknown server key is never written', async () => {
