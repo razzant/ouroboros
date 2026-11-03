@@ -231,6 +231,52 @@ def test_one_name_two_sources_compare_and_replace_is_one_install(skills_browser,
 
 
 @pytest.mark.parametrize("browser_name,width", [("chromium", 1280), ("webkit", 390)])
+def test_a_source_change_reads_the_installed_listing_again(skills_browser, browser_name, width):
+    """The listing's source facts follow the sources (a name added again for another view no longer names its id):
+    after a change on Sources the page reads the listing again, and Browse shows what the host now says."""
+    browser = getattr(skills_browser, browser_name).launch(headless=True)
+    skills = None
+    try:
+        page = browser.new_page(viewport={"width": width, "height": 900})
+        skills = _open(page)
+        _tab(page, "browse")
+        card = _card(page, "ouroboros/weather")
+        card.wait_for()
+        assert "available" in card.inner_text() and card.locator('[data-browse-action="update"]').count() == 1
+        listing = copy.deepcopy(LISTING)
+        next(skill for skill in listing if skill["name"] == "weather")["install"]["source"].pop("id")
+        skills.set_skills(listing)
+        reads = skills.requests.count(("GET", "/api/extensions"))
+        _tab(page, "sources")
+        page.locator('[data-source-menu="my-folder"]').click()
+        page.locator('body > .skills-card-menu-dialog:not([data-leaving]) [data-menu-action="remove"]').click()
+        page.locator(".confirm-dialog [data-confirm-ok]").click()
+        skills.wait_for_count(("POST", "/api/skill-sources/my-folder/remove"), 1)
+        skills.wait_for_count(("GET", "/api/extensions"), reads + 1)
+        _tab(page, "browse")
+        page.wait_for_function("""(document.querySelector('[data-browse-board] .marketplace-card[data-item="ouroboros/weather"]')
+                                   ?.textContent || '').includes('You have another')""")
+        assert "You have another “weather” (from Ouroboros)" in card.inner_text()
+        assert card.locator('[data-browse-action="compare"]').count() == 1
+        # The sheet describes this catalog entry, not the review, version or Places of the other installed copy.
+        skills.answers["/api/skill-catalog/item/ouroboros/weather"] = {"about": "Weather from the new source."}
+        card.locator(".skills-card-name").click()
+        sheet = page.locator(".skills-detail-sheet")
+        sheet.locator(".skills-sheet-about", has_text="Weather from the new source.").wait_for()
+        text = sheet.inner_text()
+        assert "Installs without review:" in text or "Ouroboros will review it" in text
+        assert "Installed without review" not in text and "You have v" not in text
+        assert "Installed folder" not in text and sheet.locator('[data-sheet-places]:not([hidden])').count() == 0
+        assert sheet.locator('[data-sheet-action="compare"]').count() == 1
+        capture(page, browser_name, width, "other-view-detail")
+        page.locator("[data-sheet-close]").click()
+        assert no_overflow(page)
+    finally:
+        if skills:
+            skills.close(browser)
+
+
+@pytest.mark.parametrize("browser_name,width", [("chromium", 1280), ("webkit", 390)])
 def test_the_detail_sheet_reads_the_entry_and_returns_focus(skills_browser, browser_name, width):
     browser = getattr(skills_browser, browser_name).launch(headless=True)
     skills = None
@@ -279,6 +325,11 @@ def test_sources_trust_menu_and_the_two_step_add(skills_browser, browser_name, w
     try:
         page = browser.new_page(viewport={"width": width, "height": 900})
         sources = _sources()
+        sources["suggestions"] = [
+            {"name": "Team skills", "url": "https://git.example.invalid/team/skills.git", "ref": "stable",
+             "path": "skills", "about": "Our curated skills", "connected": False},
+            {"name": "Ouroboros", "url": "https://github.com/razzant/OuroborosHub", "ref": "main", "about": "",
+             "connected": True}]
         skills = _open(page, sources=sources)
         _tab(page, "sources")
         rows = page.locator(".skills-source-row")
@@ -351,6 +402,50 @@ def test_sources_trust_menu_and_the_two_step_add(skills_browser, browser_name, w
             {"url": "https://github.com/kuznetsoffandrey/ru-skills", "name": "Russian services", "trust": "review"}]
         assert skills.posted("/api/skill-sources/probe") == [
             {"url": "https://github.com/someone/missing"}, {"url": "https://github.com/kuznetsoffandrey/ru-skills"}]
+
+        # A revision and a folder go with the check. While it runs its fields are read-only and another Enter
+        # starts nothing, so step two confirms, and Add sends, exactly what was checked.
+        page.locator('[data-source-action="add"]').click()
+        page.locator("[data-source-address]").fill("https://github.com/team/skills")
+        page.locator(".skills-add-more > summary").click()
+        page.locator("[data-source-revision]").fill("next")
+        page.locator("[data-source-subfolder]").fill("skills/team")
+        capture(page, browser_name, width, "add-source-revision-folder")
+        skills.hold.add("/api/skill-sources/probe")
+        page.locator("[data-add-check]").click()
+        skills.wait_for_request("/api/skill-sources/probe")
+        fields = ("[data-source-address]", "[data-source-revision]", "[data-source-subfolder]")
+        assert [page.locator(field).evaluate("element => element.readOnly") for field in fields] == [True] * 3
+        revision = page.locator("[data-source-revision]")
+        revision.evaluate("element => { element.value = 'other'; }")  # whatever reaches the field meanwhile
+        revision.press("Enter")
+        skills.hold.discard("/api/skill-sources/probe")
+        skills.release("/api/skill-sources/probe", {"kind": "git", "suggested_name": "skills", "owner": "team",
+                                                     "found": ["alpha", "beta"], "commit": "a" * 40, "problems": []})
+        page.locator("[data-source-name]").wait_for()
+        assert page.locator("[data-source-view]").inner_text() == \
+            "Follows next (now at aaaaaaa), reading the folder skills/team."
+        page.locator("[data-add-ok]").click()
+        skills.wait_for_count(("POST", "/api/skill-sources"), 2)
+        checked = {"url": "https://github.com/team/skills", "revision": "next", "subfolder": "skills/team"}
+        assert skills.posted("/api/skill-sources/probe")[2:] == [checked]
+        assert skills.posted("/api/skill-sources")[1] == {**checked, "name": "skills", "trust": "review"}
+
+        # A build's suggestion fills the address, revision and folder, checks them and names the source; a
+        # connected one is not offered.
+        page.locator('[data-source-action="add"]').click()
+        suggested = page.locator("[data-source-suggestion]")
+        suggested.first.wait_for()
+        assert suggested.count() == 1 and "git.example.invalid/team/skills.git at stable · folder skills" in \
+            suggested.inner_text()
+        suggested.click()
+        page.locator("[data-source-name]").wait_for()
+        assert page.locator("[data-source-name]").input_value() == "Team skills"
+        page.locator("[data-add-ok]").click()
+        skills.wait_for_count(("POST", "/api/skill-sources"), 3)
+        offered = {"url": "https://git.example.invalid/team/skills.git", "revision": "stable", "subfolder": "skills"}
+        assert skills.posted("/api/skill-sources/probe")[3:] == [offered]
+        assert skills.posted("/api/skill-sources")[2] == {**offered, "name": "Team skills", "trust": "review"}
         assert no_overflow(page)
     finally:
         if skills:

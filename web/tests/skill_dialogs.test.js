@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createMySkillsDestination, firstStartTrustHtml, sourceProbeWarning, updateWithoutReview } from '../modules/skill_dialogs.js';
+import {
+    createMySkillsDestination, firstStartTrustHtml, sourceProbeWarning, sourceProblemsHtml, sourceTarget, sourceViewSentence, updateWithoutReview,
+} from '../modules/skill_dialogs.js';
 import { skillSourcesApi } from '../modules/api_client.js';
 
 test('rejected update confirms its exact version and sends only that release after literal confirmation', async () => {
@@ -56,6 +58,36 @@ test('owner skip with no catalog candidate confirms and sends the rejected relea
             }
         }
     }
+});
+
+test('every repository address form the host accepts is sent as an address, whatever its host; anything else is a folder', () => {
+    for (const url of ['https://gitverse.ru/team/skills', 'http://git.local/x', 'ssh://git@git.example.org:2222/t/s.git',
+        'git@gitverse.ru:team/skills.git', 'deploy@git.example.org:team/skills.git', 'file:///srv/git/skills.git', 'FILE:///x']) {
+        assert.deepEqual(sourceTarget(`  ${url} `), { url });
+    }
+    for (const path of ['/Users/me/skills', '~/skills', 'C:\\skills', 'gitverse.ru/team/skills']) {
+        assert.deepEqual(sourceTarget(path), { path });
+    }
+    assert.deepEqual(sourceTarget('git@gitverse.ru:team/skills.git', { revision: ' v1.2 ', subfolder: ' skills/team ' }),
+        { url: 'git@gitverse.ru:team/skills.git', revision: 'v1.2', subfolder: 'skills/team' });
+    assert.deepEqual(sourceTarget('/srv/skills', { revision: 'main', subfolder: '' }), { path: '/srv/skills', revision: 'main' },
+        'a folder keeps what the owner typed so the host can refuse it by name');
+});
+
+test('the checked view says what will be read and whether it can update', () => {
+    const commit = 'f'.repeat(40);
+    assert.equal(sourceViewSentence({}, commit), 'Follows the default branch (now at fffffff).');
+    assert.equal(sourceViewSentence({ revision: 'v1.2', subfolder: 'skills/team' }, commit), 'Follows v1.2 (now at fffffff), reading the folder skills/team.');
+    assert.equal(sourceViewSentence({ revision: 'a'.repeat(40) }, 'a'.repeat(40)), 'Stays at commit aaaaaaa: its skills don’t update.');
+});
+
+test('problems are a warning count over the exact reasons, closed on a row and open where the owner decides', () => {
+    assert.equal(sourceProblemsHtml([]), '');
+    const html = sourceProblemsHtml(['a <b>: c'], { open: true });
+    assert.match(html, /^<details class="skills-source-problems" open><summary><span class="ui-status skills-status" data-tone="warn">/);
+    assert.match(html, /1 problem<\/span>/);
+    assert.match(html, /<li>a &lt;b&gt;: c<\/li>/);
+    assert.doesNotMatch(sourceProblemsHtml(['x', 'y']), / open>/);
 });
 
 test('an unencrypted probe discloses the warning; a regular probe has none', () => {

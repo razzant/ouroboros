@@ -87,8 +87,10 @@ export function shelfItems(catalog, installedByName, { query = '', source = 'all
     return recommendedMissing(Array.isArray(catalog.items) ? catalog.items : [], installedByName);
 }
 
-function installedFrom(row) {
-    return row?.install?.source?.id || '';
+function installedHere(item, row) {
+    // A copy without a source record counts as this one; a recorded copy needs this source's id: the host
+    // names the connected source the copy matches now (none: no id), whatever id it was installed under.
+    return row && !row.lifecycle_virtual && (!row.install || row.install.source?.id === item.source_id) ? row : null;
 }
 
 /**
@@ -124,8 +126,7 @@ export function browseCardState(item, { source = null, installed = null, listed 
             : { status: statusHtml(`Installed · ${escapeHtml(versionText(item.installed.version))}`, 'muted'), action: '' };
     }
     if (installed && !installed.lifecycle_virtual) {
-        const fromHere = !installedFrom(installed) || installedFrom(installed) === item.source_id;
-        if (!fromHere) {
+        if (!installedHere(item, installed)) {
             const other = installed.install?.source?.name || 'another source';
             return { status: statusHtml(`You have another “${escapeHtml(item.name)}” (from ${escapeHtml(other)})`, 'warn'), action: act('Compare…', 'compare') };
         }
@@ -455,7 +456,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
     function openSheet(item, opener) {
         state.sheet?.handle.close();
         const handle = openSkillDetailSheet({
-            item, installed: host.installedByName()?.get(item.name) || null,
+            item, installed: installedHere(item, host.installedByName()?.get(item.name)),
             source: sourceById().get(item.source_id) || null,
             actionsHtml: sheetActions(item),
             // A registry hit has no entry to read until it is installed; its card is all there is.

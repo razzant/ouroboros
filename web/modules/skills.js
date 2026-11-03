@@ -198,21 +198,24 @@ export function publishDestinations(skill, sources = []) {
     const originRow = sources.find((source) => source.id === origin?.id);
     const originKind = originRow?.kind || origin?.kind;
     const authorRepo = String(skill.install?.release?.repo || '');
-    if (origin?.id && ['hub', 'git'].includes(originKind)) {
+    // A hub read from a folder of its repository takes no entries; its pointer entries still go to their authors.
+    const folderHub = originKind === 'hub' && Boolean(originRow?.path);
+    if (origin?.id && ['hub', 'git'].includes(originKind) && (authorRepo || !folderHub)) {
         out.push(authorRepo
             ? { value: `origin:${origin.id}`, repository: repoLabel(authorRepo), label: `Back to ${repoLabel(authorRepo)} — its author’s repository`,
                 detail: 'Suggest your changes to its author as a new version. The author decides.' }
             : { value: `origin:${origin.id}`, repository: repoLabel(originRow?.url || origin.url), label: `Back to ${origin.name || originRow?.name} — where it came from`,
                 detail: 'Suggest your changes as a new version. The maintainers decide.' });
     }
-    for (const source of sources.filter((row) => row.kind === 'git')) {
+    // A view pinned to a commit, or to a tag named in full, never reads a publication (the host refuses both).
+    for (const source of sources.filter((row) => row.kind === 'git' && !row.commit && !String(row.ref || '').startsWith('refs/tags/'))) {
         if (source.id === origin?.id) continue;
         out.push({ value: `source:${source.id}`, repository: repoLabel(source.url), label: `${source.name} — your own source`,
             detail: origin ? 'Publish your version now, under the same name, for your own installs.' : `Publish now. Every Ouroboros that reads ${source.name} gets it at once.` });
     }
     // The hub's two rows are one repository: a skill from it goes back as its origin, or beside it as a new skill.
     const community = sources.find((row) => row.kind === 'hub' && row.part === 'community');
-    if (community && originKind === 'hub') {
+    if (community && originKind === 'hub' && !folderHub) {
         out.push({ value: `new:${community.id}`, repository: repoLabel(community.url), label: `${community.name} — as a new skill`,
             detail: 'Ask to list it next to the original under another name.' });
     } else if (community) {
@@ -299,7 +302,7 @@ export function initSkills(ctx = {}) {
     let firstStartAsked = false;
 
     // ---- shared reads (Browse and Sources reuse them) -------------------------------------------
-    const cache = { sources: null, sourcesValue: null, sourcesProblem: '', catalog: null, catalogValue: null };
+    const cache = { sources: null, sourcesValue: null, sourcesProblem: '', sourceSuggestions: [], catalog: null, catalogValue: null };
     const store = {
         sources(force = false) {
             if (force || !cache.sources) {
@@ -307,6 +310,7 @@ export function initSkills(ctx = {}) {
                     const list = Array.isArray(data) ? data : (Array.isArray(data?.sources) ? data.sources : []);
                     cache.sourcesValue = list;
                     cache.sourcesProblem = String(data?.problem || '');
+                    cache.sourceSuggestions = Array.isArray(data?.suggestions) ? data.suggestions : [];
                     return list;
                 }).catch((error) => { cache.sources = null; throw error; });
             }
@@ -913,8 +917,10 @@ export function initSkills(ctx = {}) {
         refreshInstalled: () => readInstalled({ quiet: true }),
         sources: (force) => store.sources(force),
         sourcesProblem: () => cache.sourcesProblem,
+        sourceSuggestions: () => cache.sourceSuggestions,
         catalog: (options) => store.catalog(options),
-        reloadAll: async () => { await store.sources(true).catch(() => null); },
+        // A source change moves the listing's source facts too (a re-added name's id, updates): read both again.
+        reloadAll: async () => { await Promise.all([store.sources(true).catch(() => null), readInstalled({ quiet: true })]); },
         runInstalledAction: async (name, action) => {
             try {
                 const changed = await runInstalledAction(name, action);

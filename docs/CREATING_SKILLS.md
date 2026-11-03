@@ -2497,15 +2497,43 @@ every marked reviewer; under Advisory Ouroboros may name `reviewers` (one or mor
 pool rows) and must state why when it narrows the panel; a review the owner starts
 uses the whole pool. Unmarked rows it adds are advisers: heard, never counted.
 
-A git repository is a source in one of two shapes:
+Add source takes any Git address (`https://`, `ssh://`, `git@host:path`,
+`file://`) or a folder on the computer running Ouroboros. A repository is read at
+an optional revision (a branch or tag it follows, or a full commit id it stays at;
+empty follows the default branch) from an optional folder, and installs record that
+view: another branch or folder of the same repository is another source. A folder
+on this computer is read as it is, always as plain skills; a hub is read only from a
+repository. The folder read from a repository is a source in one of two shapes:
 
-- **A plain skills repository**: every folder (or the root) holding a
-  `SKILL.md` or `skill.json` is a skill, described by its manifest.
-- **A hub**: `hub.json` at the root, one `entries/<name>.json` per skill
+- **Plain skills**: every folder (or the folder itself) holding a `SKILL.md` or
+  `skill.json`, up to two levels down, and every skill in `.agents/skills/`. When a
+  name appears twice, the first folder is offered and the other is listed among the
+  source's problems with both paths; choose the other folder to read it instead.
+- **A hub**: `hub.json` in that folder, one `entries/<name>.json` per skill
   (description, one or two categories, owner, version, `source` hosted at
-  `skills/<name>` or pointing at the author's repository at an exact commit,
-  release `digest`, `withdrawn`), the maintainer's `official.json`
-  (endorsements bound to digests) and `categories.json`.
+  `skills/<name>` in the hub's folder or pointing at the author's repository at an
+  exact commit, release `digest`, `withdrawn`), the maintainer's `official.json`
+  (endorsements bound to digests) and `categories.json`. A hub in a repository's
+  folder is read and installed from like any hub, but is not a publication
+  destination.
+
+A connected folder loads its skills in place, those in `.agents/skills/` too, and
+inside it the first folder of a name wins in the same way. A name that another
+location already uses (an installed skill, another connected folder) is a name
+collision like any other: neither copy runs until one is renamed or removed.
+
+A catalog in another format is converted outside the app into such a hub:
+`devtools/skill_hubs/` converts the GitVerse marketplace into pointer entries at the
+commits and digests it observes in the authors' repositories, never running the
+catalog's install commands. Each run writes a new folder, so an earlier hub never
+changes; the operator reviews the report, copies the accepted files into the Git
+repository of the hub, commits them and adds that repository's address (`file://`
+for one on this computer). Its README has the steps. A build (a fork or an
+organization's edition) can offer repositories in Add source with
+`OUROBOROS_SKILL_SOURCE_SUGGESTIONS` (`[{name, url, ref|commit, path, about}]`); a
+suggestion connects nothing and sets no trust, and the open-source build offers none.
+A build that wants a source connected from the start ships it in
+`OUROBOROS_SKILL_SOURCES` instead, marked `managed: true`.
 
 Private github.com HTTPS sources use the configured GitHub token after a read
 without it (this computer's git credentials still apply) is refused for
@@ -2554,10 +2582,17 @@ hub, unless the owner picks another:
   owner changes and Official skills wait for the maintainer. A new entry names
   one or two category ids from the hub's `categories.json`. A hub without
   `hub.json` (an older one) gets its `catalog.json` row instead.
-- **A git source of the owner's**: the skill's folder in that repository. When
+- **A git source of the owner's**: the skill's folder in that repository (one
+  pinned to a commit is not offered: it would never read the publication). When
   the GitHub account may push there, the pull request is merged at once and
   the skill is published; otherwise it waits for that repository's
   maintainers.
+
+A source's branch may be named in full (`refs/heads/main`). A source that reads
+a tag is refused by name (`destination_tag`), even for a skill that came from
+it: a tag never moves, so it would never read the publication, and no other
+branch is chosen instead. The hub chosen by default passes over hubs pinned to a
+commit or a tag, or read from a folder.
 
 **My skills** is optional: `<login>/ouroboros-skills` carries skills between
 your Ouroboros installations. When you choose it, your configured GitHub token

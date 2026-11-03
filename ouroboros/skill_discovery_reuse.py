@@ -8,7 +8,9 @@ that identity is unchanged:
 
 - the inventory: keyed by the data root, the roots the settings name and the selected manifestless name; its
   identity is the change key of each root and of every entry within the two levels the walk lists
-  (``_walk_skill_packages``), so an install, removal, rename, or a manifest added or removed changes it;
+  (``_walk_skill_packages``), and the same of each connected folder's standard skill folders, read one level
+  deeper (``skill_sources.STANDARD_SKILL_FOLDERS``), so an install, removal, rename, or a manifest added or
+  removed changes it;
 - one package: keyed by the data root, its location candidate, the manifestless choice and whether the runtime
   mode admits sensitive payload files (``_iter_payload_files``); its identity is the change key of every directory
   and file of its payload tree (the cache names the hash skips are skipped, the manifest-declared entries the hash

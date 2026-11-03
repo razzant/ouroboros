@@ -4,7 +4,11 @@ A skill installed from a git-hosted source publishes back to that origin: the hu
 entry, the author's repository for a hub entry that points at one, the repository itself (the exact
 folder it came from, including the repository root) for a plain git source. GitHub HTTPS and SSH
 origins are supported; publication to other hosts is not yet supported. Everything else (made here, built in, from a registry or
-a local folder) publishes to the hub, or to a git source the owner names. The owner's choice arrives as
+a local folder) publishes to the hub, or to a git source the owner names. A hub read from a folder of its
+repository is never a destination: a hub entry is written at the repository's top; nor is a view pinned to a
+commit, which would never read it, except for the release that came from it, nor a view of a tag (refused by
+name: ``destination_tag``); the hub chosen by default passes over all three. A branch may be named in full
+(``refs/heads/<name>``). The owner's choice arrives as
 ``{"source_id", "mode"}`` (mode ``origin``, ``entry`` or ``new_entry``, a new name beside an existing
 entry) from the Publish dialog, through the publish task's ``skill_publish_target.destination``.
 
@@ -80,8 +84,28 @@ def github_repository(url: str) -> tuple[str, str]:
     return match.group(1), match.group(2)
 
 
+def _tag(row: Dict[str, Any]) -> str:
+    """The tag a repository row reads when its ``ref`` names one in full (``refs/tags/<name>``), else ''."""
+    ref = str(row.get("ref") or "")
+    return ref[len("refs/tags/"):] if ref.startswith("refs/tags/") else ""
+
+
+def _branch(row: Dict[str, Any]) -> str:
+    """The branch a publication to ``row`` reads and targets ('' is the repository's default), named in full or not.
+    A tag never moves, so a view of one would never read a publication: it is refused by name, never sent to another
+    branch (a bare name the repository holds as a tag is refused when the branch is read: ``fetch_branch_head``)."""
+    if _tag(row):
+        error = SkillPublishDestinationError("destination_tag")
+        error.args = (f"{row['name']} stays at the tag {_tag(row)}, so it would never read this publication. "
+                      "Choose a source that follows a branch.",)
+        raise error
+    return str(row.get("ref") or "").removeprefix("refs/heads/")
+
+
 def _hub_destination(rows: List[Dict[str, Any]], *, new_entry: bool = False) -> PublishDestination:
-    hubs = [row for row in rows if row["kind"] == "hub"]
+    # A hub entry is written at the top of a branch: a hub read from a folder, a commit or a tag never reads it.
+    hubs = [row for row in rows if row["kind"] == "hub" and not row.get("path") and not row.get("commit")
+            and not _tag(row)]
     row = next((r for r in hubs if r.get("part") == "official"), hubs[0] if hubs else None)
     if row is None:
         from ouroboros.config import get_ouroboroshub_catalog_url
@@ -89,24 +113,28 @@ def _hub_destination(rows: List[Dict[str, Any]], *, new_entry: bool = False) -> 
         owner, repo, branch = parse_skill_publish_destination(get_ouroboroshub_catalog_url())
         return PublishDestination("hub", owner, repo, branch, "skills", "hub", "OuroborosHub", new_entry=new_entry)
     owner, repo = github_repository(row.get("url", ""))
-    return PublishDestination("hub", owner, repo, str(row.get("ref") or ""), "skills", row["id"], row["name"],
-                              new_entry=new_entry)
+    return PublishDestination("hub", owner, repo, _branch(row), "skills", row["id"], row["name"], new_entry=new_entry)
 
 
 def _row_destination(row: Dict[str, Any], *, skill_path: Optional[str] = None, new_entry: bool = False) -> PublishDestination:
     if row["kind"] not in {"hub", "git"}:
         raise SkillPublishDestinationError("destination_not_git")
+    if row["kind"] == "hub" and row.get("path"):  # its entries live in that folder, not where a hub entry goes
+        error = SkillPublishDestinationError("hub_folder_unsupported")
+        error.args = (f"Publishing to a hub inside a repository folder ({row['path']}) is not supported. "
+                      "Choose another destination.",)
+        raise error
     owner, repo = github_repository(row.get("url", ""))
     if row["kind"] == "hub":
-        return PublishDestination("hub", owner, repo, str(row.get("ref") or ""), "skills", row["id"], row["name"],
+        return PublishDestination("hub", owner, repo, _branch(row), "skills", row["id"], row["name"],
                                   new_entry=new_entry)
-    return PublishDestination("git", owner, repo, str(row.get("ref") or ""), str(row.get("path") or ""),
-                              row["id"], row["name"], skill_path=skill_path)
+    return PublishDestination("git", owner, repo, _branch(row), str(row.get("path") or ""), row["id"], row["name"],
+                              skill_path=skill_path)
 
 
 def _origin(record: Mapping[str, Any], rows: List[Dict[str, Any]]) -> Optional[PublishDestination]:
     """The repository the installed release came from, or ``None`` when it came from no git source."""
-    from ouroboros.skill_source_catalog import record_matches_row
+    from ouroboros.skill_source_catalog import row_for_record
 
     release = record.get("release") or {}
     source = record.get("source") or {}
@@ -114,7 +142,7 @@ def _origin(record: Mapping[str, Any], rows: List[Dict[str, Any]]) -> Optional[P
         owner, repo = github_repository(release["repo"])
         return PublishDestination("git", owner, repo, "", "", str(source.get("id") or ""), f"{owner}/{repo}",
                                   pointer=True, skill_path=str(release.get("path") or ""))
-    row = next((row for row in rows if record_matches_row(record, row)), None)
+    row = row_for_record(dict(record), rows)
     if row is None or row["kind"] not in {"hub", "git"}:
         return None
     return _row_destination(row, skill_path=release.get("path"))
@@ -135,6 +163,7 @@ def resolve_publish_destination(drive_root: pathlib.Path, skill: str, requested:
     """The destination ``requested`` names (``hub``, a source id, or ``{source_id, mode}``), else the
     skill's origin, else the hub."""
     from ouroboros.skill_install_record import read_install_record
+    from ouroboros.skill_source_catalog import record_matches_row
     from ouroboros.skill_sources import load_sources, source_by_id
 
     rows = rows if rows is not None else load_sources()
@@ -153,8 +182,16 @@ def resolve_publish_destination(drive_root: pathlib.Path, skill: str, requested:
         raise SkillPublishDestinationError("destination_unknown")
     if mode == "new_entry" and row["kind"] != "hub":
         raise SkillPublishDestinationError("destination_not_hub")
-    release = record.get("release") or {}
-    same_origin = bool(record) and (record.get("source") or {}).get("id") == row["id"] and not release.get("repo")
+    release, source = record.get("release") or {}, record.get("source") or {}
+    # Back in its own folder only on the row it came from: the view a record names (whatever the id), or an older
+    # record's own row, as before; that older record's match of every view of its repository is for updates only.
+    from_here = record_matches_row(dict(record), row) if "path" in source else source.get("id") == row["id"]
+    same_origin = bool(record) and from_here and not release.get("repo")
+    if row.get("commit") and not same_origin:  # a pinned view would never read what is published there
+        error = SkillPublishDestinationError("destination_pinned")
+        error.args = (f"{row['name']} stays at commit {row['commit'][:7]}, so it would never read this publication. "
+                      "Choose a source that follows a branch.",)
+        raise error
     return _row_destination(row, skill_path=release.get("path") if same_origin else None,
                             new_entry=mode == "new_entry")
 

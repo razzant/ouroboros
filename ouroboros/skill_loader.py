@@ -1015,10 +1015,7 @@ _ORPHAN_NAME_FRAGMENTS = (".replaced-", ".staging-", ".tmp-")
 
 def _is_orphan_marker_name(name: str) -> bool:
     """Return True for install backup/staging names that are not live skills."""
-    cleaned = (name or "").strip()
-    if not cleaned:
-        return False
-    return any(token in cleaned for token in _ORPHAN_NAME_FRAGMENTS)
+    return any(token in (name or "") for token in _ORPHAN_NAME_FRAGMENTS)
 
 
 def _walk_skill_packages(
@@ -1125,7 +1122,7 @@ def _skill_location_inventory(
     the walk is reused while the directories it lists hold (``skill_discovery_reuse``)."""
     from ouroboros.config import SKILL_SOURCE_SUBDIRS
     from ouroboros.skill_discovery_reuse import reused_inventory
-    from ouroboros.skill_sources import load_sources
+    from ouroboros.skill_sources import STANDARD_SKILL_FOLDERS, load_sources, standard_skill_dirs
 
     settings = dict(os.environ)
     if repo_path is not None:
@@ -1149,9 +1146,13 @@ def _skill_location_inventory(
         seen_dirs: set[pathlib.Path] = set()
         for root, include_manifestless_root in roots:
             excluded_children = frozenset(SKILL_SOURCE_SUBDIRS) if not include_manifestless_root else frozenset()
-            for entry in _walk_skill_packages(root, selected_manifestless_name=selected_manifestless_name,
-                                              include_manifestless_root=include_manifestless_root,
-                                              excluded_manifestless_children=excluded_children, listdir=listdir):
+            packages = _walk_skill_packages(root, selected_manifestless_name=selected_manifestless_name,
+                                            include_manifestless_root=include_manifestless_root,
+                                            excluded_manifestless_children=excluded_children, listdir=listdir)
+            if include_manifestless_root and packages != [root]:  # a connected folder's .agents/skills, as its catalog
+                packages += standard_skill_dirs(root, {_sanitize_skill_name(path.name) for path in packages},
+                                                listdir=listdir or _safe_listdir)
+            for entry in packages:
                 try:
                     resolved = entry.resolve()
                 except OSError:
@@ -1170,8 +1171,9 @@ def _skill_location_inventory(
 
     if listdir is not None:  # a caller's own reader (the strict scan): its inventory is read now, never reused
         return walk()
+    standard = [root / rel for root, manifestless in roots if manifestless for rel in STANDARD_SKILL_FOLDERS]
     return reused_inventory((str(drive_root), tuple(roots), selected_manifestless_name),
-                            [root for root, _manifestless in roots], walk)
+                            [*(root for root, _manifestless in roots), *standard], walk)
 
 
 def skill_identity_collision_names(
