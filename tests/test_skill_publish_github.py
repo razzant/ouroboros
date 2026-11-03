@@ -88,6 +88,28 @@ def test_account_repository_and_exact_files_use_https(responses):
     assert not pending and all(not row[2].get("body") for row in calls)
 
 
+def test_a_branch_name_the_destination_holds_as_a_tag_is_refused_by_name(responses):
+    """A missing branch whose name is a tag there is refused as a tag (nothing is written, no other branch is
+    chosen); a name that is neither stays an ordinary read failure, with GitHub's status."""
+    _calls, pending = responses(
+        ("GET", "/repos/hub/project/git/refs/heads/v1", GitHubError("Not Found", http_status=404)),
+        ("GET", "/repos/hub/project/git/refs/tags/v1", {"ref": "refs/tags/v1", "object": {"sha": BASE_SHA}}),
+        ("GET", "/repos/hub/project/git/refs/heads/v2", GitHubError("Not Found", http_status=404)),
+        ("GET", "/repos/hub/project/git/refs/tags/v2", [{"ref": "refs/tags/v2.0", "object": {"sha": BASE_SHA}}]),
+        ("GET", "/repos/hub/project/git/refs/heads/gone", GitHubError("Not Found", http_status=404)),
+        ("GET", "/repos/hub/project/git/refs/tags/gone", GitHubError("Not Found", http_status=404)),
+    )
+    with pytest.raises(github.SkillPublishGitHubError) as tag:
+        github.fetch_branch_head(types.SimpleNamespace(), "hub", "project", "v1")
+    assert (tag.value.reason_code, tag.value.status) == ("destination_tag", "blocked")
+    assert tag.value.repair_hint.startswith("v1 is a tag of hub/project, not a branch")
+    for name in ("v2", "gone"):  # only tags that start with the name, or nothing at all
+        with pytest.raises(github.SkillPublishGitHubError) as missing:
+            github.fetch_branch_head(types.SimpleNamespace(), "hub", "project", name)
+        assert (missing.value.reason_code, missing.value.http_status) == ("upstream_read_failed", 404)
+    assert not pending
+
+
 def test_upstream_catalog_is_read_from_the_exact_resolved_base_sha(responses):
     _, pending = responses(
         ("GET", "/repos/hub/project", {"default_branch": "trunk"}),

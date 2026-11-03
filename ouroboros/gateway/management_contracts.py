@@ -63,7 +63,8 @@ class InstalledSkill(TypedDict, total=False):
     presence_runtime: Dict[str, Any]  # a reviewed presence profile's runtime choice
     provenance: Dict[str, Any]  # a ClawHub install record
     identity_collision: bool
-    # The install record joined with the cached catalog of its source (skill_source_catalog.install_listing): source {id, name, kind, part}, official (exact endorsed bytes),
+    # The install record joined with the cached catalog of its source (skill_source_catalog.install_listing): source {id (the connected source it
+    # matches now, whatever id it was installed under; absent when none does), name, kind, part (as recorded)}, official (exact endorsed bytes),
     # release, basis, base_known, modified (null: base unknown), update_available {version, digest} | null, withdrawn ({reason, version} for a withdrawn release), left_source,
     # turn_on_when_ready, installed_by, installed_at, and reason and task_id when the record has them (an install Ouroboros made says why and in which task); check {by, notes,
     # at}, pending_update {version, digest}, and update_rejected {version, digest, reason: review_blockers|review_unfinished|preflight_failed, at}. null: not installed from a

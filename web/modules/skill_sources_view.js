@@ -7,10 +7,10 @@ import { bindMenu } from './ui_interactions.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { skillSourcesApi } from './api_client.js';
 import {
-    openAddSourceDialog, openFirstStartDialog, openRemoveSourceDialog, openRenameSourceDialog, openTrustDialog,
+    openAddSourceDialog, openFirstStartDialog, openRemoveSourceDialog, openRenameSourceDialog, openTrustDialog, sourceProblemsHtml,
 } from './skill_dialogs.js';
 import {
-    buttonHtml, chipHtml, displayAddress, officialMarkHtml, plural, relativeAge, sourceAboutText,
+    buttonHtml, chipHtml, officialMarkHtml, plural, relativeAge, sourceAboutText, sourceAddressText,
     statusHtml, trayHtml, trustValueText,
 } from './skill_presentation.js';
 
@@ -50,7 +50,7 @@ export function renderSourceRow(source, { items = [], health = null } = {}) {
     ].join('');
     const meta = [];
     const state = health || source;
-    const address = displayAddress(source.url || source.path || '');
+    const address = sourceAddressText(source);
     if (address) meta.push(escapeHtml(address));
     // A count is a fact of a list that was read; before that it is unknown, never 0.
     if (source.kind !== 'registry' && (state.state === 'ready' || items.length)) {
@@ -69,13 +69,15 @@ export function renderSourceRow(source, { items = [], health = null } = {}) {
         <div class="skills-source-meta">
             <div class="skills-source-about">${escapeHtml(sourceAboutText(source))}</div>
             <div class="skills-source-facts">${meta.join(' · ')}</div>
+            ${sourceProblemsHtml(Array.isArray(state.problems) ? state.problems : [])}
         </div>
     </div>`;
 }
 
 /**
- * Mount the Sources view. `host` = { sources(force), sourcesProblem(): string, catalog({refresh}), installedSkills(): rows|null,
- *   reloadAll(): Promise, toast(msg, tone), showMadeHere(), openBehaviorSettings() }.
+ * Mount the Sources view. `host` = { sources(force), sourcesProblem(): string, sourceSuggestions(): rows,
+ *   catalog({refresh}), installedSkills(): rows|null, reloadAll(): Promise, toast(msg, tone), showMadeHere(),
+ *   openBehaviorSettings() }.
  */
 export function createSkillSources({ pane, host, api = skillSourcesApi }) {
     let sources = [];
@@ -212,7 +214,7 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
         const source = sources.find((row) => row.id === target.dataset.sourceId);
         try {
             if (action === 'add') {
-                const added = await openAddSourceDialog({ api });
+                const added = await openAddSourceDialog({ api, suggestions: host.sourceSuggestions?.() || [] });
                 if (added) await afterChange(`${added.name || 'The source'} added. Its skills are in Browse.`);
             } else if (action === 'first_start') await confirmFirstStart();
             else if (action === 'made_here') host.showMadeHere();

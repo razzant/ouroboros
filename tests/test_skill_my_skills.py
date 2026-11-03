@@ -122,6 +122,19 @@ def test_existing_source_keeps_owner_name_trust_and_confirmation(env, monkeypatc
     assert skill_sources.source_by_id(skill_sources.load_sources(), "existing") == result["source"]
 
 
+@pytest.mark.parametrize("view", [{"path": "team"}, {"ref": "v1.2"}, {"commit": "a" * 40}])
+def test_another_view_of_the_repository_is_not_my_skills(env, monkeypatch, view):
+    """My skills reads the repository's default branch from its top folder; a subfolder, tag or pinned view of the
+    same address stays what it is and My skills is added beside it."""
+    client, _settings = env
+    other = {"id": "team", "name": "Team", "url": URL, "kind": "git", "trust": "review", "confirmed": True, **view}
+    monkeypatch.setenv("OUROBOROS_SKILL_SOURCES", json.dumps([*INITIAL, other]))
+    _fake(monkeypatch, exists=True)
+    result = client.post(ENDPOINT, json={}).json()
+    assert result["source"]["id"] == "my-skills" and skill_sources.source_view(result["source"]) == ("", "")
+    assert skill_sources.source_by_id(skill_sources.load_sources(), "team") == other
+
+
 def test_missing_token_never_touches_github_or_sources(env, monkeypatch):
     client, settings = env
     monkeypatch.setattr(skill_publish_client, "github_token_from_env_or_settings", lambda: "")

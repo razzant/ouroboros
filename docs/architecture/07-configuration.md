@@ -168,6 +168,7 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_HUB_CATALOG_URL | `https://raw.githubusercontent.com/razzant/OuroborosHub/main/catalog.json` | Derives the two hub rows; a non-GitHub raw URL needs `OUROBOROS_SKILL_SOURCES` with the git address |
 | OUROBOROS_CLAWHUB_REGISTRY_URL | `https://clawhub.ai/api/v1` | ClawHub registry URL |
 | OUROBOROS_SKILL_SOURCES | "" | Skill source list (§13); empty = derived from the keys above, unwritten |
+| OUROBOROS_SKILL_SOURCE_SUGGESTIONS | "" | A build's Add source suggestions; none connects itself or sets trust |
 | OUROBOROS_STARTER_SKILLS | "" | Starter catalog ids from any source; absent/"" = recommended, `[]` or "[]" = none; built-ins install before git reads |
 | OUROBOROS_STARTER_SKILLS_TURN_ON | true | Turn starter installs on when ready; an owner's Off persists |
 | OUROBOROS_PROMPT_CACHE_TTL | 1h | Prompt-cache tier default/5m/1h of each normalized cache marker, stamped at send, recorded in usage |
