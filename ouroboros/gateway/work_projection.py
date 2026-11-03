@@ -365,10 +365,16 @@ def durable_binding(row: Mapping[str, Any], task_id: Any, bindings: Mapping[str,
     return None
 
 
+def _named(value: Any) -> bool:
+    """Whether a stored row names an id at all. A chat id is a value, never a truth value: 0 is the hidden partition
+    (``chat_id_policy.HIDDEN_CHAT_ID``), a real room; only a missing id (None, or the empty string) is absent."""
+    return value is not None and value != ""
+
+
 def _bound_room(row: Mapping[str, Any], task_id: str, bindings: Mapping[str, Any]) -> Mapping[str, Any]:
     """A stored row's room by ``durable_binding``. Unbound, the row's own room stands."""
     binding = durable_binding(row, task_id, bindings)
-    if binding is None or not binding.get("chat_id"):
+    if binding is None or not _named(binding.get("chat_id")):
         return row
     return {**row, "chat_id": binding["chat_id"], "project_id": str(binding.get("project_id") or "")}
 
@@ -397,7 +403,7 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
         for row in _inflight_upkeep(drive_root, set(rows)):
             facts = obs.result(row["activity_id"]) or {}
             room = _bound_room(facts, row["activity_id"], bindings)  # a moved task's upkeep runs in its Project
-            row.update({key: room[key] for key in ("chat_id", "project_id") if room.get(key)})
+            row.update({key: room[key] for key in ("chat_id", "project_id") if _named(room.get(key))})
             row["kind"] = "direct_chat" if facts.get("_is_direct_chat", True) else "managed_task"
             rows[row["activity_id"]] = row
     except Exception:

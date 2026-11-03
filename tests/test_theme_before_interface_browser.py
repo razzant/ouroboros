@@ -407,9 +407,15 @@ def test_a_genuine_telegram_launch_hands_off_in_the_same_palette(engines, engine
 
 def _launcher_pages() -> dict:
     """Each pre-server window's own page, as launcher.py builds it on macOS (its ``html=`` argument, evaluated)."""
+    import html as html_module
+
     import launcher
     from ouroboros.platform_layer import git_install_hint
 
+    # The names a window's expression reads besides the launcher's own helpers: the stdlib `html` it escapes with and
+    # the `line` its caller passes (`_already_running_window`: the sentence of launcher.py's own second-launch call).
+    names = {"_window_page": launcher._window_page, "IS_MACOS": True, "_hint": git_install_hint(),
+             "html": html_module, "line": "Only one instance can run at a time."}
     pages = {}
     for node in ast.walk(ast.parse((REPO / "launcher.py").read_text(encoding="utf-8"))):
         if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "create_window":
@@ -418,7 +424,7 @@ def _launcher_pages() -> dict:
                 continue
             size = {keyword.arg: keyword.value.value for keyword in node.keywords if keyword.arg in ("width", "height")}
             source = compile(ast.Expression(html), "launcher.py", "eval")
-            page = eval(source, {"_window_page": launcher._window_page, "IS_MACOS": True, "_hint": git_install_hint()})  # noqa: S307
+            page = eval(source, dict(names))  # noqa: S307
             pages[node.args[0].value] = (page, size["width"], size["height"] - 28)  # the ordinary title bar
     assert sorted(pages) == ["Ouroboros", "Ouroboros — Setup Required", "Ouroboros — Startup Failed"]
     return pages

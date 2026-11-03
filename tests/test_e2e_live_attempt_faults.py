@@ -11,6 +11,7 @@ SQLite and the store's real writers; the lane's own server is a double only wher
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
 import pathlib
@@ -70,11 +71,18 @@ def _attempt(tmp_path, monkeypatch, acceptance=lambda ctx: ctx.check("scenario_o
 # The server's own stdio
 # --------------------------------------------------------------------------- #
 
+# Windows has no process-image replacement (``server_control.restart_current_process``): its C runtime starts the
+# successor and exits the caller, so the process the stand watches would end before its successor does and the
+# successor's ``rc=7`` could never be seen. There the first generation stays and ends as its successor does, the one
+# process identity an in-place re-exec gives.
 SERVER_REEXECS_THEN_DIES = f"""\
-import os, sys
+import os, subprocess, sys
 if len(sys.argv) == 1:
     print('first generation stdout {KEY}', flush=True)
-    os.execv(sys.executable, [sys.executable, 'server.py', 'second'])
+    successor = [sys.executable, 'server.py', 'second']
+    if os.name == 'nt':
+        raise SystemExit(subprocess.call(successor))
+    os.execv(sys.executable, successor)
 sys.stderr.write('ModuleNotFoundError: second generation died before its first import\\n')
 raise SystemExit(7)
 """
@@ -102,6 +110,42 @@ def test_a_server_dying_before_its_imports_leaves_its_stdio_through_the_reexec_a
     snap = budget.snapshot()
     assert (snap["lanes_in_flight"], snap["reserved_usd"], snap["spent_usd"], snap["unknown_liability_usd"]) == (0, 0.0, 0.0, 16.0)   # SK1: two roots
     assert "SK1_a1" in snap["spend_unknown"]
+
+
+def test_the_lane_settings_digest_names_the_bytes_that_reach_the_disk(tmp_path, monkeypatch):
+    """``write_settings`` returns the digest a strict server checks against the file (``expected_settings_sha256``).
+    Windows opens a descriptor in text mode unless ``O_BINARY`` is set, and ``os.write`` then turns each LF of the
+    indented JSON into CRLF: the digest named bytes that were never on disk and the server refused its own settings
+    (``isolated settings snapshot changed``). POSIX translates nothing, so a sentinel stands for the flag and a
+    descriptor opened without it translates, as a Windows one does."""
+    from devtools.benchmarks.common.server_runner import IsolatedServer, _settings_json_bytes
+
+    sentinel, native, real_open, real_write = 1 << 40, getattr(os, "O_BINARY", 0), os.open, os.write
+    text_mode: set = set()
+
+    def opened(path, flags, *args, **kwargs):
+        fd = real_open(path, (flags & ~sentinel) | (native if flags & sentinel else 0), *args, **kwargs)
+        (text_mode.discard if flags & sentinel else text_mode.add)(fd)
+        return fd
+
+    def written(fd, data):
+        if native or fd not in text_mode:  # Windows translates by itself, and only a descriptor in text mode
+            return real_write(fd, data)
+        real_write(fd, bytes(data).replace(b"\n", b"\r\n"))
+        return len(data)
+
+    settings = {"OUROBOROS_MODEL": "m", "TOTAL_BUDGET": 3.0, "note": "two\nlines"}
+    path = tmp_path / "lane" / "settings.json"
+    monkeypatch.setattr(os, "O_BINARY", sentinel, raising=False)
+    monkeypatch.setattr(os, "open", opened)
+    monkeypatch.setattr(os, "write", written)
+    digest = run_live_lanes.write_settings(path, settings)
+    monkeypatch.undo()
+
+    assert path.read_bytes() == _settings_json_bytes(settings) and b"\r" not in path.read_bytes()
+    assert digest == hashlib.sha256(path.read_bytes()).hexdigest()
+    strict = IsolatedServer(tmp_path, tmp_path, path, settings_authoritative_env=True, expected_settings_sha256=digest)
+    assert strict._read_authoritative_settings() == settings, "the strict server accepts what the lane wrote"
 
 
 def test_other_drivers_keep_the_silent_default(tmp_path):
@@ -511,7 +555,8 @@ def _journal(data: pathlib.Path, rows: list) -> pathlib.Path:
     """A journal-era lane's ledger as an older release appended it, one row per transition."""
     path = data / "state" / "usage_attempts.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    # Its writer is byte-exact (LF rows); text mode would write CRLF on Windows and the journal is compared byte for byte.
+    path.write_bytes("".join(json.dumps(row) + "\n" for row in rows).encode("utf-8"))
     return path
 
 

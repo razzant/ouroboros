@@ -283,8 +283,9 @@ def test_continue_leaves_an_older_top_level_answer_where_it_was(tmp_path, monkey
 def test_compact_modes_add_the_whole_composed_book_as_a_block_beside_the_shared_prefix(tmp_path, mode):
     env, core, task = _capture(tmp_path / "with", {"task_contract": {KEY: True}})
     plan = _capture_plan(env, core, task, mode)
-    entry = (env.repo_dir / "docs/DEVELOPMENT.md").read_text()
-    chapter = (env.repo_dir / "docs/development/change.md").read_text()
+    # The block holds its sources' exact bytes (``compose_book``), whatever line ending the fixture's writer produced.
+    entry = (env.repo_dir / "docs/DEVELOPMENT.md").read_bytes().decode("utf-8")
+    chapter = (env.repo_dir / "docs/development/change.md").read_bytes().decode("utf-8")
     assert _book_blocks(plan, mode) == ["## DEVELOPMENT.md\n\n" + entry + "\n\n" + chapter]
     env2, ordinary, task2 = _capture(tmp_path / "without")
     without = _blocks(_capture_plan(env2, ordinary, task2, mode), mode)

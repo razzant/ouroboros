@@ -4,7 +4,9 @@
 what they read. Each law compares the reused discovery with a fresh one of the same install, field for field,
 after a change that moves the catalogue (so a stale reuse would differ), and counts what an unchanged install
 costs: no walk, no load. ``_RACY_NS`` is zero where a law needs reuse at once (a fixture's files are seconds old);
-the racy rule itself keeps its own law.
+the racy rule itself keeps its own law. Windows (its ``st_ctime`` is the creation time) and a filesystem the store
+does not call local keep nothing, as the module documents: there each law states a full read every time, and one law
+forces that rule on every platform.
 """
 from __future__ import annotations
 
@@ -13,6 +15,7 @@ import json
 import os
 import pathlib
 import shutil
+import types
 
 import pytest
 
@@ -20,6 +23,8 @@ from ouroboros import skill_discovery_reuse as reuse
 from ouroboros import skill_loader as loader
 from ouroboros.skill_loader import SkillReviewState, discover_skills, save_enabled, save_review_state
 from ouroboros.utils import atomic_write_json
+
+KEEPS = os.name != "nt"  # where change keys are trusted discovery is reused; on Windows it reads everything every time
 
 
 def _manifest(name, description="Check the weather.", scripts="fetch.py"):
@@ -90,8 +95,10 @@ def test_an_unchanged_install_is_discovered_once(install):
     first = _dump(discover_skills(data))
     assert counts == {"walks": 1, "loads": 3}  # one root, three packages
     assert _dump(discover_skills(data)) == first and loader.find_skill(data, "beta").name == "beta"
-    assert counts == {"walks": 1, "loads": 3}
-    assert _fresh(data) == first and counts == {"walks": 2, "loads": 6}  # the fresh reference alone read again
+    # a repeat and a lookup read nothing; Windows reads it all again: a discovery walks once and loads three, a lookup one
+    assert counts == ({"walks": 1, "loads": 3} if KEEPS else {"walks": 3, "loads": 7})
+    assert _fresh(data) == first
+    assert counts == ({"walks": 2, "loads": 6} if KEEPS else {"walks": 4, "loads": 10})  # the fresh reference read again
 
 
 def _edit_same_length(path):
@@ -138,7 +145,7 @@ def test_each_change_is_seen_and_the_reuse_equals_a_fresh_discovery(install, tmp
     CHANGES[change](data, tmp_path)
     held = dict(counts)
     after = _dump(discover_skills(data))
-    assert (counts == held) is (change == "unrelated_state")  # no walk, no load only while nothing read moved
+    assert (counts == held) is (KEEPS and change == "unrelated_state")  # no walk, no load only while nothing read moved
     assert after == _fresh(data)
     assert (after == before) is (change == "unrelated_state")
 
@@ -155,7 +162,7 @@ def test_a_manifest_written_in_a_connected_folders_standard_folder_is_seen(insta
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(checkout))
     before = {skill.name for skill in discover_skills(data)}
     walks = counts["walks"]
-    assert {skill.name for skill in discover_skills(data)} == before and counts["walks"] == walks  # reused
+    assert {skill.name for skill in discover_skills(data)} == before and (counts["walks"] == walks) is KEEPS  # reused
     manifest.write_text(text, encoding="utf-8")
     after = _dump(discover_skills(data))
     assert "omega" in before and "sigma" not in before
@@ -195,7 +202,8 @@ def test_callers_get_their_own_copy(install):
     beta.enabled, beta.source, beta.review.status, beta.manifest.description = True, "x", "pass", "changed by a caller"
     other = loader.find_skill(data, "beta")
     other.review = SkillReviewState(status="pass")
-    assert _dump([loader.find_skill(data, "beta")]) == pristine and counts["loads"] == 1
+    assert _dump([loader.find_skill(data, "beta")]) == pristine
+    assert counts["loads"] == (1 if KEEPS else 4)  # one kept load; Windows loads at each of the four lookups
 
 
 def test_a_just_written_package_is_read_again_until_its_change_time_settles(install, monkeypatch):
@@ -205,6 +213,28 @@ def test_a_just_written_package_is_read_again_until_its_change_time_settles(inst
     discover_skills(data)
     discover_skills(data)
     assert counts == {"walks": 2, "loads": 6}
+
+
+@pytest.mark.parametrize("cause", ["windows", "not_local"])
+def test_where_no_change_key_can_be_trusted_nothing_is_kept(install, monkeypatch, cause):
+    """Windows and a filesystem the store does not call local answer no change key, and then every discovery walks and
+    loads again, so an equal-size edit is seen at once. Forced here, so the rule is exercised on every platform and
+    not only where the platform imposes it."""
+    from ouroboros import skill_identity, store
+
+    if cause == "windows":
+        monkeypatch.setattr(skill_identity, "os", types.SimpleNamespace(name="nt"))  # the one name ``_change_key`` reads
+    else:
+        monkeypatch.setattr(skill_identity, "_LOCAL_DEVICES", {})
+        monkeypatch.setattr(store, "_filesystem_type", lambda path: "nfs")
+    data, counts = install
+    helper = data / "skills" / "external" / "beta" / "scripts" / "helper.py"
+    assert skill_identity._change_key(helper) is None
+    first = _dump(discover_skills(data))
+    _edit_same_length(helper)
+    after = _dump(discover_skills(data))
+    assert after != first and after == _fresh(data)
+    assert counts == {"walks": 3, "loads": 9}  # the first, the edited and the fresh reference each read all of it
 
 
 def test_a_load_reads_only_the_listed_owner_state_files(install, monkeypatch):
@@ -249,7 +279,7 @@ def test_host_service_authentication_reads_the_catalogue_and_each_change(install
     assert context.authenticate_token_payload("tok")[0] == "hooked"
     loads = counts["loads"]
     context.require_permission("hooked", {}, "inject_chat")
-    assert context.authenticate_token_payload("tok")[0] == "hooked" and counts["loads"] == loads
+    assert context.authenticate_token_payload("tok")[0] == "hooked" and (counts["loads"] == loads) is KEEPS
     save_review_state(data, "hooked", SkillReviewState(status="pending"))
     with pytest.raises(HostServiceAuthError, match="no current executable review authority"):
         context.authenticate_token_payload("tok")

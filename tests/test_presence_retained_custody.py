@@ -12,7 +12,7 @@ from ouroboros.presence_runner import PresenceTurnGate, presence_turn_task_id, r
 from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_host_service_responsiveness import _event, _presence_app, _request, _turn
 from tests.test_presence_lane_rows import _checkpoint
-from tests.test_presence_moved_lifecycle import _boot_window_row, _seed_and_built, root  # noqa: F401  (fixture)
+from tests.test_presence_moved_lifecycle import _boot_window_row, _seed_and_built, root as root
 from tests.test_presence_runner import _admission, _event as _runner_event
 
 
