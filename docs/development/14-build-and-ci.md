@@ -1,6 +1,6 @@
 # Build & CI
 
-Rules for dependency locks, pytest lanes, CI and commit-gate tests, and Actions secrets. The gate stays reproducible and candidate-independent; ARCHITECTURE §8 owns the job graph, triggers and release chain.
+The commit gate stays reproducible and candidate-independent; ARCHITECTURE §8 owns the job graph, triggers and release chain.
 
 ### Python dependency locks
 
@@ -28,16 +28,16 @@ CHECKLISTS Body item 11(d) owns the review.
 
 ### Parallel CI and the `serial` marker
 
-CI runs the default suite in two passes, each owned by `scripts/run_tests.py` behind `scripts/ci_retry.py` (jobs: ARCHITECTURE §8): parallel, `-m "not serial and <the seven lane exclusions>"` with `PARALLEL_PASS_FLAGS` (`-n auto --dist loadscope --max-worker-restart=0 --timeout=300`), then serial, `-m "serial and <the same exclusions>"` with `SERIAL_PASS_FLAGS` (`--timeout=300`: SIGALRM fails one hung test on POSIX, Windows' thread method stops the worker). Every OS adds `--default-suite-shard=K/N` (`tests/default_lane.py` packs whole files by recorded durations, else by count; shard 1 adds unsharded manifests). Two rules preserve the split:
+CI uses `scripts/run_tests.py` behind `scripts/ci_retry.py` for the default-suite passes (jobs: ARCHITECTURE §8): parallel `-m "not serial and <seven lane exclusions>"` with `PARALLEL_PASS_FLAGS` (`-n auto --dist loadscope --max-worker-restart=0 --timeout=300`), then serial `-m "serial and <same exclusions>"` with `SERIAL_PASS_FLAGS` (`--timeout=300`: POSIX SIGALRM fails the hung test; Windows' thread method stops its worker). Each OS adds `--default-suite-shard=K/N`; `tests/default_lane.py` packs whole files by recorded duration, else count. Shard 1 adds unsharded manifests. Keep this split:
 
 - Mark `@pytest.mark.serial` (or list the file in `_SERIAL_TEST_FILES` in `tests/conftest.py`) only for a shared resource the test cannot isolate: a fixed port, a real daemon, a process-global its fixture cannot restore. An owned child, a private root or port 0 is not one. Under `-n` such a test flakes on kill/reap or port-reclaim timing or crashes its worker, and with `--max-worker-restart=0` a dead worker fails its co-located batch. A merely slow test is made faster or split, never `serial`.
 - Keep every other test parallel-safe: `tmp_path` (never a fixed path), `monkeypatch.setenv`/`delenv`/`setattr`, no execution-order assumptions; a fixture-restored global stays parallel (`tests/conftest.py::_isolate_workspace_executor_globals`).
 
 ### The local battery entry point
 
-`python scripts/run_tests.py` (`make test`) always runs the full Node and default Python battery; pytest arguments select focused work. `--selected [--base REF]` uses the commit selector (default base `HEAD`), prints tier/rule/module count and runs both marker passes on them. The scope reaches pytest in the run's own inventory plugin, not on the command line, here and in the gate (`preflight_inventory.launch_args`): Windows refuses 32,767-character command lines. `--extra-test PATH` or `--full-tests` widens it with `--test-reason`. Missing required Node is red `NOT_RUN`. No hermetic proof is minted.
+`python scripts/run_tests.py` (`make test`) runs the full Node/default Python battery; pytest arguments focus it. `--selected [--base REF]` (default `HEAD`) prints the commit selector's tier/rule/module count and runs both marker passes. CLI and gate carry scope in the run's inventory plugin (`preflight_inventory.launch_args`), avoiding Windows' 32,767-character argv limit. `--extra-test PATH`/`--full-tests` widen with `--test-reason`. Missing required Node is red `NOT_RUN`; no hermetic proof is minted.
 
-Full default overlaps duration-sized `--serial-shards` groups; `--sequential` restores the gate split; recheck overlap-only failures with it. `--evidence-dir DIR` gives each pass its own explicit `--ci-evidence-dir`; selected runs add `selection.json` and full inventory JSONL. Never export evidence via `PYTEST_ADDOPTS`: nested pytest could overwrite its parent's results.
+Full-default runs overlap duration-sized `--serial-shards` groups; recheck overlap-only failures with `--sequential`, which restores the gate split. `--evidence-dir DIR` sets each pass's `--ci-evidence-dir`; selected runs add `selection.json` and full inventory JSONL. Never export through `PYTEST_ADDOPTS`: nested pytest could overwrite parent results.
 
 ### Safe local verification and dirty browser candidates
 
@@ -68,13 +68,13 @@ OUROBOROS_RUN_UI_SMOKE=1 OUROBOROS_EXPECT_BROWSER_ENGINES=chromium,webkit \
 
 ### The tiered commit and CI gates
 
-`commit_reviewed` runs `test_selection.FLOOR_TESTS`, changed tests, direct AST importers of changed code and tests, and authored widening. Missing/empty floor modules block. Selected modules are scope, not execution: `LANE_EXCLUSION_EXPR` still skips opt-in markers (`ui_browser`). Selection includes dirty/untracked candidate files against `HEAD` before commit and `HEAD~1` after (a body candidate: its serving fork). Automatic CI follows ARCHITECTURE §8; local checks and review remain.
+`commit_reviewed` selects `test_selection.FLOOR_TESTS`, changed tests, direct AST importers of changed code/tests and authored widening. Missing/empty floor modules block. Selection is scope, not execution: `LANE_EXCLUSION_EXPR` still skips opt-in markers (`ui_browser`). Include dirty/untracked candidate files against `HEAD` pre-commit and `HEAD~1` post-commit (body candidates: their serving fork). Automatic CI follows ARCHITECTURE §8; local checks and review remain.
 
 Imports are a minimum: `extra_tests` covers indirect/dynamic, prompt, skill and cross-language consumers; `full_tests`, unresolved impact. Both need `test_reason`, retained until adoption. Verifier/cutover changes force full: runner/selector, floor, shared helpers/data, pytest configuration, non-version dependency edits and `_CUTOVER`. No product fan-out threshold. Records bind tier, candidate/base/policy, reasons and execution counts; missing/duplicate execution blocks.
 
 Full is required for managed updates (their forced run), non-candidate evolution publication, post-adoption boot push and tag/dispatch CI. Local adoption also accepts an exact selected run against the serving HEAD, under the loaded policy, covering the reviewed switch delta and declared widening; it withholds both branch and tag. Ordinary serving-checkout commits and `promote_to_stable` have no tier gate: a later push can publish a withheld adoption. New HEAD needs new evidence; skip/`None` proves nothing. Post-commit failures retain ordinary commits with warnings; evolution withholds publication, managed updates roll back or retain `gate_blocked`.
 
-`preflight_runner.run_hermetic_pytest` runs Node, parallel `not serial`, then timed `serial` in one disposable checkout; `LANE_EXCLUSION_EXPR`/`*_PASS_FLAGS` own exclusions and flags. Missing Node/plugins blocks. `preflight_node.node_environment` fingerprints bundled-first Node on gate/CLI child PATH; other environments retain their policy. The acorn `web/tests/no_undef.test.js` and lockfile-frozen CI ESLint remain independent. The gate shares `safe_test`'s temp default without `--temp-parent`; small/noexec `/tmp` can fail.
+`preflight_runner.run_hermetic_pytest` runs Node, parallel `not serial`, then timed `serial` in one disposable checkout; `LANE_EXCLUSION_EXPR`/`*_PASS_FLAGS` own exclusions/flags. Missing Node/plugins blocks. `preflight_node.node_environment` fingerprints bundled-first Node on gate/CLI child PATH; other environments keep their policy. Acorn (`web/tests/no_undef.test.js`) and lockfile-frozen CI ESLint stay independent. Gate temp defaults match `safe_test`, without `--temp-parent`; small/noexec `/tmp` can fail.
 
 Candidate capture uses one hardened worktree-vs-`HEAD` binary diff; assembly failure is `PREFLIGHT_CANDIDATE_ASSEMBLY`. It scrubs `PYTEST_*`, `NODE_OPTIONS`, settings and credentials; plugin probes run outside candidate control. Post-commit baselines include `HEAD~1` to catch suite deletion; exit status owns the verdict. `OUROBOROS_PREFLIGHT_SERIAL=1` is an explicit rollback lever, never silent fallback.
 
@@ -82,7 +82,7 @@ Containment is checked even after green (§9 "Test runs"); unknown or surviving 
 
 ### GitHub Actions: secrets in step-level `if:` conditions
 
-GitHub Actions rejects `secrets.*` inside a step-level `if:` expression, and a step's own `env:` block is not visible to that step's `if:`. Derive a non-secret boolean in the job-level `env:` block, gate steps with that boolean, and map the actual credentials only inside the first-party steps that need them, so later SBOM and attestation steps inherit none of them:
+GitHub rejects `secrets.*` in step-level `if:`; a step's `env:` is also unavailable to that condition. Derive a non-secret boolean in job `env:`, gate steps on it, and expose credentials only inside the first-party steps that need them. SBOM/attestation steps inherit no credentials:
 
 ```yaml
 jobs:
