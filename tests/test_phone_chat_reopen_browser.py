@@ -221,3 +221,39 @@ def test_new_document_shows_saved_text_before_history_and_reconciles(shell_ui, m
     shot(other, f'phone-reconciled-{ui["engine"]}')
     context.close()
     page.close()
+
+
+@pytest.mark.parametrize('project_room', [False, True], ids=['main','project'])
+def test_phone_keyboard_dismisses_only_on_deliberate_older_reading(shell_ui, project_room):
+    phone={**shell_ui,'new_page':lambda **options:shell_ui['new_page'](is_mobile=True,**options)}
+    page=seed_page(phone,390,844,telegram=True)
+    page.route('**/api/chat/history**',lambda route:route.fulfill(json=history(['A saved conversation line. '*15]*30)))
+    _install_controlled_visual_viewport(page,844)
+    page.goto(shell_ui['url'])
+    page.locator('#chat-messages[data-history-hydrated="true"]').wait_for()
+    if project_room:open_project(page)
+    field=page.locator('textarea.chat-input:visible' if project_room else '#chat-input')
+    field.wait_for(state='visible');field_id=field.get_attribute('id')
+    feed_id=field_id.replace('input','messages')
+    field.fill('This unsent draft must stay.');field.focus()
+    page.evaluate('window.__setTestVisualViewportHeight(320)')
+    settle(page)
+    assert field.evaluate('e=>document.activeElement===e')
+    # Layout/programmatic scroll events alone are not a reading gesture.
+    page.evaluate("id=>{const f=document.getElementById(id);f.scrollTop=10;f.dispatchEvent(new Event('scroll'));}",feed_id)
+    settle(page);assert field.evaluate('e=>document.activeElement===e')
+    def swipe(dx,dy):
+        page.evaluate('''({id,dx,dy})=>{
+            const f=document.getElementById(id);
+            const event=(type,x,y)=>{const e=new Event(type,{bubbles:true});
+                Object.defineProperty(e,'touches',{value:[{clientX:x,clientY:y}]});f.dispatchEvent(e);};
+            event('touchstart',100,150);event('touchmove',100+dx,150+dy);
+        }''',{'id':feed_id,'dx':dx,'dy':dy})
+        settle(page)
+    swipe(70,2);assert field.evaluate('e=>document.activeElement===e')
+    swipe(0,-70);assert field.evaluate('e=>document.activeElement===e')
+    swipe(0,70)
+    page.wait_for_function('id=>document.activeElement!==document.getElementById(id)',arg=field_id)
+    assert field.input_value()=='This unsent draft must stay.'
+    shot(page,f'phone-dismiss-{project_room}-{shell_ui["engine"]}')
+    page.close()

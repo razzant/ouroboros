@@ -3155,7 +3155,13 @@ export function createChatInstance({
             if (historyIslandAtEdge(messagesDiv, ids, historyNodes)) void loadHistoryAtEdge('newer');
         }
     }
-    const disposeReadingGestures = reading.bindGestures(navigateHistoryAtEdge);
+    const disposeReadingGestures = reading.bindGestures(direction => {
+        // Only the reader's deliberate movement toward older messages dismisses
+        // a phone keyboard. Layout, incoming messages and downward following do not.
+        if (direction < 0 && input.ownerDocument.activeElement === input
+                && input.ownerDocument.body.classList.contains('keyboard-open')) input.blur();
+        navigateHistoryAtEdge(direction);
+    });
     // Compact tables share rich-answer keyboard/overflow affordances; destroy releases them.
     bindMarkdownTables(messagesDiv);
     function retryHistoricalUpserts() {
