@@ -1,9 +1,18 @@
-name: Linux AppImage native qualification (diagnostic)
+# RESEARCH-BRANCH-ONLY full replacement body of .github/workflows/linux-appimage-native.yml
+# (workflow id 393697794). The existing file is the dispatch door because a
+# workflow_dispatch workflow must already exist on the default branch; this body is
+# never meant for main. OB#1234 chain probe, evidence only: published 7.4.4 vs 7.9.0
+# tarballs, Silverblue 43 userspace container with systemd + system D-Bus, launcher ->
+# server -> worker -> browse_page -> node -> Chromium, passive /proc sampler outside the
+# tree. No secrets, no --privileged, default seccomp/AppArmor. Every parameter except
+# candidate_sha is fixed here: probe dir diagnostics/ob1234-chain-probe, arms A and B,
+# loopback fixture only (no public URL), no arm C.
+name: Linux AppImage native qualification (diagnostic) - OB1234 chain probe
 on:
   workflow_dispatch:
     inputs:
       candidate_sha:
-        description: Exact 40-character source SHA on the dispatched research branch
+        description: Exact 40-character HEAD SHA of the dispatched research branch
         required: true
         type: string
 permissions:
@@ -12,16 +21,21 @@ concurrency:
   group: linux-native-${{ github.run_id }}-${{ github.run_attempt }}
   cancel-in-progress: false
 jobs:
-  native:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 120
+  probe:
+    runs-on: ubuntu-24.04
+    # Step bounds below sum to 88 min, so cleanup and upload normally run. A JOB-level
+    # timeout or a runner loss can still skip the upload step.
+    # One arm: sampler start <=45 s + driver exec <=870 s + bounded cleanup <=181 s, under 19 min.
+    timeout-minutes: 100
+    env:
+      PROBE: ${{ github.workspace }}/diagnostics/ob1234-chain-probe
+      OB1234_PUBLIC_URL: ''
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.candidate_sha }}
-          fetch-depth: 0
           persist-credentials: false
-      - name: Bind source and prepare separate disposable containers
+      - name: Bind exact source
         env:
           EXPECTED_SHA: ${{ inputs.candidate_sha }}
         run: |
@@ -29,62 +43,47 @@ jobs:
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           test "$GITHUB_SHA" = "$EXPECTED_SHA"
-          mkdir -p "$RUNNER_TEMP/ob688-evidence" "$RUNNER_TEMP/ob688-build"
-          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/ob688-evidence/source.txt"
-          docker build --progress=plain --target builder -f packaging/appimage/native-qualification.Dockerfile \
-            -t ob688-builder . 2>&1 | tee "$RUNNER_TEMP/ob688-evidence/docker-build.log"
-          docker build --progress=plain --target desktop -f packaging/appimage/native-qualification.Dockerfile \
-            -t ob688-desktop . 2>&1 | tee "$RUNNER_TEMP/ob688-evidence/docker-desktop.log"
-          docker image inspect ob688-builder ob688-desktop > "$RUNNER_TEMP/ob688-evidence/images.json"
-      - name: Build diagnostic AppImage and run focused tests
-        timeout-minutes: 90
+          sha256sum "$PROBE"/* | tee "$RUNNER_TEMP/probe-files.sha256"
+      - name: Measure disk, fetch and verify published payloads
+        id: prepare
+        timeout-minutes: 20
         run: |
-          set -euo pipefail
-          docker run --name ob688-build --rm \
-            -v "$GITHUB_WORKSPACE:/input:ro" -v "$RUNNER_TEMP/ob688-build:/work" \
-            -v "$RUNNER_TEMP/ob688-evidence:/evidence" -w /work ob688-builder \
-            bash -c 'set -euo pipefail
-              cp -R /input/. /work/
-              chown -R 0:0 /work
-              mkdir -p /tmp/ob688-build
-              python3 -I -S scripts/safe_test.py --temp-parent /tmp/ob688-build \
-                --evidence-dir /evidence/build-safe-test --timeout 5200 -- \
-                bash scripts/build_linux_native_experiment.sh /evidence' \
-            2>&1 | tee "$RUNNER_TEMP/ob688-evidence/build.log"
-      - name: Exercise actual AppImage on clean Linux X11 without network
-        timeout-minutes: 18
-        run: |
-          set -euo pipefail
-          chmod -R a+rwX "$RUNNER_TEMP/ob688-evidence"
-          # No GTK from the builder, no display socket from the runner, no secrets,
-          # no network and no privilege flag. Unconfined seccomp only lets a bwrap
-          # attempt, if WebKit made one, be observed rather than refused by Docker.
-          docker run --name ob688-desktop-run --rm --network none --shm-size=1g \
-            --security-opt seccomp=unconfined \
-            -v "$GITHUB_WORKSPACE:/source:ro" -v "$RUNNER_TEMP/ob688-evidence:/evidence" \
-            -w /source ob688-desktop bash -c 'set -euo pipefail
-              mkdir -p /tmp/ob688-native
-              cp -R /source/. /tmp/ob688-source
-              cd /tmp/ob688-source
-              python3 -I -S scripts/safe_test.py --temp-parent /tmp/ob688-native \
-                --evidence-dir /evidence/native-safe-test --timeout 900 -- \
-                dbus-run-session -- xvfb-run -a -s "-screen 0 1280x900x24" bash -c '\''
-                  openbox > /evidence/openbox.log 2>&1 &
-                  python3 -I -S scripts/qualify_linux_appimage.py /evidence/*.AppImage /evidence/native
-                '\''' 2>&1 | tee "$RUNNER_TEMP/ob688-evidence/native.log"
-      - name: Return container evidence to the runner
+          set +e
+          bash "$PROBE/run.sh" prepare
+          rc=$?
+          echo "OB1234_OUT=$(cat /tmp/ob1234-work-dir 2>/dev/null || echo "$RUNNER_TEMP/ob1234-none")/out" >> "$GITHUB_ENV"
+          exit $rc
+      - name: Build Silverblue 43 userspace image
+        timeout-minutes: 15
+        run: bash "$PROBE/run.sh" image
+      - name: Start container with systemd and system D-Bus
+        id: start
+        timeout-minutes: 5
+        run: bash "$PROBE/run.sh" start
+      - name: Arm A - published 7.4.4
+        if: ${{ !cancelled() && steps.start.outcome == 'success' }}
+        timeout-minutes: 19
+        run: bash "$PROBE/run.sh" arm A
+      - name: Arm B - published 7.9.0
+        if: ${{ !cancelled() && steps.start.outcome == 'success' }}
+        timeout-minutes: 19
+        run: bash "$PROBE/run.sh" arm B
+      - name: Collect raw facts (no verdicts)
         if: always()
+        timeout-minutes: 5
+        run: bash "$PROBE/run.sh" collect
+      - name: Stop container
+        if: always()
+        timeout-minutes: 5
         run: |
-          if test -d "$RUNNER_TEMP/ob688-evidence"; then
-            sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/ob688-evidence"
-            chmod -R u+rwX "$RUNNER_TEMP/ob688-evidence"
-          fi
-      - name: Preserve every successful and failed attempt
+          bash "$PROBE/run.sh" stop || true
+          mkdir -p "$OB1234_OUT/facts" && cp "$RUNNER_TEMP/probe-files.sha256" "$OB1234_OUT/facts/" || true
+      - name: Preserve evidence of every attempt
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: issue688-native-${{ github.sha }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/ob688-evidence
+          name: ob1234-chain-probe-${{ inputs.candidate_sha }}-${{ github.run_attempt }}
+          path: ${{ env.OB1234_OUT }}
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7

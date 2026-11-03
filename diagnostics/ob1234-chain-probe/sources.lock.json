@@ -1,0 +1,78 @@
+{
+  "schema": "ob1234-chain-probe/sources/2",
+  "observed_at": "2026-11-01 (v1 metadata GETs); v2 adds static tag reads only",
+  "observed_by": "public metadata GET only (GitHub releases API, release SHA256SUMS/SBOM/smoke receipts, quay.io tag+manifest API) and git show of tags; nothing executed, no binary downloaded",
+  "tag_commits": {
+    "v7.4.4": "796f2e8708ee375216783a7fd80a3bf79f081079",
+    "v7.9.0": "6b8a898023366f281816729daa27d7ab8a31c1f2",
+    "verified_by": "git rev-parse <tag>^{commit} (v1 run) and the nanny; release smoke receipts name the same sourceCommit"
+  },
+  "arms": {
+    "A": {
+      "label": "published 7.4.4 payload, its own frozen launcher, fresh HOME",
+      "release": "https://github.com/razzant/ouroboros/releases/tag/v7.4.4",
+      "published_at": "2026-09-21T16:51:29Z",
+      "source_commit": "796f2e8708ee375216783a7fd80a3bf79f081079",
+      "asset": "Ouroboros-7.4.4-linux-x86_64.tar.gz",
+      "url": "https://github.com/razzant/ouroboros/releases/download/v7.4.4/Ouroboros-7.4.4-linux-x86_64.tar.gz",
+      "sha256": "6af83f159af01bcfc686d6a3668fe03779e0cf184271090e12be1fb66d0a7791",
+      "size": 904504183,
+      "sbom_sha256_linux_x86_64": "141221960c73c21ed2e473bebcdf75cd6a984e960317948f73ca009c9dcba31c",
+      "sbom_identical_for": ["ouroboros_7.4.4_amd64.deb", "ouroboros-7.4.4-1.x86_64.rpm", "ouroboros-7.4.4-1.red80.x86_64.rpm"],
+      "entry": "Ouroboros/Ouroboros (PyInstaller binary; no shell wrapper in this release)",
+      "sbom_top_level_bundle_libs": ["libatomic.so.1", "libgcc_s.so.1", "libpython3.10.so.1.0", "libstdc++.so.6", "libsystemd.so.0", "libudev.so.1", "libzstd.so.1"],
+      "sbom_components": {"chrome": "151.0.7922.34 at _internal/python-standalone/lib/python3.10/site-packages/playwright/driver/package/.local-browsers/chromium-1234/chrome-linux64/chrome", "playwright": "1.62.0", "playwright-stealth": "2.0.3", "node(driver)": "24.18.1", "python": "3.10.19"},
+      "not_used": {
+        "asset": "Ouroboros-7.4.4-linux-x86_64.AppImage", "size": 711703032,
+        "sha256": "e5c05e5c14d7a92902d8e3bc84ec751122d37d08d99d8de2a34c326a5c73c3e1",
+        "why_tarball_instead": "The tarball's SBOM is byte-identical to the deb and both rpm SBOMs (the rpm/deb/tarball payload), while the AppImage SBOM differs (056f56dd...). The reporter's module mix on a Fedora host points at that rpm/deb/tarball payload class, and the tarball runs its public entry directly without FUSE or AppRun. The AppImage path (AppRun environment) therefore stays untested."
+      }
+    },
+    "B": {
+      "label": "published 7.9.0 payload, its own frozen launcher via desktop-launcher.sh wrapper, fresh HOME",
+      "release": "https://github.com/razzant/ouroboros/releases/tag/v7.9.0",
+      "published_at": "2026-10-29T01:58:51Z",
+      "source_commit": "6b8a898023366f281816729daa27d7ab8a31c1f2",
+      "asset": "Ouroboros-7.9.0-linux-x86_64.tar.gz",
+      "url": "https://github.com/razzant/ouroboros/releases/download/v7.9.0/Ouroboros-7.9.0-linux-x86_64.tar.gz",
+      "sha256": "b09f22e1376c27e9ce3c87b423c839a9757d0cd862f1a84514748e368fc4e8dc",
+      "size": 1116591716,
+      "sbom_sha256_linux_x86_64": "b25ce7ab039a2be2aa4210b246dc9202312bf48c3a944d45652166e30b5c1fa7",
+      "sbom_identical_for": ["ouroboros_7.9.0_amd64.deb", "ouroboros-7.9.0-1.x86_64.rpm", "ouroboros-7.9.0-1.red80.x86_64.rpm"],
+      "entry": "Ouroboros/Ouroboros = packaging/appimage/desktop-launcher.sh (sets OUROBOROS_DESKTOP_ENV_SAVED=1, saves caller LD_* etc., then exec Ouroboros.bin); release CI builds with OUROBOROS_BUNDLE_LINUX_GTK=1",
+      "sbom_top_level_bundle_libs": ["libpython3.10.so.1.0"],
+      "sbom_note": "syft SBOM is not a full file inventory; prepare inventories the extracted payload itself",
+      "sbom_components": {"chrome": "151.0.7922.34 (same SBOM path as arm A)", "playwright": "1.62.0", "playwright-stealth": "2.0.3", "node(driver)": "24.18.1", "python": "3.10.22"}
+    },
+    "C_manual_only": {
+      "label": "7.4.4 frozen launcher + managed source moved to 7.9.0 (6b8a898); a disclosed manual updater SIMULATION, not a lane of the workflow; see PROPOSAL.md"
+    }
+  },
+  "composition_vs_installation": "SBOM equality between tarball, deb and rpm is composition evidence only. Installer actions (rpm scriptlets, rpm-ostree layering, /usr/lib/ouroboros or /opt paths, desktop files) and the caller environment they produce are untested here.",
+  "comparison_scope": "A vs B swaps the whole payload (launcher, wrapper, bundled libraries, Python 3.10.19 vs 3.10.22, managed source). It is a comparison of two published artifacts, not a one-variable causal proof.",
+  "userspace": {
+    "image": "quay.io/fedora/fedora-silverblue:43-x86_64",
+    "digest": "sha256:e66e70e7b592a7b92c39f4a4effbb0dcc7e25f07106ffff38a8ea56522e2670d",
+    "multiarch_tag_43_digest": "sha256:63e79ebb957fa1d0ad248c490f4b9e065d208ab6b64c72f3f5bf546b990aaadb",
+    "annotations": {"org.opencontainers.image.version": "43.20261101.0", "ostree.commit": "e7559f649df69a0631e0c2cf9581f3103ff9cdc04296964d637f3f7b365d354a", "ostree.linux": "7.2.13-100.fc43.x86_64", "containers.bootc": "1"},
+    "compressed_size_bytes": 2529169638,
+    "note": "Official Fedora releng bootc/ostree image of Silverblue 43 userspace, run as an ordinary container. It is NOT native Silverblue: the runner's kernel is used, the image is not booted by ostree, no SELinux policy is enforced. No dated September 2026 tag exists on quay; this is the 2026-11-01 compose."
+  },
+  "runner": {
+    "label": "ubuntu-24.04 (GitHub-hosted standard public runner, x86_64)",
+    "documented_resources": "4 CPU, 16 GB RAM, 14 GB SSD (docs.github.com/en/actions/reference/runners/github-hosted-runners); free space is measured at prepare, not assumed"
+  },
+  "verified_at_both_tags_by_static_read": {
+    "tools_jsonl_result_row": "type=tool_call, tool, task_id, args, result_preview (<=2000), is_error, status, tool_call_id (loop_tool_execution.py ~754 at v7.4.4, ~744 at v7.9.0; CALL_SETTLED='tool_call' at v7.9.0)",
+    "onboarding_complete": "subscriptionsConnected/skipSubscriptionPresets in both; starter_skills read only by v7.9.0 (onboarding.py:920, skill_starter.py:347); v7.4.4 validate_setup_payload reads named provider fields only",
+    "tasks_api": "POST /api/tasks requires description; response task_id; GET /api/tasks/{task_id}; POST /api/tasks/{task_id}/cancel (optional body) in both",
+    "safety": "browse_page and browser_action are POLICY_SKIP in both (safety.py:63-64 at v7.4.4, :82-83 at v7.9.0); Safety JSON {status, reason} identical",
+    "background_consciousness": "off by default in both: supervisor/state.py setdefault('bg_consciousness_enabled', False) (v7.4.4 :128, v7.9.0 :160); only an explicit /bg start turns it on; no extra setting needed",
+    "defaults_kept": "OUROBOROS_TASK_REVIEW_MODE=auto and OUROBOROS_POST_TASK_EVOLUTION=false in both; the task is cancelled after the final answer, so post-task review calls, if any, get neutral answers and are logged raw",
+    "browser_launch_flag": "--disable-features=site-per-process at ouroboros/tools/browser.py:303 (v7.4.4) and :347 (v7.9.0)"
+  },
+  "not_used_on_purpose": [
+    "current .github/workflows/linux-appimage-native.yml body (seccomp=unconfined, builds from source, inert provider, no browser) - only its file path is used as the dispatch door",
+    "GHA run 40227245521 qualify.py (data: URL, plain Python, Node-only maps)"
+  ]
+}
