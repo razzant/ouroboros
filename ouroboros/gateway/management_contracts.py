@@ -664,6 +664,8 @@ class OpenAICompatibleModelsRequest(TypedDict):
     baseUrl: str
     apiKey: NotRequired[str]
     connection: NotRequired[str]  # named compatible row; omitted = the built-in pair
+    # which built-in pair a kept apiKey belongs to; omitted = the saved effective pair
+    apiKeySetting: NotRequired[Literal["OPENAI_COMPATIBLE_API_KEY", "OPENAI_API_KEY"]]
 
 
 class LocalModelStartRequest(TypedDict):

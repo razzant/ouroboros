@@ -17,13 +17,14 @@ import pathlib
 import sqlite3
 import stat
 import subprocess
+import sys
 import threading
 import types
 
 import pytest
 
 from devtools.benchmarks.common.manifests import repo_provenance
-from devtools.e2e_live import run_live_lanes, scenarios, traces
+from devtools.e2e_live import adoption, run_live_lanes, scenarios, traces
 
 KEY = "sk-or-v1-e2e-live-attempt-fault-key-never-printed-0123456789"
 SEED_FILES = {"VERSION": "7.0.0-test\n"}
@@ -227,6 +228,102 @@ def test_each_finalization_step_survives_the_failure_of_another(tmp_path, monkey
     if step == "orphan_scan":
         assert row["checks"]["no_orphans_after_stop"] is False and row["no_orphans_after_stop"] is None
         assert row["orphan_scan"] == "failed", "a scan that raised is not a host without procfs"
+
+
+# --------------------------------------------------------------------------- #
+# The lane's store, read as the install the stand launched
+# --------------------------------------------------------------------------- #
+
+REPO = pathlib.Path(__file__).resolve().parents[1]
+ROOT_TASK, CHILD_TASK, LANE_MARKER = "a5e1ec7ed0000001", "a5e1ec7ed0000002", "E2E_LIVE_LANE_STORE"
+ADOPTED, BASE = "a" * 40, "b" * 40
+# The lane server's side, in its own process on ITS data root (``IsolatedServer._env`` sets OUROBOROS_DATA_DIR): the
+# boot mints that install's identity, and the task rows go through the store's writers. The stand only reads them.
+LANE_PROCESS = """\
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from ouroboros import install_identity
+from tests._store_shared import seed_result
+root, root_task, child_task, marker, adopted, base = sys.argv[2:]
+identity = install_identity.initialize_install()
+seed_result(root, root_task, {"status": "completed", "reason_code": "final_message", "result": marker + " done",
+                              "description": marker + " root", "body_adoptions": [{"adoption_id": "lane-adoption",
+                              "outcome": "adopted", "commit_sha": adopted, "previous_sha": base, "branch": "ouroboros"}]})
+seed_result(root, child_task, {"status": "completed", "parent_task_id": root_task, "root_task_id": root_task,
+                               "delegation_role": "subagent"})
+print(json.dumps(identity))
+"""
+
+
+def _lane_install(booted: dict):
+    """The lane server as far as the store goes: its process boots on the lane's data root; HTTP says completed."""
+    class _LaneInstall(_NoopServer):
+        def __init__(self, _clone, data_root, *_args, **_kwargs) -> None:
+            self.data_root = pathlib.Path(data_root)
+
+        def start(self, **_kwargs):
+            done = subprocess.run([sys.executable, "-c", LANE_PROCESS, str(REPO), str(self.data_root), ROOT_TASK, CHILD_TASK,
+                                   LANE_MARKER, ADOPTED, BASE], cwd=str(REPO), capture_output=True, text=True, check=True,
+                                  env={**os.environ, "OUROBOROS_DATA_DIR": str(self.data_root)})
+            booted.update(json.loads(done.stdout))
+            return self
+
+        def wait_task(self, task_id, timeout=0):
+            return {"status": "completed"}
+
+    return _LaneInstall
+
+
+def _read_the_lane(seen: dict):
+    """The stand's own store readers after the terminal, each as the scenario that uses it reaches it."""
+    def acceptance(ctx):
+        seen["terminal"] = ctx.wait_task(ROOT_TASK)   # SM1_a1 refused here: harness.wait_durable_result
+        seen["on_task"] = adoption.task_adoption_fact(adoption._task_result(ctx.oracle, ROOT_TASK), "lane-adoption", ADOPTED)
+        seen["children"] = ctx.oracle.child_task_ids(ROOT_TASK)   # SW1's lineage
+        seen["child"] = ctx.oracle.task_result(CHILD_TASK)
+        seen["root"] = scenarios._find_root_task(ctx, LANE_MARKER)   # SW1's UI path
+    return acceptance
+
+
+def test_the_stand_reads_the_lane_store_as_the_install_it_launched_and_nowhere_else(tmp_path, monkeypatch):
+    """SM1_a1 (2026-11-02, ``--stub --profile full``) recorded ``http_terminal_completed`` and then ``StoreForeign``: the
+    lane's server had minted the lane root's own install identity, and the stand process is another install, which the
+    copied-folder rule refuses even a read (``install_identity``). The stand launched that install, so every store read
+    a scenario makes after the terminal answers from the real lane (the durable row, the adoption's task record, SW1's
+    children and root). Outside the lane the same readers still refuse, and the lane keeps the identity its own process
+    minted while the stand keeps its own."""
+    from ouroboros import install_identity
+    from tests.system_e2e import harness
+
+    booted, seen = {}, {}
+    own = install_identity.canonical_root()
+    row, lane, _budget = _attempt(tmp_path, monkeypatch, _read_the_lane(seen), sid="SM1", server=_lane_install(booted))
+    data = lane / "data"
+    minted = json.loads((data / install_identity.IDENTITY_PATH).read_text(encoding="utf-8"))
+    assert minted == booted and pathlib.Path(minted["root"]) == data.resolve(), "the lane's own process minted it"
+
+    assert (row["status"], row.get("refusal"), row["error"]) == ("pass", None, ""), row
+    assert row["checks"]["http_terminal_completed"] is True and row["checks"]["durable_terminal_completed"] is True
+    assert seen["terminal"]["status"] == "completed" and seen["terminal"]["result"] == f"{LANE_MARKER} done"
+    assert seen["on_task"] == {"adoption_id": "lane-adoption", "outcome": "adopted", "commit_sha": ADOPTED,
+                               "previous_sha": BASE, "branch": "ouroboros"}
+    assert seen["children"] == [CHILD_TASK] and seen["child"]["parent_task_id"] == ROOT_TASK and seen["root"] == ROOT_TASK
+    assert install_identity.canonical_root() == own, "the stand is its own install again once the lane is done"
+
+    # The default scope on the same lane: the very consumer SM1_a1 ended in refuses before reading anything.
+    oracle = harness.ArtifactOracle(data)
+    ctx = scenarios.LaneContext(server=types.SimpleNamespace(wait_task=lambda task_id, timeout=0: {"status": "completed"}),
+                                clone=lane / "clone", data_root=data, oracle=oracle, harness=harness, ui_resolver=None,
+                                ui_reason="", shots=tmp_path / "shots", log=lambda _msg: None, task_timeout=1,
+                                restart=lambda: None)
+    with pytest.raises(install_identity.StoreForeign) as refused:
+        ctx.wait_task(ROOT_TASK)
+    assert refused.value.reason_code == "foreign_install_root" and pathlib.Path(refused.value.install_root) == data.resolve()
+    assert ctx.checks == {"http_terminal_completed": True}, "SM1_a1's row: the HTTP terminal, then the refusal"
+    for read in (lambda: oracle.task_result(ROOT_TASK), lambda: oracle.child_task_ids(ROOT_TASK)):
+        with pytest.raises(install_identity.StoreForeign):
+            read()
+    assert json.loads((data / install_identity.IDENTITY_PATH).read_text(encoding="utf-8")) == booted, "never re-minted"
 
 
 # --------------------------------------------------------------------------- #

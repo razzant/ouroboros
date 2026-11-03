@@ -76,6 +76,7 @@ from devtools.e2e_live.budget import (  # noqa: F401 - the money ledger's owner;
 )
 from devtools.e2e_live.scenarios import SCENARIOS, STAND_PANEL_SETTINGS, LaneContext, diff_sha256, head_sha, now_iso
 from devtools.e2e_live.ui_probe import resolve_ui_client
+from ouroboros.install_identity import acting_as
 from ouroboros.provider_models import ALL_PROVIDER_CREDENTIAL_KEYS, declared_model_settings
 
 MAX_LANES = 6
@@ -648,7 +649,12 @@ def run_lane(job: tuple[str, int], args: argparse.Namespace, out: pathlib.Path, 
                           task_timeout=args.task_timeout, restart=restart, stub=bool(args.stub),
                           ready_timeout=args.ready_timeout)
         log("running scenario")
-        scenario.acceptance(ctx)
+        # The lane's server minted its data root's own install identity at boot, and this process is another install:
+        # the copied-folder rule refuses even a read there (SM1_a1, 2026-11-02: StoreForeign right after the HTTP
+        # terminal). This stand launched that install, so the scenario reads its store as it (the durable terminal, the
+        # adoption's task record, SW1's children and root); a context variable, so only this lane's thread.
+        with acting_as(data_root):
+            scenario.acceptance(ctx)
         server = ctx.server
         _retain_attempt(row, ctx)
         if absorbing:

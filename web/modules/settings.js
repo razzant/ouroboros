@@ -32,7 +32,7 @@ import { apiClient, apiFetch, cleanExtensionRoute, extensionRoutePath } from './
 import { claudexorStatus } from './claudexor_status_store.js';
 import { createModelRolesEditor } from './model_roles.js';
 import { PROCESSING_PREFERENCE_KEY } from './route_editor_primitives.js';
-import { collectSafeFieldValues, normalizeTone, renderSafeField, setInlineStatus, revealNewRow } from './ui_helpers.js';
+import { collectSafeFieldValues, normalizeTone, renderSafeField, setInlineStatus, revealNewRow, copyTextWithToast } from './ui_helpers.js';
 import { extensionActionStatus } from './extension_status_text.js';
 import { bindLanguageSettings } from './settings_language.js';
 import { mountInterfaceSize } from './interface_size.js';
@@ -515,7 +515,8 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     const modelRoles = createModelRolesEditor({ hostId: 'settings-model-roles',
         onChange: (settings) => { syncProcessingPreference(settings); onSettingsEdited(); } });
     // Accounts → API keys: the key rows, their Test and the "More providers" fold (settings_connections.js).
-    const connections = createConnectionsEditor({ root: page, onChange: () => onSettingsEdited() });
+    const connections = createConnectionsEditor({ root: page, onChange: () => onSettingsEdited(),
+        pageDraft: () => ({ OPENAI_BASE_URL: byId('s-openai-base-url')?.value ?? '' }) });
     modelRoles.mount();
     initMcpSettings({ onChange: onSettingsEdited });
     initSubagentsSection({
@@ -785,7 +786,10 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         } else if (meta.reachability === 'lan_reachable') {
             const url = escapeHtml(meta.recommended_url || '');
             const warning = escapeHtml(meta.warning || '');
-            hint.innerHTML = `LAN URL: <a href="${url}" target="_blank" rel="noopener">${url}</a>${warning ? ' — <strong>' + warning + '</strong>' : ''}`;
+            // Status first, action right (DESIGN "settings-action-row"). The link keeps its own words; the button
+            // carries the address this read drew, so a click after any later read copies that read's address.
+            const copy = url ? `<button type="button" class="btn btn-default btn-sm ui-hit-area" data-copy-lan-url="${url}">Copy link</button>` : '';
+            hint.innerHTML = `<div class="settings-action-row"><span>LAN URL: <a href="${url}" target="_blank" rel="noopener">${url}</a>${warning ? ' — <strong>' + warning + '</strong>' : ''}</span>${copy}</div>`;
             hint.dataset.tone = meta.warning ? 'warn' : 'ok';
             hint.hidden = false;
         } else if (meta.reachability === 'host_ip_unknown') {
@@ -798,6 +802,15 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             hint.hidden = true;
         }
     }
+
+    // Every Settings read rebuilds the hint, so one listener lives as long as the page and reads the address
+    // off the button that was clicked; the shared copy owns the fallback and reports through the toast host.
+    const lanHint = byId('settings-lan-hint');
+    const onLanHintClick = (event) => {
+        const url = event.target?.closest?.('[data-copy-lan-url]')?.dataset.copyLanUrl;
+        if (url) void copyTextWithToast(url, { okMessage: 'LAN URL copied.' });
+    };
+    lanHint?.addEventListener('click', onLanHintClick);
 
     // Skill-requested keys and extension settings sections come from the
     // installed-skill list, a read the settings document never waits for; a
@@ -1208,6 +1221,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         if (event.persisted) return;
         disposeSettingsTabs();
         window.removeEventListener('beforeunload', beforeUnload);
+        lanHint?.removeEventListener('click', onLanHintClick);
         disposeLocalModel();
         disposeOwnerSections.forEach((dispose) => dispose());
         disposeLanguage();

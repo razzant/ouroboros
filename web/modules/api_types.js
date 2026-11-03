@@ -117,10 +117,13 @@
  * @property {string[]} models
  * @property {string=} error
  */
-/** @typedef {Object} ProviderTestRequest
+/** `api_key_setting` names the built-in compatible pair under test (its address may then be overridden too);
+ * omitted keeps the historical resolution.
+ * @typedef {Object} ProviderTestRequest
  * @property {string} provider_id
  * @property {Object<string, string>=} overrides
  * @property {string=} connection
+ * @property {('OPENAI_COMPATIBLE_API_KEY'|'OPENAI_API_KEY')=} api_key_setting
  */
 /** @typedef {Object} ProviderTestResponse
  * @property {boolean} ok

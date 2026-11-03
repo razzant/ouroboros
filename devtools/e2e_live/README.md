@@ -15,6 +15,16 @@ the `--stub` $0 rehearsal; `ui_probe.py` owns the real-browser client;
 `traces.py` owns each lane's key-redacted trace bundle.
 Keep this opt-in stand outside runtime imports and default local evolution.
 
+Launch the stand like any verification command: `python -I -S scripts/safe_test.py --
+<venv>/bin/python -m devtools.e2e_live.run_live_lanes ...` with a dependency-only venv
+(DEVELOPMENT "Build and CI"). Each lane's server is a real installation started on the
+stand's interpreter, so it keeps the boot and adoption dependency sync. For a venv,
+`pip_install_target_args` targets the venv and safe_test's `PIP_REQUIRE_VIRTUALENV`
+admits it; for the bundled interpreter it adds `--user`, which that guard refuses
+(SM1_a1 of 2026-11-02 logged `Could not find an activated virtualenv` at boot). When the bundled runtime's packages match the selected lock, a venv made with
+`--system-site-packages --without-pip` can reuse them. Verify that exact runtime
+and lock before the rehearsal; this does not qualify the packaged user-site path.
+
 ## Scenario acceptance
 
 Judge durable artifacts and actual consumer observations, never model prose
@@ -22,6 +32,15 @@ or an HTTP 200 alone. `LaneContext.check` refuses duplicate keys so a later
 task cannot overwrite an earlier verdict; multi-task scenarios use separate
 terminal-check namespaces. `--attempts N --pass-of K` records every attempt
 and requires K passes for EACH selected scenario.
+
+Each lane's server mints its data root's own install identity at boot. The
+stand process is another install, and the copied-folder rule refuses another
+install even a read of that store. The stand launched the lane's install, so
+`run_lane` runs the acceptance as it (`install_identity.acting_as`, a context
+variable: that lane's thread only), and the store readers a scenario uses after
+the terminal (the durable terminal row, the adoption's task record, SW1's
+children and UI root) answer from the lane. Without that scope SM1_a1 of
+2026-11-02 ended `infra_error:foreign_install_root` right after its HTTP terminal.
 
 | Scenario | Work and required evidence | Rationale / limits |
 |---|---|---|
@@ -130,11 +149,15 @@ fence, including children. Size it for the selected review panel's reservations,
 not only settled spend; SK1's owner-side review is outside root-task accounting
 but remains inside the lane cap.
 
-Retain product-default in-task pacing without injecting a benchmark profile:
-at task start the early stop is the minimum of `cost_hard_stop_pct` (50% of
-global remaining) and the per-task cap minus its planning margin. A lane's
-global remaining is its own budget; root reservations do not disable this
-earlier stop. SW1's UI root and the evolution root also follow this path.
+Retain product-default in-task pacing without injecting a benchmark profile.
+That default has no early cost stop for an ordinary root (owner decision of
+2026-10-07, #1128; the former 50% share is gone): with no
+`budget_profile.cost_hard_stop_pct` and no producer allowance
+(`root_cost_ceiling_usd`, set only for consciousness wakes and Presence),
+`task_pacing.resolve_cost_ceiling` answers `disabled` (`no_default_cost_stop`),
+and paid calls are refused only when known spend reaches the per-root fence
+(`OUROBOROS_PER_TASK_COST_USD`) or the lane's `TOTAL_BUDGET`, its own
+reservation. SW1's UI root and the evolution root are ordinary roots too.
 
 Read settled spend and unknown-cost counts through `budget.lane_spend` (also
 reachable as `run_live_lanes.lane_spend`) from `state/usage.sqlite`, with journal

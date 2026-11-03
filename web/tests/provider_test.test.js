@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+    builtinTestRequest,
     providerTestNetworkErrorStatus,
     providerTestResultIsCurrent,
     providerTestStatusText,
+    reachesAnotherPair,
 } from '../modules/settings_connections.js';
 import { cyberReviewNote } from '../modules/settings_policy.js';
 import { renderSettingsPage } from '../modules/settings_ui.js';
@@ -47,6 +49,39 @@ test('provider test responses apply only to the exact draft generation', () => {
         sentFingerprint: '{"OPENAI_API_KEY":"old"}',
         currentFingerprint: '{"OPENAI_API_KEY":"new"}',
     }), false);
+});
+
+test('the built-in compatible key names the pair its draft reaches; other keys send their own edits', () => {
+    assert.deepEqual(builtinTestRequest('openai', { OPENAI_API_KEY: 'typed' }, { OPENAI_BASE_URL: 'http://l/v1' }),
+        { provider_id: 'openai', overrides: { OPENAI_API_KEY: 'typed' } });
+    const legacy = { OPENAI_BASE_URL: 'http://l/v1', OPENAI_API_KEY: '***set***' };
+    // The legacy pair travels as the page holds it, a kept key still masked.
+    assert.deepEqual(builtinTestRequest('openai-compatible', {}, legacy), { provider_id: 'openai-compatible',
+        api_key_setting: 'OPENAI_API_KEY', overrides: legacy });
+    // Both saved, the dedicated address cleared in the row: the legacy pair, with the key as just edited.
+    assert.deepEqual(builtinTestRequest('openai-compatible', { OPENAI_COMPATIBLE_BASE_URL: '' },
+        { ...legacy, OPENAI_API_KEY: 'sk-edited', OPENAI_COMPATIBLE_BASE_URL: '', OPENAI_COMPATIBLE_API_KEY: '***set***' }),
+    { provider_id: 'openai-compatible', api_key_setting: 'OPENAI_API_KEY',
+        overrides: { OPENAI_COMPATIBLE_BASE_URL: '', OPENAI_BASE_URL: 'http://l/v1', OPENAI_API_KEY: 'sk-edited' } });
+    // A dedicated address: the row's own edits only, and the legacy pair stays home.
+    assert.deepEqual(builtinTestRequest('openai-compatible', { OPENAI_COMPATIBLE_BASE_URL: 'http://d/v1' },
+        { ...legacy, OPENAI_COMPATIBLE_BASE_URL: 'http://d/v1' }), { provider_id: 'openai-compatible',
+        api_key_setting: 'OPENAI_COMPATIBLE_API_KEY', overrides: { OPENAI_COMPATIBLE_BASE_URL: 'http://d/v1' } });
+});
+
+test('the built-in compatible row keeps its facts only while its draft reaches their pair, as Test reads it', () => {
+    const saved = { OPENAI_BASE_URL: 'http://l/v1', OPENAI_API_KEY: 'sk-legac...' };
+    // Read as Test reads it: trimmed, and a kept key compared as the mask the page holds.
+    assert.equal(reachesAnotherPair(saved, { ...saved, OPENAI_BASE_URL: ' http://l/v1 ' }), false);
+    // Edited beside the row (the address, the key it travels with) or in it (a dedicated address): another pair.
+    for (const edit of [{ OPENAI_BASE_URL: 'http://b/v1' }, { OPENAI_API_KEY: '' }, { OPENAI_API_KEY: 'sk-typed' },
+        { OPENAI_COMPATIBLE_BASE_URL: 'http://d/v1' }]) {
+        assert.equal(reachesAnotherPair(saved, { ...saved, ...edit }), true, JSON.stringify(edit));
+    }
+    // A saved dedicated pair is the endpoint: the legacy pair is beside the point until its address is cleared.
+    const both = { ...saved, OPENAI_COMPATIBLE_BASE_URL: 'http://d/v1', OPENAI_COMPATIBLE_API_KEY: 'sk-dedic...' };
+    assert.equal(reachesAnotherPair(both, { ...both, OPENAI_BASE_URL: 'http://b/v1', OPENAI_API_KEY: '' }), false);
+    assert.equal(reachesAnotherPair(both, { ...both, OPENAI_COMPATIBLE_BASE_URL: '' }), true);
 });
 
 test('every provider test button warns that one charged request is sent', () => {

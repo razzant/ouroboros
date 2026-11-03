@@ -155,6 +155,7 @@
  * (a configured secret reads as `secretPlaceholder`), `contract.budgetFields[].stateKey` and `contract.modelSlots[].stateKey`.
  * @typedef {Object} SetupInitialState
  * @property {Object[]} connections Masked OUROBOROS_CONNECTIONS rows, keyed by kind/name.
+ * @property {string} legacyCompatibleBaseUrl Saved OPENAI_BASE_URL, display only: completion never writes it.
  * @property {string} safetyModel
  * @property {string} providerProfile
  * @property {string} reviewEnforcement

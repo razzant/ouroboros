@@ -168,7 +168,7 @@ Enforcement: `tests/test_cancel_intents_phase_a.py`, `tests/test_cancel_cascade_
 
 ### Onboarding and Settings surfaces
 
-ARCHITECTURE §2 owns wizard steps, completion and install-time proofs; §3 owns Settings, accounts and shared controls. Copy and wizard shape are review-only. The imperatives:
+ARCHITECTURE §2 owns wizard steps, completion and install proofs; §3 Settings, accounts and shared controls. Copy is review-only; layout: `test_onboarding_layout_browser`.
 
 - Keep entry models, keys, Supervisor, Review and room cognition private; never publish project overrides to process env. New participants resolve their current room; running actors retain their choice through Resume (`test_project_cognition_runtime`). Writers, grants and skill settings read current disk. Cyber configures under effective Access; permission is not a verdict.
 - One wizard host, the `GET /onboarding` page, serves subscriptions, API keys and mixed installs; its frame keeps the `allow-popups allow-popups-to-escape-sandbox` sandbox tokens, without which the sign-in click is blocked silently. Completion stays one transaction and the client completes only on the exact success envelope (`ok`/`runtime_mode`/`restart_required`; ARCHITECTURE §2), because a silent success discards the restart receipt. Only declared raw-model sources supply Main, never agent-only connections; "Without an API key" never means free.
