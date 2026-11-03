@@ -223,6 +223,20 @@ def test_the_focus_line_names_its_reader_and_its_age_at_the_rows_sample_instant(
     assert "written 3 h 20 min ago" in _facts(ctx.messages)
 
 
+@pytest.mark.parametrize("sampled,said", [("2026-10-10T12:00:00Z", "written less than a minute ago"),
+                                         ("2026-10-10T12:00:59Z", "written less than a minute ago"),
+                                         ("2026-10-10T12:01:00Z", "written 1 min ago")])
+def test_a_line_younger_than_a_minute_says_so_and_never_a_minute(tmp_path, monkeypatch, sampled, said):
+    """The age reads at one-minute granularity (``ago_text``, the wake's lines too): a line written under a minute
+    ago says so, a minute old says one."""
+    ctx = _ctx(tmp_path)
+    ctx.context_fit_plan = None
+    _record(tmp_path, "Just started")
+    _sampled_at(monkeypatch, sampled)
+    assert append_context_facts(ctx)
+    assert f"name, {said} (dated data" in _facts(ctx.messages)
+
+
 def test_an_unreadable_authoring_time_is_said_not_guessed(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     ctx.context_fit_plan = None
