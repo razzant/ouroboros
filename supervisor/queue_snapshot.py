@@ -921,8 +921,44 @@ def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -
                          if task_id not in live_direct and task_id not in pending_ids]
         if unread and not direct_caught:
             return 0
+        # A direct row the dead process had ALREADY QUEUED (it sits in this
+        # snapshot's pending list) never reaches ``direct_caught`` — restore
+        # excludes pending ids there so the queued copy is the one that decides.
+        # Its owner naming a replaced generation is the same positive fact the
+        # caught-direct path rests on: the actor that would resume it is gone, and
+        # a hold whose Resume can never be answered keeps it non-terminal forever
+        # (it counts as active for every idle gate, and no sweep heals a
+        # non-running row). Saved forms — an exact pause, an acknowledged owner
+        # wait, a working-recovery handoff, a schedule occurrence — keep their own
+        # retention branches: the scan below filters every one out BEFORE an id
+        # joins the fence (so also before retention performs its side effects),
+        # and the one fence call below reaches only the row with nothing else
+        # owning it, giving it the same cancel-intent custody that settles caught
+        # direct roots.
+        from supervisor.direct_roots import direct_owner_generation_gone, direct_row_has_surviving_owner
+
+        direct_pending_fence: list[str] = []
+        for task in snapshot_pending:
+            task_id = str(task.get("id") or "")
+            if not task.get("_is_direct_chat") or task_id in direct_caught:
+                continue
+            try:
+                stored = load_task_result(_queue().DRIVE_ROOT, task_id, strict=True) or {}
+            except Exception:
+                continue
+            if (stored and direct_owner_generation_gone(_queue().DRIVE_ROOT, stored)
+                    and not direct_row_has_surviving_owner(_queue().DRIVE_ROOT, stored, task)):
+                direct_pending_fence.append(task_id)
         snapshot_pending, unseen_pauses, consumed_rows, prior_roots = _retain_snapshot_pending(  # #1183 handoffs
             snapshot_pending, running_rows, stale=stale, direct_caught=direct_caught, handoffs=(handoffs := {}))
+        if direct_pending_fence:
+            # The queued direct rows whose owner generation is gone are fenced
+            # below like any caught direct root, so their pending copies must not
+            # survive into the revival loop (which would hold them forever) nor
+            # into the fence's own ``restored_ids`` exclusion (which would skip
+            # them exactly because retention kept the row visible).
+            snapshot_pending = [task for task in snapshot_pending
+                                if str(task.get("id") or "") not in set(direct_pending_fence)]
         from supervisor.restart_retention import consume_return_transaction, fresh_return_transaction
 
         # This boot decided the returns; a later stop can never reuse the transaction.
@@ -930,6 +966,7 @@ def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -
         fenced_running = _fence_snapshot_running_rows(
             running_rows
             + [{"id": task_id} for task_id in direct_caught]
+            + [{"id": task_id} for task_id in direct_pending_fence]
             # A stale row whose grant was consumed names work that ran on: the
             # ordinary fence, never a re-armed pause (revoke_exact_budget_resume).
             + [{"id": task_id} for task_id in consumed_rows],
