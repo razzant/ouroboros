@@ -718,7 +718,8 @@ def test_wake_affordances_describe_the_real_alarm_and_the_status_audience():
     wake = schemas["set_next_wakeup"]["description"]
     for phrase in ("after a wake-up ends", "OUROBOROS_BG_WAKEUP_MIN/MAX", "already pending keeps its time",
                    "stored for later", "failed wake-up doubles the interval (up to MAX)", "retries after MIN",
-                   "exhausted allowance waits for its reset", "sooner than MIN after the last wake-up, boot or skip",
+                   "exhausted allowance waits for its reset or a changed daily limit",
+                   "sooner than MIN after the last wake-up, boot or skip",
                    "Events never bring a wake-up forward"):
         assert phrase in wake
     # #1603 (owner 12 Oct): only the scheduled time; no event pulls the alarm earlier

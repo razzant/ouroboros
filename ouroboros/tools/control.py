@@ -110,8 +110,8 @@ _START_TASK_DESCRIPTION = (
     "workspace='none' opts out of the room's default folder. "
     "Set context_requires_development=true only when the task itself needs the whole development handbook in every "
     "mode, never for its subject; a route too small for it refuses the task. "
-    "A durable pending intent means accepted, waiting to start; inspect its recorded "
-    "outcome before explicitly retrying an uncertain admission."
+    "A durable pending intent is recorded but not yet confirmed; inspect its recorded "
+    "outcome before explicitly retrying."
 )
 
 
@@ -421,12 +421,12 @@ def get_tools() -> List[ToolEntry]:
         }, _toggle_consciousness),
         ToolEntry("set_next_wakeup", {
             "name": "set_next_wakeup", "description": (
-                "Choose the consciousness wake-up interval in seconds: how long after a wake-up ends the next one "
-                "starts, clamped into the owner's OUROBOROS_BG_WAKEUP_MIN/MAX. A wake-up calling this sets its own "
-                "next one; a wake-up already pending keeps its time; with consciousness off it is stored for later. "
-                "The alarm still adjusts it: a failed wake-up doubles the interval (up to MAX), a skipped one "
-                "retries after MIN (an exhausted allowance waits for its reset), and no wake-up starts sooner than "
-                "MIN after the last wake-up, boot or skip. Events never bring a wake-up forward; the next one "
+                "Choose the consciousness wake-up interval: how long after a wake-up ends the next one starts, "
+                "clamped into the owner's OUROBOROS_BG_WAKEUP_MIN/MAX. A wake-up calling this sets its own next "
+                "one; one already pending keeps its time; with consciousness off it is stored for later. The alarm "
+                "adjusts it: a failed wake-up doubles the interval (up to MAX), a skipped one retries after MIN (an "
+                "exhausted allowance waits for its reset or a changed daily limit), and no wake-up starts sooner "
+                "than MIN after the last wake-up, boot or skip. Events never bring a wake-up forward; the next one "
                 "observes them."),
             "parameters": {"type": "object", "properties": {"seconds": {"type": "integer", "description": "Seconds from the end of a wake-up to the next one"}}, "required": ["seconds"]},
         }, _set_next_wakeup),

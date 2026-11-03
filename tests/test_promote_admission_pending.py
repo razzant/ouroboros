@@ -118,6 +118,15 @@ def test_a_live_unconfirmed_promote_says_its_measured_wait_and_the_body_as_recor
     assert "Accepted" not in out and "behind" not in out
 
 
+def test_the_start_task_schema_says_what_its_receipt_says():
+    """The schema the mind reads before calling agrees with the receipt (#1959's pair): a pending intent is
+    recorded, not yet confirmed, and never "accepted"."""
+    from ouroboros.tools.control import _START_TASK_DESCRIPTION
+
+    assert "A durable pending intent is recorded but not yet confirmed" in _START_TASK_DESCRIPTION
+    assert "accepted" not in _START_TASK_DESCRIPTION.lower()
+
+
 def test_an_unrecorded_body_is_unknown_never_zero(tmp_path, _short_confirmation_window):
     from ouroboros.tools.control_routing import _start_task
 
