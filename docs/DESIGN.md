@@ -171,18 +171,17 @@ under System. In full screen the bar hides until the pointer reveals it; the set
 and error windows and a UI that does not declare it keep the ordinary title bar. A
 browser, another OS or an older desktop app reserves nothing.
 
-A screen that cannot read the choice follows its host (owner 26.10, #1111 A). The Mac's
-main window opens at once in the room colour of the Mac's appearance; when its page
-has read a choice that differs, the window changes once to that palette, never waiting
-to be shown; the first-run setup window opens in the Mac's colour too, then its page
-paints the saved choice. The windows shown before the server (already running, Git
-required, startup failed) follow macOS. The network login page follows this browser's
-saved choice, else the device; the Telegram connecting page the Mini App's saved
-choice, else Telegram's light or dark. The login page and the windows before the
-server inline the interface's own `theme.js` and `ui.css`; the Telegram page restates
-only the palette's room and ink and reads the same saved choice. The Mac's windows
-need a new desktop app on older frozen launchers; source-handoff shells can take
-this through source updates. Login and Telegram change with an ordinary update.
+A screen that cannot read the choice follows its host (owner 26.10, #1111 A). The main
+window opens at once in the room colour of the Mac's appearance or Windows' app mode; when
+its page reads a different choice, the window changes once to that palette without
+waiting to be shown; setup opens the same way, then its page paints the saved choice.
+The pre-server windows (already running, Git required, startup failed) follow the device. A Windows contrast theme keeps the main window dark, others white. No
+Windows desktop has shown these frames yet; Linux keeps its toolkit's first colour,
+unobserved. The login page follows this browser's saved choice, else the device; the
+Telegram connecting page the Mini App's, else Telegram's light or dark. Login and pre-server
+pages inline `theme.js` and `ui.css`; Telegram's restates only room and ink. Older frozen
+launchers need a new desktop app for this; source-handoff shells take source updates. Login
+and Telegram change with an ordinary update.
 
 **Interface size** (Settings → Appearance, under Theme) is one slider that makes
 everything larger or smaller, per device (owner 23.10). Whoever

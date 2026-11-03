@@ -52,6 +52,9 @@ appearance: the room colour (``web/ui.css`` ``--bg-primary``) of the Mac's Light
 frame follows macOS and nothing waits for the page (owner decision on #1111: A). A page whose choice
 differs forces its appearance when it declares, and the same colour then follows it, live resizes
 included. The windows shown before the server have no page choice to read and keep the Mac's.
+On Windows ``paint_room`` sets that fixed colour to the room of the app mode instead; it stays put
+after the page paints. Elsewhere it changes nothing: pywebview 5.4's GTK window takes the colour only
+through a ``GtkWindow`` style rule, and what a GTK window shows before its page is not yet observed.
 """
 
 from __future__ import annotations
@@ -61,6 +64,8 @@ import logging
 import math
 import sys
 from typing import Any, Optional
+
+from ouroboros.launcher_appearance import NativeAppearance, host_palette
 
 log = logging.getLogger("launcher.window_chrome")
 
@@ -182,9 +187,22 @@ def _webview_of(window: Any) -> Any:
 
 
 def paint_room(window: Any) -> None:
-    """Register ``window`` to open in the room colour of its own appearance; inert off macOS."""
-    if _MACOS and window is not None:
+    """Before ``webview.start``: ``window`` opens in the room colour of its host's appearance.
+
+    macOS: one dynamic colour, set in ``before_show``. Windows: the room of the app mode a System page
+    will paint (``launcher_appearance.host_palette``) becomes pywebview's ``background_color``, the form's,
+    its WebView2's and the caption's first colour, and a window made from ``html=`` has no origin, so no
+    page choice or bridge will speak for it: its caption stays with its host. Elsewhere, or with the
+    palette unknown, the colour does not change."""
+    if window is None:
+        return
+    if _MACOS:
         window.events.before_show += lambda: _paint_room(getattr(window, "native", None))
+        return
+    if room := ROOM.get(host_palette()):
+        window.background_color = room
+    if getattr(window, "html", None):
+        NativeAppearance().attach(window)  # inert off Windows
 
 
 def _paint_room(native: Any) -> None:
@@ -232,11 +250,11 @@ class WindowChrome:
         self._closed = False
 
     def attach(self, window: Any) -> None:
-        """Register on ``window`` before ``webview.start``; inert off macOS."""
+        """Register on ``window`` before ``webview.start``: its room colour everywhere, the rest on macOS only."""
+        paint_room(window)
         if not _MACOS or window is None:
             return
         self._window = window
-        paint_room(window)
         window.events.before_show += self._before_show
         window.events.before_load += self._navigation_finished
         window.events.closed += self._close
