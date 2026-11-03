@@ -696,7 +696,7 @@ def _caption_for_block(
                 get_vision_caption_timeout_sec(), deadline_ts=deadline_ts, reserve_sec=reserve),
             purpose="caption",
             # The same window bounds the send after image preparation and the slot wait (#572).
-            **({"caller_deadline_ts": deadline_ts - reserve}
+            **({"caller_dispatch_deadline_ts": deadline_ts - reserve}
                if isinstance(deadline_ts, (int, float)) and not isinstance(deadline_ts, bool) else {}),
         )
     except Exception as exc:

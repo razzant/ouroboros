@@ -201,6 +201,7 @@ class LLMClient(
         caller_execution_deadline: Optional[float] = None,
         wait_for_resources: bool = True,
         processing_preference: str | None = None,
+        caller_dispatch_deadline_ts: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Single LLM call returning (message, usage); no_proxy avoids macOS fork proxy crashes.
 
@@ -217,7 +218,9 @@ class LLMClient(
         (``llm_claudexor.ModelTurnState``); this seam is where a dispatch that
         leaves that transport ends the turn. ``wait_for_resources=False`` returns
         a confirmed quota/auth refusal to this caller without entering resource
-        waiting; task overrides, controls and dispatched-operation custody remain."""
+        waiting; task overrides, controls and dispatched-operation custody remain.
+        ``caller_dispatch_deadline_ts`` is a helper's send window, never a wait's end
+        (``deadline_utils.caller_deadline_scoped``)."""
         from ouroboros.llm_claudexor import turn_state_for_route
 
         messages = self._normalize_system_message_placement(messages)
@@ -285,6 +288,7 @@ class LLMClient(
         caller_execution_deadline: Optional[float] = None,
         wait_for_resources: bool = True,
         processing_preference: str | None = None,
+        caller_dispatch_deadline_ts: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Async remote chat; no_proxy keeps forked macOS workers off OS proxy APIs.
 
@@ -632,14 +636,14 @@ class LLMClient(
         model_account_override: str | None = None,
         processing_preference: str | None = None,
         purpose: str = "vlm",
-        caller_deadline_ts: Optional[float] = None,
+        caller_dispatch_deadline_ts: Optional[float] = None,
     ) -> Tuple[str, Dict[str, Any]]:
         """Run a lightweight vision query; image dicts use url or base64+mime.
 
         ``model`` is named explicitly, so the one image policy sends its pixels
         (``purpose`` "vlm" for a VLM tool, "caption" for a send-time caption);
         it never captions here, so a caption cannot recurse into another.
-        ``caller_deadline_ts`` is ``chat``'s absolute bound, reserve already subtracted."""
+        ``caller_dispatch_deadline_ts`` is ``chat``'s send window, reserve already subtracted."""
         from ouroboros.vision_routing import VisionRoutingContext, prepare_messages_for_send
         from ouroboros.vision_image_limits import query_image_messages
         from ouroboros.model_wait import current_model_wait
@@ -677,7 +681,8 @@ class LLMClient(
             model_operation_observer=model_operation_observer,
             model_account_override=model_account_override,
             processing_preference=processing_preference,
-            **({"caller_deadline_ts": caller_deadline_ts} if caller_deadline_ts is not None else {}),
+            **({"caller_dispatch_deadline_ts": caller_dispatch_deadline_ts}
+               if caller_dispatch_deadline_ts is not None else {}),
         ))
         waiter = current_model_wait()
         with waiter.register_reprepare(model_role, prepare) if waiter else nullcontext():
@@ -709,11 +714,11 @@ def openrouter_web_search_server_tool(
 
     *, api_key: str, model: str, query: str, search_context_size: str,
     accounting_scope: Optional[UsageScope] = None, timeout: Optional[float] = None,
-    processing_preference: str | None = None, caller_deadline_ts: Optional[float] = None,
+    processing_preference: str | None = None, caller_dispatch_deadline_ts: Optional[float] = None,
 ) -> Any:
     """Keep native search tools on the shared physical-send recovery driver.
 
-    ``caller_deadline_ts`` is ``chat``'s absolute bound, reserve already subtracted."""
+    ``caller_dispatch_deadline_ts`` is the leg's send window as in ``chat``, reserve already subtracted."""
     return _openrouter_web_search_server_tool(
         api_key=api_key, model=model, query=query, search_context_size=search_context_size,
         accounting_scope=accounting_scope, timeout=timeout, processing_preference=processing_preference,
@@ -725,11 +730,11 @@ def openrouter_web_search_server_tool(
 def anthropic_web_search_server_tool(
     *, api_key: str, model: str, query: str,
     accounting_scope: Optional[UsageScope] = None, timeout: Optional[float] = None,
-    processing_preference: str | None = None, caller_deadline_ts: Optional[float] = None,
+    processing_preference: str | None = None, caller_dispatch_deadline_ts: Optional[float] = None,
 ) -> Any:
     """Compose native Messages search without converting its provider-owned tool.
 
-    ``caller_deadline_ts`` is ``chat``'s absolute bound, reserve already subtracted."""
+    ``caller_dispatch_deadline_ts`` is the leg's send window as in ``chat``, reserve already subtracted."""
     return _anthropic_web_search_server_tool(
         api_key=api_key, model=model, query=query, accounting_scope=accounting_scope,
         timeout=timeout, processing_preference=processing_preference,

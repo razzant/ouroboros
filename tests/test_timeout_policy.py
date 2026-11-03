@@ -58,6 +58,20 @@ def test_dispatch_window_distinguishes_no_deadline_from_spent_deadline(monkeypat
     assert deadlines.dispatch_window_remaining_sec(deadline_ts=999.0) == 0.0
 
 
+def test_dispatch_window_end_is_that_window_as_an_instant_read_from_no_clock(monkeypatch):
+    from types import SimpleNamespace
+
+    import ouroboros.deadline_utils as deadlines
+
+    monkeypatch.setattr(deadlines, "time", SimpleNamespace(time=lambda: pytest.fail("no clock is read")))
+    monkeypatch.setattr(deadlines, "utc_now", lambda: pytest.fail("no clock is read"))
+    iso = "1970-01-01T00:16:50+00:00"  # 1010
+    assert deadlines.dispatch_window_end_ts() is None
+    assert deadlines.dispatch_window_end_ts(deadline_ts=1010.0, reserve_sec=3) == 1007.0
+    assert deadlines.dispatch_window_end_ts(deadline_at=iso, reserve_sec=3) == 1007.0
+    assert deadlines.dispatch_window_end_ts(deadline_ts=999.0, deadline_at=iso) == 999.0  # the epoch wins, unclamped
+
+
 def test_owner_deadline_admission_can_reserve_settlement_window(monkeypatch):
     import ouroboros.deadline_utils as deadlines
 

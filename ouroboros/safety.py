@@ -1029,7 +1029,7 @@ def _safety_model_call(
                     response_format=({"type": "json_object"}
                                      if LLMClient.supports_response_format(light_model, use_local=use_local)
                                      else None),
-                    **({"caller_deadline_ts": deadline} if deadline is not None else {}),
+                    **({"caller_dispatch_deadline_ts": deadline} if deadline is not None else {}),
                 )
         except Exception as e:
             from ouroboros.llm_claudexor import propagate_model_error

@@ -272,7 +272,8 @@ def _extract_verdict_via_light_model(
         if transport is not None:
             chat_kwargs["timeout"] = transport
         # The same deadline − grace window also bounds the send after preparation (#572).
-        chat_kwargs.update(caller_deadline_arguments(deadline_at, None, reserve_sec=get_finalization_grace_sec()))
+        chat_kwargs.update(caller_deadline_arguments(deadline_at, None, reserve_sec=get_finalization_grace_sec(),
+                                                     dispatch_only=True))
         with physical_attempt_limit(1), usage_scope(_scope):
             message, usage = llm.chat(**chat_kwargs)
     except Exception as exc:

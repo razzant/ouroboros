@@ -216,7 +216,7 @@ def test_an_ordinary_child_keeps_its_plain_failure_for_any_refusal(vlm):
 def test_without_a_deadline_the_socket_timeout_never_becomes_a_lifetime(vlm):
     assert "one pixel" in vlm.call(child_start=NOW + 5, recording_sec=10_000)
     assert [timeout["read"] for timeout in sent(vlm)] == [300.0]
-    assert "caller_deadline_ts" not in vlm.state["payloads"][0]
+    assert "caller_dispatch_deadline_ts" not in vlm.state["payloads"][0]
 
 
 def gateway_calls(env):
@@ -231,7 +231,7 @@ def test_an_unbounded_subscription_call_still_gets_no_bound(vlm):
     """No task deadline and no execution window: no child timeout and no deadline crosses to the child."""
     assert "pixels read exactly once" in vlm.call(model=SUBSCRIPTION, child_start=NOW + 10_000)
     assert vlm.state["child_timeouts"] == [None]
-    assert "caller_deadline_ts" not in vlm.state["payloads"][0]
+    assert "caller_dispatch_deadline_ts" not in vlm.state["payloads"][0]
     assert gateway_calls(vlm) == ["upload", "create", "generation", "ack"]
 
 
@@ -241,7 +241,7 @@ def test_the_pause_adjusted_execution_window_stays_with_the_parent(vlm, monkeypa
     monkeypatch.setattr(vision, "_vision_execution_window", lambda: 50.0)
     assert "pixels read exactly once" in vlm.call(model=SUBSCRIPTION, deadline=deadline, child_start=NOW + 5)
     assert vlm.state["child_timeouts"] == [50.0 + 30]
-    assert vlm.state["payloads"][0].get("caller_deadline_ts") == bound
+    assert vlm.state["payloads"][0].get("caller_dispatch_deadline_ts") == bound
 
 
 def test_a_subscription_call_with_time_left_runs_and_its_window_never_cancels_it(vlm):
@@ -250,9 +250,44 @@ def test_a_subscription_call_with_time_left_runs_and_its_window_never_cancels_it
     text = vlm.call(model=SUBSCRIPTION, deadline=DEADLINE, child_start=NOW + 5, recording_sec=10,
                     mode="slow", create_sec=200)
     assert "pixels read exactly once" in text
-    assert vlm.state["child_timeouts"] == [120.0 + 30] and vlm.state["payloads"][0]["caller_deadline_ts"] == 1120.0
+    assert vlm.state["child_timeouts"] == [120.0 + 30]
+    assert vlm.state["payloads"][0]["caller_dispatch_deadline_ts"] == 1120.0
     assert gateway_calls(vlm) == ["upload", "create", "generation", "ack"]
     assert ledger_states(vlm) == ["settled"]
+
+
+@pytest.fixture
+def slow_parent(monkeypatch):
+    """The parent's clock moves 3 s at every read, and its execution-window lookup takes 3 s more."""
+    clock = [NOW]
+
+    def read():
+        clock[0] += 3
+        return clock[0] - 3
+
+    monkeypatch.setattr(deadline_utils, "utc_now", lambda: datetime.fromtimestamp(read(), timezone.utc))
+    monkeypatch.setattr(deadline_utils, "time", SimpleNamespace(time=read))
+    monkeypatch.setattr(vision, "_vision_execution_window", lambda: clock.__setitem__(0, clock[0] + 3) or 50.0)
+    return clock
+
+
+@pytest.mark.parametrize("model", [MODEL, SUBSCRIPTION], ids=["api", "subscription"])
+def test_the_child_window_is_the_deadline_less_the_reserve_however_long_the_parent_takes(vlm, slow_parent, model):
+    """The bound used to be re-projected at a later parent read as now + remaining, carrying the time between past
+    the window. The instant itself, 1300 − 180 = 1120, now crosses, and the child takes no reserve again: started
+    at 1020, the API child sends with exactly 100 s."""
+    text = vlm.call(model=model, deadline=DEADLINE, child_start=NOW + 20)
+    assert [timeout["read"] for timeout in sent(vlm)] == ([100.0] if model == MODEL else [])
+    assert ("one pixel" if model == MODEL else "pixels read exactly once") in text and slow_parent[0] >= NOW + 6
+    assert vlm.state["payloads"][0]["caller_dispatch_deadline_ts"] == 1120.0
+
+
+@pytest.mark.parametrize("model", [MODEL, SUBSCRIPTION], ids=["api", "subscription"])
+def test_a_child_starting_just_past_that_window_sends_nothing(vlm, slow_parent, model):
+    """At 1121 the window has ended, though a bound re-projected after the parent's own reads had not."""
+    result = vlm.call(model=model, deadline=DEADLINE, child_start=1121)
+    assert "VLM_QUERY_FAILED" in result and "deadline" in result
+    assert sent(vlm) == [] and "create" not in gateway_calls(vlm) and ledger_states(vlm) == []
 
 
 @pytest.mark.parametrize("owned", [False, True], ids=["bare", "wait_owner"])

@@ -4,6 +4,7 @@ Dispatch, turn-slot, pricing and engine-version semantics: ARCHITECTURE §6."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 from dataclasses import replace
 import hashlib
@@ -30,7 +31,8 @@ from ouroboros.llm_substitution import (
     AccountRotation, CapabilityRetry, SubstitutionBudget, capability_refusal_text, substitution_fact, failed_account_preference,
     take_failed_account_preference)
 from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
-from ouroboros.model_wait import ModelWaitInterrupted, current_model_wait, dispatch_deadline_remaining_sec, prepared_call_scope
+from ouroboros.model_wait import (ModelWaitInterrupted, accepted_operation_scope, current_model_wait,
+                                  dispatch_deadline_remaining_sec, prepared_call_scope)
 from ouroboros.observability import persist_call
 from ouroboros.owner_pause import launch_admission, OwnerPauseRefused, model_handed_off
 from ouroboros.transport_custody import ProviderNotDispatched
@@ -370,11 +372,13 @@ class _ModelInvocation:
         self.outage_episode = None
 
     def check_control(self, *, starting=False):
-        """The caller supplies deadline/cancel policy; this seam transports it."""
-        reason = self.interrupt_reason or (self.poll_control() if self.poll_control else None)
-        if not reason:
-            waiter = current_model_wait()
-            reason = waiter.control_reason() if waiter is not None else None
+        """The caller supplies deadline/cancel policy; this seam transports it. Once a create may have been
+        accepted, a helper's send window no longer applies: only the caller's own deadlines and controls end it."""
+        with accepted_operation_scope() if self.create_attempted else contextlib.nullcontext():
+            reason = self.interrupt_reason or (self.poll_control() if self.poll_control else None)
+            if not reason:
+                waiter = current_model_wait()
+                reason = waiter.control_reason() if waiter is not None else None
         if not reason and starting and not self.create_attempted:
             # The first create is this route's send, so a caller's bound holds here even with no wait owner to
             # read it. A repeated create only rejoins its idempotent operation; a running one is never cancelled.

@@ -398,6 +398,9 @@ _CALENDAR: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
     "ouroboros_model_wait_calendar", default=())
 _LOGICAL: contextvars.ContextVar[tuple[tuple[float, str], ...]] = contextvars.ContextVar(
     "ouroboros_model_wait_logical", default=())
+# A helper's send window: it refuses sends like a calendar bound, never the wait for an operation it admitted.
+_DISPATCH: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
+    "ouroboros_model_wait_dispatch", default=())
 # One call's own scope, like its physical capture: never copied into a helper's context.
 _DEFERRED: contextvars.ContextVar[tuple["ResourceDeferral", ...]] = contextvars.ContextVar(
     "ouroboros_model_wait_deferred", default=())
@@ -413,7 +416,7 @@ def copy_wait_context() -> contextvars.Context:
 
     copied = contextvars.Context()
     copy_task_settings_context(copied)
-    for variable in (_CURRENT, _REPREPARE, _CALENDAR, _LOGICAL):
+    for variable in (_CURRENT, _REPREPARE, _CALENDAR, _DISPATCH, _LOGICAL):
         copied.run(variable.set, variable.get())
     return copied
 
@@ -448,20 +451,31 @@ def execution_deadline_scope(deadline: float, *, review_slot_id: str | None = No
 
 
 @contextlib.contextmanager
-def calendar_scope(deadline_at: str) -> Iterator[None]:
-    """Carry a narrower explicit caller deadline through its helper threads."""
-    token = _CALENDAR.set((*_CALENDAR.get(), deadline_at) if deadline_at else _CALENDAR.get())
+def calendar_scope(deadline_at: str, *, dispatch_only: bool = False) -> Iterator[None]:
+    """Carry a narrower explicit caller deadline through its helper threads; ``dispatch_only`` marks a send window."""
+    variable = _DISPATCH if dispatch_only else _CALENDAR
+    token = variable.set((*variable.get(), deadline_at) if deadline_at else variable.get())
     try:
         yield
     finally:
-        _CALENDAR.reset(token)
+        variable.reset(token)
+
+
+@contextlib.contextmanager
+def accepted_operation_scope() -> Iterator[None]:
+    """Await an operation already admitted: every control still applies except the send windows that admitted it."""
+    token = _DISPATCH.set(())
+    try:
+        yield
+    finally:
+        _DISPATCH.reset(token)
 
 
 def dispatch_deadline_remaining_sec() -> float | None:
-    """Read inherited calendar and quota-adjusted execution bounds, without a floor."""
+    """Read inherited calendar, send-window and quota-adjusted execution bounds, without a floor."""
     from ouroboros.deadline_utils import seconds_until
 
-    remaining = [value for bound in _CALENDAR.get()
+    remaining = [value for bound in (*_CALENDAR.get(), *_DISPATCH.get())
                  if (value := seconds_until(bound)) is not None]
     remaining.extend(max(0.0, deadline - monotonic_now(slot))
                      for deadline, slot in _LOGICAL.get())
@@ -469,16 +483,16 @@ def dispatch_deadline_remaining_sec() -> float | None:
 
 
 def owner_control_reason() -> str | None:
-    """What refuses a send here beyond every window a caller imposed (its calendar and execution scopes):
+    """What refuses a send here beyond every window a caller imposed (its calendar, send and execution scopes):
     the owner's Stop, Pause and finalize request, its task's deadline and ceiling. Unreadable controls raise."""
     from ouroboros.owner_pause import model_handed_off
 
-    calendar, logical = _CALENDAR.set(()), _LOGICAL.set(())
+    tokens = [(variable, variable.set(())) for variable in (_CALENDAR, _DISPATCH, _LOGICAL)]
     try:
         return dispatch_control_reason(current_model_wait(), handed_off=model_handed_off())
     finally:
-        _LOGICAL.reset(logical)
-        _CALENDAR.reset(calendar)
+        for variable, token in reversed(tokens):
+            variable.reset(token)
 
 
 class ResourceDeferral:
@@ -770,7 +784,8 @@ class TaskModelWait:
         if not isinstance(metadata, dict):
             metadata = self.task.get("metadata") or {}
         contract = self.task.get("task_contract") or {}
-        deadlines = (*_CALENDAR.get(), self.task.get("deadline_at"), metadata.get("deadline_at"), contract.get("deadline_at"))
+        deadlines = (*_CALENDAR.get(), *_DISPATCH.get(), self.task.get("deadline_at"), metadata.get("deadline_at"),
+                     contract.get("deadline_at"))
         if any(seconds_until(value) == 0.0 for value in deadlines if value):
             return "deadline"
         if any(monotonic_now(slot) >= deadline for deadline, slot in _LOGICAL.get()):

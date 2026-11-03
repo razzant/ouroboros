@@ -92,7 +92,8 @@ def _web_search_caller_deadline(ctx: Any) -> dict:
 
     metadata = getattr(ctx, "task_metadata", {})
     deadline_at = metadata.get("deadline_at") if isinstance(metadata, dict) else None
-    return caller_deadline_arguments(deadline_at, None, reserve_sec=effective_finalization_reserve_sec(ctx))
+    return caller_deadline_arguments(deadline_at, None, reserve_sec=effective_finalization_reserve_sec(ctx),
+                                     dispatch_only=True)
 
 
 def _web_search_deadline_exhausted(ctx: Any) -> bool:
