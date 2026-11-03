@@ -100,7 +100,9 @@ project version in `pyproject.toml`, the editable root in `uv.lock`, the version
 in `web/package.json`, `GATEWAY_CONTRACT_VERSION`, the README badge and Version
 History, the named installer links in README and both install pages, the
 Architecture version header, and release tags unchanged.
-Maintainers assign collision-free release metadata on the final landing tree.
+Between releases `VERSION` is one fixed `X.Y.Z-alpha.0` development marker that no
+contribution moves; the exact commit identifies a build. Maintainers open each cycle
+and cut each release ("Maintainer Boundary" below).
 
 Commit the intended change before producing final evidence, then require
 `git status --short` to be empty. Review evidence covers a committed
@@ -357,6 +359,30 @@ commit, push, merge, release, or publication.
 Maintainers may reproduce tests, request a smaller diff, add integration fixes,
 and rerun the project's final review on the exact landing tree. They choose the
 landing parent and release version while preserving contributor authorship.
+
+Between releases they keep one development cycle (BIBLE P9;
+`tests/test_development_cycle.py`):
+
+1. **Open.** Write `VERSION` as `X.Y.Z-alpha.0`, of a base above the last release, and
+   run `release_sync.sync_release_metadata` (`commit_reviewed` does when `VERSION` is
+   staged). Every carrier follows except the download links and README history, which
+   stay on the last published release. No row, tag, signature or installer follows: the
+   commit path never tags it, and CI's `release-preflight` and
+   `scripts/build_repo_bundle.py` refuse it.
+2. **Cut.** A selected candidate becomes plain `X.Y.Z` with its README row, beside
+   `ouroboros` if that has moved. The sync moves its links and the commit creates
+   `vX.Y.Z`. The next marker may open at once: its links wait on the old release, so no
+   branch points at unpublished assets. A greater minor leaves `X.Y.*` free for a bug
+   repair, a plain tag on its own line, promoted the same way.
+3. **Bring it in, after publication.** Merge the tag into `ouroboros`. If the next marker
+   is already open, run `python scripts/carrier_rebase_helper.py --prefer theirs` on the
+   carrier conflicts, write the marker back to `VERSION` and sync: the release's links
+   and row stay. This is the one carrier move admitted with `VERSION` unchanged, and
+   publication is the author's reviewed claim; no tag proves it.
+   `sync_release_metadata(repo, published_version="X.Y.Z")` repairs links a merge dropped.
+4. **Promote.** `scripts/promote_stable.py` refuses until `ouroboros` holds the tag and
+   its links under a numerically greater marker, and never writes that branch. `main`
+   stays the release tree plus its generated Cask, never the development tree.
 
 Contributions are licensed under the repository's
 [`LICENSE`](LICENSE). By submitting a contribution, you confirm that you have

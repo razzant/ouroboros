@@ -63,10 +63,12 @@ def _fingerprint_staged_diff(repo_dir: pathlib.Path) -> Dict[str, Any]:
     ``git write-tree`` is the staged snapshot Git will commit. HEAD plus every
     MERGE_HEAD row is the exact parent vector. VERSION is read from the index,
     and a staged VERSION bump binds the expected release tag and any pre-existing
-    tag target. The existing durable fingerprint fields remain the review-state
-    mechanism; only their input becomes complete. ``diff_sha256`` is the frozen
+    tag target; a development marker (BIBLE P9) binds none. The existing durable
+    fingerprint fields remain the review-state mechanism; only their input becomes
+    complete. ``diff_sha256`` is the frozen
     subject's own patch identity (``review_subject.staged_patch``).
     """
+    from ouroboros.tools.release_sync import is_development_marker
     from ouroboros.tools.review_subject import staged_patch
 
     try:
@@ -100,7 +102,7 @@ def _fingerprint_staged_diff(repo_dir: pathlib.Path) -> Dict[str, Any]:
             staged_version = ""
         if version_staged and not staged_version:
             raise RuntimeError("staged VERSION is missing or empty")
-        expected_tag = f"v{staged_version}" if version_staged else ""
+        expected_tag = f"v{staged_version}" if version_staged and not is_development_marker(staged_version) else ""
         existing_tag_target = ""
         if expected_tag:
             tag_probe = subprocess.run(

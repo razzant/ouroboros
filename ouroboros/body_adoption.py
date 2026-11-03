@@ -141,6 +141,7 @@ def authorize_row(data_dir: pathlib.Path, row: Dict[str, Any], commit: str, *, r
                   runtime_mode: str = "advanced", task_id: str = "", ctx: Any = None) -> Dict[str, Any]:
     """The checks and the durable handoff; shared by the tool and the evolution supervisor path."""
     from ouroboros import body_candidate
+    from ouroboros.tools.release_sync import is_development_marker
 
     serving, candidate = pathlib.Path(str(row["repo_dir"])), pathlib.Path(str(row["path"]))
     resolved = _git(candidate, "rev-parse", "--verify", f"{str(commit).strip()}^{{commit}}", check=False)
@@ -180,7 +181,8 @@ def authorize_row(data_dir: pathlib.Path, row: Dict[str, Any], commit: str, *, r
             "ADOPTION_HOOK_MISSING",
             "both the serving body and the candidate must carry the package-init adoption hook and the "
             "entry files; a body without it receives the hook through an ordinary release first.")
-    if "BIBLE.md" in paths and "VERSION" not in paths and runtime_mode != "cyber_pro":
+    if "BIBLE.md" in paths and runtime_mode != "cyber_pro" and ("VERSION" not in paths or is_development_marker(
+            _git(candidate, "show", f"{cand}:VERSION", check=False).stdout)):
         raise AdoptionRefused(
             "ADOPTION_CONSTITUTION_NEEDS_RELEASE",
             "a constitutional change takes effect only through an explicit reviewed release (BIBLE preamble): "
