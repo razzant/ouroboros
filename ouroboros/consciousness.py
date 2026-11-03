@@ -13,7 +13,9 @@ rolling-24h allowance (an unreadable ledger is the disclosed skip
 ``allowance_unknown``, never a silent block; known spend at the daily limit is
 ``allowance_exhausted``) → an owner chat must be bound → launch. A skip keeps the window it met
 (``allowance_fact``, the projection a wake's preparation carries) in its event and in the one
-overwritten ``consciousness_last_skip`` state key, which the mind's status read shows.
+overwritten ``consciousness_last_skip`` state key, which the mind's status read shows. An exhausted
+allowance waits for its window to free, a time chosen under the limit it met: a changed daily limit
+re-checks that window at once (``_limit_reopens_skip``; the appointment is untouched).
 What is left of that allowance is the launched tree's producer ceiling
 (``metadata.root_cost_ceiling_usd``, В26=A): the in-task stop pauses the wake when its known
 spend reaches it — no extra planning margin is subtracted or skipped (owner 2026-10-07) — while the
@@ -49,13 +51,14 @@ import math
 import pathlib
 import threading
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from ouroboros.config import (
     WAKE_DEFAULT_SEC,
     get_bg_wakeup_max_sec,
     get_bg_wakeup_min_sec,
     get_consciousness_autonomy,
+    get_consciousness_daily_usd,
     get_consciousness_max_tasks,
     runtime_setting,
 )
@@ -94,6 +97,20 @@ def allowance_fact(window: Dict[str, Any]) -> Dict[str, Any]:
     null is unknown, never 0."""
     return {**{key: window.get(key) for key in ("settled_usd", "unknown_unmetered", "limit_usd", "spend_by_cause")},
             "resets_at": window.get("resets_at") or None}
+
+
+def _money_skip_basis(skip: Any, next_wake_at: float) -> Optional[Tuple[float, float]]:
+    """``(the time it chose, the limit it met)`` when ``skip`` is an exhausted-allowance skip that set this next
+    wake: the fact ``_limit_reopens_skip`` compares the setting with."""
+    if not isinstance(skip, dict) or skip.get("reason") != "allowance_exhausted":
+        return None
+    allowance = skip.get("allowance") if isinstance(skip.get("allowance"), dict) else {}
+    limit = allowance.get("limit_usd")
+    try:  # a stored time that cannot be a date is no basis
+        chose_this_wake = skip.get("next_wake_at") == _iso(next_wake_at)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return (float(next_wake_at), float(limit)) if chose_this_wake and type(limit) in (int, float) else None
 
 
 def panic_blocks_wake(drive_root: Any) -> bool:
@@ -159,6 +176,7 @@ class BackgroundConsciousness:
             bootstrap = persisted_last_wake or self._booted_at
         self._observation_bootstrap_since = bootstrap
         self._backoff, self._allowance = 1, (0.0, {})
+        self._skip_basis = _money_skip_basis(state.get(LAST_SKIP_STATE_KEY), persisted)  # memory only
         self._in_flight = ""  # the id this process is binding, until its admission answers
         self._archive_legacy_inbox()
 
@@ -257,7 +275,7 @@ class BackgroundConsciousness:
                 return "disabled"
             if wake or ended_live:
                 return "wake_live"
-            if now < self._next_wake_at:
+            if now < self._next_wake_at and not self._limit_reopens_skip():
                 return "not_due"
             window = self._allowance_view(now, fresh=True)
             if window.get("status") == STATUS_UNKNOWN:
@@ -308,8 +326,17 @@ class BackgroundConsciousness:
         self._last_wake_outcome, self._last_error = f"skipped:{reason}", error
         skip = {"reason": reason, "next_wake_at": _iso(next_at), "error": error, "allowance": allowance_fact(window)}
         self._set_next_wake(next_at, skip={"at": _iso(now), **skip})
+        self._skip_basis = _money_skip_basis(skip, self._next_wake_at)
         self._record("consciousness_wake_skipped", **skip)
         return f"skipped:{reason}"
+
+    def _limit_reopens_skip(self) -> bool:
+        """An exhausted allowance chose its time (the window's reset) under the limit it met. While that time
+        stands, a different daily limit re-checks the same window now, which admits or skips again under the
+        new limit: the skip's own fact changed, no event moved the schedule. The check reads only the setting;
+        it adds no ledger or state read to a tick (#2654)."""
+        basis = self._skip_basis
+        return basis is not None and basis[0] == self._next_wake_at and basis[1] != float(get_consciousness_daily_usd())
 
     def _launch(self, now: float, chat_id: int, window: Dict[str, Any]) -> str:
         from supervisor import workers

@@ -843,7 +843,8 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
                                       "source": "owner settings, not the state file"}
     facts["notes"] = [
         "stored_next_wake_at is the last time the clock persisted and fires only while enabled; the running "
-        "clock keeps it no sooner than MIN after boot, and no event moves it.",
+        "clock keeps it no sooner than MIN after boot, and no event moves it; a changed daily limit re-checks "
+        "an allowance_exhausted last_skip at once.",
         "last_skip is the newest skipped wake with the allowance window it met (null is unknown). Not in this "
         "read (held in the supervisor's memory): other wake outcomes and errors, failure backoff, the current "
         "allowance window and a live wake task."]
