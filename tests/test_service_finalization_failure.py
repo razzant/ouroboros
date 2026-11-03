@@ -19,9 +19,12 @@ def test_pending_stop_reaches_evidence_and_checkpoint_then_success_is_fresh(tmp_
     tool_ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=tmp_path, task_id="task")
     ctx = SimpleNamespace(drive_root=tmp_path, task_id="task", tools=SimpleNamespace(_ctx=tool_ctx),
                           drive_logs=tmp_path / "logs", event_queue=queue.Queue() if live else None, llm_trace={})
+    owed = [{"pid": 41000 + index, "birth": "Mon Nov 2 12:00:00 2026", "reason": "signal_denied"} for index in range(25)]
     pending = {"service_id": "task:svc", "name": "svc", "task_id": "task",
                "lifecycle": "cleanup_pending", "state": "exited", "stop_failed": True,
-               "cleanup_dispatched": False, "stop_error": "unreadable /proc " + "x" * 2200}
+               "cleanup_dispatched": False, "stop_error": "unreadable /proc " + "x" * 2200,
+               "process_cleanup": {"exit_confirmed": False, "census_failed": False, "survivors": [],
+                                   "unverified": owed, "ended": [40999], "reach": ["group"]}}
     stopped = {"service_id": "task:svc", "name": "svc", "task_id": "task",
                "lifecycle": "stopped", "state": "stopped", "cleanup_dispatched": True}
     kept = {"service_id": "task:kept", "name": "kept", "lifecycle": "kept", "state": "running"}
@@ -37,6 +40,8 @@ def test_pending_stop_reaches_evidence_and_checkpoint_then_success_is_fresh(tmp_
     assert len(row["stop_error"]) == 2000
     assert "OMISSION NOTE" in row["stop_error"]
     assert f"original length {len(pending['stop_error'])}" in row["stop_error"]
+    assert row["process_cleanup"]["unverified"] == owed, "every owed identity, past the first twenty, by pid and birth"
+    assert row["process_cleanup"]["exit_confirmed"] is False and "ended" not in row["process_cleanup"]
     before = delivery_evidence_fingerprint(tool_ctx, ctx.llm_trace)
     assert loop_budget._finalize_task_services(ctx) is False
     assert delivery_evidence_fingerprint(tool_ctx, ctx.llm_trace) == before

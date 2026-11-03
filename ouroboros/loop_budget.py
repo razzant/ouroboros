@@ -754,6 +754,10 @@ def _service_identity_projection(service: Dict[str, Any]) -> Dict[str, Any]:
             value = truncate_within_limit(str(value), 2000)
         if value not in (None, "", [], {}):
             projected[key] = value
+    cleanup = service.get("process_cleanup")
+    if isinstance(cleanup, dict):  # what stayed unconfirmed (pid, birth, reason) and why a rest is unknown, whole
+        projected["process_cleanup"] = {key: cleanup[key] for key in (
+            "exit_confirmed", "census_failed", "residual", "survivors", "unverified", "custody") if key in cleanup}
     return projected
 
 

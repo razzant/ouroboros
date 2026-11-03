@@ -256,36 +256,34 @@ def test_spawn_supervised_kills_child_when_custody_record_fails(tmp_path, monkey
     assert killed == [proc] and proc.poll() == -9
 
 
-def test_update_quiesce_kills_service_group_that_outlives_leader(tmp_path, monkeypatch):
-    entry = {
-        "pid": 123,
-        "pgid": 456,
-        "purpose": "service:background-child",
-        "scope": "session",
-    }
-    rewritten = []
-    killed = []
-    group_alive = {456: True}
-    assert process_custody.append_jsonl(ledger_path(tmp_path), entry)
-    monkeypatch.setattr(process_custody, "_fingerprint_matches", lambda _entry: False)
-    monkeypatch.setattr(process_custody, "process_group_has_live_members", lambda pgid: group_alive.get(pgid, False))
-    monkeypatch.setattr(
-        process_custody,
-        "kill_process_group_id",
-        lambda pgid: (killed.append(pgid), group_alive.__setitem__(pgid, False)),
-    )
-    monkeypatch.setattr(
-        process_custody,
-        "_rewrite_ledger",
-        lambda _root, entries, **_kw: rewritten.extend(entries),
-    )
+@_POSIX_ONLY
+def test_update_quiesce_kills_service_group_that_outlives_leader(tmp_path):
+    """Its leader already exited and was reaped; the member it left in its group is ended by its
+    measured identity (born after the row), and the row leaves the ledger only once that is confirmed."""
+    from ouroboros.process_census import IDENTITY_ALIVE, measure_birth, read_identities
 
-    ok, blockers = process_custody.quiesce_custodied_services(tmp_path)
+    leader = spawn_supervised(
+        [sys.executable, "-c", "import subprocess, sys; child = subprocess.Popen([sys.executable, '-c', "
+         "'import time; time.sleep(60)']); print(child.pid, flush=True)"],
+        drive_root=tmp_path, purpose="service:background-child", scope="session", owner_task_id="t",
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+    )
+    child = int(leader.stdout.readline())
+    birth = measure_birth(child)
+    try:
+        assert leader.wait(timeout=20) == 0 and birth  # gone and reaped; its group lives on in the child
+        assert process_custody.process_group_has_live_members(leader.pid)
 
-    assert ok is True
-    assert blockers == []
-    assert killed == [456]
-    assert rewritten == []
+        ok, blockers = process_custody.quiesce_custodied_services(tmp_path)
+
+        identity = read_identities([child])[child]
+        assert not (identity.state == IDENTITY_ALIVE and identity.birth == birth)
+        assert (ok, blockers) == (True, [])
+        assert '"service:background-child"' not in ledger_path(tmp_path).read_text(encoding="utf-8")
+    finally:
+        identity = read_identities([child])[child]
+        if identity.state == IDENTITY_ALIVE and identity.birth == birth:
+            os.kill(child, 9)
 
 
 @_POSIX_ONLY

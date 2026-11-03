@@ -633,8 +633,6 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None, allow_trans
     from ouroboros.owner_pause import (tree_member_results, tree_model_requests, current_tool_operation,
                                        _member_coordinates)
     from ouroboros.delegate_custody_current import tree_task_ids
-    from ouroboros import process_custody as pc
-    from ouroboros.platform_layer import pid_is_alive
 
     root = _canonical_root(ctx)
     tree_id = _member_coordinates(ctx)[1]
@@ -696,13 +694,11 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None, allow_trans
                 blockers.append({"kind": "member_custody", "detail": member})
         from ouroboros.tool_custody import task_process_blockers
         blockers.extend(task_process_blockers(root, members))
-        complete, processes = pc._read_ledger_strict(root)
-        if not complete:
-            raise OSError("process_custody_unreadable")
-        for record in processes:
-            if str(record.get("owner_task") or "") in members and (
-                    pid_is_alive(int(record.get("pid") or 0)) or pc._service_group_survives_leader(record)):
-                blockers.append({"kind": "owned_process", "detail": str(record.get("pid"))})
+        from ouroboros.launch_custody import unsettled_rows
+        for record, state in unsettled_rows(root, members):
+            pid = record.get("pid")
+            blockers.append({"kind": "owned_process", "detail": str(pid)} if state == "live" else
+                            {"kind": "tree_custody_unreadable", "detail": f"launch of process {pid} unobserved"})
     except Exception as exc:
         blockers.append({"kind": "tree_custody_unreadable", "detail": str(exc)[:200]})
     return blockers
