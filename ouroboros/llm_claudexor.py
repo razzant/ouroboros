@@ -848,27 +848,28 @@ def _processing_retry_payload(payload: dict, error: ClaudexorModelNotDispatched)
 
 
 def _unstarted_repair(target: dict, payload: dict, parameters: dict, invocation: _ModelInvocation,
-                      error: ClaudexorModelNotDispatched, repaired: set) -> tuple[dict, dict] | None:
-    """(payload, parameters) for the one repair per cause a released not-started receipt permits.
-
-    ``auth_changed`` (the account's authentication changed before dispatch) sends the same request
-    once more as a NEW operation on the same route, never a correlated retry. A repaired cause refused
-    again, an unknown outcome and every other code return None: the caller's refusal path.
-    """
+                      error: ClaudexorModelNotDispatched, repaired: set) -> tuple[dict, dict, Any] | None:
+    """(payload, parameters, its prepared next attempt) for the one repair per cause a released not-started receipt
+    permits; a preparation that refuses repairs nothing. ``auth_changed`` (the account's authentication changed before
+    dispatch) sends the same request once more as a NEW operation on the same route, never a correlated retry,
+    recorded once that attempt is prepared. A repaired cause refused again, an unknown outcome and every other code
+    return None: the caller's refusal path."""
+    capture = getattr(error, "physical_attempt_capture", None)
     if ("processing" not in repaired and "standard" in target.get("processing_preferences", [])
             and (updated := _processing_retry_payload(payload, error)) is not None):
-        repaired.add("processing")
-        return updated, {**parameters, "_processing_submission": "standard"}
-    if "native" not in repaired and (updated := _reset_native(payload, error, invocation)) is not None:
-        repaired.add("native")
-        return updated, parameters
-    capture = getattr(error, "physical_attempt_capture", None)
-    if "auth" in repaired or error.code != "auth_changed" or getattr(capture, "state", None) != "released":
+        cause, repair = "processing", (updated, {**parameters, "_processing_submission": "standard"})
+    elif "native" not in repaired and (updated := _reset_native(payload, error, invocation)) is not None:
+        cause, repair = "native", (updated, parameters)
+    elif "auth" not in repaired and error.code == "auth_changed" and getattr(capture, "state", None) == "released":
+        cause, repair = "auth", (payload, parameters)
+    else:
         return None
-    repaired.add("auth")
-    append_jsonl(invocation.root / "logs" / "events.jsonl", {"ts": utc_now_iso(), "type": "model_operation_reissued",
-        "cause": error.code, "task_id": invocation.task_id, "model_role": invocation.role, "operation_id": invocation.operation_id})
-    return payload, parameters
+    repaired.add(cause)
+    prepared = _unstarted_retry_preparation(target, *repair, error)
+    if cause == "auth":
+        append_jsonl(invocation.root / "logs" / "events.jsonl", {"ts": utc_now_iso(), "type": "model_operation_reissued",
+            "cause": error.code, "task_id": invocation.task_id, "model_role": invocation.role, "operation_id": invocation.operation_id})
+    return (*repair, prepared)
 
 
 def chat_claudexor(target: dict, messages: list, tools: list | None, **parameters: Any) -> tuple[dict, dict]:
@@ -913,8 +914,7 @@ def chat_claudexor(target: dict, messages: list, tools: list | None, **parameter
             if repair is None:
                 rotation.refused_call(target, parameters, invocation, error)  # an engine verdict is never re-asked
                 raise
-            payload, parameters = repair
-            retry_preparation = _unstarted_retry_preparation(target, payload, parameters, error)
+            payload, parameters, retry_preparation = repair
         except ClaudexorModelError as error:
             all_operations_not_started = False
             updated = capability.refused(invocation, error)
@@ -1059,8 +1059,7 @@ async def chat_claudexor_async(target: dict, messages: list, tools: list | None,
             if repair is None:
                 rotation.refused_call(target, parameters, invocation, error)  # an engine verdict is never re-asked
                 raise
-            payload, parameters = repair
-            retry_preparation = _unstarted_retry_preparation(target, payload, parameters, error)
+            payload, parameters, retry_preparation = repair
         except ClaudexorModelError as error:
             all_operations_not_started = False
             updated = await invocation.offload(capability.refused, invocation, error)

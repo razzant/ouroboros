@@ -62,6 +62,26 @@ def test_released_auth_change_answers_from_one_new_operation_on_the_same_route(s
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
+def test_a_reissue_whose_next_attempt_cannot_be_prepared_is_not_recorded(setup, monkeypatch, asynchronous):
+    """The reissue is recorded once its next attempt is prepared: a preparation that refuses (a helper without a wait
+    owner inside a physical attempt, ``model_wait_reprepare_required``) leaves no second operation and no
+    ``model_operation_reissued``."""
+    from ouroboros.model_wait import ModelWaitInterrupted
+
+    root, gateway, client = setup
+    gateway.results, gateway.dispatch = [auth_refusal(), result()], ["not_started", "response_received"]
+
+    def refuse(_target, _payload, parameters, error):
+        raise ModelWaitInterrupted("model_wait_reprepare_required", role=parameters.get("model_role", ""), cause=error)
+
+    monkeypatch.setattr(transport, "_unstarted_retry_preparation", refuse)
+    with pytest.raises(ModelWaitInterrupted) as raised:
+        send(client, asynchronous)
+    assert raised.value.control_reason == "model_wait_reprepare_required"
+    assert len(gateway.accepted_operations) == 1 and not events(root, "model_operation_reissued")
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
 def test_a_second_auth_change_keeps_the_previous_refusal(setup, asynchronous):
     root, gateway, client = setup
     gateway.results, gateway.dispatch = [auth_refusal()] * 3, ["not_started"] * 3
