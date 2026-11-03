@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests._budget_pause_exact_helpers import _parked
-from tests.test_presence_moved_lifecycle import CEILING, PROJECT, _seed_and_built, root  # noqa: F401  (fixture)
+from tests.test_presence_moved_lifecycle import CEILING, PROJECT, _seed_and_built, root as root
 
 
 def _moved_paused(root, monkeypatch, built, task_id, *, metadata_extra=None, move=True):

@@ -94,6 +94,20 @@ def _bounded_response_metadata_label(value: Any) -> Optional[str]:
     return label
 
 
+def _stage_effort_clamp_disclosure(
+    requested: str, applied: str, model: str, *, reason: str = "provider_wire_mapping",
+) -> None:
+    """Stage this call's requested/applied effort note for ``_pop_effort_clamp_disclosure``.
+
+    A tier the provider dialect changed is disclosed; an unchanged one stages ``None``, so a
+    stale note from an earlier call is never inherited.
+    """
+    _EFFORT_CLAMP_CVAR.set(
+        None if applied == requested
+        else {"requested": requested, "applied": applied, "reason": reason, "model": model}
+    )
+
+
 class _OpenAICompatibleLaneMixin:
     """OpenAI-compatible payload assembly and response normalisation."""
 
@@ -216,12 +230,7 @@ class _OpenAICompatibleLaneMixin:
                 # requested/applied disclosure, including clearing a stale note.
                 applied = normalize_minimax_reasoning_effort(resolved_model, requested_effort)
                 kwargs["reasoning_effort"] = applied
-                _EFFORT_CLAMP_CVAR.set(None)
-                if applied != requested_effort:
-                    _EFFORT_CLAMP_CVAR.set({
-                        "requested": requested_effort, "applied": applied,
-                        "reason": "provider_wire_mapping", "model": resolved_model,
-                    })
+                _stage_effort_clamp_disclosure(requested_effort, applied, resolved_model)
             elif provider == "deepseek":
                 # Same carriage, projected onto DeepSeek's wire dialect
                 # (low/high/max; thinking is switched off by a toggle, not an
@@ -236,13 +245,10 @@ class _OpenAICompatibleLaneMixin:
                     kwargs.setdefault("extra_body", {})["thinking"] = {"type": "disabled"}
                 else:
                     kwargs["reasoning_effort"] = applied
-                _EFFORT_CLAMP_CVAR.set(None)  # never inherit a stale note
-                if applied != requested_effort:
-                    _EFFORT_CLAMP_CVAR.set({
-                        "requested": requested_effort, "applied": applied,
-                        "reason": "provider_forced_tool_choice" if forced_tool else "provider_wire_mapping",
-                        "model": resolved_model,
-                    })
+                _stage_effort_clamp_disclosure(
+                    requested_effort, applied, resolved_model,
+                    reason="provider_forced_tool_choice" if forced_tool else "provider_wire_mapping",
+                )
             elif provider == "zai":
                 # Same carriage family, Z.ai's OWN projection table (NOT
                 # DeepSeek's: medium does not exist at Z.ai and xhigh maps to
@@ -256,13 +262,7 @@ class _OpenAICompatibleLaneMixin:
                 # disclosed on usage as ``reasoning_effort_clamped``.
                 applied = normalize_zai_reasoning_effort(requested_effort)
                 kwargs["reasoning_effort"] = applied
-                _EFFORT_CLAMP_CVAR.set(None)  # never inherit a stale note
-                if applied != requested_effort:
-                    _EFFORT_CLAMP_CVAR.set({
-                        "requested": requested_effort, "applied": applied,
-                        "reason": "provider_wire_mapping",
-                        "model": resolved_model,
-                    })
+                _stage_effort_clamp_disclosure(requested_effort, applied, resolved_model)
             if temperature is not None:
                 kwargs["temperature"] = temperature
             if response_format:

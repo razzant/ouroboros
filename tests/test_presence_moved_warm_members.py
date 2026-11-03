@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.test_presence_moved_allowance import _Repaused, _warm_parked_turn
-from tests.test_presence_moved_lifecycle import CEILING, root  # noqa: F401  (fixture)
+from tests.test_presence_moved_lifecycle import CEILING, root as root
 
 
 @pytest.mark.parametrize("wake", ["warm_root_grant", "cold_root_release", "selected_member"])

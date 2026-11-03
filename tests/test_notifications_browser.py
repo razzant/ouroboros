@@ -391,7 +391,12 @@ def test_an_older_desktop_app_is_never_called_sound_on_or_off(subscription_ui):
     page.wait_for_function("() => window.__notifications.length === 1")
     assert recorded(page)[0]['options']['silent'] is True
     status = page.locator('[data-settings-panel="appearance"] [data-notify-status]')
-    assert 'predates them, so alerts fall back to a browser banner or the app' in status.inner_text()
+    said = status.inner_text()
+    # Settings names the one observed fact, the missing system-notification method, and where alerts go instead; it
+    # never infers the app's age or an update remedy (docs/DESIGN.md §9, owner decision 3A: Dashboard > Updates owns those).
+    assert 'has no system-notification method here, so alerts fall back to a browser banner or the app' in said, said
+    assert not [word for word in ('predate', 'older', 'outdated', 'update', 'upgrade') if word in said.lower()], said
+    capture_block(page.locator('[data-settings-panel="appearance"] [data-notify-settings]'), 'notifications-old-app-status-block')
 
     pref(page, 'sound').check()
     deliver(page, {'type': 'log', 'chat_id': MAIN,

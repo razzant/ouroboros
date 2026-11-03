@@ -24,7 +24,11 @@ from ouroboros.gateway.router import collect_routes
 from tests.test_client_contract_bindings import assert_bound
 
 LABELS = [None, "application/json", "text/plain;charset=UTF-8", "application/x-www-form-urlencoded"]
-UNREADABLE = [b"enabled=true", b"{", b"{}x", b'{"a": "\xff"}', b" ", b"\r\n", b"[" * 100_000,
+# An unterminated array nested past the parser's recursion limit. pytest names a parameter by its value unless it
+# has an id, and exports the running test's name as ``PYTEST_CURRENT_TEST``: Windows refuses a variable over
+# 32,767 characters, so this body's own 100,000-character name failed the setup and teardown of every test it keys.
+DEEPLY_NESTED = pytest.param(b"[" * 100_000, id="nested-past-the-recursion-limit")
+UNREADABLE = [b"enabled=true", b"{", b"{}x", b'{"a": "\xff"}', b" ", b"\r\n", DEEPLY_NESTED,
               b"null", b"[]", b"[1]", b"0", b"false", b'""', b'"text"']
 
 
@@ -55,6 +59,13 @@ def test_only_a_body_without_bytes_is_absent(echo):
 @pytest.mark.parametrize("body", UNREADABLE)
 def test_a_present_body_without_an_object_is_none(echo, body):
     assert echo.post("/echo", content=body, headers={"content-type": "application/json"}).json() == {"value": None}
+
+
+def test_a_body_that_names_its_own_test_is_short_enough_for_windows():
+    """A parameter without an id is named by its value, and pytest exports the running test's name as
+    ``PYTEST_CURRENT_TEST``: on Windows a 100,000-byte body failed the setup and teardown of every test it keys, and
+    nowhere else. This reads the bodies themselves, so a retry of one test alone or a ``-k`` selection cannot hide it."""
+    assert all(len(case) <= 100 if isinstance(case, bytes) else bool(case.id) for case in UNREADABLE)
 
 
 # --- real routes -----------------------------------------------------------------------------------

@@ -282,13 +282,19 @@ def test_anthropic_preserves_the_message_seal_and_gives_schemas_only_a_free_slot
 
 
 def test_the_view_fact_reaches_the_cap_info_the_task_context_and_one_event(tmp_path):
+    from types import SimpleNamespace
+
     from ouroboros.memory_inventory import VIEW_TRACE_KEY
     from ouroboros.tools.tool_context import ToolContext
 
     env, memory, _rooms = world(tmp_path)
     ctx = ToolContext(repo_dir=env.repo_dir, drive_root=memory.drive_root, task_id="tmain", task_metadata={},
                       current_chat_id=1)
-    _messages_out, cap = _messages(env, memory, MAIN, ctx=ctx)
+    # A known window, pinned as the sibling max_room tests do: the default route's catalogue answer is
+    # session-shared state, and an unknown window carries no max_room by contract (test_memory_max_room).
+    evidence = SimpleNamespace(route_fp="r", status="asserted", stale=False, window_tokens=1_000_000)
+    _messages_out, cap = _messages(env, memory, MAIN, ctx=ctx,
+                                   route_resolver=lambda *_a, **_kw: ({"model": "m", "provider": "p"}, evidence))
     facts = cap["memory_view"]
     assert facts["role"] == "integrator" and facts["room_id"] == "1"
     assert facts["store_status"] == {"state": "active", "tail_facts": "filling"}  # open rows read live, no fill yet

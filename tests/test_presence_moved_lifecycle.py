@@ -20,8 +20,8 @@ import pytest
 
 from tests._budget_pause_exact_helpers import _pause, _supervisor_ctx
 from tests.test_presence_lane_rows import _admit_lane_row
-from tests.test_presence_continuation import harness  # noqa: F401  (fixture)
-from tests.test_presence_project_activity import PROJECT, _live_turn, _move, root  # noqa: F401  (fixture)
+from tests.test_presence_continuation import harness as harness
+from tests.test_presence_project_activity import PROJECT, _live_turn, _move, root as root
 from tests.test_presence_runner import _admission, _event
 
 CEILING = 0.4  # what was left of a Place's consciousness allowance when the turn was admitted

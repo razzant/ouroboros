@@ -666,6 +666,18 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
         False,
         "tools/search.py recoverable ambiguous paid-call result returned to the LLM; the root task remains live",
     ),
+    # tell_task: both are one-call tool results for the model's next turn, never the root task's terminal reason.
+    "argument_invalid": (
+        False,
+        "tools/control_relay.py tell_task argument refusal (TOOL_ARG_ERROR, published as completed_no_effect before "
+        "any write) returned to the LLM; the root task remains live",
+    ),
+    "arrival_effect_unknown": (
+        False,
+        "tools/control_relay.py tell_task arrival hand-over whose write may or may not have landed (TELL_UNCONFIRMED: "
+        "retry the same arrival; place_intake's `arrival_effect_unknown:<task>` refusal is the same fact) returned to "
+        "the LLM; the root task remains live",
+    ),
     "finalize_control_pending": (
         False,
         "loop_transport.wait_transport_repeat llm_not_dispatched event; the never-sent repeat was withdrawn, while the later task terminal carries owner_requested_finalization or its actual rail reason",

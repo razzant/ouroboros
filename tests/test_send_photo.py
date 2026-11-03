@@ -27,9 +27,10 @@ class TestSendPhotoFilePath:
         assert ctx.pending_events[0]["type"] == "send_photo"
         assert ctx.pending_events[0]["mime"] == "image/png"
 
-    def test_file_not_found(self):
+    def test_file_not_found(self, tmp_path):
         ctx = _make_ctx()
-        result = _send_photo(ctx, file_path="/nonexistent/image.png")
+        # Absolute on every OS: a drive-less "/nonexistent/..." is workspace-relative on Windows.
+        result = _send_photo(ctx, file_path=str(tmp_path / "nonexistent" / "image.png"))
         assert "not found" in result.lower()
 
     def test_file_too_large(self, tmp_path):

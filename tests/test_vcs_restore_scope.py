@@ -298,7 +298,7 @@ def test_a_folder_turned_into_a_file_returns_inside_its_scope_only(project, path
     restoring only a child would delete the staged file outside that scope, so it is reported instead."""
     registry, repo = project
     _git(repo, "rm", "-rq", "dir")
-    (repo / "dir").write_text("staged file\n", encoding="utf-8")
+    (repo / "dir").write_text("staged file\n", encoding="utf-8", newline="\n")  # LF: Git's bytes are compared below
     _git(repo, "add", "dir")
     if missing:
         (repo / "dir").unlink()  # the unique outside-scope bytes now live only in the index

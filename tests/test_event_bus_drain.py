@@ -116,30 +116,34 @@ def test_one_pass_takes_its_batch_in_one_round_trip(monkeypatch):
     assert sorted(ctx.dispatched) == list(range(12))
 
 
-def test_a_pass_cut_by_its_time_bound_restores_its_tail_to_the_front(monkeypatch):
+@pytest.mark.parametrize("handler_seconds, expected_served", [(0.03, [0, 3]), (0.06, [0])])
+def test_a_pass_cut_by_its_time_bound_restores_its_tail_to_the_front(monkeypatch, handler_seconds, expected_served):
     from supervisor import events as events_mod
 
+    clock = [100.0]
+    monkeypatch.setattr(sl, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     late = {"type": "send_message", "n": 50, "task_id": "late", "is_progress": True, "chat_id": 1}
 
     def dispatch(evt, ctx):
         ctx.dispatched.append(evt["n"])
         if evt["n"] == 3:
             counting.bus.put(dict(late))  # arrives while the pass runs
-        time.sleep(0.03)
+        clock[0] += handler_seconds
 
     monkeypatch.setattr(events_mod, "dispatch_event", dispatch)
     monkeypatch.setattr(sl, "SUPERVISOR_EVENT_BATCH_MAX_SEC", 0.05)
     counting = _CountingBus(_filled(_mixed(12)))
     ctx = _ctx()
-    assert sl.drain_worker_events(counting, ctx, [time.monotonic(), {}, 0.0, None],
+    assert sl.drain_worker_events(counting, ctx, [clock[0], {}, 0.0, None],
                                   on_restart=lambda *_: None) is True
     served = list(ctx.dispatched)
-    assert 1 <= len(served) < 12 and counting.calls == ["drain", "restore_front"]
+    assert served == expected_served and counting.calls == ["drain", "restore_front"]
     # What remains is what a get-per-event consumer stopping at the same point leaves queued.
     reference = _filled(_mixed(12))
     for _ in served:
         reference.get_nowait()
-    reference.put(dict(late))
+    if 3 in served:
+        reference.put(dict(late))
     assert [counting.bus.get_nowait()["n"] for _ in range(counting.bus.qsize())] == \
         [reference.get_nowait()["n"] for _ in range(reference.qsize())]
 
