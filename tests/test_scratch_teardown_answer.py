@@ -154,19 +154,59 @@ def test_an_unsettled_guardian_is_the_answer_though_no_workload_ever_existed(mon
 
 
 @posix_only
-@pytest.mark.parametrize("fault", ["guardian_refused", "handshake_lost"])
+@pytest.mark.parametrize("fault", ["guardian_refused", "handshake_lost", "handshake_eof", "handshake_wrong", "selector_failed"])
 def test_a_guardian_that_never_came_up_answers_through_the_owners_reap(monkeypatch, fault):
-    started = []
+    started, waits, readiness = [], [], []
     if fault == "guardian_refused":
         _popen_refusing(monkeypatch, "-B", started=started)
+    elif fault in {"handshake_eof", "handshake_wrong"}:
+        spawn = ProcessContainer.spawn
+
+        def short_guardian(container, argv, **kwargs):
+            guardian = any("_guardian_main" in str(arg) for arg in argv)
+            if guardian:
+                code = "pass" if fault == "handshake_eof" else "import sys; sys.stdout.buffer.write(b'X')"
+                argv = [sys.executable, "-c", code]
+            proc = spawn(container, argv, **kwargs)
+            if guardian:
+                started.append(proc)
+            return proc
+
+        monkeypatch.setattr(ProcessContainer, "spawn", short_guardian)
+        selector_type = process_lifeline.selectors.DefaultSelector
+
+        class ObservedSelector(selector_type):
+            def select(self, timeout=None):
+                events = super().select(timeout)
+                readiness.append(bool(events))
+                return events
+
+        monkeypatch.setattr(process_lifeline, "selectors", SimpleNamespace(
+            DefaultSelector=ObservedSelector, EVENT_READ=process_lifeline.selectors.EVENT_READ,
+        ))
     else:
+        from contextlib import nullcontext
+
+        def wait(timeout):
+            waits.append(timeout)
+            if fault == "selector_failed":
+                raise OSError(errno.EIO, "readiness wait failed")
+            return []
+
         _popen_refusing(monkeypatch, "never-refused", started=started)
-        monkeypatch.setattr(process_lifeline, "select", SimpleNamespace(select=lambda *_a: ([], [], [])))
+        waiter = SimpleNamespace(register=lambda *_a: None, select=wait)
+        monkeypatch.setattr(process_lifeline, "selectors", SimpleNamespace(
+            DefaultSelector=lambda: nullcontext(waiter), EVENT_READ=1,
+        ))
     container = ProcessContainer(lifeline=True)
     with pytest.raises((OSError, RuntimeError)):
         container.spawn([sys.executable, "-c", "pass"])
-    assert all(proc.poll() is not None for proc in started) and len(started) == (fault == "handshake_lost")
+    assert all(proc.poll() is not None for proc in started) and len(started) == (fault != "guardian_refused")
     assert container.root_created is False and container.reap() == ""
+    if fault in {"handshake_lost", "selector_failed"}:
+        assert waits == [process_lifeline._HANDSHAKE_SEC] == [10.0]
+    if fault in {"handshake_eof", "handshake_wrong"}:
+        assert readiness == [True], "the protocol failed after readiness, not the timeout"
 
 
 def test_a_root_created_without_a_returned_handle_is_stopped_and_answered(monkeypatch):

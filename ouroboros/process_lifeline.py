@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import select
+import selectors
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -78,7 +78,10 @@ class ProcessLifeline:
              str(Path(__file__).resolve().parents[1])],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         )
-        ready, _, _ = select.select([self._proc.stdout], [], [], _HANDSHAKE_SEC)
+        # select() cannot watch high-numbered pipes in a busy owner process.
+        with selectors.DefaultSelector() as selector:
+            selector.register(self._proc.stdout, selectors.EVENT_READ)
+            ready = selector.select(_HANDSHAKE_SEC)
         if not ready or self._proc.stdout.read(1) != b"R":
             raise RuntimeError("process lifeline failed to start")
         self._proc.stdout.close()
