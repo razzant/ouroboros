@@ -1,7 +1,8 @@
 """One settings write leaves one record of what it changed: before → after, with the origin its caller declared.
 
 The settings writer returns the change it committed, read under its own lock; the generic save and the Safety
-owner endpoints record that receipt as one ``settings_changed`` event. A save the app did not declare also puts
+owner endpoints (here) and a model-wait card's saved choice (``test_model_wait_controls``) record that receipt as
+one ``settings_changed`` event. A save the app did not declare also puts
 one quiet System row in Main. Secrets and structured values keep only their names; a failed record never
 unsaves the settings.
 """

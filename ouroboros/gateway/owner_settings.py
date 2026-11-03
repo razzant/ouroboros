@@ -1,9 +1,9 @@
 """The owner-scoped settings WRITE seam — one lock, one commit boundary.
 
 Every owner endpoint that persists SETTINGS goes through here: the generic
-``POST /api/settings``, the FIVE single-decision owner endpoints (runtime mode,
-auto-grant, context mode, safety mode, desktop keep-running), and the atomic
-``POST /api/onboarding/complete``. Membership is defined by calling
+``POST /api/settings``, the single-decision owner endpoints (runtime mode,
+auto-grant, context mode, the Safety model, levels and rules, desktop keep-running),
+a model-wait card's saved choice, and the atomic ``POST /api/onboarding/complete``. Membership is defined by calling
 ``_owner_update_settings`` — directly with a transform, or through
 ``_owner_write_settings`` with a whole document — not by wearing the decorator:
 the capability-evidence acknowledgement writes its own route-fingerprinted
@@ -34,8 +34,9 @@ re-implemented (or silently skipped) per call site:
    refusal shape, and it always carries ``saved=false``.
 5. **The writer's receipt is the settings history.** ``_owner_update_settings``
    returns the before → after of every key its commit changed, taken under its
-   own lock; the generic save and the Safety owner endpoints record exactly that
-   (``record_settings_change``), so no endpoint keeps a key list of its own.
+   own lock; the generic save, the Safety owner endpoints and a model-wait card's
+   saved choice record exactly that (``record_settings_change``), so no endpoint
+   keeps a key list of its own. The other writers keep no such record.
 """
 
 from __future__ import annotations

@@ -462,7 +462,8 @@ async def _dismiss_quiz_decision(root: pathlib.Path, family: str, task_id: str, 
     return 200, payload
 
 
-async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = "web", _recovery: bool = False) -> Tuple[int, Dict[str, Any]]:
+async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = "web", _recovery: bool = False,
+                          request: Optional[Request] = None) -> Tuple[int, Dict[str, Any]]:
     """The ONE decision-answer ingress, transport-neutral: ``(status, payload)``.
 
     ``POST /api/decisions`` (the browser card) and the loopback Host Service
@@ -486,7 +487,7 @@ async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = 
     if decision_id.split(":", 1)[0] == "model_wait":
         from ouroboros.gateway.task_model_wait import answer_model_wait_decision
 
-        return await answer_model_wait_decision(drive_root, body)
+        return await answer_model_wait_decision(drive_root, body, request=request)  # its saved choice's origin
     if decision_id.split(":", 1)[0] == "card":  # its own fields (values) and its own per-press semantics
         from ouroboros.gateway.card_decision import answer_card_decision
 
@@ -710,7 +711,7 @@ async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = 
 async def api_decision_answer(request: Request) -> JSONResponse:
     """POST /api/decisions — idempotent owner answer for a decision card."""
     body = await request_json_or(request, {})
-    status, payload = await answer_decision(request_drive_root(request), body)
+    status, payload = await answer_decision(request_drive_root(request), body, request=request)
     return JSONResponse(payload, status_code=status)
 
 
