@@ -75,8 +75,11 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None)
         status = "allowance_exhausted"
         at_least = "at least " if int(snapshot.get("unknown_unmetered") or 0) > 0 else ""
         degraded = "; ledger integrity degraded" if snapshot.get("integrity_degraded") else ""
+        # Checked at the reset, or sooner once a changed daily limit moved the next attempt (``consciousness._due_at``).
+        reset = parse_deadline_ts(str(snapshot.get("allowance_resets_at") or ""))
+        sooner = deadline is not None and reset is not None and time.time() < deadline.timestamp() < reset.timestamp()
         detail = (f"Daily allowance spent ({at_least}${float(spent or 0):.2f} of ${float(daily or 0):.2f} in the last 24 h{degraded}); "
-                  f"next check {_when(snapshot.get('allowance_resets_at')) if snapshot.get('allowance_resets_at') else next_at}.")
+                  f"next check {_when(snapshot.get('allowance_resets_at')) if snapshot.get('allowance_resets_at') and not sooner else next_at}.")
     elif outcome == "skipped:allowance_unknown":
         status, detail = "allowance_unknown", f"The usage ledger could not be read ({snapshot.get('last_error') or 'unknown error'}); retry {next_at}."
     elif outcome.startswith("rejected:"):

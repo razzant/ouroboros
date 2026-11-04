@@ -298,6 +298,10 @@ def _seed_task(
         pid = str(task_metadata.get("project_id") or "").strip()
         if pid:
             task["project_id"] = pid
+    from ouroboros.project_admission import fresh_seed_unscoped
+
+    if fresh_seed_unscoped(task):  # this mint is the turn's admission: no enqueue will attest it (#2555)
+        task["_project_scope_none"] = True
     if image_data:
         # image_data is (base64, mime) or (base64, mime, caption). The bytes become an
         # actor source the carrier reads back (the row stays small); the caption still
@@ -598,6 +602,7 @@ def prepare_conversation_task(agent: Any, task: Dict[str, Any], drive_root: Any,
                 admission_basis=basis,
             )
             task["_project_admission"] = basis
+            task.pop("_project_scope_none", None)
             if broadcast is not None:  # the row (snapshot, pooled park, restore) learns the basis by frame
                 broadcast({"type": "direct_turn_bound", "task_id": str(task["id"]), "task_attempt": int(task.get("_attempt") or 1),
                            "facts": {"_project_admission": basis, "project_id": pid}})

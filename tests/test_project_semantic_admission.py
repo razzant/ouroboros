@@ -690,7 +690,7 @@ def test_named_project_consumers_keep_healthy_neighbor_available(room, tmp_path,
         ctx = SimpleNamespace(drive_root=room.root, task_id="caller", project_id="", task_metadata={},
                               event_queue=None, pending_events=events)
         answer = _start_task(ctx, "Separate work", title="Project work", project_id="target")
-        assert answer.startswith("Accepted, waiting to start:"), answer
+        assert answer.startswith("Not confirmed yet:"), answer
         assert len(events) == 1 and events[0]["project_id"] == "target"
     else:
         handler = {"create": projects.api_projects_create, "rename": projects.api_project_update,

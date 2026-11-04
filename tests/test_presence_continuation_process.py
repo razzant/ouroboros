@@ -627,7 +627,8 @@ def test_v1_tcp_disconnect_before_first_park_keeps_one_author(tmp_path, mode):
         assert initial["text"] == "" and initial["output_ref"] == ""
         assert final["text"] == ANSWER and final["output_ref"] and final["outputs"] == []
         assert host.turn().json() == initial and len(host.inputs()) == 3
-        assert host.client.get("/fixture/live").json() == []
+        # The final polls once recorded, before the author's teardown closes its receiver: require that closure too.
+        eventually(lambda: host.client.get("/fixture/live").json() == [])
         (tmp_path / "consumer-facts.json").write_text(json.dumps({
             "mode": mode, "tcp_disconnected_before_first_inference_returned": True,
             "continuation_absent_at_disconnect": True, "initial": initial, "final": final,

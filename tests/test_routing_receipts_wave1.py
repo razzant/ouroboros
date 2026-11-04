@@ -357,7 +357,7 @@ def test_an_unconfirmed_promote_names_what_was_requested_as_a_request(tmp_path, 
 
     )
 
-    assert out.startswith("Accepted, waiting to start:")
+    assert out.startswith("Not confirmed yet:")
     assert "admission to new project 'Dinosaurs'" in out
     assert "is pending" in out
 

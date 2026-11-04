@@ -531,11 +531,15 @@ def watch_left_review(ctx: Any, *, surface: str, retry_key: str, reissue: str, a
     return wait
 
 
-def owe_unwaited_review(ctx: Any, *, surface: str, retry_key: str, record_id: str, attempt: int = 0) -> bool:
+def owe_unwaited_review(ctx: Any, *, surface: str, retry_key: str, record_id: str, attempt: int = 0,
+                        left: str = "unwaited") -> bool:
     """A wave returned to its author with seats still running and no addressed message left behind it: the
     author no longer waits for those seats, so the wave's record settles once they finish, at the latest when
     the author's task ended (``ended_left_review``), whether or not the same call is re-issued. The duty is
-    the left wave's own row (``_owe_left_review``), written before this call returns."""
+    the left wave's own row (``_owe_left_review``), written before this call returns. ``left="unread"``: its
+    record already settled and its outcome never reached its author whole at a delivery that is never held for
+    it, so only this duty brings it to the room, until a saved whole receipt of it ends the duty
+    (``retire_unread_review``); an existing left-wave duty is preserved, never downgraded to unread-only."""
     from ouroboros.tool_access_paths import canonical_data_root
 
     if not retry_key or not record_id:
@@ -544,9 +548,43 @@ def owe_unwaited_review(ctx: Any, *, surface: str, retry_key: str, record_id: st
     identity = f"{surface}\0{task_id}\0{retry_key}\0{int(attempt or 0)}\0{record_id}"
     return _owe_left_review({
         "surface": surface, "task_id": task_id, "attempt": int(attempt or 0), "record_id": str(record_id),
-        "retry_key": retry_key, "unknown_seats": 0, "left": "unwaited",
+        "retry_key": retry_key, "unknown_seats": 0, "left": left,
         "msg_id": f"{surface}-review-settled:" + hashlib.sha256(identity.encode()).hexdigest()[:24],
         "drive_root": str(drive_root), "canonical_root": str(canonical_data_root(ctx))})
+
+
+def retire_unread_review(ctx: Any, *, surface: str, record_id: str) -> bool:
+    """A saved state now holds a receipt of every current outcome of ``record_id``
+    (``review_waiting.acknowledge_delivery``), so the unread duty ``owe_unwaited_review(left="unread")`` wrote for
+    it has no cause left and is retired, exactly that row: the same mark id held by a left or unwaited wave of the
+    record, another record's duty and another task's stay owed, and the record and its seat sources are untouched.
+    ``False`` when there was no such row or the store refused (the duty then stays owed)."""
+    from ouroboros import store  # the owed rows' own store (``late_review_marks._owed``)
+    from ouroboros.late_review_marks import OWED_SET  # D06->D15 is lazy-only
+    from ouroboros.tool_access_paths import canonical_data_root
+
+    task_id = str(getattr(ctx, "task_id", "") or "")
+    if not task_id or not record_id:
+        return False
+    duty_id = _left_mark_id({"surface": surface, "task_id": task_id, "record_id": str(record_id), "attempt": 0})
+
+    def unread(row: Optional[Dict[str, Any]]) -> bool:
+        duty = (row or {}).get("left_review") or {}
+        return (duty.get("left"), duty.get("task_id"), duty.get("record_id")) == ("unread", task_id, str(record_id))
+
+    root = canonical_data_root(ctx)
+    try:
+        with store.open_store(root, write=False) as txn:
+            if not unread(txn.get_row(OWED_SET, duty_id)):
+                return False
+        with store.open_store(root, write=True) as txn:
+            if not unread(txn.get_row(OWED_SET, duty_id)):
+                return False
+            txn.delete_row(OWED_SET, duty_id)
+        return True
+    except Exception:
+        log.warning("unread review %s of task %s: its duty stays owed", record_id, task_id, exc_info=True)
+        return False
 
 
 def left_review_custody_note(wait: Dict[str, Any]) -> str:
@@ -609,12 +647,14 @@ def _owe_left_review(record: Dict[str, Any]) -> bool:
     (its live controller, this process, may still settle it) and before anything process-local can be lost.
     Nothing rewrites it on settlement: the replay reads settlement from the wave's own records
     (``settle_left_review``), so a refused write cannot strand answers already paid for. The mark that
-    discharges it follows the author's task end."""
+    discharges it follows the author's task end. Unwaited and unread-only registrations never
+    replace an independently owed mail-left wave; a mail-left registration can strengthen either."""
     from ouroboros.late_review_marks import owe_after_end  # D06->D15 is lazy-only
     from ouroboros.review_operation import controller_identity
 
     return owe_after_end(record.get("canonical_root") or record["drive_root"], _left_mark_id(record), {
-        "left_review": dict(record), "controller": controller_identity()})
+        "left_review": dict(record), "controller": controller_identity()},
+        replace=record.get("left") not in {"unread", "unwaited"})
 
 
 def settle_left_review(drive_root: Any, row: Dict[str, Any]) -> str:
@@ -717,19 +757,23 @@ def ended_left_review(record: Dict[str, Any]) -> str:
     roster or a new send. The wave's own ledger record then settles from those seats
     (``_settle_left_record``): the verdict is a fact of the journal, never a decision, and nothing is
     committed or applied. A seat without a retained outcome stays unknown and counts as failed. An
-    unwaited wave whose author already collected it while running needs no mark. Publication discharges
+    unwaited wave whose current outcomes reached its author's saved transcript needs no mark; settlement
+    and cursor-only notices prove no such receipt. Publication discharges
     the owed duty (the same mark id); a failure keeps it owed. Never raises.
     """
     from ouroboros.late_review_marks import publish_late_review  # D06->D15 is lazy-only
+    from ouroboros.review_waiting import _carries_whole
 
     try:
         attempt, seats, gap = _left_seats(record)
-        prior_state = _record_state(record)
+        prior = _left_record(record)
         settled = None if gap else _settle_left_record(record, seats, final=True)
+        _settle_left_attempt(record, attempt, seats, settled, quiet=True)  # the mark never waits on the attempt row
         if settled and settled.get("state") == "pending":
             return "waiting"
-        if record.get("left") == "unwaited" and prior_state == "settled":
-            return "collected"  # its author's own re-issue collected it while the task ran
+        if record.get("left") == "unwaited" and _carries_whole(settled or prior, {
+                "outcome_states": (prior.get("waiting") or {}).get("seen_outcome_states")}):
+            return "collected"
         return publish_late_review(record.get("canonical_root") or record["drive_root"],
                                    _left_review_mark(record, attempt, seats, gap, settled)).status
     except Exception:
@@ -770,8 +814,8 @@ def _seat_unknown(seat: Dict[str, Any]) -> bool:
             or bool(seat.get("late_result_pending")))
 
 
-def _record_state(record: Dict[str, Any]) -> str:
-    """The wave's own ledger record state (``pending``/``settled``), "" when it names none or is unreadable."""
+def _left_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    """The wave's ledger before collection, including saved delivery receipts; empty when absent or unreadable."""
     from ouroboros import review_ledger as ledger
 
     record_id = str(record.get("record_id") or "")
@@ -779,7 +823,7 @@ def _record_state(record: Dict[str, Any]) -> str:
         payload = ledger.load_record(record.get("canonical_root") or record["drive_root"], record_id) if record_id else None
     except ValueError:
         payload = None
-    return str((payload or {}).get("state") or "")
+    return payload or {}
 
 
 def _settle_left_record(record: Dict[str, Any], seats: List[Dict[str, Any]], *, final: bool) -> Optional[Dict[str, Any]]:
@@ -843,12 +887,34 @@ def _settled_aggregate(record: Dict[str, Any]) -> str:
     attempt, seats, gap = _left_seats(record)
     settled = None if gap else _settle_left_record(record, seats, final=False)
     if not settled or settled.get("state") != "settled":
+        _settle_left_attempt(record, attempt, seats, settled, quiet=True)  # counted completion, an adviser still running
         return ""
-    from ouroboros.tools.review_change_custody import settle_collected_attempt
-
-    settle_collected_attempt(_left_review_root(record), attempt, seats, settled)
+    _settle_left_attempt(record, attempt, seats, settled)
     record["revision"] = settled["revision"]
     return str((settled.get("verdict") or {}).get("aggregate") or "")
+
+
+def _settle_left_attempt(record: Dict[str, Any], attempt: Any, seats: List[Dict[str, Any]],
+                         settled: Optional[Dict[str, Any]], *, quiet: bool = False) -> None:
+    """The attempt row takes the seats its record just settled from, through the one shared writer
+    (``review_change_custody.settle_collected_attempt``): counted completion ends its review phase while an
+    additional seat still running keeps its own custody, and the whole-wave notice stays the settled record's.
+    Only seats with an outcome are handed over: a running, unsent or unknown seat keeps its row exactly as
+    recorded, the binding its next collection rejoins. ``quiet``: where the producer's own outcome never
+    depended on this row, a failure is logged instead of raised."""
+    from ouroboros.review_custody import _row_is_pending
+
+    closed = [seat for seat in seats if not _row_is_pending(seat)]
+    if not settled or attempt is None or not closed:
+        return
+    from ouroboros.tools.review_change_custody import settle_collected_attempt
+
+    try:
+        settle_collected_attempt(_left_review_root(record), attempt, closed, settled)
+    except Exception:
+        if not quiet:
+            raise
+        log.warning("left review %s: its attempt row keeps its custody as recorded", record.get("retry_key"), exc_info=True)
 
 
 def _left_review_mark(record: Dict[str, Any], attempt: Any, seats: List[Dict[str, Any]], gap: str,
@@ -871,6 +937,7 @@ def _left_review_mark(record: Dict[str, Any], attempt: Any, seats: List[Dict[str
     named = f"attempt #{attempt_no}" if attempt_no else f"record {record.get('record_id') or retry_key[-12:]}"
     unknown = [seat for seat in seats if _seat_words(seat).startswith("outcome unknown")]
     how = ("that its author stopped waiting for" if record.get("left") == "unwaited"
+           else "that never reached its author" if record.get("left") == "unread"
            else "that its author left for an addressed message")
     verdict = str(((settled or {}).get("verdict") or {}).get("aggregate") or "")
     # Lifecycle facts only: the author's task ended; whether a seat answered is each seat's own line.

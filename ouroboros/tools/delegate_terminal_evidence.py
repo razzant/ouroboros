@@ -469,19 +469,16 @@ def resolved_terminal_payload(run_id, detail, authority, entry=None, gateway=Non
             full["promotion"] = dict(entry.promotion)
         if entry.superseded_by:  # its snapshot and work belong to that continuation's one capture now
             full["superseded_by"] = entry.superseded_by
-    # Requested-vs-applied model, the review lane's own lexicon and rule
-    # (AgentSessionReviewExecutor): compared only when BOTH are non-empty —
+    # Requested-vs-applied model, the review lane's own record (``model_identity_delta``,
+    # AgentSessionReviewExecutor's too): compared only when BOTH are non-empty —
     # the engine writes aliases ('sonnet' beside 'claude-opus-5'), so a
     # mismatch is an advisory disclosure, never a failure of the run.
     requested_model = str(getattr(entry, "model", "") or "") if entry is not None else ""
     applied_model = str(full.get("model") or "")
     if requested_model and applied_model and requested_model != applied_model:
-        full["capability_delta"] = [{
-            "kind": "capability_delta",
-            "requested": f"model {requested_model}",
-            "effective": f"model {applied_model}",
-            "reason": "session_route_resolves_its_own_model",
-        }]
+        from ouroboros.delegate_custody_usage import model_identity_delta
+
+        full["capability_delta"] = [model_identity_delta(requested_model, applied_model)]
     primary, full_ok, full_note = _delegate()._resolve_full_primary_output(
         gateway, run_id, full.get("primary_output"))
     full["primary_output"] = primary

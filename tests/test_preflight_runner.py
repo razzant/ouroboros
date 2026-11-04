@@ -2401,38 +2401,36 @@ def test_a_red_gate_on_a_managed_update_rolls_the_merge_back(monkeypatch):
     assert "_managed_commit_gate_failure(" in binding_src
 
 
-def test_a_gate_blocked_update_tx_is_never_promoted_by_boot_recovery():
-    """A gate_blocked tx must never be finalized or resumed by boot recovery.
+@pytest.mark.parametrize("rolled_back", [False, True])
+def test_a_gate_blocked_update_tx_is_never_promoted_by_boot_recovery(monkeypatch, rolled_back):
+    """A refused merge retries rollback, never assisted work or a successful-update finalizer.
 
-    The marker retains a refused merge after its immediate rollback failed.
-    Boot must retry rollback to pre_update_sha, never promote it to
-    pending_boot_smoke, resume assisted work or report finalized: True.
+    Exercise the dispatcher rather than its spelling: the boot rollback door
+    may wrap failures, but it must still call the existing rollback owner.
     """
     from supervisor import update_merge
 
-    assert update_merge.GATE_BLOCKED_PHASE not in update_merge._ASSISTED_PHASES, (
-        "gate_blocked is an assisted phase again, so `_recover_assisted_on_boot` "
-        "resumes or promotes the merge a gate refused"
-    )
-    src = inspect.getsource(update_merge.finalize_managed_update_on_boot)
-    assert "_finalize_managed_update_locked(" in src, "public finalizer bypasses the checked dispatch"
-    dispatch = inspect.getsource(update_merge._finalize_managed_update_locked)
-    gate_branch = dispatch.split("if phase == GATE_BLOCKED_PHASE:", 1)
-    assert len(gate_branch) == 2, (
-        "the finalizer has no explicit gate_blocked branch; an unhandled phase is "
-        "only safe until someone widens the fallthrough"
-    )
-    branch_body = gate_branch[1].split("return", 1)
-    assert "rollback_managed_update(" in branch_body[0], (
-        "the gate_blocked branch no longer retries the rollback that restores "
-        "pre_update_sha"
-    )
-    assert '"finalized": False' in branch_body[1].split("\n", 1)[0], (
-        "the gate_blocked branch reports the update as finalized"
-    )
-    assert "_finalize_pending_boot_smoke" not in gate_branch[1].split("if phase", 1)[0], (
-        "the gate_blocked branch promotes the refused merge to pending_boot_smoke"
-    )
+    tx = {"phase": update_merge.GATE_BLOCKED_PHASE, "attempt_id": "gate-test",
+          "pre_update_sha": "a" * 40, "gate_blocked_reason": "tests_failed"}
+    calls = []
+
+    def rollback(reason, *, reopen_writer_admission):
+        calls.append((reason, reopen_writer_admission))
+        return rolled_back, "fixture rollback result"
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("boot must not resume or promote a gate-refused merge")
+
+    monkeypatch.setattr(update_merge, "read_update_tx_strict", lambda: ("valid", dict(tx)))
+    monkeypatch.setattr(update_merge, "rollback_managed_update", rollback)
+    monkeypatch.setattr(update_merge, "_recover_assisted_on_boot", forbidden)
+    monkeypatch.setattr(update_merge, "_finalize_pending_boot_smoke", forbidden)
+    result = update_merge._finalize_managed_update_locked(True)
+    assert calls == [("tests_failed", False)], "boot must retry the rollback owner"
+    assert result["finalized"] is False, "boot must not finalize the refused update"
+    assert result["rolled_back"] is rolled_back
+    assert result["msg"] == "fixture rollback result"
+    assert result.get("observed", {}).get("outcome") != "applied"
 
 
 def test_an_unborn_head_is_proven_absent_not_unreadable(

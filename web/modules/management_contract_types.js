@@ -677,7 +677,8 @@
 
 /**
  * The last apply attempt on /api/update/status (`{}` when none), kept across restarts; never authority.
- * `outcome` is empty until concluded; `applied` only after a later server's startup checks; `unknown` names missing evidence.
+ * `outcome` is empty until concluded; `applied` only after a later server's startup checks; `unknown` names missing evidence;
+ * a boot `failed` names `rollback_incomplete`.
  * @typedef {Object} UpdateProgress
  * @property {string=} operation_id
  * @property {string=} generation
@@ -709,6 +710,7 @@
  * @property {boolean} active
  * @property {string=} phase
  * @property {string=} task_id
+ * @property {string=} attempt_id
  * @property {boolean=} restart_required
  * @property {boolean=} local_work_recovery
  */

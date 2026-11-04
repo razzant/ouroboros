@@ -34,7 +34,8 @@ from .lib.telegram_state import (
     _get_silent_msg, _set_silent_msg, _clear_silent_msg, _subagent_cards_enabled,
     _mirror_progress_enabled, _render_subagent_card, _data_dir,
     _jsonl_tail, _load_runtime_state, _read_json_file, _child_row_held_for_root,
-    _mirror_options, _owner_message_seen, _owner_ingress_fields, _replaceable_progress, _quiet_progress,
+    _mirror_options, _old_reference_unlinked, _owner_message_seen, _owner_ingress_fields, _replaceable_progress,
+    _quiet_progress,
 )
 from .lib import telegram_i18n, telegram_inbound, telegram_quiz
 from .lib.telegram_health import _collect_health, _build_menu_tasks
@@ -62,11 +63,11 @@ _HONOR_ENV_PROXIES = (not in_worker_process()) and env_proxies_configured()
 
 def _telegram_client(api, event=None, chat_id: int = 0, server: tuple[str, str | None] | None = None) -> TelegramClient:
     """Build each bridge client with the granted token, skill-local proxy and saved server."""
-    granted = api.get_settings(["TELEGRAM_BOT_TOKEN"])
+    token = api.get_settings(["TELEGRAM_BOT_TOKEN"]).get("TELEGRAM_BOT_TOKEN", "")
     api_base_url, files_dir = server or _saved_server(api)
-    return TelegramClient(granted.get("TELEGRAM_BOT_TOKEN", ""), trust_env=_HONOR_ENV_PROXIES,
+    return TelegramClient(token, trust_env=_HONOR_ENV_PROXIES,
                           proxy=telegram_proxy(pathlib.Path(api.get_state_dir())),
-                          **(_mirror_options(api, event, chat_id) if event is not None else {}),
+                          **(_mirror_options(api, bot_id(token), event, chat_id) if event is not None else {}),
                           api_base_url=api_base_url, files_dir=files_dir)
 
 _POLL_GENERATION_STARTED = time.time()
@@ -847,7 +848,7 @@ async def _poller(api) -> None:
                         if cb_data.startswith("qz:"):
                             await telegram_quiz.answer_from_callback(
                                 api, client, cb_data, cb_id=cb_id,
-                                update_id=update_id, lang=lang, post=_host_post,
+                                request_key=update_key(update), lang=lang, post=_host_post,
                             )
                             continue
 
@@ -917,7 +918,7 @@ async def _handle_owner_message(
     chat = message.get("chat") or {}
     sender = message.get("from") or {}
     chat_id = int(chat.get("id") or 0)
-    _owner_message_seen(api, chat_id, int(message.get("message_id") or 0))
+    _owner_message_seen(api, client.bot_id, chat_id, int(message.get("message_id") or 0))
     # Owner binding + filtering is already enforced at the top of
     # the update loop (TOFU for all command modes), so chat_id is
     # guaranteed to equal the pinned owner chat here.
@@ -959,7 +960,7 @@ async def _handle_owner_message(
             return
         try:
             sender_label = f"Telegram ({_extract_sender_label(sender, chat_id)})"
-            await asyncio.wait_for(_inject(api, {**_owner_ingress_fields(api, chat_id, message, update_id),
+            await asyncio.wait_for(_inject(api, {**_owner_ingress_fields(api, client.bot_id, chat_id, message, update_id),
                 "text": "/panic", "chat_id": chat_id,
                 "sender_label": sender_label, "transport": {"kind": "telegram", "conversation_id": str(chat_id), "sender_label": sender_label},
                 "user_id": int(sender.get("id") or chat_id), "source": "telegram"}), timeout=2)
@@ -973,10 +974,10 @@ async def _handle_owner_message(
     reply_to = message.get("reply_to_message") or {}
     quiz_ref = None
     if isinstance(reply_to, dict) and reply_to:
-        quiz_ref = telegram_quiz.quiz_for_message(api, chat_id, int(reply_to.get("message_id") or 0))
+        quiz_ref = telegram_quiz.quiz_for_message(api, client.bot_id, chat_id, int(reply_to.get("message_id") or 0))
     if quiz_ref and quiz_ref.get("secret"):
         await telegram_quiz.answer_from_reply(api, client, quiz_ref, "", chat_id=chat_id,
-                                              update_id=update_id, lang=lang, post=_host_post)
+                                              request_key=update_key(update), lang=lang, post=_host_post)
         return
 
     if cleaned_text.startswith("/language ") or cleaned_text.startswith("/language@"):
@@ -1005,6 +1006,12 @@ async def _handle_owner_message(
             )
         return
 
+    if quiz_ref is not None and quiz_ref.get("ambiguous") and not _SLASH_COMMAND_RE.match(text):
+        # An old card's number names no question for sure: an answer or a turn meant for it stays
+        # here, before any download; a command keeps its dispatch, as below.
+        await telegram_quiz.answer_from_reply(api, client, quiz_ref, "", chat_id=chat_id,
+                                              request_key=update_key(update), lang=lang, post=_host_post)
+        return
     if safe_text and not _SLASH_COMMAND_RE.match(text) and isinstance(reply_to, dict) and reply_to:
         if quiz_ref is not None:
             # A reply to a quiz card is the owner's own answer to
@@ -1014,7 +1021,7 @@ async def _handle_owner_message(
             answer_text = str(message.get("text") or message.get("caption") or "")
             await telegram_quiz.answer_from_reply(
                 api, client, quiz_ref, answer_text, chat_id=chat_id,
-                update_id=update_id, lang=lang, post=_host_post,
+                request_key=update_key(update), lang=lang, post=_host_post,
             )
             return
     photos = message.get("photo") or []
@@ -1044,7 +1051,7 @@ async def _handle_owner_message(
         parked = await telegram_inbound.park_inbound_file(api, client, inbound)
     try:
         await _inject(api, {
-            **_owner_ingress_fields(api, chat_id, message, update_id),
+            **_owner_ingress_fields(api, client.bot_id, chat_id, message, update_id),
             "text": safe_text,
             "chat_id": chat_id,
             "user_id": int(sender.get("id") or chat_id or 1),
@@ -1063,6 +1070,11 @@ async def _handle_owner_message(
     finally:
         if parked is not None:
             parked.cleanup()
+    if _old_reference_unlinked(api, client.bot_id, chat_id, message):
+        try:
+            await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["reply_not_linked"])
+        except Exception:
+            api.log("warning", "Telegram note about an unlinked reply could not be delivered.")
 
 
 def _make_poller(api):
@@ -1145,12 +1157,12 @@ def _make_outbound(api, cue: TypingCue | None = None):
             host_row = event.get("role") == "system" and not _quiet_progress(event)
             quiet = _is_silent_mode_enabled(local_settings) and not host_row
             single = quiet and event.get("is_progress") is True and len(message_chunks(text, parse_mode)) == 1
-            tracked_msg_id = _get_silent_msg(api, chat_id) if single else 0
+            tracked_msg_id = _get_silent_msg(api, client.bot_id, chat_id) if single else 0
 
             # An answer never lands under, or revives, the typing it ends (DESIGN §9).
             async with _cue_message(cue, chat_id) as delivered:
                 # editMessageText returns False on any failure (too old, deleted, parse error): send instead.
-                if tracked_msg_id and _replaceable_progress(api, chat_id, tracked_msg_id, event):
+                if tracked_msg_id and _replaceable_progress(api, client.bot_id, chat_id, tracked_msg_id, event):
                     edited = await client.edit_message_text(chat_id, tracked_msg_id, text, parse_mode=parse_mode)
                     if not edited and parse_mode:
                         edited = await client.edit_message_text(chat_id, tracked_msg_id, text, parse_mode="")
@@ -1162,7 +1174,7 @@ def _make_outbound(api, cue: TypingCue | None = None):
                     delivered()
 
             if single and msg_id:
-                _set_silent_msg(api, chat_id, msg_id)  # an edit of a split note would erase its last part
+                _set_silent_msg(api, client.bot_id, chat_id, msg_id)  # an edit of a split note would erase its last part
             elif not host_row:
                 _clear_silent_msg(api, chat_id)
         except Exception as exc:
@@ -1424,7 +1436,7 @@ def _make_quiz(api, cue: TypingCue | None = None):
                     settled_text = telegram_quiz.render_quiz_text(question, plain_labels, stake, "", **card)
                 else:
                     settled_text = body
-                telegram_quiz.remember_quiz(api, token, {
+                telegram_quiz.remember_quiz(api, client.bot_id, token, {
                     "task_id": task_id, "quiz_id": quiz_id, "chat_id": chat_id,
                     "message_id": int(message_id or 0), "options": labels,
                     "text": settled_text, **({"secret": True} if secret else {}),

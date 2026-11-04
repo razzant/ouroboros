@@ -553,8 +553,11 @@ def test_a_session_participant_reads_the_same_exact_evidence_inline_as_a_packet_
 
 def test_the_runtime_data_plane_is_never_attached_whatever_root_the_ask_names(harness, monkeypatch):
     """The live data root and settings file are denied as evidence (``plan_ask._evidence_deny_paths``
-    is wired into the attachment manifest); an ordinary workspace file still attaches."""
+    is wired into the attachment manifest); an ordinary workspace file still attaches. The refusal keeps its
+    code and says what to attach instead, once, to the author (the ask's result and a later read) and to
+    the participants (their packet); the manifest row stays ``{locator, reason}``."""
     from ouroboros import config as cfg
+    from ouroboros.tools.plan_packet import DENIED_ATTACH_HINT
 
     data_root = harness.workspace / "live_data"
     data_root.mkdir()
@@ -564,11 +567,33 @@ def test_the_runtime_data_plane_is_never_attached_whatever_root_the_ask_names(ha
     ctx = harness.make_ctx()
     assert any(str(data_root) in path for path in plan_ask._evidence_deny_paths(ctx))
     sub = harness.install({})
-    _write(ctx, ask="council", attach=["live_data/settings.json", "notes.md"])
+    asked, _result = _write(ctx, ask="council", attach=["live_data/settings.json", "notes.md"])
     ask = _record(harness)["asks"][0]
     assert {"locator": "live_data/settings.json", "reason": "denied_path"} in ask["omissions"]
     assert [a["locator"] for a in ask["attached"]] == ["notes.md"]
-    assert "sk-live-x" not in json.dumps([c["request"].slot_messages for c in sub.calls], default=str)
+    packets = json.dumps([c["request"].slot_messages for c in sub.calls], default=str)
+    assert "sk-live-x" not in packets
+    read, _result = _call(ctx)
+    for shown in (asked, read):
+        assert (f"  evidence omitted: live_data/settings.json (denied_path)\n  {DENIED_ATTACH_HINT}\n" in shown
+                and shown.count(DENIED_ATTACH_HINT) == 1), shown
+    assert "| live_data/settings.json | denied_path |" in packets and DENIED_ATTACH_HINT in packets
+    assert DENIED_ATTACH_HINT.startswith("Runtime data and the live settings file cannot be attached directly. Use "
+                                         "task:<id> for a helper's saved result, chat:<id> for dialogue, or an "
+                                         "allowed workspace file for other evidence.")
+
+
+@pytest.mark.parametrize("reason", ["missing", "outside_allowed_roots", "sensitive", "truncated_to_40000"])
+def test_only_a_deny_root_says_what_to_attach_instead(reason):
+    """The other side: every other omission keeps its code alone, and several denied locators get the
+    sentence once per list, not once per row."""
+    from ouroboros.tools.plan_packet import omission_hint, render_evidence
+
+    omissions = [{"locator": "x", "reason": reason}]
+    assert omission_hint(omissions) == ""
+    assert "cannot be attached directly" not in render_evidence({"declared": ["x"], "omissions": omissions})
+    denied = omissions + [{"locator": "y", "reason": "denied_path"}, {"locator": "z", "reason": "denied_path"}]
+    assert render_evidence({"declared": ["x", "y", "z"], "omissions": denied}).count("cannot be attached directly") == 1
 
 
 def test_an_asks_reviewer_effort_orders_the_pool_of_that_ask_only(harness, monkeypatch):

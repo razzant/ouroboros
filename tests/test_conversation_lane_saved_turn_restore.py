@@ -18,16 +18,22 @@ of that move, both seen on the real keyless server (system_e2e S42):
 
 from __future__ import annotations
 
+import json
+import queue as stdqueue
 import time
 from types import SimpleNamespace
 
 import pytest
 
 from ouroboros import cancel_intents as ci
-from ouroboros.task_results import STATUS_RUNNING, write_task_result
+from ouroboros import working_checkpoint as wc
+from ouroboros.task_results import STATUS_RUNNING, load_task_result, write_task_result
 from ouroboros.utils import utc_now_iso
 from supervisor import worker_chat_lane, workers
+from supervisor.events_budget import budget_hold_fact
+from tests._budget_pause_exact_helpers import _loop_ctx
 from tests._shared import write_queue_document
+from tests.test_update_abort_retention import _assert_returned, _Process, _system
 
 pytestmark = pytest.mark.serial
 
@@ -183,3 +189,773 @@ def test_restored_saved_turn_rows_are_dated_by_the_stop(tmp_path):
     assert queue_snapshot_observation(load_queue_document(tmp_path, fresh=True))["fresh"] is False
     write_queue_document(path, {"ts": utc_now_iso(), "pending": [], "running": []})
     assert queue_snapshot_observation(load_queue_document(tmp_path, fresh=True))["fresh"] is True
+
+
+# ---------------------------------------------------------------------------
+# #2555: a fresh Main conversation through lane -> pool -> saved stop / aborted Update
+# ---------------------------------------------------------------------------
+
+def _lane_carrier(system, wid=50):
+    from ouroboros.task_carrier import LANE_CONVERSATION
+    from tests.worker_pool_support import affirm_ready
+
+    proc = _Process(710000 + wid)
+    system.processes[proc.pid] = proc
+    commands = stdqueue.Queue()
+    slot = system.workers.Worker(wid, proc, commands, lane=LANE_CONVERSATION)
+    affirm_ready(slot)
+    system.workers.WORKERS[wid] = slot
+    return slot, commands
+
+
+def _persist_running(root, task, *, clock=True):
+    """The body's actual start record (attempt and owner included), as its agent writes it."""
+    from ouroboros.agent import OuroborosAgent
+
+    OuroborosAgent._persist_running_record(SimpleNamespace(env=SimpleNamespace(drive_root=root, budget_drive_root=root),
+                                                           _task_started_ts=time.time() if clock else None), task)
+
+
+def _carried_turn(system, root, *, metadata=None, wake=False, patch=None, started=True):
+    """A real Main (or wake) admission, published before its carrier's real first step."""
+    from supervisor.conversation_lane import handle_direct_turn_bound
+    from supervisor.worker_chat_lane import prepare_conversation_task
+
+    slot, commands = _lane_carrier(system)
+    before = set(system.workers.RUNNING)
+    if wake:
+        from ouroboros.consciousness_wake import wake_task_metadata
+
+        _lane_carrier(system, wid=51)  # a wake never takes the owner's last idle carrier
+        patch.setattr(system.state, "load_state", lambda: {"bg_consciousness_enabled": True})
+        patch.setattr(system.state, "budget_remaining", lambda *_a, **_k: 5.0)
+        receipt = system.workers.handle_wake_direct(1, "[Wake-up · test]", wake_task_metadata("reflex", "heartbeat"))
+        assert receipt["admitted"], receipt
+    else:
+        system.workers.handle_chat_direct(1, "keep working", None, task_metadata=dict(metadata or {}))
+    [task_id] = set(system.workers.RUNNING) - before
+    published = {row["id"]: row for row in json.loads(system.queue.QUEUE_SNAPSHOT_PATH.read_text())["running"]}
+    frames = []
+    dispatched = commands.get_nowait()
+    prepare_conversation_task(SimpleNamespace(), dispatched, root, broadcast=frames.append)
+    for frame in frames:
+        handle_direct_turn_bound(frame, SimpleNamespace(RUNNING=system.workers.RUNNING))
+    if started:
+        _persist_running(root, dispatched)
+    return SimpleNamespace(id=task_id, slot=slot, task=dispatched, published=published[task_id]["task"])
+
+
+def _save_work(root, turn, *, attempt=1):
+    _ctx, limit = _loop_ctx(root, turn.id, direct=True, attempt=attempt)
+    wc.save_round(limit, "pre_effect")
+
+
+def _launched(system):
+    sent = []
+    for commands in system.launches:
+        while not commands.empty():
+            sent.append(commands.get_nowait())
+    return sent
+
+
+def _detach_to_pool(system, root, monkeypatch, turn):
+    """The real ``continue_in_background``: arm, save, park the lane row, wake, launch; its pooled start record."""
+    from ouroboros import budget_pause, model_detach
+    from ouroboros.tools.control_mind import _continue_in_background
+    from supervisor import message_bus
+    from supervisor.sleep_wake import wake_ready_sleepers
+    from tests._budget_pause_exact_helpers import _fast_hold, _quiet_external
+    from tests.conversation_carrier_support import park_lane_pause
+
+    monkeypatch.setattr(model_detach, "pool_available", lambda: {"available": True})
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(push_log=lambda *_a: None))
+    monkeypatch.setattr(system.state, "budget_remaining", lambda *_a, **_k: 5.0)
+    _fast_hold(monkeypatch, budget_pause)
+    _quiet_external(monkeypatch, budget_pause)
+    ctx, limit = _loop_ctx(root, turn.id, direct=True)
+    ctx.task_attempt = turn.task.get("_attempt")  # the agent's ``ctx.task_attempt``: None on a seed's first launch
+    ctx.task_metadata = {"_execution_owner": turn.task["_execution_owner"]}
+    limit.messages.append({"role": "tool", "tool_call_id": "call_b", "content": "done b"})
+    assert json.loads(_continue_in_background(ctx, "keep working"))["status"] == "detach_armed"
+    with pytest.raises(budget_pause.BudgetPauseRequested) as raised:
+        budget_pause.enter_cold_sleep(limit)
+    park_lane_pause(budget_pause.pause_event(turn.task, raised.value.pause), worker_id=turn.slot.wid)
+    budget_pause.end_dispatch_fence(turn.id)
+    [parked] = system.workers.PENDING
+    assert parked["id"] == turn.id and parked["detached_by"] == "mind"
+    assert any(row.get("ok") for row in wake_ready_sleepers(system.queue))
+    system.workers.assign_tasks()
+    [pooled] = _launched(system)
+    assert pooled["id"] == turn.id and system.workers.RUNNING[turn.id]["worker_id"] != turn.slot.wid
+    _persist_running(root, pooled)
+    stored = load_task_result(root, turn.id)
+    assert stored["execution_owner"]["kind"] == "pooled"
+    # The pooled body consumes its single-use grant: its own ``resumed`` source, under the row's actual attempt.
+    resumed_ctx, resumed = _loop_ctx(root, turn.id, direct=True)
+    resumed_ctx.task_attempt, resumed_ctx.budget_pause_resume = pooled.get("_attempt"), pooled["_budget_pause_resume"]
+    state = budget_pause.load_budget_pause(resumed_ctx)
+    monkeypatch.setattr("ouroboros.owner_wait.rebind_restored_route", lambda *_a, **_k: (None, "max"))  # no model here
+    budget_pause.resume_paused_loop(resumed.tools, state, [], {}, {}, set(), budget_remaining_usd=5.0)
+    assert wc.save_round(resumed, "pre_effect")  # it keeps working on the pool
+    return pooled
+
+
+def _resume_and_launch(system, task_id):
+    resumed = system.queue.resume_budget_paused_task(task_id)
+    assert resumed["ok"], resumed
+    system.workers.assign_tasks()
+    return _launched(system)
+
+
+def _boot_after_stop(system, monkeypatch, root):
+    """The application stops (its teardown kill); the next generation restores the saved queue."""
+    system.workers.kill_workers(force=True, terminal_status="cancelled", result_reason="Server shutdown.",
+                                stop_source="server_shutdown", retain_saved_work=True)
+    system.workers.PENDING[:] = []
+    system.workers.RUNNING.clear()
+    _next_generation(monkeypatch, root)
+    system.queue.init(root)
+    system.queue.restore_pending_from_snapshot()
+    monkeypatch.setattr(system.state, "budget_remaining", lambda *_a, **_k: 5.0)
+    assert system.workers.ensure_worker_pool_started(allow_disabled_restart=True)
+    system.workers.open_repo_writer_admission()
+
+
+@pytest.mark.parametrize("origin", ["owner", "wake"])
+def test_a_fresh_main_turn_returns_from_an_aborted_update_once_on_its_own_scope_evidence(tmp_path, monkeypatch, origin):
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"}, wake=origin == "wake", patch=monkeypatch)
+    assert turn.published["_project_scope_none"] is True, "published before any carrier holds the turn"
+    stored = load_task_result(tmp_path, turn.id)
+    # The real first launch: what task_admission._working_attempt_unstarted reads as 0 -> 1.
+    assert stored["task_attempt"] == 0 and stored["execution_owner"]["kind"] == "direct"
+    assert stored["execution_owner"]["task_attempt"] == 0 and "admitted_dispatch_attempt" not in stored
+    _save_work(tmp_path, turn)
+    saved = wc.read_working(tmp_path, turn.id, 1)[1]
+    assert system.control._quiesce_repo_writers("auto_merge") == []
+    system.control._respawn_workers_after_failed_update()
+    source = _assert_returned(system, tmp_path, turn.id)["_working_recovery"]
+    assert source["from_attempt"] == 1
+    ctx, _ = _loop_ctx(tmp_path, turn.id, attempt=2)
+    frozen = wc.load_recovery(ctx, source)
+    assert {k: frozen[k] for k in ("usage", "round_idx", "started_at")} == {
+        k: saved[k] for k in ("usage", "round_idx", "started_at")}
+    system.workers.assign_tasks()
+    [sent] = _launched(system)
+    assert (sent["id"], sent["_attempt"], sent["_working_recovery"]) == (turn.id, 2, source)
+    assert not sent.get("project_id") and "_project_admission" not in sent
+    assert load_task_result(tmp_path, turn.id)["admitted_dispatch_attempt"] == 2
+    system.workers.assign_tasks()
+    assert not _launched(system) and not system.workers.PENDING
+
+
+def test_a_main_turn_saved_by_a_quit_waits_for_resume_and_survives_another_stop_cycle(tmp_path, monkeypatch):
+    from supervisor.events_budget import HOLD_SAVED_WORK
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    _save_work(tmp_path, turn)
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    [held] = system.workers.PENDING
+    assert budget_hold_fact(held)["reason"] == HOLD_SAVED_WORK and held["_attempt"] == 2
+    assert held["_project_scope_none"] is True
+    for _ in range(2):
+        system.workers.assign_tasks()
+    assert not _launched(system), "only the owner's Resume releases a quit's saved work"
+    [sent] = _resume_and_launch(system, turn.id)
+    assert (sent["id"], sent["_attempt"]) == (turn.id, 2) and sent["_project_scope_none"] is True
+    system.workers.assign_tasks()
+    assert not _launched(system)
+    # The second cycle: the resumed attempt runs and saves, then an Update aborts around it.
+    _persist_running(tmp_path, sent)
+    _save_work(tmp_path, turn, attempt=2)
+    assert system.control._quiesce_repo_writers("auto_merge") == []
+    system.control._respawn_workers_after_failed_update()
+    [row] = system.workers.PENDING
+    assert row["_attempt"] == 3 and row["_working_recovery"]["from_attempt"] == 2 and budget_hold_fact(row) is None
+    system.workers.assign_tasks()
+    [again] = _launched(system)
+    assert (again["id"], again["_attempt"]) == (turn.id, 3)
+    system.workers.assign_tasks()
+    assert not _launched(system)
+
+
+def test_an_acknowledged_restart_returns_a_main_turn_without_a_resume(tmp_path, monkeypatch):
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    _save_work(tmp_path, turn)
+    assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                   transaction_id="tx-main") == {turn.id}
+    _ack(tmp_path, "tx-main")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    [row] = system.workers.PENDING
+    assert budget_hold_fact(row) is None and row["_working_recovery"]["cause"] == "restart"
+    system.workers.assign_tasks()
+    [sent] = _launched(system)
+    assert (sent["id"], sent["_attempt"]) == (turn.id, 2)
+    system.workers.assign_tasks()
+    assert not _launched(system)
+
+
+@pytest.mark.parametrize("door", ["aborted_update", "quit_restore"])
+def test_a_main_turn_detached_to_the_pool_returns_once_after_a_stop(tmp_path, monkeypatch, door):
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    pooled = _detach_to_pool(system, tmp_path, monkeypatch, turn)
+    stored = load_task_result(tmp_path, turn.id)
+    assert pooled["_project_scope_none"] is True and pooled["_attempt"] == 1, "the parked row keeps its attempt"
+    assert stored["task_attempt"] == 1 and stored["execution_owner"]["task_attempt"] == 1
+    assert stored["execution_owner"]["kind"] == "pooled" and stored["admitted_dispatch_attempt"] == 1
+    if door == "aborted_update":
+        assert system.control._quiesce_repo_writers("auto_merge") == []
+        system.control._respawn_workers_after_failed_update()
+        source = _assert_returned(system, tmp_path, turn.id)["_working_recovery"]
+        system.workers.assign_tasks()
+        sent = _launched(system)
+    else:
+        _boot_after_stop(system, monkeypatch, tmp_path)
+        [held] = system.workers.PENDING
+        assert budget_hold_fact(held) and held["_attempt"] == 2
+        source = held["_working_recovery"]
+        system.workers.assign_tasks()
+        assert not _launched(system), "only the owner's Resume releases a quit's saved work"
+        sent = _resume_and_launch(system, turn.id)
+    assert [(row["id"], row["_attempt"], row["_working_recovery"]) for row in sent] == [(turn.id, 2, source)]
+    system.workers.assign_tasks()
+    assert not _launched(system)
+    # The repeat cycle: the successor runs and saves, then another Update aborts around it.
+    _persist_running(tmp_path, sent[0])
+    _save_work(tmp_path, turn, attempt=2)
+    assert system.control._quiesce_repo_writers("auto_merge") == []
+    system.control._respawn_workers_after_failed_update()
+    system.workers.assign_tasks()
+    assert [(row["id"], row["_attempt"]) for row in _launched(system)] == [(turn.id, 3)]
+    system.workers.assign_tasks()
+    assert not _launched(system)
+
+
+def test_a_historical_pooled_attempt_zero_stays_held_after_an_aborted_update(tmp_path, monkeypatch):
+    """A row a past release recorded this way proves no attempt: zero is never normalized by owner kind."""
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    _detach_to_pool(system, tmp_path, monkeypatch, turn)
+    stored = load_task_result(tmp_path, turn.id)
+    write_task_result(tmp_path, turn.id, "running", task_attempt=0,
+                      execution_owner={**stored["execution_owner"], "task_attempt": 0})
+    _aborted(system, tmp_path, turn)
+    [held] = system.workers.PENDING
+    assert held["_project_admission_restore_hold"]["reason"] == "project_dispatch_unconfirmed"
+
+
+def _parked_before_its_body(system, root, monkeypatch, *, mark=None):
+    """The carrier's real pre-body Pause event for a real Main seed, parked by the supervisor."""
+    from ouroboros import budget_pause
+    from ouroboros.owner_pause import read_fence
+    from supervisor import message_bus
+    from supervisor.owner_pause_control import request_owner_pause
+    from tests.conversation_carrier_support import park_lane_pause
+
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(push_log=lambda *_a: None))
+    monkeypatch.setattr(system.state, "budget_remaining", lambda *_a, **_k: 5.0)
+    turn = _carried_turn(system, root, metadata={"client_message_id": "cm-main"}, started=False)
+    if mark:
+        system.workers.RUNNING[turn.id]["task"]["admitted_dispatch"] = mark
+    write_task_result(root, turn.id, "scheduled", chat_id=1, root_task_id=turn.id)
+    assert request_owner_pause(turn.id, request_id="pause-main")["ok"]
+    fence = read_fence(root, turn.id)  # the Pause this carrier's prestart wait observed
+    owner = SimpleNamespace(executed_seconds=lambda: 0.0, prestart_pause_fence=fence, drive_root=root)
+    error = SimpleNamespace(before_task_start=True, control_reason=budget_pause.RAIL_OWNER_PAUSE)
+    event = budget_pause.prestart_pause_event(turn.task, error, owner)
+    assert event is not None
+    park_lane_pause(event, worker_id=turn.slot.wid)
+    return turn, event
+
+
+def test_a_main_turn_paused_before_its_body_keeps_its_attempt_through_resume_and_abort(tmp_path, monkeypatch):
+    system = _system(tmp_path, monkeypatch)
+    turn, _event = _parked_before_its_body(system, tmp_path, monkeypatch)
+    [parked] = system.workers.PENDING
+    assert parked["_project_scope_none"] is True and parked["_attempt"] == 1
+    assert "admitted_dispatch" not in parked, "the lane put this turn on its carrier: never 'none'"
+    system.workers.assign_tasks()
+    assert not _launched(system), "the owner's Pause still holds it"
+    [pooled] = _resume_and_launch(system, turn.id)
+    _persist_running(tmp_path, pooled)
+    assert load_task_result(tmp_path, turn.id)["task_attempt"] == 1
+    _save_work(tmp_path, turn)
+    assert system.control._quiesce_repo_writers("auto_merge") == []
+    system.control._respawn_workers_after_failed_update()
+    source = _assert_returned(system, tmp_path, turn.id)["_working_recovery"]
+    system.workers.assign_tasks()
+    assert [(row["id"], row["_attempt"], row["_working_recovery"]) for row in _launched(system)] == [(turn.id, 2, source)]
+    system.workers.assign_tasks()
+    assert not _launched(system)
+
+
+def test_a_resumed_pre_body_turn_caught_by_a_quit_before_its_launch_waits_for_one_more_resume(tmp_path, monkeypatch):
+    system = _system(tmp_path, monkeypatch)
+    turn, _event = _parked_before_its_body(system, tmp_path, monkeypatch)
+    assert system.queue.resume_budget_paused_task(turn.id)["ok"]
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    [held] = system.workers.PENDING
+    assert budget_hold_fact(held)["reason"] == "saved_work_hold" and "admitted_dispatch" not in held
+    from supervisor.task_admission import PRESTART_PROOF, prestart_returned_unsent
+
+    proof = prestart_returned_unsent(held)  # the quit hold replaced the result's limit and carries the proof
+    assert proof["before_task_start"] is True and budget_hold_fact(held)[PRESTART_PROOF] == proof
+    assert not held.get("_project_admission_restore_hold"), "its carrier's pre-body return is positive proof"
+    system.workers.assign_tasks()
+    assert not _launched(system), "a quit still needs the owner's Resume"
+    assert [(row["id"], row["_attempt"]) for row in _resume_and_launch(system, turn.id)] == [(turn.id, 1)]
+    system.workers.assign_tasks()
+    assert not _launched(system)
+
+
+@pytest.mark.parametrize("door", ["second_quit", "panic"])
+def test_a_resumed_pre_body_turn_keeps_its_proof_through_another_stop(tmp_path, monkeypatch, door):
+    system = _system(tmp_path, monkeypatch)
+    turn, _event = _parked_before_its_body(system, tmp_path, monkeypatch)
+    assert system.queue.resume_budget_paused_task(turn.id)["ok"]
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    if door == "second_quit":  # Resume, then another quit before the launch: the carried proof still holds
+        assert system.queue.resume_budget_paused_task(turn.id)["ok"]
+    else:
+        (tmp_path / "state" / "panic_stop.flag").write_text("panic", encoding="utf-8")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    [held] = system.workers.PENDING
+    assert budget_hold_fact(held) and not held.get("_project_admission_restore_hold")
+    system.workers.assign_tasks()
+    assert not _launched(system), "every stop still needs the owner's Resume"
+    if door == "panic":
+        (tmp_path / "state" / "panic_stop.flag").unlink()
+    assert [(row["id"], row["_attempt"]) for row in _resume_and_launch(system, turn.id)] == [(turn.id, 1)]
+    system.workers.assign_tasks()
+    assert not _launched(system)
+
+
+@pytest.mark.parametrize("evidence", ["launch_mark", "body_start"])
+def test_a_pre_body_return_proves_nothing_once_a_launch_or_body_may_have_followed(tmp_path, monkeypatch, evidence):
+    from supervisor import task_admission
+
+    system = _system(tmp_path, monkeypatch)
+    turn, _event = _parked_before_its_body(system, tmp_path, monkeypatch)
+    assert system.queue.resume_budget_paused_task(turn.id)["ok"]
+    [row] = system.workers.PENDING
+    if evidence == "launch_mark":  # the launch's own commit landed; the process died before the put
+        assert task_admission.record_project_dispatch_possible(row)
+    elif evidence == "body_start":
+        _persist_running(tmp_path, {**row, "_execution_owner": {"kind": "pooled"}}, clock=False)  # its attempt alone
+        write_task_result(tmp_path, turn.id, "scheduled")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    [held] = system.workers.PENDING
+    assert held["_project_admission_restore_hold"] and "admitted_dispatch" not in held
+    for _ in range(2):
+        system.workers.assign_tasks()
+    resumed = system.queue.resume_budget_paused_task(turn.id)
+    system.workers.assign_tasks()
+    assert not _launched(system), resumed
+    [still] = system.workers.PENDING
+    assert still["_project_admission_restore_hold"]["reason"] in {"project_dispatch_unconfirmed",
+                                                                  "project_routing_fence_lookup_failed"}
+    assert not task_admission.prestart_returned_unsent(still)
+
+
+@pytest.mark.parametrize("resume_first", [False, True])
+@pytest.mark.parametrize("door", ["quit", "panic", "owner_restart"])
+@pytest.mark.parametrize("read_gap", ["proof_reader", "store"])
+def test_pre_body_readability_recovery_keeps_quit_authority_and_resumes_once(
+        tmp_path, monkeypatch, resume_first, door, read_gap):
+    from supervisor import task_admission
+    from tests._store_shared import unreadable_result
+
+    system = _system(tmp_path, monkeypatch)
+    turn, _event = _parked_before_its_body(system, tmp_path, monkeypatch)
+    assert system.queue.resume_budget_paused_task(turn.id)["ok"]
+    original = load_task_result(tmp_path, turn.id)["resource_limit"]
+    if door != "quit":
+        flag = "panic_stop.flag" if door == "panic" else "owner_restart_no_resume.flag"
+        (tmp_path / "state" / flag).write_text(door, encoding="utf-8")
+    with monkeypatch.context() as patched:
+        def unreadable(*_a, **_k):
+            raise OSError("injected task store failure")
+
+        if read_gap == "store":
+            unreadable_result(patched, turn.id, root=tmp_path)
+        else:
+            patched.setattr(task_admission, "load_task_result", unreadable)
+        _boot_after_stop(system, monkeypatch, tmp_path)
+        for _ in range(2):
+            system.workers.assign_tasks()
+        [held] = system.workers.PENDING
+        assert held["_project_admission_restore_hold"]
+        assert not _launched(system)
+        assert not system.queue.resume_budget_paused_task(turn.id)["ok"]
+    assert load_task_result(tmp_path, turn.id)["resource_limit"] == original
+    if not resume_first:
+        system.workers.assign_tasks()
+        [held] = system.workers.PENDING
+        assert not held.get("_project_admission_restore_hold")
+        assert budget_hold_fact(held), "read recovery cannot grant Resume after Quit"
+        assert not _launched(system)
+    assert [(row["id"], row["_attempt"]) for row in _resume_and_launch(system, turn.id)] == [(turn.id, 1)]
+    system.workers.assign_tasks()
+    assert not _launched(system)
+
+
+@pytest.mark.parametrize("changed", ["launch_mark", "body_start", "late_binding", "stop", "legacy", "snapshot_failure"])
+def test_recovered_pre_body_readability_does_not_override_other_evidence(tmp_path, monkeypatch, changed):
+    from supervisor import task_admission
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    system = _system(tmp_path, monkeypatch)
+    turn, _event = _parked_before_its_body(system, tmp_path, monkeypatch)
+    assert system.queue.resume_budget_paused_task(turn.id)["ok"]
+    with monkeypatch.context() as patched:
+        def unreadable(*_a, **_k):
+            raise OSError("injected task store failure")
+
+        patched.setattr(task_admission, "load_task_result", unreadable)
+        _boot_after_stop(system, monkeypatch, tmp_path)
+    [held] = system.workers.PENDING
+    if changed == "launch_mark":
+        assert task_admission.record_project_dispatch_possible(held)
+    elif changed == "body_start":
+        _persist_running(tmp_path, {**held, "_execution_owner": {"kind": "pooled"}}, clock=False)
+        write_task_result(tmp_path, turn.id, "scheduled")
+    elif changed == "late_binding":
+        room = create_project(tmp_path, "late-room")
+        bind_task_to_project(tmp_path, turn.id, "late-room", room.get("chat_id"), origin={"absent": "mid_task_no_origin"})
+    elif changed == "stop":
+        ci.request_cancel(tmp_path, turn.id, reason="owner stop", source="owner", requested_by="owner")
+    elif changed == "legacy":
+        held.pop("_project_scope_none")
+    with monkeypatch.context() as patched:
+        if changed == "snapshot_failure":
+            assert system.queue.resume_budget_paused_task(turn.id)["ok"]
+            patched.setattr(system.queue, "publish_queue_snapshot", lambda **_k: False)
+        system.workers.assign_tasks()
+        system.queue.resume_budget_paused_task(turn.id)
+        system.workers.assign_tasks()
+        assert not _launched(system)
+    if changed == "snapshot_failure":
+        assert system.workers.PENDING[0]["_project_admission_restore_hold"]
+        system.workers.assign_tasks()
+        assert [(row["id"], row["_attempt"]) for row in _launched(system)] == [(turn.id, 1)]
+        system.workers.assign_tasks()
+        assert not _launched(system)
+
+
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_a_planned_restart_returns_a_pre_body_queue_row_once(tmp_path, monkeypatch, unreadable):
+    from supervisor import restart_retention, task_admission
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    turn, _event = _parked_before_its_body(system, tmp_path, monkeypatch)
+    assert system.queue.resume_budget_paused_task(turn.id)["ok"]
+    restart_retention.prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                               transaction_id="tx-pre-body")
+    _ack(tmp_path, "tx-pre-body")
+    with monkeypatch.context() as patched:
+        if unreadable:
+            def failed_read(*_a, **_k):
+                raise OSError("injected task store failure")
+
+            patched.setattr(task_admission, "load_task_result", failed_read)
+        _boot_after_stop(system, monkeypatch, tmp_path)
+        if unreadable:
+            system.workers.assign_tasks()
+            assert not _launched(system)
+            assert system.workers.PENDING[0]["_project_admission_restore_hold"]
+    [row] = system.workers.PENDING
+    assert budget_hold_fact(row) is None, "this acknowledged restart already granted return"
+    system.workers.assign_tasks()
+    assert [(row["id"], row["_attempt"]) for row in _launched(system)] == [(turn.id, 1)]
+    system.workers.assign_tasks()
+    assert not _launched(system)
+
+
+def test_a_panic_or_stop_still_binds_a_turn_paused_before_its_body(tmp_path, monkeypatch):
+    from ouroboros.cancel_intents import request_cancel
+
+    system = _system(tmp_path, monkeypatch)
+    turn, _event = _parked_before_its_body(system, tmp_path, monkeypatch)
+    (tmp_path / "state" / "panic_stop.flag").write_text("panic", encoding="utf-8")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    system.workers.assign_tasks()
+    assert not _launched(system) and [row["id"] for row in system.workers.PENDING] == [turn.id]
+    (tmp_path / "state" / "panic_stop.flag").unlink()
+    request_cancel(tmp_path, turn.id, reason="owner stop", source="owner", requested_by="owner")
+    system.workers.assign_tasks()
+    assert not _launched(system) and turn.id not in system.workers.RUNNING
+    assert load_task_result(tmp_path, turn.id)["status"] in {"cancelled", "cancel_requested", "interrupted"}
+
+
+def test_a_running_or_marked_turn_never_acquires_no_dispatch_from_a_park(tmp_path, monkeypatch):
+    """Zero recorded calls is not "ran no body": only the carrier's checked pre-body event says that."""
+    from supervisor import message_bus
+    from tests.conversation_carrier_support import park_lane_pause
+
+    system = _system(tmp_path, monkeypatch)
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(push_log=lambda *_a: None))
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    assert load_task_result(tmp_path, turn.id)["status"] == "running"
+    park_lane_pause({"type": "budget_pause", "task_id": turn.id, "worker_id": turn.slot.wid, "resource_limit": {
+        "status": "paused_before_dispatch", "scope": "global", "replay_safe": True, "physical_calls": 0}})
+    [parked] = system.workers.PENDING
+    assert parked["_project_scope_none"] is True and "admitted_dispatch" not in parked
+
+
+def test_a_pre_body_event_never_replaces_an_existing_dispatch_mark(tmp_path, monkeypatch):
+    system = _system(tmp_path, monkeypatch)
+    _parked_before_its_body(system, tmp_path, monkeypatch, mark="possible")
+    [parked] = system.workers.PENDING
+    assert parked["admitted_dispatch"] == "possible"
+
+
+def test_a_pre_body_event_for_a_later_attempt_is_refused_without_a_mark(tmp_path, monkeypatch):
+    from ouroboros import budget_pause
+    from ouroboros.owner_pause import read_fence
+    from supervisor import message_bus
+    from supervisor.owner_pause_control import request_owner_pause
+    from tests.conversation_carrier_support import park_lane_pause
+
+    system = _system(tmp_path, monkeypatch)
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(push_log=lambda *_a: None))
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"}, started=False)
+    write_task_result(tmp_path, turn.id, "scheduled", chat_id=1, root_task_id=turn.id)
+    assert request_owner_pause(turn.id, request_id="pause-main")["ok"]
+    owner = SimpleNamespace(executed_seconds=lambda: 0.0, prestart_pause_fence=read_fence(tmp_path, turn.id), drive_root=tmp_path)
+    error = SimpleNamespace(before_task_start=True, control_reason=budget_pause.RAIL_OWNER_PAUSE)
+    event = budget_pause.prestart_pause_event(turn.task, error, owner)
+    system.workers.RUNNING[turn.id]["attempt"] = 2  # the row is already a successor: this event is not its evidence
+    with pytest.raises(ValueError, match="no-body evidence"):
+        park_lane_pause(event, worker_id=turn.slot.wid)
+    assert turn.id in system.workers.RUNNING and "admitted_dispatch" not in system.workers.RUNNING[turn.id]["task"]
+
+
+def _move_mid_run(system, root, monkeypatch, task_id, pid="moved-room"):
+    from ouroboros.project_placement import move_task_to_project, placement_basis
+
+    monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: SimpleNamespace(broadcast=lambda _event: None))
+    move_task_to_project(root, task_id, pid, origin={"absent": "mid_task_no_origin"},
+                         basis=placement_basis(root, task_id, pid), running=system.workers.RUNNING,
+                         pending=system.workers.PENDING, initiated_by="owner")
+    return pid
+
+
+@pytest.mark.parametrize("door", ["aborted_update", "quit_restore"])
+def test_a_main_turn_moved_mid_run_keeps_its_room_not_its_old_absence(tmp_path, monkeypatch, door):
+    from ouroboros.projects_registry import get_project
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    _save_work(tmp_path, turn)
+    pid = _move_mid_run(system, tmp_path, monkeypatch, turn.id)
+    assert system.workers.RUNNING[turn.id]["task"]["_project_scope_none"] is True, "RUNNING keeps its lease until it leaves"
+    if door == "aborted_update":
+        assert system.control._quiesce_repo_writers("auto_merge") == []
+        system.control._respawn_workers_after_failed_update()
+        system.workers.assign_tasks()
+        sent = _launched(system)
+    else:
+        _boot_after_stop(system, monkeypatch, tmp_path)
+        system.workers.assign_tasks()
+        assert not _launched(system)
+        sent = _resume_and_launch(system, turn.id)
+    assert [row["id"] for row in sent] == [turn.id], system.workers.PENDING
+    room = get_project(tmp_path, pid)
+    assert sent[0]["project_id"] == pid and sent[0]["chat_id"] == room["chat_id"]
+    assert sent[0]["_project_admission"]["project_id"] == pid and "_project_scope_none" not in sent[0]
+
+
+@pytest.mark.parametrize("door", ["aborted_update", "quit_restore"])
+def test_a_project_room_seed_keeps_its_bound_basis_and_never_claims_absence(tmp_path, monkeypatch, door):
+    from ouroboros.projects_registry import create_project, project_binding_for_task
+
+    system = _system(tmp_path, monkeypatch)
+    folder = tmp_path / "room-folder"
+    folder.mkdir()
+    create_project(tmp_path, "room", working_dir=str(folder))
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-room", "project_id": "room"})
+    assert "_project_scope_none" not in turn.published
+    row = system.workers.RUNNING[turn.id]["task"]
+    basis = dict(row["_project_admission"])
+    assert basis["project_id"] == "room" and project_binding_for_task(tmp_path, turn.id)["project_id"] == "room"
+    _save_work(tmp_path, turn)
+    if door == "aborted_update":
+        assert system.control._quiesce_repo_writers("auto_merge") == []
+        system.control._respawn_workers_after_failed_update()
+        system.workers.assign_tasks()
+        sent = _launched(system)
+    else:
+        _boot_after_stop(system, monkeypatch, tmp_path)
+        sent = _resume_and_launch(system, turn.id)
+    assert [item["id"] for item in sent] == [turn.id], system.workers.PENDING
+    assert sent[0]["project_id"] == "room" and sent[0]["_project_admission"]["project_id"] == "room"
+    assert sent[0]["_project_admission"]["project"] == basis["project"] and "_project_scope_none" not in sent[0]
+
+
+@pytest.mark.parametrize("carried", [
+    {"project_id": "room"}, {"resource_intent": {"kind": "explicit_resource", "project_id": "room"}},
+    {"resource_intent": {"kind": "room_default"}}, {"origin_task_id": "pred"}, {"origin_root_task_id": "pred"},
+    {"root_task_id": "pred"}, {"parent_task_id": "pred"},
+])
+def test_a_seed_carrying_a_room_or_lineage_is_never_attested_unscoped(carried):
+    from supervisor.worker_chat_lane import _seed_task
+
+    assert "_project_scope_none" not in _seed_task(1, "work", None, None, {"client_message_id": "cm", **carried})
+    assert _seed_task(1, "work", None, None, {"client_message_id": "cm"})["_project_scope_none"] is True
+    assert _seed_task(1, "work", None, None, None)["_project_scope_none"] is True
+
+
+def test_a_presence_seed_stays_unmarked():
+    from ouroboros import presence_carrier
+    from ouroboros.presence_events import PresenceTurnEvent
+
+    event = PresenceTurnEvent("event1", "chat", "a", "r", "", "chat:a:r", {"platform_actor_id": "person"}, {}, {}, "hello")
+    admission = SimpleNamespace(binding_id="binding", transport_skill="skill", allowance=None)
+    task = presence_carrier.presence_seed_task(admission=admission, event=event, skill_name="skill", event_payload={},
+                                               staged_files=(), gate_wait=False)
+    assert "_project_scope_none" not in task
+
+
+def test_a_direct_turn_bound_frame_replaces_stale_absence_with_the_true_basis():
+    from supervisor.conversation_lane import handle_direct_turn_bound
+
+    basis = {"project_id": "room", "project": None, "frozen": True}
+    task = {"id": "t", "_project_scope_none": True}
+    running = {"t": {"task": task, "attempt": 1}}
+    handle_direct_turn_bound({"task_id": "t", "task_attempt": 1, "facts": {"project_id": "room"}},
+                             SimpleNamespace(RUNNING=running))
+    assert task["_project_scope_none"] is True, "no basis landed: nothing replaces the mark"
+    handle_direct_turn_bound({"task_id": "t", "task_attempt": 1, "facts": {"_project_admission": basis, "project_id": "room"}},
+                             SimpleNamespace(RUNNING=running))
+    assert task["_project_admission"] == basis and task["project_id"] == "room" and "_project_scope_none" not in task
+
+
+def _aborted(system, root, turn=None):
+    assert system.control._quiesce_repo_writers("auto_merge") == []
+    system.control._respawn_workers_after_failed_update()
+    system.workers.assign_tasks()
+    system.workers.assign_tasks()
+    assert not _launched(system)
+    assert not turn or turn.id not in system.workers.RUNNING
+
+
+def test_a_legacy_main_row_without_the_witness_stays_held_with_its_old_refusal(tmp_path, monkeypatch):
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    _save_work(tmp_path, turn)
+    system.workers.RUNNING[turn.id]["task"].pop("_project_scope_none")  # a row admitted before this release
+    _aborted(system, tmp_path, turn)
+    [held] = system.workers.PENDING
+    assert "_project_scope_none" not in held, "restore never backfills historical scope from absence"
+    assert held["_project_admission_restore_hold"]["reason"] == "project_routing_fence_lookup_failed"
+    assert "missing or invalid" in held["_project_admission_restore_hold"]["detail"]
+
+
+@pytest.mark.parametrize("when", ["before_quiesce", "after_quiesce"])
+def test_an_owner_stop_of_a_main_turn_is_never_returned(tmp_path, monkeypatch, when):
+    from ouroboros.cancel_intents import request_cancel
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    _save_work(tmp_path, turn)
+    if when == "before_quiesce":
+        request_cancel(tmp_path, turn.id, reason="owner stop", source="owner", requested_by="owner")
+    assert system.control._quiesce_repo_writers("auto_merge") == []
+    if when == "after_quiesce":
+        request_cancel(tmp_path, turn.id, reason="owner stop", source="owner", requested_by="owner")
+    system.control._respawn_workers_after_failed_update()
+    system.workers.assign_tasks()
+    assert not _launched(system) and turn.id not in system.workers.RUNNING
+    assert load_task_result(tmp_path, turn.id)["status"] in {"cancelled", "interrupted"}
+
+
+def test_a_panic_holds_a_main_turn_for_an_explicit_resume(tmp_path, monkeypatch):
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    _save_work(tmp_path, turn)
+    assert system.control._quiesce_repo_writers("auto_merge") == []
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
+    monkeypatch.setattr("ouroboros.server_control._restart_stop_requested", True)
+    system.control._respawn_workers_after_failed_update()
+    system.workers.assign_tasks()
+    assert not _launched(system)
+    [held] = system.workers.PENDING
+    assert held["id"] == turn.id and budget_hold_fact(held)
+
+
+@pytest.mark.parametrize("failure", ["corrupt_source", "missing_source", "mismatched_source", "unreadable_result"])
+def test_unproven_source_or_state_keeps_a_main_turn_held(tmp_path, monkeypatch, failure):
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    _save_work(tmp_path, turn)
+    assert system.control._quiesce_repo_writers("auto_merge") == []
+    checkpoint = wc.checkpoint_path(tmp_path, turn.id, 1)
+    if failure == "corrupt_source":
+        checkpoint.write_text("corrupt")
+    elif failure == "missing_source":
+        checkpoint.unlink()
+    system.control._respawn_workers_after_failed_update()
+    [row] = [item for item in system.workers.PENDING if item["id"] == turn.id]
+    if failure == "mismatched_source":
+        row["_working_recovery"] = {**row["_working_recovery"], "source_ref": "working-a1-s1-" + "0" * 64 + ".json"}
+    elif failure == "unreadable_result":
+        def unreadable(*_a, **_k):
+            raise OSError("injected task store failure")
+
+        monkeypatch.setattr("supervisor.task_admission.load_task_result", unreadable)
+    system.workers.assign_tasks()
+    system.workers.assign_tasks()
+    assert not _launched(system) and turn.id not in system.workers.RUNNING
+    [held] = [item for item in system.workers.PENDING if item["id"] == turn.id]
+    assert held.get("_project_admission_restore_hold") or budget_hold_fact(held)
+    assert not held.get("_terminalization_retry"), "unknown is custody, never a terminal"
+
+
+def test_a_late_binding_without_a_placement_grant_never_launches_an_attested_main_turn(tmp_path, monkeypatch):
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    _save_work(tmp_path, turn)
+    room = create_project(tmp_path, "late-room")
+    bind_task_to_project(tmp_path, turn.id, "late-room", room.get("chat_id"), origin={"absent": "mid_task_no_origin"})
+    _aborted(system, tmp_path, turn)
+    assert not system.workers.PENDING, "the attested scope changed: the existing settlement owns it"
+    assert load_task_result(tmp_path, turn.id)["status"] == "failed"
+
+
+def test_a_lineage_seed_bound_to_a_room_is_held_uncertain_not_failed_as_a_false_absence(tmp_path, monkeypatch):
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    system = _system(tmp_path, monkeypatch)
+    room = create_project(tmp_path, "lineage-room")
+    bind_task_to_project(tmp_path, "pred", "lineage-room", room.get("chat_id"), origin={"absent": "mid_task_no_origin"})
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main", "origin_task_id": "pred"})
+    assert "_project_scope_none" not in turn.published
+    _save_work(tmp_path, turn)
+    _aborted(system, tmp_path, turn)
+    [held] = system.workers.PENDING
+    assert held["_project_admission_restore_hold"] and not held.get("_terminalization_retry")
+
+
+def test_a_main_turn_held_across_a_second_quit_still_waits_for_one_resume(tmp_path, monkeypatch):
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    _save_work(tmp_path, turn)
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    source = system.workers.PENDING[0]["_working_recovery"]
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    [held] = system.workers.PENDING
+    assert budget_hold_fact(held) and held["_attempt"] == 2 and held["_working_recovery"] == source
+    system.workers.assign_tasks()
+    assert not _launched(system)
+    assert [(row["id"], row["_attempt"]) for row in _resume_and_launch(system, turn.id)] == [(turn.id, 2)]
+    system.workers.assign_tasks()
+    assert not _launched(system)

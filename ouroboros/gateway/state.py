@@ -536,6 +536,63 @@ def _raw_work_facts(row: dict) -> dict:
     return {**facts, **({"continuation": edges} if edges else {})}
 
 
+def _ended_tail(drive_root: Any, root_id: str) -> tuple:
+    """``(live, stoppable)`` of what an ended root's tree left, by the work's own run typing (``work_status.run_tail``
+    over its open runs, with ``work_projection.unconfirmed_stops``, as the work's tails are typed): ``live`` only when a
+    run is typed live, never for a run nobody can confirm, an unbound start or unreadable custody; ``stoppable`` while
+    an open run is there for the Stop door to reach (its ``tree_open_runs``). One tree-scoped custody read."""
+    from ouroboros.delegate_custody_current import tree_closure
+    from ouroboros.gateway import work_status as ws
+    from ouroboros.gateway.work_projection import unconfirmed_stops
+    from ouroboros.task_results import load_task_result
+
+    try:
+        held = tree_closure(pathlib.Path(drive_root), root_id)["unfinished"].values()
+        runs = [run for run in held if not run.settled]
+    except Exception:
+        return False, True  # unknown custody runs nothing it can prove; the Stop door reads it again itself
+    for run in runs:
+        task_id = str(run.task_id or "")
+        if run.terminal_state or not task_id:  # an engine terminal is no member of the work (``_open_runs``)
+            continue
+        try:
+            owner = load_task_result(pathlib.Path(drive_root), task_id)
+        except Exception:
+            owner = None  # an unreadable owner proves no failure: the run reads live, as on its tail
+        stops = unconfirmed_stops(drive_root, task_id, owner)
+        if ws.run_tail(run.source, owner, stop_unknown=str(run.run_id) in stops) == ("run", "live"):
+            return True, True
+    return False, bool(runs)
+
+
+def _answered_root_phase(drive_root: Any, root_id: str, facts: dict, reviews: Any, members: bool) -> tuple:
+    """``(phase, work facts)`` of an answered root under the owner's Pause; phase ``""`` when no row shows it.
+
+    The fence's own census is the truth of "Paused": reviewers already launched finish separately and never keep the
+    tree Pausing. With no member left, what they left holds a requested Pause: a run typed live is the Pause settling
+    (``running``); anything else (a run nobody can confirm, an unbound start) is ``tail_unknown``, never running and
+    never a settled Pause, with ``nothing_to_stop`` when no open run is there for Stop. Without this row an accepted
+    Pause over an ended root would show nowhere.
+    """
+    from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight
+    from ouroboros.work_stop import owner_fence_state
+
+    state = owner_fence_state(drive_root, {"root_task_id": root_id}, root_id)
+    if state == "paused":
+        return "budget_paused", {}
+    in_flight = post_task_synthesis_in_flight(drive_root, root_id)
+    if facts.get("finalizing") or in_flight or reviews(sent_only=True):
+        return "budget_pausing", {"running": True} if in_flight else {}
+    if reviews() or members:  # an unsent review operation deferred until Resume, or its parked members
+        return "budget_paused", {}
+    if state != "requested":
+        return "", {}
+    live, stoppable = _ended_tail(drive_root, root_id)
+    if live:
+        return "budget_pausing", {"running": True}
+    return "budget_paused", {"tail_unknown": True, **({} if stoppable else {"nothing_to_stop": True})}
+
+
 def _activity_pause_cause(row: dict, fence: dict) -> str:
     """Explain a parked census row from its existing typed control, never its phase name."""
     from ouroboros.work_stop import stop_presentation
@@ -843,25 +900,16 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
             if root_id in active_roots and not (
                     facts.get("finalizing") or post_task_synthesis_in_flight(drive_root, root_id) or reviews()):
                 continue  # the logical fence alone is no second actor; genuine late work stays
-            # The fence's own census is the truth of "Paused": reviewers already
-            # launched finish separately and never keep the tree Pausing.
-            if owner_fence_state(drive_root, {"root_task_id": root_id}, root_id) == "paused":
-                phase = "budget_paused"
-            elif (facts.get("finalizing") or post_task_synthesis_in_flight(drive_root, root_id)
-                  or reviews(sent_only=True)):
-                phase = "budget_pausing"
-            elif reviews():
-                phase = "budget_paused"  # an unsent review operation deferred until Resume
-            elif any(str(item.get("root_task_id") or "") == root_id for item in pending_rows) or any(
-                    str(item.get("root_task_id") or "") == root_id for _tid, item, _at in running_rows):
-                phase = "budget_paused"
-            else:
+            members = any(str(item.get("root_task_id") or "") == root_id for item in pending_rows) or any(
+                str(item.get("root_task_id") or "") == root_id for _tid, item, _at in running_rows)
+            phase, extra = _answered_root_phase(drive_root, root_id, facts, reviews, members)
+            if not phase:
                 continue
             row = dict(_task_activity_facts(drive_root, root_id).get("row") or {})
-            live = phase == "budget_pausing" and post_task_synthesis_in_flight(drive_root, root_id)
-            visible[root_id] = _activity(root_id, row, phase, _epoch_or_zero(row.get("queued_at")), live=live)
-            if work_facts is not None and live:  # its late work still runs
-                work_facts[root_id] = {**_raw_work_facts(row), "running": True}
+            visible[root_id] = _activity(root_id, row, phase, _epoch_or_zero(row.get("queued_at")),
+                                         live=bool(extra.get("running")))
+            if work_facts is not None and extra:  # its late work still runs, or only what nobody can confirm holds it
+                work_facts[root_id] = {**_raw_work_facts(row), **extra}
             census_ids.add(root_id)
             activities.append(visible[root_id])
         for owner in late_owners:

@@ -233,6 +233,7 @@ def test_manual_and_tag_desktop_matrix_remains_available_to_forks():
 @pytest.mark.parametrize("run_id,module", [
     ("attachment_browser", "tests/test_chat_attachments_browser.py"),
     ("composer_browser", "tests/test_chat_input_sizing_browser.py"),
+    ("tracked_chromium", "tests/test_tracked_chromium_smoke.py"),
 ])
 def test_the_windows_leg_runs_its_browser_modules_and_refuses_a_skip(tmp_path, run_id, module):
     """Real Windows browser cases in THIS matrix (no second one): the owner-attachment route's confined
@@ -260,27 +261,41 @@ def test_the_windows_leg_runs_its_browser_modules_and_refuses_a_skip(tmp_path, r
     env_root = install["env"]["UV_PROJECT_ENVIRONMENT"]
     assert env_root.startswith("${{ runner.temp }}/"), "outside the checkout the fixture copies"
     assert run["env"]["ATTACHMENT_PYTHON"] == f"{env_root}/Scripts/python.exe"
-    base, sync, playwright = install["run"].strip().splitlines()
+    base, sync, playwright, pinned = install["run"].strip().splitlines()
     # No trailing newline to capture: Git Bash keeps a Windows CR inside $(...).
     assert base == 'base="$(python -c ' + "'import sys; print(sys._base_executable, end=\"\")'" + ')"'
     assert sync == f'{profile} --no-install-project --python "$base"'
     assert playwright == '"$UV_PROJECT_ENVIRONMENT/Scripts/python.exe" -m playwright install chromium'
+    assert pinned == '"$UV_PROJECT_ENVIRONMENT/Scripts/python.exe" -m ouroboros.chromium_runtime install'
     assert run["env"]["OUROBOROS_RUN_UI_SMOKE"] == "1"
     assert install["env"]["PLAYWRIGHT_BROWSERS_PATH"] == run["env"]["PLAYWRIGHT_BROWSERS_PATH"]
     command, check, *evidence = run["run"].strip().splitlines()
     assert command.startswith('"$ATTACHMENT_PYTHON" -I -S scripts/safe_test.py -- "$ATTACHMENT_PYTHON" -m pytest '
                               + module)
-    assert " -m ui_browser -k chromium " in command and "--require-ui-browser" not in command
+    assert (" -m browser " if run_id == "tracked_chromium" else " -m ui_browser -k chromium ") in command
+    assert "--require-ui-browser" not in command
     assert "matrix" not in run["run"]
     assert "matrix.shard == 1" in install["if"] and "matrix.shard == 1" in run["if"]
     assert job["strategy"]["matrix"].keys() == {"include"}
     # The skip guard, run as written against a junit report of each shape.
-    for tests, skipped, ok in ((3, 0, True), (3, 1, False), (0, 0, False)):
+    shapes = [(3, 0, 0, 0, True), (3, 1, 0, 0, False), (0, 0, 0, 0, False)]
+    if run_id == "tracked_chromium":
+        shapes += [(3, 0, 1, 0, False), (3, 0, 0, 1, False), (2, 0, 0, 0, False)]
+    for tests, skipped, failed, errors, ok in shapes:
         report = tmp_path / "attachment-browser.xml"
-        report.write_text(f'<testsuites><testsuite tests="{tests}" skipped="{skipped}"/></testsuites>', encoding="utf-8")
+        report.write_text(f'<testsuites><testsuite tests="{tests}" skipped="{skipped}" failures="{failed}" '
+                          f'errors="{errors}"/></testsuites>', encoding="utf-8")
         script = check.split('python -c "', 1)[1].rsplit('" "$RUNNER_TEMP', 1)[0]
         result = subprocess.run([sys.executable, "-c", script, str(report)], capture_output=True, text=True)
-        assert (result.returncode == 0) is ok, (tests, skipped, result.stdout, result.stderr)
+        assert (result.returncode == 0) is ok, (tests, skipped, failed, errors, result.stdout, result.stderr)
+    if run_id == "tracked_chromium":
+        assert run["env"]["OUROBOROS_EXPECT_BROWSER_ENGINES"] == "chromium"
+        upload = next(step for step in job["steps"] if step.get("name") == "Preserve the Windows tracked Chromium evidence")
+        assert upload["with"]["path"] == "${{ runner.temp }}/ci-evidence/tracked-chromium/"
+        assert upload["with"]["if-no-files-found"] == "error" and "continue-on-error" not in upload
+        assert "steps.tracked_chromium.outcome != 'skipped'" in upload["if"]
+        assert job["steps"].index(upload) == job["steps"].index(run) + 1
+        assert "--ci-evidence-dir=" in command
     if run_id != "composer_browser":
         assert not evidence
         return

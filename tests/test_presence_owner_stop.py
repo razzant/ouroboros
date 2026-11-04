@@ -50,6 +50,7 @@ LATE_ANSWER = "The complete answer, from the call sent before Stop now."
 FORCED_ANSWER = "The round limit's best answer: the report is drafted, its numbers are unchecked."
 AUTHORED_STOP = "Stopping here: the report is drafted; checking its numbers remains."
 HELD_ANSWER = "The complete report is ready, with the backup window still unchecked."
+FOLLOW_UP = "Please also say when the backup window will be checked."
 
 
 @pytest.fixture
@@ -100,6 +101,14 @@ def _incidents(root, task_id):
     path = root / "logs" / "supervisor.jsonl"
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
     return [row for row in rows if row.get("task_id") == task_id and str(row.get("type", "")).startswith("task_cancel_cascade")]
+
+
+def _holds(root, task_id):
+    """The canonical ``completion_held`` checkpoints of ``task_id``: (round, origin, reason)."""
+    path = root / "logs" / "events.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+    return [(row["round"], row["origin"], row["reason"]) for row in rows if row.get("task_id") == task_id
+            and row.get("type") == "task_checkpoint" and row.get("checkpoint_kind") == "completion_held"]
 
 
 def _round_limited(monkeypatch, r, during_final_call):
@@ -339,12 +348,31 @@ def test_public_stop_during_an_authored_stops_batch_at_a_hard_rail_keeps_it_unse
     _kept_unsent(r, h, stopped, stop, AUTHORED_STOP)
 
 
+def _follow_up_arrives(r):
+    """A later message of the same conversation reaches the Host while the held answer's call is out: the
+    Host's own capture, attention and offer (``host_service_places._api_presence_turn``) give it to the live
+    author as a wake. ``(outcome, holder)`` of that offer."""
+    from dataclasses import replace
+
+    from ouroboros.place_intake import author_hears, decide_attention, offer_arrival
+    from ouroboros.presence_runner import capture_presence_event
+
+    event = replace(r.event, source_event_id="event2", text=FOLLOW_UP,
+                    message={"url": "https://example.test/room/thread#comment-8"})
+    captured = capture_presence_event(r.admission, event, drive_root=r.root, staged_files=())
+    decision, allowance = decide_attention(r.root, r.admission, event)
+    return offer_arrival(r.root, captured, event, wake=author_hears(decision, allowance, event))
+
+
 def _budget_refused(monkeypatch, r, press, stop_at):
-    """A held answer meets a real budget refusal: its result review FAILs, so the turn keeps the answer
-    and asks once more, and that call's reservation (``usage_accounting.reserve_attempt`` on a zero global
-    limit) is refused before a byte is sent; the budget rail ends the turn on that answer without a call.
-    Stop now is pressed while the real transaction decides the refusal (``stop_at="refusal"``), at the
-    budget answer's reply check (``"reply"``) or never (``""``)."""
+    """A held answer meets a real budget refusal. Its result review FAILs and the review call returns that
+    outcome whole, so no result review holds the answer (ARCHITECTURE §6 "Result review": a received outcome is
+    not shown again, and Presence speech is never held); a later message of its conversation arrives while
+    that answer's call is out, so the final drain reopens the unsent answer, keeps it and asks once more
+    (CREATING_SKILLS: a wake "reopens an unsent final"). That call's reservation
+    (``usage_accounting.reserve_attempt`` on a zero global limit) is refused before a byte is sent; the budget
+    rail ends the turn on the kept answer without a call. Stop now is pressed while the real transaction decides
+    the refusal (``stop_at="refusal"``), at the budget answer's reply check (``"reply"``) or never (``""``)."""
     from ouroboros import place_reply
     from ouroboros.usage_accounting import AttemptRequest, BudgetExceeded, reserve_attempt
     from ouroboros.usage_store import Txn
@@ -352,7 +380,7 @@ def _budget_refused(monkeypatch, r, press, stop_at):
     h = install_bootstrap_harness(monkeypatch, r.root, review_mode="required")
     h.release.set()
     h.addressed, h.verdict = "", "FAIL"
-    seen = SimpleNamespace(stops=[], refusals=[], admission_open=[])
+    seen = SimpleNamespace(stops=[], refusals=[], admission_open=[], arrival=None)
     exceeds_limit, prepare = Txn.exceeds_limit, place_reply.prepare_focus_reply
 
     def deciding_the_refusal(txn, limit, **kwargs):
@@ -373,6 +401,7 @@ def _budget_refused(monkeypatch, r, press, stop_at):
         if h.calls == 1:
             return review(answer=HELD_ANSWER)
         if h.calls == 2:
+            seen.arrival = _follow_up_arrives(r)  # while this answer's call is out
             return {"content": HELD_ANSWER, "tool_calls": []}
         try:
             # A priced reservation: a reached global limit refuses paid admission only (owner 2A).
@@ -392,6 +421,7 @@ def test_public_stop_during_a_real_budget_refusal_keeps_the_held_answer_unsent(o
     """The budget rail ends the turn on its held answer without a model call, so that answer is admitted
     where every no-call exit is: Stop now accepted while the real reservation is refused keeps it on the
     cancelled row, unsent. Without a Stop, or with one after that admission, the budget's answer stands."""
+    from ouroboros.place_intake import HANDED_TO_AUTHOR
     from supervisor.task_lifecycle import sweep_cancel_intents
 
     r, press = owner_stop
@@ -400,6 +430,12 @@ def test_public_stop_during_a_real_budget_refusal_keeps_the_held_answer_unsent(o
     # The review's call, the held answer's, then one refused before any byte: no further call is bought.
     assert seen.refusals == ["global"] and h.calls == 3
     tid = h.agents[0].tools._ctx.task_id
+    # The live author took the arrival; the round its reopened answer asked for carries it once, and never
+    # the FAIL its own review call already returned whole.
+    assert seen.arrival == (HANDED_TO_AUTHOR, tid)
+    reopened = json.dumps(h.inputs[2], ensure_ascii=False)
+    assert reopened.count(FOLLOW_UP) == 1 and "[Result review]" not in reopened
+    assert _holds(r.root, tid) == [(2, "prose", "place_mail")]  # the one hold: the arrival, never the review
     if stop_at == "refusal":
         assert seen.admission_open == [True]  # the held answer had not closed its admission
         [stop] = seen.stops

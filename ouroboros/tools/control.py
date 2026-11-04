@@ -110,8 +110,8 @@ _START_TASK_DESCRIPTION = (
     "workspace='none' opts out of the room's default folder. "
     "Set context_requires_development=true only when the task itself needs the whole development handbook in every "
     "mode, never for its subject; a route too small for it refuses the task. "
-    "A durable pending intent means accepted, waiting to start; inspect its recorded "
-    "outcome before explicitly retrying an uncertain admission."
+    "A durable pending intent is recorded but not yet confirmed; inspect its recorded "
+    "outcome before explicitly retrying."
 )
 
 
@@ -203,13 +203,13 @@ def get_tools() -> List[ToolEntry]:
             }, "required": ["subagent_id"], "additionalProperties": False},
         }, inspect_subagent_tool),
         ToolEntry("finish_task", {"name": "finish_task",
-            "description": "Select the complete answer and request completion of your current task. "
-                "Use finish after considering the observed work, or stop with a rationale naming unfinished work. "
+            "description": "Select the complete answer after considering the work. Use finish, or stop with a rationale naming unfinished work or why you are stopping. "
+                "A root's stop records unfinished work for explicit Continue under the same limits. Continue does not reopen an ordinary finish or a final reply without this tool, even when its text calls it partial. "
                 "Select exactly one of answer or a host-offered answer_sha256. Successful page, note, mark and addressed-message writes may ride in the same response; any other result is read before the finish. On a self-started run (a consciousness wake's own turn, or a schedule-born root without a Presence binding) or a root answering its place, silent=true sends no message (any answer stays your internal note), refused while your human awaits a reply. No answer is needed. The run records no message unless a host notice is owed. This grants no success, cancels no children, and retains all configured review and owner controls.",
             "parameters": {"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["finish", "stop"]}, "answer": {"type": "string", "description": "The complete answer, including a short correction; a child's parent reads it as your report, a root's goes where that root answers (its owner's chat, or the conversation a Presence root answers, as your context names)."},
                 "answer_sha256": {"type": "string", "description": "Exact offered retained or whole held response hash."},
-                "rationale": {"type": "string", "description": "For stop, what remains unfinished; the owner reads it as the stop's cause on the task row. Optional for finish."}, "acceptance_subject": {"type": "object", "properties": {"owner_source_sha256": {"type": "string"},
+                "rationale": {"type": "string", "description": "For stop, what remains unfinished or why you are stopping; the owner reads it as the stop's cause on the task row. Optional for finish."}, "acceptance_subject": {"type": "object", "properties": {"owner_source_sha256": {"type": "string"},
                     "effective_criteria": {"type": "string"}, "material_tool_indices": {"type": "array", "items": {"type": "integer"}},
                 }, "required": ["owner_source_sha256"]},
                 "pending_review": {"type": "string", "enum": ["wait", "finish"], "default": "wait"},
@@ -339,12 +339,12 @@ def get_tools() -> List[ToolEntry]:
         }, _chat_history),
         ToolEntry("update_scratchpad", {
             "name": "update_scratchpad",
-            "description": "Write working memory (scratchpad): append a timestamped block, or with replaces fold the "
-                           "named blocks (the sha256 after each heading; an earlier fold too) into one text you "
-                           "accept, placed where the oldest was. Originals are journaled first, unnamed blocks stay, a "
-                           "stale or ambiguous selection changes nothing; nothing leaves by count, size or age. Write "
-                           "what matters NOW — active tasks, decisions, observations. Persists across sessions, read "
-                           "whole at every task start. Project rooms included: one working memory in every room.",
+            "description": "Write working memory (scratchpad): append a timestamped block, or with replaces fold the named blocks (the sha256 after each heading; an "
+                           "earlier fold too) into one text you accept, placed where the oldest was. Originals are journaled first, unnamed blocks stay, a stale or "
+                           "ambiguous selection changes nothing; nothing leaves by count, size or age. Write what you carry now, in any form: intentions, concerns, "
+                           "questions, debts, waits, decisions that coordinate work, and why you would return; several can stand side by side. Another work's status "
+                           "stands in its own facts: repeat it only where it changes what you intend. Persists across sessions, read whole at every task start. Project "
+                           "rooms included: one working memory in every room.",
             "parameters": {"type": "object", "properties": {
                 "content": {"type": "string", "description": "The new block, or the accepted text of a fold"},
                 "replaces": {"type": "array", "items": {"type": "string"}, "description": "Fold: sha256 of each "
@@ -354,21 +354,24 @@ def get_tools() -> List[ToolEntry]:
         }, _update_scratchpad),
         ToolEntry("send_user_message", {
             "name": "send_user_message",
-            "description": "Send a separate reply to the owner while work continues: the first "
-                           "line of longer work (what I am about to do and why), or a mid-work "
-                           "insight, a question, or an invitation to collaborate. It appears in "
-                           "the conversation as a normal reply and leaves the work running; later "
-                           "progress stays in the card and the final answer is delivered "
-                           "automatically.",
+            "description": "Send a separate reply to the owner while work continues: the first line of longer work (what "
+                           "I am about to do and why), a question, an invitation to collaborate, or anything else that "
+                           "needs the owner now. It appears in this work's room as a normal reply, calls the owner back "
+                           "and leaves the work running; work news goes on update_focus, later progress stays in the "
+                           "card. For Presence-bound work that room is local, not the place conversation: a connector "
+                           "tool reaches that, and your final answer only where your context names that route.",
             "parameters": {"type": "object", "properties": {
                 "text": {"type": "string", "description": "Message text"},
                 "reason": {"type": "string", "description": "Why you're reaching out (logged, not sent)"},
                 "request_id": {"type": "string", "description": "Presence Main contact retry key (at most 128 characters). Reuse the same key and words after uncertain delivery; a new key permits a distinct identical report. Omitted: identical words from this work rejoin."},
                 "reply_to_relay": {"type": "string", "description": "Reply to a drained relay in its source room; this work's Project shows the same answer. Empty selects the single open relay; omit for an ordinary room message."},
                 "destination": {"type": "string", "enum": ["current", "main"], "default": "current",
-                                "description": "'current' (default): this conversation's room. 'main': also the "
-                                               "owner's main chat, for a substantive message that needs the owner "
-                                               "there while this work lives in an owner-visible Project room. One "
+                                "description": "'current' (default): this work's room. 'main': also the "
+                                               "owner's main chat while this work lives in an owner-visible Project "
+                                               "room, for an expected result, a decision or a substantial change to "
+                                               "what the owner relies on (such as lost promised verification or "
+                                               "unique data, risk to shared work, a correction of a reported "
+                                               "result), even when a workaround means they need not act. One "
                                                "message: the Project shows it too, and it is read once; it is not "
                                                "this task's answer. A Presence root reports privately, with host-bound "
                                                "source attribution, including from Silent places: Main keeps its "
@@ -422,12 +425,12 @@ def get_tools() -> List[ToolEntry]:
         }, _toggle_consciousness),
         ToolEntry("set_next_wakeup", {
             "name": "set_next_wakeup", "description": (
-                "Choose the consciousness wake-up interval in seconds: how long after a wake-up ends the next one "
-                "starts, clamped into the owner's OUROBOROS_BG_WAKEUP_MIN/MAX. A wake-up calling this sets its own "
-                "next one; a wake-up already pending keeps its time; with consciousness off it is stored for later. "
-                "The alarm still adjusts it: a failed wake-up doubles the interval (up to MAX), a skipped one "
-                "retries after MIN (an exhausted allowance waits for its reset), and no wake-up starts sooner than "
-                "MIN after the last wake-up, boot or skip. Events never bring a wake-up forward; the next one "
+                "Choose the consciousness wake-up interval: how long after a wake-up ends the next one starts, "
+                "clamped into the owner's OUROBOROS_BG_WAKEUP_MIN/MAX. A wake-up calling this sets its own next "
+                "one; one already pending keeps its time; with consciousness off it is stored for later. The alarm "
+                "adjusts it: a failed wake-up doubles the interval (up to MAX), a skipped one retries after MIN (an "
+                "exhausted allowance waits for its reset or a changed daily limit), and no wake-up starts sooner "
+                "than MIN after the last wake-up, boot or skip. Events never bring a wake-up forward; the next one "
                 "observes them."),
             "parameters": {"type": "object", "properties": {"seconds": {"type": "integer", "description": "Seconds from the end of a wake-up to the next one"}}, "required": ["seconds"]},
         }, _set_next_wakeup),

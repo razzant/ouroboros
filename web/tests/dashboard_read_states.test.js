@@ -818,7 +818,7 @@ test('Activity shows a row\'s own known outcome first and its unfinished finaliz
         'chip words come from the translation seam, so the overlay leaves them alone');
 });
 
-test('Activity says a pause in its word alone, with or without a work; reviews it lets finish stand beside it', async (t) => {
+test('Activity separates the pause word from confirmed work context and offers only declared controls', async (t) => {
     const { mount, routes, ws } = setup(t);
     emptyActivity(routes);
     const paused = (id, extra = {}) => outcomeRow(id, 'completed', 'ok', 'budget_paused', 'paused', { pause_cause: 'owner', ...extra });
@@ -831,9 +831,20 @@ test('Activity says a pause in its word alone, with or without a work; reviews i
             pausedWork('by-mind', 'paused_by_mind', 'Ouroboros: pause before the update'),
             pausedWork('unconfirmed', 'paused_by_owner', 'You paused it', { confirmed: false })], works_complete: true }));
     await initActivity({ mount, ws }).refresh();
-    // Who paused is the work's line on its card, its row and the sidebar; a chip says the word alone.
-    for (const id of ['by-owner', 'by-mind', 'unnamed', 'unconfirmed']) assert.equal(chip(rowOf(mount, id)).secondary, 'Paused', id);
-    assert.doesNotMatch(section(mount, 'queue').textContent, /by you|by Ouroboros|You paused it/);
+    const rows = section(mount, 'queue').querySelectorAll('.activity-row');
+    assert.equal(rows.length, 5, 'rows without controls remain visible');
+    for (const text of ['You paused it', 'Ouroboros: pause before the update']) {
+        const matches = rows.filter((row) => row.textContent.includes(text));
+        assert.equal(matches.length, 1, text);
+        const [row] = matches;
+        assert.equal(chip(row).secondary, 'Paused', 'the chip keeps only the state word');
+        assert.equal(row.querySelector('[data-act="task-control"]'), null, 'empty controls invent no action');
+    }
+    for (const id of ['unnamed', 'unconfirmed']) {
+        const row = rowOf(mount, id);
+        assert.equal(chip(row).secondary, 'Paused', id);
+        assert.doesNotMatch(row.textContent, /You paused it|Ouroboros: pause before the update/);
+    }
     assert.equal(chip(rowOf(mount, 'reviewed')).secondary, 'Paused · Review work finishing');
 });
 

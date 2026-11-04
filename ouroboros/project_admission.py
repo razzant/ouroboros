@@ -30,6 +30,20 @@ def host_unscoped(task: dict) -> bool:
             and not task.get("project_id") and "_project_admission" not in task)
 
 
+def fresh_seed_unscoped(task: dict) -> bool:
+    """Whether a conversation seed the host minted just now proves no Project scope (#2555).
+
+    No binding can name an id this new, so the membership owner reads only what the
+    seed carries. A room, a resource intent's room or a carried lineage stays
+    uncertain: it is never attested absent here, and nothing is read from disk.
+    """
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    if "_project_admission" in task or any(
+            metadata.get(key) for key in ("origin_task_id", "origin_root_task_id", "root_task_id", "parent_task_id")):
+        return False
+    return task_project_membership(None, task, bindings_snapshot={}) == ("", False)
+
+
 def carried_basis(source: dict) -> dict:
     """The Project basis a row or result carries, copied unchanged (#2547).
 

@@ -842,7 +842,11 @@ from ouroboros.review_state_custody import (  # noqa: E402, F401 -- intentional 
     _attempt_review_roster_rows,
     _review_roster_row_is_pending,
     _strip_attempt_heavy_payload,
+    attempt_counted_seats_closed,
     checkpoint_pending_review_invocation,
+    counted_roster_rows,
+    late_write_outlived,
     mark_review_attempt_paid,
     settle_completed_round,
+    settled_row_outlives,
 )

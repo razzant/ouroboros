@@ -415,11 +415,12 @@ def test_foreign_work_retains_server_pointer_in_scratch_not_inline_json(tmp_path
 
 
 def test_session_report_uses_real_host_envelope_on_scale_root(tmp_path, monkeypatch):
-    import socket
+    from tests._socket_seal import block_network_except_socketpair
 
     def forbidden(*args, **kwargs):
         pytest.fail('offline session report attempted a provider connection')
-    monkeypatch.setattr(socket.socket, 'connect', forbidden)
+    # The report ends its host on an event loop, which Windows builds through connect(): only that self-pipe passes.
+    block_network_except_socketpair(monkeypatch, forbidden)
     root = scale.write_root(tmp_path / 'data')
     offline_fixture(root)
     before = fingerprint(root)

@@ -12,8 +12,10 @@ import shutil
 import subprocess  # noqa: F401
 import tempfile  # noqa: F401
 import threading  # noqa: F401
+from contextlib import contextmanager, nullcontext
 from hashlib import sha256
 from typing import Any, BinaryIO, Dict, Iterable, List, Optional, Sequence, Tuple  # noqa: F401
+from uuid import uuid4
 
 from ouroboros.contracts.task_constraint import normalize_task_constraint  # noqa: F401
 from ouroboros.post_task_checkpoint import CANONICAL_CUSTODY_FIELDS, project_replica_task_result_fields
@@ -591,8 +593,14 @@ def _copy_child_task_result_locked(parent_drive_root: pathlib.Path, task: Dict[s
     if child_status in _FINAL_STATUSES and task_requires_workspace_capture(task):
         artifact_status = str(canonical_existing.get("artifact_status") or "").strip().lower()
         if artifact_status in ARTIFACT_TERMINAL_STATUSES | {ARTIFACT_STATUS_PENDING, ARTIFACT_STATUS_FINALIZING}:
+            incoming = list(child_result.get("artifacts") or [])
+            if (native_capture_owner(parent_drive_root, task_id, _workspace_root_from_task(canonical_existing))
+                    and any(row.get("kind") == "workspace_patch_manifest" for row in canonical_existing.get("artifacts", []))):
+                incoming = [{**row, "kind": "workspace_capture_history", "capture_kind": row["kind"],
+                             "immutable": bool(row.get("sha256"))}
+                            if row.get("kind") in _CAPTURE_KINDS else row for row in incoming]
             child_result["artifacts"] = _merge_artifacts(
-                list(canonical_existing.get("artifacts") or []), list(child_result.get("artifacts") or []))
+                list(canonical_existing.get("artifacts") or []), incoming)
             child_result.update({key: canonical_existing[key] for key in _ARTIFACT_LIFECYCLE_FIELDS
                             if key in canonical_existing})
         else:
@@ -956,29 +964,52 @@ def finalize_task_artifacts(parent_drive_root: pathlib.Path, task: Dict[str, Any
         return _finalize_task_artifacts_locked(parent_drive_root, task, task_id)
 
 
-def _finalize_task_artifacts_locked(parent_drive_root: pathlib.Path, task: Dict[str, Any], task_id: str) -> List[Dict[str, Any]]:
+def _finalize_task_artifacts_locked(parent_drive_root: pathlib.Path, task: Dict[str, Any], task_id: str,
+                                    *, late: bool = False) -> List[Dict[str, Any]]:
     artifacts: List[Dict[str, Any]] = []
     existing = load_task_result(parent_drive_root, task_id) or {}
     # A cancellation latch wins before artifact creation or surviving-root reads.
     if cancellation_blocks_child_result(existing):
         return artifacts
-    artifact_dir = task_artifacts_dir(parent_drive_root, task_id)
+    task = {**task, **existing, "id": task_id}
+    _in_place_capture_inputs(parent_drive_root, task)
+    existing = load_task_result(parent_drive_root, task_id) or existing
+    task = {**task, **existing, "id": task_id}
+    blockers = _native_capture_blockers(parent_drive_root, existing)
+    artifact_base = task_artifacts_dir(parent_drive_root, task_id)
     workspace_root = _workspace_root_from_task(task)
+    native = bool(native_capture_owner(parent_drive_root, task_id, workspace_root))
+    artifact_dir = _capture_version_dir(artifact_base, existing) if native else artifact_base
     status = str(existing.get("status") or "completed")
     artifact_status = ARTIFACT_STATUS_READY
     artifact_error = ""
     if workspace_root is not None:
-        write_task_result(
-            parent_drive_root,
-            task_id,
-            status,
-            artifact_status=ARTIFACT_STATUS_FINALIZING,
-        )
+        if not late and not blockers:
+            write_task_result(parent_drive_root, task_id, status, artifact_status=ARTIFACT_STATUS_FINALIZING)
         try:
-            direct = _directory_direct_artifacts(workspace_root, artifact_dir, task, existing)
-            patch_artifacts, manifest = direct if direct is not None else write_workspace_patch_artifacts(
-                workspace_root, artifact_dir, task=task,
-            )
+            if blockers:
+                manifest = _empty_patch_manifest(workspace_root, status=ARTIFACT_STATUS_FAILED,
+                    errors=[{"type": "native_capture_not_current", "message": "; ".join(blockers)}])
+                manifest_path = artifact_dir / "workspace_patch.json"
+                atomic_write_json(manifest_path, manifest, trailing_newline=True)
+                patch_artifacts = [_file_artifact("workspace_patch_manifest", manifest_path)]
+            else:
+                direct = _directory_direct_artifacts(workspace_root, artifact_dir, task, existing)
+                patch_artifacts, manifest = direct if direct is not None else write_workspace_patch_artifacts(
+                    workspace_root, artifact_dir, task=task, scratch_dir=artifact_base,
+                )
+            if existing.get("native_capture_pending"):
+                from ouroboros.delegate_custody_current import run
+                sources = {key: dict(value) for key, value in existing["native_capture_pending"].items()}
+                for source in sources.values():
+                    if source.get("effect") == "in_place" and source.get("run_id"):
+                        entry = run(parent_drive_root, source["run_id"])
+                        source["terminal_source"] = entry.terminal_source if entry else {}
+                manifest["native_capture_sources"] = sources
+                manifest_path = artifact_dir / "workspace_patch.json"
+                atomic_write_json(manifest_path, manifest, trailing_newline=True)
+                patch_artifacts = [(_file_artifact("workspace_patch_manifest", manifest_path)
+                                    if row["kind"] == "workspace_patch_manifest" else row) for row in patch_artifacts]
             artifacts.extend(patch_artifacts)
             artifact_status = str(manifest.get("status") or ARTIFACT_STATUS_READY_WITH_CHANGES)
             if manifest.get("status") == ARTIFACT_STATUS_FAILED:
@@ -1008,7 +1039,7 @@ def _finalize_task_artifacts_locked(parent_drive_root: pathlib.Path, task: Dict[
             artifacts.append(row)
 
     child_drive = _child_drive_from_task(task)
-    if child_drive is not None:
+    if child_drive is not None and not late:
         try:
             export_path = artifact_dir / "memory_export.json"
             atomic_write_json(export_path, build_memory_export(child_drive, task), trailing_newline=True)
@@ -1049,14 +1080,16 @@ def _finalize_task_artifacts_locked(parent_drive_root: pathlib.Path, task: Dict[
     if artifacts or workspace_root is not None:
         existing = load_task_result(parent_drive_root, task_id) or {}
         drop_kinds = {"workspace_patch"} if workspace_root is not None and artifact_status == ARTIFACT_STATUS_FAILED else set()
-        merged = _merge_artifacts(list(existing.get("artifacts") or []), artifacts, drop_kinds=drop_kinds)
+        merged = (_capture_artifact_rows(existing, artifacts, artifact_base) if native else
+                  _merge_artifacts(list(existing.get("artifacts") or []), artifacts, drop_kinds=drop_kinds))
         fields: Dict[str, Any] = {
             "artifacts": merged,
             "artifact_status": artifact_status if workspace_root is not None else str(existing.get("artifact_status") or ""),
             "artifact_finalized_at": utc_now_iso(),
+            "artifact_error": artifact_error,
         }
-        if artifact_error:
-            fields["artifact_error"] = artifact_error
+        if native and artifact_status != ARTIFACT_STATUS_FAILED:
+            fields["native_capture_pending"] = {}
         # ``fields`` already carries "artifacts" and "artifact_status".
         provisional = {**existing, **fields}
         provisional.pop("artifact_bundle", None)
@@ -1089,6 +1122,249 @@ def _finalize_task_artifacts_locked(parent_drive_root: pathlib.Path, task: Dict[
             **fields,
         )
     return artifacts
+
+
+_CAPTURE_KINDS = {"workspace_patch", "workspace_patch_manifest", "workspace_file_outputs_manifest", "workspace_file_outputs"}
+
+
+def current_workspace_manifest(root: pathlib.Path, task_id: str, result: Dict[str, Any]) -> pathlib.Path:
+    """Current pointer, with a fixed-name fallback only for pre-publication rows."""
+    row = next((item for item in result.get("artifacts", []) if item.get("kind") == "workspace_patch_manifest"), {})
+    if not row and any(item.get("kind") == "workspace_capture_history" for item in result.get("artifacts", [])):
+        raise FileNotFoundError("Current native capture has not been published; historical captures remain available.")
+    return pathlib.Path(row["path"]) if row.get("path") else task_artifacts_dir(root, task_id, create=False) / "workspace_patch.json"
+
+
+def _capture_version_dir(base, result):
+    # Never rewrite a published manifest OR any of the addresses it names. A new
+    # store-relative version uses the existing nested-artifact/copy-back readers.
+    return base / "captures" / uuid4().hex if ((base / "workspace_patch.json").exists()
+        or any(row.get("kind") == "workspace_patch_manifest" for row in result.get("artifacts", []))) else base
+
+
+def _capture_artifact_rows(result, artifacts, base):
+    previous = [{**row, "kind": "workspace_capture_history", "capture_kind": row["kind"],
+                 "immutable": bool(row.get("sha256"))}
+                if row.get("kind") in _CAPTURE_KINDS else row for row in result.get("artifacts", [])]
+    fresh = [{**row, "immutable": bool(row.get("sha256")), "relpath": pathlib.Path(row["path"]).relative_to(base).as_posix()}
+             if row.get("kind") in _CAPTURE_KINDS else row for row in artifacts]
+    # Paths, not basenames: separate versions can contain identically named files.
+    from ouroboros.artifacts import merge_artifact_records
+    return merge_artifact_records(previous, fresh)
+
+
+def native_capture_owner(root, task_id, target):
+    """Only the registered native owner's exact write root, never the disposer."""
+    from ouroboros.workspace_copies import copy_binding, same_directory
+    if not task_id or not target:
+        return {}
+    row = load_task_result(root, task_id, strict=True) or {}
+    constraint = _acting_constraint_from_task(row)
+    binding = copy_binding(row)
+    if (constraint is None or constraint.surface != "self_worktree"
+            or not same_directory(constraint.write_root, target)
+            or binding and not same_directory(binding.get("execution_root"), target)):
+        return {}
+    return row
+
+
+@contextmanager
+def native_capture_custody(root, entry):
+    """Serialize a supported late writer with native capture, publication and release."""
+    from ouroboros.task_custody import CustodyBusy, task_custody_lock
+    owner = native_capture_owner(root, entry.task_id, entry.target_root)
+    with (task_custody_lock(root, entry.task_id, timeout_sec=PUBLICATION_LOCK_SEC) if owner else nullcontext(True)) as held:
+        if not held:
+            raise CustodyBusy(f"native capture of {entry.task_id} is held by another publisher")
+        yield owner
+
+
+def _native_capture_gap(root, task_id, pending, reason):
+    """Artifact-only failure BEFORE mutation; settled task lifecycle and old bytes stand."""
+    from ouroboros.outcomes import artifact_bundle_from_result
+    row = load_task_result(root, task_id, strict=True) or {}
+    base = task_artifacts_dir(root, task_id)
+    folder = _capture_version_dir(base, row)
+    manifest = _empty_patch_manifest(_workspace_root_from_task(row), status=ARTIFACT_STATUS_FAILED,
+                                    errors=[{"type": "native_capture_not_current", "message": reason}])
+    sources = {**row.get("native_capture_pending", {}), **pending}
+    manifest["native_capture_sources"] = sources
+    path = folder / "workspace_patch.json"
+    failure, artifacts = None, []
+    try:
+        atomic_write_json(path, manifest, trailing_newline=True)
+        artifacts = [_file_artifact("workspace_patch_manifest", path)]
+    except Exception as exc:
+        failure = exc
+        reason += f" Capture manifest unavailable: {type(exc).__name__}: {exc}"
+        artifacts = [{"kind": "workspace_patch_manifest", "name": path.name, "path": str(path),
+                      "status": "missing", "measured": False, "errors": [reason]}]
+    fields = {"artifacts": _capture_artifact_rows(row, artifacts, base), "artifact_status": ARTIFACT_STATUS_FAILED,
+              "artifact_error": reason, "native_capture_pending": sources}
+    provisional = {**row, **fields}
+    provisional.pop("artifact_bundle", None)
+    fields["artifact_bundle"] = artifact_bundle_from_result(provisional)
+    if row.get("outcome_axes"):
+        fields["outcome_axes"] = {**row["outcome_axes"], "artifacts": {
+            **row["outcome_axes"].get("artifacts", {}), "status": ARTIFACT_STATUS_FAILED}}
+    write_task_result(root, task_id, row["status"], **fields)
+    if failure is not None:
+        raise failure
+    return artifacts
+
+
+def begin_native_capture_update(root, entry):
+    """Called under native custody after the durable apply intent, before any effect."""
+    owner = native_capture_owner(root, entry.task_id, entry.target_root)
+    if owner:
+        _native_capture_gap(root, entry.task_id, {entry.run_id: {
+            "run_id": entry.run_id, "invocation_id": entry.invocation_id, "target_root": entry.target_root,
+            "apply_idempotency_key": entry.patch_apply_key, "effect": "unknown"}},
+            f"Native capture is not current: delegated apply {entry.run_id} is unresolved.")
+
+
+def record_native_received_files(root, task_id, target, paths, source):
+    """Only addressed successful deliveries; CURRENT union survives concurrent additions.
+
+    This is a path selection with an apply reference, not another preimage store.
+    Capture always uses the native copy's original file_baseline or Git base.
+    """
+    if not paths:
+        return
+    owner = native_capture_owner(root, task_id, target)
+    if not owner or cancellation_blocks_child_result(owner):
+        return
+    def merge(current, fields):
+        fields["received_file_outputs"] = {**current.get("received_file_outputs", {}),
+                                           **{path: dict(source) for path in paths}}
+        return fields
+    write_task_result(root, task_id, owner["status"], _field_projector=merge)
+
+
+def record_native_capture_effect(root, entry, outcome):
+    owner = native_capture_owner(root, entry.task_id, entry.target_root)
+    if not owner or entry.run_id not in owner.get("native_capture_pending", {}):
+        return
+    proc = outcome.get("proc")
+    effect = ("unmutated" if outcome.get("reverted") or proc is None or proc.returncode != 0 else
+              "unknown" if outcome.get("staging_failure") else "applied")
+    source = {"run_id": entry.run_id, "apply_idempotency_key": entry.patch_apply_key}
+    if effect == "applied":
+        record_native_received_files(root, entry.task_id, entry.target_root, outcome.get("unindexed") or [], source)
+    def merge(current, fields):
+        pending = dict(current.get("native_capture_pending") or {})
+        pending[entry.run_id] = {**pending[entry.run_id], "effect": effect}
+        return {**fields, "native_capture_pending": pending}
+    write_task_result(root, entry.task_id, owner["status"], _field_projector=merge)
+
+
+def _native_capture_blockers(root, row):
+    from ouroboros.delegate_custody import invocation_record
+    from ouroboros.delegate_custody_current import run
+    blockers = []
+    for rid, source in (row.get("native_capture_pending") or {}).items():
+        entry = run(root, rid) if source.get("run_id") else None
+        if not source.get("run_id"):
+            request = invocation_record(root, source.get("invocation_id")) or {}
+            if (request.get("task_id") == row["task_id"] and request.get("target_root") == source.get("target_root")
+                    and request.get("state") == "failed_definite" and not request.get("run_id")):
+                continue  # this exact start authoritatively created no writer
+            entry = run(root, request["run_id"]) if request.get("run_id") else None
+        if entry is None or entry.invocation_id != source.get("invocation_id", ""):
+            blockers.append(f"{rid}: writer identity unavailable")
+        elif (entry.task_id != row["task_id"] or entry.target_root != source.get("target_root")
+              or not native_capture_owner(root, entry.task_id, entry.target_root)):
+            blockers.append(f"{rid}: native owner target mismatch")
+        elif source.get("effect") == "in_place":
+            from ouroboros.workspace_copies import same_directory
+            if not same_directory(entry.execution_root, entry.target_root):
+                blockers.append(f"{rid}: in-place execution target mismatch")
+            elif not entry.terminal_source or not entry.terminal_state:
+                blockers.append(f"{rid}: in-place writer live or unknown")
+        elif entry.patch_apply_pending or entry.patch_apply_key != source.get("apply_idempotency_key", ""):
+            blockers.append(f"{rid}: apply outcome unknown")
+        elif source.get("effect") == "applied" and entry.patch_disposed == "applied":
+            continue
+        elif source.get("effect") != "unmutated":
+            blockers.append(f"{rid}: apply confirmation unavailable")
+    return blockers
+
+
+def _in_place_capture_inputs(root, task):
+    """Record every covered in-place writer, including those terminal before finalization."""
+    from ouroboros.delegate_custody_current import task_snapshot
+    from ouroboros.delegate_directory import is_in_place_run
+    tid = str(task.get("id") or task.get("task_id") or "")
+    if not tid or not native_capture_owner(root, tid, _workspace_root_from_task(task)):
+        return
+    snapshot = task_snapshot(root, tid)
+    pending = dict(task.get("native_capture_pending") or {})
+    for entry in snapshot["runs"].values():
+        if is_in_place_run(entry) and native_capture_owner(root, tid, entry.target_root):
+            pending[entry.run_id] = {"run_id": entry.run_id, "invocation_id": entry.invocation_id,
+                                     "target_root": entry.target_root, "effect": "in_place"}
+    for request in snapshot["pending"]:
+        if is_in_place_run(request) and native_capture_owner(root, tid, request.get("target_root")):
+            iid = request["invocation_id"]
+            pending["invocation:" + iid] = {"invocation_id": iid, "target_root": request["target_root"], "effect": "in_place"}
+    if pending != (task.get("native_capture_pending") or {}):
+        _native_capture_gap(root, tid, pending, "Native capture awaits the recorded in-place writers' terminal observations.")
+
+
+def refresh_native_capture(root, task_id, *, locked=False, read_refusal=None):
+    """Finish addressed publication debt, never replay apply. GET does not call this."""
+    from ouroboros.task_custody import CustodyBusy, task_custody_lock
+    with (nullcontext(True) if locked else task_custody_lock(root, task_id, timeout_sec=PUBLICATION_LOCK_SEC)) as held:
+        if not held:
+            raise CustodyBusy(f"native capture of {task_id} is held by another publisher")
+        row = load_task_result(root, task_id, strict=True) or {}
+        if not native_capture_owner(root, task_id, _workspace_root_from_task(row)):
+            return ""
+        if cancellation_blocks_child_result(row):
+            return "Native capture promotion refused: the native owner is cancelled; the run result remains separate."
+        if not row.get("native_capture_pending") or row.get("status") not in _FINAL_STATUSES:
+            return ""
+        blockers = _native_capture_blockers(root, row)
+        if blockers:
+            return "Native capture is unavailable: " + "; ".join(blockers)
+        if read_refusal and (refusal := read_refusal()):
+            return "Native capture publication is still owed: " + refusal
+        try:
+            _finalize_task_artifacts_locked(root, {**row, "id": task_id}, task_id, late=True)
+        except Exception as exc:
+            return f"Native capture publication is still owed: {type(exc).__name__}: {exc}"
+        fresh = load_task_result(root, task_id, strict=True) or {}
+        if fresh.get("artifact_status") == ARTIFACT_STATUS_FAILED:
+            return "Native capture publication is still owed: " + str(fresh.get("artifact_error") or "capture failed")
+        return "Native capture refreshed; inspect the current result before native integration."
+
+
+def refresh_in_place_native_capture(root, entry):
+    owner = native_capture_owner(root, entry.task_id, entry.target_root)
+    if not owner or owner.get("status") not in _FINAL_STATUSES:
+        return ""
+    with native_capture_custody(root, entry):
+        owner = native_capture_owner(root, entry.task_id, entry.target_root)
+        if not owner or owner.get("status") not in _FINAL_STATUSES:
+            return ""
+        refusal = "Native capture promotion refused: the native owner is cancelled." if cancellation_blocks_child_result(owner) else ""
+        if entry.run_id not in owner.get("native_capture_pending", {}):
+            # Output revisions do not create another writer or require the retired checkout.
+            path = current_workspace_manifest(root, entry.task_id, owner)
+            previous = json.loads(path.read_text()) if path.exists() else {}
+            source = {"run_id": entry.run_id, "invocation_id": entry.invocation_id,
+                      "target_root": entry.target_root, "effect": "in_place", "terminal_source": entry.terminal_source}
+            covered = previous.get("native_capture_sources", {}).get(entry.run_id, {})
+            from ouroboros.workspace_copies import same_directory
+            if (previous.get("status") in {ARTIFACT_STATUS_READY_NO_CHANGES, ARTIFACT_STATUS_READY_WITH_CHANGES}
+                    and entry.terminal_source and entry.terminal_state and covered.get("terminal_source")
+                    and same_directory(entry.execution_root, entry.target_root)
+                    and all(covered.get(key) == source[key] for key in ("run_id", "invocation_id", "target_root", "effect"))):
+                return refusal
+            _native_capture_gap(root, entry.task_id, {entry.run_id: source}, f"Native capture is owed after {entry.run_id}.")
+        if refusal:
+            return refusal
+        return refresh_native_capture(root, entry.task_id, locked=True)
 
 
 def _published_ledger_summary(task_id: str, rows: List[Dict[str, Any]],
@@ -1180,6 +1456,7 @@ def _merge_artifacts(
     drop = drop_kinds or set()
     key_for = lambda item: (
         str(item.get("kind") or ""),
+        str(item.get("path")) if item.get("kind") == "workspace_capture_history" else
         str(item.get("name") or pathlib.Path(str(item.get("path") or "")).name),
     )
     keys = {key_for(item) for item in new_items if isinstance(item, dict)}

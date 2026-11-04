@@ -74,9 +74,13 @@ export function modelRolesHost(id) {
     return `<div id="${escapeHtml(id)}" class="model-role-editor"></div>`;
 }
 
-/** In-memory form controller; refreshes have no settings or login side effects. */
+/** Settings shows this under Main, before Save: what a new Main does to work already running (owner, 2026-11-03). */
+export const MAIN_FOLLOW_NOTE = 'Running work that follows Main uses this model at its next call. '
+    + 'The new route may need to read its full context again; work with its own model keeps it.';
+
+/** In-memory form controller; refreshes have no settings or login side effects. `mainNote`: Settings' Main note. */
 export function createModelRolesEditor({ hostId, store = claudexorStatus,
-    doc = () => document, onChange = () => {}, catalogFetch = fetchJson, showContext = true } = {}) {
+    doc = () => document, onChange = () => {}, catalogFetch = fetchJson, showContext = true, mainNote = false } = {}) {
     const getDoc = typeof doc === 'function' ? doc : () => doc;
     let slots = [];
     let rows = [];
@@ -228,10 +232,11 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     function rowHtml(row, index, total) {
         const isFallback = row.slot.slot === 'fallback';
         const inputId = inputIdFor(row);
+        const described = mainNote && row.slot.slot === 'main' ? ` aria-describedby="${escapeHtml(hostId)}-main-note"` : '';
         return `<div class="model-role-row" data-model-role="${escapeHtml(row.id)}">
             <div class="model-role-controls">
                 ${selectHtml(`data-model-role-source aria-label="${escapeHtml(row.slot.label)} source"`, sourceGroupsFor(row), sourceChoice(row.source))}
-                ${modelChooserHtml(`id="${escapeHtml(inputId)}" data-model-role-model aria-label="${escapeHtml(row.slot.label)}${isFallback ? ` ${index + 1}` : ''}"`, row.model, `${hostId}-${row.id}-models`, [], { placeholder: row.slot.slot === 'main' ? 'Choose a model' : emptyUsesText(row) })}
+                ${modelChooserHtml(`id="${escapeHtml(inputId)}" data-model-role-model aria-label="${escapeHtml(row.slot.label)}${isFallback ? ` ${index + 1}` : ''}"${described}`, row.model, `${hostId}-${row.id}-models`, [], { placeholder: row.slot.slot === 'main' ? 'Choose a model' : emptyUsesText(row) })}
                 <select class="ui-control" data-model-role-account aria-label="${escapeHtml(row.slot.label)} account" ${sourceId(row) ? '' : 'hidden'}></select>
                 ${isFallback ? `<span class="model-role-order"><button type="button" class="btn btn-default" data-model-up aria-label="Move fallback up" ${index === 0 ? 'disabled' : ''}>↑</button><button type="button" class="btn btn-default" data-model-down aria-label="Move fallback down" ${index === total - 1 ? 'disabled' : ''}>↓</button><button type="button" class="btn btn-default" data-model-remove aria-label="Remove fallback">Remove</button></span>` : ''}
             </div>
@@ -257,6 +262,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
                 </div>
                 ${slot.slot === 'fallback' ? '<p class="model-role-copy">Tried in this order when the acting model refuses, cannot be reached or loses its answer. A wait starts only when none of them answers.</p>' : ''}
                 ${matching.map((row, index) => rowHtml(row, index, matching.length)).join('')}
+                ${mainNote && slot.slot === 'main' ? `<p class="model-role-copy" id="${escapeHtml(hostId)}-main-note" data-main-follow-note>${escapeHtml(MAIN_FOLLOW_NOTE)}</p>` : ''}
             </section>`;
         }).join('');
         element.querySelector('[data-global-processing]')?.addEventListener('change', (event) => {

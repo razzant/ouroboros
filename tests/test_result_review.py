@@ -263,15 +263,18 @@ def test_nothing_is_forced_for_a_child_auto_off_or_a_plain_text_answer(tmp_path,
     assert sends == []
 
 
+@pytest.mark.parametrize("enforcement", ["advisory", "blocking"])
 def test_required_reviews_presence_results_without_holding_them_and_ignores_a_declared_expected_output(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, enforcement):
     from ouroboros.tools.review_result import required_material, result_review_at_delivery
 
     sends: list[dict] = []
-    ctx = _floor_ctx(tmp_path / "presence", monkeypatch)
+    ctx = _floor_ctx(tmp_path / "presence", monkeypatch, enforcement=enforcement)
+    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "1")
     _produced_answer_protocol(monkeypatch)
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends, {"t1": CRITICAL}))
-    ctx._presence_completion = {"outcome": "spoken"}
+    # The host stamps a Presence turn before any review (``presence_runner._build_task``).
+    ctx.task_metadata = {**dict(getattr(ctx, "task_metadata", None) or {}), "presence_event_identity": "event-1"}
     trace, shown = {"tool_calls": []}, []
     assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is False, \
         "Presence speech is never held for a review"
@@ -281,6 +284,16 @@ def test_required_reviews_presence_results_without_holding_them_and_ignores_a_de
     assert presence["panel"]["chosen_by"] == "host" and presence["panel"]["composition"] == "full_pool"
     assert set(presence["panel"]["assigned"]) == {"t1", "t2", "s1"}
     assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is False and len(sends) == 3
+    for _ in range(3):  # the same answer reopened by place mail keeps one $0 refusal, without holding speech
+        assert result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is False
+    rows = review_ledger.recent_records(ctx.drive_root, ctx.task_id, limit=50, surface="result")
+    refused = [row for row in rows if (row.get("verdict") or {}).get("aggregate") == "NOT_DISPATCHED"]
+    assert len(refused) == 1 and len(sends) == 3 and shown == []
+    current = [run for run in trace["review_runs"] if not run.get("superseded_by_revision")]
+    assert len(current) == 1 and current[0]["record_id"] == refused[0]["record_id"]
+    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "2")
+    assert result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is False
+    assert len(sends) == 6 and shown == [], "a raised ceiling permits its review; Presence still never holds"
     sends.clear()
 
     # The expected result a task was given is intent, never production (owner, 11 Oct, #1731).
@@ -379,8 +392,9 @@ def test_an_advisory_delivery_after_a_shown_refusal_is_the_authors_own_decision(
 
 
 @pytest.mark.parametrize("owner_message", [False, True])
+@pytest.mark.parametrize("checkpointed", [False, True])
 def test_delivery_collects_the_running_review_the_mind_started_without_buying_another(tmp_path, monkeypatch,
-                                                                                      owner_message):
+                                                                                      owner_message, checkpointed):
     """With ``owner_message`` an owner message arrives while the review runs (the usual reason its author left
     it): the running review of the same answer is still collected at $0 under its own subject, and since it
     judged the earlier request the host asks once whether the new words change it; delivering again keeps it."""
@@ -412,6 +426,18 @@ def test_delivery_collects_the_running_review_the_mind_started_without_buying_an
         assert (run["record_id"], run["aggregate_signal"]) == (first["record_id"], "PASS"), mode
         record = review_ledger.load_record(ctx.drive_root, first["record_id"])
         assert record["brief"]["goal"] == "Check the arithmetic", "the collected record keeps the mind's brief"
+        from ouroboros.chronicle_store import ChronicleStore, is_late_review_mark
+        from ouroboros.late_review_marks import replay_owed_late_reviews
+        from ouroboros.task_results import write_task_result
+        from ouroboros.working_checkpoint import flush_content_acks
+
+        assert not (record.get("waiting") or {}).get("seen_outcome_states"), "showing alone is not a saved receipt"
+        if checkpointed:
+            flush_content_acks(ctx)  # the successful transcript checkpoint's commit point
+        write_task_result(ctx.drive_root, ctx.task_id, "completed", chat_id=1)
+        assert replay_owed_late_reviews(ctx.drive_root)["settled"] == 1
+        marks = [mark for mark in ChronicleStore(ctx.drive_root).active_marks(None) if is_late_review_mark(mark)]
+        assert bool(marks) is (not checkpointed), "only a whole saved host handback makes the unwaited mark redundant"
 
 
 def test_a_delivered_answer_never_keeps_an_earlier_answers_run_current(tmp_path, monkeypatch):

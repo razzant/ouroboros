@@ -138,7 +138,7 @@ def _install_child_fixture(mode, events_path):
 
 @pytest.fixture
 def child_fixture(tmp_path, monkeypatch):
-    from ouroboros.tools import shell, shell_process
+    from ouroboros.tools import shell
 
     events = tmp_path / "events.jsonl"
     original = shell._tracked_subprocess_run
@@ -157,7 +157,7 @@ def child_fixture(tmp_path, monkeypatch):
         try:
             if state.get("window_from_checkpoint"):
                 with monkeypatch.context() as patch:
-                    patch.setattr(shell_process, "subprocess", _window_from_checkpoint(events))
+                    patch.setattr(subprocess.Popen, "communicate", _window_from_checkpoint(events))
                     return original(child_argv, **kwargs)
             return original(child_argv, **kwargs)
         finally:
@@ -195,18 +195,20 @@ def _checkpointed(events):
 
 
 def _window_from_checkpoint(events, ceiling_sec=120):
-    """The tracked runner's ``subprocess`` with one change: the child's execution window opens only once the child
+    """Observe communicate without replacing the contained birth: its execution window opens only once the child
     has published its operation checkpoint. A loaded runner can spend any fixed window on the child's imports
     before it creates the operation (#2113); the expiry, the kill and the parent's read stay the real ones."""
 
-    class Popen(subprocess.Popen):
-        def communicate(self, input=None, timeout=None):
+    communicate = subprocess.Popen.communicate
+
+    def wait_from_checkpoint(self, input=None, timeout=None):
+        if isinstance(self.args, list) and any("_install_child_fixture" in str(arg) for arg in self.args):
             ceiling = time.monotonic() + ceiling_sec  # a bound for a child that never gets there, not a window
             while self.poll() is None and not _checkpointed(events) and time.monotonic() < ceiling:
                 time.sleep(0.02)
-            return super().communicate(input, timeout)
+        return communicate(self, input, timeout)
 
-    return SimpleNamespace(**{**vars(subprocess), "Popen": Popen})
+    return wait_from_checkpoint
 
 
 def _call(client=None, *, timeout=1.0, **kwargs):

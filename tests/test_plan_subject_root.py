@@ -325,6 +325,7 @@ def test_evidence_an_ask_could_not_attach_is_named_in_its_result_and_in_the_free
     line = "\n  evidence omitted: notes/absent.md (missing); notes/long.md (truncated_to_40000)\n"
     for shown in (text, read):
         assert line in shown and shown.index("- ask a1 on revision 1") < shown.index(line), shown
+        assert "cannot be attached directly" not in shown  # what to attach instead is said only for a deny root
 
 
 def test_a_late_reply_settles_from_its_recorded_assignment_after_the_candidate_is_bound(env):

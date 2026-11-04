@@ -117,14 +117,30 @@ def test_gemini_partial_then_late_final_keeps_complete_caption_and_audio_identit
     asyncio.run(scenario())
 
 
-def test_gemini_expiry_with_untranscribed_audio_is_an_explicit_failure(packages):
+def test_gemini_expiry_with_untranscribed_audio_continues_with_an_explicit_hearing_gap(packages):
+    """Owner's choice: keep the call, saying what may not have been heard, never inventing owner words."""
     from tests.test_live_provider_regressions import DriverHost, driver, session as make_session, until
     from ouroboros import call_protocol as cp
-    from ouroboros.contracts.realtime import RealtimeSetupError
+    from ouroboros.contracts.live_conversation import LiveEvent
+    from websockets.exceptions import ConnectionClosedOK
+    from websockets.frames import Close
 
     async def scenario():
         adapter, wire = make_session("gemini")
         host = DriverHost(adapter)
+        facts = []
+
+        async def record_fact(text):
+            facts.append(text)
+        host.record_fact = record_fact
+        receive = wire.recv
+
+        async def expiring():
+            value = await receive()
+            if '"expired"' in value:
+                raise ConnectionClosedOK(Close(1001, "session expired"), None)
+            return value
+        wire.recv = expiring
         running = asyncio.create_task(driver().run(host))
         try:
             await until(lambda: host.hub._state["state"] == cp.STATE_LIVE)
@@ -133,9 +149,15 @@ def test_gemini_expiry_with_untranscribed_audio_is_an_explicit_failure(packages)
             await until(lambda: any("realtimeInput" in row for row in wire.sent))
             wire.put({"voiceActivity": {"type": "ACTIVITY_START"}})
             wire.put({"goAway": {"timeLeft": "0.05s"}})
-            with pytest.raises(RealtimeSetupError, match="renewal_pending_work"):
-                await asyncio.wait_for(running, 1)
-            assert not host.rows
+            await asyncio.sleep(.2)
+            assert not running.done(), "past its deadline the renewal is fresh, never renewal_pending_work"
+            wire.put({"expired": True})  # the engine closes the expired session itself
+            await until(lambda: len(host.sessions) == 2)
+            assert host.options[1].resume_handle == ""
+            host.sessions[1].put(LiveEvent("ready", {"input_rate": 24000, "output_rate": 24000}))
+            await until(lambda: facts)
+            assert len(facts) == 1 and "may not have been heard" in facts[0]
+            assert not host.rows and not host.messages, "neither owner words nor a peer observation"
         finally:
             host.hub.close("fixture_done")
             if not running.done():

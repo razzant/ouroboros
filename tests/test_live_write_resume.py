@@ -73,6 +73,8 @@ def test_failed_tool_result_write_defers_to_native_resumption(gemini, resumable)
         closed = ConnectionClosedError(Close(1012, 'synthetic restart'), Close(1012, 'synthetic restart'), True)
         async def send(raw):
             if 'toolResponse' in json.loads(raw):
+                if resumable:  # issued after the call arrived, the handle resumes a conversation holding it
+                    wire.put({'sessionResumptionUpdate': {'resumable': True, 'newHandle': 'synthetic-resume'}})
                 wire.put(closed)
                 raise closed
             await original_send(raw)
@@ -99,9 +101,6 @@ def test_failed_tool_result_write_defers_to_native_resumption(gemini, resumable)
         running = asyncio.create_task(run(host))
         try:
             await until(lambda: host.hub.states)
-            if resumable:
-                wire.put({'sessionResumptionUpdate': {'resumable': True, 'newHandle': 'synthetic-resume'}})
-                await until(lambda: host.state.get('resume_handle'))
             wire.put({'toolCall': {'functionCalls': [{'id': 'c', 'name': 'read_file', 'args': {}}]}})
             if resumable:
                 await until(lambda: len(wires) == 2 and any('toolResponse' in e for e in wires[1].sent) or running.done())

@@ -1694,7 +1694,7 @@ this way, so its first named action needs no schema-enablement reconnect.
 loaded provider and its credential grants. Beta defaults off. No connection duration
 or per-call dollar limit exists; responses share the ordinary spending limit.
 
-`handler(host)` receives the `LiveHost` protocol in `contracts/live_conversation.py`. Its additive `prepare_session(options)` defaults to None for older hosts; a supporting host returns a silent successor lease with async `run(consume)`/`close()` and `caught_up` indicating canonical arrivals delivered on adoption. The additive `ContextUpdate.respond` defaults to true; false delivers catch-up history without asking for another answer. Providers opt in with `LiveSession.silent_context_updates=True`; its absent/false default preserves sequential renewal for older implementations. The additive host operation `take_mail_answer()` claims an unanswered durable mailbox delivery after cancellation; its old-host default is false, and returned mailbox rows still request an answer.
+`handler(host)` receives the `LiveHost` protocol in `contracts/live_conversation.py`. Its additive `prepare_session(options)` defaults to None for older hosts; a supporting host returns a silent successor lease with async `run(consume)`/`close()` and `caught_up` indicating canonical arrivals delivered on adoption. The additive `ContextUpdate.respond` defaults to true; false delivers catch-up history without asking for another answer. Providers opt in with `LiveSession.silent_context_updates=True`; its absent/false default preserves sequential renewal for older implementations. The additive host operation `take_mail_answer()` claims an unanswered durable mailbox delivery after cancellation; its old-host default is false, and returned mailbox rows still request an answer. Additive `take_mail_rows()` returns, once, what that waiter would have received: a fresh fit holds those rows, a native resume writes them before their pointer (old hosts: none). Additive `tool_requested(call)` records a provider's call as a host fact before its effect (old hosts: None); `record_fact(text)` records the call's own observations, such as a hearing gap (else `observe_context`).
 The host owns admission, current canonical history, ordinary context fitting, tools,
 mailbox, accounting and Stop. The feature owns call state, media, captions, language
 choices and session renewal. It calls `session(consume, LiveOptions(...))`; every reopen
@@ -1717,7 +1717,7 @@ output-limit evidence in `LiveOptions.model_output_bound_tokens`. A provider own
 layout and normalization, and must never cut selected input. It reports each response's
 start, finish, status and usage axes, including interrupted/tool-only responses.
 `connected_seconds` is a cumulative connection watermark, including idle and closing
-time. For optional delivery evidence, shared `JsonSession.hold_context` and `hold_tool_call` record rows only after delivery, and `capture_response_context(response_id)` snapshots what that response held before queued updates are released. Older/external providers without these hooks keep exposure unknown; setup or queued results never prove exposure.
+time. For optional delivery evidence, shared `JsonSession.hold_context` and `hold_tool_call` record rows only after delivery, and `capture_response_context(response_id)` snapshots what that response held before queued updates are released. They also bound answers: an ordinary result or typed room request is answered only by a response begun after its rows are held (after a fresh switch, the pointer asking for its answer) that ends without `continues` and, where captured, held them at its end (without hooks, after the send returns). Older/external providers without these hooks keep exposure unknown; setup or queued results never prove exposure.
 The factory's `observe("usage", raw)` reports JSON
 `{"usage": {...}, "raw_usage": {...}}` for that physical connection; `close()` emits
 its final sample before returning. Samples and responses share one watermark. The host
@@ -1730,7 +1730,12 @@ usage remains unknown; settlement never silently fetches a newer tariff. Catalog
 
 Call tools join ordinary schemas; collisions refuse admission. Their async
 `handler(host, arguments)` runs on the serialized tool lane with pre/post-effect
-checkpoints and ordinary history rows. `tool_batch` returns a list-compatible
+checkpoints and ordinary history rows. Effects and call-tool handlers hold no history lock, so a
+handler may await `record_fact`. A control ending the batch still leaves each call/result unit whole: finished
+effects keep exact results, an interrupted call states an unknown outcome, the rest say they did not start, then
+`tool_batch` raises that control. Each handler's start reads the call's own end, so Stop or End taken meanwhile starts
+nothing more (End records the same rows, raising nothing). Native outputs answer only the issuing conversation; a fresh
+one holds the unit in setup, and a refused fit ends the call typed `context_capacity`. `tool_batch` returns a list-compatible
 `ToolBatch`; forward its `silent` ids in `ToolOutputs.silent`. `observe_context(row)`
 records a labelled peer observation without private host access. Final captions are
 durable immediately; whole-turn checkpoints are coalesced. The server's host-attributed
@@ -1739,7 +1744,13 @@ durable immediately; whole-turn checkpoints are coalesced. The server's host-att
 
 `renewal_due()` uses held input and observed growth against the route reserve/window.
 Provider-specific audio-drop policy stays in the provider. `renewal_ready` carries
-native input/transcription work; the feature also waits for tools and playback.
+native input/transcription work and open calls; the feature also waits for playback,
+never for a running tool. Optional `input_pending` reports words said or awaiting recognition, apart from open calls:
+a forced switch waits for it, and a loss with it set gives a fresh session the hearing-gap fact (absent, VAD events decide).
+`input_started` may name a `response_id` already begun for its words when no VAD start preceded them, so that response
+answers them. A native resume needs a handle published after the open calls and last native result; one history outran
+while opening continues fresh. OpenAI withholds `response.create` while its own call awaits output: speech on the issuing
+connection, or after a further call behind a running effect, is answered once that output is written.
 `final_captions()` returns received unfinished words at teardown without new wire work.
 After a failed speculative fit, the additive `LiveHost.delivery_fits(rows, schemas)` checks pending delivery against serving room (older hosts default false, declining an unproven fallback). The feature retains its last successfully delivered catalog, initially `selected.tools_json`; a session need not expose a private `tools` member. `LiveHost.fitted_frame_rows()` defaults to an empty tuple and supplies only fitted pixel rows for duplicate suppression when implemented. The call applies the owner-mode image floor only at fresh projection, retaining canonical pixels. Authored receipts price the existing connection without a fresh room fact.
 Automatic feature/provider reload refuses with `live_call_active` and retries later.

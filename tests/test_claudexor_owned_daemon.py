@@ -1802,6 +1802,11 @@ def test_installer_invocation_is_exact_grouped_and_stdout_bounded(monkeypatch):
     seen = {}
 
     class Process:
+        returncode = 0
+
+        def poll(self):
+            return self.returncode
+
         stdout = io.BytesIO(json.dumps(_install_receipt()).encode())
 
         def wait(self, timeout):
@@ -1818,7 +1823,10 @@ def test_installer_invocation_is_exact_grouped_and_stdout_bounded(monkeypatch):
         # lock-free Panic request and a begun stop see the start through its count and publication.
         seen["lock_held_during_spawn"] = shell._subprocess_lock.locked()
         seen["counted_during_spawn"] = shell_process._spawning_subprocesses
-        return Process()
+        proc = Process()
+        from tests.test_tracked_tree_containment import fake_tree_read
+        fake_tree_read(monkeypatch, proc, remains=False)
+        return proc
 
     monkeypatch.setattr(installer.subprocess, "Popen", popen)
     installer.install_missing_harness_cli("cursor")
@@ -1862,6 +1870,11 @@ def test_installer_timeout_kills_the_process_tree(monkeypatch):
     waits = []
 
     class Process:
+        returncode = 0
+
+        def poll(self):
+            return self.returncode
+
         pid = 42
         stdout = io.BytesIO()
 
@@ -1872,6 +1885,8 @@ def test_installer_timeout_kills_the_process_tree(monkeypatch):
             return -9
 
     proc = Process()
+    from tests.test_tracked_tree_containment import fake_tree_read
+    fake_tree_read(monkeypatch, proc, remains=False)
     monkeypatch.setattr(installer.subprocess, "Popen", lambda *_a, **_kw: proc)
     killed = []
     import ouroboros.tools.shell as shell
@@ -1906,6 +1921,11 @@ def test_installer_child_is_panic_tracked_for_its_whole_run(monkeypatch):
     observed = {}
 
     class Process:
+        returncode = 0
+
+        def poll(self):
+            return self.returncode
+
         pid = 43
         stdout = io.BytesIO(json.dumps(_install_receipt()).encode())
 
@@ -1914,6 +1934,8 @@ def test_installer_child_is_panic_tracked_for_its_whole_run(monkeypatch):
             return 0
 
     proc = Process()
+    from tests.test_tracked_tree_containment import fake_tree_read
+    fake_tree_read(monkeypatch, proc, remains=False)
     monkeypatch.setattr(installer.subprocess, "Popen", lambda *_a, **_kw: proc)
     installer.install_missing_harness_cli("cursor")
     assert observed["tracked_during_wait"] is True, "panic sweep must see the live installer"

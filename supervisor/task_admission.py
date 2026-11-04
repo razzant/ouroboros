@@ -368,6 +368,46 @@ def restored_handoff_unproven(task: dict, existing: Optional[dict], *, ancestor_
     return host_unscoped(task) and possible
 
 
+PRESTART_PROOF = "returned_before_body"  # the carried copy of a pre-body return, in a later hold or Resume record
+
+
+def prestart_returned_unsent(task: dict, stored: Optional[dict] = None) -> dict:
+    """The proof that a lane turn's first attempt came back before its body and never launched since (#2555).
+
+    The carrier's pre-body Pause event, checked by the supervisor's park, is the proof:
+    its scheduled result keeps that limit (``before_task_start``, attempt 1, no calls),
+    and a later quit hold or Resume record carries it by value (``PRESTART_PROOF``). A
+    body start records its attempt and every pooled launch of this scoped row commits its
+    dispatch mark before the put, so a result with neither proves none since. This is not
+    ``admitted_dispatch='none'``: the lane did put the turn on its carrier. ``{}`` when
+    unproven; an unreadable result raises and the caller keeps its hold. Restore,
+    hold revalidation and Resume read the same evidence; readability grants no Resume.
+    """
+    from ouroboros.project_admission import host_unscoped
+
+    if (not task.get("_is_direct_chat") or not host_unscoped(task) or governing_continuation(task)
+            or type(task.get("_attempt")) is not int or task["_attempt"] != 1 or "admitted_dispatch" in task
+            or task.get("original_task_id") or task.get("timeout_retry_from")):
+        return {}
+    if stored is None:
+        from supervisor import queue
+
+        stored = load_task_result(pathlib.Path(task.get("budget_drive_root") or queue.DRIVE_ROOT),
+                                  str(task.get("id") or ""), strict=True) or {}
+    if (stored.get("status") != STATUS_SCHEDULED or stored.get("started_at") or stored.get("task_attempt") is not None
+            or stored.get("admission_outcome") == "never_admitted"
+            or "admitted_dispatch" in stored or "admitted_dispatch_attempt" in stored):
+        return {}
+    limit = stored.get("resource_limit") if isinstance(stored.get("resource_limit"), dict) else {}
+    for proof in (limit, limit.get(PRESTART_PROOF)):
+        if (isinstance(proof, dict) and proof.get("before_task_start") is True and proof.get("cause") == "owner_pause"
+                and proof.get("task_attempt") == 1 and proof.get("replay_safe") is True
+                and proof.get("physical_calls") == 0):
+            return {key: proof[key] for key in ("before_task_start", "cause", "task_attempt", "replay_safe",
+                                                "physical_calls")}
+    return {}
+
+
 def enqueue_with_admission_receipt(task: Dict[str, Any], *, receipt_required: bool = True,
                                    prepare_admission: Optional[Callable[[dict], bool]] = None, **enqueue_kwargs: Any) -> Any:
     """Admit a host producer's row together with its positive scheduled receipt.
@@ -733,8 +773,9 @@ def revalidate_project_holds() -> None:
             # A first-attempt schedule receipt that still proves no handoff outranks an
             # earlier launcher's Project mark of that attempt (``first_dispatch_unsent``).
             unsent = not governing and first_dispatch_unsent(task)
+            returned = prestart_returned_unsent(task, stored)
             if (stored.get("admission_outcome") == "never_admitted"
-                    or not granted and not unsent and (
+                    or not granted and not unsent and not returned and (
                         stored.get("status") != STATUS_SCHEDULED or stored.get("started_at")
                         or task.get("admitted_dispatch") != "none"
                         or "admitted_dispatch" in stored and stored["admitted_dispatch"] != "none")):

@@ -381,6 +381,16 @@ EVENT_HANDLERS = {
 }
 
 
+def _event_shape(evt: Any) -> Dict[str, Any]:
+    """A dropped frame's content-free facts: its body can hold a conversation's or owner's words."""
+    if not isinstance(evt, dict):
+        return {"value_type": type(evt).__name__}
+    ids = {key: str(evt[key])[:128] for key in ("task_id", "parent_task_id", "root_task_id", "work_ref", "output_ref")
+           if evt.get(key)}
+    return {**ids, "event_keys": sorted(str(key)[:64] for key in evt)[:64],
+            "value_chars": sum(len(value) for value in evt.values() if isinstance(value, str))}
+
+
 def dispatch_event(evt: Dict[str, Any], ctx: Any) -> None:
     """Dispatch a single worker event to its handler."""
     if not isinstance(evt, dict):
@@ -390,7 +400,7 @@ def dispatch_event(evt: Dict[str, Any], ctx: Any) -> None:
                 "ts": utc_now_iso(),
                 "type": "invalid_worker_event",
                 "error": "event is not dict",
-                "event_repr": repr(evt)[:1000],
+                **_event_shape(evt),
             },
         )
         return
@@ -403,7 +413,7 @@ def dispatch_event(evt: Dict[str, Any], ctx: Any) -> None:
                 "ts": utc_now_iso(),
                 "type": "invalid_worker_event",
                 "error": "missing event.type",
-                "event_repr": repr(evt)[:1000],
+                **_event_shape(evt),
             },
         )
         return
@@ -416,8 +426,8 @@ def dispatch_event(evt: Dict[str, Any], ctx: Any) -> None:
             {
                 "ts": utc_now_iso(),
                 "type": "unknown_worker_event",
-                "event_type": event_type,
-                "event_repr": repr(evt)[:1000],
+                "event_type": event_type[:128],
+                **_event_shape(evt),
             },
         )
         return

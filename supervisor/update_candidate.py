@@ -919,12 +919,12 @@ def refuse_unready_boot_resolver(timeout_sec: float = 0.0) -> Dict[str, Any]:
     if _boot_resolver_ready(wait):
         return {}
     from supervisor import workers
-    from supervisor.update_merge import _log_supervisor, rollback_managed_update
+    from supervisor.update_merge import _log_supervisor, rollback_managed_update_on_boot
 
     blockers = workers.kill_workers_for_update(
         result_reason="Assisted update resolver did not become ready after the restart.",
         terminal_status="interrupted")
-    ok, msg = rollback_managed_update("assisted_resolver_unready", reopen_writer_admission=False)
+    ok, msg = rollback_managed_update_on_boot("assisted_resolver_unready")
     _log_supervisor({"type": "managed_update_assisted_resolver_unready", "ok": ok, "msg": msg, "wait_sec": wait,
                      **({"blockers": blockers} if blockers else {})})
     cause = ("the conflicting update could not resume after the restart: its workers were not all ready "
@@ -932,4 +932,6 @@ def refuse_unready_boot_resolver(timeout_sec: float = 0.0) -> Dict[str, Any]:
     note = (f"{cause}, so it was rolled back before its conflicts were staged again ({msg}). "
             "Apply the update again to retry." if ok else
             f"{cause}, and its rollback did not finish ({msg}). Quit and reopen Ouroboros to retry the recovery.")
-    return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": note}
+    # Workers whose stop is unproven are disclosed with the outcome, never a veto on the rollback.
+    return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": note,
+            **({"blockers": list(blockers)} if blockers else {})}

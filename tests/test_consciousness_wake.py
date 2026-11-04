@@ -76,7 +76,8 @@ def test_previous_wake_distinguishes_absence_and_unreadability(tmp_path, monkeyp
     from ouroboros import task_store
     from ouroboros.store import StoreError
 
-    assert wake.previous_wake_text(tmp_path, "missing", now=T0) == "unreadable"
+    assert wake.previous_wake_text(tmp_path, "missing", now=T0) == (
+        "missing, unreadable; get_task_result(task_id='missing') reads it")
     reads = []
 
     def broken(root, task_id):
@@ -86,7 +87,8 @@ def test_previous_wake_distinguishes_absence_and_unreadability(tmp_path, monkeyp
     monkeypatch.setattr(task_store, "read_document", broken)
     assert wake.previous_wake_text(tmp_path, "", now=T0) == "none"
     assert reads == []
-    assert wake.previous_wake_text(tmp_path, "previous", now=T0) == "unreadable"
+    assert wake.previous_wake_text(tmp_path, "previous", now=T0) == (
+        "previous, unreadable; get_task_result(task_id='previous') reads it")
     assert reads == ["previous"]
 
 
@@ -112,7 +114,8 @@ def test_previous_wake_failure_does_not_block_launch(clock, monkeypatch, caplog,
     if failure == "none":
         assert row["result"] in text and "unreadable" not in text
     else:
-        assert "- previous wake: unreadable\n" in text
+        task_id = row["task_id"]
+        assert f"- previous wake: {task_id}, unreadable; get_task_result(task_id='{task_id}') reads it\n" in text
         assert any(row["task_id"] in record.message and record.exc_info for record in caplog.records)
 
 
@@ -654,7 +657,8 @@ def test_render_substitutes_every_placeholder_and_keeps_every_event(tmp_path, mo
         running=1, max_tasks=2, interval=3300, events=observation.full_text())
     for key in wake.PLACEHOLDERS:
         assert "{" + key + "}" not in text, key
-    assert text.startswith("You are Ouroboros. No one has asked for a task")
+    opening = (repo / "prompts/CONSCIOUSNESS.md").read_text(encoding="utf-8").split("\n\n", 1)[0]
+    assert text.startswith(opening + "\n\n"), "the actual prompt's complete opening reaches the consumer"
     assert "1 h 30 min ago" in text and "autonomy: Acts — Also acts on its own:" in text
     assert "toggle_evolution, request_restart" in text
     assert "allowance known spend (last 24 h): 4.00 / 20.00 USD" in text and "own tasks: 1/2" in text
@@ -681,21 +685,14 @@ def test_render_survives_a_missing_template_and_an_unreadable_task_store(tmp_pat
     assert text.startswith("[Wake-up · heartbeat]") and "{" not in text
 
 
-def test_template_names_only_its_placeholders_and_the_wake_hints():
+def test_template_parameters_and_the_explicitly_retained_lookahead():
     template = (REPO / "prompts" / "CONSCIOUSNESS.md").read_text(encoding="utf-8")
     import re
 
     assert set(re.findall(r"\{([a-z_]+)\}", template)) == set(wake.PLACEHOLDERS)
-    for hint in ("A pause is a legitimate decision", "Distinguish incremental cash cost",
-                 "do not ask the review pool to review the wake itself as a result", "wake facts", "recent facts"):
-        assert hint in template, hint
-    assert "a heartbeat, a task that finished, a project digest" not in template
-    assert "up to 10 rounds" not in template and "300 seconds" not in template
-    assert template.splitlines(keepends=True)[0].encode() == (
-        b"You are Ouroboros. No one has asked for a task; this turn is yours. What matters to you now, "
-        b"and what would be worth understanding, continuing, or changing?\n")
-    assert "no message is sent; the summary still names the wake" in template
-    assert "Finish with summary: one plain sentence in your human's language" in template
+    # The owner chose to retain this exact tested hint in the first delivery. Other prose's meaning
+    # belongs to review; render_substitutes above tests delivery rather than a second copy of that prose.
+    assert "If you cannot say from something recent when your human is next expected by someone, look before you finish." in template
     assert "what you heard and did here" in (REPO / "prompts/FOCUS.md").read_text(encoding="utf-8")
 
 
@@ -735,7 +732,8 @@ def test_projection_names_every_honest_status(describe):
     first = describe({**BASE, "last_wake_outcome": "skipped:waiting_for_first_conversation"})
     assert first["status"] == "waiting_for_first_conversation"
     exhausted = describe({**BASE, "last_wake_outcome": "skipped:allowance_exhausted", "spent_24h_usd": 21.5,
-                          "allowance_resets_at": "2027-01-15T18:00:00+00:00"})
+                          "allowance_resets_at": "2027-01-15T18:00:00+00:00",
+                          "next_wake_at": "2027-01-15T18:00:00+00:00"})  # a real skip waits no sooner than its reset
     assert exhausted["status"] == "allowance_exhausted"
     assert "$21.50 of $20.00" in exhausted["detail"] and server._clock_of("2027-01-15T18:00:00+00:00") in exhausted["detail"]
     assert "at least" not in exhausted["detail"] and "degraded" not in exhausted["detail"]

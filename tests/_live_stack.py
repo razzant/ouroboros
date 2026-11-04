@@ -81,11 +81,14 @@ class Stack:
                         and not self.host.state.get('refit'))
 
     async def owner_says(self, text):
-        before = len(self.wire.audio)
+        # One serving socket for the whole utterance. A renewal's prepared successor can be accepted while the owner
+        # speaks, and `self.wire` would then name a socket that serves nothing: the call keeps serving this one until quiet.
+        wire = self.wire
+        before = len(wire.audio)
         item = f'owner-{len(self.page.controls)}'
-        self.wire.input_start(item)
-        await self.wait(lambda: len(self.wire.audio) >= before + 960)
-        self.wire.input_end(item, text)
+        wire.input_start(item)
+        await self.wait(lambda: len(wire.audio) >= before + 960)
+        wire.input_end(item, text)
         await self.wait(lambda: any(r.get('text') == text and r.get('final') for r in self.page.controls))
 
     async def tool(self, cid, name, args):

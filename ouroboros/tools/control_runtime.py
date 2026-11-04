@@ -534,7 +534,7 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
         if refusal:
             return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
                 f"⚠️ MAIN_NOTICE_BLOCKED: destination='main' refused: {refusal}. Nothing was sent; "
-                "destination='current' still reaches this conversation.")))
+                "destination='current' still writes this work's own room.")))
         from ouroboros.presence_owner_contact import ContactRequestConflict, ContactRequestInvalid, contact_origin, send_main_message
         try:
             origin = contact_origin(ctx)
@@ -580,7 +580,7 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
         chat_id, system_type = relay["source"]["chat_id"], "relay_reply"
         reply_meta = {"reply_to": resolve_reply(canonical_data_root(ctx), relay["source"]["address"]),
                       "reply_to_relay": relay["relay_id"]}
-    from ouroboros.tools.owner_delivery import deliver_owner_event, stamp_lineage
+    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt, stamp_lineage
     from ouroboros.utils import append_jsonl
     event = stamp_lineage(ctx, {
         "type": "send_message",
@@ -620,10 +620,8 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
         return (f"OK: answer to relay {relay['relay_id']} owed to {relay['source'].get('label') or 'its source room'} "
                 f"(delivery {event['delivery_id']}); the outbox retries it until sent.")
     if target == "main":
-        return "OK: notice sent to the main chat." if mode == "live" else "OK: notice queued for delivery to the main chat."
-    if mode == "live":
-        return "OK: message sent to owner chat."
-    return "OK: message queued for delivery."
+        return "OK: notice accepted for delivery to the main chat." if mode == "live" else "OK: notice queued for delivery to the main chat."
+    return publish_delivery_receipt(ctx, event, mode, "message")
 
 
 def _update_identity(ctx: ToolContext, content: str, expected_revision: str | None = None) -> str:
@@ -788,6 +786,7 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
     from ouroboros.config import get_bg_wakeup_max_sec, get_bg_wakeup_min_sec
     from ouroboros.consciousness import (
         INTERVAL_STATE_KEY,
+        LAST_SKIP_STATE_KEY,
         LAST_WAKE_STATE_KEY,
         NEXT_WAKE_STATE_KEY,
         _iso,
@@ -816,7 +815,8 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
             gap = "" if stored is not None else "corrupt: the file is not a JSON object"
     facts = {"source": str(path), "observed_at": utc_now_iso()}
     fields = (("enabled", "bg_consciousness_enabled"), ("stored_next_wake_at", NEXT_WAKE_STATE_KEY),
-              ("last_wake_ended_at", LAST_WAKE_STATE_KEY), ("chosen_interval_sec", INTERVAL_STATE_KEY))
+              ("last_wake_ended_at", LAST_WAKE_STATE_KEY), ("chosen_interval_sec", INTERVAL_STATE_KEY),
+              ("last_skip", LAST_SKIP_STATE_KEY))
     if stored is None:
         facts.update(read_gap=gap, not_read=[name for name, _key in fields])
     else:
@@ -841,9 +841,11 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
                                       "source": "owner settings, not the state file"}
     facts["notes"] = [
         "stored_next_wake_at is the last time the clock persisted and fires only while enabled; the running "
-        "clock keeps it no sooner than MIN after boot, and no event moves it.",
-        "Not in this read (held in the supervisor's memory): the last wake outcome and error, failure "
-        "backoff, the allowance window and a live wake task."]
+        "clock keeps it no sooner than MIN after boot, and no event moves it; a changed daily limit retries "
+        "an allowance_exhausted last_skip MIN after that skip and after boot instead of at its reset.",
+        "last_skip is the newest skipped wake with the allowance window it met (null is unknown). Not in this "
+        "read (held in the supervisor's memory): other wake outcomes and errors, failure backoff, the current "
+        "allowance window and a live wake task."]
     return json.dumps(facts, ensure_ascii=False, indent=2)
 
 

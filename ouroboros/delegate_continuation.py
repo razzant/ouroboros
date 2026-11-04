@@ -137,7 +137,9 @@ def still_continuable(drive: Any, entry: Any, live_task_ids=None, *, recoverable
     Each root of the recorded Continue chain (the original root and every
     successor it admitted) can be offered Continue after a technical break, so
     the offer is read at every settled member the walk reaches, not only at the
-    run's own root; child tasks never carry an offer.
+    run's own root; child tasks never carry an offer. An author's stop is offered Continue, but that offer adds
+    no hold here: its line keeps a finished root's ordinary retention (every other check below still applies),
+    and its successor's work order says so. An admitted claim is followed below, like any other.
 
     The sweep supplies its live census and exact reserved handles. Addressed result
     reads validate retry and Continue edges; missing/changed evidence keeps the
@@ -151,7 +153,7 @@ def still_continuable(drive: Any, entry: Any, live_task_ids=None, *, recoverable
     if live_task_ids is None or not entry.task_id:
         return True
     from types import SimpleNamespace
-    from ouroboros.owner_continue import continuation_offer, recorded_continuation
+    from ouroboros.owner_continue import AUTHOR_STOP_CAUSE, continuation_offer, recorded_continuation
     from ouroboros.task_status import SETTLED_STATUSES, load_effective_task_result
     from supervisor import queue
     from supervisor.queue_transitions import _live_retry_target_locked
@@ -205,9 +207,11 @@ def still_continuable(drive: Any, entry: Any, live_task_ids=None, *, recoverable
                         or not recorded_continuation(drive, task_id, successor)):
                     return True
                 pending.append(successor)
-            elif continuation_offer(load_effective_task_result(drive, task_id, materialize_artifacts=False)
-                                    or current, task_id)['eligible']:
-                return True  # the offer exactly as the task card reads it (a retry leaf's end)
+            else:  # the offer exactly as the task card reads it (a retry leaf's end)
+                offer = continuation_offer(load_effective_task_result(drive, task_id, materialize_artifacts=False)
+                                           or current, task_id)
+                if offer['eligible'] and offer.get('cause') != AUTHOR_STOP_CAUSE:
+                    return True
         return not reads.unchanged(reads.rows)
     except Exception:
         log.debug('Registration continuation authority unavailable for %s', entry.run_id, exc_info=True)

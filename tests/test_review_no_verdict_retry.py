@@ -555,3 +555,40 @@ def test_an_identical_commit_after_a_failing_verdict_is_refused_free(staged_body
     shared.git(staged_body, "add", "-A")
     second = _run_non_committing_review_cycle(ctx, "fix: return the proposal's constant", **GATE_ASK)
     assert second["block_reason"] == "identical_diff_refused" and len(sends) == 1, second
+
+
+def test_an_identical_commit_from_a_fresh_context_collects_the_counted_pass_while_an_adviser_runs(
+        staged_body, tmp_path, monkeypatch):
+    """Counted completion and an additional adviser's physical lifetime are separate facts (#2587): once the
+    counted seat settled PASS, the same unchanged commit from a fresh context (a later process) collects that PASS
+    at $0 although an adviser of the wave is still in flight. No second paid wave, no adviser veto; the adviser's
+    row keeps its operation and start token on the original attempt, still collectable."""
+    from ouroboros import review_ledger, review_state
+    from ouroboros.tools import git
+
+    gate = _public_commit(staged_body, tmp_path / "public-drive", monkeypatch, ScriptedTests())
+    first = gate.commit()
+    assert "GIT_ERROR (commit)" in first, first
+    [paid] = review_state.load_state(gate.ctx.drive_root).attempts
+    adviser = {"slot_id": "adviser", "model_id": "test/adviser", "status": "error", "operation_id": "op-adviser",
+               "operation_state": "in_flight", "late_result_pending": True, "pending_invocation_id": "inv-adviser",
+               "review_plan": {"additional": True}}
+
+    def adviser_still_running(state):
+        state.attempts[0].triad_raw_results.append(dict(adviser))
+        state.attempts[0].late_result_pending = True
+    review_state.update_state(gate.ctx.drive_root, adviser_still_running)
+    review_ledger.revise_record(gate.ctx.drive_root, paid.review_record_id, lambda payload: {
+        **payload, "state": "pending", "rows": [*payload["rows"], {
+            "seat_id": "adviser", "additional": True, "status": "pending", "operation_id": "op-adviser",
+            "operation_state": "in_flight"}]})
+    fresh = ToolContext(repo_dir=staged_body, drive_root=gate.ctx.drive_root, task_id=gate.ctx.task_id)
+
+    second = git._commit_reviewed(fresh, **GATE_ASK, commit_message="fix: return the proposal's constant")
+
+    assert "GIT_ERROR (commit)" in second, second
+    assert len(gate.sends) == 1 and len(gate.commits) == 2, "the counted PASS bought no second wave"
+    original = review_state.load_state(gate.ctx.drive_root).attempts[0]
+    kept = next(row for row in original.triad_raw_results if row["slot_id"] == "adviser")
+    assert kept["operation_state"] == "in_flight" and kept["pending_invocation_id"] == "inv-adviser"
+    assert sum(row.paid for row in review_state.load_state(gate.ctx.drive_root).attempts) == 1

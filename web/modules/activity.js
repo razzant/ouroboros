@@ -11,7 +11,9 @@ import { fmt, tr } from './i18n.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { taskCancelPending } from './log_events.js';
 import { waitingModel } from './project_activity.js';
-import { memberState, openWorkControls, resumeTargets, workLine, workOfEpisode, workRowView } from './work_status.js';
+import {
+    memberState, openWorkControls, resumeTargets, workControls, workLine, workMenuActions, workOfEpisode, workRowView,
+} from './work_status.js';
 import { censusTaskFacts, censusTaskPhase, paintTaskPhase } from './task_phase_chip.js';
 import {
     ACTION_HURRY,
@@ -80,16 +82,29 @@ export function ownOutcomePhase(activity, queueFact = null) {
         ? { ...view, secondary: queueFact } : view;
 }
 
+// Census phases that only guess at a parked row; the confirmed work whose live episode the row is says what is true.
+const PARKED_PHASES = new Set(['budget_paused', 'budget_pausing']);
+
+/** What remains of an answered root, from its confirmed `work` when one is given, else its census phase. */
+function lateState(a, work) {
+    if (work?.activity === 'unknown') return 'status unknown';
+    if (work?.activity === 'working' && work.transition === 'pausing') return 'pausing';
+    if (work?.activity === 'paused') return 'paused';
+    return { budget_paused: 'paused', budget_pausing: 'pausing', unknown: 'status unknown' }[a.phase] || 'running';
+}
+
 /** An answered root whose late work remains (its upkeep, or a review its Pause deferred) names
- * its own work, when it answered, and that only the work after the answer waits — never a generic turn. */
-function lateWorkHtml(a, late) {
+ * its own work, when it answered, and that only the work after the answer waits — never a generic turn.
+ * A confirmed `work` says that state, then its own line (who paused it, what still runs or nobody can confirm). */
+function lateWorkHtml(a, late, work = null) {
     const at = new Date(String(late.answered_at || ''));
     const iso = Number.isNaN(at.getTime()) ? '' : at.toISOString();
     const when = iso ? ` <time datetime="${esc(iso)}" title="${esc(iso)}">${esc(at.toLocaleString([], {
         month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }))}</time>` : '';
-    const state = { budget_paused: 'paused', budget_pausing: 'pausing', unknown: 'status unknown' }[a.phase] || 'running';
+    const line = work ? workLine(work) : '';
     // The state leads: a narrow row's ellipsis may cut the time, never what waits.
-    return { name: esc(late.title || 'Answered task'), sub: `Remaining work ${state} · answer delivered${when}` };
+    return { name: esc(late.title || 'Answered task'),
+        sub: `Remaining work ${lateState(a, work)} · answer delivered${when}${line ? ` · ${esc(line)}` : ''}` };
 }
 
 /** The name of the work a Presence turn's id belongs to ('' when no work names it): its correspondent's words never are. */
@@ -103,25 +118,32 @@ function presenceWorkName(census, taskId) {
  * Resume only where its work's Resume control targets it (`resume`, work_status.resumeTargets).
  * `slot` marks where the caller paints a known outcome (`ownOutcomePhase`). A Presence turn says its `work`'s name and
  * line (a recorded Stop, what runs beside it) and offers no control before its first durable write (`cancelable`
- * false: no door takes it yet). */
+ * false: no door takes it yet). `work` is the confirmed work whose live episode this row is: a parked census phase
+ * only guesses, so that work's word and line say it, the row's own outcome still leading, as on a queue row. A work's
+ * episode is offered that work's controls only (the click handler, never the generic menu), and a parked row whose
+ * work lists none (an unbound start no door reaches) shows no trigger at all. */
 export function liveActivityRowHtml(a, nowMs = Date.now(), slot = null, resume = false, work = null) {
     const names = { direct_chat: 'Direct turn', managed_task: 'Managed task' };
     const started = Number(a.started_at) || 0;
     const spent = started > 0 ? elapsedWords(nowMs / 1000 - started) : '';
     const elapsed = spent ? ` · ${spent}` : '';
-    const late = a.late_work && typeof a.late_work === 'object' ? lateWorkHtml(a, a.late_work) : null;
-    const outcome = !late && slot && ownOutcomePhase(a);
+    const truth = work && PARKED_PHASES.has(a.phase) ? workRowView(work) : null;
+    const late = a.late_work && typeof a.late_work === 'object' ? lateWorkHtml(a, a.late_work, truth && work) : null;
+    const own = !late && slot ? ownOutcomePhase(a) : null;
+    const outcome = own && truth ? { ...own, secondary: truth.word } : own;
     const presence = a.kind === 'presence';
     const named = !late && presence && work?.name;
-    const line = presence && work ? workLine(work) : '';
+    const line = presence && work ? workLine(work) : truth?.secondary || '';
+    const said = (text) => `<span data-i18n-skip>${esc(text)}</span>`;
+    const offers = !truth || workMenuActions(workControls(work), { resume: true }).length > 0;
     return `<div class="activity-row">
                 <div class="activity-row-main">
                     <span class="activity-name"${named ? ' data-i18n-authored' : ''}>${late ? late.name : esc(named || names[a.kind] || 'Live turn')}</span>
-                    <span class="activity-sub">${late ? late.sub : `${outcome ? slot(outcome)
-                        : `<span data-i18n-skip>${esc([censusWords(a), line].filter(Boolean).join(' · '))}</span>`}${elapsed}`}</span>
+                    <span class="activity-sub">${late ? late.sub : `${outcome ? `${slot(outcome)}${line ? ` · ${said(line)}` : ''}`
+                        : said([truth ? truth.word : censusWords(a), line].filter(Boolean).join(' · '))}${elapsed}`}</span>
                 </div>
                 <div class="activity-row-actions">
-                    ${presence && a.cancelable === false ? '' : `<button type="button" class="btn btn-xs btn-default" data-act="task-control" data-id="${esc(a.activity_id || '')}" data-root="1"${a.phase === 'budget_paused' ? ' data-budget-paused="1"' : ''}${resume ? ' data-resume="1"' : ''}>${esc(TASK_CONTROL_TRIGGER_LABEL)}</button>`}
+                    ${(presence && a.cancelable === false) || !offers ? '' : `<button type="button" class="btn btn-xs btn-default" data-act="task-control" data-id="${esc(a.activity_id || '')}" data-root="1"${a.phase === 'budget_paused' ? ' data-budget-paused="1"' : ''}${resume ? ' data-resume="1"' : ''}>${esc(TASK_CONTROL_TRIGGER_LABEL)}</button>`}
                 </div>
             </div>`;
 }
@@ -565,10 +587,15 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                 if (exc?.status !== 404) showToast(`Could not refresh task state: ${exc?.message || exc}`, 'error');
             }
             // A work's current episode offers that work's controls: Stop reaches every episode root still
-            // running, Stop earlier attempt the earlier ones, each at the server's exact target.
+            // running, Stop earlier attempt the earlier ones, each at the server's exact target. It offers
+            // only those: a work that lists none opens nothing, never the generic menu below, whose Stop or
+            // Resume a door that work does not list would refuse.
             const work = btn.dataset.root === '1' ? workOfEpisode(lastCensus, id) : null;
-            if (work && openWorkControls(btn, work, { cancelPending: taskCancelPending(stored), withResume: true,
-                afterAction: refresh })) return;
+            if (work) {
+                openWorkControls(btn, work, { cancelPending: taskCancelPending(stored), withResume: true,
+                    afterAction: refresh });
+                return;
+            }
             openTaskControlMenu(btn, {
                 cancelPending: taskCancelPending(stored),
                 budgetPaused: btn.dataset.budgetPaused === '1',

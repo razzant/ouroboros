@@ -191,7 +191,12 @@ def test_missing_binding_auth_failure_and_unreadable_store_are_not_unbound(clien
     def unreadable(*_):
         raise places.PlaceError("places_unreadable")
     monkeypatch.setattr(places, "load_places", unreadable)
-    assert bind(client).status_code == 503
+    held = bind(client)
+    # The connector's Held row repeats the core's words; the code, status, retry and the exception stay.
+    assert (held.status_code, held.json()) == (503, {
+        "ok": False, "error": "Ouroboros could not read whether this place allows sending right now.",
+        "code": "places_unavailable", "disposition": "retry", "detail": "places_unreadable: place"})
+    assert client.get("/presence/place", params=TARGET).json()["error"] == held.json()["error"]
     async def refused(*_):
         raise host_service.HostServiceAuthError("token no longer valid")
     monkeypatch.setattr(host_service, "_authenticated", refused)

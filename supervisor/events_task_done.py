@@ -20,7 +20,7 @@ from ouroboros.outcomes import (
     normalize_outcome_axes,
 )
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
-from ouroboros.task_finalization import quiet_finish, send_provider_death_notice
+from ouroboros.task_finalization import quiet_finish, send_provider_death_notice, work_label
 from ouroboros.task_results import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
@@ -597,12 +597,14 @@ def _finish_task_done_dispatch(
             log.warning("Failed to release budget root fence for %s", task_id, exc_info=True)
         if tree_root:
             try:
-                from supervisor.owner_pause_control import refresh_owner_pause_tree
+                from supervisor.owner_pause_control import mark_tree_changed, refresh_owner_pause_tree
 
                 # A member that finished while its tree was pausing may be the
                 # last one the owner's Pause was waiting for — or the last writer
                 # an owner's Continue of that tree was held behind. The root's own
                 # terminal counts too: its late phase ended, or the Pause ended it.
+                # What it left running has no transition of its own: the pass looks.
+                mark_tree_changed(tree_root)
                 refresh_owner_pause_tree(tree_root)
                 from supervisor.continuation_admission import release_settled_continuations
 
@@ -798,7 +800,7 @@ def _resolve_lifecycle_fault(
             default=HIDDEN_CHAT_ID,
         ),
         "status": status,
-        "wake_silent": stored.get("wake_silent") is True, **{key: stored[key] for key in ("wake_summary", "schedule_name") if stored.get(key)},
+        "wake_silent": stored.get("wake_silent") is True, **{key: stored[key] for key in ("wake_summary", "schedule_name") if stored.get(key)}, **work_label(stored, task_row),
         "quiet_effective": quiet_finish(stored),
         "reason_code": str(stored.get("reason_code") or ""),
         "outcome_axes": normalize_outcome_axes(stored),
@@ -1067,7 +1069,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             default=HIDDEN_CHAT_ID,
         ),
         "status": str(final_task_result.get("status") or evt.get("status") or ""),
-        "wake_silent": known_result.get("wake_silent") is True, **{key: known_result[key] for key in ("wake_summary", "schedule_name") if known_result.get(key)},
+        "wake_silent": known_result.get("wake_silent") is True, **{key: known_result[key] for key in ("wake_summary", "schedule_name") if known_result.get(key)}, **work_label(known_result, task),
         "quiet_effective": quiet_finish(known_result),
         # The direct-turn fact rides the rebuilt terminal so the chat block keys
         # its chrome on host truth: the worker frame carries it, the durable

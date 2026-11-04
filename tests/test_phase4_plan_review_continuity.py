@@ -498,6 +498,8 @@ def test_session_model_mismatch_is_disclosed_on_the_actor_row(monkeypatch, tmp_p
         "requested": "model fable",
         "effective": "model grok-4.6",
         "reason": "session_route_resolves_its_own_model",
+        "note": "The engine names the model it ran by its own alias; the names differ, capabilities were "
+                "not compared. A disclosure, not a failure.",
     }]
     assert result.raw_text == "[]\nNO_FINDINGS"  # disclosed, never discarded
     row = _plan_row_from_actor({

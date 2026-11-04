@@ -15,7 +15,10 @@ import threading
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
+from ouroboros.external_runs import unbound_starts
 from ouroboros.gateway import work_status as ws
+from ouroboros.owner_pause import owner_stopped
+from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +31,8 @@ _RESULTS_LOCK = threading.Lock()
 
 _CONTINUE_PREFIX = "Continue: "
 # The census's execution facts for a member (gateway/state.py), never a work's identity.
-_EXECUTION_FACTS = frozenset({"running", "owner_pause_warm", "owner_wait", "cancel_pending"})
+_EXECUTION_FACTS = frozenset({"running", "owner_pause_warm", "owner_wait", "cancel_pending", "nothing_to_stop",
+                              "tail_unknown"})
 
 
 def _strip_continue(name: str) -> str:
@@ -196,10 +200,12 @@ def tree_review_reads(drive_root: Any, root_id: str):
 
 def unconfirmed_stops(drive_root: Any, task_id: str, owner: Optional[Mapping[str, Any]] = None) -> frozenset:
     """The runs whose stop ``task_id``'s live Pause could not confirm (``external_runs.EXTERNAL_STOP_UNKNOWN``): its
-    cold park's pause row, or the record its warm park keeps on its stored result (``owner``, waiting under the
-    owner's Pause). The server's and the roster's one reading; an unreadable record proves no trouble, so those
-    runs read as before."""
-    from ouroboros.external_runs import EXTERNAL_STOP_UNKNOWN
+    cold park's pause row, the record its warm park keeps on its stored result (``owner``, waiting under the
+    owner's Pause), or, once it ended, the record its root's closed fence keeps for it. The server's and the
+    roster's one reading; an unreadable record proves no trouble, so those runs read as before."""
+    from ouroboros.external_runs import ENDED_MEMBER_RUNS, EXTERNAL_STOP_UNKNOWN
+    from ouroboros.owner_pause import fence_closed, read_fence
+    from ouroboros.store_hot_facts import lineage_root
     from supervisor.owner_pause_control import warm_paused_member
 
     def unknown(external: Any) -> set:
@@ -216,6 +222,10 @@ def unconfirmed_stops(drive_root: Any, task_id: str, owner: Optional[Mapping[str
         row = budget_pause_row(pathlib.Path(drive_root), str(task_id)) if task_id else {}
         if row.get("state") in LIVE_PAUSE_STATES:
             stops |= unknown(row.get("external_runs"))
+        if isinstance(owner, Mapping) and owner.get("status") in _TRULY_TERMINAL_STATUSES:  # only an ended owner has one
+            fence = read_fence(pathlib.Path(drive_root), lineage_root({"task_id": task_id, **dict(owner)}))
+            if fence_closed(fence):
+                stops |= unknown(((fence.get(ENDED_MEMBER_RUNS) or {}).get(task_id) or {}).get("external_runs"))
     except Exception:
         log.debug("Work projection could not read the pause of %s", task_id, exc_info=True)
     return frozenset(stops)
@@ -451,14 +461,20 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
         entry["roots"].add(root_id)
         entry["name"] = entry["name"] or name
     works: List[Dict[str, Any]] = []
+    # The census rows' own names: what a sleep waits for is said by them, never by an id or a new read.
+    names = {task_id: _first_name(facts) for task_id, facts in raw.items()}
     for work_id, entry in groups.items():
-        members, live_roots, owners_by_root = [], [], {}
+        members, live_roots, owners_by_root, starts = [], [], {}, set()
         for row, facts, root_id in entry["rows"]:
-            member = ws.classify_member(row, _member_raw(row, facts, obs, root_id))
+            member = ws.classify_member(row, _member_raw(row, facts, obs, root_id), names)
             members.append(member)
             owners_by_root.setdefault(root_id, []).append(member)
             if _episode_row(row, facts, root_id):
                 live_roots.append((row, facts, member, root_id))
+            if row.get("phase") in {"budget_paused", "budget_pausing"}:
+                starts.update(unbound_starts(obs.fence(root_id, facts.get("budget_drive_root"))))
+        # A start no run is bound to yet: the fence names it, no custody row can, and nobody can confirm it.
+        entry["runs"].extend({"run_id": start, "kind": "run", "state": "unknown"} for start in sorted(starts))
         current_row = current_state = None
         current_root = ""
         if live_roots:
@@ -491,7 +507,14 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
         ended = [] if current_state is not None else [current_id]
         controls = ws.controls_for(current_state, current_row, earlier_live=earlier, live_roots=ended + logical + earlier,
                                    presence_turn=bool((raw.get(current_id) or {}).get("_presence_turn")))
-        if current_state is None and members and any(m["activity"] in {"working", "queued", "waiting"} for m in members):
+        if (raw.get(current_id) or {}).get("nothing_to_stop"):
+            controls = [control for control in controls if control["action"] != "stop"]  # its door has nothing to reach
+        # An ended author's tree takes the owner's Pause while a helper lives, or an ordinary run its members left
+        # may still execute (the door reads the same ended task: ``owner_pause_control._ended_tail``).
+        stored_root = obs.result(current_id) or {} if current_state is None else {}
+        if current_state is None and (any(m["activity"] in {"working", "queued", "waiting"} for m in members) or (
+                any(run["kind"] == "run" for run in entry["runs"])
+                and stored_root.get("status") in _TRULY_TERMINAL_STATUSES and not owner_stopped(stored_root))):
             controls.insert(0, {"action": "pause", "target": current_id})
         if current_state is None:
             # An ended author is never run again. Each held helper has its own

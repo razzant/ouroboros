@@ -114,6 +114,7 @@ def _review_rounds(data_root: Any) -> tuple:
     names of rounds whose custody is still active, and every recorded round's task by its checkout
     name. A state that cannot be read raises: no checkout is judged without it."""
     from ouroboros.review_state import _load_state_unlocked
+    from ouroboros.tools.review_change_custody import custody_settled
     from ouroboros.tools.review_subject import checkout_token
 
     state = _load_state_unlocked(pathlib.Path(data_root), strict_attempt_authority=True)
@@ -121,7 +122,9 @@ def _review_rounds(data_root: Any) -> tuple:
     def name(attempt: Any) -> str:
         return checkout_token(attempt.review_retry_key, task_id=attempt.task_id)
 
-    return ({name(row) for row in state.get_active_attempts() if row.review_retry_key},
+    # A row whose exact settled record leaves no seat running is not custody, whatever start token it kept (#2587).
+    return ({name(row) for row in state.get_active_attempts() if row.review_retry_key
+             and not custody_settled(data_root, row)},
             {name(row): str(row.task_id) for row in state.attempts if row.review_retry_key and row.task_id})
 
 

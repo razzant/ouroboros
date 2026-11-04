@@ -1172,7 +1172,7 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None) ->
         window_tokens=int(capacity or 0), known_window=capacity is not None,
         ratio=measurement.measurement_density,
         output_reserve=int(plan.output_reserve_tokens), tool_schemas=ctx.tool_schemas, start_mode=mode,
-        current_messages=ctx.messages,
+        current_messages=ctx.messages, measured_input_tokens=measurement.reprojection_input_tokens,
         refused_tokens=max(1, int(saving or measurement.capacity_deficit_tokens or 0)),
     )
     selected_mode = rebound.initial_mode

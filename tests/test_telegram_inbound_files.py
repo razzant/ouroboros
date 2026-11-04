@@ -44,6 +44,7 @@ class Api:
 
 
 class Client:
+    bot_id = ""
     updates: list = []
     instances: list = []
 

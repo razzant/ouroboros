@@ -58,7 +58,8 @@ def test_without_a_reader_the_wait_is_the_one_communicate_it_was(tmp_path, monke
     communicate = subprocess.Popen.communicate
 
     def recorded(self, *args, **kwargs):
-        waits.append(kwargs.get("timeout"))
+        if self.args[:1] == ["sh"]:
+            waits.append(kwargs.get("timeout"))
         return communicate(self, *args, **kwargs)
 
     monkeypatch.setattr(subprocess.Popen, "communicate", recorded)

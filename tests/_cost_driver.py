@@ -89,7 +89,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, List
 
 from tests._cost_meter import BOUNDARY, CostMeter, tag_of, tagged
-from tests._scale_root import CURRENT, force_store_journal, money, spend_limit_usd, terminal_detail
+from tests._scale_root import CURRENT, force_store_journal, heartbeats, money, spend_limit_usd, terminal_detail
 
 READY_TIMEOUT_SEC = 240.0  # the transport bound of this measurement, not a judgment about the boot
 # The supervisor is held before its first tick, and the body's driver parked, for the whole measurement;
@@ -291,7 +291,7 @@ def _mark(result: Dict[str, Any], name: str) -> None:
     result.setdefault("marks", {})[name] = round(time.monotonic() - result["_started"], 3)
 
 
-def _install_checkpoints(meter: CostMeter, srv: Any, result: Dict[str, Any]) -> Dict[str, threading.Event]:
+def _install_checkpoints(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pathlib.Path) -> Dict[str, threading.Event]:
     import functools
 
     from ouroboros import server_liveness, store_journal, store_switch
@@ -341,6 +341,17 @@ def _install_checkpoints(meter: CostMeter, srv: Any, result: Dict[str, Any]) -> 
         return noted(*args, **kwargs)
 
     server_liveness.note_supervisor_ready = ready
+    recover = srv._run_startup_task_recovery
+
+    def recover_live(*args, **kwargs):
+        # The root holds the previous process's running tasks as live ones, and counting is not timing: a row older than
+        # task_status._ORPHAN_RUNNING_GRACE_SECONDS sends the boot of one size down the stale-orphan check (it parses the
+        # events tail) and not the other's. The bench stamps their heartbeats as its own step, at the doorstep of the
+        # recovery that reads them; the check, the grace and the tail read stay the product's.
+        tagged("heartbeats", lambda: heartbeats(root))
+        return recover(*args, **kwargs)
+
+    srv._run_startup_task_recovery = recover_live
     return events
 
 
@@ -470,18 +481,6 @@ def _measure_boundaries(meter: CostMeter, srv: Any, result: Dict[str, Any], root
     _boundary(meter, result, "P:metrics_review", lambda: _publish_review(root, held[1]["task_id"]))
     _boundary(meter, result, "P:send", lambda: _send_answer(ctx, CURRENT["running"][0], "the final answer of the cost contract"))
     _boundary(meter, result, "P:allowance", lambda: allowance_window(root))
-
-
-def _heartbeats(root: pathlib.Path) -> None:
-    """The running tasks' workers' heartbeats, as a live install's would be when the producer boundaries
-    run: their rows keep the build's ``ts`` otherwise, and a build plus a boot that take longer than the
-    orphan grace (``task_status._ORPHAN_RUNNING_GRACE_SECONDS``, at k=100 under load) would send the
-    send boundary down the stale-orphan check, a path the small root never takes."""
-    from ouroboros.task_results import write_task_result
-    from ouroboros.utils import utc_now_iso
-
-    for task_id in CURRENT["running"]:
-        write_task_result(root, task_id, "running", ts=utc_now_iso())
 
 
 def _addressed_stream(root: pathlib.Path, result: Dict[str, Any]) -> None:
@@ -945,7 +944,7 @@ def _measure_contract(meter: CostMeter, srv: Any, client: Any, result: Dict[str,
     _request(meter, client, result, "B5", "POST", f"/api/tasks/{CURRENT['stop_root']}/cancel", json={"cascade": True})
     _boundary(meter, result, "B9", lambda: _addressed_stream(root, result))
     if facts.get("held_runs"):  # a root with the duties' shapes: B8 first, then B7
-        _heartbeats(root)
+        heartbeats(root)
         _measure_boundaries(meter, srv, result, root, facts)
         _measure_duties(meter, srv, result, root, facts, stubs)
     _measure_turns(meter, srv, result, root, facts)  # B10 last: no earlier law's inputs change
@@ -974,7 +973,7 @@ def run(spec: Dict[str, Any]) -> Dict[str, Any]:
         from ouroboros import install_identity
 
         install_identity.canonical_root()
-        events = _install_checkpoints(meter, srv, result)
+        events = _install_checkpoints(meter, srv, result, root)
         from ouroboros import install_identity
 
         tagged("B0", install_identity.canonical_root)

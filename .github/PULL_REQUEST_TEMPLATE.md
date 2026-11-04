@@ -54,7 +54,7 @@ Evidence:
       generated build/review artifacts in the commit; tracked material follows
       DEVELOPMENT.md "Documentation contract" (including plans and optional reports).
 - [ ] I did **not** bump `VERSION` or release-only version carriers; maintainers
-      assign the collision-free release version during final integration.
+      open each development cycle and cut each release.
 
 ## Review evidence
 

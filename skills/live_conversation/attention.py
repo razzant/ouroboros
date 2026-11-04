@@ -63,9 +63,10 @@ class Attention:
                     path = await self.retained(frame)
                     detail = (f'{path}. This engine is blind; vlm_query with this file_path reads this exact remote frame.'
                               if path else FRAME_UNAVAILABLE)
-                    row = {'role': 'user', 'content': '[Host fact; not owner words]\n'
-                        f'Latest {self.kinds.get(source, "shared frame")} from peer {source}: {detail}'}
-                    await self.host.observe_context(row)
+                    fact = f'Latest {self.kinds.get(source, "shared frame")} from peer {source}: {detail}'
+                    row = {'role': 'user', 'content': '[Host fact; not owner words]\n' + fact}
+                    record = getattr(self.host, 'record_fact', None)
+                    await (record(fact) if record is not None else self.host.observe_context(row))
                     rows.append({**row, '_canonical': True})
             except BaseException:
                 if self.seen.get(source) == digest:

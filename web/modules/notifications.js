@@ -54,7 +54,7 @@
    in-app toast and says so in Settings. */
 
 import { TERMINAL_TASK_STATUSES } from './chat_activity.js';
-import { getLogTaskGroupId } from './log_events.js';
+import { getLogTaskGroupId, taskPresentation, taskReasonDetail, taskTerminalPhase } from './log_events.js';
 import { shellBridgeApi } from './ui_helpers.js';
 import { tr } from './i18n.js';
 
@@ -156,6 +156,17 @@ function trimBody(value) {
     return `${body.slice(0, BODY_CHARS - 1)}…`;
 }
 
+/* A finished root's body on both wire shapes: the work's name (`target_label`) and outcome word,
+   else the word alone, then the cause its record holds: a row's `reason_detail`, else the card's
+   sentence over the same facts (`taskReasonDetail`; a live `task_done` carries facts, not prose).
+   Never the row's host sentence: its task id is for Ouroboros, and the row keeps it (DESIGN §9). */
+function conclusionBody(frame) {
+    const word = taskPresentation(text(frame.outcome_phase) || taskTerminalPhase(frame)).headline;
+    const name = text(frame.target_label).trim();
+    const reason = text(frame.reason_detail).trim() || taskReasonDetail(frame);
+    return trimBody(`${name ? `${name} · ${word}` : word}${reason ? `: ${reason}` : ''}`);
+}
+
 /* A reminder (a note Ouroboros wrote earlier, shown now by the host) and a
    granted skill's notice are System rows whose first line is the host's
    signature; the banner names the author from `source` and shows only the words
@@ -186,12 +197,12 @@ function noticeBody(content) {
  * dropped here on either of its two shapes: only root terminals and the frames
  * a parent itself emits reach a banner.
  *
- * A finished ROOT arrives in more than one live shape — the managed-queue
- * conclusion is a `log` frame with `type='task_done'`
- * (supervisor/events_task_done.py pushes it), while the authored summary
- * arrives as a chat row — and a turn's ordinary reply is the same ending. All
- * of them map to ONE key, `conclusion:<task_id>`, so whichever shape reaches
- * this client first rings and the others collapse.
+ * A finished ROOT reaches this client live as a `log` frame with `type='task_done'`
+ * (supervisor/events_task_done.py pushes it); its `task_summary` row is only stored, so
+ * the chat reads it back with history, never through here, yet a frame of that shape is
+ * classified alike — and a turn's ordinary reply is the same ending. All of them map to
+ * ONE key, `conclusion:<task_id>`, so whichever reaches this client first rings and the
+ * others collapse.
  */
 export function classifyLiveFrame(frame, { kind = 'chat', isMain = false, isRoot, taskId: taskIdHint = '' } = {}) {
     if (!frame || typeof frame !== 'object') return null;
@@ -228,8 +239,8 @@ export function classifyLiveFrame(frame, { kind = 'chat', isMain = false, isRoot
     }
 
     if (kind === 'log') {
-        // Log frames carry runtime diagnostics, not owner-facing prose, so this
-        // one stays title-only even when message text is switched on.
+        // Log frames carry runtime diagnostics, not owner-facing prose: the body
+        // is said from the facts the event carries (name, outcome word, cause).
         if (text(frame.type || frame.event) !== 'task_done') return null;
         if (frame.quiet_effective === true) return null;
         if (!rootEligible(taskId)) return null;
@@ -250,7 +261,7 @@ export function classifyLiveFrame(frame, { kind = 'chat', isMain = false, isRoot
             category: 'task_done',
             key: `conclusion:${taskId}`,
             title: notifyTitle('task_done'),
-            body: '',
+            body: conclusionBody(frame),
             target: { chatId: frame.chat_id, taskId },
         };
     }
@@ -304,7 +315,7 @@ export function classifyLiveFrame(frame, { kind = 'chat', isMain = false, isRoot
             category: 'task_done',
             key: `conclusion:${taskId}`,
             title: notifyTitle('task_done'),
-            body: trimBody(frame.content),
+            body: conclusionBody(frame),
             target: { chatId: frame.chat_id, taskId },
         };
     }

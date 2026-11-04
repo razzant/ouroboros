@@ -28,7 +28,7 @@ import { SECRET_KEYS, bindSettingsTabs, renderSettingsPage } from './settings_ui
 import { connectionReferencesText, createConnectionsEditor } from './settings_connections.js';
 import { showToast } from './toast.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
-import { apiClient, apiFetch, cleanExtensionRoute, extensionRoutePath } from './api_client.js';
+import { APP_SETTINGS_ORIGIN, apiClient, apiFetch, cleanExtensionRoute, extensionRoutePath } from './api_client.js';
 import { claudexorStatus } from './claudexor_status_store.js';
 import { createModelRolesEditor } from './model_roles.js';
 import { PROCESSING_PREFERENCE_KEY } from './route_editor_primitives.js';
@@ -512,7 +512,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     let settingsSaving = false;
     let saveOutcomeUnknown = false;
     let validationAttempted = false;
-    const modelRoles = createModelRolesEditor({ hostId: 'settings-model-roles',
+    const modelRoles = createModelRolesEditor({ hostId: 'settings-model-roles', mainNote: true,
         onChange: (settings) => { syncProcessingPreference(settings); onSettingsEdited(); } });
     // Accounts → API keys: the key rows, their Test and the "More providers" fold (settings_connections.js).
     const connections = createConnectionsEditor({ root: page, onChange: () => onSettingsEdited(),
@@ -1286,7 +1286,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         let checkerSaved = false;
         try {
             checkerSaved = await saveSafetyChecker(ownerDraft.safety);
-            const data = await apiClient.saveSettings(body);
+            const data = await apiClient.saveSettings(body, { headers: APP_SETTINGS_ORIGIN });
             if (data?.status !== 'saved') {
                 const error = new Error(data?.error || 'The server did not confirm the settings save.');
                 error.body = data;

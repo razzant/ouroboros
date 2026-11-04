@@ -371,7 +371,7 @@ def test_truncate_with_notice_uses_utils_ssot():
 
 
 def test_emit_task_results_surfaces_receipt_absent_flag_in_event_stream(tmp_path, monkeypatch):
-    # Regression: the receipt_absent / expected_output_ungrounded objective-axis flag must reach
+    # Regression: the receipt_absent objective-axis flag must reach
     # the task_eval (events.jsonl) and task_metrics (pending_events) monitoring streams — where the
     # day-1 kill-switch metric reads it — not only the stored task_result.json. Previously the flag
     # was applied inside _store_task_result, AFTER the events were already emitted from an un-flagged
@@ -409,6 +409,36 @@ def test_emit_task_results_surfaces_receipt_absent_flag_in_event_stream(tmp_path
 
     # single source: the SAME flagged loop_outcome is threaded to _store_task_result (not re-derived)
     assert captured["loop_outcome"]["outcome_axes"]["objective"].get("warning") == "receipt_absent"
+
+
+def test_declared_output_answered_in_prose_without_tools_finishes_done(tmp_path, monkeypatch):
+    # A consultation that declared expected_output and answered in plain prose, with no tool
+    # call and no FINAL ANSWER marker, once read "Done with warnings" (the retired M2 check).
+    from ouroboros.outcomes import normalize_outcome_axes
+    from ouroboros.project_dialogue import outcome_phase
+
+    captured = {}
+    monkeypatch.setattr(pipeline, "_store_task_result", lambda *a, **k: captured.update(k))
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **k: None)
+    pending_events = []
+    drive_logs = tmp_path / "logs"
+    drive_logs.mkdir(parents=True)
+    pipeline.emit_task_results(
+        env=SimpleNamespace(drive_root=tmp_path), memory=object(), llm=object(),
+        pending_events=pending_events,
+        task={"id": "prose", "type": "task", "chat_id": 1, "text": "which option?",
+              "expected_output": "a recommendation with its reasons"},
+        text="Take option B: it keeps the history and costs nothing to undo.",
+        usage={"rounds": 1, "cost": 0.01},
+        llm_trace={"tool_calls": [], "reasoning_notes": []},
+        start_time=0.0, drive_logs=drive_logs, ctx=SimpleNamespace(pending_restart_reason=""),
+    )
+    objective = captured["loop_outcome"]["outcome_axes"]["objective"]
+    assert "warning" not in objective and "warnings" not in objective
+    metrics = next(e for e in pending_events if e["type"] == "task_metrics")
+    assert "warning" not in metrics["outcome_axes"]["objective"]
+    axes = normalize_outcome_axes({"outcome_axes": captured["loop_outcome"]["outcome_axes"]})
+    assert outcome_phase({"status": "completed", "reason_code": "final_message", "outcome_axes": axes}, {}) == "done"
 
 
 def test_stopped_direct_turn_pays_no_post_task_synthesis(tmp_path, monkeypatch):

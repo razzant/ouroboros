@@ -137,8 +137,8 @@ def install_missing_harness_cli(harness: str) -> None:
     from ouroboros.platform_layer import merge_hidden_kwargs, subprocess_new_group_kwargs
     # The same custody set /panic reaps (isolated_deps._run is the template):
     # an in-flight vendor installer must not survive an emergency stop.
-    from ouroboros.tools.shell import _active_subprocesses, _kill_process_group, _subprocess_lock
-    from ouroboros.tools.shell_process import CommandAdmissionClosed, tracked_start
+    from ouroboros.tools.shell import _kill_process_group
+    from ouroboros.tools.shell_process import CommandAdmissionClosed, contained_popen, retire_tracked, tracked_start
 
     try:
         command = get_runtime_manager().ensure_cli_command()
@@ -167,8 +167,8 @@ def install_missing_harness_cli(harness: str) -> None:
         # request or a begun stop that misses the handle is seen by its publication, which stops it
         # (the round-2 reviewer's interleaving), and Popen never runs under the registry lock.
         with tracked_start() as publish:
-            proc = publish(subprocess.Popen(
-                argv,
+            proc = publish(contained_popen(
+                subprocess.Popen, argv,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -204,8 +204,7 @@ def install_missing_harness_cli(harness: str) -> None:
                 f"managed Claudexor installer exceeded {timeout_sec:d}s",
             ) from exc
     finally:
-        with _subprocess_lock:
-            _active_subprocesses.discard(proc)
+        retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
         # Bounded CLEANUP of an already-finished/killed child's pipe, not a
         # behavioral wait: the drain thread ends when the pipe does.
         reader.join(timeout=10)

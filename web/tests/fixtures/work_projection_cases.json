@@ -1978,7 +1978,16 @@
      "because": [
       {
        "code": "sleeping",
-       "text": "Sleeping until it is woken"
+       "text": "Sleeping until the task it chose finishes or a message arrives",
+       "wake": [
+        {
+         "kind": "tasks",
+         "count": 1
+        },
+        {
+         "kind": "mail"
+        }
+       ]
       }
      ],
      "tails": [
@@ -2015,7 +2024,16 @@
         "because": [
          {
           "code": "sleeping",
-          "text": "Sleeping until it is woken"
+          "text": "Sleeping until the task it chose finishes or a message arrives",
+          "wake": [
+           {
+            "kind": "tasks",
+            "count": 1
+           },
+           {
+            "kind": "mail"
+           }
+          ]
          }
         ],
         "tails": []
@@ -2075,6 +2093,251 @@
      "confirmed": true,
      "works": [
       "sw"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 0,
+     "queued": 0,
+     "waiting": 1,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
+  "sleeping_on_named_helper": {
+   "works": [
+    {
+     "work_id": "sn",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "sn",
+      "live": true
+     },
+     "activity": "waiting",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "sleeping",
+       "text": "Sleeping until Draft the release notes finishes or writes",
+       "wake": [
+        {
+         "kind": "task_or_writes",
+         "name": "Draft the release notes"
+        }
+       ]
+      }
+     ],
+     "tails": [
+      {
+       "code": "helpers_running",
+       "text": "1 helper still working",
+       "count": 1,
+       "ids": [
+        "sn-c"
+       ],
+       "kind": "helper",
+       "state": "live"
+      }
+     ],
+     "live": true,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "sn",
+       "sn-c"
+      ],
+      "states": {
+       "sn": {
+        "activity": "waiting",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "sleeping",
+          "text": "Sleeping until Draft the release notes finishes or writes",
+          "wake": [
+           {
+            "kind": "task_or_writes",
+            "name": "Draft the release notes"
+           }
+          ]
+         }
+        ],
+        "tails": []
+       },
+       "sn-c": {
+        "activity": "working",
+        "transition": "none",
+        "call": "working",
+        "live": true,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [],
+        "tails": []
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "still",
+     "kind": "task",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "wrap_up",
+       "target": "sn"
+      },
+      {
+       "action": "hurry",
+       "target": "sn"
+      },
+      {
+       "action": "pause",
+       "target": "sn"
+      },
+      {
+       "action": "stop",
+       "target": "sn",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "waiting",
+     "transition": "none",
+     "call": "",
+     "turn": [],
+     "amber": false,
+     "mark": "moving",
+     "confirmed": true,
+     "works": [
+      "sn"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 0,
+     "queued": 0,
+     "waiting": 1,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
+  "sleeping_until_time": {
+   "works": [
+    {
+     "work_id": "st",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "st",
+      "live": true
+     },
+     "activity": "waiting",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "sleeping",
+       "text": "Sleeping until a message arrives or 2026-10-17T18:05:00+00:00",
+       "wake": [
+        {
+         "kind": "mail"
+        },
+        {
+         "kind": "time",
+         "at": "2026-10-17T18:05:00+00:00"
+        }
+       ]
+      }
+     ],
+     "tails": [],
+     "live": false,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "st"
+      ],
+      "states": {
+       "st": {
+        "activity": "waiting",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "sleeping",
+          "text": "Sleeping until a message arrives or 2026-10-17T18:05:00+00:00",
+          "wake": [
+           {
+            "kind": "mail"
+           },
+           {
+            "kind": "time",
+            "at": "2026-10-17T18:05:00+00:00"
+           }
+          ]
+         }
+        ],
+        "tails": []
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "still",
+     "kind": "task",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "stop",
+       "target": "st",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "waiting",
+     "transition": "none",
+     "call": "",
+     "turn": [],
+     "amber": false,
+     "mark": "still",
+     "confirmed": true,
+     "works": [
+      "st"
      ]
     }
    },
@@ -2511,6 +2774,10 @@
      "project_id": "",
      "since": null,
      "controls": [
+      {
+       "action": "pause",
+       "target": "x"
+      },
       {
        "action": "stop",
        "target": "x",
@@ -3408,6 +3675,207 @@
   },
   "stop_requested": {
    "": "Stop requested: it ends at its next step"
+  }
+ },
+ "sleeps": {
+  "task": {
+   "code": "sleeping",
+   "text": "Sleeping until Draft the release notes finishes",
+   "wake": [
+    {
+     "kind": "task",
+     "name": "Draft the release notes"
+    }
+   ]
+  },
+  "task_unnamed": {
+   "code": "sleeping",
+   "text": "Sleeping until the task it chose finishes",
+   "wake": [
+    {
+     "kind": "tasks",
+     "count": 1
+    }
+   ]
+  },
+  "tasks": {
+   "code": "sleeping",
+   "text": "Sleeping until one of 3 tasks finishes",
+   "wake": [
+    {
+     "kind": "tasks",
+     "count": 3
+    }
+   ]
+  },
+  "all_tasks": {
+   "code": "sleeping",
+   "text": "Sleeping until all 2 tasks it chose finish",
+   "wake": [
+    {
+     "kind": "all_tasks",
+     "count": 2
+    }
+   ]
+  },
+  "run": {
+   "code": "sleeping",
+   "text": "Sleeping until its external run finishes",
+   "wake": [
+    {
+     "kind": "runs",
+     "count": 1
+    }
+   ]
+  },
+  "runs": {
+   "code": "sleeping",
+   "text": "Sleeping until one of 3 external runs finishes",
+   "wake": [
+    {
+     "kind": "runs",
+     "count": 3
+    }
+   ]
+  },
+  "service": {
+   "code": "sleeping",
+   "text": "Sleeping until a service it started stops",
+   "wake": [
+    {
+     "kind": "service"
+    }
+   ]
+  },
+  "reviewer": {
+   "code": "sleeping",
+   "text": "Sleeping until a reviewer answers",
+   "wake": [
+    {
+     "kind": "reviewer"
+    }
+   ]
+  },
+  "sender": {
+   "code": "sleeping",
+   "text": "Sleeping until Draft the release notes writes",
+   "wake": [
+    {
+     "kind": "sender",
+     "name": "Draft the release notes"
+    }
+   ]
+  },
+  "sender_unnamed": {
+   "code": "sleeping",
+   "text": "Sleeping until a message arrives",
+   "wake": [
+    {
+     "kind": "mail"
+    }
+   ]
+  },
+  "mail": {
+   "code": "sleeping",
+   "text": "Sleeping until a message arrives",
+   "wake": [
+    {
+     "kind": "mail"
+    }
+   ]
+  },
+  "time_only": {
+   "code": "sleeping",
+   "text": "Sleeping until 2026-10-17T18:05:00+00:00",
+   "wake": [
+    {
+     "kind": "time",
+     "at": "2026-10-17T18:05:00+00:00"
+    }
+   ]
+  },
+  "time": {
+   "code": "sleeping",
+   "text": "Sleeping until a message arrives or 2026-10-17T18:05:00+00:00",
+   "wake": [
+    {
+     "kind": "mail"
+    },
+    {
+     "kind": "time",
+     "at": "2026-10-17T18:05:00+00:00"
+    }
+   ]
+  },
+  "task_and_time": {
+   "code": "sleeping",
+   "text": "Sleeping until Draft the release notes finishes or 2026-10-17T18:05:00+00:00",
+   "wake": [
+    {
+     "kind": "task",
+     "name": "Draft the release notes"
+    },
+    {
+     "kind": "time",
+     "at": "2026-10-17T18:05:00+00:00"
+    }
+   ]
+  },
+  "task_and_sender": {
+   "code": "sleeping",
+   "text": "Sleeping until Draft the release notes finishes or writes",
+   "wake": [
+    {
+     "kind": "task_or_writes",
+     "name": "Draft the release notes"
+    }
+   ]
+  },
+  "task_and_sender_and_time": {
+   "code": "sleeping",
+   "text": "Sleeping until Draft the release notes finishes or writes or 2026-10-17T18:05:00+00:00",
+   "wake": [
+    {
+     "kind": "task_or_writes",
+     "name": "Draft the release notes"
+    },
+    {
+     "kind": "time",
+     "at": "2026-10-17T18:05:00+00:00"
+    }
+   ]
+  },
+  "every_kind": {
+   "code": "sleeping",
+   "text": "Sleeping until all 2 tasks it chose finish or its external run finishes or a service it started stops or a reviewer answers or Draft the release notes writes or 2026-10-17T18:05:00+00:00",
+   "wake": [
+    {
+     "kind": "all_tasks",
+     "count": 2
+    },
+    {
+     "kind": "runs",
+     "count": 1
+    },
+    {
+     "kind": "service"
+    },
+    {
+     "kind": "reviewer"
+    },
+    {
+     "kind": "sender",
+     "name": "Draft the release notes"
+    },
+    {
+     "kind": "time",
+     "at": "2026-10-17T18:05:00+00:00"
+    }
+   ]
+  },
+  "unrecorded": {
+   "code": "sleeping",
+   "text": "Sleeping until it is woken"
   }
  }
 }

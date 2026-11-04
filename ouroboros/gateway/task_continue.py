@@ -1,4 +1,4 @@
-"""``POST /api/tasks/{task_id}/continue`` — the owner's Continue of an interrupted root.
+"""``POST /api/tasks/{task_id}/continue`` — the owner's Continue of an interrupted or author-stopped root.
 
 Owner Batch4 (1A). The body carries ONLY ``{"action_nonce"}``: a random id the
 client keeps across retry and reload, so the same press always answers the

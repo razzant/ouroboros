@@ -57,6 +57,7 @@ def test_call_result_refits_whole_then_falls_back_without_repeating_effect(
             if failed:
                 await asyncio.gather(call.preparing,return_exceptions=True)
                 await call.check_preparation()
+                await call.release_serving()  # the connection's delivery worker
                 output=next(c for c in sent if isinstance(c,ToolOutputs))
                 text=next(r['content'] for r in output.messages if r.get('tool_call_id')=='one')
                 assert 'RESULT_VIEW_JSON=' in text and body not in text

@@ -69,7 +69,7 @@ test('in English every catalog reading is the source text and matches the twin f
         if (!row.headline) continue;
         assert.equal(taskPresentation(row.phase).headline, row.headline, row.name);
     }
-    assert.equal(en.cause, 'Ouroboros stopped with unfinished work; no review approval was granted.');
+    assert.equal(en.cause, 'Ouroboros stopped with unfinished work; the reviewers had not signed it off.');
     assert.equal(en.rawCode, 'no_such_cause_code');
     assert.equal(en.question, 'Waiting for your answer');
     assert.equal(en.pending, 'Choosing the right destination…');

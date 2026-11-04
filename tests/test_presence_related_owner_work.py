@@ -136,7 +136,7 @@ def test_an_old_late_answer_root_resumes_as_the_owners_work_and_its_place_still_
 
     ctx, sent = worker(old)
     assert presence_caller_binding(ctx) is None and not _restricted_actor(ctx) and _scope_authority(ctx)[0] == "root"
-    assert _send_user_message(ctx, "Found it.", destination="main") == "OK: notice sent to the main chat."
+    assert _send_user_message(ctx, "Found it.", destination="main") == "OK: notice accepted for delivery to the main chat."
     assert [event["system_type"] for event in sent] == ["main_notice"] and owner_contact_refusal(ctx, 1) == ""
     assert presence_binding_authority_metadata(ctx.task_metadata, task_contract=ctx.task_contract) == {}
     assert asks_for_a_secret(ctx) == "", "an owner root asks the owner for a missing secret"
@@ -301,7 +301,7 @@ def test_a_pending_late_answer_start_is_readable_by_its_place_and_its_record_out
                                                "answer_snapshot": {"task_id": "source", "quiz": block}}})
 
     started = _start_task(owner, "Investigate the source", title="Source research")
-    assert started.startswith("Accepted, waiting to start:"), started
+    assert started.startswith("Not confirmed yet:"), started
     [event] = emitted
     assert event["presence_binding_relation"] == {"binding_id": BINDING} and "task_contract" not in event
     stub = load_task_result(tmp_path, event["task_id"])

@@ -16,6 +16,8 @@ patching ``deadline_utils.utc_now``.
 from __future__ import annotations
 
 import json
+import math
+import time
 from datetime import timedelta
 
 import pytest
@@ -35,11 +37,24 @@ author, fake_route, stopped_wave = _author, _fake_route, _stopped_wave  # fixtur
 pytestmark = pytest.mark.serial
 
 
+def _entered_at(monkeypatch):
+    """When the executor enters each session run, by operation id (``time.monotonic``): it read its window no later,
+    and a window only shrinks, so the time up to that instant bounds what a slow host can have taken from it."""
+    from ouroboros import review_execution
+
+    entered, run = {}, review_execution.run_delegated_review_session
+    monkeypatch.setattr(review_execution, "run_delegated_review_session", lambda *, invocation, **kw: (
+        entered.setdefault(invocation.operation_id, time.monotonic()), run(invocation=invocation, **kw))[1])
+    return entered
+
+
 def _timed_wave(a, monkeypatch):
     """The wave whose session seat runs with a real window (its START carries ``maxSeconds``)."""
     monkeypatch.setenv("OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC", "600")
+    entered, began = _entered_at(monkeypatch), time.monotonic()
     first = _wave(a)
-    assert a.engine.posts[0][0]["maxSeconds"] == 600, a.engine.posts[0][0]
+    lost = math.ceil(max(entered.values()) - began)  # the START carries what remained of the 600 s, rounded up
+    assert 600 - lost <= a.engine.posts[0][0]["maxSeconds"] <= 600, a.engine.posts[0][0]
     return first
 
 
@@ -442,12 +457,15 @@ def test_a_carried_start_with_less_left_than_the_settlement_margin_generates_onl
     first = _timed_wave(a, monkeypatch)
     decision, start, at = _carried_never_posted(a, monkeypatch, first)
     at(-10)
+    entered = _entered_at(monkeypatch)
     granted, polled = _host_windows(monkeypatch), _polled(monkeypatch)
+    began = time.monotonic()
     collected = _call(a, review_reference=first["review_reference"])
     assert collected["state"] == "settled" and _seat(a, first["record_id"])["status"] == "responded", collected
     (_first, _k), (body, key) = a.engine.posts
     assert key == decision["invocation_id"] and body == start["request"] and body["maxSeconds"] > 500  # bytes unchanged
-    assert granted[decision["operation_id"]] >= 29 and polled["run-2"] <= 10, (granted, polled)
+    lost = math.ceil(entered[decision["operation_id"]] - began)  # the 30 s grant shrinks only until the executor reads it
+    assert granted[decision["operation_id"]] >= 30 - lost and polled["run-2"] <= 10, (granted, polled)
 
 
 def _polled(monkeypatch):

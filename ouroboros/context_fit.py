@@ -118,9 +118,9 @@ class ContextFitPlan:
                             refused_tokens: int = 0, select_mode: Optional[str] = None,
                             measured_input_tokens: Optional[int] = None, start_work: bool = False,
                             slack_tokens: int = 0) -> "ContextFitPlan":
-        """Fit shown bytes; an actual envelope's raw estimate also prices its extra framing.
+        """Fit shown bytes; the prepared envelope's raw estimate includes its signed size difference.
 
-        The measurement belongs to this candidate, includes tools and excludes the reply.
+        The measurement belongs to this candidate, includes tools and excludes the reply; withholding an image can shrink it.
         A requested saving alone does not establish pressure on held owner words or notes.
         ``slack_tokens`` asks room beyond the measured or refused excess: memory and ordinary host forms may pay it,
         a whole-or-outline section never (``memory_floor._host_steps``).
@@ -157,7 +157,7 @@ class ContextFitPlan:
                                    shown.user_content_json or self.user_content_json,
                                    supplementary_messages_json=self.core.supplementary_messages_json,
                                    current_messages=current_messages) + tool_schema_tokens(list(sent)))
-            overhead = max(0, int(measured_input_tokens or 0) - raw)
+            overhead = int(measured_input_tokens) - raw if measured_input_tokens is not None else 0
             request = math.ceil((raw + overhead) * ratio)
             request += context_mode_limits(start, self.preferred_mode, output_reserve, **reserve_args)[1]
             if start_work and known_window:
@@ -885,24 +885,21 @@ def build_context_fit_plan(
     ratio = 1.0 if window_basis == "estimator" else _route_calibration_ratio(
         None, str(evidence.route_fp or ""), str(route["model"] or ""),
         estimate_context_prompt_tokens(rows, schemas, provider=str(route.get("provider") or "")), view_kind=view_kind)
-    levels, pointer = start_room(view_task, role), None
+    levels, delivered = start_room(view_task, role), {}
+
+    def fit(user_content_json: str) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str]:
+        return _view_projections(core, governance, user_content_json, **view_args, ratio=ratio, work_room_levels=levels)
     try:
-        contents, initial_mode = _view_projections(core, governance, core.user_content_json, **view_args, ratio=ratio,
-                                                   work_room_levels=levels)
+        contents, initial_mode = fit(core.user_content_json)
     except MinimumViewUnfit as unfit:
-        # Physical rescue only (owner 2026-10-13, #1527): the exact source pointer replaces the whole input only when the
-        # owner-Nano request itself overflows; a room-only shortfall or an unfit pointer request names the start (7A).
-        from ouroboros.context_input_selection import task_input_pointer
-        pointer = (task_input_pointer(env, task, core.user_content_json)
-                   if preferred == "nano" and unfit.physical and not unfit.required_book_tokens else None)
-        if pointer is None:
-            raise
-        contents, initial_mode = _view_projections(core, governance, pointer, **view_args, ratio=ratio,
-                                                   work_room_levels=levels)
+        # Physical rescue only (owner 2026-10-13, #1527): an exact source replaces the whole input only when no view of
+        # the known window holds it, a wake's bound projection first (``context_input_selection.rescued_start``).
+        from ouroboros.context_input_selection import rescued_start
+        contents, initial_mode, delivered = rescued_start(env, task, core.user_content_json, unfit, preferred, fit)
     def _projection(mode: str) -> ContextFitProjection:
         system_content, memory_facts = contents[mode]
         system_content_json = json.dumps(system_content, ensure_ascii=False, sort_keys=True)
-        user_projection = pointer if mode == "nano" else None
+        user_projection = delivered.get(mode)
         estimated = _request_tokens(system_content, user_projection or core.user_content_json,
                                     supplementary_messages_json=core.supplementary_messages_json)
         return ContextFitProjection(

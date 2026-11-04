@@ -18,7 +18,7 @@ Optional bounds: `OUROBOROS_MAX_ROUNDS`/`OUROBOROS_TASK_ABS_CEILING_SEC` use `pa
 
 Five writers use `serialize_settings()` and exact bytes (no CRLF conversion). `config.save_settings`, `owner_settings._owner_update_settings` and `packaged_cli._save_settings` use `prepare_settings_for_persist` for disk-authored silence and context/safety ratchets. Exempt: `context_mode_compat.normalize_and_persist_context_mode_compat` updates only the raw compat pair; `colab_bootstrap.write_colab_settings` generates a foreign-root document. All persist review migration receipts before replacing the pre-image (`review_pool_receipts.persist_write_receipts`). `tests/_shared.py::settings_writers` rejects an unlisted sixth writer.
 
-An owner endpoint changes one decision in a document it does not own: `_owner_update_settings(transform, expected_digest)` reads, changes and writes under one settings lock; a no-change decision never rewrites the file, and a digest mismatch (`settings_document_digest()`) refuses before the transform runs, so no concurrent owner change is reverted key by key while the request answers "saved". Incidental writers (launcher, `set_tool_timeout`) land one field (`fields_on_saved_document`).
+Owner endpoints change one decision in a document they do not own: `_owner_update_settings` reads, changes and writes under one lock (no change writes nothing; a digest mismatch, `settings_document_digest()`, refuses first, never reverting a concurrent change under "saved"). The generic save, Safety endpoints and a wait card's model save record old → new per key and declared origin (`record_settings_change`; Main row: DESIGN); incidental writers (launcher, `set_tool_timeout`) land one field (`fields_on_saved_document`).
 
 ### LLM output token budgets
 

@@ -280,8 +280,9 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     })),
     "ouroboros/tools/subagent_integration_delegated.py": ("ouroboros/tools/subagent_integration.py", "_si", frozenset({
         "_baseline_drifted_paths", "_capture_at_disposition", "_locked_apply",
-        "_patch_touched_paths", "_sha256_file", "_stageable_paths",
+        "_patch_touched_paths", "_sha256_file",
         "_target_is_system_repo", "_write_verdict", "_integration_runtime_mode",
+        "_shared_read_refusal", "load_task_result",
     })),
     "ouroboros/tools/control_scheduling.py": ("ouroboros/tools/control.py", "_ctl", frozenset({
         "load_settings",
@@ -425,7 +426,8 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_strip_attempt_heavy_payload", "_utc_now",
     })),
     "ouroboros/review_state_records.py": ("ouroboros/review_state.py", "_rs", frozenset({
-        "_strip_attempt_heavy_payload", "_truncate_review_reason",
+        "_attempt_review_roster_rows", "_review_roster_row_is_pending", "_strip_attempt_heavy_payload",
+        "_truncate_review_reason", "settled_row_outlives",
     })),
     "ouroboros/review_verdict.py": ("ouroboros/review_substrate.py", "_sub", frozenset({
         "truncate_review_artifact",

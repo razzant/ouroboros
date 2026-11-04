@@ -573,6 +573,8 @@ def handle_direct_turn_bound(evt: Dict[str, Any], ctx: Any) -> None:
         for key in BOUND_FACTS:
             if key in facts and facts[key] is not None:
                 meta["task"][key] = facts[key]
+        if meta["task"].get("_project_admission") is not None:
+            meta["task"].pop("_project_scope_none", None)  # a real basis replaces attested absence
         persist_queue_snapshot(reason="conversation_turn_bound")
 
 

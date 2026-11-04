@@ -16,7 +16,7 @@ of every observed task (``_transitions_since``) and the last observed journal se
 the alarm's finish time, so a fact written during a wake, or written late with an older stamp,
 reaches the next wake. A wake never activates the journal. ``bind_wake_observation`` stores the complete observation as an exact
 source under the registered wake; when the actual request cannot fit it, the context fit
-delivers composition, window, coverage and that pointer instead (``loop_model_call``).
+delivers composition, window, coverage and that pointer instead (first build: ``context_input_selection.rescued_start``; rounds: ``loop_model_call``).
 ``wake_task_metadata`` is the wake's origin/authority envelope for ``handle_wake_direct`` (``consciousness_authority``).
 """
 
@@ -42,12 +42,14 @@ from ouroboros.consciousness_authority import (
     runtime_mode_cap_for,
 )
 from ouroboros.context_health import safe_read
+from ouroboros.deadline_utils import ago_text
 from ouroboros.dialogue_provenance import dialogue_speaker, is_presence_task, reaction_note, wordless_reaction
 
 log = logging.getLogger(__name__)
 
 PROMPT_REL = pathlib.Path("prompts") / "CONSCIOUSNESS.md"
 WAKE_OBSERVATION_KEY = "wake_observation"  # task metadata: the bound observation's source and projection
+WAKE_CONTINUITY_KEY = "wake_continuity"  # task metadata: the notes this wake carries to the next (``previous_wake_text``)
 OBSERVATION_BOUNDARY_VERSION = 1
 TRANSITIONS_VERSION = 2  # complete per-task transition inventory, including closed tasks
 PLACEHOLDERS = ("reason", "last_wake_ago", "events", "level", "level_line", "withheld_tools",
@@ -57,7 +59,7 @@ LEVEL_LINES = {
     "act": "Also acts on its own: starts work, runs commands, speaks and acts in places. It does not change itself.",
     "full": "Also changes itself: its own code, its settings, connecting new places.",
 }
-_FALLBACK_TEMPLATE = "[Wake-up · {reason}] No one wrote to you: this turn is yours. Previous wake: {previous_wake}. Wake context (last wake {last_wake_ago}): {events}"
+_FALLBACK_TEMPLATE = "[Wake-up · {reason}] No request started this turn: it is yours. Previous wake: {previous_wake}. Wake context (last wake {last_wake_ago}): {events}"
 
 
 def wake_task_metadata(level: Any, reason: str, *, root_cost_ceiling_usd: Optional[float] = None) -> Dict[str, Any]:
@@ -87,15 +89,6 @@ def _iso(ts: float) -> str:
     return _dt.datetime.fromtimestamp(float(ts), tz=_dt.timezone.utc).isoformat()
 
 
-def _ago(seconds: float) -> str:
-    seconds = max(0, int(seconds))
-    if seconds >= 86400:
-        return f"{seconds // 86400} d {(seconds % 86400) // 3600} h ago"
-    if seconds < 3600:
-        return f"{max(1, seconds // 60)} min ago"
-    return f"{seconds // 3600} h {(seconds % 3600) // 60} min ago"
-
-
 def _parse_iso(value: Any) -> Optional[float]:
     try:
         return _dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
@@ -103,27 +96,157 @@ def _parse_iso(value: Any) -> Optional[float]:
         return None
 
 
-def previous_wake_text(drive_root: Any, task_id: str, *, now: float) -> str:
-    """One previous own wake by primary key, with its whole authored note."""
+def wake_authorship(row: Dict[str, Any]) -> str:
+    """Who ended a wake, from typed terminal facts alone: ``authored`` (``model_final``, or the sentence only
+    its accepting exit publishes, whatever the outcome and however empty the note), the host's own origin,
+    or ``unknown``: a missing origin proves no absence of a decision."""
+    from ouroboros.task_finalization import HOST_AUTHORED_TERMINAL_ORIGINS, TERMINAL_ORIGIN_MODEL_FINAL
+
+    origin = str(row.get("terminal_origin") or "")
+    if origin == TERMINAL_ORIGIN_MODEL_FINAL or row.get("wake_summary"):
+        return "authored"
+    return origin if origin in HOST_AUTHORED_TERMINAL_ORIGINS else "unknown"
+
+
+_ENDING_WORDS = {"authored": "its note", "host_notice": "the host's notice, not a note of mine",
+                 "host_salvage": "words the host kept from its unfinished turn, not a note I chose",
+                 "unknown": "its note, author not recorded"}
+_DOUBT = ("unknown", "unreadable")  # endings no record attributes: a later author's end alone settles them
+
+
+def wake_continuity(value: Any) -> Dict[str, Any]:
+    """Two addressed attempts and whether older uncertainty also survives. No list grows with failed wakes."""
+    value = value if isinstance(value, dict) else {}
+    return {**{key: str(value.get(key) or "") for key in ("last_authored", "unattributed")},
+            "earlier_unattributed": value.get("earlier_unattributed") is True}
+
+
+def _carried(row: Any, fallback: Any) -> Dict[str, Any]:
+    """The notes a wake was prepared with, from its own row, else ``fallback`` (the clock's)."""
+    metadata = row.get("metadata") if row and isinstance(row.get("metadata"), dict) else {}
+    own = metadata.get(WAKE_CONTINUITY_KEY)
+    return wake_continuity(own if isinstance(own, dict) else fallback)
+
+
+def _with_doubt(carried: Dict[str, Any], task_id: str) -> Dict[str, Any]:
+    # Replacing the named doubt must not turn an earlier uninspected attempt into silence.
+    return {**carried, "unattributed": task_id, "earlier_unattributed": carried["earlier_unattributed"]
+            or bool(carried["unattributed"] and carried["unattributed"] != task_id)}
+
+
+def wake_continuity_after(row: Any, task_id: str, fallback: Any = None) -> Dict[str, Any]:
+    """What the next wake carries past this one: itself when its author ended it; else the notes it carried,
+    itself the doubt when no record says who ended it (an unreadable row, ``None``, included). The host's own
+    end changes neither."""
+    ending = wake_authorship(row) if row else "unreadable"
+    if ending == "authored":
+        return wake_continuity({"last_authored": task_id})
+    carried = _carried(row, fallback)
+    if ending in _DOUBT and carried["last_authored"] != task_id:
+        return _with_doubt(carried, task_id)
+    return carried
+
+
+def _shown_reader(row: Dict[str, Any]) -> str:
+    """The bound observation's reader, not evidence of model delivery or comprehension."""
+    try:
+        read = row["metadata"][WAKE_OBSERVATION_KEY]["source"]["read"]
+        return f"{read['tool']}({', '.join(f'{key}={value!r}' for key, value in read['arguments'].items())})"
+    except (KeyError, TypeError, AttributeError):
+        return ""
+
+
+def _wake_record(row: Dict[str, Any], task_id: str, now: float) -> str:
     from ouroboros.project_dialogue import OUTCOME_PHASE_HEADLINE, outcome_phase
-    from ouroboros.task_store import read_document
     from ouroboros.terminal_time import terminal_time_fact
 
-    if not task_id:
-        return "none"
+    stamp = _parse_iso(terminal_time_fact(row).get("occurred_at"))
+    ago = ago_text(now - stamp) if stamp is not None else "at an unknown time"
+    line = f"«{row['wake_summary']}»" if row.get("wake_summary") else "no line"
+    outcome = "Interrupted" if row.get("status") == "interrupted" else OUTCOME_PHASE_HEADLINE[outcome_phase(row, {})]
+    ending = wake_authorship(row)
+    shown = "" if ending == "authored" else _shown_reader(row)
+    return (f"{task_id}, {outcome} {ago}; its line: {line}; {_ENDING_WORDS[ending]}: «{row.get('result') or ''}»"
+            + (f"; retained observation: {shown}" if shown else ""))
+
+
+def _read_wake(drive_root: Any, task_id: str, now: float) -> Tuple[Optional[Dict[str, Any]], str]:
+    """One wake by primary key: its row (``None`` when absent or unreadable) and its record, else ``unreadable``."""
+    from ouroboros.task_store import read_document
+
+    row = None
     try:
-        row = read_document(drive_root, task_id)
-        if not row:
-            return "unreadable"
-        stamp = _parse_iso(terminal_time_fact(row).get("occurred_at"))
-        ago = _ago(now - stamp) if stamp is not None else "at an unknown time"
-        line = f"«{row['wake_summary']}»" if row.get("wake_summary") else "no line"
-        outcome = "Interrupted" if row.get("status") == "interrupted" else OUTCOME_PHASE_HEADLINE[outcome_phase(row, {})]
-        return (f"{task_id}, {outcome} {ago}; "
-                f"its line: {line}; its note: «{row.get('result') or ''}»")
+        row = read_document(drive_root, task_id) or None
+        return row, _wake_record(row, task_id, now) if row else "unreadable"
     except Exception:
-        log.debug("consciousness: previous wake %s is unreadable", task_id, exc_info=True)
-        return "unreadable"
+        log.debug("consciousness: wake %s is unreadable", task_id, exc_info=True)
+        return row, "unreadable"
+
+
+def _last_authored_note(drive_root: Any, task_id: str, *, now: float, doubt: str = "") -> str:
+    """The last wake its author ended, dated, beside newer attempts; ``doubt`` names those no record attributes."""
+    unresolved = f"; unresolved authorship: {doubt}" if doubt else ""
+    if not task_id:
+        return ". No earlier note of mine is known" + unresolved
+    row, record = _read_wake(drive_root, task_id, now)
+    if not row or record == "unreadable":
+        return f". My last note before it, {task_id}, is unreadable" + unresolved
+    if wake_authorship(row) != "authored":  # its row changed since it was mine: never offered as my note
+        return (f". My last note before it, {task_id}, no longer reads as a note of mine; "
+                f"get_task_result(task_id='{task_id}') reads it" + unresolved)
+    return (f". My last {'known ' if doubt else ''}note before it: {record} — dated, "
+            f"what I understood then{f'; {doubt} may have changed it' if doubt else ''}")
+
+
+def _previous_wake(drive_root: Any, task_id: str, now: float, fallback: Any) -> Tuple[str, Dict[str, Any]]:
+    if not task_id:
+        return "none", wake_continuity(fallback)
+    row, record = _read_wake(drive_root, task_id, now)
+    if record == "unreadable":
+        record = f"{task_id}, unreadable; get_task_result(task_id='{task_id}') reads it"
+    ending = wake_authorship(row) if row else "unreadable"
+    if ending == "authored":
+        return record, wake_continuity_after(row, task_id)
+    carried = _carried(row, fallback)
+    if carried["last_authored"] == task_id:  # the clock knew it as mine; its row no longer says so
+        return record, carried
+    doubt, between, since = ("the attempt above" if ending in _DOUBT else ""), "", carried["unattributed"]
+    if since and since not in (task_id, carried["last_authored"]):
+        since_row, since_record = _read_wake(drive_root, since, now)
+        since_ending = wake_authorship(since_row) if since_row else "unreadable"
+        if since_ending == "authored":  # it reads as mine now: the newer note
+            carried = wake_continuity({"last_authored": since})
+        elif since_ending in _DOUBT:
+            between = f". Before it: {since + ', unreadable' if since_record == 'unreadable' else since_record}"
+            doubt = "the attempts above" if doubt else since
+        elif carried["earlier_unattributed"]:
+            between = f". Previously unresolved: {since_record}"
+        else:
+            carried["unattributed"] = ""
+    if carried["earlier_unattributed"]:
+        older = f"earlier unattributed attempts before {since}"
+        doubt = f"{doubt} and {older}" if doubt else older
+    after = _with_doubt(carried, task_id) if ending in _DOUBT else dict(carried)
+    if not row and not (carried["last_authored"] or between or carried["earlier_unattributed"]):
+        return record, after
+    return record + between + _last_authored_note(drive_root, carried["last_authored"], now=now, doubt=doubt), after
+
+
+def previous_wake_text(drive_root: Any, task_id: str, *, now: float, last_authored: str = "", unattributed: str = "",
+                       carried: Optional[Dict[str, Any]] = None, earlier_unattributed: bool = False) -> str:
+    """The previous own wake by primary key, whole with its actual outcome; ``carried`` receives the notes this
+    wake carries on (``WAKE_CONTINUITY_KEY``).
+
+    An authored end stands alone however it ended and however empty its note: the mind's newest decision.
+    Any other shows beside it the notes it carried itself (its row's, else the clock's ``last_authored`` and
+    ``unattributed``): the newest attempt since the last note that no record attributes, read by its current
+    facts, and that note, dated. Resolving that one attempt as host-only cannot settle earlier uncertainty;
+    only a later authored end clears that span. At most three addressed reads; no history is walked."""
+    text, after = _previous_wake(drive_root, task_id, now, {"last_authored": last_authored, "unattributed": unattributed,
+                                                        "earlier_unattributed": earlier_unattributed})
+    if carried is not None:
+        carried.update(after)
+    return text
 
 
 def _clip_preview(value: Any, limit: int = 100) -> str:
@@ -152,7 +275,7 @@ def _card_line(task_id: str, quiz_id: str, block: Dict[str, Any], *, now: float,
     label = question_status(state, facts, bool(block.get("wait_for_answer")))
     asked_at = str(block.get("asked_at") or "")
     asked_ts = _parse_iso(asked_at)
-    age = f", {_ago(now - asked_ts)}" if asked_ts is not None else ""
+    age = f", {ago_text(now - asked_ts)}" if asked_ts is not None else ""
     preview = _clip_preview(block.get("question") or "question text unavailable")
     return f"- owner card {quiz_id} on task {task_id}: {label}{age}; {preview}"
 
@@ -169,7 +292,7 @@ def _answered_card_line(task_id: str, quiz_id: str, block: Dict[str, Any], *, no
     parts = []
     for key, word in (("answered_at", "answered"), ("asked_at", "asked")):
         stamp = _parse_iso(block.get(key))
-        parts.append(f"{word} {_ago(now - stamp)}" if stamp is not None else f"{word} at an unknown time")
+        parts.append(f"{word} {ago_text(now - stamp)}" if stamp is not None else f"{word} at an unknown time")
     options = block.get("options") if isinstance(block.get("options"), list) else []
     index = block.get("answered_index")
     comment = str(block.get("comment") or "")
@@ -192,7 +315,7 @@ def _answered_card_line(task_id: str, quiz_id: str, block: Dict[str, Any], *, no
 
 def _closed_card_line(task_id, quiz_id, block, *, now):
     stamp = _parse_iso(block.get("closed_at"))
-    when = _ago(now - stamp) if stamp is not None else "at an unknown time"
+    when = ago_text(now - stamp) if stamp is not None else "at an unknown time"
     actor = str(block.get("closed_actor") or "unknown actor")
     if actor == "model" and block.get("closed_by_task_id"):
         actor += f" task {block['closed_by_task_id']}"
@@ -325,7 +448,7 @@ def _event_line(kind: str, row: Dict[str, Any], results: Dict[str, Dict[str, Any
                 rooms: Any, projects: Dict[str, str], now: float, *, when: str = "") -> str:
     """One chat-row event, or (``when`` given) a task terminal read from its result."""
     stamp = _parse_iso(row.get("ts"))
-    when = when or (_ago(now - stamp) if stamp is not None else "at an unknown time")
+    when = when or (ago_text(now - stamp) if stamp is not None else "at an unknown time")
     task_id = str(row.get("task_id") or "")
     if kind in {"owner_message", "correspondent_message"}:
         return (f"- {_KIND_WORDS[kind][0]} in {rooms.label(row)}, {when}: "
@@ -458,7 +581,7 @@ def _transition_line(fact: Dict[str, Any], results: Dict[str, Dict[str, Any]], r
                      now: float, projects: Dict[str, str]) -> Tuple[str, str]:
     """``(kind, line)`` for one canonical transition."""
     kind, task_id, stamp = fact["kind"], fact["task_id"], fact["stamp"]
-    ago = _ago(now - stamp) if stamp is not None else "at an unknown time"
+    ago = ago_text(now - stamp) if stamp is not None else "at an unknown time"
     if kind == "card_answer":
         return kind, _answered_card_line(task_id, fact["quiz_id"], fact["block"], now=now)
     if kind == "card_state":
@@ -753,7 +876,8 @@ def prepare_wake(task: Dict[str, Any], drive_root: Any) -> None:
     schedule); everything that reads history runs here, in the carrier (owner decision 1A,
     L7). The complete observation becomes the task's text, its exact source is stored under
     the wake, and the boundary it accepts rides the task metadata to the clock
-    (``consciousness._settle_wake``). A failure here leaves the admitted text as the only input.
+    (``consciousness._settle_wake``), as do the notes it carries (``previous_wake_text``). A failure
+    here leaves the admitted text as the only input.
     """
     facts = task.pop("_wake_prepare", None)
     if not isinstance(facts, dict):
@@ -762,6 +886,12 @@ def prepare_wake(task: Dict[str, Any], drive_root: Any) -> None:
 
     root = pathlib.Path(drive_root)
     now = float(facts.get("now") or 0.0)
+    # Capture the predecessor before unrelated observation work can fail. This carry is kept even
+    # when the wake runs on its admitted text alone; it does not certify a delivered observation.
+    carried: Dict[str, Any] = {}
+    previous = previous_wake_text(root, str(facts.get("last_wake_task_id") or ""), now=now, carried=carried,
+                                  **wake_continuity(facts.get("continuity")))
+    task.setdefault("metadata", {})[WAKE_CONTINUITY_KEY] = carried
     reason = str(facts.get("reason") or "heartbeat")
     window = facts.get("window") if isinstance(facts.get("window"), dict) else {}
     observation = observe_wake(root, boundary=facts.get("boundary"), since=float(facts.get("since") or 0.0),
@@ -772,8 +902,6 @@ def prepare_wake(task: Dict[str, Any], drive_root: Any) -> None:
         places = None
     context = {"spend_by_cause": cause_views(window.get("spend_by_cause"), places),
                "counted_roots": root_views(list(facts.get("counted_roots") or []), places), "places": places}
-    previous = previous_wake_text(root, str(facts.get("last_wake_task_id") or ""), now=now)
-
     def render(events: str) -> str:
         return render_wake_message(
             facts.get("repo_dir"), drive_root=root, reason=reason, last_wake_at=float(facts.get("last_wake_at") or 0.0),
@@ -834,7 +962,7 @@ def render_wake_message(repo_dir: Any, *, drive_root: Any, reason: str, last_wak
                         appointment_at: float = 0.0) -> str:
     """Fill ``prompts/CONSCIOUSNESS.md`` for one wake; every placeholder is substituted.
 
-    "On time" is lateness below ``_ago``'s one-minute display granularity, not a new scheduling threshold.
+    "On time" is lateness below ``ago_text``'s one-minute display granularity, not a new scheduling threshold.
     """
     template = safe_read(pathlib.Path(repo_dir) / PROMPT_REL) or _FALLBACK_TEMPLATE
     from ouroboros.consciousness_view import places_text, roots_text, spend_text
@@ -844,10 +972,10 @@ def render_wake_message(repo_dir: Any, *, drive_root: Any, reason: str, last_wak
         spent = f"at least {spent}"  # unmetered rows in the window: the number is a floor
     reason_text = str(reason or "heartbeat")
     if appointment_at:
-        reason_text += f" ({'on time' if now - appointment_at < 60 else 'due ' + _ago(now - appointment_at)})"
+        reason_text += f" ({'on time' if now - appointment_at < 60 else 'due ' + ago_text(now - appointment_at)})"
     facts = {
         "reason": reason_text,
-        "last_wake_ago": _ago(now - last_wake_at) if last_wake_at else "no wake since this process started",
+        "last_wake_ago": ago_text(now - last_wake_at) if last_wake_at else "no wake since this process started",
         "previous_wake": previous_wake,
         "events": events or "nothing new",
         "level": {"observe": "Advises", "act": "Acts", "full": "Evolves"}[normalized],

@@ -140,6 +140,8 @@ jobs:
       # runner) fails only a test that hangs. scripts/ci_retry.py retries each failed
       # test once outside the lane guard and records FLAKY tests in verdict.json; the
       # `ui-smoke` reconciliation reads that verdict, never a hidden red.
+      # Native tab-visibility cases need a display even though most tests are headless.
+      # Playwright's --with-deps above installs Xvfb; keep it around both retry rounds.
       - name: Run complete host UI lane with collection and availability guards
         id: ui_tests
         if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
@@ -151,7 +153,7 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
           SEPARATE_UI_CADDY: ${{ steps.install_caddy.outputs.path }}
         run: >-
-          python -I -S scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/ui/host" --accepted tests/accepted_failures.json --
+          xvfb-run -a python -I -S scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/ui/host" --accepted tests/accepted_failures.json --
           python -I -S scripts/safe_test.py -- python -m pytest tests/ -m ui_browser --require-ui-browser -vv --tb=short --timeout=900
           --ui-browser-shard=${{ matrix.shard }}/8 --session-timeout=4500
           --junitxml="${{ runner.temp }}/ci-private/ui/host.xml"

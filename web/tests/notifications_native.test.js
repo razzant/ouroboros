@@ -17,7 +17,8 @@ import { loadDesktopShell, mountDesktopShell } from '../modules/desktop_shell.js
 import { recordingAudio, settle } from './notification_audio_fixture.js';
 
 const ON = { ...DEFAULT_NOTIFY_PREFS, enabled: true };
-const FINISHED = { role: 'system', system_type: 'task_summary', task_id: 't1', chat_id: 7, content: 'Report ready' };
+const FINISHED = { role: 'system', system_type: 'task_summary', task_id: 't1', chat_id: 7, content: 'Done. Root task t1.',
+    outcome_phase: 'done', target_label: 'Report ready' };
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 function storage(prefs = ON) {
@@ -95,7 +96,7 @@ test('Sound off asks the system for a silent notification', async () => {
     const fx = fixture({ answer: { ok: true, status: 'submitted', sound: 'off' }, prefs: { ...ON, sound: false, show_text: true } });
     fx.notifier.handleFrame(FINISHED, { kind: 'chat', isMain: true });
     await tick();
-    assert.equal(fx.calls[0][2], 'Report ready', 'text shown only when the owner turned it on');
+    assert.equal(fx.calls[0][2], 'Report ready · Done', 'text shown only when the owner turned it on');
     assert.equal(fx.calls[0][3], false);
     assert.equal(fx.tones(), 0);
     fx.notifier.destroy();

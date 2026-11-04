@@ -17,7 +17,8 @@ from typing import Any, Dict, Optional
 
 from ouroboros.outcomes import EXECUTION_INFRA_FAILED, terminal_outcome_axes
 from ouroboros.utils import append_jsonl, utc_now_iso
-from supervisor.events import HOST_NARRATION, _bound_project_chat_id
+from supervisor.events_chat_delivery import HOST_NARRATION
+from supervisor.log_addressing import bound_project_chat_id as _bound_project_chat_id
 from supervisor.message_bus import notification_chat_route, send_with_budget
 
 log = logging.getLogger(__name__)

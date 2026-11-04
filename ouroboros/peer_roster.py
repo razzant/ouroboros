@@ -181,11 +181,10 @@ def _owner_wait_fact(wait: Dict[str, Any]) -> Dict[str, Any]:
 
 def _pause_by(fence: Any) -> str:
     """Who declared the tree's Pause, in words, read as the owner's card reads it (``control_actor.pause_author``):
-    ``owner`` for the owner's press, Ouroboros's own sentence for its ``pause_task``, ``""`` when it declared nobody."""
+    ``owner`` or ``Ouroboros``, then the words the press recorded, whoever declared it; ``""`` when it declared nobody."""
     author = pause_author(fence)
-    if author["actor"] == "ouroboros":
-        return f"Ouroboros: {author['text']}" if author["text"] else "Ouroboros"
-    return author["actor"]
+    head = "Ouroboros" if author["actor"] == "ouroboros" else author["actor"]
+    return f"{head}: {author['text']}" if head and author["text"] else head
 
 
 def _pause_fact(pause: Dict[str, Any], fence: Any) -> Dict[str, Any]:
@@ -322,6 +321,7 @@ def _tree_tails(root: Any, tree: Optional[Dict[str, Any]], fence: Any, root_task
     """What of a tree still runs, typed and worded as the owner's card says it (``work_status.work_tails``):
     helpers the queue runs that its Pause has not parked, open runs typed by ``work_status.run_tail`` from their
     own task's stored result, and the review work a settled Pause lets finish."""
+    from ouroboros.external_runs import unbound_starts
     from ouroboros.gateway import work_status as ws  # D01->D11 is lazy-only
     from ouroboros.gateway.work_projection import unconfirmed_stops
     from ouroboros.task_results import load_task_result
@@ -338,6 +338,7 @@ def _tree_tails(root: Any, tree: Optional[Dict[str, Any]], fence: Any, root_task
         stops = unconfirmed_stops(root, str(entry.task_id), owner) if entry.task_id else frozenset()
         kind, state = ws.run_tail(getattr(entry, "source", ""), owner, stop_unknown=str(entry.run_id) in stops)
         runs.append({"run_id": str(entry.run_id), "kind": kind, "state": state})
+    runs.extend({"run_id": start, "kind": "run", "state": "unknown"} for start in unbound_starts(fence))
     from supervisor.continuation_admission import model_handoffs
     root_task_id = root_task_id or str(fence.get("root_task_id") or "")
     tails = ws.work_tails([task for task in tree["running"] if task not in parked], runs,

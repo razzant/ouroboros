@@ -11,7 +11,11 @@ the owner's work in Main or any room and beside the focuses, which never hold it
 Tick order, each step a typed outcome: disabled → its own live wake → not yet due → the
 rolling-24h allowance (an unreadable ledger is the disclosed skip
 ``allowance_unknown``, never a silent block; known spend at the daily limit is
-``allowance_exhausted``) → an owner chat must be bound → launch.
+``allowance_exhausted``) → an owner chat must be bound → launch. A skip keeps the window it met
+(``allowance_fact``, the projection a wake's preparation carries) in its event and in the one
+overwritten ``consciousness_last_skip`` state key, which the mind's status read shows. An exhausted
+allowance waits for its window to free, a time chosen under the limit it met: a changed daily limit
+retries it like any skip, MIN after the skip and after boot (``_limit_reopens_skip``; appointment untouched).
 What is left of that allowance is the launched tree's producer ceiling
 (``metadata.root_cost_ceiling_usd``, В26=A): the in-task stop pauses the wake when its known
 spend reaches it — no extra planning margin is subtracted or skipped (owner 2026-10-07) — while the
@@ -47,19 +51,20 @@ import math
 import pathlib
 import threading
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from ouroboros.config import (
     WAKE_DEFAULT_SEC,
     get_bg_wakeup_max_sec,
     get_bg_wakeup_min_sec,
     get_consciousness_autonomy,
+    get_consciousness_daily_usd,
     get_consciousness_max_tasks,
     runtime_setting,
 )
 from ouroboros.consciousness_allowance import STATUS_EXHAUSTED, STATUS_UNKNOWN, allowance_window
 from ouroboros.consciousness_authority import is_consciousness_origin, is_own_clock_wake
-from ouroboros.consciousness_wake import WAKE_OBSERVATION_KEY, wake_task_metadata
+from ouroboros.consciousness_wake import WAKE_OBSERVATION_KEY, wake_continuity, wake_continuity_after, wake_task_metadata
 from ouroboros.deadline_utils import parse_deadline_ts
 from ouroboros.utils import append_jsonl, utc_now_iso
 
@@ -69,9 +74,11 @@ NEXT_WAKE_STATE_KEY = "consciousness_next_wake_at"
 INTERVAL_STATE_KEY = "consciousness_next_interval_sec"
 LAST_WAKE_STATE_KEY = "consciousness_last_wake_at"
 APPOINTMENT_STATE_KEY = "consciousness_appointment_at"  # the scheduled time; skips and refusals move only the next attempt
+LAST_SKIP_STATE_KEY = "consciousness_last_skip"  # the newest skipped wake with the allowance window it met; overwritten
 OWN_WAKE_STATE_KEY = "consciousness_own_wake"  # the admitted clock actor, retained across carrier changes/restart
 OBSERVATION_STATE_KEY = "consciousness_observation_boundary"  # chat position + transition state the last ACCEPTED wake observed
 OBSERVATION_BOOTSTRAP_STATE_KEY = "consciousness_observation_bootstrap_since"
+CONTINUITY_STATE_KEY = "consciousness_wake_continuity"  # notes the next wake carries when its predecessor's row cannot say
 LEGACY_INBOX_REL = pathlib.Path("state") / "consciousness_observations.jsonl"
 ARCHIVED_INBOX_REL = pathlib.Path("archive") / "consciousness_observations.jsonl"
 HEARTBEAT = "heartbeat"
@@ -83,6 +90,30 @@ SNAPSHOT_KEYS = ("enabled", "level", "next_wake_at", "last_wake_at", "last_wake_
 
 def _iso(ts: float) -> str:
     return _dt.datetime.fromtimestamp(float(ts), tz=_dt.timezone.utc).isoformat() if ts else ""
+
+
+def allowance_fact(window: Dict[str, Any]) -> Dict[str, Any]:
+    """The one projection of the allowance window a wake decision met: a wake's preparation and a skip's
+    record carry the same keys (known spend, unmetered calls, the limit, spend by cause, the reset time);
+    null is unknown, never 0."""
+    return {**{key: window.get(key) for key in ("settled_usd", "unknown_unmetered", "limit_usd", "spend_by_cause")},
+            "resets_at": window.get("resets_at") or None}
+
+
+def _money_skip_basis(skip: Any, next_wake_at: float) -> Optional[Tuple[float, float, float]]:
+    """``(the time it chose, the limit it met, when it skipped)`` when ``skip`` is an exhausted-allowance skip
+    record that set this next wake: the facts ``_limit_reopens_skip`` compares the setting and the clock with."""
+    if not isinstance(skip, dict) or skip.get("reason") != "allowance_exhausted":
+        return None
+    allowance = skip.get("allowance") if isinstance(skip.get("allowance"), dict) else {}
+    limit, skipped = allowance.get("limit_usd"), parse_deadline_ts(skip.get("at"))
+    try:  # a stored time that cannot be a date is no basis
+        chose_this_wake = skip.get("next_wake_at") == _iso(next_wake_at)
+    except (OverflowError, OSError, ValueError):
+        return None
+    if not chose_this_wake or type(limit) not in (int, float) or skipped is None:
+        return None
+    return float(next_wake_at), float(limit), skipped.timestamp()
 
 
 def panic_blocks_wake(drive_root: Any) -> bool:
@@ -140,6 +171,7 @@ class BackgroundConsciousness:
         admitted = state.get(OWN_WAKE_STATE_KEY)
         self._own_wake = dict(admitted) if isinstance(admitted, dict) else {}
         self._last_wake_task_id = str(self._own_wake.get("task_id") or "")
+        self._continuity = wake_continuity(state.get(CONTINUITY_STATE_KEY))
         try:
             bootstrap = float(state.get(OBSERVATION_BOOTSTRAP_STATE_KEY, persisted_last_wake or self._booted_at))
             if not math.isfinite(bootstrap) or not 0 <= bootstrap <= self._booted_at:
@@ -148,6 +180,7 @@ class BackgroundConsciousness:
             bootstrap = persisted_last_wake or self._booted_at
         self._observation_bootstrap_since = bootstrap
         self._backoff, self._allowance = 1, (0.0, {})
+        self._skip_basis = _money_skip_basis(state.get(LAST_SKIP_STATE_KEY), persisted)  # memory only
         self._in_flight = ""  # the id this process is binding, until its admission answers
         self._archive_legacy_inbox()
 
@@ -166,11 +199,11 @@ class BackgroundConsciousness:
             log.debug("consciousness: runtime state unreadable", exc_info=True)
             return {}
 
-    def _set_next_wake(self, at: float, *, appointment: bool = False) -> None:
+    def _set_next_wake(self, at: float, *, appointment: bool = False, skip: Optional[Dict[str, Any]] = None) -> None:
         from supervisor import state
 
         self._next_wake_at = float(at)
-        keys = {NEXT_WAKE_STATE_KEY: self._next_wake_at}
+        keys = {NEXT_WAKE_STATE_KEY: self._next_wake_at, **({LAST_SKIP_STATE_KEY: skip} if skip else {})}
         if appointment:
             self._appointment_at = self._next_wake_at
             keys[APPOINTMENT_STATE_KEY] = self._appointment_at
@@ -246,18 +279,20 @@ class BackgroundConsciousness:
                 return "disabled"
             if wake or ended_live:
                 return "wake_live"
-            if now < self._next_wake_at:
+            if now < self._next_wake_at and not self._limit_reopens_skip(now):
                 return "not_due"
             window = self._allowance_view(now, fresh=True)
             if window.get("status") == STATUS_UNKNOWN:
-                return self._skip("allowance_unknown", now + self.floor, now=now, error=str(window.get("error") or ""))
+                return self._skip("allowance_unknown", now + self.floor, window, now=now,
+                                  error=str(window.get("error") or ""))
             # Known spend reached the daily allowance (#1487: unresolved bounds are
             # disclosed exposure, not spending). No extra early margin skips a wake.
             if window.get("status") == STATUS_EXHAUSTED or float(window.get("remaining_usd") or 0.0) <= 0.0:
                 resets = parse_deadline_ts(str(window.get("resets_at") or ""))
-                return self._skip("allowance_exhausted", max(resets.timestamp() if resets else 0.0, now + self.floor), now=now)
+                return self._skip("allowance_exhausted", max(resets.timestamp() if resets else 0.0, now + self.floor),
+                                  window, now=now)
             if not self._owner_chat_id():
-                return self._skip("waiting_for_first_conversation", now + self.floor, now=now)
+                return self._skip("waiting_for_first_conversation", now + self.floor, window, now=now)
         return self._launch(now, int(self._owner_chat_id() or 0), window)
 
     def _settle_unreported_terminal(self) -> bool:
@@ -279,20 +314,56 @@ class BackgroundConsciousness:
             row = load_task_result(self._drive_root, task_id, strict=True) or {}
         except Exception:
             log.debug("Own wake %s is unreadable; its terminal stays unknown", task_id, exc_info=True)
+            self._note_continuity(task_id, None)
             return False
         ok = pooled_terminal_ok(row)
         if ok is None or row.get("status") == "cancelled":
+            self._note_continuity(task_id, row)  # the next start replaces it
             return False
         if task_settlement_liveness(task_id) is not False:
             return True
         self._wake_finished(task_id, ok, pooled=True)
         return False
 
-    def _skip(self, reason: str, next_at: float, *, now: float, error: str = "") -> str:
+    def _note_continuity(self, task_id: str, row: Any) -> None:
+        """The notes past an own wake the next start replaces, from the row this clock already read (``None``:
+        unreadable); a wake that settles writes them with its settlement (``_settle_wake``)."""
+        from supervisor import state
+
+        self._continuity = wake_continuity_after(row, task_id, self._continuity)
+        carried = dict(self._continuity)
+        try:
+            state.update_state(lambda st: st.__setitem__(CONTINUITY_STATE_KEY, carried))
+        except Exception:  # the next wake's carrier still reads that row's own facts (``previous_wake_text``)
+            log.debug("consciousness: notes past %s not persisted", task_id, exc_info=True)
+
+    def _skip(self, reason: str, next_at: float, window: Dict[str, Any], *, now: float, error: str = "") -> str:
+        """A skipped wake keeps the allowance window it met (``allowance_fact``) in its event and in the one
+        overwritten ``consciousness_last_skip`` key, written with the next wake time: a status read answers
+        whether it stopped for money with no second reader or writer."""
         self._last_wake_outcome, self._last_error = f"skipped:{reason}", error
-        self._set_next_wake(next_at)
-        self._record("consciousness_wake_skipped", reason=reason, next_wake_at=_iso(next_at), error=error)
+        skip = {"reason": reason, "next_wake_at": _iso(next_at), "error": error, "allowance": allowance_fact(window)}
+        record = {"at": _iso(now), **skip}
+        self._set_next_wake(next_at, skip=record)
+        self._skip_basis = _money_skip_basis(record, self._next_wake_at)
+        self._record("consciousness_wake_skipped", **skip)
         return f"skipped:{reason}"
+
+    def _limit_reopens_skip(self, now: float) -> bool:
+        """An exhausted allowance chose its time (the window's reset) under the limit it met. While that time
+        stands, a different daily limit turns the wait into any skip's retry: the same window is re-checked no
+        sooner than MIN after that skip and after boot, and admits or skips again under the new limit. The
+        skip's own fact changed, no event moved the schedule. The check reads only the settings; it adds no
+        ledger or state read to a tick (#2654)."""
+        return now >= self._due_at() < self._next_wake_at
+
+    def _due_at(self) -> float:
+        """When the next check can come: the stored time, or, after a changed limit turned a money skip's wait into
+        any skip's retry (``_limit_reopens_skip``), MIN after that skip and after boot. The status shows this time."""
+        basis = self._skip_basis
+        if basis is None or basis[0] != self._next_wake_at or basis[1] == float(get_consciousness_daily_usd()):
+            return self._next_wake_at
+        return min(self._next_wake_at, max(basis[2], self._booted_at) + self.floor)
 
     def _launch(self, now: float, chat_id: int, window: Dict[str, Any]) -> str:
         from supervisor import workers
@@ -325,12 +396,14 @@ class BackgroundConsciousness:
         # Only the facts that live in this process travel with the admission.
         from supervisor.queue import live_consciousness_roots
 
+        persisted = self._read_state()
         preparation = {
-            "boundary": self._read_state().get(OBSERVATION_STATE_KEY), "since": self._observation_bootstrap_since,
+            "boundary": persisted.get(OBSERVATION_STATE_KEY), "since": self._observation_bootstrap_since,
             "now": now, "reason": reason, "level": level, "repo_dir": str(self._repo_dir),
             "last_wake_at": self._last_wake_at, "last_wake_task_id": self._last_wake_task_id,
+            "continuity": dict(self._continuity),
             "disabled_tools": list(metadata.get("disabled_tools") or []),
-            "window": {key: window.get(key) for key in ("settled_usd", "unknown_unmetered", "limit_usd", "spend_by_cause")},
+            "window": allowance_fact(window),
             "counted_roots": live_consciousness_roots(), "max_tasks": get_consciousness_max_tasks(),
             "interval": self._interval(), "appointment_at": self._appointment_at,
         }
@@ -449,6 +522,8 @@ class BackgroundConsciousness:
             now = time.time()
             self._last_wake_at, self._last_wake_task_id = now, str(task_id)
             self._own_wake = {**self._own_wake, "finished": True}
+            # Like the predecessor id, retain this computation when the state write fails.
+            self._continuity = wake_continuity_after(row, task_id, self._continuity)
             if ok:
                 self._backoff, self._last_wake_outcome, self._last_error = 1, outcome, ""
             else:
@@ -456,11 +531,12 @@ class BackgroundConsciousness:
                 self._last_error = f"wake-up {task_id} failed in its runner (see the chat and events.jsonl)"
             self._next_wake_at = self._appointment_at = now + min(self.ceiling, self._interval() * self._backoff)
             from supervisor import state
-            try:
+            try:  # the notes past it (``None``: an unreadable row) persist with the settlement itself
                 state.update_state(lambda st: st.update({OWN_WAKE_STATE_KEY: self._own_wake,
                     LAST_WAKE_STATE_KEY: now, NEXT_WAKE_STATE_KEY: self._next_wake_at,
                     APPOINTMENT_STATE_KEY: self._appointment_at,
-                    OBSERVATION_BOOTSTRAP_STATE_KEY: self._observation_bootstrap_since}))
+                    OBSERVATION_BOOTSTRAP_STATE_KEY: self._observation_bootstrap_since,
+                    CONTINUITY_STATE_KEY: dict(self._continuity)}))
             except Exception:
                 log.debug("consciousness: wake completion not persisted", exc_info=True)
         if (row or {}).get("wake_summary"):
@@ -524,7 +600,7 @@ class BackgroundConsciousness:
         wake = self.live_wake()
         window = self._allowance_view(time.time())
         context = self._context_facts(window)
-        values = (self._enabled, get_consciousness_autonomy(), _iso(self._next_wake_at),
+        values = (self._enabled, get_consciousness_autonomy(), _iso(self._due_at()),
                   _iso(self._last_wake_at), self._last_wake_task_id, self._last_wake_outcome, self._last_error,
                   window.get("settled_usd"), window.get("limit_usd"), str(window.get("resets_at") or ""),
                   len(context["counted_roots"]), int(get_consciousness_max_tasks()), wake,

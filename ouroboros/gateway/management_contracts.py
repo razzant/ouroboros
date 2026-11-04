@@ -841,9 +841,9 @@ class UpdateProgress(TypedDict, total=False):
     when it cannot be read. An observation, never authority. ``active`` is true only while THIS server
     executes it. ``outcome`` stays empty until concluded: ``applied`` only after a later server's startup
     checks passed while serving the landed commit; ``not_applied``, ``rolled_back``, ``failed`` or
-    ``unknown`` (``reason`` names the missing evidence). ``work_stop`` appears only on the executor's own
-    conclusion; ``none`` means it reached no worker or service teardown. A version, SHA or reconnect
-    alone proves nothing."""
+    ``unknown`` (``reason`` names the missing evidence; a boot ``failed`` names ``rollback_incomplete``).
+    ``work_stop`` appears only on the executor's own conclusion; ``none`` means it reached no worker or
+    service teardown. A version, SHA or reconnect alone proves nothing."""
 
     operation_id: str
     generation: str
@@ -898,11 +898,13 @@ class UpdateLetter(TypedDict):
 
 
 class UpdateTransactionState(TypedDict, total=False):
-    """An update in progress: ``{active: false}``, or active with its phase and assisted task."""
+    """An update in progress: ``{active: false}``, or active with its phase, assisted task and the
+    ``attempt_id`` a retained attempt's ``tx_attempt_id`` binds to."""
 
     active: Required[bool]
     phase: str
     task_id: str
+    attempt_id: str
     restart_required: bool
     local_work_recovery: bool
 

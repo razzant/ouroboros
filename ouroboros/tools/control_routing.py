@@ -365,6 +365,13 @@ def _start_task(
             # focus keeps ordinary workspace admission and its return carrier.
             evt.update({key: "" for key in ("project_id", "project_name", "workspace_root", "workspace", "source")})
             repo_root_note = ""
+        if "presence" in presence_carrier:
+            from ouroboros.presence_context import PRESENCE_FINAL_ROUTE_KEY, handoff_fact
+
+            # ``_finish_swarm_handoff`` holds the first attempt whatever its status; start_task runs
+            # serially. A candidate written before submission: only what the source publishes decides.
+            evt[PRESENCE_FINAL_ROUTE_KEY] = handoff_fact(getattr(ctx, "task_id", ""), tid, held=not isinstance(
+                getattr(ctx, "_swarm_handoff_attempt", None), dict))
     else:
         # The owner's own work related to a place (#2482): an ordinary owner start
         # with its own contract; only the relation the place reads it by rides along.
@@ -411,8 +418,8 @@ def _start_task(
         return _finish_swarm_handoff(
             ctx, evt, response, status="rejected", reason=shown_reason or "admission_rejected",
         )
+    root = Path(str(getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
     try:
-        root = Path(str(getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
         append_jsonl(
             root / "logs" / "supervisor.jsonl",
             {
@@ -426,9 +433,17 @@ def _start_task(
         )
     except Exception:
         log.debug("Failed to record unconfirmed promote", exc_info=True)
+    # A live wait that timed out says what it measured and the body as recorded, each with its own clock;
+    # a deferred emission was never waited for (its admission comes after this turn).
+    waited, observed = confirmation.get("waited_sec"), ""
+    if mode == "live" and isinstance(waited, (int, float)):
+        from ouroboros.context_runtime_facts import admission_observation
+
+        observed = (f" No confirmation came in {float(waited):.1f} s of waiting. "
+                    + admission_observation(root, observed_at=utc_now_iso()))
     response = (
-        f"Accepted, waiting to start: separate task {tid}. Its complete intent is durable; "
-        f"admission to {_requested_scope_label(display_name, pid)} is pending ({mode}). "
+        f"Not confirmed yet: separate task {tid} is waiting to start. Its complete intent is durable; "
+        f"admission to {_requested_scope_label(display_name, pid)} is pending ({mode}).{observed} "
         "A [ROUTING_RECEIPTS] row reports its recorded outcome. "
         f"Use get_task_result({tid}) to reconcile it before an explicit retry."
     )

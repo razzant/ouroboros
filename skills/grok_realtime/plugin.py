@@ -179,6 +179,10 @@ class GrokSession(JsonSession):
             or self.outstanding or self.session_update is not None or self.waiting_tools or self.truncations
             or self.input_transcripts or self.output_transcripts)
 
+    @property
+    def input_pending(self):
+        return self.speech_active or bool(self.input_transcripts)
+
     def final_captions(self):
         events = [LiveEvent('caption', {'speaker': speaker, 'item_id': item, 'text': text,
                   'final': True, 'replace': True, 'incomplete': True})

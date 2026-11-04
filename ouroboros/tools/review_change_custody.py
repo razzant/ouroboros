@@ -432,31 +432,232 @@ def prepare_recorded_commit_review(ctx, *, target_repo, blocking_review: bool, l
             "layer": layer}, None, False
 
 
-def settle_collected_attempt(root, attempt, seats, record):
-    """Merge each collected seat against the current attempt under its state lock."""
+# A settled attempt's lifecycle projection, per tool: a commit's outcome returned before Git
+# (``commit_gate._return_commit_feedback``), a review's closed wave (``settle_attempt``).
+_SETTLED_PROJECTION = {"commit_reviewed": ("reviewed", "review_only"), "vcs_commit_reviewed": ("reviewed", "review_only")}
+
+
+def _merge_seat(rows, incoming):
+    """One collected seat onto its slot's row. A terminal outcome of the row's own operation, with no start token
+    left in its usage, closes the start token that operation left on the row (#2587): a merged token would keep a
+    settled seat in custody forever. A pending, lost, other-operation or unidentified outcome keeps its custody."""
+    from ouroboros.review_custody import _row_is_pending
+
+    key = str(incoming.get("slot_id") or incoming.get("slot") or "")
+    old = rows.get(key) or {}
+    if old and not _row_is_pending(old) and _row_is_pending(incoming):
+        return
+    if old.get("operation_id") and incoming.get("operation_id") not in (None, "", old["operation_id"]):
+        return
+    if old.get("superseded_operation_ids") and incoming.get("operation_id") != old.get("operation_id"):
+        return  # a seat reopened by an explicit continuation takes only its successor's outcome
+    merged = {**old, **incoming}
+    usage = incoming.get("usage") if isinstance(incoming.get("usage"), dict) else {}
+    if (old.get("operation_id") and incoming.get("operation_id") == old["operation_id"]
+            and not _row_is_pending(incoming) and not usage.get("pending_invocation_id")):
+        merged.pop("pending_invocation_id", None)
+    rows[key] = merged
+
+
+def _settled_row(current, seats, record):
+    """``current`` with each collected seat merged: a scope seat onto the scope roster, every other seat onto the
+    triad (``_merge_seat``). Once every counted seat is terminal with no start token left, a row still ``reviewing``
+    takes its tool's settled projection (``_SETTLED_PROJECTION``): counted completion ends the review phase, while an
+    additional seat still running keeps its own physical custody (the late flag). Pure, so a row it leaves equal
+    needs no save."""
     from dataclasses import replace
     from ouroboros.review_custody import _row_is_pending
-    from ouroboros.review_state import update_state
+    from ouroboros.review_ledger import counted_pending
+    from ouroboros.review_state import _utc_now, counted_roster_rows
+
+    rows = {str(row.get("slot_id") or ""): copy.deepcopy(row) for row in current.triad_raw_results}
+    wrapper = copy.deepcopy(current.scope_raw_result) if isinstance(current.scope_raw_result, dict) else {}
+    listed = isinstance(wrapper.get("raw_results"), list)
+    scope = {str(row.get("slot_id") or row.get("slot") or ""): row for row in (
+        wrapper["raw_results"] if listed else [wrapper] if wrapper else []) if isinstance(row, dict)}
+    for incoming in seats:
+        roster = scope if incoming.get("surface") == "scope_review" and scope else rows
+        _merge_seat(roster, {key: value for key, value in incoming.items() if key != "surface"})
+    if listed:
+        wrapper["raw_results"] = list(scope.values())
+    elif wrapper:  # a historical single scope row is its own wrapper
+        wrapper = next(iter(scope.values()), wrapper)
+    roster = [*rows.values(), *scope.values()]
+    status, phase = ((_SETTLED_PROJECTION.get(current.tool_name, ("reviewed", "review")))
+                     if roster and current.status == "reviewing" and not counted_pending(roster)
+                     and not any(row.get("pending_invocation_id") for row in counted_roster_rows(roster))
+                     else (current.status, current.phase))
+    return replace(current, triad_raw_results=list(rows.values()), scope_raw_result=wrapper,
+                   late_result_pending=any(_row_is_pending(row) for row in roster), status=status, phase=phase,
+                   finished_ts=current.finished_ts or (_utc_now() if status != current.status else ""),
+                   review_record_id=record["record_id"])
+
+
+def settle_collected_attempt(root, attempt, seats, record):
+    """Merge each collected seat against the current attempt under its state lock (``_settled_row``). The record's
+    verdict and every recorded answer stay as they are, and a collection that changes nothing (a periodic replay of a
+    wave still waiting, a seat already merged) writes nothing (``ReviewStateMutation``)."""
+    from ouroboros.review_state import ReviewStateMutation, update_state
 
     def mutate(state):
         for index, current in enumerate(state.attempts):
             if (current.repo_key, current.tool_name, current.task_id, current.attempt) != (
                     attempt.repo_key, attempt.tool_name, attempt.task_id, attempt.attempt):
                 continue
-            rows = {str(row.get("slot_id") or ""): copy.deepcopy(row) for row in current.triad_raw_results}
-            for incoming in seats:
-                key = str(incoming.get("slot_id") or "")
-                old = rows.get(key) or {}
-                if old and not _row_is_pending(old) and _row_is_pending(incoming):
-                    continue
-                if old.get("operation_id") and incoming.get("operation_id") not in (None, "", old["operation_id"]):
-                    continue
-                if old.get("superseded_operation_ids") and incoming.get("operation_id") != old.get("operation_id"):
-                    continue  # a seat reopened by an explicit continuation takes only its successor's outcome
-                rows[key] = {**old, **incoming}
-            state.attempts[index] = replace(current, triad_raw_results=list(rows.values()),
-                late_result_pending=any(_row_is_pending(row) for row in rows.values()),
-                review_record_id=record["record_id"])
-            return
+            state.attempts[index] = settled = _settled_row(current, seats, record)
+            return ReviewStateMutation(None, changed=settled != current)
         raise LookupError("the paid attempt disappeared before collection was saved")
     update_state(root, mutate)
+
+
+def settled_record(ledger, attempt, record=None):
+    """The attempt's bound review record, read without a lock from the ``ledger`` drive (or the ``record`` a caller
+    already read by that id), once its counted seats positively settled, whatever their verdict (an additional seat
+    may still run): ``None`` unless that exact record is this attempt's (its task, and for a commit its staged
+    fingerprint), names at least one counted seat, each under its operation and none open, and an attempt that still
+    keeps its rows holds those same counted operations closed. A missing, foreign, unreadable, empty or reopened
+    record, or a counted seat still open or unbound on either side, proves nothing."""
+    from ouroboros.review_custody import _row_is_pending
+    from ouroboros.review_ledger import counted_pending, load_record
+    from ouroboros.review_state import _attempt_review_roster_rows, counted_roster_rows
+
+    record_id = str(getattr(attempt, "review_record_id", "") or "")
+    try:
+        record = record if record is not None and record.get("record_id") == record_id else (
+            load_record(ledger, record_id) if record_id else None)
+    except (OSError, ValueError):
+        return None
+    seats = counted_roster_rows([row for row in (record or {}).get("rows") or [] if isinstance(row, dict)])
+    if (not record or record.get("task_id") != attempt.task_id or not seats or counted_pending(record.get("rows") or [])
+            or not all(seat.get("operation_id") for seat in seats)
+            or (attempt.tool_name in _SETTLED_PROJECTION
+                and (record.get("fingerprints") or {}).get("binding") != attempt.pre_review_fingerprint)):
+        return None
+    confirmed = {str(seat.get("seat_id") or ""): str(seat["operation_id"]) for seat in seats}
+    own = counted_roster_rows(_attempt_review_roster_rows(attempt))
+    if not attempt.raw_stripped and (not own or any(_row_is_pending(row) or confirmed.get(
+            str(row.get("slot_id") or row.get("slot") or "")) != str(row.get("operation_id") or "") for row in own)):
+        return None
+    return record
+
+
+def settled_seats(ledger, attempt):
+    """A persisted attempt's own closed seats that its bound settled record (``settled_record``) confirms:
+    ``(record, seats)``, every counted row and each additional row already terminal under the operation its record
+    seat names (a running adviser keeps its custody and is left out); ``None`` when the record proves nothing or the
+    attempt keeps no rows of its own."""
+    from ouroboros.review_custody import _row_is_pending
+    from ouroboros.review_ledger import seat_open
+    from ouroboros.review_state import counted_roster_rows
+
+    record = settled_record(ledger, attempt)
+    if record is None or attempt.raw_stripped:
+        return None
+    confirmed = {str(seat.get("seat_id") or ""): str(seat.get("operation_id") or "")
+                 for seat in record.get("rows") or [] if not seat_open(seat)}
+    wrapper = attempt.scope_raw_result if isinstance(attempt.scope_raw_result, dict) else {}
+    scope = wrapper.get("raw_results") if isinstance(wrapper.get("raw_results"), list) else [wrapper] if wrapper else []
+    rows = [{**row, "surface": surface} for surface, group in (
+        ("multi_model_review", attempt.triad_raw_results or []), ("scope_review", scope)) for row in group
+        if isinstance(row, dict)]
+    counted = counted_roster_rows(rows)
+    closed = [row for row in rows if row not in counted and not _row_is_pending(row) and row.get("operation_id")
+              and confirmed.get(str(row.get("slot_id") or row.get("slot") or "")) == str(row["operation_id"])]
+    return record, counted + closed
+
+
+def custody_settled(ledger, attempt):
+    """Read-only, for a consumer that only judges custody (Storage's checkout hold): whether exact settled evidence
+    (``settled_seats``) leaves no seat of this attempt running, so a start token left on a closed row holds nothing.
+    A running adviser, or an open or unproven seat, keeps the attempt's custody."""
+    from ouroboros.review_state import _attempt_review_roster_rows
+
+    found = settled_seats(ledger, attempt)
+    return found is not None and len(found[1]) == len(_attempt_review_roster_rows(attempt))
+
+
+def late_write_check(ctx, phase, record_id, triad, scope):
+    """The test a ``late_wait`` write (``commit_gate._record_commit_attempt``) applies to its row under the state lock
+    (``review_state_custody.late_write_outlived``). Its bound record is read here, once, outside that lock: for a row
+    compacted out of the recent history, the operations that settled record confirms closed stand for its rows."""
+    from ouroboros.review_ledger import ledger_root, load_record, seat_open
+    from ouroboros.review_state import late_write_outlived
+
+    if phase != "late_wait":
+        return lambda existing: False
+    try:
+        record = load_record(ledger_root(ctx), str(record_id)) if record_id else None
+    except (OSError, ValueError):
+        record = None
+
+    def outlived(existing):
+        bound = record if record and existing is not None and existing.review_record_id == record.get("record_id") else None
+        settled = settled_record(None, existing, bound) if bound and existing.raw_stripped else None
+        operations = None if settled is None else {
+            (str(seat.get("seat_id") or ""), str(seat.get("operation_id") or "")) for seat in settled.get("rows") or []
+            if seat.get("operation_id") and not seat_open(seat)
+            and "not_dispatched" not in (seat.get("status"), seat.get("operation_state"))}
+        return late_write_outlived(existing, triad, scope, operations)
+    return outlived
+
+
+def repair_settled_attempt(root, ledger, attempt):
+    """The exact repair of one persisted attempt a consumer would otherwise hold or refuse: a row an earlier
+    collector settled without its lifecycle projection, or with a closed seat's start token still on it. The bound
+    record is read here from ``ledger``, outside the shared-state lock (``settled_seats``); the writer then rechecks
+    the current row in ``root`` at its own mutation. A row that already says what its record proves (a settled row
+    beside a still-running adviser) is returned as read, with no lock and no save. The row as saved, or ``None``
+    when nothing proves it settled."""
+    from ouroboros.review_state import load_state
+
+    found = settled_seats(ledger, attempt)
+    if found is None:
+        return None
+    if _settled_row(attempt, found[1], found[0]) == attempt:
+        return attempt
+    try:
+        settle_collected_attempt(root, attempt, found[1], found[0])
+        return load_state(pathlib.Path(root)).latest_attempt_for(
+            repo_key=attempt.repo_key, tool_name=attempt.tool_name, task_id=attempt.task_id, attempt=int(attempt.attempt or 0))
+    except (OSError, LookupError, ValueError):
+        log.warning("settled review attempt %s could not be repaired", attempt.attempt, exc_info=True)
+        return None
+
+
+def repaired_commit_source(ctx, source):
+    """``source`` after its exact repair (``repair_settled_attempt``), for a resolver about to refuse its phase."""
+    from ouroboros.review_ledger import ledger_root
+
+    return repair_settled_attempt(pathlib.Path(ctx.drive_root), ledger_root(ctx), source) or source
+
+
+def stripped_source_bound(ctx, source, *, locked):
+    """Whether an attempt whose inline rows were compacted (``raw_stripped``) still names its exact review for an
+    explicit author continuation: outside the state lock, its bound settled record (``settled_record``), which keeps
+    every seat's retained source; inside the lock, only the source this same call bound outside it."""
+    if locked:
+        bound = getattr(ctx, "_author_commit_source", None)
+        return bound is not None and (bound.repo_key, bound.tool_name, bound.task_id, bound.attempt) == (
+            source.repo_key, source.tool_name, source.task_id, source.attempt)
+    from ouroboros.review_ledger import ledger_root
+
+    return settled_record(ledger_root(ctx), source) is not None
+
+
+def repair_held_commit_attempts(ctx):
+    """Before the overlap check reads them under its lock: this repository's active commit attempts with no counted
+    seat open, the shape an earlier collector left when it settled the seats but not the row's projection or a
+    closed seat's start token. Each gets its exact repair (``repair_settled_attempt``); anything unproven stays."""
+    from ouroboros.review_ledger import counted_pending, ledger_root
+    from ouroboros.review_state import _attempt_review_roster_rows, load_state, make_repo_key
+
+    root = pathlib.Path(ctx.drive_root)
+    try:
+        held = [item for item in load_state(root).get_active_attempts(repo_key=make_repo_key(pathlib.Path(ctx.repo_dir)))
+                if item.tool_name in _SETTLED_PROJECTION and item.review_record_id
+                and _attempt_review_roster_rows(item) and not counted_pending(_attempt_review_roster_rows(item))]
+    except Exception:
+        log.warning("held commit attempts could not be read for their exact repair", exc_info=True)
+        return
+    for item in held:
+        repair_settled_attempt(root, ledger_root(ctx), item)

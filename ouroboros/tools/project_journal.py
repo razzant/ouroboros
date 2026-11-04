@@ -75,6 +75,13 @@ def _scope_authority(ctx: ToolContext) -> tuple[str, Dict[str, Any]]:
     return ("root" if root else "scoped"), metadata
 
 
+def may_publish_focus(ctx: ToolContext) -> bool:
+    """Whether this actor's focus line is its own to publish: an independent root, never a child or a
+    speaker (``_update_focus``'s rule; its one exception, a Project-bound inline speaker, is Presence).
+    The round's facts name an absent line only for such an actor in the pool (a live direct turn answers in chat)."""
+    return _scope_authority(ctx)[0] == "root"
+
+
 def _resolve_project_id(ctx: ToolContext, explicit: Any, *, write: bool = False) -> tuple[str, str]:
     own_value = placed_project_id(ctx)
     if own_value not in (None, "") and not isinstance(own_value, str):
@@ -824,7 +831,8 @@ def get_tools() -> List[ToolEntry]:
             {
                 "name": "update_focus",
                 "description": (
-                    "Optionally publish one short line about this live root's work. Your context facts repeat "
+                    "Optionally publish one short line about this live root's work, the place for routine "
+                    "progress. Your context facts repeat "
                     "its dated text as working thought, never an owner directive; revise it when your focus changes. "
                     "OTHER live roots see it, and the owner reads it under the work's name, while this task is "
                     "unsettled (waits included), until replaced; "
