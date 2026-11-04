@@ -17,6 +17,9 @@ barrier outside Q (``publish_awaiting_rows``) and, under Q again, hands the turn
 the ready spare when one is idle, else to the disclosed degraded executor on a
 physical fact; otherwise the row awaits a carrier and ``reconcile_conversation_lane``
 dispatches it on the tick that has one. No carrier holds a row that is not on disk.
+A row admitted ``reserved`` (a live call's: ``inline_carrier.run_inline_turn``) awaits no
+carrier at all: it is ``_inline_bind`` from its admission until ``start_inline_turn``
+binds it, and no dispatch door passes it to a carrier or the degraded executor meanwhile.
 The carrier runs the turn through the same ``handle_task`` path as any task; its
 frames carry chat and lineage by value (``log_addressing``), its phases reach the
 census as ``direct_turn_phase`` frames, and its owner waits use the pooled protocol.
@@ -154,9 +157,12 @@ def ready_idle_carrier(*, for_owner: bool = True) -> Any:
 
 
 def awaiting_turns() -> List[Dict[str, Any]]:
-    """Under Q: the lane's RUNNING rows no carrier holds yet, oldest first."""
+    """Under Q: the lane's RUNNING rows awaiting a carrier (none holds them yet), oldest first.
+
+    A row reserved for the inline executor that admitted it (``_inline_bind``) awaits none: no door here
+    hands it out, counts it as wanting a carrier or starts the degraded executor for it."""
     rows = [meta for meta in _pool().RUNNING.values()
-            if conversation_row(meta) and meta.get("worker_id") is None
+            if conversation_row(meta) and meta.get("worker_id") is None and not meta.get("_inline_bind")
             and not isinstance(meta.get("_terminal_file_recovery"), dict)]
     return sorted(rows, key=lambda meta: float(meta.get("started_at") or 0.0))
 
@@ -199,7 +205,8 @@ def _unpublished(rows: List[Dict[str, Any]]) -> set:
 
 
 def publish_awaiting_rows() -> bool:
-    """Outside Q: one admission barrier for every awaiting row not on disk yet; True when none stays unpublished.
+    """Outside Q: one admission barrier for every lane row not on disk yet (a carrier awaited, or its own
+    executor's bind); True when none stays unpublished.
 
     The capture happens under Q inside the barrier and covers every row marked before it, so only the rows
     collected before the barrier lose their mark; a row admitted meanwhile keeps it for the next pass.
@@ -208,7 +215,7 @@ def publish_awaiting_rows() -> bool:
     from supervisor import queue
 
     with _queue_lock:
-        pending = [meta for meta in awaiting_turns() if meta.get("_unpublished")]
+        pending = [meta for meta in _pool().RUNNING.values() if conversation_row(meta) and meta.get("_unpublished")]
     if not pending:
         return True
     if queue.publish_queue_snapshot(reason="conversation_turn_admitted") is False:
@@ -226,15 +233,16 @@ def dispatch_admitted_turn(meta: Dict[str, Any]) -> None:
 
     Under Q again the row takes a ready idle carrier, else the disclosed degraded executor on a physical
     fact (``worker_chat_lane._degrade_if_no_carrier_can_start``; ``InlineExecutorUnavailable`` propagates
-    to the caller when its thread cannot start); a row a Stop took meanwhile, one already held, or one whose
-    barrier failed is left as it is (the lane's next pass looks again).
+    to the caller when its thread cannot start); a row a Stop took meanwhile, one already held or reserved for
+    its own executor, or one whose barrier failed is left as it is (the lane's next pass looks again).
     """
     from supervisor.worker_chat_lane import _degrade_if_no_carrier_can_start
 
     publish_awaiting_rows()
     task_id = str(meta["task"].get("id") or "")
     with _queue_lock:
-        if _pool().RUNNING.get(task_id) is not meta or meta.get("worker_id") is not None or meta.get("_unpublished"):
+        if (_pool().RUNNING.get(task_id) is not meta or meta.get("worker_id") is not None
+                or meta.get("_unpublished") or meta.get("_inline_bind")):
             return
         slot = ready_idle_carrier(for_owner=owner_turn(meta["task"]))
         if slot is not None and hand_to_carrier(meta, slot):
@@ -272,7 +280,7 @@ def live_turn_count() -> int:
 # ---------------------------------------------------------------------------
 
 def admit_turn(task: Dict[str, Any], *, chat_id: int, client_message_id: str = "", quiet: bool = False,
-               reply_expected: bool = False) -> Dict[str, Any]:
+               reply_expected: bool = False, reserved: bool = False) -> Dict[str, Any]:
     """Under Q and the repo-writer gate lock (the caller's): the RUNNING row, marked, awaiting its barrier.
 
     Durable intent before effects: the row is written here and published by ``dispatch_admitted_turn``
@@ -281,6 +289,9 @@ def admit_turn(task: Dict[str, Any], *, chat_id: int, client_message_id: str = "
     facts); the carrier layers attachments, Project binding, authority, contract
     and tool profile on it as its first step (``worker_chat_lane.prepare_conversation_task``).
     Returns the RUNNING meta; ``worker_id`` is None while the row awaits a carrier.
+    ``reserved``: the caller binds the turn to its own inline executor (``inline_carrier.start_inline_turn``,
+    which clears the mark); until then the row is ``_inline_bind``, awaiting no carrier, so the tick's lane
+    pass in the barrier window hands it to none.
     """
     from ouroboros.task_status import execution_owner_record
     from supervisor import queue
@@ -302,6 +313,8 @@ def admit_turn(task: Dict[str, Any], *, chat_id: int, client_message_id: str = "
     meta = _awaiting_row(row_task, attempt=1, client_message_id=client_message_id, reply_expected=reply_expected,
                          fresh_identity=task.get("_fresh_identity"))
     meta["_unpublished"] = True  # on disk only once its barrier lands (``dispatch_admitted_turn``, outside Q)
+    if reserved:
+        meta["_inline_bind"] = True
     pool.RUNNING[task_id] = meta
     queue.persist_queue_snapshot(reason="conversation_turn_admitted")  # a mark under Q; the barrier follows outside it
     return meta
