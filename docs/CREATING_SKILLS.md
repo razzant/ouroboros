@@ -1362,7 +1362,8 @@ deduplicate by `output_ref`, never by text, since an identical correction is new
   keep waiting in the gate.
 - **Interrupted turn.** A turn whose carrier ended before it answered (a Stop's kill, a crash, a
   pool stop) answers HTTP 503 `{ok: false, error, code: "presence_turn_interrupted", disposition:
-  "retry"}`; one that could not start at all answers 503 `presence_turn_not_started`, also
+  "retry"}`; one that could not start at all (a server whose worker pool has not started yet, at
+  boot or after a whole-table stop, included) answers 503 `presence_turn_not_started`, also
   `retry`. Resend the same event unchanged: the Host answers it from the turn's durable record (a
   replay, or the retained refusal), never by regenerating an ended attempt.
 - **Polls.** A version-2 turn's poll echoes `continuation_version: 2`; turns admitted at other

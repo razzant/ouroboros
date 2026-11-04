@@ -174,12 +174,19 @@ def dispatch_presence_turn(execution: PresenceTurnExecution, *, drive_root: Path
 
     The Host keeps authentication, capture, dedup and its in-flight reservation; the gate
     (conversation lock, ``OUROBOROS_PRESENCE_MAX_ACTIVE`` slot) is acquired by the carrier.
+    In the server process the lane's carriers exist only for a started pool generation: before it
+    arms (the boot, a whole-table stop) the turn is not started at all, a typed retry for the
+    connector (``PresenceTurnNotStarted``), never the degraded executor on a server thread and never
+    a row published over a saved queue this generation has not restored (#1952). A Host serving
+    without a supervisor queue of its own keeps the disclosed degraded executor (2A).
     """
     from supervisor import queue, workers
-    from supervisor.conversation_lane import LANE_CONVERSATION, admit_turn, replenish_after_claim
+    from supervisor.conversation_lane import LANE_CONVERSATION, admit_turn, armed, replenish_after_claim
     from supervisor.inline_carrier import InlineExecutorUnavailable
     from supervisor.worker_chat_lane import _degrade_if_no_carrier_can_start
 
+    if not armed() and queue.owns_live_queue(drive_root):
+        raise PresenceTurnNotStarted("the worker pool of this server has not started yet; retry the event")
     if not gate_wait:
         # Version 2 never waits in the gate, and a busy gate costs no lane admission (no row, no barrier, no
         # spare claimed, no carrier spawned): one non-blocking pass of the carrier's own acquisition, released.
