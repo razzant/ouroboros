@@ -708,34 +708,32 @@ def test_plan_task_no_deadline_does_not_skip(harness, monkeypatch, seconds):
 
 
 # ---------------------------------------------------------------------------
-# 1.6 — schedule_subagent slot visibility
+# 1.6 — schedule_subagent reads pool counts, and does not decide from them
 
 
-def test_subagent_slot_note_reads_snapshot(tmp_path):
-    from ouroboros.tools.control import _subagent_slot_note
+def test_engine_pool_line_reads_snapshot_counts(tmp_path):
+    from ouroboros.engine_facts import engine_pool_line
 
     ctx = _ctx(tmp_path)
-    ctx.task_metadata = {"work_kind": "owner"}
     state = tmp_path / "data" / "state"
     state.mkdir(parents=True, exist_ok=True)
     snap = {
-        "running": [
-            {"id": "c1", "task": {"delegation_role": "subagent", "root_task_id": "root-1"}},
-            {"id": "other", "task": {"delegation_role": "subagent", "root_task_id": "root-2"}},
-        ],
-        "pending": [
-            {"id": "c2", "task": {"delegation_role": "subagent", "root_task_id": "root-1"}},
-        ],
+        "active_worker_count": 4, "worker_total": 8,
+        "assignable_idle_workers": 2, "pending_count": 3,
+        "running": [], "pending": [],
     }
     (state / "queue_snapshot.json").write_text(json.dumps(snap), encoding="utf-8")
-    note = _subagent_slot_note(ctx, "root-1")
-    assert "1/" in note and "1 queued" in note
+    note = engine_pool_line(ctx.drive_root)
+    assert "active 4" in note and "total 8" in note
+    assert "assignable idle 2" in note and "pending 3" in note
+    assert "tree slots" not in note
 
 
-def test_subagent_slot_note_fail_soft_without_snapshot(tmp_path):
-    from ouroboros.tools.control import _subagent_slot_note
+def test_engine_pool_line_names_a_missing_snapshot(tmp_path):
+    from ouroboros.engine_facts import engine_pool_line
 
-    assert _subagent_slot_note(_ctx(tmp_path), "root-1") == " [tree slot observation unavailable; current occupancy is unknown]"
+    note = engine_pool_line(_ctx(tmp_path).drive_root)
+    assert "pool: not observed" in note and "unknown" not in note
 
 
 # ---------------------------------------------------------------------------

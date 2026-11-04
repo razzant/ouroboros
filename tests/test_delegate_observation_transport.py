@@ -286,7 +286,7 @@ def test_observation_read_failure_carries_the_gateway_typed_code(tmp_path, monke
         "daemon_unreachable", "ReadTimeout", observation_timeout=True,
         observation_reason="observation_read_timeout"))
     slow = json.loads(delegate._delegate_wait(ctx, "run-dead", observation_only=True))
-    assert slow["status"] == "observation_pending"
+    assert slow["status"] == "observation_pending" and "primary" in slow["engine_pool"]
     assert slow["reason"] == "observation_read_timeout"
     refusals.append(gateway_module.ClaudexorUnavailable("http_401", "unauthorized", status_code=401))
     refused = json.loads(delegate._delegate_wait(ctx, "run-dead", observation_only=True))
