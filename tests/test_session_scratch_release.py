@@ -13,10 +13,11 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import tempfile
 
 import pytest
 
-from ouroboros import delegate_custody, headless, owner_keep, task_custody, test_environment
+from ouroboros import delegate_custody, headless, owner_keep, session_scratch, task_custody, test_environment
 from ouroboros.workspace_preflight import (
     OPEN_SCRATCH_DIR, SESSION_SCRATCH_DIRNAME, release_finished_scratch, session_service_directories,
 )
@@ -47,11 +48,20 @@ def _record(data, task_id="task-1", key="snap-1"):
     return data / "task_drives" / task_id / SESSION_SCRATCH_DIRNAME / key / "scratch.json"
 
 
+def _hold(data, reason, task_id="task-1", key="snap-1"):
+    """The typed hold one kept record reports: its class, the record folder and since the note was written."""
+    from ouroboros.session_scratch import _iso
+
+    note = data / OPEN_SCRATCH_DIR / task_id / f"{key}.json"
+    return {"class": reason, "count": 1, "example": str(_record(data, task_id, key).parent),
+            "since": _iso(note.lstat().st_mtime)}
+
+
 def test_a_finished_task_releases_its_scratch_on_the_custody_pass_long_before_its_drive_retires(tmp_path):
     data, scratch = _started(tmp_path)
     drive = data / "task_drives" / "task-1"
     report = release_finished_scratch(data, OVER)
-    assert report == {"released": [str(_record(data).parent.resolve())], "kept": 0, "errors": []}
+    assert report == {"released": [str(_record(data).parent.resolve())], "holds": [], "errors": []}
     assert _notes(data) == [] and not (data / OPEN_SCRATCH_DIR / "task-1").exists()
     assert drive.is_dir() and not _record(data).parent.exists()  # the drive itself waits for its own term
     [entry] = (data / "state" / "custody_trash").iterdir()
@@ -59,9 +69,9 @@ def test_a_finished_task_releases_its_scratch_on_the_custody_pass_long_before_it
     assert (entry / SESSION_SCRATCH_DIRNAME / "snap-1" / "scratch.json").is_file()
     assert not any((data / "state" / "custody_staging").iterdir())
     assert scratch.is_dir()  # the delete is the maintenance child's, off the serving process
-    assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "retained": []}
+    assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "holds": []}
     assert not scratch.exists() and drive.is_dir()
-    assert release_finished_scratch(data, OVER) == {"released": [], "kept": 0, "errors": []}
+    assert release_finished_scratch(data, OVER) == {"released": [], "holds": [], "errors": []}
 
 
 @pytest.mark.parametrize("still_open", ["run", "start_request"])
@@ -73,7 +83,7 @@ def test_a_spared_delegated_run_keeps_its_finished_tasks_scratch_until_it_settle
         else:
             assert delegate_custody.emit(data, delegate_custody.START_REQUESTED, {
                 "invocation_id": "inv-1", "task_id": "task-1", "request": {"prompt": "x"}})
-        assert release_finished_scratch(data, OVER) == {"released": [], "kept": 1, "errors": []}
+        assert release_finished_scratch(data, OVER) == {"released": [], "holds": [_hold(data, "run_open")], "errors": []}
         assert _record(data).is_file() and (scratch / "env" / "pyvenv.cfg").is_file()
         if still_open == "run":
             assert delegate_custody.emit(data, delegate_custody.SETTLED, {
@@ -201,7 +211,7 @@ def test_an_unreadable_custody_store_keeps_the_scratch(tmp_path, monkeypatch):
         raise OSError("the store could not be read")
 
     monkeypatch.setattr(delegate_custody_current, "task_snapshot", unreadable)
-    assert release_finished_scratch(data, OVER) == {"released": [], "kept": 1, "errors": []}
+    assert release_finished_scratch(data, OVER) == {"released": [], "holds": [_hold(data, "custody_unreadable")], "errors": []}
     assert _record(data).is_file() and scratch.is_dir()
 
 
@@ -258,11 +268,13 @@ def test_a_linked_note_is_never_read_or_removed(tmp_path):
     assert outside.read_text(encoding="utf-8") == '{"unrelated": true}\n'
 
 
-@pytest.mark.parametrize("status, live", [("completed", True), ("completed", None), ("running", False)],
+@pytest.mark.parametrize("status, live, reason", [("completed", True, "task_live"), ("completed", None, "liveness_unknown"),
+                                                  ("running", False, "task_not_terminal")],
                          ids=["live", "unknown", "unfinished"])
-def test_a_task_not_proven_over_keeps_its_scratch_for_its_next_start(tmp_path, status, live):
+def test_a_task_not_proven_over_keeps_its_scratch_for_its_next_start(tmp_path, status, live, reason):
     data, scratch = _started(tmp_path, status=status)
-    assert release_finished_scratch(data, lambda _task_id: live) == {"released": [], "kept": 1, "errors": []}
+    assert release_finished_scratch(data, lambda _task_id: live) == {"released": [], "holds": [_hold(data, reason)],
+                                                                      "errors": []}
     assert _notes(data) == ["task-1/snap-1.json"] and _record(data).is_file()
     assert not (data / "state" / "custody_trash").exists()
     assert (scratch / "env" / "pyvenv.cfg").is_file()
@@ -272,7 +284,7 @@ def test_a_task_not_proven_over_keeps_its_scratch_for_its_next_start(tmp_path, s
 def test_the_owner_keep_holds_a_finished_tasks_scratch_until_released(tmp_path):
     data, scratch = _started(tmp_path)
     assert owner_keep.set_owner_keep(data, "task-1", keep=True, source={"basis": "test"})["keep"] is True
-    assert release_finished_scratch(data, OVER) == {"released": [], "kept": 1, "errors": []}
+    assert release_finished_scratch(data, OVER) == {"released": [], "holds": [_hold(data, "owner_keep")], "errors": []}
     assert _notes(data) == ["task-1/snap-1.json"] and scratch.is_dir()
     assert owner_keep.set_owner_keep(data, "task-1", keep=False, source={"basis": "test"})["keep"] is False
     assert release_finished_scratch(data, OVER)["released"]
@@ -284,7 +296,7 @@ def test_a_note_whose_record_retired_with_its_drive_is_dropped(tmp_path):
     data, scratch = _started(tmp_path)
     assert task_custody.settle_child_drive(data, "task-1", data / "task_drives" / "task-1", live=OVER,
                                            admission_rollback=True)["status"] == "removed"
-    assert release_finished_scratch(data, OVER) == {"released": [], "kept": 0, "errors": []}
+    assert release_finished_scratch(data, OVER) == {"released": [], "holds": [], "errors": []}
     assert _notes(data) == []
     assert task_custody.remove_custody_trash(data)["removed"] == 1 and not scratch.exists()
 
@@ -334,14 +346,73 @@ def test_the_custody_pass_releases_only_on_the_supervisors_negative_probe(tmp_pa
     assert scratch.is_dir()  # deleted by the maintenance child, not on this pass
 
 
-def test_a_retained_scratch_stays_in_place_and_holds_no_trash(tmp_path):
+def test_a_record_under_the_legacy_tmp_parent_still_releases_and_a_foreign_parent_never(tmp_path, monkeypatch):
+    """O3: new scratch allocates under ``session_scratch_parent``; a record made before that parent existed
+    names ``default_temp_parent`` and still releases; a record naming any other parent is refused, not deleted."""
+    legacy = tmp_path / "legacy-tmp"
+    legacy.mkdir()
+    monkeypatch.setattr(test_environment, "default_temp_parent", lambda: legacy)
+    data, scratch = _started(tmp_path)
+    assert scratch.parent == test_environment.session_scratch_parent().resolve() != legacy.resolve()
+    old = pathlib.Path(tempfile.mkdtemp(prefix="obs-", dir=legacy))
+    (old / "env").mkdir()
+    seen = old.lstat()
+    _record(data).write_text(json.dumps({"schema_version": 1, "path": str(old), "identity": [seen.st_dev, seen.st_ino]}),
+                             encoding="utf-8")
+    assert release_finished_scratch(data, OVER)["released"]
+    assert task_custody.remove_custody_trash(data)["removed"] == 1 and not old.exists() and scratch.is_dir()
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    stray = pathlib.Path(tempfile.mkdtemp(prefix="obs-", dir=foreign))
+    seen = stray.lstat()
+    _record(data, "task-2").parent.mkdir(parents=True)
+    _record(data, "task-2").write_text(json.dumps({"schema_version": 1, "path": str(stray),
+                                                   "identity": [seen.st_dev, seen.st_ino]}), encoding="utf-8")
+    with pytest.raises(OSError, match="invalid scratch ownership record"):
+        session_scratch.release_session_scratch(data / "task_drives" / "task-2")
+    assert stray.is_dir()
+
+
+@pytest.mark.parametrize("reason", ["the live process table could not be enumerated", "debug retention"],
+                         ids=["process-proof-failed", "debug-keep"])
+def test_a_retained_scratch_keeps_its_record_as_a_visible_hold_until_its_marker_goes(tmp_path, reason):
+    """#2708: a producer's retention marker never deletes the scratch, and no longer drops its owner: the
+    record stays in the trash as the hold ``producer_retained`` (the marker's words, since it was written),
+    re-read every run, and the scratch goes only once the marker is gone, a failed process proof and a
+    deliberate debug keep alike; nothing else distinguishes them here."""
+    from ouroboros.session_scratch import _iso
+
     data, scratch = _started(tmp_path)
     nested = scratch / "t" / "ob-run.noindex"  # a test run inside the scratch that could not prove its exit
     nested.mkdir(parents=True)
-    reason = "the live process table could not be enumerated"
     assert test_environment.retain_tree(nested, reason)
+    marker = nested / test_environment.RETENTION_MARKER
     assert release_finished_scratch(data, OVER)["released"]
-    assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "retained": [str(scratch)]}
-    assert (scratch / "env" / "pyvenv.cfg").is_file() and (nested / test_environment.RETENTION_MARKER).is_file()
-    assert not list((data / "state" / "custody_trash").iterdir())
-    assert retire_synthetic_retention(nested, reason)
+    hold = {"class": "producer_retained", "count": 1, "example": f"{scratch}: {reason}", "since": _iso(marker.lstat().st_mtime)}
+    assert task_custody.remove_custody_trash(data) == {"removed": 0, "stuck": {}, "holds": [hold]}
+    assert (scratch / "env" / "pyvenv.cfg").is_file() and marker.is_file()
+    [entry] = (data / "state" / "custody_trash").iterdir()  # the record survives, in its own handoff entry
+    assert entry.name.startswith("task-1+scratch-") and (entry / SESSION_SCRATCH_DIRNAME / "snap-1" / "scratch.json").is_file()
+    assert task_custody.remove_custody_trash(data) == {"removed": 0, "stuck": {}, "holds": [hold]}  # unchanged: silent
+    assert retire_synthetic_retention(nested, reason)  # the producer's proof holds (or the owner removed the marker)
+    assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "holds": []}
+    assert not scratch.exists() and not list((data / "state" / "custody_trash").iterdir())
+
+
+def test_a_retained_sibling_does_not_pin_the_retired_drive_and_keeps_only_its_own_record(tmp_path):
+    """A drive whose settlement retired it goes at once; the one marked scratch inside it keeps its record in
+    a handoff entry of its own, and the drive's other scratch is deleted."""
+    data, held = _started(tmp_path)
+    plain = pathlib.Path(_prepare(tmp_path, _Catalog(GRANTED), key="snap-2").scratch)
+    reason = "producer could not prove process exit"
+    assert test_environment.retain_tree(held, reason)
+    assert task_custody.settle_child_drive(data, "task-1", data / "task_drives" / "task-1", live=OVER,
+                                           admission_rollback=True)["status"] == "removed"
+    report = task_custody.remove_custody_trash(data)
+    assert (report["removed"], report["stuck"], [hold["class"] for hold in report["holds"]]) == (1, {}, ["producer_retained"])
+    assert not plain.exists() and (held / "env" / "pyvenv.cfg").is_file()
+    [entry] = (data / "state" / "custody_trash").iterdir()
+    assert entry.name.startswith("task-1+scratch-") and (entry / SESSION_SCRATCH_DIRNAME / "snap-1" / "scratch.json").is_file()
+    assert not (data / "task_drives" / "task-1").exists()
+    assert retire_synthetic_retention(held, reason)
+    assert task_custody.remove_custody_trash(data)["removed"] == 1 and not held.exists()
