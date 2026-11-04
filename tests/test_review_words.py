@@ -233,6 +233,14 @@ def test_a_dictionary_of_error_messages_for_people_is_words_not_model_input():
     assert not compare_sources([(PATH, "", chat)]).changes
 
 
+def test_a_system_row_for_the_owner_is_words_though_it_names_a_role():
+    old, new = "the stop request was retracted from its mailbox", "the stop request was withdrawn"
+    row = f'send({{"type": "send_message", "role": "system", "text": "{old}"}})\n'
+    assert pairs(compare_sources([(PATH, row, row.replace(old, new))])) == [(old, new)]
+    turn = 'reply = {"role": "assistant", "content": "Read the input carefully", "name": "reviewer"}\n'
+    assert not compare_sources([(PATH, "", turn)]).changes
+
+
 @pytest.mark.parametrize("path,source", [
     ("app.py", 'LABEL = "Resume"'),
     ("src/client.js", "const label = 'Resume';"),

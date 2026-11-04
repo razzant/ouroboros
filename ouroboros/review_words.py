@@ -69,6 +69,9 @@ def words_material(source: str = "the diff's file/blob identities") -> list[str]
     return [sample.render(section_budget(), source), sample.omission(source)]
 
 
+_CHAT_TURN_KEYS = frozenset({"role", "content", "name", "tool_calls", "tool_call_id"})
+
+
 def has_words(path: str) -> bool:
     """A source whose literals a person may read; a minified bundle is machine output, nobody's words."""
     return path.endswith((".py", ".js", ".html")) and not path.endswith(".min.js")
@@ -124,7 +127,7 @@ def _python_literals(path: str, source: str) -> list[Literal]:
 
     def model_input(name):
         # A prompt's name identifies model context, never words in its prose; `messages` does only as a call's
-        # argument (a dictionary of error messages for people is words), and a chat turn by its `role` key.
+        # argument (a dictionary of error messages for people is words), and a chat turn by its API shape.
         return bool(re.search(r"(?:^|_)prompt(?:_|$)", name, re.I))
 
     def machine_call(node):
@@ -186,8 +189,9 @@ def _python_literals(path: str, source: str) -> list[Literal]:
             walk(node.value, (*place, ast.unparse(target)))
             return
         if isinstance(node, ast.Dict):
-            if any(isinstance(key, ast.Constant) and key.value == "role" for key in node.keys):
-                return  # a chat turn for a model
+            keys = {key.value for key in node.keys if isinstance(key, ast.Constant)}
+            if {"role", "content"} <= keys <= _CHAT_TURN_KEYS and len(keys) == len(node.keys):
+                return  # a model's chat turn; a System row to the owner carries `text`, not `content`
             for key, value in zip(node.keys, node.values):
                 walk(value, (*place, ast.unparse(key) if key else "**"))
             return
