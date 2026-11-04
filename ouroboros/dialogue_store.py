@@ -18,7 +18,6 @@ A row's provider thread keeps each element once (``shared``); a reader that cons
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import heapq
 import json
 import logging
@@ -29,8 +28,7 @@ import sqlite3
 import uuid
 from typing import Any, Callable, Dict, Iterable, Iterator, List, NamedTuple, Optional, Tuple
 
-from ouroboros import store, store_empty
-from ouroboros.queue_observation import SHARED_KEY
+from ouroboros import shared_values, store, store_empty
 from ouroboros.store import StoreBusy, StoreError, StoreLost, StoreMigrating, TIER_ENFORCED, TIER_NAME
 from ouroboros.utils import utc_now_iso
 
@@ -496,17 +494,17 @@ def _unstamped(row: Dict[str, Any]) -> Dict[str, Any]:
 # --- provider threads held once ----------------------------------------------------------------
 # A connector copies the thread an event belongs to into ``transport.conversation`` (Slack
 # ``thread_history.data.messages``, GitHub ``history.rows``, a ``transport_queue``'s ``events``), so a thread
-# of a hundred messages stored its first one a hundred times. ``append`` keeps every dict that is an element
-# of a list reached there through dicts (not the elements' insides) once, in ``shared`` under the sha256 of
-# its exact ``encode`` text, and stores ``{"$shared": <sha256>}`` in its place (``queue_observation``'s token)
-# with the whole row's identity last (``ROW_SHA_KEY``). Nothing else in the row changes, so every SQL path and
-# every reader of other fields reads it as before; a reader that consumes the thread expands it
-# (``whole_body``, ``whole_rows``, ``whole_line``), and a reference the table does not answer is an
-# unreadable row, never a shorter thread. Created on first use; an older body ignores it. Rows are
-# biography and so are their elements: nothing removes one. Rows written before stay whole.
+# of a hundred messages stored its first one a hundred times. ``append`` applies the ``shared_values`` rule
+# with ``transport.conversation`` as its scope root: every dict that is an element of a list reached there
+# through dicts is kept once in ``shared``, as its exact ``encode`` text under that text's sha256, and the
+# stored row holds the token in its place and its whole row's identity last (``ROW_SHA_KEY``). Nothing else
+# in the row changes, so every SQL path and every reader of other fields reads it as before; a reader that
+# consumes the thread expands it (``whole_body``, ``whole_rows``, ``whole_line``), and a reference the
+# table does not answer is an unreadable row (``StoreLost``), never a shorter thread. Created on first use;
+# an older body ignores it. Rows are biography and so are their elements: nothing removes one. Rows
+# written before stay whole.
 SHARED_DDL = "CREATE TABLE IF NOT EXISTS shared (sha256 TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID"
-_TOKEN = re.compile(r'\{"\$shared": "([0-9a-f]{64})"\}')
-_MARKER = re.compile(r', "\$row_sha256": "[0-9a-f]{64}"\}\Z')
+_MARKER = re.compile(rb', "\$row_sha256": "[0-9a-f]{64}"\}\Z')
 
 
 def _thread(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -515,93 +513,64 @@ def _thread(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return conversation if isinstance(conversation, dict) else None
 
 
-def _rebuilt(value: Dict[str, Any], element: Callable[[Dict[str, Any]], Dict[str, Any]]) -> Dict[str, Any]:
-    """``value`` rebuilt through its dicts with each dict element of a list met there as ``element`` gives it."""
-    rebuilt: Dict[str, Any] = {}
-    for key, item in value.items():
-        if isinstance(item, dict):
-            rebuilt[key] = _rebuilt(item, element)
-        elif isinstance(item, list):
-            rebuilt[key] = [element(entry) if isinstance(entry, dict) else entry for entry in item]
-        else:
-            rebuilt[key] = item
-    return rebuilt
+def _encoded(value: Any) -> bytes:
+    return encode(value).encode("utf-8")
 
 
 def thread_references(conversation: Any) -> List[str]:
-    """The digests a conversation names by reference where a stored thread keeps its elements (empty when whole)."""
+    """The digests a conversation names where a stored thread keeps its elements (empty when it is whole)."""
     found: List[str] = []
-    for item in conversation.values() if isinstance(conversation, dict) else ():
-        if isinstance(item, dict):
-            found += thread_references(item)
-        elif isinstance(item, list):
-            found += [entry[SHARED_KEY] for entry in item if isinstance(entry, dict) and len(entry) == 1
-                      and isinstance(entry.get(SHARED_KEY), str)]
+    shared_values.expand(conversation, lambda digest: found.append(digest) or shared_values.token(digest))
     return found
 
 
 def _by_reference(row: Dict[str, Any], body: str) -> Tuple[str, Dict[str, str]]:
-    """The text ``append`` stores for ``row`` (its line is ``body``) and the elements that text names: ``body``
-    and none when the thread has no element, or when content already reads as a reference or the references
+    """The text ``append`` stores for ``row`` (its line is ``body``) and the elements it names: ``body`` and none
+    when the thread shares nothing, or when the row's own content reads as a reference so that the references
     would not give ``body`` back byte for byte (that row stays whole, as every row was)."""
-    conversation, parts, placed = _thread(row), {}, []
-
-    def part(element: Dict[str, Any]) -> Dict[str, str]:
-        text = encode(element)
-        placed.append(hashlib.sha256(text.encode("utf-8")).hexdigest())
-        parts[placed[-1]] = text
-        return {SHARED_KEY: placed[-1]}
-
-    if conversation is None:
+    conversation = _thread(row)
+    thread = shared_values.tokenize(conversation, _encoded) if conversation is not None else None
+    if thread is None:
         return body, {}
-    skeleton = {**row, "transport": {**row["transport"], "conversation": _rebuilt(conversation, part)}}
-    if not placed:
-        return body, {}
-    held = encode(skeleton)
-    if held.count('"$shared": ') != len(placed) or _spliced(held, parts) != body:
+    skeleton = {**row, "transport": {**row["transport"], "conversation": json.loads(thread.skeleton)}}
+    try:
+        exact = shared_values.splice(_encoded(skeleton), thread.parts) == body.encode("utf-8")
+    except shared_values.SharedValueMissing:  # a value shaped as a reference elsewhere in the row
+        exact = False
+    if not exact:
         return body, {}
     from ouroboros.chat_chain import source_row_id
 
-    return encode({**skeleton, ROW_SHA_KEY: source_row_id(row)}), parts
+    return encode({**skeleton, ROW_SHA_KEY: source_row_id(row)}), {
+        digest: part.decode("utf-8") for digest, part in thread.parts.items()}
 
 
-def _parts(conn: sqlite3.Connection, digests: Iterable[str]) -> Dict[str, str]:
-    """The texts of ``digests`` in one step; a digest the table does not hold is simply absent."""
+def _parts(conn: sqlite3.Connection, digests: Iterable[str]) -> Callable[[str], bytes]:
+    """The resolver of ``digests``, read in one step: a digest the table does not hold is an unreadable row."""
     wanted = sorted(set(digests))
-    if not wanted:
-        return {}
-    return {record[0]: record[1] for record in conn.execute(
-        "SELECT sha256, value FROM shared WHERE sha256 IN (SELECT value FROM json_each(?))", (json.dumps(wanted),))}
+    held = {record[0]: record[1].encode("utf-8") for record in conn.execute(
+        "SELECT sha256, value FROM shared WHERE sha256 IN (SELECT value FROM json_each(?))",
+        (json.dumps(wanted),))} if wanted else {}
+
+    def resolve(digest: str) -> bytes:
+        if digest not in held:
+            raise StoreLost(f"dialogue row names a thread element the store does not hold: {digest!r}")
+        return held[digest]
+
+    return resolve
 
 
-def _missing(digest: Any) -> StoreLost:
-    return StoreLost(f"dialogue row names a thread element the store does not hold: {digest!r}")
-
-
-def _spliced(text: str, parts: Dict[str, str]) -> str:
-    try:
-        return _TOKEN.sub(lambda match: parts[match[1]], text)
-    except KeyError as exc:
-        raise _missing(exc.args[0]) from None
-
-
-def _whole_row(row: Dict[str, Any], parts: Dict[str, str]) -> Dict[str, Any]:
+def _whole_row(row: Dict[str, Any], resolve: Callable[[str], bytes]) -> Dict[str, Any]:
     """A decoded stored row as it was written (``place_arrivals.SourceProjection`` keeps its projection)."""
     from ouroboros.place_arrivals import SourceProjection
 
     if ROW_SHA_KEY not in row:
         return row
     if isinstance(row, SourceProjection):
-        return SourceProjection(_whole_row(row.source_body, parts), row["context_source_ref"])
-
-    def element(token: Dict[str, Any]) -> Dict[str, Any]:
-        digest = token.get(SHARED_KEY) if len(token) == 1 else None
-        if digest not in parts:
-            raise _missing(digest)
-        return json.loads(parts[digest])
-
+        return SourceProjection(_whole_row(row.source_body, resolve), row["context_source_ref"])
     whole = {key: value for key, value in row.items() if key != ROW_SHA_KEY}
-    whole["transport"] = {**row["transport"], "conversation": _rebuilt(_thread(row) or {}, element)}
+    whole["transport"] = {**row["transport"], "conversation": shared_values.expand(
+        _thread(row), lambda digest: json.loads(resolve(digest)))}
     return whole
 
 
@@ -614,10 +583,12 @@ def whole_body(conn: sqlite3.Connection, body: str) -> Dict[str, Any]:
 
 def whole_line(conn: sqlite3.Connection, body: str) -> str:
     """A stored body as the exact line its row was written as (the rollback export's bytes)."""
-    marker = _MARKER.search(body)
+    raw = body.encode("utf-8")
+    marker = _MARKER.search(raw)
     if marker is None:
         return body
-    return _spliced(body[:marker.start()] + "}", _parts(conn, _TOKEN.findall(body)))
+    skeleton = raw[:marker.start()] + b"}"
+    return shared_values.splice(skeleton, _parts(conn, shared_values.token_digests(skeleton))).decode("utf-8")
 
 
 def whole_rows(root: Any, rows: Iterable["Row"]) -> List["Row"]:
@@ -627,8 +598,8 @@ def whole_rows(root: Any, rows: Iterable["Row"]) -> List["Row"]:
     if not held:
         return rows
     with transaction(root, write=False) as conn:
-        parts = _parts(conn, held)
-    return [entry._replace(row=_whole_row(entry.row, parts)) for entry in rows]
+        resolve = _parts(conn, held)
+    return [entry._replace(row=_whole_row(entry.row, resolve)) for entry in rows]
 
 
 def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Dict[str, Any]] = None,
@@ -724,20 +695,20 @@ def revise_text(root: Any, stream: str, seq: int, text: str) -> Dict[str, Any]:
         if existing is None:
             raise ValueError("dialogue row missing for text revision")
         row = decode(existing["body"])
-        parts = _parts(conn, thread_references(_thread(row))) if ROW_SHA_KEY in row else None
+        resolve = _parts(conn, thread_references(_thread(row))) if ROW_SHA_KEY in row else None
         if row.get("text") != text:
             row["text"] = text
-            if parts is not None:
+            if resolve is not None:
                 from ouroboros.chat_chain import source_row_id
 
-                row[ROW_SHA_KEY] = source_row_id(_whole_row(row, parts))
+                row[ROW_SHA_KEY] = source_row_id(_whole_row(row, resolve))
             conn.execute("UPDATE dialogue SET body=? WHERE stream=? AND seq=?", (encode(row), stream, seq))
             if stream == "chat":
                 _set_meta(conn, "chat_text_revision", int(_meta(conn, "chat_text_revision") or 0) + 1)
             columns = facts(row)
             if columns["chat_id"] is not None:
                 touch_room(conn, columns["chat_id"], None, columns["ts"], 1)
-        return row if parts is None else _whole_row(row, parts)
+        return row if resolve is None else _whole_row(row, resolve)
 
 
 def _receipt(conn: sqlite3.Connection, existing: sqlite3.Row) -> Receipt:

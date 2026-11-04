@@ -184,10 +184,13 @@ def test_a_row_without_a_thread_and_a_row_written_before_stay_whole_and_read_as_
 
 
 def test_content_that_already_reads_as_a_reference_keeps_its_row_whole(tmp_path):
-    conversation = {**slack(2), "meta": {"$shared": "c" * 64}}  # outside the thread's positions
+    conversation = {**slack(2), "meta": {"$shared": "c" * 64}}  # in the thread, outside its positions
     row = presence_row(conversation)
     receipt = ds.append(tmp_path, "chat", row)
     assert _stored(tmp_path, receipt.seq) == ds.encode(row) and dialogue_test.chat_rows(tmp_path) == [row]
+    elsewhere = presence_row(slack(2), cmid="tok-1", ts="2026-11-04T09:59:59+00:00", meta={"$shared": "e" * 64})
+    receipt = ds.append(tmp_path, "chat", elsewhere)  # beside the thread, in the row's own fields
+    assert _stored(tmp_path, receipt.seq) == ds.encode(elsewhere) and dialogue_test.chat_rows(tmp_path)[-1] == elsewhere
     # At a position it is simply an element: held once like any other, given back exactly.
     tokenish = presence_row({"history": {"rows": [{"$shared": "d" * 64}, {"id": 1}]}}, cmid="tok-2",
                             ts="2026-11-04T10:00:01+00:00")
