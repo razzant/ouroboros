@@ -21,6 +21,7 @@ class _Api:
 
 
 class _Rec:
+    bot_id = ""
     sent = []; edited = []; _id = [1000]
     muted = []
     def __init__(self, token, **kwargs): self.on_message = kwargs.get("on_message")
@@ -209,7 +210,7 @@ def test_a_terminal_answer_reaches_telegram_alone_and_keeps_every_reply(tmp_path
     assert "sent to owner chat" in _send_user_message(tool_ctx, "A later ongoing reply.")
     delivery._handle_send_message(events.get_nowait(), host)
     assert _Rec.sent[-1][1] == "A later ongoing reply." and _Rec.edited == []
-    assert plugin._get_silent_msg(api, 42) == 0
+    assert plugin._get_silent_msg(api, "", 42) == 0
 
 
 def test_routing_refusal_speaks_in_the_third_person(tmp_path, monkeypatch):
@@ -230,7 +231,7 @@ def test_a_landed_receipt_stays_silent_unless_a_file_was_not_attached(tmp_path, 
     """A landed act publishes nothing here either; only a file the host could not attach earns one
     plain line, sent fresh: it never edits or takes over silent mode's tracked answer."""
     plugin, api = _setup(tmp_path, monkeypatch, TELEGRAM_SILENT_MODE=silent)
-    plugin._set_silent_msg(api, 42, 555)
+    plugin._set_silent_msg(api, "", 42, 555)
     handle = plugin._make_outbound(api)
     ack = {"annotation_type": "routing_ack", "status": "delivered", "action": "steer_task", "target": "t1",
            "attachment_manifest": [{"ordinal": 0, "label": "a.png", "status": "staged"}]}
@@ -239,7 +240,7 @@ def test_a_landed_receipt_stays_silent_unless_a_file_was_not_attached(tmp_path, 
     ack["attachment_manifest"].append({"ordinal": 1, "label": "b.pdf", "status": "rejected", "reason": "source_missing"})
     asyncio.run(handle(ack))
     assert [(row[1], row[2]) for row in _Rec.sent] == [("Not attached to the task: b.pdf", "")]
-    assert _Rec.edited == [] and plugin._get_silent_msg(api, 42) == 555
+    assert _Rec.edited == [] and plugin._get_silent_msg(api, "", 42) == 555
 
 
 def test_the_not_attached_line_speaks_the_install_language(tmp_path, monkeypatch):

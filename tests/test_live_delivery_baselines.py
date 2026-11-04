@@ -118,6 +118,7 @@ def test_serving_price_uses_same_basis_as_receipt(host_world, record_property, v
                 assert isinstance(call.preparing.exception(), RealtimeSetupError)
                 assert call.preparing.exception().code == 'context_capacity'
                 await call.check_preparation()
+                await call.release_serving()  # the connection's delivery worker
             finally:
                 await call.close_preparation()
             assert len(sent) == 1, 'already-held canonical pixels are not new delivery growth'

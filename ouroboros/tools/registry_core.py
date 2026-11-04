@@ -380,6 +380,14 @@ class ToolRegistry:
     def set_context(self, ctx: ToolContext) -> None:
         self._ctx = ctx
 
+    def copy_for(self, ctx: ToolContext) -> "ToolRegistry":
+        """This catalog bound to ``ctx``; handlers the copy rebinds (``override_handler``) stay its own."""
+        view = copy.copy(self)
+        view._ctx = ctx
+        view._entries, view._scoped_entries = dict(self._entries), dict(self._scoped_entries)
+        view._entry_origins, view._handler_overrides = dict(self._entry_origins), dict(self._handler_overrides)
+        return view
+
     def register(self, entry: ToolEntry, *, origin: str = "") -> None:
         """Register one task-scoped entry without mutating the base catalog."""
         scoped_origin = str(origin or "").strip()

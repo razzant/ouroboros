@@ -36,7 +36,7 @@ HOST_ONLY_MESSAGE_KEYS = frozenset({
     REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY, STABLE_PREFIX_BLOCKS_KEY,
     "cache_control", "_context_capsule", "_evicted_image", "_caption", "_source_path", "_source_sha256",
     "_review_image_id", "_original_image_url", "acceptance_observation", "_acceptance_observation", "review_feedback",
-    "_capture_source", "_canonical", "_requested_look", "_call_frame_source", "_call_frame_digest",
+    "_capture_source", "_canonical", "_requested_look", "_tool_answer", "_call_frame_source", "_call_frame_digest",
 })
 DELIVERY_MESSAGE_KEYS = frozenset({"_call_frame_source", "_call_frame_digest"})
 

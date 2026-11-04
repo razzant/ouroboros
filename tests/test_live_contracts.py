@@ -162,9 +162,14 @@ def test_plugin_api_2_3_unites_memory_and_voice_without_losing_prior_minimums():
 def test_new_fit_ports_keep_old_host_defaults():
     import asyncio
     from ouroboros.contracts.live_conversation import LiveHost
+    observed = []
     class OldHost(LiveHost):
-        pass
+        async def observe_context(self, row):
+            observed.append(row)
     old = OldHost()
+    asyncio.run(old.record_fact('A peer joined.'))
+    assert observed == [{'role': 'user', 'content': '[Host fact; not owner words]\nA peer joined.'}], (
+        'a call fact is never silently lost on a host without its own record')
     assert old.fitted_frame_rows() == ()
     assert asyncio.run(old.delivery_fits([], [])) is False
     assert asyncio.run(old.tool_result_fallback([], [])) is None

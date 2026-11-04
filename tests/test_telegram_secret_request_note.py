@@ -35,7 +35,7 @@ def test_a_secret_request_is_a_note_without_keyboard_wait_line_or_reply_prompt(t
     client = _LAST_CLIENT[-1]
     assert client.panels == []
     assert client.sent == [(42, f"Question: {_HINT}\nA reply here is not sent to Ouroboros.")]
-    record = plugin.telegram_quiz.quiz_for_message(api, 42, 1)
+    record = plugin.telegram_quiz.quiz_for_message(api, "", 42, 1)
     assert record["secret"] is True and record["options"] == []
     assert "Reply to this message" not in client.sent[0][1] and "Waiting for your answer" not in client.sent[0][1]
 
@@ -186,7 +186,7 @@ def test_ordinary_replies_and_media_keep_their_paths(tmp_path, monkeypatch, mode
     api = _send_note(plugin, tmp_path, monkeypatch)
     asyncio.run(plugin._make_quiz(api)({**_EVENT, "quiz_id": "q-plain", "task_id": "task-2", "question": "Which db?",
                                          "options": [{"label": "a"}], "secret_request": None}))
-    record = plugin.telegram_quiz.quiz_for_token(api, plugin.telegram_quiz.mint_token("task-2", "q-plain"))
+    record = plugin.telegram_quiz.quiz_for_token(api, "", plugin.telegram_quiz.mint_token("task-2", "q-plain"))
     assert record and not record.get("secret")
     plain = record["message_id"]
     # A text reply to an ordinary question is its answer, as before.

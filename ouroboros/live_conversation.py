@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import functools
 import json
 import logging
 import math
@@ -19,8 +18,8 @@ import weakref
 from contextlib import contextmanager
 from dataclasses import replace
 
-from ouroboros.contracts.live_conversation import LiveConfig, LiveOptions, ToolBatch
-from ouroboros.contracts.realtime import RealtimeSetupError, canonical_json, sha256
+from ouroboros.contracts.live_conversation import LiveConfig, LiveOptions
+from ouroboros.contracts.realtime import RealtimeSetupError, canonical_json
 from ouroboros.realtime_setup import _LoopWork, loaded_provider, rows_for_engine
 from ouroboros.realtime_session import joined
 from ouroboros.realtime_turn import RealtimeTurn
@@ -390,7 +389,7 @@ class ConversationHost:
         ctx._execution_trace = self.trace
         self.executor = StatefulToolExecutor()
         self.tool_jobs = set()
-        self.executed, self.captioned = {}, {}
+        self.executed, self.captioned, self.requested = {}, {}, {}
         self.wire_path = task_artifact_dir_path(ctx.drive_root, ctx.task_id, create=True) / "conversation-wire.jsonl"
         self.wire = WireJournal(self.wire_path)
         self.connection_number = 0
@@ -398,7 +397,8 @@ class ConversationHost:
         self._connection_tasks = []
         self._connection_view = None
         self._prepared_successor = None
-        self._tools_lock = asyncio.Lock()
+        # History (rows, schemas) is locked briefly; effects queue on their own lane, taken first.
+        self._tools_lock, self._effect_lock = asyncio.Lock(), asyncio.Lock()
         self._rows_lock = asyncio.Lock()
         self.incoming = self.event_queue = None
         self.owner_seen = set()
@@ -468,6 +468,9 @@ class ConversationHost:
                 controls = _drain_incoming_messages(rows, self.incoming, self.ctx.drive_root,
                     self.ctx.task_id, self.event_queue, self.owner_seen, owner_ctx=self.ctx,
                     defer_content_ack=True)
+                if controls.get("finalize_now") or controls.get("owner_stop"):
+                    # The joined drain owns this control even if its connection waiter is cancelled.
+                    self._end_reason = ("owner_stop", "ordinary owner control ended the call")
                 self.messages.extend(rows)
                 if rows:
                     # Call-owned before the cancellable connection worker gets
@@ -476,7 +479,12 @@ class ConversationHost:
                     self._context_changed()
                     self.checkpoint("ready")
                 return controls
-            controls = await joined(asyncio.to_thread(drain))
+            try:
+                controls = await joined(asyncio.to_thread(drain))
+            except asyncio.CancelledError:
+                # Joined, so the rows are whole and canonical; only their waiter is gone.
+                self._cancelled_mail = rows_for_engine(rows, vision=self.model.vision, schemas=self.schemas)
+                raise
             if controls.get("finalize_now") or controls.get("owner_stop"):
                 raise RealtimeSetupError("owner_stop", "ordinary owner control ended the call")
             # A live delta reaches the engine as it can take it: an image attached in the room is a caption for a
@@ -487,6 +495,11 @@ class ConversationHost:
         pending = getattr(self, '_pending_mail_answer', False)
         self._pending_mail_answer = False
         return pending
+
+    def take_mail_rows(self):
+        rows = getattr(self, '_cancelled_mail', [])
+        self._cancelled_mail = []
+        return rows
 
     def observe(self, direction, raw):
         self.wire.append({"connection": self.connection_number, "direction": direction, "raw": raw,
@@ -603,15 +616,23 @@ class ConversationHost:
     async def session(self, consume, options: LiveOptions):
         from ouroboros.live_connections import PreparedConnection
         self.hub.pause_input()
-        lease = PreparedConnection(self, options)
-        try:
-            result = await lease.run(consume)
-            if result or self._prepared_successor is None:
-                await joined(lease.task)
-            return result
-        except BaseException:
-            await lease.close()
-            raise
+        while True:
+            lease = PreparedConnection(self, options)
+            try:
+                result = await lease.run(consume)
+                if result or self._prepared_successor is None:
+                    await joined(lease.task)
+                return result
+            except RealtimeSetupError as exc:
+                await lease.close()
+                view = getattr(lease, "view", None)
+                # A spent native handle cannot be opened twice: the caller continues fresh.
+                if exc.code != "prepared_stale" or options.resume_handle or view is not None and self._connection_view is view:
+                    raise
+                # History changed while this connection opened (a finished tool batch): fit it again.
+            except BaseException:
+                await lease.close()
+                raise
 
     def _response_args(self, response_id):
         return dict(engine=self.turn.route.accounting_provider, model=self.turn.model,
@@ -730,13 +751,15 @@ class ConversationHost:
 
     def context_view_pending(self):
         from ouroboros.live_context_view import pending_context_view
-        return pending_context_view(self)
+        return not self.tool_jobs and pending_context_view(self)
 
     async def apply_context_view(self):
         from ouroboros.live_context_view import apply_context_view
         from ouroboros.live_context_view import drain_exposure
         await drain_exposure(self)
         async with self._tools_lock:
+            if self.tool_jobs:  # a running effect's unit and owner dialogue land first
+                return False
             return await joined(asyncio.to_thread(apply_context_view, self))
 
     async def observe_context(self, row):
@@ -764,89 +787,23 @@ class ConversationHost:
             raise RealtimeSetupError("frame_retention", "call frame could not be retained")
         return saved["path"]
 
-    async def tool_batch(self, calls):
-        """Serialize ordinary and feature tools; retain changes to existing rows too."""
-        from ouroboros.live_context_view import drain_exposure
-        await drain_exposure(self)
+    async def record_fact(self, text):
+        from ouroboros.context_budget import bound_host_row
         async with self._tools_lock:
-            fresh, cached, proposed = [], [], {}
-            for call in calls:
-                key, identity = call["id"], canonical_json(call)
-                previous = proposed.get(key)
-                if previous is not None:
-                    if previous != identity:
-                        raise RealtimeSetupError("tool_identity", "conflicting call ids in one provider batch")
-                    continue
-                proposed[key] = identity
-                if key in self.executed:
-                    if self.executed[key][0] != identity:
-                        raise RealtimeSetupError("tool_identity", "provider reused a call id with different arguments")
-                    cached.extend(copy.deepcopy(self.executed[key][1]))
-                else:
-                    fresh.append(call)
-            silent = [call["id"] for call in calls if (self.call_tools.get(call["function"]["name"]) is not None
-                       and self.call_tools[call["function"]["name"]].silent)]
-            if not fresh:
-                return ToolBatch(rows_for_engine(cached, vision=self.model.vision, schemas=self.schemas), silent=silent)
-            await self.check()
+            self.messages.append(bound_host_row("call_fact", "[Host fact; not owner words]\n" + str(text)))
+            self._context_changed()
 
-            async def run():
-                from ouroboros.loop import handle_tool_calls, _measure_tool_result_batch, _resolve_loop_max_rounds
-                from ouroboros.live_context_view import project_call_tool_results
-                from ouroboros.tool_call_log import invocation_scope
-                self.rounds += 1
-                maximum = _resolve_loop_max_rounds(self.ctx)
-                if maximum is not None and self.rounds > maximum:
-                    raise RealtimeSetupError("round_limit", "ordinary tool round limit reached")
-                self.messages.append({"role": "assistant", "content": "", "tool_calls": fresh})
-                self._context_changed()
-                # A compact content receipt detects even in-place image/view edits,
-                # without retaining a second copy of the complete conversation.
-                before = tuple(sha256(canonical_json(row)) for row in self.messages)
-                await joined(asyncio.to_thread(self.checkpoint, "pre_effect"))
-                ordinary = [call for call in fresh if call["function"]["name"] not in self.call_tools]
-                if ordinary:
-                    try:
-                        await joined(asyncio.to_thread(handle_tool_calls, ordinary, self.tools,
-                            self.ctx.drive_root / "logs", self.ctx.task_id, self.executor, self.messages, self.trace,
-                            self.ctx.emit_progress_fn, tool_schemas=self.schemas,
-                            project_results=functools.partial(project_call_tool_results, self), fit_candidate=functools.partial(
-                                _measure_tool_result_batch, self.ctx, round_id=self.ctx.task_id + ":call-tools")))
-                    finally:
-                        # Ordinary tools also edit existing rows and enable schemas.
-                        self._context_changed()
-                for call in fresh:
-                    tool = self.call_tools.get(call["function"]["name"])
-                    if tool is None:
-                        continue
-                    try:
-                        args = json.loads(call["function"]["arguments"])
-                        if not isinstance(args, dict): raise ValueError("arguments must be an object")
-                        with invocation_scope({"tool_call_id": call["id"]}):
-                            result = await tool.handler(self, args)
-                    except (ValueError, TypeError) as exc:
-                        result = f"Call tool argument error: {exc}"
-                    self.messages.append({"role": "tool", "tool_call_id": call["id"], "content": str(result)})
-                    self._context_changed()
-                    self.trace["tool_calls"].append({"name": tool.name, "call_id": call["id"], "result": str(result)})
-                changes = [copy.deepcopy(row) for i, row in enumerate(self.messages)
-                           if i >= len(before) or sha256(canonical_json(row)) != before[i]]
-                for call in fresh:
-                    self.executed[call["id"]] = (canonical_json(call), [
-                        row for row in changes if row.get("tool_call_id") == call["id"]])
-                await joined(asyncio.to_thread(self.checkpoint, "post_batch"))
-                return ToolBatch(rows_for_engine(cached + changes, vision=self.model.vision, schemas=self.schemas), silent=silent)
+    async def tool_requested(self, call):
+        from ouroboros.live_context_view import drain_exposure
+        from ouroboros.live_tool_lane import record_request
+        await drain_exposure(self)  # the answer that carried this call belongs to the view it binds
+        async with self._tools_lock:
+            record_request(self, call)
 
-            job = asyncio.create_task(run())
-            self.tool_jobs.add(job)
-            try:
-                return await asyncio.shield(job)
-            except asyncio.CancelledError:
-                await joined(job)
-                raise
-            finally:
-                if job.done():
-                    self.tool_jobs.discard(job)
+    async def tool_batch(self, calls):
+        """Serialize ordinary and feature tools on the effect lane; history stays writable meanwhile."""
+        from ouroboros.live_tool_lane import tool_batch
+        return await tool_batch(self, calls)
 
     async def caption(self, speaker, text, item_id, *, heard=False, played_ms=0, interrupted=False, completed=False,
                       replace=False, speaker_label=""):
@@ -952,6 +909,20 @@ class ConversationHost:
             if cancelled is not None:
                 raise cancelled
 
+    async def _final_history(self):
+        """A requested call that never started says so; images take their text form once."""
+        from ouroboros.context_images import evict_stale_image_blocks, render_image_placeholders
+        from ouroboros.live_tool_lane import unrun_requests
+        async with self._tools_lock:
+            unrun = unrun_requests(self)
+            self.messages.extend(unrun)
+            changed = evict_stale_image_blocks(self.messages, owner_mode=self.plan.preferred_mode, readable_only=True)
+            rendered = render_image_placeholders(self.messages)  # text has the core image reader
+            if unrun or changed or rendered != self.messages:
+                self.messages[:] = rendered
+                self._context_changed()
+                await joined(asyncio.to_thread(self.checkpoint, "ready"))
+
     async def finish(self):
         """End call-lifetime custody, after sessions and owned work have drained."""
         from ouroboros.live_usage import abandon_live_response
@@ -964,25 +935,21 @@ class ConversationHost:
         if pending_connections:
             await joined(asyncio.gather(*pending_connections, return_exceptions=True))
         await drain_exposure(self)
-        from ouroboros.context_images import evict_stale_image_blocks, render_image_placeholders
-        changed = evict_stale_image_blocks(self.messages, owner_mode=self.plan.preferred_mode, readable_only=True)
-        rendered = render_image_placeholders(self.messages)  # text has the core image reader
-        if changed or rendered != self.messages:
-            self.messages[:] = rendered
-            self._context_changed()
-            await joined(asyncio.to_thread(self.checkpoint, "ready"))
         with _active_hosts_lock:
             _active_hosts.discard(self)
         try:
             try:
                 for job in list(self.tool_jobs):
-                    await joined(job)
+                    await joined(job)  # a started effect records its unit before history takes its final form
             finally:
                 self.tool_jobs.clear()
                 try:
-                    for key, attempt in list(self.responses.items()):
-                        abandon_live_response(attempt, reason="call_ended_without_receipt")
-                        del self.responses[key]
+                    try:
+                        await self._final_history()
+                    finally:
+                        for key, attempt in list(self.responses.items()):
+                            abandon_live_response(attempt, reason="call_ended_without_receipt")
+                            del self.responses[key]
                 finally:
                     self._response_text_estimates.clear()
                     self._density_input = 0

@@ -162,7 +162,18 @@ def test_thinking_language_tool_through_driver_waits_for_playback_and_idle(host_
             assert setup["inputAudioTranscription"] == {"languageCodes": ["ru-RU", "en-US"]}
             assert setup["sessionResumption"] == {}
             assert host.state["greeted"]
-            assert not any("clientContent" in event for event in wires[call.session].sent)  # No second greeting.
+            # The call's turn ended IDLE with no response begun after the result, so the successor owes it the one
+            # neutral continuation pointer: that is its only clientContent, and the opening is never sent again.
+            stage = "fresh language refit continuation"
+            successor = wires[call.session]
+            await until(lambda: any("clientContent" in event for event in successor.sent))
+            texts = [[part.get("text", "") for turn in event["clientContent"]["turns"] for part in turn["parts"]]
+                     for wire in wires.values() for event in wire.sent if "clientContent" in event]
+            continuation = [part.get("text", "") for event in successor.sent if "clientContent" in event
+                            for turn in event["clientContent"]["turns"] for part in turn["parts"]]
+            assert len(continuation) == 1 and "The requested tool batch returned" in continuation[0], continuation
+            assert sum(host.opening in text for parts in texts for text in parts) == 1  # the first connection's opening
+            assert host.opening not in continuation[0]
         except Exception as exc:
             sent = [[list(event) for event in wire.sent] for wire in wires.values() if wire.sent]
             raise AssertionError(f"Gemini language scenario failed at {stage}; sent frame types={sent}") from exc

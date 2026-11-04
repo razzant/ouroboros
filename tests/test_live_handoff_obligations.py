@@ -316,9 +316,9 @@ def test_handoff_mail_offer_keeps_custody_until_its_write_succeeds(host_world, m
             run.provider.script.append(('say', 'Old connection answered the spoken owner turn.'))
             old.input_end('owner-holds-mail-switch', 'Synthetic spoken turn before the handoff.')
             await run.wait(lambda: run.host.connection_number == (3 if break_offer else 2))
+            # Quiet can precede the offer's actual write. Observe its answer, not a scheduling allowance.
+            await run.wait(lambda: bool(run.wire.spoken), 30)
             await run.quiet()
-            # Allow the normal offer worker to process an event-loop turn after quiet.
-            await asyncio.sleep(.1)
             assert any(text in str(row) for row in run.host.messages)
             assert len(run.wire.spoken) == 1, dict(
                 broken=broken, spoken=run.wire.spoken, pending=run.call.pending_offers,
