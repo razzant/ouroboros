@@ -186,7 +186,7 @@ export class ElementStub {
 export function installDom(fetchImpl = async () => ({ ok: true, json: async () => ({ active_direct_turns: [] }) })) {
     const prior = {
         document: globalThis.document, window: globalThis.window,
-        sessionStorage: globalThis.sessionStorage, fetch: globalThis.fetch,
+        sessionStorage: globalThis.sessionStorage, localStorage: globalThis.localStorage, fetch: globalThis.fetch,
         ResizeObserver: globalThis.ResizeObserver,
         requestAnimationFrame: globalThis.requestAnimationFrame,
         getComputedStyle: globalThis.getComputedStyle,
@@ -234,6 +234,9 @@ export function installDom(fetchImpl = async () => ({ ok: true, json: async () =
         setItem: (key, value) => storage.set(key, String(value)),
         removeItem: (key) => storage.delete(key),
     };
+    const persistent = new Map();
+    globalThis.localStorage = { getItem: key => persistent.get(key) || null,
+        setItem: (key, value) => persistent.set(key, String(value)), removeItem: key => persistent.delete(key) };
     globalThis.fetch = fetchImpl;
     globalThis.ResizeObserver = class { observe() {} disconnect() {} };
     globalThis.requestAnimationFrame = (fn) => { fn(); return 1; };

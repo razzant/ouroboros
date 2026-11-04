@@ -123,6 +123,8 @@ export function attachChatInputSizing(input) {
         placeholder = new MutationObserver(markStale);
         placeholder.observe(input, { attributes: true, attributeFilter: ['placeholder'] });
     }
+    const viewport = globalThis.window?.visualViewport;
+    if (measured) { viewport?.addEventListener('resize', markStale); globalThis.window?.addEventListener('resize', markStale); }
     fonts?.addEventListener('loading', fontsLoading);
     // A loading period already running sent its `loading` before this listener.
     if (fonts?.status === 'loading') fontsLoading();
@@ -142,6 +144,7 @@ export function attachChatInputSizing(input) {
             placeholder?.disconnect();
             placeholder = null;
             fonts?.removeEventListener('loading', fontsLoading);
+            if (measured) { viewport?.removeEventListener('resize', markStale); globalThis.window?.removeEventListener('resize', markStale); }
             if (queued) cancelAnimationFrame(frame);
             queued = false;
         },
