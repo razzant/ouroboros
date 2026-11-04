@@ -78,6 +78,34 @@ def host_lane(monkeypatch, root) -> None:
     monkeypatch.setattr(workers, "REPO_DIR", root / "repo")
 
 
+def booted_host_lane(monkeypatch, workers_module) -> None:
+    """Arm an installed server table whose lane carrier exhausted readiness, preserving inline authors.
+
+    The fixture has no supervisor loop, so its bus delivers Presence frames to the same handlers here;
+    other frames stay queued for inspection. Admission, degraded execution and settlement remain real.
+    """
+    from queue import Queue
+
+    from ouroboros.presence_carrier import handle_presence_turn_initial, handle_presence_turn_settled
+    from supervisor import conversation_lane
+
+    class Frames(Queue):
+        def put(self, item, *args, **kwargs):
+            kind = item.get("type") if isinstance(item, dict) else None
+            if kind in ("presence_turn_initial", "presence_turn_settled"):
+                handler = handle_presence_turn_initial if kind == "presence_turn_initial" else handle_presence_turn_settled
+                handler(item, workers_module)
+            else:
+                super().put(item, *args, **kwargs)
+
+    monkeypatch.setattr(conversation_lane, "_ARMED_TABLE", None)
+    monkeypatch.setattr(conversation_lane, "_SPAWN_REFUSED", [""])
+    conversation_lane.arm(workers_module.WORKERS)
+    install_lane_spare(workers_module).readiness_exhausted = True
+    frames = Frames()
+    monkeypatch.setattr(workers_module, "get_event_q", lambda create=True: frames)
+
+
 class _LaneFrames:
     """The test's stand-in for the supervisor's frame consumer: every frame reaches ``inner``; the
     carrier's bound facts (``direct_turn_bound``) reach the RUNNING row as ``conversation_lane`` lays them."""
