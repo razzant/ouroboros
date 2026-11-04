@@ -78,7 +78,7 @@ def _scope_authority(ctx: ToolContext) -> tuple[str, Dict[str, Any]]:
 def may_publish_focus(ctx: ToolContext) -> bool:
     """Whether this actor's focus line is its own to publish: an independent root, never a child or a
     speaker (``_update_focus``'s rule; its one exception, a Project-bound inline speaker, is Presence).
-    The round's facts name an absent line only for such an actor with a work card (never a direct turn)."""
+    The round's facts name an absent line only for such an actor in the pool (a live direct turn answers in chat)."""
     return _scope_authority(ctx)[0] == "root"
 
 

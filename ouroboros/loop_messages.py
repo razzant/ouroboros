@@ -887,9 +887,10 @@ def _own_focus_fact(ctx: Any, now: float) -> Tuple[str, str]:
     result once per preparation; no history scan, second store or focus clock: the
     line's age is computed at the row's sample instant ``now`` (``ago_text``), outside
     the identity, so a reprepare of the same row keeps its text and the cache. A root
-    that may publish (``may_publish_focus``) and has no line is told so when a work card
-    would carry one; a direct turn of Main (a reply, a wake) has no card, and a child or a
-    speaker may not publish: they are told nothing.
+    that may publish (``may_publish_focus``) and has no line is told so while the pool
+    carries it (``execution_kind``: a work card shows the line), a turn handed off by
+    ``continue_in_background`` too; a live direct turn of Main (a reply, a wake) answers
+    in chat, and a child or a speaker may not publish: they are told nothing.
     """
     from ouroboros.deadline_utils import ago_text, parse_deadline_ts
     from ouroboros.focus import compact_focus, focus_fingerprint
@@ -907,10 +908,11 @@ def _own_focus_fact(ctx: Any, now: float) -> Tuple[str, str]:
         result = load_task_result(root, task_id, strict=True)
         raw = result.get("focus") if result else None
         if raw is None:
+            from ouroboros.task_carrier import execution_kind
             from ouroboros.tools.project_journal import may_publish_focus
 
-            carded = (tool_ctx is not None and not getattr(tool_ctx, "is_direct_chat", False)
-                      and may_publish_focus(tool_ctx))
+            # The carrier, not the origin: ``is_direct_chat`` stays true after a handoff to the pool.
+            carded = tool_ctx is not None and execution_kind(tool_ctx) == "pooled" and may_publish_focus(tool_ctx)
             return "absent", ("self-authored focus: none; my human reads nothing under this work's name"
                               if carded else "")
         focus = compact_focus(raw)

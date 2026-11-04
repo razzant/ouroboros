@@ -248,11 +248,19 @@ def test_an_unreadable_authoring_time_is_said_not_guessed(tmp_path, monkeypatch)
     assert "ago" not in line.split("self-authored focus", 1)[1].split("{", 1)[0]
 
 
+_POOLED, _DIRECT = {"_execution_owner": {"kind": "pooled"}}, {"_execution_owner": {"kind": "direct"}}
+
+
 @pytest.mark.parametrize("metadata,direct,told", [
     ({"delegation_role": "root"}, False, True),  # an independent root's work card would carry a line: a fact
-    ({"delegation_role": "root"}, True, False),  # a direct turn of Main (a reply, a wake) has no card to carry one
-    ({}, True, False),  # a direct turn is a root by its door alone: still no card
-    ({"delegation_role": "subagent", "parent_task_id": "parent"}, False, False),  # a child may not publish
+    ({"delegation_role": "root", **_POOLED}, False, True),  # the same, its carrier recorded
+    # The carrier, not the origin: a direct turn handed to the pool (continue_in_background) has a card.
+    ({"delegation_role": "root", **_POOLED}, True, True),
+    (dict(_POOLED), True, True),  # a root by its door alone, handed to the pool
+    ({"delegation_role": "root"}, True, False),  # a live direct turn of Main (a reply, a wake) answers in chat
+    ({"delegation_role": "root", **_DIRECT}, True, False),  # the same, its carrier recorded
+    ({}, True, False),  # a direct turn is a root by its door alone: it still answers in chat
+    ({"delegation_role": "subagent", "parent_task_id": "parent", **_POOLED}, False, False),  # a child may not publish
     ({"delegation_role": "root", "_presence_turn": True}, False, False),  # a speaker's line is its place's
     ({}, False, False),  # no root marker is no publishing authority
 ])
