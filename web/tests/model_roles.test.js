@@ -174,8 +174,8 @@ function inertNode() {
 }
 
 test('Settings says under Main, before Save, what a new Main does to running work; no other host does', () => {
-    assert.equal(MAIN_FOLLOW_NOTE, 'Running work that follows Main uses this model at its next call. '
-        + 'The new route may need to read its full context again; work with its own model keeps it.');
+    // The words are review's (DESIGN principle 7); the note forecasts no tokens or cost (DESIGN §7).
+    assert.doesNotMatch(MAIN_FOLLOW_NOTE, /token|cost|\$|\d/i);
     const rendered = (mainNote) => {
         const host = inertNode();
         const editor = createModelRolesEditor({ hostId: 'roles', doc: { getElementById: () => host }, showContext: false, mainNote });
