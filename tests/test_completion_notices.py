@@ -129,7 +129,7 @@ def test_recorded_author_completion_and_review_obligations(trigger, enforcement,
     assert neutral is expected_neutral
     assert bool(detail) is not expected_neutral
     assert record == before
-    assert "had not signed it off" in dialogue._completion_verdict(record, {})
+    assert dialogue.TASK_CAUSE_PHRASES["author_finish"].rstrip(".") in dialogue._completion_verdict(record, {})
 
 
 def test_unavailable_review_without_an_author_completion_is_not_guessed_optional():

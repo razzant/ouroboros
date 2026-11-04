@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros.project_dialogue import TASK_CAUSE_PHRASES
+
 
 def test_progress_thought_keeps_full_content_and_existing_authorship():
     from ouroboros.agent import OuroborosAgent
@@ -561,7 +563,7 @@ def _planned_root(tmp_path, monkeypatch, enforcement, *, owner_marked=True, unre
     return loop, registry, limit_ctx, trace, record, candidate
 
 
-STOPPED = "Ouroboros stopped with unfinished work; the reviewers had not signed it off"
+STOPPED = TASK_CAUSE_PHRASES["author_stop"].rstrip(".")  # the clause; its words are review's
 STILL_OPEN = "The plan review was still open when this answer was delivered"
 UNKNOWN = "The plan record could not be read, so the state of the plan review is unknown."
 
