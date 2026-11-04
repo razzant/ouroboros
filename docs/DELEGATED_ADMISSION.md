@@ -186,7 +186,12 @@ to the immutable stored request (`execution.workspaceRoot` + `access`) at recove
 recomputed from a live engine. Older engines keep the legacy snapshot-in-`scope.root`
 shape: that host-minted snapshot declares `scope.ephemeral` and registers nothing where
 the engine accepts the field (`CLAUDEXOR_EPHEMERAL_SCOPE_MIN_VERSION`), and otherwise
-retires its one-shot registration as before.
+retires its one-shot registration as before. A target Ouroboros minted itself
+(`delegate_registration_policy.minted_root`: a folder inside a task's own drive, a review
+tree, a registry copy) is no user identity either and declares `scope.ephemeral` the same
+way; a sticky thread on such a root does so from `CLAUDEXOR_EPHEMERAL_THREAD_MIN_VERSION`,
+the engine release that sweeps the lanes those threads leave, and below it keeps the
+registration the thread is bound to.
 
 ## 3. What Ouroboros actually controls
 
