@@ -23,7 +23,7 @@ from ouroboros.cost_projection import (
 )
 
 
-@pytest.mark.parametrize("status", ["running", "scheduled", "interrupted", "completed"])
+@pytest.mark.parametrize("status", ["running", "scheduled", "interrupted", "cancel_requested", "completed"])
 def test_current_cost_refreshes_live_totals_without_rewriting_terminal_receipts(root, status):
     from ouroboros import usage_accounting as ua
     from ouroboros.cost_projection import current_cost
