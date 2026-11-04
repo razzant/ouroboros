@@ -155,7 +155,7 @@ def produced_material(ctx: Any) -> Dict[str, Any]:
                 from ouroboros.review_words import ReviewWords, section_budget
 
                 try:
-                    out["words_section"] = _workspace_words(repo, snapshot, candidates)
+                    out["words_section"] = _workspace_words(repo, snapshot, candidates, _result_words_budget())
                 except Exception as exc:
                     out["words_section"] = ReviewWords(gaps=(
                         f"workspace words ({type(exc).__name__}: {exc})",)).render(section_budget(), RESULT_WORDS_SOURCE)
@@ -167,15 +167,35 @@ def produced_material(ctx: Any) -> Dict[str, Any]:
     return out
 
 
-def _workspace_words(repo: Any, snapshot: dict, candidates: list[str]) -> str:
+def _result_words_budget() -> int:
+    """The words share a change packet takes, sized against this panel's packet rows (none: the global bound)."""
+    from ouroboros.review_records import ReviewSlot
+    from ouroboros.review_words import section_budget
+    from ouroboros.reviewer_slot_config import commit_triad_delivery, row_plan_retrieves
+    from ouroboros.tools.review import _triad_governance_usable_window
+    from ouroboros.tools.review_admission import seat_vectors
+
+    try:
+        plan = seat_vectors(commit_triad_delivery())
+    except ValueError:  # the wave refuses this pool itself; the subject keeps the global bound
+        return section_budget()
+    rows = [i for i in range(len(plan.get("models") or [])) if not row_plan_retrieves(plan, i)]
+    slots = [ReviewSlot(slot_id=plan["slot_ids"][i], model=plan["models"][i],
+                        session_profile=plan["session_profiles"][i], use_local=plan["use_local"][i]) for i in rows]
+    if not slots:
+        return section_budget()
+    return section_budget(_triad_governance_usable_window([slot.model for slot in slots], slots))
+
+
+def _workspace_words(repo: Any, snapshot: dict, candidates: list[str], budget: int) -> str:
     """Extract bounded words from attributed changes; the diff is transient, never retained."""
-    from ouroboros.review_words import section_budget, words_for_diff
+    from ouroboros.review_words import has_words, words_for_diff
     from ouroboros.tools.review_subject import _HARDENED_DIFF_FLAGS, _decode_diff, _git_bytes
 
     base = snapshot.get("base_tree") or snapshot.get("base_commit")
     if not base:
         raise ValueError("workspace diff has no recorded baseline")
-    paths = [f":(literal){path}" for path in candidates if path.endswith((".py", ".js", ".html"))]
+    paths = [f":(literal){path}" for path in candidates if has_words(path)]
     if not paths:
         return ""
     rc, raw, error = _git_bytes(repo, ["diff", *_HARDENED_DIFF_FLAGS, "--full-index", str(base), "--", *paths])
@@ -192,7 +212,7 @@ def _workspace_words(repo: Any, snapshot: dict, candidates: list[str]) -> str:
             raise ValueError(f"workspace new file diff failed: {error}")
         raw += added
     diff = _decode_diff(raw)
-    return words_for_diff(repo, diff).render(section_budget(), RESULT_WORDS_SOURCE)
+    return words_for_diff(repo, diff).render(budget, RESULT_WORDS_SOURCE)
 
 
 def _declared_effects(ctx: Any, root: Any, task_id: str, issues: List[str]) -> List[Dict[str, Any]]:

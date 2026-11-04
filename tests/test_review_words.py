@@ -381,6 +381,29 @@ def test_result_capture_keeps_only_attributed_paths_hashes_and_frozen_words(repo
     assert HEADING not in no_diff and "## Workspace diff" not in no_diff
 
 
+@pytest.mark.parametrize("window,bounded", [(1_000_000, False), (100_000, True)])
+def test_result_words_take_the_packet_rows_share_of_the_window(repo, tmp_path, monkeypatch, window, bounded):
+    from ouroboros import mutation_attribution
+    from ouroboros.tools import review, review_admission, review_result
+
+    # One packet row and one retrieving row: the packet row's window bounds the words both read.
+    plan = {"models": ["test/packet", "test/session"], "slot_ids": ["packet", "session"], "retrieves": [False, True],
+            "session_profiles": ["", ""], "use_local": [False, False]}
+    monkeypatch.setattr(review_admission, "seat_vectors", lambda _delivery: plan)
+
+    changed_repo(repo)
+    (repo / "report.html").write_text("".join(f"<p>Finding {i} reads as one sentence for the owner.</p>\n"
+                                              for i in range(4000)), encoding="utf-8")
+    snapshot = {"candidates": [PATH, "report.html"], "base_commit": git(repo, "rev-parse", "HEAD").strip()}
+    monkeypatch.setattr(mutation_attribution, "attributed_git_candidates", lambda *a, **k: snapshot)
+    monkeypatch.setattr(review, "reviewer_context_window", lambda *a, **k: window)
+    ctx = SimpleNamespace(drive_root=tmp_path / "drive", repo_dir=repo, task_id="words", task_contract={})
+    section = review_result.produced_material(ctx)["words_section"]
+    assert section.startswith(HEADING) and "Finding 0 reads" in section
+    assert ("OMISSION NOTE" in section) is bounded
+    assert len(section) <= review_result._result_words_budget() < 4 * window
+
+
 def test_result_word_capture_failure_does_not_undo_attribution(repo, tmp_path, monkeypatch):
     from ouroboros import mutation_attribution
     from ouroboros.tools import review_result, review_subject
