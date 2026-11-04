@@ -213,13 +213,15 @@ def _read(drive_root: Any) -> dict:
 def paused_places_sentence(drive_root: Any) -> str:
     """Name current pauses, including legacy imports in memory, without writing."""
     try:
-        current = _migrated_document(drive_root, _read(drive_root))
+        current = _read(drive_root)
+        migration_pending = not current.get("migration", {}).get("presence_bindings_v1")
+        current = _migrated_document(drive_root, current)
         rows = current["places"]
     except (PlaceError, OSError, ValueError):
         return "Paused places: unknown (place records could not be read)."
     labels = [row.get("label") or key for key, row in sorted(rows.items()) if row.get("state") == STATE_PAUSED]
     sentence = "Places still paused: " + ", ".join(labels) + "." if labels else ""
-    if current.get("migration", {}).get("problems"):
+    if migration_pending and current.get("migration", {}).get("problems"):
         sentence += " Paused legacy places: unknown (some old connections could not be read)."
     return sentence.strip()
 

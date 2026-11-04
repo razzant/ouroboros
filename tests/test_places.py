@@ -38,6 +38,29 @@ def test_paused_places_sentence_reads_without_migration_or_writes(tmp_path, monk
     assert (path.read_bytes() if path.exists() else None) == before
 
 
+@pytest.mark.parametrize("migration_saved", [False, True])
+def test_paused_places_legacy_warning_ends_after_persisted_migration(tmp_path, monkeypatch, migration_saved):
+    expected = paused_inventory(tmp_path, "paused")
+    binding = PresenceBinding("a" * 32, "slack-bridge", "missing-mind", PresenceEndpoint("slack", "team", "*"),
+                              PresenceEndpoint("slack", "team", "elsewhere"), False)
+    save_presence_binding(tmp_path, binding)
+    legacy = tmp_path / "state" / "presence_bindings.json"
+    legacy_bytes = legacy.read_bytes()
+    monkeypatch.setattr("ouroboros.skill_loader.find_skill", lambda *_a: None)
+    if migration_saved:
+        document = p.migrate_places(tmp_path)
+        assert document["migration"]["presence_bindings_v1"] and document["migration"]["problems"]
+    else:
+        expected += " Paused legacy places: unknown (some old connections could not be read)."
+    path = p.places_path(tmp_path)
+    before = path.read_bytes()
+    monkeypatch.setattr(p, "migrate_places", lambda *_a: pytest.fail("display persisted migration"))
+    monkeypatch.setattr(p, "update_json_locked", lambda *_a, **_k: pytest.fail("display wrote places"))
+    assert p.paused_places_sentence(tmp_path) == expected
+    assert p.paused_places_sentence(tmp_path) == expected
+    assert path.read_bytes() == before and legacy.read_bytes() == legacy_bytes
+
+
 def connect(root, **kw):
     return p.connect_place(root, connector="slack-bridge", provider="slack", account_id="team", **kw)
 
