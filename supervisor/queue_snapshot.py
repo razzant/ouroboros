@@ -131,7 +131,7 @@ def _retained_daemon_pids() -> "set[int]":
 _PENDING_FIELDS = (
     'id', 'type', 'chat_id', 'text',
     'priority', 'depth', 'description', 'objective',
-    'title', 'expected_output', 'constraints', 'role',
+    'title', 'suggested_name', 'expected_output', 'constraints', 'role',
     'context', 'parent_task_id', 'root_task_id', 'session_id',
     'actor_id', 'delegation_role', 'workspace_root', 'workspace_mode',
     'project_id', 'placement_applied_at', '_project_admission_restore_hold', 'focus', 'allowed_resources',
@@ -148,7 +148,7 @@ _PENDING_FIELDS = (
     '_attempt', 'review_reason', 'review_source_task_id', '_budget_pause',
     'budget_resumed_at', '_terminalization_retry', '_cancel_intent_authority_hold', '_owner_wait_resume',
     '_budget_pause_resume', '_budget_pause_hold', '_resume_selection', '_continuation_prepared', '_admission_owner_token',
-    '_is_direct_chat', 'detached_at', 'detached_by',
+    '_is_direct_chat', '_presence_turn', 'source', 'detached_at', 'detached_by',
     '_conversation_prepare',  # a turn saved across Restart still owes its first step in the worker that runs it
 )
 
@@ -209,7 +209,7 @@ def _fence_snapshot_running_rows(rows: Any, *, restored_ids: "set[str]") -> "lis
             continue
         try:
             stored = load_task_result(_queue().DRIVE_ROOT, task_id, strict=True) or {}
-            if presence_turn(row.get("task")) or presence_turn(stored):
+            if presence_turn(row.get("task"), _queue().DRIVE_ROOT) or presence_turn(stored, _queue().DRIVE_ROOT):
                 continue  # a correspondent's turn: its place's recovery settles it (the Presence sweep), not a fence
             if not stored:
                 # Admission writes the durable scheduled row (task_admission.py
@@ -245,7 +245,7 @@ def _fence_snapshot_running_rows(rows: Any, *, restored_ids: "set[str]") -> "lis
     return fenced
 
 
-def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stale: bool,
+def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stale: bool, certified: bool = True,
                              direct_caught: "list[str]" = (), handoffs: Optional[dict] = None) -> tuple:
     """Which snapshot rows survive the restore, and the RUNNING rows parked beside them.
 
@@ -278,7 +278,9 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
     for explicit Resume regardless of age, beside any Project verification hold.
     Returns retained rows, unseen pause ids, consumed task ids, and the roots'
     pre-park rows. Unseen pauses use those transient rows to apply the ordinary
-    latch generation rule before parking erased their prior selection.
+    latch generation rule before parking erased their prior selection. A bundle no certificate names
+    (``certified`` false: a publication that failed or died part way) may carry a writer wait its door refused
+    (``events_budget.resume_into_writer_wait``), the one row that releases itself: it waits for Resume instead.
     ``handoffs`` (when given) receives ``{task_id: from_attempt}`` for each saved RUNNING row of
     the stopped generation that recovery turned into its successor (#1183).
     """
@@ -295,7 +297,7 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
                                               retained_pending, HOLD_SAVED_SLEEP_RECOVERY, unseen_pause)
     from supervisor.schedule_occurrence import first_attempt, first_dispatch_unsent, restore_verdict
 
-    from ouroboros.work_stop import clear_refusal, continuation_refusal, current_stop
+    from ouroboros.work_stop import clear_refusal, continuation_refusal, current_stop, writer_wait
 
     from ouroboros.delegate_recovery import boot_door
     door = boot_door(_queue().DRIVE_ROOT)
@@ -355,7 +357,7 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
             "_attempt": attempt, "root_task_id": task_id, "depth": 0, **carried_basis(stored),
         }
         for key in ("origin_message_ref", "origin_message_text", "metadata", "project_id", "tool_profile", "detached_at",
-                    "detached_by", "task_contract", "title", "text", "budget_drive_root"):
+                    "detached_by", "task_contract", "title", "suggested_name", "text", "budget_drive_root"):
             if stored.get(key) not in (None, ""):
                 record[key] = stored[key]
         if (saved_wait and int(wait.get("task_attempt") or 0) == attempt and tx_id
@@ -480,7 +482,7 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
                     "The schedule receipt was busy at restore; recovery is checked automatically when it is readable.")}
             saved_or_accepted = never_started(task) or isinstance(task.get("_working_recovery"), dict)
             kept = retained_pending(task, sleep_hold_reason=sleep_hold_reason)
-            if panicked and not current_stop(task):
+            if panicked and not current_stop(task) or not certified and writer_wait(task):
                 # This also covers a planned delegate return under Project custody:
                 # its current stop must survive consumption of the installation input.
                 row = hold_stopped_queue(dict(task), _queue().DRIVE_ROOT, stop_door)
@@ -520,6 +522,9 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
     _record_refused_returns(_queue().DRIVE_ROOT, {
         str(task["id"]): "planned_handoff_not_retained" for task in snapshot_pending
         if task.get("id") in set(transaction.get("task_ids") or []) and task["id"] not in kept_ids}, stop_door)
+    from ouroboros.presence_carrier import adopt_saved_records
+
+    adopt_saved_records(retained, _queue().DRIVE_ROOT)  # a returned moved Presence turn: its record, never its seed (#2566)
     return retained, unseen, consumed, prior_roots
 
 
@@ -871,6 +876,24 @@ def restore_pending_from_snapshot(
         _RESTORING.pop(key, None)
 
 
+def _direct_roots_caught(direct_roots: dict, snapshot_pending: list, running_rows: list) -> list:
+    """Direct-chat roots the stop caught: not live here, not restored as pending, not a RUNNING row.
+
+    An in-process supervisor revival re-runs queue init while direct turns of THIS process are
+    alive: the roster then names live work, not what a stop caught. A conversation-lane turn owns a
+    RUNNING row (#2654): the stop that caught it published that row and recovery takes it from there.
+    Queue init's orphan sweep can name the same id again (its durable result still says running once
+    the published row is older than the observation window), and a second successor of one id closes
+    recovery for both ("Another queue owner holds this task id").
+    """
+    from supervisor.active_activity import get_direct_activity_registry
+    live_direct = {str(row.get("activity_id") or "") for row in get_direct_activity_registry().snapshot()}
+    pending_ids = {str(task.get("id") or "") for task in snapshot_pending}
+    running_ids = {str(row.get("id") or "") for row in running_rows if isinstance(row, dict)}
+    return [task_id for task_id in direct_roots.get("task_ids") or []
+            if task_id not in live_direct and task_id not in pending_ids and task_id not in running_ids]
+
+
 def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -> int:
     try:
         from ouroboros.queue_observation import load_queue_document, queue_stamp
@@ -891,7 +914,7 @@ def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -
                  "snapshot_ts": ts[:64], "action": "treated_as_stale"},
             )
         stale = ts_unix is None or (time.time() - ts_unix) > max_age_sec
-        from supervisor.restart_retention import conserve_unreadable_pending
+        from supervisor.restart_retention import conserve_unreadable_pending, consume_return_transaction, fresh_return_transaction
         from ouroboros.task_results import (
             _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED, STATUS_CANCELLED,
             load_task_result, write_task_result,
@@ -912,19 +935,12 @@ def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -
         # one fence call gives them the one cancel-intent path custody settles — except a direct root
         # whose exact budget pause was complete on disk, parked under its own id like a paused RUNNING row (#1196).
         direct_roots = dict(_queue().PRIOR_DIRECT_ROOTS)
-        # An in-process supervisor revival re-runs queue init while direct turns of THIS process are
-        # alive: the roster then names live work, not what a stop caught.
-        from supervisor.active_activity import get_direct_activity_registry
-        live_direct = {str(row.get("activity_id") or "") for row in get_direct_activity_registry().snapshot()}
-        pending_ids = {str(task.get("id") or "") for task in snapshot_pending}
-        direct_caught = [task_id for task_id in direct_roots.get("task_ids") or []
-                         if task_id not in live_direct and task_id not in pending_ids]
+        direct_caught = _direct_roots_caught(direct_roots, snapshot_pending, running_rows)
         if unread and not direct_caught:
             return 0
         snapshot_pending, unseen_pauses, consumed_rows, prior_roots = _retain_snapshot_pending(  # #1183 handoffs
-            snapshot_pending, running_rows, stale=stale, direct_caught=direct_caught, handoffs=(handoffs := {}))
-        from supervisor.restart_retention import consume_return_transaction, fresh_return_transaction
-
+            snapshot_pending, running_rows, stale=stale, certified=ts_unix is not None, direct_caught=direct_caught,
+            handoffs=(handoffs := {}))
         # This boot decided the returns; a later stop can never reuse the transaction.
         consume_return_transaction(_queue().DRIVE_ROOT, fresh_return_transaction(_queue().DRIVE_ROOT))
         fenced_running = _fence_snapshot_running_rows(
@@ -1057,6 +1073,8 @@ def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -
                     log.debug("Snapshot restore result-authority check failed for %s", task.get("id"), exc_info=True)
                     continue
                 else:
+                    if task.get("suggested_name") and (existing or {}).get("suggested_name"):  # #2107: a lost frame left
+                        task["suggested_name"] = existing["suggested_name"]  # the saved copy older than its result's name
                     if (not _exact_pause_row(task) and not task.get("_owner_wait_resume")
                             and not task.get("_project_admission_restore_hold")
                             and restored_handoff_unproven(task, existing, ancestor_unknown=_descends_from(task, lineage_unknown, pending_by_id))):

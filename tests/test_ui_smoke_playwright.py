@@ -2455,14 +2455,14 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                    if not card["collapsedChild"]) <= 3.2, facts
         assert max(card["activityLines"] for card in facts["cardFacts"]
                    if card["collapsedChild"]) <= 1.2, facts
-        # #623: a collapsed child keeps its identity row: its title beside the chip
-        # and side controls, whole if short, ellipsized if long (child-01). The summary is reading content, no
-        # button (#1998): the title holds the whole role as its text, however much of it shows.
+        # #623: a collapsed child keeps its identity row: title beside chip and controls, whole if short, wrapped
+        # if long (child-01). The summary is reading content, no button (#1998): the title holds the whole role
+        # as its text, however much shows.
         assert page.get_by_text(long_role, exact=True).count() == 1
         for card in facts["cardFacts"]:
             if card["collapsedChild"]:
-                assert 0 < card["titleClient"] and (
-                    card["titleScroll"] > card["titleClient"] + 1) == (card["id"] == "layout-child-01"), card
+                assert 0 < card["titleClient"] and card["titleScroll"] <= card["titleClient"] + 1 and (
+                    card["titleLines"] > 1.5) == (card["id"] == "layout-child-01"), card
                 assert abs(card["titleTop"] - card["mainTop"]) <= 4, card
                 assert card["summaryBottom"] - card["mainTop"] <= 2.2 * card["titleHeight"] + 8, card
         assert all(card["activityTitle"] is None for card in facts["cardFacts"]), facts

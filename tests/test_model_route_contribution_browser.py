@@ -218,9 +218,11 @@ def test_claude_variant_agent_and_reviewer_rows_keep_exact_selection(route_ui):
         entry['profile']['harness_id'] = 'claude'
     ui['fixture']['status']['harnesses'] = [{'id': 'claude', 'display_name': 'Claude Code', 'enabled': True,
         'status': 'ok', 'models': [{'id': 'claude-future', 'credential_profile_id': 'personal'}]}]
-    # Available is the engine's verdict for the exact scope it answered (#1981), never a bare fresh row.
-    ui['fixture']['status']['quota'] = [{'subject': {'harness': 'claude', 'subject_id': 'personal'},
-                                        'freshness': 'fresh', 'constraints': [], 'availability': {'state': 'available'}}]
+    # Available is the engine's verdict for the exact scope it answered (#1981), never a bare fresh row, and the
+    # engine's "available" names a request only beside one measured every-model window (docs/PASSIVE_QUOTA_READ.md).
+    quota = {'subject': {'harness': 'claude', 'subject_id': 'personal'},
+             'freshness': 'fresh', 'constraints': [], 'availability': {'state': 'available'}}
+    ui['fixture']['status']['quota'] = [quota]
     ui['fixture']['status']['availability_scope'] = {'model': 'claude-future[1M]', 'requestKind': 'text',
                                                      'basis': 'quota_block'}
     items = ui['settings']['OUROBOROS_SUBAGENTS']['items']
@@ -231,13 +233,31 @@ def test_claude_variant_agent_and_reviewer_rows_keep_exact_selection(route_ui):
                   'route': {'kind': 'agent_session', 'target_id': target}})
     page = roles.open_agents(ui)
     rows = page.locator('[data-subagent-row]')
-    page.wait_for_function("() => [...document.querySelectorAll('[data-subagent-row]')]"
-                           ".filter(x => x.textContent.includes('Base model listed')).length === 2")
+    listed_by_base = ("() => [...document.querySelectorAll('[data-subagent-row]')]"
+                      ".filter(x => x.textContent.includes('Base model listed')).length === 2")
+    page.wait_for_function(listed_by_base)
+    # No measured window yet: the exact echo and the engine's verdict alone prove nothing, so each row says Not checked
+    # (neither Available nor Unavailable) and keeps its catalog qualifier, the exact selection and its Reviewer mark.
+    for index, reviews in ((2, True), (3, False)):
+        row = rows.nth(index)
+        assert row.locator('[data-subagent-status]').inner_text() == 'Not checked', row.inner_text()
+        assert 'Available' not in row.inner_text() and 'Unavailable' not in row.inner_text()
+        assert row.locator('[data-subagent-field="model"]').input_value() == 'claude-future[1M]'
+        assert row.locator('[data-subagent-field="review_eligible"]').is_checked() is reviews
+    rows.nth(2).scroll_into_view_if_needed()
+    roles.capture(page, 'model-routes-claude-not-proven')
+    # One measured window beside the engine's own verdict makes it Available.
+    quota['constraints'] = [{'id': 'primary', 'used_ratio': 0.2}]
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
+    page.reload()
+    page = roles.open_agents(ui)
+    page.wait_for_function(listed_by_base)
     for index, reviews in ((2, True), (3, False)):
         row = rows.nth(index)
         assert row.locator('[data-subagent-field="model"]').input_value() == 'claude-future[1M]'
         assert row.locator('[data-subagent-field="review_eligible"]').is_checked() is reviews
-        assert 'Available' in row.inner_text() and 'Unavailable' not in row.inner_text()
+        assert row.locator('[data-subagent-status]').inner_text() == 'Available', row.inner_text()
+        assert 'Unavailable' not in row.inner_text()
     rows.nth(2).scroll_into_view_if_needed()
     roles.capture(page, 'model-routes-claude-reviewer-row')
     page.set_viewport_size({'width': 390, 'height': 844})
@@ -258,4 +278,7 @@ def test_claude_variant_agent_and_reviewer_rows_keep_exact_selection(route_ui):
     saved = roles.saved_catalog(ui)['items']
     assert [row['route']['target_id'] for row in saved[2:]] == [target, target]
     assert saved[2]['review_eligible'] is True and 'review_eligible' not in saved[3]
+    # The reviewer's account pin survives the save, and the unpinned agent stays on automatic rotation.
+    assert saved[2]['route'].get('credential_profile_id') == 'personal'
+    assert not saved[3]['route'].get('credential_profile_id')
     assert not ui['errors']

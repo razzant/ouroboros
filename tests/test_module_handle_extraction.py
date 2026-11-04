@@ -205,7 +205,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_run_reviewed_stage_cycle", "_stage_candidate_for_review", "_staged_index",
         "_subject_binding_mismatch_outcome", "_unstage_binaries", "_unstage_candidate",
         "classify_review_block", "handle_revalidation_failure",
-        "mode_allows_protected_write", "paths_from_name_status",
+        "mode_allows_protected_write",
         "protected_paths_in", "run_cmd", "safe_relpath",
     })),
     "ouroboros/tools/git_vcs_ops.py": ("ouroboros/tools/git.py", "_git", frozenset({

@@ -12,23 +12,23 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D02 | LLM client, routing & providers | 47 | 0 |
 | D03 | Context assembly, fit & compaction | 33 | 0 |
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
-| D05 | Tool surfaces: files, code, shell, media, external | 48 | 0 |
+| D05 | Tool surfaces: files, code, shell, media, external | 51 | 0 |
 | D06 | Review stack | 96 | 0 |
-| D07 | Delegation, subagents & Claudexor | 104 | 0 |
+| D07 | Delegation, subagents & Claudexor | 106 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 76 | 0 |
-| D09 | Cancellation, owner control & process custody | 27 | 0 |
+| D09 | Cancellation, owner control & process custody | 28 | 0 |
 | D10 | Git, update & release machinery | 40 | 0 |
 | D11 | Gateway, server & Web UI | 115 | 0 |
 | D12 | Settings & configuration | 27 | 0 |
 | D13 | Safety, guards & runtime mode | 11 | 0 |
 | D14 | Skills & extensions | 72 | 0 |
-| D15 | Memory, knowledge, consciousness & self-evolution | 34 | 0 |
+| D15 | Memory, knowledge, consciousness & self-evolution | 35 | 0 |
 | D16 | Observability, usage accounting & cost | 30 | 0 |
 | D17 | Projects, workspaces & task results | 54 | 0 |
 | D18 | Launcher, packaging, platform & shared substrate | 38 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 24 | 0 |
-| **total** | | **979** | **0** |
+| **total** | | **986** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -387,18 +387,21 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/browser_policy.py`
 - `ouroboros/card_store.py`
 - `ouroboros/chat_uploads.py`
+- `ouroboros/chromium_runtime.py`
 - `ouroboros/code_import_candidates.py`
 - `ouroboros/code_intelligence.py`
 - `ouroboros/code_intelligence_architecture.py`
 - `ouroboros/code_navigation.py`
 - `ouroboros/code_occurrences.py`
 - `ouroboros/code_search_rg.py`
+- `ouroboros/mcp_browser_guard.py`
 - `ouroboros/mcp_catalog.py`
 - `ouroboros/mcp_client.py`
 - `ouroboros/mcp_headers.py`
 - `ouroboros/mcp_import.py`
 - `ouroboros/mcp_result_images.py`
 - `ouroboros/mcp_schema.py`
+- `ouroboros/mcp_task_session.py`
 - `ouroboros/process_interpreters.py`
 - `ouroboros/query_data_sql.py`
 - `ouroboros/tools/browser.py`
@@ -593,6 +596,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/gateways/claudexor_route_health.py`
 - `ouroboros/gateways/claudexor_routing.py`
 - `ouroboros/gateways/claudexor_run_events.py`
+- `ouroboros/gateways/claudexor_threads.py`
 - `ouroboros/gateways/claudexor_uploads.py`
 - `ouroboros/genesis_project.py`
 - `ouroboros/harness_maintenance.py`
@@ -600,6 +604,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/owner_keep.py`
 - `ouroboros/owner_stop_receipt.py`
 - `ouroboros/private_copy_read.py`
+- `ouroboros/review_thread_retention.py`
 - `ouroboros/subagent_bootstrap.py`
 - `ouroboros/subagent_dispatch_notes.py`
 - `ouroboros/subagent_history.py`
@@ -719,6 +724,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 
 - `ouroboros/cancel_intents.py`
 - `ouroboros/custody_owed.py`
+- `ouroboros/launch_custody.py`
 - `ouroboros/local_custody_repair.py`
 - `ouroboros/model_wait.py`
 - `ouroboros/owned_shutdown.py`
@@ -1060,6 +1066,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/tools/knowledge.py`
 - `ouroboros/tools/memory_tools.py`
 - `ouroboros/world_profiler.py`
+- `supervisor/evolution_cleanup.py`
 - `supervisor/evolution_lifecycle.py`
 
 ### D16 — Observability, usage accounting & cost

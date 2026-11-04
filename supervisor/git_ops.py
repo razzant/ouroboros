@@ -499,6 +499,10 @@ def _ensure_local_version_tag() -> None:
     version = version_path.read_text(encoding="utf-8").strip().lstrip("v")
     if not re.match(r"^\d+\.\d+\.\d+(?:-?(?:rc|alpha|beta|a|b)\.?\d+)?$", version, re.IGNORECASE):
         return
+    from ouroboros.tools.release_sync import is_development_marker
+
+    if is_development_marker(version):  # a cycle's marker is never tagged (BIBLE P9)
+        return
 
     tag_name = f"v{version}"
     rc, tag_match, err = git_capture(["git", "tag", "-l", tag_name])

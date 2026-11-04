@@ -3,7 +3,7 @@
 ``shell_process._tracked_subprocess_run`` waited in one ``communicate(timeout)``, so a command of an inline
 Presence or direct-chat turn ran its whole requested time after Stop now (the turn's Stop kills no process).
 With a ``stop`` reader the same requested timeout is waited in ``communicate`` slices; Stop now kills the
-command's process group as the timeout does and keeps what it already wrote. Without a reader (a pooled worker,
+command's process group as the timeout does and keeps what it already wrote. Without a reader (an ordinary pooled worker,
 whose Stop is the worker kill) the wait is the one ``communicate(timeout)`` it was. Natural exit, the requested
 timeout and Panic keep their meaning. Real child processes; no clock or Popen is faked.
 """
@@ -95,10 +95,11 @@ def test_panic_still_ends_a_command_whose_wait_reads_stop(tmp_path, monkeypatch)
     assert done.returncode != 0 and time.monotonic() - started < 10
 
 
-def test_only_an_in_process_turn_gets_a_stop_reader_and_only_stop_now_stops(tmp_path):
+@pytest.mark.parametrize("worker_slot_held", [False, True], ids=["inline", "pooled-presence"])
+def test_only_an_in_process_turn_gets_a_stop_reader_and_only_stop_now_stops(tmp_path, worker_slot_held):
     assert turn_stop_reader(SimpleNamespace()) is None
     assert turn_stop_reader(SimpleNamespace(model_wait_context=SimpleNamespace(worker_slot_held=True))) is None
-    reader = turn_stop_reader(_turn(tmp_path))
+    reader = turn_stop_reader(_turn(tmp_path, worker_slot_held=worker_slot_held))
     assert callable(reader) and reader() is False  # no open intent: no stop
     _intents(tmp_path, {"t1": {"stop_policy": "finalize_then_cancel", "request_id": "r1"}})
     assert reader() is False, "Wrap up is not an immediate kill"
@@ -112,9 +113,9 @@ def _intents(root, rows):
     (root / "state" / "cancel_intents.json").write_text(text, encoding="utf-8")
 
 
-def _turn(root, task_id="t1", **task):
+def _turn(root, task_id="t1", *, worker_slot_held=False, **task):
     return SimpleNamespace(model_wait_context=SimpleNamespace(
-        worker_slot_held=False, canonical_root=root, task_id=task_id, task={"_presence_turn": True, **task}))
+        worker_slot_held=worker_slot_held, canonical_root=root, task_id=task_id, task={"_presence_turn": True, **task}))
 
 
 def _errors_of_one_read(caplog, read):
@@ -243,7 +244,8 @@ def test_a_container_command_stops_through_its_owned_pidfile_never_the_container
 
 
 @posix_sh
-def test_verify_and_record_records_a_stopped_check_as_failed_with_what_it_wrote(tmp_path, monkeypatch):
+@pytest.mark.parametrize("worker_slot_held", [False, True], ids=["inline", "pooled-presence"])
+def test_verify_and_record_records_a_stopped_check_as_failed_with_what_it_wrote(tmp_path, monkeypatch, worker_slot_held):
     from ouroboros.outcomes import verification_receipts_path
     from ouroboros.tools.registry import ToolContext, ToolRegistry
 
@@ -254,7 +256,7 @@ def test_verify_and_record_records_a_stopped_check_as_failed_with_what_it_wrote(
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *args, **kwargs: (True, ""))
     ctx = ToolContext(repo_dir=system, drive_root=data, workspace_root=workspace, workspace_mode="external",
                       task_id="verify-stop")
-    ctx.model_wait_context = _turn(data, "verify-stop").model_wait_context
+    ctx.model_wait_context = _turn(data, "verify-stop", worker_slot_held=worker_slot_held).model_wait_context
     registry = ToolRegistry(system, data)
     registry.set_context(ctx)
     _intents(data, {"verify-stop": {"stop_policy": "immediate", "request_id": "r1"}})
@@ -270,7 +272,8 @@ def test_verify_and_record_records_a_stopped_check_as_failed_with_what_it_wrote(
 
 
 @pytest.mark.parametrize("tool", ["run_command", "run_script"])
-def test_a_stopped_command_is_the_calling_tools_typed_failure_with_its_masked_output(tmp_path, monkeypatch, tool):
+@pytest.mark.parametrize("worker_slot_held", [False, True], ids=["inline", "pooled-presence"])
+def test_a_stopped_command_is_the_calling_tools_typed_failure_with_its_masked_output(tmp_path, monkeypatch, tool, worker_slot_held):
     """Stop now's host kill is never a success: the calling tool's typed ``SHELL_ERROR`` with everything the command
     wrote, its selected secret masked, and the host kill on the process-facts channel once its exit was observed. The
     command itself records the immediate intent after its first line, so the kill always lands after that output."""
@@ -286,7 +289,7 @@ def test_a_stopped_command_is_the_calling_tools_typed_failure_with_its_masked_ou
     monkeypatch.setattr("ouroboros.config.load_settings", lambda: {"CUSTOM_KEY": secret})
     ctx = ToolContext(repo_dir=system, drive_root=data, workspace_root=workspace, workspace_mode="external",
                       task_id="command-stop")
-    ctx.model_wait_context = _turn(data, "command-stop").model_wait_context
+    ctx.model_wait_context = _turn(data, "command-stop", worker_slot_held=worker_slot_held).model_wait_context
     registry = ToolRegistry(system, data)
     registry.set_context(ctx)
     intent = json.dumps({"intents": {"command-stop": {"stop_policy": "immediate", "request_id": "r1"}}})

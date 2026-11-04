@@ -906,7 +906,11 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 448 -> 447: a source probe reads ``hub.json`` in the folder it was asked for inside its scratch clone, so the
 # fixed ``state/skill_sources/.scratch/*-*/repo/hub.json`` spelling is gone; the ``.scratch/<label>-<id>`` row
 # still covers that clone (base-vs-tree scan diff: that one path).
-EXPECTED_SCAN_PATHS = 447
+# 447 -> 448 (#2593): ``task_results/artifacts/*/source_handles/delegated_readonly_inputs/*``, a selection's
+# retained bytes (its own PERSISTENCE row).
+# 448 -> 450: ``artifacts.stream_actor_source`` streams a retained source into its
+# ``source_handles/*`` category folder through a ``*.stream`` temporary (the task artifacts row).
+EXPECTED_SCAN_PATHS = 450
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

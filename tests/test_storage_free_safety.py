@@ -56,6 +56,16 @@ def _git(path, *args):
     return subprocess.run(["git", *args], cwd=str(path), check=True, capture_output=True, text=True).stdout
 
 
+# A case sets up only what the checkout's filesystem can hold. Win32 holds no settable execute bit (``os.chmod`` there
+# toggles the read-only attribute alone), and its file names exclude ``"``, the control characters (newline, tab) and
+# ``\`` (the path separator). Linux and macOS run the cases marked here as real modes and names; the cases beside
+# them run everywhere.
+_NO_EXEC_BIT = pytest.mark.skipif(
+    os.name == "nt", reason="Win32 chmod only toggles the read-only attribute, so +x changes no mode")
+_POSIX_NAME = pytest.mark.skipif(
+    os.name == "nt", reason="Win32 names exclude double quotes and control characters, and a backslash separates paths")
+
+
 def test_a_copy_with_nothing_unique_goes_without_any_capture(copies):
     handle = _copy(copies)
     assert _prune(copies)["removed"] == 1 and not Path(handle.path).exists()
@@ -151,6 +161,7 @@ def test_a_file_changed_after_a_good_capture_stays(copies):
     assert _prune(copies)["removed"] == 0 and (path / "work.txt").read_text(encoding="utf-8") == "later\n"
 
 
+@_NO_EXEC_BIT
 def test_a_mode_changed_after_a_good_capture_stays(copies):
     handle = _copy(copies)
     path = Path(handle.path)
@@ -257,6 +268,7 @@ def test_a_file_result_edited_after_its_capture_keeps_the_copy(copies):
     assert _prune(copies)["removed"] == 0 and (path / "blob.bin").is_file()
 
 
+@_NO_EXEC_BIT
 def test_a_file_result_whose_mode_changed_after_its_capture_keeps_the_copy(copies):
     handle = _copy(copies)
     path = Path(handle.path)
@@ -264,6 +276,29 @@ def test_a_file_result_whose_mode_changed_after_its_capture_keeps_the_copy(copie
     _capture(copies, handle)
     (path / "blob.bin").chmod(0o755)
     assert _prune(copies)["removed"] == 0 and (path / "blob.bin").is_file()
+
+
+def test_a_file_result_made_read_only_after_its_capture_keeps_the_copy(copies):
+    """A mode every system can change: the write bit (Win32 holds the read-only attribute alone, ``0o444`` against
+    ``0o666``). The same capture lets the copy go until the mode moves, then keeps it."""
+    from ouroboros import copy_capture_proof as proof
+
+    handle = _copy(copies)
+    blob = Path(handle.path) / "blob.bin"
+    blob.write_bytes(bytes(range(256)) * 8)
+    assert _capture(copies, handle)["status"] == "ready_with_changes"
+    row, saved = sw._record_at(handle.path, copies[0]), stat.S_IMODE(blob.stat().st_mode)
+    proven = {"remove": True, "keep_branch": False, "reason": "capture_holds"}
+    unproven = {"remove": False, "keep_branch": True, "reason": proof.CAPTURE_UNPROVEN}
+    assert proof.plain_copy_verdict(row, copies[0]) == proven
+    blob.chmod(0o444)
+    try:
+        assert stat.S_IMODE(blob.stat().st_mode) != saved, "the filesystem took the new mode"
+        assert proof.plain_copy_verdict(row, copies[0]) == unproven
+        assert _prune(copies)["removed"] == 0 and blob.is_file()
+    finally:
+        if blob.exists():
+            blob.chmod(saved)  # Win32 cannot delete a read-only file
 
 
 @pytest.mark.parametrize("damage", ["archive_bytes", "archive_gone", "ledger_gone", "member_lies"])
@@ -328,15 +363,20 @@ def _counted_hashing(monkeypatch):
     return calls
 
 
-AWKWARD = ['with\nnewline.txt', 'quo"te.txt', '"leading.txt', 'back\\slash.txt', 'tab\t.txt', 'space d.txt', 'ю.txt']
+POSIX_ONLY_NAMES = ['with\nnewline.txt', 'quo"te.txt', '"leading.txt', 'back\\slash.txt', 'tab\t.txt']
+PORTABLE_NAMES = ['space d.txt', 'ю.txt']  # the awkward names a Win32 checkout holds
+AWKWARD = [*POSIX_ONLY_NAMES, *PORTABLE_NAMES]
+AWKWARD_CASES = [*(pytest.param(name, marks=_POSIX_NAME) for name in POSIX_ONLY_NAMES), *PORTABLE_NAMES]
 
 
-def test_one_hashing_process_proves_every_saved_file_whatever_its_name(copies, monkeypatch):
+@pytest.mark.parametrize("names", [pytest.param(AWKWARD, id="every_name", marks=_POSIX_NAME),
+                                   pytest.param(PORTABLE_NAMES, id="portable_names")])
+def test_one_hashing_process_proves_every_saved_file_whatever_its_name(copies, monkeypatch, names):
     handle = _copy(copies)
     path = Path(handle.path)
     for number in range(30):
         (path / f"note{number}.txt").write_text(f"{number}\n", encoding="utf-8")
-    for name in AWKWARD:
+    for name in names:
         (path / name).write_text(f"{name}\n", encoding="utf-8")
     assert _capture(copies, handle)["status"] == "ready_with_changes"
     calls = _counted_hashing(monkeypatch)
@@ -344,7 +384,7 @@ def test_one_hashing_process_proves_every_saved_file_whatever_its_name(copies, m
     assert len(calls) == 1, calls
 
 
-@pytest.mark.parametrize("name", AWKWARD)
+@pytest.mark.parametrize("name", AWKWARD_CASES)
 def test_an_awkwardly_named_file_edited_after_its_capture_still_keeps_the_copy(copies, name):
     handle = _copy(copies)
     path = Path(handle.path)

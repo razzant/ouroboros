@@ -878,6 +878,8 @@
  * @property {string[]=} held_siblings
  * @property {string[]=} rebound_held_siblings
  * @property {string=} released_hold
+ * @property {boolean=} held  // a Continue back in its writer wait: it starts by itself once `blockers` settle
+ * @property {Array<Object>=} blockers
  * @property {{rows: Array<{task_id: string, reason: string}>, count: number}=} membership_gaps
  * @property {string=} message
  */

@@ -13,7 +13,7 @@
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://ouroboros-agent.ai/install/#linux)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)][download-windows-x64]
 [![OuroborosHub](https://img.shields.io/badge/OuroborosHub-skills%20marketplace-8A2BE2.svg)](https://github.com/razzant/OuroborosHub)
-[![Version 7.9.0](https://img.shields.io/badge/version-7.9.0-green.svg)](VERSION)
+[![Version 7.10.0-alpha.0](https://img.shields.io/badge/version-7.10.0--alpha.0-green.svg)](VERSION)
 
 Ouroboros is an open-source, general-purpose AI agent whose identity, durable memory, and history continue across tasks and restarts. It works on external projects, coordinates a live swarm of specialist agents, and can rewrite the implementation it runs on, including its code, architecture, prompts, tools, and dependencies. Reflection can also change how it understands itself without severing that continuity.
 
@@ -45,6 +45,8 @@ Files named `SHA256SUMS`, `release-evidence.json`, `release-smoke-*.json`, and `
 1. Click [**Download for macOS (.dmg)**][download-macos-arm64]. The current file is named `Ouroboros-<version>.dmg`.
 2. Open the DMG and drag `Ouroboros.app` onto the **Applications** shortcut.
 3. Open Ouroboros from Applications. If macOS refuses to open it, choose **Open Anyway** in **System Settings → Privacy & Security** (on macOS 14 and earlier, right-clicking the app and choosing **Open** also works).
+
+On macOS 12 the app runs, but its browser tools refuse Chromium: the patched build they pin needs macOS 13 or later, and Ouroboros never falls back to an older Chromium. WebKit stays a separate choice where Playwright supports it.
 
 <p align="center">
   <img src="assets/install-macos.png" width="760" alt="Ouroboros DMG window with a large arrow from Ouroboros.app to the Applications shortcut and Install CLI.command below">
@@ -220,7 +222,7 @@ If FUSE mounting is unavailable, extract and run ephemerally instead:
 APPIMAGE_EXTRACT_AND_RUN=1 "$HOME/Applications/Ouroboros.AppImage"
 ```
 
-Chromium and WebKit binaries are bundled, but their distro-level shared libraries remain host dependencies. If a browser engine reports missing libraries, use the native `.deb`/`.rpm` package where available, or extract the AppImage and let its bundled Playwright report/install the packages required by your distribution:
+Chromium and WebKit binaries are bundled, but their distro-level shared libraries remain host dependencies. Browser tools start Chromium only inside its sandbox, which on Linux needs unprivileged user namespaces (Ubuntu 23.10+ AppArmor restricts them for unprofiled binaries); where it cannot start they refuse Chromium and name the fix rather than run it unsandboxed. If a browser engine reports missing libraries, use the native `.deb`/`.rpm` package where available, or extract the AppImage and let its bundled Playwright report/install the packages required by your distribution:
 
 ```bash
 "$HOME/Applications/Ouroboros.AppImage" --appimage-extract
@@ -391,8 +393,8 @@ docker run --rm -p 8765:8765 \
   ouroboros-web
 ```
 
-Docker runs the web runtime, not the native desktop shell. Its Python is the same standalone build as the desktop packages (CPython 3.10.22, SQLite 3.53.1). The image bundles Chromium and WebKit for the locked
-Playwright version and needs Docker's default BuildKit builder. Persistent volumes, the managed image whose body updates
+Docker runs the web runtime, not the native desktop shell. Its Python is the same standalone build as the desktop packages (CPython 3.10.22, SQLite 3.53.1). The image bundles WebKit for the locked
+Playwright version and the pinned Chromium, and needs Docker's default BuildKit builder. It runs as root, where Chromium's sandbox cannot start, so browser tools refuse Chromium unless the administrator opts out (`OUROBOROS_CHROMIUM_SANDBOX=off`, [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)). Persistent volumes, the managed image whose body updates
 itself, restart policy and Panic, network exposure and extra CAs: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md); the
 executable recipes are [`packaging/docker/compose.yaml`](packaging/docker/compose.yaml).
 

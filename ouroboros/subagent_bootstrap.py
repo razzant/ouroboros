@@ -311,7 +311,8 @@ def _pre_start_leaf(
         "effort_fact": dict(actor_bootstrap.get("effort_fact") or {}), "_initial_bootstrap": True,
         **({"mode": actor_bootstrap["delegated_mode"]} if "delegated_mode" in actor_bootstrap else {}),
         **{key: actor_bootstrap[key] for key in ("directory_strategy", "scope_paths", "workspace") if key in actor_bootstrap},
-        **first_start_selection(actor_bootstrap),
+        **first_start_selection(actor_bootstrap),  # the parent's documents and schedule-time input copies
+        **({"_prepared_inputs": list(actor_bootstrap["prepared_input_files"])} if actor_bootstrap.get("prepared_input_files") else {}),
     })
     try:
         payload = delegate_payload(started)
@@ -818,7 +819,7 @@ def _prepare_actor_first_bootstrap(
         **({"delegated_mode": task["delegated_mode"]} if "delegated_mode" in task else {}),
         **{key: list(task[key]) if key in ("scope_paths", "attachment_paths") else task[key]
            for key in ("directory_strategy", "scope_paths", "workspace", "attachment_paths", "attachment_import",
-                       "document_import_intent") if key in task},
+                       "document_import_intent", "prepared_input_files") if key in task},
     }
     zero_run_evidence_gaps: set[str] = set()
     durable_zero_run = _durable_zero_run_receipt(

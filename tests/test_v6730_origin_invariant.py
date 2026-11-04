@@ -332,11 +332,22 @@ def test_ingress_ref_hash_matches_lens_matcher():
 
 
 class _ImmediateThread:
+    """``threading.Thread`` whose target has run to its end when ``start()`` returns.
+
+    Tests patch it over the global class, so every caller meets it, not only the code under test: Windows
+    ``subprocess`` drains a child's pipes through reader threads it then ``join()``s and polls with ``is_alive()``."""
+
     def __init__(self, target, args=(), kwargs=None, daemon=False, **_ignored):
         self._target, self._args, self._kwargs = target, args, kwargs or {}
 
     def start(self):
         self._target(*self._args, **self._kwargs)
+
+    def join(self, timeout=None):
+        """Nothing to wait for: ``start()`` returned only after the target did."""
+
+    def is_alive(self):
+        return False
 
 
 def test_ingress_captures_origin_and_threads_it_into_turn_metadata(tmp_path, monkeypatch):

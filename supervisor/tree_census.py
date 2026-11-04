@@ -317,18 +317,14 @@ def conflicting_writers(q: Any, predecessor: str, *, drive_root: Any = None, own
                             for run in observed.get("runs") or [] if isinstance(run, dict)
                             and not (for_continue and run.get("independent_review") is True))
     try:
-        from ouroboros import process_custody as pc
-        from ouroboros.platform_layer import pid_is_alive
+        from ouroboros.launch_custody import unsettled_rows
         from ouroboros.tool_custody import task_process_blockers
         blockers.extend(task_process_blockers(custody_root, members))
-        complete, records = pc._read_ledger_strict(custody_root)
-        if not complete:
-            raise OSError("process_custody_unreadable")
-        for row in records:
-            if str(row.get("owner_task") or "") in members:
-                pid = int(row.get("pid") or 0)
-                if pid and (pid_is_alive(pid) or pc._service_group_survives_leader(row)):
-                    blockers.append({"kind": "owned_process", "task_id": row.get("owner_task"), "pid": pid})
+        for row, state in unsettled_rows(custody_root, members):
+            pid = int(row.get("pid") or 0)
+            blockers.append({"kind": "owned_process", "task_id": row.get("owner_task"), "pid": pid}
+                            if state == "live" else
+                            {"kind": "process_custody_unreadable", "detail": f"launch of process {pid} unobserved"})
     except Exception as exc:
         blockers.append({"kind": "process_custody_unreadable", "detail": str(exc)[:200]})
     blockers.extend(model_handoffs(custody_root, predecessor, member_results=facts.rows,

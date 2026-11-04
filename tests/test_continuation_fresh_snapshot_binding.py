@@ -209,7 +209,8 @@ def _pairings(legs, current, facts):
     """A resumed native session may keep ANY earlier leg's instructions (a packet leg opened a
     new session), the current ones, or both; a packet re-brief reads the current instructions
     and the current turn, then quotes earlier prompts after it. Every view leaves one reading."""
-    roots = lambda text: re.findall(re.escape(_BOUND) + r"(\S+?):", text)  # noqa: E731
+    # The binding ends the root with ": "; the "D:" of a Windows drive, followed by a backslash, is part of it.
+    roots = lambda text: re.findall(re.escape(_BOUND) + r"(\S+?): ", text)  # noqa: E731
     own = [facts["root"]] if facts["kind"] == "copy" else []
     assert roots(current["instructions"]) == own == roots(_run_blocks(current["prompt"])[0][1])  # new only
     for earlier in legs:  # old only, or both: what an earlier set names is scoped to ITS run

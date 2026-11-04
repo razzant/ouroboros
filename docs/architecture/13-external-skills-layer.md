@@ -34,7 +34,7 @@ ClawHub lands atomically with file hashes; direct review attempts precede `skill
 
 ### Desktop actions and result views
 
-`skills/unix_computer_use/`: quiet AX, screenshot-bound input and remote receipts. `paste_chord.js` sends Command-plane V locally/over SSH; `key()` maps layout letters. Targeting, grants, limits: `SKILL.md`; native tests use owned fixtures.
+`skills/unix_computer_use/`: one macOS helper: quiet AX, app-local exposure, same-window reads. `paste_chord.js`: Command-plane V, local/SSH; `key()`: layout letters. Targeting, grants, receipts: `SKILL.md`; owned native fixtures.
 
 Composition/`PRODUCER_RESULT_SOURCE_JSON` vs `FULL_RESULT_SOURCE_JSON`: `tools/tool_result.py`, `loop_tool_execution.py`.
 

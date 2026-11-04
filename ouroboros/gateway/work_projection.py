@@ -138,6 +138,18 @@ class _Observations:
             self.models[root_id] = tree_model_handoffs(drive_root or self.drive_root, root_id)
         return self.models[root_id]
 
+    def resume_attempt(self, task_id: str, drive_root: Any = None) -> dict:
+        """The task's latest Resume attempt (``work_stop.ATTEMPT_KEY``) from the census's own body facts
+        (``gateway.state._task_activity_facts``: its body is read again only once its row moves). An unreadable
+        one is a disclosed gap, never an absent attempt."""
+        from ouroboros.gateway.state import _task_activity_facts
+
+        facts = _task_activity_facts(drive_root or self.drive_root, task_id)
+        if facts.get("unavailable"):
+            self.gaps.append({"reason": "resume_attempt_unavailable", "task_id": task_id})
+        attempt = facts.get("resume_attempt")
+        return attempt if isinstance(attempt, dict) else {}
+
     def stop_unknown(self, task_id: str, drive_root: Any = None, owner: Optional[Mapping[str, Any]] = None
                      ) -> frozenset:
         if task_id not in self.stops:
@@ -288,6 +300,7 @@ def _member_raw(row: Mapping[str, Any], raw: Mapping[str, Any], obs: _Observatio
         facts["fences"] = {"owner": fence}
         facts["model_handoffs"] = obs.model_handoffs(root_id, raw.get("budget_drive_root"))
         facts["parked"] = [str(task) for task in fence.get("parked_members") or () if task]
+        facts["resume_attempt"] = obs.resume_attempt(str(row.get("activity_id") or ""), raw.get("budget_drive_root"))
     return facts
 
 
@@ -365,10 +378,16 @@ def durable_binding(row: Mapping[str, Any], task_id: Any, bindings: Mapping[str,
     return None
 
 
+def _named(value: Any) -> bool:
+    """Whether a stored row names an id at all. A chat id is a value, never a truth value: 0 is the hidden partition
+    (``chat_id_policy.HIDDEN_CHAT_ID``), a real room; only a missing id (None, or the empty string) is absent."""
+    return value is not None and value != ""
+
+
 def _bound_room(row: Mapping[str, Any], task_id: str, bindings: Mapping[str, Any]) -> Mapping[str, Any]:
     """A stored row's room by ``durable_binding``. Unbound, the row's own room stands."""
     binding = durable_binding(row, task_id, bindings)
-    if binding is None or not binding.get("chat_id"):
+    if binding is None or not _named(binding.get("chat_id")):
         return row
     return {**row, "chat_id": binding["chat_id"], "project_id": str(binding.get("project_id") or "")}
 
@@ -397,7 +416,7 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
         for row in _inflight_upkeep(drive_root, set(rows)):
             facts = obs.result(row["activity_id"]) or {}
             room = _bound_room(facts, row["activity_id"], bindings)  # a moved task's upkeep runs in its Project
-            row.update({key: room[key] for key in ("chat_id", "project_id") if room.get(key)})
+            row.update({key: room[key] for key in ("chat_id", "project_id") if _named(room.get(key))})
             row["kind"] = "direct_chat" if facts.get("_is_direct_chat", True) else "managed_task"
             rows[row["activity_id"]] = row
     except Exception:
@@ -470,7 +489,8 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
         # Stop ends the whole work: a retry's logical original carries its tree too (never an earlier attempt).
         logical = [current_root] if current_root and current_root != current_id else []
         ended = [] if current_state is not None else [current_id]
-        controls = ws.controls_for(current_state, current_row, earlier_live=earlier, live_roots=ended + logical + earlier)
+        controls = ws.controls_for(current_state, current_row, earlier_live=earlier, live_roots=ended + logical + earlier,
+                                   presence_turn=bool((raw.get(current_id) or {}).get("_presence_turn")))
         if current_state is None and members and any(m["activity"] in {"working", "queued", "waiting"} for m in members):
             controls.insert(0, {"action": "pause", "target": current_id})
         if current_state is None:

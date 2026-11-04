@@ -5,7 +5,8 @@ next-ask continuation); its original START body holds the engine thread it ran o
 choice records one decision in the ask's ledger record, reopens the same participant of the same
 ask and revision, and sends ONE new turn of that thread (never ``continueFrom``, which the engine
 refuses on a thread turn); no new ask is prepared. Only the engine is scripted: the plan record,
-substrate, custody, ledger and the released-reply hook are real.
+substrate, custody, ledger and the released-reply hook are real. That START is also what names the
+stopped seat's thread as the task's material for retention and Keep, never as an answer.
 """
 from __future__ import annotations
 
@@ -17,12 +18,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import plan_record
+from ouroboros import owner_keep, plan_record
+from ouroboros import review_thread_retention as rt
 from ouroboros.review_ledger import load_record
+from ouroboros.task_store import read_document
 from tests._review_session_route_shared import FakeGateway, _owned_gateway_uses_each_test_transport  # noqa: F401
 from tests._review_session_route_shared import _terminal_detail, fake_route as _fake_route
 from tests.test_plan_task_tool import CLEAN, _call, _write
 from tests.test_plan_task_tool import harness as _harness
+from tests.test_review_thread_retention import KEEP, Engine, _publish_queue, _route_keep, _row, _tool_keep
 
 harness, fake_route = _harness, _fake_route
 pytestmark = pytest.mark.serial
@@ -469,3 +473,231 @@ def test_a_stale_reply_of_the_stopped_operation_never_overwrites_the_continued_p
     assert not said, said  # nothing about the stopped operation reaches its author as news
     seat = load_record(h.drive, ask["record_id"])["rows"][0]
     assert seat["status"] == "responded" and seat["operation_id"] == answered["operation_id"]
+
+
+# ---- a stopped seat's thread is the task's material: its START names it, never an answer --------------------------
+# A stopped reply names no answered thread, and only an answered row continues into a next ask (``last_answer_row``);
+# the thread the seat ran on is still this task's and still in the engine. Each test ends the task through the real
+# writers and runs the step with its real live probe and queue census; the retention engine is the scripted mock.
+
+PLACE = "review_thread:thread-1"
+
+
+def _retention(h, engine):
+    _publish_queue(h.drive)
+    return rt.retire_finished_review_threads(h.drive, engine=engine)
+
+
+def _stop(h, ctx, times=1):
+    """The first ask stops; each further stop is an explicit continuation that stopped again. Nothing else continues."""
+    _write(ctx, ask=["s2"])
+    stopped, offers = _offered(h, ctx)
+    for number in range(2, times + 1):
+        h.engine.fates[f"run-{number}"] = "stop"
+        text, result = _call(ctx, continue_seats=[{"seat_id": "s2", "operation_id": stopped["operation_id"]}])
+        assert result.status == "ok", text
+        before = stopped["operation_id"]
+        _eventually(lambda: _participant(h)[1], lambda p: p["status"] == "failed" and p["operation_id"] != before,
+                    "the continuation stopping again")
+        stopped, offers = _offered(h, ctx)
+    _eventually(_live_operations, lambda live: not live, "every review worker finishing")
+    assert len(h.engine.turns) == times and {turn[0] for turn in h.engine.turns} == {"thread-1"}
+    return stopped, offers
+
+
+def _release(h, task_id="task-1"):
+    return (read_document(h.drive, task_id).get(rt.RELEASES) or {}).get("thread-1", {})
+
+
+@pytest.mark.parametrize("stops", [1, 2], ids=["first_stop", "stopped_again"])
+def test_a_stopped_seat_thread_reaches_the_archive_and_keep_and_stays_a_failed_seat(plan_session, stops):
+    h = plan_session
+    engine = Engine(runs=[f"run-{number}" for number in range(1, stops + 1)])
+    assert _retention(h, engine) == {"activated": True}
+    ctx = h.make_ctx()
+    stopped, offers = _stop(h, ctx, stops)
+    assert stopped["status"] == "failed" and not stopped.get("review_thread_id")  # no answered thread
+    assert [offer["operation_id"] for offer in offers] == [stopped["operation_id"]]  # still only an offer
+    ask, _ = _participant(h)
+    _row(h.drive, "task-1", "completed", tree="task-1")
+    row = read_document(h.drive, "task-1")
+    assert rt.review_threads(row) == {} and rt.seat_threads(h.drive, row) == (
+        {"thread-1": [(ask["record_id"], "s2")]}, True)
+    report = _retention(h, engine)
+    assert (report["accepted"], report["waiting"], report["holds"]) == (1, 0, {}), report
+    assert engine.calls[0] == ("export", "thread-1") and engine.purged
+    release = _release(h)
+    assert release["state"] == "accepted" and rt.read_thread_export(h.drive, "task-1", release["receipt"])["verified"]
+    now = _participant(h)[1]
+    assert (now["status"], now["review_thread_id"], now["operation_id"]) == ("failed", "", stopped["operation_id"])
+    seat = load_record(h.drive, ask["record_id"])["rows"][0]
+    assert seat["status"] != "responded" and "thread_export" in [ref["role"] for ref in seat["historical_source_refs"]]
+    answer = owner_keep.set_owner_keep(h.drive, "task-1", keep=False, source=KEEP)
+    assert PLACE in answer["retired"] and answer["releases"] == {PLACE: "accepted_pending_removal"}
+
+
+@pytest.mark.parametrize("gap", ["incomplete_evidence", "closure_misses_a_run"])
+def test_a_stopped_seat_thread_whose_export_is_not_whole_keeps_its_originals(plan_session, gap):
+    """Discovery widens what is looked at, never what may go: an unqualified native format, or a closure that does not
+    name the turn that stopped again, is retained as a named hold and nothing is asked of the engine's retire route."""
+    h = plan_session
+    engine = Engine(runs=("run-1", "run-2") if gap == "incomplete_evidence" else ("run-1",))
+    if gap == "incomplete_evidence":
+        engine.coverage, engine.gaps = "partial", [{"code": "native_format_unqualified", "subject": "s", "message": "m"}]
+    assert _retention(h, engine) == {"activated": True}
+    _stop(h, h.make_ctx(), 2)
+    _row(h.drive, "task-1", "completed", tree="task-1")
+    report = _retention(h, engine)
+    code = "export_partial" if gap == "incomplete_evidence" else "closure_identity_mismatch"
+    assert report["holds"] == {code: 1} and report["accepted"] == 0, report
+    assert not [kind for kind, _ in engine.calls if kind in ("item", "retire")] and not engine.purged
+    assert _release(h)["state"] == "held" and _release(h)["holds"] == [code]
+    answer = owner_keep.set_owner_keep(h.drive, "task-1", keep=False, source=KEEP)
+    assert PLACE in answer["retained"] and answer["releases"] == {PLACE: "held"}
+
+
+def test_a_keep_before_any_pass_names_a_stopped_seat_thread_and_wins(plan_session, monkeypatch):
+    h = plan_session
+    engine = Engine()
+    assert _retention(h, engine) == {"activated": True}
+    _stop(h, h.make_ctx())
+    _row(h.drive, "task-1", "completed", tree="task-1")
+    told = json.loads(_tool_keep(h.drive, task="task-1"))
+    assert told["keep"] is True and PLACE in told["retained"] and told["releases"] == {PLACE: "unrecorded"}, told
+    report = _retention(h, engine)
+    assert report["holds"] == {"owner_keep": 1} and engine.calls == [] and not _release(h), report
+    route = _route_keep(h.drive, monkeypatch, keep=False, task="task-1")
+    assert route["status"] == "released" and PLACE in route["retained"], route
+    assert _retention(h, engine)["accepted"] == 1 and _release(h)["state"] == "accepted"
+
+
+def test_a_stopped_seat_thread_from_before_activation_stays_in_the_engine_and_keep_names_it(plan_session):
+    h = plan_session
+    _stop(h, h.make_ctx())
+    engine = Engine()
+    assert _retention(h, engine) == {"activated": True}  # the code arrives after that run started
+    _row(h.drive, "task-1", "completed", tree="task-1")
+    report = _retention(h, engine)
+    assert report["holds"] == {"predates_activation": 1} and report["waiting"] == 0, report
+    assert engine.calls == [] and not _release(h) and not engine.purged
+    answer = owner_keep.set_owner_keep(h.drive, "task-1", keep=False, source=KEEP)
+    assert PLACE in answer["retained"] and answer["releases"] == {PLACE: "unrecorded"}
+
+
+def test_a_recorded_continuation_never_carried_holds_the_stopped_seat_thread(plan_session, monkeypatch):
+    """Its START is written and pending, its participant never reopened: the ended task's thread stays until that
+    start resolves, as for any other pending start of the tree."""
+    h = plan_session
+    engine = Engine(runs=("run-1", "run-2"))
+    assert _retention(h, engine) == {"activated": True}
+    ctx = h.make_ctx()
+    stopped, _offers = _stop(h, ctx)
+    reopen = plan_record.reopen_participant
+    monkeypatch.setattr(plan_record, "reopen_participant", lambda *_a, **_k: (_ for _ in ()).throw(
+        OSError("process ended before the reopen")))
+    text, result = _call(ctx, continue_seats=[{"seat_id": "s2", "operation_id": stopped["operation_id"]}])
+    monkeypatch.setattr(plan_record, "reopen_participant", reopen)
+    assert result.code == "TOOL_ERROR" and "PLAN_CONTINUATION_UNSENT" in text, text
+    _row(h.drive, "task-1", "completed", tree="task-1")
+    report = _retention(h, engine)
+    assert report["holds"] == {"custody_open": 1} and report["waiting"] == 1, report
+    assert engine.calls == [] and not _release(h) and not engine.purged
+
+
+def test_a_seat_still_pending_keeps_nobody_waiting_until_its_settlement_names_the_task_again(plan_session):
+    """A continuation carried and then lost: the seat is pending and unresolved, for as long as nothing settles it.
+    Keep names its thread, no pass reads the engine or holds the task for it, and the settlement's write takes it up."""
+    h = plan_session
+    engine = Engine()
+    assert _retention(h, engine) == {"activated": True}
+    stopped, _offers = _stop(h, h.make_ctx())
+    ask, _ = _participant(h)
+    lost = {"operation_id": "review_continue_lost", "status": "pending", "unresolved": True,
+            "superseded_operation_ids": [stopped["operation_id"]]}  # as ``continued_row`` carries it
+    plan_record.reopen_participant(h.drive, "task-1", ask_id=ask["ask_id"], seat_id="s2",
+                                   supersedes=stopped["operation_id"], facts=lost)
+    _row(h.drive, "task-1", "completed", tree="task-1")
+    report = _retention(h, engine)
+    assert (report["waiting"], report["holds"], report["errors"], engine.calls) == (0, {}, [], []), report
+    answer = owner_keep.set_owner_keep(h.drive, "task-1", keep=False, source=KEEP)
+    assert PLACE in answer["retained"] and answer["releases"] == {PLACE: "unrecorded"}
+    assert rt.seat_threads(h.drive, read_document(h.drive, "task-1"), settled_only=True) == ({}, True)
+    plan_record.update_participant(h.drive, "task-1", ask_id=ask["ask_id"], seat_id="s2", facts={
+        "operation_id": "review_continue_lost", "status": "failed", "unresolved": False, "error": "never came back"})
+    assert _retention(h, engine)["accepted"] == 1 and _release(h)["state"] == "accepted"
+    assert _participant(h)[1]["status"] == "failed"
+
+
+def test_a_stopped_seat_thread_waits_for_the_original_and_the_continued_tree(plan_session):
+    from ouroboros.owner_continue import claim_on_predecessor, mark_claim_admitted
+
+    h = plan_session
+    engine = Engine()
+    assert _retention(h, engine) == {"activated": True}
+    _stop(h, h.make_ctx())
+    _row(h.drive, "child-1", "scheduled", parent="task-1", tree="task-1")  # a native child: no queue row of its own
+    _row(h.drive, "task-1", "cancelled", tree="task-1", cancel_origin={"source": "", "reason": "server_shutdown"})
+    report = _retention(h, engine)
+    assert report["holds"] == {"tree_unsettled": 1} and report["waiting"] == 1 and engine.calls == [], report
+    _row(h.drive, "child-1", "running", parent="task-1", tree="task-1")
+    _row(h.drive, "child-1", "completed", parent="task-1", tree="task-1")
+    assert _retention(h, engine)["holds"] == {"continuable": 1} and engine.calls == []  # the owner can still Continue
+    claim_on_predecessor(h.drive, "task-1", "nonce-1", {"successor_task_id": "task-2"})
+    mark_claim_admitted(h.drive, "task-1", "nonce-1")
+    _row(h.drive, "task-2", "running", tree="task-2")
+    _row(h.drive, "child-2", "scheduled", parent="task-2", tree="task-2")
+    _row(h.drive, "task-2", "completed", tree="task-2")
+    report = _retention(h, engine)
+    assert report["holds"] == {"continued_tree_unsettled": 1} and engine.calls == [] and not _release(h), report
+    _row(h.drive, "child-2", "running", parent="task-2", tree="task-2")
+    _row(h.drive, "child-2", "completed", parent="task-2", tree="task-2")
+    assert _retention(h, engine)["accepted"] == 1 and _release(h)["state"] == "accepted"
+
+
+def test_a_continued_seat_that_answers_names_its_own_thread_and_reads_no_start(plan_session, monkeypatch):
+    from ouroboros import delegate_invocation
+
+    h = plan_session
+    engine = Engine(runs=("run-1", "run-2"))
+    assert _retention(h, engine) == {"activated": True}
+    ctx = h.make_ctx()
+    stopped, _offers = _stop(h, ctx)
+    text, result = _call(ctx, continue_seats=[{"seat_id": "s2", "operation_id": stopped["operation_id"]}])
+    assert result.status == "ok", text
+    answered = _settled(h, "answered")
+    assert answered["review_thread_id"] == "thread-1"
+    ask, _ = _participant(h)
+    _eventually(lambda: load_record(h.drive, ask["record_id"])["rows"][0], lambda row: row["status"] == "responded",
+                "the ledger seat settling")
+    _eventually(_live_operations, lambda live: not live, "every review worker finishing")
+    _row(h.drive, "task-1", "completed", tree="task-1")
+    reads = []
+    monkeypatch.setattr(delegate_invocation, "operation_record", lambda *args: reads.append(args))
+    row = read_document(h.drive, "task-1")
+    assert rt.seat_threads(h.drive, row) == ({"thread-1": [(ask["record_id"], "s2")]}, True) and reads == []
+    assert _retention(h, engine)["accepted"] == 1 and _release(h)["state"] == "accepted"
+
+
+def test_a_start_that_cannot_be_read_is_unknown_never_gone_or_retained(plan_session, monkeypatch):
+    from ouroboros import delegate_invocation, delegate_pending, store
+
+    h = plan_session
+    engine = Engine()
+    assert _retention(h, engine) == {"activated": True}
+    _stop(h, h.make_ctx())
+    _row(h.drive, "task-1", "completed", tree="task-1")
+    monkeypatch.setattr(delegate_pending, "request_body", lambda *_a, **_k: None)  # its stored body is unreadable
+    report = _retention(h, engine)
+    assert report["holds"] == {"thread_start_unreadable": 1} and report["waiting"] == 0, report
+    assert engine.calls == [] and not _release(h)
+    answer = owner_keep.set_owner_keep(h.drive, "task-1", keep=True, source=KEEP)
+    assert answer["unknown"] == ["review_threads"] and answer["keep"] is True and answer["releases"] == {}, answer
+    owner_keep.set_owner_keep(h.drive, "task-1", keep=False, source=KEEP)
+
+    def busy(*_a, **_k):
+        raise store.StoreBusy("the store is held")
+
+    monkeypatch.setattr(delegate_invocation, "operation_record", busy)
+    assert owner_keep.set_owner_keep(h.drive, "task-1", keep=False, source=KEEP)["unknown"] == ["review_threads"]
+    report = _retention(h, engine)  # the one failed read keeps the task asked, and is reported
+    assert report["waiting"] == 1 and len(report["errors"]) == 1 and "StoreBusy" in report["errors"][0], report

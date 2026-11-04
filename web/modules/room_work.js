@@ -24,7 +24,8 @@ import { desiredLiveCardPhase, replayTerminalPhase } from './task_phase_chip.js'
 import { createStatusMark, markView, paintStatusMark } from './status_mark.js';
 import { closeTaskControlMenu, createTaskResumeButton, requestStop, taskControlBusy } from './task_control_menu.js';
 import {
-    OUTCOME_TONES, amberNote, clock, openWorkControls, workControls, workMenuActions, workQuestion, workRowView,
+    OUTCOME_TONES, amberNote, clock, openWorkControls, resumeAttemptWords, workControls, workMenuActions, workQuestion,
+    workRowView,
 } from './work_status.js';
 import { showToast } from './toast.js';
 import { motionMs, reducedMotion } from './motion.js';
@@ -275,8 +276,8 @@ export function createRoomWork({
             const id = String(work.work_id || '');
             if (!id) continue;
             const episode = String(work.episode?.task_id || id);
-            const shown = current ? work : { ...work, activity: 'unknown', because: [], tails: [], turn: [], confirmed: false,
-                mark: 'ring' };
+            const shown = current ? work : { ...work, activity: 'unknown', because: [], tails: [], last_resume: undefined,
+                turn: [], confirmed: false, mark: 'ring' };
             const view = workRowView(shown, { stopping: records.get(episode)?.cancelPendingPolicy || '' });
             items.push({ id, kind: work.kind === 'task' ? 'task' : 'direct', work, record: workCard(work, records), view,
                 episode, attempt: state.attempts?.get?.(episode) ?? null, activity: current ? String(work.activity || '') : 'unknown',
@@ -414,6 +415,10 @@ export function createRoomWork({
         const uncontrolled = !row.confirmed && !row.canMenu && !row.resume && !row.settled && !row.latest;
         if (uncontrolled) lines.push([tr('room_work.detail.why', 'Why no controls'),
             tr('room_work.detail.why_text', 'The latest update did not confirm this work, so nothing here can be paused or stopped.')]);
+        // The work's latest refused Resume, or its own refused start, in the door's words (its line keeps the date).
+        const attempt = row.confirmed ? resumeAttemptWords(row.work?.last_resume) : '';
+        if (attempt) lines.push([row.work.last_resume.by?.actor === 'host' ? tr('room_work.detail.last_start', 'Last start')
+            : tr('room_work.detail.last_resume', 'Last Resume'), attempt]);
         const what = row.kind === 'pending' ? tr('room_work.what.pending', 'Your message, being sent')
             : row.kind === 'direct' ? (row.cmid ? tr('room_work.what.reply', 'A reply to your message')
                 : tr('room_work.what.turn', 'A turn in this chat'))

@@ -865,6 +865,12 @@ def test_no_op_cleanup_skips_when_other_tasks_running_or_already_clean(tmp_path)
     assert tx3["cleanup_status"] == "skipped_no_base"
 
 
+def _only_cleanup_reads(cmd):
+    """Behind a fence or a busy lock the cleanup reads this transaction's own label and branch and runs nothing else."""
+    assert cmd[1] in {"for-each-ref", "log"}, f"evolution cleanup must not run {cmd} behind the guard"
+    return 0, "", ""
+
+
 def test_evolution_cleanup_never_mutates_checkout_owned_by_update(monkeypatch):
     from supervisor import git_ops, update_merge, workers
 
@@ -875,13 +881,7 @@ def test_evolution_cleanup_never_mutates_checkout_owned_by_update(monkeypatch):
     monkeypatch.setattr(
         workers, "repo_writer_admission_closed", lambda: "managed_update:smart"
     )
-    monkeypatch.setattr(
-        git_ops,
-        "git_capture",
-        lambda _cmd: (_ for _ in ()).throw(
-            AssertionError("evolution cleanup must not touch git behind writer fence")
-        ),
-    )
+    monkeypatch.setattr(git_ops, "git_capture", _only_cleanup_reads)
     tx = {"base_head": "a" * 40, "transaction_id": "evo-update-race"}
 
     lifecycle._cleanup_worktree_after_cycle(tx, "evolution-task")
@@ -899,13 +899,7 @@ def test_evolution_cleanup_skips_when_update_lock_is_busy(monkeypatch):
         "acquire_update_lock",
         lambda: (_ for _ in ()).throw(RuntimeError("busy")),
     )
-    monkeypatch.setattr(
-        git_ops,
-        "git_capture",
-        lambda _cmd: (_ for _ in ()).throw(
-            AssertionError("busy update lock must stop cleanup before git")
-        ),
-    )
+    monkeypatch.setattr(git_ops, "git_capture", _only_cleanup_reads)
     tx = {"base_head": "a" * 40, "transaction_id": "evo-update-lock-race"}
 
     lifecycle._cleanup_worktree_after_cycle(tx, "evolution-task")

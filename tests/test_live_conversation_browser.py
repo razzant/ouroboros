@@ -221,12 +221,11 @@ def test_talk_a_real_composer_and_loaded_feature(subscription_ui, monkeypatch, w
         assert len(posts) == 1 and posts[0]["chat_id"] == 1
         assert page.locator("#page-chat [data-composer-voice]").is_hidden()
         assert page.evaluate("window.__callFixture.microphones") == 1
-        if engine == "grok":
-            assert page.locator(".call-show").is_hidden()
-            assert page.locator(".call-vision-note").inner_text() == "This voice engine does not accept images."
-        else:
-            assert page.locator(".call-show").is_visible()
-            assert page.locator(".call-vision-note").count() == 0
+        # Show follows what this page can capture, never the engine's own sight: a blind route (grok) still takes a
+        # shared screen or camera and reads the exact saved frame (owner 27.10), so no engine hides Show or explains a
+        # refusal (call.js `vision`).
+        assert page.locator(".call-show").is_visible()
+        assert page.locator(".call-vision-note").count() == 0
         browser.capture(page, f"live-voice-{engine}-{width}-{scheme}")
         assert page.locator('.call-glass').evaluate("node => getComputedStyle(node).borderRadius") == radius
         page.locator('.call-size').click()
@@ -537,8 +536,12 @@ def test_catalog_settings_save_and_client_devices(subscription_ui, monkeypatch, 
     form.locator('[name="thinking"]').select_option(thinking['thinking_levels'][-1])
     grok = by_id['grok_realtime:grok']
     form.locator('[name="provider"]').select_option(grok['id'])
-    assert_catalog_model(grok, next(model for model in grok['models'] if model['default']))
-    expect(form.locator('[name="thinking"]')).to_have_value('none')
+    grok_model = next(model for model in grok['models'] if model['default'])
+    assert_catalog_model(grok, grok_model)
+    # Another engine starts at its own default, not at the level chosen for the last one, and names it (owner 28.10).
+    expect(form.locator('[name="thinking"]')).to_have_value('')
+    expect(form.locator('[name="thinking"] option[value=""]')).to_have_text(
+        f"Default ({grok_model['thinking_default'] or grok_model['thinking_levels'][0]})")
     expect(form).not_to_contain_text('Google does not offer Gemini Live in Russia or Belarus.')
     form.locator('[name="provider"]').select_option('openai_realtime:openai')
     expect(form.locator('[data-call-memory]')).to_contain_text('not yet measured')

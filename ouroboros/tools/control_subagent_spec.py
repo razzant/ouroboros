@@ -28,6 +28,7 @@ def schedule_subagent_properties() -> Dict[str, Any]:
     from ouroboros.tool_access import SUBAGENT_CAPABILITIES
     from ouroboros.configured_subagents import SESSION_ACCESS_LOWERING
     from ouroboros.delegate_documents import attachment_parameters
+    from ouroboros.delegate_readonly_inputs import input_files_parameter
     from ouroboros.settings_scales import EFFORT_SCALE
 
     return {
@@ -52,7 +53,8 @@ def schedule_subagent_properties() -> Dict[str, Any]:
         "access": {"type": "string", "enum": ["inherit", *SESSION_ACCESS_LOWERING], "default": "inherit", "description":
             "inherit (default/omitted) preserves owner-selected Agent-session access; readonly or "
             "workspace_write may only lower it. API-model rows ignore it with disclosure. It grants "
-            "no task or product-write authority. "
+            "no task or product-write authority: a non-acting session's evidence-only private checking copy owes no apply, "
+            "so do not call integrate_delegated_patch to apply or reject its changes. "
             "Select readonly for read-only session execution; write_surface controls native child/nanny authority."},
         "objective": {"type": "string", "description": "Focused OUTCOME and scope, not a step-by-step script. A harness-dispatched child forwards work to its delegated run; a scripted objective can read as orders to execute natively."},
         "expected_output": {"type": "string", "description": "Concrete handoff expected from the child."},
@@ -115,6 +117,11 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             "Your retained inputs, for an agent_session child only (API children refuse both): the first start of "
             "the child's work order attaches them; its later starts, continuations and replacements select their own. "
             "With input_sources=declared only these inputs are copied to the child."),
+        **input_files_parameter(
+            "Read-only children only (write_surface omitted or read_only); [] reports an empty receipt. Checked with your "
+            "read authority and the child's limits and retained before the child is queued; the queued receipt lists each "
+            "copy. An API child's first input names each copy for read_file(path=<copy>); an agent_session child's first "
+            "start verifies them."),
         "protected_paths_grant": {"type": "boolean", "default": False, "description": "Allow the child to modify protected paths in its self_worktree. Honored only in pro runtime mode; you still re-check at integration."},
         "external_tool_grants": {"type": "array", "items": {"type": "string"}, "description": "Optional extension/MCP tool names to grant this mutative child. Denied by default."},
         "allowed_origins": {
@@ -268,6 +275,16 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tu
             import uuid
 
             directory_options["document_import_intent"] = uuid.uuid4().hex
+    if params.get("input_files") is not None:  # shape only: permission and copying happen with the queued child's identity
+        from ouroboros.delegate_readonly_inputs import InputSelectionError, selection_entries
+
+        try:
+            directory_options["input_files"] = selection_entries(params["input_files"])
+        except InputSelectionError as exc:
+            return {}, f"⚠️ TOOL_ARG_ERROR (schedule_subagent): {exc.detail}"
+        if directory_options["input_files"] and str(params.get("write_surface") or "").strip().lower() not in {"", "read_only"}:
+            return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): input_files_readonly_only: input_files prepares inputs "
+                        "for a read-only child; omit it or write_surface.")
     if params.get("workspace") not in (None, "copy", "in_place"):
         return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): workspace must be copy or in_place."
     if params.get("workspace") == "in_place":  # the documented default geometry is no folder request, as at delegate_start

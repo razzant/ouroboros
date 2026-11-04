@@ -157,8 +157,10 @@ export function taskActivityPresentation({ phase = 'working', outcome = '', ende
     // The card of a work's current episode says the work's word and its line (work_status.cardWorkView).
     else if (workView) current = { ...phaseView(workView.phase, workView.text, workView.classes, { mark: work?.mark,
         tone: workView.tone, waiting: workView.waiting }), ...(workView.secondary ? { secondary: workView.secondary } : {}),
-        // The exact call still explains the work's word in the card's details where both say the same word.
-        ...(modelPhase?.detail && modelPhase.text === workView.text ? { detail: modelPhase.detail } : {}) };
+        // The exact call still explains the work's word in the card's details where both say the same word; a held
+        // work's latest refused Resume (`note`, already dated and attributed) explains it there too.
+        ...(modelPhase?.detail && modelPhase.text === workView.text ? { detail: modelPhase.detail } : {}),
+        ...(workView.note ? { note: workView.note } : {}) };
     else if (['budget_paused', 'budget_pausing'].includes(phase)) {
         // The chip says the word; what holds it, a hold and the reviews a settled Pause lets finish are its quieter
         // second fact.
@@ -391,8 +393,9 @@ export function setLiveCardPhase(record, phase = 'working', text = '', className
     const changed = paintTaskPhase(record.phaseEl, {
         phase, text, className, secondary, ...chipLook(view.phase === phase ? view : plainView(phase)),
     }, phaseSecondaryElement(record), record.isSubagent);
-    // The exact phase rides with the chip word it explains, never beside another one.
-    const detail = view.detail && view.text === text ? fmt('Model call: {detail}', { detail: view.detail }) : '';
+    // The exact phase rides with the chip word it explains, never beside another one; so does a held work's note.
+    const detail = view.text !== text ? '' : view.detail ? fmt('Model call: {detail}', { detail: view.detail })
+        : view.note || '';
     const detailChanged = paintLiveDetail(record, 'livePhaseDetail', detail);
     return changed || detailChanged;
 }

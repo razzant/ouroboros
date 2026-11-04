@@ -437,26 +437,25 @@ def pending_member_replay_safe(q: Any, member: Dict[str, Any]) -> Tuple[bool, st
 def resume_budget_paused_task(task_id: str, *, selected_by: str = "") -> Dict[str, Any]:
     from ouroboros.owner_pause import paused_gap
     from ouroboros.pause_notices import gap_fact
-    from ouroboros.work_stop import resume_outcome
+    from ouroboros.work_stop import resume_asked, resume_outcome
 
     gap = paused_gap(_queue_module().DRIVE_ROOT, task_id)  # read before this Resume ends that Pause
+    answered = resume_asked(_queue_module(), task_id, selected_by=selected_by)  # and the control it answers about
     seen: List[Dict[str, str]] = []  # what this Resume's own census found; the Pause's record keeps its own
     outcome = _resume_budget_paused_task(task_id, selected_by=selected_by, gaps=seen)
-    if seen:
-        gap = {"membership_gaps": gap_fact(seen, gap.get("membership_gaps"))}
-    return resume_outcome({**outcome, **gap} if outcome.get("ok") else outcome)
+    gap = {"membership_gaps": gap_fact(seen, gap.get("membership_gaps"))} if seen else gap
+    return answered(resume_outcome({**outcome, **gap} if outcome.get("ok") else outcome))
 
 
 def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
                                gaps: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     """Explicitly resume one budget-paused task and, if needed, its root latch.
 
-    A replay-safe ZERO-dispatch row is released as before. An EXACT
-    continuation gets a single-use ``grant_exact_budget_resume``, never a rerun.
-    A lifted root fence releases a held row only after recording its selection.
-    ``selected_by`` names the MODEL-issued request (owner Q9); an empty value is
-    the owner's own act, which needs no root grant above itself. ``gaps``
-    receives the damaged rows each door's owner-Pause tree census ties to no tree.
+    A replay-safe ZERO-dispatch row is released as before. An EXACT continuation gets a single-use
+    ``grant_exact_budget_resume``, never a rerun. A lifted root fence releases a held row only after recording
+    its selection. ``selected_by`` names the MODEL-issued request (owner Q9); an empty value is the owner's own
+    act, which needs no root grant above itself. ``gaps`` receives the damaged rows each door's owner-Pause tree
+    census ties to no tree.
     """
     from ouroboros.control_actor import control_actor, observed_control_stop
     from ouroboros.work_stop import clear_refusal, release_refusal, selection_record
@@ -657,6 +656,9 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
             except Exception:
                 return {"ok": False, "error": "selection_authority_unavailable"}
         else:
+            from ouroboros.presence_carrier import owner_resume_lift
+            if refusal := owner_resume_lift(task, result_root):  # the owner's Resume of a moved Presence turn (#2566)
+                return refusal
             resumed_at = utc_now_iso()
             prior_pause = dict(pause)
             task.pop("_budget_pause", None)

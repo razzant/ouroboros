@@ -34,7 +34,8 @@ uv pip install --python "$PY" -r "$EVIDENCE/payload-requirements.txt"
 "$PY" -m ouroboros.betterleaks_runtime install --build-output betterleaks-standalone
 "$PY" scripts/fetch_claudexor_runtime.py --output-dir claudexor-runtime
 "$PY" -m playwright install-deps chromium webkit
-PLAYWRIGHT_BROWSERS_PATH=0 "$PY" -m playwright install chromium webkit
+PLAYWRIGHT_BROWSERS_PATH=0 "$PY" -m playwright install webkit
+PLAYWRIGHT_BROWSERS_PATH=0 "$PY" -m ouroboros.chromium_runtime install
 # No release tag is created or validation weakened. This diagnostic seed is
 # intentionally tagless; the normal build_linux.sh release guard is unchanged.
 git bundle create repo.bundle HEAD

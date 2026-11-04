@@ -86,10 +86,26 @@ def _presence_exception(exc: Exception, status: int) -> JSONResponse:
         facts["retry_after"] = exc.retry_after
     if getattr(exc, "work_ref", ""):
         facts["work_ref"] = exc.work_ref
+    if getattr(exc, "custody", ""):
+        facts["custody"] = exc.custody  # ``queued`` or ``unknown``: the queue's custody, never a liveness claim
     manifest = getattr(exc, "attachment_manifest", None)
     if isinstance(manifest, list):
         facts["attachment_manifest"] = [dict(row) for row in manifest if isinstance(row, dict)]
     return _presence_error(str(exc), status, code, disposition, **facts)
+
+
+def _queue_custody_refusal(data_dir: Any, turn_id: str, identity: str) -> None:
+    """Raise the typed retained answer of a turn whose saved work the queue keeps (``presence_recovery.queue_custody``),
+    before any intake, reservation, admission or author; a canonical terminal is the replay's, not this answer."""
+    from pathlib import Path
+
+    from ouroboros.presence_recovery import CUSTODY_HOLDS, custody_refusal, queue_custody
+    from ouroboros.presence_runner import _retry_target, _stored_turn
+
+    physical = _retry_target(Path(data_dir), turn_id, identity) if identity else turn_id
+    stored = _stored_turn(Path(data_dir), physical, identity)
+    if stored and (custody := queue_custody(Path(data_dir), physical, stored)) in CUSTODY_HOLDS:
+        raise custody_refusal(stored, physical, custody)
 
 
 def _admit_presence(ctx: host.HostServiceContext, skill_name: str, binding_id: str, **origin: str) -> Any:
@@ -119,7 +135,8 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
     queues on the gate as a coroutine and runs on its own thread. Every version releases
     the request reservation at a qualified park (or terminal settlement); version 1
     returns the initial envelope while version 0's HTTP waiter stays open until the
-    terminal result. Version 2 takes that envelope as soon as its author accepts intake,
+    terminal result, or the typed retained answer of a moved turn the queue parks. Version 2 takes
+    that envelope as soon as its author accepts intake,
     and never queues: a busy conversation or slot is a typed retry. A retry of the same
     event joins the retained execution.
     """
@@ -237,6 +254,10 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
         # A settled turn answers from its durable row without queueing behind its conversation.
         result = await host._bounded_host_read(ctx, functools.partial(
             presence_turn_replay, ctx.data_dir, turn_id, event.conversation_key, identity, continuing))
+        if result is None and turn_id not in ctx.presence_turns.live():
+            # Saved work the queue keeps (a moved turn's park, Resume or restart return), or that no read yet
+            # confirms: answered from that custody before any intake, reservation, admission or author.
+            await host._bounded_host_read(ctx, functools.partial(_queue_custody_refusal, ctx.data_dir, turn_id, identity))
         from ouroboros.presence_runner import _stored_turn
         from ouroboros.conversation_lease import live_author
         # A retry of work already admitted belongs to its frozen custody, even if the

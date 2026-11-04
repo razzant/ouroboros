@@ -3,8 +3,11 @@ evaluate IIFE retry."""
 
 from __future__ import annotations
 
+import types
+
 import pytest
 
+from ouroboros import chromium_runtime
 from ouroboros.tools import browser
 
 
@@ -14,12 +17,13 @@ def test_launch_args_include_swiftshader():
     class _Chromium:
         def launch(self, **kw):
             captured.update(kw)
-            return "browser"
+            return types.SimpleNamespace(version=chromium_runtime.CHROMIUM_VERSION)
 
     class _PW:
         chromium = _Chromium()
 
-    browser._launch_browser_with_fallback(_PW(), engine="chromium")
+    browser._launch_browser_with_fallback(_PW(), engine="chromium", executable_path="/pinned/chrome-headless-shell",
+                                          sandbox=True)
     args = captured.get("args", [])
     for flag in ("--use-gl=angle", "--use-angle=swiftshader",
                  "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"):

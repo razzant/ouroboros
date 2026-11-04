@@ -26,6 +26,7 @@ as the agent's ``cancel_task`` does — never a 404 that leaves it running.
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -870,11 +871,30 @@ def test_cascade_stop_now_during_the_inflight_synthesis_keeps_the_intent_open_an
     assert not active_intent(tmp_path, TURN_ID)
 
 
-def test_stop_now_ends_a_command_the_direct_turn_is_running_through_its_open_intent(tmp_path, monkeypatch):
+def _windows_shell_processes() -> list:
+    """Windows only, for the ``sh`` stimulus's failure text: every shell and sleep alive, whatever their parent chain."""
+    if os.name != "nt":
+        return []
+    import psutil
+
+    return sorted((process.info["pid"], process.info["ppid"], process.info["name"])
+                  for process in psutil.process_iter(["pid", "ppid", "name"])
+                  if process.info["name"] in {"sh.exe", "bash.exe", "sleep.exe"})
+
+
+@pytest.mark.parametrize("stimulus", ["native tree", "sh"])
+def test_stop_now_ends_a_command_the_direct_turn_is_running_through_its_open_intent(tmp_path, monkeypatch, stimulus):
     """R4: the direct turn's Stop control is drained only at a round boundary, so a command the turn was running
     kept its whole wait. The real public Stop now leaves the intent open for a turn still inside a step (202); the
     turn's own command wait reads it, kills the command's process group within a poll and keeps the output so far.
-    Its boundary then ends the turn as before (the control stays in the mailbox)."""
+    Its boundary then ends the turn as before (the control stays in the mailbox).
+
+    ``native tree``: two interpreters on every host, the root waiting on a child that holds the same pipes, so only
+    the whole group's (Windows: tree's) kill closes them before the 5 s output bound. It says nothing about a shell.
+    ``sh``: the original stimulus. UNRESOLVED on Windows, not fixed by the other case: a Git-for-Windows ``sh`` tree
+    kept the pipes past Stop now's ``taskkill /F /T`` (CI 41634598146, job 125912568384: 5.2 s and 5.3 s, its reader
+    threads leaked), cause not established natively. Its failure there names the shells still alive."""
+    import sys
     import threading
     import time
 
@@ -891,6 +911,11 @@ def test_stop_now_ends_a_command_the_direct_turn_is_running_through_its_open_int
     work = tmp_path / "work"
     work.mkdir()
     ran = {}
+    ready = work / "tree.ready"
+    child = f"import pathlib, time; pathlib.Path({str(ready)!r}).touch(); time.sleep(25)"
+    command = ["sh", "-c", "echo started; sleep 25; echo finished"] if stimulus == "sh" else [
+        sys.executable, "-c", f"import subprocess, sys; print('started', flush=True); subprocess.run("
+        f"[sys.executable, '-c', {child!r}], stdout=sys.stdout, stderr=sys.stderr); print('finished', flush=True)"]
 
     def turn_runs_a_command():
         task = {"id": TURN_ID, "type": "task", "_is_direct_chat": True, "chat_id": 0, "_attempt": 1}
@@ -898,12 +923,17 @@ def test_stop_now_ends_a_command_the_direct_turn_is_running_through_its_open_int
             ctx = SimpleNamespace(repo_dir=work, drive_root=tmp_path, drive_logs=lambda: tmp_path, task_id=TURN_ID,
                                   model_wait_context=owner)
             ran["started"] = time.monotonic()
-            ran["text"] = _run_shell(ctx, ["sh", "-c", "echo started; sleep 25; echo finished"], timeout_sec=60)
+            ran["text"] = _run_shell(ctx, command, timeout_sec=60)
             ran["ended"] = time.monotonic()
 
     turn = threading.Thread(target=turn_runs_a_command, name="direct-turn-command", daemon=True)
     turn.start()
     time.sleep(1.5)  # the command is inside its wait
+    ready_by = time.monotonic() + 120  # an interpreter's start on a loaded host, not the bound under test
+    while stimulus != "sh" and not ready.exists():
+        assert turn.is_alive() and time.monotonic() < ready_by, ran
+        time.sleep(0.02)
+    shells = _windows_shell_processes()
     with _client(tmp_path) as client:
         pressed = time.monotonic()
         cancel = client.post(f"/api/tasks/{TURN_ID}/cancel", json={"stop_policy": "immediate"})
@@ -911,6 +941,7 @@ def test_stop_now_ends_a_command_the_direct_turn_is_running_through_its_open_int
 
     assert not turn.is_alive()
     assert cancel.status_code == 202 and cancel.json()["cancel_state"] == "pending", cancel.text
-    assert ran["ended"] - pressed < 5, f"the command ended {ran['ended'] - pressed:.1f}s after Stop now"
+    assert ran["ended"] - pressed < 5, (f"the command ended {ran['ended'] - pressed:.1f}s after Stop now; "
+                                        f"shells before it {shells}, after {_windows_shell_processes()}")
     assert "started" in ran["text"] and "finished" not in ran["text"]
     assert "finalize_now" in _mailbox_kinds(tmp_path) and active_intent(tmp_path, TURN_ID)

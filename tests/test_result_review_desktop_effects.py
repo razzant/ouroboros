@@ -297,14 +297,13 @@ def test_an_element_act_receipt_keeps_its_complete_label_and_values_in_the_retai
     real, lines = native.op_act, []
 
     def helper(_self, op, *args, timeout=20):
-        if op == "resolve":
-            return {"ok": True, "candidates": [app_dict(KEYNOTE)]}
-        assert op == "act"
-        monkeypatch.setattr(native, "op_act", lambda pid, do, sel, n, ms: real(
-            pid, do, sel, n, ms, ax=ax, front=lambda: app_dict(KEYNOTE), settle=lambda _s: None))
+        assert op == "element", "resolve and act in one helper process"
+        monkeypatch.setattr(native, "op_resolve", lambda q: {"ok": True, "query": q, "candidates": [app_dict(KEYNOTE)]})
+        monkeypatch.setattr(native, "op_act", lambda pid, do, sel, n, ms, **kw: real(
+            pid, do, sel, n, ms, **{**kw, "ax": ax, "front": lambda: app_dict(KEYNOTE), "settle": lambda _s: None}))
         try:
-            with mock.patch("builtins.print", lambda text: lines.append(text)):
-                native.main(["act", *[str(a) for a in args]])
+            with mock.patch("builtins.print", lambda text, **_kw: lines.append(text)):
+                native.main(["element", *[str(a) for a in args]])
         finally:
             monkeypatch.setattr(native, "op_act", real)
         return json.loads(lines[-1])

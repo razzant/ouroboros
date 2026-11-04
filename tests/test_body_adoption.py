@@ -487,6 +487,8 @@ def test_authorization_refusals_leave_the_serving_tree_and_no_handoff(scene, mon
 
     bible = scene.commit(files={"BIBLE.md": "# Constitution\n\nAmended.\n"})
     assert _refusal(scene) == "ADOPTION_CONSTITUTION_NEEDS_RELEASE"
+    scene.commit(files={"VERSION": "1.1.0-alpha.0\n"})  # a development marker is no release
+    assert _refusal(scene) == "ADOPTION_CONSTITUTION_NEEDS_RELEASE"
     release = scene.commit(files={"VERSION": "1.0.1\n"})  # the same change as a numbered release
     assert body_adoption.authorize(scene.ctx, release, reason="adopt it")["cand"] == release
     body_adoption.abandon(scene.data, "test")

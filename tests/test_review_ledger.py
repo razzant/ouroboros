@@ -1114,7 +1114,7 @@ def test_naming_the_record_keeps_a_typed_result_paired_with_its_text(tmp_path):
         _restore_tool_result_sidecar,
     )
 
-    ctx = SimpleNamespace(_current_review_record_id="rl-typed-1")
+    ctx = SimpleNamespace(_current_review_record_id="rl-typed-1", drive_root=tmp_path)  # its record offers no seat
     sentinel = object()
     token = _install_tool_result_sidecar(ctx, sentinel)
     try:

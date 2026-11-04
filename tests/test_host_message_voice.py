@@ -171,8 +171,9 @@ HOST_ROW_CLASSES = {
     "consciousness_notice": ("runtime_state", 1),
     "deep_self_review_queued": ("owner_act_receipt", 1),
     "deep_self_review_unavailable": ("not_started", 2),
+    "evolution_cleanup": ("card_row", 1),  # what a cycle's cleanup moved; alone only on a page without its card
     "evolution_cycle_outcome": ("runtime_state", 1),
-    "evolution_notice": ("runtime_state", 10),
+    "evolution_notice": ("runtime_state", 7),  # lifecycle x4, toggle, light-mode queue drop, /evolve off report; the failure, repeat and reserve stops are gone (owner, 2026-11-02)
     "finalization_notice": ("card_row", 2),
     "host_progress": ("card_row", 1),
     "initialization_notice": ("not_started", 1),

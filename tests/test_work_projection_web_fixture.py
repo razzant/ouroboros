@@ -144,6 +144,29 @@ CASES = {
     "paused_model_handoff": (
         [_row("mh", "budget_pausing", pause_cause="owner", live=False)], {}, {}, {},
     ),
+    # The owner's Resume of a work they paused was refused after the press: the line keeps who paused it and says
+    # that refusal last, dated; its words go to the card's details. Its Resume control stays the door's own.
+    "paused_resume_refused": (
+        [_row("rr", "budget_paused", pause_cause="owner", can_resume=False)], {}, {}, {},
+    ),
+    # Saved when the app stopped, then Ouroboros's own Resume was refused: said as Ouroboros's, never the owner's.
+    "saved_resume_refused": (
+        [_row("sr", "budget_paused", pause_cause="restart", can_resume=True)],
+        {"sr": {"_budget_pause_hold": {"reason": "saved_work_hold", "release": "resume", "held_at": "2026-10-17T14:00:00Z",
+                                       "by": {"actor": "host", "task_id": "", "text": "", "at": "2026-10-17T14:00:00Z"}}}},
+        {}, {},
+    ),
+    # A refusal about an earlier Pause (another fence) belongs to that stop: nothing is said of it.
+    "paused_resume_refused_earlier": (
+        [_row("re", "budget_paused", pause_cause="owner", can_resume=False)], {}, {}, {},
+    ),
+    # A Continue whose earlier work settled, its own start refused for another reason: that refusal, dated, in place
+    # of the wait's sentence; it still waits and tries again by itself (no Resume).
+    "continue_start_refused": (
+        [_row("cs", "budget_paused", pause_cause="unknown", can_resume=False)],
+        {"cs": {**_HOLD, "title": "Continue: release", "continuation": {"predecessor_task_id": "ps"}}},
+        {"ps": {"task_id": "ps", "status": "failed", "suggested_name": "Finish the saved release"}}, {},
+    ),
 }
 
 # The owner fence records who declared the Pause: the owner's own press, or Ouroboros with its sentence (here a
@@ -155,17 +178,49 @@ FENCES = {"o": {"by": {"actor": "owner", "text": "", "at": _PRESSED}, "requested
           "z": {"by": {"actor": "owner", "text": "", "at": _PRESSED}, "requested_at": _PRESSED},
           "rv": {"by": {"actor": "owner", "text": "", "at": _PRESSED}, "requested_at": _PRESSED},
           "n": {"requested_by": "owner", "requested_at": _PRESSED},
-          **{task: {"by": {"actor": "owner", "text": "", "at": _PRESSED}, "requested_at": _PRESSED}
-             for task in ("pr", "wa", "so", "mh")}}
+          **{task: {"by": {"actor": "owner", "text": "", "at": _PRESSED}, "requested_at": _PRESSED,
+                    **({"fence_id": f"fence-{task}"} if task in {"rr", "re"} else {})}
+             for task in ("pr", "wa", "so", "mh", "rr", "re")}}
 # The runs whose stop a task's live Pause could not confirm (its pause row's ``external_runs``).
 STOPS = {"so": ["run-s"]}
+# The latest Resume attempt each stored record keeps (``work_stop.attempt_record``), as its door wrote it: bound to
+# the control it answered about (``work_stop.control_identity``), the door's whole answer kept.
+_REFUSED_AT = "2026-10-17T15:05:00Z"
+_QUEUED = [{"kind": "dispatchable_member", "task_id": "h1"}, {"kind": "dispatchable_member", "task_id": "h2"}]
+_OWNER_PAUSE = {"cause": "pause", "scope": "tree", "ui_code": "owner_paused", "release": "resume"}
+
+
+def _attempt(by, control, answer, at=_REFUSED_AT, **extra):
+    return {"at": at, "answered_at": at, "by": by, "control": control, "ok": False, **extra,
+            "answer": {"ok": False, **answer}}
+
+
+ATTEMPTS = {
+    "rr": _attempt({"actor": "owner"}, {**_OWNER_PAUSE, "fence_id": "fence-rr"}, {
+        "error": "predecessor_writers_unsettled", "action": "wait_or_stop_the_previous_work", "blockers": _QUEUED,
+        "message": "Resume refused: task h1 is queued to run; task h2 is queued to run"}),
+    "sr": _attempt({"actor": "ouroboros", "task_id": "coordinator"}, {
+        "cause": "app_stop", "scope": "member", "ui_code": "saved_work_hold", "reason": "saved_work_hold",
+        "release": "resume", "held_at": "2026-10-17T14:00:00Z"}, {
+        "error": "predecessor_writers_unsettled", "action": "wait_or_stop_the_previous_work",
+                               "blockers": _QUEUED[:1], "message": "Resume refused: task h1 is queued to run"}),
+    "re": _attempt({"actor": "owner"}, {**_OWNER_PAUSE, "fence_id": "fence-re-earlier"}, {
+        "error": "selection_authority_changed", "message": "Resume refused: selection authority changed"},
+        at="2026-10-17T14:55:00Z"),
+    "cs": _attempt({"actor": "host"}, {
+        "cause": "wait", "ui_code": "continuation_writer_unsettled",
+        "reason": "continuation_writer_unsettled", "release": "none"}, {
+        "error": "accounting_unavailable", "action": "cancel_or_new_run",
+        "message": "Resume refused: accounting unavailable"}, selected_by="reconciliation"),
+}
 
 
 def project(name):
     """The ``/api/state`` work fields the server builds for one case."""
     owners, raw, stored, held = CASES[name]
     return work_fields(owners, raw, results=stored, fences={k: {"state": "paused", **v} for k, v in FENCES.items()},
-                       held=held, stops=STOPS, models={"mh": [{"kind": "model_handoff", "attempt_id": "attempt-mh"}]})
+                       held=held, stops=STOPS, models={"mh": [{"kind": "model_handoff", "attempt_id": "attempt-mh"}]},
+                       attempts=ATTEMPTS)
 
 
 def reason_sentences():
@@ -192,6 +247,8 @@ def test_the_web_fixture_is_the_servers_projection():
     ("paused_unattributed", "paused"), ("pausing_with_queued_helper", "working"), ("two_works_one_pausing", "working"),
     ("working_with_review", "working"), ("paused_stop_unknown", "paused"),
     ("paused_model_handoff", "paused"), ("sleeping_on_paused_helper", "waiting"),
+    ("paused_resume_refused", "paused"), ("saved_resume_refused", "paused"), ("paused_resume_refused_earlier", "paused"),
+    ("continue_start_refused", "waiting"),
 ])
 def test_each_fixture_room_is_the_state_its_name_says(name, activity):
     """The fixture is meaningful, not merely equal: each room is the case the web tests read it as."""

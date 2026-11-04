@@ -397,8 +397,6 @@ def test_a_pointer_reopening_after_a_keyboard_close_stays_quiet(cue_ui):
 def test_keyboard_return_from_the_composer_shows_the_reading_focus(cue_ui, monkeypatch, forced):
     """Use the real work list and Back to reading pill, not a substitute focus() button."""
     ui, engine = cue_ui, cue_ui['engine']
-    if forced and engine == 'webkit':
-        pytest.skip('Playwright WebKit does not emulate forced colors')
     tid = 'focus-work'
     monkeypatch.setitem(HISTORY, 501, [*HISTORY[501], {
         'role': 'assistant', 'direction': 'out', 'is_progress': True, 'task_id': tid,

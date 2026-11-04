@@ -171,18 +171,16 @@ under System. In full screen the bar hides until the pointer reveals it; the set
 and error windows and a UI that does not declare it keep the ordinary title bar. A
 browser, another OS or an older desktop app reserves nothing.
 
-A screen that cannot read the choice follows its host (owner 26.10, #1111 A). The Mac's
-main window opens at once in the room colour of the Mac's appearance; when its page
-has read a choice that differs, the window changes once to that palette, never waiting
-to be shown; the first-run setup window opens in the Mac's colour too, then its page
-paints the saved choice. The windows shown before the server (already running, Git
-required, startup failed) follow macOS. The network login page follows this browser's
-saved choice, else the device; the Telegram connecting page the Mini App's saved
-choice, else Telegram's light or dark. The login page and the windows before the
-server inline the interface's own `theme.js` and `ui.css`; the Telegram page restates
-only the palette's room and ink and reads the same saved choice. The Mac's windows
-need a new desktop app on older frozen launchers; source-handoff shells can take
-this through source updates. Login and Telegram change with an ordinary update.
+A screen that cannot read the choice follows its host (owner 26.10, #1111 A). Main and
+setup open at once: the Mac's room colour, Windows' app mode, or GTK's theme until its
+WebView takes the matching room. The page then paints its saved choice; showing waits
+for no page. Pre-server windows (already running, Git required, startup failed) keep the
+host. A Windows contrast theme keeps main dark, others white. Native samples cover
+Windows 2025/WebView2 and Jammy GTK/X11; Windows' dark held-canvas provenance and packaged
+startup remain unqualified. Login uses this browser's saved choice, else the device;
+Telegram connecting uses the Mini App's, else Telegram's palette. Login/pre-server pages
+inline `theme.js` and `ui.css`; Telegram restates room and ink. Frozen launchers need a new
+app; source-handoff shells take source updates. Login/Telegram take an ordinary update.
 
 **Interface size** (Settings → Appearance, under Theme) is one slider that makes
 everything larger or smaller, per device (owner 23.10). Whoever
@@ -1209,6 +1207,16 @@ preference when it opens and on every reconnect; there is no file watcher.
   Failed scans say unknown; zero adds no line. Done stays Done; no adoption/publication claim.
   Owner 2026-10-25 17:22:09, quiz `3766b0a01ce14dec9a17adee2488bdcf`:
   “A — короткий факт сразу, файлы в Details”.
+  What an evolution cleanup moved takes the same shape (owner 2026-11-01, quiz
+  `fb45adf3fd631b7fcc9b0c0d678d5094`): one short fact on the card; the repository, stash,
+  branch and restore command in its Details row, which stands alone only where no card
+  exists. It names what Git did, never whose bytes they were or how long Git keeps them.
+  A failed stash command is read back like any other: the row names what it saved or that
+  this is unknown beside the failure, and how to put back what it removed. Its literals keep
+  their exact bytes (a code span keeps repeated spaces); a path no span can carry is shown
+  escaped with no command to copy, and commands that quote a path declare their shell.
+  Moving nothing adds no line; a row landing on a settled card re-reads its stored line
+  and never changes the outcome word.
 - **A nested child card is subordinate to its root.** Its compact identity row
   shows status, role and `Details`; a short task id disambiguates siblings. On a
   narrow card a long status wraps inside its chip, never narrower than its
@@ -1418,8 +1426,21 @@ controls the server lists for its work, each at its exact task, on the shared
 task controls: Stop ends the whole work (every episode still running, the newest
 first), `Stop earlier attempt` only what earlier attempts left running, and
 Pause, Resume, Hurry and Wrap up act on the current episode. A control its door
-would refuse is never offered, so a Continue waiting for its earlier attempt
-offers no Resume. While
+would refuse is never offered: a Continue waiting for its earlier attempt says
+what it waits for, offers no Resume and starts by itself once that work
+settles. A paused or saved Continue offers Resume; when all of its earlier
+attempt's remaining work is observed running or queued, Resume returns it to
+that wait (owner 1.11, «Один Resume возвращает в существующее ожидание»), while
+work whose outcome nobody knows still refuses it, and a newer
+Pause, Stop, Panic or the owner's Restart replaces the wait with its own stop. A
+refused Resume stays as dated history beside the stop it answered about, never
+the reason, a control or the owner's turn: the line ends `Resume refused at
+17:49` (`Resume by Ouroboros refused…` for its own), the card's and row's
+details and Main's message give the door's words, and an accepted Resume or a
+newer stop, even one pressed while the door still worked, drops it. When that
+Continue's own start is refused after its earlier work settled, the line says
+`Continue tries to start again by itself · Start refused at 17:49` in place of
+the wait, with the words in details, and it starts once that clears. While
 open, order and focus hold, and work that ends keeps its row and outcome, without
 controls, until close. Escape, an outside press or leaving closes it; `Back to
 reading` returns to the passage left, reading its page again if it was let go, or

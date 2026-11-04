@@ -324,6 +324,37 @@ def task_snapshot(root, task_id: str = "", *, root_task_id: str = "", wait_sec=s
     return {"runs": _decode_all(runs_by_id), "pending": current_rows(root, requests)}
 
 
+# A whole-tree closure question drops only the runs whose facts definitely say settled (true or numeric one) with a
+# terminal state; open runs, a settled run with no or another terminal state (``CLOSED_ABSENT`` leaves it empty) and
+# non-ordinary JSON pass, and the caller's predicate decides, as over ``runs``. ``state`` cannot answer it: a closed
+# row may hold no terminal state.
+_MAYBE_UNFINISHED = ("CASE WHEN json_valid(facts) THEN NOT (COALESCE(json_extract(facts, '$.settled'), 0)=1 "
+                     "AND COALESCE(json_type(facts, '$.terminal_state'), '')='text' "
+                     "AND json_extract(facts, '$.terminal_state') IN (SELECT value FROM json_each(?))) ELSE 1 END")
+
+
+def tree_closure(root, root_task_id: str, task_id: str = "", *, wait_sec=store.STORE_WAIT_SEC):
+    """ONE transaction's answer to "is this tree's delegated work over?": ``runs``, TASK_ID's own runs in the tree;
+    ``unfinished``, the tree's runs that may not be settled with a terminal state (``_MAYBE_UNFINISHED``: the settled
+    majority is neither fetched nor decoded); ``pending``, every pending invocation of the tree, as
+    ``task_snapshot(root_task_id=...)`` reads them. SQL still visits every run of the tree once."""
+    from ouroboros.delegate_custody import TERMINAL_STATES
+    from ouroboros.delegate_pending import current_rows
+    from ouroboros.store_hot_facts import tree_requests
+
+    mine = str(task_id or "")
+    with store.open_store(root, write=False, wait_sec=wait_sec) as txn:
+        where, params = _selected(txn, _TREE, _LEGACY_TREE, (root_task_id, root_task_id))
+        own = txn.custody_raw_rows(f"({where}) AND task_id=?", (*params, mine)) if mine else {}
+        maybe = txn.custody_raw_rows(f"({where}) AND {_MAYBE_UNFINISHED}",
+                                     (*params, json_dumps(sorted(TERMINAL_STATES))))
+        requests = [facts for _, _, facts in tree_requests(txn, root_task_id)]
+    runs = _decode_all({rid: json_loads(text) for rid, text in own.items()})
+    return {"runs": {rid: entry for rid, entry in runs.items() if entry.task_id == mine},
+            "unfinished": _decode_all({rid: json_loads(text) for rid, text in maybe.items()}),
+            "pending": current_rows(root, requests)}
+
+
 def payload_snapshot(root):
     """ONE transaction's view of who may hold a skill payload: the payload runs not surely
     settled and disposed, and every pending invocation (a holder whose REQUESTED becomes

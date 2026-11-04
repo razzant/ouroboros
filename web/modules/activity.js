@@ -92,6 +92,12 @@ function lateWorkHtml(a, late) {
     return { name: esc(late.title || 'Answered task'), sub: `Remaining work ${state} · answer delivered${when}` };
 }
 
+/** The name of the work a Presence turn's id belongs to ('' when no work names it): its correspondent's words never are. */
+function presenceWorkName(census, taskId) {
+    const works = Array.isArray(census?.works) ? census.works : [];
+    return String(works.find((work) => String(work?.episode?.task_id || '') === taskId)?.name || '');
+}
+
 /** A census-only live root (a direct turn, a live inline Presence turn, or an answered root whose late work remains):
  * its state in the chip's own words (never the census code), and the shared control —
  * Resume only where its work's Resume control targets it (`resume`, work_status.resumeTargets).
@@ -336,7 +342,9 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         const row = (q, kind) => {
             const t = (q && q.task) || {};
             const id = esc(q.id || t.id || '');
-            const label = esc(t.title || t.objective || t.text || q.type || id || 'task');
+            // A Presence turn's words are its correspondent's, never its name: its saved work says its work's name.
+            const named = t._presence_turn ? presenceWorkName(census, String(q.id || t.id || '')) : '';
+            const label = esc(t._presence_turn ? named || 'Live turn' : t.title || t.objective || t.text || q.type || id || 'task');
             const spent = kind === 'running' ? elapsedWords(q.runtime_sec) : '';
             const rt = spent ? ` · ${spent}` : '';
             const ownId = String(q.id || t.id || '');
@@ -368,10 +376,13 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             </div>`;
         };
         // Queue facts keep their runtime/budget controls. The census adds only
-        // missing identities; queued direct turns can appear in both sources.
-        const known = new Set([...running, ...pending].map((q) => String(q.id || q.task?.id || '')));
+        // missing identities; queued direct turns can appear in both sources. A live Presence turn its
+        // conversation lane carries (the Host's admission facts, `_presence_run`) is its place's conversation:
+        // only the census lists it, by its work, and a published queue row it already left never stands for it.
+        const queued = running.filter((q) => !q?.task?._presence_run);
+        const known = new Set([...queued, ...pending].map((q) => String(q.id || q.task?.id || '')));
         const live = activities.filter((a) => a && !known.has(String(a.activity_id || '')));
-        const parts = [...running.map((q) => row(q, 'running')), ...pending.map((q) => row(q, 'pending')),
+        const parts = [...queued.map((q) => row(q, 'running')), ...pending.map((q) => row(q, 'pending')),
             ...live.map((a) => liveActivityRowHtml(a, Date.now(), phaseSlot, resumable.has(String(a.activity_id || '')),
                 workOfEpisode(census, a.activity_id)))];
         if (parts.length) return parts.join('');

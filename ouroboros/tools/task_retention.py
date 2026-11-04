@@ -67,7 +67,7 @@ def _set_task_retention(ctx: ToolContext, task_id: str, keep: bool, reason: str,
               "tool": "set_task_retention", "by_task_id": str(getattr(ctx, "task_id", "") or "")}
     result = set_owner_keep(canonical_data_root(ctx), target, keep=keep, source=source,
                             note=reason.strip()[:_REASON_MAX])
-    if result["status"] in {"refused", "inflight"}:
+    if result["status"] in {"refused", "inflight"}:  # only these save nothing; release_unconfirmed saved the keep
         return publish_no_effect(ctx, ToolResult(
             status="error", code="TOOL_REPORTED_FAILURE", meta={"reason_code": result["reason"]},
             text=f"TASK_RETENTION_{result['status'].upper()}: {result['reason']}. Nothing was saved. "
@@ -80,8 +80,9 @@ _DESCRIPTION = (
     "copies, environments, review copies, result pins and call journals stay until the owner releases them. "
     "It never stops running work or lossless compression, and never covers that task's children. "
     "It needs the owner's own words: by default the message this turn answers, or one of your held "
-    "owner_quote_handles. The result says what is kept now, what had already gone (`retired`), and what "
-    "could not be checked (`unknown`)."
+    "owner_quote_handles. The result says what is kept now, what had already gone or was accepted for deletion "
+    "(`retired`), what could not be checked (`unknown`) and each reviewer thread's release as last seen "
+    "(`releases`); `release_unconfirmed` means the keep is saved while a release already started may still win."
 )
 
 

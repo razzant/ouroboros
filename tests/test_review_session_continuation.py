@@ -21,7 +21,8 @@ RESUMABLE = {"cause": "pool_exhausted", "carriers": ["native", "packet"], "reset
              "workspace": {"kind": "none", "root": None}}
 
 
-def _engine(monkeypatch, *, resumable=True, stops=1):
+def _engine(monkeypatch, *, resumable=True, stops=1, lose_response=False):
+    """``lose_response``: the engine accepts the first continuation POST (its run exists) and the reply is lost."""
     posts, accepted = [], {}
 
     def capabilities(self):
@@ -48,7 +49,10 @@ def _engine(monkeypatch, *, resumable=True, stops=1):
         posts.append((dict(request), idempotency_key))
         if "continueFrom" in request:  # one run per idempotency key, like the engine
             self.start_requests.append(dict(request))
-            return {"runId": accepted.setdefault(idempotency_key, f"run-{len(accepted) + 2}")}
+            run_id = accepted.setdefault(idempotency_key, f"run-{len(accepted) + 2}")
+            if lose_response and sum("continueFrom" in sent for sent, _key in posts) == 1:
+                raise OSError("Continuation accepted, response lost")
+            return {"runId": run_id}
         return first_start(self, request, idempotency_key=idempotency_key)
 
     monkeypatch.setattr(FakeGateway, "agent_capabilities", capabilities)
@@ -89,17 +93,34 @@ def legacy_successor(tmp_path, checkpoints, *, started=False):
     """What an older host left behind: the stopped run-1 and the automatic successor it recorded for it."""
     with pytest.raises(ClaudexorUnavailable):
         _run(tmp_path, {}, checkpoints, [])
-    anchor = custody.invocation_record(tmp_path, checkpoints[0])
-    stopped = custody.lookup(tmp_path, "t-review", "run-1")[1]
-    token = custody.idempotency_key("review_continue", stopped.invocation_id, "run-1")
-    assert custody.record_start_requested(tmp_path, run_id="", task_id="t-review", invocation_id=token,
-        idempotency_key=token, operation_id="op-review", request={"continueFrom": "run-1"},
-        continuation_of="run-1", surface="multi_model_review", slot_id="seat", route=anchor["route"],
-        max_seconds=60, root_task_id=anchor["root_task_id"])
+    return record_legacy_successor(tmp_path, checkpoints[0], started=started)
+
+
+_LEGACY_KEYS = ("root_task_id", "parent_task_id", "category", "source", "review_skill", "review_wave_id",
+                "review_slot_id", "authority_source", "execution_root", "target_root")
+
+
+def record_legacy_successor(root, anchor, *, started=False):
+    """The automatic successor an older host recorded for the stopped run of seat token ``anchor``, as its
+    continuation step wrote it: the START naming the stopped run under ``("review_continue", invocation, run)``
+    and, once bound, the successor ``run-2``'s STARTED row. The current host only joins it."""
+    seat = custody.invocation_record(root, anchor)
+    stopped = custody.lookup(root, seat["task_id"], seat["run_id"])[1]
+    token = custody.idempotency_key("review_continue", stopped.invocation_id, stopped.run_id)
+    assert custody.record_start_requested(root, run_id="", task_id=stopped.task_id, invocation_id=token,
+        idempotency_key=token, operation_id=seat["operation_id"], request={"continueFrom": stopped.run_id},
+        continuation_of=stopped.run_id, surface=seat["surface"], slot_id=seat["slot_id"], route=stopped.route_id,
+        max_seconds=stopped.max_seconds, project_id=stopped.project_id, project_owned=stopped.project_owned,
+        **{key: getattr(stopped, key) for key in _LEGACY_KEYS})
     if started:
-        successor = custody.RunCustody(run_id="run-2", task_id="t-review", invocation_id=token, idempotency_key=token,
-                                       continuation_of="run-1", route_id=stopped.route_id, ledger_root=str(tmp_path))
-        assert custody.record_started(tmp_path, successor, shape={"surface": "multi_model_review", "slot_id": "seat"})
+        successor = custody.RunCustody(run_id="run-2", invocation_id=token, idempotency_key=token,
+            continuation_of=stopped.run_id, ledger_root=str(root), **{key: getattr(stopped, key) for key in (
+                "task_id", "route_id", "model", "profile_id", "project_id", "project_owned", "project_persistent",
+                *_LEGACY_KEYS)})
+        assert custody.record_started(root, successor, shape={
+            "access": stopped.access, "mode": stopped.mode, "isolation": stopped.isolation,
+            "delegated": stopped.delegated, "max_seconds": stopped.max_seconds,
+            "surface": seat["surface"], "slot_id": seat["slot_id"]})
     custody._CUSTODY.clear()
     return token
 

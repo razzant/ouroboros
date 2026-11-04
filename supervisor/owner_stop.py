@@ -500,15 +500,23 @@ def owner_stop_ending(record: Dict[str, Any]) -> tuple:
 REASON_OWNER_STOPPED_DIRECT_TURN = "owner_stopped_direct_chat_turn"
 
 
+def runner_reads_stop(waiter: Any) -> bool:
+    """A Presence author reads its own Stop wherever it runs: no custody kill ends it once witnessed (#2012)."""
+    task = getattr(waiter, "task", None)
+    return isinstance(task, dict) and bool(task.get("_presence_turn"))
+
+
 def in_process_stop_now(owner_ctx: Any) -> Optional[bool]:
     """Whether Stop now holds the in-process turn ``owner_ctx`` acts for (an inline Presence or a direct
     chat turn, whose Stop kills no process): its open immediate intent, one read. A pooled worker reads
-    nothing (its Stop is the kill). ``None`` is unknown, never "no Stop": the projection, or this turn's
+    nothing (its Stop is the kill), except a Presence author, its lane's or a moved turn's in a pool worker:
+    custody leaves a witnessed author's Stop to its runner there too (#2012, ``cancel_publication.runner_takes_stop``).
+    ``None`` is unknown, never "no Stop": the projection, or this turn's
     own row in it, cannot be read, and nothing bounds how long that lasts; another row's damage hides no
     Stop of this turn. A running in-slot wait and a command wait poll it (``_await_messages``,
     ``shell_process.communicate_or_stop``)."""
     waiter = getattr(owner_ctx, "model_wait_context", None)
-    if waiter is None or getattr(waiter, "worker_slot_held", True):
+    if waiter is None or (getattr(waiter, "worker_slot_held", True) and not runner_reads_stop(waiter)):
         return False
     from ouroboros.cancel_intents import STOP_POLICY_IMMEDIATE, read_active_intents, stop_policy
 

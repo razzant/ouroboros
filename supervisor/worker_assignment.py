@@ -679,6 +679,10 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
         # The direct actor that parked this id has not released its registry entry yet:
         # no second live actor for one id.
         return True
+    if candidate.get("_presence_turn") and not claim and any(
+            w.busy_task_id == task_id for w in _pool().WORKERS.values()):
+        # The carrier that parked this Presence turn still holds its slot until its own settlement (#2566).
+        return True
     if root_cancellation_fenced(candidate, root_task_id or task_id):
         return True
     if budget_resume_dispatch_allowed(queue, candidate) is not True:

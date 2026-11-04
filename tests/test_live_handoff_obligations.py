@@ -30,10 +30,9 @@ def test_preparation_refusal_is_terminal_without_another_attempt(host_world, mon
         monkeypatch.setattr(NativeWire, 'send', refuse)
         async with stack(host_world, monkeypatch, engine, thinking=thinking) as run:
             await request(run)
-            for _ in range(1500):
-                if run.running.done() or len(run.provider.connections) >= 3:
-                    break
-                await asyncio.sleep(.01)
+            # The refusal ends the call; a third connection would be a retry. 15 s of elapsed time (the span the old
+            # loop nominally had), not a count of sleeps.
+            await run.wait(lambda: run.running.done() or len(run.provider.connections) >= 3, timeout=15)
             attempts = len(run.provider.connections)
         assert attempts == 2, f'Provider refused connection 2, but {attempts} connections opened'
         assert run.result[1]['reason_code'] == 'provider_error'
@@ -257,10 +256,9 @@ def test_exact_documented_gemini_expiry_continues(host_world, monkeypatch, think
                 run.wire.put({'sessionResumptionUpdate': {'resumable': True, 'newHandle': 'synthetic-expiry-handle'}})
                 await run.wait(lambda: run.host.state.get('resume_handle') == 'synthetic-expiry-handle')
             await run.wire.websocket.close(code=1011, reason='Deadline expired before operation could complete.')
-            for _ in range(1500):
-                if run.running.done() or len(run.provider.connections) >= 2:
-                    break
-                await asyncio.sleep(.01)
+            # Continuation is a second connection while the call lives; the call ending first is the failure.
+            # The same 15 s of elapsed time as the refusal case.
+            await run.wait(lambda: run.running.done() or len(run.provider.connections) >= 2, timeout=15)
             continued = len(run.provider.connections) == 2
         assert continued, run.result
     asyncio.run(scenario())

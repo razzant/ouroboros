@@ -600,7 +600,7 @@ def run_worker_task(agent: Any, task: dict, *, wid: int, out_q: Any, repo_dir: s
             with store_timing.metered() as meter:
                 if carrier_turn is not None:
                     carrier_turn.execution.meter = meter
-                events = _run_task_body(runner, task, task_drive_root, task_queue, repo_dir)
+                events = _run_task_body(runner, task, task_drive_root, task_queue, repo_dir, wid)
         except Exception as task_error:
             if on_failure is not None and on_failure(runner, task_error):
                 return
@@ -646,19 +646,20 @@ def run_worker_task(agent: Any, task: dict, *, wid: int, out_q: Any, repo_dir: s
         _release_drive_stores(task_drive_root)
 
 
-def _run_task_body(runner: Any, task: dict, task_drive_root: str, task_queue: Any, repo_dir: str = "") -> list:
+def _run_task_body(runner: Any, task: dict, task_drive_root: str, task_queue: Any, repo_dir: str = "",
+                   wid: Any = None) -> list:
     """The carrier's first step for a conversation turn, then the agent's loop; a refusal is the turn's own terminal
     (an exception is too: ``run_worker_task`` routes it to ``conversation_exception_terminal``).
 
-    A Host-admitted Presence turn (``presence_runner.PRESENCE_RUN_KEY``) is its own runner: it
-    re-admits from durable facts, takes the gate, runs and reports its settlement as a frame."""
-    if task.get("_presence_run"):
+    A Presence turn is its own runner, never the pool's generic ``handle_task``: a Host-admitted one
+    (``presence_runner.PRESENCE_RUN_KEY``) re-admits from durable facts, takes the gate, runs and reports its
+    settlement as a frame; a moved turn's saved record (a Resume, a restart's return) continues there too."""
+    if task.get("_presence_run") or task.get("_presence_turn"):
         from ouroboros.presence_carrier import carry_presence_turn
 
         task.pop("_conversation_prepare", None)
-        carry_presence_turn(task, task_queue, repo_dir, task_drive_root,
-                            owner_wait_callback=getattr(runner, "owner_wait_callback", None))
-        return []
+        return carry_presence_turn(task, task_queue, repo_dir, task_drive_root, worker_id=wid,
+                                   owner_wait_callback=getattr(runner, "owner_wait_callback", None)) or []
     if task.get("_conversation_prepare"):
         from supervisor.worker_chat_lane import ConversationRefusal, prepare_conversation_task, refusal_terminal
 

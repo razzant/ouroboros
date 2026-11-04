@@ -114,13 +114,14 @@ class TestBuildSh:
         assert '"$SHELL_SIGN_ID" != "com.ouroboros.agent"' in src
         assert src.index('"$SHELL_SIGN_ID" !=') < src.index('codesign --verify --strict --deep')
 
-    def test_playwright_install_chromium_present(self):
+    def test_pinned_chromium_install_present(self):
         src = _read("build.sh")
-        assert "playwright install --only-shell chromium" in src, (
-            "build.sh must call 'playwright install --only-shell chromium' on macOS"
+        assert "python3 -m ouroboros.chromium_runtime install" in src, (
+            "build.sh must bundle the pinned Chromium headless shell on macOS"
         )
+        assert "playwright install --only-shell chromium" not in src
         assert 'rglob(".local-browsers")' in src
-        assert 'glob("webkit-*")' in src
+        assert 'glob("webkit-*")' in src and 'glob("chromium_headless_shell-*")' in src
         assert "shutil.rmtree" in src
         assert "playwright install webkit" not in src
         assert "pw.webkit.launch" not in src
@@ -133,12 +134,12 @@ class TestBuildSh:
 
     def test_playwright_install_before_pyinstaller(self):
         src = _read("build.sh")
-        pw_pos = src.find("playwright install --only-shell chromium")
+        pw_pos = src.find("PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m ouroboros.chromium_runtime install")
         pi_pos = _find_pyinstaller_cmd_pos(src)
-        assert pw_pos != -1, "playwright install --only-shell chromium not found in build.sh"
+        assert pw_pos != -1, "the pinned Chromium install into .local-browsers was not found in build.sh"
         assert pi_pos != -1, "PyInstaller command not found in build.sh"
         assert pw_pos < pi_pos, (
-            "playwright install --only-shell chromium must appear BEFORE PyInstaller in build.sh "
+            "the pinned Chromium install must appear BEFORE PyInstaller in build.sh "
             f"(found at char {pw_pos}, PyInstaller cmd at {pi_pos})"
         )
 
@@ -330,11 +331,13 @@ def test_compileall_env_neutralization_actually_seals_bytecode(tmp_path):
 # ---------------------------------------------------------------------------
 
 class TestBuildLinuxSh:
-    """build_linux.sh must install Chromium/WebKit with PLAYWRIGHT_BROWSERS_PATH=0 before PyInstaller."""
+    """build_linux.sh must install the pinned Chromium and WebKit with PLAYWRIGHT_BROWSERS_PATH=0 before PyInstaller."""
 
     def test_playwright_install_chromium_present(self):
         src = _read("build_linux.sh")
-        assert "playwright install chromium webkit" in src
+        assert 'PLAYWRIGHT_BROWSERS_PATH=0 "$PORTABLE_PYTHON" -m playwright install webkit' in src
+        assert 'PLAYWRIGHT_BROWSERS_PATH=0 "$PORTABLE_PYTHON" -m ouroboros.chromium_runtime install' in src
+        assert "playwright install chromium" not in src
         assert "playwright install-deps chromium webkit" in src
 
     def test_playwright_browsers_path_zero_set(self):
@@ -344,14 +347,12 @@ class TestBuildLinuxSh:
     def test_playwright_install_before_pyinstaller(self):
         src = _read("build_linux.sh")
         deps_pos = src.find("playwright install-deps chromium webkit")
-        pw_pos = src.find("playwright install chromium webkit")
+        webkit_pos = src.find("-m playwright install webkit")
+        chromium_pos = src.find("-m ouroboros.chromium_runtime install")
         pi_pos = _find_pyinstaller_cmd_pos(src)
-        assert deps_pos != -1
-        assert pw_pos != -1
-        assert pi_pos != -1
-        assert deps_pos < pw_pos
-        assert pw_pos < pi_pos, (
-            "playwright install chromium webkit must appear BEFORE PyInstaller in build_linux.sh"
+        assert -1 not in (deps_pos, webkit_pos, chromium_pos, pi_pos)
+        assert deps_pos < webkit_pos < pi_pos and deps_pos < chromium_pos < pi_pos, (
+            "host libraries, then WebKit and the pinned Chromium, must precede PyInstaller in build_linux.sh"
         )
 
     def test_repo_bundle_generation_before_pyinstaller(self):
@@ -467,7 +468,8 @@ class TestBuildWindowsPs1:
 
     def test_playwright_install_chromium_present(self):
         src = _read("build_windows.ps1")
-        assert "playwright install --only-shell chromium" in src
+        assert '-m ouroboros.chromium_runtime install' in src
+        assert "playwright install --only-shell chromium" not in src
         assert "playwright install webkit" in src
 
     def test_playwright_browsers_path_zero_set(self):
@@ -479,15 +481,14 @@ class TestBuildWindowsPs1:
 
     def test_playwright_install_before_pyinstaller(self):
         src = _read("build_windows.ps1")
-        pw_pos = src.find("playwright install --only-shell chromium")
+        pw_pos = src.find("-m ouroboros.chromium_runtime install")
         webkit_pos = src.find("playwright install webkit")
         pi_pos = _find_pyinstaller_cmd_pos(src)
         assert pw_pos != -1
         assert webkit_pos != -1
         assert pi_pos != -1
-        assert pw_pos < webkit_pos
         assert pw_pos < pi_pos, (
-            "playwright install --only-shell chromium must appear BEFORE PyInstaller in build_windows.ps1"
+            "the pinned Chromium install must appear BEFORE PyInstaller in build_windows.ps1"
         )
         assert webkit_pos < pi_pos, (
             "playwright install webkit must appear BEFORE PyInstaller in build_windows.ps1"
@@ -498,12 +499,6 @@ class TestBuildWindowsPs1:
         assert "Checking Windows archive path lengths" in src
         assert "Length -gt 200" in src
         assert "paths longer than 200 chars" in src
-
-    def test_windows_build_prunes_optional_long_chromium_paths(self):
-        src = _read("build_windows.ps1")
-        assert "Pruning optional Chromium resources with long Windows paths" in src
-        assert "PrivacySandboxAttestationsPreloaded" in src
-        assert "reading_mode_gdocs_helper" in src
 
     def test_repo_bundle_generation_before_pyinstaller(self):
         src = _read("build_windows.ps1")
@@ -721,13 +716,28 @@ class TestDockerfile:
     def test_browsers_install_before_the_lock_copy(self):
         src = _read("Dockerfile")
         deps_pos = src.find("playwright install-deps chromium webkit")
-        install_pos = src.find("playwright install chromium webkit")
+        install_pos = src.find("playwright install webkit")
+        chromium_pos = src.find("COPY --from=chromium /ms-playwright/ /ms-playwright/")
         lock_pos = src.find("COPY pyproject.toml uv.lock")
-        assert deps_pos != -1 and install_pos != -1 and lock_pos != -1
-        assert deps_pos < install_pos < lock_pos, (
-            "install-deps, then the browser download, then the lock copy — otherwise a release "
+        assert -1 not in (deps_pos, install_pos, chromium_pos, lock_pos)
+        assert "playwright install chromium" not in src
+        assert deps_pos < install_pos < chromium_pos < lock_pos, (
+            "install-deps, then WebKit and the pinned Chromium, then the lock copy — otherwise a release "
             f"bump re-downloads the browsers (deps {deps_pos}, install {install_pos}, lock {lock_pos})"
         )
+
+    def test_pinned_chromium_stage_reads_only_the_pin_and_its_verifier(self):
+        """The stage that fetches Chromium copies no per-release file, so releases reuse it,
+        and the image installs nothing but the pin through ``ouroboros.chromium_runtime``."""
+        src = _read("Dockerfile")
+        stage = src[src.index("FROM python-standalone AS chromium"):src.index("FROM debian:trixie-slim AS runtime")]
+        copies = [line for line in stage.splitlines() if line.startswith("COPY ")]
+        assert copies == ["COPY ouroboros/__init__.py ouroboros/version.py ouroboros/verified_download.py "
+                          "ouroboros/chromium_runtime.py ./ouroboros/"]
+        assert "-m ouroboros.chromium_runtime install" in stage and "--archive /tmp/chromium.zip" in stage
+        for module in ("ouroboros/chromium_runtime.py", "ouroboros/verified_download.py", "ouroboros/version.py"):
+            imports = [line for line in _read(module).splitlines() if line.startswith(("import ", "from "))]
+            assert not any("ouroboros" in line for line in imports), (module, imports)
 
     def test_no_runtime_uv_project_environment(self):
         """A baked ``UV_PROJECT_ENVIRONMENT`` makes an agent's ``uv sync`` in a task
@@ -935,6 +945,11 @@ class TestMacOSSigning:
         assert "Run Docker browser tools Chromium/WebKit smoke" in src
         assert "tests/test_browser_tools_smoke.py -m browser" in src
         assert "-e OUROBOROS_EXPECT_BROWSER_ENGINES=chromium,webkit" in src
+        # The root image keeps its default refusal covered beside the explicit opt-out pass.
+        docker_smoke = src[src.index("Run Docker browser tools Chromium/WebKit smoke"):src.index("  docker-portable-test:")]
+        default_pass, opt_out_pass = docker_smoke.split("docker run --rm")[1:]
+        assert "-k root_on_linux_refuses" in default_pass and "OUROBOROS_CHROMIUM_SANDBOX" not in default_pass
+        assert "-e OUROBOROS_CHROMIUM_SANDBOX=off" in opt_out_pass and "-k 'not root_on_linux_refuses'" in opt_out_pass
 
     def test_marker_guard_uses_pipefail(self):
         src = _read(self._CI_PATH)
@@ -1127,10 +1142,13 @@ class TestMacOSSigning:
         assert order == sorted(order), "the stapled app must be what the DMG contains"
 
     def test_build_sh_drops_debug_symbols_and_pyobjc_tests_before_pyinstaller(self, tmp_path):
-        """Executes build.sh's own payload prune: debug-symbol bundles and pyobjc's
-        test suite go, runtime extensions stay, and it happens before PyInstaller."""
+        """Executes build.sh's own payload prune: debug-symbol bundles, pyobjc's test
+        suite and a reused tree's Playwright Chromium go; runtime extensions and the
+        pinned headless shell stay, and it happens before PyInstaller."""
+        from ouroboros import chromium_runtime
+
         src = _read("build.sh")
-        marker = "--- Removing stale WebKit, debug-symbol and test payloads"
+        marker = "--- Removing stale WebKit, Playwright Chromium, debug-symbol and test payloads"
         assert src.index(marker) < src.index("python3 -m PyInstaller")
         body = src[src.index("python3 - <<'PY'\n", src.index(marker)) + len("python3 - <<'PY'\n"):]
         body = body[:body.index("\nPY\n")]
@@ -1143,6 +1161,10 @@ class TestMacOSSigning:
         (site / "PyObjCTest" / "test_null.py").write_text("", encoding="utf-8")
         (site / "AppKit").mkdir()
         (site / "AppKit" / "__init__.py").write_text("", encoding="utf-8")
+        browsers = site / "playwright" / "driver" / "package" / ".local-browsers"
+        pinned = browsers / chromium_runtime.PINS["mac-arm64"].directory
+        (pinned).mkdir(parents=True)
+        (browsers / "chromium_headless_shell-1234" / "chrome-headless-shell-mac-arm64").mkdir(parents=True)
 
         result = subprocess.run([sys.executable, "-c", body], cwd=tmp_path,
                                 capture_output=True, text=True, check=False)
@@ -1152,6 +1174,8 @@ class TestMacOSSigning:
         assert not (site / "objc" / "_objc.cpython-310-darwin.so.dSYM").exists()
         assert (site / "objc" / "_objc.cpython-310-darwin.so").read_bytes() == b"runtime"
         assert (site / "AppKit" / "__init__.py").exists()
+        assert pinned.is_dir() and not (browsers / "chromium_headless_shell-1234").exists()
+        assert "Removed 1 stale WebKit/Playwright Chromium payload(s)" in result.stdout
         assert "Removed 1 test package(s) and 2 debug-symbol bundle(s)" in result.stdout
 
     def test_macos_smoke_proves_gatekeeper_on_the_copied_out_app(self):

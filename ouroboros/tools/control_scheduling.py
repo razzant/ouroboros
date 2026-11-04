@@ -12,6 +12,7 @@ predicted authority, and any host-minted shared cooperative tree.
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import time
@@ -354,10 +355,12 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
         "(api_model); write_surface controls read/write authority."
         if route_kind == "api_model" and emission.get("requested_access") is not None else ""
     )
+    inputs_note = ("\ninput_files (retained before queueing; prepared is not read): "
+                   + json.dumps(emission["input_files"], ensure_ascii=False) if emission.get("input_files") is not None else "")
     return (
         f"Subagent request queued {task_ids[0]}: {objective} "
         f"(subagent_id={selected_name}, route={route_kind}, {commitment})"
-        f"{worker_note}{slot_note}{profile_note}{coop_note}{legacy_note}{access_note}"
+        f"{worker_note}{slot_note}{profile_note}{coop_note}{legacy_note}{access_note}{inputs_note}"
         f"{_effort_request_note(configured, str(emission.get('requested_effort') or ''), getattr(ctx, 'task_metadata', None))}"
     )
 
@@ -936,14 +939,15 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     if _drive_err:
         return _publish_scheduling_refusal(ctx, "error", "TOOL_ERROR", _drive_err)
     child_attachment_authority, attachment_error = ({"attachment_manifest": []}, "")
-    if fields.get("input_sources") != "declared" or fields.get("attachment_paths"):  # selected documents are declared material
+    input_error = _prepare_child_input_files(ctx, fields, tid)  # first: its refusal leaves no copy for the child
+    if not input_error and (fields.get("input_sources") != "declared" or fields.get("attachment_paths")):  # selected documents are declared material
         child_attachment_authority, attachment_error = _materialize_child_attachment_manifest(
             parent_contract, child_drive or status_drive_root, tid, owner_drive=Path(ctx.drive_root),
             owner_task_id=parent_task_id, custody_drive=canonical_data_root(ctx), selected=fields.get("attachment_paths"),
             declared=fields.get("input_sources") == "declared")
-    if attachment_error:
+    if attachment_error or input_error:
         shutil.rmtree(task_state_dir(status_drive_root, tid), ignore_errors=True)
-        return f"⚠️ SUBTASK_ATTACHMENT_ERROR: {attachment_error}"
+        return f"⚠️ SUBTASK_ATTACHMENT_ERROR: {attachment_error}" if attachment_error else input_error
 
     # C3.1: propagate and narrow the parent's typed delegation intent.
     child_delegation_budget = child_budget_for_schedule(
@@ -990,7 +994,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "configured_subagent": configured_subagent,
         "parent_cognitive_route": parent_cognitive_route,
         **{key: fields[key] for key in ("directory_strategy", "scope_paths", "delegated_mode", "workspace", "attachment_paths",
-                                        "attachment_import", "document_import_intent") if key in fields},
+                                        "attachment_import", "document_import_intent", "prepared_input_files") if key in fields},
     }
     owner_origin = {**governing_words_for_schedule(ctx), **declared_words_fact(child_contract)}  # the owner's words, by value
     child_facts = {
@@ -1079,7 +1083,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "configured_subagent": configured_subagent, "parent_cognitive_route": parent_cognitive_route,
         "legacy_selection": legacy_selection,
         "requested_access": params.get("access"),
-        "requested_effort": fields["requested_effort"],
+        "requested_effort": fields["requested_effort"], "input_files": fields.get("prepared_input_files"),
         # Host-minted shared coop tree only (a caller-supplied write_root is the
         # parent's own knowledge already).
         "coop_shared_tree": (
@@ -1088,6 +1092,30 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
             else ""
         ),
     })
+
+
+def _prepare_child_input_files(ctx: ToolContext, fields: Dict[str, Any], child_task_id: str) -> str:
+    """Check and retain the child's ``input_files`` before it is queued; "" or the published refusal.
+
+    The caller's read authority and the child's read-only limits under its own resource
+    policy must both admit each file; the receipt rides ``fields['prepared_input_files']``."""
+    if fields.get("input_files") is None:
+        return ""
+    from ouroboros.delegate_readonly_inputs import InputSelectionError, schedule_selected_inputs
+    from ouroboros.delegate_shared import refusal_host_code
+    from ouroboros.tools.tool_result import TOOL_CODE_SPECS
+
+    try:
+        fields["prepared_input_files"] = schedule_selected_inputs(
+            ctx, fields["input_files"], child_task_id, fields.get("resource_policy")) if fields["input_files"] else []
+        return ""
+    except InputSelectionError as exc:
+        text, reason = (f"⚠️ {exc.code}: {exc.detail} The child was not queued. "
+                        f"input_files: {json.dumps(exc.results, ensure_ascii=False)}"), exc.code
+    except (OSError, ValueError) as exc:
+        text, reason = f"⚠️ input_files_unavailable: {type(exc).__name__}: {exc} The child was not queued.", "input_files_unavailable"
+    code = refusal_host_code(reason)
+    return _publish_scheduling_refusal(ctx, TOOL_CODE_SPECS[code].status, code, text, reason=reason)
 
 
 def _context_task_depth(ctx: ToolContext) -> tuple[int, str]:

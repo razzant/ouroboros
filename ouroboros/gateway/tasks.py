@@ -109,9 +109,9 @@ _RESERVED_METADATA_KEYS = frozenset({
     "executor_ref",
     "workspace_executor",
     "project_id",
-    # Owner provenance (and its recorded absence) belongs to the host, never to a caller.
+    # Owner provenance (its recorded absence, a late answer's place relation) belongs to the host, never a caller.
     "origin_message_ref",
-    "origin_suppressed", "origin_message_absent",
+    "origin_suppressed", "origin_message_absent", "presence_binding_relation",
 })
 
 
@@ -1103,9 +1103,17 @@ def _record_stop(task_id: str, *, cascade: bool, stop_action_id: str) -> Optiona
         from supervisor.cancel_publication import live_presence_row
 
         row = load_task_result(DRIVE_ROOT, task_id, strict=True)
-        # A Presence row is its runner's: only a turn the shared owner still holds takes the Stop (#2012).
-        if (live_presence_row(row) and not task_has_live_ownership(task_id)
-                or not row and not still_owned()):
+        # A Presence row is its runner's: only a turn the shared owner still holds takes the Stop (#2012), or one
+        # whose saved work the queue keeps (a moved turn's restart return, #2566); unconfirmed custody is retried.
+        if live_presence_row(row) and not task_has_live_ownership(task_id):
+            from ouroboros.presence_recovery import CUSTODY_QUEUED, CUSTODY_UNKNOWN, queue_custody
+
+            custody = queue_custody(DRIVE_ROOT, task_id, row)
+            if custody == CUSTODY_UNKNOWN:
+                raise OSError("Presence queue custody is unreadable; Stop intent not recorded")
+            if custody != CUSTODY_QUEUED:
+                return None
+        elif not row and not still_owned():
             return None
     source = "http_cascade" if cascade else "http_single"
     record = functools.partial(
@@ -1348,9 +1356,13 @@ async def api_task_resume(request: Request) -> JSONResponse:
     revocation, an acceptance fence at restore) is granted by the same call once
     its durable authority validates again; a fence-lifted zero-dispatch sibling
     is released by this same call as an explicit selection. A paused direct
-    owner-chat turn is resumed here too, under its own task id. The optional
+    owner-chat turn is resumed here too, under its own task id. A held Continue
+    whose earlier attempt's writers all still run returns to its writer wait
+    (``held``, ``blockers``) and starts by itself once they settle. The optional
     body (``TaskResumeRequest``) names held calls whose outcome is unknown that
     the owner goes on past (a refusal's ``acceptable_unknown``), never re-run.
+    This door binds itself (``control_actor.owner_door``): only its Resume moves a
+    moved Presence turn off its producer allowance (owner, 2026-11-02, #2566).
     """
     try:
         task_id = validate_task_id(request.path_params.get("task_id"))
@@ -1363,10 +1375,10 @@ async def api_task_resume(request: Request) -> JSONResponse:
         return json_error('resume accepts only {"accept_unknown", "reason"}', 400, task_id=task_id,
                           reason_code="unexpected_fields")
     try:
-        from ouroboros.control_actor import accepting_unknown
+        from ouroboros.control_actor import accepting_unknown, owner_door
         from supervisor.queue import resume_budget_paused_task
 
-        with accepting_unknown(named, str(body.get("reason") or "")):
+        with owner_door("api_task_resume"), accepting_unknown(named, str(body.get("reason") or "")):
             result = resume_budget_paused_task(task_id)
     except Exception as exc:
         return json_exception(exc, 503)

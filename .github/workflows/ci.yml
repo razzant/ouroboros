@@ -1134,13 +1134,21 @@ jobs:
           OUROBOROS_RUN_DOCKER_UI_SMOKE: "1"
           OUROBOROS_DOCKER_UI_IMAGE: ouroboros-web:test
         run: python -m pytest tests/test_ui_smoke_playwright.py -m ui_browser_docker -q --tb=short
+      # The image runs as root, where Chromium's sandbox cannot start: the default must
+      # refuse Chromium, and only the administrator's explicit opt-out launches it, warned
+      # and disclosed. WebKit runs unchanged in the second pass.
       - name: Run Docker browser tools Chromium/WebKit smoke
         if: ${{ !cancelled() && steps.docker_build.outcome == 'success' && steps.setup_python.outcome == 'success' && steps.install_browsers.outcome == 'success' }}
         run: |
           docker run --rm --entrypoint sh \
             -e OUROBOROS_EXPECT_BROWSER_ENGINES=chromium,webkit \
             ouroboros-web:test -c \
-            "python -m pytest tests/test_browser_tools_smoke.py -m browser -q --tb=short"
+            "python -m pytest tests/test_browser_tools_smoke.py -m browser -k root_on_linux_refuses -q --tb=short"
+          docker run --rm --entrypoint sh \
+            -e OUROBOROS_EXPECT_BROWSER_ENGINES=chromium,webkit \
+            -e OUROBOROS_CHROMIUM_SANDBOX=off \
+            ouroboros-web:test -c \
+            "python -m pytest tests/test_browser_tools_smoke.py -m browser -k 'not root_on_linux_refuses' -q --tb=short"
 
   docker-portable-test:
     if: |
@@ -1847,7 +1855,7 @@ jobs:
           import os
           import pathlib
           import re
-          from ouroboros.tools.release_sync import is_release_version
+          from ouroboros.tools.release_sync import is_development_marker, is_release_version
 
           version = pathlib.Path("VERSION").read_text(encoding="utf-8").strip()
           tag = os.environ["GITHUB_REF_NAME"].strip()
@@ -1861,6 +1869,10 @@ jobs:
               with output.open("a", encoding="utf-8") as fh:
                   fh.write("tag_valid=false\nis_prerelease=false\n")
               raise SystemExit(f"VERSION is not a supported release version: {version!r}")
+          if is_development_marker(version):
+              with output.open("a", encoding="utf-8") as fh:
+                  fh.write("tag_valid=false\nis_prerelease=false\n")
+              raise SystemExit(f"VERSION {version} is a development-cycle marker, never a release: cut a plain X.Y.Z")
           is_prerelease = bool(re.search(r'(?:rc|alpha|beta|a|b)\.?\d+$', version, re.IGNORECASE))
           with output.open("a", encoding="utf-8") as fh:
               fh.write(f"is_prerelease={'true' if is_prerelease else 'false'}\n")

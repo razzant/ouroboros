@@ -27,7 +27,7 @@ from ouroboros.task_results import STATUS_SCHEDULED, write_task_result
 from ouroboros.work_stop import hold_fact as budget_hold_fact  # noqa: F401
 from ouroboros.work_stop import (
     SELECTION_KEY, clear_refusal, continuation_refusal, declare_stop, reason_policy, record_policy,
-    release_refusal, resume_selection, selection_record, stop_record,
+    release_refusal, resume_selection, selection_record, stop_record, writer_wait,
 )
 
 log = logging.getLogger(__name__)
@@ -352,6 +352,9 @@ def _handle_budget_pause(evt: Dict[str, Any], ctx: Any) -> None:
                      "replay_safe": True, "physical_calls": 0}
         ctx.RUNNING.pop(task_id, None)
         resumed_task = dict(task)
+        if task.get("_presence_turn"):  # a Presence turn parks as its own built record, never the lane seed (#2566)
+            from ouroboros.presence_carrier import park_record
+            resumed_task = park_record(task, ctx.DRIVE_ROOT, evt.get("task"))
         resumed_task["_budget_pause"] = dict(pause)
         if prestart:
             resumed_task["_execution_handoff_sec"] = pause["execution_consumed_sec"]
@@ -530,6 +533,9 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
             marker = {**marker, "fence_id": fence["fence_id"]}
         ctx.RUNNING.pop(task_id, None)
         paused_task = dict(task)
+        if task.get("_presence_turn"):  # a Presence turn parks as its own built record, never the lane seed (#2566)
+            from ouroboros.presence_carrier import park_record
+            paused_task = park_record(task, result_root, evt.get("task"))
         paused_task["_budget_pause"] = marker
         # The detach stamps ride the durable pause row (``model_detach.detached_fields``): the row's
         # task never saw them, so a parked lane turn takes them here, as the direct turn's record did.
@@ -562,6 +568,9 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
         # stale ``paused`` over a live grant; the state CAS below is the second
         # rail, for a writer this lock does not cover (#1196, F1).
         persisted = persist_snapshot(reason="budget_pause_exact_continuation")
+        if persisted and task.get("_presence_turn"):  # its custody is durable: the waiting transport hears so now
+            from ouroboros.presence_carrier import answer_parked_turn
+            answer_parked_turn(result_root, task_id)
         confirmed, superseded = False, ""
         from ouroboros.owner_pause import SETTLEMENT_EXTERNAL_RUNNING
 
@@ -941,6 +950,59 @@ def hold_budget_row(task: Dict[str, Any], *, reason: str, detail: str = "",
     return hold
 
 
+def hold_continuation_writers(task: Dict[str, Any], predecessor: str, blockers: Any, *,
+                              result_root: Optional[pathlib.Path] = None) -> Dict[str, Any]:
+    """A Continue's own writer hold over its predecessor's observed writers: its admission sets it, and an explicit
+    Resume returns it there while every one of them still runs (owner, 1 Nov). ``release_settled_continuations``
+    releases it once they settle; a newer Stop, Pause, Panic or app stop replaces it (``door_can_replace``)."""
+    return hold_budget_row(task, reason=HOLD_CONTINUATION_WRITER,
+                           detail="the interrupted task's own work is not proven settled; this Continue waits",
+                           extra={"predecessor_task_id": predecessor, "blockers": list(blockers or ()),
+                                  "root_task_id": str(task.get("id") or "")}, result_root=result_root)
+
+
+def project_writer_wait(result_root: pathlib.Path, task_id: str, wait: Dict[str, Any]) -> None:
+    """The task's record says a Continue's writer wait as its admission says it: a reader's copy of the queue row."""
+    try:
+        write_task_result(result_root, task_id, STATUS_SCHEDULED, reason_code=HOLD_CONTINUATION_WRITER,
+                          resource_limit={"status": "budget_hold", "auto_resume": False, "exact_continuation": False,
+                                          **wait})
+    except Exception:
+        log.debug("Failed to project the writer wait of %s", task_id, exc_info=True)
+
+
+def resume_into_writer_wait(q: Any, task: Dict[str, Any], writers: Any, *, predecessor: str,
+                            result_root: pathlib.Path, root_task_id: str) -> Dict[str, Any]:
+    """The explicit Resume of a held Continue whose earlier attempt's writers all observably run: the stop it
+    selected gives way to the Continue's own writer hold, which releases it once they settle and every other check
+    passes again. Nothing dispatches now and no child is selected. Queue lock held. The owner's own Resume of a moved
+    Presence turn decides first (#2566), while only the stop is on disk, so a refusal has nothing to withdraw and no
+    crash can restore a wait it refused. The wait stands only once its row is on disk, or the row returns as it was."""
+    from ouroboros.presence_carrier import owner_resume_lift
+    from supervisor.budget_resume import take_back_owner_resume_lift
+
+    task_id, before = str(task.get("id") or ""), copy.deepcopy(task)
+    if refusal := owner_resume_lift(task, result_root):
+        return refusal
+    task.pop("_budget_pause", None)
+    task.pop(BUDGET_HOLD_KEY, None)
+    clear_refusal(task)
+    wait = hold_continuation_writers(task, predecessor, writers)
+    if not q.publish_queue_snapshot(reason="continuation_resume_waits"):  # durable before the wait stands
+        take_back_owner_resume_lift(task, before, result_root)
+        task.clear()
+        task.update(before)
+        # A failed write can land part of its bundle: its stop goes back over it now, else with the tick's rewrite.
+        q.publish_queue_snapshot(reason="continuation_resume_wait_withdrawn")
+        return {"ok": False, "error": "snapshot_not_persisted"}
+    project_writer_wait(result_root, task_id, wait)
+    q.append_jsonl(q.DRIVE_ROOT / "logs" / "events.jsonl",
+                   {"ts": utc_now_iso(), "type": "continuation_resume_waits", "task_id": task_id,
+                    "root_task_id": root_task_id, "predecessor_task_id": predecessor, "blockers": wait["blockers"]})
+    return {"ok": True, "task_id": task_id, "root_task_id": root_task_id, "same_generation": True, "held": True,
+            "blockers": wait["blockers"]}
+
+
 def hold_restored_budget_pause(task: Dict[str, Any], drive_root: Any, *, reason: str,
                                detail: str = "") -> Dict[str, Any]:
     """Restore-time hold for a paused row the restart could not clear for dispatch.
@@ -1119,14 +1181,16 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
         return {"ok": False, "error": "selection_owner_held"}
     continuation = ((task.get("metadata") or {}).get("continuation") or {}) if isinstance(
         task.get("metadata"), dict) else {}
-    if continuation.get("predecessor_task_id"):
-        # A Continue never releases over its predecessor's unsettled writers,
-        # whichever hold (its own, or a later Restart's) is being released.
-        blockers = observation["blockers"]
-        if blockers:
-            from supervisor.continuation_admission import writers_unsettled_refusal
+    # A Continue never releases over its predecessor's unsettled writers, whichever hold (its own, or a later
+    # Restart's) is being released. An explicit Resume over writers that all observably run returns it to its own
+    # writer hold once every check below passed (owner, 1 Nov); its reconciliation, a wait it is already in and a fact
+    # no wait settles (an unknown outcome, unreadable custody) keep the refusal.
+    writers = list(observation["blockers"] or ()) if continuation.get("predecessor_task_id") else []
+    if writers:
+        from supervisor.continuation_admission import only_running_writers, writers_unsettled_refusal
 
-            return writers_unsettled_refusal(blockers)
+        if selected_by == "reconciliation" or writer_wait(task) or not only_running_writers(writers):
+            return writers_unsettled_refusal(writers)
     # Use the identity already revalidated with this selection's snapshot.
     # A reciprocal retry is the root actor even though its physical id differs.
     actor = current["root_actor"]
@@ -1147,6 +1211,9 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
                 "detail": "stopped while pausing, before anything was saved: there is nothing to continue"}
     if not safe:
         return {"ok": False, "error": unsafe_error, "action": "cancel_or_new_run"}
+    if writers:
+        return resume_into_writer_wait(q, task, writers, predecessor=str(continuation["predecessor_task_id"]),
+                                       result_root=result_root, root_task_id=root_task_id)
     selection = resume_selection(hold, by=control_actor(), selected_at=utc_now_iso(),
                                  selected_by=str(selected_by or "owner"))
     if not native_read_gap:
@@ -1161,8 +1228,16 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
         elif root_grant:
             selection.update(root_grant_id=root_grant["grant_id"],
                              root_resume_generation=int(root_grant["generation"]))
-    prior_points = {key: copy.deepcopy(task[key]) for key in (
-        "_budget_pause", "_owner_wait_resume", "_working_recovery", SELECTION_KEY, BUDGET_HOLD_KEY) if key in task}
+    points = ("_budget_pause", "_owner_wait_resume", "_working_recovery", SELECTION_KEY, BUDGET_HOLD_KEY,
+              "metadata", "root_cost_ceiling_usd")
+    prior_points = {key: copy.deepcopy(task[key]) for key in points if key in task}
+    from ouroboros.presence_carrier import owner_resume_lift
+    from supervisor.budget_resume import take_back_owner_resume_lift
+
+    # Every other refusal has passed and only the stop is on disk: the owner's own Resume of a moved Presence turn
+    # (#2566) decides now, or there was no Resume, so a refusal has nothing to withdraw whatever a crash restores.
+    if refusal := owner_resume_lift(task, result_root):
+        return refusal
     task.pop("_budget_pause", None)
 
     rebound, invalidated, exact_rebound = [], [], []
@@ -1205,8 +1280,9 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
                 else:
                     invalidated.append((member, prior))
 
-    def withdraw(persist: bool = True) -> None:
-        for key in ("_budget_pause", "_owner_wait_resume", "_working_recovery", SELECTION_KEY, BUDGET_HOLD_KEY):
+    def withdraw() -> None:
+        take_back_owner_resume_lift(task, prior_points, result_root)
+        for key in points:
             task.pop(key, None)
         task.update(copy.deepcopy(prior_points))
         for member, key, prior in rebound:
@@ -1216,8 +1292,8 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
             member[SELECTION_KEY] = prior
         for member, prior in exact_rebound:
             member['_budget_pause_resume'] = prior
-        if persist:
-            q.persist_queue_snapshot(reason='budget_hold_selection_withdrawn')
+        # A failed write can land part of its bundle: this goes back over it now, else with the tick's rewrite.
+        q.publish_queue_snapshot(reason='budget_hold_selection_withdrawn')
 
     def publish() -> bool:
         clear_refusal(task)
@@ -1249,7 +1325,7 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
     refused = (complete_consumed_member_resume(result_root, root_task_id, task_id, completing, publish, withdraw)
                if completing else "" if publish() else "snapshot_not_persisted")
     if refused:
-        withdraw(persist=False)
+        withdraw()
         return {"ok": False, "error": "snapshot_not_persisted" if refused == "snapshot_not_persisted"
                 else "selection_owner_held", **({"detail": refused} if completing else {})}
     try:

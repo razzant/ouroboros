@@ -1241,8 +1241,11 @@ identical contact needs a new key. Questions use the normal canonical quiz and
 answer ingress. An answer reaches a live inline author through its mailbox and
 final-drain admission lock. After that author ends, normal late-answer intake
 starts an unrestricted Main owner turn with the source snapshot, current child
-work and exact owner words. Roots that turn starts inherit the source binding
-as related work, without an automatic external-final route. Inline `wait_for_answer=true`
+work and exact owner words. Roots that turn starts, and their Continue, are the
+owner's ordinary work related to the source binding: they keep the owner's tools and
+admission, and the place lists, reads, tells and cancels them. A place's `tell_task`
+arrives as a task's words, context the work judges, never an owner directive; nothing
+gives this work an automatic external-final route. Inline `wait_for_answer=true`
 uses the narrow Presence continuation park: idle custody lends conversation and
 active slot, then reacquires both before reentry; otherwise it waits holding
 custody. Pooled roots retain their normal owner wait. Stop/deadlines still apply;
@@ -1256,8 +1259,9 @@ carrier and ordinary resource/control semantics. A scheduled root explicitly
 uses connector tools to deliver later; it is not discovered by polling the old
 event, its finish reaches no one by itself, and it reads the conversation's
 current previous turn rather than the copy taken when it was scheduled. Any turn
-of the place lists, reads and withdraws the follow-ups that place scheduled
-(`manage_schedules` `list`/`get`/`delete`); withdrawal stops future runs only, and
+of the place lists, reads and withdraws the follow-ups related to it, its own and
+those of the owner's work a late answer began (`manage_schedules`
+`list`/`get`/`delete`); withdrawal stops future runs only, and
 `cancel_task` stops work one already started. `notify=true` and the owner-wide
 schedule table remain separate capabilities.
 
@@ -1375,6 +1379,18 @@ deduplicate by `output_ref`, never by text, since an identical correction is new
   - Reply to the anchored message in the turn's conversation and thread.
   - Promoted children and retained refusals keep their own references and carry no anchor.
   - A turn answered within the request (`status: "completed"`) carries the same anchor.
+
+**Saved work of a moved turn.** When the owner has moved a text turn to a Project, the owner's Pause,
+spent money or a technical stop saves it instead of ending it: the server's queue keeps its work under
+the same task id until the owner resumes it or a restart returns it. Once that custody is durable the
+request answers at every version: 1 and 2 take the `continuing` envelope; a request without
+`continuation_version` answers HTTP 409 `{ok: false, code: "presence_turn_parked", disposition:
+"retained", custody: "queued", turn_ref}` instead of waiting. A resend of the same event gets the same
+answer, never a rerun. While the server's queue is unrestored or unreadable, a resend of a turn it
+may keep answers 409 `presence_turn_custody_unknown` (`custody: "unknown"`, `retained`): neither
+lost nor running; resend later. Its poll answers 202 `pending` while the queue keeps or may keep the
+work and the terminal once it ends; the resumed author reacquires the conversation and receives the
+facts since it was saved before it speaks again. Live calls and turns not moved keep the behaviour above.
 
 Before speaking again, the same author reacquires the conversation and active slot and receives
 observed conversation and delivery facts since its yield. Reentry retains the exact observed text,

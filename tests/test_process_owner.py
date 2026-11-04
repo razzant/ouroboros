@@ -160,8 +160,38 @@ def test_abrupt_owner_death_reaps_tree_without_owner_finally(tmp_path, owned, se
     assert _live(sentinel)
 
 
-def test_normal_release_joins_guardian(tmp_path, owned, sentinel):
+@pytest.mark.parametrize("high_fd", [False, True])
+def test_normal_release_joins_guardian(tmp_path, owned, sentinel, monkeypatch, high_fd):
+    if high_fd:
+        if os.name == "nt":
+            pytest.skip("Windows uses a Job instead of a pipe guardian")
+        import fcntl
+        import resource
+        import select
+
+        soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft != resource.RLIM_INFINITY and soft <= 2048:
+            pytest.skip(f"high-fd guardian needs RLIMIT_NOFILE > 2048; current soft limit is {soft}")
+        spawn = ProcessContainer.spawn
+        descriptors = []
+
+        def high_pipe(container, argv, **kwargs):
+            proc = spawn(container, argv, **kwargs)
+            if any("_guardian_main" in str(arg) for arg in argv):
+                # One real high-numbered pipe, without descriptor pressure or
+                # changing the process-wide resource limit of the test runner.
+                fd = fcntl.fcntl(proc.stdout.fileno(), fcntl.F_DUPFD, 2048)
+                proc.stdout.close()
+                proc.stdout = os.fdopen(fd, "rb")
+                descriptors.append(fd)
+                with pytest.raises(ValueError, match="filedescriptor out of range"):
+                    select.select([proc.stdout], [], [], 0)
+            return proc
+
+        monkeypatch.setattr(ProcessContainer, "spawn", high_pipe)
     container, proc = owned("pass", lifeline=True)
+    if high_fd:
+        assert descriptors and descriptors[0] >= 2048
     guardian = container._lifeline._proc if container._lifeline else None
     proc.wait(timeout=5)
     assert container.reap() == ""

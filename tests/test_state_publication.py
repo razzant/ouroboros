@@ -224,6 +224,25 @@ def test_each_source_the_body_reads_moves_the_revision(serving):
     assert _key(serving) != after_direct
 
 
+def test_a_recorded_stop_and_the_presence_author_census_move_the_revision(serving, monkeypatch):
+    """Two body facts no queue or store revision announces: a recorded Stop a live Presence turn has not taken yet
+    (its work's ``stop_requested``: the cancel-intent projection) and whether the Presence author census could read
+    every held witness (one released makes the census whole again)."""
+    from ouroboros import conversation_lease
+    from ouroboros.cancel_intents import request_cancel
+
+    def presence(key):
+        return next(part for part in key if part[0] == "presence")
+
+    before = presence(_key(serving))
+    request_cancel(serving.root, "a-live-turn", source="http_cascade", requested_stop_policy="immediate")
+    assert presence(_key(serving)) != before
+    monkeypatch.setattr(conversation_lease, "live_presence_roots", lambda root: {"roots": [], "complete": False})
+    gap = publication._presence_authors(str(serving.root))
+    monkeypatch.setattr(conversation_lease, "live_presence_roots", lambda root: {"roots": [], "complete": True})
+    assert publication._presence_authors(str(serving.root)) != gap
+
+
 def test_an_unprovable_source_is_never_reused(serving, monkeypatch):
     monkeypatch.setattr("ouroboros.projects_registry.bindings_revision", lambda _root: "")
     assert _key(serving) != _key(serving)

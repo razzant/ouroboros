@@ -234,7 +234,8 @@ def _request_facts(drive_root: Any, row: Dict[str, Any]) -> Dict[str, Any]:
         "authority_source": str(row.get("authority_source") or ""),
         # Continuation lineage and the same-tree capture identity replay too.
         **{key: str(row.get(key) or "") for key in ("continuation_of", "capture_id", "snapshot_task_id")},
-        **{key: copy.deepcopy(row[key]) for key in ("execution_mode", "effective_access", "thread_id", "authority_ceiling", "promotion") if key in row},
+        **{key: copy.deepcopy(row[key]) for key in ("execution_mode", "effective_access", "thread_id", "authority_ceiling", "promotion",
+                                                  "input_files") if key in row},  # the selected inputs' source map
         # A copy: the source rows may be the shared, read-only custody memo.
         "resource_ref": copy.deepcopy(row.get("resource_ref")) if isinstance(row.get("resource_ref"), dict) else {},
         "selected_subagent_id": str(row.get("selected_subagent_id") or ""),

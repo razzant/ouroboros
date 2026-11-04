@@ -531,7 +531,7 @@ def assert_test_data_path(path: pathlib.Path) -> None:
 
 def append_jsonl(
     path: pathlib.Path, obj: Dict[str, Any], *, ensure_record_boundary: bool = False,
-    require_lock: bool = False, lock_timeout_sec: float = 2.0, live: bool = True,
+    require_lock: bool = False, lock_timeout_sec: float = 2.0, live: bool = True, lock_held: bool = False,
 ) -> bool:
     """Append a JSON object as a line to a JSONL file (concurrent-safe).
 
@@ -543,6 +543,8 @@ def append_jsonl(
     shared owner-aware lock primitive, so a live holder is never displaced.
     ``lock_timeout_sec=0`` takes one attempt without a contention wait, for
     shutdown callers whose grace has expired; unlocked fallback is unchanged.
+    ``lock_held``: the caller already holds this file's append lock (a read of
+    the stream and this append under one hold), so none is taken again.
     Runtime ``logs/*.jsonl`` rows are streamed to the ``set_log_sink`` sink, minus
     types with a dedicated live owner (``WORKER_LOG_SINK_SUPPRESSED_TYPES``, server
     superset ``SERVER_LOG_SINK_SUPPRESSED_TYPES``): one event, one live frame, so a
@@ -575,7 +577,7 @@ def append_jsonl(
     try:
         # Both lanes wait out a live lock holder, never displacing it;
         # the non-required lane then appends unlocked.
-        lock_fd = acquire_exclusive_file_lock(
+        lock_fd = None if lock_held else acquire_exclusive_file_lock(
             lock_path,
             timeout_sec=lock_timeout_sec,
             stale_sec=10.0,
@@ -583,7 +585,7 @@ def append_jsonl(
             owner_aware_stale=True,
         )
 
-        if require_lock and lock_fd is None:
+        if require_lock and lock_fd is None and not lock_held:
             log.warning("append_jsonl: required lock unavailable for %s", path)
             return False
 

@@ -43,7 +43,7 @@ from typing import Any, Dict, List
 
 from ouroboros.consciousness_authority import consciousness_origin_metadata, work_kind
 from ouroboros.deadline_utils import parse_deadline_ts
-from ouroboros.dialogue_provenance import presence_caller_binding, presence_root_carrier
+from ouroboros.dialogue_provenance import presence_caller_binding, presence_root_carrier, presence_root_relation
 from ouroboros.settings_scales import EFFORT_SCALE, requested_effort
 from ouroboros.tools.arg_feedback import ignored_argument_note
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -81,7 +81,8 @@ def _manage_schedules(
         return publish_no_effect(ctx, ToolResult(
             status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED",
             text=("⚠️ RESOURCE_CONSTRAINT_BLOCKED: a Presence conversation lists, reads and withdraws (delete) "
-                  "only the follow-ups its place scheduled; owner schedules and other changes stay out of reach."),
+                  "only the follow-ups related to its place: its own and those of the owner's work begun by answering "
+                  "one of its questions; the owner's other schedules and other changes stay out of reach."),
         ))
     owned_by = functools.partial(presence_promise, binding) if binding is not None else None
     if operation not in {"list", "get"} and not _root_schedule_mutation_authorized(ctx):
@@ -367,7 +368,8 @@ def get_tools() -> List[ToolEntry]:
                 "be resolved. Exact hold release preserves enabled/deletion state, pending task identity, "
                 "money/deadline and other holds. Changes belong to a root turn; delegated tasks may "
                 "list/get only; Observe cannot update; "
-                "a Presence conversation lists, gets and deletes only the follow-ups its place scheduled. "
+                "a Presence conversation lists, gets and deletes only the follow-ups related to its place: its own "
+                "and those of the owner's work begun by answering one of its questions. "
                 "Schedules fire only while Ouroboros runs, with one late "
                 "catch-up after downtime rather than replaying missed cron ticks."
             ),
@@ -708,6 +710,9 @@ def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
             if key not in {"objective", "context", "expected_output", "acceptance_claims", "success_criteria",
                            "predecessor_authority", "context_requires_development"}}
         record["task"].pop("project_id", None)
+    elif not carrier:
+        # The owner's own work related to a place: an ordinary follow-up keeping only the relation.
+        record["task"]["metadata"].update(presence_root_relation(metadata_src))
     from supervisor.queue import ScheduleRefused, ScheduleStoreUnreadable
 
     try:

@@ -134,6 +134,15 @@ _ADDED_OWNERS = {
     "_CURRENT_TASK_CEILING": runtime_limits,
     "explicit_execution_timeout_sec": runtime_limits,
     "resolve_task_execution_timeout_sec": runtime_limits,
+    # MCP task sessions and their browser-policy callback: fixed structural bounds.
+    "MCP_TASK_SESSION_CLOSE_WAIT_SEC": runtime_limits,
+    "MCP_TASK_SESSION_RETURN_WAIT_SEC": runtime_limits,
+    "MCP_TASK_SESSION_IDLE_POLL_SEC": runtime_limits,
+    "MCP_BROWSER_GUARD_READ_SEC": runtime_limits,
+    "MCP_BROWSER_GUARD_LINE_BYTES": runtime_limits,
+    "MCP_BROWSER_GUARD_WORKERS": runtime_limits,
+    "MCP_BROWSER_GUARD_PENDING": runtime_limits,
+    "MCP_STDIO_STDERR_TAIL_BYTES": runtime_limits,
 }
 
 _MOVED_OWNERS = {

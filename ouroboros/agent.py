@@ -56,7 +56,7 @@ from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.consciousness_authority import apply_consciousness_authority
 from ouroboros.contracts.task_contract import attach_task_contract
 from ouroboros.outcomes import infra_failed_axes
-from ouroboros import body_candidate, route_choice, subagent_bootstrap, subagent_runtime
+from ouroboros import body_candidate, mcp_task_session, route_choice, subagent_bootstrap, subagent_runtime
 from ouroboros.subagents import (
     SubagentDispatch,
     effort_result_fields,
@@ -506,9 +506,7 @@ class OuroborosAgent:
             execution_owner = execution_owner_record(canonical, task, execution_kind)
             task["_execution_owner"] = execution_owner
             started = getattr(self, "_task_started_ts", None)
-            # A queue row's focus is a REPLAY (retry clone, owner-wait restart
-            # handoff): it may be older than the focus the same task id already
-            # published durably, so it is accepted only when it is newer.
+            # Replayed queue focus/name may be stale: accept only newer focus and never overwrite a durable name.
             focus_kw: Dict[str, Any] = {}
             if task.get("focus"):
                 from ouroboros.focus import compact_focus
@@ -528,6 +526,8 @@ class OuroborosAgent:
                 **({"started_at": datetime.fromtimestamp(started, timezone.utc).isoformat()}
                    if isinstance(started, (int, float)) and started > 0 else {}),
                 **({"queued_at": task["queued_at"]} if task.get("queued_at") is not None else {}),
+                **{key: task[key] for key in ("suggested_name",) if task.get(key)},  # the name its queue row carries
+                _field_projector=lambda current, fields: {k: v for k, v in fields.items() if k != "suggested_name" or not current.get(k)},
                 chat_id=task.get("chat_id"),
                 _is_direct_chat=bool(task.get("_is_direct_chat")),
                 parent_task_id=task.get("parent_task_id"),
@@ -1369,6 +1369,7 @@ class OuroborosAgent:
                 cleanup_browser(self.tools._ctx)
             except Exception:
                 log.debug("Failed to cleanup browser", exc_info=True)
+            mcp_task_session.close_context_sessions(self.tools._ctx, reason="its task turn ended")  # never raises
             if heartbeat_stop is not None:
                 heartbeat_stop.set()
             self._current_task_type = None

@@ -111,7 +111,7 @@ def test_staged_deletion_recreated_on_disk_is_staged_again(task, monkeypatch):
     repo = task.repo_dir
     _baseline(task)
     _git(repo, "rm", "-q", "gone.txt")
-    (repo / "gone.txt").write_text("recreated\n", encoding="utf-8")
+    (repo / "gone.txt").write_bytes(b"recreated\n")  # the blob is asserted byte for byte; text mode writes CRLF on Windows
     selected, _evidence, error = resolve_attributed_git_paths(task.drive_root, task.task_id, repo, None)
     assert not error and selected == ["gone.txt"]
     head = _git(repo, "rev-parse", "HEAD")

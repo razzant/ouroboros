@@ -195,8 +195,9 @@ PROVISION_MARGIN_SEC = 15 * 60
 def test_the_job_bound_outlasts_the_stand_worst_case(monkeypatch):
     """The stand, not GitHub, must end the run: a job killed mid-wait loses the
     finalized manifest, the step summary's verdict and the traces bundle. The
-    worst case is server ready + the task (+ fixed waits) + the absorb wait
-    (``confirm_absorb`` reuses --task-timeout) + the post-restart health wait,
+    worst case is server ready + the task (+ fixed waits) + the direct adoption's
+    wait (bounded by --ready-timeout) + the absorb wait (``confirm_absorb``
+    reuses --task-timeout) + the post-restart health wait,
     read from the stand's own parser over the job's exact argv, so raising
     --task-timeout without the job bound trips here, and the bound passes only
     with room for provisioning."""
@@ -205,7 +206,7 @@ def test_the_job_bound_outlasts_the_stand_worst_case(monkeypatch):
     monkeypatch.setattr(run_live_lanes.tempfile, "gettempdir", lambda: "/tmp")
     argv = shlex.split(_stand_step()["run"].replace("\\\n", " "))[3:]
     parsed = run_live_lanes.parse_args(argv)
-    worst = 2 * (parsed.task_timeout + parsed.ready_timeout) + STAND_FIXED_WAITS_SEC
+    worst = 2 * (parsed.task_timeout + parsed.ready_timeout) + parsed.ready_timeout + STAND_FIXED_WAITS_SEC
     bound = int(_job()["timeout-minutes"]) * 60
     assert bound >= worst + PROVISION_MARGIN_SEC, (bound, worst)
 

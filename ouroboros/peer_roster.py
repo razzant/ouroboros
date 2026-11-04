@@ -464,8 +464,12 @@ def independent_roots(drive_root: pathlib.Path) -> Dict[str, Any]:
                     continue
                 task = row.get("task") if isinstance(row.get("task"), dict) else {}
                 task_id = str(row.get("id") or task.get("id") or "").strip()
-                if (  # a carried Presence turn's lane row is its place's: the census below lists it once moved
-                    not task_id or task_id in seen or execution_kind(task) == "presence"
+                # A carried Presence turn's lane row is its place's (the census below lists it once moved); the
+                # saved work of a moved turn the queue keeps or the pool continues is a root like any queued one.
+                carried = (execution_kind(task) == "presence"
+                           and (task.get("_execution_owner") or {}).get("lane") == "conversation")
+                if (
+                    not task_id or task_id in seen or carried
                     or str(task.get("parent_task_id") or "").strip()
                     or str(task.get("delegation_role") or "") == "subagent"
                 ):

@@ -1187,8 +1187,9 @@ export function createChatInstance({
             updateLiveCardCount(record);
             reanchorTaskCard(record, rawTs, { suppressDomInsert });
             ensureLiveCardVisible(record, { suppressDomInsert });
-            // Only new review rows trigger a read.
+            // Only new review rows trigger a read; a live receipt on a settled card re-reads its stored line.
             if (fresh && placement === 'reviews') hydrateCardReviews(taskId);
+            if (fresh && !msg.history_id && record.finished && msg.terminal_receipt) scheduleHistorySync();
             return Boolean(changed || liveCardProjectionChanged(before, record));
         });
     }

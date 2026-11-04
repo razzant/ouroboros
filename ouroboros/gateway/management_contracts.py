@@ -759,6 +759,8 @@ class McpServerStatus(TypedDict, total=False):
     env_from_settings: Any
     configuration_warnings: List[str]
     schemas_at_start: bool  # the owner's pin: call schemas in every request from task start
+    task_session: bool  # stdio: one task loop's calls share one session (listings stay per call)
+    browser_policy: bool  # that session's process may ask the host's browser policy per request
     instructions: str  # the server's own usage text from initialize, untrusted
     map_tokens: int  # this server's part of the connections map (Main, Low/Max)
     schema_tokens: int  # all its call schemas, loaded or not
