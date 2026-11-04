@@ -5650,27 +5650,24 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .evo-meta { margin: 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .evo-title { margin: 0; color: var(--text-primary); font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; }
 
-/* The campaign: what it is and says on the left, consciousness beside it, the one command it offers at the end. */
-.evo-campaign { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center;
-    gap: var(--space-2) var(--space-5); padding: 14px 16px 14px 20px; }
+/* Keep a reading measure for the campaign; status and actions reflow before they can squeeze its words. */
+.evo-campaign { display: flex; flex-wrap: wrap; align-items: center;
+    gap: var(--space-3) var(--space-5); padding: 14px 16px 14px 20px; }
 .evo-campaign-main, .evo-campaign-lines, .evo-campaign-side { display: grid; gap: 3px; min-width: 0; }
+.evo-campaign-main { flex: 2 1 24rem; min-width: min(100%, 24rem); }
 .evo-campaign-line { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
 .evo-campaign-name { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-title); font-weight: 600; }
 .evo-campaign-chip { height: 20px; padding: 0 8px; font-size: var(--type-meta); font-weight: 500; }
-.evo-campaign-side { max-width: 34ch; }
+.evo-campaign-side { flex: 1 1 17rem; }
 .evo-campaign-side .ui-status { margin: 0; }
-.evo-campaign-actions { display: flex; gap: var(--space-2); }
-/* A height, not a min-height: the Dashboard's shared control minimum (--page-control-min) still lifts it under a finger. */
-.evo-campaign-actions .btn { height: 32px; padding: 0 16px; }
+.evo-campaign-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); max-width: 100%; margin-inline-start: auto; }
+/* Long translated labels can grow; the Dashboard still supplies the larger touch minimum. */
+.evo-campaign .evo-campaign-actions .btn { height: auto; min-block-size: max(32px, var(--page-control-min, 0px)); max-width: 100%;
+    padding: 6px 16px; white-space: normal; overflow-wrap: anywhere; }
 .evo-campaign :is(.evo-meta, .ui-status) { overflow-wrap: anywhere; }
-@container (max-width: 600px) {
-    .evo-campaign { grid-template-columns: minmax(0, 1fr) auto; }
-    .evo-campaign-side { grid-column: 1 / -1; grid-row: 2; max-width: none; }
-}
 @container (max-width: 420px) {
-    .evo-campaign { grid-template-columns: minmax(0, 1fr); padding: 14px 16px; }
-    .evo-campaign-side { grid-row: auto; }
-    .evo-campaign-actions { justify-content: flex-start; }
+    .evo-campaign { padding: 14px 16px; }
+    .evo-campaign-actions { margin-inline-start: 0; }
 }
 
 /* How Ouroboros changed: the head, one measure at a time, the chart, its caption and the chosen version. */
