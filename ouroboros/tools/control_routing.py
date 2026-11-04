@@ -80,14 +80,14 @@ def _attach_drafted_objective(ctx: ToolContext, evt: Dict[str, Any]) -> None:
     one, and a suppressed stamp is owner input that the door did not log.
 
     The corpus is persisted with the start (its receipt, the queue snapshot, the running
-    record): the one owner-corpus projection (``owner_words.owner_corpus_rows``).
+    record): the one owner-corpus projection (``owner_words.carried_owner_corpus``).
     """
-    from ouroboros.owner_words import owner_corpus_rows
+    from ouroboros.owner_words import carried_owner_corpus
 
     evt["objective_author"] = {"kind": "task", "task_id": str(getattr(ctx, "task_id", "") or "")}
     if not (evt.get("source_ref") or evt.get("origin_suppressed")):
         evt["origin_message_absent"] = True
-    evt["owner_corpus"] = owner_corpus_rows(ctx, evt.get("source_text"))
+    evt["owner_corpus"] = carried_owner_corpus(ctx, evt.get("source_text"))
 
 
 def _inherited_project_scope(ctx: ToolContext) -> str:

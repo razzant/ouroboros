@@ -180,7 +180,7 @@ def directive_owner_rows(ctx: Any) -> List[Dict[str, str]]:
     return _deduped(rows)
 
 
-def owner_corpus_rows(ctx: Any, source_text: Any = "") -> List[Dict[str, Any]]:
+def carried_owner_corpus(ctx: Any, source_text: Any = "") -> List[Dict[str, Any]]:
     """The run's owner corpus, carried by value into work it starts: a drafted objective or a follow-up.
 
     Every row the run admitted as my human's words, as the retained corpus's text (an image by reference

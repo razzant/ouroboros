@@ -14,8 +14,8 @@ import pytest
 from ouroboros import dialogue_store
 from ouroboros.chat_chain import format_address, row_address
 from ouroboros.loop_messages import _initialize_owner_directives, _record_owner_directive
-from ouroboros.owner_words import (FIELD, OWNER_SOURCES, REPLY_TARGET, _deduped, governing_words_for_schedule,
-                                   owner_corpus_rows, render_owner_words)
+from ouroboros.owner_words import (FIELD, OWNER_SOURCES, REPLY_TARGET, _deduped, carried_owner_corpus,
+                                   governing_words_for_schedule, render_owner_words)
 from ouroboros.tools.registry import ToolContext
 
 LONG = ("Sasha's estimate is fine, but before you start: keep the old export path working for the finance team, "
@@ -115,7 +115,7 @@ def test_one_list_names_my_humans_corpus_labels_for_every_reader(tmp_path):
     evt: dict = {}
     _attach_drafted_objective(ctx, evt)
     assert [row["source"] for row in evt["owner_corpus"]] == ["place_owner"] == [
-        row["source"] for row in owner_corpus_rows(ctx)]
+        row["source"] for row in carried_owner_corpus(ctx)]
     seeded = SimpleNamespace(task_metadata={"objective_author": {"kind": "task", "task_id": "place-turn"},
                                             "owner_corpus": evt["owner_corpus"]})
     _initialize_owner_directives(seeded, [{"role": "user", "content": "drafted"}])
