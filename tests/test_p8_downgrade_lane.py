@@ -132,7 +132,8 @@ def test_v760_reads_the_export_and_the_new_release_reconciles_its_writes(lane_ro
     assert boot == {"status": "importing"} and store_switch.wait_ready(root, timeout=60)["status"] == "published"
     assert current.outbox_depth(root) == 0 and "run-dead" in _chain_text(root)
     outcome = _switch_to_old(root, repo, old)
-    assert outcome["status"] == "switched" and outcome["needs"] == {"facts": True, "money": True, "handles": True, "dialogue": True}
+    assert outcome["status"] == "switched" and outcome["needs"] == {"facts": True, "money": True, "handles": True, "dialogue": True,
+                                                                    "threads": True}
     assert store.probe(root)[0] == "absent" and (root / "state" / "usage_attempts.jsonl").exists()
 
     read = old_body(v760, root, "write", tmp_path / "home")
