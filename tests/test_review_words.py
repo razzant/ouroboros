@@ -389,13 +389,14 @@ def test_result_capture_keeps_only_attributed_paths_hashes_and_frozen_words(repo
     assert HEADING not in no_diff and "## Workspace diff" not in no_diff
 
 
+@pytest.mark.parametrize("retrieves", [[False, True], [True, True]], ids=["mixed", "retrieving"])
 @pytest.mark.parametrize("window,bounded", [(1_000_000, False), (100_000, True)])
-def test_result_words_take_the_packet_rows_share_of_the_window(repo, tmp_path, monkeypatch, window, bounded):
+def test_result_words_take_the_seats_share_of_the_window(repo, tmp_path, monkeypatch, window, bounded, retrieves):
     from ouroboros import mutation_attribution
     from ouroboros.tools import review, review_admission, review_result
 
-    # One packet row and one retrieving row: the packet row's window bounds the words both read.
-    plan = {"models": ["test/packet", "test/session"], "slot_ids": ["packet", "session"], "retrieves": [False, True],
+    # The one subject reaches every seat, inline or in a retrieving seat's brief: their windows bound its words.
+    plan = {"models": ["test/packet", "test/session"], "slot_ids": ["packet", "session"], "retrieves": retrieves,
             "session_profiles": ["", ""], "use_local": [False, False]}
     monkeypatch.setattr(review_admission, "seat_vectors", lambda _delivery: plan)
 

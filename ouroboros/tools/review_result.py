@@ -168,10 +168,11 @@ def produced_material(ctx: Any) -> Dict[str, Any]:
 
 
 def _result_words_budget() -> int:
-    """The words share a change packet takes, sized against this panel's packet rows (none: the global bound)."""
+    """The words share a change packet takes, sized against this panel's seats: the one subject reaches every seat,
+    inline for a packet seat and in a retrieving seat's brief."""
     from ouroboros.review_records import ReviewSlot
     from ouroboros.review_words import section_budget
-    from ouroboros.reviewer_slot_config import commit_triad_delivery, row_plan_retrieves
+    from ouroboros.reviewer_slot_config import commit_triad_delivery
     from ouroboros.tools.review import _triad_governance_usable_window
     from ouroboros.tools.review_admission import seat_vectors
 
@@ -179,9 +180,9 @@ def _result_words_budget() -> int:
         plan = seat_vectors(commit_triad_delivery())
     except ValueError:  # the wave refuses this pool itself; the subject keeps the global bound
         return section_budget()
-    rows = [i for i in range(len(plan.get("models") or [])) if not row_plan_retrieves(plan, i)]
     slots = [ReviewSlot(slot_id=plan["slot_ids"][i], model=plan["models"][i],
-                        session_profile=plan["session_profiles"][i], use_local=plan["use_local"][i]) for i in rows]
+                        session_profile=plan["session_profiles"][i], use_local=plan["use_local"][i])
+             for i in range(len(plan.get("models") or []))]
     if not slots:
         return section_budget()
     return section_budget(_triad_governance_usable_window([slot.model for slot in slots], slots))
