@@ -69,6 +69,11 @@ def words_material(source: str = "the diff's file/blob identities") -> list[str]
     return [sample.render(section_budget(), source), sample.omission(source)]
 
 
+def has_words(path: str) -> bool:
+    """A source whose literals a person may read; a minified bundle is machine output, nobody's words."""
+    return path.endswith((".py", ".js", ".html")) and not path.endswith(".min.js")
+
+
 def section_budget(window_tokens: int | None = None) -> int:
     """Use the existing review inline share; the enclosing packet still has to fit."""
     from ouroboros.runtime_limits import REVIEW_GOVERNANCE_INLINE_SHARE
@@ -84,6 +89,12 @@ def _prose(text: str) -> bool:
             and not re.match(r"^(?:\.?\.?/|https?://|[A-Za-z]:\\)", token)
             and not re.fullmatch(r"(?:--?[\w-]+|\S*[/\\]\S*|[\w.-]*\.[\w-]+|\w*_\w*|[A-Z]+\d+)", token)
             and not re.fullmatch(r"\s*(?:--[\w-]+|[a-z-]+)\s*:[^\n]+[;}]\s*", text))
+
+
+def _label(text: str) -> bool:
+    """Prose a person reads: several words, or one capitalised word (`Resume`), never a lower-case code."""
+    token = text.strip()
+    return _prose(token) and (any(c.isspace() for c in token) or token[:1].isupper())
 
 
 def _python_text(node) -> str | None:
@@ -112,8 +123,9 @@ def _python_literals(path: str, source: str) -> list[Literal]:
             machine_calls.update(alias.asname or alias.name for alias in node.names)
 
     def model_input(name):
-        # The producer/argument names identify model context, never words in its prose.
-        return bool(re.search(r"(?:^|_)(?:prompt|messages)(?:_|$)", name, re.I))
+        # A prompt's name identifies model context, never words in its prose; `messages` does only as a call's
+        # argument (a dictionary of error messages for people is words), and a chat turn by its `role` key.
+        return bool(re.search(r"(?:^|_)prompt(?:_|$)", name, re.I))
 
     def machine_call(node):
         name = ast.unparse(node.func)
@@ -127,18 +139,20 @@ def _python_literals(path: str, source: str) -> list[Literal]:
                 else [node.slice] if isinstance(node, ast.Subscript) else [])
         if isinstance(node, ast.Call) and ast.unparse(node.func).rsplit(".", 1)[-1] in {"get", "pop", "setdefault", "tr", "t"}:
             keys = node.args[:1]
+        inner = []
         if isinstance(node, ast.Call):
             if machine_call(node):
-                keys = node.args
-            keys = [*keys, *(kw.value for kw in node.keywords if model_input(kw.arg or ""))]
+                inner = node.args
+            inner = [*inner, *(kw.value for kw in node.keywords if kw.arg == "messages" or model_input(kw.arg or ""))]
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             if any(model_input(ast.unparse(target)) for target in targets):
-                keys = [node.value]
-        # Named argv, regexes and model messages are not captions just because
-        # their literals are assigned separately from the consuming call.
-        keys = [part for key in keys if key is not None for part in ast.walk(key)]
-        scoped_keys[scope].update(key.id for key in keys if isinstance(key, ast.Name))
+                inner = [node.value]
+        # A lookup's key is its own name. Named argv, regexes and model messages are not captions just because
+        # their literals are assigned separately from the consuming call, wherever the name sits inside it.
+        names = [key for key in keys if isinstance(key, ast.Name)]
+        names += [part for key in inner if key is not None for part in ast.walk(key) if isinstance(part, ast.Name)]
+        scoped_keys[scope].update(name.id for name in names)
         for child in ast.iter_child_nodes(node):
             key_uses(child, scope)
 
@@ -172,6 +186,8 @@ def _python_literals(path: str, source: str) -> list[Literal]:
             walk(node.value, (*place, ast.unparse(target)))
             return
         if isinstance(node, ast.Dict):
+            if any(isinstance(key, ast.Constant) and key.value == "role" for key in node.keys):
+                return  # a chat turn for a model
             for key, value in zip(node.keys, node.values):
                 walk(value, (*place, ast.unparse(key) if key else "**"))
             return
@@ -208,7 +224,7 @@ def _python_literals(path: str, source: str) -> list[Literal]:
             return
         text = _python_text(node)
         if text is not None:
-            if _prose(text) and (any(c.isspace() for c in text.strip()) or text[:1].isupper()):
+            if _label(text):
                 found.append(Literal(path, ".".join(place) or "module", node.lineno, text))
             # Conditional literal words inside an interpolation are words too.
             for child in ast.walk(node):
@@ -237,7 +253,7 @@ class _HTMLWords(HTMLParser):
         if tag not in {"input", "img", "br", "hr", "meta", "link", "source", "wbr", "area", "embed"}:
             self.stack.append((tag, place))
         for name in ("title", "alt", "placeholder", "aria-label", "value"):
-            if _prose(attrs.get(name) or ""):
+            if _label(attrs.get(name) or ""):
                 self.add(attrs[name], (*self.place, place, name))
 
     def handle_endtag(self, tag):
@@ -255,7 +271,7 @@ class _HTMLWords(HTMLParser):
             return
         if "script" in tags:
             self.found.extend(_javascript_literals(self.path, data, self.line + self.getpos()[0] - 1))
-        elif _prose(data):
+        elif _label(data):
             self.add(data.strip(), (*self.place, *(place for _, place in self.stack)))
 
 
@@ -357,7 +373,7 @@ def _javascript_literals(path: str, source: str, line=1) -> list[Literal]:
                 value = f"<span {value}></span>"  # an HTML attribute fragment, not prose
             if re.search(r"</?[a-zA-Z][^>]*>", value):
                 found.extend(_html_literals(path, value, place, line + node.start_point[0]))
-            elif _prose(value):
+            elif _label(value):
                 found.append(Literal(path, ".".join(place) or "module", line + node.start_point[0], value))
             return
         for child in node.named_children:
@@ -473,7 +489,7 @@ def words_for_diff(repo_dir, diff: str) -> ReviewWords:
                 except UnicodeError:
                     pass  # core.quotePath=false keeps non-ASCII characters literal
             path = path[2:]
-            if not path.endswith((".py", ".js", ".html")):
+            if not has_words(path):
                 continue
             if "tests" in path.split("/") or "@@ " not in block:
                 continue

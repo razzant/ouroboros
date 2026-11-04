@@ -162,6 +162,16 @@ def test_js_single_word_labels_are_paired(source):
         assert not compare_sources([("client.js", before, before)]).changes
 
 
+def test_lower_case_codes_stay_out_while_capitalised_labels_stay_in():
+    source = ("const row = {tone: 'warn', action: 'restart', label: 'Resume'};\n"
+              "node.className += ' is-unknown';\n"
+              "const html = `<input value=\"auto\"><button>Retry</button>`;\n")
+    after = (source.replace("'warn'", "'error'").replace("'restart'", "'stop'").replace("' is-unknown'", "' is-qualified'")
+             .replace('"auto"', '"manual"').replace("'Resume'", "'Continue'").replace(">Retry<", ">Try again<"))
+    assert pairs(compare_sources([("web/view.js", source, after)])) == [("Resume", "Continue"), ("Retry", "Try again")]
+    assert pairs(compare_sources([("web/view.js", after, source)])) == [("Continue", "Resume"), ("Try again", "Retry")]
+
+
 def test_chained_js_calls_keep_receiver_callbacks_and_literal_receivers():
     source = '''function rows(slots) {
       return slots.map(slot => `<button>${tr('save', 'Save changes')}</button>`).join('');
@@ -200,6 +210,27 @@ tokens = ['-o', '--no-sandbox', 'utf-8', 'install.json', 'dir/file.py', r'C:\out
 '''
     assert pairs(compare_sources([(PATH, "", source)])) == [
         (None, "Resume"), (None, "Decide what the user should do next"), (None, "Saved!")]
+
+
+def test_a_name_inside_a_lookup_is_not_a_key_for_its_other_assignments():
+    old, new = "Parent task was interrupted before this child started.", "The parent stopped first."
+    before = ('def retry(task):\n    fence = FENCES.get(str(task.get("root_task_id")))\n'
+              f'    task["retry"] = {{"reason": "{old}"}}\n    return fence\n')
+    assert pairs(compare_sources([(PATH, before, before.replace(old, new))])) == [(old, new)]
+
+
+@pytest.mark.parametrize("path,found", [("web/lib.min.js", False), ("web/lib.js", True)])
+def test_a_minified_bundle_is_machine_output_not_words(repo, path, found):
+    diff = changed_repo(repo, "const a = 'Save changes';\n", "const a = 'Resume work';\n", path=path)
+    assert bool(words_for_diff(repo, diff).changes) is found
+
+
+def test_a_dictionary_of_error_messages_for_people_is_words_not_model_input():
+    old, new = "This request was already saved or cancelled; nothing was saved now.", "This request is already closed."
+    before = f'messages = {{"closed": "{old}"}}\n\ndef refuse(code):\n    return {{"error": messages[code]}}\n'
+    assert pairs(compare_sources([(PATH, before, before.replace(old, new))])) == [(old, new)]
+    chat = 'llm.chat(messages=[{"role": "user", "content": "Read the input carefully"}])\n'
+    assert not compare_sources([(PATH, "", chat)]).changes
 
 
 @pytest.mark.parametrize("path,source", [
