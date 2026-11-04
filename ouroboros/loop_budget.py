@@ -955,11 +955,14 @@ def _prepare_post_tool_budget_context(
 
 
 def authored_completion_budget_exhausted(ctx: Any, budget_remaining: float | None, ceiling: Any) -> bool:
-    """Only actual money exhaustion owns a no-spend stop; prospective reserves do not."""
-    global_remaining = _wrapup_global_remaining() if not ctx.active_use_local else None
-    if ((budget_remaining is not None and budget_remaining <= 0)
-            or (global_remaining is not None and global_remaining <= 0)):
-        return True
+    """Only actual money exhaustion owns a no-spend stop; prospective reserves do not. A reached global
+    limit owns it only on a route whose next round needs paid admission (``_next_round_pays``, the round
+    gate's own rule); the root cap binds every route."""
+    if _next_round_pays(ctx):
+        global_remaining = _wrapup_global_remaining()
+        if ((budget_remaining is not None and budget_remaining <= 0)
+                or (global_remaining is not None and global_remaining <= 0)):
+            return True
     cap = getattr(ceiling, "root_cap_usd", None)
     if cap is None:
         return False

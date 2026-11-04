@@ -645,9 +645,10 @@ def _foreign_roots_refused(candidate) -> bool:
 def needs_paid_admission(task: Dict[str, Any]) -> bool:
     """Owner 2A at the queue: whether a row's next attempt needs PAID admission, which alone a reached
     global limit refuses (``usage_accounting.paid_admission`` before any price is known). The worker's own
-    opening rules name the route (``route_choice``). A continuation saved on another route, or a subscription
-    route whose receipts carried cash, is admitted here and refused by its first reservation, which is the
-    authority. An unresolvable route keeps the money stop."""
+    opening rules name the route (``route_choice``) over what its dispatch resolves: a delegated child's frozen
+    row selects its route (``subagent_runtime.configured_actor_route``), never Main. A continuation saved on
+    another route, or a subscription route whose receipts carried cash, is admitted here and refused by its
+    first reservation, which is the authority. An unresolvable route keeps the money stop."""
     from types import SimpleNamespace
     from ouroboros import route_choice
     from ouroboros.provider_models import provider_for_model
@@ -655,6 +656,14 @@ def needs_paid_admission(task: Dict[str, Any]) -> bool:
 
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     try:
+        actor = task.get("configured_subagent")
+        if str(task.get("delegation_role") or "").lower() == "subagent" and isinstance(actor, dict):
+            from ouroboros.subagent_runtime import configured_actor_route, validate_subagent_snapshot
+            from ouroboros.supervisor_route import validate_cognitive_route
+
+            model, local = configured_actor_route(validate_subagent_snapshot(actor),
+                                                  validate_cognitive_route(task.get("parent_cognitive_route")))
+            metadata = {**metadata, "model": model, "use_local_model": local}
         ctx = SimpleNamespace(task_metadata=metadata, primary_route=None)
         route_choice.bind_task_route(ctx, metadata, presence=bool(task.get("_presence_turn")))
         model, use_local, _choice = route_choice.open_route(ctx, None)

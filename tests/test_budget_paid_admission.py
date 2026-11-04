@@ -168,6 +168,67 @@ def test_at_the_limit_the_queue_pauses_only_work_that_needs_paid_admission(
         assert sent == [] and workers.PENDING[0]["_budget_pause"]["status"] == "paused_before_dispatch"
 
 
+def _scheduled_child(kind, target, parent_route, tid="child", root="root"):
+    """A configured child exactly as the scheduler queues it (``build_scheduled_task_payload``): its frozen row and
+    the parent's frozen cognition, no resolved model (dispatch resolves it later)."""
+    import json
+    from ouroboros.subagent_runtime import select_subagent_snapshot
+    from ouroboros.supervisor_route import validate_cognitive_route
+    from supervisor.task_dispatch import build_scheduled_task_payload
+
+    row = {"subagent_id": "builder", "name": "Builder", "recommended_use": "Exact actor.", "effort": "high",
+           "route": {"kind": kind, "target_id": target, **({"credential_profile_id": "p"} if kind == "agent_session"
+                                                           else {})}}
+    snapshot = select_subagent_snapshot({"OUROBOROS_SUBAGENTS": json.dumps({"enabled": True, "items": [row]})},
+                                        subagent_id="builder")[0]
+    model, chosen_by = parent_route
+    cognition = validate_cognitive_route({
+        "schema": 2, "model": model, "effort": "high", "use_local_model": False, "source_role": "main",
+        "credential_profile_id": "", "processing_preference": "", "chosen_by": chosen_by,
+        "follows_role": "main" if chosen_by == "inherited" else ""})
+    return build_scheduled_task_payload({"tid": tid, "parent_id": root, "root_task_id": root, "depth": 1,
+                                         "delegation_role": "subagent", "configured_subagent": snapshot,
+                                         "parent_cognitive_route": cognition})
+
+
+@pytest.mark.parametrize("main, kind, target, parent_route, paid", [
+    ("openai/gpt-5.2", "api_model", SUBSCRIPTION, ("openai/gpt-5.2", "inherited"), False),
+    ("openai/gpt-5.2", "api_model", "small-model (local)", ("openai/gpt-5.2", "inherited"), False),
+    (SUBSCRIPTION, "api_model", "openai/gpt-5.2", (SUBSCRIPTION, "inherited"), True),
+    # A nanny supervises its run on the parent's cognition: a parent that chose its own route hands that route down.
+    ("openai/gpt-5.2", "agent_session", "codex=gpt-6-astra", (SUBSCRIPTION, "parent_switch"), False),
+    (SUBSCRIPTION, "agent_session", "codex=gpt-6-astra", ("openai/gpt-5.2", "parent_switch"), True),
+    # ... a parent following Main hands Main down, live.
+    ("openai/gpt-5.2", "agent_session", "codex=gpt-6-astra", ("openai/gpt-5.2", "inherited"), True),
+])
+def test_a_queued_childs_paid_admission_is_its_own_routes_not_mains(monkeypatch, main, kind, target, parent_route,
+                                                                    paid):
+    """The pre-worker gate reads the route the child's dispatch will resolve from its frozen row, so a free child of
+    a paid Main runs at the reached limit and a paid child of a free Main is held before dispatch."""
+    from ouroboros.provider_models import provider_for_model
+    from ouroboros.subagent_runtime import resolve_configured_actor_dispatch
+    from supervisor.worker_assignment import needs_paid_admission
+
+    monkeypatch.setenv("OUROBOROS_MODEL", main)
+    monkeypatch.setenv("USE_LOCAL_MAIN", "")
+    child = _scheduled_child(kind, target, parent_route)
+    assert "model" not in child["metadata"] and "model" not in child  # the queue holds intent only
+    assert needs_paid_admission(child) is paid
+    if kind == "api_model":  # the same route the worker's own dispatch resolves
+        lane = resolve_configured_actor_dispatch(child, task_type="task").lane
+        assert ua.paid_admission("local" if lane.use_local_model else provider_for_model(lane.model), None) is paid
+
+
+def test_at_the_limit_the_queue_runs_a_free_child_of_a_paid_main(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai/gpt-5.2")
+    monkeypatch.setenv("USE_LOCAL_MAIN", "")
+    _queue, _state, workers, sent = _install_queue(tmp_path, monkeypatch)
+    free = _scheduled_child("api_model", SUBSCRIPTION, ("openai/gpt-5.2", "inherited"))
+    workers.PENDING.append({**free, "admitted_dispatch": "none", "priority": 1})
+    workers.assign_tasks()
+    assert [task["id"] for task in sent] == ["child"] and workers.PENDING == []
+
+
 def _prior_dispatch(tmp_path, task_id):
     held = ua.reserve_attempt(ua.AttemptRequest(model="openai/gpt-5.2", provider="openai", reservation_usd=0.1,
                                                 drive_root=tmp_path, task_id=task_id, root_task_id=task_id,
@@ -212,3 +273,102 @@ def test_a_dispatched_row_with_nothing_saved_keeps_the_honest_terminal(tmp_path,
     stored = load_task_result(tmp_path, "retry")
     assert sent == [] and workers.PENDING == []
     assert stored["status"] == "failed" and "after prior dispatch" in stored["result"]
+
+
+# ---- doors that start several actors at the reached limit (owner 2A): the assisted update, an answered root's Resume
+
+_SESSION_ROW = {"kind": "agent_session", "target_id": "codex=gpt-6-astra"}
+
+
+@pytest.mark.parametrize("main, pool, admitted", [
+    (SUBSCRIPTION, ({"kind": "api_model", "target_id": SUBSCRIPTION}, _SESSION_ROW), True),  # every actor is free
+    (SUBSCRIPTION, ({"kind": "api_model", "target_id": "openai/gpt-test"}, _SESSION_ROW), False),  # a paid seat
+    ("openai/gpt-test", (_SESSION_ROW,), False),  # its resolver opens on a paid Main
+])
+def test_at_the_limit_an_assisted_update_starts_only_when_every_actor_is_free(data_root, monkeypatch, main, pool,
+                                                                              admitted):
+    """The update's resolver and every seat of its commit-review wave are the actors it starts: all free, it goes
+    on at the reached limit (the wave answered by the reservation's own ``review_wave_admission``); a paid one keeps
+    the refusal before anything is changed."""
+    import json
+    import ouroboros.pricing as pricing
+    import supervisor.git_ops as git_ops
+    import supervisor.state as state
+    from ouroboros.gateway import control
+
+    class Admitted(Exception):
+        pass
+
+    _reach_global_limit(data_root)  # $1 known against the $1 limit
+    monkeypatch.setattr(state, "DRIVE_ROOT", data_root)
+    monkeypatch.setattr(state, "TOTAL_BUDGET_LIMIT", 1.0)
+    monkeypatch.setattr(state, "load_state", lambda: {})
+    assert state.budget_remaining({}, strict=True) == 0.0
+    monkeypatch.setenv("OUROBOROS_MODEL", main)
+    monkeypatch.setenv("USE_LOCAL_MAIN", "")
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", json.dumps({"enabled": True, "items": [
+        {"subagent_id": f"critic-{index}", "recommended_use": "Reviews diffs.", "review_eligible": True,
+         "route": route} for index, route in enumerate(pool)]}))
+    for name in ("_cached_pricing", "_pricing_fetched_at", "_pricing_retry_after"):
+        monkeypatch.setattr(pricing, name, {})
+    monkeypatch.setattr(pricing, "_fetch_live_rows", lambda *_a, **_k: {"openai/gpt-test": (1.0, 0.1, None, 4.0)})
+    monkeypatch.setattr(git_ops, "DRIVE_ROOT", data_root)
+    (data_root / "logs").mkdir(exist_ok=True)
+    monkeypatch.setattr(control, "_respawn_workers_after_failed_update", lambda: None)
+    monkeypatch.setattr(git_ops, "_create_rescue_snapshot", lambda *_a, **_k: (_ for _ in ()).throw(Admitted()))
+    plan = {"base_sha": "a" * 40, "target_sha": "b" * 40, "local_snapshot": "a" * 40, "code_conflict_paths": ["x.py"]}
+    tx = {"phase": "stashing_local_work", "stash_sha": "", "local_work_carrier": "none"}
+    if admitted:
+        with pytest.raises(Admitted):  # past the money door: the update goes on to its rescue snapshot
+            control._start_assisted_merge_fenced(plan, tx)
+    else:
+        response = control._start_assisted_merge_fenced(plan, tx)
+        assert response.status_code == 409 and "needs model budget" in json.loads(response.body)["error"]
+
+
+@pytest.mark.parametrize("member_routes, refused", [
+    ((), False),  # review-only late work: the answered root runs nothing again, its unsent review is never sent
+    ((SUBSCRIPTION, "small-model (local)"), False),  # every member it lets start is free
+    ((SUBSCRIPTION, "openai/gpt-5.2"), True),  # a member that pays: the mixed Resume stays refused
+])
+def test_at_the_limit_an_answered_roots_resume_refuses_only_work_that_needs_paid_admission(
+        tmp_path, monkeypatch, member_routes, refused):
+    """The Resume of an answered root's Pause (its late phase or its tree) asks the global limit about what it
+    starts: the tree's queued and warm members, each by its own route; it stays an explicit Resume per root."""
+    from supervisor import budget_resume, continuation_admission
+
+    queue, _state, workers, _sent = _install_queue(tmp_path, monkeypatch)  # remaining $0
+    monkeypatch.setenv("OUROBOROS_MODEL", SUBSCRIPTION)
+    monkeypatch.setenv("USE_LOCAL_MAIN", "")
+    monkeypatch.setattr(budget_resume, "_restart_or_update_refusal", lambda *_a: None)
+    monkeypatch.setattr("ouroboros.cancel_intents.has_active_intent", lambda *_a, **_k: False)
+    monkeypatch.setattr(continuation_admission, "action_writers", lambda *_a, **_k: [])
+    for index, target in enumerate(member_routes):
+        workers.PENDING.append({**_scheduled_child("api_model", target, (SUBSCRIPTION, "inherited"),
+                                                   tid=f"member-{index}", root="answered"), "priority": 1})
+    refusal = budget_resume._late_phase_refusal(queue, tmp_path, "answered", {"status": "completed"},
+                                                {"fence_id": "fence"})
+    assert (refusal or {}).get("error") == ("budget_still_exhausted" if refused else None)
+
+
+def test_at_the_limit_the_owners_resume_of_an_answered_roots_unsent_late_review_proceeds(tmp_path, monkeypatch):
+    """Through the real door (``resume_budget_paused_task`` -> ``resume_late_phase``): the Pause of an answered root
+    whose only late work is a review never sent (a preparation pointer: it is never sent again) starts nothing that
+    pays, so at the reached global limit its explicit Resume releases the Pause."""
+    from ouroboros import owner_pause
+    from ouroboros.review_operation import _update_operations
+    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
+    from ouroboros.utils import utc_now_iso
+    from supervisor.owner_pause_control import refresh_owner_pause_tree
+
+    queue, _state, _workers, sent = _install_queue(tmp_path, monkeypatch)  # remaining $0
+    write_task_result(tmp_path, "answered", STATUS_COMPLETED, result="The answer.")
+    _update_operations(tmp_path, "answered", lambda rows: {**rows, "late-review": {
+        "surface": "commit_review", "retry_key": "k", "task_attempt": 1, "controller": {}, "operations": {"s": "op"},
+        "recorded_at": utc_now_iso(), "state": "preparing"}}, create=True)
+    fence, created = owner_pause.install_fence(tmp_path, "answered", request_id="pause-answered", late_work=True)
+    assert created and owner_pause.fence_closed(fence)
+    assert refresh_owner_pause_tree("answered") == owner_pause.FENCE_PAUSED  # the tick's census settles the Pause
+    outcome = queue.resume_budget_paused_task("answered")
+    assert outcome.get("ok") is True and outcome.get("late_phase") == "resumed", outcome
+    assert not owner_pause.fence_closed(owner_pause.read_fence(tmp_path, "answered")) and sent == []

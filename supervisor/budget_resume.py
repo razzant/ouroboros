@@ -239,7 +239,7 @@ def resume_warm_owner_pause_root(task_id: str, *, selected_by: str = "",
     if blockers:
         return {"ok": False, "error": "owner_pause_effects_unsettled", "blockers": blockers,
                 "action": "wait_for_effect_settlement"}
-    refusal = _global_money_refusal(q, budget_remaining, task) or _root_money_refusal(result_root, task, root_task_id)
+    refusal = _global_money_refusal(q, budget_remaining, [task]) or _root_money_refusal(result_root, task, root_task_id)
     if refusal:
         return refusal
     try:
@@ -330,7 +330,8 @@ def resume_warm_owner_pause_root(task_id: str, *, selected_by: str = "",
             "grant_id": grant["grant_id"], "held_siblings": held_siblings, "snapshot_persisted": bool(persisted)}
 
 
-def _global_money_refusal(q: Any, budget_remaining: Any, task: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+def _global_money_refusal(q: Any, budget_remaining: Any,
+                          starts: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
     try:
         # Authoritative, never the admit-only stale snapshot: a grant is money.
         remaining = budget_remaining(q.load_state(), strict=True, allow_stale=False)
@@ -338,9 +339,10 @@ def _global_money_refusal(q: Any, budget_remaining: Any, task: Optional[Dict[str
         return {"ok": False, "error": "monetary_authority_unavailable"}
     from supervisor.worker_assignment import needs_paid_admission
 
-    # A reached global limit refuses paid admission only: a $0 route's Resume proceeds and its every send
-    # still meets the reservation. Without ``task`` (a money pause names a refused paid send) it refuses.
-    if remaining <= 0 and (task is None or needs_paid_admission(task)):
+    # A reached global limit refuses paid admission only: a Resume proceeds when nothing it ``starts`` needs it,
+    # and their every send still meets the reservation. Without ``starts`` (a money pause names a refused paid
+    # send) it refuses.
+    if remaining <= 0 and (starts is None or any(needs_paid_admission(task) for task in starts)):
         return {"ok": False, "error": "budget_still_exhausted", "action": "increase_budget_then_resume"}
     return None
 
@@ -549,7 +551,7 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
     ceiling = resolve_task_execution_timeout_sec(task)  # None = unlimited; 0 = exhausted
     if ceiling is not None and started and executed_sec >= float(ceiling):
         return {"ok": False, "error": "lifetime_exhausted", "executed_sec": round(executed_sec, 1)}
-    if refusal := _global_money_refusal(q, budget_remaining, None if str(row.get("reason") or "budget") == "budget" else task):
+    if refusal := _global_money_refusal(q, budget_remaining, None if str(row.get("reason") or "budget") == "budget" else [task]):
         return refusal
     # The grant binds to the queue row's own lineage (``root_task_id`` above), the
     # one ``budget_resume_dispatch_allowed`` revalidates: a saved pause's root field
@@ -972,10 +974,14 @@ def _late_phase_refusal(q: Any, root: pathlib.Path, task_id: str, row: Dict[str,
     except Exception:
         return {"ok": False, "error": "cancellation_authority_unavailable"}
     with q._queue_lock:
+        rows = [t for t in [*q.PENDING, *(m.get("task") or {} for m in q.RUNNING.values())] if isinstance(t, dict)]
         # A Continue of this answered root that may already write would overlap the late work.
-        successors = [str(t.get("id") or "") for t in [*q.PENDING, *(m.get("task") or {} for m in q.RUNNING.values())]
-                      if isinstance(t, dict) and ((t.get("metadata") or {}).get("continuation") or {}).get(
+        successors = [str(t.get("id") or "") for t in rows
+                      if ((t.get("metadata") or {}).get("continuation") or {}).get(
                           "predecessor_task_id") == task_id and (t.get("id") in q.RUNNING or not budget_hold_fact(t))]
+        # All this Resume can start: the tree's queued and warm members. The answered root runs nothing again and
+        # its unsent late review is never sent again (``review_pause``), so review-only work starts no actor.
+        members = [dict(t) for t in rows if str(t.get("root_task_id") or "") == task_id and t.get("id") != task_id]
     # The whole tree's sent work must have settled, exactly as for a paused loop's Resume.
     # Reviewers already launched finish separately; Resume does not wait for them.
     blockers = [{"kind": "continuation_successor", "task_id": tid} for tid in successors] + _owner_pause_blockers(
@@ -987,7 +993,7 @@ def _late_phase_refusal(q: Any, root: pathlib.Path, task_id: str, row: Dict[str,
                                  or (row.get("metadata") or {}).get("deadline_at"))
     if deadline is not None and deadline <= utc_now():
         return {"ok": False, "error": "deadline_passed"}
-    return _global_money_refusal(q, budget_remaining) or _root_money_refusal(
+    return _global_money_refusal(q, budget_remaining, members) or _root_money_refusal(
         root, {**row, "id": task_id}, str(row.get("root_task_id") or task_id))
 
 
