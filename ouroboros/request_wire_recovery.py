@@ -18,8 +18,9 @@ settlement failed; ``request_wire_history`` is a bounded, ordered disclosure, wh
 ``usage_store.py`` / ``state/usage.sqlite`` owns money.
 
 The host's optional temperature hint (``LLMClient`` ``default_temperature``) keeps its origin
-on the route, never on the wire. Only after every prior repair declines may a refusal whose
-complete allowed temperatures (``request_wire_temperature``) exclude the sent hint withdraw it.
+on the route, never on the wire. After prior repairs decline, a complete allowed-temperature
+statement (``request_wire_temperature``) excluding the hint, or an unreadable statement beside
+recognized field-refusal evidence without recognized value evidence, may withdraw it.
 A withdrawal stays for the call's later rungs; its exact-success record replays only on hints,
 so an explicit value, equal or not, stays the caller's choice and a value refusal of it stays the
 provider's error. A send with no bound candidate withdraws the same way and teaches nothing.
@@ -838,9 +839,9 @@ def _value_evidence(message: str) -> bool:
 
 
 def _value_implicated(evidence: "_WireRejection", low: str) -> bool:
-    """The refusal concerns a value (a typed constraint, value wording or a value code), not the field."""
+    """Recognized value evidence: typed constraints, legacy wording markers and explicit value codes."""
     return bool(evidence.value_constraint or _value_evidence(low)
-                or evidence.code in {"invalid_value", "invalid_enum_value", "invalid_option"})
+                or evidence.code in {"invalid_value", "unsupported_value", "invalid_enum_value", "invalid_option"})
 
 
 def _field_drop(*fields: str) -> Dict[str, Any]:
@@ -1059,11 +1060,11 @@ def _allowed_temperatures(evidence: _WireRejection) -> Optional[Tuple[Tuple[floa
 
 
 def _refuses_hint(target: Mapping[str, Any], payload: Mapping[str, Any], evidence: _WireRejection) -> bool:
-    """A validation refusal allows temperatures excluding the host's hint this payload carries, or refuses the
-    field itself beside a value statement it cannot read. That second case is the legacy field refusal (the
-    field named beside capability wording, without value evidence): it holds back an explicit value's field
-    repair, never the optional hint's withdrawal. An unreadable statement worded as a value refusal withdraws
-    nothing, exactly as the legacy repair declines it."""
+    """Withdraw a carried hint excluded by a readable statement, or beside an unreadable statement classified
+    as a field refusal. This classification uses the bound repair's legacy wording markers plus typed value
+    constraints/codes, not arbitrary value language: ``invalid parameter: temperature can only be [0, 1; 0.2]``
+    still counts as a field refusal without such evidence. Explicit values have no hint to withdraw.
+    Carrierless legacy repair had weaker value guards; this hint path retains the bound repair's guards."""
     if (evidence.status not in {400, 422} or any(token in evidence.code for token in _NON_COMPATIBILITY_CODE_TOKENS)
             or not _carries_temperature_hint(target, payload)):
         return False

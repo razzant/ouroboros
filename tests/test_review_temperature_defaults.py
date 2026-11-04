@@ -581,6 +581,7 @@ def test_a_non_compatibility_code_keeps_the_classifier_admission(code):
     "unsupported temperature: cannot exceed 1",
     "unsupported temperature: only 1 is not allowed",
     "temperature is unsupported by this provider. only 1 is allowed",
+    "invalid parameter: temperature can only be [0, 1; 0.2]",  # legacy markers classify this as a field refusal
 ])
 def test_a_statement_of_values_it_cannot_use_keeps_an_explicit_value_and_withdraws_the_hint(message, hint):
     retry, reasons = _plan(_Refused(message), hint=hint)
@@ -594,10 +595,12 @@ def test_a_statement_of_values_it_cannot_use_keeps_an_explicit_value_and_withdra
 @pytest.mark.parametrize("error", [
     _Refused("unsupported value: temperature must be one of [0, 1"),
     _Refused("invalid parameter: temperature must be one of [0, 1; 0.2]"),
-    _Refused("invalid parameter: temperature", allowed_values=[0, 1, "2e-1"]),
-], ids=["unclosed-list", "semicolon-list", "typed-unreadable-member"])
+    _Refused("unsupported temperature: only 1 is allowed", allowed_values=[0, 1, "2e-1"]),
+    _Refused("invalid parameter: temperature must be [0, 1; 0.2]", code="invalid_value"),
+    _Refused("temperature is not supported; must be at most 1", param="temperature", code="unsupported_value"),
+], ids=["unclosed-list", "semicolon-list", "typed-unreadable-member", "value-code", "unsupported-value-code"])
 def test_an_unreadable_value_refusal_beside_capability_wording_repairs_nothing(error, hint):
-    # Value wording keeps it a refusal of a value: neither the hint nor the field goes, as the legacy repair declines.
+    # Recognized value evidence prevents hint withdrawal; the typed/code rows each exercise a separate guard.
     assert _plan(error, hint=hint)[0] is None
 
 
@@ -609,10 +612,14 @@ def test_an_unreadable_value_refusal_beside_capability_wording_repairs_nothing(e
     ("unsupported temperature: only 1 or less is allowed", "temperature"),
     ("invalid max_tokens: only 1 is allowed for temperature-less models", "default_temperature"),
     ("unsupported value: temperature must be one of [0, 1", "default_temperature"),
-], ids=["a-count", "read-parameter", "quota-code", "explicit-bound", "a-compound", "unreadable-value-list"])
+    (("unsupported temperature: only 1 is allowed", {"allowed_values": [0, 1, "2e-1"]}), "default_temperature"),
+    (("invalid parameter: temperature must be [0, 1; 0.2]", {"code": "invalid_value"}), "default_temperature"),
+    (("temperature is not supported; must be at most 1", {"param": "temperature", "code": "unsupported_value"}), "default_temperature"),
+], ids=["a-count", "read-parameter", "quota-code", "explicit-bound", "a-compound", "unreadable-value-list",
+        "unreadable-typed-list", "unreadable-value-code", "unsupported-value-code"])
 def test_a_refusal_that_authorizes_nothing_reaches_the_caller_unrepaired(api, refusal, origin, asynchronous):
     api.rule = lambda _payload: refusal
-    with pytest.raises(Exception, match="attempts|custom_field|only 1|must be one of"):
+    with pytest.raises(Exception, match="attempts|custom_field|only 1|must be"):
         _caller(PROVIDER_DRIVERS["openai-compatible"].model, asynchronous=asynchronous)(**{origin: 0.2})
     assert api.temperatures() == [0.2] and _records(api.root) == []
 
