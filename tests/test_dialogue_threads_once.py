@@ -434,3 +434,34 @@ def test_rows_read_as_written_keep_a_readers_projection_and_their_identity(tmp_p
     assert isinstance(whole.row, SourceProjection) and whole.row.source_body == row
     assert whole.row == {**row, "context_source_ref": ref}
     assert chat_chain.source_row_id(whole.row) == chat_chain.source_row_id(stored.row) == chat_chain.source_row_id(row)
+
+
+# ---- an unexpanded thread never reaches the model ----------------------------------------------
+
+def _event(conversation):
+    from ouroboros.presence_events import PresenceTurnEvent
+
+    return PresenceTurnEvent(source_event_id="slack:T1:C1:1", provider="slack", account_id="T1", conversation_id="C1",
+                             thread_id="1730700000.000000", conversation_key=KEY, actor={"platform_actor_id": "U1"},
+                             conversation=conversation, message={}, text="words")
+
+
+def test_an_event_still_naming_a_stored_reference_is_refused_typed_and_a_whole_one_is_not():
+    from ouroboros.presence_events import PresenceTurnError
+
+    whole = slack(3)
+    assert _event(whole).conversation == whole
+    assert _event({"meta": {"$shared": "f" * 64}}).conversation  # a value of that shape, not where a thread keeps one
+    with pytest.raises(PresenceTurnError) as refused:
+        _event({"title": "#general", "history": {"rows": [{"$shared": "a" * 64}, {"id": 2}]}})
+    assert (refused.value.code, refused.value.field) == ("presence_event_unexpanded", "event.conversation")
+
+
+def test_a_rebuilt_arrival_whose_reader_skipped_the_expansion_is_refused_before_the_model(tmp_path, monkeypatch):
+    from ouroboros import place_intake
+    from ouroboros.presence_events import PresenceTurnError
+
+    ds.append(tmp_path, "chat", presence_row(slack(3)))
+    monkeypatch.setattr(ds, "whole_body", lambda conn, body: ds.decode(body))  # a reader that forgot to expand
+    with pytest.raises(PresenceTurnError, match="presence_event_unexpanded"):
+        place_intake._captured_arrival(tmp_path, {"focus": {"place_id": "place-1"}}, "turn-1", "e" * 64, None)
