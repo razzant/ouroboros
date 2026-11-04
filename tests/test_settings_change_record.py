@@ -10,6 +10,8 @@ unsaves the settings.
 from __future__ import annotations
 
 import json
+import os
+import re
 import threading
 
 import pytest
@@ -62,19 +64,23 @@ def save(test_client, entry, value, headers=None):
     return response
 
 
-@pytest.mark.parametrize("entry, value, key, old, new, row", [
+@pytest.mark.parametrize("entry, value, key, old, new, shown", [
     ("safety_model", "openrouter/new-main", "OUROBOROS_MODEL", "openrouter/old-main", "openrouter/new-main",
-     "Main model: openrouter/old-main → openrouter/new-main. Changed via api; declared actor: not declared."),
-    ("generic", 40, ALLOWANCE, 20.0, 40.0,
-     "Consciousness allowance: 20 → 40 USD per rolling 24 hours. Changed via api; declared actor: not declared."),
+     ("openrouter/old-main", "openrouter/new-main")),
+    ("generic", 40, ALLOWANCE, 20.0, 40.0, ("20", "40")),
 ])
-def test_both_writers_record_old_and_new_and_an_undeclared_save_tells_main_once(client, entry, value, key, old, new, row):
+def test_both_writers_record_old_and_new_and_an_undeclared_save_tells_main_once(client, entry, value, key, old, new, shown):
+    from ouroboros.gateway.owner_settings import settings_change_text
+
     test_client, install, rows = client
     save(test_client, entry, value)
     [record] = records(install)
     assert record["changes"] == {key: {"old": old, "new": new}}
     assert (record["surface"], record["actor"]) == ("api", "not declared") and "actor_task_id" not in record
-    assert rows == [((77, row), {"role": "system", "system_type": "settings_changed"})]
+    [((chat, text), kwargs)] = rows
+    assert (chat, kwargs) == (77, {"role": "system", "system_type": "settings_changed"})
+    assert text == settings_change_text(record["changes"], record) and "\n" not in text  # one line of the record
+    assert all(value in text for value in shown), text  # what changed, before and after
 
 
 @pytest.mark.parametrize("entry, value", [("safety_model", "openrouter/new-main"), ("generic", 40)])
@@ -85,12 +91,38 @@ def test_the_apps_own_save_is_recorded_without_a_main_row(client, entry, value):
     assert (record["surface"], record["actor"]) == ("app", "owner") and not rows
 
 
-def test_a_declared_script_names_its_surface_actor_and_task(client):
-    test_client, _install, rows = client
-    save(test_client, "generic", 40, headers={"X-Ouroboros-Surface": "Script", "X-Ouroboros-Actor": "ouroboros",
-                                              "X-Ouroboros-Task-Id": "task-19"})
-    [((_chat, text), _kwargs)] = rows
-    assert text.endswith("Changed via script; declared actor: ouroboros (task task-19).")
+_SCRIPT = {"X-Ouroboros-Surface": "Script", "X-Ouroboros-Actor": "ouroboros", "X-Ouroboros-Task-Id": "task-19"}
+
+
+def _words(text):
+    return set(re.findall(r"[A-Za-z][\w-]*", text))
+
+
+def test_the_row_says_who_changed_it_and_the_record_keeps_where_it_came_from(client):
+    """Main's row names who changed the setting in words (Ouroboros, you, or neither when nobody declared);
+    the surface, the declaration and the task are the record's facts and never reach the row (DESIGN principle 7)."""
+    from ouroboros.gateway.owner_settings import settings_change_text
+
+    test_client, install, rows = client
+    for value, headers in ((40, _SCRIPT), (50, {"X-Ouroboros-Actor": "owner"}), (60, {})):
+        save(test_client, "generic", value, headers=headers)
+    recorded = records(install)
+    assert [(record["surface"], record["actor"], record.get("actor_task_id")) for record in recorded] == [
+        ("script", "ouroboros", "task-19"), ("api", "owner", None), ("api", "not declared", None)]
+    texts = [text for ((_chat, text), _kwargs) in rows]
+    assert texts == [settings_change_text(record["changes"], record) for record in recorded]
+    by_ouroboros, by_owner, undeclared = map(_words, texts)
+    assert "Ouroboros" in by_ouroboros and "you" not in by_ouroboros
+    assert "you" in by_owner and "Ouroboros" not in by_owner
+    assert not {"Ouroboros", "you"} & undeclared
+    for text in texts:
+        assert not {"script", "Script", "api", "declared", "ouroboros", "owner"} & _words(text), text
+        assert "task-19" not in text and "\n" not in text
+    # One change reads alike whoever made it: the words for who changed it are all that differ.
+    said = [settings_change_text({ALLOWANCE: {"old": 20.0, "new": 40.0}}, {"surface": "api", "actor": actor})
+            for actor in ("ouroboros", "owner", "not declared")]
+    shared = os.path.commonprefix(said)
+    assert len(set(said)) == 3 and "20" in shared and "40" in shared
 
 
 @pytest.mark.parametrize("entry, value", [("safety_model", "openrouter/old-main"), ("generic", 20)])
@@ -113,7 +145,7 @@ def test_secrets_and_structures_keep_only_their_names(client):
     assert record["changes"]["MCP_SERVERS"] == {"withheld": "structure"}
     assert record["changes"][ALLOWANCE] == {"old": 20.0, "new": 30.0}
     [((_chat, text), _kwargs)] = rows
-    assert "OPENROUTER_API_KEY changed." in text and "MCP_SERVERS changed." in text
+    assert all(key in text for key in ("OPENROUTER_API_KEY", "SERVICE_TOKEN", "MCP_SERVERS", "30")), text
     written = (install.parent / "logs" / "events.jsonl").read_text(encoding="utf-8") + text
     assert all(value not in written for value in (secret, custom, "mcp-private-token"))
 
@@ -124,8 +156,8 @@ def test_a_text_of_several_lines_is_named_in_main_and_kept_in_the_record():
     rules = {"old": "Ask before paying.", "new": "Ask before paying.\nNever post publicly."}
     text = settings_change_text({"OUROBOROS_SAFETY_OWNER_RULES": rules, ALLOWANCE: {"new": 5.5}},
                                 {"surface": "api", "actor": "not declared"})
-    assert text == ("OUROBOROS_SAFETY_OWNER_RULES changed. Consciousness allowance: not set → 5.5 USD per rolling 24 hours. "
-                    "Changed via api; declared actor: not declared.")
+    assert "\n" not in text and "OUROBOROS_SAFETY_OWNER_RULES" in text and "5.5" in text
+    assert "Ask before paying" not in text and "Never post publicly" not in text
 
 
 def test_two_saves_in_a_row_record_the_exact_steps(client):

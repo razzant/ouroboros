@@ -12,7 +12,7 @@
       "name": "single saved file follows author stop rationale",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "task_completion": {"action": "stop", "rationale": "The requested change is saved."}, "mutation_attribution": {"uncommitted_remainder": {"state": "known", "count": 1, "paths_omitted": 1}}}}},
       "phase": "done", "headline": "Done",
-      "acceptance_clause": "Ouroboros stopped with unfinished work; the reviewers had not signed it off · The requested change is saved · 1 uncommitted file remains in the saved candidate.",
+      "acceptance_clause": "Ouroboros stopped with unfinished work · The requested change is saved · 1 uncommitted file remains in the saved candidate.",
       "exact_clause": true
     },
     {
@@ -304,7 +304,7 @@
       "record": {"status": "completed", "outcome_axes": {"execution": {"status": "ok"}, "review": {"status": "degraded", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "author_finish"}}}},
       "phase": "warn",
       "headline": "Done with warnings",
-      "acceptance_clause": "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off."
+      "acceptance_clause": "Ouroboros delivered this answer without the reviewers' sign-off."
     },
     {
       "name": "acceptance reason review_degraded says its own sentence",
@@ -542,7 +542,7 @@
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "pass", "source": "author_acceptance", "reason": "author_finish"}, "review": {"status": "awaiting", "eligibility": "review_in_flight", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "author_finish", "enforcement": "advisory", "author_action": "finish", "author_disposition": {"disposition": "accepted", "rationale": "Main submitted this complete response for delivery.", "subject_hash": "s1", "reviewer_signal": "", "enforcement": "advisory", "recorded_at": "2026-09-20T00:00:00+00:00", "source": "author_final_response"}}}}},
       "phase": "done",
       "headline": "Done",
-      "acceptance_clause": "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off."
+      "acceptance_clause": "Ouroboros delivered this answer without the reviewers' sign-off."
     },
     {
       "name": "an awaited acceptance panel with no author decision is still not a warning",
@@ -622,7 +622,7 @@
       },
       "phase": "done",
       "headline": "Done",
-      "acceptance_clause": "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off."
+      "acceptance_clause": "Ouroboros delivered this answer without the reviewers' sign-off."
     },
     {
       "name": "current informed Advisory author finish preserves raw critic degraded",
@@ -658,7 +658,7 @@
       },
       "phase": "done",
       "headline": "Done",
-      "acceptance_clause": "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off."
+      "acceptance_clause": "Ouroboros delivered this answer without the reviewers' sign-off."
     },
     {
       "name": "Blocking saved plan cap remains unfinished through host normalization, and the card says why it was held (a held task never reads as work that went on)",
@@ -706,14 +706,14 @@
       },
       "phase": "error",
       "headline": "Failed",
-      "acceptance_clause": "Ouroboros stopped with unfinished work; the reviewers had not signed it off."
+      "acceptance_clause": "Ouroboros stopped with unfinished work."
     },
     {
       "name": "an explicit task-acceptance author stop is Failed and the row carries the agent's own reason beside the typed sentence (TZ-2 C4)",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "fail", "source": "task_acceptance_review", "reason": "author_stop", "outcome_tier": "blocked_with_evidence"}, "review": {"status": "skipped", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "author_stop", "author_action": "stop", "enforcement": "advisory", "rationale": "reviewer prose that never reaches the row", "author_disposition": {"disposition": "", "action": "stop", "rationale": "Not ready: the export endpoint still fails on empty input.", "subject_hash": "s1", "reviewer_signal": "", "enforcement": "advisory", "recorded_at": "2026-09-25T00:00:00+00:00", "source": "author"}}}}},
       "phase": "error",
       "headline": "Failed",
-      "acceptance_clause": "Ouroboros stopped with unfinished work; the reviewers had not signed it off · Not ready: the export endpoint still fails on empty input."
+      "acceptance_clause": "Ouroboros stopped with unfinished work · Not ready: the export endpoint still fails on empty input."
     },
     {
       "name": "an author stop recorded after the review rounds ran out keeps its true terminal cause and still carries the agent's own reason",
@@ -776,14 +776,14 @@
       "record": {"status": "completed", "reason_code": "plan_review_advisory", "terminal_plan_review_open": true, "outcome_axes": {"execution": {"status": "degraded", "reason_code": "plan_review_advisory", "plan_review": "objections_open", "task_completion": {"action": "stop", "rationale": "The objection stands; stopping with the draft."}}, "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}, "review": {"status": "skipped"}}},
       "phase": "error",
       "headline": "Failed",
-      "acceptance_clause": "Ouroboros stopped with unfinished work; the reviewers had not signed it off · The objection stands; stopping with the draft · The plan review was still open when this answer was delivered."
+      "acceptance_clause": "Ouroboros stopped with unfinished work · The objection stands; stopping with the draft · The plan review was still open when this answer was delivered."
     },
     {
       "name": "an author's stop over an unreadable plan record names the stop and keeps the plan review's state unknown",
       "record": {"status": "completed", "reason_code": "plan_review_advisory", "terminal_plan_review_open": true, "outcome_axes": {"execution": {"status": "degraded", "reason_code": "plan_review_advisory", "plan_review": "unreadable", "task_completion": {"action": "stop", "rationale": "The plan record cannot be read; stopping with the draft."}}, "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}, "review": {"status": "skipped"}}},
       "phase": "error",
       "headline": "Failed",
-      "acceptance_clause": "Ouroboros stopped with unfinished work; the reviewers had not signed it off · The plan record cannot be read; stopping with the draft · The plan record could not be read, so the state of the plan review is unknown."
+      "acceptance_clause": "Ouroboros stopped with unfinished work · The plan record cannot be read; stopping with the draft · The plan record could not be read, so the state of the plan review is unknown."
     },
     {
       "name": "a rail over an unreadable plan record keeps its own cause and the plan review's state unknown",
@@ -860,7 +860,7 @@
       "record": {"status": "completed", "outcome_axes": {"execution": {"status": "ok"}, "review": {"status": "degraded", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "author_finish", "acceptance_incident": {"incident_id": "acceptance-preparation:1f2e3d4c", "status": "resolved", "stage": "preparation", "attempts": 1}}}}},
       "phase": "warn",
       "headline": "Done with warnings",
-      "acceptance_clause": "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off."
+      "acceptance_clause": "Ouroboros delivered this answer without the reviewers' sign-off."
     },
     {
       "name": "the round-limit rail says its own sentence on a best-effort finish",
@@ -1009,7 +1009,7 @@
       "headline": "Failed",
       "acceptance_clause": "The deep self-review stopped on an error."
     },
-    {"name": "generic unfinished stop states its own rationale without an acceptance decision", "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "task_completion": {"action": "stop", "rationale": "The **export** still fails on empty input."}}, "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}, "review": {"status": "skipped"}}}, "phase": "error", "headline": "Failed", "acceptance_clause": "Ouroboros stopped with unfinished work; the reviewers had not signed it off · The export still fails on empty input."},
+    {"name": "generic unfinished stop states its own rationale without an acceptance decision", "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "task_completion": {"action": "stop", "rationale": "The **export** still fails on empty input."}}, "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}, "review": {"status": "skipped"}}}, "phase": "error", "headline": "Failed", "acceptance_clause": "Ouroboros stopped with unfinished work · The export still fails on empty input."},
     {"name": "a generic stop preserves a stronger failure", "record": {"status": "failed", "reason_code": "provider_failure", "outcome_axes": {"execution": {"status": "infra_failed", "task_completion": {"action": "stop", "rationale": "The **export** still fails on empty input."}}, "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}, "review": {"status": "skipped"}}}, "phase": "error", "headline": "Failed", "acceptance_clause": "The model provider failed to answer, so the task could not finish · The export still fails on empty input."},
     {"name": "a generic stop preserves a stronger cancellation", "record": {"status": "cancelled", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "cancelled", "task_completion": {"action": "stop", "rationale": "The **export** still fails on empty input."}}, "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}, "review": {"status": "skipped"}}}, "phase": "cancelled", "headline": "Stopped", "acceptance_clause": "The export still fails on empty input."},
     {

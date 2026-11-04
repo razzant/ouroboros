@@ -54,10 +54,11 @@ function lifecycleKey(row) {
 }
 
 // A paused task reads its mail only after its Resume, which nobody presses for the owner (owner 07.10): an answer it
-// waits for, or one saved in its mailbox, says so while its work is paused. A queued or held one keeps the plain words.
+// waits for, or one saved in its mailbox, says so while its work is paused, in one clause after its lead word (owner
+// 04.11, 1A: why it is paused is the work's own line). A queued or held one keeps the plain words.
 const PAUSED_STATUS = {
-    waiting: 'Waiting for your answer · its work is paused; it reads this after Resume',
-    answer_saved: 'Answer saved · its work is paused; it reads this after Resume',
+    waiting: 'Waiting for your answer · read after Resume',
+    answer_saved: 'Answer saved · read after Resume',
 };
 
 export function questionPresentation(row = {}, { paused = false } = {}) {

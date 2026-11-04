@@ -577,7 +577,7 @@ def test_the_brief_carries_the_index_the_governance_tiers_and_both_manifests(tmp
     assert "## BIBLE.md" in task and "Philosophy version" in task
     assert "standing disclosures" in task          # CHECKLISTS_ARCHIVE rides with checklist item 7
     head = task.index("## BIBLE.md")
-    for change_relative in ("## Intended transformation", "### Staged diff",
+    for change_relative in ("## Intended transformation", "## Staged diff",
                             "## Repository index", "TOUCHED PATHS", "REQUIRED SOURCES"):
         assert head < task.index(change_relative), change_relative
     tiers = {row["path"]: row for row in manifest["governance_manifest"]}

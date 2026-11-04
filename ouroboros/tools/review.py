@@ -530,7 +530,8 @@ def _triad_governance_usable_window(api_models: list, api_slots: list) -> int:
 def _triad_governance_context(ctx: ToolContext, touched_paths: list,
                               checklist_section: str, api_models: list, api_slots: list,
                               *, delivery: str = "packet", governance_root=None,
-                              layer: str = "body", subject_root: Optional[pathlib.Path] = None):
+                              layer: str = "body", subject_root: Optional[pathlib.Path] = None,
+                              review_words=None):
     """The triad's shared governance tiers for either delivery class.
 
     ``governance_root`` is the installed body (a frozen subject names it; the
@@ -562,6 +563,7 @@ def _triad_governance_context(ctx: ToolContext, touched_paths: list,
         already_inline=already_inline,
         layer=layer,
         subject_root=subject_root,
+        review_words=review_words,
     )
 
 
@@ -765,9 +767,14 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
     # disclosures ride the checklist section, so both are declared as already
     # delivered rather than sent twice. An all-retrieving panel assembles no
     # packet, so it asks for none.
+    from ouroboros.review_words import section_budget, words_for_diff
+
+    words = (frozen.review_words if frozen is not None and frozen.diff_text == diff_text
+             else words_for_diff(target_repo, diff_text))
+    words_section = words.render(section_budget(_triad_governance_usable_window(api_models, api_slots))) if api_models else ""
     governance = _triad_governance_context(
         ctx, touched_paths, checklist_section, api_models, api_slots,
-        governance_root=governance_root, layer=layer, subject_root=subject_root)
+        governance_root=governance_root, layer=layer, subject_root=subject_root, review_words=words)
 
     # Build touched-file pack for full current context (managed: the reviewed
     # resolution set; binary rows carry the M0 baseline identity). A plain
@@ -820,12 +827,14 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
             diff_text=staged_diff, changed_files=review_changed, rebuttal_section=rebuttal_section,
             review_history_section=review_history_section,
             task_evidence_section=commit_review_evidence_section(task_evidence, delivery="packet", compact=task_evidence_compact),
+            words_section=words_section,
         )
 
     def _compact_task_evidence():
-        nonlocal task_evidence_compact
+        nonlocal task_evidence_compact, words_section
         task_evidence_compact = True
-    if task_evidence:
+        words_section = words.omission()
+    if task_evidence or words_section:
         _assemble_prompt.compact_optional_evidence = _compact_task_evidence
 
     # P3 stays one-pass. The api pack, its fit ladder and the fixed_overflow
@@ -888,7 +897,8 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
         ctx, row_plan, models, row_routes, target_repo=target_repo, governance_root=governance_root,
         subject=subject, frozen=frozen, diff_text=diff_text, layer=layer, checklist_section=checklist_section,
         commit_message=commit_message, goal=goal, scope=scope, review_rebuttal=review_rebuttal,
-        owner_words=owner_words, task_evidence=task_evidence, preflight_execution=execution, diff_pulse=pulse)
+        owner_words=owner_words, task_evidence=task_evidence, preflight_execution=execution, diff_pulse=pulse,
+        review_words=words)
     if brief_failure is not None:
         failed_slot, exc = brief_failure
         ctx._last_review_block_reason = "infra_failure"
