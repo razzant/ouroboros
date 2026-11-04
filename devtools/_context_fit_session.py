@@ -1,4 +1,5 @@
 """Optional offline call envelope: run the real host seam, never open a session."""
+import asyncio
 from dataclasses import asdict, replace
 import importlib
 import importlib.util
@@ -135,7 +136,12 @@ def report_session(core, tools, *, root, scratch, window, reserve, mode, provide
         try:
             result = measure_session(host, factory, session_options(host), observation_fp='')
         finally:
-            hub.close('diagnostic_done')
+            try:
+                # Building the host registered it as a live call of its feature, the registry a settings write walks
+                # (end_feature_calls). No call runs here, so the envelope that built the host ends it, as a call's run does.
+                asyncio.run(host.finish())
+            finally:
+                hub.close('diagnostic_done')
     result['tools']['by_surface'] = surface_counts(host.schemas, own=host.call_tools)
     result['diagnostic_notes'] = [
         'Bundled default model and call options; saved feature settings/languages, opening turn and live mailbox are not supplied.',

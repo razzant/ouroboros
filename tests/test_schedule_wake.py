@@ -52,8 +52,11 @@ def _due(q, at=None):
 
 def test_a_quiet_table_wakes_only_at_its_next_due_instant_or_on_a_write(q):
     _row(q, "s1", cron=True)
-    due_at = time.time() + 3600
-    _edit(q, "s1", next_run_at=_iso(due_at))
+    stored = _iso(time.time() + 3600)
+    # The table keeps whole microseconds: the row's own instant is the stored one, not the float it was
+    # rendered from (which the ISO text rounds, up about as often as down).
+    due_at = dt.datetime.fromisoformat(stored).timestamp()
+    _edit(q, "s1", next_run_at=stored)
     assert _due(q), "a process's first pass"
     _pass(q)
     now = time.time()

@@ -401,7 +401,8 @@ def test_blocking_holds_a_failed_desktop_result_and_presence_is_never_held(tmp_p
     assert "not delivered until a review passes it" in shown[-1] and len(sends) == 3
 
     ctx = _floor_ctx(tmp_path / "presence", monkeypatch)
-    ctx._presence_completion = {"outcome": "spoken"}
+    # The host stamps a Presence turn before any review (``presence_runner._build_task``).
+    ctx.task_metadata = {**dict(getattr(ctx, "task_metadata", None) or {}), "presence_event_identity": "event-1"}
     sends.clear()
     mac(ctx, tmp_path / "presence", monkeypatch).call("click", x=1, y=2, raw=True)
     shown.clear()

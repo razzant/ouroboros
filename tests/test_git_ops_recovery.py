@@ -179,7 +179,8 @@ def test_git_capture_default_timeout_is_unbounded(monkeypatch, tmp_path):
     communicate = subprocess.Popen.communicate
 
     def observed(proc, *args, **kwargs):
-        waits.append((proc, kwargs.get("timeout"), proc in shell_process._active_subprocesses, proc.stdin))
+        if proc.args == ["git", "status", "--porcelain"]:
+            waits.append((proc, kwargs.get("timeout"), proc in shell_process._active_subprocesses, proc.stdin))
         return communicate(proc, *args, **kwargs)
 
     monkeypatch.setattr(subprocess.Popen, "communicate", observed)
@@ -242,6 +243,9 @@ def test_git_capture_unconfirmed_cleanup_keeps_custody_and_original_error(monkey
     failure = KeyboardInterrupt("original interruption")
 
     class UnconfirmedProcess:
+        def poll(self):
+            return self.returncode
+
         pid = 12345
         returncode = None
         stdin = None
@@ -284,6 +288,9 @@ def test_bounded_git_process_kills_tree_and_is_panic_tracked(monkeypatch):
     killed = []
 
     class HungProcess:
+        def poll(self):
+            return self.returncode
+
         returncode = -9
         stdin = stdout = stderr = None
 
@@ -299,6 +306,8 @@ def test_bounded_git_process_kills_tree_and_is_panic_tracked(monkeypatch):
             return "", "partial diagnostic"
 
     proc = HungProcess()
+    from tests.test_tracked_tree_containment import fake_tree_read
+    fake_tree_read(monkeypatch, proc, remains=False)
     monkeypatch.setattr(git_ops.subprocess, "Popen", lambda *_a, **_k: proc)
     monkeypatch.setattr(
         platform_layer, "kill_process_tree", lambda child: killed.append(child),

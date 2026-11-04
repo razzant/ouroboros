@@ -2,12 +2,14 @@
 
 The real owners do the work over local bare repositories: release sync, commit admission, the review
 binding, the tag writer, the carrier resolver, startup's version check, Stable promotion, the bundle
-builder and CI's tag preflight. GitHub's server, signing and a published build stay outside this proof.
+builder, CI's tag preflight and its tag-source step. GitHub's server, signing and a published build stay
+outside this proof.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import runpy
 import shutil
@@ -34,6 +36,7 @@ from ouroboros.tools.release_sync import (
     sync_release_metadata,
 )
 from scripts import promote_stable as promotion
+from supervisor import git_ops
 from supervisor.update_carriers import resolve_carrier_conflicts
 from tests.test_release_sync import _download_page, _download_references, _make_repo
 
@@ -52,11 +55,18 @@ class Cycle:
     """origin (bare) and one integrator clone; the public 7.9.0 is on every official branch."""
 
     def __init__(self, tmp_path):
+        self.root = tmp_path
         self.origin, self.work, self.publisher = tmp_path / "origin.git", tmp_path / "work", tmp_path / "publisher"
         _git(tmp_path, "init", "-q", "--bare", str(self.origin))
         self.work.mkdir()
         _git(self.work, "init", "-q")
         _git(self.work, "config", "core.autocrlf", "false")
+        # The product's commit and tag steps read the checkout's Git identity (a packaged install's is written by
+        # ouroboros/launcher_bootstrap.py, a source clone has its owner's), so this one gets its own, never the host's.
+        # Its text policy is the repository's .gitattributes: LF in the index, whatever the OS writes.
+        for setting in IDENT[1::2]:
+            _git(self.work, "config", *setting.split("=", 1))
+        (self.work / ".gitattributes").write_bytes((ROOT / ".gitattributes").read_bytes())
         _make_repo(self.work, "7.9.0")
         sync_release_metadata(str(self.work))
         _git(self.work, "add", "-A")
@@ -142,7 +152,11 @@ class Cycle:
 
 
 @pytest.fixture()
-def cycle(tmp_path):
+def cycle(tmp_path, monkeypatch):
+    # Git guesses no identity here, as on a runner whose account has no name: a tag must find the checkout's own.
+    guess_free = tmp_path / "guess-free.gitconfig"
+    guess_free.write_text("[user]\n\tuseConfigOnly = true\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(guess_free))
     return Cycle(tmp_path)
 
 
@@ -151,7 +165,7 @@ def test_opening_a_cycle_projects_every_carrier_but_the_links_and_creates_no_rel
     cycle.set_version("7.10.0-alpha.0")
 
     for source in ("index", "worktree"):
-        report = admission.release_metadata_diagnostics(cycle.work, source=source, neutral_allowed=False)
+        report = admission.release_metadata_diagnostics(cycle.work, source=source, neutral_allowed=True)
         assert (report["form"], report["status"], report["findings"]) == ("development_marker", "clean", []), source
     landed = cycle.land("open the 7.10.0 cycle")
 
@@ -187,6 +201,34 @@ def test_a_marker_refuses_a_history_row_and_a_base_it_has_not_outgrown(cycle, da
     assert expected in "\n".join(report["findings"])
 
 
+@pytest.mark.parametrize("source,allowed,admitted", [
+    ("index", None, True),  # the prepared index lane
+    ("index", True, True),
+    ("worktree", True, True),  # a bound candidate
+    ("index", False, False),  # a commit on the serving checkout
+    ("worktree", False, False),
+    ("worktree", None, False),
+])
+def test_a_marker_is_admitted_only_where_the_neutral_form_is(cycle, source, allowed, admitted):
+    cycle.set_version("7.10.0-alpha.0")
+    report = admission.release_metadata_diagnostics(cycle.work, source=source, neutral_allowed=allowed)
+    error = admission.format_release_metadata_preflight(report)
+    if admitted:
+        assert (report["form"], report["status"], report["findings"]) == ("development_marker", "clean", [])
+        assert error is None
+    else:
+        assert (report["form"], report["status"]) == ("numbered", "blocked")
+        assert len(report["findings"]) == 1 and "development marker 7.10.0-alpha.0" in report["findings"][0]
+        assert "PREFLIGHT_BLOCKED" in error
+
+
+@pytest.mark.parametrize("version", ["7.10.0", "7.10.0-alpha.1"])
+def test_a_serving_commit_keeps_its_numbered_forms(cycle, version):
+    cycle.set_version(version, row=True)
+    report = admission.release_metadata_diagnostics(cycle.work, source="index", neutral_allowed=False)
+    assert (report["form"], report["status"], report["findings"]) == ("numbered", "clean", [])
+
+
 def test_a_landing_cannot_move_a_carrier_under_the_marker(cycle):
     cycle.set_version("7.10.0-alpha.0")
     cycle.land("open")
@@ -210,7 +252,7 @@ def test_one_whole_cycle_from_marker_through_promotion_to_the_next_marker(cycle)
     assert cycle.tags() == ["v7.9.0"] and cycle.public_links() == links
     cycle.push("HEAD:refs/heads/ouroboros")
 
-    # The selected candidate becomes the plain release beside development, which goes on.
+    # The selected candidate becomes the plain release beside development, which moved on.
     _git(cycle.work, "checkout", "-q", "-b", "release", candidate)
     cycle.set_version("7.10.0", row=True)
     report = cycle.admit()
@@ -220,20 +262,25 @@ def test_one_whole_cycle_from_marker_through_promotion_to_the_next_marker(cycle)
     assert _git(cycle.work, "cat-file", "-t", "refs/tags/v7.10.0") == "tag"
     assert _git(cycle.work, "rev-parse", "v7.10.0^{commit}") == release.sha
     assert published_download_version(*cycle.public_links()) == "7.10.0"
-    cycle.push("refs/tags/v7.10.0")
     _git(cycle.work, "checkout", "-q", "ouroboros")
     cycle.neutral_landing("third")
     cycle.push("HEAD:refs/heads/ouroboros")
-    assert published_download_version(*cycle.public_links()) == "7.9.0"  # still unpublished here
+    assert published_download_version(*cycle.public_links()) == "7.9.0"  # nothing is cut on this line yet
 
-    # Every way to forget the next cycle refuses and writes nothing.
+    # The cut reaches ouroboros first, then its tag goes out. For this one build window only development
+    # links to the unpublished release: the branches behind the public surfaces have not moved.
     before = cycle.refs()
-    with pytest.raises(ValueError, match="does not contain v7.10.0"):
-        cycle.promote("v7.10.0", push=True)
     _git(cycle.work, "merge", "-q", "--no-edit", "v7.10.0")
     assert cycle.read("VERSION").strip() == "7.10.0"
     assert _git(cycle.work, "log", "-1", "--format=%P").count(" ") == 1
     cycle.push("HEAD:refs/heads/ouroboros")
+    cycle.push("refs/tags/v7.10.0")
+    assert published_download_version(*cycle.public_links()) == "7.10.0"
+    for branch in ("main", "ouroboros-stable"):
+        assert "v7.9.0/" in _git(cycle.origin, "show", f"refs/heads/{branch}:README.md")
+        assert "v7.10.0/" not in _git(cycle.origin, "show", f"refs/heads/{branch}:README.md")
+
+    # Every way to forget the next cycle refuses and writes nothing.
     with pytest.raises(ValueError, match="7.10.0 is not a development marker"):
         cycle.promote("v7.10.0", push=True)
     assert {name: sha for name, sha in cycle.refs().items() if name != "ouroboros"} == \
@@ -272,77 +319,85 @@ def test_one_whole_cycle_from_marker_through_promotion_to_the_next_marker(cycle)
     assert cycle.promote("v7.10.0", push=True) == 0 and cycle.refs() == refs  # repeating it changes nothing
 
 
-def test_a_next_marker_opened_at_the_cut_still_receives_the_published_links_and_row(cycle):
-    """The cut opens the next base at once, so development's links wait on the old release, unbroken."""
-    cycle.set_version("7.10.0-alpha.0")
-    cycle.land("open")
-    candidate = cycle.neutral_landing("first").sha
-    _git(cycle.work, "checkout", "-q", "-b", "release", candidate)
-    cycle.set_version("7.10.0", row=True)
-    cycle.land("release 7.10.0")
-    cycle.push("refs/tags/v7.10.0")
-    _git(cycle.work, "checkout", "-q", "ouroboros")
-    cycle.set_version("7.11.0-alpha.0")
-    cycle.land("open the 7.11.0 cycle at the cut")
-    assert published_download_version(*cycle.public_links()) == "7.9.0"
-    cycle.push("HEAD:refs/heads/ouroboros")
-    with pytest.raises(ValueError, match="does not contain v7.10.0"):
-        cycle.promote("v7.10.0", push=True)
+def _cut_beside(cycle, candidate="HEAD", *, version="7.10.0", branch="release"):
+    """The plain cut on a side branch of the integrator's clone; its tag stays local until it is pushed."""
+    _git(cycle.work, "checkout", "-q", "-b", branch, candidate)
+    cycle.set_version(version, row=True)
+    return cycle.land(f"release {version}")
 
-    # After publication the release merges in, through the operator's own helper. Its carrier conflicts
-    # resolve to the release, and the marker is projected again; links and row stay the release's.
-    assert _git(cycle.work, "merge", "--no-commit", "--no-ff", "v7.10.0", check=False).returncode
+
+def _cut_repair(cycle, release_sha):
+    """The repair: plain 7.10.1 with its fix, cut from the 7.10.0 release commit and tagged locally."""
+    _git(cycle.work, "checkout", "-q", "-b", "repair", release_sha)
+    (cycle.work / "fix.txt").write_text("the fix\n", encoding="utf-8", newline="\n")
+    cycle.set_version("7.10.1", row=True)
+    repair = cycle.land("repair 7.10.1")
+    assert repair.tagged == " [tagged: v7.10.1]"
+    return repair
+
+
+def _merge_cut_under_marker(cycle, tag, marker):
+    """The merge's resolution through the operator's own helper: the release's links and row, the marker again."""
+    assert _git(cycle.work, "merge", "--no-commit", "--no-ff", tag, check=False).returncode
     conflicted = _git(cycle.work, "diff", "--name-only", "--diff-filter=U").split()
     assert {"VERSION", "README.md", "pyproject.toml", "uv.lock"} <= set(conflicted)
     helper = subprocess.run([sys.executable, str(ROOT / "scripts" / "carrier_rebase_helper.py"),
                              "--worktree", str(cycle.work), "--prefer", "theirs"], capture_output=True, text=True)
     assert helper.returncode == 0, helper.stdout + helper.stderr
     assert _git(cycle.work, "diff", "--name-only", "--diff-filter=U") == ""
-    cycle.set_version("7.11.0-alpha.0")
+    cycle.set_version(marker)
     report = cycle.admit()
     assert (report["form"], report["status"], report["findings"]) == ("development_marker", "clean", [])
-    merged = cycle.land("bring the published 7.10.0 into development")
+    return cycle.land(f"bring {tag} into development")
+
+
+def test_a_next_marker_already_open_resolves_the_cut_merge_and_keeps_its_links_and_row(cycle):
+    """The marker moved first, so the cut comes in as a merge whose resolution writes the marker back."""
+    cycle.set_version("7.10.0-alpha.0")
+    cycle.land("open")
+    candidate = cycle.neutral_landing("first").sha
+    _cut_beside(cycle, candidate)
+    _git(cycle.work, "checkout", "-q", "ouroboros")
+    cycle.set_version("7.11.0-alpha.0")
+    cycle.land("open the 7.11.0 cycle")
+    assert published_download_version(*cycle.public_links()) == "7.9.0"
+    cycle.push("HEAD:refs/heads/ouroboros")
+
+    merged = _merge_cut_under_marker(cycle, "v7.10.0", "7.11.0-alpha.0")
     assert merged.binding["expected_tag"] == "" and len(merged.binding["parents"]) == 2
     assert published_download_version(*cycle.public_links()) == "7.10.0" and "| 7.10.0 |" in cycle.history()
     cycle.push("HEAD:refs/heads/ouroboros")
+    cycle.push("refs/tags/v7.10.0")
     assert cycle.promote("v7.10.0", push=True) == 0 and cycle.stable() == "v7.10.0"
     assert _git(cycle.origin, "show", "refs/heads/ouroboros:VERSION") == "7.11.0-alpha.0"
 
 
-def test_a_tag_only_repair_of_the_published_release_and_the_next_release_both_lead_on(cycle):
-    """The next cycle opened at a greater minor, so 7.10.1 stays free for a repair beside development."""
+def test_a_repair_of_the_published_release_and_the_next_release_both_lead_on(cycle):
+    """The next cycle opened at a greater minor, so 7.10.1 stays free: cut from the release, merged like any cut."""
     cycle.set_version("7.10.0-alpha.0")
     cycle.land("open")
-    _git(cycle.work, "checkout", "-q", "-b", "release")
-    cycle.set_version("7.10.0", row=True)
-    release = cycle.land("release 7.10.0")
-    cycle.push("refs/tags/v7.10.0")
+    release = _cut_beside(cycle)
     _git(cycle.work, "checkout", "-q", "ouroboros")
     _git(cycle.work, "merge", "-q", "--no-edit", "v7.10.0")
     cycle.set_version("7.11.0-alpha.0")
     cycle.land("open the 7.11.0 cycle")
     cycle.push("HEAD:refs/heads/ouroboros")
+    cycle.push("refs/tags/v7.10.0")
     assert cycle.promote("v7.10.0", push=True) == 0
 
-    # The repair is a plain release on its own line; development's marker and tags never moved.
-    _git(cycle.work, "checkout", "-q", "-b", "repair", release.sha)
-    (cycle.work / "fix.txt").write_text("the fix\n", encoding="utf-8", newline="\n")
-    cycle.set_version("7.10.1", row=True)
-    repair = cycle.land("repair 7.10.1")
-    assert repair.tagged == " [tagged: v7.10.1]"
-    cycle.push("refs/tags/v7.10.1")
+    # The repair is a plain release cut from the release, so it reaches QA; development's marker never moved.
+    repair = _cut_repair(cycle, release.sha)
     _git(cycle.work, "checkout", "-q", "ouroboros")
     assert cycle.read("VERSION").strip() == "7.11.0-alpha.0"
-    with pytest.raises(ValueError, match="does not contain v7.10.1"):
-        cycle.promote("v7.10.1", push=True)
     assert _git(cycle.work, "merge", "--no-commit", "--no-ff", "v7.10.1", check=False).returncode
     conflicted = _git(cycle.work, "diff", "--name-only", "--diff-filter=U").split()
     assert resolve_carrier_conflicts(str(cycle.work), conflicted, prefer="theirs")["kept"] == {}
     cycle.set_version("7.11.0-alpha.0")
     report = cycle.admit()
     assert (report["form"], report["status"], report["findings"]) == ("development_marker", "clean", [])
-    cycle.land("bring the published repair into development")
+    cycle.land("bring the repair into development")
     cycle.push("HEAD:refs/heads/ouroboros")
+    cycle.push("refs/tags/v7.10.1")
     assert cycle.promote("v7.10.1", push=True) == 0
     assert cycle.refs()["ouroboros-stable"] == repair.sha and cycle.stable() == "v7.10.1"
 
@@ -361,7 +416,7 @@ def test_a_tag_only_repair_of_the_published_release_and_the_next_release_both_le
     _git(cycle.work, "checkout", "-q", "ouroboros")
     cycle.set_version("7.11.0", row=True)
     release2 = cycle.land("release 7.11.0")
-    cycle.push("refs/tags/v7.11.0", "HEAD:refs/heads/ouroboros")
+    cycle.push("HEAD:refs/heads/ouroboros", "refs/tags/v7.11.0")
     cycle.set_version("7.12.0-alpha.0")
     cycle.land("open the 7.12.0 cycle")
     cycle.push("HEAD:refs/heads/ouroboros")
@@ -376,7 +431,6 @@ def test_promotion_refuses_a_merge_that_dropped_the_release_links(cycle):
     _git(cycle.work, "checkout", "-q", "-b", "release")
     cycle.set_version("7.10.0", row=True)
     cycle.land("release 7.10.0")
-    cycle.push("refs/tags/v7.10.0")
     _git(cycle.work, "checkout", "-q", "ouroboros")
     cycle.set_version("7.11.0-alpha.0")
     cycle.land("open the next cycle")
@@ -389,6 +443,7 @@ def test_promotion_refuses_a_merge_that_dropped_the_release_links(cycle):
     assert (published_download_version(links[0]), published_download_version(links[1])) == ("7.9.0", "7.10.0")
     assert cycle.admit()["form"] == "none"
     cycle.push("HEAD:refs/heads/ouroboros")
+    cycle.push("refs/tags/v7.10.0")
     before = cycle.refs()
     with pytest.raises(ValueError, match="download links still name 7.9.0: move them to the published v7.10.0"):
         cycle.promote("v7.10.0", push=True)
@@ -484,6 +539,181 @@ def test_a_marker_is_never_packaged_by_any_build_script(tmp_path):
     for version in ("7.10.0", "7.10.0-alpha.1", "7.10.0-rc.1"):
         (tmp_path / "VERSION").write_text(f"{version}\n", encoding="utf-8")
         assert bundle["_read_version"](tmp_path) == version
+
+
+def _ci_checkout(cycle, tag):
+    """What a tag-push build starts from: every official branch as origin/*, the tag object, HEAD detached at it."""
+    checkout = cycle.root / f"ci-{tag}-{len(list(cycle.root.glob('ci-*')))}"
+    _git(cycle.root, "clone", "-q", str(cycle.origin), str(checkout))
+    _git(checkout, "checkout", "-q", "--detach", f"refs/tags/{tag}")
+    return checkout
+
+
+def _ci_tag_source_run(checkout, tag):
+    """CI's real step, run from ci.yml as written; returns the result and the branch it exports."""
+    jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))["jobs"]
+    scripts = {step["run"] for job in jobs.values() for step in job.get("steps", [])
+               if step.get("name") == "Resolve the managed source branch of this tag"}
+    assert len(scripts) == 1
+    output = checkout.parent / f"{checkout.name}.env"
+    output.write_text("", encoding="utf-8")
+    result = subprocess.run([shutil.which("bash"), "-c", scripts.pop()], cwd=checkout, capture_output=True, text=True,
+                            env={**os.environ, "GITHUB_REF_NAME": tag, "GITHUB_ENV": str(output)})
+    exported = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+    return result, exported.get("OUROBOROS_MANAGED_SOURCE_BRANCH", "")
+
+
+def _bundle_manifest(checkout, tag, branch, monkeypatch):
+    """The real bundle build at that checkout; the manifest is what a packaged install reads."""
+    # A tag-push runner sets these for its own tag; the build would read it as a second tag
+    # (tests/test_launcher_sync.py _BUILD_BUNDLE_ENV_SCRUB_KEYS).
+    for key in ("GITHUB_REF_TYPE", "GITHUB_REF", "GITHUB_REF_NAME"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("OUROBOROS_RELEASE_TAG", tag)
+    bundle = runpy.run_path(str(ROOT / "scripts" / "build_repo_bundle.py"))
+    manifest = checkout.parent / f"{checkout.name}.json"
+    bundle["build_bundle"](checkout, checkout.parent / f"{checkout.name}.bundle", manifest, source_branch=branch,
+                           local_branch="ouroboros", local_stable_branch="ouroboros-stable",
+                           remote_stable_branch="ouroboros-stable", managed_remote_name="managed")
+    return json.loads(manifest.read_text(encoding="utf-8"))
+
+
+def _assert_ci_builds_for_ouroboros(cycle, tag, sha, monkeypatch):
+    """The tag-push build: CI's step names `ouroboros`, the bundle packs the tag's commit, installs track it."""
+    checkout = _ci_checkout(cycle, tag)
+    assert _git(checkout, "rev-parse", "HEAD") == sha
+    result, branch = _ci_tag_source_run(checkout, tag)
+    assert (result.returncode, branch) == (0, "ouroboros"), result.stderr
+    manifest = _bundle_manifest(checkout, tag, branch, monkeypatch)
+    assert (manifest["source_sha"], manifest["app_version"]) == (sha, tag[1:])
+    assert git_ops._managed_remote_branch_for(git_ops.BRANCH_DEV, manifest) == "ouroboros"
+
+
+def _cut_on_the_tip(cycle):
+    cycle.set_version("7.10.0", row=True)
+    return cycle.land("release 7.10.0").sha, "7.10.0"
+
+
+def _cut_beside_a_moved_tip(cycle):
+    candidate = _git(cycle.work, "rev-parse", "HEAD")
+    release = _cut_beside(cycle, candidate)
+    _git(cycle.work, "checkout", "-q", "ouroboros")
+    cycle.neutral_landing("moved")
+    cycle.push("HEAD:refs/heads/ouroboros")
+    _git(cycle.work, "merge", "-q", "--no-edit", "v7.10.0")
+    return release.sha, "7.10.0"
+
+
+def _cut_merged_under_the_next_marker(cycle):
+    candidate = _git(cycle.work, "rev-parse", "HEAD")
+    release = _cut_beside(cycle, candidate)
+    _git(cycle.work, "checkout", "-q", "ouroboros")
+    cycle.set_version("7.11.0-alpha.0")
+    cycle.land("open the 7.11.0 cycle")
+    _merge_cut_under_marker(cycle, "v7.10.0", "7.11.0-alpha.0")
+    return release.sha, "7.11.0-alpha.0"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the step is a Bash script on the runners")
+@pytest.mark.parametrize("cut", [_cut_on_the_tip, _cut_beside_a_moved_tip, _cut_merged_under_the_next_marker])
+def test_every_documented_cut_order_builds_and_installs_track_ouroboros(cycle, monkeypatch, cut):
+    cycle.set_version("7.10.0-alpha.0")
+    cycle.land("open")
+    cycle.push("HEAD:refs/heads/ouroboros")
+    cut_sha, development_version = cut(cycle)
+    assert cycle.read("VERSION").strip() == development_version
+    assert published_download_version(*cycle.public_links()) == "7.10.0"
+    cycle.push("HEAD:refs/heads/ouroboros")
+    cycle.push("refs/tags/v7.10.0")
+    _assert_ci_builds_for_ouroboros(cycle, "v7.10.0", cut_sha, monkeypatch)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the step is a Bash script on the runners")
+def test_a_repair_cut_from_the_release_and_merged_in_builds_and_installs_track_ouroboros(cycle, monkeypatch):
+    """CONTRIBUTING's repair: 7.10.1 cut from the 7.10.0 commit, merged under 7.11.0-alpha.0, branch before tag."""
+    cycle.set_version("7.10.0-alpha.0")
+    cycle.land("open")
+    cycle.push("HEAD:refs/heads/ouroboros")
+    release = _cut_beside(cycle)
+    _git(cycle.work, "checkout", "-q", "ouroboros")
+    cycle.set_version("7.11.0-alpha.0")
+    cycle.land("open the 7.11.0 cycle")
+    _merge_cut_under_marker(cycle, "v7.10.0", "7.11.0-alpha.0")
+    cycle.push("HEAD:refs/heads/ouroboros")
+    cycle.push("refs/tags/v7.10.0")
+
+    repair = _cut_repair(cycle, release.sha)
+    _git(cycle.work, "checkout", "-q", "ouroboros")
+    _merge_cut_under_marker(cycle, "v7.10.1", "7.11.0-alpha.0")
+    assert cycle.read("VERSION").strip() == "7.11.0-alpha.0"
+    assert published_download_version(*cycle.public_links()) == "7.10.1" and "| 7.10.1 |" in cycle.history()
+    cycle.push("HEAD:refs/heads/ouroboros")
+    cycle.push("refs/tags/v7.10.1")
+    _assert_ci_builds_for_ouroboros(cycle, "v7.10.1", repair.sha, monkeypatch)
+
+
+def _tag_no_branch_contains(cycle):
+    cycle.set_version("7.10.0-alpha.0")
+    cycle.land("open")
+    cycle.push("HEAD:refs/heads/ouroboros")
+    cut = _cut_beside(cycle)
+    cycle.push("refs/tags/v7.10.0")
+    return cut
+
+
+def test_a_tag_no_remote_branch_contains_is_refused_by_the_bundle_build_and_by_promotion(cycle, monkeypatch):
+    cut = _tag_no_branch_contains(cycle)
+    checkout = _ci_checkout(cycle, "v7.10.0")
+    bundle = runpy.run_path(str(ROOT / "scripts" / "build_repo_bundle.py"))
+    with pytest.raises(SystemExit, match="is not reachable from the configured managed source branch 'ouroboros'"):
+        bundle["_ensure_source_sha_tracks_branch"](checkout, cut.sha, "ouroboros")
+    with pytest.raises(SystemExit, match="is not reachable from the configured managed source branch 'ouroboros'"):
+        _bundle_manifest(checkout, "v7.10.0", "ouroboros", monkeypatch)
+    with pytest.raises(ValueError, match="does not contain v7.10.0"):
+        cycle.promote("v7.10.0", push=True)
+
+    # The same tag becomes buildable once the cut lands on the branch, the order CONTRIBUTING documents.
+    _git(cycle.work, "checkout", "-q", "ouroboros")
+    _git(cycle.work, "merge", "-q", "--no-edit", "v7.10.0")
+    cycle.push("HEAD:refs/heads/ouroboros")
+    checkout = _ci_checkout(cycle, "v7.10.0")
+    bundle["_ensure_source_sha_tracks_branch"](checkout, cut.sha, "ouroboros")
+    assert _bundle_manifest(checkout, "v7.10.0", "ouroboros", monkeypatch)["managed_remote_branch"] == "ouroboros"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the step is a Bash script on the runners")
+def test_ci_refuses_a_tag_no_remote_branch_contains_and_builds_it_once_ouroboros_does(cycle):
+    _tag_no_branch_contains(cycle)
+    result, branch = _ci_tag_source_run(_ci_checkout(cycle, "v7.10.0"), "v7.10.0")
+    assert (result.returncode, branch) == (1, "")
+    assert "expected exactly one remote branch containing HEAD, got: none" in result.stderr
+
+    _git(cycle.work, "checkout", "-q", "ouroboros")
+    _git(cycle.work, "merge", "-q", "--no-edit", "v7.10.0")
+    cycle.push("HEAD:refs/heads/ouroboros")
+    result, branch = _ci_tag_source_run(_ci_checkout(cycle, "v7.10.0"), "v7.10.0")
+    assert (result.returncode, branch) == (0, "ouroboros"), result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the step is a Bash script on the runners")
+def test_a_cut_on_its_own_remote_branch_would_become_the_branch_installs_track(cycle, monkeypatch):
+    """Why the cut lands on ouroboros: the build accepts this, and the manifest then misdirects Development installs."""
+    cycle.set_version("7.10.0-alpha.0")
+    cycle.land("open")
+    cycle.push("HEAD:refs/heads/ouroboros")
+    _cut_beside(cycle)
+    cycle.push("HEAD:refs/heads/release", "refs/tags/v7.10.0")
+
+    checkout = _ci_checkout(cycle, "v7.10.0")
+    result, branch = _ci_tag_source_run(checkout, "v7.10.0")
+    assert (result.returncode, branch) == (0, "release"), result.stderr
+    manifest = _bundle_manifest(checkout, "v7.10.0", branch, monkeypatch)
+    assert git_ops._managed_remote_branch_for(git_ops.BRANCH_DEV, manifest) == "release"
+
+    # Two such branches leave no one source: refused.
+    cycle.push("HEAD:refs/heads/release-copy")
+    result, branch = _ci_tag_source_run(_ci_checkout(cycle, "v7.10.0"), "v7.10.0")
+    assert (result.returncode, branch) == (1, "") and "expected exactly one remote branch" in result.stderr
 
 
 def _release_meta_run(tmp_path, version, tag):

@@ -546,6 +546,28 @@ jobs:
           base="$(python -c 'import sys; print(sys._base_executable, end="")')"
           uv sync --locked --extra browser --group dev --no-install-project --python "$base"
           "$UV_PROJECT_ENVIRONMENT/Scripts/python.exe" -m playwright install chromium
+          "$UV_PROJECT_ENVIRONMENT/Scripts/python.exe" -m ouroboros.chromium_runtime install
+      - name: Verify sandboxed Chromium inside a tracked Windows command (normal, Stop, Panic)
+        id: tracked_chromium
+        timeout-minutes: 20
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.attachment_browser_install.outcome == 'success' && matrix.shard == 1 }}
+        shell: bash
+        env:
+          OUROBOROS_RUN_UI_SMOKE: "1"
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/attachment-browsers
+          ATTACHMENT_PYTHON: ${{ runner.temp }}/attachment-env/Scripts/python.exe
+        run: |
+          "$ATTACHMENT_PYTHON" -I -S scripts/safe_test.py -- "$ATTACHMENT_PYTHON" -m pytest tests/test_tracked_chromium_smoke.py -m browser -q --tb=short -rs --ci-evidence-dir="$RUNNER_TEMP/ci-evidence/tracked-chromium" --junitxml="$RUNNER_TEMP/ci-private/tracked-chromium.xml"
+          python -c "import sys, xml.etree.ElementTree as E; s = next(E.parse(sys.argv[1]).getroot().iter('testsuite')); n, k, f, e = [int(s.get(key, 0)) for key in ('tests', 'skipped', 'failures', 'errors')]; print(f'{n} ran, {k} skipped, {f} failed, {e} errors'); sys.exit(n != 3 or k > 0 or f > 0 or e > 0)" "$RUNNER_TEMP/ci-private/tracked-chromium.xml"
+      - name: Preserve the Windows tracked Chromium evidence
+        if: ${{ !cancelled() && runner.os == 'Windows' && matrix.shard == 1 && steps.tracked_chromium.outcome != 'skipped' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tracked-chromium-windows-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-evidence/tracked-chromium/
+          if-no-files-found: error
+          retention-days: 30
       - name: Run the owner-attachment browser test on Windows (Chromium)
         id: attachment_browser
         timeout-minutes: 30

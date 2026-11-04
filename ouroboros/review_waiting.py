@@ -1,8 +1,10 @@
 """Chosen wake sources and delivery cursors of one retained review wait.
 
 Readiness never consumes a fact. A complete transcript insertion stages its
-cursor; the working checkpoint makes that acknowledgement durable. The late
-room duty has an independent lifetime and is never discharged here.
+cursor; the working checkpoint makes that acknowledgement durable. A cursor
+never discharges a room duty. ``seen_outcome_states`` retains rendered feedback
+separately in the same ledger wait: it ends unread duties here and lets the
+terminal collector distinguish a received unwaited outcome from mere settlement.
 """
 from __future__ import annotations
 
@@ -184,7 +186,7 @@ def save_wait(ctx, record_id, state):
     def merge(record):
         old = record.get("waiting") or {}
         record["waiting"] = {**copy.deepcopy(state), **{key: sorted(set(old.get(key) or ()) | set(state.get(key) or ()))
-                             for key in ("seen_helpers", "seen_outcomes")}}
+                             for key in ("seen_helpers", "seen_outcomes", "seen_outcome_states")}}
         return record
     record = revise_record(ledger_root(ctx), record_id, merge)
     if record and (record.get("waiting") or {}).get("duty_id"):
@@ -266,8 +268,18 @@ def publish_delivery(ctx, text, record, rendered_rows=None):
                                 meta={**prior.meta, "review_delivery": receipt}))
 
 
+def _carries_whole(record, receipt):
+    """Whether this receipt carried all of ``record`` as it stands now: the wave settled and every current outcome
+    state is one its response rendered (``publish_delivery``). Cursor ids prove nothing here: a helper notice names
+    them and a report that renders no rows certifies none, and a seat that settled after the render leaves it short."""
+    current = set(outcome_states(record))
+    return record.get("state") == "settled" and bool(current) and current <= set(receipt.get("outcome_states") or ())
+
+
 def acknowledge_delivery(ctx, receipt):
-    """Called after complete transcript insertion, never from a readiness peek."""
+    """Called after complete transcript insertion, never from a readiness peek. Once a saved state holds it
+    (``working_checkpoint``), the cursor is durable and a whole receipt of a result record ends that record's unread
+    duty; a crash or a failed save before then acknowledges nothing."""
     from ouroboros.review_ledger import ledger_root, load_record
     from ouroboros.working_checkpoint import defer_content_ack
 
@@ -283,14 +295,24 @@ def acknowledge_delivery(ctx, receipt):
         from ouroboros.sleep_custody import record_question_notice
         record_question_notice(ctx, receipt["questions"])
     state = copy.deepcopy(record.get("waiting") or getattr(ctx, "_review_wait_selection", None) or {})
-    for target, source in (("seen_helpers", "helpers"), ("seen_outcomes", "outcomes")):
+    for target, source in (("seen_helpers", "helpers"), ("seen_outcomes", "outcomes"),
+                           ("seen_outcome_states", "outcome_states")):
         state[target] = sorted(set(state.get(target) or ()) | set(receipt.get(source) or ()))
     ctx._review_wait_selection = state
     wait = getattr(ctx, "_left_review_wait", None)
     if isinstance(wait, dict) and wait.get("record_id") == record_id:
-        wait.update({key: copy.deepcopy(state[key]) for key in ("selection", "seen_helpers", "seen_outcomes")
+        wait.update({key: copy.deepcopy(state[key]) for key in ("selection", "seen_helpers", "seen_outcomes", "seen_outcome_states")
                      if key in state})
-    defer_content_ack(ctx, lambda: save_wait(ctx, record_id, state))
+
+    def commit():
+        saved = save_wait(ctx, record_id, state)
+        if (saved and saved.get("surface") == "result"
+                and _carries_whole(saved, {"outcome_states": saved["waiting"]["seen_outcome_states"]})):
+            from ouroboros.review_pause import retire_unread_review
+
+            retire_unread_review(ctx, surface="result", record_id=record_id)
+
+    defer_content_ack(ctx, commit)
 
 
 def append_helper_notice(ctx, messages):

@@ -691,14 +691,18 @@ def test_a_measured_build_times_each_section_on_its_receipt(tmp_path, monkeypatc
                 if '"context_memory_view"' in line][-1]
 
     history = events.read_bytes() if events.exists() else b""
+    # The request's queue fact is read from the task's budget root. A task naming none reads the session's
+    # shared data root, where an earlier test of this worker may have left a snapshot whose age is measured
+    # afresh by each build; this world's own drive holds none.
+    task = {**MAIN, "budget_drive_root": str(memory.drive_root)}
     with measured_sections():
-        timed_messages, _cap = _messages(env, memory, MAIN, review_context_builder=lambda: build_review_context(env))
+        timed_messages, _cap = _messages(env, memory, task, review_context_builder=lambda: build_review_context(env))
     timed = receipt()
     assert discoveries == [memory.drive_root]
     assert timed["sections_ms"]["installed_skills"] == 2000
     assert timed["sections_cpu_ms"]["installed_skills"] == 1000
     events.write_bytes(history)  # the second build reads the same recent events as the first
-    plain_messages, _cap = _messages(env, memory, MAIN, review_context_builder=lambda: build_review_context(env))
+    plain_messages, _cap = _messages(env, memory, task, review_context_builder=lambda: build_review_context(env))
     assert discoveries == [memory.drive_root, memory.drive_root]
     plain = receipt()
     assert {"memory_view", "knowledge", "health", "runtime", "registry", "installed_skills",

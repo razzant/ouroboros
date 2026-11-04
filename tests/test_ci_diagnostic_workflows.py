@@ -361,9 +361,12 @@ def _run_shell(step, tmp_path, *, diagnostic="viewport", result=0, scope="all"):
     command = command.replace("${{ matrix.shards }}", "4")
     command = command.replace("${{ runner.os == 'Windows' && format('--default-suite-shard={0}/8', matrix.shard) || '' }}",
                               "--default-suite-shard=2/8")
-    stub = 'python() { printf "%s\\n" "$@" > "$ARGV_FILE"; return "$PRODUCER_EXIT"; }\n'
+    stub = ('xvfb-run() { test "$1" = -a || return 97; shift; DISPLAY=:ci-test "$@"; }\n'
+            'python() { [[ "$NEEDS_DISPLAY" != 1 || "$DISPLAY" == :ci-test ]] || return 97; '
+            'printf "%s\\n" "$@" > "$ARGV_FILE"; return "$PRODUCER_EXIT"; }\n')
     env = {**os.environ, "ARGV_FILE": str(args), "PRODUCER_EXIT": str(result),
-           "DIAGNOSTIC": diagnostic, "SCOPE": scope}
+           "DIAGNOSTIC": diagnostic, "SCOPE": scope,
+           "NEEDS_DISPLAY": "1" if step.get("id") == "ui_tests" else "0"}
     completed = subprocess.run([bash, "-e", "-o", "pipefail", "-c", stub + command],
                                env=env, capture_output=True, text=True, encoding="utf-8", timeout=10)
     return completed, args.read_text(encoding="utf-8").splitlines() if args.exists() else []
@@ -531,6 +534,12 @@ def test_full_lane_runs_as_eight_guarded_shards_under_step_ceilings(tmp_path):
     # Browser tools keep their manual/tag condition, independent of the host lane's outcome, on one shard.
     assert "matrix.shard == 1" in tools["if"] and "steps.ui_tests" not in tools["if"]
     assert "github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')" in tools["if"]
+    # The real headed visibility fixture must reach an X server; preserving only
+    # the pytest argv would miss the Linux setup failure this wrapper repairs.
+    assert lane["run"].startswith("xvfb-run -a python ")
+    without_display = {**lane, "run": lane["run"].removeprefix("xvfb-run -a ")}
+    completed, _args = _run_shell(without_display, tmp_path)
+    assert completed.returncode == 97
 
 
 # The GitHub-published SHA-256 of caddy_2.11.7_linux_amd64.tar.gz; that archive's SHA-512 is the
