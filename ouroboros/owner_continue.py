@@ -54,6 +54,7 @@ import pathlib
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from ouroboros.owner_words import OWNER_SOURCES
 from ouroboros.utils import utc_now_iso
 from ouroboros.task_store import patch_document
 
@@ -102,13 +103,12 @@ AUTHOR_STOP_CAUSE = "author_stop"  # a completed row its own author stopped as u
 # extends them, so a task they ended is not offered Continue.
 HARD_LIMIT_REASON_CODES = frozenset({"deadline", "deadline_local", "budget_exhausted"})
 OWNER_SOURCE_KINDS = frozenset({"owner_text", "quiz_answer", "quiz_closed", "card_input"})
-# The retained owner corpus (``review_evidence.task_inputs``) labels each row
-# by its recorder's typed ``source`` (``loop_messages._record_owner_directive``):
-# owner-authored rows (the successor's seeding set), the run's first text (a
-# projection of the original, never a later message) and a task's words
-# (context). A row whose label is none of these is not promoted to owner text.
-CORPUS_OWNER_SOURCES = frozenset({"owner_mailbox", "owner_quiz_answer", "owner_corpus", "direct_incoming"})
+# The retained owner corpus (``review_evidence.task_inputs``) labels each row by its recorder's typed
+# ``source`` (``loop_messages._record_owner_directive``): my human's later words (the one owner list less
+# the first text; the successor's seeding set), the run's first text (a projection of the original, never a
+# later message) and a task's words (context). A row whose label is none of these is not promoted to owner text.
 CORPUS_INITIAL_SOURCES = frozenset({"origin_message", "initial_user", "initial_text", "initial_text_transcript"})
+CORPUS_OWNER_SOURCES = OWNER_SOURCES - CORPUS_INITIAL_SOURCES
 CORPUS_TASK_SOURCES = frozenset({"principal_task_message", "relayed_peer_message"})
 # The typed ids an owner-source row may carry, each a string when present: its message,
 # a task message's sender and relaying sibling, an owner answer's card.

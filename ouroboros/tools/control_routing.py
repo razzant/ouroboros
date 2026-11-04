@@ -80,29 +80,14 @@ def _attach_drafted_objective(ctx: ToolContext, evt: Dict[str, Any]) -> None:
     one, and a suppressed stamp is owner input that the door did not log.
 
     The corpus is persisted with the start (its receipt, the queue snapshot, the running
-    record), so each row is the retained owner corpus's text (``_owner_content_projection``):
-    the owner's words verbatim and an image as its reference beside the path of its
-    retained original, never its base64.
+    record): the one owner-corpus projection (``owner_words.owner_corpus_rows``).
     """
-    from ouroboros.review_evidence_sections import _owner_content_projection
+    from ouroboros.owner_words import owner_corpus_rows
 
     evt["objective_author"] = {"kind": "task", "task_id": str(getattr(ctx, "task_id", "") or "")}
     if not (evt.get("source_ref") or evt.get("origin_suppressed")):
         evt["origin_message_absent"] = True
-    owner_rows = [dict(row) for row in (getattr(ctx, "_owner_directives", None) or [])
-                  if isinstance(row, dict) and row.get("source") in {
-                      "owner_mailbox", "owner_quiz_answer", "origin_message", "owner_corpus", "direct_incoming"}]
-    if evt.get("source_text") and not any(row.get("source") == "origin_message" for row in owner_rows):
-        owner_rows.insert(0, {"source": "origin_message", "content": evt["source_text"]})
-    elif not evt.get("source_text"):
-        # A suppressed (never-logged) origin carries no text; the owner's words
-        # then live only in this run's first row, and ONLY under the host's
-        # owner-ingress stamp (``initial_user``) — an unstamped first turn
-        # (``initial_text``) is never laundered into owner authority.
-        owner_rows[:0] = [dict(row) for row in (getattr(ctx, "_owner_directives", None) or [])
-                          if isinstance(row, dict) and row.get("source") == "initial_user"]
-    rows = [{**row, "content": _owner_content_projection(row.get("content"))} for row in owner_rows]
-    evt["owner_corpus"] = [row for row in rows if row["content"].strip()]
+    evt["owner_corpus"] = owner_corpus_rows(ctx, evt.get("source_text"))
 
 
 def _inherited_project_scope(ctx: ToolContext) -> str:

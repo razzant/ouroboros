@@ -33,11 +33,14 @@ from typing import Any, Dict, List, Mapping, Tuple
 
 log = logging.getLogger(__name__)
 
+# The one list of corpus labels (``loop_messages._record_owner_directive``) that are my human's own words;
+# ``place_owner``: an addressed place turn's event from an account its place confirmed at admission.
 OWNER_SOURCES = frozenset({"initial_user", "owner_mailbox", "owner_quiz_answer", "origin_message",
-                           "owner_corpus", "direct_incoming"})
+                           "owner_corpus", "direct_incoming", "place_owner"})
 FIELD, ABSENT_FIELD = "governing_owner_words", "governing_owner_words_absent"
 NOT_RECORDED = "not_recorded"
-ROW_KEYS = ("text", "source", "carrier", "task_id", "ts", "ref")
+REPLY_TARGET = "reply_target"  # the message my human replied to: its author's words beside theirs, never theirs
+ROW_KEYS = ("text", "source", "carrier", "task_id", "ts", "ref", "author")
 _RUN_ORIGIN_MARKERS = ("initiator", "source", "task_type")
 _ANNOTATED_ACTS = frozenset({"promote_chat_to_task", "route_to_project", "steer_task", "mailbox_delivery"})
 _ANNOTATED_STATUSES = frozenset({"scheduled", "delivered", "read"})
@@ -68,9 +71,16 @@ def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _row(text: Any, *, source: Any, carrier: str, task_id: Any = "", ts: Any = "", ref: Any = "") -> Dict[str, str]:
+def _row(text: Any, *, source: Any, carrier: str, task_id: Any = "", ts: Any = "", ref: Any = "",
+         author: Any = "") -> Dict[str, str]:
     return {"text": str(text or ""), "source": str(source or ""), "carrier": carrier,
-            "task_id": str(task_id or ""), "ts": str(ts or ""), "ref": str(ref or "")}
+            "task_id": str(task_id or ""), "ts": str(ts or ""), "ref": str(ref or ""),
+            **({"author": str(author)} if author else {})}
+
+
+def _kept(row: Mapping[str, Any]) -> bool:
+    """Words to carry, or a reply target whose words could not be read: its address is still the fact."""
+    return bool(str(row.get("text") or "").strip() or (row.get("source") == REPLY_TARGET and row.get("ref")))
 
 
 def _chat_ref(source: Mapping[str, Any]) -> str:
@@ -79,14 +89,15 @@ def _chat_ref(source: Mapping[str, Any]) -> str:
 
 
 def _deduped(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    """Drop empty rows and repeats of the same whitespace-normalized text (the ingress checksum)."""
+    """Drop empty rows and repeats of one source: its reference, else (none recorded) its whitespace-normalized
+    text. Similar words under different references are not copies (BIBLE P1): two "yes" stay two."""
     from ouroboros.project_dialogue import _text_sha256
 
     seen: set = set()
     kept = []
     for row in rows:
-        key = _text_sha256(row["text"])
-        if row["text"].strip() and key not in seen:
+        key = (row["source"] == REPLY_TARGET, row["ref"]) if row["ref"] else _text_sha256(row["text"])
+        if _kept(row) and key not in seen:
             seen.add(key)
             kept.append(row)
     return kept
@@ -163,7 +174,53 @@ def directive_owner_rows(ctx: Any) -> List[Dict[str, str]]:
         rows.append(_row(_owner_content_projection(content), source=item["source"], carrier="ctx",
                          task_id=task_id, ts=origin_ref.get("ts") if stamped else "",
                          ref=_chat_ref(origin_ref) if stamped else (f"msg {msg_id}" if msg_id else "")))
+        if (target := _mapping(item.get("reply_to"))).get("address"):
+            rows.append(_row(target.get("text"), source=REPLY_TARGET, carrier="ctx", task_id=task_id,
+                             ref=target["address"], author=target.get("author") or "author not recorded"))
     return _deduped(rows)
+
+
+def owner_corpus_rows(ctx: Any, source_text: Any = "") -> List[Dict[str, Any]]:
+    """The run's owner corpus, carried by value into work it starts: a drafted objective or a follow-up.
+
+    Every row the run admitted as my human's words, as the retained corpus's text (an image by reference
+    beside its original's path, never its base64), their typed ids and reply target kept. ``source_text``:
+    the owner message a routed start names, the door's own record of it, first. Without one, a
+    suppressed (never-logged) origin's words live only in the run's first row and ride only under the
+    door's stamp (``initial_user``): an unstamped first turn (``initial_text``) is never owner words.
+    """
+    from ouroboros.review_evidence_sections import _owner_content_projection
+
+    directives = [dict(row) for row in getattr(ctx, "_owner_directives", None) or [] if isinstance(row, dict)]
+    rows = [row for row in directives if row.get("source") in OWNER_SOURCES - {"initial_user"}]
+    if source_text and not any(row.get("source") == "origin_message" for row in rows):
+        rows.insert(0, {"source": "origin_message", "content": source_text})
+    elif not source_text:
+        rows[:0] = [row for row in directives if row.get("source") == "initial_user"]
+    rows = [{**row, "content": _owner_content_projection(row.get("content"))} for row in rows]
+    return [row for row in rows if row["content"].strip()]
+
+
+def reply_target(drive_root: Any, reference: Any) -> Dict[str, str]:
+    """The whole message my human's words reply to, under its author, by the address the door resolved: one
+    sha-checked read. Unreadable: the address alone; a reply to a work card names work, not anyone's words."""
+    reference = _mapping(reference)
+    address = str(reference.get("address") or "")
+    if not address or address.startswith("task:"):
+        return {}
+    if reference.get("unresolved"):
+        return {"address": address, "author": "", "text": ""}
+    from ouroboros.chat_chain import resolve_row
+    from ouroboros.dialogue_provenance import render_row_text, row_author
+    from ouroboros.store import StoreError
+
+    try:
+        row, _resolution = resolve_row(drive_root, address)
+    except (StoreError, OSError, ValueError, TypeError):
+        row = None
+    if not row:
+        return {"address": address, "author": str(reference.get("author_label") or ""), "text": ""}
+    return {"address": address, "author": row_author(row)["label"], "text": render_row_text(row)}
 
 
 def task_governing_words(task: Mapping[str, Any]) -> Tuple[List[Dict[str, str]], str]:
@@ -173,18 +230,19 @@ def task_governing_words(task: Mapping[str, Any]) -> Tuple[List[Dict[str, str]],
     holder = source if (FIELD in source or ABSENT_FIELD in source) else nested
     raw = holder.get(FIELD)
     rows = [_row(item.get("text"), source=item.get("source"), carrier=str(item.get("carrier") or ""),
-                 task_id=item.get("task_id"), ts=item.get("ts"), ref=item.get("ref"))
+                 task_id=item.get("task_id"), ts=item.get("ts"), ref=item.get("ref"), author=item.get("author"))
             for item in (raw if isinstance(raw, list) else []) if isinstance(item, Mapping)]
-    return [row for row in rows if row["text"].strip()], str(holder.get(ABSENT_FIELD) or "")
+    return [row for row in rows if _kept(row)], str(holder.get(ABSENT_FIELD) or "")
 
 
 def governing_words_for_schedule(ctx: Any) -> Dict[str, Any]:
-    """``{FIELD: rows}`` or ``{ABSENT_FIELD: marker}`` for the helper this run is about to schedule."""
+    """``{FIELD: rows}`` or ``{ABSENT_FIELD: marker}`` for the helper this run is about to schedule: a child's
+    inherited words unchanged, any other run's own corpus beside the words it carries itself."""
     metadata = _ctx_metadata(ctx)
     if str(metadata.get("delegation_role") or "") == "subagent":
         rows, absent = task_governing_words(metadata)
     else:
-        rows, absent = directive_owner_rows(ctx), ""
+        rows, absent = _deduped(task_governing_words(metadata)[0] + directive_owner_rows(ctx)), ""
     if rows:
         return {FIELD: rows}
     return {ABSENT_FIELD: absent or _absent_marker({"type": getattr(ctx, "current_task_type", None),
@@ -318,8 +376,7 @@ def render_owner_words(rows: Any, absent: str = "", *, audience: str, root_task_
     """
     if audience not in _HEADINGS:
         raise ValueError(f"unknown owner-words audience {audience!r}; expected one of {sorted(_HEADINGS)}")
-    rows = [row for row in (rows if isinstance(rows, list) else []) if isinstance(row, Mapping)
-            and str(row.get("text") or "").strip()]
+    rows = [row for row in (rows if isinstance(rows, list) else []) if isinstance(row, Mapping) and _kept(row)]
     if not rows:
         return f"No words of my human are recorded for this work (host marker: {absent})." if absent else ""
     origin = _ORIGIN.format(root=root_task_id) if root_task_id else ""
@@ -328,7 +385,12 @@ def render_owner_words(rows: Any, absent: str = "", *, audience: str, root_task_
         source, task_id = str(row.get("source") or ""), str(row.get("task_id") or "")
         stamp = [str(row.get("ts") or ""), "owner", f"{source} of task {task_id}" if task_id else source,
                  str(row.get("ref") or "")]
-        words = "\n".join(indent + line if line else line for line in str(row["text"]).split("\n"))
+        text = str(row.get("text") or "")
+        if source == REPLY_TARGET:  # context beside the words, under its own author: never my human's words
+            stamp = [f"{row.get('author') or 'author not recorded'}: the message my human replied to, "
+                     "not my human's words", str(row.get("ref") or "")]
+            text = text or "(its words are not carried here; this address reads them)"
+        words = "\n".join(indent + line if line else line for line in text.split("\n"))
         blocks.append("[" + " · ".join(part for part in stamp if part) + "]\n" + words)
     return f"{_HEADINGS[audience]}\n{_FRAMES[audience].format(origin=origin)}\n" + "\n\n".join(blocks)
 

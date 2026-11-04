@@ -175,6 +175,7 @@ def _record_owner_directive(
     content: Any,
     msg_id: str = "",
     origin: Optional[Dict[str, str]] = None,
+    reply_to: Optional[Dict[str, str]] = None,
 ) -> None:
     """Retain the task-local owner corpus across transcript compaction.
 
@@ -187,6 +188,8 @@ def _record_owner_directive(
     sibling's words; an owner answer's card as ``source_task_id`` + ``quiz_id``): the row
     keeps them so every reader of this one corpus can tell a directive from a relayed
     proposal, and find an answer's question, without inferring it from the text.
+    ``reply_to`` is the message these words reply to (``owner_words.reply_target``): its
+    author's words beside them, carried with the row, never counted as my human's.
     """
     if ctx is None:
         return
@@ -212,6 +215,8 @@ def _record_owner_directive(
     if stable_id:
         row["msg_id"] = stable_id
     row.update({key: str(value) for key, value in (origin or {}).items() if value})
+    if reply_to:
+        row["reply_to"] = dict(reply_to)
     directives.append(row)
 
 
@@ -243,28 +248,41 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
                                       origin={"source_task_id": late["task_id"], "quiz_id": late["quiz_id"]})
         return
     author = metadata.get("objective_author")
+    from ouroboros.owner_words import OWNER_SOURCES, reply_target
     # A task-drafted objective, or the host's Continue work order (its facts are
     # the host's; the owner's exact words ride ``owner_corpus``).
     if isinstance(author, dict) and author.get("kind") in {"task", "continuation"}:
         for row in metadata.get("owner_corpus") or []:
-            if isinstance(row, dict) and row.get("source") in {
-                    "owner_mailbox", "owner_quiz_answer", "origin_message", "owner_corpus", "direct_incoming",
-                    "initial_user"}:  # the routing turn's own stamped owner row (a suppressed origin)
+            if isinstance(row, dict) and row.get("source") in OWNER_SOURCES:
                 _loop()._record_owner_directive(
                     ctx, source=str(row["source"]), content=row.get("content"),
                     msg_id=str(row.get("msg_id") or ""),
                     origin={key: row[key] for key in ("source_task_id", "relayed_from_task_id", "quiz_id") if row.get(key)},
+                    reply_to=row.get("reply_to") if isinstance(row.get("reply_to"), dict) else None,
                 )
         return  # The task-drafted objective is never an owner directive.
+    focus, presence = metadata.get("focus") or {}, metadata.get("presence") or {}
+    if (focus.get("addressed") is True and (focus.get("actor") or {}).get("owner_confirmed") is True
+            and str(presence.get("observed_text") or "").strip()):
+        # A place turn addressed to me from an account its place confirmed at admission: my human's exact
+        # words, beside the event frame (``initial_text``, which Safety reads); an unaddressed one is not work.
+        event = presence.get("event") or {}
+        replied = str((event.get("message") or {}).get("reply_to_message_id") or "")
+        _loop()._record_owner_directive(
+            ctx, source="place_owner", content=presence["observed_text"],
+            msg_id=f"chat {focus.get('room_chat_id')} / {event.get('source_event_id') or ''}",
+            reply_to={"address": f"platform message {replied} in this room", "author": "", "text": ""} if replied else None)
     for message in messages:
         if isinstance(message, dict) and str(message.get("role") or "") == "user":
             from ouroboros.dialogue_provenance import run_origin
 
             stamped = run_origin({"metadata": metadata})["owner_ingress"]
+            target = reply_target(getattr(ctx, "drive_root", None), metadata.get("reply_reference")) if stamped else {}
             _loop()._record_owner_directive(
                 ctx,
                 source="initial_user" if stamped else "initial_text",
                 content=message.get("content"),
+                reply_to=target or None,
             )
             return
 

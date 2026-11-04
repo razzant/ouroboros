@@ -690,6 +690,10 @@ def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
     # authority. Only independent work uses the root-start exception and cause.
     record["task"]["metadata"].update(consciousness_origin_metadata(
         metadata_src, started_root=relation["kind"] == "independent"))
+    from ouroboros.owner_words import owner_corpus_rows
+
+    if corpus := owner_corpus_rows(ctx):  # my human's words ride by value, as a drafted start's; none: no claim
+        record["task"]["metadata"]["owner_corpus"] = corpus
     # The resource choice rides BY VALUE (#1315): the origin's producer-stamped intent,
     # else a direct turn's own (its room's default, or Main's system repo).
     intent = followup_resource_intent(ctx, metadata_src, project_id)
