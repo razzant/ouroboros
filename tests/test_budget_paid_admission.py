@@ -11,10 +11,13 @@ with nothing saved keeps the honest terminal (holding is no permission to replay
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from ouroboros import usage_accounting as ua
 from tests._usage_store_testing import ledger_rows
+from tests.worker_pool_support import affirm_ready
 
 SUBSCRIPTION = "claudexor::codex=gpt-6-astra"
 
@@ -123,3 +126,43 @@ def test_a_known_zero_price_is_admitted_and_root_caps_still_refuse_everything(da
     with pytest.raises(ua.BudgetExceeded) as refused:  # 2A is the global limit's rule, not a root cap's
         ua.reserve_attempt(_subscription(data_root, task_id="capped", root_task_id="capped", root_limit_usd=0))
     assert refused.value.limit_scope == "root"
+
+
+# ---- the queue (pre-worker hold, owner 2A) and saved work at the limit (owner 4A) ----------------------
+
+def _install_queue(tmp_path, monkeypatch):
+    from supervisor import queue, state, workers
+
+    state.init(tmp_path, total_budget_limit=10.0)
+    queue.init(tmp_path)
+    workers.DRIVE_ROOT = tmp_path
+    queue.DRIVE_ROOT = tmp_path
+    workers.PENDING[:] = []
+    workers.RUNNING.clear()
+    workers.WORKERS.clear()
+    queue.BUDGET_ROOT_FENCES.clear()
+    queue.init_queue_refs(workers.PENDING, workers.RUNNING, workers.QUEUE_SEQ_COUNTER_REF)
+    monkeypatch.setattr(workers, "load_state", lambda: {"owner_chat_id": 0})
+    monkeypatch.setattr(state, "budget_remaining", lambda _st, **_kwargs: 0.0)
+    sent = []
+    workers.WORKERS[0] = affirm_ready(SimpleNamespace(
+        wid=0, busy_task_id=None, reaping=False, in_q=SimpleNamespace(put=lambda task: sent.append(dict(task)))))
+    return queue, state, workers, sent
+
+
+@pytest.mark.parametrize("main, local, dispatched", [
+    (SUBSCRIPTION, "", True),
+    ("some-local-model", "true", True),
+    ("openai/gpt-5.2", "", False),  # paid admission: paused before dispatch, as before
+])
+def test_at_the_limit_the_queue_pauses_only_work_that_needs_paid_admission(
+        tmp_path, monkeypatch, main, local, dispatched):
+    monkeypatch.setenv("OUROBOROS_MODEL", main)
+    monkeypatch.setenv("USE_LOCAL_MAIN", local)
+    queue, _state, workers, sent = _install_queue(tmp_path, monkeypatch)
+    workers.PENDING.append({"id": "root", "admitted_dispatch": "none", "type": "task", "chat_id": 0, "priority": 1})
+    workers.assign_tasks()
+    if dispatched:
+        assert [task["id"] for task in sent] == ["root"] and workers.PENDING == []
+    else:
+        assert sent == [] and workers.PENDING[0]["_budget_pause"]["status"] == "paused_before_dispatch"
