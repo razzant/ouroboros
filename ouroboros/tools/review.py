@@ -769,7 +769,8 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
     # packet, so it asks for none.
     from ouroboros.review_words import section_budget, words_for_diff
 
-    words = words_for_diff(target_repo, diff_text)
+    words = (frozen.review_words if frozen is not None and frozen.diff_text == diff_text
+             else words_for_diff(target_repo, diff_text))
     words_section = words.render(section_budget(_triad_governance_usable_window(api_models, api_slots))) if api_models else ""
     governance = _triad_governance_context(
         ctx, touched_paths, checklist_section, api_models, api_slots,
@@ -896,7 +897,8 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
         ctx, row_plan, models, row_routes, target_repo=target_repo, governance_root=governance_root,
         subject=subject, frozen=frozen, diff_text=diff_text, layer=layer, checklist_section=checklist_section,
         commit_message=commit_message, goal=goal, scope=scope, review_rebuttal=review_rebuttal,
-        owner_words=owner_words, task_evidence=task_evidence, preflight_execution=execution, diff_pulse=pulse)
+        owner_words=owner_words, task_evidence=task_evidence, preflight_execution=execution, diff_pulse=pulse,
+        review_words=words)
     if brief_failure is not None:
         failed_slot, exc = brief_failure
         ctx._last_review_block_reason = "infra_failure"

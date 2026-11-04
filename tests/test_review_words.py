@@ -365,3 +365,33 @@ def test_result_word_capture_failure_does_not_undo_attribution(repo, tmp_path, m
     assert "Extraction unavailable" in failed["words_section"]
     assert "workspace words" in failed["words_section"]
     assert "could not be attributed" not in str(failed)
+
+
+def test_frozen_subject_shares_extraction_across_seats_but_not_revisions(repo, monkeypatch):
+    import dataclasses
+    from ouroboros import review_words
+    from ouroboros.tools import review
+    from ouroboros.tools.review_admission import build_two_part_brief
+    from ouroboros.tools.review_subject import FrozenSubject, ReviewSubjectSpec
+
+    diff = changed_repo(repo)
+    subject = FrozenSubject(spec=ReviewSubjectSpec(root_kind="system_repo", root=str(repo), kind="index",
+                            governance_root=str(repo), layer="body"), diff_text=diff, diff_sha="first",
+                            tree_sha=git(repo, "write-tree").strip(), parent_sha=git(repo, "rev-parse", "HEAD").strip(),
+                            name_status=(("M", PATH),))
+    captured, extract = [], review_words.words_for_diff
+
+    def count(root, text):
+        captured.append(text)
+        return extract(root, text)
+
+    monkeypatch.setattr(review_words, "words_for_diff", count)
+    monkeypatch.setattr(review, "reviewer_context_window", lambda *a, **k: 1_000_000)
+    for retrieves in (False, True, False):
+        packet = build_two_part_brief(subject, {"slot_id": "words", "model": "test/model", "retrieves": retrieves})
+        assert "Review needs your answer" in packet["system"]
+    assert captured == [diff]
+    new_diff = diff.replace('+    return "Review needs your answer"', '+    return "Review needs your approval"')
+    next_subject = dataclasses.replace(subject, diff_sha="second", diff_text=new_diff)
+    assert next_subject.review_words != subject.review_words
+    assert captured == [diff, new_diff]

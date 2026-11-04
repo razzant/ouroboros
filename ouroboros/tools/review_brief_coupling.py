@@ -133,6 +133,7 @@ class BriefInputs:
     # The reviewed change as the frozen subject renders it (``FrozenSubject
     # .diff_text``); ``None`` captures the reading root's staged index.
     diff_text: Optional[str] = None
+    review_words: Any = None
     task_evidence_section: str = ""
     required_sources: Optional[list] = None
     required_sources_ref: Optional[dict] = None
@@ -589,7 +590,7 @@ def build_retrieving_brief(
     from ouroboros.review_words import section_budget, words_for_diff
 
     header, body, unavailable = _staged_diff(repo_dir, brief)
-    words = words_for_diff(repo_dir, body)
+    words = brief.review_words if brief.review_words is not None else words_for_diff(repo_dir, body)
     words_section = words.render(section_budget(bound // _CHARS_PER_ESTIMATED_TOKEN))
     governance = governance_context(
         pathlib.Path(brief.governance_repo_dir or repo_dir),
