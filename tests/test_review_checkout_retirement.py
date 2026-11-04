@@ -161,6 +161,29 @@ def test_an_unmarked_checkout_goes_only_past_the_wait_when_a_recorded_round_name
     assert later["checkouts_removed"] == 1 and not entry.exists(), later
 
 
+@pytest.mark.parametrize("seat", ["late_settled_token", "in_flight", "adviser_running"])
+def test_a_settled_reviewer_row_keeping_its_start_token_no_longer_holds_its_checkout(subject, seat):
+    """#2710, the live shape (225 of 287 held checkouts on 03.11): a reviewer row that settled late yet kept its start
+    token holds nothing, so its round's checkout goes once its task ended; a reviewer still in flight, or a running
+    additional adviser beside the settled seat, keeps it."""
+    entry = _retain(subject)
+    settled = {"slot_id": "s1", "operation_id": "op-1", "status": "ok", "operation_state": "late_settled",
+               "late_result_pending": False, "pending_invocation_id": "inv-1"}
+    running = {**settled, "status": "error", "operation_state": "in_flight", "late_result_pending": True}
+    adviser = {**running, "slot_id": "a1", "operation_id": "op-a1", "pending_invocation_id": "inv-a1",
+               "review_plan": {"additional": True}}
+    rows = {"late_settled_token": [settled], "in_flight": [running], "adviser_running": [settled, adviser]}[seat]
+    (subject.data / "state" / "advisory_review.json").write_text(json.dumps({"attempts": [{
+        "task_id": TASK, "review_retry_key": RETRY_KEY, "status": "reviewed", "tool_name": "review_change",
+        "repo_key": "subject", "paid": True, "ts": "2026-10-17T00:00:00+00:00", "triad_raw_results": rows}]}),
+        encoding="utf-8")
+    report = _prune(subject)
+    if seat == "late_settled_token":
+        assert not entry.exists() and report["checkouts_removed"] == 1, report
+    else:
+        assert entry.is_dir() and report["checkouts_removed"] == 0 and not report["errors"], report
+
+
 def test_an_unreadable_review_state_removes_no_checkout(subject):
     entry = _retain(subject)
     (subject.data / "state" / "advisory_review.json").write_text("{torn", encoding="utf-8")

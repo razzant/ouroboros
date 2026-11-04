@@ -21,7 +21,9 @@ The same pass retires an isolated checkout (``state/review_checkouts/<token>/``,
 ``review_subject.isolated_checkout``) that its wave kept for open custody or that a crash left,
 once no review can still read it: its task is terminal and not live, no active review custody
 (``state/advisory_review.json``) names its round, no live review operation runs for the task and
-no seat that still holds a copy checks from it. Its owner is the task its ``checkout.json`` names;
+no seat that still holds a copy checks from it. Before judging, the pass repairs, in one locked
+write, the attempts that custody still holds whose seats are proven closed (#2710), so a leftover
+of an old writer is released by its own proof, never by age. Its owner is the task its ``checkout.json`` names;
 a checkout made before the marker is owned only through a recorded round of that state, and goes
 only once older than the retention period. Targeted ``git worktree remove`` retires only this
 checkout's registration. A rejoin rebuilds a retired checkout at its frozen tree. An unreadable
@@ -109,22 +111,27 @@ def _checkout_entries(base: pathlib.Path) -> list:
         return []
 
 
-def _review_rounds(data_root: Any) -> tuple:
+def _review_rounds(data_root: Any, *, repair: bool = False) -> tuple:
     """``(active, owners)`` from the one review state (``state/advisory_review.json``): the checkout
-    names of rounds whose custody is still active, and every recorded round's task by its checkout
-    name. A state that cannot be read raises: no checkout is judged without it."""
+    names of rounds whose custody is still active (the one custody predicate,
+    ``review_state._attempt_has_active_review_custody``), and every recorded round's task by its
+    checkout name. ``repair`` (the background pass, never Storage → Free, which only reads): the
+    attempts the predicate still holds whose exact records prove their seats closed first take that
+    repair, in one locked write (``review_change_custody.repair_held_attempts``). A state that cannot
+    be read raises: no checkout is judged without it."""
     from ouroboros.review_state import _load_state_unlocked
-    from ouroboros.tools.review_change_custody import custody_settled
     from ouroboros.tools.review_subject import checkout_token
 
     state = _load_state_unlocked(pathlib.Path(data_root), strict_attempt_authority=True)
+    if repair:
+        from ouroboros.tools.review_change_custody import repair_held_attempts
+
+        state = repair_held_attempts(data_root, state)
 
     def name(attempt: Any) -> str:
         return checkout_token(attempt.review_retry_key, task_id=attempt.task_id)
 
-    # A row whose exact settled record leaves no seat running is not custody, whatever start token it kept (#2587).
-    return ({name(row) for row in state.get_active_attempts() if row.review_retry_key
-             and not custody_settled(data_root, row)},
+    return ({name(row) for row in state.get_active_attempts() if row.review_retry_key},
             {name(row): str(row.task_id) for row in state.attempts if row.review_retry_key and row.task_id})
 
 
@@ -217,7 +224,7 @@ def _retire_checkouts(data_root: Any, entries: list, live: Callable[[], Any], cu
                       stopped: Callable[[], bool], report: Dict[str, Any]) -> None:
     """Judge and remove the isolated checkouts ENTRIES; ``sources`` are the roots kept seats check from."""
     try:
-        rounds = _review_rounds(data_root)
+        rounds = _review_rounds(data_root, repair=True)
     except Exception as exc:  # unknown custody: every checkout stays
         report["errors"].append(f"review state unreadable: {type(exc).__name__}: {exc}")
         return
