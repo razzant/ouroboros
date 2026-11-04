@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import delegate_custody as custody
-from ouroboros import workspace_preflight, test_environment
+from ouroboros import session_scratch, workspace_preflight, test_environment
 from ouroboros.delegate_start_instructions import scratch_fact
 from ouroboros.workspace_preflight import (
     PACKAGE_DOWNLOADS_DIRNAME,
@@ -36,7 +36,7 @@ from tests._delegated_transport_shared import (  # noqa: F401 -- autouse transpo
 
 GRANTED = {"accessControl": {"auxiliaryWritableRoots": True}}
 CACHES = (("uv", "UV_CACHE_DIR"), ("pip", "PIP_CACHE_DIR"), ("npm", "npm_config_cache"))
-_PLATFORM_TEMP_PARENT = test_environment.default_temp_parent
+_PLATFORM_TEMP_PARENT = test_environment.session_scratch_parent
 
 
 @pytest.fixture(autouse=True)
@@ -45,12 +45,21 @@ def _synthetic_temp_parent(tmp_path, monkeypatch):
     # explicit real consumer test uses the platform's physically short parent.
     parent = tmp_path / "temp"
     parent.mkdir()
-    monkeypatch.setattr(test_environment, "default_temp_parent", lambda: parent)
+    monkeypatch.setattr(test_environment, "session_scratch_parent", lambda: parent)
 
 
 def _scratch_for(data, task, key):
     record = data / "task_drives" / task / SESSION_SCRATCH_DIRNAME / key / "scratch.json"
     return pathlib.Path(json.loads(record.read_text(encoding="utf-8"))["path"])
+
+
+def _seat_scratch_for(data, task, operation):
+    """A seat's scratch record lives in the seat's own home, keyed by that home's name (#2706, #2707)."""
+    from ouroboros.review_checking import seat_dir
+
+    home = seat_dir(data, task, operation)
+    record = home / SESSION_SCRATCH_DIRNAME / f"seat-{home.name}" / "scratch.json"
+    return pathlib.Path(json.loads(record.read_text(encoding="utf-8"))["path"]), record
 
 
 class _Catalog:
@@ -263,7 +272,9 @@ def test_existing_drive_settlement_retires_only_its_short_scratch(tmp_path, layo
     reason = "producer could not prove process exit"
     test_environment.retain_tree(held.scratch, reason)
     # The producer's retention is never deleted, and no longer holds the custodied drive in the trash.
-    assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "retained": [held.scratch]}
+    report = task_custody.remove_custody_trash(data)
+    assert (report["removed"], report["stuck"]) == (1, {}) and [hold["class"] for hold in report["holds"]] == ["producer_retained"]
+    assert report["holds"][0]["example"].startswith(held.scratch) and report["holds"][0]["count"] == 1
     assert not retired.exists() and not pathlib.Path(first.scratch).exists()
     assert (pathlib.Path(held.scratch) / test_environment.RETENTION_MARKER).is_file()
     assert pathlib.Path(sibling.scratch).is_dir()
@@ -281,7 +292,7 @@ def test_unrelated_data_link_does_not_keep_a_retired_drive(tmp_path):
     outside.mkdir()
     (outside / "keep.txt").write_text("untouched", encoding="utf-8")
     _symlink_or_skip(retired / "data", outside)
-    assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "retained": []}
+    assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "holds": []}
     assert (outside / "keep.txt").read_text(encoding="utf-8") == "untouched"
 
 
@@ -328,7 +339,7 @@ def test_real_bus_through_safe_test_uses_the_actual_short_grant(tmp_path, monkey
     from tests.test_delegate_continuation import _start
     from ouroboros.test_evidence import evidence_directory
 
-    monkeypatch.setattr(test_environment, "default_temp_parent", _PLATFORM_TEMP_PARENT)
+    monkeypatch.setattr(test_environment, "session_scratch_parent", _PLATFORM_TEMP_PARENT)
     if consumer == "delegate":
         request, payload, ctx, _calls = _start(tmp_path, monkeypatch, acting=True, run_id="run-socket",
                                               harness_row=GRANTED)
@@ -363,7 +374,7 @@ def test_real_bus_through_safe_test_uses_the_actual_short_grant(tmp_path, monkey
         assert record["returncode"] == 0 and pathlib.Path(record["scratch"]).parent == scratch
     finally:
         custody._CUSTODY.clear()
-        workspace_preflight.release_session_scratch(drive)
+        session_scratch.release_session_scratch(drive)
 
 
 def test_the_facts_name_exactly_the_granted_places_and_a_limitation_as_one(tmp_path, monkeypatch):
@@ -650,7 +661,8 @@ def test_a_supported_writable_seat_sends_names_and_sizes_exactly_its_directories
     shape = delegated_run_shape(False, "workspace_write")
     binding = rc.session_checking(_Catalog(GRANTED), custody_drive=data, task_id="task-1", operation_id="op-1",
                                   root=str(author), source=source, shape=shape, route_id="route")
-    scratch = _scratch_for(data.resolve(), "task-1", f"seat-{rc.seat_dir(data, 'task-1', 'op-1').name}")
+    scratch, record = _seat_scratch_for(data.resolve(), "task-1", "op-1")
+    assert not (data / "task_drives").exists() and not (data / "state" / "session_scratch").exists()
     cache = data.resolve() / PACKAGE_DOWNLOADS_DIRNAME
     execution = binding["execution"]
     assert execution["auxiliaryWritableRoots"] == [str(scratch), *(str(cache / name) for name, _v in CACHES)]
@@ -674,7 +686,8 @@ def test_a_supported_writable_seat_sends_names_and_sizes_exactly_its_directories
     assert request["execution"] == execution and request["instructions"] == binding["instructions"]
     assert delivery["input_limit"]["prompt_chars"] == len("review") + len(binding["instructions"])
     assert delivery["first_send_bytes"] == len(json.dumps(request, ensure_ascii=False).encode("utf-8"))
-    # Its evidence is the copy's named folder; the scratch is neither retained nor released with the copy.
+    # Its evidence is the copy's named folder; the scratch is never retained, and it goes with the copy:
+    # its record is handed to the custody trash, whose remover deletes it off the serving process.
     (scratch / "pip-tmp").write_text("disposable\n", encoding="utf-8")
     (area / ".review-evidence").mkdir()
     (area / ".review-evidence" / "check.log").write_text("passed\n", encoding="utf-8")
@@ -682,7 +695,11 @@ def test_a_supported_writable_seat_sends_names_and_sizes_exactly_its_directories
     assert receipt["status"] == "retained", receipt
     assert [row["path"] for row in receipt["named_evidence"]] == [".review-evidence/check.log"]
     assert str(scratch) not in json.dumps(receipt) and not area.exists()
-    assert (scratch / "pip-tmp").read_text(encoding="utf-8") == "disposable\n"
+    assert (scratch / "pip-tmp").read_text(encoding="utf-8") == "disposable\n" and not record.exists()
+    [entry] = (data / "state" / "custody_trash").iterdir()
+    assert entry.name.startswith("task-1+scratch-")
+    from ouroboros.task_custody import remove_custody_trash
+    assert remove_custody_trash(data)["removed"] == 1 and not scratch.exists()
 
 
 @pytest.mark.parametrize("row", [None, {"accessControl": {"auxiliaryWritableRoots": False}}],
@@ -701,6 +718,7 @@ def test_unsupported_seats_keep_their_request_and_rights(tmp_path, row):
     assert "your engine grants this run none (auxiliary_roots_unsupported:" in text
     assert "granted to this run" not in text and f"({scratch_fact()})" in text
     assert not list(data.glob(f"task_drives/*/{SESSION_SCRATCH_DIRNAME}"))
+    assert not list(data.glob(f"state/review_checkouts/seats/*/{SESSION_SCRATCH_DIRNAME}"))
     assert not (data / PACKAGE_DOWNLOADS_DIRNAME).exists()
     rc.capture_seat_evidence(data, "task-1", "op-1")
 
@@ -719,7 +737,7 @@ def test_a_full_access_seat_owns_named_disposable_scratch_that_its_evidence_neve
     area = rc.seat_dir(data, "task-1", "op-1") / "area.noindex"
     assert binding["execution"] == {"isolation": "live", "delegated": True, "workspaceRoot": str(area)}
     assert gateway.reads == 0  # nothing to negotiate at full access
-    scratch = _scratch_for(data.resolve(), "task-1", f"seat-{rc.seat_dir(data, 'task-1', 'op-1').name}")
+    scratch, record = _seat_scratch_for(data.resolve(), "task-1", "op-1")
     text = binding["instructions"]
     assert f"goes outside every Git working tree (in {scratch}, this run's disposable scratch)" in text
     assert f"in {scratch}, this run's disposable scratch, never inside this copy" in text
@@ -730,7 +748,7 @@ def test_a_full_access_seat_owns_named_disposable_scratch_that_its_evidence_neve
     (area / ".review-evidence" / "check.log").write_text("passed\n", encoding="utf-8")
     receipt = rc.capture_seat_evidence(data, "task-1", "op-1")
     assert receipt["status"] == "retained" and str(scratch) not in json.dumps(receipt), receipt
-    assert (scratch / "venv-marker").is_file()  # it goes with the review task's drive, not with the seat
+    assert (scratch / "venv-marker").is_file() and not record.exists()  # handed to the trash with the copy
 
 
 def test_a_thread_seat_claims_no_grant_its_turns_cannot_carry(tmp_path):
