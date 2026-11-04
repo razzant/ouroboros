@@ -1,6 +1,7 @@
 """A wake observes people's words whole: every new row under its host-known author and exact address, in the
-observation, its stored source and its coverage facts; my human's words stay whole in the pointer form too, and
-a task's terminal line says the card's outcome and an explicit stop's recorded reason.
+observation, its stored source and its coverage facts; the fallback form keeps my human's words (a card answer's
+too) whole and names every other person's row by author, size and exact address, and a task's terminal line says
+the card's outcome and an explicit stop's recorded reason.
 
 Every guard is checked both ways (whole vs the earlier 240-character cut; my human vs a participant, a shared
 account or a bot; coverage only beside a stored source; a plain finish vs an author's stop).
@@ -69,19 +70,50 @@ def test_people_words_reach_the_wake_whole_with_author_and_address(tmp_path, pla
     assert source.count(TAIL.replace('"', '\\"')) == 5, "the stored source holds the same whole lines"
 
 
-def test_the_pointer_form_keeps_my_humans_words_and_the_bare_pointer_stays_for_an_overflow(tmp_path, place):
+def test_the_fallback_form_keeps_my_humans_words_and_points_at_every_other_person(tmp_path, place):
     since = T0 - 3600
     _chat(tmp_path, _owner(LONG, since + 1, cmid="a"), _place_row(place, "sasha", "Sasha: " + LONG, since + 2))
     observation = _observe(tmp_path)
     task = {"id": "wake-1", "metadata": {}}
     wake.bind_wake_observation(tmp_path, task, observation, lambda events: "[Wake-up] " + events)
     facts = task["metadata"][wake.WAKE_OBSERVATION_KEY]
-    assert LONG in facts["projection_text"] and "Sasha: " not in facts["projection_text"]
-    assert LONG not in facts["pointer_text"] and json.dumps(facts["source"]["read"], sort_keys=True,
-                                                            ensure_ascii=False) in facts["pointer_text"]
-    addresses = _stored(tmp_path)
+    projection, pointer, addresses = facts["projection_text"], facts["pointer_text"], _stored(tmp_path)
+    assert LONG in projection and "Sasha: " not in projection, "my human's words whole, no other body"
+    [sasha] = [line for line in projection.splitlines() if addresses["Sasha: " + LONG] in line]
+    assert sasha.startswith("- message in a place in ") and "; Sasha [" in sasha
+    assert sasha.endswith(f"] {len('Sasha: ' + LONG)} chars, at the source"), "author, size and exact address"
+    assert LONG not in pointer and addresses["Sasha: " + LONG] not in pointer, "the bare pointer names no row"
+    assert json.dumps(facts["source"]["read"], sort_keys=True, ensure_ascii=False) in pointer
     assert facts["whole_rows"] == sorted([addresses[LONG], addresses["Sasha: " + LONG]])
     assert facts["inline_rows_in_fallback"] == [addresses[LONG]]
+
+
+def test_a_bare_pointer_is_bound_only_when_the_fallback_form_holds_more(tmp_path, place):
+    since = T0 - 3600
+    _result(tmp_path, "t1", ts=since + 5)
+    _chat(tmp_path, _summary("t1", since + 6))
+    plain = {"id": "wake-4", "metadata": {}}
+    wake.bind_wake_observation(tmp_path, plain, _observe(tmp_path), lambda events: events)
+    assert "pointer_text" not in plain["metadata"][wake.WAKE_OBSERVATION_KEY], "no words: the projection is bare"
+    _chat(tmp_path, _place_row(place, "sasha", "Sasha: " + LONG, since + 7))
+    people = {"id": "wake-5", "metadata": {}}
+    wake.bind_wake_observation(tmp_path, people, _observe(tmp_path), lambda events: events)
+    facts = people["metadata"][wake.WAKE_OBSERVATION_KEY]
+    assert facts["pointer_text"] != facts["projection_text"] and facts["inline_rows_in_fallback"] == []
+
+
+def test_my_humans_card_answer_stays_whole_in_the_fallback_form(tmp_path):
+    since = T0 - 3600
+    comment = "Keep the old parser.\n\nReason: " + "the migration cost is too high; " * 40 + "END-OF-COMMENT"
+    block = {"quiz_id": "qown", "state": "answered", "asked_at": _iso(since + 60), "answered_at": _iso(since + 2400),
+             "options": ["A", "B"], "comment": comment, "question": "Which parser?"}
+    _chat(tmp_path, {"ts": _iso(since + 2400), "direction": "system", "type": "quiz_answer", "task_id": "asker",
+                     "quiz": block})
+    task = {"id": "wake-6", "metadata": {}}
+    wake.bind_wake_observation(tmp_path, task, _observe(tmp_path), lambda events: events)
+    facts = task["metadata"][wake.WAKE_OBSERVATION_KEY]
+    assert comment in facts["projection_text"], "my human's answer, whole"
+    assert "END-OF-COMMENT" not in facts["pointer_text"], "the bare pointer carries no words"
 
 
 def test_coverage_is_claimed_only_beside_a_stored_source(tmp_path, place, monkeypatch):
