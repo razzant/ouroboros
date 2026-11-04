@@ -1,7 +1,7 @@
 """Durable handlers for rare, typed telemetry-only worker events.
 
 The supervisor drops an event whose type is not in EVENT_HANDLERS (it decays
-into a truncated ``unknown_worker_event`` repr in supervisor.jsonl), so every
+into a content-free ``unknown_worker_event`` row in supervisor.jsonl), so every
 literal-typed emitter needs a registered sink. The types here share one
 type-agnostic durable passthrough — each row is appended verbatim to
 events.jsonl for typed consumers (budget audits, advisory forensics). They
@@ -73,6 +73,25 @@ def _handle_task_message_injected(evt: Dict[str, Any], ctx: Any) -> None:
         log.debug("Failed to forward task_message_injected to live logs", exc_info=True)
 
 
+def _handle_presence_result(evt: Dict[str, Any], ctx: Any) -> None:
+    """A pooled Presence-bound root's result frame: its fact, never its words.
+
+    The words stay on the task result (a connector reads them by a known reference through
+    ``/presence/work``); this frame neither confirms that write nor sends anything. Inline
+    turns read their own copy in process, so only pooled drains arrive here. Not the shared
+    passthrough above: that would copy the final text into the ledger.
+    """
+    try:
+        ctx.append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", {
+            "ts": evt.get("ts", utc_now_iso()), "type": "presence_result",
+            "task_id": str(evt.get("task_id") or ""), "outcome": str(evt.get("outcome") or ""),
+            "work_ref": str(evt.get("work_ref") or ""), "output_ref": str(evt.get("output_ref") or ""),
+            "text_chars": len(str(evt.get("text") or "")),
+        })
+    except Exception:
+        log.debug("Failed to record presence_result for %s", evt.get("task_id"), exc_info=True)
+
+
 # Merged into supervisor.events.EVENT_HANDLERS (the `**_CEH` pattern). The
 # review_wave_budget_partial_unknown twin was the v6.69.0-class omission: the
 # fix registered one branch of review_helpers' if/else and missed the other.
@@ -87,4 +106,5 @@ TELEMETRY_EVENT_HANDLERS = {
     # #Q-2b: the owner's quiz answer landed in a worker round — same
     # duplicate-detection telemetry as its task-message sibling.
     "quiz_answer_injected": _handle_typed_telemetry,
+    "presence_result": _handle_presence_result,
 }
