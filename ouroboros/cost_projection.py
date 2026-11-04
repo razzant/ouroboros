@@ -543,13 +543,15 @@ def current_cost(source: Mapping[str, Any], drive_root: Any, *, breakdown=None) 
 
 def current_costs(sources: Any, drive_root: Any) -> list:
     """Read each requested task tree once, independently of the observer's tree."""
+    from ouroboros.task_results import resolve_task_lineage
     from ouroboros.usage_accounting import usage_breakdown
 
     rows, breakdowns = list(sources), {}
     for index, row in enumerate(rows):
         if not _live_cost_source(row):
             continue
-        root_task_id = str(row.get("root_task_id") or row.get("task_id") or row.get("id"))
+        root_task_id = resolve_task_lineage(row.get("task_id") or row.get("id"),
+            root_task_id=row.get("root_task_id"), metadata=row.get("metadata"))["root_task_id"]
         if root_task_id not in breakdowns:
             try:
                 breakdowns[root_task_id] = usage_breakdown(drive_root, root_task_id=root_task_id, include_custody=True)

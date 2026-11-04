@@ -110,7 +110,8 @@ def test_terminal_batches_keep_the_receipt_without_reading_current_accounting(ro
 
 
 @pytest.mark.parametrize("same_tree", [True, False])
-def test_wait_cost_batch_reads_each_actual_root_once(root, monkeypatch, same_tree):
+@pytest.mark.parametrize("lineage_carrier", ["top_level", "metadata"])
+def test_wait_cost_batch_reads_each_actual_root_once(root, monkeypatch, same_tree, lineage_carrier):
     from ouroboros import usage_accounting as ua
     from ouroboros.task_results import write_task_result
     from ouroboros.tools import control_task_results as results
@@ -123,7 +124,8 @@ def test_wait_cost_batch_reads_each_actual_root_once(root, monkeypatch, same_tre
     for index, owner in enumerate(roots):
         for suffix in ("1", "2"):
             tid = owner + "-child-" + suffix
-            write_task_result(root, tid, "scheduled", parent_task_id=owner, root_task_id=owner)
+            lineage = {"root_task_id": owner} if lineage_carrier == "top_level" else {"metadata": {"root_task_id": owner}}
+            write_task_result(root, tid, "scheduled", parent_task_id=owner, **lineage)
             expected[tid] = index + 3.5
             ua.record_subscription_session("run-" + tid, drive_root=root, task_id=tid,
                                            root_task_id=owner, route="test", spend_usd=expected[tid])
