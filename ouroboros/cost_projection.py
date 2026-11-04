@@ -553,10 +553,17 @@ def current_costs(sources: Any, drive_root: Any) -> list:
         if root_task_id not in breakdowns:
             try:
                 breakdowns[root_task_id] = usage_breakdown(drive_root, root_task_id=root_task_id, include_custody=True)
-            except Exception:
-                log.debug("Batch task cost unavailable for %s", root_task_id, exc_info=True)
-                breakdowns[root_task_id] = {}
-        rows[index] = current_cost(row, drive_root, breakdown=breakdowns[root_task_id])
+            except Exception as exc:
+                log.warning("Batch task cost unavailable for %s: %s: %s", root_task_id, type(exc).__name__, exc)
+                breakdowns[root_task_id] = None
+        breakdown = breakdowns[root_task_id]
+        rows[index] = current_cost(row, drive_root, breakdown=breakdown) if breakdown is not None else {
+            **with_cost_aliases(row), "cost_accounting_status": "unavailable", "cost_final": False,
+            "cost_accounting_error": "ledger_unavailable", "cost_presentation": None,
+            "accounted_upper_bound_usd": None, "total_rounds": None, "prompt_tokens": None,
+            "completion_tokens": None, "reserved_usd": None, "unresolved_upper_bound_usd": None,
+            "unknown_unmetered": None, "non_final_rows": None, "ledger_integrity_degraded": True,
+        }
     return rows
 
 

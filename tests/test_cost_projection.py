@@ -139,6 +139,31 @@ def test_wait_cost_batch_reads_each_actual_root_once(root, monkeypatch, same_tre
     assert sorted(row["root_task_id"] for row in reads) == sorted(roots)
 
 
+def test_batch_unavailable_accounting_warns_once_with_the_original_cause(root, monkeypatch, caplog):
+    import logging
+    from ouroboros import usage_accounting as ua
+    from ouroboros.cost_projection import current_costs
+
+    reads = []
+
+    def unavailable(*args, **kwargs):
+        reads.append(kwargs)
+        raise OSError("ledger unreadable")
+
+    monkeypatch.setattr(ua, "usage_breakdown", unavailable)
+    rows = [{"task_id": f"child-{i}", "root_task_id": "parent", "status": "running",
+             "accounted_upper_bound_usd": 0.1, "cost_final": True} for i in range(5)]
+    with caplog.at_level(logging.WARNING):
+        result = current_costs(rows, root)
+    assert len(reads) == 1
+    assert all(row["accounted_upper_bound_usd"] is None and row["cost_final"] is False
+               and row["cost_accounting_status"] == "unavailable" for row in result)
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1 and warnings[0].levelno == logging.WARNING
+    assert "ledger unreadable" in warnings[0].getMessage()
+    assert "KeyError" not in caplog.text
+
+
 class TestAliases:
     def test_legacy_spelling_resolves_but_is_never_emitted(self):
         out = with_cost_aliases({"cost_usd": 1.5})
