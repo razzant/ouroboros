@@ -286,6 +286,8 @@
     --space-3: 12px;
     --space-4: 16px;
     --space-5: 24px;
+    /* Smallest result measure before a neighbouring action wraps below it. */
+    --result-copy-min-width: 12rem;
     /* Bounded scroll region for the Updates restore list (DESIGN section 5:
        a new visual dimension becomes a variable before a page-local literal). */
     --updates-list-max-height: 320px;

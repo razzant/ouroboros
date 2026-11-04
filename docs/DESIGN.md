@@ -2510,10 +2510,9 @@ or its host page, and a checked box is not re-said beside it. A conditional line
 moves the control that caused it: controls own stable slots, and a line an edit toggles
 opens beside or below them.
 
-For a row with one action and a durable result, the result occupies the flexible
-left side and the neutral action stays docked on the right. Field-level actions
-(for example Show/Clear) keep the field's control height; they are not reused as
-the compact result-row action.
+In a result/action row, the result has readable space. The action docks right
+when it fits, otherwise below, by the row's width. Long content stays whole.
+Field actions (Show/Clear) keep the field's height, not the compact result-row size.
 
 Rows of the same kind are equivalent: no row gets extra visual weight for
 being first, default, or native. Grouping and section-level actions express

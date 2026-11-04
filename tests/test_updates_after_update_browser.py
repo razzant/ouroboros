@@ -205,6 +205,33 @@ def refresh(page, transport, reads):
     wait_reads(page, reads, count + 2)
 
 
+def test_action_row_preserves_empty_notes_and_hidden_primary_buttons(updates_ui):
+    from playwright.sync_api import expect
+
+    current = {"status": {**status(None, {}), "checked_at": ""}}
+    page, transport, reads = open_updates(updates_ui, current)
+    note, button = page.locator("#updates-action-note"), page.locator("#btn-update-primary")
+    row = note.locator("..")
+    expect(button).to_be_visible()
+    expect(note).to_be_empty()
+    expect(note).not_to_be_visible()
+    row_box, action_box = row.bounding_box(), button.bounding_box()
+    assert abs(action_box["x"] + action_box["width"] - row_box["x"] - row_box["width"]) <= 1
+    capture(page, "action-with-empty-note")
+    # An unmanaged checkout can still say when it was checked, without offering
+    # an update. Layout must not revive that hidden primary action.
+    current["status"].update(managed=False, checked_at=datetime.now(timezone.utc).isoformat())
+    refresh(page, transport, reads)
+    expect(note).to_be_visible()
+    expect(button).not_to_be_visible()
+    expect(row).to_be_visible()
+    assert note.bounding_box()["width"] >= row.bounding_box()["width"] - 2
+    capture(page, "checked-with-no-primary-action")
+    current["status"]["checked_at"] = ""
+    refresh(page, transport, reads)
+    expect(row).not_to_be_visible()
+
+
 def toggle(page, selector, key):
     page.locator(selector).focus()
     page.keyboard.press(key)

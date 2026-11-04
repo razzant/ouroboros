@@ -25,11 +25,13 @@ test('neutral controls have one shared button role in both UI shells', () => {
     assert.doesNotMatch(onboardingCss, /settings-ghost-btn/);
 });
 
-test('single-action settings rows reserve a flexible status and responsive action edge', () => {
-    assert.match(settingsCss, /\.settings-action-row\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) auto/);
-    assert.match(settingsCss, /\.settings-action-row\s*>\s*\.btn-default\s*\{[^}]*justify-self:\s*end/);
-    assert.match(settingsCss, /@media \(max-width: 760px\)[\s\S]*?\.settings-action-row\s*>\s*\.settings-inline-status:empty\s*\{[^}]*display:\s*none/);
-    assert.match(settingsCss, /@media \(max-width: 760px\)[\s\S]*?\.settings-action-row\s*\{[^}]*grid-template-columns:\s*1fr/);
+test('result/action composition has one shared owner, independent of page and viewport', async () => {
+    // Real-container reflow and readability are exercised by the browser consumer.
+    const pageCss = await readFile(new URL('../style.css', import.meta.url), 'utf8');
+    assert.match(settingsCss, /\.settings-action-row\s*\{[^}]*flex-wrap:\s*wrap/);
+    assert.match(settingsCss, /\.settings-action-row\s*>\s*:last-child[^}]*margin-inline-start:\s*auto/);
+    assert.doesNotMatch(sharedCss, /\.settings-action-row\s*\{/);
+    assert.doesNotMatch(pageCss, /\.skills-card-action-row\s*\{[^}]*(?:display:|grid-template|flex:)/);
 });
 
 test('async actions expose the same busy and status semantics', () => {

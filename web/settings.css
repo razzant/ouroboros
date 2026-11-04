@@ -464,23 +464,28 @@
     gap: 10px;
 }
 
-/* A single action with a durable result belongs to one row: the result stays
-   readable on the left while the action keeps a stable right edge. */
+/* Result/action composition shared by Settings, Skills and Updates. Wrap at the
+   row's width before its action leaves the result a sliver; spacing stays local. */
 .settings-action-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--space-3);
     min-width: 0;
 }
-
-.settings-action-row > .settings-inline-status {
+.settings-action-row > :first-child {
+    flex: 1 1 0;
+    min-width: min(100%, var(--result-copy-min-width));
+    overflow-wrap: anywhere;
+}
+.settings-action-row > :last-child:not(:first-child) {
+    flex: 0 1 auto;
     min-width: 0;
+    max-width: 100%;
+    margin-inline-start: auto;
+    white-space: normal;
 }
-
-.settings-action-row > .btn-default {
-    justify-self: end;
-}
+.settings-action-row > :empty { display: none; }
 
 .settings-footer {
     flex-shrink: 0;
@@ -1136,18 +1141,6 @@
         margin-left: 0;
     }
 
-    .settings-action-row {
-        grid-template-columns: 1fr;
-        align-items: start;
-    }
-
-    .settings-action-row > .settings-inline-status:empty {
-        display: none;
-    }
-
-    .settings-action-row > .btn-default {
-        justify-self: end;
-    }
 }
 
 @media (max-width: 640px) {
