@@ -198,9 +198,11 @@ def test_a_closed_pr_is_the_latest_readback_beside_the_earlier_queued_request(wo
     assert f"- Outcome: **queued** {QUEUED_CLOSED.removeprefix('queued ')}\n" in body
     assert f"- Observed PR head `{moved_head}`, base `{moved_base}`" in body
     assert world.ctx.pending_events[-1]["text"] == merge_receipts.card_row_text(receipt)
-    # Nothing merged: the card's coverage words name the head this request named, never "what merged".
-    assert merge_receipts.card_row_text(receipt).endswith(
-        ". This review was for earlier code; it does not cover this head.")
+    # Nothing merged: the card's coverage detail names the head this request named, never "what merged", and its
+    # head ends on the earlier-version label rather than the sentence.
+    head, _, detail = merge_receipts.card_row_text(receipt).partition("\n")
+    assert head.endswith(f" · {merge_receipts._EARLIER}") and detail not in head
+    assert "this head" in detail and "what merged" not in head + detail
     assert _merges(world) == 1
 
 
