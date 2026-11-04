@@ -46,8 +46,9 @@ class StorageFreeEntry(TypedDict):
 
 
 class StorageFreeKept(TypedDict):
-    reason: str  # results_pending | in_use | busy | unreadable_record | capture_unproven | unproven_excluded_inputs
-    # | owner_keep | changed | retained_evidence | undeclared_environment | advanced_group | restart | other
+    reason: str  # the retirer's own typed reason, as stored (task_live | liveness_unknown | store_busy | not_proven_over |
+    # custody_held | child_result_unadopted | ... | owner_keep | changed | capture_unproven | unproven_excluded_inputs |
+    # unreadable_record | generation_closed | advanced_group | other); the client groups the words
     count: int
     manual_count: NotRequired[int]  # ``pool.excluded`` only: how many of ``count`` the owner can discard by hand (``view=manual``)
 
@@ -93,7 +94,7 @@ def _ordinary(plan: Dict[str, Any]) -> List[Any]:
 
 
 def _excluded(plan: Dict[str, Any]) -> List[Any]:
-    found = [(item.reason or "in_use", item) for group in plan["groups"] for item in group["excluded"]]
+    found = [(item.reason or "other", item) for group in plan["groups"] for item in group["excluded"]]
     found += [(ADVANCED, item) for group in plan["groups"] for item in group["candidates"] if not item.ordinary]
     return sorted(found, key=lambda pair: (pair[0], pair[1].key))
 

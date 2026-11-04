@@ -151,7 +151,7 @@
  * @property {string} id  // work_folders | working_copies | review_evidence | review_checkouts | lost_copies | service_folders | result_pins
  * @property {number} count
  * @property {number} inside_wait  // finished less than retention_days ago
- * @property {number} in_use  // live, pending, unknown or non-terminal: offered nowhere, named here
+ * @property {number} in_use  // held: not offered and not unreadable; each item names the typed reason it stays for
  * @property {number} unreadable  // no readable task record or custody: shown, never freed
  * @property {number|null} bytes
  * @property {boolean} bytes_complete
@@ -161,7 +161,7 @@
 /**
  * A typed reason and how many items it holds, for what a pool leaves out and what a run kept.
  * @typedef {Object} StorageFreeKept
- * @property {string} reason  // results_pending | in_use | busy | unreadable_record | restart | capture_unproven | unproven_excluded_inputs | retained_evidence | undeclared_environment | owner_keep | changed | other; and, only for what a pool leaves out, advanced_group (offered as a whole saved-work group)
+ * @property {string} reason  // the retirer's own typed reason as stored (task_live | liveness_unknown | store_busy | not_proven_over | custody_held | child_result_unadopted | … | owner_keep | changed | capture_unproven | unproven_excluded_inputs | unreadable_record | generation_closed | other; storage_free.js KEPT_REASONS groups the words) and, only for what a pool leaves out, advanced_group (offered as a whole saved-work group)
  * @property {number} count
  * @property {number=} manual_count  // a pool's row only, when above zero: how many of `count` can be discarded by hand (view=manual). Never subtract the pool's global manual count from a row: each row says its own.
  */

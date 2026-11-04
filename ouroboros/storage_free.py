@@ -83,26 +83,15 @@ GROUP_RESULT_PINS = "result_pins"
 GROUPS = (GROUP_WORK_FOLDERS, GROUP_WORKING_COPIES, GROUP_REVIEW_EVIDENCE, GROUP_REVIEW_CHECKOUTS,
           GROUP_LOST_COPIES, GROUP_SERVICE_FOLDERS, GROUP_RESULT_PINS)
 LARGEST_ITEMS = 20
-# A retirer's typed reason -> the owner's reason (the client's sentences): results or messages
-# still being saved (late mail and call records that moved under the pass included: the next pass
-# carries them), in use again, busy right now, the task record or its mailbox unreadable, a restart.
-_KEPT_REASONS = {
-    "results_pending": ("child_result_unadopted", "child_refs_pending", "call_inventory_pending", "call_inventory_changed",
-                        "inputs_uncustodied", "unread_mailbox_uncustodied", "verification_receipts_uncustodied",
-                        "canonical_changed", "drive_occupant_changed", "canonical_not_settled", "post_work_open",
-                        "artifacts_not_terminal", "child_drive_mismatch"),
-    "in_use": ("task_live", "liveness_unknown", "owner_processes_live", "owner_not_terminal", "task_not_terminal", "parent_not_terminal",
-               "not_proven_over", "custody_held", "owner_paused"),
-    "busy": ("custody_busy", "mailbox_busy", "store_busy", "busy", "record_busy"),
-    "unreadable_record": ("task_result_unreadable", "unread_mailbox_unreadable", "record_unreadable"),
-    "capture_unproven": ("capture_unproven", "capture_incomplete"),
-    "retained_evidence": ("retained_process_environment",),
-    "changed": ("changed", "nothing_unsaved", "nested_repository", "commits_unprotected"),
-    "unproven_excluded_inputs": ("unproven_excluded_inputs",),
-    "owner_keep": ("owner_keep",),
-    "restart": ("generation_closed",),
-}
 _RETIRER_STAMPS = ("scratch_retention", "retiring", "removal_failed", "removal_failed_identity")  # no change of ownership
+
+
+def _liveness_reason(answer: Any) -> str:
+    """The typed hold a liveness probe's answer names: ``""`` for proven absence, ``task_live``,
+    ``liveness_unknown``, or the probe's own cause (``store_busy``: ``supervisor.task_ownership.ProbeUnknown``)."""
+    if answer is False:
+        return ""
+    return "liveness_unknown" if answer is None else str(getattr(answer, "cause", "task_live"))
 
 
 class StorageFreeItem(TypedDict):
@@ -115,7 +104,7 @@ class StorageFreeGroup(TypedDict):
     id: str  # one of GROUPS
     count: int
     inside_wait: int  # finished less than retention_days ago (the background would still wait)
-    in_use: int  # live, pending, unknown or non-terminal: offered nowhere, named here
+    in_use: int  # held: not offered and not unreadable; each item names the typed reason it stays for
     unreadable: int  # no readable task record (or unreadable custody): shown, never freed
     bytes: Optional[int]
     bytes_complete: bool
@@ -191,17 +180,18 @@ class _Candidate:
         # when the owner may discard it by hand
 
 
-def _sorted_into(root: pathlib.Path, group: Dict[str, Any], verdict: str, candidate: "_Candidate", reason: str = "") -> None:
-    """A lister's verdict: offered, or named with its reason; in use or unreadable (shown, never freed)."""
+def _sorted_into(root: pathlib.Path, group: Dict[str, Any], verdict: str, candidate: "_Candidate") -> None:
+    """A lister's verdict: ``offer`` (unless the owner keeps it), ``unreadable`` (shown, never freed), or the typed
+    reason it stays for (the retirer's own word, as the engine names its holds); the client says the words."""
     from ouroboros.owner_keep import OWNER_KEEP, is_kept
 
     if verdict == "offer" and is_kept(root, candidate.owner):
-        verdict, reason = "in_use", OWNER_KEEP
+        verdict = OWNER_KEEP
     if verdict == "offer":
         group["candidates"].append(candidate)
         return
     group["unreadable" if verdict == "unreadable" else "in_use"] += 1
-    candidate.reason = reason or ("unreadable_record" if verdict == "unreadable" else verdict if verdict == OWNER_KEEP else "in_use")
+    candidate.reason = "unreadable_record" if verdict == "unreadable" else verdict
     candidate.ordinary = False
     group["excluded"].append(candidate)
 
@@ -265,13 +255,12 @@ def _name_items(root: pathlib.Path, items: List["_Candidate"]) -> None:
 
 
 def _reason(raw: str) -> str:
+    """A retirer's own reason, kept as it named it (the client groups the words); a custody error's class
+    is read for the one fact it carries (an unreadable row), an unnamed keep is ``other``."""
     raw = str(raw or "")
     if raw.startswith("custody_error"):
         return "unreadable_record" if "ValueError" in raw else "other"
-    for reason, codes in _KEPT_REASONS.items():
-        if raw in codes:
-            return reason
-    return "other"
+    return raw or "other"
 
 
 class FreeSpace:
@@ -559,9 +548,10 @@ class FreeSpace:
                         raise _Stopped()
                     item = _Candidate(GROUP_WORK_FOLDERS, f"{layout}:{task_id}", base / task_id, layout, inside_wait=inside, task=task_id)
                     item.eligible_after = _eligible_after(at, days)
-                    # No readable row: shown, never freed.
-                    _sorted_into(root, group, "unreadable" if not fact else "in_use" if status not in FINAL_STATUSES
-                                 or live(task_id) is not False else "offer", item)
+                    # No readable row: shown, never freed; a row not terminal, or a task the probe cannot prove absent,
+                    # stays with that reason.
+                    _sorted_into(root, group, "unreadable" if not fact else "task_not_terminal" if status not in FINAL_STATUSES
+                                 else _liveness_reason(live(task_id)) or "offer", item)
             groups.append(group)
         read = read_records(root)  # one passive read per copy: no import, no event row; unreadable ones are named
         rows = list(read.rows)
@@ -589,26 +579,26 @@ class FreeSpace:
                     snapshot = str(row.get("snapshot_id") or "")
                     item = _Candidate(GROUP_WORKING_COPIES, f"snapshot:{snapshot}", path, "delegated", task=task_id, row=row)
                     item.eligible_after = _eligible_after(float(row.get("created_at") or 0), 0)
-                    kept = owner_keep.is_kept(root, task_id)  # the proof reads the keep too: name it, not "in use"
-                    _sorted_into(root, group, "in_use" if kept else "unreadable" if open_ids is None else "offer"
-                                 if snapshot_released(row, open_ids, data_dir=root, live=live) else "in_use", item,
-                                 owner_keep.OWNER_KEEP if kept else "")
+                    kept = owner_keep.is_kept(root, task_id)  # the proof reads the keep too: name it, not a held run
+                    _sorted_into(root, group, owner_keep.OWNER_KEEP if kept else "unreadable" if open_ids is None else "offer"
+                                 if snapshot_released(row, open_ids, data_dir=root, live=live) else "custody_held", item)
                     continue
                 item = _Candidate(GROUP_WORKING_COPIES, f"{kind or 'plain'}:{_record_name(path)}", path, kind or "plain",
                                   task=task_id, row=row)
                 item.eligible_after = _eligible_after(max(float(row.get("created_at") or 0), float(row.get("used_at") or 0)), days)
                 over = body_candidate._recorded_terminal(task_id, root) and not body_candidate.live_lineage_processes(root, task_id)
-                reason = ""
+                reason = "" if over else "not_proven_over"
                 if over and kind == "body_candidate":
                     # The retirer's own order (``retention_verdict``), its scratch witness left unwritten.
                     reason = ("retained_evidence" if body_candidate._retained_scratch(row, classify=True, record_witness=False)
                               else "unproven_excluded_inputs" if body_candidate.unique_work(row).get("excluded") else "")
                 elif over:
-                    over = live(task_id) is False
-                    reason = plain_copy_verdict(row, root)["reason"] if over else ""
-                    reason = reason if reason == "capture_unproven" else ""
+                    reason = _liveness_reason(live(task_id))
+                    if not reason:
+                        verdict = plain_copy_verdict(row, root)["reason"]
+                        reason = verdict if verdict == "capture_unproven" else ""
                 reason = "owner_keep" if reason and owner_keep.is_kept(root, task_id) else reason  # the keep is what holds it now
-                _sorted_into(root, group, "in_use" if not over or reason else "offer", item, reason)
+                _sorted_into(root, group, reason or "offer", item)
                 if reason in ("capture_unproven", "unproven_excluded_inputs"):
                     offer = discard_offer(row, root, live, _resolve_root())  # held for the plan's life: the largest paths only
                     item.manual = None if offer["refusal"] else {**offer, "unsaved": offer["unsaved"][:UNSAVED_LISTED],
@@ -653,7 +643,7 @@ class FreeSpace:
                     named_unreadable.add(_record_file(entry, root).name)
                     _sorted_into(root, group, "unreadable", item)  # a record may name it: unread is not unregistered
                     continue
-                _sorted_into(root, group, "in_use" if live(owner) is not False else "offer", item)
+                _sorted_into(root, group, _liveness_reason(live(owner)) or "offer", item)
             groups.append(group)
         if copies_group is not None:  # a record whose folder this listing did not reach is still named
             for name in sorted(read.unreadable - named_unreadable):
@@ -672,11 +662,11 @@ class FreeSpace:
                     if not why:
                         item.kind = "environment"
                         item.eligible_after = _eligible_after((entry / SCRATCH_MARKER).stat().st_mtime, days)
-                    _sorted_into(root, group, "in_use" if live(owner) is not False else "offer", item, why if why == "in_use" else "")
+                    _sorted_into(root, group, _liveness_reason(live(owner)) or "offer", item)
             for runs in (folder / ".test-evidence" for folder in folders):  # runs inside copies without a task drive
                 for run in sorted(runs.iterdir()) if runs.is_dir() and not runs.is_symlink() else ():
                     if run.is_dir() and not run.is_symlink():
-                        _sorted_into(root, group, "offer" if _run_finished(run) else "in_use",
+                        _sorted_into(root, group, "offer" if _run_finished(run) else "run_open",
                                      _Candidate(GROUP_SERVICE_FOLDERS, f"test_run:{_record_name(run)}", run, "test_run"))
             groups.append(group)
         if GROUP_RESULT_PINS in self._offered:
@@ -688,7 +678,7 @@ class FreeSpace:
                         or os.path.lexists(str(row.get("path") or "")) or (open_ids is not None and snap not in open_ids):
                     continue  # a checkout is G2's; a snapshot custody releases goes with the custody GC
                 verdict = "unreadable" if open_ids is None else "offer" if _task_proven_over(
-                    str(row.get("task_id") or ""), root, live) else "in_use"
+                    str(row.get("task_id") or ""), root, live) else "not_proven_over"
                 _sorted_into(root, group, verdict, _Candidate(GROUP_RESULT_PINS, f"pins:{snap}", pathlib.Path(
                     str(row.get("path") or "")), "pins", task=str(row.get("task_id") or ""), row=row))
             groups.append(group)
@@ -995,11 +985,11 @@ class FreeSpace:
             try:
                 if delegate_custody.custody_log_unreadable(root):
                     return "unreadable_record"
-                return "other" if snapshot_released(item.row, delegate_custody.open_snapshot_ids(root), data_dir=root, live=live) else "in_use"
+                return "other" if snapshot_released(item.row, delegate_custody.open_snapshot_ids(root), data_dir=root, live=live) else "custody_held"
             except Exception:
                 return "unreadable_record"
         if not _task_proven_over(task_id, root, live):
-            return "in_use"
+            return "not_proven_over"
         if item.layout == "body_candidate":
             return "other"
         reason = plain_copy_verdict(item.row, root)["reason"]
@@ -1067,11 +1057,12 @@ class FreeSpace:
                 continue
             registration = checkout_registration(path, root) if item.layout == "lost" else "absent"
             if item.layout == "test_run":
-                holds = not _run_finished(path)
+                reason = "" if _run_finished(path) else "run_open"
             else:
-                holds = live(item.owner) is not False or registration == "registered" or (
-                    item.layout == "env" and os.path.lexists(path.with_name(name[:-len(".env")])))
-            reason = "unreadable_record" if registration == "unknown" else "in_use" if holds else ""
+                reason = _liveness_reason(live(item.owner)) or ("copy_registered" if registration == "registered" else
+                                                                "copy_present" if item.layout == "env"
+                                                                and os.path.lexists(path.with_name(name[:-len(".env")])) else "")
+            reason = "unreadable_record" if registration == "unknown" else reason
             if not reason and os.path.lexists(path):  # gone already counts as removed
                 try:
                     with gate(root, item.owner, timeout_sec=0) as why:
@@ -1122,7 +1113,7 @@ def _release_pins(root: pathlib.Path, snapshot_id: str, live: Callable[[str], Op
         if os.path.lexists(str(row.get("path") or "")) or snapshot_id not in custody.open_snapshot_ids(root):
             return "other"  # a checkout came back, or custody let it go: the custody GC owns it now
         if not sw._task_proven_over(str(row.get("task_id") or ""), root, live):
-            return "in_use"
+            return "not_proven_over"
         with sw._record_lock(row["path"], root, op="release_pins", task_id=str(row.get("task_id") or "")), \
                 gate(root, row.get("task_id"), timeout_sec=0) as why:
             if why:
