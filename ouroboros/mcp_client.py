@@ -799,6 +799,7 @@ async def _call_tool_async(
 ) -> ToolResult:
     """Open a fresh session and preserve the SDK-owned error bit."""
     from ouroboros.owner_pause import submit_async_operation, submit_async_preparation, OwnerPauseRefused, _TOOL_OPERATION
+    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
     from ouroboros.model_wait import ModelWaitInterrupted
     from ouroboros.usage_accounting import UsageAccountingError
     from ouroboros.store import StoreError
@@ -818,7 +819,7 @@ async def _call_tool_async(
             else:
                 try:
                     pending = submit_async_operation(None, session.call_tool, tool_name, arguments)
-                except (OwnerPauseRefused, ModelWaitInterrupted, UsageAccountingError, StoreError) as exc:
+                except (OwnerPauseRefused, ModelWaitInterrupted, PhysicalDispatchInterrupted, UsageAccountingError, StoreError) as exc:
                     refusal = exc
                 else:
                     result = await pending  # any error here may follow a send
@@ -835,7 +836,7 @@ async def _call_tool_async(
     # Launch admission precedes transport entry: a stdio server starts there.
     try:
         pending = submit_async_preparation(_do)
-    except (OwnerPauseRefused, ModelWaitInterrupted, UsageAccountingError, StoreError) as exc:
+    except (OwnerPauseRefused, ModelWaitInterrupted, PhysicalDispatchInterrupted, UsageAccountingError, StoreError) as exc:
         exc.mcp_unsent_joined = True  # no transport task was handed off
         raise
     try:
@@ -1455,6 +1456,7 @@ class MCPManager:
         if resolution.status != "callable":
             return resolution.refusal(prefixed_name)
         from ouroboros.owner_pause import OwnerPauseRefused, _TOOL_OPERATION, record_mcp_call_returned
+        from ouroboros.llm_attempt import PhysicalDispatchInterrupted
         from ouroboros.store import StoreError
         from ouroboros.tool_custody import external_handoff
         confirmed = external_handoff("mcp_transport")
@@ -1499,6 +1501,8 @@ class MCPManager:
             return ToolResult(status="timeout", code="MCP_TIMEOUT", text=text,
                               meta={"mcp_call_not_sent": not_sent or closing})
         except BaseException as exc:  # noqa: BLE001 - any failure is reported
+            if isinstance(exc, PhysicalDispatchInterrupted):
+                raise  # caller control is not a provider error; exited() already settled proven no-send custody
             not_sent = unsent(exc)
             if not_sent and isinstance(exc, (OwnerPauseRefused, StoreError)):
                 from ouroboros.tools.tool_result import launch_refusal_result

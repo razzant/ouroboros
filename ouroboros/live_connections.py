@@ -177,6 +177,10 @@ class PreparedConnection:
             if host.messages[:len(self.source)] != self.source or host.schemas != self.source_schemas:
                 raise RealtimeSetupError('prepared_stale', 'canonical prefix or tools changed while preparing')
             tail = copy.deepcopy(host.messages[len(self.source):])
+            if any(row.get('tool_calls') or row.get('role') == 'tool' for row in tail):
+                # A completed call/result unit reaches a new connection only in its fitted setup: as live
+                # items its call would be issued again (xAI also empties such an item's arguments).
+                raise RealtimeSetupError('prepared_stale', 'a tool batch completed while preparing')
             evidence, manifest = view._prepared_view
             if tail:
                 _, request, evidence, _ = await joined(asyncio.to_thread(measure_session_wire,
@@ -252,11 +256,11 @@ class PreparedConnection:
                 self.source, self.source_schemas = copy.deepcopy(host.messages), copy.deepcopy(host.schemas)
                 view = self.view = copy.copy(host)
                 view._connection_owner, view._connection_view = host, None
-                view.ctx, view.tools = copy.copy(host.ctx), copy.copy(host.tools)
+                view.ctx = copy.copy(host.ctx)
                 view.ctx._last_context_observation = copy.deepcopy(getattr(host.ctx, '_last_context_observation', None))
                 view.messages, view.schemas = copy.deepcopy(self.source), copy.deepcopy(self.source_schemas)
-                view.ctx.messages, view.tools._ctx = view.messages, view.ctx
-                view.tools._handler_overrides = dict(host.tools._handler_overrides)
+                # The fit may rebind discovery to its own schemas; the serving catalog keeps its binding.
+                view.ctx.messages, view.tools = view.messages, host.tools.copy_for(view.ctx)
                 view.ctx._actor_loaded_tool_names = set(getattr(host.ctx, '_actor_loaded_tool_names', ()))
                 host._connection_sequence += 1
                 view.connection_number = host._connection_sequence

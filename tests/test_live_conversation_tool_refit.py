@@ -194,7 +194,7 @@ def test_tool_refit_failure_retains_completed_effect_without_retry():
 
 
 @pytest.mark.parametrize('overflow', [False, True])
-def test_tool_refit_includes_queued_effects_before_fitting_the_replacement(overflow):
+def test_tool_refit_fits_the_batches_that_finished_first(overflow):
     async def scenario():
         host = Host()
         running, release = asyncio.Event(), asyncio.Event()
