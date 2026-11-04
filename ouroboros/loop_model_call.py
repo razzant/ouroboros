@@ -12,7 +12,7 @@ from ouroboros.config import runtime_setting
 import logging
 import contextlib
 import copy
-import json
+from datetime import datetime, timezone
 import pathlib
 import queue
 import time
@@ -1260,14 +1260,13 @@ def _project_wake_input(ctx: _RoundModelCallContext, *, overflowed: bool = False
     if index is None or any(isinstance(message, dict) and message.get("role") == "assistant"
                             for message in ctx.messages[index + 1:]):
         return False  # a response already followed the wake input: consumed history, never rewritten
-    from ouroboros.context_input_selection import wake_input_checkpoint, whole_wake_input
+    from ouroboros.context_input_selection import wake_deliveries, wake_input_checkpoint, whole_wake_input
     if not hasattr(tool_ctx, "_wake_input_full_message"):  # a projected start's whole input is its plan's
         tool_ctx._wake_input_full_message = whole_wake_input(ctx.messages[index], ctx.context_fit_plan, wake)
     full = tool_ctx._wake_input_full_message
-    delivery = {"role": "user", "content": str(overflowed and wake.get("pointer_text") or wake["projection_text"])}
-    if len(json.dumps(delivery, ensure_ascii=False)) >= len(json.dumps(full, ensure_ascii=False)):
-        return False  # a pointer must actually save space
-    from datetime import datetime, timezone
+    forms = wake_deliveries(wake, full)  # rescue order, the bare pointer last, each smaller than the whole input
+    if not forms:
+        return False  # no bound form saves space
     from ouroboros.send_clock import main_clock_policy, render_clock_note
     from ouroboros.utils import estimate_tokens
 
@@ -1285,11 +1284,12 @@ def _project_wake_input(ctx: _RoundModelCallContext, *, overflowed: bool = False
                     and measurement.estimated_input_tokens + measurement.response_reserve_tokens + clock
                     > measurement.capacity_total_tokens)
 
-    # The FULL input is measured again on each actual route, even after a pointer; a projection measured unfit
-    # too gives way to the bare pointer, as at the start (``context_input_selection.rescued_start``).
+    # The FULL input is measured first on each actual route, even after a pointer, and restored when it fits; else
+    # the first bound form measured to fit, the bare pointer last, as at the start (``rescued_start``).
     projected = overflowed or unfit(full)
-    if projected and not overflowed and wake.get("pointer_text") and unfit(delivery):
-        delivery = {"role": "user", "content": str(wake["pointer_text"])}
+    delivery = forms[-1]  # a real overflow's one strict-shrink retry, and the last rescue: the smallest form
+    if projected and not overflowed:
+        delivery = next((form for form in forms[:-1] if not unfit(form)), delivery)
     desired = delivery if projected else full
     # Cross-family fallbacks copy the transcript, then restore it on failure.
     # Projection belongs to THESE bytes, never a flag on the shared tool context.

@@ -336,12 +336,25 @@ def _wake_forms(wake: Dict[str, Any]) -> List[str]:
     return [text for text in dict.fromkeys((wake.get("projection_text"), wake.get("pointer_text"))) if text]
 
 
+def wake_deliveries(wake: Dict[str, Any], full: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The round boundary's choices (``loop_model_call._project_wake_input``): this wake's bound forms as its first
+    user message, in rescue order with the bare pointer last, each only when strictly smaller than ``full``."""
+    size = len(json.dumps(full, ensure_ascii=False))
+    forms = [{"role": "user", "content": text} for text in _wake_forms(wake)]
+    return [form for form in forms if len(json.dumps(form, ensure_ascii=False)) < size]
+
+
 def wake_input_checkpoint(wake: Dict[str, Any], content: Any, *, round_idx: int, after_overflow: bool) -> Dict[str, Any]:
     """The record of the wake delivery a request carried (``content``; ``None``: the whole observation): its
     ``form`` is ``whole``, ``projection`` (my human's words inline: ``inline_rows_in_fallback`` covers only this
     form) or ``pointer`` (the bare pointer, nothing inline)."""
-    form = ("whole" if content is None else "projection" if content == wake.get("projection_text")
-            and wake.get("pointer_text") else "pointer")
+    forms = _wake_forms(wake)
+    if content is None:
+        form = "whole"
+    elif content in forms[:-1]:  # any bound form before the last carries my human's words inline
+        form = "projection"
+    else:  # the last bound form, or a projection with no words of mine: the bare pointer
+        form = "pointer"
     return {"checkpoint_kind": "wake_input_inline" if form == "whole" else "wake_input_by_source", "round": round_idx,
             "after_overflow": after_overflow, "form": form, "composition": wake.get("composition"),
             "source_sha256": (wake.get("source") or {}).get("sha256")}

@@ -116,3 +116,50 @@ def test_every_delivery_record_names_the_form_the_request_carried():
     assert form(bound, bound["pointer_text"]) == "pointer", "nothing inline: no coverage claim applies"
     assert form(plain, plain["projection_text"]) == "pointer", "a projection with no words of mine is the bare pointer"
     assert wake_input_checkpoint(bound, None, round_idx=1, after_overflow=False)["checkpoint_kind"] == "wake_input_inline"
+
+
+# --- RV2W: the round boundary chooses among the forms smaller than the whole input (Astra R4, Opus N3) ----------
+
+ALL_WORDS = "My human's words, whole: " + "w" * 400_000  # ~100K tokens: almost the whole window is theirs
+ALL_WHOLE = "Wake facts:\n- owner message: " + ALL_WORDS
+ALL_POINTER = "Wake facts: the complete observation is stored at <source>; read the ranges you need."
+ALL_PROJECTION = ALL_POINTER + "\nMy human's words in this window, whole:\n- owner message: " + ALL_WORDS
+
+
+def test_a_real_owner_wake_gets_its_whole_input_back_on_a_route_that_holds_it(tmp_path, monkeypatch):
+    """Astra R4: the projection of a window that is almost all my human's words is longer than the whole input; after
+    a pointer start a route that holds everything still gets the whole input back."""
+    from ouroboros import loop
+    from ouroboros.loop_model_call import _project_wake_input
+
+    env, _memory, task, _registry = _large_owner_wake(tmp_path, monkeypatch)
+    wake = task["metadata"]["wake_observation"]
+    whole, projection, pointer = task["text"], wake["projection_text"], wake["pointer_text"]
+    assert len(projection) > len(whole) > len(pointer), "the projection saves nothing here"
+    events = _record_events(monkeypatch)
+    ctx, _ = _ctx(env.drive_root, window=1_000_000, text=whole, wake=wake)
+    measured = loop._measure_round_main_fit(ctx, automatic_pass_used=False).measurement
+    assert measured.estimated_input_tokens + measured.response_reserve_tokens < measured.capacity_total_tokens
+    ctx.messages[1]["content"] = pointer  # the start rescued it with the bare pointer
+    ctx.context_fit_plan = replace(ctx.context_fit_plan, user_content_json=json.dumps(whole))
+    assert _project_wake_input(ctx) is True and ctx.messages[1]["content"] == whole
+    assert [(event["checkpoint_kind"], event["form"]) for event in events] == [("wake_input_inline", "whole")]
+
+
+@pytest.mark.parametrize("route", ["smaller", "larger"])
+def test_a_projection_that_saves_nothing_never_stops_the_pointer_or_the_whole_input(tmp_path, monkeypatch, route):
+    """Opus N3, both edges: on a route too small for the whole input the bare pointer goes, never the longer
+    projection; after a pointer start a route that holds everything gets the whole input back."""
+    from ouroboros.loop_model_call import _project_wake_input
+
+    events = _record_events(monkeypatch)
+    wake = {**WAKE, "projection_text": ALL_PROJECTION, "pointer_text": ALL_POINTER}
+    if route == "smaller":
+        ctx, _ = _ctx(tmp_path, window=120_000, text=ALL_WHOLE, wake=wake)
+        expected, form = ALL_POINTER, ("wake_input_by_source", "pointer")
+    else:
+        ctx, _ = _ctx(tmp_path, window=1_000_000, text=ALL_POINTER, wake=wake)
+        ctx.context_fit_plan = replace(ctx.context_fit_plan, user_content_json=json.dumps(ALL_WHOLE))
+        expected, form = ALL_WHOLE, ("wake_input_inline", "whole")
+    assert _project_wake_input(ctx) is True and ctx.messages[1]["content"] == expected
+    assert [(event["checkpoint_kind"], event["form"]) for event in events] == [form]
