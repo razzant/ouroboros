@@ -159,7 +159,7 @@ ouroboros/ — agent core and shared runtime (§6)
   work_diagnostics.py — diagnostic source binding, controls and revocation (§5)
   budget_pause.py, tool_custody.py — exact pause/Resume, invocation futures and durable residuals (§6)
   owner_pause.py, control_actor.py — whole-tree Pause fence, launch gate, per-attempt review episode, retained-member selection, mind-control attribution (§6 Owner Pause)
-  review_pause.py, review_waiting.py, tools/review_collection.py — review custody, selected wakes, delivery cursors; collection by reference (§6)
+  review_pause.py, review_waiting.py, ouroboros/tools/review_collection.py — review custody, selected wakes, delivery cursors; collection by reference (§6)
   external_runs.py — a task's delegated runs under one stop policy (§6 Owner Pause)
   working_checkpoint.py — one rolling working state per attempt, delayed content ACK, frozen recovery (§6 Saved working state)
   local_custody_repair.py, custody_owed.py — ended owners' claims retire on proof; unwritten facts stay owed (§6 Owner Continue)
@@ -240,7 +240,7 @@ ouroboros/ — agent core and shared runtime (§6)
   reference_books.py — ordered book reader/validator; free worktree balance vs cached official merge-base, unknown if unavailable, nonblocking (DEVELOPMENT "Documentation contract")
   local_model_server.py — read-only local formatter measurement and serving-process probe
   context_compaction.py, context_source_view.py, context_renewal.py, context_health.py — atomic compaction, source-address recovery, same-task renewal, provenance capsules, transactional apply; health invariants: own delegated obligations full, all foreign work one exact-source pointer (§6 Context fitting)
-  context_runtime_facts.py — the runtime section's fact builders
+  context_runtime_facts.py, engine_facts.py — the runtime section's fact builders
   headless.py, history_retention.py — child-drive isolation, answer/file adoption, workspace patches, memory export; typed `sensitive_blocked` exclusions (§6 Headless finalization; §10)
   task_custody.py — the one child-drive deletion owner (`settle_child_drive`) and per-task custody lock (§6 Headless finalization)
   owner_keep.py, review_thread_retention.py — one task's Keep; archived reviewer threads and gated release (§6 Headless finalization)
