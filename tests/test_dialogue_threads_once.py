@@ -494,3 +494,18 @@ def test_a_rows_recorded_context_is_read_by_its_address_exactly_as_its_copy_held
     assert any(text.startswith("message 7: ") for text in _source_texts(tmp_path, address))  # a mark's quote finds it
     with pytest.raises(chat_chain.RowAddressError):
         chat_chain.recorded_context(tmp_path, {**address, "row_sha256": "0" * 64})
+
+
+def test_the_public_log_and_task_event_readers_hand_clients_the_whole_thread(tmp_path):
+    """``/api/logs/chat`` and the task-event streams give API clients whole dialogue rows (docs/CLIENT_CONTRACT.md):
+    a thread stored once reads back whole there too, never as references with a trailing identity marker."""
+    from ouroboros.gateway import logs
+    from ouroboros.gateway.task_events import _TaskEventFollower
+
+    row = presence_row(slack(12))
+    receipt = ds.append(tmp_path, "chat", row)
+    assert ds.thread_references(ds.decode(_stored(tmp_path, receipt.seq))["transport"]["conversation"])  # by reference
+
+    assert [served for _line, served in logs._dialogue_tail(tmp_path, "chat", 10, None, lambda _row: True)] == [row]
+    delta = _TaskEventFollower(tmp_path, row["task_id"])._read_dialogue_delta(tmp_path, "chat")
+    assert [served for served, _line in delta] == [row]

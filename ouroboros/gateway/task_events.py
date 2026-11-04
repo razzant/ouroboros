@@ -421,7 +421,8 @@ class _TaskEventFollower:
             ordinals = ordinals_of(root, source, [row.seq for row in rows]) if rows else {}
         except StoreError:  # the counts below the cutover are not settled: no number is better than a guess
             ordinals = {}
-        return [(row.row, ordinals[row.seq].ordinal + 1 if row.seq in ordinals else None) for row in rows]
+        return [(row.row, ordinals[row.seq].ordinal + 1 if row.seq in ordinals else None)
+                for row in ds.whole_rows(root, rows)]
 
     def _read_chain_delta(self, root: pathlib.Path, source: str, parts: tuple) -> List[Any]:
         """Entries appended to one (root, source) chain since the recorded state: a dialogue
@@ -759,7 +760,7 @@ class _TaskEventCursorFollower(_TaskEventFollower):
         lower = position
         while lower < bound:
             rows = ds.probe_rows(root, source, keys, lower=lower, before=bound, limit=_DIALOGUE_BATCH, newest_first=False)
-            for row in rows:
+            for row in ds.whole_rows(root, rows):
                 while skipped and skipped[0].seq < row.seq:
                     gap = skipped.pop(0)
                     self.positions[key][source] = gap.end
