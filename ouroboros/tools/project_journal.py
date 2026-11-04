@@ -831,7 +831,8 @@ def get_tools() -> List[ToolEntry]:
             {
                 "name": "update_focus",
                 "description": (
-                    "Optionally publish one short line about this live root's work. Your context facts repeat "
+                    "Optionally publish one short line about this live root's work, the place for routine "
+                    "progress. Your context facts repeat "
                     "its dated text as working thought, never an owner directive; revise it when your focus changes. "
                     "OTHER live roots see it, and the owner reads it under the work's name, while this task is "
                     "unsettled (waits included), until replaced; "
