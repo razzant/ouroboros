@@ -390,8 +390,6 @@ def _handle_budget_pause(evt: Dict[str, Any], ctx: Any) -> None:
         "type": "budget_scope_paused",
         "task_id": task_id,
         "task_type": evt.get("task_type") or task.get("type"),
-        "owner_visible": True,
-        "toast_once": f"{task_id}:budget-paused:{pause.get('scope') or 'global'}",
         **pause,
     }
     _address_task_event({task_id: meta} if isinstance(meta, dict) else None, ctx.DRIVE_ROOT, event)
@@ -621,15 +619,17 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
                 from supervisor.state import reconstruct_task_cost
 
                 reason = str(row.get("reason") or "")
-                cause = {"owner": "owner Pause", "authority": str(row.get("rail") or "").replace("_", " ")}.get(reason, "budget")
+                cause = {"owner": "owner Pause", "sleep": "model sleep",
+                         "authority": str(row.get("rail") or "").replace("_", " ")}.get(reason, "budget")
                 cost_fields = reconstruct_task_cost(task_id, fields=True, drive_root=result_root)
                 write_task_result(
                     result_root, task_id, STATUS_SCHEDULED, resource_limit=marker,
-                    reason_code={"owner": "owner_paused", "authority": "authority_paused"}.get(reason, "budget_paused"),
-                    result=(f"Task paused exactly at a completed boundary ({cause})"
+                    reason_code={"owner": "owner_paused", "authority": "authority_paused", "sleep": "model_sleeping"}.get(reason, "budget_paused"),
+                    result=(f"Task {'sleeping' if reason == 'sleep' else 'paused exactly'} at a completed boundary ({cause})"
                             + ("; delegated work it had already sent is still running" if unsettled else "")
-                            + ". Cumulative spend, rounds and execution time are retained; an explicit owner "
-                            "Resume continues the same task."),
+                            + ". Cumulative spend, rounds and execution time are retained; "
+                            + ("the selected wake condition continues the same task." if reason == "sleep" else
+                               "an explicit owner Resume continues the same task.")),
                     # An unavailable projection is published too: it carries the
                     # explicit unknown state that must replace any stale amount
                     # write_task_result would otherwise keep merged in.
@@ -642,11 +642,9 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
             "type": "budget_scope_paused",
             "task_id": task_id,
             "task_type": (evt or {}).get("task_type") or task.get("type"),
-            "owner_visible": True,
-            "toast_once": f"{task_id}:budget-paused:{pause_id}",
             "pause_source": source,
             "park_state": STATE_PAUSED if confirmed else STATE_PAUSING,
-            **({"pause_reason": str(row["reason"])} if row.get("reason") in {"owner", "authority"} else {}),
+            **({"pause_reason": str(row["reason"])} if row.get("reason") in {"owner", "authority", "sleep"} else {}),
             **{key: value for key, value in marker.items() if key != "checkpoint"},
             "pause_id": pause_id,
             "external_runs": [
@@ -657,9 +655,7 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
         if superseded:
             # Not an owner-visible pause: the durable row moved on (a grant, a
             # newer pause, an abandoned row). The anomaly is recorded as itself.
-            event = {key: value for key, value in event.items() if key != "toast_once"}
-            event.update(type="budget_pause_park_superseded", owner_visible=False,
-                         park_state=superseded)
+            event.update(type="budget_pause_park_superseded", park_state=superseded)
         _address_task_event({task_id: meta} if isinstance(meta, dict) else None, ctx.DRIVE_ROOT, event)
         append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", event)
         try:
@@ -738,8 +734,6 @@ def _handle_budget_root_fence(evt: Dict[str, Any], ctx: Any) -> None:
         "type": "budget_scope_paused",
         "task_id": task_id,
         "task_type": evt.get("task_type"),
-        "owner_visible": True,
-        "toast_once": f"{root_task_id}:budget-paused:root",
         **fence,
     }
     _address_ctx(ctx, event)
