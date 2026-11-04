@@ -199,25 +199,27 @@ def carried_owner_corpus(ctx: Any, source_text: Any = "") -> List[Dict[str, Any]
     """The run's owner corpus, carried by value into work it starts: a drafted objective or a follow-up.
 
     Every row the run admitted as my human's words, as the retained corpus's text (an image by reference
-    beside its original's path, never its base64), their typed ids and reply target kept. ``source_text``:
-    the owner message a routed start names, the door's own record of it, first, with the reply target and
-    message id of the door's row it stands for. Without one, a suppressed (never-logged) origin's words live
-    only in the run's first row and ride only under the door's stamp (``initial_user``): an unstamped first
-    turn (``initial_text``) is never owner words.
+    beside its original's path, never its base64), their typed ids and reply target kept, door rows carried into
+    the run (an edited schedule's every instruction) among them. ``source_text``: the owner message a routed start
+    names, the door's own record of it, first, standing for the run's own door row with that row's reply target and
+    message id. Without one, a suppressed (never-logged) origin's words live only in the run's first row and ride
+    only under the door's stamp (``initial_user``): an unstamped first turn (``initial_text``) is never owner words.
     """
     from ouroboros.review_evidence_sections import _owner_content_projection
 
     directives = [dict(row) for row in getattr(ctx, "_owner_directives", None) or [] if isinstance(row, dict)]
-    rows = [row for row in directives if row.get("source") in OWNER_SOURCES - {"initial_user"}]
-    door = next((row for row in directives if row.get("source") == "initial_user"), None)  # the run's first row
+    owner = [row for row in directives if row.get("source") in OWNER_SOURCES]
+    # The run's own door row is the first it recorded itself; a door row carried into it is carried words.
+    door = next((row for row in owner if row.get("source") == "initial_user" and not row.get("carried")), None)
+    rest = [row for row in owner if row is not door]
     client_id = str(_mapping(_ctx_metadata(ctx).get("origin_message_ref")).get("client_message_id") or "")
     if door is not None and client_id:
         door = {"client_message_id": client_id, **door}  # the door's message, by its typed id
-    if source_text and not any(row.get("source") == "origin_message" for row in rows):
+    if source_text and not any(row.get("source") == "origin_message" for row in rest):
         ids = {key: door[key] for key in ("reply_to", "client_message_id") if door and key in door}
-        rows.insert(0, {**ids, "source": "origin_message", "content": source_text})
-    elif not source_text and door is not None:
-        rows.insert(0, door)
+        rows = [{**ids, "source": "origin_message", "content": source_text}, *rest]
+    else:
+        rows = [*([door] if door is not None and not source_text else []), *rest]
     rows = [{**row, "content": _owner_content_projection(row.get("content"))} for row in rows]
     return [row for row in rows if row["content"].strip()]
 

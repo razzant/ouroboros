@@ -86,3 +86,35 @@ def test_one_source_is_one_carried_row_and_an_empty_id_names_none():
              {"source": "owner_mailbox", "content": "yes", "client_message_id": "c1"},
              {"source": "owner_mailbox", "content": "later", "msg_id": "m3", "client_message_id": "c1"}]
     assert [row["content"] for row in merged_corpus(kept, added)] == ["yes", "yes", "no", "maybe", "yes"]
+
+
+def test_an_edited_schedule_hands_both_door_instructions_to_the_next_follow_up(tmp_path):
+    """RV2W Astra R2: creation and edit each came through my human's door (``initial_user``, two message ids); the
+    fired run holds both as carried words, and the follow-up it schedules carries both, not only the first."""
+    from ouroboros.tools.followup import _handle_schedule_followup, _manage_schedules
+    from supervisor import queue as schedules
+    from tests.test_owner_words_carried import _owner_root
+
+    ctx = _owner_root(tmp_path, {"origin_message_ref": {"chat_id": 1, "client_message_id": "registration"}})
+    _initialize_owner_directives(ctx, [{"role": "user", "content": "Check staging."}])
+    assert _handle_schedule_followup(ctx, relation="independent", objective="Check staging.",
+                                     cron="0 9 * * 1").startswith("FOLLOWUP_SCHEDULED")
+    [registered] = schedules.list_scheduled_tasks(ctx.drive_root)["tasks"]
+    ctx.task_metadata["origin_message_ref"]["client_message_id"] = "revision"
+    ctx._owner_directives = []
+    constraint = "Check production, but never restart it."
+    _initialize_owner_directives(ctx, [{"role": "user", "content": constraint}])
+    assert json.loads(_manage_schedules(ctx, action="update", schedule_id=registered["id"],
+                                       objective="Check production.", reason="Owner changed the assignment."))["ok"]
+    [updated] = schedules.list_scheduled_tasks(ctx.drive_root)["tasks"]
+    fired = schedules._task_from_schedule(updated)
+    ctx.task_metadata, ctx.task_id, ctx._owner_directives = fired["metadata"], "fired", []
+    _initialize_owner_directives(ctx, [{"role": "user", "content": fired["text"]}])
+    assert [row["content"] for row in ctx._owner_directives] == ["Check staging.", constraint]
+    assert _handle_schedule_followup(ctx, relation="independent", objective="Recheck production.",
+                                     run_at="2030-01-01T00:00:00+00:00").startswith("FOLLOWUP_SCHEDULED")
+    descendant = next(row for row in schedules.list_scheduled_tasks(ctx.drive_root)["tasks"]
+                      if row["id"] != registered["id"])
+    carried = descendant["task"]["metadata"]["owner_corpus"]
+    assert [(row["content"], row.get("client_message_id")) for row in carried] == [
+        ("Check staging.", "registration"), (constraint, "revision")], "both instructions, each by its own id"
