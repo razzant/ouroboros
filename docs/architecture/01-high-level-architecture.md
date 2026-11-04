@@ -143,7 +143,7 @@ ouroboros/ — agent core and shared runtime (§6)
   ui_language.py, i18n_memory.py — the interface-language fact and one translation memory per language, `state/i18n/<tag>.json`: owner > imported > generated (§7)
   loop_tool_execution.py, tool_call_log.py, late_tool_results.py — tool dispatch, results, per-invocation counting
   deadline_utils.py — deadline parsing and the transport-vs-logical wait seam
-  observability.py, source_retention.py — private CAS: equal histories stored once, gzip-1, hardlinks (§10)
+  observability.py, source_retention.py — private CAS: request views store each repeated element once (skeleton placement + parts, spliced on read), gzip-1, hardlinks (§10)
   shared_values.py — the `$shared` reference: one rule (a list's dict elements, reached through dicts, stored once by content address), tokenize/splice/expand for the queue table and the CAS parts
   evidence_packs.py, evidence_packer.py — per-task xz packs (maintenance job, §5); verified addressed reads, missing ≠ `evidence_corrupt` (PERSISTENCE)
   finalization_timing.py — final-event phase fields and `task_finalization_timing` (§6)
