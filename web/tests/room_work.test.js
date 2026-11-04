@@ -739,6 +739,7 @@ test('Back reads the page it left again, stays after a failed read and takes a f
 
 for (const asPanel of [false, true]) for (const [words, expected] of [
     [{ wakeSummary: 'Export fixed.' }, 'Export fixed.'],
+    [{ wakeSummary: 'Export fixed.', suggestedName: 'Export fixed.' }, ''],
     [{ wakeSummary: 'Export fixed.', causeHeld: true, collapsedActivity: 'The upload failed.' }, 'The upload failed.'],
     [{}, ''],
 ]) test(`settled room row keeps its closing words, never its old focus (${asPanel}, ${expected})`, () => {

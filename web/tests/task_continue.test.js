@@ -136,7 +136,7 @@ test('a refused Continue press explains its hard bound and preserves the same ac
 
 test('chat reaches the Continue action through the one settled-card seam', () => {
     const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
-    assert.match(chat, /import \{ syncSettledItems \} from '\.\/settled_card\.js';/);
+    assert.match(chat, /import \{[^}]*\bsyncSettledItems\b[^}]*\} from '\.\/settled_card\.js';/);
     const seam = readFileSync(new URL('../modules/settled_card.js', import.meta.url), 'utf8');
     assert.match(seam, /syncContinueAction\(record, detail, options\)/);
     assert.match(seam, /return syncResultFilesItem\(record, detail\)/);

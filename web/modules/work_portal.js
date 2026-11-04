@@ -29,6 +29,7 @@ import { DURABLE_RECEIPTS, receiptNotice } from './project_handoff.js';
 import { nameProjectReference, projectReference } from './project_reference.js';
 import { admittedSuccessor } from './task_episodes.js';
 import { continueControlSuccessor } from './task_continue.js';
+import { closingLine } from './settled_card.js';
 
 const key = (value) => String(value || '').trim();
 export const isPortal = (record) => record?.root?.dataset?.portal === '1';
@@ -131,7 +132,7 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
 
     // Replace the live census line with the closing sentence or held cause, as on the finished card.
     function dropLine(record) {
-        const line = record.causeHeld ? record.collapsedActivity : !record.isSubagent ? record.wakeSummary || '' : '';
+        const line = closingLine(record);
         record.collapsedActivity = line;
         return renderCollapsedActivity(record, line);
     }
@@ -143,7 +144,8 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
     }
 
     function present(record) {
-        if (!isPortal(record) || record.finished) return false;
+        if (!isPortal(record)) return false;
+        if (record.finished) return dropLine(record);
         relabel(record);
         const row = census.get(record.groupId);
         if (!row) {
@@ -159,8 +161,8 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         const facts = censusTaskFacts(row);
         if (facts.ended) {
             record.portalActivity = null;
-            dropLine(record);
-            return card.finish(record.groupId, facts.outcome);
+            const changed = card.finish(record.groupId, facts.outcome);
+            return dropLine(record) || changed;
         }
         record.portalActivity = row;
         const startedSec = Number(row.started_at);

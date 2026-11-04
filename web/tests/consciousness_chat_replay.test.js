@@ -210,3 +210,28 @@ test('live: the supervisor\'s task_done names the origin without waiting for a h
         assert.match(seen.facts, /<dt>Started by<\/dt><dd>Schedule · <span data-i18n-authored>Daily check<\/span><\/dd>/);
     });
 });
+
+
+test('an ordinary root says its closing sentence once; a held cause keeps the sentence in Details', async () => {
+    for (const held of [false, true]) {
+        const row = terminal('o-summary', { suggested_name: 'Owner work', wake_summary: SENTENCE,
+            quiet_effective: false, ...(held ? { status: 'cancelled', outcome_phase: 'cancelled', reason_code: 'author_stop' } : {}) });
+        await replay({ messages: [checkpoint('o-summary'), row], window: { complete: true } }, feed => {
+            const seen = view(feed, 'o-summary');
+            assert.equal(seen.facts.includes('In its words'), held);
+            if (!held) assert.equal(seen.line, SENTENCE);
+            else assert.notEqual(seen.line, SENTENCE);
+        });
+    }
+});
+
+test('a later terminal detail without a sentence clears the previous attempt on the same card', async () => {
+    await replay({ messages: [checkpoint('retry'), terminal('retry', { suggested_name: 'Owner work', wake_summary: SENTENCE,
+        task_attempt: 1 })], window: { complete: true } }, (feed, handlers) => {
+        assert.equal(view(feed, 'retry').line, SENTENCE);
+        handlers.get('log')({ chat_id: 1, data: { type: 'task_done', task_id: 'retry', status: 'completed',
+            task_attempt: 2, ts: '2026-10-28T07:00:00+00:00' } });
+        assert.notEqual(view(feed, 'retry').line, SENTENCE);
+        assert.ok(!view(feed, 'retry').facts.includes(SENTENCE));
+    });
+});

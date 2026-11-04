@@ -30,6 +30,7 @@ import {
 import { showToast } from './toast.js';
 import { motionMs, reducedMotion } from './motion.js';
 import { isStackLayout } from './layout.js';
+import { closingLine } from './settled_card.js';
 
 // The closed list rises back as it fades (room_work.css rw-unfold, reversed).
 const SHADE_FOLDS = [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-6px)' }];
@@ -59,9 +60,6 @@ export function cardRowView(view = {}, { settled = false, closing = '' } = {}) {
         tone: OUTCOME_TONES[outcome] || (settled ? 'ended' : 'unknown'), mark: outcome ? 'none' : 'ring', owner: false,
         outcome, focus: settled ? String(closing || '') : '' };
 }
-
-const closingLine = (record) => record?.causeHeld ? record.collapsedActivity
-    : !record?.isSubagent ? record?.wakeSummary || '' : '';
 
 /** The card a work's row goes to: its current episode's, else another of its episodes' root cards that is shown
  *  (Continue episodes share one card, task_episodes.js). */

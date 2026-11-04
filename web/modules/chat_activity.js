@@ -79,7 +79,7 @@ export function isLiveLineExpandable(item) {
     );
 }
 
-// Host evidence uses its saved task/record/seat or artifact reader; absent selectors offer no link.
+// Exact record (#1369) or reviewer report: timeline and card-less System rows share readers; absent selectors offer no link.
 export function cardRowEvidenceRef(msg) {
     const source = msg?.late_evidence?.kind === 'merge_review' && msg.late_evidence.review_source;
     if (source?.task_id && source.record_id && source.seat_id && /^[0-9a-f]{64}$/.test(source.sha256 || ''))
@@ -89,7 +89,7 @@ export function cardRowEvidenceRef(msg) {
     return evidence ? { href: evidence, label: 'Download the review record' } : null;
 }
 
-// One download anchor through a task source reader; restored snapshots keep that route.
+// A restored snapshot keeps its task reader; the download wears chat link ink (md-link), like result-file downloads.
 export function evidenceLinkHtml(evidenceRef) {
     const href = typeof evidenceRef?.href === 'string' && evidenceRef.href.startsWith('/api/tasks/') ? evidenceRef.href : '';
     return href
@@ -1427,7 +1427,7 @@ function metaLineHtml(parts) {
 function paintLiveFacts(record, rows) {
     const el = ownLiveDetail(record, 'liveFacts');
     if (!el) return false;
-    if (record.wakeSummary) rows.unshift([tr('task.fact.wake_summary', 'In its words'), `<span data-i18n-authored>${escapeHtml(record.wakeSummary)}</span>`]);
+    if (record.wakeSummary && (record.initiator === 'consciousness' || record.scheduleName || record.causeHeld)) rows.unshift([tr('task.fact.wake_summary', 'In its words'), `<span data-i18n-authored>${escapeHtml(record.wakeSummary)}</span>`]);
     const html = rows.filter(([, value]) => value).map(([label, value]) =>
         `<div class="chat-live-fact"><dt>${escapeHtml(label)}</dt><dd>${value}</dd></div>`).join('');
     if (el.innerHTML === html && el.hidden === !html) return false;
