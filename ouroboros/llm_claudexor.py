@@ -33,7 +33,7 @@ from ouroboros.llm_substitution import (
 from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
 from ouroboros.model_wait import (ModelWaitInterrupted, accepted_operation_scope, current_model_wait,
                                   dispatch_deadline_remaining_sec, prepared_call_scope)
-from ouroboros.observability import persist_call
+from ouroboros.observability import persist_call, update_call_manifest_metadata
 from ouroboros.owner_pause import launch_admission, OwnerPauseRefused, model_handed_off
 from ouroboros.transport_custody import ProviderNotDispatched
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
@@ -470,13 +470,11 @@ class _ModelInvocation:
             try:
                 # Only this operational request manifest is updated. The
                 # ledger's immutable physical-candidate manifest is untouched.
-                self.request_manifest_ref = persist_call(
+                self.request_manifest_ref = update_call_manifest_metadata(
                     self.root, task_id=self.task_id, call_id=f"{self.invocation_id}_model_request",
-                    call_type="llm_claudexor_request", payload=self.payload, keep_raw=True,
-                    manifest={"invocation_id": self.invocation_id, "request_ref": self.request_ref,
-                              "model_role": self.role, "operation_id": self.operation_id,
+                    metadata={"operation_id": self.operation_id,
                               "capture_failure_evidence": self.capture_failure_evidence,
-                              "capture_effort_evidence": self.capture_effort_evidence})["manifest_ref"]
+                              "capture_effort_evidence": self.capture_effort_evidence})
             except Exception as error:
                 self.request_manifest_ref = {}
                 log.warning("Model custody checkpoint unavailable: %s", type(error).__name__)

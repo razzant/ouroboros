@@ -930,6 +930,64 @@ def test_operation_observer_has_recovery_identity_without_provider_content(setup
     assert retained(root, "request") == gateway.uploads[0][0]
 
 
+def test_acceptance_updates_only_receipt_and_preserves_physical_seal(setup, monkeypatch):
+    root, gateway, client = setup
+    initial, physical, payload_passes = {}, {}, []
+    persist = transport.persist_call
+
+    def counted(*args, **kwargs):
+        if kwargs["call_type"] == "llm_claudexor_request":
+            payload_passes.append(kwargs["call_id"])
+        return persist(*args, **kwargs)
+
+    def observe(value):
+        if value["operation_id"]:
+            return
+        directory = root / "observability" / "calls" / "task-one"
+        initial.update(json.loads((directory / f'{value["invocation_id"]}_model_request.json').read_text()))
+        path = directory / f'{value["invocation_id"]}.json'
+        physical[path] = path.read_bytes()
+
+    monkeypatch.setattr(transport, "persist_call", counted)
+    client.chat([], MODEL, model_operation_observer=observe)
+    path = root / "observability" / "calls" / "task-one" / f'{initial["call_id"]}.json'
+    accepted = json.loads(path.read_text())
+    assert len(payload_passes) == 1
+    assert accepted == {**initial, "operation_id": "op-0"}
+    assert all(path.read_bytes() == raw for path, raw in physical.items())
+    assert len(gateway.accepted_operations) == 1
+
+
+def test_equal_payloads_remain_separate_invocations(setup, monkeypatch):
+    root, gateway, client = setup
+    monkeypatch.setattr(transport, "stamp_clock_note", lambda payload: deepcopy(payload))
+    gateway.results.append(result())
+    gateway.dispatch.append("response_received")
+    client.chat([], MODEL)
+    client.chat([], MODEL)
+    assert gateway.uploads[0][0] == gateway.uploads[1][0]
+    assert gateway.uploads[0][1] != gateway.uploads[1][1]
+    assert len(gateway.accepted_operations) == 2
+    assert len(ledger(root)) == 2
+
+
+def test_acceptance_checkpoint_recovers_same_operation_after_crash(setup, monkeypatch):
+    root, gateway, client = setup
+
+    def crash(_self, _raw):
+        raise OSError("Process lost before retaining the response")
+
+    monkeypatch.setattr(transport._ModelInvocation, "retain", crash)
+    with pytest.raises(OSError, match="Process lost"):
+        client.chat([], MODEL)
+    [row] = ledger(root)
+    assert row["state"] == "unresolved"
+    recovered = transport.recover_model_attempt(root, row, gateway_factory=lambda: gateway)
+    assert recovered[0] == "settled"
+    assert gateway.reads == ["op-0"]
+    assert len(gateway.creates) == len(gateway.accepted_operations) == 1
+
+
 def test_observer_failure_does_not_lose_response_or_repeat_generation(setup):
     root, gateway, client = setup
 

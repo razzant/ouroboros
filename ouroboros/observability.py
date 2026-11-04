@@ -1089,6 +1089,16 @@ def write_call_manifest(
     }
 
 
+def update_call_manifest_metadata(
+    drive_root: pathlib.Path, *, task_id: str, call_id: str, metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Merge receipt facts into an existing manifest without reopening its payload."""
+    path = call_manifest_path(drive_root, task_id, call_id)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    return write_call_manifest(drive_root, task_id=task_id, call_id=call_id,
+                               manifest={**manifest, **metadata})
+
+
 def _redact_text(text: str, records: List[RedactionRecord], path: str) -> str:
     out = text
     for rule, pattern in _TOKEN_PATTERNS:
