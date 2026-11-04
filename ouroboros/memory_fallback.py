@@ -470,7 +470,8 @@ def _rows(root: pathlib.Path, read_rows: List[Tuple[Dict[str, Any], Dict[str, An
 
 def _owner_words(root: pathlib.Path, items: List[_Row]) -> Dict[str, Tuple[str, str, str]]:
     """``task -> (group, verbatim block, address block)``: the owner's words that caused each task."""
-    from ouroboros.owner_words import render_owner_words, task_owner_words  # D15->D17 is lazy-only
+    from ouroboros.owner_words import (UNREAD_TARGET, render_owner_words, task_owner_words,  # D15->D17 is lazy-only
+                                       words_stamp)
 
     out: Dict[str, Tuple[str, str, str]] = {}
     for item in items:
@@ -486,9 +487,9 @@ def _owner_words(root: pathlib.Path, items: List[_Row]) -> Dict[str, Tuple[str, 
         block = render_owner_words(rows, absent, audience="writer", root_task_id=root_task)
         if not block:
             continue
-        refs = [f"[{row.get('ts') or 'time not recorded'} · {row.get('author') or 'owner'} · {row.get('source')} of task "
-                f"{row.get('task_id')} · {row.get('ref')}] ({len(row.get('text') or '')} chars — not shown: the input "
-                "could not hold them)" for row in rows]
+        # The whole form's stamps (a reply target under its own author, never my human), each body's size alone.
+        refs = [words_stamp(row) + (f" ({len(row['text'])} chars — not shown: the input could not hold them)"
+                                    if row.get("text") else f" {UNREAD_TARGET}") for row in rows]
         pointer = "## Words of my human that caused this work (by reference)\n" + "\n".join(refs) if refs else block
         out[item.task] = (group, block, pointer)
     return out

@@ -17,11 +17,13 @@ from ouroboros.context_budget import OWNER_WORDS_KIND
 KIND_RELAY = "relay_entry"
 
 
-def _owner_row(row, drive_root=None) -> bool:
+def quotable_owner_row(row, drive_root=None, *, accounts=None) -> bool:
+    """An attested owner row (``owner_words.owner_row``, over the caller's one place snapshot when given) or an
+    owner's answered card."""
     from ouroboros.owner_quiz import secret_outcome_block
-    from ouroboros.owner_words import _owner_row as attested
+    from ouroboros.owner_words import owner_row
     # A secret request's answer row is the host's outcome frame: never a quotable owner row.
-    return attested(row, drive_root) or bool(row and row.get("type") == "quiz_answer"
+    return owner_row(row, drive_root, accounts=accounts) or bool(row and row.get("type") == "quiz_answer"
         and row.get("source") == "owner_quiz_answer" and (row.get("quiz") or {}).get("state") == "answered"
         and secret_outcome_block(row) is None)
 
@@ -52,7 +54,7 @@ def held_owner_messages(ctx) -> dict:
                 row = resolve_owner_message_source(canonical_data_root(ctx), ref)
             except StoreError:  # its archive is still importing: nothing held yet, never a failed turn
                 row = None
-            if _owner_row(row, canonical_data_root(ctx)):
+            if quotable_owner_row(row, canonical_data_root(ctx)):
                 held[format_address(row_address(row))] = row
         persist_held_state(ctx)
     return held
@@ -68,7 +70,7 @@ def retain_owner_message(ctx, row=None, *, client_message_id="") -> None:
         row = accepted_chat_message(canonical_data_root(ctx), 1 if chat_id is None else int(chat_id),
                                     client_message_id)
     from ouroboros.tool_access import canonical_data_root
-    if _owner_row(row, canonical_data_root(ctx) if getattr(ctx, "drive_root", None) else None):
+    if quotable_owner_row(row, canonical_data_root(ctx) if getattr(ctx, "drive_root", None) else None):
         held_owner_messages(ctx)[format_address(row_address(row))] = copy.deepcopy(row)
         persist_held_state(ctx)
 

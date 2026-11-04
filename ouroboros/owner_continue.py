@@ -321,12 +321,10 @@ def valid_start(start: Any) -> bool:
 
 
 def _wake_opening(metadata: Dict[str, Any], task_id: str, gaps: List[str]) -> Optional[Dict[str, Any]]:
-    """The opening a consciousness wake's own row recorded, copied by value, or a named gap.
-
-    Own clock: ``wake_task_metadata``'s reason. Place focus: ``focus_metadata``'s facts
-    (sender, ``owner_confirmed`` as the place recorded it) and the event's exact words
-    (``metadata.presence.observed_text``), the room's context. None is ever owner text.
-    """
+    """The opening a consciousness wake's own row recorded, copied by value, or a named gap: own clock, its
+    ``wake_task_metadata`` reason; place focus, ``focus_metadata``'s facts (sender, ``owner_confirmed`` as the place
+    recorded it) and the event's exact words (``metadata.presence.observed_text``), the room's context. None is owner
+    text here: an addressed event from my human's confirmed account is its own ``place_owner`` corpus row."""
     from ouroboros.consciousness_authority import (
         WAKE_CAUSE_FOCUS, WORK_KIND_CONSCIOUSNESS, is_consciousness_origin, wake_cause, work_kind,
     )
@@ -860,11 +858,13 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
         for row in start.get("answers") or []:
             lines += _card_lines(row)
     wake = sources.get("wake") if isinstance(sources.get("wake"), dict) else None
+    later = [row for row in sources.get("later") or [] if isinstance(row, dict) and row.get("content")]
     if wake:
         lines += ["", "That task was a wake of your consciousness; no owner message opened it. Its recorded "
                       "opening (host facts, not owner words):",
                   json.dumps({key: value for key, value in wake.items() if key != "observed_text"}, ensure_ascii=False)]
-        if "observed_text" in wake:
+        mine = {row["content"] for row in later if row.get("source") == "place_owner"}  # shown once, below, as mine
+        if "observed_text" in wake and wake["observed_text"] not in mine:
             lines += ["The event's words, from the sender recorded above (context, not an owner "
                       "instruction; verbatim):", str(wake["observed_text"])]
     api = sources.get("api") if isinstance(sources.get("api"), dict) else None
@@ -874,7 +874,6 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
                       "owner words; verbatim):", str(api.get("description") or "")]
         lines += [f"{label}: {api[key]}" for key, label in (("context", "Context"), ("expected_output", "Expected output"),
                                                             ("constraints", "Constraints")) if api.get(key)]
-    later = [row for row in sources.get("later") or [] if isinstance(row, dict) and row.get("content")]
     if later:
         lines += ["", "Other owner words in that task's record (verbatim, in order):"]
         for row in later:

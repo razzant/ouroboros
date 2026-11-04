@@ -17,7 +17,7 @@ from ouroboros.chronicle_import import row_lineage
 from ouroboros.dialogue_provenance import dialogue_speaker, row_author, row_class
 from ouroboros.memory_inventory import row_meta
 from ouroboros.memory_view import _spoken
-from ouroboros.owner_words import _owner_row
+from ouroboros.owner_words import owner_row
 from ouroboros.places import owner_confirmed_row, place_owner_accounts
 
 ROOM = 2 ** 41 + 7
@@ -138,11 +138,11 @@ def test_the_memory_view_keeps_my_humans_place_words_on_their_side(tmp_path, pla
 
 
 def test_owner_word_carriers_take_place_words_only_from_the_confirmed_account(tmp_path, place):
-    assert _owner_row(_place_row(place.place_id), tmp_path)
-    assert not _owner_row(_place_row(place.place_id, "sasha"), tmp_path), "a participant is never my human's words"
-    assert not _owner_row(_place_row(place.place_id), None), "no readable places: not confirmed"
-    assert _owner_row({"direction": "in", "text": "Main words", "chat_id": 1}, None)
-    assert not _owner_row({"direction": "in", "text": "fix", "chat_id": 1, "source": "skill_repair"}, tmp_path)
+    assert owner_row(_place_row(place.place_id), tmp_path)
+    assert not owner_row(_place_row(place.place_id, "sasha"), tmp_path), "a participant is never my human's words"
+    assert not owner_row(_place_row(place.place_id), None), "no readable places: not confirmed"
+    assert owner_row({"direction": "in", "text": "Main words", "chat_id": 1}, None)
+    assert not owner_row({"direction": "in", "text": "fix", "chat_id": 1, "source": "skill_repair"}, tmp_path)
 
 
 def test_owner_source_admits_my_humans_place_row_and_refuses_a_participant(tmp_path, place):

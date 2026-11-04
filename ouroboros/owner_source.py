@@ -48,10 +48,10 @@ def resolve_owner_source(ctx: Any, source: Any) -> dict[str, Any]:
             return {}
         row = resolve_owner_message_source(drive, ref)
         # System/skill injections and a place participant cannot become owner authority merely by
-        # retaining an inbound-looking row or a copied owner reference (``owner_words._owner_row``).
-        from ouroboros.owner_words import _owner_row
+        # retaining an inbound-looking row or a copied owner reference (``owner_words.owner_row``).
+        from ouroboros.owner_words import owner_row
 
-        if not _owner_row(row, drive):
+        if not owner_row(row, drive):
             return {}
         # Canonicalize selectors to the actual row so omitting a client id or
         # adding caller fields cannot turn one owner message into two grants.
