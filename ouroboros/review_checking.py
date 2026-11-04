@@ -58,10 +58,8 @@ class CheckingAreaUnavailable(RuntimeError):
 def _checking_area_present(path: pathlib.Path) -> bool:
     try:
         path.lstat()
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
+    except OSError as exc:
+        return not isinstance(exc, FileNotFoundError)  # dangling links and unreadable paths are not absence
     return True
 
 
@@ -101,18 +99,14 @@ def _remove_checking_area(path: pathlib.Path, git: Optional[Mapping[str, Any]] =
 
 def _release_unless_kept(data_root: Any, task_id: str, area: pathlib.Path, summary: Dict[str, Any],
                          git: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
-    """Release a captured copy unless the owner keeps its task (``owner_keep``): the receipt stands either
-    way, and a kept copy goes at a later pass once the keep is lifted. Taken under the seat lock, never waiting.
-    The seat's scratch goes with its copy (``session_scratch.release_seat_scratch``); a released copy never
-    keeps the scratch that served it."""
+    """Release a captured copy, and its seat's scratch (``session_scratch.release_seat_scratch``), unless the owner
+    keeps its task (``owner_keep``): the receipt stands either way, a kept copy goes at a later pass. Seat-locked."""
     from ouroboros.owner_keep import gate
     from ouroboros.session_scratch import release_seat_scratch
 
     with gate(data_root, task_id, timeout_sec=0) as why:
-        if why:
-            return summary
-        released = _release_area(area, summary, git)
-        if "cleanup_error" not in released:
+        released = summary if why else _release_area(area, summary, git)
+        if not (why or "cleanup_error" in released):
             release_seat_scratch(data_root, task_id, area.parent)
         return released
 

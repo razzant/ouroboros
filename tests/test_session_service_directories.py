@@ -374,7 +374,9 @@ def test_real_bus_through_safe_test_uses_the_actual_short_grant(tmp_path, monkey
         assert record["returncode"] == 0 and pathlib.Path(record["scratch"]).parent == scratch
     finally:
         custody._CUSTODY.clear()
-        session_scratch.release_session_scratch(drive)
+        session_scratch.release_session_scratch(drive)  # the delegate's record, in its task drive
+        if consumer == "reviewer":  # the seat's record lives in the seat home (#2706)
+            session_scratch.release_session_scratch(rc.seat_dir(data, "task-1", "socket"))
 
 
 def test_the_facts_name_exactly_the_granted_places_and_a_limitation_as_one(tmp_path, monkeypatch):

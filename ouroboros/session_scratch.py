@@ -85,7 +85,8 @@ def _nested_drives(drive: pathlib.Path) -> Iterator[pathlib.Path]:
     for relative, suffix in (("task_drives", ()), ("state/headless_tasks", ("data",))):
         children = drive / relative
         if (children.is_dir() and not children.is_symlink()
-                and all(not parent.is_symlink() for parent in children.parents if parent != drive and drive in parent.parents)):
+                and all(not parent.is_symlink() for parent in children.parents
+                        if parent != drive and drive in parent.parents)):
             for child in sorted(children.iterdir()):
                 nested = child.joinpath(*suffix)
                 if child.is_dir() and not child.is_symlink() and nested.is_dir() and not nested.is_symlink():
@@ -247,7 +248,8 @@ def _holders(root: pathlib.Path) -> Iterator[Tuple[str, str, pathlib.Path]]:
     for home in listing(root / "state" / "review_checkouts" / "seats"):
         if not home.name.startswith("."):
             with contextlib.suppress(OSError, ValueError, AttributeError):
-                yield "seat", str(json.loads((home / "checking.json").read_text(encoding="utf-8")).get("task_id") or ""), home
+                marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
+                yield "seat", str(marker.get("task_id") or ""), home
     for kind, folder in (("trash", root / _TRASH_DIR), ("staging", root / _STAGING_DIR)):
         for entry in listing(folder):
             task_id = entry.name.split("+", 1)[0].rsplit("-", 1)[0]
@@ -275,8 +277,9 @@ def scratch_records(data_root: Any, live: Any = None) -> List[Dict[str, Any]]:
         try:
             owners = list(owner_records(holder))
         except OSError as exc:
-            rows.append({"holder": kind, "task_id": task_id, "key": "", "record": str(holder), "path": "", "valid": False,
-                         "missing": False, "problem": f"{type(exc).__name__}: {exc}", "hold": "", "since": ""})
+            rows.append({"holder": kind, "task_id": task_id, "key": "", "record": str(holder), "path": "",
+                         "valid": False, "missing": False, "problem": f"{type(exc).__name__}: {exc}",
+                         "hold": "", "since": ""})
             continue
         for owner in owners:
             record, row = owner / "scratch.json", {"holder": kind, "task_id": task_id, "key": owner.name}
