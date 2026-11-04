@@ -325,7 +325,7 @@ def test_a_captured_arrival_is_rebuilt_with_its_whole_thread(tmp_path):
 
 
 _RUNTIME = ("ouroboros", "supervisor")
-_EXPANDERS = ("whole_body(", "whole_rows(", "whole_line(", "_whole_row(")
+_EXPANDERS = ("whole_body(", "whole_rows(", "whole_row(", "whole_line(", "_whole_row(")
 # Every function that reads a ``conversation`` key, and what it reads it from. A stored dialogue row's thread is
 # consumed only where it is expanded; the others never see a stored row.
 _CONVERSATION_READERS = {
@@ -349,11 +349,12 @@ _BODY_DECODERS = {
     "ouroboros/place_arrivals.py::heard_replay": "stored row, identity and import marker only",
     "ouroboros/place_arrivals.py::record_heard": "stored row, identity only",
     "ouroboros/place_arrivals.py::_room_details": "stored row, scalar title/name only",
+    "ouroboros/place_arrivals.py::retain_focus_source": "stored row, its address only",
 }
 # Readers that hand a stored row on whole (a receipt, a comparison, a rebuilt source, the export) expand it.
 _WHOLE_ROW_READERS = ("ouroboros/dialogue_store.py::append", "ouroboros/dialogue_store.py::_receipt",
                       "ouroboros/dialogue_import.py::_continues_store", "ouroboros/dialogue_import.py::_export_stream",
-                      "ouroboros/place_arrivals.py::retain_focus_source", "ouroboros/presence_history.py::_record_one",
+                      "ouroboros/chat_chain.py::recorded_context", "ouroboros/presence_history.py::_record_one",
                       "ouroboros/place_intake.py::_captured_arrival")
 
 
@@ -465,3 +466,31 @@ def test_a_rebuilt_arrival_whose_reader_skipped_the_expansion_is_refused_before_
     monkeypatch.setattr(ds, "whole_body", lambda conn, body: ds.decode(body))  # a reader that forgot to expand
     with pytest.raises(PresenceTurnError, match="presence_event_unexpanded"):
         place_intake._captured_arrival(tmp_path, {"focus": {"place_id": "place-1"}}, "turn-1", "e" * 64, None)
+
+
+# ---- the model opens a thread by its row's address ----------------------------------------------
+
+def test_a_rows_recorded_context_is_read_by_its_address_exactly_as_its_copy_held_it(tmp_path):
+    from ouroboros.dialogue_provenance import dialogue_text
+    from ouroboros.place_arrivals import SourceProjection
+
+    row = {**presence_row(slack(30)), "context_source_ref": dict(chat_chain.ROW_CONTEXT)}
+    del row["type"]  # a non-focus Presence event's row names itself as its context
+    receipt = ds.append(tmp_path, "chat", row)
+    entry = ds.row_at(tmp_path, "chat", receipt.seq)
+    address = chat_chain.context_address(row)
+    assert isinstance(entry.row, SourceProjection) and entry.row["context_source_ref"] == address
+    assert address == {"kind": "chat_row", "chat_id": 912345, "ts": TS, "row_sha256": chat_chain.source_row_id(row)}
+    pointer = dialogue_text(entry.row).split("memory_read(source_ref=", 1)[1]
+    assert json.JSONDecoder().raw_decode(pointer)[0] == address  # what every row reader prints
+    copy = json.dumps({"recorded_at": row["ts"], "source_event_id": row["presence_provenance"]["source_event_id"],
+                       "text": row["text"], "transport": row["transport"]},
+                      ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    stored, document = chat_chain.recorded_context(tmp_path, address)
+    assert document == copy and stored["row_sha256"] == address["row_sha256"]  # its thread whole, byte for byte
+    assert chat_chain.recorded_context(tmp_path, chat_chain.format_address(address))[1] == copy
+    from ouroboros.tools.chronicle import _source_texts
+
+    assert any(text.startswith("message 7: ") for text in _source_texts(tmp_path, address))  # a mark's quote finds it
+    with pytest.raises(chat_chain.RowAddressError):
+        chat_chain.recorded_context(tmp_path, {**address, "row_sha256": "0" * 64})

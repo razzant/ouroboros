@@ -103,6 +103,36 @@ def _normalized(address: Any) -> Dict[str, Any]:
     return wanted
 
 
+# The context recorded with an inbound row is the row itself, never a copy: a non-focus Presence event's row
+# names it so (``presence_runner._log_dialogue``), an admitted or author-mailed arrival in its dedup record
+# (``place_arrivals.retain_focus_source``); every row reader shows it as the row's exact address
+# (``place_arrivals.project_source``), which ``memory_read(source_ref=…)`` reads (``recorded_context``).
+ROW_CONTEXT = {"kind": "chat_row"}
+
+
+def context_address(row: Dict[str, Any]) -> Dict[str, Any]:
+    """The exact address by which ``memory_read(source_ref=…)`` reads the context recorded with ``row``."""
+    return {"kind": "chat_row", "chat_id": _row_chat_id(row), "ts": str(row.get("ts") or ""),
+            "row_sha256": source_row_id(row)}
+
+
+def recorded_context(root: Any, address: Any) -> Tuple[Dict[str, Any], bytes]:
+    """``(stored address, document)``: the context recorded with the row at ``address``, its provider thread
+    whole, as the document a per-event copy held (``recorded_at``, ``source_event_id`` -- the Presence event's,
+    else the row's client id -- ``text``, ``transport``; sorted keys, compact). ``RowAddressError`` when the
+    address resolves to no row."""
+    from ouroboros.place_arrivals import SourceProjection
+
+    row, found = resolve_row(root, address)
+    if row is None:
+        raise RowAddressError(found)
+    whole = ds.whole_row(root, row.source_body if isinstance(row, SourceProjection) else row)
+    event = whole.get("presence_provenance") if isinstance(whole.get("presence_provenance"), dict) else {}
+    document = {"recorded_at": whole.get("ts"), "source_event_id": event.get("source_event_id") or whole.get("client_message_id"),
+                "text": whole.get("text"), "transport": whole.get("transport")}
+    return found["address"], json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
 def stored_address(root: Any, entry: ds.Row) -> Dict[str, Any]:
     """Content identity, with an imported physical hint or a new SQL coordinate."""
     return address_at(entry.row, entry.seq, ds.legacy_address(root, entry.seq) if entry.stream == "chat" else None)

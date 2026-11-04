@@ -591,6 +591,15 @@ def whole_line(conn: sqlite3.Connection, body: str) -> str:
     return shared_values.splice(skeleton, _parts(conn, shared_values.token_digests(skeleton))).decode("utf-8")
 
 
+def whole_row(root: Any, row: Dict[str, Any]) -> Dict[str, Any]:
+    """One decoded row a reader returned (``resolve_row``'s), as it was written."""
+    if ROW_SHA_KEY not in row:
+        return row
+    with transaction(root, write=False) as conn:
+        resolve = _parts(conn, thread_references(_thread(row)))
+    return _whole_row(row, resolve)
+
+
 def whole_rows(root: Any, rows: Iterable["Row"]) -> List["Row"]:
     """Rows any reader returned, each as it was written, from one read: for a reader that hands rows on whole."""
     rows = list(rows)

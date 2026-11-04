@@ -8,9 +8,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
-from ouroboros import dialogue_store, store
+from ouroboros import chat_chain, dialogue_store, store
 
 _PLACE = "json_extract(body, '$.place_id')"
 _ARRIVAL = "stream='chat' AND kind='place_arrival'"
@@ -39,12 +38,16 @@ class SourceProjection(dict):
 
 
 def project_source(record):
-    """Project a deferred source pointer without mutating the accepted source bytes."""
+    """Project a deferred source pointer without mutating the accepted source bytes: an arrival's from its dedup
+    record, and a context recorded in the row itself (``chat_chain.ROW_CONTEXT``) as the row's exact address."""
     body = dialogue_store.decode(record["body"])
-    if body.get("type") != "place_arrival" or "dispatch_input" not in record.keys():
-        return body
-    extra = json.loads(record["dispatch_input"] or "{}")
-    source = extra.get("place_context_source_ref") if isinstance(extra, dict) else None
+    if body.get("type") == "place_arrival" and "dispatch_input" in record.keys():
+        extra = json.loads(record["dispatch_input"] or "{}")
+        source = extra.get("place_context_source_ref") if isinstance(extra, dict) else None
+    else:
+        source = body.get("context_source_ref") if body.get("context_source_ref") == chat_chain.ROW_CONTEXT else None
+    if source == chat_chain.ROW_CONTEXT:
+        source = chat_chain.context_address(body)
     return SourceProjection(body, source) if isinstance(source, dict) else body
 
 
@@ -146,32 +149,28 @@ def pin_recipient(root, captured_task_id, conversation_key, pin, *, expect, admi
 
 
 def retain_focus_source(root, task_id):
-    """The immutable context-source blob of an admitted focus, or of an arrival whose author's mail leaves
-    facts out (``place_intake.offer_to_author``); heard-only arrivals need none. Returns its reference,
-    the one already retained when there is one.
+    """The context source of an admitted focus, or of an arrival whose author's mail leaves facts out
+    (``place_intake.offer_to_author``); heard-only arrivals name none. It is the arrival's own row, by its exact
+    address (``chat_chain.context_address``); an arrival that retained a blob before keeps it. Returns the reference.
 
-    Its pointer lives in the existing dedup record, so source row bytes and byte
-    coordinates stay unchanged. dialogue_store projects it for every row reader.
+    The mark lives in the existing dedup record, so source row bytes and byte coordinates stay
+    unchanged; dialogue_store projects it as the row's address for every row reader.
     Caller holds intake_lock through this operation (and a focus's running-task write).
     """
-    from ouroboros import chat_chain
     with dialogue_store.transaction(root, write=False) as conn:
         row = _record(conn, task_id)
-        body = dialogue_store.whole_body(conn, row['body']) if row is not None else None
     if row is None:
         raise ValueError('Focus requires its captured event')
-    facts = json.loads(row['dispatch_input'] or '{}')
-    if body.get('context_source_ref') or facts.get('place_context_source_ref'):
-        return body.get('context_source_ref') or facts['place_context_source_ref']
-    source = {'recorded_at': body['ts'], 'source_event_id': body['client_message_id'],
-              'text': body['text'], 'transport': body['transport']}
-    ref = chat_chain.retain_memory_source(SimpleNamespace(drive_root=root, task_id=task_id), 'presence-event',
-        json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode(), 'json')
-    with dialogue_store.transaction(root, write=True) as conn:
-        conn.execute("UPDATE dialogue SET dispatch_input=json_set(COALESCE(dispatch_input,'{}'), "
-                     "'$.place_context_source_ref',json(?)) WHERE stream='chat' AND seq=?",
-                     (json.dumps(ref), row['seq']))
-    return ref
+    body = dialogue_store.decode(row['body'])
+    held = body.get('context_source_ref') or json.loads(row['dispatch_input'] or '{}').get('place_context_source_ref')
+    if held and held != chat_chain.ROW_CONTEXT:
+        return held
+    if not held:
+        with dialogue_store.transaction(root, write=True) as conn:
+            conn.execute("UPDATE dialogue SET dispatch_input=json_set(COALESCE(dispatch_input,'{}'), "
+                         "'$.place_context_source_ref',json(?)) WHERE stream='chat' AND seq=?",
+                         (json.dumps(chat_chain.ROW_CONTEXT), row['seq']))
+    return chat_chain.context_address(body)
 
 
 def _dialogue_indexes(root):

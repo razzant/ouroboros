@@ -596,7 +596,7 @@ def test_distinct_conversations_run_their_own_authors_side_by_side(v2, monkeypat
 
 @pytest.mark.parametrize("version", [1, 2])
 def test_an_arrival_reaches_the_model_with_its_message_conversation_and_attachments(v2, version):
-    from ouroboros import dialogue_store
+    from ouroboros import chat_chain, dialogue_store
     from ouroboros.presence_bindings import conversation_key
 
     h, go = v2, threading.Event()
@@ -628,11 +628,11 @@ def test_an_arrival_reaches_the_model_with_its_message_conversation_and_attachme
     queue = arrival["conversation"]["transport_queue"]
     assert {key: value for key, value in queue.items() if key != "events"} == {
         key: value for key, value in inbox.items() if key != "events"}
-    source = arrival["context_source_ref"]  # a locator of the arrival's own retained source, as row readers print it
-    assert "memory_read(source_ref=" in queue["events"] and source["task_id"] == turn_ref(h, 2)
-    assert source["kind"] == "task_source" and not {"read", "canonical_root"} & set(source)
+    source = arrival["context_source_ref"]  # the arrival's own room row, by its exact address, as row readers print it
+    assert "memory_read(source_ref=" in queue["events"]
     room_row, = [entry.row for entry in dialogue_store.whole_rows(h.root, dialogue_store.iter_rows(h.root, "chat"))
                  if entry.row.get("client_message_id") == "chat:a:2" and entry.row.get("direction") == "in"]
+    assert source == chat_chain.context_address(room_row.source_body) and source["kind"] == "chat_row"
     assert room_row["transport"]["conversation"]["transport_queue"] == inbox  # the exact snapshot, kept (read as written)
     assert room_row["transport"]["message"] == message
     # The author's own registered readers resolve that reference: one retained source, and the room row's
@@ -648,10 +648,10 @@ def test_an_arrival_reaches_the_model_with_its_message_conversation_and_attachme
     assert source in context_refs(history) and source in context_refs(rows)
 
 
-def test_an_arrival_whose_queue_source_cannot_be_retained_is_not_handed_over(v2, monkeypatch):
-    """No omission without a source this author can resolve: when the arrival's exact facts cannot be retained,
-    the handoff is refused before any mail, and its transport retries the same event."""
-    from ouroboros import chat_chain
+def test_an_arrival_whose_queue_source_cannot_be_named_is_not_handed_over(v2, monkeypatch):
+    """No omission without a source this author can resolve: when the arrival's room row cannot be named as its
+    source, the handoff is refused before any mail, and its transport retries the same event."""
+    from ouroboros import place_arrivals
     from ouroboros.presence_bindings import conversation_key
 
     h, go = v2, threading.Event()
@@ -663,19 +663,19 @@ def test_an_arrival_whose_queue_source_cannot_be_retained_is_not_handed_over(v2,
              "conversation_key": conversation_key("chat", "a", "r", ""), "after_source_event_id": "chat:a:2",
              "complete": True, "pending_count": 1, "omitted_count": 0,
              "events": [{"source_event_id": "chat:a:3", "text": "a queued follow-up"}]}
-    real = chat_chain.retain_memory_source
+    real = place_arrivals.retain_focus_source
 
     def unavailable(*_args, **_kwargs):
-        raise OSError("source storage unavailable")
+        raise OSError("the arrival's record is unavailable")
 
-    monkeypatch.setattr(chat_chain, "retain_memory_source", unavailable)
+    monkeypatch.setattr(place_arrivals, "retain_focus_source", unavailable)
     refused = post(h, 2, "see the queue", conversation={"transport_queue": inbox})
     assert refused.status_code == 400 and refused.json()["disposition"] == "retry", refused.text
     assert place_mail(h, ref) == []
-    monkeypatch.setattr(chat_chain, "retain_memory_source", real)
+    monkeypatch.setattr(place_arrivals, "retain_focus_source", real)
     assert post(h, 2, "see the queue", conversation={"transport_queue": inbox}).json()["outcome"] == "silent"
     entry, = place_mail(h, ref)
-    assert json.loads(entry["text"])["context_source_ref"]["task_id"] == turn_ref(h, 2)
+    assert json.loads(entry["text"])["context_source_ref"]["kind"] == "chat_row"
     go.set()
     assert settled(h, ref)["reply_anchor"]["source_event_id"] == "chat:a:2"
 
