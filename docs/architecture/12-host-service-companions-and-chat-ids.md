@@ -27,7 +27,7 @@ Reads/cancel visit only the accepted row (`dialogue_store.accepted_row`) and its
 
 `review_requested`/`assigned` are observed facts, never inferred words. Source-bound roots contact Main with `send_user_message(destination="main")` or `escalate`, each with a `request_id`. `presence_owner_contact.py` retains source facts for the voice line, preserving authored words. Messages use the outbox, questions `owner_quiz`, deferred events the attached supervisor bus. Identical retries rejoin; changed fields (waiting intent included) refuse. Only source-bound contact deduplicates omitted keys. Authority-only roots keep room questions; children report upward.
 
-Live answers use the author's final-drain admission lock; late answers enter Main with the exact owner words, source snapshot and child reference. Only owner-started roots inherit `presence_binding_authority`, never an automatic external final; the owner stays unrestricted. Silent permits private contact; Paused preserves owed contact without new focus. Service/scheduled notices keep separate gates. Display routing: §3.
+Live answers take the author's final-drain lock; late ones open unrestricted Main owner work with exact words/source/child ref. Its roots/Continue retain `presence_binding_relation`: place read/stop/task-authored steering, no external final. Listings disclose role-less settled gaps; ids remain readable. Silent permits private contact; Paused keeps owed contact without new focus. Service/scheduled notices gate separately (§3).
 
 `GET /identity` advertises each Presence capability independently (CREATING_SKILLS); missing required support is a setup gap, never fallback through owner ingress.
 

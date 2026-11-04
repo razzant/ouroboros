@@ -230,12 +230,14 @@ def _with_cognition(snapshot: TaskSettingsSnapshot, cognition: Mapping) -> TaskS
 
 def _actor_scope(task: Mapping, drive_root: Path) -> tuple[Path, Mapping]:
     from ouroboros.consciousness_authority import is_consciousness_origin
-    from ouroboros.dialogue_provenance import presence_metadata_binding
+    from ouroboros.dialogue_provenance import presence_metadata_binding, presence_record_metadata
 
     metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
     actor = {key: task.get(key) or metadata.get(key) for key in (
         "id", "parent_task_id", "root_task_id", "project_id", "chat_id")}
-    actor["presence"] = bool(task.get("_presence_turn") or presence_metadata_binding(metadata) is not None)
+    # The record's own view (its owner door and lineage too): the owner's related work keeps its room.
+    actor["presence"] = bool(task.get("_presence_turn")
+                             or presence_metadata_binding(presence_record_metadata(task)) is not None)
     actor["autonomous"] = bool(task.get("type") == "evolution" or metadata.get("evolution_root_task_id")
                                or metadata.get("evolution_transaction") or is_consciousness_origin(metadata)
                                or metadata.get("work_kind") == "consciousness" or actor["presence"])

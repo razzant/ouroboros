@@ -413,6 +413,23 @@ def test_binding_only_source_preserves_existing_scoped_read_authority(attention,
         assert result.status == "blocked" and "FOREIGN SECRET" not in result.text
 
 
+@pytest.mark.parametrize("fields,inherits", [
+    ({"metadata": {"presence_binding_relation": {"binding_id": "one-binding"}}}, False),
+    ({"metadata": {"presence_binding_authority": {"binding_id": "one-binding"}}, "delegation_role": "root",
+      "origin_message_ref": {"chat_id": 1, "client_message_id": "owner-late-answer"}}, False),
+    ({"metadata": {"presence_binding_authority": {"binding_id": "one-binding"}}, "delegation_role": "root"}, True),
+], ids=["related-owner-work", "old-related-owner-root", "place-acting-root"])
+def test_owner_related_source_hands_its_diagnostic_no_place_authority(attention, fields, inherits):
+    """#2482: the diagnostic of the owner's related work, new or recorded before the relation, is the
+    owner's child; only work acting for a place hands its binding authority down, read from its own record."""
+    source = attention.meta["task"]
+    source["metadata"].update(fields["metadata"])
+    source.update({key: value for key, value in fields.items() if key != "metadata"})
+    child = _mint(attention)
+    assert ("presence_binding_authority" in child["metadata"]) is inherits
+    assert not {"presence", "presence_binding_relation", "origin_message_ref"} & set(child["metadata"])
+
+
 @pytest.mark.parametrize("barrier", ["parent", "pause", "billing", "store"])
 def test_unchanged_attention_avoids_tick_reads_and_recovers(attention, monkeypatch, barrier):
     from ouroboros.config import BODY_MAINTENANCE_INTERVAL_SEC

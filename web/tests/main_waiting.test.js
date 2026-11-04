@@ -6,6 +6,7 @@ import test from 'node:test';
 import { ElementStub, installDom, restoreDom } from './chat_dom_fixture.js';
 import { stampNodeTimestamp } from '../modules/chat_activity.js';
 import { createMainWaiting } from '../modules/main_waiting.js';
+import { resumeAttemptWords } from '../modules/work_status.js';
 
 const turn = () => new Promise(resolve => setTimeout(resolve, 0));
 const find = (node, predicate) => predicate(node) ? node : node.children.reduce((found, child) => found || find(child, predicate), null);
@@ -347,6 +348,23 @@ test('the reason names what the task needs from the owner', t => {
     const reason = id => find(main.actionNode(id), node => node.classList.contains('owner-action-reason')).textContent;
     assert.deepEqual(rows.map(row => reason(row.task_id)), ['Needs Resume after the restart.', 'Needs an explicit Resume.',
         'Needs you to restore model access.', 'A reason of its own.', 'Waiting for a Project slot.']);
+});
+
+test('the message says a refused Resume as dated history and opens no message of its own for one', t => {
+    const main = mainPage(t);
+    const attempt = { at: '2026-10-17T15:05:00Z', by: { actor: 'ouroboros' }, error: 'predecessor_writers_unsettled',
+        text: 'task h1 is queued to run' };
+    const held = (id) => ({ work_id: id, confirmed: true, episode: { task_id: id, live: true }, last_resume: attempt,
+        members: { ids: [id], states: { [id]: { activity: 'paused', last_resume: attempt } } } });
+    main.waiting.snapshot({ ...census({ actions: [action('saved', { attention_reason: 'restart' })] }),
+        works: [held('saved'), held('quiet')] });
+    const reason = find(main.actionNode('saved'), node => node.classList.contains('owner-action-reason')).textContent;
+    assert.equal(reason, `Needs Resume after the restart. ${resumeAttemptWords(attempt)}.`);
+    assert.match(reason, /Resume by Ouroboros refused at .+: task h1 is queued to run\.$/);
+    assert.equal(main.actionNode('quiet'), null, 'an old refusal is no action of its own');
+    main.waiting.snapshot({ ...census({ actions: [action('saved', { attention_reason: 'restart' })] }), works: [] });
+    assert.equal(find(main.actionNode('saved'), node => node.classList.contains('owner-action-reason')).textContent,
+        'Needs Resume after the restart.', 'a body without it says the need alone');
 });
 
 test('Resume is offered only for a resumable pause the owner did not make; the task control only when cancelable', t => {

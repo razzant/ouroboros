@@ -109,9 +109,9 @@ _RESERVED_METADATA_KEYS = frozenset({
     "executor_ref",
     "workspace_executor",
     "project_id",
-    # Owner provenance (and its recorded absence) belongs to the host, never to a caller.
+    # Owner provenance (its recorded absence, a late answer's place relation) belongs to the host, never a caller.
     "origin_message_ref",
-    "origin_suppressed", "origin_message_absent",
+    "origin_suppressed", "origin_message_absent", "presence_binding_relation",
 })
 
 
@@ -1356,7 +1356,9 @@ async def api_task_resume(request: Request) -> JSONResponse:
     revocation, an acceptance fence at restore) is granted by the same call once
     its durable authority validates again; a fence-lifted zero-dispatch sibling
     is released by this same call as an explicit selection. A paused direct
-    owner-chat turn is resumed here too, under its own task id. The optional
+    owner-chat turn is resumed here too, under its own task id. A held Continue
+    whose earlier attempt's writers all still run returns to its writer wait
+    (``held``, ``blockers``) and starts by itself once they settle. The optional
     body (``TaskResumeRequest``) names held calls whose outcome is unknown that
     the owner goes on past (a refusal's ``acceptable_unknown``), never re-run.
     This door binds itself (``control_actor.owner_door``): only its Resume moves a

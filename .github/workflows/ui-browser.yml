@@ -131,7 +131,9 @@ jobs:
         timeout-minutes: 45
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
-        run: python -m playwright install --with-deps chromium webkit
+        run: |
+          python -m playwright install --with-deps chromium webkit
+          python -m ouroboros.chromium_runtime install
       # `--session-timeout` stops the session BETWEEN tests, so a slow shard still
       # ends through its session finish: the guard names the nodes it did not run
       # and the evidence is exported. The per-test timeout (SIGALRM on this Linux

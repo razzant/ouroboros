@@ -134,6 +134,49 @@ test('a reviews-placed row attaches to the card and asks the Reviews group to re
     } finally { instance?.destroy(); restoreDom(prior); }
 });
 
+// A terminal receipt can land after its card settled (an evolution cleanup the campaign's Stop ran
+// later): the card's collapsed line is its stored terminal line, so that row asks for one history
+// read, the read a live completion already schedules. Other rows, a live card and a repeat ask none.
+test('a terminal receipt landing live on a settled card asks for one history read', async () => {
+    const calls = [];
+    const { prior, instance, handlers, working, messages } = openCardChat(async (url) => {
+        calls.push(String(url));
+        return { ok: true, json: async () => (String(url).startsWith('/api/chat/history')
+            ? { messages: [] } : { id: 't1', active_direct_turns: [] }) };
+    });
+    const receipt = {
+        chat_id: 2, role: 'system', system_type: 'evolution_cleanup', card_row: 'timeline',
+        card_row_id: 'evolution-cleanup:tx1', terminal_receipt: 'retained_work', task_id: 't1',
+        content: 'Evolution cleanup moved local changes to a Git stash.\n\n- Repository: `/repo`',
+        ts: '2026-09-16T00:09:00Z',
+    };
+    const historyReads = () => calls.filter((url) => url.startsWith('/api/chat/history')).length;
+    const resync = () => new Promise((resolve) => setTimeout(resolve, 900));  // past the 700 ms debounce
+    try {
+        working('t1');
+        const card = walkCard(messages(), 't1');
+        handlers.get('chat')({ ...receipt, card_row_id: 'evolution-cleanup:tx0' });
+        await resync();
+        assert.notEqual(card.dataset.finished, '1');
+        const live = historyReads();
+        handlers.get('log')({ chat_id: 2, data: { type: 'task_done', task_id: 't1', status: 'cancelled',
+            ts: '2026-09-16T00:08:00Z', outcome_axes: { lifecycle: { status: 'cancelled' } } } });
+        await resync();
+        assert.equal(card.dataset.finished, '1', 'the terminal settled the card');
+        assert.ok(historyReads() >= live, 'the receipt on the live card asked for nothing of its own');
+        const settled = historyReads();
+        handlers.get('chat')(CUSTODY_ROW);
+        await resync();
+        assert.equal(historyReads(), settled, 'an ordinary card row on a settled card reads nothing');
+        handlers.get('chat')(receipt);
+        await resync();
+        assert.equal(historyReads(), settled + 1, 'the late receipt asked for one read of the stored line');
+        handlers.get('chat')(receipt);
+        await resync();
+        assert.equal(historyReads(), settled + 1, 'the same row again asks for no second read');
+    } finally { instance?.destroy(); restoreDom(prior); }
+});
+
 test('history replay places stamped rows on their cards and keeps unplaceable ones visible', async () => {
     const rows = [
         { task_id: 'r1', is_progress: true, text: '💬 reading the ledger', ts: '2026-09-16T00:00:00Z' },

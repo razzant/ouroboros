@@ -112,7 +112,7 @@ def test_real_current_page_waits_and_timeout_observations(tmp_path, engine):
         assert evaluated.status == "ok" and evaluated.producer_text == "7"
         assert len(evaluated.host_annotations) == 1
         conditions = evaluated.host_annotations[0]
-        assert conditions.startswith(f"Browser conditions: {engine} ") and "(Playwright); " in conditions
+        assert conditions.startswith(f"Browser conditions: {engine} ") and "(Playwright" in conditions
         assert evaluated.text == f"7\n\n{conditions}"
     finally:
         try:

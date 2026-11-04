@@ -403,8 +403,8 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
     live nowhere else: ``status`` as written, ``reason_code``, ``timeout_retry_from``, ``original_task_id``,
     ``delegated_runs_unreconciled``, ``model_waits`` (its handoff rows), ``outcome_axes``/``cancel_origin``, an
     answered root's ``late_work`` title and answer time, the card's ``detached``, the routing row (``chat_id``,
-    ``_is_direct_chat``, ``queued_at``) and the waited quiz (its id, resume reason and display fields).
-    ``{}`` is an absent document; a read that could not answer is ``{"unavailable": True}``."""
+    ``_is_direct_chat``, ``queued_at``), the waited quiz (its id, resume reason, display fields) and the latest
+    Resume attempt. ``{}`` is an absent document; a read that could not answer is ``{"unavailable": True}``."""
     from ouroboros.task_store import read_document
     from ouroboros.store_hot_facts import read
     from ouroboros.task_activity_facts import card_facts
@@ -456,7 +456,7 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
         # The executor's own terminal fact or nothing: generic ts is never an answer time.
         display["late_work"] = {"title": task_presentation_name(data),
                                 "answered_at": terminal_time_fact(data).get("occurred_at") or ""}
-    facts = {"card": card_facts(data), "display": display,
+    facts = {"card": card_facts(data), "display": display, "resume_attempt": data.get("resume_attempt"),
              # An answered root's census row carries only its own routing identity.
              "row": {key: data[key] for key in ("chat_id", "project_id", "_is_direct_chat", "queued_at")
                      if key in data},

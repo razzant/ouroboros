@@ -72,7 +72,7 @@ supervisor/ — background thread inside server.py (§5)
   schedule_time.py, schedule_occurrence.py — cron/timezone parsing; a due occurrence admits at most one root
   schedule_notes.py — a due `kind:"notify"` row becomes a signed `reminder` System row; no model, no retry
   schedule_view.py — pure schedule facts and digest
-  evolution_lifecycle.py — evolution campaign state and cycle lifecycle (§6 Background consciousness)
+  evolution_lifecycle.py, evolution_cleanup.py — campaign state, cycle lifecycle, Git cleanup (§6)
   events.py, event_observation.py — worker→supervisor dispatch and the pending idle-input index; `main_llm_call_state` binds the active attempt/round/call
   subagent_task_truth.py — delegation-truth enrichment of the subagent `task_done` frame (§11.1)
   card_delivery.py — a card's chat row, `card`/`card_state` frames, `chat.card` and the `chat.outbound` fallback text
@@ -390,7 +390,8 @@ ouroboros/ — agent core and shared runtime (§6)
   tool_policy.py — Round-one tool visibility (the sets live in tool_capabilities.py)
   tool_effects.py, place_guard.py — per-tool effect facts (read · message · write) declared by connectors, and the dispatch refusals they drive: Advises, Silent/Paused places, one author per conversation
   icon_geometry.py — connector icons reduced to bounded geometry and drawn by the host in currentColor
-  browser_policy.py — every browser surface's target, script and control-request policy: granted origins, metadata/private/reserved refusals, three-valued `runtime_service_kind` (§6 MCP)
+  browser_policy.py — Browser targets, scripts and control requests: grants and service identity (§6 MCP)
+  chromium_runtime.py — Pinned Chromium supply and sandbox selection (§6)
   skill_payload_binding.py — Skill payload targeting: `.seed-origin` distinguishes native from external; read/list/search only for read profiles
   utils.py — atomic/locked JSON, timestamps, hashes, sanitization, subprocess helpers, `truncate_review_artifact`
   jsonl_tail.py — `JsonlChainSnapshot` (captured byte reads of a file chain; the swarm rollup) and the bounded filtered tail over the rotated file logs

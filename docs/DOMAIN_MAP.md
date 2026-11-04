@@ -12,7 +12,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D02 | LLM client, routing & providers | 47 | 0 |
 | D03 | Context assembly, fit & compaction | 33 | 0 |
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
-| D05 | Tool surfaces: files, code, shell, media, external | 50 | 0 |
+| D05 | Tool surfaces: files, code, shell, media, external | 51 | 0 |
 | D06 | Review stack | 96 | 0 |
 | D07 | Delegation, subagents & Claudexor | 106 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 76 | 0 |
@@ -22,13 +22,13 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D12 | Settings & configuration | 27 | 0 |
 | D13 | Safety, guards & runtime mode | 11 | 0 |
 | D14 | Skills & extensions | 72 | 0 |
-| D15 | Memory, knowledge, consciousness & self-evolution | 34 | 0 |
+| D15 | Memory, knowledge, consciousness & self-evolution | 35 | 0 |
 | D16 | Observability, usage accounting & cost | 30 | 0 |
 | D17 | Projects, workspaces & task results | 54 | 0 |
 | D18 | Launcher, packaging, platform & shared substrate | 38 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 24 | 0 |
-| **total** | | **984** | **0** |
+| **total** | | **986** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -387,6 +387,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/browser_policy.py`
 - `ouroboros/card_store.py`
 - `ouroboros/chat_uploads.py`
+- `ouroboros/chromium_runtime.py`
 - `ouroboros/code_import_candidates.py`
 - `ouroboros/code_intelligence.py`
 - `ouroboros/code_intelligence_architecture.py`
@@ -1065,6 +1066,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/tools/knowledge.py`
 - `ouroboros/tools/memory_tools.py`
 - `ouroboros/world_profiler.py`
+- `supervisor/evolution_cleanup.py`
 - `supervisor/evolution_lifecycle.py`
 
 ### D16 — Observability, usage accounting & cost

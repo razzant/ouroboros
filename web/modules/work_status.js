@@ -11,7 +11,7 @@
  * Finalizing…, moving). Whether something waits for the owner (`owner`: the server's `turn`) is a separate fact;
  * status_mark.js draws the two together.
  */
-import { fmt, tr } from './i18n.js';
+import { fmt, tr, tx } from './i18n.js';
 import { taskPresentation, taskTerminalPhase } from './log_events.js';
 import { startingStatus } from './host_starting_status.js';
 import { chipWord } from './task_phase_chip.js';
@@ -40,7 +40,7 @@ export function emptyWorkState() {
 // What an incomplete body did not list again: still shown, never as confirmed work and never with controls or a line;
 // its mark is the ring of unconfirmed state.
 const unconfirmedWork = (work) => ({ ...work, activity: 'unknown', transition: 'none', call: '', because: [], tails: [],
-    live: false, turn: [], controls: [], confirmed: false, mark: 'ring' });
+    last_resume: undefined, live: false, turn: [], controls: [], confirmed: false, mark: 'ring' });
 
 /**
  * One body applied to an instance's work state. `room` and `works` are this chat's (`works[].room`, keyed as the
@@ -181,18 +181,38 @@ export function clock(at) {
         : date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
+/** A held work's latest refused Resume (`last_resume`, work_stop.last_resume on the server) as its line's last clause,
+ *  dated and naming who asked as its door bound it; '' without one. History beside the reason, never a door or proof
+ *  that what blocked it still does; the host's own refused start (`host`) is a waiting Continue's reason. */
+export function resumeAttemptClause(attempt) {
+    const time = attempt && typeof attempt === 'object' ? clock(attempt.at) : '';
+    if (!time) return '';
+    const actor = attempt.by?.actor;
+    return actor === 'ouroboros' ? fmt('Resume by Ouroboros refused at {time}', { time })
+        : actor === 'host' ? fmt('Start refused at {time}', { time }) : fmt('Resume refused at {time}', { time });
+}
+
+/** The same attempt with the door's own words after its clause (the card's details, Main's owner-action message):
+ *  a host sentence, read in the install's language by its exact text (`tx`). */
+export function resumeAttemptWords(attempt) {
+    const clause = resumeAttemptClause(attempt);
+    const text = clause ? tx(attempt.text) : '';
+    return text ? `${clause}: ${text}` : clause;
+}
+
 /**
  * A work's line, said beside its word (the card's quieter line, the work-list row's, the sidebar's name after the word):
  * the current episode's own sentence (the owner's Pause with the time it was pressed), then what still runs beside
- * it, one sentence per tail, joined " · ". The line never repeats `word`: an answer wait's own words are compared by
- * their code, in any language.
+ * it, one sentence per tail, then its latest refused Resume with its time, joined " · ". The line never repeats
+ * `word`: an answer wait's own words are compared by their code, in any language.
  */
 export function workLine(work = {}, word = activityWord(work)) {
     const first = list(work.because)[0];
     const said = first?.code === 'owner_answer' && word === chipWord('ownerWait') ? '' : reasonText(first);
     const sentence = said === word ? '' : said;
     const pressed = sentence && first.code === 'paused_by_owner' ? clock(first.since) : '';
-    return [sentence, pressed, ...tailWords(list(work.tails))].filter(Boolean).join(' · ');
+    return [sentence, pressed, ...tailWords(list(work.tails)), resumeAttemptClause(work.last_resume)]
+        .filter(Boolean).join(' · ');
 }
 
 /** The first of a room's works that says the room's own word, else null: a work Pausing beside a running one never
@@ -293,7 +313,8 @@ export function workQuestion(work) {
 /**
  * What the card of a work's current episode says (one work, one status): the work's word alone in the chip, and its
  * line as the chip's quieter second fact (the episode's reason, then what still runs beside it: reviews a Pause lets
- * finish, helpers, external runs). Plain running work with nothing to say beside it, finalizing work (its outcome
+ * finish, helpers, external runs; then its latest refused Resume, dated, whose words are the details' `note`).
+ * Plain running work with nothing to say beside it, finalizing work (its outcome
  * beside Finalizing…) and unconfirmed work keep the card's own words; so does a card whose episode is not live. The
  * word is the live one only while the work plainly runs; its mark is the work's own (applyCardWorkViews keeps it).
  */
@@ -305,9 +326,13 @@ export function cardWorkView(work) {
     const running = work.activity === 'working';
     const classes = list(work.turn).length ? 'warn' : running ? (work.transition === 'pausing' ? 'working waiting' : 'working')
         : work.activity;
+    // The latest refused Resume in the door's own words explains the word in the card's details (its line keeps the
+    // dated clause alone).
+    const note = resumeAttemptWords(work.last_resume);
     return {
         phase: running ? 'working' : work.activity, text: word, secondary: line, classes,
         tone: running && work.transition === 'none' ? 'live' : 'neutral', waiting: !running || work.transition !== 'none',
+        ...(note ? { note } : {}),
     };
 }
 

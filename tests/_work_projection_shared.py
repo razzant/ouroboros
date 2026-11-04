@@ -31,12 +31,14 @@ def _custody(root_id, run):
                            source=run.get("source", "delegated_subagent"), terminal_state=run.get("terminal_state", ""))
 
 
-def work_fields(owners, raw=None, *, results=None, fences=None, held=None, stops=None, models=None, complete=True):
+def work_fields(owners, raw=None, *, results=None, fences=None, held=None, stops=None, models=None, attempts=None,
+                complete=True):
     """``works``, ``rooms``, ``work_summary``, ``works_complete`` and ``works_gaps`` for these rows, as JSON.
 
     ``held`` maps a tree root to its open runs: run ids, or ``{run_id, task_id, source}`` rows; ``stops`` maps a
-    task to the runs whose stop its live Pause could not confirm."""
-    results, fences, stops = dict(results or {}), dict(fences or {}), dict(stops or {})
+    task to the runs whose stop its live Pause could not confirm; ``attempts`` maps a task to the latest Resume
+    attempt its stored record keeps (``work_stop.ATTEMPT_KEY``), which the server reads for held members only."""
+    results, fences, stops, attempts = dict(results or {}), dict(fences or {}), dict(stops or {}), dict(attempts or {})
     held = {root: [_custody(root, run) for run in runs] for root, runs in dict(held or {}).items()}
     with tempfile.TemporaryDirectory(prefix=ROOT_PREFIX) as root, contextlib.ExitStack() as release, \
             mock.patch.object(wp._Observations, "result", lambda self, task_id: results.get(task_id)), \
@@ -46,6 +48,8 @@ def work_fields(owners, raw=None, *, results=None, fences=None, held=None, stops
             mock.patch.object(wp._Observations, "stop_unknown",
                               lambda self, task_id, drive_root=None, owner=None: frozenset(stops.get(task_id, ()))), \
             mock.patch.object(wp, "_open_runs", lambda drive_root: held), \
+            mock.patch.object(wp._Observations, "resume_attempt",
+                              lambda self, task_id, drive_root=None: attempts.get(task_id, {})), \
             mock.patch.object(wp, "_inflight_upkeep", lambda drive_root, known: []):
         # The projection's real reads cache this root's stores per thread; Windows removes no open file, so hand
         # them back before the root goes (this root's only: never another root's, never the installation's).

@@ -874,3 +874,28 @@ def test_a_cyber_acting_presence_child_steers_and_answers_its_parent_through_the
     assert text == "Findings: the figures are confirmed."
     assert "[PRESENCE_DELIVERY]" not in json.dumps(calls)
     assert not [event for event in events if event["type"] == "presence_result"]  # it answers its parent
+
+
+def test_a_settled_legacy_continue_is_named_as_a_listing_gap_and_still_reads_by_id(tmp_path, monkeypatch):
+    """The old writer omitted the role; ending that row must not silently prove a complete inventory.
+    The page stays body-free over ended turns, and the existing keyed reader still judges this admission."""
+    from ouroboros.presence_context import _own_work_section
+    from supervisor.queue_snapshot import persist_queue_snapshot
+    from tests.test_presence_related_owner_work import RELATION, _continue_before_the_root_fact
+
+    workers, successor = _continue_before_the_root_fact(tmp_path, monkeypatch, RELATION)
+    write_task_result(tmp_path, successor, "cancelled", result="ended before dispatch")
+    workers.PENDING.clear()
+    assert persist_queue_snapshot(reason="ended_legacy_continue") is True
+    place, _ = _registry(tmp_path)
+    stranger, _ = _registry(tmp_path, binding=OTHER)
+
+    page = json.loads(place.execute("recent_tasks", {"limit": 20}))
+    assert successor not in {row["task_id"] for row in page["tasks"]}
+    assert page["read_gap"] == {"settled_kind_unclassified": 1}
+    assert "ended before dispatch" in place.execute("get_task_result", {"task_id": successor})
+    assert "PRESENCE_CAPABILITY_BLOCKED" in stranger.execute("get_task_result", {"task_id": successor})
+    foreign = json.loads(stranger.execute("recent_tasks", {"limit": 20}))
+    assert "read_gap" not in foreign and successor not in json.dumps(foreign)
+    section = _own_work_section(tmp_path, _presence(), "new-turn")
+    assert "older Continue work may be absent" in section and "get_task_result" in section

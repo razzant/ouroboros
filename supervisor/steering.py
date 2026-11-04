@@ -64,7 +64,7 @@ def _presence_target_refused(ctx: Any, evt: Dict[str, Any], task: Dict[str, Any]
     stands in only for a record without Presence provenance.
     """
     from ouroboros.dialogue_provenance import (
-        presence_metadata_binding, presence_record_binding, presence_related_work, presence_target_record,
+        presence_record_binding, presence_related_work, presence_target_record, presence_task_binding,
     )
 
     if "presence_binding_id" in evt:
@@ -74,9 +74,7 @@ def _presence_target_refused(ctx: Any, evt: Dict[str, Any], task: Dict[str, Any]
         running = getattr(ctx, "RUNNING", None)
         meta = running.get(str(_issuer(evt).get("task_id") or "")) if isinstance(running, dict) else None
         row = meta.get("task") if isinstance(meta, dict) else None
-        binding = presence_metadata_binding(row.get("metadata")) if isinstance(row, dict) else None
-        if binding is None and isinstance(row, dict) and isinstance(row.get("task_contract"), dict):
-            binding = "" if "capability_ceiling" in row["task_contract"] else None
+        binding = presence_task_binding(row) if isinstance(row, dict) else None
     if binding is None:
         return False
     target = str(evt.get("target_task_id") or task.get("id") or "").strip()

@@ -45,6 +45,24 @@ class SleepWake(TypedDict):
     at: NotRequired[str]
 
 
+class LastResumeBy(TypedDict):
+    """Who asked, as the door bound it (``work_stop.resume_asked``): ``owner``, ``ouroboros``, or ``host`` for the
+    host's own start of a Continue whose earlier work settled."""
+
+    actor: str
+
+
+class LastResume(TypedDict):
+    """A held episode's latest refused Resume about the control holding it now (``work_stop.last_resume``): dated
+    history beside the reason, never a door or proof that a blocker still exists; the host's refused start is the
+    reason of a waiting Continue (``start_refused``)."""
+
+    at: Any  # when it was asked
+    by: LastResumeBy
+    error: str  # the door's typed refusal
+    text: str  # the door's own words after "Resume refused: "
+
+
 class WorkTail(TypedDict):
     """What still runs beside or after the current episode, said as a second fact, never as the work's word."""
 
@@ -113,6 +131,7 @@ class Work(TypedDict):
     mark: str
     stop: NotRequired[Dict[str, Any]]
     refusal: NotRequired[Dict[str, Any]]
+    last_resume: NotRequired[LastResume]  # also on each held member's state
     outcome: NotRequired[str]
     focus: NotRequired[WorkFocus]
     gaps: NotRequired[List[Dict[str, Any]]]

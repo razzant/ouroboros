@@ -131,6 +131,7 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_EXTERNAL_HOST_UPDATE | unset | Env-only: external-host installer command supporting read-only `--check` |
 | OUROBOROS_EXTERNAL_HOST_RESULT | unset | Env-only: launcher-verified installed-artifact facts for one core generation, not a persisted PASS |
 | OUROBOROS_USER_FILES_ROOT | "" | Env-only: `user_files` jail root (empty = `$HOME`) |
+| OUROBOROS_CHROMIUM_SANDBOX | unset | Env-only: `off` = administrator's Chromium sandbox opt-out (§6) |
 | OUROBOROS_OBSERVABILITY_KEEP_RAW | unset | Env-only: truthy persists raw observability payloads |
 | OUROBOROS_REVIEWER_SLOTS | (migrated) | Retired review-lane key: a stored value is read once into reviewer rows of `OUROBOROS_SUBAGENTS`; an unreadable value stays for the owner; env inert. Rollback: restore the keys from the `before` of `state/review_migrations/<ts>-slots-to-pool.json`, which the owner message names (Review pool) |
 | OUROBOROS_SUBSCRIPTION_PRESET_VERSION | "" | One-shot install-preset marker; endpoint-authored, disk-only (`ENDPOINT_AUTHORED_SETTINGS`); absence authorizes nothing (§2) |
