@@ -486,9 +486,9 @@ def _owner_words(root: pathlib.Path, items: List[_Row]) -> Dict[str, Tuple[str, 
         block = render_owner_words(rows, absent, audience="writer", root_task_id=root_task)
         if not block:
             continue
-        refs = [f"[{row.get('ts') or 'time not recorded'} · owner · {row.get('source')} of task {row.get('task_id')}"
-                f" · {row.get('ref')}] ({len(row.get('text') or '')} chars — not shown: the input could not hold "
-                "them)" for row in rows]
+        refs = [f"[{row.get('ts') or 'time not recorded'} · {row.get('author') or 'owner'} · {row.get('source')} of task "
+                f"{row.get('task_id')} · {row.get('ref')}] ({len(row.get('text') or '')} chars — not shown: the input "
+                "could not hold them)" for row in rows]
         pointer = "## Words of my human that caused this work (by reference)\n" + "\n".join(refs) if refs else block
         out[item.task] = (group, block, pointer)
     return out
