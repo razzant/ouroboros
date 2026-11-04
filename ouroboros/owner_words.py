@@ -289,12 +289,14 @@ def governing_words_for_schedule(ctx: Any) -> Dict[str, Any]:
                                                     "metadata": dict(metadata)})}
 
 
-def _inbound_rows(drive_root: Any, client_ids: Mapping[str, str], accounts: Any) -> List[Dict[str, Any]]:
-    """Owner rows addressed by client message id, in canonical order."""
+def _inbound_rows(drive_root: Any, client_ids: Mapping[str, str], accounts: Any = None) -> List[Dict[str, Any]]:
+    """Owner rows addressed by client message id, in canonical order, judged over one place snapshot (the
+    caller's, else one read here)."""
     from ouroboros import dialogue_store as ds
 
     ds.require_imported(drive_root, "chat")
     rows = [entry.row for entry in ds.iter_probes(drive_root, "chat", [("client_message_id", key) for key in client_ids])]
+    accounts = owner_place_accounts(drive_root) if accounts is None else accounts
     return [row for row in rows if owner_row(row, drive_root, accounts=accounts)]
 
 
