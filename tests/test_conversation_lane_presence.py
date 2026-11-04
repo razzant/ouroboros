@@ -215,6 +215,12 @@ def test_a_host_serving_alone_runs_the_turn_on_the_disclosed_degraded_executor(p
                 event_payload=_payload(event), staged_files=[], gate_wait=True))
         assert started
         assert execution.result.result(timeout=10).text == "Hi"  # settled by the executor's own frame
+        # The frame resolves the waiter before releasing its lane row; join the actual carrier before
+        # asserting teardown, rather than racing the rest of handle_presence_turn_settled.
+        for slot in list(workers.WORKERS.values()):
+            if slot.proc.pid is None:
+                slot.proc.join(5)
+                assert not slot.proc.is_alive()
         assert ran and ran[0]["carrier_owner"]["executor"] == "inline_degraded"
         assert turn_id not in workers.RUNNING and registry.find(turn_id) is None
         vitals = inline_carrier.inline_vitals()

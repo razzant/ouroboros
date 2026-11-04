@@ -77,6 +77,7 @@ def attention(world, source):
 
 @pytest.fixture
 def host(tmp_path, monkeypatch):
+    from tests.conversation_carrier_support import booted_host_lane
     from tests.test_host_service_api import _seed_token
     from tests.test_presence_continuation_bootstrap import install_bootstrap_harness
     from tests.test_promote_chat_flow import _confirm_promote
@@ -93,6 +94,7 @@ def host(tmp_path, monkeypatch):
         monkeypatch.setattr("ouroboros.pricing._fetch_live_rows", lambda *_a, **_kw: {})
         workers.WORKERS[1] = workers.Worker(1, SimpleNamespace(pid=2147483201, is_alive=lambda: True), queue_module.Queue())
         affirm_ready(workers.WORKERS[1])  # the published pool a promotion's producer asks about
+        booted_host_lane(monkeypatch, workers)
         _confirm_promote(monkeypatch)
         _seed_token(data, skill=skill, token=TOKEN, permissions=["presence"], manifest_permissions=["presence"])
         place = places.connect_place(data, connector=skill, provider=provider, account_id=account, conversation_id="",

@@ -98,6 +98,9 @@ def _seed_reviewing_behavior(data_dir: pathlib.Path) -> str:
 
 @pytest.fixture
 def host(harness, monkeypatch):
+    from tests.conversation_carrier_support import host_lane
+
+    host_lane(monkeypatch, harness.data)
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_args, **_kwargs: (True, ""))
     monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
     monkeypatch.setattr("supervisor.consciousness_carriers.autonomous_work_enabled", lambda *_: True, raising=False)
