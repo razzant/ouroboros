@@ -11,8 +11,8 @@ that identity is unchanged:
   (``_walk_skill_packages``), and the same of each connected folder's standard skill folders, read one level
   deeper (``skill_sources.STANDARD_SKILL_FOLDERS``), so an install, removal, rename, or a manifest added or
   removed changes it;
-- one package: keyed by the data root, its location candidate, the manifestless choice and whether the runtime
-  mode admits sensitive payload files (``_iter_payload_files``); its identity is the change key of every directory
+- one package: keyed by the data root, its location candidate and the manifestless choice (no load fact depends
+  on the runtime mode: the gate reads the mode when asked); its identity is the change key of every directory
   and file of its payload tree (the cache names the hash skips are skipped, the manifest-declared entries the hash
   adds are added) and of the owner-state files a load reads (``STATE_FILES``): an update, review, enablement,
   attestation, owner edit or an external edit of any payload byte changes it.
@@ -130,13 +130,10 @@ def reused_inventory(key: Tuple[Any, ...], roots: Iterable[Any], walk: Callable[
 def reused_skill(key: Tuple[Any, ...], skill_dir: Any, state_dir: Any, load: Callable[[], Any]) -> Any:
     """A copy of ``load()``, the loaded package at ``skill_dir`` (or None), or of the last one of ``key`` while
     its payload tree, the owner-state files in ``state_dir`` and the manifest-declared entries hold."""
-    from ouroboros.config import get_runtime_mode
-    from ouroboros.runtime_mode_policy import runtime_mode_at_least
     from ouroboros.skill_loader import _SKILL_DIR_CACHE_NAMES
 
     if _key(skill_dir) is None:  # Windows or a filesystem not called local: read, keep nothing
         return load()
-    key = (*key, runtime_mode_at_least(get_runtime_mode(), "cyber_pro"))
 
     def identity(loaded: Any) -> Dict[str, Any]:
         keys = _tree(skill_dir, skip=_SKILL_DIR_CACHE_NAMES)

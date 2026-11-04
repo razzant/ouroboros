@@ -38,9 +38,6 @@ _MANIFEST_NAMES = ("SKILL.md", "skill.json")
 # and reviewed because a skill subprocess can import/source/read them.
 _SKILL_DIR_CACHE_NAMES = frozenset({"__pycache__", "node_modules", ".git", ".hg", ".svn", ".idea", ".vscode", ".tox", ".pytest_cache", ".ouroboros_env", ".DS_Store"})
 
-# Sensitive files are excluded from review prompts and hashes; their presence
-# in a runtime-reachable skill tree is handled as a hard block below.
-
 _REVIEW_STATUS_FAIL = STATUS_BLOCKERS
 _REVIEW_STATUS_ADVISORY = STATUS_WARNINGS
 _REVIEW_STATUS_PENDING = STATUS_PENDING
@@ -348,8 +345,8 @@ def _iter_payload_files(
     Confined manifest entries are re-added even under excluded directories,
     keeping executable entry points inside the reviewed surface. Per-install notes
     stay listed (reviewers see them); the release digest leaves them out
-    (skill_identity). Sensitive filenames refuse ordinary loading; Cyber includes
-    them in the byte hash and review pack.
+    (skill_identity). A credential-like name refuses or hides nothing: ``.env``,
+    ``credentials.json`` or ``id_rsa`` is payload, hashed and reviewed in every mode.
     """
     out: List[pathlib.Path] = []
     seen: set[pathlib.Path] = set()
@@ -375,25 +372,6 @@ def _iter_payload_files(
         except (ValueError, FileNotFoundError, NotADirectoryError):
             return
 
-    # Confinement and the shared sensitive-path policy still cover every candidate.
-    from ouroboros.tools.review_helpers import (
-        _SENSITIVE_EXTENSIONS,
-        _SENSITIVE_NAMES,
-    )
-    from ouroboros.config import get_runtime_mode
-    from ouroboros.runtime_mode_policy import runtime_mode_at_least
-
-    cyber = runtime_mode_at_least(get_runtime_mode(), "cyber_pro")
-
-    def _is_sensitive(path: pathlib.Path) -> bool:
-        lowered = path.name.lower()
-        if lowered in _SENSITIVE_NAMES:
-            return True
-        for ext in _SENSITIVE_EXTENSIONS:
-            if lowered.endswith(ext):
-                return True
-        return False
-
     if resolved_root.is_dir():
         paths = []
         pending = [resolved_root]
@@ -409,18 +387,6 @@ def _iter_payload_files(
         for path in sorted(paths):
             if not path.is_file():
                 continue
-            if _is_sensitive(path) and not cyber:
-                # Fail closed: a reviewed skill could still read a skipped
-                # credential-shaped file at runtime.
-                raise SkillPayloadUnreadable(
-                    str(path.relative_to(resolved_root)),
-                    RuntimeError(
-                        "exact credential filename or .env-tail filename present "
-                        "in skill tree (e.g. .env / prod.env / credentials.json / "
-                        "id_rsa / .netrc). Rename or relocate the file outside "
-                        "the skill checkout."
-                    ),
-                )
             # Symlink escape guard: resolve the final path and re-check
             # confinement under skill_dir.
             try:

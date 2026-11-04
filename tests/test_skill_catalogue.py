@@ -2,6 +2,7 @@
 from tests._tool_result_delivery_shared import measured_fit
 
 import json
+from pathlib import Path
 
 import httpx
 import openai
@@ -277,9 +278,23 @@ def test_native_and_user_repo_pointers_read_through_registry(
     assert write.status != "ok" and (folder / "SKILL.md").read_text() == manifest
 
 
-def test_readable_manifest_stays_addressed_when_other_payload_is_unreadable(registry):
+def _unreadable_payload(folder, monkeypatch):
+    """Exercise a read failure independently of payload naming policy."""
+    payload = folder / "payload.txt"
+    payload.write_text("fixture payload\n", encoding="utf-8")
+    original_open = Path.open
+
+    def open_payload(path, *args, **kwargs):
+        if path == payload:
+            raise OSError("fixture payload unreadable")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_payload)
+
+
+def test_readable_manifest_stays_addressed_when_other_payload_is_unreadable(registry, monkeypatch):
     folder = _seed(registry, "leaky", body="LEAKY_INSTRUCTIONS")
-    (folder / ".env").write_text("TOKEN=x\n")
+    _unreadable_payload(folder, monkeypatch)
     page, typed = _consumer(registry, {"name": "leaky"})
     row = page["skills"][0]
     assert typed.status == "ok" and "payload unreadable" in row["load_error"]
@@ -413,7 +428,7 @@ def test_broken_counts_every_load_error_its_rows_show(registry, worker_extension
 
     data, failing = worker_extensions, "def register(api):\n    raise RuntimeError('register failed')\n"
     (_seed(registry, "manifest-bad") / "SKILL.md").write_bytes(b"---\nname: [unterminated\n---\n")
-    (_seed(registry, "payload-bad") / ".env").write_text("TOKEN=x\n")
+    _unreadable_payload(_seed(registry, "payload-bad"), monkeypatch)
     _seed(registry, "same")
     _seed(registry, "same", bucket="clawhub")
     for name in ("runtime-fail", "old-fail", "disabled-fail"):
