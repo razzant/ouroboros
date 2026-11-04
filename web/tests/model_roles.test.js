@@ -174,7 +174,11 @@ function inertNode() {
 }
 
 test('Settings says under Main, before Save, what a new Main does to running work; no other host does', () => {
-    // The words are review's (DESIGN principle 7); the note forecasts no tokens or cost (DESIGN §7).
+    // Its fact, not its words (DESIGN principle 7): work that follows Main switches at its next call, and work with
+    // its own model is not said to switch. The note forecasts no tokens or cost (DESIGN §7).
+    assert.match(MAIN_FOLLOW_NOTE, /\bfollow(?:s|ing)? Main\b/);
+    assert.match(MAIN_FOLLOW_NOTE, /\bnext call\b/);
+    assert.doesNotMatch(MAIN_FOLLOW_NOTE, /\bown model\b[^.]*\bswitch/i);
     assert.doesNotMatch(MAIN_FOLLOW_NOTE, /token|cost|\$|\d/i);
     const rendered = (mainNote) => {
         const host = inertNode();
