@@ -705,7 +705,7 @@ test('a retained merge row refreshes its later review and report without another
         assert.match(rendered, /data-body-format="text"/, 'coverage and later review keep their visible line break');
         assert.match(rendered, /href="\/api\/tasks\/[^" ]+\/reviews\/[^" ]+"/);
         assert.ok(rendered.indexOf('merge: merged') < rendered.indexOf('Its later review: FAIL'));
-        const [head, detail] = old.text.replace(/^⚠️ /u, '').split('\n'); // host progress loses its carrier badge in a card
+        const [head, detail] = old.text.replace(/^⚠️ /u, 'Warning: ').split('\n'); // the carrier badge becomes a severity word in the card
         assert.ok(rendered.includes(`class="chat-live-line-title">${head}</span>`), 'the receipt keeps its head');
         const label = head.split(' · ')[1];
         if (label) assert.equal(rendered.split(label).length - 1, 1, 'coverage is labelled once, in the head');
