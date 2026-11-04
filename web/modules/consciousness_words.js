@@ -14,12 +14,7 @@ export function sendsAsHtml(sender) {
 // Stored values never change: only these words do, so a relabel is one line here. Pure data and pure
 // helpers over host facts; nothing here reads the network or the page.
 
-/** Consciousness autonomy: stored observe / act / full. */
-export const AUTONOMY_LEVELS = Object.freeze([
-    { value: 'observe', label: 'Advises', note: 'On its own it studies, keeps its memory and tells you; it changes nothing outside.' },
-    { value: 'act', label: 'Acts', note: 'Also acts on its own: starts work, runs commands, speaks and acts in places. It does not change itself.' },
-    { value: 'full', label: 'Evolves', note: 'Also changes itself: its own code, its settings, connecting new places.' },
-]);
+export { AUTONOMY_LEVELS, autonomyOf } from './consciousness_autonomy.js';
 
 /** Place state: stored active / silent / paused. `word` is the row's status word. */
 export const PLACE_STATES = Object.freeze([
@@ -76,7 +71,6 @@ export const CHECK_CHIPS = Object.freeze({
 });
 
 export const placeStateOf = (value) => PLACE_STATES.find((state) => state.value === value) || null;
-export const autonomyOf = (value) => AUTONOMY_LEVELS.find((level) => level.value === value) || null;
 export const safetyLevelOf = (value) => SAFETY_LEVELS.find((level) => level.value === value) || null;
 
 /** «a», «a and b», «a, b and c». */

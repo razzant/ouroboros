@@ -2603,6 +2603,17 @@ editable with the same controls as Settings. A subscription-only Budget step lea
 optional API spending fields collapsed. "No API key" never claims unlimited free
 work or that paid provider credits were enabled.
 
+Before the first completion, Summary offers Consciousness as an unchecked choice. Its
+row names the autonomy, daily allowance and own-task limit consciousness runs under
+now, and where to change or stop it (owner decision 2026-11-04: a visible, unchecked
+offer in the wizard; a conversation can personalize it later). A consciousness already
+on reads On already, with nothing to tick; a completed setup shows no row. The choice
+is never saved. Only a tick and a confirmed save send one ordinary Start, and the
+screen after the save keeps saved, accepted and observed on apart. A Start that was
+not sent, was refused or is not confirmed says so and is never sent again, also when
+the page was left and shown again. Summary labels the model row Consciousness model,
+so it does not read as this offer.
+
 The first-run wizard is compact; the step rail alone says which step this is. An
 ordinary Accounts state, blank or connected, fits a 980×752 client viewport
 with every row, the limits warning and Continue in view: subscriptions
