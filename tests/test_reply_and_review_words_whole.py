@@ -15,7 +15,8 @@ LONG = "Keep the export path for finance; " * 30 + "and ship only after the revi
 
 def test_a_reply_preview_marks_its_cut_and_leaves_a_short_text_alone():
     long = reference_from_row({"direction": "in", "chat_id": 1, "ts": "2026-11-04T10:00:00Z", "text": LONG})
-    assert long["snippet"].endswith("…") and len(long["snippet"]) == 161 and LONG.startswith(long["snippet"][:-1])
+    preview, mark = long["snippet"].split("… ", 1)
+    assert len(preview) == 160 and LONG.startswith(preview) and mark == f"[{len(LONG)} chars in full]"
     short = reference_from_row({"direction": "in", "chat_id": 1, "ts": "2026-11-04T10:00:00Z", "text": "  yes \n "})
     assert short["snippet"] == "yes"
 

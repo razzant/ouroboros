@@ -184,3 +184,23 @@ def test_room_history_reads_the_same_fact_for_a_shared_account(tmp_path, monkeyp
                  if row["text"] in {"own-sent", "owner-typed", "bot-sent"}}
     assert confirmed == {"own-sent": True, "owner-typed": True, "bot-sent": False}, "the owner's account reads (you)"
     client.close()
+
+
+@pytest.mark.parametrize("actor_id,mine", [("anton", True), ("sasha", False)])
+def test_review_evidence_signs_a_place_row_by_the_snapshot_without_an_activated_chronicle(tmp_path, place, actor_id,
+                                                                                         mine):
+    """No activated chronicle, so no row has a stream position: the places' owner snapshot still signs the row
+    (``dialogue_evidence._row_projection``), as every other reader does."""
+    from ouroboros.chronicle_import import ChronicleStore
+    from ouroboros.dialogue_evidence import _row_projection, read_room_source
+
+    row = _place_row(place.place_id, actor_id)
+    lineage = row_lineage(tmp_path)
+    assert "lineage_epoch" not in lineage and not ChronicleStore(tmp_path).log_path.exists()
+    author = _row_projection(row, "chat", 1, tmp_path, pos=None, lineage=lineage)["author"]
+    assert author.startswith("my human: Anton [") is mine and (actor_id.title() in author)
+    dialogue_store.append(tmp_path, "chat", row)
+    source = read_room_source(tmp_path, ROOM)
+    assert source is not None
+    [stored] = [line for line in source["rows"] if line.get("text") == row["text"]]
+    assert stored["author"] == author, "the room source reads the same author"

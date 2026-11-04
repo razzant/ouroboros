@@ -62,8 +62,9 @@ def _row_projection(row: dict, stream: str, ordinal: int, root: Any = None, *, p
         result["author"] = "host"  # a secret request's outcome frame, never the owner's words
     elif stream == "mailbox" and row.get("type") != "quiz_answer":
         result["author"] = str(row.get("provenance") or "Owner")
-    else:
-        result["author"] = row_author(row, pos=pos, **(lineage if pos is not None and lineage else {}))["label"]
+    else:  # the epoch's rule needs the row's stream position; the places' owner snapshot never does
+        keywords = dict(lineage or {}) if pos is not None else {"owner_accounts": (lineage or {}).get("owner_accounts")}
+        result["author"] = row_author(row, pos=pos, **keywords)["label"]
     # Payload bytes are never interpreted as dialogue. Existing attachment
     # manifests carry the owner-visible file names alongside custody handles.
     attachments = row.get("attachment_manifest")

@@ -31,9 +31,11 @@ def projection_fields(row: dict) -> dict:
 
 
 def _snippet(text) -> str:
-    """A Reply's one-line preview: the first 160 characters, a longer text visibly cut; the address reads it all."""
-    words = " ".join(str(text or "").split())
-    return words if len(words) <= 160 else words[:160].rstrip() + "…"
+    """A Reply's one-line preview: the first 160 characters, a longer text visibly cut with its full size; the
+    address reads it all."""
+    full = str(text or "")
+    words = " ".join(full.split())
+    return words if len(words) <= 160 else words[:160].rstrip() + f"… [{len(full)} chars in full]"
 
 
 def reference_from_row(row: dict) -> dict:
