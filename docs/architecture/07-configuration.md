@@ -113,7 +113,7 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_DELIVERABLES_ROOT | "" | Deliverables root (empty: basis default; `tool_access.py`) |
 | OUROBOROS_GC_RETENTION_DAYS | 7 | Unified GC retention (`retention.py`) |
 | OUROBOROS_RESTART_DRAIN_MAX_SEC | 120 | Restart drain bound |
-| TOTAL_BUDGET | 200.0 | Global USD budget, reached by known spend; once reached it refuses paid admission only, subscription and local calls continue (§6 Monetary authority); non-positive = no finite limit; resolved live at every model call (`resolve_total_budget_usd`) |
+| TOTAL_BUDGET | 200.0 | Global USD budget, reached by known spend, then refusing paid admission only (§6); non-positive = no finite limit; resolved live at every model call (`resolve_total_budget_usd`) |
 | OUROBOROS_PER_TASK_COST_USD | 50.0 | Hard cap over one task's whole tree: new paid calls are refused once its known spend (confirmed + estimated; holds are not spending) reaches it; only an explicit `cost_hard_stop_pct` profile stops earlier (`task_pacing.py`; §6 Budget tracking) |
 | OUROBOROS_RUB_USD_RATE | "" | Manual RUB→USD rate for RUB-priced providers |
 | OUROBOROS_PRICING_TTL_SEC | 21600 | Provider-catalog pricing cache TTL |
