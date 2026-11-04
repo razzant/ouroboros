@@ -108,7 +108,8 @@ def row_ref(item: Mapping[str, Any]) -> str:
 
 def _deduped(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
     """Drop empty rows and repeats of one source: its reference, else (none recorded) its whitespace-normalized
-    text. Similar words under different references are not copies (BIBLE P1): two "yes" stay two."""
+    text. Similar words under different references are not copies (BIBLE P1): two "yes" stay two. A reply target
+    repeats by its address: two replies of my human to one message keep one target row, beside the first."""
     from ouroboros.project_dialogue import _text_sha256
 
     seen: set = set()
@@ -256,7 +257,8 @@ def merged_corpus(kept: Any, added: Any) -> List[Dict[str, Any]]:
 
 def reply_target(drive_root: Any, reference: Any) -> Dict[str, str]:
     """The whole message my human's words reply to, under its author, by the address the door resolved: one
-    sha-checked read. Unreadable: the address alone; a reply to a work card names work, not anyone's words."""
+    sha-checked read. Unreadable: the address alone; a reply to a work card names work, not anyone's words. Its
+    author is signed without the places' owner snapshot on purpose: a target is context, never my human's words."""
     reference = _mapping(reference)
     address = str(reference.get("address") or "")
     if not address or address.startswith("task:"):

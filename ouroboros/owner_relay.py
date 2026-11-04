@@ -60,7 +60,8 @@ def held_owner_messages(ctx) -> dict:
     return held
 
 
-def retain_owner_message(ctx, row=None, *, client_message_id="") -> None:
+def retain_owner_message(ctx, row=None, *, client_message_id="", accounts=None) -> None:
+    """Hold one owner row of this turn by its address; ``accounts``: the caller's one place snapshot for its rows."""
     if ctx is None:
         return
     if row is None and client_message_id and getattr(ctx, "drive_root", None):
@@ -70,7 +71,8 @@ def retain_owner_message(ctx, row=None, *, client_message_id="") -> None:
         row = accepted_chat_message(canonical_data_root(ctx), 1 if chat_id is None else int(chat_id),
                                     client_message_id)
     from ouroboros.tool_access import canonical_data_root
-    if quotable_owner_row(row, canonical_data_root(ctx) if getattr(ctx, "drive_root", None) else None):
+    if quotable_owner_row(row, canonical_data_root(ctx) if getattr(ctx, "drive_root", None) else None,
+                          accounts=accounts):
         held_owner_messages(ctx)[format_address(row_address(row))] = copy.deepcopy(row)
         persist_held_state(ctx)
 
@@ -229,12 +231,13 @@ def inject_relay(ctx, entry: dict, messages: list) -> None:
     """Only exact owner rows enter the owner corpus, carried from the teller (no reply owed); the note has its
     own voice."""
     from ouroboros import loop
-    from ouroboros.owner_words import reply_target
+    from ouroboros.owner_words import owner_place_accounts, reply_target
     from ouroboros.tool_access import canonical_data_root
 
     root = canonical_data_root(ctx) if getattr(ctx, "drive_root", None) else None
+    accounts = owner_place_accounts(root)  # one place snapshot for every quoted row
     for row in entry.get("owner_rows") or []:
-        retain_owner_message(ctx, row)
+        retain_owner_message(ctx, row, accounts=accounts)
         address = format_address(row_address(row))
         loop._record_owner_directive(ctx, source="owner_mailbox", content=owner_text(row), msg_id=address, carried=True,
                                      origin={"source_task_id": entry.get("source_task_id"),

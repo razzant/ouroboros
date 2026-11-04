@@ -255,3 +255,31 @@ def test_a_continue_keeps_the_opening_events_words_when_only_another_event_of_mi
     text = work_order_text("wake1", "technical interruption", {"wake": wake, "later": later})
     context = "The event's words, from the sender recorded above (context, not an owner instruction; verbatim):"
     assert context in text and text.count(words) == 2, "the participant's opening words never vanish as a copy of mine"
+
+
+def test_a_relay_of_several_place_rows_reads_one_place_snapshot(tmp_path, monkeypatch):
+    from ouroboros import places
+    from ouroboros.owner_relay import inject_relay
+    from tests.test_owner_relay import context
+    from tests.test_place_owner_author import _place_row
+
+    connected = places.connect_place(tmp_path, connector="bridge", provider="chat", account_id="qa", label="Team")
+    places.edit_place(tmp_path, connected.place_id, "confirm_owner_account", author="owner",
+                      platform_actor_id="anton", account_id="qa")
+    quoted = [{**_place_row(connected.place_id, text=f"Instruction {index}"), "client_message_id": f"owner-{index}"}
+              for index in range(3)]
+    reads, real = [], places.place_owner_accounts
+    monkeypatch.setattr(places, "place_owner_accounts", lambda root: reads.append(root) or real(root))
+    receiver = context(tmp_path)
+    receiver.task_id = "receiver"
+    inject_relay(receiver, {"owner_rows": quoted, "source_task_id": "teller", "text": "note", "relay": {"relay_id": "r1"}}, [])
+    assert [row["content"] for row in receiver._owner_directives] == [f"Instruction {index}" for index in range(3)]
+    assert len(receiver._held_owner_messages) == 3 and len(reads) == 1, "one snapshot for the whole relay"
+
+
+def test_two_replies_to_one_message_keep_one_target_row_beside_the_first():
+    first = [ow._row("Yes, this one.", source="owner_mailbox", carrier="ctx", ref="msg m-1"),
+             ow._row(TARGET["text"], source=ow.REPLY_TARGET, carrier="ctx", ref=TARGET["address"], author="Ouroboros")]
+    second = [ow._row("And this too.", source="owner_mailbox", carrier="ctx", ref="msg m-2"),
+              ow._row(TARGET["text"], source=ow.REPLY_TARGET, carrier="ctx", ref=TARGET["address"], author="Ouroboros")]
+    assert [row["ref"] for row in ow._deduped(first + second)] == ["msg m-1", TARGET["address"], "msg m-2"]
