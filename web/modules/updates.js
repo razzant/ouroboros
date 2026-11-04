@@ -2,7 +2,7 @@ import { escapeHtmlAttr as escapeHtml, lastAppVersion, watchAppVersion } from '.
 import { openConfirmDialog } from './confirm_dialog.js';
 import { showToast } from './toast.js';
 import { apiClient, apiFetch } from './api_client.js';
-import { UPDATE_STAGE_LABELS, afterUpdateRows, attemptTime, bindPreflightDescription, preflightDescription, preflightEvidenceRows, updateAttemptView, verifiedUpdatePlan } from './update_status.js';
+import { RECOVERY_RETRY, UPDATE_STAGE_LABELS, afterUpdateRows, assistedUpdatePhase, attemptOutcome, attemptTime, bindPreflightDescription, preflightDescription, preflightEvidenceRows, unfinishedRecovery, updateAttemptView, verifiedUpdatePlan } from './update_status.js';
 import { destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { updateEffectsText } from './update_effects.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
@@ -133,16 +133,18 @@ export function updateVerdict(data = {}, phase = '', appVersion = '') {
 
     const warnings = extraWarnings(data);
     const base = { chips, warnings, checkedAgo };
+    // `recoveryInstruction`: this verdict's hint is the quit/reopen instruction, so Last attempt does not repeat one.
     if (data.update_tx?.active && data.update_tx.local_work_recovery) {
-        return { ...base, state: 'resolving', tone: 'warn',
+        return { ...base, state: 'resolving', tone: 'warn', recoveryInstruction: true,
             headline: 'Local changes still need recovery confirmation.',
             hint: 'Quit and reopen the desktop app, or restart the server process for a web deployment. '
                 + 'In-app Restart is deferred to preserve the current files. The saved update stash is retained.',
             action: { id: 'check', label: 'Check again' } };
     }
+    const attempt = data.update_progress;
     const recovery = data.update_tx?.active && (
         ['corrupt', 'gate_blocked', 'marker_cleanup_retry'].includes(data.update_tx.phase)
-        || (!data.update_progress?.active && data.update_progress?.result === 'failed')
+        || attemptOutcome(attempt) === 'failed' || (!attempt?.active && attempt?.result === 'failed')
     );
     if (recovery) phase = ''; // Durable recovery always outranks an older progress observation.
     if (!recovery && !['restarting', 'restart_needed', 'restart_required'].includes(phase)) {
@@ -186,10 +188,23 @@ export function updateVerdict(data = {}, phase = '', appVersion = '') {
             // that cannot reach that boot recovery path.
             return {
                 ...base,
-                state: 'resolving', tone: 'error',
+                state: 'resolving', tone: 'error', recoveryInstruction: true,
                 headline: 'The update transaction marker is corrupt.',
                 hint: 'Quit and reopen Ouroboros so boot recovery can quarantine readable corruption when no merge is active. The in-app restart is deferred while this marker is corrupt. If this state remains after reopening, inspect the marker file (ouroboros-update-tx.json in the repository .git directory) manually, then check again.',
                 action: { id: 'check', label: 'Check again' },
+            };
+        }
+        const unfinished = unfinishedRecovery(attempt, data.update_tx);
+        if (unfinished) {
+            // The bound attempt's own boot report outranks the phase it left behind (an assisted one included); the
+            // phase keeps its own control: pending_boot_smoke still allows the in-app Restart that reruns that recovery.
+            return {
+                ...base,
+                state: 'resolving', tone: 'error', recoveryInstruction: true,
+                headline: unfinished.headline,
+                hint: RECOVERY_RETRY,
+                action: txPhase === 'pending_boot_smoke' ? { id: 'restart', label: 'Restart now' }
+                    : { id: 'check', label: 'Check again' },
             };
         }
         if (txPhase === 'pending_boot_smoke') {
@@ -206,13 +221,13 @@ export function updateVerdict(data = {}, phase = '', appVersion = '') {
             // so only a new process reaches boot recovery: offer no Restart control.
             return {
                 ...base,
-                state: 'resolving', tone: 'error',
+                state: 'resolving', tone: 'error', recoveryInstruction: true,
                 headline: 'An update attempt stopped mid-flight and needs recovery.',
                 hint: `Phase: ${txPhase}. Quit and reopen the desktop app, or restart the server process for a web deployment: boot recovery retries the rollback/cleanup. The in-app Restart is deferred in this phase.`,
                 action: { id: 'check', label: 'Check again' },
             };
         }
-        if (txPhase.includes('assisted')) {
+        if (assistedUpdatePhase(txPhase)) {
             return {
                 ...base,
                 state: 'resolving', tone: 'warn',
@@ -847,7 +862,8 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     // The retained last attempt (#1818), apart from the primary action and kept until the next attempt.
     // While this server's attempt runs or awaits its restart, the headline above already names it.
     function renderAttempt(verdict) {
-        const view = updateAttemptView(latestStatus?.update_progress);
+        const view = updateAttemptView(latestStatus?.update_progress, latestStatus?.update_tx,
+            { showRecoveryInstruction: !verdict.recoveryInstruction });
         const above = !view?.terminal && ['updating', 'restarting', 'restart_required'].includes(verdict.state);
         attemptSection.hidden = !view || (above && !view.text);
         if (attemptSection.hidden) return;
@@ -1142,11 +1158,9 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
             setPhase('updating');
             const data = await apiClient.updateApply(strategy, plan);
             if (data.status === 'assisted_started') {
-                showToast('Ouroboros is resolving the update merge under review. Watch progress in chat.', 'success');
-                latestStatus = {
-                    ...latestStatus,
-                    update_tx: { active: true, phase: 'assisted_resolution', task_id: data.task_id || '' },
-                };
+                // Said of the admission, which a later status read may already have outlived.
+                showToast('Ouroboros started a reviewed resolution of the update merge. Watch progress in chat.', 'success');
+                await loadStatus({ fetchRemote: false, preservePhase: true });
                 setPhase('');
             } else if (data.status === 'restart_required') {
                 showToast('Update landed, but automatic restart failed. Restart Ouroboros to finish.', 'error');

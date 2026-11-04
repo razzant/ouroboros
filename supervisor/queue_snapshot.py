@@ -293,7 +293,7 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
                                           budget_hold_fact, hold_budget_row, hold_restored_budget_pause)
     from supervisor.restart_retention import (fresh_return_transaction, hold_after_stop, hold_for_owner_restart,
                                               hold_stopped_queue, never_started, park_saved_pause, pause_ids,
-                                              recover_saved_running,
+                                              recover_saved_running, returned_before_body,
                                               retained_pending, HOLD_SAVED_SLEEP_RECOVERY, unseen_pause)
     from supervisor.schedule_occurrence import first_attempt, first_dispatch_unsent, restore_verdict
 
@@ -468,28 +468,36 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
             # Age or an unavailable receipt cannot erase accepted Project work;
             # assignment still requires positive original no-dispatch authority.
             project_hold, dispatch = task.get("_project_admission_restore_hold"), task.get("admitted_dispatch")
+            returned = returned_before_body(task)  # a carrier's pre-body return, never launched since
+            recheck = recheck or returned is None  # unknown keeps this stop's authority until a readable recheck
             if not project_hold and (task.get("project_id") or "_project_admission" in task) and (
                     stale or dispatch != "none" or not schedule_replay):
                 project_hold = {"reason": "project_routing_fence_lookup_failed", "detail": (
                     "The saved task needs original Project and no-dispatch verification."
                     if isinstance(task.get("_project_admission"), dict) else
                     "The original Project basis has unknown historical identity; automatic recovery is not authorized.")}
-            elif not project_hold and host_unscoped(task) and not stale and dispatch != "none" and schedule_replay:
+            elif (not project_hold and host_unscoped(task) and not stale and dispatch != "none" and schedule_replay
+                  and not returned):
                 project_hold = {"reason": "project_routing_fence_lookup_failed",
                                 "detail": "The task may already have reached a worker; automatic recovery is not authorized."}
             elif not project_hold and recheck:
                 project_hold = {"reason": "project_routing_fence_lookup_failed", "detail": (
-                    "The schedule receipt was busy at restore; recovery is checked automatically when it is readable.")}
-            saved_or_accepted = never_started(task) or isinstance(task.get("_working_recovery"), dict)
+                    "The return receipt was unreadable at restore; recovery is checked when it is readable.")}
+            saved_or_accepted = (never_started(task) or isinstance(task.get("_working_recovery"), dict)
+                                 or returned and not project_hold)
             kept = retained_pending(task, sleep_hold_reason=sleep_hold_reason)
             if panicked and not current_stop(task) or not certified and writer_wait(task):
                 # This also covers a planned delegate return under Project custody:
                 # its current stop must survive consumption of the installation input.
-                row = hold_stopped_queue(dict(task), _queue().DRIVE_ROOT, stop_door)
+                row = hold_stopped_queue(dict(task), _queue().DRIVE_ROOT, stop_door, proof=returned,
+                                         persist_result=returned is not None)
             elif kept:
                 row = task
             elif str(task.get("id") or "") in returning_queue and (saved_or_accepted and schedule_replay or recheck):
                 row = task  # the fresh Restart returns it: ordinary admission, at any age
+            elif owner_restart and (returned or returned is None):
+                row = hold_stopped_queue(dict(task), _queue().DRIVE_ROOT, stop_door, proof=returned,
+                                         persist_result=returned is not None)
             elif owner_restart and (never_started(task) and schedule_replay or recheck):
                 row = hold_for_owner_restart(dict(task), _queue().DRIVE_ROOT)
             elif (owner_restart and (not schedule_replay or not never_started(task))
@@ -504,7 +512,8 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
                 # Quit/crash retain ALL accepted work for explicit Resume (#1563).
                 # Project verification is independent: healing it cannot release
                 # the owner's application-stop hold, even for a fresh snapshot.
-                row = hold_stopped_queue(dict(task), _queue().DRIVE_ROOT, stop_door)
+                row = hold_stopped_queue(dict(task), _queue().DRIVE_ROOT, stop_door, proof=returned,
+                                         persist_result=returned is not None)
             elif not project_hold and stale:
                 continue  # no provable never-started fact: the old snapshot-age rule still decides
             else:

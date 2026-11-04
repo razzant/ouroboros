@@ -203,13 +203,54 @@ const UNKNOWN_REASONS = {
     state_unreadable: 'The saved state could not be read, so the last attempt is unknown.',
 };
 
+// A boot recovery that reported its own rollback unfinished. The retry comes from this reason, never from the branch's
+// text, and only while that attempt's transaction is still open; it is no Restart or Restore control.
+export const RECOVERY_RETRY = 'Quit and reopen the desktop app, or restart the server process for a web deployment, '
+    + 'to retry the recovery.';
+const FAILED_REASONS = {
+    rollback_incomplete: { pill: 'Update recovery incomplete',
+        headline: 'The update failed, and restoring the previous version did not finish.' },
+};
+
+// supervisor/update_merge._ASSISTED_PHASES (pinned by a source test): only these are a reviewed resolution at work.
+const ASSISTED_PHASES = new Set(['materializing_assisted', 'assisted_resolution', 'committing_assisted']);
+// supervisor/update_merge.MARKER_CLEANUP_RETRY_PHASE: the transaction recorded its completion (a finished rollback
+// awaiting its restart included) and only cleanup is left, so an earlier unfinished report is history.
+const COMPLETION_RECORDED_PHASE = 'marker_cleanup_retry';
+
+/** Whether an update transaction phase is a reviewed resolution at work: the one reading for panel and record. */
+export function assistedUpdatePhase(phase) {
+    return ASSISTED_PHASES.has(String(phase || ''));
+}
+
+/** The still-active transaction this attempt is bound to (its `tx_attempt_id`), else null. */
+export function boundUpdateTx(progress, tx) {
+    return tx?.active && tx.attempt_id && tx.attempt_id === progress?.tx_attempt_id ? tx : null;
+}
+
+/** The attempt's one concluded reading: its outcome; a record without the field (an older shape) that failed is a failure. */
+export function attemptOutcome(progress) {
+    return progress?.outcome || (!progress?.active && progress?.result === 'failed' ? 'failed' : '');
+}
+
+function recoveryReport(progress) {
+    return attemptOutcome(progress) === 'failed' ? FAILED_REASONS[progress.reason] || null : null;
+}
+
+/** A bound attempt whose boot recovery reported its rollback unfinished, still the transaction's state: its words, else null. */
+export function unfinishedRecovery(progress, tx) {
+    const known = recoveryReport(progress);
+    const bound = boundUpdateTx(progress, tx);
+    return known && bound && bound.phase !== COMPLETION_RECORDED_PHASE ? known : null;
+}
+
 const REFUSALS = {
     release_moved: 'The update changed after it was prepared.',
     late_local_changes: 'Local files changed while the update was starting.',
     replace_not_applied: 'Git refused the first checkout step.',
 };
 
-function attemptText(progress) {
+function attemptText(progress, recovery = false) {
     const blockers = Array.isArray(progress.blockers) ? progress.blockers.map(String) : [];
     // Only the drain refusal names active writers, and it returns before any handoff or teardown.
     const busy = blockers.length > 0 && blockers.every((item) => item.startsWith('active:'));
@@ -227,7 +268,7 @@ function attemptText(progress) {
             || 'No completion record arrived; the running version alone does not establish the outcome.');
     } else if (progress.outcome === 'applied') {
         parts.push('The restarted server confirmed this update.');
-    } else {
+    } else if (!recovery) {
         parts.push(progress.error);
     }
     if (progress.work_stop === 'invoked') parts.push('Running work may have been interrupted.');
@@ -235,7 +276,7 @@ function attemptText(progress) {
         parts.push('Ouroboros needs a restart before updates can continue.');
     }
     if (progress.keep_branch) parts.push(`Your local commits are kept on branch ${progress.keep_branch}.`);
-    if (progress.stash_note) parts.push(progress.stash_note);
+    if (progress.stash_note && !recovery) parts.push(progress.stash_note);
     return parts.filter(Boolean).join(' ');
 }
 
@@ -251,6 +292,7 @@ function attemptDetails(progress, outcome) {
     add('Reason', progress.reason);
     add('Blocked by', (Array.isArray(progress.blockers) ? progress.blockers : []).join(', '));
     add('Error', progress.error);
+    if (outcome === 'failed' && FAILED_REASONS[progress.reason]) add('Recovery note', progress.stash_note);
     add('Saved local work', progress.keep_branch);
     add('Concluded by', { executor: 'this update', boot: 'the restarted server' }[progress.concluded_by]);
     return rows;
@@ -258,12 +300,12 @@ function attemptDetails(progress, outcome) {
 
 /**
  * One reading of the retained attempt for the pill and the panel: the stage while it runs, then the
- * server's conclusion or its named uncertainty. `null` when there is no attempt to show.
+ * server's conclusion or its named uncertainty. `tx` is the same status read's `update_tx`. `null` when
+ * there is no attempt to show.
  */
-export function updateAttemptView(progress) {
+export function updateAttemptView(progress, tx = null, { showRecoveryInstruction = true } = {}) {
     if (!progress || typeof progress !== 'object' || !progress.operation_id) return null;
-    // A record without the outcome field (an older shape) that failed is still a failure, never a stage.
-    const key = progress.outcome || (!progress.active && progress.result === 'failed' ? 'failed' : '');
+    const key = attemptOutcome(progress);
     const base = {
         id: String(progress.operation_id),
         when: String(progress.outcome_at || progress.stage_started_at || progress.started_at || ''),
@@ -273,15 +315,25 @@ export function updateAttemptView(progress) {
         ? 'This observation could not be saved and may be unavailable after restart.' : '';
     const outcome = OUTCOMES[key];
     if (outcome && !progress.active) {
-        return { ...base, terminal: true, tone: outcome.tone, pill: outcome.pill, headline: outcome.headline,
+        const recovery = recoveryReport(progress);
+        // A later recorded completion of the bound transaction outdates "did not finish"; its record stays failed.
+        const named = recovery && boundUpdateTx(progress, tx)?.phase !== COMPLETION_RECORDED_PHASE ? recovery : outcome;
+        // Exact diagnostics stay in Details, including an older note's retry wording. The current action is said once:
+        // here, unless the panel's own verdict already gives a recovery instruction.
+        const retry = showRecoveryInstruction && unfinishedRecovery(progress, tx) ? RECOVERY_RETRY : '';
+        return { ...base, terminal: true, tone: outcome.tone, pill: named.pill, headline: named.headline,
             restoreTarget: key === 'applied' ? String(progress.base_sha || '') : '',
-            text: [attemptText({ ...progress, outcome: key }), retention].filter(Boolean).join(' ') };
+            text: [attemptText({ ...progress, outcome: key }, Boolean(recovery)), retry, retention].filter(Boolean).join(' ') };
     }
     // Not concluded: this server's stage, a restart it needs, a reviewed resolution, or a later server's checks.
     const stage = String(progress.stage || '');
     const here = progress.active || progress.current_generation !== false;
+    const resolving = assistedUpdatePhase(boundUpdateTx(progress, tx)?.phase);
     const [pill, headline] = progress.result === 'assisted_started'
-        ? ['Resolving update…', 'A reviewed resolution owns this update.']
+        // A resolver start whose transaction left the assisted phases (cleanup retry, stash recovery, a rollback or
+        // gate block) is not a resolution at work, and nothing here says how it ended.
+        ? (resolving ? ['Resolving update…', 'A reviewed resolution owns this update.']
+            : ['Update not concluded', 'This update has not concluded yet.'])
         : progress.result === 'restart_required' && here
             ? ['Restart needed', 'The update needs a restart to finish.']
             : here
@@ -373,7 +425,7 @@ export function initUpdateStatus({ showPage, openDashboardTab, ws, readStatus = 
 
     function renderPill(status) {
         const pill = ensurePill();
-        const attempt = updateAttemptView(status?.update_progress);
+        const attempt = updateAttemptView(status?.update_progress, status?.update_tx);
         // A stage always shows; a concluded attempt shows only if its outcome has a word for the pill (a success has
         // none) and this browser has not hidden it. What is hidden is the notice: the record stays in the panel.
         const shown = Boolean(attempt?.pill) && !(attempt.terminal && attempt.id === dismissedUpdateAttempt());

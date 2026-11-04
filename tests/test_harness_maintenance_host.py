@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
 from copy import deepcopy
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -16,7 +19,7 @@ from ouroboros.gateway import harness_maintenance as api
 from ouroboros.gateways.claudexor import ClaudexorUnavailable
 from ouroboros.tools import control_maintenance as tools
 from ouroboros.tools.registry import ToolContext, ToolRegistry
-from tests.test_harness_maintenance_transport import OPERATION, REQUEST
+from tests.test_harness_maintenance_transport import OPERATION, REQUEST, client  # noqa: F401  (client: wire fixture)
 
 
 @pytest.fixture
@@ -50,8 +53,8 @@ def http():
         Route("/api/claudexor/maintenance/operations", api.api_harness_maintenance_create, methods=["POST"]),
         Route("/api/claudexor/maintenance/operations/{operation_id}", api.api_harness_maintenance_operation),
         Route("/api/claudexor/maintenance/operations/{operation_id}/cancel", api.api_harness_maintenance_operation, methods=["POST"]),
-    ])) as client:
-        yield client
+    ])) as owner_client:
+        yield owner_client
 
 
 def test_owner_aliases_are_exact_engine_envelopes_and_passive_reads_never_ensure(http, owned):
@@ -395,3 +398,202 @@ def test_malformed_update_never_downloads_before_engine_validation(http, owned, 
     reply = http.post("/api/claudexor/maintenance/operations", json=body, headers={"Idempotency-Key": "bad-body"})
     assert reply.status_code == 400
     assert not owned.calls, "no preparation inventory or install for a malformed Update"
+
+
+# ---- A current inspection whose reported executable is gone (#2461) ----
+PINNED_SPAWN_FAILURE = json.loads((Path(__file__).parent / "fixtures/claudexor_maintenance_spawn_enoent.json").read_text(encoding="utf-8"))
+RESTART_ADVICE = "Restart in the chat header"
+
+
+def spawn_failure_body(path):
+    return {**deepcopy(PINNED_SPAWN_FAILURE["body"]), "message": f"spawn {path} ENOENT"}
+
+
+@pytest.fixture
+def real_wire(client, monkeypatch):  # noqa: F811
+    """The real gateway and its error parsing, answering with the pinned engine's captured bytes."""
+    from ouroboros import review_run_isolation
+    monkeypatch.setattr(review_run_isolation, "attach_home", lambda: None)
+    monkeypatch.delenv("OUROBOROS_CLAUDEXOR_BIN", raising=False)
+
+    def build(respond):
+        gateway, seen = client(respond)
+        gateway._engine_version = PINNED_SPAWN_FAILURE["provenance"]["engine_version"]
+        gateway._engine_build_sha = PINNED_SPAWN_FAILURE["provenance"]["engine_build_sha"]
+
+        @contextmanager
+        def connection():
+            yield gateway
+
+        monkeypatch.setattr(service, "read_owned_gateway", connection)
+        return seen
+    return build
+
+
+def failing_inventory(path):
+    return lambda request: httpx.Response(PINNED_SPAWN_FAILURE["status"], json=spawn_failure_body(path))
+
+
+def test_pinned_wire_reports_the_missing_executable_over_http_and_tool(http, real_wire, tmp_path, monkeypatch):
+    missing = tmp_path / "moved-app" / "Contents" / "node"
+    seen = real_wire(failing_inventory(missing))
+    monkeypatch.setattr(service, "ensure_owned_gateway", lambda: pytest.fail("Inspection never starts an engine"))
+    reply = http.get("/api/claudexor/maintenance/harnesses?harness=cursor&fresh=true")
+    assert reply.status_code == PINNED_SPAWN_FAILURE["status"]
+    problem = reply.json()["error"]
+    # The engine's own facts stay exactly as received; only this host's observation is added.
+    expected = spawn_failure_body(missing)
+    assert {key: problem[key] for key in expected if key != "context"} == {key: value for key, value in expected.items() if key != "context"}
+    assert problem["requiredActions"] == [], "may help is never a required action"
+    facts = problem["context"]
+    assert facts["observation"] == "reported_executable_missing"
+    assert facts["engineVersion"] == PINNED_SPAWN_FAILURE["provenance"]["engine_version"]
+    assert facts["engineBuildSha"] == PINNED_SPAWN_FAILURE["provenance"]["engine_build_sha"]
+    assert facts["observedAt"]
+    assert facts["remedy"].startswith("The executable reported by this inspection is no longer present.")
+    assert RESTART_ADVICE in facts["remedy"] and "interrupts engine sessions" in facts["remedy"]
+    assert "not guaranteed" in facts["remedy"]
+    assert [request.method for request in seen if request.url.path != "/v2/operations"] == ["GET"]
+    answer = json.loads(tools._inspect_harness(context(tmp_path), harnesses=["cursor"], fresh=True))
+    assert answer["error"]["context"]["observation"] == "reported_executable_missing"
+    assert answer["error"]["message"] == f"spawn {missing} ENOENT"
+    assert {request.method for request in seen} == {"GET"}
+
+
+def test_a_broken_link_is_a_missing_executable(http, real_wire, tmp_path):
+    link = tmp_path / "node"
+    link.symlink_to(tmp_path / "gone")
+    real_wire(failing_inventory(link))
+    facts = http.get("/api/claudexor/maintenance/harnesses?fresh=true").json()["error"]["context"]
+    assert facts["observation"] == "reported_executable_missing"
+
+
+def unchanged(http, body, status=500):
+    reply = http.get("/api/claudexor/maintenance/harnesses?fresh=true")
+    assert reply.status_code == status
+    assert reply.json()["error"] == body
+
+
+def test_a_present_file_is_not_called_missing(http, real_wire, tmp_path):
+    present = tmp_path / "node"
+    present.write_text("")
+    real_wire(failing_inventory(present))
+    unchanged(http, spawn_failure_body(present))
+
+
+@pytest.mark.parametrize("message", [
+    "spawn node ENOENT", "spawn ./bin/node ENOENT", "spawn  ENOENT", "spawn ENOENT",
+    "before spawn {missing} ENOENT", "spawn {missing} ENOENT after", "spawn {missing} EACCES",
+    "spawn {missing} ENOENT\nspawn {missing} ENOENT", "ENOENT: no such file, open '{missing}'",
+])
+def test_unknown_message_shapes_pass_unchanged(http, real_wire, tmp_path, message):
+    body = {**spawn_failure_body(tmp_path), "message": message.format(missing=tmp_path / "gone")}
+    real_wire(lambda request: httpx.Response(500, json=body))
+    unchanged(http, body)
+
+
+@pytest.mark.parametrize("code", ["EACCES", "enoent", "maintenance_inspection_failed", None])
+def test_other_codes_pass_unchanged(http, real_wire, tmp_path, code):
+    body = {**spawn_failure_body(tmp_path / "gone"), "code": code}
+    real_wire(lambda request: httpx.Response(500, json=body))
+    reply = http.get("/api/claudexor/maintenance/harnesses?fresh=true").json()["error"]
+    assert "observation" not in (reply.get("context") or {})
+    assert RESTART_ADVICE not in json.dumps(reply)
+
+
+def test_a_path_that_cannot_be_examined_is_not_called_missing(http, real_wire, tmp_path, monkeypatch):
+    body = spawn_failure_body(tmp_path / "gone")
+    real_wire(lambda request: httpx.Response(500, json=body))
+    real_stat = os.stat
+    monkeypatch.setattr(service.os, "stat", lambda path, *a, **kw: (_ for _ in ()).throw(PermissionError("denied"))
+                        if str(path) == str(tmp_path / "gone") else real_stat(path, *a, **kw))
+    unchanged(http, body)
+
+
+@pytest.mark.parametrize("selection", ["external", "attach_only"])
+def test_a_selected_external_engine_gets_no_restart_advice(http, real_wire, tmp_path, monkeypatch, selection):
+    from ouroboros import review_run_isolation
+    body = spawn_failure_body(tmp_path / "gone")
+    real_wire(lambda request: httpx.Response(500, json=body))
+    if selection == "external":
+        monkeypatch.setenv("OUROBOROS_CLAUDEXOR_BIN", "/external/claudexord")
+    else:
+        monkeypatch.setattr(review_run_isolation, "attach_home", lambda: "/external-home")
+    unchanged(http, body)
+
+
+def test_engine_context_survives_and_a_bad_context_is_not_trusted(http, real_wire, tmp_path):
+    gone = tmp_path / "gone"
+    real_wire(lambda request: httpx.Response(500, json={**spawn_failure_body(gone), "context": {"engineFact": 1}}))
+    facts = http.get("/api/claudexor/maintenance/harnesses").json()["error"]["context"]
+    assert facts["engineFact"] == 1 and facts["observation"] == "reported_executable_missing"
+    real_wire(lambda request: httpx.Response(500, json={**spawn_failure_body(gone), "context": "text"}))
+    assert http.get("/api/claudexor/maintenance/harnesses").json()["error"]["context"]["observation"] == "reported_executable_missing"
+
+
+def historical_operation(path):
+    return {**deepcopy(OPERATION), "state": "failed", "phase": "settled", "mutation": "unknown", "termination": "confirmed",
+            "before": {"version": "2.0.0", "binary": "/managed/agy", "selection": "managed", "proved": True},
+            "finishedAt": "2026-10-09T12:00:00Z", "problem": spawn_failure_body(path)}
+
+
+def test_retained_operation_after_replacement_never_advises_another_restart(http, real_wire, tmp_path):
+    """The old operation names a path gone for ever: a healthy replacement must not read as needing Restart."""
+    gone = tmp_path / "old-app" / "node"
+    assert not gone.exists()
+    failed = historical_operation(gone)
+    replacement = {"observedAt": "2026-10-09T12:02:00Z", "harnesses": [{
+        "harness": "agy", "observedAt": "2026-10-09T12:02:00Z", "operation": {
+            key: failed[key] for key in ("id", "state", "phase", "finishedAt")},
+        "availableProblem": spawn_failure_body(gone)}]}
+    calls = []
+
+    def replacement_engine(request):
+        calls.append((request.method, request.url.path, request.headers.get("Idempotency-Key")))
+        if request.url.path.endswith("/harnesses"):
+            return httpx.Response(200, json=replacement)
+        return httpx.Response(202 if request.method == "POST" else 200, json=failed)
+
+    real_wire(replacement_engine)
+    assert http.get("/api/claudexor/maintenance/harnesses?fresh=true").json() == replacement
+    assert http.get("/api/claudexor/maintenance/operations/maintenance-one").json() == failed
+    assert http.post("/api/claudexor/maintenance/operations/maintenance-one/cancel").json() == failed
+    assert json.loads(tools._inspect_harness(context(tmp_path), operation_id="maintenance-one")) == failed
+    assert RESTART_ADVICE not in json.dumps(failed)
+    assert not any(method == "POST" and path.endswith("/operations") for method, path, _ in calls)
+
+
+def test_create_and_rejoin_keep_acceptance_facts_and_inventory_failure_adds_no_precondition(http, real_wire, tmp_path, monkeypatch):
+    """A failed optional read stays no gate; the same-key rejoin returns the retained failure unchanged."""
+    from ouroboros import claudexor_runtime as runtime
+    gone = tmp_path / "gone"
+    failed = historical_operation(gone)
+    keys = []
+
+    def engine(request):
+        if request.url.path.endswith("/harnesses"):
+            return failing_inventory(gone)(request)
+        keys.append(request.headers["Idempotency-Key"])
+        return httpx.Response(202, json=failed)
+
+    real_wire(engine)
+    monkeypatch.setattr(service, "ensure_owned_gateway", service.read_owned_gateway)
+    monkeypatch.setattr(runtime, "get_runtime_manager", lambda: pytest.fail("A read failure prepares nothing"))
+    for _attempt in range(2):
+        reply = http.post("/api/claudexor/maintenance/operations", json=REQUEST, headers={"Idempotency-Key": "same-key"})
+        assert reply.status_code == 202 and reply.json() == failed
+    assert keys == ["same-key", "same-key"]
+
+
+def test_an_engine_refusal_of_create_is_never_reclassified(http, real_wire, tmp_path, monkeypatch):
+    gone = tmp_path / "gone"
+
+    def engine(request):
+        if request.url.path.endswith("/harnesses"):
+            return httpx.Response(200, json={"harnesses": []})
+        return httpx.Response(500, json=spawn_failure_body(gone))
+
+    real_wire(engine)
+    monkeypatch.setattr(service, "ensure_owned_gateway", service.read_owned_gateway)
+    reply = http.post("/api/claudexor/maintenance/operations", json=REQUEST, headers={"Idempotency-Key": "same-key"})
+    assert reply.status_code == 500 and reply.json()["error"] == spawn_failure_body(gone)

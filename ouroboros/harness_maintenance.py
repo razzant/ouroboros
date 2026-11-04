@@ -9,11 +9,16 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 from contextlib import ExitStack
 
 from ouroboros.claudexor_daemon import ensure_owned_gateway, read_owned_gateway
 from ouroboros.gateways.claudexor import ClaudexorUnavailable
 from ouroboros.gateways.claudexor_maintenance import maintenance_request_id
+from ouroboros.utils import utc_now_iso
+
+_REPORTED_SPAWN_MISSING = re.compile(r"spawn (.+) ENOENT")
+_REPORTED_EXECUTABLE_MISSING = "reported_executable_missing"
 
 
 def maintenance_problem(error: Exception) -> tuple[int, dict]:
@@ -47,13 +52,54 @@ def _authority(ctx, *, mutate=False, network=False):
                                   "This task may not request that CLI maintenance action", status_code=403)
 
 
+def _explain_missing_executable(error: ClaudexorUnavailable, gateway) -> None:
+    """Add what this host sees now to a current inventory failure; the engine's words stay.
+
+    Only for inventory GETs: a retained operation's problem is history, and its path
+    stays missing after a healthy replacement, so it must never source this advice.
+    "Reported" is deliberate: neither a path nor a version proves whose executable it
+    is or why it went. Restart is the owner's choice, so requiredActions stay as received.
+    """
+    from ouroboros.review_run_isolation import attach_home
+
+    received = getattr(error, "problem", None)
+    if not isinstance(received, dict) or received.get("code") != "ENOENT":
+        return
+    match = _REPORTED_SPAWN_MISSING.fullmatch(str(received.get("message") or ""))
+    if match is None or not os.path.isabs(match.group(1)):
+        return
+    if attach_home() is not None or os.environ.get("OUROBOROS_CLAUDEXOR_BIN"):
+        return  # A selected external engine is not this host's Restart to suggest.
+    try:
+        os.stat(match.group(1))
+        return
+    except FileNotFoundError:  # Including a symlink whose target went.
+        pass
+    except OSError:
+        return
+    context = received.get("context")
+    error.problem = {**copy.deepcopy(received), "context": {
+        **(copy.deepcopy(context) if isinstance(context, dict) else {}),
+        "observation": _REPORTED_EXECUTABLE_MISSING, "observedAt": utc_now_iso(),
+        "engineVersion": getattr(gateway, "engine_version", "") or None,
+        "engineBuildSha": getattr(gateway, "engine_build_sha", "") or None,
+        "remedy": ("The executable reported by this inspection is no longer present. If the app was moved "
+                   "or replaced, Restart in the chat header may help; it interrupts engine sessions, "
+                   "and success is not guaranteed."),
+    }}
+
+
 def inspect_harnesses(harnesses=(), *, fresh=False, check_latest=False, ctx=None) -> dict:
     _authority(ctx, network=check_latest)
     if (not isinstance(harnesses, (list, tuple)) or any(not isinstance(item, str) or not item for item in harnesses)
             or type(fresh) is not bool or type(check_latest) is not bool):
         raise ValueError("harnesses must be names and fresh/check_latest must be booleans")
     with read_owned_gateway() as gateway:
-        return gateway.maintenance_harnesses(harnesses, fresh=fresh, check_latest=check_latest)
+        try:
+            return gateway.maintenance_harnesses(harnesses, fresh=fresh, check_latest=check_latest)
+        except ClaudexorUnavailable as exc:
+            _explain_missing_executable(exc, gateway)
+            raise
 
 
 def inspect_operation(operation_id: str, *, ctx=None) -> dict:

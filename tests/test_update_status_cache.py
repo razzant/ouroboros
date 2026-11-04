@@ -162,6 +162,12 @@ def test_payload_carries_minimal_update_tx_projection(monkeypatch):
         "active": True, "phase": "assisted_running",
         "task_id": "task-77", "restart_required": False,
     }
+    monkeypatch.setattr(
+        update_merge, "active_update_tx",
+        lambda: {"phase": "rolling_back", "attempt_id": "attempt-9"},
+    )
+    payload = control._managed_update_payload(fetch=False, include_tags=False)
+    assert payload["update_tx"]["attempt_id"] == "attempt-9"  # what update_progress.tx_attempt_id binds to
     monkeypatch.setattr(update_merge, "active_update_tx", lambda: {})
     payload = control._managed_update_payload(fetch=False, include_tags=False)
     assert payload["update_tx"] == {"active": False}

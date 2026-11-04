@@ -505,3 +505,86 @@ def test_disclosure_focus_and_raw_tray_use_shared_design_tokens(updates_ui, them
     page.keyboard.press("Tab")
     page.locator("#updates-attempt-raw > summary").focus()
     capture(page, f"design-tokens-{theme}", "#updates-attempt-raw > summary", "center")
+
+
+@pytest.mark.parametrize("theme,width,height", [("dark", 1100, 750), ("light", 390, 844)])
+def test_assisted_apply_keeps_server_binding_and_failed_recovery_instruction(updates_ui, theme, width, height):
+    """A late apply reply cannot replace a bound transaction with a client-invented one."""
+    from playwright.sync_api import expect
+
+    current = {"status": {**status(None, progress={}), "available": True, "latest_sha": TARGET}}
+    page, transport, reads = open_updates(updates_ui, current, theme=theme, width=width, height=height)
+    plan = {"available": True, "kind": "conflicting", "base_sha": BASE, "target_sha": TARGET,
+            "local_dirty_count": 0, "code_conflict_paths": [], "doc_conflict_paths": [], "hot_code_paths": []}
+    page.route("**/api/update/preflight", lambda route: route.fulfill(json={"merge_plan": plan}))
+    pending = []
+    page.route("**/api/update/apply", lambda route: pending.append(route))
+    try:
+        page.click("#btn-update-primary")
+        with page.expect_request("**/api/update/apply"):
+            page.click("[data-confirm-ok]")
+        expect(page.locator("#updates-summary")).to_have_text("Applying the update…")
+        progress = {"operation_id": OPERATION, "generation": "server-a", "current_generation": True,
+                    "active": False, "result": "assisted_started", "stage": "resolving",
+                    "tx_attempt_id": "bound-transaction", "base_sha": BASE, "target_sha": TARGET}
+        current["status"].update(update_progress=progress, update_tx={
+            "active": True, "attempt_id": "bound-transaction", "phase": "assisted_resolution",
+            "task_id": "resolver-task"})
+        refresh(page, transport, reads)  # the authoritative status arrives before the apply response
+        assert pending
+        pending.pop().fulfill(json={"status": "assisted_started", "task_id": "resolver-task"})
+        expect(page.locator("#updates-summary")).to_have_text("A conflicting update is being resolved under review.")
+        assert page.locator("#updates-attempt-headline").inner_text() == "A reviewed resolution owns this update."
+        resolving = facts(page)
+        # Said of the admission: the later failed and finished-rollback states below never contradict it.
+        page.get_by_text("Ouroboros started a reviewed resolution of the update merge. Watch progress in chat.",
+                         exact=True).wait_for(state="hidden", timeout=10000)
+        capture(page, f"assisted-binding-{theme}-{width}")
+
+        current["status"]["update_tx"]["phase"] = "rolling_back"
+        current["status"]["update_progress"] = {
+            **progress, "current_generation": False, "outcome": "failed", "concluded_by": "boot",
+            "reason": "rollback_incomplete", "error": "The update's original failure.",
+            "stash_note": "The rollback could not save its intent.", "keep_branch": "recovery/local-work",
+            "retention_unconfirmed": True}
+        refresh(page, transport, reads)
+        expect(page.locator("#updates-summary")).to_have_text(
+            "The update failed, and restoring the previous version did not finish.")
+        retry = "Quit and reopen the desktop app, or restart the server process for a web deployment, to retry the recovery."
+        closed = facts(page)
+        assert closed["cardText"].count(retry) == 1, closed["cardText"]
+        assert "recovery/local-work" in closed["cardText"] and "could not be saved" in closed["cardText"]
+        assert not closed["restore"] and closed["cardOverflow"] <= 1 and closed["pageOverflow"] <= 1
+        capture(page, f"failed-recovery-{theme}-{width}-closed", "#updates-summary")
+        page.locator("#updates-attempt-details > summary").click()
+        opened = facts(page)
+        assert "The update's original failure." in opened["cardText"]
+        assert "The rollback could not save its intent." in opened["cardText"]
+        assert opened["cardText"].count(retry) == 1, opened["cardText"]
+        capture(page, f"failed-recovery-{theme}-{width}-details", "#updates-attempt-details > summary")
+
+        # The same report under pending_boot_smoke keeps the in-app Restart that phase allows.
+        current["status"]["update_tx"]["phase"] = "pending_boot_smoke"
+        refresh(page, transport, reads)
+        expect(page.locator("#btn-update-primary")).to_have_text("Restart now")
+        smoke = facts(page)
+        assert smoke["cardText"].count(retry) == 1, smoke["cardText"]
+
+        # A later boot finished the rollback and awaits its restart (rollback_restart_pending): the local-work verdict
+        # gives the one instruction, and Last attempt no longer says restoring "did not finish".
+        current["status"]["update_tx"].update(phase="marker_cleanup_retry", local_work_recovery=True)
+        refresh(page, transport, reads)
+        expect(page.locator("#updates-summary")).to_have_text("Local changes still need recovery confirmation.")
+        finished = facts(page)
+        assert finished["cardText"].count("Quit and reopen") == 1, finished["cardText"]
+        assert "did not finish" not in finished["cardText"]
+        assert finished["attemptHeadline"] == "The update did not complete."
+        assert "The rollback could not save its intent." in finished["cardText"]  # history stays in Details
+        assert finished["cardOverflow"] <= 1 and finished["pageOverflow"] <= 1
+        capture(page, f"rollback-finished-{theme}-{width}", "#updates-summary")
+        evidence(f"assisted-recovery-{theme}-{width}", {"resolving": resolving, "closed": closed, "open": opened,
+                                                      "smoke": smoke, "finished": finished,
+                                                      "statusReads": len(reads), "console": transport.console})
+    finally:
+        for route in pending:
+            route.abort()

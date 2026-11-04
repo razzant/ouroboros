@@ -65,7 +65,7 @@ import { harnessIdentityMarkup } from './harness_presentation.js';
 import { SIGN_IN_SCOPE_NOTE, createLoginCardController, normalizeProfileName, preserveCardFocus } from './harness_login_cards.js';
 import { createHarnessMaintenanceController } from './harness_maintenance.js';
 import { formatRelativeAge } from './ui_helpers.js';
-import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import { absoluteTime, escapeHtmlAttr as escapeHtml } from './utils.js';
 
 // ---------------------------------------------------------------------------
 // Pure helpers.
@@ -833,7 +833,32 @@ function faultOutranksReassurance(service, note) {
     return { tone: note.tone, text: `${note.text}${service?.pinNote ? ` ${service.pinNote}` : ''}` };
 }
 
-export function serviceBannerLine(store, { wakeError = '', wakeBusy = false } = {}) {
+// The current program inspection's missing executable, said once for the tab: every family's
+// reading depends on it, and the conditional recovery stays the owner's. "Last" is the honest
+// tense: status carries no engine process identity, so a replacement made from another tab or
+// phone is only noticed by this page's next inspection (opening the tab, Refresh, Check version).
+const MISSING_EXECUTABLE_NOTICE = 'The executable reported by the last program inspection is no longer present. '
+    + 'Versions below are last known. If the app was moved or replaced, Restart in the chat header may help; '
+    + 'it interrupts engine sessions, and success is not guaranteed.';
+
+function withMissingExecutable(line, problem) {
+    const context = problem.context;
+    const engine = [context.engineVersion, context.engineBuildSha].filter(Boolean).join(' · ');
+    return { ...line, tone: TONE_RANK[line.tone] < TONE_RANK.warn ? 'warn' : line.tone,
+        // Serving, but it could not start the child that inspection needs.
+        text: `${line.text.replace(/^Claudexor ready/, 'Claudexor running')} · ${MISSING_EXECUTABLE_NOTICE}`,
+        facts: [['Last program inspection', [absoluteTime(context.observedAt), `${problem.code}: ${problem.message}`].filter(Boolean).join(' · ')],
+            ...(engine ? [['Inspected by engine', engine]] : []), ...(line.facts || [])] };
+}
+
+export function serviceBannerLine(store, options = {}) {
+    const line = serviceReadLine(store, options);
+    // A wake the owner just pressed, and its refusal, lead outright.
+    return options.programProblem && !options.wakeBusy && !options.wakeError
+        ? withMissingExecutable(line, options.programProblem) : line;
+}
+
+function serviceReadLine(store, { wakeError = '', wakeBusy = false } = {}) {
     if (wakeBusy) {
         return { tone: 'muted', text: 'Starting the agent daemon…' };
     }
@@ -1166,6 +1191,19 @@ export function harnessFamilyMarkup(group, payload, facets) {
     `;
 }
 
+function paintServiceBanner() {
+    const banner = document.getElementById('agents-service-banner');
+    if (!banner) return;
+    const line = serviceBannerLine(state.store, {
+        wakeError: state.wakeError,
+        wakeBusy: state.wakeBusy,
+        programProblem: state.maintenance?.inspectionProblem,
+    });
+    banner.textContent = line.text;
+    banner.dataset.tone = line.tone;
+    paintServiceDiagnostics(line);
+}
+
 function renderRows() {
     // The wake error expires HERE, on the one condition that makes it moot: a
     // FRESH reading (store error retired) in which the daemon provably
@@ -1176,16 +1214,7 @@ function renderRows() {
         state.wakeError = '';
     }
     const host = document.getElementById('harness-accounts-groups');
-    const banner = document.getElementById('agents-service-banner');
-    if (banner) {
-        const line = serviceBannerLine(state.store, {
-            wakeError: state.wakeError,
-            wakeBusy: state.wakeBusy,
-        });
-        banner.textContent = line.text;
-        banner.dataset.tone = line.tone;
-        paintServiceDiagnostics(line);
-    }
+    paintServiceBanner();
     // The Refresh button says what pressing it does (one predicate feeds the
     // label AND the click — see initHarnessAccounts), and while a wake is in
     // flight it says that instead of inviting a second one.
@@ -1463,6 +1492,7 @@ async function _init(store) {
     state.maintenance = createHarnessMaintenanceController({
         host: () => document.getElementById('harness-accounts-groups'),
         onInventory: renderRows,
+        onInspectionProblem: paintServiceBanner,
         onSettled: () => state.store.refresh(),
         visible: () => !document.hidden
             && document.getElementById('harness-accounts-groups')?.offsetParent != null,

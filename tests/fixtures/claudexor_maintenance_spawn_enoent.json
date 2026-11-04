@@ -1,0 +1,21 @@
+{
+  "provenance": {
+    "source": "HTTP GET /v2/maintenance/harnesses?fresh=true from the shipped claudexord bundle, its own process.execPath (a private Node copy) unlinked after a good read",
+    "engine_version": "5.0.1",
+    "engine_build_sha": "f10efc2f92a29752f93c611dba1545de400e50ba",
+    "archive_sha256": "22c627f80b3985d3a0abf9fdca38ebbebb18157f986baed3f18c3f9fee0f5827",
+    "node_version": "24.16.0",
+    "captured_on": "2026-11-04",
+    "platform": "darwin-arm64"
+  },
+  "status": 500,
+  "body": {
+    "code": "ENOENT",
+    "message": "spawn {executable} ENOENT",
+    "retryable": false,
+    "fieldErrors": {},
+    "requiredActions": [],
+    "evidenceRefs": [],
+    "context": {}
+  }
+}
