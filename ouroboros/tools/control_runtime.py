@@ -534,7 +534,7 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
         if refusal:
             return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
                 f"⚠️ MAIN_NOTICE_BLOCKED: destination='main' refused: {refusal}. Nothing was sent; "
-                "destination='current' still reaches this conversation.")))
+                "destination='current' still writes this work's own room.")))
         from ouroboros.presence_owner_contact import ContactRequestConflict, ContactRequestInvalid, contact_origin, send_main_message
         try:
             origin = contact_origin(ctx)
@@ -580,7 +580,7 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
         chat_id, system_type = relay["source"]["chat_id"], "relay_reply"
         reply_meta = {"reply_to": resolve_reply(canonical_data_root(ctx), relay["source"]["address"]),
                       "reply_to_relay": relay["relay_id"]}
-    from ouroboros.tools.owner_delivery import deliver_owner_event, stamp_lineage
+    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt, stamp_lineage
     from ouroboros.utils import append_jsonl
     event = stamp_lineage(ctx, {
         "type": "send_message",
@@ -620,10 +620,8 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
         return (f"OK: answer to relay {relay['relay_id']} owed to {relay['source'].get('label') or 'its source room'} "
                 f"(delivery {event['delivery_id']}); the outbox retries it until sent.")
     if target == "main":
-        return "OK: notice sent to the main chat." if mode == "live" else "OK: notice queued for delivery to the main chat."
-    if mode == "live":
-        return "OK: message sent to owner chat."
-    return "OK: message queued for delivery."
+        return "OK: notice accepted for delivery to the main chat." if mode == "live" else "OK: notice queued for delivery to the main chat."
+    return publish_delivery_receipt(ctx, event, mode, "message")
 
 
 def _update_identity(ctx: ToolContext, content: str, expected_revision: str | None = None) -> str:

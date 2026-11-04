@@ -9,7 +9,10 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 from urllib.parse import urlsplit
+
+log = logging.getLogger(__name__)
 
 MAIN_CONTACT_VERSION = 1  # Host-bound private messages, quizzes and live/late answer routing.
 
@@ -144,30 +147,27 @@ def answer_source_context(block: dict) -> str:
 
 
 def flush_owner_events(root, events: list, sink=None) -> None:
-    """Return private deferred frames to the attached supervisor bus, in order.
+    """Return a turn's buffered frames to the attached supervisor bus, in order.
 
-    Never create a child-local bus or invoke handlers with invented queue state.
-    On an uncertain enqueue the unchanged event retains its durable retry identity.
-    ``sink(rows)`` receives the frames instead when this process carries the turn for
-    another (a conversation-lane carrier has no server bus of its own).
+    A turn's runner has no end-of-task drain, so these frames have no other consumer: private
+    Main contact, and the local-room rows its tools were told are queued. Never create a child-local
+    bus or invoke handlers with invented queue state. On an uncertain enqueue a private event
+    retains its durable retry identity and fails the turn; a local row has no outbox, so it is logged
+    and left with the remaining ordered suffix for the carrier's drain; the final can still finish. ``sink(rows)`` receives the
+    frames instead when this process carries the turn for another (a conversation-lane carrier
+    has no server bus of its own).
     """
     from ouroboros.owner_quiz import quiz_states
+    from ouroboros.tools.owner_delivery import local_room_frame
 
-    if sink is not None:
-        picked = []
-        for event in list(events):
-            kind = event.get("type")
-            task_id = str(event.get("task_id") or "")
-            block = event.get("progress_meta") or {}
-            if kind in {"send_quiz", "send_quiz_state"}:
-                block = quiz_states(root, task_id).get(str(event.get("quiz_id") or "")) or {}
-            if kind in {"send_message", "send_quiz", "send_quiz_state"} and private_main_contact(block, task_id):
-                picked.append(dict(event))
-                events.remove(event)
-        if picked:
-            sink(picked)
-        return
-    from supervisor.workers import get_event_q
+    def send(rows: list) -> None:
+        if sink is not None:
+            sink(rows)
+            return
+        from supervisor.workers import get_event_q
+
+        for row in rows:
+            get_event_q(create=False).put(row)
 
     for event in list(events):
         kind = event.get("type")
@@ -175,7 +175,14 @@ def flush_owner_events(root, events: list, sink=None) -> None:
         block = event.get("progress_meta") or {}
         if kind in {"send_quiz", "send_quiz_state"}:
             block = quiz_states(root, task_id).get(str(event.get("quiz_id") or "")) or {}
-        if kind not in {"send_message", "send_quiz", "send_quiz_state"} or not private_main_contact(block, task_id):
+        if kind in {"send_message", "send_quiz", "send_quiz_state"} and private_main_contact(block, task_id):
+            send([dict(event)])
+        elif local_room_frame(event):
+            try:
+                send([dict(event)])
+            except Exception:
+                log.warning("local room row of turn %s had no consumer at its end", task_id, exc_info=True)
+                break
+        else:
             continue
-        get_event_q(create=False).put(dict(event))
         events.remove(event)

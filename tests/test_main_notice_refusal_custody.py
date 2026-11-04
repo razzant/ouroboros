@@ -17,7 +17,7 @@ pytestmark = pytest.mark.serial
      "(this room) or 'main' (the owner's main chat). Nothing was sent."),
     ("main", 1, {"text": "Hello", "destination": "main"}, "blocked", "ACCESS_BLOCKED",
      "⚠️ MAIN_NOTICE_BLOCKED: destination='main' refused: this root is neither bound to a registered "
-     "Project nor started by the owner. Nothing was sent; destination='current' still reaches this conversation."),
+     "Project nor started by the owner. Nothing was sent; destination='current' still writes this work's own room."),
 ], ids=["no-chat", "empty", "destination", "main"])
 @pytest.mark.parametrize("next_action", ["pause", "continue"])
 def test_message_refusal_preserves_result_and_releases_only_its_call(

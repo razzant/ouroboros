@@ -1397,7 +1397,7 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("send_photo", {
             "name": "send_photo",
             "description": (
-                "Send an image to the owner's chat. "
+                "Send an image to this work's room (Presence-bound: local, not the place conversation). "
                 "Preferred: use file_path to send a local file. "
                 "Legacy: use image_base64 with raw base64 or __last_screenshot__. "
                 "Use after browse_page(output='screenshot') or browser_action(action='screenshot')."
@@ -1410,7 +1410,7 @@ def get_tools() -> List[ToolEntry]:
         }, _send_photo),
         ToolEntry("send_video", {
             "name": "send_video",
-            "description": "Send a local video file to the owner's chat, with an optional caption. Requires file_path.",
+            "description": "Send a local video file to this work's room (Presence-bound: local, not the place conversation), with an optional caption. Requires file_path.",
             "parameters": {"type": "object", "properties": {
                 "file_path": {"type": "string", "description": "Local video path: relative to the active workspace, or absolute."},
                 "caption": {"type": "string", "description": "Optional caption for the video"},
@@ -1419,7 +1419,7 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("send_file", {
             "name": "send_file",
             "description": (
-                "Send an arbitrary document/file to the owner's chat (e.g. a report, .md/.csv/.html, "
+                "Send an arbitrary document/file to this work's room (Presence-bound: local, not the place conversation; e.g. a report, .md/.csv/.html, "
                 "PDF, archive, or code file — anything that is not an image or video). "
                 "Requires a local file_path; large files use a captured download reference. Deliver a finished file result "
                 "the owner can download, rather than only describing it or sending a screenshot."
@@ -1431,7 +1431,7 @@ def get_tools() -> List[ToolEntry]:
         }, _send_file),
         ToolEntry("send_links", {
             "name": "send_links",
-            "description": "Send one or more HTTP(S) links as prominent clickable buttons in the owner's chat.",
+            "description": "Send one or more HTTP(S) links as prominent clickable buttons in this work's room (Presence-bound: local, not the place conversation).",
             "parameters": {"type": "object", "properties": {
                 "title": {"type": "string", "description": "Optional heading above the buttons"},
                 "links": {"type": "array", "minItems": 1, "maxItems": _MAX_LINK_ACTIONS, "items": {

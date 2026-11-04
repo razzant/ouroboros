@@ -44,7 +44,7 @@ class TestProducer:
         q = queue.Queue()
         ctx = _ctx(tmp_path, _project(tmp_path), event_queue=q)
         assert _send_user_message(ctx, "The Cursor account is out of usage.", destination="main") == (
-            "OK: notice sent to the main chat.")
+            "OK: notice accepted for delivery to the main chat.")
         frame = q.get_nowait()
         assert frame["chat_id"] == 1
         assert frame["system_type"] == "main_notice"
@@ -70,7 +70,7 @@ class TestProducer:
         assert q.empty() and not bare.pending_events
         assert not (tmp_path / "logs" / "events.jsonl").exists()
         owner = _ctx(tmp_path, 1, event_queue=q, meta={"origin_message_ref": {"chat_id": 1, "client_message_id": "m1"}})
-        assert _send_user_message(owner, "An owner notice", destination="main") == "OK: notice sent to the main chat."
+        assert _send_user_message(owner, "An owner notice", destination="main") == "OK: notice accepted for delivery to the main chat."
         frame = q.get_nowait()
         assert frame["chat_id"] == 1 and frame["system_type"] == "main_notice"
 
@@ -78,7 +78,7 @@ class TestProducer:
     def test_default_and_empty_destination_stay_in_the_current_room(self, tmp_path, destination):
         q = queue.Queue()
         ctx = _ctx(tmp_path, 1_000_123, event_queue=q)
-        assert _send_user_message(ctx, "A word while I work.", destination=destination) == "OK: message sent to owner chat."
+        assert _send_user_message(ctx, "A word while I work.", destination=destination) == "OK: message accepted for delivery to owner chat."
         frame = q.get_nowait()
         assert frame["chat_id"] == 1_000_123
         assert frame["system_type"] == "proactive_message"
@@ -126,7 +126,7 @@ class TestFinalCustody:
         ctx = _ctx(tmp_path, _project(tmp_path), event_queue=None)
         assert _send_user_message(ctx, "Owner-held problem.", destination="main") == (
             "OK: notice queued for delivery to the main chat.")
-        assert _send_user_message(ctx, "Mid-task reply.") == "OK: message queued for delivery."
+        assert _send_user_message(ctx, "Mid-task reply.") == 'OK: message queued for delivery to Project room "Launch".'
         live = queue.Queue()
         # No final buffered yet: neither typed send may ship as the answer.
         assert deliver_final_message_live(live, ctx.pending_events, ctx.task_id) is False

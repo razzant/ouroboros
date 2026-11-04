@@ -67,7 +67,7 @@ def test_continued_origin_reaches_main_notice_consumer_without_new_authority(tmp
     assert bool(refusal) is not allowed, refusal
     result = _send_user_message(ctx, "A continued-task notice.", destination="main")
     if allowed:
-        assert result == "OK: notice sent to the main chat."
+        assert result == "OK: notice accepted for delivery to the main chat."
         notice = events.get_nowait()
         assert notice["chat_id"] == 1 and notice["system_type"] == "main_notice"
     else:

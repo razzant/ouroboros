@@ -321,7 +321,7 @@ def test_project_root_main_notice_is_one_message_in_main_and_its_project(
                     wait_until(lambda: main_row in _identities(_chat_rows(oracle, notice_mark)), 60)
                     notice_rows = _chat_rows(oracle, notice_mark)
                     assert _identities(notice_rows) == [main_row], notice_rows
-                    assert any("notice sent to the main chat" in text for text in tool_results), tool_results
+                    assert any("notice accepted for delivery to the main chat" in text for text in tool_results), tool_results
                     proactive = [row for row in oracle.events("proactive_message") if row.get("task_id") == task_id]
                     assert [row.get("destination") for row in proactive] == ["main"], proactive
                     # Unread where it is shown, never silent before he reads it: Main and the Project.

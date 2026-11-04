@@ -173,7 +173,7 @@ def test_a_terminal_answer_reaches_telegram_alone_and_keeps_every_reply(tmp_path
                                      drive_logs=lambda: tmp_path / "logs")
     ongoing = ["I found the source.", "I am checking the result."]
     for text in ongoing:
-        assert "sent to owner chat" in _send_user_message(tool_ctx, text)
+        assert "accepted for delivery to owner chat" in _send_user_message(tool_ctx, text)
         delivery._handle_send_message(events.get_nowait(), host)
     assert not tool_ctx.pending_events
     assert all(row["system_type"] == "proactive_message" for row in published)
@@ -207,7 +207,7 @@ def test_a_terminal_answer_reaches_telegram_alone_and_keeps_every_reply(tmp_path
                                    "system_type": "terminal_incident"}, host)
     receipt_id = _Rec.sent[-1][3]
     assert receipt_id not in _Rec.muted
-    assert "sent to owner chat" in _send_user_message(tool_ctx, "A later ongoing reply.")
+    assert "accepted for delivery to owner chat" in _send_user_message(tool_ctx, "A later ongoing reply.")
     delivery._handle_send_message(events.get_nowait(), host)
     assert _Rec.sent[-1][1] == "A later ongoing reply." and _Rec.edited == []
     assert plugin._get_silent_msg(api, "", 42) == 0

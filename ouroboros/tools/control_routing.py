@@ -365,6 +365,13 @@ def _start_task(
             # focus keeps ordinary workspace admission and its return carrier.
             evt.update({key: "" for key in ("project_id", "project_name", "workspace_root", "workspace", "source")})
             repo_root_note = ""
+        if "presence" in presence_carrier:
+            from ouroboros.presence_context import PRESENCE_FINAL_ROUTE_KEY, handoff_fact
+
+            # ``_finish_swarm_handoff`` holds the first attempt whatever its status; start_task runs
+            # serially. A candidate written before submission: only what the source publishes decides.
+            evt[PRESENCE_FINAL_ROUTE_KEY] = handoff_fact(getattr(ctx, "task_id", ""), tid, held=not isinstance(
+                getattr(ctx, "_swarm_handoff_attempt", None), dict))
     else:
         # The owner's own work related to a place (#2482): an ordinary owner start
         # with its own contract; only the relation the place reads it by rides along.
