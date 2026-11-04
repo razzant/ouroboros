@@ -932,8 +932,8 @@ def _left_review_mark(record: Dict[str, Any], attempt: Any, seats: List[Dict[str
     from ouroboros.merge_receipts import review_settlement_facts
 
     surface, task_id, retry_key = str(record["surface"]), str(record["task_id"]), str(record["retry_key"])
-    drive, attempt_no = pathlib.Path(record["drive_root"]), int(record.get("attempt") or 0)
-    root = record.get("canonical_root") or drive
+    root = record.get("canonical_root") or record["drive_root"]
+    attempt_no = int(record.get("attempt") or 0)
     revision = (settled or {}).get("revision")
     merged, room, merge_words = review_settlement_facts(root, task_id, str(record.get("record_id") or ""), revision, in_room=True)
     source = {"kind": "left_review_settlement", "gap": gap, "seats": seats, "merged_under_record": merged,
@@ -943,8 +943,7 @@ def _left_review_mark(record: Dict[str, Any], attempt: Any, seats: List[Dict[str
               "attempt_row": {key: getattr(attempt, key, None) for key in (
                   "repo_key", "tool_name", "attempt", "review_record_id", "pre_review_fingerprint", "phase",
                   "status", "block_reason")} if attempt is not None else None}
-    ref = store_actor_source_bytes(
-        record.get("canonical_root") or drive, task_id, category="context_checkpoints",
+    ref = store_actor_source_bytes(root, task_id, category="context_checkpoints",
         source_id=f"left-review-{surface}-{hashlib.sha256(retry_key.encode()).hexdigest()[:16]}",
         data=json.dumps(source, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8"), extension="json")
     named = f"attempt #{attempt_no}" if attempt_no else f"record {record.get('record_id') or retry_key[-12:]}"

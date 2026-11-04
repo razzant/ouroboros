@@ -115,6 +115,22 @@ _START_TASK_DESCRIPTION = (
 )
 
 
+_MESSAGE_DESTINATION_DESCRIPTION = (
+    "'current' (default): this work's room. 'main': also the "
+    "owner's main chat while this work lives in an owner-visible Project "
+    "room, for an expected result, a decision or a substantial change to "
+    "what the owner relies on (such as lost promised verification or "
+    "unique data, risk to shared work, a correction of a reported "
+    "result), even when a workaround means they need not act. One "
+    "message: the Project shows it too, and it is read once; it is not "
+    "this task's answer. A Presence root reports privately, with host-bound "
+    "source attribution, including from Silent places: Main keeps its "
+    "address, the Project its work lives in (if any) shows the same row, "
+    "and its place never sees it. "
+    "Delegated and agent-to-agent work cannot use it."
+)
+
+
 _ROOT_EFFORT_PARAM = {"type": "string", "enum": list(EFFORT_SCALE), "description": (
     "Optional: the reasoning effort the NEW task starts on; applied in Cyber Pro only — otherwise the "
     "task starts at my human's recommended level and the result says so. Omit for that level.")}
@@ -366,18 +382,7 @@ def get_tools() -> List[ToolEntry]:
                 "request_id": {"type": "string", "description": "Presence Main contact retry key (at most 128 characters). Reuse the same key and words after uncertain delivery; a new key permits a distinct identical report. Omitted: identical words from this work rejoin."},
                 "reply_to_relay": {"type": "string", "description": "Reply to a drained relay in its source room; this work's Project shows the same answer. Empty selects the single open relay; omit for an ordinary room message."},
                 "destination": {"type": "string", "enum": ["current", "main"], "default": "current",
-                                "description": "'current' (default): this work's room. 'main': also the "
-                                               "owner's main chat while this work lives in an owner-visible Project "
-                                               "room, for an expected result, a decision or a substantial change to "
-                                               "what the owner relies on (such as lost promised verification or "
-                                               "unique data, risk to shared work, a correction of a reported "
-                                               "result), even when a workaround means they need not act. One "
-                                               "message: the Project shows it too, and it is read once; it is not "
-                                               "this task's answer. A Presence root reports privately, with host-bound "
-                                               "source attribution, including from Silent places: Main keeps its "
-                                               "address, the Project its work lives in (if any) shows the same row, "
-                                               "and its place never sees it. "
-                                               "Delegated and agent-to-agent work cannot use it."},
+                                "description": _MESSAGE_DESTINATION_DESCRIPTION},
             }, "required": ["text"]},
         }, _send_user_message),
         ToolEntry("update_identity", {
