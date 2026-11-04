@@ -168,3 +168,83 @@ def test_a_round_its_record_does_not_prove_stays_held_and_the_pass_writes_nothin
     active, _owners = review_checking_prune._review_rounds(world.data, repair=True)
 
     assert active == _names(world) and writes == [] and load_state(world.data).attempts == before
+
+
+def _start(data, slot, *, operation=None, fate="terminal"):
+    """The custody record of seat SLOT's own start token (``inv-<slot>``), as the delegated transport writes it."""
+    from ouroboros import delegate_custody as custody
+    from tests.test_unwaited_review_settlement import TASK
+
+    token, run = f"inv-{slot}", f"run-{slot}"
+    assert custody.emit(data, custody.START_REQUESTED, {
+        "invocation_id": token, "task_id": TASK, "surface": "multi_model_review", "slot_id": slot,
+        "operation_id": operation or f"op-{slot}", "route": "claude", "request": {"prompt": "review"}})
+    if fate == "refused":
+        assert custody.emit(data, custody.START_FAILED, {"invocation_id": token, "task_id": TASK, "definite": True,
+                                                         "error": "refused"})
+    if fate in {"running", "terminal"}:
+        assert custody.emit(data, custody.STARTED, {"run_id": run, "task_id": TASK, "invocation_id": token})
+    if fate == "terminal":
+        assert custody.emit(data, custody.TERMINAL_OBSERVED, {"run_id": run, "task_id": TASK, "state": "succeeded",
+                                                              "observation_seq": 1, "source_ref": {"sha256": "0" * 64}})
+
+
+@pytest.mark.parametrize("fate", ["terminal_run", "definite_refusal", "pending_invocation", "run_still_going",
+                                  "answer_awaited", "foreign_invocation"])
+def test_an_in_flight_row_of_an_ended_task_closes_only_by_its_invocations_own_custody_record(
+        tmp_path, monkeypatch, fate):
+    """O1(c): a seat left ``in_flight`` after its round ended closes from its start token's own custody record: a
+    definite refusal (no outcome exists) or a run custody holds terminal whose outcome the wave's record holds. A
+    pending or unbound start, a run still going, a foreign invocation and an answer the record still awaits (the
+    wave's own $0 collection reads it) keep the seat's token, its row and the round's checkout. The task has ended in
+    every case, and the control seat ``s1`` (a terminal run its record holds) closes in the same single write."""
+    from ouroboros import review_checking_prune
+    from ouroboros import review_ledger as rl
+    from ouroboros.task_results import write_task_result
+    from tests.test_review_ledger import _raw
+    from tests.test_unwaited_review_settlement import TASK, _commit_world, _saved, _state_writes
+
+    world = _commit_world(tmp_path, monkeypatch)
+    write_task_result(world.data, TASK, "completed", result="done")
+    recorded = [{**_raw("s1", "m1", parts=("change", "coupling")), "operation_id": "op-s1"}]
+    if fate not in {"definite_refusal", "answer_awaited"}:  # a refused start has no outcome to record
+        recorded.append({**_raw("s2", "m2"), "operation_id": "op-s2"})
+    rl.settle_from_collected(world.data, world.record_id, recorded)
+    _start(world.data, "s1")
+    _start(world.data, "s2", operation="op-elsewhere" if fate == "foreign_invocation" else None, fate={
+        "definite_refusal": "refused", "pending_invocation": "requested", "run_still_going": "running"}.get(fate, "terminal"))
+    name = next(iter(review_checking_prune._review_rounds(world.data)[1]))
+    writes = _state_writes(monkeypatch)
+
+    first, _owners = review_checking_prune._review_rounds(world.data, repair=True)
+    second, _owners = review_checking_prune._review_rounds(world.data, repair=True)
+
+    closes = fate in {"terminal_run", "definite_refusal"}
+    assert len(writes) == 1 and (name in first) is (not closes) and first == second, (writes, first)
+    saved = _saved(world)
+    rows = {row["slot_id"]: row for row in saved.triad_raw_results}
+    assert rows["s1"]["operation_state"] == "late_settled" and "pending_invocation_id" not in rows["s1"]
+    assert rows["s1"]["custody_closure"] == {"invocation_id": "inv-s1", "run_id": "run-s1", "run_state": "succeeded"}
+    if not closes:
+        assert (rows["s2"]["operation_state"], rows["s2"]["pending_invocation_id"]) == ("in_flight", "inv-s2")
+        assert saved.status == "reviewing" and saved.late_result_pending
+        return
+    assert (saved.status, saved.phase, saved.late_result_pending) == ("reviewed", "review_only", False)
+    assert "pending_invocation_id" not in rows["s2"]
+    assert rows["s2"]["operation_state"] == ("not_dispatched" if fate == "definite_refusal" else "late_settled")
+
+
+def test_a_pass_whose_in_flight_seats_have_only_pending_starts_writes_nothing(tmp_path, monkeypatch):
+    from ouroboros import review_checking_prune
+    from ouroboros.review_state import load_state
+    from tests.test_unwaited_review_settlement import _commit_world, _state_writes
+
+    world = _commit_world(tmp_path, monkeypatch)
+    for slot in ("s1", "s2"):
+        _start(world.data, slot, fate="requested")
+    before = load_state(world.data).attempts
+    writes = _state_writes(monkeypatch)
+
+    active, _owners = review_checking_prune._review_rounds(world.data, repair=True)
+
+    assert writes == [] and len(active) == 1 and load_state(world.data).attempts == before
