@@ -690,13 +690,13 @@ def _scan_outcomes(root, snapshot):
                 continue
             notice = terminal_host_notice_text(result)
             words = str(result.get("wake_summary") or "").strip()
-            # A host notice is the run's public line, else the sentence it wrote for its human (whole),
-            # else the end of a spoken answer; a quiet run's internal note never is.
+            # A host notice's first line (its cause) is the run's public line, else the sentence it wrote
+            # for its human (whole), else the end of a spoken answer; a quiet run's internal note never is.
             text = str(notice or ("" if words or result.get("wake_silent") is True else result.get("result")) or "").strip()
             observed[str(row.get("id") or "")] = {
                 "task_id": task_id, "state": result["status"], "quiet": quiet_finish(result),
                 "notice": bool(notice), "ended_at": terminal_time_fact(result)["occurred_at"],
-                "line": text.splitlines()[-1][:160] if text else words,
+                "line": text.splitlines()[0 if notice else -1][:160] if text else words,
             }
         except Exception:
             log.debug("schedule result %s not observed this pass", task_id, exc_info=True)

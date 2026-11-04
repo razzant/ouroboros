@@ -1,8 +1,8 @@
-// Owner Batch4: "Continue" on a card whose root task was interrupted.
+// Owner Batch4: "Continue" on a card whose root task was interrupted or stopped by its author as unfinished.
 //
 // The server decides what a settled card may offer (`continuation_offer` on the
-// task detail: a Continue after a technical interruption, or the successor this
-// task already has). The press carries ONE random action nonce kept in local
+// task detail: a Continue after a technical interruption or an author's stop, or
+// the successor this task already has). The press carries ONE random action nonce kept in local
 // storage per task, so a retry or a reload after a lost answer returns the SAME
 // admission instead of starting a second task; a timeout is never read as "not
 // continued". The card then points to its successor (a stale card never offers
@@ -98,7 +98,9 @@ export async function continueTaskAction(taskId, { request = continueTask, stora
         }
         if (body.state === 'bound' && body.action_nonce) continueNonce(id, storage, body.action_nonce);
         // The same nonce stays: pressing again retries this very admission.
-        toast(`Continue not confirmed: ${exc?.message || exc}`, 'error');
+        const reason = body.reason_code === 'hard_limit_reached' && body.cause
+            ? taskReasonPhrase(body.cause) : exc?.message || exc;
+        toast(`Continue not confirmed: ${reason}`, 'error');
         return '';
     } finally {
         inFlight.delete(id);
@@ -125,13 +127,16 @@ export function continueControlSuccessor(record) {
  * without being opened. A live event row (task_done, task_eval, …) says nothing
  * about it and never removes a shown action; when it is the terminal of a ROOT
  * card that did not complete cleanly (a best-effort completion may be a
- * technical limit), the card reads the full detail once to learn the offer.
+ * technical limit, and an author's stop is unfinished), the card reads the full
+ * detail once to learn the offer.
  */
 export function syncContinueAction(record, detail, { read = fetchTaskDetail, write = (fn) => fn() } = {}) {
     if (!detail || typeof detail !== 'object') return false;
     if (!('continuation_offer' in detail)) {
         const status = String(detail.task_terminal_status || detail.status || '').toLowerCase();
-        const clean = ['completed', 'done'].includes(status) && detail.outcome_axes?.execution?.status !== 'best_effort';
+        const axes = detail.outcome_axes;
+        const authorStop = axes?.execution?.task_completion?.action === 'stop' || axes?.objective?.reason === 'author_stop';
+        const clean = ['completed', 'done'].includes(status) && axes?.execution?.status !== 'best_effort' && !authorStop;
         if (record?.root && !record.isSubagent && !offerReads.has(record) && taskDoneIsTerminal(detail) && !clean) {
             offerReads.add(record);
             Promise.resolve().then(() => read(record.groupId))
@@ -183,6 +188,7 @@ export function syncContinueAction(record, detail, { read = fetchTaskDetail, wri
     button.textContent = view.kind === 'retry' ? tr('task.continue.retry', 'Retry Continue') : tr('task.continue.label', 'Continue');
     button.disabled = false;
     button.title = view.kind === 'retry' ? tr('task.continue.retry_title', 'Retry the same unconfirmed Continue action')
+        : view.cause === 'author_stop' ? tr('task.continue.stopped_title', 'Start a new task that continues this unfinished work')
         : fmt('Start a new task that continues this interrupted one ({cause})', { cause: tx(view.cause || 'technical interruption') });
     button.onclick = async (event) => {
         event.stopPropagation();

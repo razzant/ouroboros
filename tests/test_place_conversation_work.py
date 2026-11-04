@@ -577,10 +577,12 @@ def test_a_focus_in_a_worker_process_with_no_queue_memory_hands_over_through_the
 import json, sys
 from pathlib import Path
 from ouroboros.place_intake import conversation_work_section, hand_own_arrival
+root, metadata = Path(sys.argv[1]), json.loads(sys.argv[2])
+assert "supervisor.queue" not in sys.modules  # the real consumer runs before anything preloads the queue
+answer = [conversation_work_section(root, metadata["presence"]), hand_own_arrival(root, metadata, sys.argv[3])]
 from supervisor import queue
 assert not queue.INITIALIZED and not queue.RUNNING and not queue.PENDING
-root, metadata = Path(sys.argv[1]), json.loads(sys.argv[2])
-print(json.dumps([conversation_work_section(root, metadata["presence"]), hand_own_arrival(root, metadata, sys.argv[3])]))
+print(json.dumps(answer))
 '''
     done = subprocess.run([sys.executable, "-c", code, str(world.data), json.dumps(ctx.task_metadata), work["id"]], text=True,
                           capture_output=True, timeout=120, cwd=str(Path(__file__).resolve().parents[1]))

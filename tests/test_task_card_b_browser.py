@@ -787,3 +787,76 @@ def test_long_root_title_and_line_are_whole_live_and_after_reload(engine):
         page.locator('#chat-messages > .chat-live-card[data-task-id="long-named"]').wait_for()
         _settle(page)
         check(room, "reload")
+
+
+# A Swarm root that tried no helper, in the fields the host's receipt holds (ouroboros/swarm_receipt_sources.py).
+SOLO_ROOT = {"id": "task:sw-solo", "task_id": "sw-solo", "kind": "supervisor", "start": _at("22:40")}
+SOLO_COST = {"known_final_usd": 0.12, "unknown_attempts": 0, "attempts": [{"attempt_id": "a1", "task_id": "sw-solo", "model": "model-alpha"}]}
+SOLO_RECEIPT = {"root_task_id": "sw-solo", "state": "closed", "coverage": {"tree": "complete", "gaps": []}, "refused_starts": [],
+                "actor_intervals": [SOLO_ROOT], "cost": SOLO_COST}
+SOLO_NONE = {"intent_source": "swarm", "planned": None, "observed_started": 0, "status": "no_fanout_observed"}
+SOLO_BASE = {"task_id": "sw-solo", "status": "failed", "metadata": {"subagents_mode": "swarm"}}
+
+
+@pytest.mark.parametrize("engine,theme,width,height,coarse", [
+    ("webkit", "light", 1100, 750, False), ("chromium", "light", 1100, 750, False),
+    ("webkit", "dark", 390, 844, True),
+], ids=["webkit-light-1100", "chromium-light-1100", "webkit-dark-390"])
+def test_a_root_proven_solo_closes_its_foot_and_an_open_fact_reopens_it(engine, theme, width, height, coarse):
+    """Unknown keeps a line; proof of no helper takes it away and the foot closes as if it never was; a refused start the
+    record later holds brings it back. The real card, stylesheet and `:has()`, in one card's life."""
+    playwright = _skip_without_smoke()
+    details = {"sw-solo": {**SOLO_BASE, "swarm_receipt": {**SOLO_RECEIPT, "state": "provisional"}}}
+    with playwright.sync_playwright() as pw, card_room(pw, engine, theme, width, height, coarse=coarse, rows=[_ended("sw-solo", _at("22:41"))],
+                                                        details=details, chat_id=7) as room:
+        page = room["page"]
+        page.wait_for_function("() => document.querySelector('.chat-live-card[data-task-id=\"sw-solo\"][data-finished=\"1\"]')")
+        _settle(page)
+        untouched = page.evaluate(FOOT, "sw-solo")
+        assert not untouched["shown"], untouched
+        card = page.locator('.chat-live-card[data-task-id="sw-solo"]')
+        door = page.locator('.chat-live-card[data-task-id="sw-solo"] > .chat-live-summary-button [data-live-disclosure]')
+        line = page.locator('.chat-live-card[data-task-id="sw-solo"] > .chat-live-foot > .chat-live-swarm-receipt')
+
+        def read(detail, text):
+            """Details asks the host again; the card shows what this read says, without a repaint elsewhere."""
+            room["details"]["sw-solo"] = detail
+            if door.get_attribute("aria-expanded") == "true":
+                door.click()
+            door.click()
+            page.wait_for_function("""([id, text]) => { const el = document.querySelector(
+                `.chat-live-card[data-task-id="${id}"] > .chat-live-foot > .chat-live-swarm-receipt`);
+                return text ? el?.textContent === text : !el; }""", arg=["sw-solo", text])
+            door.click()
+            _settle(page)
+
+        def snap(name):
+            shot = _evidence(f"swarm-transition-{engine}-{theme}-{width}-{name}.png")
+            if shot:
+                card.screenshot(path=shot)
+
+        read(details["sw-solo"], "Swarm · helpers unknown · 1 model · $0.12 known")
+        unknown = page.evaluate(FOOT, "sw-solo")
+        assert unknown["shown"] and abs(unknown["inset"] - 16) <= 1.5, unknown
+        snap("1-unknown")
+        # The same tree from a receipt that never read the refusals: no proof, so the line stays rather than going.
+        older = {key: value for key, value in SOLO_RECEIPT.items() if key != "refused_starts"}
+        read({**SOLO_BASE, "swarm_efficiency": SOLO_NONE, "swarm_receipt": older}, "Swarm · helpers unknown · 1 model · $0.12 known")
+        snap("1b-older-receipt-stays")
+        read({**SOLO_BASE, "swarm_efficiency": SOLO_NONE, "swarm_receipt": SOLO_RECEIPT}, "")
+        assert line.count() == 0
+        proven = page.evaluate(FOOT, "sw-solo")
+        assert not proven["shown"] and abs(proven["inset"] - untouched["inset"]) <= 1, (proven, untouched)
+        snap("2-proven-solo")
+        refused = {**SOLO_RECEIPT, "refused_starts": [{"invocation_id": "i1", "task_id": "sw-solo", "reason": "engine_refused"}]}
+        read({**SOLO_BASE, "swarm_efficiency": SOLO_NONE, "swarm_receipt": refused}, "Swarm · 1 helper start failed · 1 model · $0.12 known")
+        reopened = page.evaluate(FOOT, "sw-solo")
+        assert reopened["shown"] and abs(reopened["inset"] - 16) <= 1.5, reopened
+        snap("3-refused-start")
+        # A run that started beside a start still open: both stand, the open one never folded into the started one.
+        mixed = {**SOLO_RECEIPT, "state": "provisional", "actor_intervals": [SOLO_ROOT,
+            {"id": "run:r1", "task_id": "sw-solo", "kind": "delegated_run", "start": _at("22:41")},
+            {"id": "invocation:i2", "task_id": "sw-solo", "kind": "delegated_start", "start": None, "state": "pending"}]}
+        read({**SOLO_BASE, "swarm_efficiency": {"subagent_count": 1}, "swarm_receipt": mixed},
+             "Swarm · 1 helper started · 1 helper start unconfirmed · 1 model · $0.12 known")
+        snap("4-started-and-open")

@@ -105,9 +105,9 @@ def mind_tool_entries() -> list:
              "It preserves spent money, clocks and review history; capacity and holds still apply. "
              "Only the owner can release a Panic hold. The outcome arrives in your task mailbox.")), _resume_task),
         ToolEntry("continue_task", _control_schema("continue_task",
-             "Request one successor episode of listed interrupted work through "
-             "the same Continue action as the owner's button. Author-finished work, owner Stop/Panic and "
-             "hard money/deadline stops refuse. A finite execution budget carries only its recorded unspent "
+             "Request one successor episode of listed work that was interrupted or that its author stopped "
+             "as unfinished (finish_task action=stop), through the same Continue action as the owner's button. "
+             "An ordinary finished answer, owner Stop/Panic and hard money/deadline stops refuse. A finite execution budget carries only its recorded unspent "
              "remainder; when that remainder cannot be read the request refuses as execution_budget_unknown "
              "and starts no successor, never with fresh time. Repeated delivery of this call reuses its one "
              "successor. The outcome arrives in your task mailbox."), _continue_task)]
