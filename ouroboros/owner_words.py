@@ -201,6 +201,25 @@ def carried_owner_corpus(ctx: Any, source_text: Any = "") -> List[Dict[str, Any]
     return [row for row in rows if row["content"].strip()]
 
 
+def _corpus_keys(row: Mapping[str, Any]) -> set:
+    """One carried row's identities: its ``msg_id`` and origin ``client_message_id`` (an empty id names none),
+    else its source and words."""
+    keys = {(key, str(row[key])) for key in ("msg_id", "client_message_id") if str(row.get(key) or "").strip()}
+    return keys or {("words", str(row.get("source") or ""), str(row.get("content") or ""))}
+
+
+def merged_corpus(kept: Any, added: Any) -> List[Dict[str, Any]]:
+    """``kept`` carried rows, then each row of ``added`` whose source is not among them yet (one source is one
+    row): a schedule edit's new words join the words already carried, never doubling an old message."""
+    merged: List[Dict[str, Any]] = []
+    seen: set = set()
+    for row in [*(kept if isinstance(kept, list) else []), *(added if isinstance(added, list) else [])]:
+        if isinstance(row, Mapping) and not (keys := _corpus_keys(row)) & seen:
+            seen |= keys
+            merged.append(dict(row))
+    return merged
+
+
 def reply_target(drive_root: Any, reference: Any) -> Dict[str, str]:
     """The whole message my human's words reply to, under its author, by the address the door resolved: one
     sha-checked read. Unreadable: the address alone; a reply to a work card names work, not anyone's words."""

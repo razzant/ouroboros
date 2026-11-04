@@ -161,13 +161,17 @@ def _collapse_description_copies(record):
             template.pop("description", None)
 
 
-_PATCH_FIELDS = frozenset({"name", "objective", "context", "trigger", "timezone", "reasoning_effort"})
+# ``owner_corpus`` is internal: the editing run's carried words (``tools.followup._update_schedule``), joined
+# to the template's by identity only when the assignment itself changes, under this write's transaction.
+_PATCH_FIELDS = frozenset({"name", "objective", "context", "trigger", "timezone", "reasoning_effort", "owner_corpus"})
 
 
 def _patch_value(record, key):
     if key == "objective":
         return ((record.get("notification") or {}).get("text") if record.get("kind") == "notify"
                 else (record.get("task") or {}).get("text"))
+    if key == "owner_corpus":
+        return ((record.get("task") or {}).get("metadata") or {}).get("owner_corpus")
     if key in {"context", "reasoning_effort"}:
         return (record.get("task") or {}).get(key)
     return record.get(key)
@@ -181,6 +185,8 @@ def _patched_definition(current, patch):
     incoming = copy.deepcopy(current)
     note = incoming.get("kind") == "notify"
     for key, value in patch.items():
+        if key == "owner_corpus":
+            continue  # joined below, once the new assignment is known
         if key != "trigger" and not isinstance(value, str):
             raise ScheduleRefused("invalid_template", f"{key} must be a string")
         if key == "objective":
@@ -219,6 +225,12 @@ def _patched_definition(current, patch):
     _require_template_effort(template)
     if not note:
         incoming["task"] = template
+        if patch.get("owner_corpus") and any(_patch_value(current, key) != _patch_value(incoming, key)
+                                             for key in ("objective", "context")):
+            from ouroboros.owner_words import merged_corpus  # the words of the run that changed the assignment
+
+            metadata = template.setdefault("metadata", {})
+            metadata["owner_corpus"] = merged_corpus(metadata.get("owner_corpus"), patch["owner_corpus"])
     changed = sorted(key for key in patch if _patch_value(current, key) != _patch_value(incoming, key))
     if "trigger" in changed or "timezone" in changed:
         old = current.get("trigger") or {}

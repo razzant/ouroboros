@@ -238,6 +238,11 @@ def _update_schedule(ctx: ToolContext, root: Any, schedule_id: str, reason: str,
         patch["trigger"] = {"type": "once", "run_at": patch.pop("run_at")}
     elif "cron" in patch:
         patch["trigger"] = {"type": "cron", "expr": patch.pop("cron")}
+    if patch.keys() & {"objective", "context"}:  # a new assignment keeps the words that changed it
+        from ouroboros.owner_words import carried_owner_corpus
+
+        if words := carried_owner_corpus(ctx):
+            patch["owner_corpus"] = words
     outcome = patch_scheduled_task(schedule_id, patch, reason=reason, actor="agent",
                                    task_id=str(getattr(ctx, "task_id", "") or ""), drive_root=root,
                                    writer_kind=work_kind(getattr(ctx, "task_metadata", None)),
