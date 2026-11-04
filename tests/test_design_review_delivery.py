@@ -132,6 +132,18 @@ def test_python_word_evidence_uses_only_design_bible(governance_repo, window, in
         assert row["chars"] == len(DESIGN_BIBLE.strip())
 
 
+def test_bible_excerpt_follows_the_numbered_list_not_a_fixed_count(governance_repo):
+    from ouroboros.review_words import compare_sources
+
+    eighth = "8. **Principle 8.** A later rule.\n   Its continuation.\n"
+    _design(governance_repo, DESIGN_BIBLE + eighth + "\n**Seed**\n\nFull design recipes.\n" + DESIGN)
+    words = compare_sources([("ouroboros/notice.py", 'TEXT = "Read the result"', 'TEXT = "Read the updated result"')])
+    context = governance_context(governance_repo, surface="triad", touched_paths=["ouroboros/notice.py"],
+                                 usable_window_tokens=1_000_000, review_words=words)
+    assert "Its continuation." in context.selected_inline and "principles 1–8" in context.selected_inline
+    assert "Full design recipes." not in context.selected_inline
+
+
 def test_missing_bible_excerpt_never_falls_back_to_whole_design(governance_repo):
     from ouroboros.review_words import compare_sources
 

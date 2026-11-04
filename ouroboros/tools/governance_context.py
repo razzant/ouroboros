@@ -652,12 +652,13 @@ def governance_context(
                            "a touched path is under web/"))
     elif has_words:
         # The seed and component recipes follow the numbered principles inside
-        # the same Markdown section: stop at the end of principle 7, not at H2.
-        bible = re.search(r"(?ms)^## Design bible\b.*?^7\. .*?(?=\n\S|\Z)", design_text)
+        # the same Markdown section: stop where the numbered list ends, not at H2.
+        bible = re.search(r"(?ms)^## Design bible\b.*?^1\. .*?(?=^(?!\d+\. )\S|\Z)", design_text)
         path = f"{DESIGN_PATH}#Design bible"
         if bible:
+            last = re.findall(r"(?m)^(\d+)\. ", bible[0])[-1]
             chapter_text[path] = bible[0].strip()
-            candidates.append(((1, 0, path), path, f"{path} (excerpt: principles 1–7)",
+            candidates.append(((1, 0, path), path, f"{path} (excerpt: principles 1–{last})",
                                "changed source words; design bible excerpt only"))
         else:
             rows.append(_row(path, 2, "navigation", 0, "design bible excerpt unavailable; inspect the named source"))
