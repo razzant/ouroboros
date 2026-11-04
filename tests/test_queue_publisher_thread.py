@@ -273,3 +273,82 @@ def test_three_consecutive_failed_writes_still_answer_false_three_times(publishe
         answers.append(queue_publication.publish_queue_changes())
     assert answers == [True, False, False, False, True]
     assert _read(root, "queue.alive")["generation"] == _read(root, "queue_snapshot.json")["generation"]
+
+
+# ---- a disk that keeps failing slowly still ends the loop (round-2 review N1) ----------------------------------------
+
+def _loop_reaches_its_cutoff(answers) -> bool:
+    """``server._run_supervisor``'s exact rule over the tick's answers: a False is a crash, anything else resets the
+    count, three consecutive crashes end the loop."""
+    streak, reached = 0, False
+    for answer in answers:
+        streak = streak + 1 if answer is False else 0
+        reached |= streak >= 3
+    return reached
+
+
+def _slow_failing_disk(monkeypatch, *, failures: int):
+    """Every writer write waits until the test releases it, then the first ``failures`` fail; ``reached[i]`` tells the
+    test write ``i`` is on the disk. Writes after the failures land."""
+    real = queue.atomic_write_text
+    reached, releases = [threading.Event() for _ in range(failures + 1)], [threading.Event() for _ in range(failures + 1)]
+    state = {"calls": 0}
+
+    def write(target, content, *args, **kwargs):
+        if threading.current_thread().name != WRITER:
+            return real(target, content, *args, **kwargs)
+        index, state["calls"] = state["calls"], state["calls"] + 1
+        if index < len(reached):
+            reached[index].set()
+            assert releases[index].wait(10), "the test released the slow disk"
+        if index < failures:
+            return False
+        return real(target, content, *args, **kwargs)
+
+    monkeypatch.setattr(queue, "atomic_write_text", write)
+    return reached, releases, state
+
+
+def _ticks_through_slow_failures(published, monkeypatch, *, failures: int, ticks_after_last: int):
+    """Astra's probe shape: one tick while each write sits on the disk, one after its failure; then
+    ``ticks_after_last`` more while the write after the last failure is still on the disk."""
+    _seed(published)
+    reached, releases, state = _slow_failing_disk(monkeypatch, failures=failures)
+    queue_publication.start_queue_writer()
+    queue.PENDING.append(_task("p1"))
+    queue.persist_queue_snapshot("admitted")
+    answers = [queue_publication.publish_queue_changes()]
+    try:
+        for index in range(failures):
+            assert reached[index].wait(10)
+            answers.append(queue_publication.publish_queue_changes())  # a tick while this write is on the disk
+            releases[index].set()  # ...then it fails
+            assert reached[index + 1].wait(10)
+            answers.append(queue_publication.publish_queue_changes())
+        for _ in range(ticks_after_last):
+            answers.append(queue_publication.publish_queue_changes())
+    finally:
+        for release in releases:
+            release.set()
+        assert queue_publication.drain_writer()
+    return answers, state
+
+
+def test_three_slow_consecutive_failed_writes_end_the_loop_through_the_servers_own_count(published, monkeypatch):
+    """A disk that fails every write, slowly: after three consecutive failures the publisher answers False on every
+    tick until a write lands, so the loop's three-consecutive rule is reached while the fourth attempt is still on the
+    disk (no fourth failure needed); a disk failing fast still ends it after three ticks."""
+    answers, _state = _ticks_through_slow_failures(published, monkeypatch, failures=3, ticks_after_last=2)
+    assert answers[:7] == [True, True, False, True, False, True, False], "each failure is answered once, on its tick"
+    assert answers[7:] == [False, False], "three in a row: every tick is a crash until a write lands"
+    assert _loop_reaches_its_cutoff(answers)
+    assert queue_publication._STATE["failed_writes"] == 3, "no fourth failure was needed"
+    assert queue_publication.publish_queue_changes() is True, "the fourth attempt landed: the streak is over"
+
+
+def test_two_slow_consecutive_failed_writes_and_a_slow_success_never_end_the_loop(published, monkeypatch):
+    """Below three, a retry on the disk is not a crash: two failures, one slow attempt that lands, no shutdown."""
+    answers, _state = _ticks_through_slow_failures(published, monkeypatch, failures=2, ticks_after_last=2)
+    assert answers == [True, True, False, True, False, True, True]
+    assert not _loop_reaches_its_cutoff(answers) and queue_publication._STATE["failed_writes"] == 2
+    assert queue_publication.publish_queue_changes() is True and not queue_publication._STATE["write_failed"]
