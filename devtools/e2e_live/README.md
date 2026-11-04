@@ -376,7 +376,11 @@ The `.github/workflows/ci.yml` `e2e-live` job runs only on an explicit
 tag, and checks out the dispatched SHA (`gh workflow run CI --ref ouroboros
 -f e2e_live=true` tests the development tip). It runs one SM1 attempt with
 `--self-mod --total-budget 30 --per-task-usd 15`, reserving $30 for its two
-roots, and `--task-timeout 4500` (75 minutes: at 2400 all four runs hit the
+roots. A keyless `--stub` SM1 rehearsal on the same seed must succeed first;
+it exercises direct adoption, not the later evolution or live reasoning. It
+gets no provider key, has a separate output directory and retains its own
+results even on failure; a failed rehearsal admits no paid attempt. The live
+step keeps `--task-timeout 4500` (75 minutes: at 2400 all four runs hit the
 deadline, and the traced one spent ~21 minutes on edits and ~17 on the review
 path before a review wave was cut off, #1501). The job's `timeout-minutes`
 outlasts the stand's own worst-case waits, so the stand's verdict and traces,
