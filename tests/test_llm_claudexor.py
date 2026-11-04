@@ -228,8 +228,13 @@ def retained(root, suffix="response", *, raw=False):
     manifest = json.loads(files[-1].read_text())
     assert manifest["full_payload_redacted"] is False
     ref = manifest["full_payload_ref"]
-    with gzip.open(ref["path"], "rt", encoding="utf-8") as handle:
-        payload = json.load(handle)
+    if suffix == "response":
+        with gzip.open(ref["path"], "rt", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    else:  # a request view is stored once (skeleton placement plus parts): the verified reader splices it
+        from ouroboros.observability import read_blob_ref
+
+        payload = read_blob_ref(root, ref)
     if suffix != "response":
         return payload
     return payload["result_json_utf8"].encode("utf-8") if raw else json.loads(payload["result_json_utf8"])

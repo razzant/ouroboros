@@ -205,7 +205,6 @@ def test_planned_saved_task_crosses_startup_admission_bootstrap_and_real_loop(
         prepared, monkeypatch, stub_delegate_engines, adopt_before_restore):
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros import claudexor_daemon, delegate_recovery as recovery, loop, subagent_bootstrap
-    from ouroboros.working_checkpoint import checkpoint_path
     from ouroboros.agent_dispatch import resolve_dispatch_axes
     from supervisor import queue, workers
     from tests.test_project_hold_recovery import worker
@@ -219,8 +218,10 @@ def test_planned_saved_task_crosses_startup_admission_bootstrap_and_real_loop(
     source = case.host.pending[0]["_working_recovery"]
     assert source["from_attempt"] == case.handoff["old_attempt"]
     assert source["source_task_id"] == "child1" and source["cause"] == "restart"
-    assert read_actor_source_bytes(root, "child1", source["source_ref"]) == checkpoint_path(
-        root, "child1", case.handoff["old_attempt"]).read_bytes()
+    from ouroboros.working_checkpoint import read_working
+
+    assert read_actor_source_bytes(root, "child1", source["source_ref"]) == read_working(
+        root, "child1", case.handoff["old_attempt"])[0]
     def no_engine(*_args, **_kwargs):
         pytest.fail("startup cannot admit the leaf before restoring its owner")
     monkeypatch.setattr(claudexor_daemon, "ensure_owned_gateway", no_engine)

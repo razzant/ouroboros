@@ -243,8 +243,12 @@ def _tampering_persist(monkeypatch, tamper):
 
 def test_corrupted_blob_yields_reconstruction_fact_and_does_not_block(data_root, monkeypatch):
     def corrupt_blob(manifest_path: pathlib.Path):
+        from ouroboros.evidence_packs import shared_placement_path
+
         manifest = json.loads(manifest_path.read_text())
-        blob = pathlib.Path(manifest["full_payload_ref"]["path"])
+        # The view is stored once: its durable record is the skeleton placement, not the canonical loose name.
+        blob = shared_placement_path(data_root, manifest["full_payload_ref"]["sha256"])
+        assert blob.is_file() and not pathlib.Path(manifest["full_payload_ref"]["path"]).exists()
         with gzip.open(blob, "wb") as handle:
             handle.write(b'{"tampered": true}')
 
@@ -260,9 +264,11 @@ def test_corrupted_blob_yields_reconstruction_fact_and_does_not_block(data_root,
     fact = json.loads(files[0].read_text())
     assert fact["type"] == seal_mod.VIOLATION_EVENT_TYPE
     assert fact["kind"] == "reconstruction_divergence"
-    assert fact["divergence_class"] == "record_corrupt"
+    # A view stored once is spliced and verified before any byte is handed back: a damaged
+    # skeleton (or part) is a typed unreadable record, never wrong bytes presented as the view.
+    assert fact["divergence_class"] == "record_unreadable"
     assert fact["attempt_id"] == final["attempt_id"]
-    assert isinstance(fact["first_divergent_offset"], int)
+    assert "first_divergent_offset" not in fact, "no bytes came back, so there is no offset to name"
     # Digests and offsets only — no payload/secret bytes in the fact.
     assert "sk-secret" not in json.dumps(fact)
     events = _violation_events(data_root)
