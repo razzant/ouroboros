@@ -504,8 +504,10 @@ def settle_collected_attempt(root, attempt, seats, record):
             if (current.repo_key, current.tool_name, current.task_id, current.attempt) != (
                     attempt.repo_key, attempt.tool_name, attempt.task_id, attempt.attempt):
                 continue
-            state.attempts[index] = settled = _settled_row(current, seats, record)
-            return ReviewStateMutation(None, changed=settled != current)
+            state.attempts[index] = _settled_row(current, seats, record)
+            # The saved bytes decide: the file keeps each seat's named evidence as a reference to its producer
+            # payload, so a seat collected again with its full inventory differs in memory and not on disk.
+            return ReviewStateMutation(None, changed=False)
         raise LookupError("the paid attempt disappeared before collection was saved")
     update_state(root, mutate)
 
