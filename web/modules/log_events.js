@@ -544,7 +544,7 @@ export function taskReasonDetail(evt, codes = []) {
     const reviewCause = !taskStoppedWithSummary(evt) && decision?.status
         && (decision.status !== 'accepted' || Object.hasOwn(TASK_CAUSE_PHRASES, decisionCause))
         && (['done', 'warn'].includes(severity) || explicitAuthorStop(decision)
-            || (severity === 'error' && decision.status !== 'accepted' && !custody
+            || ((severity === 'error' || (severity === 'cancelled' && authorStop)) && decision.status !== 'accepted' && !custody
                 && ['', 'final_message'].includes(reason))) ? decisionCause : '';
     const bypass = { budget_exhausted: 'acceptance_bypassed_budget_exhausted', round_limit: 'acceptance_bypassed_round_limit',
         finalization_grace: 'acceptance_bypassed_deadline', deadline_local: 'acceptance_bypassed_deadline',
@@ -618,16 +618,16 @@ function normalizeTaskTerminalRecord(evt) {
 export function taskOutcomeSeverity(evt) {
     const record = normalizeTaskTerminalRecord(evt);
     const lifecycle = String(record.outcome_axes?.lifecycle?.status || record.status || '').toLowerCase();
-    // v6.82 (P5): a cancelled task is neither Done nor Failed — it is honestly
-    // Stopped. Checked first: forced teardown routinely leaves failure-shaped
-    // side facts (e.g. artifacts missing on a cancelled workspace task) that must
-    // not relabel an owner-requested cancellation as a failure.
+    // v6.82 (P5): cancellation is Stopped, neither Done nor Failed. Checked first:
+    // forced teardown's failure-shaped side facts (e.g. missing workspace artifacts)
+    // must not relabel an owner-requested cancellation as a failure.
     // 'cancel_requested' as a STATUS is legacy replay only (phase A moved cancel
     // intent to the durable cancel_state projection); old task_done frames and
     // pre-redesign history rows keep resolving as cancelled.
-    if (lifecycle === 'cancelled' || lifecycle === 'cancel_requested') return 'cancelled';
     const [command, ending] = ownerStopEnding(record);  // Stop now is Stopped whatever it kept
-    if (command === 'stop_now') return 'cancelled';
+    if (lifecycle === 'cancelled' || lifecycle === 'cancel_requested' || command === 'stop_now') {
+        return 'cancelled';
+    }
     const unanswered = ending === 'stop';  // a Wrap up without an answer: its own failure is the stop
     const execution = String(record.outcome_axes?.execution?.status || '').toLowerCase();
     const objective = advisoryProceduralRefusal(record) ? 'best_effort'

@@ -307,7 +307,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     card_row_id: NotRequired[str]
     card_row_revision: NotRequired[int]  # canonical source order, independent of delivery timestamp
     terminal_receipt: NotRequired[Literal["retained_work"]]  # a placed row typed as a terminal receipt, not progress
-    late_evidence: NotRequired[Dict[str, Any]]  # late review identity/revision + exact applied source; no transcript
+    late_evidence: NotRequired[Dict[str, Any]]  # applied source or merge_review identity/revision + retained report; merge_review refreshes on history reads only
     # Event-time human presentation; raw task/project ids remain machine keys.
     target_label: NotRequired[str]
     project_id: NotRequired[str]

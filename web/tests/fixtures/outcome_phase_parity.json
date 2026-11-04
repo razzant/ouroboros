@@ -1193,6 +1193,38 @@
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "review_change", "status": "argument_error", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
       "acceptance_clause": "A review request was called with invalid arguments; no review checked the result."
+    },
+    {
+      "name": "a historical explicit author stop keeps the non-FAIL acceptance decision cause",
+      "record": {
+        "status": "completed",
+        "reason_code": "final_message",
+        "outcome_axes": {
+          "execution": {
+            "status": "ok",
+            "task_completion": {
+              "action": "stop",
+              "rationale": "Work remains."
+            }
+          },
+          "objective": {
+            "status": "fail",
+            "source": "task_completion",
+            "reason": "author_stop"
+          },
+          "review": {
+            "status": "skipped",
+            "acceptance_decision": {
+              "status": "finalized_unaccepted",
+              "reason": "open_obligations",
+              "enforcement": "advisory"
+            }
+          }
+        }
+      },
+      "phase": "cancelled",
+      "headline": "Stopped",
+      "acceptance_clause": "Ouroboros stopped with unfinished work · The answer was delivered with reviewer requests still open · Work remains."
     }
   ]
 }

@@ -642,7 +642,8 @@ Status, owner action, and urgent notification are separate product concepts:
   met. Stop now reads `Stopped` whatever it kept (answer and files stay shown);
   a Wrap up reads `Done` over its final answer and `Stopped` without one; failed
   file preservation beside Wrap up reads `Failed`; the cause names the button.
-  Live author stops read `Stopped`, keeping `author_stop` and Continue (03.11, 23:15Z); older rows keep their word (25.10 A).
+  Explicit `task_completion/author_stop` reads `Stopped`, keeping its cause and Continue (03.11, 23:15Z), including records since 30.09.
+  A record naming no button keeps its recorded word (owner 25.10, A).
 - **Owner action** exists only when the responsible domain exposes a current
   concrete continuation, such as Resume, Retry, Connect, Repair, Grant access,
   or Restart: a real adjacent control, which severity alone never manufactures.
@@ -1429,12 +1430,11 @@ or `until you resume it` after Panic; a Continue's earlier helper is just
 read as `Working`, with their count; an
 access wait is not an answer wait, and unknown stays unknown. Under the state a
 live work shows its authored focus (`update_focus`: stage · done · left), led by its time,
-quiet and at most two lines. A finished row shows the author’s closing sentence,
-a held cause taking precedence, else nothing; never the old focus (01.11 A, extended 04.11).
-The name goes to the work's message wherever
-it lies, finished work included: its card or the owner's message when loaded, else
-the room reads the page of its history around the work's first message there and
-lands on it, the list staying open while it looks. Before that a row claims nothing
+quiet, at most two lines. A finished row shows the author’s closing sentence,
+unless already the title; a held cause wins, else nothing, never old focus (01.11 A, extended 04.11).
+The name opens the work's message, even when finished: its loaded card or
+owner message, else the room reads history around the work's first message and
+lands there with the list open. Until then a row claims nothing
 about where its message is; when the room's history holds none (`No message yet.`,
 or `No message saved in this chat.` once ended), belongs to another room, or cannot
 be checked, its details say so. `View question`
@@ -1735,19 +1735,18 @@ Unavailable canonical refresh retains text, references and drafts but disables a
 
 **One message in two rooms.** Main is the owner's own conversation, where a work's expected results, decisions and substantial changes arrive promptly, even with no action needed; the rest stays in its room, routine progress on its card and focus line, in Main too. A Project room is its work's whole conversation. What its work says in Main, or answers in the room a note came from, also stands there at its time: the same words, address, Reply and Copy, never a copy or a link, and one notification (owner 28.10, A). Presence's private contact stands there too, never in its place; work a place started answers in its Project too, with its Done row, while the place hears only its own reply (owner 31.10). Host refusals and move receipts stay where issued.
 
-**Work portal.** Project work keeps its Main card at the request’s place, whoever
-moved it; a start or transfer row names its destination without a second entry. Its portal: status chip and quiet fact, title,
-one latest line (two lines, cut on a word), the meta line (tool calls · money ·
+**Work portal.** Work keeps its Main card at the request’s place after a Project move
+(Turn into project, the mind's move, a binding); start/transfer rows name the destination without a second entry. Its portal: status chip and quiet fact, title,
+latest line (two lines, cut on a word), the meta line (tool calls · money ·
 updated), one action row: the Project reference, then `[Reply] [Resume] [Stop…]`
 with one primary (owner 26.10, B). Timeline, Reviews and children live
-in the room; the summary is reading content. The room’s census supplies the present
-(last line, tool calls, `in background` for detached work); missing facts leave the card unchanged.
-At the end, the author’s closing sentence replaces that line, a held cause taking
-precedence, else nothing (01.11 A, extended 04.11). The chip reads the final’s typed
-outcome or durable detail. An undurable Main receipt keeps
-a dashed border and a plain warning; the binding holds. The owner's routing line
-under his message steps aside while that work's portal stands in the feed; words
-passed on to the work later keep theirs. A Continue is the same card: the
+in the room; the summary is reading content, not a disclosure. The room’s census supplies
+last line, tool calls and `in background` for detached work; missing facts change nothing.
+At the end, show the closing sentence unless it repeats the title; a held cause
+wins, else nothing (01.11 A, extended 04.11). The chip reads typed final outcome
+or durable detail. An undurable Main receipt keeps
+a dashed border and plain warning; its binding holds. The owner's routing line under his message hides while its portal is in the
+feed; later words passed to the work keep theirs. A Continue is the same card: the
 admitted successor takes the work's place and first name. Each episode has its
 own name, time and past outcome; only the current one owns the chip and controls.
 Expanded ordinary cards disclose earlier Files, timeline, Reviews and children
