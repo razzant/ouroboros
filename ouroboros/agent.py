@@ -289,8 +289,6 @@ def _emit_budget_pause_checkpoint(
 
     _emit_checkpoint_event(event_queue, task_id, drive_logs, {
         "checkpoint_kind": "budget_scope_paused",
-        "owner_visible": True,
-        "toast_once": f"{task_id}:budget-paused:{resource_limit['scope']}",
         **resource_limit,
     })
 

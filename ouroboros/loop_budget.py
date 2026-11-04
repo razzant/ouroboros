@@ -520,8 +520,6 @@ def _handle_budget_exceeded(
     ctx.llm_trace["resource_limit"] = resource_limit
     _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
         "checkpoint_kind": "budget_scope_paused",
-        "owner_visible": True,
-        "toast_once": f"{ctx.task_id}:budget-paused:{scope}",
         **resource_limit,
     })
     if (

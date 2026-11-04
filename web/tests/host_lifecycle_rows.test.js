@@ -59,6 +59,15 @@ test('#931 every typed checkpoint kind names itself; only a kindless one is peri
     assert.equal(taskCheckpointLabel({ checkpoint_number: 7 }), 'Checkpoint 7 — periodic self-check');
 });
 
+test('sleep checkpoints name sleep while budget checkpoints keep their label', () => {
+    for (const pause_reason of ['sleep', 'budget', 'owner', undefined]) {
+        const event = { type: 'task_checkpoint', checkpoint_kind: 'budget_scope_paused', pause_reason };
+        const expected = pause_reason === 'sleep' ? 'Task sleeping' : 'Budget scope paused';
+        assert.equal(taskCheckpointLabel(event), expected);
+        assert.equal(summarizeLogEvent(event).headline, expected);
+    }
+});
+
 test('#931 typed checkpoints are task facts in the expanded card, never narration', () => {
     for (const kind of ['context_view', 'budget_scope_paused', 'brand_new_kind', '']) {
         const view = summarizeChatLiveEvent({ type: 'task_checkpoint', task_id: 't1', checkpoint_kind: kind, round: 30 });
