@@ -443,6 +443,8 @@ def _participant_line(root: Any, task_id: str, row: Dict[str, Any], runs: Dict[s
                          f'delegate_start(retry_of="{invocation}") retrieves it without starting another'))
                      if invocation and invocation in pending else "custody holds no row for it now: its fate is UNKNOWN")
         return "; ".join(facts)
+    inspection = (f'get_task_result("{task_id}")' if foreign
+                  else f'delegate_wait(run_id="{run.run_id}")')
     if not run.terminal_state:
         facts.append("custody closed it without a recorded engine terminal: what became of its work is UNKNOWN"
                      if run.settled else
@@ -451,7 +453,7 @@ def _participant_line(root: Any, task_id: str, row: Dict[str, Any], runs: Dict[s
         facts.append(f"engine terminal: {run.terminal_state}" + (f" ({run.terminal_reason})" if run.terminal_reason else ""))
         if row.get("stop_requested") and run.terminal_state == "succeeded":
             facts.append("it finished on its own; the stop did not end it")
-        facts += _retained_terminal(root, task_id, run)
+        facts += _retained_terminal(root, task_id, run, inspection)
         facts.append(f"output retained ({'complete' if run.output_complete else 'partial'}, "
                      f"{'read' if run.output_consumed else 'not read yet'})" if run.output_artifact
                      else "no retained output recorded")
@@ -470,8 +472,7 @@ def _participant_line(root: Any, task_id: str, row: Dict[str, Any], runs: Dict[s
             facts.append(f'it may be continued: delegate_start(subagent_id=..., continue_from="{run.run_id}") '
                          "(a configured session omits subagent_id)")
     if not review:
-        facts.append(f'inspect: get_task_result("{task_id}")' if foreign
-                     else f'inspect: delegate_wait(run_id="{run.run_id}")')
+        facts.append(f"inspect: {inspection}")
     return "; ".join(facts)
 
 
@@ -485,7 +486,7 @@ def _decided_by(run: Any, task_id: str) -> str:
             + (" by this task" if by and by == task_id else f" by task {by}" if by else " (disposer not recorded)"))
 
 
-def _retained_terminal(root: Any, task_id: str, run: Any) -> List[str]:
+def _retained_terminal(root: Any, task_id: str, run: Any, inspection: str) -> List[str]:
     """The engine's own continuation facts from the run's retained terminal source, verified locally."""
     ref = run.terminal_source if isinstance(run.terminal_source, dict) else {}
     if not ref:
@@ -499,10 +500,10 @@ def _retained_terminal(root: Any, task_id: str, run: Any) -> List[str]:
         facts = terminal_continuity(run.run_id, summary_of(detail if isinstance(detail, dict) else {}))
     except Exception as exc:
         return [f"its retained terminal source failed local verification ({type(exc).__name__}): "
-                f'read_file(root="artifact_store", path="{ref.get("path") or "?"}") shows what remains']
+                f"{inspection} shows what remains"]
     lines = [("engine resumable facts: " + json.dumps(facts["resumable"], ensure_ascii=False, sort_keys=True))
              if facts.get("resumable") else "the engine reported no resumable block: whether its session can be reused is unknown"]
     continuity = list(facts.get("continuity") or [])
     if len(continuity) > 3:
-        lines.append(f"{len(continuity) - 3} earlier continued tries: delegate_wait shows every try")
+        lines.append(f"{len(continuity) - 3} earlier continued tries: {inspection} shows every try")
     return lines + continuity[-3:]

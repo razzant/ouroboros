@@ -662,13 +662,28 @@ def test_a_restored_latch_with_nothing_left_is_still_swept(tmp_path, monkeypatch
     assert sweep_orphaned_budget_fences([], queue.BUDGET_ROOT_FENCES, tmp_path) == ["root-1"]
 
 
-def test_the_ended_members_lines_never_offer_a_root_the_doors_of_a_foreign_starter(tmp_path):
+@pytest.mark.parametrize("terminal_source", ["absent", "long", "unreadable"])
+def test_the_ended_members_lines_never_offer_a_root_the_doors_of_a_foreign_starter(tmp_path, terminal_source):
+    import json
+
     from ouroboros import delegate_custody as dc
+    from ouroboros.artifacts import store_actor_source_bytes
     from ouroboros.external_runs import episode_disclosure
 
     dc._CUSTODY.clear()
+    ref = {}
+    if terminal_source != "absent":
+        ref = store_actor_source_bytes(tmp_path, "child-dead", category="tool_results", source_id="terminal",
+                                       data=json.dumps({"summary": {"continuity": [
+                                           {"tryIndex": index} for index in range(5)]}}).encode(), extension="json")
+        if terminal_source == "unreadable":
+            ref = {**ref, "sha256": "0" * 64}
     _run(tmp_path)
     assert dc.emit(tmp_path, dc.SETTLED, {"run_id": "run-leaf", "task_id": "child-dead", "state": "cancelled"})
+    if ref:
+        assert dc.emit(tmp_path, dc.TERMINAL_OBSERVED, {
+            "run_id": "run-leaf", "task_id": "child-dead", "state": "cancelled",
+            "observation_seq": 1, "source_ref": ref})
     assert dc.emit(tmp_path, dc.START_REQUESTED, {
         "invocation_id": "inv-1", "task_id": "child-dead", "root_task_id": "root-1", "route": "codex",
         "surface": "delegate", "request": {"prompt": "work"}})
@@ -682,6 +697,12 @@ def test_the_ended_members_lines_never_offer_a_root_the_doors_of_a_foreign_start
     assert foreign.count("started by ended task child-dead") == 3
     assert "delegate_start refuses any other task" in foreign and 'get_task_result("child-dead")' in foreign
     assert "a review panel's run" in foreign
+    assert 'read_file(root="artifact_store"' not in foreign, "a child's relative path is not the root's source"
+    if terminal_source == "long":
+        assert "2 earlier continued tries" in own and "2 earlier continued tries" in foreign
+        assert "try 0 (" not in foreign and "try 4 (" in foreign
+    if terminal_source == "unreadable":
+        assert "failed local verification" in own and "failed local verification" in foreign
     many = [{"run_id": f"run-{index}"} for index in range(9)]
     assert 'get_task_result("child-dead") reads them' in episode_disclosure(tmp_path, "child-dead", many, reader="root-1")
 
