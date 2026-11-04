@@ -96,6 +96,14 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    loader that is not work (history, reconnecting, a widget refreshing) keeps its own
    progress signal; nothing else animates by itself, and a state change never moves a
    neighbour, resizes a bar or changes a height.
+7. **Words serve the next step.** The main view says the state and what its reader
+   needs to understand or do next, in owner words; provenance, caveats, codes and
+   gaps (`not recorded`, `not declared`, `not confirmed`) are facts of the record and of
+   details that pointer, touch and keyboard open, never hover alone. A phrase stays on
+   the main view only if without it its reader would understand or act differently;
+   clarity comes from placement, never from smaller text or a line quota. This book
+   keeps principles and roles; exact strings, templates and their history live with the
+   code and its tests, the owner's reactions in the installation's knowledge.
 
 **Seed (light | dark)**
 
@@ -721,9 +729,8 @@ origin-addressed routing notices stay ordinary rows by design. Local diagnostic
 failures stay inspectable in details and Logs but do not relabel the whole
 still-working task. A failed child keeps a compact factual `Failed` marker
 inside its parent while the root continues under its own authoritative status.
-Internal reason codes belong in details and diagnostics, not compact headlines:
-a card that shows a cause says it in the owner's words while the record keeps
-the machine code. In root ending summaries, episodes and Main completion rows, a typed cause
+A card says a cause in the owner's words, its reason code in details, diagnostics
+and the record (bible principle 7). In root ending summaries, episodes and Main completion rows, a typed cause
 without a sentence reads "The recorded reason has no description yet", with
 its exact code in accessible details. Authored warning prose and raw host text
 stay intact; never infer meaning from spelling. The loop's forced-finalization rails
@@ -2497,18 +2504,14 @@ a server entry):
    rendered at secondary ink reads as disabled: its label is `--text-primary` (a
    setting's name and an unchosen option take the secondary ink, bible principle 4).
 
-**The main view carries understanding, state and action; justification is
-disclosed where needed.** A row reads identity, state, facts; its primary choices,
-exceptions and owner actions stay visible, and a value keeps its honest form
-(`up to`, `Tracked:`, unknown). A rule every row shares is said once for the
-section; history, provenance and why a state or value reads so wait in details
-pointer, touch and keyboard open, never hover alone (Accounts: metrics under Diagnostics,
-explicit store failures visible; exact program text under Details). New copy serves a decision or error, adding meaning no
-control or status already carries: a checked box is not re-said beside it, and
-an unsaved draft is said once by the editor or its host page, not on every row. A conditional
-line never moves the control that caused it: controls own stable slots, and a
-line an edit toggles opens beside or below them. Clarity comes from placement,
-never from smaller text or a line quota; real exceptions all stay.
+**A row's words follow bible principle 7.** Its primary choices, owner actions and each
+exception that changes the next action or the state's name (an explicit store failure)
+stay visible, a value keeps its honest form (`up to`, `Tracked:`, unknown), and the rest
+opens in details (Accounts: metrics under Diagnostics, exact program text under Details).
+A rule every row shares is said once for the section, an unsaved draft once by the editor
+or its host page, and a checked box is not re-said beside it. A conditional line never
+moves the control that caused it: controls own stable slots, and a line an edit toggles
+opens beside or below them.
 
 For a row with one action and a durable result, the result occupies the flexible
 left side and the neutral action stays docked on the right. Field-level actions
