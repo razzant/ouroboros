@@ -182,15 +182,18 @@ def test_a_declared_entry_under_a_skipped_cache_name_is_part_of_the_identity(ins
         {s["name"]: s["content_hash"] for s in json.loads(_fresh(data))}, sort_keys=True)
 
 
-def test_the_runtime_mode_facet_keys_the_load(install, monkeypatch):
-    """Cyber Pro admits a credential-shaped payload file that refuses the load below it: one load per facet."""
-    data, _counts = install
+def test_a_load_is_the_same_in_every_runtime_mode(install, monkeypatch):
+    """No load fact depends on the mode (a credential-like payload name included): switching to Cyber Pro reuses
+    the load and equals a fresh discovery; the gate reads the mode when it is asked, not at load."""
+    data, counts = install
     (data / "skills" / "external" / "beta" / ".env").write_text("TOKEN=x\n", encoding="utf-8")
-    plain = {skill.name: skill.load_error for skill in discover_skills(data)}
+    plain = _dump(discover_skills(data))
+    assert not loader.find_skill(data, "beta").load_error
+    held = dict(counts)
     monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "cyber_pro")
-    cyber = {skill.name: skill.load_error for skill in discover_skills(data)}
-    assert plain["beta"] and not cyber["beta"]
-    assert json.dumps(cyber) == json.dumps({s["name"]: s["load_error"] for s in json.loads(_fresh(data))})
+    cyber = _dump(discover_skills(data))
+    assert (counts == held) is KEEPS  # the switch read nothing again where change keys are trusted
+    assert cyber == plain == _fresh(data)
 
 
 def test_callers_get_their_own_copy(install):

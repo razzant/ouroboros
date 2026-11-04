@@ -361,6 +361,44 @@ def test_legacy_record_without_base_says_original_unknown(drive, hub):
     assert listing["install"]["base_known"] is False and listing["install"]["modified"] is None
 
 
+def test_credential_like_files_survive_git_install_update_and_merge_trees(drive, hub):
+    """The Git copy owner refuses no credential-like name: install and replace land a release's `.env`,
+    `credentials.json` and `id_rsa` byte for byte under its digest, and a merge lays out the new and the
+    base release whole."""
+    files = {".env": b"TOKEN=synthetic-first\n", "config/prod.env": b"MODE=fixture\n",
+             "credentials.json": b'{"fixture": true}\n', "id_rsa": b"SYNTHETIC KEY FIXTURE\n"}
+
+    def release(version):
+        for rel, body in files.items():
+            path = hub.work / "skills" / "keys" / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        digest = hub.add_hosted("keys", version, official=True)
+        hub.commit(f"keys {version}")
+        _refresh(drive, rows[1:2])
+        return digest
+
+    rows = hub.rows()
+    first = release("1.0.0")
+    installer.install_item(drive, "ouroboros/keys", rows=rows)
+    target = drive / "skills" / "ouroboroshub" / "keys"
+    assert {rel: (target / rel).read_bytes() for rel in files} == files
+    assert read_install_record(drive, "keys")["release"]["digest"] == first
+    files[".env"] = b"TOKEN=synthetic-second\n"
+    second = release("1.1.0")
+    installer.update_installed(drive, "keys", mode="replace", digest=second, rows=rows)
+    assert {rel: (target / rel).read_bytes() for rel in files} == files
+    assert read_install_record(drive, "keys")["base_digest"] == second
+    base = dict(files)
+    (target / "SKILL.md").write_text((target / "SKILL.md").read_text() + "\nlocal edit\n")
+    files["id_rsa"] = b"SYNTHETIC KEY FIXTURE TWO\n"
+    release("2.0.0")
+    merged = installer.update_installed(drive, "keys", mode="merge", rows=rows, actor="ouroboros")
+    assert merged["base_available"] is True
+    assert {rel: (drive / merged["new_tree"] / rel).read_bytes() for rel in files} == files
+    assert {rel: (drive / merged["base_tree"] / rel).read_bytes() for rel in base} == base
+
+
 def test_copy_refuses_symlinks_and_oversized_trees(tmp_path):
     from ouroboros.marketplace.fetcher import FetchError, copy_tree_checked
 

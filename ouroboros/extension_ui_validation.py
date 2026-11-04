@@ -17,7 +17,7 @@ import re
 from typing import Any, Dict
 
 from ouroboros.contracts.plugin_api import VALID_EXTENSION_ROUTE_METHODS, ExtensionRegistrationError
-from ouroboros.skill_loader import SkillPayloadUnreadable, _iter_payload_files
+from ouroboros.skill_loader import _iter_payload_files
 
 _EXTENSION_SHORT_MAX = 24
 _UI_RENDER_KINDS = {"", "iframe", "declarative", "module"}
@@ -614,12 +614,8 @@ def read_module_sources(skill_dir: pathlib.Path | None, *entries: str) -> Dict[s
     for entry in entries:
         if not (root / entry).resolve().is_relative_to(root):
             raise ExtensionRegistrationError(f"module widget entry {entry!r} escapes the skill directory")
-    try:
-        files = _iter_payload_files(root)
-    except SkillPayloadUnreadable as exc:
-        raise ExtensionRegistrationError(f"module widget sources are unreadable: {exc}") from None
     sources: Dict[str, str] = {}
-    for path in files:
+    for path in _iter_payload_files(root):
         rel = path.relative_to(root).as_posix()
         if path.suffix not in (".js", ".mjs") or any(part.startswith(".") for part in rel.split("/")):
             continue

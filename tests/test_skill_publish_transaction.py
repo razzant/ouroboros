@@ -370,6 +370,51 @@ def test_high_payload_finding_blocks_before_any_github_or_mutation(monkeypatch, 
     }
 
 
+@pytest.mark.parametrize("high", [True, False], ids=["high-finding-blocks", "clean-scan-publishes"])
+def test_credential_like_payload_file_reaches_the_publication_scan_from_the_real_capture(monkeypatch, tmp_path, high):
+    """No name gate hides a `.env`: the real capture hands its exact bytes to the existing scan before any
+    network call, a high finding there blocks the submission, and a clean scan publishes the same bytes."""
+    from ouroboros.skill_loader import load_skill
+    from ouroboros.skill_publish_snapshot import capture_skill_publish_snapshot
+
+    payload = tmp_path / "data" / "skills" / "external" / "demo"
+    payload.mkdir(parents=True)
+    (payload / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: A safe test skill.\nversion: 1.0.0\ntype: instruction\n"
+        "when_to_use: Use for a test.\n---\nBody.\n", encoding="utf-8")
+    env_bytes = b"API_TOKEN=synthetic-fixture-not-a-key\n"
+    (payload / ".env").write_bytes(env_bytes)
+    loaded = load_skill(payload, tmp_path / "data")
+    assert loaded is not None and not loaded.load_error
+    loaded.source = SKILL_SOURCE_EXTERNAL
+    loaded.review = SkillReviewState(status="clean", content_hash=loaded.content_hash)
+    scanned = []
+
+    def scanner(named):
+        scanned.append(named)
+        if high and ".env" in named:
+            return _scan_result(_finding(".env", confidence="high", disposition="blocker"))
+        return _scan_result()
+
+    ctx, events, captured = _install_transaction_fakes(monkeypatch, tmp_path, snapshot=_snapshot(), scanner=scanner)
+    monkeypatch.setattr(skill_publish, "_validate_local_skill", lambda *_args: ("demo", loaded))
+    monkeypatch.setattr(skill_publish, "capture_skill_publish_snapshot", capture_skill_publish_snapshot)
+    fake_receipt = skill_publish.create_pr_receipt  # the fake PR names the real capture it published
+    monkeypatch.setattr(skill_publish, "create_pr_receipt", lambda _ctx, attempt, **kwargs: {
+        **fake_receipt(_ctx, attempt, **kwargs), "snapshot_hash": attempt.snapshot_hash})
+    if high:
+        monkeypatch.setattr(skill_publish, "github_login", lambda _ctx: pytest.fail("no GitHub call after a blocker"))
+    result = _submit(ctx)
+    assert scanned[0][".env"] == env_bytes  # the payload scan, first, over the exact captured bytes
+    if high:
+        assert result["ok"] is False and result["reason_code"] == "secret_blocked"
+        assert not any(row[0] == "mutation" for row in events)
+        return
+    assert result["ok"] is True, result
+    committed = {row["path"]: base64.b64decode(row["contents"]) for row in captured["additions"]}
+    assert committed["skills/demo/.env"] == env_bytes
+
+
 def test_medium_payload_warning_and_audited_high_do_not_block(monkeypatch, tmp_path):
     findings = (
         _finding("SKILL.md", confidence="medium", disposition="warning"),

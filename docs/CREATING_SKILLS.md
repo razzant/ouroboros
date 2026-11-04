@@ -2277,7 +2277,7 @@ sees each non-text asset as a content-hash-bound descriptor. The module
 endpoint stays JavaScript-only. Installs from sources and ClawHub archives
 admit inert assets such as `.png .jpg .jpeg .gif .webp .svg`, `.mp3 .ogg .wav`,
 `.mp4 .webm`, `.woff .woff2 .ttf .otf` and `.wasm`, and refuse loadable binaries
-and credential-shaped files outside Cyber Pro. Both are capped at 8 MiB per
+outside Cyber Pro; a credential-like name such as `.env` refuses nothing. Both are capped at 8 MiB per
 file, 50 MiB in total and 200 files (`ouroboros/marketplace/fetcher.py`). A large runtime image
 — a v86 disk image of several megabytes and up — does not fit a package: have
 the installer fetch it through an exact `download` spec and serve it from
@@ -2678,9 +2678,13 @@ manifest exists, ordinary discovery, preflight, and fresh review resume.
 Grouping directories, unknown or colliding identities, nested manifests, and
 path escapes are still refused; no parallel `external` payload is created.
 
-An ordinary `.env.example` is included in the payload hash, review and publication
+A payload file with a credential-like name (`.env`, `prod.env`,
+`credentials.json`, `id_rsa`) is included like `.env.example` in the payload
+hash, review, delegated copies, installs and updates and the publication
 snapshot, including after ClawHub archive import. Its name does not exempt its
-contents from the existing publication scan.
+contents from the existing publication scan. Keep a real credential out of the payload: ask for it
+with `secret_fields` and read it through `env_from_settings` ("Asking the owner
+for a secret"); reviewers flag a working one there (`payload_credentials`).
 
 Only literal Betterleaks `high` confidence blocks an outbound publication call.
 `medium`, `low`, missing, and unknown confidence remain redacted warnings. For

@@ -605,7 +605,14 @@ Scope of a skill review pack:
   `bin/run.sh`), and manifest-declared extension entry modules (e.g.
   `plugin.py`). Hidden files that are NOT VCS/cache metadata (e.g.
   `.hidden_helper.py`) are hashed + reviewed for the same reason — a
-  skill could still ``import`` them.
+  skill could still ``import`` them. A credential-like name never excludes or
+  refuses a file: `.env` and its variants, `credentials.json`, `id_rsa`, `.netrc`,
+  certificates and key containers are ordinary payload in every mode, also
+  through delegation, install, update and the publication capture. A real
+  key placed there reaches the selected reviewers, private copies and an
+  authorized publication candidate; the existing publication scan judges
+  those bytes without proving them secret-free, and item 18
+  (`payload_credentials`) judges such a key.
 - The manifest's declared `permissions` list, for comparison against
   what the code actually does.
 - Any declared `scheduled_tasks` suggestions, for comparison against the
@@ -619,28 +626,6 @@ review pack:
   `.idea`, `.vscode`, `.tox`, `__pycache__`, `node_modules`, `.DS_Store`
   (silently excluded — a byte-flip in a cache file does not
   invalidate a PASS review).
-- **Exact credential file names HARD-BLOCK the skill**: the shared
-  `_SENSITIVE_NAMES` policy (`.env` and its explicitly listed runtime
-  variants, `credentials.json`, `service-account.json`, `secrets.yaml`,
-  `secrets.json`, `id_rsa` and the other SSH private-key names,
-  `.git-credentials`, `.netrc`, `.npmrc`, `.pypirc`) plus the `.env` tail in
-  `_SENSITIVE_EXTENSIONS`, which covers spellings such as `prod.env`.
-  (Reused from `ouroboros.tools.review_helpers._SENSITIVE_EXTENSIONS`
-  + `_SENSITIVE_NAMES`.) The loader raises `SkillPayloadUnreadable`
-  on first discovery and the skill shows up in `list_skills` with a
-  non-empty `load_error` — neither reviewable nor executable until
-  the operator renames or relocates the file outside the skill
-  tree. Rationale: silently excluding the file would leave it
-  runtime-reachable via `open('.env').read()`, so a reviewed skill
-  could still exfiltrate credentials the reviewer never saw.
-  `.pem`, `.key`, `.p12`, `.pfx`, `.jks`, `.keystore`, `.kdbx`, `.gpg` and
-  `.asc` are NOT credential shapes: they are ordinary reviewed payload and are
-  SHOWN to the reviewer. A name rule never bought what the rationale above
-  promises anyway, since a real `.env` renamed to `config.txt` walks straight
-  through it, while a public certificate or a release signature used to break
-  the whole skill (owner decision, 2026-09-11).
-  `.env.example` is ordinary reviewed payload: its bytes remain in the
-  freshness hash and the existing publication scan.
 - Symlinks whose targets resolve outside `skill_dir` (confinement
   guard — otherwise a symlink to `/etc/passwd` would leak into the
   review pack sent to external reviewer models).
@@ -830,6 +815,7 @@ the reviewer's word.
 | 15 | bug_hunting | Are there obvious runtime bugs in reviewed code: wrong filenames, mismatched manifest script names, missing imports, impossible arguments, JSON/schema mismatches, blocking calls in async handlers, or untested happy-path assumptions? For every FAIL, cite the concrete runtime bug and state how you propose to fix it (file/symbol/change), so the author can apply the correction instead of guessing. Concrete likely runtime breakage should use `severity=critical`; latent issues, provider fragility, minor cleanup, or dead-code concerns should use `severity=advisory`. | severity-driven |
 | 16 | completion_notification | For long-running or user-visible work, does the skill emit or document a completion/failure notification path (for example a host event, `events.jsonl` append, or clear stdout marker consumed by Ouroboros)? A skill that must reach the owner directly (a reminder, a finished external job) declares `notify_owner` and hands the host one bounded sentence through `POST /notify`, shown as a signed System row in the owner's chat — judged as under item 9: attributable, bounded, user-facing, and never a way to inject conversation. Not applicable for tiny synchronous utilities — return nothing for it. | advisory |
 | 17 | context_snapshot_discipline | For `context_snapshot`: are the declared local snapshots compact deterministic facts, with honest dates/units/unknowns, no instructions, secrets or relative-age counters? Check atomic publication, the complete UTF-8 file bound and withdrawal on expiry/revocation (CREATING_SKILLS “Passive context snapshots”); no network, model or refresh belongs on prompt preparation. Not applicable for other skills — return nothing for it. | severity-driven when applicable |
+| 18 | payload_credentials | Does the evidence show a working credential stored in the payload (a live token, a private key, a filled-in `.env`) rather than a fixture, template, schema or placeholder? A file name or a secret-like pattern alone proves nothing: `.env.example`, test fixtures and documented placeholders are ordinary content. A FAIL names where the value belongs: a Settings secret the skill reads through `env_from_settings` and asks for with `secret_fields` (CREATING_SKILLS "Asking the owner for a secret"); a grant authorizes reading a key, never storing one. This judges bytes the reviewers already received; it is no scanner and no proof that nothing secret leaves. Sending a secret to an unrelated party or mishandling the host token stays a FAIL of the item that owns it (e.g. `host_token_handling`), at that item's severity. | advisory |
 
 ### Severity rules
 

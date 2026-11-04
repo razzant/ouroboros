@@ -34,7 +34,7 @@ from ouroboros.tool_access import canonical_data_root, load_bound_skill
 
 def run_owner_attestation(ctx: Any, drive_root: pathlib.Path, skill: Any, content_hash: str):
     """Owner-attested skill review — skip the EXPENSIVE LLM review for these exact bytes.
-    The DETERMINISTIC preflight floor STILL runs (an invalid manifest / sensitive-shaped /
+    The DETERMINISTIC preflight floor STILL runs (an invalid manifest or a
     path-escaping payload can NEVER be attested); only the LLM phase is skipped.
     On a clean preflight, persist a durable CLEAN verdict bound to the content_hash
     (review_profile='owner_attested', reviewer_models=['owner_attestation'], one explicit
