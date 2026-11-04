@@ -27,9 +27,11 @@ a second pause store:
   same fence and enters the exact pause without buying a model round.
 
 The fence being closed is NOT the tree being Paused: the root's ``state``
-turns ``paused`` only when no member of the tree still runs and every parked
-member's own sent work (delegated runs included) has settled; reviewers the
-Pause lets finish never keep it pausing (the fence lists them as
+turns ``paused`` only when no member of the tree still runs and every member's
+own sent work (delegated runs included) has settled, an ended member's too: a
+terminal result is not ended execution, and nothing parks to stop what it left
+running, so the fence owns that stop (``ended_member_runs``, #2669). Reviewers
+the Pause lets finish never keep it pausing (the fence lists them as
 ``finishing_reviews``). Until then the truthful state is ``requested``.
 """
 
@@ -150,6 +152,23 @@ def fence_closed(fence: Dict[str, Any]) -> bool:
     return str((fence or {}).get("state") or "") in CLOSED_FENCE_STATES
 
 
+def owner_stopped(row: Any) -> bool:
+    """A root whose own terminal is a recorded Stop (its cancel intent's ``cancel_origin``): Stop outranks Pause.
+    It owns what remains (that intent's watchdog, the sweep a closed fence would refuse), so no Pause holds over it."""
+    origin = row.get("cancel_origin") if isinstance(row, dict) else None
+    return bool(isinstance(origin, dict) and origin.get("request_id") and row.get("status") == "cancelled")
+
+
+def root_stopped(root_drive: Any, root_task_id: str) -> bool:
+    """``owner_stopped`` of the root's stored row; unreadable is False, so the census still decides."""
+    from ouroboros.task_results import load_task_result
+
+    try:
+        return owner_stopped(load_task_result(root_drive, root_task_id, strict=True))
+    except Exception:
+        return False
+
+
 def paused_gap(root_drive: Any, task_id: str) -> Dict[str, Any]:
     """``{"membership_gaps": ...}`` the task's still-closed Pause last named, as its Resume reads it,
     else ``{}``: the fence's current fact, never the episode's older notice. Never raises."""
@@ -220,7 +239,7 @@ def install_fence(root_drive: Any, root_task_id: str, *, request_id: str,
     terminal root refuses: a finished tree has nothing to pause — unless its
     answered task still owns late work: an open post-task checkpoint read
     under this lock (the Pause ends that upkeep at once), or a live review
-    operation or live descendants the caller attests (``late_work``). ``by`` is the author a press
+    operation, live descendants or a delegated tail the caller attests (``late_work``). ``by`` is the author a press
     declared (``control_actor.pause_author``): the fence keeps its first one,
     and a press that declared nobody claims none. Raises
     ``OwnerPauseRefused`` without any write on refusal; any write failure
@@ -312,6 +331,7 @@ def set_fence_state(root_drive: Any, root_task_id: str, *, fence_id: str, state:
     ``expected_state`` also binds the state its caller read: a Resume that
     released this same fence after that read refuses a stale write here.
     ``row_update`` rewrites the root's row in this same write: what stands or falls with the transition.
+    A write that keeps the state keeps its date: ``requested_at`` is the press (``control_actor.pause_author``).
     """
     from ouroboros.task_results import (
         require_writable_task_result_schema, stamp_task_result_schema,
@@ -330,7 +350,8 @@ def set_fence_state(root_drive: Any, root_task_id: str, *, fence_id: str, state:
         if str(old.get("state") or "") == state and not fields:
             written.update(old)
             return None
-        fence = {**old, **fields, "state": state, f"{state}_at": utc_now_iso()}
+        moved = {} if str(old.get("state") or "") == state else {f"{state}_at": utc_now_iso()}
+        fence = {**old, **fields, "state": state, **moved}
         written.update(fence)
         from ouroboros.pause_notices import notice_fields
         notice = (notice_fields(current, root_drive, root_task_id, fence_id, "owner", fence=fence)

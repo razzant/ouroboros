@@ -1452,7 +1452,7 @@ def _retire_worktree(match: Dict[str, Any], root: Path, data_dir: Any, branch: s
                      lock_wait_sec: Optional[float] = None, holds: Optional[Callable[[Dict[str, Any], str], Optional[str]]] = None,
                      reasons: Optional[Dict[str, str]] = None) -> bool:
     """Retire one copy under its own record lock, only while its record still equals ``match`` and
-    ``holds`` (the deciding owner's current proof, asked before the keep gate) still answers the branch to
+    ``holds`` (the deciding owner's current proof, asked inside task custody) still answers the branch to
     drop, not ``None``. An own-body candidate is marked retiring inside the gate, at the effect: a keep or a
     busy gate leaves its record as it was."""
     if worktree_removal.unchanged(match):
@@ -1464,13 +1464,13 @@ def _retire_worktree(match: Dict[str, Any], root: Path, data_dir: Any, branch: s
             if reasons is not None:
                 reasons[str(wt_path)] = "changed"
             return False  # another writer changed ownership since the decision
-        branch = holds(match, branch) if holds else branch
-        if branch is None:
-            return False
         with owner_keep.gate(_data_dir(data_dir), match.get("task_id")) as why:
             if why:
                 if reasons is not None:
                     reasons[str(wt_path)] = why
+                return False
+            branch = holds(match, branch) if holds else branch
+            if branch is None:
                 return False
             if match.get("kind") == _KIND_BODY_CANDIDATE and not match.get("retiring"):
                 _put_record({**match, "retiring": True}, data_dir)  # no resume takes it now, even if its removal fails
@@ -1568,8 +1568,15 @@ def prune_orphans(
         except (WorktreeOpsLockBusy, SubagentWorktreeRegistryCorrupt) as exc:
             reasons[path] = "record_busy" if isinstance(exc, WorktreeOpsLockBusy) else "record_unreadable"
             continue  # busy or unreadable: the next pass decides
+        # Refresh the queue probe before custody; recorded terminal/process and capture facts are rechecked inside.
+        if entry.get("kind") != _KIND_BODY_CANDIDATE:
+            try:
+                if live(str(entry.get("task_id") or "")) is not False:
+                    continue
+            except Exception:
+                continue  # unknown queue ownership still retains the copy
         removed += bool(_retire_worktree(entry, root, data_dir, branch, holds=partial(body_branch, verdicts[path]) if entry.get(
-            "kind") == _KIND_BODY_CANDIDATE else partial(plain_copy_branch, root=root, data_dir=data_dir, live=live), reasons=reasons))
+            "kind") == _KIND_BODY_CANDIDATE else partial(plain_copy_branch, root=root, data_dir=data_dir, live=lambda _: False), reasons=reasons))
     return {"removed": removed, "kept": len(_records(data_dir, op="prune_orphans"))}
 
 

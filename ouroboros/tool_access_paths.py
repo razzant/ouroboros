@@ -79,6 +79,14 @@ def normalize_root(root: str | None, *, default: ResourceRoot = "active_workspac
     return candidate  # type: ignore[return-value]
 
 
+def entry_path(path: pathlib.Path) -> pathlib.Path:
+    """A directory entry's physical address: its folder resolved, its own name never followed, so a
+    symlink stays the link itself. ``..`` names no entry and resolves whole. A loop above the name
+    raises (RuntimeError before Python 3.13, which resolves it as far as it can)."""
+    path = pathlib.Path(path)
+    return path.resolve(strict=False) if path.name == ".." else path.parent.resolve(strict=False) / path.name
+
+
 def path_is_relative_to(path: pathlib.Path, root: pathlib.Path) -> bool:
     try:
         pathlib.Path(path).resolve(strict=False).relative_to(pathlib.Path(root).resolve(strict=False))

@@ -383,6 +383,30 @@ def test_effective_result_preserves_workspace_patch_kind_with_child_drive(tmp_pa
     assert client.paths == [f"/api/tasks/{task_id}/artifacts/workspace.patch"]
 
 
+def test_repeated_directory_capture_keeps_its_registered_output_store(tmp_path):
+    from hashlib import sha256
+    from ouroboros.artifacts import copy_file_to_task_artifacts
+    from ouroboros.headless import current_workspace_manifest
+    from ouroboros.task_results import load_task_result
+    data, folder = tmp_path / "data", tmp_path / "folder"
+    data.mkdir(); folder.mkdir()
+    task = {"id": "direct-folder", "workspace_root": str(folder), "workspace_mode": "external"}
+    ctx = SimpleNamespace(drive_root=data, task_id=task["id"])
+    write_task_result(data, task["id"], "completed", workspace_root=str(folder), workspace_mode="external")
+    for content in (b"first direct output", b"updated direct output"):
+        path = folder / "output.txt"
+        path.write_bytes(content)
+        assert copy_file_to_task_artifacts(ctx, path, kind="user_file")
+        finalize_task_artifacts(data, task)
+        result = load_task_result(data, task["id"])
+        source = current_workspace_manifest(data, task["id"], result)
+        assert source == task_artifacts_dir(data, task["id"]) / "workspace_patch.json"
+        manifest = json.loads(source.read_bytes())
+        assert manifest["capture_kind"] == "directory_direct" and manifest["apply_state"] == "already_applied"
+        assert any(row["sha256"] == sha256(content).hexdigest() for row in manifest["registered_outputs"])
+        assert result["artifact_status"] == result["artifact_bundle"]["status"] == "ready"
+
+
 def test_task_artifact_endpoint_serves_only_declared_artifacts(tmp_path):
     data = tmp_path / "data"
     artifact_dir = task_artifacts_dir(data, "task-artifact")

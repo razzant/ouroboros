@@ -417,11 +417,14 @@ def presence_ceiling_from_context(ctx: Any) -> PresenceCapabilityCeiling | None:
     return presence_ceiling_from_payload(raw) if raw is not None else None
 
 
-def presence_ceiling_allows_binding(ceiling: PresenceCapabilityCeiling, binding: Any) -> bool:
-    """Intersect an already-resolved registry target with the positive ceiling."""
+def presence_ceiling_allows_binding(ceiling: PresenceCapabilityCeiling, binding: Any, *, entry: bool = False) -> bool:
+    """Intersect an already-resolved registry target with the positive ceiling. An ``entry`` target is
+    a directory entry read as itself (a symlink is its link): only its folder is resolved, never its name."""
+
+    from ouroboros.tool_access_paths import entry_path
 
     try:
-        target = Path(binding.target_path).resolve(strict=False)
+        target = entry_path(binding.target_path) if entry else Path(binding.target_path).resolve(strict=False)
         base = Path(binding.base_path).resolve(strict=False)
         logical_base = getattr(binding, "logical_base_path", None)
         if logical_base is not None:
