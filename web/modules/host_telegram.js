@@ -6,7 +6,8 @@
  * gate, `call(target, method, minVersion, ...args)`: method presence and `isVersionAtLeast`, never a version
  * number in a screen. Binding is idempotent and `dispose()` releases every listener.
  *
- * What it does, once: `ready()`, `expand()`, `disableVerticalSwipes()` (7.7, owner Q5=A: nested scrollers on every
+ * What it does, once: `ready()`, `expand()`, `requestFullscreen()` (8.0, observed through SDK state/events),
+ * `disableVerticalSwipes()` (7.7, owner Q5=A: nested scrollers on every
  * screen would otherwise minimise the app on a drag at the top); Telegram's BackButton is visible while the layer
  * stack is non-empty and its click pops one layer; the header, background and bottom bar take the room colour
  * (again on every theme change); the safe-area insets are mirrored to `--tg-safe-area-inset-*` and
@@ -19,7 +20,7 @@ export const KEYBOARD_COLLAPSE_PX = 100;
 const SDK_SCRIPT = 'script[src*="telegram-web-app.js"]';
 const LATE_POLL_MS = 250;
 const LATE_POLL_LIMIT_MS = 10000;
-const SIDES = ['top', 'bottom'];  // the shell reads vertical insets (ui.css --inset-top/bottom)
+const SIDES = ['top', 'bottom', 'left', 'right'];
 
 /** Inside Telegram: the host stamp, or launch data the SDK only carries there. */
 export function isTelegramHost({ win = globalThis.window, doc = globalThis.document } = {}) {
@@ -86,10 +87,19 @@ export function createTelegramHost({
         if (!root?.style?.setProperty) return;
         for (const [prefix, inset] of [['--tg-safe-area-inset-', app?.safeAreaInset], ['--tg-content-safe-area-inset-', app?.contentSafeAreaInset]]) {
             for (const side of SIDES) {
-                const px = Math.max(0, Number(inset?.[side]) || 0);
+                const value = Number(inset?.[side]);
+                const px = Number.isFinite(value) ? Math.max(0, value) : 0;
                 root.style.setProperty(`${prefix}${side}`, `${px}px`);
             }
         }
+    }
+
+    // Request dispatch is not success: Telegram owns the observed fullscreen state.
+    function syncFullscreen() {
+        if (doc?.documentElement?.dataset) {
+            doc.documentElement.dataset.telegramFullscreen = app?.isFullscreen === true ? 'active' : 'expanded';
+        }
+        mirrorInsets();
     }
 
     // ---- the host's Back control follows the layer stack and closes one layer
@@ -131,7 +141,10 @@ export function createTelegramHost({
         call('ready');
         call('expand');
         call('disableVerticalSwipes', '7.7');
-        mirrorInsets();
+        on('fullscreenChanged', syncFullscreen);
+        on('fullscreenFailed', syncFullscreen);
+        syncFullscreen();
+        if (app.isFullscreen !== true) call('requestFullscreen', '8.0');
         on('safeAreaChanged', mirrorInsets);
         on('contentSafeAreaChanged', mirrorInsets);
         paintChrome();
@@ -161,14 +174,14 @@ export function createTelegramHost({
         // The async tag may still be loading: bind on its load, and poll in case it loaded before we looked.
         const script = doc?.querySelector?.(SDK_SCRIPT);
         if (script?.addEventListener) {
-            const onLoad = () => attach();
+            const onLoad = () => { if (isTelegramHost({ win, doc })) attach(); };
             script.addEventListener('load', onLoad, { once: true });
             disposers.push(() => script.removeEventListener('load', onLoad));
         }
         pollSince = Date.now();
         const poll = () => {
             pollTimer = 0;
-            if (disposed || attach()) return;
+            if (disposed || (isTelegramHost({ win, doc }) && attach())) return;
             if (Date.now() - pollSince < LATE_POLL_LIMIT_MS) pollTimer = win.setTimeout(poll, LATE_POLL_MS);
         };
         pollTimer = win.setTimeout(poll, LATE_POLL_MS);
@@ -177,7 +190,12 @@ export function createTelegramHost({
     /** Bind once; outside Telegram this is a no-op that reports `false`. */
     function bind() {
         if (disposed) return false;
-        if (!isTelegramHost({ win, doc })) return false;
+        if (!isTelegramHost({ win, doc })) {
+            // Selected-directory pages also load the SDK in ordinary browsers.
+            // Wait for a late script, but never bind solely because it exists.
+            if (!webApp() && !pollTimer && doc?.querySelector?.(SDK_SCRIPT)) waitForSdk();
+            return false;
+        }
         if (attach()) return true;
         if (!pollTimer) waitForSdk();
         return false;
@@ -189,6 +207,7 @@ export function createTelegramHost({
         stopWaiting();
         while (disposers.length) { try { disposers.pop()(); } catch { /* already gone */ } }
         bound = false;
+        if (doc?.documentElement?.dataset) delete doc.documentElement.dataset.telegramFullscreen;
     }
 
     return { bind, dispose, bound: () => bound, active: () => isTelegramHost({ win, doc }), recoverKeyboard, paintChrome, mirrorInsets };

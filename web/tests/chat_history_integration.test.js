@@ -367,9 +367,9 @@ for (const systemType of ['reminder', 'skill_notice']) for (const historyFirst o
             assert.equal(original.dataset.historyId, 'chat:100');
             assert.equal(original.dataset.historySource, 'chat:rotation-1');
             assert.equal(original.dataset.historyOffset, '100');
-            const saved = sessionStorage.getItem('ouro_chat:2');
+            const saved = localStorage.getItem('ouroboros.chat-preview.v1');
             f.emit(live);
-            assert.equal(sessionStorage.getItem('ouro_chat:2'), saved, 'a late live copy is not persisted again');
+            assert.equal(localStorage.getItem('ouroboros.chat-preview.v1'), saved, 'a late live copy is not persisted again');
             await f.refresh(page([message]));
         }
         assert.equal(f.bubbles().length, 1);
@@ -399,7 +399,7 @@ test('repeated physical history identity updates the routing annotation on the s
     assert.notEqual(note.textContent, 'Choosing the right destination…');
     assert.match(note.textContent, /Investigation/);
     const annotationText = note.textContent, metadata = { ...bubble.dataset };
-    const saved = sessionStorage.getItem('ouro_chat:2');
+    const saved = localStorage.getItem('ouroboros.chat-preview.v1');
     f.emit({ role: message.role, content: message.text, ts: message.ts,
         client_message_id: message.client_message_id, source: message.source,
         sender_session_id: message.sender_session_id });
@@ -408,7 +408,7 @@ test('repeated physical history identity updates the routing annotation on the s
     assert.equal(bubble.querySelector('.msg-routing-annotation'), note);
     assert.equal(note.textContent, annotationText, 'the live echo cannot clear the saved routing receipt');
     assert.deepEqual(bubble.dataset, metadata);
-    assert.equal(sessionStorage.getItem('ouro_chat:2'), saved);
+    assert.equal(localStorage.getItem('ouroboros.chat-preview.v1'), saved);
 });
 
 test('a live echo preserves the projected saved-context note and origin metadata', async t => {
@@ -425,7 +425,7 @@ test('a live echo preserves the projected saved-context note and origin metadata
     assert.equal(original.dataset.originId, origin.origin_id);
     assert.equal(original.dataset.originProjected, '1');
     const metadata = { ...original.dataset }, noteText = note.textContent;
-    const saved = sessionStorage.getItem('ouro_chat:2');
+    const saved = localStorage.getItem('ouroboros.chat-preview.v1');
     f.emit({ role: origin.role, content: origin.text, ts: origin.ts,
         source: origin.source, sender_session_id: origin.sender_session_id });
     assert.equal(f.bubbles().length, 1);
@@ -433,7 +433,7 @@ test('a live echo preserves the projected saved-context note and origin metadata
     assert.equal(original.querySelector('.saved-project-context'), note);
     assert.equal(note.textContent, noteText);
     assert.deepEqual(original.dataset, metadata);
-    assert.equal(sessionStorage.getItem('ouro_chat:2'), saved);
+    assert.equal(localStorage.getItem('ouroboros.chat-preview.v1'), saved);
 });
 
 test('a replayed refusal receipt shows the host cause and a later scheduled receipt patches the same note', async (t) => {

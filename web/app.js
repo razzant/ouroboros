@@ -1528,7 +1528,8 @@ if (hashPage && hashPage !== state.activePage) showPage(hashPage);
         if (isStackLayout()) {
             // A pinch only magnifies: the room keeps the height it had, or it would shrink with the visual viewport.
             if (pinchMagnified()) return;
-            vvhStyle.textContent = ':root{--vvh:' + Math.max(320, Math.ceil(h)) + 'px}';
+            if (Number.isFinite(h) && h > 0) vvhStyle.textContent = ':root{--vvh:' + Math.ceil(h)
+                + 'px;--chat-viewport-input-cap:' + Math.max(28, Math.min(140, Math.floor(h / 4))) + 'px}';
             if (!focusedKeyboardEditable()) {
                 applyKeyboardState(false);
                 rememberStableViewport(h);
@@ -1563,6 +1564,8 @@ if (hashPage && hashPage !== state.activePage) showPage(hashPage);
             if (revision !== focusRevision || focusedKeyboardEditable()) return;
             applyKeyboardState(false);
             focusBaselineHeight = 0;
+            // Native dismissal can restore the viewport without a second resize.
+            updateVvh();
         });
     });
 

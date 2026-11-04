@@ -220,14 +220,14 @@ class _ProxyStreamResponse:
         self.close = close
 
     async def __call__(self, _scope: dict[str, Any], _receive: Any, send: Any) -> None:
-        await send(
-            {
-                "type": "http.response.start",
-                "status": self.status_code,
-                "headers": self.headers,
-            }
-        )
         try:
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": self.status_code,
+                    "headers": self.headers,
+                }
+            )
             async for chunk in self.body:
                 if chunk:
                     await send({"type": "http.response.body", "body": chunk, "more_body": True})
@@ -742,7 +742,12 @@ class TelegramProxySidecar:
             self._http_client = httpx.AsyncClient(
                 follow_redirects=False,
                 trust_env=False,
-                timeout=httpx.Timeout(connect=3.0, read=None, write=None, pool=3.0),
+                # A slow phone can retain response slots while the SPA imports
+                # its module graph. Queue locally instead of turning healthy
+                # finite bursts into 502 after three seconds. Cancellation and
+                # closing the client still end acquisition; active sockets stay
+                # bounded by the existing connection limit.
+                timeout=httpx.Timeout(connect=3.0, read=None, write=None, pool=None),
                 limits=httpx.Limits(max_connections=32, max_keepalive_connections=8),
             )
         return self._http_client

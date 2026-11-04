@@ -1,0 +1,115 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createChatPreview, clearChatPreviews, PREVIEW_KEY } from '../modules/chat_preview.js';
+import { installDom, restoreDom } from './chat_dom_fixture.js';
+
+function fixture(t) {
+    const { prior, mount } = installDom();
+    t.after(() => restoreDom(prior));
+    const values = new Map();
+    const storage = { getItem: key => values.get(key), setItem: (key, value) => values.set(key, value),
+        removeItem: key => values.delete(key) };
+    const make = (room = [1, ''], scope = '') => createChatPreview({ feed: mount, room, scope,
+        labelForRow: row => row.sender_label || (row.role === 'user' ? 'You' : 'Ouroboros'),
+        storage: () => storage, mutate: fn => fn() });
+    return { mount, values, storage, make };
+}
+const data = (text = 'An exact saved answer') => ({ page_cursor: 'page:1', messages: [
+    { role: 'assistant', text, history_id: 'chat:1', task_id: 'ended-work', cancelable: true,
+        review_projection: { findings: ['not cached'] }, api_key: 'not cached' },
+] });
+
+test('a new room instance paints only source text, not cached controls or task facts', t => {
+    const f = fixture(t), original = f.make();
+    original.save(data()); original.destroy();
+    const fresh = f.make();
+    assert.equal(fresh.show(), true);
+    assert.equal(f.mount.querySelectorAll('.chat-bubble').length, 1);
+    assert.equal(f.mount.querySelectorAll('button').length, 0);
+    assert.doesNotMatch(f.values.get(PREVIEW_KEY), /ended-work|cancelable|api_key|findings/);
+    fresh.retire();
+    assert.equal(f.mount.querySelectorAll('.chat-saved-preview').length, 0);
+    fresh.destroy();
+});
+
+test('room, project and installation scope never borrow each other\'s preview', t => {
+    const f = fixture(t); f.make().save(data());
+    assert.equal(f.make([2, '']).show(), false);
+    assert.equal(f.make([1, 'different-project']).show(), false);
+    assert.equal(f.make([1, ''], 'another-install').show(), false);
+});
+
+test('failed and partial reads keep the previous record; a successful empty read clears it', t => {
+    const f = fixture(t), preview = f.make();
+    preview.save(data()); const saved = f.values.get(PREVIEW_KEY);
+    preview.save({ ...data('wrong'), reason_code: 'history_source_unavailable' });
+    preview.save({ messages: data('incomplete').messages });
+    assert.equal(f.values.get(PREVIEW_KEY), saved);
+    preview.save({ page_cursor: 'page:empty', messages: [] });
+    assert.equal(f.make().show(), false);
+});
+
+test('storage failure, corrupt data and unsupported versions leave online chat usable', t => {
+    const f = fixture(t);
+    for (const raw of ['{', '{"v":3,"rooms":[]}', 'x'.repeat(200001), '{"v":1,"rooms":[{"key":"bad"}]}']) {
+        f.values.set(PREVIEW_KEY, raw);
+        assert.equal(f.make().show(), false);
+    }
+    const preview = createChatPreview({ feed: f.mount, room: 1, labelForRow: () => 'Ouroboros', mutate: fn => fn(), storage: () => { throw Error('denied'); } });
+    assert.equal(preview.show(), false);
+    assert.doesNotThrow(() => preview.save(data()));
+    assert.doesNotThrow(() => clearChatPreviews({ removeItem() { throw Error('denied'); } }));
+});
+
+test('the persistent record is bounded and never cuts text inside a message', t => {
+    const f = fixture(t), text = 'long exact passage '.repeat(1000);
+    for (let i = 0; i < 12; i++) f.make([i, '']).save({ page_cursor: 'page',
+        messages: Array.from({ length: 100 }, (_, j) => ({ role: 'user', text, history_id: `chat:${j}` })) });
+    const raw = f.values.get(PREVIEW_KEY), saved = JSON.parse(raw);
+    assert.ok(raw.length <= 200000 && saved.rooms.length <= 8);
+    assert.ok(saved.rooms.every(room => room.rows.length <= 80 && room.rows.every(row => row.text === text)));
+    clearChatPreviews(f.storage);
+    assert.equal(f.make().show(), false);
+});
+
+
+test('canonical speaker labels are plain text, bounded with rows, and legacy unlabeled previews open cold', t => {
+    const f = fixture(t), preview = f.make();
+    const input = data('First line\nSecond line');
+    input.messages[0].sender_label = '<img src=x onerror=alert(1)> Mira';
+    input.messages[0].sender_session_id = 'private-session';
+    preview.save(input); preview.destroy();
+    const fresh = f.make();
+    assert.equal(fresh.show(), true);
+    assert.equal(f.mount.querySelector('.sender').textContent, input.messages[0].sender_label);
+    assert.equal(f.mount.querySelector('.message').textContent, input.messages[0].text);
+    assert.equal(f.mount.querySelectorAll('img').length, 0);
+    const saved = JSON.parse(f.values.get(PREVIEW_KEY));
+    assert.equal(saved.v, 2);
+    assert.doesNotMatch(f.values.get(PREVIEW_KEY), /private-session|sender_session_id/);
+    fresh.destroy();
+    saved.v = 1;
+    f.values.set(PREVIEW_KEY, JSON.stringify(saved));
+    assert.equal(f.make().show(), false);
+});
+
+
+test('accepted canonical deltas extend empty or existing previews, deduplicate and respect newest/error resets', t => {
+    const f = fixture(t), preview = f.make();
+    preview.save({ page_cursor: 'empty', messages: [] });
+    const delta = data('Arrived since opening');
+    preview.save(delta, true); preview.save(delta, true);
+    let rows = JSON.parse(f.values.get(PREVIEW_KEY)).rooms[0].rows;
+    assert.equal(rows.length, 1); assert.equal(rows[0].text, 'Arrived since opening');
+    const update = data('Updated canonical text');
+    preview.save(update, true);
+    preview.save({ page_cursor: 'delta', messages: [{ role: 'user', sender_label: 'Mira', text: 'Next', history_id: 'chat:2' }] }, true);
+    rows = JSON.parse(f.values.get(PREVIEW_KEY)).rooms[0].rows;
+    assert.deepEqual(rows.map(row => row.text), ['Updated canonical text', 'Next']);
+    assert.equal(rows[1].speaker, 'Mira');
+    const saved = f.values.get(PREVIEW_KEY);
+    preview.save({ ...data('Rejected'), reason_code: 'unavailable' }, true);
+    assert.equal(f.values.get(PREVIEW_KEY), saved);
+    preview.save({ page_cursor: 'reset', messages: [] });
+    assert.equal(f.make().show(), false);
+});

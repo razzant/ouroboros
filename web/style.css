@@ -7831,6 +7831,17 @@ html[data-layout="stack"] #chat-messages::after {
 }
 
 /* Keyboard-open layout: only #chat-messages scrolls within visual viewport. */
+body.keyboard-open #chat-input-area,
+body.keyboard-open .chat-input-area {
+    --message-field-max-height: var(--chat-viewport-input-cap, 140px);
+}
+
+.chat-saved-preview {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+}
+
 html.keyboard-open,
 body.keyboard-open {
     position: fixed;
@@ -8569,9 +8580,9 @@ html[data-layout="stack"] .project-panel.open {
     transform: translateY(0);
 }
 
-/* With the keyboard up a Project room shrinks to the visible viewport, as Main does (body.keyboard-open #page-chat):
-   its composer, with the room's ☰, stays above the keyboard instead of behind it. */
-body.keyboard-open .project-panel {
+/* A stack Project follows the visible height even while keyboard dismissal has
+   removed focus but the native viewport is still closing. */
+html[data-layout="stack"] .project-panel {
     height: var(--vvh);
     max-height: var(--vvh);
 }
@@ -11167,4 +11178,47 @@ body.keyboard-open .secret-request-backdrop .secret-request-dialog {
 }
 :root[data-theme] :is(.chat-capsule, .chat-send-inline, .app-tab, .filter-chip, .chat-load-older-btn, .chat-composer-chip) {
     transition: var(--motion-tone);
+}
+
+/* Telegram's horizontal safe area belongs to the shell, not the keyboard height.
+   Fixed stack rooms need the same edges as the grid; do not subtract them twice. */
+html[data-telegram-fullscreen] {
+    --tg-edge-left: calc(max(env(safe-area-inset-left, 0px), var(--tg-safe-area-inset-left, 0px)) + var(--tg-content-safe-area-inset-left, 0px));
+    --tg-edge-right: calc(max(env(safe-area-inset-right, 0px), var(--tg-safe-area-inset-right, 0px)) + var(--tg-content-safe-area-inset-right, 0px));
+}
+html[data-telegram-fullscreen] #app {
+    margin-left: var(--tg-edge-left);
+    margin-right: var(--tg-edge-right);
+}
+html[data-telegram-fullscreen][data-layout="stack"] .project-panel {
+    right: var(--tg-edge-right);
+    max-width: calc(100% - var(--tg-edge-left) - var(--tg-edge-right));
+}
+html[data-telegram-fullscreen][data-layout="stack"] #primary-sidebar {
+    left: var(--tg-edge-left);
+    max-width: calc(100% - var(--tg-edge-left) - var(--tg-edge-right));
+}
+html[data-telegram-fullscreen][data-layout="stack"] .project-panel {
+    left: var(--tg-edge-left);
+    width: auto;
+}
+html[data-telegram-fullscreen][data-layout="stack"] .nav-drawer-backdrop {
+    left: calc(var(--tg-edge-left) + var(--drawer-w));
+}
+html[data-telegram-fullscreen] body.keyboard-open #content {
+    width: auto;
+}
+html[data-telegram-fullscreen] body.keyboard-open #content,
+html[data-telegram-fullscreen] body.keyboard-open #page-chat.active {
+    left: var(--tg-edge-left);
+    right: var(--tg-edge-right);
+}
+
+/* A wide Telegram viewport can use the docked shell too. Its headers do not
+   inherit the stack layout's existing native-control clearance. */
+html[data-telegram-fullscreen][data-layout="docked"] :is(.page-header, .app-page-header, .project-panel-bar) {
+    padding-top: calc(var(--chrome-inset) + var(--inset-top));
+}
+html[data-telegram-fullscreen][data-layout="docked"] #primary-sidebar {
+    padding-top: var(--inset-top);
 }

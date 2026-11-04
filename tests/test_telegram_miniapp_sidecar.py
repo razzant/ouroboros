@@ -694,3 +694,78 @@ def test_websocket_disables_proxy_when_connector_supports_it() -> None:
         await gateway.aclose()
 
     asyncio.run(scenario())
+
+
+def test_proxy_start_send_failure_closes_upstream_once() -> None:
+    async def run():
+        closed = []
+        async def body():
+            yield b"module"
+        async def close():
+            closed.append(True)
+        async def send(_message):
+            raise OSError("downstream disconnected before headers")
+        response = sidecar_module._ProxyStreamResponse(200, [], body(), close)
+        with pytest.raises(OSError):
+            await response({}, None, send)
+        assert closed == [True]
+    asyncio.run(run())
+
+
+def test_real_pool_queues_module_burst_and_cancels_waiters() -> None:
+    """Healthy finite responses may outlive the former three-second pool bound."""
+    async def run():
+        release = asyncio.Event()
+        saturated = asyncio.Event()
+        handlers = set()
+        accepted = 0
+        async def handle(reader, writer):
+            nonlocal accepted
+            task = asyncio.current_task()
+            handlers.add(task)
+            try:
+                await reader.readuntil(b"\r\n\r\n")
+                accepted += 1
+                if accepted == 32:
+                    saturated.set()
+                await release.wait()
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                handlers.discard(task)
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        gateway = sidecar_module.TelegramProxySidecar(BOT_TOKEN, OWNER_ID, port)
+        client = await gateway._get_http_client()
+        jobs = []
+        try:
+            url = f"http://127.0.0.1:{port}/static/module.js"
+            jobs = [asyncio.create_task(client.get(url)) for _ in range(40)]
+            await asyncio.wait_for(saturated.wait(), 5)
+            # The first 32 requests own all slots. One additional waiter can be
+            # cancelled without retiring the client or replaying any request.
+            cancelled = asyncio.create_task(client.get(url))
+            await asyncio.sleep(0)
+            cancelled.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await cancelled
+            await asyncio.sleep(3.2)
+            assert all(not job.done() for job in jobs), "finite burst expired during pool acquisition"
+            release.set()
+            responses = await asyncio.wait_for(asyncio.gather(*jobs), 5)
+            assert all(response.status_code == 200 and response.content == b"ok" for response in responses)
+            assert accepted == 40
+        finally:
+            release.set()
+            for job in jobs:
+                if not job.done():
+                    job.cancel()
+            await asyncio.gather(*jobs, return_exceptions=True)
+            await gateway.aclose()
+            server.close()
+            await server.wait_closed()
+            if handlers:
+                await asyncio.gather(*list(handlers), return_exceptions=True)
+    asyncio.run(run())
