@@ -76,7 +76,10 @@ def test_live_cost_readers_refresh_the_effective_task_and_batch_once(root, monke
     monkeypatch.setattr(ua, "usage_breakdown", counted)
 
     authority = json.loads(results._get_task_result(ctx, "predecessor", include_authority=True))["authority"]
-    assert authority["accounted_upper_bound_usd"] == amount and authority["cost_final"] is False
+    assert authority["accounted_upper_bound_usd"] == 0.1 and authority["cost_final"] is True
+    assert reads == []
+    summary = json.loads(results._get_task_result(ctx, "predecessor", view="summary"))["cost"]
+    assert summary["accounted_upper_bound_usd"] == amount and summary["cost_final"] is False
     assert reads[-1][1]["task_id"] == "successor"
     peek = join_ledger._peek_task(ctx, "predecessor")
     assert (f"cost=${amount:.2f} (upper bound, not final)" if amount is not None else "cost=unknown") in peek
@@ -162,6 +165,31 @@ def test_batch_unavailable_accounting_warns_once_with_the_original_cause(root, m
     assert len(warnings) == 1 and warnings[0].levelno == logging.WARNING
     assert "ledger unreadable" in warnings[0].getMessage()
     assert "KeyError" not in caplog.text
+
+
+def test_live_authority_pages_survive_new_usage_rows(root):
+    from ouroboros import usage_accounting as ua
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.control_task_results import _get_task_result
+
+    write_task_result(root, "parent", "running", root_task_id="parent")
+    write_task_result(root, "child", "scheduled", parent_task_id="parent", root_task_id="parent",
+                      task_contract={"objective": "a stable contract"})
+    ctx = SimpleNamespace(drive_root=root, budget_drive_root=root, task_id="parent",
+                          task_metadata={"root_task_id": "parent"})
+    args = {"authority_fields": ["task_contract"], "source_only": True}
+    metadata = json.loads(_get_task_result(ctx, "child", **args))
+    args["authority_projection_sha256"] = metadata["authority_projection_sha256"]
+    first = json.loads(_get_task_result(ctx, "child", **args, source_start_char=0, source_end_char=10))
+    ua.record_subscription_session("new-run", drive_root=root, task_id="child", root_task_id="parent",
+                                   route="test", spend_usd=3.5)
+    last = json.loads(_get_task_result(ctx, "child", **args, source_start_char=10,
+                                     source_end_char=metadata["authority_source"]["complete_chars"]))
+    assert last.get("reason") != "authority_identity_mismatch", last
+    assert first["authority_projection_sha256"] == last["authority_projection_sha256"]
+    text = first["authority_source"]["text"] + last["authority_source"]["text"]
+    assert json.loads(text) == {"task_contract": {"objective": "a stable contract"}}
+    assert json.loads(_get_task_result(ctx, "child", view="summary"))["cost"]["accounted_upper_bound_usd"] == 3.5
 
 
 class TestAliases:

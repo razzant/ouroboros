@@ -333,7 +333,8 @@ def _get_task_result(
     notice = promotion_intent_notice(task_id, data)
     if notice:
         return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE", text=notice))
-    data = current_cost(data, status_drive_root)
+    if authority_fields is None and not include_authority:
+        data = current_cost(data, status_drive_root)
     if authority_fields is not None or source_only and include_authority and not other_source:
         from ouroboros.tools.task_result_views import authority_selection_response
 
