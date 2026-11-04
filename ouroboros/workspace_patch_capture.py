@@ -77,10 +77,22 @@ def write_workspace_patch_artifacts(
     *,
     task: Dict[str, Any],
     scratch_dir: Optional[pathlib.Path] = None,
+    retain_evidence_dir: Optional[pathlib.Path] = None,
+    retained_evidence: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Stream workspace patch and manifest artifacts into ``artifact_dir``."""
+    """Stream workspace patch and manifest artifacts into ``artifact_dir``.
+
+    The copy's named evidence folder (``EVIDENCE_DIRNAME``; ``metadata.host_evidence`` names the one of a
+    copy whose run worked in a folder of it) is held out of the patch and the file outputs by that one
+    name, for every capture alike: its new files are evidence its owner retains beside the capture, never
+    work product (#2711). A capture whose run does not retain it names ``retain_evidence_dir``: the folder
+    is then retained there once (``delegate_named_evidence.retain_workspace_evidence``; ``retained_evidence``
+    is the last published summary, reused while the folder is unchanged), and a retention that fails keeps
+    those files in the patch and outputs instead, so there is never no copy and never two. Paths the
+    recorded baseline holds (Git or a supplied ``file_baseline``) are the project's own and stay product."""
 
     from ouroboros.artifacts import stream_artifact_file
+    from ouroboros.delegate_start_instructions import EVIDENCE_DIRNAME
 
     root = pathlib.Path(workspace_root).resolve(strict=False)
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -147,12 +159,24 @@ def write_workspace_patch_artifacts(
     # throwaway verification file the agent forgot to delete never leaks into the workspace patch.
     scratch = _declared_scratch(scratch_dir or artifact_dir, root)
     base_sizes = baseline_blob_sizes(root, base_ref, errors=errors)
-    # A delegated copy's named evidence folder: its owner retains those files beside this
-    # capture, so one NEW since the recorded baseline (untracked, staged or committed in the
-    # copy) never rides the work product; a path the baseline holds is the project's own.
-    evidence = str(metadata.get("host_evidence") or "").strip("/")
-    held = {rel for rel in {*untracked, *changed_tracked} if evidence and rel not in base_sizes
+    # The copy's named evidence folder: its owner retains those files beside this capture, so one NEW
+    # since the recorded baseline (untracked, staged or committed in the copy) never rides the work
+    # product; a path the baseline holds is the project's own. One name for every capture (#2711).
+    evidence = str(metadata.get("host_evidence") or EVIDENCE_DIRNAME).strip("/")
+    held = {rel for rel in {*untracked, *changed_tracked} if rel not in base_sizes
             and rel not in file_baseline and (rel == evidence or rel.startswith(evidence + "/"))}
+    named_evidence: Optional[Dict[str, Any]] = None
+    if held and retain_evidence_dir is not None:  # no run retains this copy's evidence: this capture does, once
+        from ouroboros.delegate_named_evidence import retain_workspace_evidence
+
+        area = root / pathlib.PurePosixPath(evidence).parent
+        inside = lambda rel: pathlib.PurePosixPath(rel).is_relative_to(pathlib.PurePosixPath(evidence).parent)  # noqa: E731
+        products = {pathlib.PurePosixPath(rel).relative_to(pathlib.PurePosixPath(evidence).parent).as_posix()
+                    for rel in {*base_sizes, *file_baseline} if inside(rel) and rel.startswith(evidence + "/")}
+        named_evidence = retain_workspace_evidence(area, retain_evidence_dir, product_paths=products,
+                                                   previous=retained_evidence)
+        if named_evidence.get("status") != "retained":
+            held = set()  # unretained evidence rides the capture as it did: never zero copies
     excluded.extend({"path": rel, "reason": NAMED_EVIDENCE_EXCLUSION} for rel in sorted(held & set(untracked)))
     held_tracked = sorted(held - set(untracked))
     tracked_excluded.extend({"path": rel, "reason": NAMED_EVIDENCE_EXCLUSION} for rel in held_tracked)
@@ -348,6 +372,12 @@ def write_workspace_patch_artifacts(
         "exclude_rules_version": _PATCH_EXCLUDE_RULES_VERSION,
         "diagnostics": diagnostics,
         "errors": errors,
+        # Where this capture retained the copy's evidence folder (its files are the exclusions above), or why
+        # it could not and carried those files itself; absent when a run owns the retention or there was none.
+        **({"named_evidence": {key: named_evidence[key] for key in ("status", "evidence_dir", "summary_path", "error")
+                               if key in named_evidence} | {"files": len(named_evidence.get("files") or []),
+                                                            "gaps": len(named_evidence.get("gaps") or [])}}
+           if named_evidence is not None else {}),
     }
     atomic_write_json(manifest_path, manifest, trailing_newline=True)
 
