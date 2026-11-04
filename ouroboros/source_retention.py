@@ -465,8 +465,11 @@ class RetentionWalk:
                     return (raw, manifest), root
                 try:  # this root's loose copy, else the exact locator inside a retained root
                     path = obs._blob_ref_path(root, ref)
-                except FileNotFoundError:  # nothing loose: the member may sit in one of this root's packs
+                except FileNotFoundError:  # nothing loose: a view's skeleton placement, else a pack member
                     path = root / "observability" / "blobs" / f"{ref['sha256']}.{ref['kind']}.gz"
+                    placement = packs.shared_placement_path(root, ref["sha256"])
+                    if ref["kind"] == "json" and placement.is_file():
+                        path = placement  # promoted as the placement; its parts travel through the manifest
                 # Bytes and placement come from the SAME root, so a corrupt canonical copy is
                 # repaired from the child placement instead of being read through it.
                 return (packs.blob_bytes(pathlib.Path(*path.parts[:-3]), {**ref, "path": ""}), path), root
@@ -548,10 +551,16 @@ class RetentionWalk:
         if ref["kind"] == "json" and carrier != "response_ref":
             self._discover(json.loads(raw.decode("utf-8")), task, carrier)
         target = self.parent / "observability" / "blobs" / source_path.name
+        placement = target.name.endswith(packs.SHARED_PLACEMENT_SUFFIX)
         _check_open()
         def verified_destination():
             from ouroboros.task_custody import PublicationClosed
 
+            if placement:  # a skeleton verifies only as the whole it splices to, from this parent's parts
+                try:
+                    return packs.blob_bytes(self.parent, {**ref, "path": ""}) == raw
+                except (OSError, ValueError, EOFError, zlib.error):
+                    return False
             digest, size = hashlib.sha256(), 0
             try:
                 with gzip.open(target, "rb") as stream:
@@ -589,7 +598,8 @@ class RetentionWalk:
             if not verified_destination():
                 raise OSError("retained blob destination failed verification")
         self.state["promoted_ref_count"] += 1
-        return {**ref, "path": str(target), "compressed_size": target.stat().st_size if target.is_file() else 0}
+        canonical = target.with_name(f"{ref['sha256']}.{ref['kind']}.gz") if placement else target
+        return {**ref, "path": str(canonical), "compressed_size": target.stat().st_size if target.is_file() else 0}
 
     def _manifest(self, node, data):
         from ouroboros import observability as obs
@@ -609,6 +619,10 @@ class RetentionWalk:
         carrier = ("call_request" if call_type.endswith("_request") else "call_response"
                    if call_type.endswith(("_response", "_error", "_review_collected")) else "metadata")
         projection = dict(manifest)
+        for part in manifest.get("shared_parts") or []:  # a view's parts before its skeleton, which verifies through them
+            if isinstance(part, dict) and part.get("sha256"):
+                self.reference({**part, "path": str(self.child / "observability" / "blobs" /
+                                                    f"{part['sha256']}.{part.get('kind') or 'json'}.gz")}, task, "response_ref")
         for name in ("full_payload_ref", "redacted_projection_ref"):
             nested = manifest.get(name)
             if isinstance(nested, dict) and nested:

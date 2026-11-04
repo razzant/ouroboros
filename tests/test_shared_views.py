@@ -308,4 +308,8 @@ def test_a_child_root_promotion_leaves_a_readable_whole_in_the_parent(tmp_path):
     shutil.rmtree(child)
     manifest, restored, _ = obs.read_call_payload(parent, task_id=task, call_id="llm_1_request")
     assert restored == json.loads(_json_bytes(obs.redact_projection(payload).value))
-    assert pathlib.Path(manifest["full_payload_ref"]["path"]).is_file(), "the parent holds the verified whole"
+    ref = manifest["full_payload_ref"]
+    assert ref["path"].endswith(f"{ref['sha256']}.json.gz") and not pathlib.Path(ref["path"]).exists()
+    assert packs.shared_placement_path(parent, ref["sha256"]).is_file(), "the parent holds the placement, not a materialized whole"
+    members = packs.loose_members(parent, task, missing=(missing := []))
+    assert not missing and {p["sha256"] for p in manifest["shared_parts"]} < {m["sha256"] for m in members}, "every part came along"
