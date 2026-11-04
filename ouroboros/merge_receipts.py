@@ -219,6 +219,26 @@ def task_receipts(drive_root: Any, task_id: str) -> List[Dict[str, Any]]:
     return [dict(r) for r in row.get(RECEIPTS_KEY) or [] if isinstance(r, dict)]
 
 
+def merged_under_record(drive_root: Any, task_id: str, record_id: str) -> List[Dict[str, Any]]:
+    """Observed merges naming this exact review record; no polling, publication or receipt revision."""
+    return [receipt for receipt in task_receipts(drive_root, task_id) if record_id
+            and (receipt.get("outcome") or {}).get("status") == "merged"
+            and ((receipt.get("review") or {}).get("record") or {}).get("record_id") == record_id]
+
+
+def review_settlement_words(receipts: List[Dict[str, Any]], room_id: Optional[str], revision: Any) -> List[str]:
+    """Merge facts beside a late review, shared by its mailbox notice and retained room mark."""
+    lines = []
+    for receipt in receipts:
+        outcome, review = receipt.get("outcome") or {}, (receipt.get("review") or {}).get("record") or {}
+        lines.append(f"Room {room_id or 'unconfirmed'}: PR #{receipt['number']} was already merged as "
+            f"{outcome.get('merge_sha') or 'unrecorded commit'} at {outcome.get('merged_at') or 'unrecorded time'} "
+            f"(receipt revision {receipt.get('revision')}; review revision {review.get('revision')} at merge, "
+            f"{revision} at settlement). {coverage_words(receipt)} "
+            f"Coverage: {(receipt.get('coverage') or {}).get('status', 'unknown')}.")
+    return lines
+
+
 # --- facts -----------------------------------------------------------------------------
 
 
@@ -507,7 +527,7 @@ def coverage_codes(receipt: Dict[str, Any]) -> str:
             + (f" ({', '.join(coverage['gaps'])})" if coverage.get("gaps") else "") + source)
 
 
-def card_row_text(receipt: Dict[str, Any], *, codes: bool = False) -> str:
+def card_row_text(receipt: Dict[str, Any], *, codes: bool = False, later_review: Optional[Dict[str, Any]] = None) -> str:
     """The merge's card row: its outcome and coverage label on the first line, the coverage sentence on the next,
     which the card shows below the head (``codes``: the agent's own result, one line with the typed codes)."""
     outcome, coverage = receipt.get("outcome") or {}, receipt.get("coverage") or {}
@@ -521,7 +541,44 @@ def card_row_text(receipt: Dict[str, Any], *, codes: bool = False) -> str:
     if codes:
         return f"{head}; {coverage_codes(receipt)}"
     label, sentence = coverage_reading(receipt)
-    return f"{head}{f' · {label}' if label else ''}" + (f"\n{sentence}" if sentence else "")
+    return (f"{head}{f' · {label}' if label else ''}" + (f"\n{sentence}" if sentence else "")
+            + ("\nIts later review: FAIL." if (later_review or {}).get("verdict") == "FAIL" else ""))
+
+
+def card_row_projection(drive_root: Any, receipt: Dict[str, Any]) -> Dict[str, Any]:
+    """Passive current review evidence beside the immutable merge facts, on the existing card row."""
+    later = _later_review(drive_root, receipt)
+    return {"text": card_row_text(receipt, later_review=later), "late_evidence": later}
+
+
+def _later_review(drive_root: Any, receipt: Dict[str, Any]) -> Dict[str, Any]:
+    """The named record's newer revision and, on FAIL, an exact saved reviewer report for the existing reader."""
+    frozen = (receipt.get("review") or {}).get("record") or {}
+    if (receipt.get("outcome") or {}).get("status") != "merged" or not frozen.get("record_id"):
+        return {}
+    try:
+        current = review_ledger.load_record(drive_root, frozen["record_id"]) or {}
+    except (OSError, ValueError):
+        return {}
+    before, after = frozen.get("revision"), current.get("revision")
+    if (current.get("record_id") != frozen["record_id"] or type(before) is not int or type(after) is not int
+            or after <= before):
+        return {}
+    evidence = {"kind": "merge_review", "record_id": current["record_id"], "revision": after,
+                "verdict": (current.get("verdict") or {}).get("aggregate") if current.get("state") == "settled" else ""}
+    if evidence["verdict"] != "FAIL":
+        return evidence
+    for seat in current.get("rows") or []:
+        verdict = (seat.get("outcome") or {}).get("verdict") or (current["verdict"].get("per_row") or {}).get(seat.get("seat_id"))
+        source = review_ledger.seat_text_source(seat) or {}
+        sha = (source.get("ref") or {}).get("sha256")
+        if (verdict != "FAIL" or source.get("status") != "retained" or not sha or not current.get("task_id")
+                or not seat.get("seat_id") or source.get("role") not in {"response", "failure"}):
+            continue
+        evidence["review_source"] = {"task_id": current["task_id"], "record_id": current["record_id"],
+            "seat_id": seat["seat_id"], "role": source["role"], "part": source.get("part") or "", "sha256": sha}
+        break
+    return evidence
 
 
 # --- orchestration ---------------------------------------------------------------------

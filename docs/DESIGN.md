@@ -1538,6 +1538,8 @@ reviews create child tasks or prove execution.
   review passed exactly what merged, a short coverage label; a coverage sentence that
   says more than the label is the row's second line inside the card's Details, its
   codes stay in the receipt, the PR body and the merging agent's result.
+  A later FAIL of that record appears below with one retained report link when
+  available; it creates no Main row.
 - Read opens the selected saved answer in the document reader (Markdown, Source
   exact; a failure note as plain text) and never regenerates a review or
   switches sources after an update; limits, Download, timeout and focus follow

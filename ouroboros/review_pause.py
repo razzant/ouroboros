@@ -500,6 +500,8 @@ def watch_left_review(ctx: Any, *, surface: str, retry_key: str, reissue: str, a
 
     def notify(unknown: int) -> None:
         from ouroboros.owner_mailbox import mailbox_drain_ended, write_task_message
+        from ouroboros.merge_receipts import merged_under_record, review_settlement_words
+        from ouroboros.late_review_marks import owning_room
 
         record.update(unknown_seats=int(unknown))
         verdict = _settled_aggregate(record)
@@ -510,6 +512,10 @@ def watch_left_review(ctx: Any, *, surface: str, retry_key: str, reissue: str, a
                 + (f"; durable revision {record.get('revision')} reads {verdict}" if verdict else "") + ". "
                 f"That review call committed or applied nothing. Re-issue {reissue} to collect its outcome at $0 "
                 "(no second dispatch), or choose another course.")
+        root = record.get("canonical_root") or drive_root
+        merged = merged_under_record(root, task_id, str(record.get("record_id") or ""))
+        if merged:
+            text += "\n" + "\n".join(review_settlement_words(merged, owning_room(root, task_id, None), record.get("revision")))
         if unknown:
             text += (f" {unknown} seat(s) had already left this process's live custody without a retained "
                      "outcome; they stay unknown until that call collects what was recorded.")
@@ -761,10 +767,13 @@ def ended_left_review(record: Dict[str, Any]) -> str:
     and cursor-only notices prove no such receipt. Publication discharges
     the owed duty (the same mark id); a failure keeps it owed. Never raises.
     """
-    from ouroboros.late_review_marks import publish_late_review  # D06->D15 is lazy-only
+    from ouroboros.late_review_marks import publish_late_review, replay_settled_late_review  # D06->D15 is lazy-only
     from ouroboros.review_waiting import _carries_whole
 
     try:
+        replay = replay_settled_late_review(record.get("canonical_root") or record["drive_root"], _left_mark_id(record))
+        if replay is not None:
+            return replay.status
         attempt, seats, gap = _left_seats(record)
         prior = _left_record(record)
         settled = None if gap else _settle_left_record(record, seats, final=True)
@@ -921,10 +930,16 @@ def _left_review_mark(record: Dict[str, Any], attempt: Any, seats: List[Dict[str
                       settled: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """The late-review record of one left wave, composed from its attempt row and retained source."""
     from ouroboros.artifacts import store_actor_source_bytes
+    from ouroboros.merge_receipts import merged_under_record, review_settlement_words
+    from ouroboros.late_review_marks import owning_room
 
     surface, task_id, retry_key = str(record["surface"]), str(record["task_id"]), str(record["retry_key"])
     drive, attempt_no = pathlib.Path(record["drive_root"]), int(record.get("attempt") or 0)
-    source = {"kind": "left_review_settlement", "gap": gap, "seats": seats,
+    root = record.get("canonical_root") or drive
+    merged = merged_under_record(root, task_id, str(record.get("record_id") or ""))
+    room, revision = owning_room(root, task_id, None), (settled or {}).get("revision")
+    source = {"kind": "left_review_settlement", "gap": gap, "seats": seats, "merged_under_record": merged,
+              "room_id": room, "review_revision": revision,
               **{key: record.get(key) for key in ("surface", "task_id", "attempt", "record_id", "retry_key",
                                                   "unknown_seats", "msg_id", "left")},
               "attempt_row": {key: getattr(attempt, key, None) for key in (
@@ -940,18 +955,19 @@ def _left_review_mark(record: Dict[str, Any], attempt: Any, seats: List[Dict[str
            else "that never reached its author" if record.get("left") == "unread"
            else "that its author left for an addressed message")
     verdict = str(((settled or {}).get("verdict") or {}).get("aggregate") or "")
+    no_effect = "the review call committed or applied nothing" if merged else "nothing was committed or applied"
     # Lifecycle facts only: the author's task ended; whether a seat answered is each seat's own line.
     head = (f"The paid {surface} review ({named}) {how}, kept here because its author's task ended. "
-            + (f"Its record now reads {verdict}; nothing was committed or applied; "
+            + (f"Its record now reads {verdict}; {no_effect}; "
                if verdict and (settled or {}).get("state") == "settled"
-               else "No panel verdict was formed for it and nothing was committed or applied; ")
+               else f"No panel verdict was formed for it and {no_effect}; ")
             + (f"its record could not be read ({gap}), so every seat's outcome stays unknown."
                if gap else "each seat's recorded state follows."))
     if unknown:
         head += f" {len(unknown)} seat(s) have no retained outcome and stay unknown; nothing is sent again."
     return {"surface": _LEFT_SURFACES.get(surface, surface), "task_id": task_id, "source_ref": ref,
-            "publication_id": _left_publication_id(record),
-            "lines": [head, *(f"- {seat.get('model') or 'reviewer'} (seat {seat['slot_id']}): {_seat_words(seat)}"
+            "publication_id": _left_publication_id(record), "room_id": room,
+            "lines": [head, *review_settlement_words(merged, room, revision), *(f"- {seat.get('model') or 'reviewer'} (seat {seat['slot_id']}): {_seat_words(seat)}"
                               for seat in seats)],
             "subject": {"retry_key": retry_key, "attempt": attempt_no, "record_id": str(record.get("record_id") or ""),
                         "reviewed_fingerprint": str(getattr(attempt, "pre_review_fingerprint", "") or "")}}

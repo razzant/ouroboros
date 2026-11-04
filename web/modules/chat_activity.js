@@ -4,7 +4,7 @@
 import { META_PART_SEPARATOR, executorIdentityMarkup, executorModelText, formatCoordinatorProvenance, harnessPresentation } from './harness_presentation.js';
 import { effortChipMarkup } from './effort_chip.js';
 import { resultFilesItemHtml } from './result_files.js';
-import { taskSourceDownloadUrl, readState } from './api_client.js';
+import { taskSourceDownloadUrl, taskReviewSourceUrl, readState } from './api_client.js';
 import { compactModel, formatLogDuration, modelExecutionView } from './log_events.js';
 import { connectionLabel, routeConnectionId } from './connection_labels.js';
 import { fitText, fullText } from './text_fit.js';
@@ -79,18 +79,17 @@ export function isLiveLineExpandable(item) {
     );
 }
 
-// A late-review row links its exact applied review record through the task artifact
-// route (#1369) — an absent or unsupported `late_evidence.source_ref` offers no link
-// rather than a guessed one. The card's timeline and a card-less System row share it.
+// Host evidence uses its saved task/record/seat or artifact reader; absent selectors offer no link.
 export function cardRowEvidenceRef(msg) {
+    const source = msg?.late_evidence?.kind === 'merge_review' && msg.late_evidence.review_source;
+    if (source?.task_id && source.record_id && source.seat_id && /^[0-9a-f]{64}$/.test(source.sha256 || ''))
+        return { href: taskReviewSourceUrl(source.task_id, source.record_id, source.seat_id, source), label: 'Download the reviewer’s report' };
     const evidence = msg?.late_evidence && typeof msg.late_evidence === 'object'
         ? taskSourceDownloadUrl(String(msg.task_id || '').trim(), msg.late_evidence.source_ref) : '';
     return evidence ? { href: evidence, label: 'Download the review record' } : null;
 }
 
-// The stored record link as one download anchor, or nothing. A value restored from
-// the session snapshot is held to the task artifact route it was minted on. It wears
-// the chat link ink (`md-link`), as the result-file downloads beside it do.
+// One download anchor through a task source reader; restored snapshots keep that route.
 export function evidenceLinkHtml(evidenceRef) {
     const href = typeof evidenceRef?.href === 'string' && evidenceRef.href.startsWith('/api/tasks/') ? evidenceRef.href : '';
     return href
@@ -107,6 +106,7 @@ export function cardRowSummary(msg, phase, rawTs = '') {
     return {
         phase, headline: lines[0].trim(), body: lines.slice(1).join('\n').trim(), dedupeKey: `cardrow|${rowId}`,
         cardRowRevision: msg.card_row_revision, evidenceRef: cardRowEvidenceRef(msg),
+        cardReview: msg?.late_evidence?.kind === 'merge_review' ? msg.late_evidence : null,
     };
 }
 

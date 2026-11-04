@@ -62,11 +62,17 @@ export function mergeHistoricalTimelineItem(record, summary, row, ts) {
         if (adoptedSource) Object.assign(item, source);
         const incomingTime = Date.parse(row.ts), existingTime = Date.parse(item.sourceTs || '');
         if (Number.isSafeInteger(item.cardRowRevision)) {
-            if (!Number.isSafeInteger(summary.cardRowRevision) || summary.cardRowRevision <= item.cardRowRevision) return adoptedSource;
+            // Only a newer revision of this merge's review can enrich an equal receipt revision.
+            const newerReview = summary.cardReview?.record_id && Number.isSafeInteger(summary.cardReview.revision)
+                && (!item.cardReview || summary.cardReview.record_id === item.cardReview.record_id
+                    && summary.cardReview.revision > item.cardReview.revision);
+            if (!Number.isSafeInteger(summary.cardRowRevision) || summary.cardRowRevision < item.cardRowRevision
+                || summary.cardRowRevision === item.cardRowRevision && !newerReview) return adoptedSource;
         } else if (!Number.isSafeInteger(summary.cardRowRevision) && (incomingTime < existingTime || incomingTime === existingTime
                 && compareHistoryPosition(row.history_position, existingPosition) < 0)) return adoptedSource;
         const update = { headline: summary.headline || item.headline,
             cardRowRevision: summary.cardRowRevision,
+            cardReview: summary.cardReview || null, evidenceRef: summary.evidenceRef || null,
             fullHeadline: summary.fullHeadline || summary.headline || item.fullHeadline,
             body: summary.body || '', fullBody: summary.fullBody || summary.body || '',
             phase: summary.phase || item.phase, sourceTs: row.ts || item.sourceTs,
@@ -87,6 +93,7 @@ export function mergeHistoricalTimelineItem(record, summary, row, ts) {
     } else {
         record.items.push({
             cardRowRevision: summary.cardRowRevision,
+            cardReview: summary.cardReview || null,
             phase: summary.phase || 'working', headline: summary.headline || 'Update',
             fullHeadline: summary.fullHeadline || summary.headline || 'Update',
             body: summary.body || '', fullBody: summary.fullBody || summary.body || '',

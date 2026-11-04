@@ -552,14 +552,14 @@ def _annotate_terminal_task_truth(
             # Selected receipt events keep their physical identity, but show current task-result truth.
             row_id = str(message.get("card_row_id") or "")
             if message.get("card_row") == "reviews" and row_id.startswith("merge-receipt:"):
-                from ouroboros.merge_receipts import card_row_text
+                from ouroboros.merge_receipts import card_row_projection
                 try:
                     receipt = next(r for r in cache.get(task_id, {}).get("merge_receipts", [])
                                    if isinstance(r, dict) and row_id == f"merge-receipt:{r.get('receipt_id')}")
                     revision = receipt.get("revision", 0)
                     if type(revision) is not int or revision < int(message.get("card_row_revision") or 0):
                         raise ValueError("canonical receipt revision unavailable")
-                    message.update(text=card_row_text(receipt), card_row_revision=revision)
+                    message.update(**card_row_projection(data_dir, receipt), card_row_revision=revision)
                 except (StopIteration, KeyError, TypeError, ValueError, AttributeError):
                     message["text"] += "\nCurrent merge receipt unavailable; showing recorded event."
             if cache.get(task_id, {}).get("_history_result_absent"):
