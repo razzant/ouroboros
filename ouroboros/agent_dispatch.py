@@ -611,7 +611,7 @@ def capability_delta_prompt_block(dispatch: Optional[SubagentDispatch]) -> str:
             "You are running BELOW what your parent asked for: "
             + "; ".join(disclosures)
             + f" ({reason_text}). " + action
-            + "so in your answer if the gap actually limited your answer — do not quietly "
+            + "so in your answer if the gap actually limited it — do not quietly "
             "return a weaker result as if it were full strength."
         )
     if delta.get("legacy_note"):

@@ -955,7 +955,7 @@ def test_a_reduction_reaches_the_record_the_child_and_the_parents_readback(tmp_p
     # 2) the child's own prompt
     block = capability_delta_prompt_block(dispatch)
     assert "[CAPABILITY DELTA]" in block
-    assert "executor harness->blocked" in block and "so in your answer if the gap actually limited your answer" in block
+    assert "executor harness->blocked" in block and "so in your answer if the gap actually limited it" in block
 
     # 3) the parent, when it READS the answer
     ctx = _scheduling_ctx(tmp_path / "readback")
