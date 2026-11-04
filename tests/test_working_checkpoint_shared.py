@@ -199,6 +199,29 @@ def test_the_manifest_union_survives_a_resume_in_a_new_process_and_a_dropped_ele
     assert {sha for _kind, sha, _size in packs.manifest_blob_refs(tmp_path, "pause-task")} == listed, "the packer's walk sees every part"
 
 
+def test_a_manifest_write_that_failed_is_written_by_the_same_contexts_next_save(tmp_path, monkeypatch):
+    """A part counts as listed only once a manifest naming it landed: the save that retries after a failed
+    manifest write (``save_or_log``'s next boundary, ``_hold_until``'s next try) lists it before its file names it."""
+    _ctx, limit_ctx = _state_fixture(tmp_path, rounds=4)
+    real, calls = obs.write_call_manifest, []
+
+    def fails_once(*args, **kwargs):
+        calls.append(kwargs.get("call_id"))
+        if len(calls) == 1:
+            raise OSError("the disk refused the manifest")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(obs, "write_call_manifest", fails_once)
+    with pytest.raises(OSError):
+        wc.save_round(limit_ctx, "post_batch")
+    assert not _file(tmp_path).exists() and _manifest(tmp_path) == {}, "no file names a part no manifest lists"
+    assert wc.save_round(limit_ctx, "post_batch") is True
+    named = set(token_digests(_file(tmp_path).read_bytes()))
+    listed = {p["sha256"] for p in _manifest(tmp_path)["shared_parts"]}
+    assert calls == ["working-a1", "working-a1"] and named and named <= listed
+    assert {sha for _kind, sha, _size in packs.manifest_blob_refs(tmp_path, "pause-task")} == listed, "the packer's walk sees every part"
+
+
 def test_an_older_body_refuses_the_shared_form_typed_and_a_missing_part_is_typed(tmp_path):
     ctx, limit_ctx = _state_fixture(tmp_path, rounds=2)
     write_task_result(tmp_path, "pause-task", "running")

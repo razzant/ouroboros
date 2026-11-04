@@ -174,7 +174,8 @@ def _list_working_parts(ctx: Any, parts: Dict[str, bytes]) -> int:
     The manifest holds the union of every part this attempt's checkpoints ever named (a part a
     later state drops is still a listed blob the packer retires with the task, never an orphan);
     the union is seeded from the manifest on disk once per process, so a resumed attempt keeps
-    the earlier listings. Returns the number of parts written.
+    the earlier listings. A part counts as listed only once a manifest naming it landed, so a
+    failed write is written again by the next save. Returns the number of parts written.
     """
     from ouroboros.observability import call_manifest_path, write_blob_bytes, write_call_manifest
 
@@ -194,13 +195,15 @@ def _list_working_parts(ctx: Any, parts: Dict[str, bytes]) -> int:
     new = {digest: raw for digest, raw in parts.items() if digest not in listed}
     if not new:
         return 0
+    union = dict(listed)
     for digest, raw in new.items():
         ref = write_blob_bytes(root, raw)
-        listed[digest] = {key: ref[key] for key in ("sha256", "kind", "encoding", "size")}
+        union[digest] = {key: ref[key] for key in ("sha256", "kind", "encoding", "size")}
     created_at = getattr(ctx, "_working_parts_created_at", None)
     write_call_manifest(root, task_id=task_id, call_id=call_id, manifest={
-        "call_type": WORKING_PARTS_CALL_TYPE, "task_attempt": attempt, "shared_parts": list(listed.values()),
+        "call_type": WORKING_PARTS_CALL_TYPE, "task_attempt": attempt, "shared_parts": list(union.values()),
         **({"created_at": created_at} if created_at else {})})
+    ctx._working_parts_listed = union
     return len(new)
 
 
