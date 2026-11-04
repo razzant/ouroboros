@@ -313,3 +313,28 @@ def test_a_child_root_promotion_leaves_a_readable_whole_in_the_parent(tmp_path):
     assert packs.shared_placement_path(parent, ref["sha256"]).is_file(), "the parent holds the placement, not a materialized whole"
     members = packs.loose_members(parent, task, missing=(missing := []))
     assert not missing and {p["sha256"] for p in manifest["shared_parts"]} < {m["sha256"] for m in members}, "every part came along"
+
+
+def test_a_child_whose_later_call_sorts_first_is_promoted_complete_in_one_pass(root, tmp_path):
+    """A later call's view reuses parts only the first call's manifest listed (``persist_call`` lists a part once per
+    process); the inventory walks manifests by call id, which sorts in no time order. Every manifest's parts still
+    land before any skeleton verifies, so one pass promotes the child complete and its drive can go."""
+    from ouroboros import headless
+
+    parent, task = tmp_path / "canonical", "promoted"
+    child = headless.prepare_task_drive(parent, task, "empty")
+    first, later = _view(_transcript(2)), _view(_transcript(3))
+    obs.persist_call(child, task_id=task, call_id="llm_z_request", call_type="llm_request", payload=first)
+    obs.persist_call(child, task_id=task, call_id="llm_a_request", call_type="llm_request", payload=later)
+    manifests = {call: json.loads(obs.call_manifest_path(child, task, call).read_text(encoding="utf-8"))
+                 for call in ("llm_z_request", "llm_a_request")}
+    listed = {call: {p["sha256"] for p in manifest.get("shared_parts") or []} for call, manifest in manifests.items()}
+    skeleton = _skeleton(child, manifests["llm_a_request"]["full_payload_ref"])
+    assert set(token_digests(skeleton)) & listed["llm_z_request"] - listed["llm_a_request"], \
+        "the later view names parts only the earlier manifest lists"
+    _rewritten, state = obs.promote_child_task_refs(parent, child, task, {})
+    assert (state["status"], state["call_inventory_preserved"], state["pending_refs"]) == ("complete", True, [])
+    shutil.rmtree(child)
+    for call, payload in (("llm_z_request", first), ("llm_a_request", later)):
+        _manifest, restored, _ = obs.read_call_payload(parent, task_id=task, call_id=call)
+        assert restored == json.loads(_json_bytes(obs.redact_projection(payload).value)), call
