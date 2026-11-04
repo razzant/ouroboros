@@ -542,16 +542,16 @@ def settled_record(ledger, attempt, record=None):
     return record
 
 
-def settled_seats(ledger, attempt):
-    """A persisted attempt's own closed seats that its bound settled record (``settled_record``) confirms:
-    ``(record, seats)``, every counted row and each additional row already terminal under the operation its record
-    seat names (a running adviser keeps its custody and is left out); ``None`` when the record proves nothing or the
-    attempt keeps no rows of its own."""
+def settled_seats(ledger, attempt, record=None):
+    """A persisted attempt's own closed seats that its bound settled record (``settled_record``, ``record`` when the
+    caller already read it) confirms: ``(record, seats)``, every counted row and each additional row already terminal
+    under the operation its record seat names (a running adviser keeps its custody and is left out); ``None`` when the
+    record proves nothing or the attempt keeps no rows of its own."""
     from ouroboros.review_custody import _row_is_pending
     from ouroboros.review_ledger import seat_open
     from ouroboros.review_state import counted_roster_rows
 
-    record = settled_record(ledger, attempt)
+    record = settled_record(ledger, attempt, record)
     if record is None or attempt.raw_stripped:
         return None
     confirmed = {str(seat.get("seat_id") or ""): str(seat.get("operation_id") or "")
@@ -565,16 +565,6 @@ def settled_seats(ledger, attempt):
     closed = [row for row in rows if row not in counted and not _row_is_pending(row) and row.get("operation_id")
               and confirmed.get(str(row.get("slot_id") or row.get("slot") or "")) == str(row["operation_id"])]
     return record, counted + closed
-
-
-def custody_settled(ledger, attempt):
-    """Read-only, for a consumer that only judges custody (Storage's checkout hold): whether exact settled evidence
-    (``settled_seats``) leaves no seat of this attempt running, so a start token left on a closed row holds nothing.
-    A running adviser, or an open or unproven seat, keeps the attempt's custody."""
-    from ouroboros.review_state import _attempt_review_roster_rows
-
-    found = settled_seats(ledger, attempt)
-    return found is not None and len(found[1]) == len(_attempt_review_roster_rows(attempt))
 
 
 def late_write_check(ctx, phase, record_id, triad, scope):
@@ -623,6 +613,44 @@ def repair_settled_attempt(root, ledger, attempt):
     except (OSError, LookupError, ValueError):
         log.warning("settled review attempt %s could not be repaired", attempt.attempt, exc_info=True)
         return None
+
+
+def repair_held_attempts(root, state, ledger=None):
+    """``repair_settled_attempt`` for every attempt ``state`` still holds active, in ONE locked write: the checkout
+    pass's repair before it judges custody (``review_checking_prune._review_rounds``). Each bound record is read here,
+    outside the shared-state lock (``settled_seats``, from ``ledger``, default ``root``); inside it, an attempt that
+    changed since it was read is left for the next pass, so a writer in between wins. Returns the state as saved, or
+    ``state`` itself when nothing is proven or the write failed (those rounds stay held this pass); a pass that proves
+    nothing new writes nothing."""
+    from ouroboros.review_ledger import load_record
+    from ouroboros.review_state import ReviewStateMutation, update_state
+    from ouroboros.review_state_records import _attempt_identity_tuple
+
+    ledger, plans = root if ledger is None else ledger, []
+    for attempt in state.get_active_attempts():
+        try:
+            record = load_record(ledger, attempt.review_record_id) if attempt.review_record_id else None
+        except (OSError, ValueError):
+            continue  # an unreadable record proves nothing
+        found = settled_seats(ledger, attempt, record)
+        if found is not None and _settled_row(attempt, found[1], found[0]) != attempt:
+            plans.append((_attempt_identity_tuple(attempt), attempt, found))
+    if not plans:
+        return state
+
+    def mutate(current):
+        changed = False
+        for identity, read, (record, seats) in plans:
+            index = next((at for at, row in enumerate(current.attempts) if _attempt_identity_tuple(row) == identity), None)
+            if index is not None and current.attempts[index] == read:
+                current.attempts[index] = _settled_row(read, seats, record)
+                changed = True
+        return ReviewStateMutation(None, changed=changed)
+    try:
+        return update_state(pathlib.Path(root), mutate)
+    except Exception:
+        log.warning("held review attempts were not repaired this pass; they stay held", exc_info=True)
+        return state
 
 
 def repaired_commit_source(ctx, source):

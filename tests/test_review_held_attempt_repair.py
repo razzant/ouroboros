@@ -101,3 +101,70 @@ def test_a_dead_owners_settled_rows_close_its_attempt_and_a_delegated_seat_stays
     else:
         assert (attempt.status, attempt.phase, attempt.late_result_pending) == ("reviewing", "review", True)
         assert attempt.triad_raw_results[0]["pending_invocation_id"] == TOKEN
+
+
+def _old_writers_rounds(tmp_path, monkeypatch, rounds):
+    """ROUNDS finished commit rounds an old writer left ``reviewing`` with closed seats' start tokens, each proved
+    settled by its exact record (``_prefix_shape``); every round has its own retry key, so its own checkout name."""
+    import copy
+
+    from ouroboros.review_state import update_state
+    from tests.test_unwaited_review_settlement import _commit_world, _prefix_shape
+
+    world = _commit_world(tmp_path, monkeypatch, phase="review")
+    _prefix_shape(world)
+
+    def more(state):
+        for number in range(2, rounds + 1):
+            clone = copy.deepcopy(state.attempts[0])
+            clone.attempt, clone.review_retry_key = number, f"round-{number}"
+            state.attempts.append(clone)
+    update_state(world.data, more)
+    return world
+
+
+def _names(world):
+    from ouroboros.review_state import load_state
+    from ouroboros.tools.review_subject import checkout_token
+
+    return {checkout_token(row.review_retry_key, task_id=row.task_id) for row in load_state(world.data).attempts}
+
+
+def test_the_checkout_pass_repairs_every_proven_round_in_one_write_and_a_second_pass_writes_nothing(
+        tmp_path, monkeypatch):
+    from ouroboros import review_checking_prune
+    from ouroboros.review_state import load_state
+    from tests.test_unwaited_review_settlement import _state_writes
+
+    world = _old_writers_rounds(tmp_path, monkeypatch, 3)
+    assert review_checking_prune._review_rounds(world.data)[0] == _names(world), "all three read as custody"
+    writes = _state_writes(monkeypatch)
+
+    first, _owners = review_checking_prune._review_rounds(world.data, repair=True)
+    assert len(writes) == 1 and first == set(), writes
+    attempts = load_state(world.data).attempts
+    assert [(row.status, row.phase) for row in attempts] == [("reviewed", "review_only")] * 3
+    assert not any(row.get("pending_invocation_id") for item in attempts for row in item.triad_raw_results)
+    second, _owners = review_checking_prune._review_rounds(world.data, repair=True)
+    assert len(writes) == 1 and second == set(), "an identical second pass writes nothing"
+
+
+@pytest.mark.parametrize("evidence", ["unreadable_record", "record_seat_naming_another_operation"])
+def test_a_round_its_record_does_not_prove_stays_held_and_the_pass_writes_nothing(tmp_path, monkeypatch, evidence):
+    from ouroboros import review_checking_prune
+    from ouroboros import review_ledger as rl
+    from ouroboros.review_state import load_state
+    from tests.test_unwaited_review_settlement import _state_writes
+
+    world = _old_writers_rounds(tmp_path, monkeypatch, 1)
+    if evidence == "unreadable_record":
+        rl.record_path(world.data, world.record_id).write_text("{not json", encoding="utf-8")
+    else:
+        rl.revise_record(world.data, world.record_id, lambda payload: {**payload, "rows": [
+            {**row, "operation_id": f"{row.get('operation_id')}-successor"} for row in payload["rows"]]})
+    before = load_state(world.data).attempts
+    writes = _state_writes(monkeypatch)
+
+    active, _owners = review_checking_prune._review_rounds(world.data, repair=True)
+
+    assert active == _names(world) and writes == [] and load_state(world.data).attempts == before
