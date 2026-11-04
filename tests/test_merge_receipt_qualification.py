@@ -770,6 +770,7 @@ def test_a_record_reads_green_only_when_settled_with_pass(world, monkeypatch, st
     # A rejection reads apart from a missing verdict, both as the head's label; neither is the verdict's token.
     label = gap_only_in_detail(receipt, aggregate, state)
     assert label == (merge_receipts._REJECTED if rejected else merge_receipts._NO_VERDICT)
+    assert "\n" not in merge_receipts.card_row_text(receipt)  # the label says it all: no second line repeats it
     assert (f"({state})" in out) is (state != "settled")
     assert f"verdict **{aggregate}**" in world.gh.pr["body"]
 
