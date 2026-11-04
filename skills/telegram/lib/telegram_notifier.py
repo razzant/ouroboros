@@ -16,6 +16,7 @@ from .telegram_api import (
     next_telegram_retry_delay,
     _LOCALIZED_TEXTS,
 )
+from .telegram_poll_binding import bot_id
 from .telegram_state import (
     _data_dir,
     _jsonl_tail,
@@ -72,12 +73,12 @@ async def _push_notification(
     recovered transition warning (which carries the exception) is the one
     owner-visible line per episode.
     """
-    protected = api.get_settings(["TELEGRAM_BOT_TOKEN"])
+    token = api.get_settings(["TELEGRAM_BOT_TOKEN"]).get("TELEGRAM_BOT_TOKEN", "")
     state_dir = Path(api.get_state_dir())
     client = TelegramClient(
-        protected.get("TELEGRAM_BOT_TOKEN", ""), trust_env=trust_env,
+        token, trust_env=trust_env,
         proxy=telegram_proxy(state_dir),
-        **(_mirror_options(api, event, chat_id) if event is not None else {}),
+        **(_mirror_options(api, bot_id(token), event, chat_id) if event is not None else {}),
         api_base_url=telegram_api_base(state_dir),
         files_dir=telegram_files_dir(state_dir),
     )

@@ -18,6 +18,7 @@ from ..scripts.telegram_settings import (
     validate_telegram_proxy as _telegram_proxy,
 )
 from .telegram_i18n import Index
+from .telegram_poll_binding import bot_id
 
 # Telegram hard-caps a single sendMessage at 4096 UTF-16 code units.
 _TELEGRAM_TEXT_LIMIT = 4096
@@ -584,6 +585,8 @@ class TelegramClient:
                  on_message=None, reply_to_message_id: int = 0,
                  api_base_url: Optional[str] = None, files_dir: Optional[str] = None):
         self.token = str(token or "").strip()
+        # The bot this client speaks as, fixed with its token: every id it reads or sends is this bot's.
+        self.bot_id = bot_id(self.token)
         self.trust_env = bool(trust_env)
         # One observer per mirrored host row, called for EVERY confirmed part,
         # including media and edits. A later chunk failure cannot erase earlier ids.
@@ -959,6 +962,7 @@ _MENU_TEXTS_EN = {
     "unknown_command": "Unknown command",
     "use_miniapp": "Use the Mini App.",
     "update_failed": "Could not deliver that Telegram update to Ouroboros.",
+    "reply_not_linked": "Sent, but not linked to the earlier work: a message from before this bridge update can't be matched safely.",
     "metrics_budget_status": "• **Budget Status:**\n  Spent: `${spent_usd}`\n  Limit: `${total_budget}`\n  Remaining: `${rem}`\n\n• **System Environment:**\n  Branch: `{branch}`\n  BG Thoughts: `{bg_status}`",
     "file_too_large_notice": "{filename} is saved in Ouroboros. This file exceeds the Telegram upload limit and cannot be mirrored here.",
     "file_open_app_hint": "Open the app to download it.",

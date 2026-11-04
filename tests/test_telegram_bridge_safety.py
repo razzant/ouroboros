@@ -50,6 +50,7 @@ class FakeApi:
 
 
 class FakeTelegramClient:
+    bot_id = ""
     instances = []
 
     def __init__(self, token, **_kwargs):
