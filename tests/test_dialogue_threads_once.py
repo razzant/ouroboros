@@ -351,9 +351,10 @@ _BODY_DECODERS = {
     "ouroboros/place_arrivals.py::_room_details": "stored row, scalar title/name only",
     "ouroboros/place_arrivals.py::retain_focus_source": "stored row, its address only",
 }
-# Readers that hand a stored row on whole (a receipt, a comparison, a rebuilt source, the export) expand it.
+# Readers that hand a stored row on whole (a receipt, a comparison, a rebuilt source, the exports) expand it.
 _WHOLE_ROW_READERS = ("ouroboros/dialogue_store.py::append", "ouroboros/dialogue_store.py::_receipt",
                       "ouroboros/dialogue_import.py::_continues_store", "ouroboros/dialogue_import.py::_export_stream",
+                      "ouroboros/dialogue_import.py::_expand_stream",
                       "ouroboros/chat_chain.py::recorded_context", "ouroboros/presence_history.py::_record_one",
                       "ouroboros/place_intake.py::_captured_arrival")
 

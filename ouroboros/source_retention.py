@@ -415,7 +415,7 @@ class RetentionWalk:
         self.discovering = False
         self.current_node = None
 
-    def reference(self, ref, task_id, carrier="metadata"):
+    def reference(self, ref, task_id, carrier="metadata", *, first=False):
         from ouroboros import observability as obs
 
         _check_open()
@@ -429,7 +429,7 @@ class RetentionWalk:
             node = {"ref": dict(ref), "task_id": task_id, "carrier": carrier, "kind": kind,
                     "key": key, "dependencies": set()}
             self.nodes[key] = node
-            self.queue.append(node)
+            (self.queue.appendleft if first else self.queue.append)(node)
         if self.current_node is not None:
             self.current_node["dependencies"].add(node["key"])
         if self.discovering or kind == "source":
@@ -619,10 +619,13 @@ class RetentionWalk:
         carrier = ("call_request" if call_type.endswith("_request") else "call_response"
                    if call_type.endswith(("_response", "_error", "_review_collected")) else "metadata")
         projection = dict(manifest)
-        for part in manifest.get("shared_parts") or []:  # a view's parts before its skeleton, which verifies through them
+        # The parts go to the front: every queued manifest's parts land before any skeleton, which verifies through
+        # them, also through the parts only an earlier call's manifest listed (call ids sort in no time order).
+        for part in manifest.get("shared_parts") or []:
             if isinstance(part, dict) and part.get("sha256"):
                 self.reference({**part, "path": str(self.child / "observability" / "blobs" /
-                                                    f"{part['sha256']}.{part.get('kind') or 'json'}.gz")}, task, "response_ref")
+                                                    f"{part['sha256']}.{part.get('kind') or 'json'}.gz")}, task, "response_ref",
+                               first=True)
         for name in ("full_payload_ref", "redacted_projection_ref"):
             nested = manifest.get(name)
             if isinstance(nested, dict) and nested:
