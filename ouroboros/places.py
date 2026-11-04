@@ -405,6 +405,44 @@ def owner_account_matches(owner_accounts: Iterable[OwnerAccount], platform_actor
                                for a in owner_accounts)
 
 
+def place_owner_accounts(drive_root: Any) -> dict[str, tuple[OwnerAccount, ...]]:
+    """Every place's confirmed owner accounts as stored now: one read, never a migration (``load_places``
+    may write). An unreadable document raises ``PlaceError``: unknown, never "no owner"."""
+    current = _read(drive_root)
+    connections = current.get("connections", {})
+    return {key: _decode(value, connections.get(key)).owner_accounts for key, value in current["places"].items()}
+
+
+def _fields(value: Any, key: str) -> Mapping[str, Any]:
+    found = value.get(key) if isinstance(value, Mapping) else None
+    return found if isinstance(found, Mapping) else {}
+
+
+def row_place_id(row: Mapping[str, Any]) -> str:
+    """The place a stored room row came through: its provenance stamp (kept beside the text), else its own field."""
+    return str(_fields(row, "presence_provenance").get("place_id") or row.get("place_id") or "")
+
+
+def owner_confirmed_row(row: Mapping[str, Any], accounts: Mapping[str, Iterable[OwnerAccount]]) -> bool:
+    """A place row as my human's own words: its actor is an account its place confirms now.
+
+    ``accounts`` is one ``place_owner_accounts`` read per pass. The answer is the current confirmation,
+    as the room's history shows it (``gateway.place_history``): confirming an account names its earlier
+    rows too, and withdrawing a mistaken confirmation unnames them; what caused a work is the admission's
+    own snapshot instead (``focus.actor.owner_confirmed``). Only facts a stored row keeps beside its text
+    are read (``memory_inventory._META_FIELDS``). An actor the connector reports unauthenticated, a row
+    from the account I send as (``transport.identity.sends_as``: who typed it is unknown) and an imported
+    earlier message (``presence_history``) are never confirmed.
+    """
+    transport = _fields(row, "transport")
+    actor = _fields(transport, "actor")
+    actor_id = str(actor.get("platform_actor_id") or actor.get("id") or "")
+    return (actor.get("authenticated") is not False and not isinstance(row.get("historical_import"), Mapping)
+            and str(_fields(_fields(transport, "identity"), "sends_as").get("id") or "") != actor_id
+            and owner_account_matches(accounts.get(row_place_id(row), ()), actor_id,
+                                      str(transport.get("account_id") or "")))
+
+
 def note_identity(place_id: str, index: int, note: NoteEntry) -> str:
     return note.note_id or hashlib.sha256(f"{place_id}:{index}:{note.text}".encode()).hexdigest()[:24]
 

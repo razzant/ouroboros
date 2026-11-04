@@ -17,11 +17,11 @@ from ouroboros.context_budget import OWNER_WORDS_KIND
 KIND_RELAY = "relay_entry"
 
 
-def _owner_row(row) -> bool:
+def _owner_row(row, drive_root=None) -> bool:
     from ouroboros.owner_quiz import secret_outcome_block
     from ouroboros.owner_words import _owner_row as attested
     # A secret request's answer row is the host's outcome frame: never a quotable owner row.
-    return attested(row) or bool(row and row.get("type") == "quiz_answer"
+    return attested(row, drive_root) or bool(row and row.get("type") == "quiz_answer"
         and row.get("source") == "owner_quiz_answer" and (row.get("quiz") or {}).get("state") == "answered"
         and secret_outcome_block(row) is None)
 
@@ -52,7 +52,7 @@ def held_owner_messages(ctx) -> dict:
                 row = resolve_owner_message_source(canonical_data_root(ctx), ref)
             except StoreError:  # its archive is still importing: nothing held yet, never a failed turn
                 row = None
-            if _owner_row(row):
+            if _owner_row(row, canonical_data_root(ctx)):
                 held[format_address(row_address(row))] = row
         persist_held_state(ctx)
     return held
@@ -67,7 +67,8 @@ def retain_owner_message(ctx, row=None, *, client_message_id="") -> None:
         chat_id = getattr(ctx, "current_chat_id", None)  # a context may carry no chat: Main's lookup
         row = accepted_chat_message(canonical_data_root(ctx), 1 if chat_id is None else int(chat_id),
                                     client_message_id)
-    if _owner_row(row):
+    from ouroboros.tool_access import canonical_data_root
+    if _owner_row(row, canonical_data_root(ctx) if getattr(ctx, "drive_root", None) else None):
         held_owner_messages(ctx)[format_address(row_address(row))] = copy.deepcopy(row)
         persist_held_state(ctx)
 

@@ -17,7 +17,8 @@ on a helper's start path. Carriers are tried in order and the first that yields 
 is taken: the task's ingress origin text or ref, its Project binding, its routing
 annotations, its mailbox, then the marker. An annotation counts only through the
 inbound chat row with the same client message id: Ouroboros writes steer receipts of
-its own, and nothing inbound joins to them.
+its own, and nothing inbound joins to them. A place row counts only from an account
+its place confirms as my human's now (``_owner_row``): a participant's words never do.
 
 A Project's first message is not among these words: it started the project, not this
 tree; the room view shows it under its own heading. ``objective_author_line`` names who
@@ -195,14 +196,25 @@ def _inbound_rows(drive_root: Any, client_ids: Mapping[str, str]) -> List[Dict[s
     from ouroboros import dialogue_store as ds
 
     ds.require_imported(drive_root, "chat")
-    return [entry.row for entry in ds.iter_probes(drive_root, "chat", [("client_message_id", key) for key in client_ids])
-            if _owner_row(entry.row)]
+    rows = [entry.row for entry in ds.iter_probes(drive_root, "chat", [("client_message_id", key) for key in client_ids])]
+    return [row for row in rows if _owner_row(row, drive_root)]
 
 
-def _owner_row(row: Mapping[str, Any] | None) -> bool:
-    """The owner-source cut: inbound, non-empty, not a system/presence/skill-repair injection."""
-    return bool(row and row.get("direction") == "in" and str(row.get("text") or "").strip()
-                and not (row.get("system_type") or row.get("presence") or row.get("source") == "skill_repair"))
+def _owner_row(row: Mapping[str, Any] | None, drive_root: Any = None) -> bool:
+    """The owner-source cut: inbound, non-empty, not a system or skill-repair injection, and a place row only
+    from an account its place confirms as my human's now (``places.owner_confirmed_row``; unreadable: not)."""
+    if not (row and row.get("direction") == "in" and str(row.get("text") or "").strip()
+            and not (row.get("system_type") or row.get("source") == "skill_repair")):
+        return False
+    from ouroboros.dialogue_provenance import row_provenance
+    from ouroboros.places import PlaceError, owner_confirmed_row, place_owner_accounts  # D17->D20 is lazy-only
+
+    if row_provenance(row) != "place":
+        return True
+    try:
+        return drive_root is not None and owner_confirmed_row(row, place_owner_accounts(drive_root))
+    except PlaceError:
+        return False
 
 
 def _message_rows(drive_root: Any, task_id: str, text: Any, ref: Any, carrier: str) -> List[Dict[str, str]]:
@@ -215,7 +227,7 @@ def _message_rows(drive_root: Any, task_id: str, text: Any, ref: Any, carrier: s
     from ouroboros.project_dialogue import resolve_owner_message_source
 
     row = resolve_owner_message_source(drive_root, dict(ref))
-    if not _owner_row(row):
+    if not _owner_row(row, drive_root):
         return []
     return [_row(row["text"], source="origin_message", carrier=carrier, task_id=task_id, ts=row.get("ts"),
                  ref=_chat_ref(row))]
@@ -260,7 +272,7 @@ def _mailbox_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any]) -
                  ref=f"msg {entry.get('msg_id')}") for entry in entries if entry.get("kind") == KIND_OWNER_TEXT] + [
         _row(owner_text(row), source="owner_mailbox", carrier="relay", task_id=task_id, ts=row.get("ts"),
              ref=_chat_ref(row)) for entry in entries if entry.get("kind") == "relay_entry"
-        for row in entry.get("owner_rows") or [] if relay_owner_row(row)]
+        for row in entry.get("owner_rows") or [] if relay_owner_row(row, drive_root)]
 
 
 def _task_record(drive_root: Any, task_id: str) -> Dict[str, Any]:
@@ -283,7 +295,7 @@ def task_owner_words(drive_root: Any, task_id: str, *,
     from ouroboros.owner_relay import owner_text, _owner_row as held_owner_row
     held = [_row(owner_text(row), source="owner_mailbox", carrier="held", task_id=task_id,
                  ts=row.get("ts"), ref=address) for address, row in (record.get("held_owner_messages") or {}).items()
-            if held_owner_row(row)]
+            if held_owner_row(row, drive_root)]
     rows, absent = task_governing_words(record)
     if rows or absent:
         return _deduped(rows + held), "" if rows or held else absent

@@ -125,7 +125,7 @@ def read_room_source(drive_root: Any, chat_id: int, *, task_id: str = "",
     # An activated chronicle records the lineage epoch: an outgoing row before it is signed by
     # its task result, never assumed mine. That rule needs each room row's stream position.
     lineage, positions = row_lineage(root), {}
-    if lineage and coverage["snapshot_stable"]:
+    if lineage.get("lineage_epoch") and coverage["snapshot_stable"]:
         for address, _row, pos in iter_room_rows(root, chat_id):
             positions.setdefault(address["row_sha256"], pos)
     source_rows = []

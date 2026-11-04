@@ -76,18 +76,24 @@ def legacy_frontier(store: Any) -> Dict[str, Any]:
 
 
 def row_lineage(root: Any) -> Dict[str, Any]:
-    """``row_author`` keywords from the activation receipt: its lineage epoch (a data fact) and
-    a strict task-result lookup. Empty before activation, and where the chain was empty then;
-    a reader never creates the chronicle to ask.
+    """``row_author`` keywords for one pass: the places' current owner accounts (read once, absent
+    when unreadable) and, from the activation receipt, its lineage epoch (a data fact) and a strict
+    task-result lookup — none before activation, nor where the chain was empty then; a reader never
+    creates the chronicle to ask.
     """
     from ouroboros.dialogue_provenance import task_lineage_lookup
+    from ouroboros.places import PlaceError, place_owner_accounts  # D15->D20 is lazy-only
 
+    try:
+        keywords: Dict[str, Any] = {"owner_accounts": place_owner_accounts(root)}
+    except PlaceError:
+        keywords = {}
     store = ChronicleStore(root)
     receipt = (store.activation() if store.log_path.exists() else None) or {}
     epoch = (receipt.get("metadata") or {}).get("lineage_epoch")
     if not isinstance(epoch, dict) or type(epoch.get("pos")) is not int:
-        return {}
-    return {"lineage_epoch": epoch, "lineage_lookup": task_lineage_lookup(root)}
+        return keywords
+    return {**keywords, "lineage_epoch": epoch, "lineage_lookup": task_lineage_lookup(root)}
 
 
 def ensure_activated(store: Any, *, wait: bool = False) -> Dict[str, Any]:
