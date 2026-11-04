@@ -95,6 +95,29 @@ test('a lost answer is retried under the SAME nonce; an already accepted press n
     assert.equal(await continueTaskAction('root-9', { request: refused, storage, toast }), 'root-1-cabc');
 });
 
+test('a refused Continue press explains its hard bound and preserves the same action nonce', async () => {
+    for (const cause of ['budget_exhausted', 'deadline', 'execution_budget_exhausted']) {
+        const storage = memoryStorage();
+        const nonces = [], notices = [];
+        const request = async (_id, nonce) => {
+            nonces.push(nonce);
+            throw Object.assign(new Error('continue refused: hard_limit_reached'), {
+                body: { reason_code: 'hard_limit_reached', cause },
+            });
+        };
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+            assert.equal(await continueTaskAction(`limited-${cause}`, {
+                storage, request, toast: (...row) => notices.push(row),
+            }), '');
+        }
+        assert.deepEqual(notices, Array.from({ length: 2 }, () => [
+            `Continue not confirmed: ${taskReasonPhrase(cause)}`, 'error',
+        ]));
+        assert.doesNotMatch(notices[0][0], /hard_limit_reached/);
+        assert.equal(nonces[0], nonces[1]);
+    }
+});
+
 test('chat reaches the Continue action through the one settled-card seam', () => {
     const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
     assert.match(chat, /import \{ syncSettledItems \} from '\.\/settled_card\.js';/);
@@ -138,6 +161,29 @@ test('a Continue read late, after its card was drawn, is written through the cal
         await flush();
         assert.deepEqual(seam, ['open', 'close'], 'the late write is one transaction of the caller\'s seam');
         assert.equal(card.root.querySelector('[data-continue-task]')?.textContent, 'Continue');
+    } finally { restoreDom(prior); }
+});
+
+test('a live terminal of an author stop reads the offer once; a clean finish reads nothing', async () => {
+    const { prior } = installDom();
+    try {
+        const reads = [];
+        const read = async (id) => { reads.push(id);
+            return { status: 'completed', continuation_offer: { eligible: true, cause: 'author_stop' } }; };
+        const stopped = settledRootCard('stopped-root');
+        syncContinueAction(stopped, { type: 'task_done', status: 'completed', outcome_axes: { execution: {
+            status: 'ok', task_completion: { action: 'stop', rationale: 'Not ready' } } } }, { read });
+        const legacy = settledRootCard('legacy-stopped-root');
+        syncContinueAction(legacy, { type: 'task_done', status: 'completed', outcome_axes: {
+            execution: { status: 'ok' }, objective: { status: 'fail', reason: 'author_stop' } } }, { read });
+        const clean = settledRootCard('clean-root');
+        syncContinueAction(clean, { type: 'task_done', status: 'completed', outcome_axes: { execution: { status: 'ok' } } }, { read });
+        await flush();
+        assert.deepEqual(reads, ['stopped-root', 'legacy-stopped-root']);
+        const button = stopped.root.querySelector('[data-continue-task]');
+        assert.equal(button?.textContent, 'Continue');
+        assert.equal(button?.title, 'Start a new task that continues this unfinished work');
+        assert.equal(clean.root.querySelector('[data-continue-task]'), null);
     } finally { restoreDom(prior); }
 });
 

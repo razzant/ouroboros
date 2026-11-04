@@ -58,7 +58,9 @@ def _child_result_sha256(result: Dict[str, Any]) -> str:
     construction. A content/status/artifact change therefore invalidates a prior
     disposition, while accounting or coordination telemetry does not. The host
     notice is part of the parent's consumed result, separate from model-answer
-    identity; its absence preserves the historical hash exactly.
+    identity; its absence preserves the historical hash exactly. So does hashing
+    the custody text with its empty categories: a shorter display of the same
+    facts must not void a recorded disposition (#1403).
     """
 
     semantic_result = result
@@ -111,7 +113,7 @@ def _child_result_sha256(result: Dict[str, Any]) -> str:
     }
     from ouroboros.task_finalization import terminal_host_notice_text
 
-    notice = terminal_host_notice_text(semantic_result)
+    notice = terminal_host_notice_text(semantic_result, include_empty=True)
     if "terminal_host_notice" in semantic_result or notice:
         payload["terminal_host_notice"] = notice
     encoded = json.dumps(

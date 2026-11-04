@@ -140,7 +140,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/tasks/{task_id}/hurry` | (§5 Stop policy and hurry) |
 | POST | `/api/tasks/{task_id}/pause` | (§6 Owner Pause of a whole tree) |
 | POST | `/api/tasks/{task_id}/owner-keep` | `OwnerKeepRequest`; keep or release exactly this task's materials |
-| POST | `/api/tasks/{task_id}/continue` | (§6 Owner Continue after a technical interruption) |
+| POST | `/api/tasks/{task_id}/continue` | (§6 Continue after interruption or an unfinished author stop) |
 | POST | `/api/tasks/{task_id}/resume` | |
 | POST | `/api/call/open` | admits a live call as an ordinary room turn when Calls (beta) is on (§13 Live Conversation) |
 | POST | `/api/decisions` | |

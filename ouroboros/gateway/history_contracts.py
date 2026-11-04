@@ -208,7 +208,7 @@ class ChatHistoryMessage(TypedDict, total=False):
     elapsed_sec: Any
     tool_evidence: Dict[str, Any]  # system_type task_evidence: the task's recorded tool calls
     cancel_origin: Dict[str, Any]
-    continuation_offer: Dict[str, Any]  # ContinuationOffer of an interrupted root
+    continuation_offer: Dict[str, Any]  # ContinuationOffer of an interrupted or author-stopped root
 
 
 class ChatHistoryCoverage(TypedDict):

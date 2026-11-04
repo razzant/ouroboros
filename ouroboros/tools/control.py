@@ -203,13 +203,13 @@ def get_tools() -> List[ToolEntry]:
             }, "required": ["subagent_id"], "additionalProperties": False},
         }, inspect_subagent_tool),
         ToolEntry("finish_task", {"name": "finish_task",
-            "description": "Select the complete answer and request completion of your current task. "
-                "Use finish after considering the observed work, or stop with a rationale naming unfinished work. "
+            "description": "Select the complete answer after considering the work. Use finish, or stop with a rationale naming unfinished work or why you are stopping. "
+                "A root's stop records unfinished work for explicit Continue under the same limits. Continue does not reopen an ordinary finish or a final reply without this tool, even when its text calls it partial. "
                 "Select exactly one of answer or a host-offered answer_sha256. Successful page, note, mark and addressed-message writes may ride in the same response; any other result is read before the finish. On a self-started run (a consciousness wake's own turn, or a schedule-born root without a Presence binding) or a root answering its place, silent=true sends no message (any answer stays your internal note), refused while your human awaits a reply. No answer is needed. The run records no message unless a host notice is owed. This grants no success, cancels no children, and retains all configured review and owner controls.",
             "parameters": {"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["finish", "stop"]}, "answer": {"type": "string", "description": "The complete answer, including a short correction; a child's parent reads it as your report, a root's goes where that root answers (its owner's chat, or the conversation a Presence root answers, as your context names)."},
                 "answer_sha256": {"type": "string", "description": "Exact offered retained or whole held response hash."},
-                "rationale": {"type": "string", "description": "For stop, what remains unfinished; the owner reads it as the stop's cause on the task row. Optional for finish."}, "acceptance_subject": {"type": "object", "properties": {"owner_source_sha256": {"type": "string"},
+                "rationale": {"type": "string", "description": "For stop, what remains unfinished or why you are stopping; the owner reads it as the stop's cause on the task row. Optional for finish."}, "acceptance_subject": {"type": "object", "properties": {"owner_source_sha256": {"type": "string"},
                     "effective_criteria": {"type": "string"}, "material_tool_indices": {"type": "array", "items": {"type": "integer"}},
                 }, "required": ["owner_source_sha256"]},
                 "pending_review": {"type": "string", "enum": ["wait", "finish"], "default": "wait"},
