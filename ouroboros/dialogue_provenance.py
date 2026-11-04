@@ -727,17 +727,17 @@ def _pre_epoch_author(row: Mapping[str, Any], lineage_lookup: Any) -> dict[str, 
 
 def _place_speaker(row: Mapping[str, Any], owner_accounts: Mapping[str, Any] | None) -> str:
     """The host fact a place row's author label leads with: ``my human`` (``places.owner_confirmed_row`` over the
-    current snapshot), ``the account I send as`` (its sender is that account: who typed it is unknown), else none."""
-    transport = _mapping(row.get("transport"))
-    actor = _mapping(transport.get("actor"))
-    actor_id = _text(actor.get("platform_actor_id") or actor.get("id"))
-    if actor_id and actor_id == _text(_mapping(_mapping(transport.get("identity")).get("sends_as")).get("id")):
-        return "the account I send as"
+    current snapshot), else ``the account I send as`` (a bot or service account of mine wrote it), else none."""
     if owner_accounts is not None:
         from ouroboros.places import owner_confirmed_row  # D15->D20 is lazy-only
 
-        return "my human" if owner_confirmed_row(row, owner_accounts) else ""
-    return ""
+        if owner_confirmed_row(row, owner_accounts):
+            return "my human"
+    transport = _mapping(row.get("transport"))
+    actor = _mapping(transport.get("actor"))
+    actor_id = _text(actor.get("platform_actor_id") or actor.get("id"))
+    sends_as = _text(_mapping(_mapping(transport.get("identity")).get("sends_as")).get("id"))
+    return "the account I send as" if actor_id and actor_id == sends_as else ""
 
 
 def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch: Mapping[str, Any] | None = None,

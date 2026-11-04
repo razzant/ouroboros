@@ -32,13 +32,13 @@ def place(tmp_path):
 
 
 def _place_row(place_id, actor_id="anton", *, text="Ship the long answer, the end changes its meaning.",
-               sends_as="", authenticated=None, account="qa", **extra):
+               sends_as="", sends_kind="user", authenticated=None, account="qa", **extra):
     actor = {"platform_actor_id": actor_id, "display_name": actor_id.title()}
     if authenticated is not None:
         actor["authenticated"] = authenticated
     transport = {"provider": "chat", "account_id": account, "conversation_id": "design", "actor": actor}
     if sends_as:
-        transport["identity"] = {"sends_as": {"id": sends_as, "label": "Shared", "kind": "user"}}
+        transport["identity"] = {"sends_as": {"id": sends_as, "label": "Shared", "kind": sends_kind}}
     return {"ts": "2026-11-04T10:00:00Z", "direction": "in", "chat_id": ROOM, "text": text, "source": "presence:chat",
             "sender_label": actor_id.title(), "sender_session_id": actor_id, "client_message_id": f"ev-{actor_id}",
             "transport": transport, "presence_provenance": {"place_id": place_id}, "place_id": place_id, **extra}
@@ -52,11 +52,20 @@ def test_the_confirmed_account_is_my_human_on_the_row_and_on_its_stored_facts(tm
     assert not owner_confirmed_row(owner, {}), "no snapshot of the place: no confirmation"
 
 
-@pytest.mark.parametrize("variant", ["shared_account", "unauthenticated", "other_account", "imported", "legacy_form"])
+def test_a_place_where_i_write_from_my_humans_account_keeps_their_rows_theirs(tmp_path, place):
+    """The owner's "This is my account" confirms the account I send as: their rows there stay theirs, as at
+    admission (``presence_context.focus_metadata``), on the full row and its stored facts."""
+    accounts = place_owner_accounts(tmp_path)
+    shared = _place_row(place.place_id, sends_as="anton")
+    assert owner_confirmed_row(shared, accounts) and owner_confirmed_row(row_meta(shared), accounts)
+    assert not owner_confirmed_row(_place_row(place.place_id, "ouro-bot", sends_as="ouro-bot", sends_kind="bot"),
+                                   accounts), "a bot of mine is never my human"
+
+
+@pytest.mark.parametrize("variant", ["unauthenticated", "other_account", "imported", "legacy_form"])
 def test_a_row_the_confirmation_cannot_vouch_for_is_not_my_human(tmp_path, place, variant):
     accounts = place_owner_accounts(tmp_path)
     row = {
-        "shared_account": lambda: _place_row(place.place_id, sends_as="anton"),
         "unauthenticated": lambda: _place_row(place.place_id, authenticated=False),
         "other_account": lambda: _place_row(place.place_id, account="other"),
         "imported": lambda: _place_row(place.place_id, historical_import={"authorship": "platform_person"}),
@@ -97,7 +106,9 @@ def test_row_author_names_my_human_only_from_the_current_confirmation(tmp_path, 
     sasha = row_author(_place_row(place.place_id, "sasha"), owner_accounts=accounts)
     assert sasha["label"].startswith("Sasha [") and "owner_confirmed" not in sasha
     shared = row_author(_place_row(place.place_id, sends_as="anton"), owner_accounts=accounts)
-    assert shared["label"].startswith("the account I send as: Anton") and "owner_confirmed" not in shared
+    assert shared["label"].startswith("my human: Anton [") and shared["owner_confirmed"] is True
+    bot = row_author(_place_row(place.place_id, "ouro-bot", sends_as="ouro-bot", sends_kind="bot"), owner_accounts=accounts)
+    assert bot["label"].startswith("the account I send as: Ouro-Bot [") and "owner_confirmed" not in bot
     places.edit_place(tmp_path, place.place_id, "revoke_owner_account", author="owner",
                       platform_actor_id="anton", account_id="qa")
     withdrawn = row_author(owner, owner_accounts=place_owner_accounts(tmp_path))
@@ -121,7 +132,8 @@ def test_the_memory_view_keeps_my_humans_place_words_on_their_side(tmp_path, pla
 
     assert side(_place_row(place.place_id)) is True
     assert side(_place_row(place.place_id, "sasha")) is False
-    assert side(_place_row(place.place_id, sends_as="anton")) is False
+    assert side(_place_row(place.place_id, sends_as="anton")) is True, "my human's account, which I also write from"
+    assert side(_place_row(place.place_id, "ouro-bot", sends_as="ouro-bot", sends_kind="bot")) is False
     assert side({"ts": "2026-11-04T10:00:00Z", "direction": "in", "chat_id": 1, "text": "Main words"}) is True
 
 
@@ -160,13 +172,15 @@ def test_room_history_reads_the_same_fact_for_a_shared_account(tmp_path, monkeyp
     client, _place, task, event = scenario(tmp_path, monkeypatch)
     admission = admit_presence_turn(drive_root=tmp_path, authenticated_transport_skill="bridge",
                                     provider="chat", account_id="qa", conversation_id="design")
-    for source_id, identity in (("own-sent", {"sends_as": {"id": "owner", "label": "Anton", "kind": "user"}}),
-                                ("owner-typed", None)):
+    for source_id, actor, identity in (
+            ("own-sent", "owner", {"sends_as": {"id": "owner", "label": "Anton", "kind": "user"}}),
+            ("owner-typed", "owner", None),
+            ("bot-sent", "ouro-bot", {"sends_as": {"id": "ouro-bot", "label": "Ouroboros", "kind": "bot"}})):
         capture_presence_event(admission, replace(event, source_event_id=source_id, identity=identity, text=source_id,
-                                                  actor={"platform_actor_id": "owner", "display_name": "Anton"}),
+                                                  actor={"platform_actor_id": actor, "display_name": actor}),
                                drive_root=tmp_path)
     page = client.get("/api/chat/history", params={"chat_id": task["chat_id"]}).json()
     confirmed = {row["text"]: row["place_history"].get("owner_confirmed") for row in page["messages"]
-                 if row["text"] in {"own-sent", "owner-typed"}}
-    assert confirmed == {"own-sent": False, "owner-typed": True}
+                 if row["text"] in {"own-sent", "owner-typed", "bot-sent"}}
+    assert confirmed == {"own-sent": True, "owner-typed": True, "bot-sent": False}, "the owner's account reads (you)"
     client.close()

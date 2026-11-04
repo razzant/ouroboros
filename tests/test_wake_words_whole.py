@@ -29,11 +29,11 @@ def place(tmp_path):
     return connected
 
 
-def _place_row(place, actor_id, text, ts, *, sends_as="", **actor):
+def _place_row(place, actor_id, text, ts, *, sends_as="", sends_kind="user", **actor):
     transport = {"provider": "chat", "account_id": "qa", "conversation_id": "design",
                  "actor": {"platform_actor_id": actor_id, "display_name": actor_id.title(), **actor}}
     if sends_as:
-        transport["identity"] = {"sends_as": {"id": sends_as, "label": "Shared", "kind": "user"}}
+        transport["identity"] = {"sends_as": {"id": sends_as, "label": "Shared", "kind": sends_kind}}
     return {"ts": _iso(ts), "direction": "in", "chat_id": ROOM, "text": text, "source": "presence:chat",
             "sender_label": actor_id.title(), "client_message_id": f"ev-{actor_id}-{ts}", "transport": transport,
             "presence_provenance": {"place_id": place.place_id}, "place_id": place.place_id}
@@ -49,8 +49,8 @@ def test_people_words_reach_the_wake_whole_with_author_and_address(tmp_path, pla
     since = T0 - 3600
     _chat(tmp_path, _owner(LONG, since + 1, cmid="a"),
           _place_row(place, "sasha", "Sasha's long answer: " + LONG, since + 2),
-          _place_row(place, "anton", "From my phone: " + LONG, since + 3),
-          _place_row(place, "anton", "Echoed: " + LONG, since + 4, sends_as="anton"),
+          _place_row(place, "anton", "From my phone: " + LONG, since + 3, sends_as="anton"),  # I write from it too
+          _place_row(place, "ouro-bot", "Echoed: " + LONG, since + 4, sends_as="ouro-bot", sends_kind="bot"),
           _place_row(place, "ci-bot", "Bot report: " + LONG, since + 5, kind="bot", is_bot=True))
     observation = _observe(tmp_path)
     kinds = [kind for kind, _offset, _line in observation.events]
@@ -62,7 +62,7 @@ def test_people_words_reach_the_wake_whole_with_author_and_address(tmp_path, pla
                                   "Echoed: " + LONG, "Bot report: " + LONG]):
         assert line.endswith(text) and addresses[text] in line, "whole words under their exact address"
     assert "my human: Anton" in lines[2] and lines[2].startswith("- owner message in ")
-    assert "the account I send as: Anton" in lines[3] and lines[3].startswith("- message in a place in ")
+    assert "the account I send as: Ouro-Bot" in lines[3] and lines[3].startswith("- message in a place in ")
     assert "Sasha [" in lines[1] and "my human" not in lines[1]
     assert "…[" not in observation.full_text() and TAIL in observation.full_text()
     source = observation.source_bytes().decode("utf-8")

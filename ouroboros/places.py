@@ -429,16 +429,17 @@ def owner_confirmed_row(row: Mapping[str, Any], accounts: Mapping[str, Iterable[
     ``accounts`` is one ``place_owner_accounts`` read per pass. The answer is the current confirmation,
     as the room's history shows it (``gateway.place_history``): confirming an account names its earlier
     rows too, and withdrawing a mistaken confirmation unnames them; what caused a work is the admission's
-    own snapshot instead (``focus.actor.owner_confirmed``). Only facts a stored row keeps beside its text
-    are read (``memory_inventory._META_FIELDS``). An actor the connector reports unauthenticated, a row
-    from the account I send as (``transport.identity.sends_as``: who typed it is unknown) and an imported
-    earlier message (``presence_history``) are never confirmed.
+    own snapshot instead (``focus.actor.owner_confirmed``), with the same rule. Only facts a stored row keeps
+    beside its text are read (``memory_inventory._META_FIELDS``). An actor the connector reports
+    unauthenticated and an imported earlier message (``presence_history``) are never confirmed. A place where
+    I write from my human's own account (``sends_as`` confirmed, CREATING_SKILLS "Who the connector writes as")
+    confirms their rows as theirs, as admission does; returning my own sends as arrivals is the connector's to
+    filter, never inferred here.
     """
     transport = _fields(row, "transport")
     actor = _fields(transport, "actor")
     actor_id = str(actor.get("platform_actor_id") or actor.get("id") or "")
     return (actor.get("authenticated") is not False and not isinstance(row.get("historical_import"), Mapping)
-            and str(_fields(_fields(transport, "identity"), "sends_as").get("id") or "") != actor_id
             and owner_account_matches(accounts.get(row_place_id(row), ()), actor_id,
                                       str(transport.get("account_id") or "")))
 
