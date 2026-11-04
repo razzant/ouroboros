@@ -221,10 +221,10 @@ def test_a_reached_limit_refuses_resume_only_for_work_that_needs_paid_admission(
 
     q, zero = SimpleNamespace(load_state=lambda: {}), (lambda *_a, **_k: 0.0)
     monkeypatch.setenv("OUROBOROS_MODEL", "claudexor::codex=gpt-6-astra")
-    assert budget_resume._global_money_refusal(q, zero, {"id": "t"}) is None
+    assert budget_resume._global_money_refusal(q, zero, [{"id": "t"}]) is None
     assert budget_resume._global_money_refusal(q, zero)["error"] == "budget_still_exhausted"
     monkeypatch.setenv("OUROBOROS_MODEL", "openai/gpt-5.2")
-    assert budget_resume._global_money_refusal(q, zero, {"id": "t"})["error"] == "budget_still_exhausted"
+    assert budget_resume._global_money_refusal(q, zero, [{"id": "t"}])["error"] == "budget_still_exhausted"
 
 
 def test_resume_refuses_while_money_is_still_exhausted(tmp_path, monkeypatch):
