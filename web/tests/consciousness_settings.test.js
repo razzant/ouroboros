@@ -13,7 +13,8 @@ import {
     recheckFromSettings, saveCheckerSettings, saveSafetyLevel, saveSafetyRules, updatePlace, disconnectPlace,
 } from '../modules/consciousness_api.js';
 import {
-    agentRowHandle, applySafetySettings, checkerSaveEffect, checkerTabsText, checkerText, safetyOwnerDraft, safetySectionHtml,
+    agentRowHandle, applySafetySettings, bindSafetySettings, checkerSaveEffect, checkerTabsText, checkerText, safetyOwnerDraft,
+    safetySectionHtml,
     saveSafetyChecker, saveSafetyOwnerChanges, secondCheckText, takeCheckerChanges,
 } from '../modules/settings_safety.js';
 import { chooseRecheckRow, recheckDraft, recheckMarkHtml, syncRecheckState } from '../modules/safety_recheck.js';
@@ -22,7 +23,7 @@ import {
 } from '../modules/settings_consciousness.js';
 import { parseAvailableSubagentsSetting, buildAvailableSubagentsSetting } from '../modules/subagents_settings.js';
 import { setup, NodeStub } from './dashboard_dom_fixture.js';
-import { apiClient } from '../modules/api_client.js';
+import { APP_SETTINGS_ORIGIN, apiClient } from '../modules/api_client.js';
 
 const FIXTURE = JSON.parse(fs.readFileSync(new URL('./fixtures/consciousness_contract.json', import.meta.url), 'utf8'));
 
@@ -235,8 +236,20 @@ test('a refused lowering keeps the level and still saves the rest; an unknown se
     } finally { stub.restore(); }
     // No OUROBOROS_CONSCIOUSNESS_SAFETY_MODE in the document: that row is not written.
     assert.deepEqual(stub.calls.map(({ url }) => url), ['/api/owner/safety-rules']);
+    assert.equal(stub.calls[0].headers['X-Ouroboros-Surface'], 'app');
     assert.match(result.error, /Safety for your work was not changed: The change was not confirmed\./);
     assert.equal(result.unknown, false);
+});
+
+test('Check consciousness fully declares the app on its owner write', async () => {
+    const root = new NodeStub();
+    root.innerHTML = safetySectionHtml();
+    const saves = [];
+    const dispose = bindSafetySettings(root, { save: async (...args) => { saves.push(args); } });
+    const section = root.querySelector('[data-safety-consciousness-row]')?.closest('.form-section') || root;
+    await section.fire('click', { target: root.querySelector('[data-safety-check-fully]') });
+    dispose();
+    assert.deepEqual(saves, [['full', 'consciousness', { headers: APP_SETTINGS_ORIGIN }]]);
 });
 
 test('the second-check mark shows only on eligible rows, one row at a time, and saves as the owner chose', async () => {
