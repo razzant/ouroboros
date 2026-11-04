@@ -103,7 +103,40 @@ def test_terminal_batches_keep_the_receipt_without_reading_current_accounting(ro
 
     monkeypatch.setattr(ua, "usage_breakdown", lambda *_a, **_k: pytest.fail("terminal batch read accounting"))
     rows = [{"task_id": "done", "status": "completed", "accounted_upper_bound_usd": 0.1, "cost_final": True}]
-    assert current_costs(rows, root, root_task_id="parent") == rows
+    assert current_costs(rows, root) == rows
+
+
+@pytest.mark.parametrize("same_tree", [True, False])
+def test_wait_cost_batch_reads_each_actual_root_once(root, monkeypatch, same_tree):
+    from ouroboros import usage_accounting as ua
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools import control_task_results as results
+
+    observer = "observer"
+    roots = [observer] if same_tree else ["root-a", "root-b"]
+    for tid in [observer, *roots]:
+        write_task_result(root, tid, "running", root_task_id=tid)
+    expected = {}
+    for index, owner in enumerate(roots):
+        for suffix in ("1", "2"):
+            tid = owner + "-child-" + suffix
+            write_task_result(root, tid, "scheduled", parent_task_id=owner, root_task_id=owner)
+            expected[tid] = index + 3.5
+            ua.record_subscription_session("run-" + tid, drive_root=root, task_id=tid,
+                                           root_task_id=owner, route="test", spend_usd=expected[tid])
+    reads, real_read = [], ua.usage_breakdown
+
+    def counted(drive, **kwargs):
+        reads.append(kwargs)
+        return real_read(drive, **kwargs)
+
+    monkeypatch.setattr(ua, "usage_breakdown", counted)
+    ctx = SimpleNamespace(drive_root=root, budget_drive_root=root, task_id=observer,
+                          task_metadata={"root_task_id": observer})
+    waited = json.loads(results._wait_for_tasks(ctx, list(expected), timeout_sec=0))["tasks"]
+    assert {tid: row["accounted_upper_bound_usd"] for tid, row in waited.items()} == expected
+    assert all(row["cost_final"] is False for row in waited.values())
+    assert sorted(row["root_task_id"] for row in reads) == sorted(roots)
 
 
 class TestAliases:

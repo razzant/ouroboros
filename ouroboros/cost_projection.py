@@ -541,20 +541,23 @@ def current_cost(source: Mapping[str, Any], drive_root: Any, *, breakdown=None) 
     return {**with_cost_aliases(source), **fresh, "cost_final": False}
 
 
-def current_costs(sources: Any, drive_root: Any, *, root_task_id: str) -> list:
-    """Project one batch from one ledger observation, including an unavailable observation."""
+def current_costs(sources: Any, drive_root: Any) -> list:
+    """Read each requested task tree once, independently of the observer's tree."""
     from ouroboros.usage_accounting import usage_breakdown
 
-    rows = list(sources)
-    if not any(_live_cost_source(row) for row in rows):
-        return rows
-    try:
-        breakdown = usage_breakdown(drive_root, root_task_id=root_task_id, include_custody=True)
-    except Exception:
-        log.debug("Batch task cost unavailable for %s", root_task_id, exc_info=True)
-        breakdown = {}  # reconstruction reports unavailable; never retry once per child
-    return [current_cost(row, drive_root, breakdown=breakdown) if isinstance(row, Mapping) else row
-            for row in rows]
+    rows, breakdowns = list(sources), {}
+    for index, row in enumerate(rows):
+        if not _live_cost_source(row):
+            continue
+        root_task_id = str(row.get("root_task_id") or row.get("task_id") or row.get("id"))
+        if root_task_id not in breakdowns:
+            try:
+                breakdowns[root_task_id] = usage_breakdown(drive_root, root_task_id=root_task_id, include_custody=True)
+            except Exception:
+                log.debug("Batch task cost unavailable for %s", root_task_id, exc_info=True)
+                breakdowns[root_task_id] = {}
+        rows[index] = current_cost(row, drive_root, breakdown=breakdowns[root_task_id])
+    return rows
 
 
 def cost_display(source: Optional[Mapping[str, Any]], *, decimals: int = 2) -> str:

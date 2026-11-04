@@ -33,7 +33,6 @@ from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import truncate_review_artifact
 from ouroboros.work_stop import stop_for_reader, task_current_stop
 from ouroboros.cost_projection import current_cost, current_costs
-from ouroboros.tools.task_tree import tree_root_id
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
 
 
@@ -1218,7 +1217,7 @@ def _children_roster_projection(
     from ouroboros.cost_projection import cost_projection
 
     roster: List[Dict[str, Any]] = []
-    for row in current_costs(rows, status_drive_root, root_task_id=tree_root_id(ctx)):
+    for row in current_costs(rows, status_drive_root):
         if not isinstance(row, dict):
             continue
         _cost = cost_projection(row)
@@ -1506,7 +1505,7 @@ def _batch_wait_payload(ctx: Any, waited: Dict[str, Any], normalized_ids: List[s
         # truncation. get_task_result and a SETTLED wait_task stay full; an
         # unsettled wait_task returns this same projection.
         public_tasks: Dict[str, Any] = {}
-        for tid, data in zip(tasks, current_costs(tasks.values(), status_drive_root, root_task_id=tree_root_id(ctx))):
+        for tid, data in zip(tasks, current_costs(tasks.values(), status_drive_root)):
             if str(tid) in unknown_ids:
                 public_tasks[str(tid)] = {
                     "task_id": str(tid),
