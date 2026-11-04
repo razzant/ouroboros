@@ -597,8 +597,10 @@ def test_cancelled_native_in_place_result_becomes_historical_without_promotion(c
 
 
 @pytest.mark.parametrize("terminal_first", [False, True])
-def test_revised_in_place_output_keeps_retired_native_capture(case, terminal_first):
+@pytest.mark.parametrize("publish_while_waiting", [False, True])
+def test_revised_in_place_output_keeps_retired_native_capture(case, monkeypatch, terminal_first, publish_while_waiting):
     import json
+    from contextlib import contextmanager
     from ouroboros import delegate_custody as custody, delegate_custody_current as current, headless
     from ouroboros.delegate_collection import collect_terminal
     from ouroboros.task_results import load_task_result, write_task_result
@@ -615,31 +617,54 @@ def test_revised_in_place_output_keeps_retired_native_capture(case, terminal_fir
     if terminal_first:
         collect_terminal(data, entry.run_id, detail=terminal(entry.run_id))
     write_task_result(data, "native", "completed")
-    headless.finalize_task_artifacts(data, task)
+    if not terminal_first or not publish_while_waiting:
+        headless.finalize_task_artifacts(data, task)
     if not terminal_first:
         assert load_task_result(data, "native")["native_capture_pending"]
-        collect_terminal(data, entry.run_id, detail=terminal(entry.run_id))
-    before = load_task_result(data, "native")
-    assert before["artifact_status"] == "ready_with_changes" and not before.get("native_capture_pending")
-    manifest_path = headless.current_workspace_manifest(data, "native", before)
-    manifest = json.loads(manifest_path.read_bytes())
-    old_bytes = {row["path"]: Path(row["path"]).read_bytes() for row in before["artifacts"]}
-    assert_current_consumers(case, task, "ready_with_changes", expected_path="in-place.txt")
-    assert trees.prune_orphans(worktree_root=case[3], data_dir=data, retention_days=0,
-                               live=lambda _tid: False, only={"native"})["removed"] == 1
-    assert not folder.exists()
+        if not publish_while_waiting:
+            collect_terminal(data, entry.run_id, detail=terminal(entry.run_id))
+    saved = {}
+
+    def retain_then_retire():
+        before = load_task_result(data, "native")
+        assert before["artifact_status"] == "ready_with_changes" and not before.get("native_capture_pending")
+        path = headless.current_workspace_manifest(data, "native", before)
+        saved.update(path=path, manifest=json.loads(path.read_bytes()),
+                     bytes={row["path"]: Path(row["path"]).read_bytes() for row in before["artifacts"]},
+                     source=current.run(data, entry.run_id).terminal_source)
+        assert_current_consumers(case, task, "ready_with_changes", expected_path="in-place.txt")
+        assert trees.prune_orphans(worktree_root=case[3], data_dir=data, retention_days=0,
+                                  live=lambda _tid: False, only={"native"})["removed"] == 1
+        assert not folder.exists()
+
+    if publish_while_waiting:
+        acquire = headless.native_capture_custody
+
+        @contextmanager
+        def publish_before_acquisition(root, writer):
+            # Another finalizer wins custody after the collector's initial read.
+            # Exercise both a formerly pending capture and an unpublished manifest.
+            headless.finalize_task_artifacts(data, task)
+            retain_then_retire()
+            with acquire(root, writer) as owner:
+                yield owner
+
+        monkeypatch.setattr(headless, "native_capture_custody", publish_before_acquisition)
+    else:
+        retain_then_retire()
     old_source = current.run(data, entry.run_id).terminal_source
     out = collect_terminal(data, entry.run_id, detail=terminal(entry.run_id, text="revised answer", seq=8))
     fresh = current.run(data, entry.run_id)
     assert fresh.terminal_source != old_source and fresh.settled
     after = load_task_result(data, "native")
     assert after["artifact_status"] == "ready_with_changes" and not after.get("native_capture_pending"), out
-    assert headless.current_workspace_manifest(data, "native", after) == manifest_path
-    assert all(Path(path).read_bytes() == body for path, body in old_bytes.items())
+    assert headless.current_workspace_manifest(data, "native", after) == saved["path"]
+    assert all(Path(path).read_bytes() == body for path, body in saved["bytes"].items())
+    manifest = saved["manifest"]
     witness = manifest["native_capture_sources"][entry.run_id]
     assert (witness["run_id"], witness["invocation_id"], witness["target_root"], witness["effect"]) == (
         entry.run_id, entry.invocation_id, str(folder), "in_place")
-    assert witness["terminal_source"] == old_source
+    assert witness["terminal_source"] == saved["source"]
     assert manifest["base_head"] == task["task_constraint"]["base_sha"]
     assert not fresh.patch_captured and not fresh.patch_disposed and not fresh.patch_apply_pending
     out = _integrate_subagent_patch(parent_context(case), task_id="native")

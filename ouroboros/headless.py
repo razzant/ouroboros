@@ -1344,6 +1344,9 @@ def refresh_in_place_native_capture(root, entry):
     if not owner or owner.get("status") not in _FINAL_STATUSES:
         return ""
     with native_capture_custody(root, entry):
+        owner = native_capture_owner(root, entry.task_id, entry.target_root)
+        if not owner or owner.get("status") not in _FINAL_STATUSES:
+            return ""
         refusal = "Native capture promotion refused: the native owner is cancelled." if cancellation_blocks_child_result(owner) else ""
         if entry.run_id not in owner.get("native_capture_pending", {}):
             # Output revisions do not create another writer or require the retired checkout.
