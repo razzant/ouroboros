@@ -25,11 +25,11 @@ from tests.test_place_focus import focus as focus, task_for
 @pytest.fixture(autouse=True)
 def isolated_supervisor(tmp_path, monkeypatch):
     import supervisor.message_bus as bus
-    import supervisor.queue as queue
     import supervisor.state as state
+    from tests.conversation_carrier_support import host_lane
 
+    host_lane(monkeypatch, tmp_path)
     monkeypatch.setattr(bus, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(queue, "DRIVE_ROOT", tmp_path)
     for name, value in {
         "DRIVE_ROOT": tmp_path, "STATE_PATH": tmp_path / "state/state.json",
         "STATE_LAST_GOOD_PATH": tmp_path / "state/state.last_good.json",

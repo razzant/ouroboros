@@ -68,12 +68,13 @@ def carry(workers_module: Any, slot: Any, actor: Any, *, out_q: Any = None,
 
 
 def host_lane(monkeypatch, root) -> None:
-    """A Host serving in a process with no started pool generation (the Host-only tests): the lane's tables
-    and roots isolated under ``root``, no lane carrier, so every turn body takes the disclosed degraded executor
-    on a thread of this process (``inline_carrier``), and its own frames settle the Host's waiter."""
-    from supervisor import workers
+    """A standalone Host without an owned supervisor queue (the Host-only tests): isolated lane tables
+    and roots, no pool generation, so turn bodies take the disclosed degraded executor in this process.
+    A server that owns the queue but has not armed its pool instead refuses Presence with a typed retry."""
+    from supervisor import queue, workers
 
     isolate_lane_pool(monkeypatch, root, spares=0)
+    monkeypatch.setattr(queue, "INITIALIZED", False)
     monkeypatch.setattr(workers, "REPO_DIR", root / "repo")
 
 
