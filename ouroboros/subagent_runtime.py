@@ -972,6 +972,10 @@ def resolve_configured_actor_dispatch(
             availability["previous_observation"] = dict(previous)
     reasons = []
     if unavailable:
+        from ouroboros.engine_facts import engine_pool_line
+        meta = task.get("task_metadata") if isinstance(task.get("task_metadata"), dict) else {}
+        availability["engine_pool"] = engine_pool_line(
+            task.get("budget_drive_root") or meta.get("budget_drive_root"))
         reasons.append(unavailable)
     delta = CapabilityDelta(
         derived_effort=nanny_effort,

@@ -512,7 +512,8 @@ def test_refused_bootstrap_receipt_never_claims_a_live_leaf(monkeypatch):
         }),
     )
     receipt = messages[0]["content"]
-    assert "Physical custody is unresolved" in receipt
+    assert "no run exists" in receipt and "A fresh delegate_start is safe" in receipt
+    assert "Physical custody is unresolved" not in receipt
     assert "proves a physical run" not in receipt
     assert "never authorizes native/API fallback" in receipt
 

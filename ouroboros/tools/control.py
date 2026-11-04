@@ -552,7 +552,6 @@ from ouroboros.tools.control_scheduling import (  # noqa: E402, F401 -- intentio
     _resolve_executor_ref,
     _schedule_task,
     _select_subagent_constraint,
-    _subagent_slot_note,
     maybe_emit_delegated_run_fanout,
 )
 from ouroboros.tools.control_task_results import (  # noqa: E402, F401 -- intentional public re-exports

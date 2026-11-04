@@ -716,6 +716,7 @@ D20 = "Presence"
 "ouroboros/subagent_route_health.py" = "D07"
 "ouroboros/subagent_inspection.py" = "D07"
 "ouroboros/claudexor_observations.py" = "D07"
+"ouroboros/engine_facts.py" = "D07"
 "ouroboros/subscription_install_presets.py" = "D12"
 "ouroboros/synthesis_cost_text.py" = "D01"
 "ouroboros/task_continuation.py" = "D06"
@@ -1078,7 +1079,6 @@ allowed = [
   "D01->D05",
   "D01->D06",
   "D01->D07",
-  "D01->D08",
   "D01->D09",
   "D01->D12",
   "D01->D13",
@@ -1272,6 +1272,7 @@ cycle_groups = [
 # Cross-domain pairs reachable ONLY through function-level (lazy) imports —
 # hidden coupling, classified out of the strict graph.
 lazy_only = [
+  "D01->D08",
   "D01->D10",
   "D01->D11",
   "D02->D05",
