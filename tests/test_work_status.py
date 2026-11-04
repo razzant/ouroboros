@@ -584,7 +584,9 @@ def test_a_run_whose_own_task_failed_is_unconfirmed_and_its_work_stays_stoppable
     [work] = wp.works_snapshot(tmp_path, [], {})["works"]
     assert (work["activity"], work["live"], work["mark"]) == ("unknown", False, "ring")
     assert [(tail["state"], tail["text"]) for tail in work["tails"]] == [("unknown", "1 external run may still be running")]
-    assert work["confirmed"] is True and work["controls"] == [{"action": "stop", "target": "p", "scope": "cascade"}]
+    # Pause reaches it too once its root ended (#2669: ``owner_pause_control._ended_tail``, the door's own read).
+    assert work["confirmed"] is True and work["controls"] == [{"action": "pause", "target": "p"},
+                                                              {"action": "stop", "target": "p", "scope": "cascade"}]
     # The same run of a task that answered is live work (owner 19.10: Stop reaches it).
     stored["h"] = {"task_id": "h", "status": "completed"}
     [work] = wp.works_snapshot(tmp_path, [], {})["works"]

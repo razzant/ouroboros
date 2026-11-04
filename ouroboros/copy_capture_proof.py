@@ -40,6 +40,12 @@ def plain_copy_verdict(row: Dict[str, Any], data_dir: Optional[Any] = None) -> D
         work = checkout_work(path)
         if not base or work["tip"] != base:
             return keep  # a moved HEAD carries commits no patch of this copy holds
+        if row.get("task_id"):
+            from ouroboros.subagent_worktrees import _data_dir
+            from ouroboros.task_results import load_task_result
+            result = load_task_result(_data_dir(data_dir), row["task_id"], strict=True) or {}
+            if result.get("native_capture_pending"):
+                return keep  # an empty tree does not resolve an unknown writer or publish its result
         unique = [*work["tracked"], *work["untracked"], *work["ignored"]]
         if not unique:
             return {"remove": True, "keep_branch": False, "reason": "no_unique_work"}
@@ -148,6 +154,14 @@ def discard_unsaved_copy(preview: Dict[str, Any], signature: str, *, worktree_ro
     if sw._record_at(path, data_dir, op="discard_unsaved") != preview:
         reasons[path] = "changed"
         return False
+    # The supervisor probe may take Q; holds runs under task custody and must not take it there.
+    try:
+        idle = live is not None and live(str(row.get("task_id") or "")) is False
+    except Exception:
+        idle = False
+    if not idle:
+        reasons[path] = "not_proven_over"
+        return False
     verdict: Dict[str, Any] = {}
     if is_body:  # the capture and its witness are written outside the record lock, as the GC's are
         verdict = body_candidate.retention_verdict(row, expired=True, data_dir=data_dir, discard_excluded=True)
@@ -156,7 +170,7 @@ def discard_unsaved_copy(preview: Dict[str, Any], signature: str, *, worktree_ro
             return False
 
     def holds(match: Dict[str, Any], branch: str) -> Optional[str]:
-        offer = discard_offer(match, data_dir, live, root)
+        offer = discard_offer(match, data_dir, lambda _: False, root)
         refusal = offer["refusal"] or ("" if offer["signature"] == signature else "changed")
         if not refusal and is_body and not body_candidate.verdict_holds(match, verdict, data_dir=data_dir):
             refusal = "changed"
@@ -220,12 +234,18 @@ def _branch_may_hold_commits(row: Dict[str, Any], base: str) -> bool:
 
 def _manifest(path: pathlib.Path, row: Dict[str, Any], base: str, data_dir: Optional[Any]) -> Tuple[Optional[Dict[str, Any]], pathlib.Path]:
     """The task's capture manifest when it speaks for exactly this checkout at this base, and its folder."""
-    from ouroboros.headless import task_artifacts_dir
+    from ouroboros.headless import current_workspace_manifest
     from ouroboros.headless_status import ARTIFACT_STATUS_READY_WITH_CHANGES
     from ouroboros.subagent_worktrees import _data_dir
+    from ouroboros.task_results import load_task_result
 
-    artifacts = task_artifacts_dir(_data_dir(data_dir), str(row.get("task_id") or ""), create=False)
-    manifest = json.loads((artifacts / "workspace_patch.json").read_text(encoding="utf-8"))
+    root, tid = _data_dir(data_dir), str(row.get("task_id") or "")
+    result = load_task_result(root, tid) or {}
+    source = current_workspace_manifest(root, tid, result)
+    artifacts = source.parent
+    if result.get("native_capture_pending") or result.get("artifact_status") == "failed":
+        return None, artifacts
+    manifest = json.loads(source.read_text(encoding="utf-8"))
     if (manifest.get("status") != ARTIFACT_STATUS_READY_WITH_CHANGES or manifest.get("errors")
             or pathlib.Path(str(manifest.get("workspace_root") or "")).resolve(strict=False) != path.resolve(strict=False)
             or manifest.get("base_head") != base or manifest.get("current_head") != base):

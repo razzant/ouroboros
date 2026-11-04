@@ -74,6 +74,43 @@ def test_a_seat_home_retirer_asks_the_probe_before_the_custody_lock(tmp_path):
     assert outcome["result"] == "in_use" and area.is_dir()  # its checking copy is still there
 
 
+@pytest.mark.parametrize("discard", [False, True])
+def test_plain_copy_retirement_probes_before_custody_and_proves_contents_inside(copies, monkeypatch, discard):  # noqa: F811
+    from contextlib import contextmanager
+    from ouroboros import copy_capture_proof as proof
+
+    root, _, wtroot = copies
+    handle = _copy(copies)
+    row = sw._record_at(handle.path, root)
+    if discard:
+        (Path(handle.path) / "unsaved.txt").write_text("explicitly discarded fixture work")
+    offer = proof.discard_offer(row, root, lambda _: False, wtroot) if discard else None
+    gate, inside = owner_keep.gate, []
+
+    @contextmanager
+    def observed_gate(*args, **kwargs):
+        with gate(*args, **kwargs) as why:
+            inside.append(True)
+            try:
+                yield why
+            finally:
+                inside.pop()
+
+    monkeypatch.setattr(owner_keep, "gate", observed_gate)
+    def run(live):
+        def outside_probe(tid):
+            assert not inside, "queue probe ran under task custody"
+            return live(tid)
+        if discard:
+            return proof.discard_unsaved_copy(row, offer["signature"], worktree_root=wtroot,
+                                              data_dir=root, live=outside_probe)
+        return sw.prune_orphans(worktree_root=wtroot, data_dir=root, retention_days=0, live=outside_probe)["removed"] == 1
+
+    outcome = _settlement_meanwhile(root, "finished", run)
+    assert outcome["custody"] is True and outcome["result"] is True
+    assert not Path(handle.path).exists()
+
+
 def test_a_task_continued_after_its_proof_keeps_its_seat_home(tmp_path):
     root, source = _frozen(tmp_path)
     area = _seat(root, source, "op-done")
@@ -172,7 +209,7 @@ def test_a_kept_candidate_stays_resumable_through_every_pass_and_goes_once_relea
 
 @pytest.mark.parametrize("late", ["owner_keep", "busy"])
 def test_a_keep_or_a_busy_gate_after_the_proof_leaves_the_candidate_unmarked(candidate, monkeypatch, late):  # noqa: F811
-    """The proof is read before the gate; a keep landing after it, or a gate that cannot answer, leaves the
+    """The initial proof precedes custody; a keep landing after it, or a gate that cannot answer, leaves the
     record as it was: never retiring, so the next pass and a resume both find it."""
     import contextlib
 
@@ -180,20 +217,21 @@ def test_a_keep_or_a_busy_gate_after_the_proof_leaves_the_candidate_unmarked(can
 
     ctx, data, _scratch = candidate
     (Path(ctx.repo_dir) / "work.txt").write_text("unique\n", encoding="utf-8")
-    real = body.verdict_holds
+    real = body.retention_verdict
 
     def holds_then_late(*args, **kwargs):
         answer = real(*args, **kwargs)
-        assert answer, "the proof held: only the gate stands between it and the removal"
+        assert answer["remove"], "the initial proof allows removal, subject to the custody recheck"
         if late == "owner_keep":
-            owner_keep.set_owner_keep(data, ctx.task_id, keep=True, source=KEEP)
+            kept = owner_keep.set_owner_keep(data, ctx.task_id, keep=True, source=KEEP)
+            assert kept["keep"] is True, kept
         return answer
 
     @contextlib.contextmanager
     def busy(*_args, **_kwargs):
         yield "busy"
 
-    monkeypatch.setattr(body, "verdict_holds", holds_then_late)
+    monkeypatch.setattr(body, "retention_verdict", holds_then_late)
     if late == "busy":
         monkeypatch.setattr(owner_keep, "gate", busy)
     reasons: dict = {}

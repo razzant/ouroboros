@@ -15,6 +15,7 @@ from ouroboros.shell_parse import (
     unwrap_env_argv,
 )
 from ouroboros.tool_access import ResolvedResourceBinding, resolve_shell_cwd
+from ouroboros.tool_access_paths import entry_path
 from ouroboros.tools.shell_guards import interpreter_family
 from ouroboros.workspace_executor import BackendPathNoMatch, executor_ref_from_ctx, map_backend_path, map_host_path
 
@@ -178,7 +179,9 @@ def _resolve_policy_path(
     ctx: Any,
     raw_path: str,
     binding: ResolvedResourceBinding | None = None,
+    entry: bool = False,
 ) -> pathlib.Path | None:
+    """A policy path's physical target; as an ``entry``, the directory entry it names (`entry_path`)."""
     text = str(raw_path or "").strip()
     if not text:
         return None
@@ -186,20 +189,23 @@ def _resolve_policy_path(
         path = pathlib.Path(text).expanduser()
     except (OSError, TypeError, ValueError):
         return None
-    if path.is_absolute():
-        return path.resolve(strict=False)
-    roots = _base_roots(ctx, binding)
-    if not roots:
-        return path.resolve(strict=False)
-    return (roots[0] / path).resolve(strict=False)
+    roots = [] if path.is_absolute() else _base_roots(ctx, binding)
+    path = roots[0] / path if roots else path
+    return entry_path(path) if entry else path.resolve(strict=False)
 
 
-def _backend_spellings_for_host_path(ctx: Any, path: pathlib.Path) -> set[str]:
+def _backend_spellings_for_host_path(ctx: Any, path: pathlib.Path, *, entry: bool = False) -> set[str]:
     try:
         executor = executor_ref_from_ctx(ctx)
         if executor is None:
             return set()
-        backend = map_host_path(executor, pathlib.Path(path))
+        if entry:
+            path = entry_path(path)
+            backend = next((m.backend_path for m in executor.mappings if path == m.host_path), None)
+            if backend is None:
+                backend = map_host_path(executor, path.parent).rstrip("/") + "/" + path.name
+        else:
+            backend = map_host_path(executor, pathlib.Path(path))
     except Exception:
         return set()
     return {backend, backend.rstrip("/")}
@@ -249,9 +255,10 @@ def _operation_denied(record: Dict[str, Any], operation: str) -> bool:
     return str(record.get("role") or "") == "black_box_reference" and operation in _DEFAULT_DENIED_OPERATIONS
 
 
-def _matches(candidate: pathlib.Path, protected_path: pathlib.Path) -> bool:
+def _matches(candidate: pathlib.Path, protected_path: pathlib.Path, entry: bool = False) -> bool:
     try:
-        candidate_resolved = pathlib.Path(candidate).expanduser().resolve(strict=False)
+        candidate = pathlib.Path(candidate).expanduser()
+        candidate_resolved = entry_path(candidate) if entry else candidate.resolve(strict=False)
         protected_resolved = pathlib.Path(protected_path).expanduser().resolve(strict=False)
     except (OSError, TypeError, ValueError):
         return False
@@ -294,17 +301,22 @@ def block_reason_for_path(
     target: pathlib.Path,
     operation: str,
     binding: ResolvedResourceBinding | None = None,
+    *,
+    entry: bool = False,
 ) -> str:
+    """The policy refusal for one target, or "". An ``entry`` target is a directory entry read as itself:
+    it is never followed, and a policy path naming that entry (a symlink included) still covers it."""
     for record in _artifact_records(ctx):
         if not _operation_denied(record, operation):
             continue
         for raw_path in record.get("paths") or []:
             protected_path = _resolve_policy_path(ctx, str(raw_path), binding)
             protected_spellings = _policy_backend_spellings(ctx, str(raw_path), protected_path)
-            target_backend_spellings = _backend_spellings_for_host_path(ctx, pathlib.Path(target))
+            target_backend_spellings = _backend_spellings_for_host_path(ctx, pathlib.Path(target), entry=entry)
             if (
                 protected_path is not None
-                and _matches(pathlib.Path(target), protected_path)
+                and _matches(pathlib.Path(target), protected_path, entry)
+                or entry and entry_path(pathlib.Path(target)) == _resolve_policy_path(ctx, str(raw_path), binding, True)
                 or _backend_spelling_matches(pathlib.Path(target), protected_spellings)
                 or bool(protected_spellings & target_backend_spellings)
             ):

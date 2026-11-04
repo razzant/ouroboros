@@ -1026,7 +1026,8 @@ def _patch_from_result(
         patch_artifact = next((
             artifact
             for artifact in artifacts
-            if str(artifact.get("name") or pathlib.Path(str(artifact.get("path") or "")).name) == "workspace.patch"
+            if artifact.get("kind") != "workspace_capture_history"
+            and str(artifact.get("name") or pathlib.Path(str(artifact.get("path") or "")).name) == "workspace.patch"
         ), None)
     if patch_artifact is not None:
         patch_status = str(patch_artifact.get("status") or "").lower()
@@ -1035,7 +1036,8 @@ def _patch_from_result(
         if patch_status == "failed":
             raise PatchCLIError("workspace patch artifact failed")
         name = str(patch_artifact.get("name") or pathlib.Path(str(patch_artifact.get("path") or "")).name or "workspace.patch")
-        raw = client.get_bytes(f"/api/tasks/{urllib.parse.quote(task_id)}/artifacts/{urllib.parse.quote(name)}")
+        selector = "?" + urllib.parse.urlencode({"relpath": patch_artifact["relpath"]}) if "/" in str(patch_artifact.get("relpath", "")) else ""
+        raw = client.get_bytes(f"/api/tasks/{urllib.parse.quote(task_id)}/artifacts/{urllib.parse.quote(name)}{selector}")
         if strict and not raw:
             raise PatchCLIError("workspace patch artifact is empty")
         return raw.decode("utf-8", errors="replace")
@@ -1043,8 +1045,9 @@ def _patch_from_result(
         manifest_artifact = next((item for item in artifacts if item.get("kind") == "workspace_patch_manifest"), None)
         if manifest_artifact is not None:
             name = str(manifest_artifact.get("name") or "workspace_patch.json")
+            selector = "?" + urllib.parse.urlencode({"relpath": manifest_artifact["relpath"]}) if "/" in str(manifest_artifact.get("relpath", "")) else ""
             manifest = json.loads(client.get_bytes(
-                f"/api/tasks/{urllib.parse.quote(task_id)}/artifacts/{urllib.parse.quote(name)}"))
+                f"/api/tasks/{urllib.parse.quote(task_id)}/artifacts/{urllib.parse.quote(name)}{selector}"))
             if manifest.get("capture_kind") in {"directory_direct", "engine_directory"} or manifest.get("file_outputs"):
                 raise PatchCLIError(
                     f"This result is delivered as complete files rather than a Git patch; inspect {name} and its file references.")
