@@ -137,44 +137,36 @@ def test_pool_timeout_does_not_charge_pause_and_duplicate_park_cannot_widen_it(p
     assert reaps.get_nowait()["terminal_reason"] == "absolute_ceiling"
 
 
-@pytest.mark.parametrize("failure_phase", ["park", "resume"])
-def test_failed_pool_snapshot_never_leaks_or_double_counts_pause(pool, monkeypatch, clock, failure_phase):  # noqa: F811
+@pytest.mark.parametrize("phase", ["park", "resume"])
+def test_a_failed_publication_neither_refuses_a_warm_pause_park_nor_withholds_its_grant(pool, monkeypatch, clock, phase):  # noqa: F811
+    """The warm owner-Pause park and its grant are store commits that mark the queue (Q spans memory only); a
+    publication that fails changes neither: the park stands with its clock facts (sleep, not execution) and the
+    grant hands the lent capacity back with the confirmed paused total, never double counted."""
     started = clock[0] - 100
     pool.meta.update(started_at=started, budget_paused_sec=20.0)
     wait = {**pool.wait, "started_at": started, "reason": "owner_pause", "budget_paused_sec": 20.0,
             "owner_pause": {"parked_at": deadline_utils.utc_now().isoformat()}}
     event = {**pool.event, "checkpoint": wait}
-    if failure_phase == "park":
+    if phase == "park":
         monkeypatch.setattr(queue, "persist_queue_snapshot", lambda **_kw: False)
     worker_owner_wait.handle_owner_wait(event, workers)
-    if failure_phase == "park":
-        assert pool.original.in_q.get_nowait()["phase"] == "refused"
-        # Refusal grants no capacity or retry, but this live worker's known
-        # sleep remains sleep until the physical wait ends, not execution.
-        assert pool.original.active_capacity and pool.meta["sleep_parked_at"] == clock[0]
-        assert worker_owner_wait.has_owner_wait_checkpoint(pool.meta, 3)
-        assert not worker_owner_wait.waiting_on_owner(pool.meta, 3)
-        worker_owner_wait.retry_pending_owner_waits(workers)
-        assert pool.original.in_q.empty()
-        clock[0] += 200
-        assert execution_elapsed_seconds(pool.meta, clock[0]) == 80
-        return
     assert pool.original.in_q.get_nowait()["phase"] == "parked"
+    assert not pool.original.active_capacity and pool.meta["sleep_parked_at"] == clock[0]
+    assert worker_owner_wait.waiting_on_owner(pool.meta, 3)
+    assert load_task_result(pool.root, "owner")["owner_wait"]["state"] == "waiting"
     clock[0] += 200
+    assert execution_elapsed_seconds(pool.meta, clock[0]) == 80, "the parked interval is sleep, not execution"
+    if phase == "park":
+        return
     worker_owner_wait.handle_owner_wait({**event, "phase": "resume"}, workers)
     with monkeypatch.context() as failed:
         failed.setattr(queue, "persist_queue_snapshot", lambda **_kw: False)
         worker_owner_wait.maintain_owner_wait_capacity()
-    assert pool.original.in_q.empty()
-    assert pool.meta["budget_paused_sec"] == 20
-    assert execution_elapsed_seconds(pool.meta, clock[0]) == 80
-    # The failed grant minted nothing: its lent capacity is still free (demand
-    # growth belongs to assignment), so the next tick grants the same stack.
-    assert set(workers.WORKERS) == {0}
-    worker_owner_wait.maintain_owner_wait_capacity()
     assert pool.original.in_q.get_nowait()["phase"] == "resume_granted"
-    assert pool.meta["budget_paused_sec"] == 220
+    assert pool.original.active_capacity and pool.meta["budget_paused_sec"] == 220
+    assert "sleep_parked_at" not in pool.meta
     assert execution_elapsed_seconds(pool.meta, clock[0]) == 80
+    assert load_task_result(pool.root, "owner")["owner_wait"]["state"] == "resumed"
 
 
 def test_shutdown_preserves_warm_start_through_actual_budget_resume(tmp_path, monkeypatch, clock):

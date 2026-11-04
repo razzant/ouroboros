@@ -19,6 +19,7 @@ import pytest
 from ouroboros import queue_observation, task_status
 from supervisor import queue, queue_publication, queue_snapshot
 from supervisor.work_stop_migration import FORMAT_KEY, FORMAT_VERSION
+from tests.test_owner_wait_pool import pool as pool  # noqa: F401 -- fixture: a parked stack on a real store
 
 SENTINEL = "<<the owner's words, published once>>"
 OWNER_TEXT = SENTINEL + " and kept whole " * 2500  # ~40 KB, like a live Main message
@@ -387,6 +388,100 @@ def test_a_document_that_does_not_answer_its_own_reference_is_invalid(published)
     (root / "state/queue_snapshot.json").write_text(json.dumps(document), encoding="utf-8")
     assert queue_observation.load_queue_document(root) == {"_snapshot_invalid": True}
     assert queue_observation.load_queue_document(root, fresh=True) == {"_snapshot_invalid": True}
+
+
+# ---- Q spans memory only: a park and a grant are marks; the store is the restore authority ----------------
+
+def _restart_and_restore(root, monkeypatch):
+    """The next generation: nothing in memory, the saved snapshot and the store on disk."""
+    from supervisor import workers
+
+    workers.RUNNING.clear()
+    workers.PENDING.clear()
+    monkeypatch.setattr(queue_snapshot, "_RESTORED", set())
+    monkeypatch.setattr(queue_snapshot, "_RESTORING", {})
+    queue.init(root)
+    fenced: list = []
+    assert queue.restore_pending_from_snapshot(terminalized=fenced) >= 0
+    return list(workers.PENDING), fenced
+
+
+def _restore_facts(task):
+    """What a restore decided for a row: its attempt, its recovery source and its hold; stamps aside."""
+    recovery = task.get("_working_recovery") or {}
+    hold = task.get("_budget_pause_hold") or {}
+    return {"id": task["id"], "attempt": task.get("_attempt"), "source_kind": recovery.get("source_kind"),
+            "source_ref": recovery.get("source_ref"), "wait_id": recovery.get("wait_id"),
+            "from_attempt": recovery.get("from_attempt"), "budget_paused_sec": recovery.get("budget_paused_sec"),
+            "started_at": recovery.get("started_at"), "hold": hold.get("reason"),
+            "owner_wait_resume": task.get("_owner_wait_resume")}
+
+
+@pytest.mark.parametrize("published", [True, False], ids=["published", "unpublished"])
+def test_a_park_restores_alike_whether_or_not_its_mark_was_published(pool, monkeypatch, published):
+    """k4's objection to a mark here (server-saturation k4_astra.r2.md:31: "a crash then restores the wrong
+    state") answered by the kill after the step. The park is a store commit; the queue is marked and the tick
+    publishes the row. Kill the process right after the store commit, before the tick (``unpublished``: the
+    snapshot on disk is the one before the park), or right after the tick (``published``): the next generation
+    restores the same row under the same attempt with the same recovery source, the park's own (the store's
+    wait, its source ref and wait id), held for Resume; the snapshot row's ``owner_wait`` decides nothing."""
+    from supervisor import worker_owner_wait, workers
+    from supervisor.events_budget import HOLD_SAVED_WORK
+
+    root = pool.root
+    assert queue.persist_queue_snapshot("before_park") is True  # the row is on disk without its park
+    before = (root / "state/queue_snapshot.json").read_bytes()
+    worker_owner_wait.handle_owner_wait(pool.event, workers)  # the store commit, the mark (published at once here)
+    assert pool.original.in_q.get_nowait()["phase"] == "parked"
+    stored = task_status.load_task_result(root, "owner")["owner_wait"]
+    assert stored["state"] == "waiting" and stored["wait_id"] == "wait"
+    if not published:
+        (root / "state/queue_snapshot.json").write_bytes(before)  # the kill came before the tick's publication
+        assert _read(root, "queue_snapshot.json")["running"][0].get("owner_wait") is None
+    else:
+        assert _read(root, "queue_snapshot.json")["running"][0]["owner_wait"]["state"] == "waiting"
+    pending, fenced = _restart_and_restore(root, monkeypatch)
+    assert fenced == [] and [row["id"] for row in pending] == ["owner"]
+    assert _restore_facts(pending[0]) == {
+        "id": "owner", "attempt": 4, "source_kind": "owner_wait", "source_ref": pool.wait["source_ref"],
+        "wait_id": "wait", "from_attempt": 3, "budget_paused_sec": 0.0, "started_at": pool.wait["started_at"],
+        "hold": HOLD_SAVED_WORK, "owner_wait_resume": None}
+
+
+@pytest.mark.parametrize("published", [True, False], ids=["published", "unpublished"])
+def test_a_grant_restores_the_newer_work_whether_or_not_its_mark_was_published(pool, monkeypatch, published):
+    """The grant's half of the same objection: the stack resumed (the store says ``resumed``, the worker saved
+    newer work) and the process died before the tick published the row, so the snapshot still shows the wait
+    (``unpublished``). The next generation restores the newer working state, never the old grant: the store,
+    not the snapshot row, says whether the wait stands."""
+    from ouroboros import working_checkpoint as wc
+    from supervisor import worker_owner_wait, workers
+    from supervisor.events_budget import HOLD_SAVED_WORK
+    from tests._budget_pause_exact_helpers import _loop_ctx
+
+    root = pool.root
+    worker_owner_wait.handle_owner_wait(pool.event, workers)
+    assert pool.original.in_q.get_nowait()["phase"] == "parked"
+    assert queue.persist_queue_snapshot("parked") is True
+    parked = (root / "state/queue_snapshot.json").read_bytes()
+    assert _read(root, "queue_snapshot.json")["running"][0]["owner_wait"]["state"] == "waiting"
+    worker_owner_wait.handle_owner_wait({**pool.event, "phase": "resume"}, workers)
+    worker_owner_wait.maintain_owner_wait_capacity()  # the grant: store commit, mark, resume_granted
+    assert pool.original.in_q.get_nowait()["phase"] == "resume_granted"
+    assert task_status.load_task_result(root, "owner")["owner_wait"]["state"] == "resumed"
+    _ctx, limit = _loop_ctx(root, "owner", attempt=3)
+    assert wc.save_round(limit, "pre_effect")  # the resumed stack's newer work
+    if not published:
+        (root / "state/queue_snapshot.json").write_bytes(parked)  # killed before the tick: the row still says waiting
+    else:
+        assert queue.persist_queue_snapshot("resumed") is True
+        assert _read(root, "queue_snapshot.json")["running"][0]["owner_wait"]["state"] == "resumed"
+    pending, fenced = _restart_and_restore(root, monkeypatch)
+    assert fenced == [] and [row["id"] for row in pending] == ["owner"]
+    facts = _restore_facts(pending[0])
+    assert facts["source_kind"] == wc.SOURCE_WORKING and facts["from_attempt"] == 3 and facts["attempt"] == 4
+    assert facts["hold"] == HOLD_SAVED_WORK and facts["owner_wait_resume"] is None
+    assert facts["wait_id"] in (None, ""), "the newer work, never the old grant"
 
 
 def test_embedded_and_shared_rows_restore_alike(tmp_path, monkeypatch):
