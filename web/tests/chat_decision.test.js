@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { NodeStub, countPropertyWrites, fixture, frameBubble, turn, WS_MSG } from './chat_decision_fixture.js';
+import { questionPresentation } from '../modules/question_presentation.js';
 // The head's shared status mark (web/modules/status_mark.js): [shape, hue, hidden].
 const markOf = (card) => { const mark = card.querySelector('.chat-quiz-mark'); return [mark.dataset.shape, mark.dataset.hue, mark.hidden]; };
 test('targeted detail preserves normalized option details, single-flight, and the existing answer form', async () => {
@@ -1217,7 +1218,9 @@ test('a question card says its work is paused from the instance\'s works and ret
         const works = (activity) => ({ episodes: new Map([['root', { work_id: 'root', confirmed: true, episode: { task_id: 'root' },
             members: { ids: ['root', 't-1'], states: { 't-1': { activity } } } }]]) });
         fx.decision.syncWorks(works('paused'));
-        assert.equal(status(), 'Waiting for your answer · its work is paused; it reads this after Resume');
+        // The card shows the paused reading of its own question, which names Resume (question_presentation.test.js).
+        assert.equal(status(), questionPresentation({ state: 'open', owner_wait_state: 'waiting' }, { paused: true }).status);
+        assert.match(status(), /\bResume\b/);
         assert.deepEqual(markOf(card), ['dot', 'owner', false], 'the owner\'s answer is still wanted');
         fx.decision.syncWorks(works('working'));
         assert.equal(status(), 'Waiting for your answer');

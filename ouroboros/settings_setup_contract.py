@@ -507,7 +507,24 @@ def build_initial_setup_state(settings: dict, host_mode: str = "desktop") -> dic
     return state
 
 
-def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_install: bool = False) -> dict:
+def consciousness_offer(settings: dict, *, enabled: Optional[bool] = None) -> dict:
+    """The Summary's optional Consciousness row. It is offered while setup has never completed here
+    (an unticked choice the owner makes now; a completed setup neither shows nor repeats one), with
+    the limits consciousness runs under now, as the runtime's own readers report them. ``enabled``
+    is the control as the state shows it (``None``: unknown). Nothing here is saved or started:
+    a ticked row sends the ordinary Start after the save, from the wizard."""
+    from ouroboros.runtime_limits import (
+        get_consciousness_autonomy, get_consciousness_daily_usd, get_consciousness_max_tasks,
+    )
+
+    return {"offered": not _string(settings.get(ONBOARDING_COMPLETED_KEY)),
+            "enabled": enabled if isinstance(enabled, bool) else None,
+            "autonomy": get_consciousness_autonomy(), "dailyUsd": get_consciousness_daily_usd(),
+            "maxTasks": get_consciousness_max_tasks()}
+
+
+def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_install: bool = False,
+                          consciousness_enabled: Optional[bool] = None) -> dict:
     normalized_host = "web" if host_mode == "web" else "desktop"
     return {
         "hostMode": normalized_host,
@@ -524,6 +541,7 @@ def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_i
         "secretPlaceholder": CONFIGURED_SECRET_PLACEHOLDER,
         "contract": build_setup_contract(normalized_host),
         "initialState": build_initial_setup_state(settings, normalized_host),
+        "consciousnessOffer": consciousness_offer(settings, enabled=consciousness_enabled),
     }
 
 

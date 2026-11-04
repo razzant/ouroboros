@@ -156,6 +156,16 @@ class SetupInitialState(TypedDict):
     modelProcessingPreferences: Dict[str, Any]
 
 
+class SetupConsciousnessOffer(TypedDict):
+    """``settings_setup_contract.consciousness_offer``: the Summary's optional, unticked Consciousness row."""
+
+    offered: bool  # setup has never completed on this install; a completed setup shows no row
+    enabled: Optional[bool]  # the control as the state shows it; null = unknown
+    autonomy: Literal["observe", "act", "full"]
+    dailyUsd: float  # rolling-24h recorded-spend allowance; subscription quota is separate
+    maxTasks: int  # how many of its own tasks may run at once; 0 = it starts none
+
+
 class SetupBootstrap(TypedDict):
     """``settings_setup_contract.build_setup_bootstrap``: what the builtin wizard page embeds."""
 
@@ -169,6 +179,7 @@ class SetupBootstrap(TypedDict):
     secretPlaceholder: str  # a prefilled credential that is configured holds this marker
     contract: SetupContract
     initialState: SetupInitialState
+    consciousnessOffer: SetupConsciousnessOffer  # display; a ticked row sends the ordinary Start after the save
 
 
 class OnboardingBootstrapResponse(TypedDict):
@@ -755,7 +766,7 @@ __all__ = [
     "ServedUiState",
     "SetupStep", "SetupProviderField", "SetupProviderProfile", "SetupModelSlot", "SetupModeChoice",
     "SetupLocalRoutingMode", "SetupBudgetField", "SetupSubscriptionField", "SetupContract",
-    "SetupLocalPreset", "SetupInitialState", "SetupBootstrap", "OnboardingBootstrapResponse",
+    "SetupLocalPreset", "SetupInitialState", "SetupConsciousnessOffer", "SetupBootstrap", "OnboardingBootstrapResponse",
     "SettingsReadResponse", "SettingsWriteRefusal",
     "AuthLoginRequest", "AuthLoginResponse",
     "ContractBody", "ContractHttpEntry", "ContractWsEntry", "ContractWs", "GatewayContractResponse",

@@ -19,8 +19,9 @@ def test_wizard_freshness_comes_from_settings_file(surface, existing, monkeypatc
     if existing:
         path.write_text(content, encoding="utf-8")
     monkeypatch.setattr(config, "SETTINGS_PATH", path)
+    # Both surfaces read the one live Setup derivation in onboarding_host.
     module, handler = (onboarding_host, onboarding_host.onboarding_page) if surface == "page" else (
-        settings, settings.api_onboarding)
+        onboarding_host, settings.api_onboarding)
     monkeypatch.setattr(module, "load_settings", lambda: {
         "OUROBOROS_MODEL": "google/gemini-3.8-flash",
     })

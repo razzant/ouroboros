@@ -759,6 +759,7 @@
 /**
  * @typedef {Object} CommandRequest
  * @property {string} cmd
+ * @property {string=} if_boot // optional boot.since precondition; Panic ignores it
  * @property {Object=} client_surface
  * @property {string=} visible_text
  * @property {string=} visible_task_id
@@ -771,6 +772,14 @@
  * @property {boolean=} ok
  * @property {boolean=} deduped
  * @property {string=} task_id
+ */
+
+/**
+ * `POST /api/command` 400/409. `accepted: false` only when refused before queueing; without it the outcome is unknown.
+ * @typedef {Object} CommandRefusal
+ * @property {string} error
+ * @property {boolean=} accepted // always false when present
+ * @property {string=} reason_code // boot_changed: `if_boot` named an earlier server
  */
 
 /**

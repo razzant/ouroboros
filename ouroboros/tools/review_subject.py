@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import hashlib
 import logging
 import os
@@ -726,6 +727,13 @@ class FrozenSubject:
     # An index/worktree read against an EXPLICIT base is an ordinary tree delta,
     # never the gate's subject (``is_gate_subject``).
     at_head: bool = True
+
+    @functools.cached_property
+    def review_words(self):
+        """Parse this immutable subject once; each seat renders it to its own budget."""
+        from ouroboros.review_words import words_for_diff
+
+        return words_for_diff(self.review_root, self.diff_text)
 
     @property
     def review_root(self) -> str:

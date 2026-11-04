@@ -165,6 +165,8 @@ def test_stage_rejects_symlink_member():
         ".env",
         ".env.production",
         ".env.development",
+        "prod.env",
+        "config/.env",
         "credentials.json",
         "service-account.json",
         "secrets.yaml",
@@ -174,13 +176,19 @@ def test_stage_rejects_symlink_member():
         ".npmrc",
     ],
 )
-def test_stage_rejects_sensitive_filenames(name):
+def test_stage_admits_credential_like_filenames_with_exact_bytes(name):
+    """A credential-like name never refuses an archive member: its bytes land exactly, for review to judge."""
+    body = b"SYNTHETIC_FIXTURE=not-a-key\n"
     archive = _zip_with([
         ("SKILL.md", SKILL_MD_BYTES),
-        (name, b"secret"),
+        (name, body),
     ])
-    with pytest.raises(FetchError, match="sensitive"):
-        stage(archive, slug="x", version="1.0.0")
+    staged = stage(archive, slug="x", version="1.0.0")
+    try:
+        assert name in staged.file_list
+        assert (staged.staging_dir / name).read_bytes() == body
+    finally:
+        staged.cleanup()
 
 
 def test_stage_accepts_a_certificate_and_a_release_signature():
@@ -325,7 +333,7 @@ def test_stage_preserves_arbitrary_data_through_loading_and_review(tmp_path):
 
 @pytest.mark.serial
 @pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
-@pytest.mark.parametrize("name", ["credentials.json", "program.so", "node_modules/lib/index.js"])
+@pytest.mark.parametrize("name", ["program.so", "node_modules/lib/index.js"])
 def test_cyber_stages_archive_findings_as_advice(monkeypatch, caplog, mode, name):
     from ouroboros.marketplace import fetcher
 

@@ -25,7 +25,7 @@ def entry_app(tmp_path, monkeypatch):
     monkeypatch.setattr(server_process, "_applied_restart_settings", {})
     monkeypatch.setattr(server_auth, "get_configured_network_password", lambda: "secret")
     monkeypatch.setattr(server_auth, "_auth_secret_cache", b"test-selected-login")
-    monkeypatch.setattr(onboarding_host, "_live_setup", lambda: ({}, {}))
+    monkeypatch.setattr(onboarding_host, "_live_setup", lambda _request: ({}, {}))
     selected = tmp_path / "selected"
     (selected / "auth").mkdir(parents=True)
     for name, text in {
@@ -63,7 +63,7 @@ def test_setup_selects_whole_page_and_builtin_recovery_keeps_its_graph(entry_app
 
 
 def test_setup_without_selection_owner_remains_builtin(monkeypatch):
-    monkeypatch.setattr(onboarding_host, "_live_setup", lambda: ({}, {}))
+    monkeypatch.setattr(onboarding_host, "_live_setup", lambda _request: ({}, {}))
     with TestClient(Starlette(routes=[Route("/onboarding", endpoint=onboarding_host.onboarding_page)])) as client:
         response = client.get("/onboarding")
     assert response.status_code == 200 and "/onboarding/static/" in response.text

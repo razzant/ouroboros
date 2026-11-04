@@ -188,7 +188,7 @@ async def api_command(request: Request) -> JSONResponse:
             panic_evidence = source_evidence(request, kind, client_surface=surface)
 
         if not isinstance(body.get("reply_to", ""), str):
-            return json_error("reply_to must be an address string", 400)
+            return json_error("reply_to must be an address string", 400, accepted=False)
         if cmd:
             from supervisor.message_bus import get_bridge, log_chat
 
@@ -203,6 +203,15 @@ async def api_command(request: Request) -> JSONResponse:
                                  startup_owner_command=getattr(request.app.state, "startup_owner_command", None)):
                     return JSONResponse({"status": "ok"})
                 return json_error("Panic emergency owner is unavailable.", 503)
+            if "if_boot" in body:
+                from ouroboros.server_liveness import BOOT
+
+                expected = body["if_boot"]
+                if not isinstance(expected, str) or not expected:
+                    return json_error("if_boot must be a non-empty boot.since string", 400, accepted=False)
+                if expected != BOOT.snapshot(jobs=False)["since"]:
+                    return json_error("Ouroboros restarted before this command arrived.", 409,
+                                      accepted=False, reason_code="boot_changed")
             visible_text = str(body.get("visible_text") or "").strip()
             task_constraint = body.get("task_constraint") if isinstance(body.get("task_constraint"), dict) else None
             visible_task_id = str(body.get("visible_task_id") or "").strip()
@@ -232,7 +241,7 @@ async def api_command(request: Request) -> JSONResponse:
                 if action is not None:
                     return JSONResponse({"status": "ok"}, background=BackgroundTask(action))
             if bridge is None:
-                return json_error("Complete provider setup before sending this command.", 409)
+                return json_error("Complete provider setup before sending this command.", 409, accepted=False)
             bridge.ui_send(cmd, **send_kwargs)
             if visible_task_id:
                 _RECENT_VISIBLE_COMMANDS[visible_task_id] = time.monotonic()

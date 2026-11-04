@@ -416,7 +416,7 @@ PACKET_TEMPLATE_DYNAMIC = """\
 def assemble_packet_prompt(*, layer: str, checklist_section: str, governance: Any, goal_section: str,
                            scope_section: str, files_section: str, diff_text: str, changed_files: str,
                            rebuttal_section: str = "", review_history_section: str = "",
-                           task_evidence_section: str = "") -> Tuple[str, int]:
+                           task_evidence_section: str = "", words_section: str = "") -> Tuple[str, int]:
     """The packet seat's Part-1 prompt: ``(prompt, stable_prefix_len)``. The stable
     governance prefix is byte-identical across rounds and becomes the cache-marked
     block; the change-class governance block opens the dynamic half."""
@@ -432,7 +432,8 @@ def assemble_packet_prompt(*, layer: str, checklist_section: str, governance: An
         checklist_section=checklist_section,
     ) + (f"\n{stable_inline}\n" if stable_inline.strip() else "")
     dynamic = (f"{tail}\n\n" if tail else "") + PACKET_TEMPLATE_DYNAMIC.format(
-        goal_section=goal_section, scope_section=scope_section, current_files_section=files_section,
+        goal_section=goal_section, scope_section=scope_section,
+        current_files_section=files_section + ("\n\n" + words_section if words_section else ""),
         rebuttal_section=rebuttal_section, review_history_section=review_history_section,
         diff_text=diff_text, changed_files=changed_files, task_evidence_section=task_evidence_section,
     )
@@ -449,6 +450,7 @@ def change_brief_words(layer: str, *, packet: bool = True, retrieving: bool = Tr
     from types import SimpleNamespace
 
     from ouroboros.owner_words import reviewer_words_material
+    from ouroboros.review_words import words_material
     from ouroboros.preflight_receipts import execution_material
     from ouroboros.reference_books import BOOK_GROWTH_RULE
     from ouroboros.review import DIFF_PULSE_QUESTION
@@ -462,7 +464,7 @@ def change_brief_words(layer: str, *, packet: bool = True, retrieving: bool = Tr
     from ouroboros.tools.review_prompt_text import round_material
     from ouroboros.tools.review_subject import managed_material
 
-    every = [*intent_material(), *wave_label_material(), *round_material(), *history_material(),
+    every = [*intent_material(), *wave_label_material(), *round_material(), *history_material(), *words_material(),
              *reviewer_words_material(), *execution_material(), *managed_material((True,)),
              *((DIFF_PULSE_QUESTION, BOOK_GROWTH_RULE) if layer == "body" else ())]
     if not packet:
@@ -555,7 +557,7 @@ def retrieving_brief_for_seat(*, review_root: Any, governance_root: Any, path_su
                               intent: Any, parts: Sequence[str], delegated: bool, model: str, slot_id: str,
                               session_profile: str = "", use_local: Optional[bool] = None,
                               task_evidence_section: str = "", drive_root: Any = None, task_id: str = "",
-                              source_root: str = "") -> Tuple[str, dict]:
+                              source_root: str = "", review_words: Any = None) -> Tuple[str, dict]:
     """ONE retrieving seat's two-part brief and its manifest, from the subject's
     frozen trees: the touched paths, the candidate tree identity and the
     change-relative required-source manifest are computed here, the text by
@@ -573,7 +575,8 @@ def retrieving_brief_for_seat(*, review_root: Any, governance_root: Any, path_su
         commit_message=commit_message, intent=intent,
         drive_root=pathlib.Path(drive_root) if drive_root else None,
         governance_repo_dir=pathlib.Path(governance_root) if governance_root else None,
-        managed_subject=managed_subject, diff_text=diff_text, task_evidence_section=task_evidence_section,
+        managed_subject=managed_subject, diff_text=diff_text, review_words=review_words,
+        task_evidence_section=task_evidence_section,
         required_sources=rows, required_sources_ref=required_sources_ref(rows, staged_tree_sha=tree_sha),
         touched_manifest=touched_manifest(repo_dir, touched), touched_paths=tuple(path for _s, path in touched),
         layer=layer, checklist_section=checklist_section, parts=tuple(parts), delegated=delegated, model=model,
@@ -607,7 +610,7 @@ def prepare_retrieving_seats(ctx: Any, row_plan: dict, models: list, row_routes:
                              target_repo, governance_root, subject, frozen, diff_text: str, layer: str,
                              checklist_section: str, commit_message: str, goal: str, scope: str,
                              review_rebuttal: str, owner_words: str, task_evidence: dict,
-                             preflight_execution: Optional[dict] = None, diff_pulse: str = "") -> tuple:
+                             preflight_execution: Optional[dict] = None, diff_pulse: str = "", review_words: Any = None) -> tuple:
     """Every retrieving seat receives ITS OWN two-part brief (Part 1 the change,
     Part 2 the coupling questions; a coupling-only seat answers Part 2 alone),
     sized to the seat's own first-send bound. Returns ``(row_plan,
@@ -651,7 +654,7 @@ def prepare_retrieving_seats(ctx: Any, row_plan: dict, models: list, row_routes:
                 session_profile=str(row_plan["session_profiles"][i] or ""), use_local=row_plan["use_local"][i],
                 drive_root=getattr(ctx, "drive_root", None),
                 task_id=str(getattr(ctx, "task_id", "") or "") or "commit_review",
-                source_root=source_root_for(ctx, task_evidence))
+                source_root=source_root_for(ctx, task_evidence), review_words=review_words)
         except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as exc:
             from ouroboros.llm_claudexor import propagate_model_error
             propagate_model_error(exc)
@@ -752,19 +755,23 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
             checklist_section=checklist_section, commit_message=commit_message, intent=intent, parts=parts,
             delegated=delegated, model=model, slot_id=slot_id, session_profile=str(_field("session_profile") or ""),
             use_local=_field("use_local", None), task_evidence_section=task_evidence_section, drive_root=drive_root,
-            task_id=task_id, source_root=source_root)
+            task_id=task_id, source_root=source_root, review_words=frozen_subject.review_words)
         return {"system": text, "user": TRIAD_USER_TURN, "parts": list(parts), "sha": manifest["sha"],
                 "delivery": "retrieving", "manifest": manifest, "stable_prefix_len": 0}
     # A packet seat: the assembled change evidence, fit to the seat's window.
     from ouroboros.tools.review_file_pack import build_touched_file_pack, pack_omission_note, triad_pack_exclusions
+    from ouroboros.review_words import section_budget
+
+    words = frozen_subject.review_words
 
     touched_paths = [path for _status, path in frozen_subject.name_status] if frozen_subject.name_status else [
         p.strip() for p in str(_rv.run_cmd(["git", "diff", "--cached", "--name-only"], cwd=review_root) or "").splitlines() if p.strip()]
     slot = ReviewSlot(slot_id=slot_id, model=model, session_profile=str(_field("session_profile") or ""),
                       use_local=_field("use_local", None))
+    words_section = words.render(section_budget(_rv._triad_governance_usable_window([model], [slot])))
     governance = _rv._triad_governance_context(
         None, touched_paths, checklist_section, [model], [slot], governance_root=governance_root, layer=layer,
-        subject_root=review_root if layer != "body" else None)
+        subject_root=review_root if layer != "body" else None, review_words=words)
     managed = frozen_subject.managed
     exclude_paths, exclusion_note = (set(), "") if managed is not None else triad_pack_exclusions(
         review_root, touched_paths, prefix_texts=dict(governance.inline_whole_documents))
@@ -783,7 +790,13 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
             layer=layer, checklist_section=checklist_section, governance=governance, goal_section=goal_section,
             scope_section=scope_section, files_section=files or "(no touched files could be read)", diff_text=diff,
             changed_files=changed, rebuttal_section=rebuttal_section, review_history_section=history_section,
-            task_evidence_section=task_evidence_section)
+            task_evidence_section=task_evidence_section, words_section=words_section)
+
+    def _compact_words():
+        nonlocal words_section
+        words_section = words.omission()
+    if words_section:
+        _assemble.compact_optional_evidence = _compact_words
 
     prompt, stable_len, fit_error = fit_triad_prompt(
         [model], _assemble, files_section, frozen_subject.diff_text, changed, str(review_root), ctx=None,

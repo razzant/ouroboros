@@ -56,11 +56,11 @@ When a core governance artifact does not fit the available budget:
 
 Enforcement: `tests/test_tool_result_delivery.py`, `tests/test_delegated_result_delivery.py` and `tests/test_owner_facing_honesty.py`.
 
-### Invariant: Owner-facing surfaces show the full text
+### Invariant: What a person reads whole stays whole
 
-Disclosed truncation (the `⚠️ OMISSION NOTE` marker) protects **LLM context budgets**; it never licenses shortening what the owner reads.
+Disclosed truncation (the `⚠️ OMISSION NOTE` marker) protects **LLM context budgets**; it never licenses cutting what a person reads whole.
 
-- **Owner/UI-bound surfaces** (chat, task_results projections, review verdicts shown to a person) present the complete text or a reference to a durable full copy (an observability `response_ref`): reviewer rationale is a cognitive artifact (BIBLE P1), and truncating it beside an unreferenced full copy is partial memory loss. Terminal text asserts only recovery facts the round record carries, never a route mechanism the selected transport cannot perform.
+- **Artifacts a person reads whole** (reviewer rationale, an answer) stay reachable in full, in details or via a durable copy (an observability `response_ref`): rationale is a cognitive artifact (BIBLE P1); cutting it beside an unreferenced copy is partial memory loss. A status, label or card line follows DESIGN principle 7. Terminal text asserts only recovery facts the round record carries, never a route mechanism the selected transport cannot perform.
 - **Model-bound projections** (review packs, context sections, tool-result transport) keep their disclosed-truncation budgets.
 - **A cut cheaper than its own marker is forbidden everywhere** (the shared primitive's floor).
 

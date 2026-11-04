@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
     taskOutcomeSeverity, taskPresentation, taskReasonDetail, taskTerminalPhase, taskTerminalSummary,
 } from '../modules/log_events.js';
+import { TASK_CAUSE_PHRASES } from '../modules/task_reason_words.js';
 
 // A review that was merely awaited when its task ended is a gap, never a warning:
 // the chip stays Done and the card states the fact. Every real degradation keeps
@@ -80,10 +81,7 @@ test('an acceptance panel that was only awaited is not a warning', () => {
         },
     });
     assert.equal(taskOutcomeSeverity(authored), 'done');
-    assert.equal(
-        taskReasonDetail(authored),
-        'Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off.',
-    );
+    assert.equal(taskReasonDetail(authored), TASK_CAUSE_PHRASES.author_finish);
     // The legacy top-level mirror of the review axis reads the same way.
     assert.equal(taskOutcomeSeverity({ status: 'completed', review_status: { status: 'awaiting' } }), 'done');
 });
