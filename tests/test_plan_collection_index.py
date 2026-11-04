@@ -190,7 +190,7 @@ def test_known_plan_work_uses_its_own_index_before_unknown_history(tmp_path, mon
     with store.open_store(tmp_path / "packer", write=True) as txn:
         txn.conn.execute("UPDATE tasks SET plan_collection_pending=1 WHERE task_id='quiet'")
     with store.open_store(tmp_path / "packer", write=False) as txn:
-        assert evidence_packs.task_packable(txn, "quiet"), "selector is not a new retention duty"
+        assert not evidence_packs.task_packable(txn, "quiet"), "pending council readers still need loose source paths"
 
 
 def test_stopped_plan_classification_keeps_unknown_rows_for_next_pass(tmp_path, monkeypatch):

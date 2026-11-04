@@ -1,12 +1,12 @@
 """Evidence packing passes the maintenance child runs (``ouroboros/maintenance.py``, job ``evidence_packing``);
 storage protocol: docs/PERSISTENCE.md, evidence pack row.
 
-A task is packed once its row is terminal and no review of it is open (``evidence_packs.task_packable``:
-the row's ``review_collection_pending`` fact names an open review operation or an uncollected acceptance,
-whose agent-session reader was handed a retained handle's absolute path): no duty, money or delivery
+A task is packed once its row is terminal and no review or council is open (``evidence_packs.task_packable``:
+``review_collection_pending``/``plan_collection_pending`` name readers still using loose source paths,
+including after the author finishes): no duty, money or delivery
 fact is consulted, because packing moves verified bytes, never content, and anything written for the
 task later becomes its next generation. Loose blobs stay for the tasks whose row is live or under an
-open review (the keep-set, read through the status and review indexes) and for the manifests published
+open review or council (the keep-set, read through their indexes) and for the manifests published
 during a pass (the publication journal). A pass's census is the tasks whose rows were written terminal
 since the position its last pass recorded (``tasks.terminal_seq``) plus the candidates that pass left
 unfinished; a position holds only under the store's body fact it was recorded with (``store_body``: an
@@ -34,7 +34,7 @@ COUNTERS = ("packed", "examined", "swept", "candidates", "raw", "compressed", "v
             "unlinked", "kept", "busy", "faults", "archived", "missing", "live", "reading", "storeless", "deferred")
 
 
-_ROW_COLUMNS = ("status", "write_seq", "updated_at", "review_collection_pending")
+_ROW_COLUMNS = ("status", "write_seq", "updated_at", "review_collection_pending", "plan_collection_pending")
 
 
 def _terminal(row: Optional[tuple]) -> bool:
@@ -44,11 +44,11 @@ def _terminal(row: Optional[tuple]) -> bool:
 
 
 def _packable(row: Optional[tuple]) -> bool:
-    return row is not None and packs.row_packable(row[0], row[3])
+    return row is not None and packs.row_packable(row[0], row[3], row[4])
 
 
 def task_rows(root: pathlib.Path, ids, *, txn=None) -> Dict[str, Optional[tuple]]:
-    """``{task_id: (status, write_seq, updated_at, review_collection_pending)}`` for IDS from one indexed
+    """``{task_id: (status, write_seq, updated_at, review_collection_pending, plan_collection_pending)}`` from one indexed
     select (``None``: no row); the only store facts a pass reads, in one short read closed before any
     directory probe."""
     ids = sorted(set(ids))
@@ -67,12 +67,13 @@ def task_stamps(root: pathlib.Path, task_id: str, *, txn=None) -> str:
 
 
 def _stamp(root: pathlib.Path, task_id: str, row: Optional[tuple]) -> str:
-    """The facts the rule reads: the row's status and review fact (``None``: no row) and the two evidence
+    """The facts the rule reads: the row's status and reader facts (``None``: no row) and the two evidence
     directories' identity, built from facts already read: no store access, so no transaction spans its
     ``stat`` calls."""
     from ouroboros.artifacts import task_artifact_dir_path
 
-    stamps: list = [("status", None if row is None else str(row[0] or "")), ("review", None if row is None else row[3])]
+    stamps: list = [("status", None if row is None else str(row[0] or "")), ("review", None if row is None else row[3]),
+                   ("plan", None if row is None else row[4])]
     paths = [root / "observability" / "calls" / task_id,
              task_artifact_dir_path(root, task_id, create=False).joinpath(*packs.CHECKPOINTS_REL.parts)]
     for path in paths:
@@ -277,8 +278,8 @@ def ordered_candidates(root: pathlib.Path, packable: List[str], *, rows: Optiona
 
 def keep_rows(root: pathlib.Path) -> Dict[str, tuple]:
     """The rows whose loose blobs a pass keeps (``PackSweep.collect_keep``): the tasks not settled
-    (``task_status.NONTERMINAL_STATUSES``) and the tasks under an open review, from the status and
-    review indexes in one short read, whatever the census covers."""
+    (``task_status.NONTERMINAL_STATUSES``) and tasks under open reviews or councils, from the status,
+    review and plan indexes in one short read, whatever the census covers."""
     from ouroboros.task_status import NONTERMINAL_STATUSES
 
     live = sorted(NONTERMINAL_STATUSES)
@@ -288,11 +289,12 @@ def keep_rows(root: pathlib.Path) -> Dict[str, tuple]:
         return {record["task_id"]: tuple(record[name] for name in _ROW_COLUMNS) for record in txn.conn.execute(
             f"SELECT task_id, {', '.join(_ROW_COLUMNS)} FROM tasks WHERE task_id IN (SELECT task_id FROM tasks "
             f"WHERE unlikely(status IN ({','.join('?' * len(live))})) UNION SELECT task_id FROM tasks "
-            "WHERE unlikely(review_collection_pending=1))", live)}
+            "WHERE unlikely(review_collection_pending=1) UNION SELECT task_id FROM tasks "
+            "WHERE unlikely(plan_collection_pending=1))", live)}
 
 
 class PackSweep:
-    """The keep-set of one pass: the blobs referenced by tasks whose row is live or under an open review
+    """The keep-set of one pass: blobs referenced by tasks whose row is live or under an open review/council
     (``keep_rows``), read once outside the deletion locks (``collect_keep``), plus the refs of manifests
     published during the pass, read from the journal suffix under the publication lock (``refresh_keep``).
     Store-less folders are neither packed nor kept. A blob such a task shares with a packed one stays loose

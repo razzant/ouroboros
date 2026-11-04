@@ -925,7 +925,7 @@ def release_ask_completion(root: Any, task_id: str, ask_id: str) -> None:
 
 
 def collection_pending(value: Any) -> bool:
-    """Body-only candidate selection, not a plan verdict or a packing obligation.
+    """Body-only pending-reader fact, not a plan verdict or a retention duty.
     Unknown record/participant shapes stay selectable. No sources or liveness are
     read here: the collector validates the record and checks its task's end."""
     if value is None or value == {}:

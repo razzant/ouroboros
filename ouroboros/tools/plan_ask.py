@@ -213,22 +213,13 @@ def first_body_ask(record: Mapping[str, Any], revision: Optional[Mapping[str, An
 # ------------------------------------------------------------------ delivery
 
 def _evidence_deny_paths(ctx: Any) -> list[str]:
-    """Paths evidence may never attach: the runtime data plane and the live settings file."""
+    """Paths evidence may never attach: the live settings file and every runtime data root (``runtime_data_roots``:
+    the execution, canonical and configured drives), beneath which only the caller's own task stores attach."""
     from ouroboros import config as _config
+    from ouroboros.tools.core_secret_paths import runtime_data_roots
 
-    out: list[str] = []
-    for value in (getattr(_config, "SETTINGS_PATH", ""), getattr(_config, "DATA_DIR", "")):
-        if str(value or "").strip():
-            out.append(str(value).strip())
-    try:
-        from ouroboros.tool_access import canonical_data_root
-
-        drive = canonical_data_root(ctx)
-        if drive:
-            out.append(str(drive))
-    except Exception:
-        pass
-    return out
+    values = (getattr(_config, "SETTINGS_PATH", ""), *runtime_data_roots(ctx))
+    return [str(value).strip() for value in values if str(value or "").strip()]
 
 
 def _readable_roots(ctx: Any, system_root: pathlib.Path, active_root: pathlib.Path) -> List[pathlib.Path]:
@@ -245,14 +236,16 @@ def _readable_roots(ctx: Any, system_root: pathlib.Path, active_root: pathlib.Pa
 def attachment_manifest(ctx: Any, attach: List[str], *, state_root: pathlib.Path, task_id: str,
                         system_root: pathlib.Path, active_root: pathlib.Path) -> Dict[str, Any]:
     """The attached evidence, bounded, every absence named (``plan_evidence``), resolved
-    against the task's readable roots."""
+    against the task's readable roots, every file through ``read_file``'s read admission (its own task stores too,
+    whose file seen in part keeps its whole source beside the plan record)."""
     from ouroboros.tools import plan_evidence
     from ouroboros.tools.plan_dialogue import plan_chat_reader
 
     manifest = plan_evidence.resolve_evidence(
         list(attach or []), active_root=active_root, allowed_roots=_readable_roots(ctx, system_root, active_root),
         resolve_task=plan_evidence.task_evidence_reader(state_root), deny_paths=_evidence_deny_paths(ctx),
-        resolve_chat=plan_chat_reader(state_root, task_id))
+        own_stores=plan_evidence.own_task_stores(ctx), admit=plan_evidence.evidence_read_admission(ctx, system_root),
+        retain=plan_evidence.own_source_retention(state_root, task_id), resolve_chat=plan_chat_reader(state_root, task_id))
     manifest["declared"] = list(attach or [])
     return manifest
 
@@ -592,7 +585,9 @@ def dispatch_ask(ctx: Any, prepared: PreparedAsk, *, revision: Optional[Mapping[
         })
     record = plan_record.append_ask(state_root, task_id, {
         "ask_id": prepared.ask_id, "ts": utc_now_iso(), "revision": number, "message": prepared.message,
-        "attach": list(prepared.attach), "attached": [{k: a.get(k) for k in ("locator", "sha256", "bytes")} for a in prepared.manifest.get("attached") or []],
+        "attach": list(prepared.attach), "attached": [{**{k: a.get(k) for k in ("locator", "sha256", "bytes")},
+                                                       **({"ref": a["ref"]} if a.get("ref") else {})}
+                                                      for a in prepared.manifest.get("attached") or []],
         "omissions": list(prepared.manifest.get("omissions") or []), "reviewer_effort": prepared.reviewer_effort,
         "body_first_ask": bool(prepared.body_first_ask), "panel": prepared.panel, "reason": prepared.panel.get("reason", ""),
         **_dialogue_carrier(prepared.manifest),
