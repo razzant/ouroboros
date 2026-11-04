@@ -51,6 +51,44 @@ def test_the_task_done_event_carries_the_work_name_on_its_log_and_live_channel(t
         assert {key: live[key] for key in ("target_label",) if key in live} == expected
 
 
+def test_the_live_banner_says_the_name_word_and_cause_from_the_frame_the_producer_pushes(tmp_path):
+    """A root's ending goes live only as its ``task_done`` event (the ``task_summary`` row is stored, never sent): the
+    banner that frame rings names the work and its word, then the cause the card says over the same facts."""
+    import pathlib
+    import subprocess
+
+    from ouroboros.headless import prepare_terminal_task_files
+    from ouroboros.preflight_node import resolve_node
+    from ouroboros.task_results import write_task_result
+    from supervisor.events import _handle_task_done
+
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    frames = {}
+    for task_id, status, facts in (("crashed", "failed", {"reason_code": "worker_crash_signal"}), ("clean", "completed", {})):
+        sent, pushed = [], []
+        ctx = _mk_ctx(tmp_path, sent, pushed)
+        task = {"id": task_id, "type": "task", "chat_id": 1, "title": "Rename the config keys"}
+        ctx.RUNNING[task_id] = {"task": task}
+        write_task_result(tmp_path, task_id, status, result="done", chat_id=1, title=task["title"], **facts)
+        assert not prepare_terminal_task_files(tmp_path, task)["error"]
+        _handle_task_done({"type": "task_done", "task_id": task_id, "task_type": "task", "worker_id": 0, "chat_id": 1,
+                           "status": status, "ts": "2026-11-03T00:00:00Z", "_files_prepared_attempt": 1}, ctx)
+        (frames[task_id],) = [p for p in pushed if p.get("type") == "task_done"]
+        assert "reason_detail" not in frames[task_id], "the event carries the facts, not the sentence"
+        assert not [p for p in pushed if "task_summary" in (p.get("type"), p.get("system_type"))]
+        assert not [s for s in sent if "task_summary" in repr(s)]
+    node = resolve_node()
+    assert node, "the live banner proof requires Node"
+    script = """import { classifyLiveFrame } from './web/modules/notifications.js';
+let text = ''; for await (const chunk of process.stdin) text += chunk;
+const said = Object.entries(JSON.parse(text)).map(([id, frame]) => [id, classifyLiveFrame(frame, { kind: 'log' })?.body]);
+console.log(JSON.stringify(Object.fromEntries(said)));"""
+    run = subprocess.run([node, "--input-type=module", "-e", script], input=json.dumps(frames), text=True,
+                         cwd=pathlib.Path(__file__).resolve().parents[1], capture_output=True, timeout=60, check=True)
+    assert json.loads(run.stdout) == {"crashed": "Rename the config keys · Failed: The worker process running the task crashed",
+                                      "clean": "Rename the config keys · Done"}
+
+
 def test_history_replays_the_rows_work_name():
     from ouroboros.gateway.history import _copy_task_summary_metadata
 

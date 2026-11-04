@@ -288,15 +288,14 @@ def test_choices_survive_reload_and_reload_itself_never_notifies(subscription_ui
     assert pref(page, 'enabled').is_checked() is True, 'the choice is client-local and persisted'
     assert pref(page, 'show_text').is_checked() is True
 
-    # With text shown, a finished task's body is its work's name, outcome word and the cause its row
-    # records (DESIGN §9), never the row's host sentence with its task id.
-    deliver(page, {'type': 'chat', 'role': 'system', 'system_type': 'task_summary',
-                   'task_id': 't-after-reload', 'chat_id': MAIN, 'outcome_phase': 'error',
-                   'target_label': 'Alpha', 'reason_detail': 'The report could not be written.',
-                   'content': 'Failed. Root task t-after-reload. The report could not be written.'})
+    # With text shown, a finished task's body is its work's name, outcome word and the cause its record
+    # holds (DESIGN §9), said from the facts of the live event the server pushes, never a task id.
+    deliver(page, {'type': 'log', 'chat_id': MAIN,
+                   'data': {'type': 'task_done', 'task_id': 't-after-reload', 'chat_id': MAIN, 'status': 'failed',
+                            'target_label': 'Alpha', 'reason_code': 'worker_crash_signal'}})
     notes = recorded(page)
     assert len(notes) == 1
-    assert notes[0]['options']['body'] == 'Alpha · Failed: The report could not be written.'
+    assert notes[0]['options']['body'] == 'Alpha · Failed: The worker process running the task crashed'
     capture(page, 'notifications-after-reload')
 
 

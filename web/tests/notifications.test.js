@@ -15,6 +15,7 @@ import {
     readNotifyPrefs,
     writeNotifyPrefs,
 } from '../modules/notifications.js';
+import { taskReasonDetail } from '../modules/log_events.js';
 import { recordingAudio, settle } from './notification_audio_fixture.js';
 
 const ON = { ...DEFAULT_NOTIFY_PREFS, enabled: true };
@@ -208,30 +209,36 @@ test('a finished root\'s body is its work\'s name and outcome word on both wire 
         'Publish the release notes · Failed', 'the log-first shape names the same work and outcome');
     assert.equal(log({ status: 'cancelled', target_label: 'Publish the release notes' }).body,
         'Publish the release notes · Stopped');
-    // Without a name only the word: no invented "Task", no task id, never the host sentence.
-    for (const candidate of [chat({ outcome_phase: 'warn' }), log({ status: 'completed',
-        outcome_axes: { objective: { status: 'pass', warning: 'receipt_absent', warnings: ['receipt_absent'] } } })]) {
-        assert.equal(candidate.body, 'Done with warnings');
-    }
+    // Without a name only the word and its cause: no invented "Task", no task id, never the host sentence.
+    assert.equal(chat({ outcome_phase: 'warn' }).body, 'Done with warnings');
+    assert.equal(log({ status: 'completed', outcome_axes: { objective: { status: 'pass', warning: 'receipt_absent',
+        warnings: ['receipt_absent'] } } }).body, 'Done with warnings: No host verification receipt was recorded; '
+        + 'this does not establish whether other checks ran.');
     assert.ok(!chat({ outcome_phase: 'error' }).body.includes('Root task'));
     // Both shapes stay one event.
     assert.equal(chat({ outcome_phase: 'done' }).key, log({ status: 'completed' }).key);
 });
 
-test('a finished root\'s chat row adds the cause it records; the log shape keeps the name and the word', () => {
+test('a finished root\'s body adds the cause its record holds on either wire shape', () => {
     const asRoot = { isMain: true, isRoot: true, taskId: 'rel' };
     const cause = 'A tool this task used failed and nothing recovered it.';
     const chat = (extra) => classifyLiveFrame({ role: 'system', system_type: 'task_summary', task_id: 'rel',
         outcome_phase: 'error', content: `Failed. Root task rel. ${cause}`, ...extra }, { kind: 'chat', ...asRoot });
-    const log = (extra) => classifyLiveFrame({ type: 'task_done', chat_id: 1, status: 'failed', ...extra },
-        { kind: 'log', ...asRoot });
+    const event = (extra) => ({ type: 'task_done', chat_id: 1, status: 'failed', ...extra });
+    const log = (extra) => classifyLiveFrame(event(extra), { kind: 'log', ...asRoot });
     assert.equal(chat({ target_label: 'Alpha', reason_detail: cause }).body, `Alpha · Failed: ${cause}`);
     assert.equal(chat({ reason_detail: cause }).body, `Failed: ${cause}`, 'without a name: the word and its cause');
     for (const absent of [{}, { reason_detail: '' }, { reason_detail: '   ' }, { reason_detail: null }]) {
         assert.equal(chat({ target_label: 'Alpha', ...absent }).body, 'Alpha · Failed', 'no cause: as before');
+        assert.equal(log({ target_label: 'Alpha', ...absent }).body, 'Alpha · Failed', 'no fact of a cause: none');
     }
-    // A task_done event carries no cause; one riding along is not read: the name and the word only.
-    assert.equal(log({ target_label: 'Alpha', reason_detail: cause }).body, 'Alpha · Failed');
+    assert.equal(log({ status: 'completed', target_label: 'Alpha' }).body, 'Alpha · Done', 'a clean ending has none');
+    // The live event carries the facts, not the sentence: the body says the card's own cause over them.
+    const crashed = { target_label: 'Alpha', reason_code: 'worker_crash_signal' };
+    assert.equal(log(crashed).body, 'Alpha · Failed: The worker process running the task crashed');
+    assert.equal(log(crashed).body, `Alpha · Failed: ${taskReasonDetail(event(crashed))}`);
+    // A sentence the record holds speaks first, on either shape.
+    assert.equal(log({ ...crashed, reason_detail: cause }).body, `Alpha · Failed: ${cause}`);
     // The one trim, after the cause joined: a long cause ends in an ellipsis at the body's length.
     const long = chat({ target_label: 'Alpha', reason_detail: `${'x'.repeat(200)} tail` }).body;
     assert.equal(long.length, 140);

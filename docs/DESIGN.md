@@ -2805,9 +2805,9 @@ notification shown), the click opens the window as it was left, no navigation.
 owner turns message text on: a banner can appear on a shared screen. With it on,
 a finished task says its work's name and outcome word (`Release notes · Done
 with warnings`) on either wire shape, the word alone without a name, then the
-cause its chat row records (`Failed: <cause>`; a log event has none), never the
-host sentence with its task id; Telegram's completion line names the work
-alike, its short id only when it has no name.
+cause its record holds (`Failed: <cause>`), never the host sentence with its
+task id; Telegram's completion line names the work alike, its short id only
+when it has no name.
 
 **Deliberately absent.** No numeric badge, repeated reminder, inline reply,
 Telegram escalation or attention after quitting. A current desktop launcher may
