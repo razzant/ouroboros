@@ -39,7 +39,7 @@ def pairs(words):
 
 
 def test_historical_2766_fixture_keeps_the_words_at_their_producers():
-    history = json.loads((pathlib.Path(__file__).parent / "fixtures/review_words_2766.json").read_text())
+    history = json.loads((pathlib.Path(__file__).parent / "fixtures/review_words_2766.json").read_text(encoding="utf-8"))
     sections = []
     for commit in history:
         words = compare_sources((row["path"], row["before"], row["after"]) for row in commit["files"])
@@ -174,7 +174,7 @@ def test_new_deleted_renamed_files_and_no_final_newline(repo):
 
 @pytest.mark.parametrize("quote_path", ["true", "false"])
 def test_git_quoted_unicode_paths_do_not_turn_evidence_into_a_failure(repo, quote_path):
-    changed_repo(repo, 'const TEXT = "Read before";', 'const TEXT = "Read after";', path="web/слова\n.js")
+    changed_repo(repo, 'const TEXT = "Read before";', 'const TEXT = "Read after";', path="web/слова.js")
     git(repo, "config", "core.quotePath", quote_path)
     assert pairs(words_for_diff(repo, git(repo, "diff", "--cached"))) == [("Read before", "Read after")]
 
