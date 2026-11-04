@@ -981,10 +981,14 @@ def auto_resume_after_restart() -> None:
             return
 
         if not conversation_turn_live():
+            from ouroboros.places import paused_places_sentence
+
             # The admission is short (the body runs in a carrier): no thread of its own.
             handle_chat_direct(
                 int(chat_id),
-                "[auto-resume after restart] Continue your work. Read scratchpad and identity — they contain context of what you were doing.",
+                "\n".join(filter(None, (
+                    "[auto-resume after restart] Continue your work. Read scratchpad and identity — they contain context of what you were doing.",
+                    paused_places_sentence(_pool().DRIVE_ROOT)))),
                 None,
             )
             append_jsonl(

@@ -9,6 +9,35 @@ from ouroboros.presence_bindings import PresenceBinding, PresenceEndpoint
 from tests.frozen_presence_bindings import save_presence_binding
 
 
+def paused_inventory(root, kind):
+    """A stored inventory without a migration stamp, shared with restart consumers."""
+    path = p.places_path(root)
+    if kind == "absent":
+        return ""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "unreadable":
+        path.write_text("{broken", encoding="utf-8")
+        return "Paused places: unknown (place records could not be read)."
+    rows = {key: p.place_summary(p.Place(key, "custom-bridge", "custom", label=label, state=state))
+            for key, label, state in [("a", "Research room", "paused"), ("b", "", "paused"),
+                                     ("c", "Active room", "active"), ("d", "Silent room", "silent")]}
+    if kind == "empty":
+        rows = {}
+    path.write_text(json.dumps({"schema_version": 1, "revision": 4, "places": rows}), encoding="utf-8")
+    return "Places still paused: Research room, b." if rows else ""
+
+
+@pytest.mark.parametrize("kind", ["paused", "empty", "absent", "unreadable"])
+def test_paused_places_sentence_reads_without_migration_or_writes(tmp_path, monkeypatch, kind):
+    expected = paused_inventory(tmp_path, kind)
+    path = p.places_path(tmp_path)
+    before = path.read_bytes() if path.exists() else None
+    monkeypatch.setattr(p, "migrate_places", lambda *_a: pytest.fail("display migrated places"))
+    monkeypatch.setattr(p, "update_json_locked", lambda *_a, **_k: pytest.fail("display wrote places"))
+    assert p.paused_places_sentence(tmp_path) == expected
+    assert (path.read_bytes() if path.exists() else None) == before
+
+
 def connect(root, **kw):
     return p.connect_place(root, connector="slack-bridge", provider="slack", account_id="team", **kw)
 

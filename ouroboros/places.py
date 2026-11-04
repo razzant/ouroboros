@@ -210,6 +210,16 @@ def _read(drive_root: Any) -> dict:
         raise PlaceError("places_unreadable", str(path), f"Place records need repair: {path}: {exc}") from exc
 
 
+def paused_places_sentence(drive_root: Any) -> str:
+    """Name current pauses without migrating, writing or changing any place."""
+    try:
+        rows = _read(drive_root)["places"]
+    except (PlaceError, OSError):
+        return "Paused places: unknown (place records could not be read)."
+    labels = [row.get("label") or key for key, row in sorted(rows.items()) if row.get("state") == STATE_PAUSED]
+    return "Places still paused: " + ", ".join(labels) + "." if labels else ""
+
+
 def migrate_places(drive_root: Any) -> dict:
     """Atomically import each binding once; a failed import leaves all source bytes intact."""
     from ouroboros.places_migration import legacy_places

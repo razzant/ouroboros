@@ -33,7 +33,7 @@ from ouroboros.server_auth import (
 from ouroboros.server_entrypoint import (ServerAdmissionRefused, admit_data_root, bound_service_socket,
                                          find_free_port, parse_server_args, reserved_service_ports, write_port_file)
 from ouroboros.launcher_bootstrap import automatic_launch_allowed
-from ouroboros import body_adoption, process_scope, server_boot, store_switch
+from ouroboros import body_adoption, places, process_scope, server_boot, store_switch
 from ouroboros.server_web import ServedUI
 from ouroboros.config import resolve_port_file
 from ouroboros.process_logging import configure_process_logging
@@ -733,6 +733,7 @@ def _run_supervisor(settings: dict) -> None:
                         f"Settling {count} task{'' if count == 1 else 's'} that "
                         f"{'was' if count == 1 else 'were'} still running when the server stopped."
                     )
+                notice.extend(filter(None, [places.paused_places_sentence(DATA_DIR)]))
                 send_with_budget(int(st_boot["owner_chat_id"]), " ".join(notice), role="system", system_type="startup_notice")
         _startup_retired_settings_notice(settings)
         _startup_environment_review_notice()
