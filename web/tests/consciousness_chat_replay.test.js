@@ -123,6 +123,35 @@ test('replay: a quiet schedule run is titled by its schedule and says what it di
     });
 });
 
+test('replay keeps the sentence when history stamps completion on progress before the summary', async () => {
+    for (const row of [terminal('stamped', { ...named, wake_summary: SENTENCE }),
+        evidence('stamped', { ...named, wake_summary: SENTENCE })]) {
+        const progress = checkpoint('stamped', { ...named, task_terminal_status: 'completed',
+            text: 'Checking the disk and the gateway.', outcome_phase: 'done', outcome_final: true });
+        delete progress.task_phase;
+        assert.ok(!Object.hasOwn(progress, 'wake_summary') && !Object.hasOwn(row, 'task_terminal_status'));
+        await replay({ messages: [progress, row], window: { complete: true } }, feed => {
+            assert.equal(view(feed, 'stamped').title, 'Daily check');
+            assert.equal(view(feed, 'stamped').line, SENTENCE, 'a history status stamp does not replace the task summary');
+            assert.ok(view(feed, 'stamped').facts.includes(SENTENCE));
+        });
+    }
+});
+
+test('the task own terminal carriers clear an absent sentence even in the same attempt', async () => {
+    for (const source of ['task_done', 'task_summary']) {
+        await replay({ messages: [checkpoint('cleared'), terminal('cleared', { ...named, wake_summary: SENTENCE })],
+            window: { complete: true } }, (feed, handlers) => {
+            assert.equal(view(feed, 'cleared').line, SENTENCE);
+            if (source === 'task_done') handlers.get('log')({ chat_id: 1, data: {
+                type: 'task_done', task_id: 'cleared', status: 'completed', task_terminal_status: 'completed', ts: AT } });
+            else handlers.get('chat')(terminal('cleared', named));
+            assert.notEqual(view(feed, 'cleared').line, SENTENCE);
+            assert.ok(!view(feed, 'cleared').facts.includes(SENTENCE));
+        });
+    }
+});
+
 // A wake's narration as the live path sends it and history replays it: the words after the mark are its line.
 const narration = (task_id, words, extra = {}) => ({ task_id, chat_id: 1, ts: '2026-10-28T06:30:00+00:00', role: 'assistant',
     is_progress: true, narration: true, text: `💬 ${words}`, content: `💬 ${words}`, ...extra });

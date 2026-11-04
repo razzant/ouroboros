@@ -20,10 +20,12 @@ export function syncSettledItems(record, detail, options) {
     return syncResultFilesItem(record, detail);
 }
 
-/** A terminal detail or a new attempt replaces the previous sentence, including with absence. */
+/** The task's own terminal detail or a new attempt replaces its sentence; history stamps only settle status. */
 export function syncClosingSentence(record, detail) {
     const attempt = detail?.task_attempt;
-    const reset = isTerminalTaskDetail(detail) || positiveTaskTerminalFact(detail)
+    const stamped = Object.hasOwn(detail || {}, 'task_terminal_status')
+        && detail?.system_type !== 'task_summary' && detail?.type !== 'task_done';
+    const reset = (!stamped && (isTerminalTaskDetail(detail) || positiveTaskTerminalFact(detail)))
         || (Number.isSafeInteger(attempt) && attempt !== record?.summaryAttempt);
     const sentence = detail && 'wake_summary' in detail ? detail.wake_summary : reset ? '' : record?.wakeSummary;
     const words = record && record.wakeSummary !== sentence;
