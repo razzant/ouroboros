@@ -114,6 +114,7 @@ from ouroboros.request_wire_recovery import (
     prepare_wire_payload_for_send,  # noqa: F401
     request_wire_scoped,
 )
+from ouroboros.request_wire_recovery import resolve_temperature_hint
 from ouroboros.transport_custody import is_loopback_base_url  # noqa: F401
 from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS  # noqa: F401 -- historical public import surface
 from ouroboros.usage_accounting import (
@@ -213,6 +214,8 @@ class LLMClient(
         ``default_temperature`` is a host hint, unlike explicit ``temperature``.
         Resolve it on this invocation's effective route after any model wait:
         raw model operations defer to provider defaults; explicit values win.
+        Its origin stays on the route: a bounded value refusal may withdraw a hint
+        and no explicit value (``request_wire_recovery``).
 
         ``model_turn_state`` is the caller's optional active-turn transport slot
         (``llm_claudexor.ModelTurnState``); this seam is where a dispatch that
@@ -240,8 +243,7 @@ class LLMClient(
                 # avoids OS proxy lookup; a spawned carrier keeps the server's policy.
                 no_proxy = no_proxy or transport_no_proxy()
                 target = {**self._resolve_remote_target(model), "processing_preference": processing_preference}
-                if temperature is None and target.get("provider") != "claudexor":
-                    temperature = default_temperature
+                temperature = resolve_temperature_hint(target, temperature, default_temperature)
                 message, usage = self._chat_remote(
                     target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature,
                     no_proxy=no_proxy,
@@ -322,8 +324,7 @@ class LLMClient(
             result[1]["ledger_attempt_ids"] = list(attempt_ids)
             return result
         target = {**self._resolve_remote_target(model), "processing_preference": processing_preference}
-        if temperature is None and target.get("provider") != "claudexor":
-            temperature = default_temperature
+        temperature = resolve_temperature_hint(target, temperature, default_temperature)
         carried_turn_state = turn_state_for_route(model_turn_state, target.get("provider"))
         if target.get("provider") == "claudexor":
             from ouroboros.llm_claudexor import chat_claudexor_async
