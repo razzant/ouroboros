@@ -57,6 +57,7 @@ def test_exact_pause_event_parks_same_task_id_and_confirms_row(tmp_path, monkeyp
     assert not {"owner_visible", "toast_once"}.intersection(pushed[0])
     result = load_task_result(tmp_path, ctx.task_id)
     assert result["reason_code"] == code
+    assert result["cost_final"] is False
     if reason == "sleep":
         assert pushed[0]["pause_reason"] == "sleep" and pushed[0]["rail"] == "model_sleep"
         assert "sleeping" in result["result"] and "selected wake condition" in result["result"]

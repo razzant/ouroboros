@@ -521,6 +521,38 @@ def cost_projection(source: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+def current_cost(source: Mapping[str, Any], drive_root: Any, *, breakdown=None) -> Dict[str, Any]:
+    """Overlay live accounting after effective-result resolution; terminal receipts stay intact."""
+    from ouroboros.task_status import NONTERMINAL_STATUSES
+    from supervisor.state import reconstruct_task_cost
+
+    task_id = str(source.get("task_id") or source.get("id") or "")
+    if not task_id or str(source.get("status") or "").strip().lower() not in NONTERMINAL_STATUSES:
+        return dict(source)
+    fresh = reconstruct_task_cost(task_id, fields=True, drive_root=drive_root, breakdown=breakdown)
+    if isinstance(fresh.get("cost_presentation"), dict) and not fresh["cost_presentation"]["has_rows"]:
+        fresh["accounted_upper_bound_usd"] = None  # no ledger rows do not establish a free task
+    return {**with_cost_aliases(source), **fresh, "cost_final": False}
+
+
+def current_costs(sources: Any, drive_root: Any, *, root_task_id: str) -> list:
+    """Project one batch from one ledger observation, including an unavailable observation."""
+    from ouroboros.task_status import NONTERMINAL_STATUSES
+    from ouroboros.usage_accounting import usage_breakdown
+
+    rows = list(sources)
+    if not any(isinstance(row, Mapping) and str(row.get("status") or "").strip().lower()
+               in NONTERMINAL_STATUSES for row in rows):
+        return rows
+    try:
+        breakdown = usage_breakdown(drive_root, root_task_id=root_task_id, include_custody=True)
+    except Exception:
+        log.debug("Batch task cost unavailable for %s", root_task_id, exc_info=True)
+        breakdown = {}  # reconstruction reports unavailable; never retry once per child
+    return [current_cost(row, drive_root, breakdown=breakdown) if isinstance(row, Mapping) else row
+            for row in rows]
+
+
 def cost_display(source: Optional[Mapping[str, Any]], *, decimals: int = 2) -> str:
     """Human rendering of one task's cost. Null NEVER renders as ``$0.00``.
 
@@ -552,6 +584,8 @@ __all__ = [
     "LIVE_ROOT_COSTS",
     "LiveRootCosts",
     "build_cost_presentation",
+    "current_cost",
+    "current_costs",
     "carry_cost_meta",
     "cost_display",
     "cost_projection",

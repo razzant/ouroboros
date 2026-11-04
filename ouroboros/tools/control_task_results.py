@@ -32,6 +32,8 @@ from ouroboros.task_status import (
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import truncate_review_artifact
 from ouroboros.work_stop import stop_for_reader, task_current_stop
+from ouroboros.cost_projection import current_cost, current_costs
+from ouroboros.tools.task_tree import tree_root_id
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
 
 
@@ -332,6 +334,7 @@ def _get_task_result(
     notice = promotion_intent_notice(task_id, data)
     if notice:
         return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE", text=notice))
+    data = current_cost(data, status_drive_root)
     if authority_fields is not None or source_only and include_authority and not other_source:
         from ouroboros.tools.task_result_views import authority_selection_response
 
@@ -809,7 +812,7 @@ def _unsettled_wait_body(drive_root: Path, tid: str, data: Any, known_result_sha
     sha = _child_result_sha256(data)
     if known_result_sha256 and known_result_sha256 != sha:
         return ""
-    projection = _compact_child_projection(tid, data, known_result_sha256 or None)
+    projection = _compact_child_projection(tid, current_cost(data, drive_root), known_result_sha256 or None)
     _reader_stop(projection, data, reader)
     projection["delegated_runs"] = _delegated_run_facts(drive_root, projection["task_id"])
     return (
@@ -1215,7 +1218,7 @@ def _children_roster_projection(
     from ouroboros.cost_projection import cost_projection
 
     roster: List[Dict[str, Any]] = []
-    for row in rows:
+    for row in current_costs(rows, status_drive_root, root_task_id=tree_root_id(ctx)):
         if not isinstance(row, dict):
             continue
         _cost = cost_projection(row)
@@ -1503,7 +1506,7 @@ def _batch_wait_payload(ctx: Any, waited: Dict[str, Any], normalized_ids: List[s
         # truncation. get_task_result and a SETTLED wait_task stay full; an
         # unsettled wait_task returns this same projection.
         public_tasks: Dict[str, Any] = {}
-        for tid, data in tasks.items():
+        for tid, data in zip(tasks, current_costs(tasks.values(), status_drive_root, root_task_id=tree_root_id(ctx))):
             if str(tid) in unknown_ids:
                 public_tasks[str(tid)] = {
                     "task_id": str(tid),
