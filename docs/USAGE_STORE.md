@@ -96,7 +96,11 @@ network-bound runs inside it.
   that attempt or replace an already final price. This exception leaves the
   open-set/continuation ownership predicate unchanged.
 - `mark_dispatched` re-checks known spend against the global, root and group
-  limits and the owner Pause/admission fences in the same transaction.
+  limits and the owner Pause/admission fences in the same transaction. A
+  reached global limit refuses there, as at the reservation, only paid
+  admission (`usage_accounting.paid_admission`): the evidence that a
+  subscription route bills is its own `model` summary's settled cash, read in
+  that transaction only when it could decide.
 - Recovery that raced a settlement passes `expected_revision`; the UPDATE
   matches it in its WHERE, and zero rows updated leaves the settlement
   authoritative.
