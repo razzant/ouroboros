@@ -532,9 +532,18 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
                 ctx.drive_root or pathlib.Path(ctx.drive_logs).parent, ctx.task_id,
                 category="context_checkpoints", source_id=hashlib.sha256(raw).hexdigest(),
                 data=raw, extension="json")
-            retained_receipt = copy.deepcopy(receipt)
-            receipt_source = {**source, "task_id": ctx.task_id}
             notice = {"status": receipt["status"], "receipt_source": source}
+            from ouroboros.observability import promote_task_source_ref
+            from ouroboros.task_custody import canonical_owner_root
+
+            root = ctx.drive_root or pathlib.Path(ctx.drive_logs).parent
+            try:
+                promote_task_source_ref(root, getattr(tool_ctx, "budget_drive_root", None) or canonical_owner_root(root),
+                                        source, task_id=ctx.task_id)
+                retained_receipt = copy.deepcopy(receipt)
+                receipt_source = {**source, "task_id": ctx.task_id}
+            except (OSError, ValueError):
+                pass  # Local model receipt remains valid; the event keeps all structures.
         except (OSError, ValueError):
             notice = {"status": receipt["status"], "receipt_source": "unavailable"}
         if memory_price:

@@ -109,7 +109,7 @@ def test_omitted_revision_binds_this_actors_actual_send_without_inspection(tmp_p
     assert _compact_context(ctx, expected_view_revision="unrelated", working_note="stale", keep_unit_ids=[]).startswith("Context view mismatch")
 
 
-@pytest.mark.parametrize("outcome", ["applied", "fit_rejected", "no_op", "store_error"])
+@pytest.mark.parametrize("outcome", ["applied", "fit_rejected", "no_op", "store_error", "retention_error"])
 def test_checkpoint_event_keeps_final_facts_and_resolves_saved_structures(tmp_path, monkeypatch, outcome):
     from ouroboros import artifacts, loop
     from ouroboros.loop_round_limits import _run_authored_context_view
@@ -135,18 +135,28 @@ def test_checkpoint_event_keeps_final_facts_and_resolves_saved_structures(tmp_pa
         return store(*args, **kwargs)
 
     monkeypatch.setattr(artifacts, "store_actor_source_bytes", save)
+    if outcome == "retention_error":
+        from ouroboros import observability
+
+        def unavailable(*args, **kwargs):
+            raise OSError("canonical source storage unavailable")
+
+        monkeypatch.setattr(observability, "promote_task_source_ref", unavailable)
     candidate = _run_authored_context_view(messages, frame, ctx._pending_compaction, None)
     event, = events
     receipt = ctx._context_view_receipt
-    assert event["status"] == receipt["status"] == ("applied" if outcome == "store_error" else outcome)
+    assert event["status"] == receipt["status"] == ("applied" if outcome.endswith("error") else outcome)
     assert event["checkpoint_kind"] == "context_view" and event["round"] == 1
-    if outcome in ("no_op", "store_error"):
+    if outcome in ("no_op", "store_error", "retention_error"):
         assert "receipt_source" not in event and "at_source" not in event
         assert event == {"checkpoint_kind": "context_view", "round": 1, **receipt}
         if outcome == "no_op":
             assert candidate is messages
-        else:
+        elif outcome == "store_error":
             assert '"receipt_source": "unavailable"' in candidate[-1]["content"]
+        else:
+            notice = json.loads(candidate[-1]["content"].split("\n", 1)[1])
+            assert notice["receipt_source"]["read"]["tool"] == "read_file"
         return
 
     source = event["receipt_source"]
@@ -169,3 +179,63 @@ def test_checkpoint_event_keeps_final_facts_and_resolves_saved_structures(tmp_pa
         model_notice = json.loads(candidate[-1]["content"].split("\n", 1)[1])
         assert "task_id" not in model_notice["receipt_source"]
         assert model_notice["receipt_source"]["read"]["tool"] == "read_file"
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_checkpoint_event_still_explains_its_structures_after_child_gc(tmp_path, monkeypatch, accepted):
+    from ouroboros import headless, loop, observability
+    from ouroboros.loop_round_limits import _run_authored_context_view
+    from ouroboros.task_custody import settle_child_drive
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.chronicle import _memory_read
+    from ouroboros.tools.compact_context import _compact_context, record_context_view
+
+    parent = tmp_path / "parent"
+    task_id = "view-task"
+    child = parent / "task_drives" / task_id
+    child.mkdir(parents=True)
+    write_task_result(parent, task_id, "running", root_task_id="parent")
+    ctx = SimpleNamespace(active_context_mode="low")
+    messages, schemas, events = _source(), [], []
+    observability.persist_call(child, task_id=task_id, call_id="before", call_type="llm_request",
+                               payload={"messages": messages})
+    record_context_view(ctx, messages, schemas)
+    _compact_context(ctx, working_note="I retain the conclusion.")
+
+    def fit(candidate, tools):
+        last = candidate[-1].get("content")
+        final = isinstance(last, str) and last.startswith("[Context view receipt]")
+        return {"accepted": accepted or not final, "measured_final": final}
+
+    frame = _context(child, ctx, schemas, monkeypatch, fit)
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda q, t, logs, event: events.append(copy.deepcopy(event)))
+    candidate = _run_authored_context_view(messages, frame, ctx._pending_compaction, None)
+    event, = events
+    assert "receipt_source" in event
+    assert event["status"] == ("applied" if accepted else "fit_rejected")
+    reader = SimpleNamespace(task_id="another-reader", drive_root=parent, budget_drive_root=parent)
+
+    def structures():
+        if "receipt_source" not in event:
+            return event
+        text = _memory_read(reader, **event["receipt_source"]["read"]["arguments"])
+        try:
+            return json.loads(text.split("\n", 2)[2])["receipt"]
+        except (ValueError, IndexError, KeyError):
+            return {"read_error": text}
+
+    before = structures()
+    assert before["source_refs"]
+    observability.persist_call(child, task_id=task_id, call_id="after", call_type="llm_request",
+                               payload={"messages": candidate})
+    write_task_result(child, task_id, "completed", result="The answer", artifact_status="ready")
+    headless.copy_child_task_result(parent, {"id": task_id, "drive_root": str(child)})
+    headless.retry_child_task_refs(parent, child, task_id)
+    outcome = settle_child_drive(parent, task_id, child, live=lambda _: False)
+    assert outcome["status"] == "removed", outcome
+    assert not child.exists()
+    from ouroboros.artifacts import read_actor_source_bytes
+    retained = read_actor_source_bytes(parent, task_id, event["receipt_source"])
+    assert json.loads(retained)["receipt"] == before
+    after = structures()
+    assert after.get("source_refs") == before["source_refs"], after

@@ -530,6 +530,11 @@ def promote_call_manifest_ref(source_drive_root, canonical_drive_root, ref, *, t
     return _retain_single_ref(source_drive_root, canonical_drive_root, ref, task_id=task_id)
 
 
+def promote_task_source_ref(source_drive_root, canonical_drive_root, ref, *, task_id):
+    """Retain an actor source and its owned closure before publishing its address."""
+    return _retain_single_ref(source_drive_root, canonical_drive_root, ref, task_id=task_id)
+
+
 # A tuple in written order, never a set: every process walks these fields in the
 # same order (a frozenset of str follows the per-process hash seed).
 _PUBLISHED_CHILD_REF_FIELDS = (
