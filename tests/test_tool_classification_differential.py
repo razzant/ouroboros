@@ -7,6 +7,7 @@ so obsolete exceptions cannot survive silently.
 
 from __future__ import annotations
 
+import base64
 import json
 import pathlib
 from types import MappingProxyType
@@ -520,6 +521,14 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     "INTEGRATE_FILE_OUTPUTS_UNAVAILABLE": (True, "integration_blocked"),
     "INTEGRATE_APPLY_UNKNOWN": (True, "integration_blocked"),
     "INTEGRATE_COPY_BINDING_MISMATCH": (True, "integration_blocked"),
+    # #2753 late native captures (subagent_integration.py `_locate_child_patch` / `_integrate_subagent_patch`,
+    # subagent_integration_delegated.py `_integrate_git_capture`): a cancelled child, a capture that had to be
+    # refreshed (or could not be), and an unreadable child result apply nothing to the target. Plain text the
+    # registry adapts, so the live answer through the tool is the family's, the same as for the bare text.
+    "INTEGRATE_NATIVE_CANCELLED": (True, "integration_blocked"),
+    "INTEGRATE_NATIVE_CAPTURE": (True, "integration_blocked"),
+    "INTEGRATE_NATIVE_CAPTURE_UNAVAILABLE": (True, "integration_blocked"),
+    "INTEGRATE_RESULT_UNREADABLE": (True, "integration_blocked"),
     # The harvest puts every identifier first. A standalone capture failure
     # is an error; the actual successful-write suffix is pinned separately.
     "OUTPUT_CAPTURE_FAILED": (True, "error"),
@@ -601,6 +610,14 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # retired text chain keyed on, so it is the generic ok the retired chain gave FOCUS_STALE and CHERRY_PICK_CONFLICT.
     "RELAY_RETURN_NOT_OWED": (False, "ok"),
     "native:CAPABILITY_UNAVAILABLE:RELAY_RETURN_NOT_OWED": (True, "unavailable"),
+    # #2751 send family (owner_delivery.py `publish_delivery_receipt`, cards.py `_show_card`): a local-room frame an
+    # inline turn has no consumer for, and a non-text frame for an unbound peer, queue nothing and publish native
+    # CAPABILITY_UNAVAILABLE. The bare `_UNAVAILABLE` warning already reads unavailable; the bare `_UNSUPPORTED` one
+    # names no suffix the retired chain keyed on, so it is the generic ok and only the typed result carries the refusal.
+    "LOCAL_ROOM_UNAVAILABLE": (True, "unavailable"),
+    "native:CAPABILITY_UNAVAILABLE:LOCAL_ROOM_UNAVAILABLE": (True, "unavailable"),
+    "PEER_DELIVERY_UNSUPPORTED": (False, "ok"),
+    "native:CAPABILITY_UNAVAILABLE:PEER_DELIVERY_UNSUPPORTED": (True, "unavailable"),
     # control_runtime `_fold_refusal`: a scratchpad fold that changed no block publishes native
     # TOOL_REPORTED_FAILURE for a failed fold and for a conflict alike. The bare `_FAILED` warning is the
     # retired chain's error (every prefix-free `_FAILED` golden row); a bare `_CONFLICT` reads as ok.
@@ -718,6 +735,57 @@ def test_unrecordable_relay_answer_publishes_the_current_producer_contract(tmp_p
     assert "RELAY_RETURN_NOT_OWED" in result.text and recipient.event_queue.empty() and "once" in recipient._open_relays
     assert _published_answer("send_user_message", result) == (
         CURRENT_PRODUCER_CONTRACTS["native:CAPABILITY_UNAVAILABLE:RELAY_RETURN_NOT_OWED"])
+
+
+@pytest.mark.parametrize("tool", ["send_user_message", "send_photo", "send_video", "send_file", "send_links", "show_card"])
+@pytest.mark.parametrize("identifier", ["LOCAL_ROOM_UNAVAILABLE", "PEER_DELIVERY_UNSUPPORTED"])
+def test_undelivered_send_frames_publish_the_current_producer_contract(tmp_path, monkeypatch, identifier, tool):
+    """A send that queued nothing answers through the registry as the producer's typed refusal.
+
+    LOCAL_ROOM_UNAVAILABLE: an inline Presence turn's local-room frame with no live queue, worker sink or
+    supervisor bus (owner_delivery `_no_consumer`). PEER_DELIVERY_UNSUPPORTED: a non-text frame for an unbound
+    peer, where text still goes. Real Place turns and their receipt words: tests/test_presence_final_route.py
+    and tests/test_owner_live_delivery.py.
+    """
+    from queue import Queue
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+    from ouroboros.utils import WORKER_PROCESS_ENV
+
+    def no_supervisor_bus(**_kwargs):
+        raise RuntimeError("no supervisor event bus in this process")
+
+    peer = identifier == "PEER_DELIVERY_UNSUPPORTED"
+    monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
+    monkeypatch.delenv(WORKER_PROCESS_ENV, raising=False)
+    monkeypatch.setattr("supervisor.workers.get_event_q", no_supervisor_bus)
+    repo, data = tmp_path / "repo", tmp_path / "data"
+    repo.mkdir()
+    data.mkdir()
+    (repo / "a.mp4").write_bytes(b"0" * 64)
+    (repo / "a.txt").write_text("a report", encoding="utf-8")
+    arguments = {"send_user_message": {"text": "A word."},
+                 "send_photo": {"image_base64": base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"0" * 4096).decode()},
+                 "send_video": {"file_path": str(repo / "a.mp4")}, "send_file": {"file_path": str(repo / "a.txt")},
+                 "send_links": {"links": [{"label": "Docs", "url": "https://example.test/x"}]},
+                 "show_card": {"title": "Status", "fallback_text": "All green",
+                               "components": [{"type": "metric", "label": "Up", "value": "9"}]}}
+    ctx = ToolContext(repo_dir=repo, drive_root=data, budget_drive_root=data, task_id="sender",
+                      current_chat_id=-5 if peer else 1001, task_contract={},
+                      task_metadata={} if peer else {"presence_event_identity": "place-event:fixture"})
+    ctx.event_queue = Queue() if peer else None
+    registry = ToolRegistry(repo_dir=repo, drive_root=data)
+    registry.set_context(ctx)
+    result = registry.execute_result(tool, arguments[tool])
+    words = json.loads(result.text)["delivery"] if tool == "show_card" else result.text
+    if peer and tool == "send_user_message":  # the refusal is the frame's, not the peer's: text is queued for it
+        assert (result.code, words, len(ctx.pending_events)) == (
+            "OK", "OK: message queued for delivery to the peer conversation.", 1)
+        return
+    assert words.startswith(f"⚠️ {identifier}: ") and "not delivered" in words, words
+    assert (result.status, result.code) == ("unavailable", "CAPABILITY_UNAVAILABLE")
+    assert not ctx.pending_events and (ctx.event_queue is None or ctx.event_queue.empty())
+    assert _published_answer(tool, result) == CURRENT_PRODUCER_CONTRACTS[f"native:CAPABILITY_UNAVAILABLE:{identifier}"]
 
 
 @pytest.mark.parametrize("scenario", ["fold_conflict", "fold_failed", "projection_stale"])

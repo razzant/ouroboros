@@ -153,6 +153,56 @@ def test_one_measure_milestones_and_the_chosen_version_beneath(subscription_ui, 
     setup_browser.capture(page, f"evolution-identity-{width}")
 
 
+@pytest.mark.parametrize("running", [False, True])
+@pytest.mark.parametrize("language", ["en", "de"])
+def test_campaign_keeps_readable_text_when_status_and_actions_grow(subscription_ui, running, language):
+    """A wide window can hold a narrow card. No overflow alone missed a one-word-wide objective."""
+    objective = "Autonomously improve Ouroboros by acting on the highest-value backlog or process-memory signal."
+    state = {**STATE, "evolution_enabled": running,
+             "evolution_state": {"status": "running" if running else "disabled", "enabled": running,
+                                 "detail": "Evolution task is running now.", "campaign": {"objective": objective}},
+             "bg_consciousness_state": {"status": "sleeping", "next_wake_at": "2026-11-04T15:41:00+03:00",
+                                        "detail": "Sleeping until the next scheduled wake.",
+                                        "spent_24h_usd": 39.94, "daily_usd": 300, "unknown_unmetered": 1}}
+    page = subscription_ui["page"]
+    if language == "de":
+        page.route("**/api/ui/i18n", lambda route: route.fulfill(json={"language": "de", "english": False,
+                   "revision": 1, "entries": {key: {"text": text} for key, text in {
+                       "Start campaign…": "Verbesserungskampagne starten…", "Pause": "Kampagne pausieren",
+                       "New objective…": "Neues Kampagnenziel festlegen…",
+                       "Run review…": "Unabhängige Überprüfung starten…"}.items()}}))
+    open_evolution(subscription_ui, history(), state=state)
+    page.locator(".evo-detail-title").wait_for()
+    if language == "de":
+        page.wait_for_function("() => document.querySelector('#evo-review').textContent.includes('Überprüfung')")
+    page.locator("#evo-start").focus()
+    for width, slot in [(1100, None), (1100, 650), (1100, 480), (900, None), (1440, None), (390, None)]:
+        page.set_viewport_size({"width": width, "height": 844 if width == 390 else 750})
+        page.locator(".evo-root").evaluate("(node, slot) => node.style.maxWidth = slot ? slot + 'px' : ''", slot)
+        page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+        sizes = page.evaluate("""() => {
+            const card = document.querySelector('.evo-campaign'), main = card.querySelector('.evo-campaign-main');
+            const r = card.getBoundingClientRect(), m = main.getBoundingClientRect(), s = getComputedStyle(card);
+            const buttons = [...card.querySelectorAll('button:not([hidden])')];
+            return {available: card.clientWidth - parseFloat(s.paddingLeft) - parseFloat(s.paddingRight),
+                main: m.width, outside: buttons.some(n => { const b = n.getBoundingClientRect();
+                    return b.left < r.left || b.right > r.right + 1 || n.scrollHeight > n.clientHeight + 1; }),
+                clipped: main.scrollWidth > main.clientWidth + 1, count: buttons.length};
+        }""")
+        assert sizes["main"] >= min(320, sizes["available"]) - 1, sizes
+        assert not sizes["outside"] and not sizes["clipped"], sizes
+        assert sizes["count"] == (3 if running else 2)
+        assert objective in page.locator(".evo-campaign-lines").inner_text()
+        assert page.evaluate("() => document.activeElement.id") == "evo-start"
+        assert overflow(page) == {"page": 0, "panel": 0}
+        setup_browser.capture(page, f"evolution-reading-{language}-{running}-{width}-{slot or 'auto'}")
+    # The real action is still operable after reflow; cancel the dialog, never send a live command.
+    page.locator("#evo-start").click()
+    page.locator("[data-confirm-input]").wait_for(state="visible")
+    page.keyboard.press("Escape")
+    assert not any(path == "/api/command" for path, _body in subscription_ui["posts"])
+
+
 def test_history_states_never_hold_the_campaign_or_drop_a_saved_copy(subscription_ui):
     answers = {"now": history(refresh="running", versions=False)}
     asked = []
