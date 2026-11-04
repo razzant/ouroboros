@@ -133,6 +133,22 @@ def test_a_switch_to_a_body_that_reads_references_leaves_the_rows_as_stored(tmp_
     assert dialogue_test.chat_rows(root) == rows
 
 
+def test_a_checkout_that_already_reads_no_reference_gets_the_rows_whole_at_the_restart_exit(tmp_path, monkeypatch):
+    """T2: the agent's ``vcs_revert`` or a manual checkout put such a body's tree at HEAD and no door recorded an
+    intent; the restart exit, every writer dead, writes the rows whole for it and resets nothing a second time."""
+    root = tmp_path / "data"
+    rows = _thread_rows(root)
+    repo, older, current = _trees(tmp_path)
+    _git(repo, "checkout", "-q", "--detach", older)
+    monkeypatch.setattr(store_switch, "switching_owner", lambda door: pytest.fail("nothing may reset a second time"))
+    census = {"worker_exits": {"unconfirmed": []}, "live_children": [], "owned_stop": {"state": "completed"}}
+    outcome = store_switch.switch_at_restart(root, repo, census)
+    assert outcome["status"] == "switched" and outcome["needs"]["threads"], outcome
+    assert _bodies(root) == [ds.encode(row) for row in rows] and store_switch.read_switch_intent(root) is None
+    _git(repo, "checkout", "-q", "--detach", current)
+    assert store_switch.switch_at_restart(root, repo, census) == {"status": "no_intent"}, "a tree that reads them"
+
+
 def test_this_bodys_dialogue_store_names_the_format_it_reads():
     """``switch_needs`` reads the marker from a tree's ``dialogue_store.py`` bytes: this body's must carry it, or
     every restart would take its own checkout for a body that reads no reference."""
