@@ -123,7 +123,6 @@ function budgetCrossingLabel(kind, evt) {
 
 export function taskCheckpointLabel(evt = {}) {
     const kind = String(evt.checkpoint_kind || '');
-    if (kind === 'budget_scope_paused' && evt.pause_reason === 'sleep') return 'Task sleeping';
     if (Object.hasOwn(WAIT_LABELS, kind)) return WAIT_LABELS[kind][evt.phase === 'ended' ? 1 : 0];
     if (!kind && Number(evt.checkpoint_number) > 0) {
         return `Checkpoint ${evt.checkpoint_number} — periodic self-check`;
