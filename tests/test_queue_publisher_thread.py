@@ -2,8 +2,9 @@
 
 ``publish_queue_changes`` captures under Q as before; with the writer started (``start_queue_writer``, the server's
 loop right after ``tick_publisher_started``) the capture is handed to one daemon thread that encodes and writes it,
-so event dispatch never waits on ``rename`` and ``open``. The tick answers the outcome of the last write that landed:
-a failure shows one tick later and that tick's capture is the complete rewrite (FU1/R2 unchanged). The writer holds
+so event dispatch never waits on ``rename`` and ``open``. The tick answers False once for each failed write the writer
+completed, one tick later, and that tick's capture is the complete rewrite (FU1/R2 unchanged); a retry still on the
+disk is not another failure (the loop ends at three consecutive). The writer holds
 the newest capture only (a slow disk never queues a backlog), an older capture a barrier overtook is skipped under
 the publish lock, a capture of an ended generation is never written, and the writer ends with the loop that fed it
 (``stop_queue_writer``): the doors after the loop publish synchronously where they stand. Without the writer
@@ -215,3 +216,60 @@ def test_the_supervisor_loop_starts_the_writer_with_its_tick_publisher_and_stops
     exit_line = source.index("_watchdog_stop.set()  # every ordinary exit")
     assert source.index("tick_publisher_started()") < source.index("start_queue_writer()") < loop
     assert loop < exit_line < source.index("stop_queue_writer()") < source.rindex("_supervisor_thread = None")
+
+
+# ---- a failed write is answered once, not on every tick while its retry is on the disk (review F2) ----------------
+
+def _writer_writes(monkeypatch, *, fail_first: int = 0, hold: threading.Event | None = None):
+    """The writer thread's document writes: the first ``fail_first`` answer False; the ones after that wait at
+    ``hold`` before they land (a retry that sits on a slow disk). Other threads write as they stand."""
+    real, state = queue.atomic_write_text, {"calls": 0}
+
+    def write(target, content, *args, **kwargs):
+        if threading.current_thread().name == WRITER:
+            state["calls"] += 1
+            if state["calls"] <= fail_first:
+                return False
+            if hold is not None:
+                assert hold.wait(10), "the test released the slow disk"
+        return real(target, content, *args, **kwargs)
+
+    monkeypatch.setattr(queue, "atomic_write_text", write)
+    return state
+
+
+def test_one_failed_write_and_a_slow_retry_answer_false_once(published, monkeypatch):
+    """One failed write, then its retry sits on the disk across three ticks: the loop counts one crash, not three
+    (``server._run_supervisor`` ends the loop at three consecutive), and the retry that lands is answered True."""
+    _root, _now = _seed(published)
+    release = threading.Event()
+    _writer_writes(monkeypatch, fail_first=1, hold=release)
+    queue_publication.start_queue_writer()
+    queue.PENDING.append(_task("p1"))
+    queue.persist_queue_snapshot("admitted")
+    answers = [queue_publication.publish_queue_changes()]
+    assert queue_publication.drain_writer()  # the one failed write
+    for _ in range(3):  # three ticks while the single retry is still on the disk
+        answers.append(queue_publication.publish_queue_changes())
+    release.set()
+    assert queue_publication.drain_writer()
+    answers.append(queue_publication.publish_queue_changes())
+    assert answers == [True, False, True, True, True]
+    assert not queue_publication._STATE["write_failed"]
+    assert [row["id"] for row in _read(_root, "queue_snapshot.json")["pending"]] == ["p1"]
+
+
+def test_three_consecutive_failed_writes_still_answer_false_three_times(published, monkeypatch):
+    """Each failed write the writer completed is one False, on the tick after it: three in a row still end the
+    loop, and the write that lands after them is answered True."""
+    root, _now = _seed(published)
+    _writer_writes(monkeypatch, fail_first=3)
+    queue_publication.start_queue_writer()
+    queue.PENDING.append(_task("p1"))
+    queue.persist_queue_snapshot("admitted")
+    answers = [queue_publication.publish_queue_changes()]
+    for _ in range(4):
+        assert queue_publication.drain_writer()
+        answers.append(queue_publication.publish_queue_changes())
+    assert answers == [True, False, False, False, True]
+    assert _read(root, "queue.alive")["generation"] == _read(root, "queue_snapshot.json")["generation"]
