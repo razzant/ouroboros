@@ -1097,7 +1097,7 @@ and content hash) and the host-attested verification receipts.
 - When what was produced is something a person will look at, look at it (the frames the subject carries,
   at the viewer's size) and say first what a person sees there and whether it does its job; its geometry
   and its code come after. For each phrase a person reads there first (when the subject carries "Words to
-  the owner: before → after", read it before the diff), say what they would understand or do differently
+  the owner: before → after", read that section first), say what they would understand or do differently
   without it: one that changes neither belongs in details or the record (DESIGN principle 7), and a DESIGN
   rule the same change adds is no ground for its own words.
 - A finding names the concrete gap, where it is, and what would close it.

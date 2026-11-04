@@ -100,8 +100,8 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    needs to understand or do next, in owner words. A phrase stays there only if without
    it its reader would understand or act differently, so a gap that changes either stays
    visible (an unconfirmed Panic; a message not confirmed as saved, beside Send again);
-   provenance, caveats, codes and gaps that change neither (`not recorded`,
-   `not declared`, `not confirmed`) are facts of the record and of details that pointer,
+   provenance, caveats, codes and any gap (`not recorded`, `not declared`,
+   `not confirmed`) that changes neither are facts of the record and of details that pointer,
    touch and keyboard open, never hover alone. Clarity comes from placement, never from
    smaller text or a line quota. This book keeps principles and roles; exact strings,
    templates and their history live in the code, its tests hold their facts and places,
