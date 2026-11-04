@@ -500,10 +500,14 @@ def _unstamped(row: Dict[str, Any]) -> Dict[str, Any]:
 # stored row holds the token in its place and its whole row's identity last (``ROW_SHA_KEY``). Nothing else
 # in the row changes, so every SQL path and every reader of other fields reads it as before; a reader that
 # consumes the thread expands it (``whole_body``, ``whole_rows``, ``whole_line``), and a reference the
-# table does not answer is an unreadable row (``StoreLost``), never a shorter thread. Created on first use;
-# an older body ignores it. Rows are biography and so are their elements: nothing removes one. Rows
-# written before stay whole.
+# table does not answer is an unreadable row (``StoreLost``), never a shorter thread. Created on first use.
+# Rows are biography and so are their elements: nothing removes one. Rows written before stay whole.
+# A body reads such rows only when its copy of this module names ``THREAD_FORMAT`` (``store_switch.switch_needs``
+# looks for it): before a body that does not takes the file, every row held by reference is written whole again,
+# from its stream's first one (``SHARED_FROM``, set by ``append``; ``dialogue_import.expand_for_older_body``).
 SHARED_DDL = "CREATE TABLE IF NOT EXISTS shared (sha256 TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID"
+THREAD_FORMAT = "dialogue_shared_v1"
+SHARED_FROM = "shared_from:"  # + stream: the meta key of the coordinate of the stream's first row held by reference
 _MARKER = re.compile(rb', "\$row_sha256": "[0-9a-f]{64}"\}\Z')
 
 
@@ -678,6 +682,7 @@ def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Di
         if parts:
             conn.execute(SHARED_DDL)
             conn.executemany("INSERT OR IGNORE INTO shared (sha256, value) VALUES (?, ?)", sorted(parts.items()))
+            conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)", (SHARED_FROM + stream, json.dumps(seq)))
         for chat in others:
             touch_room(conn, chat, None, columns["ts"], 1)
         keys = sorted(set(appearances)) if appearances is not None else []

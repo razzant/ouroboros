@@ -27,9 +27,12 @@ from types import SimpleNamespace
 import pytest
 
 import supervisor.git_ops as git_ops
+from ouroboros.dialogue_store import THREAD_FORMAT
 
 pytestmark = pytest.mark.serial  # real writer processes and pinned module roots
 _real_sleep = time.sleep  # the fixtures' own polling; the code under test runs with `_no_retry_sleep`
+# A release's dialogue store that reads a thread held by reference: a rollback to its tree resets at once.
+DIALOGUE_STORE = f"THREAD_FORMAT = {THREAD_FORMAT!r}\n"
 
 
 @pytest.fixture(autouse=True)
@@ -393,7 +396,7 @@ def replacement_history(tmp_path_factory):
     """Build the common four-commit history once; expose immutable bytes, never its root."""
     repo = _init_repo(tmp_path_factory.mktemp("git-lock-history"))
     root = _commit(repo, "root", {"BIBLE.md": "constitution\n", "ouroboros/store.py": "# store\n",
-                                  "ouroboros/usage_store.py": "# usage\n", "ouroboros/dialogue_store.py": "# dialogue\n",
+                                  "ouroboros/usage_store.py": "# usage\n", "ouroboros/dialogue_store.py": DIALOGUE_STORE,
                                   "seed.txt": "seed\n"})
     base = _commit(repo, "owner work", {"local.txt": "owner commit\n"})
     _git(repo, "checkout", "-q", "-b", "official", root)
@@ -937,7 +940,7 @@ def test_a_store_less_target_the_switch_did_not_reach_is_never_replayed_or_final
     scene = replace_scene
     if history == "older_ancestor":  # a real downgrade: the running checkout descends from the old release
         _git(scene.repo, "checkout", "-q", "-B", "ouroboros", scene.storeless)
-        _commit(scene.repo, "the store arrives", {"ouroboros/store.py": "# store\n", "ouroboros/dialogue_store.py": "# dialogue\n"})
+        _commit(scene.repo, "the store arrives", {"ouroboros/store.py": "# store\n", "ouroboros/dialogue_store.py": DIALOGUE_STORE})
         scene.base = _commit(scene.repo, "owner work", {"local.txt": "owner commit\n"})
     ensure_current_store(scene.data)
     status, body = scene.apply(scene.storeless)
@@ -1107,7 +1110,7 @@ def restore_door(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
     storeless = _commit(repo, "before the store", {"BIBLE.md": "constitution\n", "seed.txt": "storeless\n",
                                                    "ouroboros/usage_store.py": "# usage\n"})
-    old = _commit(repo, "the store arrives", {"ouroboros/store.py": "# store\n", "ouroboros/dialogue_store.py": "# dialogue\n",
+    old = _commit(repo, "the store arrives", {"ouroboros/store.py": "# store\n", "ouroboros/dialogue_store.py": DIALOGUE_STORE,
                                               "seed.txt": "old\n"})
     head = _commit(repo, "owner work", {"seed.txt": "new\n", "new.txt": "new\n"})
     data = tmp_path / "data"
