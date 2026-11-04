@@ -209,7 +209,7 @@ Costs reads the physical-attempt ledger: confirmed/estimated spend separately, r
 
 Storage (`storage.js`, `storage_deleted.js`) opens passively. **Measure** uses a low-I/O child (progress, Stop, phase-only live region); shares/date/growth need a finished count. Free space/removers stay fresh; failed reads keep the gauge. **Temporary space** (`storage_free.js`) previews read-only. Saved groups and manual copy discards start unchecked; discards warn of unsaved loss (CLIENT_CONTRACT §15). Remove sends exact ids once; retirers re-judge each at retention zero, Stop between. Visible polling covers count, preview, deletion, not stuck items.
 
-Evolution shows campaign state, consciousness/allowance, Start (shared dialog, empty = default objective; off in Light or without state), Pause when on and Run review. `evolution_history.py` serves saved history independently, remeasuring only on new tags or Try again. Milestone dots share one measure; the selected version's README row sits below.
+Evolution wraps campaign words, consciousness/allowance and actions before squeezing text. Start uses the shared dialog (empty = default; off in Light or without state), Pause when on; Run review. `evolution_history.py` serves saved history independently; new tags or Try again remeasure. Milestones share one measure; selected README row is below.
 
 #### Updates
 
