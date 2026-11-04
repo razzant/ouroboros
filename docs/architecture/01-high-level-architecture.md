@@ -194,7 +194,7 @@ ouroboros/ — agent core and shared runtime (§6)
   transport_custody.py — typed transport facts for the physical-attempt custody seam
   openrouter_attribution.py — canonical OpenRouter application attribution, centralized so forks do not compete under one identity (§7)
   openai_chat_custom.py, openai_chat_dispatch.py — direct-OpenAI Chat function→custom codec and its dispatch policy: custom first, exact-dialect fallback, task-local `none` last
-  request_wire_contract.py, request_wire_resolution.py, request_wire_receipts.py, request_wire_attempt.py, request_wire_custom_validation.py, request_wire_recovery.py, effort_evidence.py — exact-route wire compatibility, one concern each as named (§6 Context fitting, retry, and compaction; §10 invariant 13)
+  request_wire_contract.py, request_wire_resolution.py, request_wire_receipts.py, request_wire_attempt.py, request_wire_custom_validation.py, request_wire_recovery.py, request_wire_temperature.py, effort_evidence.py — exact-route wire compatibility (§6 Context fitting, retry, and compaction; §10 invariant 13)
   anthropic_native_custody.py — whole-block replay custody for Anthropic native reasoning on the same route
   reasoning_artifacts.py — sealed-vs-portable reasoning-artifact classification, fail-closed; `SIGNED_PORTABLE` is a decaying external fact, extended only by a fresh cross-provider replay probe (inventory: docs/DEVELOPMENT.md)
   llm_observability.py — public call projections persisted; private sidecars stripped from durable records
