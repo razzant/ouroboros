@@ -541,7 +541,7 @@ def answer_format_section(parts: Sequence[str]) -> str:
 
 # Part 1's heading and its subject slot (the touched manifest, then the diff section).
 _PART_ONE = "## Part 1 — The change\n\n"
-_SUBJECT_SLOT = "## Subject — the staged change\n\n{touched}\n\n{words}### Staged diff\n\n{diff}"
+_SUBJECT_SLOT = "## Subject — the staged change\n\n{touched}\n\n{words}## Staged diff\n\n{diff}"
 
 
 def build_retrieving_brief(

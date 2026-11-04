@@ -69,11 +69,6 @@ def words_material(source: str = "the diff's file/blob identities") -> list[str]
     return [sample.render(section_budget(), source), sample.omission(source)]
 
 
-def touches_owner_surface(paths, words: ReviewWords) -> bool:
-    """One change-class fact for DESIGN: frontend paths or changed source words."""
-    return bool(words.changes or words.gaps) or any(str(path).replace("\\", "/").startswith("web/") for path in paths)
-
-
 def section_budget(window_tokens: int | None = None) -> int:
     """Use the existing review inline share; the enclosing packet still has to fit."""
     from ouroboros.runtime_limits import REVIEW_GOVERNANCE_INLINE_SHARE

@@ -11,7 +11,8 @@ carry inline and which it reaches through a navigation map. Three tiers:
    ``docs/CHECKLISTS_ARCHIVE.md`` whole. This tier is byte-stable across
    commits, so the caller puts it in its cache-marked prefix.
 2. **Rules by change class, within a budget share.** ``docs/DESIGN.md`` when the
-   change touches ``web/``; the review-and-commit protocol chapter always; and
+   change touches ``web/``, its design bible alone for changed words elsewhere;
+   the review-and-commit protocol chapter always; and
    every DEVELOPMENT chapter whose text mentions a touched file NAME. Bounded by
    :data:`~ouroboros.runtime_limits.REVIEW_GOVERNANCE_INLINE_SHARE` of the
    reviewer's usable window, largest-relevance-first. Whenever DESIGN is not
@@ -546,7 +547,6 @@ def governance_context(
     runs :func:`_skill_layer_context` over ``manifest_facts`` (``type`` and the
     manifest's ``declares``)."""
     from ouroboros.tools.review_helpers import load_checklist_section, load_governance_doc
-    from ouroboros.review_words import ReviewWords, touches_owner_surface
 
     if layer not in GOVERNANCE_LAYERS:
         raise ValueError(f"unknown governance layer {layer!r}; expected one of {GOVERNANCE_LAYERS}")
@@ -638,21 +638,35 @@ def governance_context(
             rows.append(_row(path, 2, "navigation", len(chapter.text),
                              "no touched file mentioned"))
 
-    design_touched = touches_owner_surface(touched, review_words or ReviewWords())
+    web_touched = any(path.startswith("web/") for path in touched)
+    has_words = review_words is not None and bool(review_words.changes or review_words.gaps)
     design_text = load_governance_doc(root, DESIGN_PATH, on_missing="explicit")
+    chapter_text = {chapter.source_path: chapter.text for chapter in dev_chapters}
+    chapter_text[DESIGN_PATH] = design_text
     design_missing = design_text.startswith("[⚠️ OMISSION") or not design_text.strip()
     if design_missing:
         rows.append(_row(DESIGN_PATH, 2, "navigation", 0,
                          design_text or "DESIGN source is empty; content not delivered"))
-    elif design_touched:
+    elif web_touched:
         candidates.append(((1, 0, DESIGN_PATH), DESIGN_PATH, DESIGN_PATH,
-                           "the change touches what the owner sees (web/ or source words)"))
+                           "a touched path is under web/"))
+    elif has_words:
+        # The seed and component recipes follow the numbered principles inside
+        # the same Markdown section: stop at the end of principle 7, not at H2.
+        bible = re.search(r"(?ms)^## Design bible\b.*?^7\. .*?(?=\n\S|\Z)", design_text)
+        path = f"{DESIGN_PATH}#Design bible"
+        if bible:
+            chapter_text[path] = bible[0].strip()
+            candidates.append(((1, 0, path), path, f"{path} (excerpt: principles 1–7)",
+                               "changed source words; design bible excerpt only"))
+        else:
+            rows.append(_row(path, 2, "navigation", 0, "design bible excerpt unavailable; inspect the named source"))
+        rows.append(_row(DESIGN_PATH, 2, "navigation", len(design_text),
+                         "full DESIGN remains on demand; only its bible is selected for source words"))
     else:
         rows.append(_row(DESIGN_PATH, 2, "navigation", len(design_text),
                          "heading map only; no frontend path or changed source words"))
 
-    chapter_text = {chapter.source_path: chapter.text for chapter in dev_chapters}
-    chapter_text[DESIGN_PATH] = design_text
     for order, path, title, reason in sorted(candidates):
         _admit(path, title, chapter_text.get(path, ""), 2, reason)
 

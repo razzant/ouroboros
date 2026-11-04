@@ -21,6 +21,8 @@ harness = _harness
 
 
 DESIGN = "# Design\n\n## Interaction meaning\n\nOriginal interaction rule.\n\n## Appearance\n\nOriginal appearance rule.\n"
+DESIGN_BIBLE = '## Design bible: "Airy dopamine"\n\n' + ''.join(
+    f'{i}. **Principle {i}.** Governing rule.\n   More of this principle.\n' for i in range(1, 8))
 
 
 def _design(root, text=DESIGN):
@@ -109,17 +111,37 @@ def test_inline_design_is_content_without_duplicate_map(governance_repo):
 
 @pytest.mark.parametrize("window,inline", [(0, False), (1_000_000, True)])
 @pytest.mark.parametrize("changed", [False, True])
-def test_python_word_evidence_uses_the_existing_design_share(governance_repo, window, inline, changed):
+@pytest.mark.parametrize("delivery", ["packet", "retrieving"])
+def test_python_word_evidence_uses_only_design_bible(governance_repo, window, inline, changed, delivery):
     from ouroboros.review_words import compare_sources
 
-    _design(governance_repo)
+    _design(governance_repo, DESIGN_BIBLE + '\n**Seed**\n\nFull design recipes.\n' + DESIGN)
     before = 'TEXT = "Read the result"'
     after = 'TEXT = "Read the updated result"' if changed else before + "\n# comment only\n"
     words = compare_sources([("ouroboros/notice.py", before, after)])
     context = governance_context(governance_repo, surface="triad", touched_paths=["ouroboros/notice.py"],
-                                 usable_window_tokens=window, review_words=words)
-    assert ("docs/DESIGN.md" in context.inline_whole_documents) is (inline and changed)
-    assert ("Interaction meaning" in context.navigation) is not (inline and changed)
+                                 usable_window_tokens=window, review_words=words, delivery=delivery)
+    assert "docs/DESIGN.md" not in context.inline_whole_documents
+    assert (DESIGN_BIBLE.strip() in context.selected_inline) is (inline and changed)
+    assert "Full design recipes." not in context.selected_inline
+    assert "Interaction meaning" in context.navigation
+    if changed:
+        row = next(row for row in context.manifest if row["path"] == "docs/DESIGN.md#Design bible")
+        assert row["disposition"] == ("inline" if inline else "navigation")
+        assert "excerpt" in row["reason"]
+        assert row["chars"] == len(DESIGN_BIBLE.strip())
+
+
+def test_missing_bible_excerpt_never_falls_back_to_whole_design(governance_repo):
+    from ouroboros.review_words import compare_sources
+
+    _design(governance_repo)
+    words = compare_sources([("notice.py", '', 'LABEL = "Resume"')])
+    context = governance_context(governance_repo, surface="triad", touched_paths=["notice.py"],
+                                 usable_window_tokens=1_000_000, review_words=words)
+    assert "Original interaction rule." not in context.selected_inline
+    assert "Interaction meaning" in context.navigation
+    assert any("excerpt unavailable" in row["reason"] for row in context.manifest)
 
 
 @pytest.mark.parametrize("layer", ["body", "core"])
@@ -156,11 +178,14 @@ def test_missing_design_is_named_without_claiming_content(governance_repo, deliv
 
 
 def test_foreign_review_indexes_own_design_without_ouroboros_rules(governance_repo, tmp_path):
+    from ouroboros.review_words import compare_sources
+
     _design(governance_repo)
     foreign = tmp_path / "foreign"
     _design(foreign, "# Foreign product\n\n## Foreign colors\n\nIts own rule.\n")
     context = governance_context(governance_repo, surface="triad", layer="core", subject_root=foreign,
-                                 touched_paths=["web/ui.js"], usable_window_tokens=1_000_000)
+                                 touched_paths=["web/ui.js"], usable_window_tokens=1_000_000,
+                                 review_words=compare_sources([("web/ui.js", "", "const label = 'Resume';")]))
     assert "Foreign colors" in context.navigation
     assert "Interaction meaning" not in context.navigation + context.selected_inline
     assert str(governance_repo / "docs/DESIGN.md") not in context.navigation

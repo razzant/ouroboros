@@ -285,25 +285,31 @@ def test_budget_discloses_cut_and_small_section_is_unchanged():
 
 @pytest.mark.parametrize("retrieves", [False, True], ids=["packet", "scope-brief"])
 @pytest.mark.parametrize("word_change", [False, True])
-def test_real_change_briefs_put_words_before_diff_and_deliver_design_for_python(repo, monkeypatch, retrieves, word_change):
+@pytest.mark.parametrize("layer", ["body", "core"])
+def test_real_change_briefs_put_words_before_diff_and_deliver_design_for_python(repo, monkeypatch, retrieves, word_change, layer):
     from ouroboros.tools import review
     from ouroboros.tools.review_admission import build_two_part_brief
     from ouroboros.tools.review_subject import FrozenSubject, ReviewSubjectSpec
+    from tests.test_design_review_delivery import DESIGN_BIBLE, _design
 
+    _design(repo, DESIGN_BIBLE + '\n**Seed**\n\nFull design recipes.\n')
     before = 'def notice():\n return "Review is ready"\n'
     after = before.replace("ready", "waiting") if word_change else before + "\n# A code-only refactor\n"
     diff = changed_repo(repo, before, after)
     subject = FrozenSubject(spec=ReviewSubjectSpec(root_kind="system_repo", root=str(repo), kind="index",
-                            governance_root=str(repo), layer="body"), diff_text=diff, diff_sha="test-sha",
+                            governance_root=str(repo), layer=layer), diff_text=diff, diff_sha="test-sha",
                             tree_sha=git(repo, "write-tree").strip(), parent_sha=git(repo, "rev-parse", "HEAD").strip(),
                             name_status=(("M", PATH),))
     monkeypatch.setattr(review, "reviewer_context_window", lambda *a, **k: 1_000_000)
     packet = build_two_part_brief(subject, {"slot_id": "words", "model": "test/model", "retrieves": retrieves})
     text = packet["system"]
     assert (HEADING in text) is word_change
-    assert ((repo / "docs/DESIGN.md").read_text() in text) is word_change
+    assert (DESIGN_BIBLE in text) is (word_change and layer == "body")
+    assert "Full design recipes." not in text
     if word_change:
-        assert text.index(HEADING) < text.index("# Staged diff")
+        diff_heading = "## Staged diff" if retrieves else "# Staged diff"
+        assert text.index(HEADING) < text.index(diff_heading)
+        assert "### Staged diff" not in text
         assert text.count(HEADING) == 1
         if not retrieves:
             assert text.index(HEADING) >= packet["stable_prefix_len"]
