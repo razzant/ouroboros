@@ -96,6 +96,16 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    loader that is not work (history, reconnecting, a widget refreshing) keeps its own
    progress signal; nothing else animates by itself, and a state change never moves a
    neighbour, resizes a bar or changes a height.
+7. **Words serve the next step.** The main view says the state and what its reader
+   needs to understand or do next, in owner words. A phrase stays there only if without
+   it its reader would understand or act differently, so a gap that changes either stays
+   visible (an unconfirmed Panic; a message not confirmed as saved, beside Send again);
+   provenance, caveats, codes and any gap (`not recorded`, `not declared`,
+   `not confirmed`) that changes neither are facts of the record and of details that pointer,
+   touch and keyboard open, never hover alone. Clarity comes from placement, never from
+   smaller text or a line quota. This book keeps principles and roles; exact strings,
+   templates and their history live in the code, its tests hold their facts and places,
+   and the owner's reactions live in the installation's knowledge.
 
 **Seed (light | dark)**
 
@@ -692,8 +702,7 @@ keeps the host's typed disclosure that the review was still open (the
 the same fact as its cause sentence, and no second chat bubble carries it; a
 card that reads `Done with warnings` or `Failed` for another reason keeps that
 reason, with the open review stated beside it when the result records it. For a result review the card's
-cause sentence already says whether the reviewers signed the answer off or
-Ouroboros delivered it on its own judgement. A real
+cause sentence already says when a delivered answer lacks the reviewers' sign-off. A real
 outcome keeps its word: no reviewer quorum, a failed, refused or unresolved
 slot, a collected blocking finding, a reviewer verdict nobody closed, a rail or
 a blocking exit still read `Done with warnings` or `Failed`.
@@ -721,9 +730,7 @@ origin-addressed routing notices stay ordinary rows by design. Local diagnostic
 failures stay inspectable in details and Logs but do not relabel the whole
 still-working task. A failed child keeps a compact factual `Failed` marker
 inside its parent while the root continues under its own authoritative status.
-Internal reason codes belong in details and diagnostics, not compact headlines:
-a card that shows a cause says it in the owner's words while the record keeps
-the machine code. In root ending summaries, episodes and Main completion rows, a typed cause
+In root ending summaries, episodes and Main completion rows, a typed cause
 without a sentence reads "The recorded reason has no description yet", with
 its exact code in accessible details. Authored warning prose and raw host text
 stay intact; never infer meaning from spelling. The loop's forced-finalization rails
@@ -1028,9 +1035,8 @@ message, and a landed act publishes no row (its receipt or card already says it)
 A standalone System row exists only where nothing else can carry the fact: no mind
 can speak, no mind will read the message, the owner's own direct act, the
 runtime's state (a settings change saved outside the app: one
-`settings_changed` row per save, `Main model: {old} → {new}. Changed via
-{surface}; declared actor: {actor}.`; the app's own Save publishes none),
-Main's Project lifecycle, or words signed by their author (a reminder, a
+`settings_changed` row per save, what changed and who changed it; the app's own
+Save publishes none), Main's Project lifecycle, or words signed by their author (a reminder, a
 skill notice). It is one short typed mark in owner words, never a
 paragraph or text written for a model. `tests/test_host_message_voice.py` keeps
 every host type stamped as a literal at its send site in one of these classes, with
@@ -1529,11 +1535,10 @@ reviews create child tasks or prove execution.
   unrecorded tree or a cut adopted range reads as not recorded, and a commit the
   task's record does not name reads only as committed, which denies no adoption
   (one the task failed to record stays unnamed here).
-- A merge receipt row in its task's card says the merge's outcome, then its review
-  coverage in one sentence of the same family (`The review passed exactly what
-  merged.`, `This review was for earlier code; it does not cover what merged.`, `No
-  review was declared for this merge.`; `this head` while nothing merged); the
-  coverage codes stay in the receipt, the PR body and the merging agent's result.
+- A merge receipt row in its task's card says the merge's outcome and, unless its
+  review passed exactly what merged, a short coverage label; a coverage sentence that
+  says more than the label is the row's second line inside the card's Details, its
+  codes stay in the receipt, the PR body and the merging agent's result.
 - Read opens the selected saved answer in the document reader (Markdown, Source
   exact; a failure note as plain text) and never regenerates a review or
   switches sources after an update; limits, Download, timeout and focus follow
@@ -1624,9 +1629,8 @@ Anatomy, top to bottom:
    roles: owner blue in dark, the existing meta/ok treatment in light; unknown delivery retains its owner-action mark;
    `Replaced by a newer question` and `Question closed` use the disabled dot; an unreadable source
    reads `Status unavailable`, never an invented invitation. While the asking task is a paused member of its work
-   (the browser's work projection), a waiting question adds `· its work is paused; it reads this after Resume` and a
-   saved answer reads `Answer saved · its work is paused; it reads this after Resume`; a queued or held task keeps the
-   plain words, and nothing resumes it for the owner. No answer-deadline
+   (the browser's work projection), a waiting question or a saved answer says it is read after Resume; a queued or
+   held task keeps the plain words, and nothing resumes it for the owner. No answer-deadline
    countdown: task completion closes its mailbox, not the question's answerability.
    Pressing immediately shows `Sending…` and the brand-marked choice, keeping the
    full form and focus, the head's mark neutral until the answer is confirmed; inert controls are faded in light (in
@@ -2497,18 +2501,14 @@ a server entry):
    rendered at secondary ink reads as disabled: its label is `--text-primary` (a
    setting's name and an unchosen option take the secondary ink, bible principle 4).
 
-**The main view carries understanding, state and action; justification is
-disclosed where needed.** A row reads identity, state, facts; its primary choices,
-exceptions and owner actions stay visible, and a value keeps its honest form
-(`up to`, `Tracked:`, unknown). A rule every row shares is said once for the
-section; history, provenance and why a state or value reads so wait in details
-pointer, touch and keyboard open, never hover alone (Accounts: metrics under Diagnostics,
-explicit store failures visible; exact program text under Details). New copy serves a decision or error, adding meaning no
-control or status already carries: a checked box is not re-said beside it, and
-an unsaved draft is said once by the editor or its host page, not on every row. A conditional
-line never moves the control that caused it: controls own stable slots, and a
-line an edit toggles opens beside or below them. Clarity comes from placement,
-never from smaller text or a line quota; real exceptions all stay.
+**A row's words follow bible principle 7.** Its primary choices and owner actions stay
+visible and a value keeps its honest form (`up to`, `Tracked:`, unknown). Accounts keeps
+an explicit store failure in view, metrics under Diagnostics and exact program text under
+Details.
+A rule every row shares is said once for the section, an unsaved draft once by the editor
+or its host page, and a checked box is not re-said beside it. A conditional line never
+moves the control that caused it: controls own stable slots, and a line an edit toggles
+opens beside or below them.
 
 For a row with one action and a durable result, the result occupies the flexible
 left side and the neutral action stays docked on the right. Field-level actions

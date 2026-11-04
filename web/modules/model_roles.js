@@ -74,9 +74,9 @@ export function modelRolesHost(id) {
     return `<div id="${escapeHtml(id)}" class="model-role-editor"></div>`;
 }
 
-/** Settings shows this under Main, before Save: what a new Main does to work already running (owner, 2026-11-03). */
-export const MAIN_FOLLOW_NOTE = 'Running work that follows Main uses this model at its next call. '
-    + 'The new route may need to read its full context again; work with its own model keeps it.';
+/** Settings shows this under Main, before Save: what a new Main does to work already running (owner, 2026-11-03),
+ *  in one sentence (owner 04.11, 1A: work with its own model is the work's own fact). */
+export const MAIN_FOLLOW_NOTE = 'Running work that follows Main switches at its next call.';
 
 /** In-memory form controller; refreshes have no settings or login side effects. `mainNote`: Settings' Main note. */
 export function createModelRolesEditor({ hostId, store = claudexorStatus,

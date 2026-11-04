@@ -248,6 +248,8 @@ _ROW_PHRASES = {  # the two decisions the owner reads by name; any other key is 
     "OUROBOROS_MODEL": "Main model: {old} → {new}.",
     "OUROBOROS_CONSCIOUSNESS_DAILY_USD": "Consciousness allowance: {old} → {new} USD per rolling 24 hours.",
 }
+# Who changed it, in the owner's words; the surface and the task stay in the event (DESIGN principle 7).
+_ROW_ACTORS = {"ouroboros": "Changed by Ouroboros.", "owner": "Changed by you."}
 
 
 def declared_settings_origin(request: Request) -> Dict[str, str]:
@@ -297,13 +299,13 @@ def _shown(change: Dict[str, Any], side: str) -> str:
 
 
 def settings_change_text(changes: Dict[str, Dict[str, Any]], origin: Dict[str, str]) -> str:
-    """The one System row of a change the app did not declare: one line, so a withheld value or a
-    text of several lines (the owner's rules) is said by its key alone; the event keeps the text."""
+    """The one System row of a change the app did not declare: what changed and who changed it, in one
+    line, so a withheld value or a text of several lines (the owner's rules) is said by its key alone. The
+    event keeps the text, the surface, the declared actor and its task."""
     parts = [f"{key} changed." if "withheld" in change or any("\n" in str(value) for value in change.values())
              else _ROW_PHRASES.get(key, key + ": {old} → {new}.").format(old=_shown(change, "old"), new=_shown(change, "new"))
              for key, change in changes.items()]
-    task = f" (task {origin['actor_task_id']})" if origin.get("actor_task_id") else ""
-    return " ".join(parts) + f" Changed via {origin['surface']}; declared actor: {origin['actor']}{task}."
+    return " ".join(parts) + " " + _ROW_ACTORS.get(str(origin.get("actor") or ""), "Changed outside the app.")
 
 
 def record_settings_change(request: Request, changes: Dict[str, Dict[str, Any]]) -> None:

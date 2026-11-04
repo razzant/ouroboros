@@ -733,9 +733,9 @@ TASK_CAUSE_PHRASES = {
     # clause (clean_pass, clean_pass_obligations_closed carry no sentence); one with a sentence states its cause.
     "previous_revision_accepted": "The reviewers approved an earlier version of this answer; the current version was not re-reviewed.",
     "admission_close_unconfirmed": "Reviewers approved this answer; the supervisor did not confirm that task admission was closed.",
-    "author_stop": "Ouroboros stopped with unfinished work; the reviewers had not signed it off.",
+    "author_stop": "Ouroboros stopped with unfinished work.",
     "review_outcome_received": "Ouroboros received the reviewers' outcome and finished on that.",
-    "author_finish": "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off.",
+    "author_finish": "Ouroboros delivered this answer without the reviewers' sign-off.",
     "review_degraded": "The reviewers did not reach a verdict on this answer.",
     "infra_failure": "The review could not run because of an infrastructure failure, so there is no verdict.",
     "acceptance_preparation_failed": "Ouroboros could not assemble the evidence for this answer's review, so this preparation attempt dispatched no new reviewers; the work itself is kept.",

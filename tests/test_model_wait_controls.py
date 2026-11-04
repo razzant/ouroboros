@@ -636,10 +636,12 @@ def test_a_main_model_saved_on_a_wait_card_is_recorded_like_a_settings_save(live
     if declared:
         assert sent == []
     else:
+        from ouroboros.gateway.owner_settings import settings_change_text
+
         [((chat, text), kwargs)] = sent
         assert chat == 77 and kwargs == {"role": "system", "system_type": "settings_changed"}
-        assert text.startswith(f"Main model: openrouter/old-main → {MODEL}.")
-        assert text.endswith("Changed via api; declared actor: not declared."), text
+        assert text == settings_change_text(record["changes"], record)  # Main's row says what the record holds
+        assert "openrouter/old-main" in text and MODEL in text and "declared" not in text, text
 
 
 @pytest.mark.serial

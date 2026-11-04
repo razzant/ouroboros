@@ -186,7 +186,7 @@ def test_the_two_part_brief_carries_the_words_after_its_intent(tmp_path):
 
     brief, words = _two_part_brief(tmp_path, "root")
     assert words == _section("root", task_id=BRIEF_TASK_ID)
-    assert words in brief and brief.index("GOAL_SENTINEL") < brief.index(words) < brief.index("### Staged diff")
+    assert words in brief and brief.index("GOAL_SENTINEL") < brief.index(words) < brief.index("## Staged diff")
     assert brief.index(words) < brief.index("## Part 2")  # the words ride Part 1's intent; Part 2 reads them there
     conscious, _words = _two_part_brief(tmp_path, "conscious")
     assert ABSENT_CONSCIOUS in conscious and OWNER not in conscious

@@ -654,8 +654,12 @@ def test_a_record_written_by_the_review_ledger_covers_the_head_through_the_real_
     assert receipt["review"]["record"]["panel"] == {"seats": 3, "distinct_models": 2}
     assert receipt["review"]["record"]["subject"]["kind"] == "base..head" and receipt["review"]["declared_only"] is False
     assert out.startswith("✅ PR #7 merge: merged") and "review source: record, verdict PASS" in out
-    # The card says it in words; the codes stay in the agent's result above.
-    assert merge_receipts.card_row_text(receipt).endswith(". The review passed exactly what merged.")
+    # The card says it in words; the codes stay in the agent's result above. A review that passed exactly what
+    # merged adds no label to the head: the row's second line says so.
+    head, detail = card_lines(receipt)
+    assert head.startswith("✅ PR #7 merge: merged") and " · " not in head
+    assert (merge_receipts.coverage_reading(receipt)) == ("", detail) and detail not in head
+    assert not any(code in head + detail for code in ("covers_head", "review source", "PASS"))
 
 
 @pytest.mark.parametrize("kind", ["index", "worktree"])
@@ -667,34 +671,49 @@ def test_an_uncommitted_record_at_the_same_head_is_a_named_gap_and_still_merges(
     assert receipt["coverage"] == {**receipt["coverage"], "status": "unknown", "gaps": ["subject_kind_not_committed"]}
     assert out.startswith("⚠️ PR #7 merge: merged") and "subject_kind_not_committed" in out
     assert f"`{kind}` subject" in world.gh.pr["body"] and "gaps: subject_kind_not_committed" in world.gh.pr["body"]
-    card = merge_receipts.card_row_text(receipt)
-    assert card.endswith(". The review read uncommitted files; whether it saw what merged is not recorded.")
-    assert "subject_kind" not in card
+    assert gap_only_in_detail(receipt, "subject_kind_not_committed") == merge_receipts._UNKNOWN
+    # The second line names the gap, what the review read; the head's label already says the coverage is unknown.
+    detail = card_lines(receipt)[1]
+    assert "uncommitted" in detail and "not recorded" not in detail, detail
 
 
-_EARLIER = "This review was for earlier code; it does not cover what merged."
-_UNRECORDED = "Whether the review covers what merged is not recorded."
+def card_lines(receipt):
+    """The merge row as its card shows it (web/modules/chat_activity.js ``cardRowSummary``): the first line heads
+    the row, the rest is its second line, inside the card's Details."""
+    head, _, detail = merge_receipts.card_row_text(receipt).partition("\n")
+    return head, detail
 
 
-@pytest.mark.parametrize(("facts", "status", "gaps", "words"), [
-    ({"base": "e" * 40}, "unknown", ["reviewed_base_differs"], "The review read it against a different base."),
-    ({"base": ""}, "unknown", ["reviewed_base_not_recorded"], _UNRECORDED),
-    ({"tree": "9" * 40}, "unknown", ["merged_tree_differs_from_reviewed_head"], _EARLIER),
-    ({"tree": ""}, "unknown", ["tree_comparison_unavailable"], _UNRECORDED),
-    ({"head": "e" * 40}, "changes_after_review", [], _EARLIER),
-    ({"head": ""}, "unknown", ["reviewed_head_not_recorded"], "The review did not record which version it read."),
+def gap_only_in_detail(receipt, *codes):
+    """Coverage the review did not prove reads as one short label at the end of the head, a sentence that says more
+    as the row's second line and its codes in the receipt alone (DESIGN principle 7); returns the label."""
+    head, detail = card_lines(receipt)
+    label, sentence = merge_receipts.coverage_reading(receipt)
+    assert label and head.startswith("⚠️ PR #7 merge: ") and head.endswith(f" · {label}"), head
+    assert detail == sentence and (not sentence or sentence not in head) and "\n" not in detail
+    assert not any(code in head + detail for code in (*codes, "review source", "PASS", "FAIL")), (head, detail)
+    return label
+
+
+@pytest.mark.parametrize(("facts", "status", "gaps", "earlier"), [
+    ({"base": "e" * 40}, "unknown", ["reviewed_base_differs"], False),
+    ({"base": ""}, "unknown", ["reviewed_base_not_recorded"], False),
+    ({"tree": "9" * 40}, "unknown", ["merged_tree_differs_from_reviewed_head"], True),
+    ({"tree": ""}, "unknown", ["tree_comparison_unavailable"], False),
+    ({"head": "e" * 40}, "changes_after_review", [], True),
+    ({"head": ""}, "unknown", ["reviewed_head_not_recorded"], False),
 ])
-def test_covers_head_needs_the_record_head_base_and_tree(world, monkeypatch, facts, status, gaps, words):
+def test_covers_head_needs_the_record_head_base_and_tree(world, monkeypatch, facts, status, gaps, earlier):
     install_ledger(monkeypatch, {RECORD_ID: ledger_record(**facts)})
     out = record_merge(world, review_record_id=RECORD_ID)
     (receipt,) = _receipts(world)
     assert receipt["outcome"]["status"] == "merged"
     assert (receipt["coverage"]["status"], receipt["coverage"]["gaps"]) == (status, gaps)
     assert out.startswith("⚠️ PR #7 merge: merged") and f"review coverage {status}" in out
-    # The owner's card says the coverage in one sentence and no code; the receipt, the body and the result keep them.
-    card = merge_receipts.card_row_text(receipt)
-    assert card.startswith("⚠️ PR #7 merge: merged") and card.endswith(f". {words}")
-    assert not any(code in card for code in (status, *gaps, "review coverage", "review source"))
+    # The owner's card heads with a short label and no code, its sentence is the row's second line; the receipt, the
+    # body and the result keep the codes. Other code than what merged reads as an earlier version, never as unknown.
+    label = gap_only_in_detail(receipt, *[code for code in (status, *gaps) if "_" in code])
+    assert label == (merge_receipts._EARLIER if earlier else merge_receipts._UNKNOWN)
 
 
 @pytest.mark.parametrize("absent", [{}, {"error": KeyError(RECORD_ID)}, {"error": FileNotFoundError(RECORD_ID)}])
@@ -729,26 +748,29 @@ def test_a_declaration_without_a_record_is_declared_only_and_says_so(world, monk
     assert receipt["review"]["declared_only"] is True and receipt["review"]["record"] is None
     assert receipt["coverage"] == {**receipt["coverage"], "status": "unknown", "gaps": ["no_host_observed_review_record"]}
     assert out.startswith("⚠️ PR #7 merge: merged") and out.split("\n")[0].endswith("; review source: declaration")
-    assert merge_receipts.card_row_text(receipt).endswith(". A review was declared; Ouroboros holds no record of it.")
+    assert gap_only_in_detail(receipt, "no_host_observed_review_record", "declaration") == merge_receipts._UNKNOWN
     assert "(declared by the merging agent; no host review record)" in world.gh.pr["body"]
     assert "Review record (host review ledger)" not in world.gh.pr["body"]
     unreviewed = {**receipt, "review": {**receipt["review"], "declared": None, "declared_only": False}}
     assert "review source" not in merge_receipts.card_row_text(unreviewed)
 
 
-@pytest.mark.parametrize(("state", "aggregate", "words"), [
-    ("settled", "FAIL", "This review rejected what merged."),
-    ("pending", "PASS", "This review gave no verdict on what merged."),
-    ("settled", "QUORUM_FAILED", "This review gave no verdict on what merged."),
+@pytest.mark.parametrize(("state", "aggregate", "rejected"), [
+    ("settled", "FAIL", True),
+    ("pending", "PASS", False),
+    ("settled", "QUORUM_FAILED", False),
 ])
-def test_a_record_reads_green_only_when_settled_with_pass(world, monkeypatch, state, aggregate, words):
+def test_a_record_reads_green_only_when_settled_with_pass(world, monkeypatch, state, aggregate, rejected):
     install_ledger(monkeypatch, {RECORD_ID: ledger_record(aggregate=aggregate, state=state)})
     out = record_merge(world, review_record_id=RECORD_ID)
     (receipt,) = _receipts(world)
     assert receipt["outcome"]["status"] == "merged"  # a failed review is a fact, never a veto
     assert receipt["coverage"]["status"] == "covers_head" and receipt["coverage"]["gaps"] == []
     assert out.startswith("⚠️ PR #7 merge: merged") and f"review source: record, verdict {aggregate}" in out
-    assert merge_receipts.card_row_text(receipt).endswith(f". {words}")
+    # A rejection reads apart from a missing verdict, both as the head's label; neither is the verdict's token.
+    label = gap_only_in_detail(receipt, aggregate, state)
+    assert label == (merge_receipts._REJECTED if rejected else merge_receipts._NO_VERDICT)
+    assert "\n" not in merge_receipts.card_row_text(receipt)  # the label says it all: no second line repeats it
     assert (f"({state})" in out) is (state != "settled")
     assert f"verdict **{aggregate}**" in world.gh.pr["body"]
 
@@ -829,8 +851,7 @@ def test_history_reprojects_a_stored_declaration_only_receipt_without_green(worl
     (row,) = [r for r in json.loads(response.body)["messages"] if r.get("card_row_id")]
     assert row["card_row_revision"] == legacy["revision"]
     assert row["text"] == merge_receipts.card_row_text(legacy)
-    assert row["text"].startswith("⚠️ PR #7 merge: merged") and row["text"].endswith(
-        ". A review was declared; Ouroboros holds no record of it.")
+    assert row["text"].startswith("⚠️ PR #7 merge: merged") and gap_only_in_detail(legacy) == merge_receipts._UNKNOWN
 
 
 @pytest.mark.parametrize("verdict", ["PASS after the panel's requested fixes were applied", "PASS.", "1 PASS"])
