@@ -1,6 +1,6 @@
 ---
 name: ui_design
-version: 2.0.1
+version: 2.0.2
 type: instruction
 os: any
 permissions: []
@@ -30,14 +30,14 @@ A surface looks designed when every choice on it is explained by what the viewer
 - Shared edges: related things start on one left edge and sit on one baseline; correct by eye after looking.
 - Spacing rhythm: one small scale, tight inside a group, generous between groups. Air is space, never faded text.
 - Proximity before boxes: a border, fill or shadow marks a separate object; if everything has one, nothing does.
-- Quiet surface: caveats, counters and test counts go in your reply, never on the surface.
+- Quiet surface: process notes and test counts go in your reply; uncertainty, exceptions and facts needed for the viewer's decision stay visible.
 - A plan that would look the same for another subject is a default, not a choice. The checkable floor, the tells and the words: `references/craft.md`.
 
 ## 3. Look, then let another eye look
 
 - Open the delivered thing as its viewer will: the entry file or page, alone, at their size, theme and engine. Look at the first screen at 1:1, then at 2× crops of what changed; never a stitched sheet or a scaled grid.
-- Then measure what eyes miss: overflow, clipped or covered text, bars over content, stuck controls, small targets, contrast (`references/browser.md`, `references/measure.js`). Measure after a paint; WebKit can report one width before the first paint and another after.
-- An eye that did not draw it often sees what yours no longer can: when you judge it worth it, ask one to say what it sees first (what the thing is, who speaks to whom, what a viewer would do next). A reviewer given the frames, a critic you brief or a cold reader all serve; show the scene before your intent (the comparison page's clean view hides your names, notes and recommendation). When its words differ from your viewer sentence, the design is unclear: fix it before geometry.
+- Then measure what eyes miss: overflow, clipped or covered text, bars over content, stuck controls, small targets, contrast (`references/browser.md`, `references/measure.js`). Check primary text space with long content at intermediate container widths: fitting without overflow can still be unreadable. Measure after a paint; WebKit may change widths then.
+- When another eye is useful, ask what the thing is, who speaks to whom and what the viewer would do next. For an unbriefed first impression, its first request contains only the scene and those questions; send your intent after its answer. Putting frames before your explanation in one request is still briefed. Both kinds of critique help; neither replaces the complete context a formal review requires. If the reading differs from your viewer sentence, investigate the mismatch before polishing geometry.
 - Findings are evidence, never a verdict. A green test, a saved screenshot or a check count is not a look. If you could not render or see the result, say so and give what you measured.
 
 ## 4. Putting a choice before a person

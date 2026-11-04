@@ -55,7 +55,7 @@ def _card(page, item_id):
     return page.locator(f'[data-browse-board] .marketplace-card[data-item="{item_id}"]').first
 
 
-@pytest.mark.parametrize("browser_name,width", [("chromium", 1280), ("webkit", 390)])
+@pytest.mark.parametrize("browser_name,width", [("chromium", 1280), ("webkit", 1280), ("webkit", 390)])
 def test_browse_install_says_its_consequence_and_follows_the_host(skills_browser, browser_name, width):
     browser = getattr(skills_browser, browser_name).launch(headless=True)
     skills = None
@@ -102,6 +102,16 @@ def test_browse_install_says_its_consequence_and_follows_the_host(skills_browser
         page.wait_for_function("document.querySelector('[data-item=\"ouroboros-community/scholion\"].marketplace-card').textContent.includes('Reviewing · started just now')")
         assert scholion.locator('[data-browse-action="skip"]').is_visible()
         assert "you can leave this page" in scholion.inner_text()
+        if width == 1280:
+            # A short result must not reserve the long-message measure and push
+            # a small action below it when both fit in the actual card.
+            short_row = scholion.locator(".settings-action-row")
+            text_box = short_row.locator(":scope > :first-child").bounding_box()
+            action_box = short_row.locator(".skills-card-actions-end").bounding_box()
+            short_row.evaluate("e => e.scrollIntoView({block: 'center'})")
+            capture(page, browser_name, width, "browse-short-status")
+            assert action_box["y"] < text_box["y"] + text_box["height"]
+            assert short_row.evaluate("e => e.scrollWidth <= e.clientWidth + 1")
 
         # A typed refusal of this install: the card says it and that nothing was installed.
         skills.answers["/api/skill-catalog/install"] = (409, {"ok": False, "code": "withdrawn",
@@ -112,6 +122,15 @@ def test_browse_install_says_its_consequence_and_follows_the_host(skills_browser
         page.wait_for_function("document.querySelector('[data-item=\"ouroboros-community/happy_farm\"].marketplace-card').textContent.includes('Nothing was installed')")
         assert "Couldn’t install happy_farm from Ouroboros Community" in farm.inner_text()
         assert farm.locator('[data-browse-action="install"]').inner_text() == "Try again"
+        result_row = farm.locator(".settings-action-row")
+        result_row.evaluate("e => { e.style.width = '280px'; e.style.maxWidth = '100%'; }")
+        text_box = result_row.locator(":scope > :first-child").bounding_box()
+        action_box = result_row.locator(".skills-card-actions-end").bounding_box()
+        assert text_box["width"] >= result_row.bounding_box()["width"] - 2
+        assert action_box["y"] >= text_box["y"] + text_box["height"] - 1
+        assert result_row.evaluate("e => e.scrollWidth <= e.clientWidth + 1")
+        result_row.evaluate("e => e.scrollIntoView({block: 'center'})")
+        capture(page, browser_name, width, "browse-failure-container-reflow")
 
         # A refusal about what is already installed is said once; the card is not a failed install.
         skills.answers["/api/skill-catalog/install"] = (409, {"ok": False, "code": "name_taken",
@@ -133,6 +152,33 @@ def test_browse_install_says_its_consequence_and_follows_the_host(skills_browser
         _tab(page, "browse")
         _card(page, "ouroboros/pdf_tools").wait_for()
         assert page.locator('[data-browse-grid="recommended"]').count() == 0
+    finally:
+        if skills:
+            skills.close(browser)
+
+
+@pytest.mark.parametrize("browser_name", ["chromium", "webkit"])
+def test_withdrawn_browse_result_uses_the_row_without_an_empty_action(skills_browser, browser_name):
+    from playwright.sync_api import expect
+
+    browser = getattr(skills_browser, browser_name).launch(headless=True)
+    skills = None
+    try:
+        page = browser.new_page(viewport={"width": 1100, "height": 750})
+        catalog = copy.deepcopy(CATALOG)
+        item = next(item for item in catalog["items"] if item["id"] == "ouroboros-community/happy_farm")
+        item["withdrawn"] = {"reason": "No longer maintained"}
+        skills = _open(page, catalog=catalog)
+        _tab(page, "browse")
+        row = _card(page, item["id"]).locator(".settings-action-row")
+        expect(row).to_contain_text("Withdrawn by")
+        row.evaluate("e => { e.style.width = '280px'; e.style.maxWidth = '100%'; }")
+        expect(row.locator(".skills-card-actions-end")).to_be_empty()
+        expect(row.locator(".skills-card-actions-end")).not_to_be_visible()
+        assert row.locator(":scope > :first-child").bounding_box()["width"] >= row.bounding_box()["width"] - 2
+        assert row.evaluate("e => e.scrollWidth <= e.clientWidth + 1")
+        row.evaluate("e => e.scrollIntoView({block: 'center'})")
+        capture(page, browser_name, 1100, "browse-no-action")
     finally:
         if skills:
             skills.close(browser)
