@@ -83,9 +83,11 @@ def section_budget(window_tokens: int | None = None) -> int:
                * 4 * REVIEW_GOVERNANCE_INLINE_SHARE)
 
 
-def _prose(text: str, *, require_space: bool = True) -> bool:
-    return ((not require_space or any(c.isspace() for c in text)) and any(c.isalpha() for c in text)
-            and not re.match(r"^(?:\.?\.?/|https?://|[A-Za-z]:\\)", text.strip())
+def _prose(text: str) -> bool:
+    token = text.strip()
+    return (any(c.isalpha() for c in token)
+            and not re.match(r"^(?:\.?\.?/|https?://|[A-Za-z]:\\)", token)
+            and not re.fullmatch(r"(?:--?[\w-]+|\S*[/\\]\S*|[\w.-]*\.[\w-]+|\w*_\w*|[A-Z]+\d+)", token)
             and not re.fullmatch(r"\s*(?:--[\w-]+|[a-z-]+)\s*:[^\n]+[;}]\s*", text))
 
 
@@ -107,6 +109,20 @@ def _python_literals(path: str, source: str) -> list[Literal]:
     # Names used as keys remain keys when their literals live in a constant,
     # loop or a local helper's argument instead of directly in the lookup.
     owners, scoped_keys = {}, defaultdict(set)
+    machine_modules, machine_calls = {"re", "subprocess"}, {"git", "run_cmd", "_git_bytes"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            machine_modules.update(alias.asname or alias.name for alias in node.names if alias.name in {"re", "subprocess"})
+        if isinstance(node, ast.ImportFrom) and node.module in {"re", "subprocess"}:
+            machine_calls.update(alias.asname or alias.name for alias in node.names)
+
+    def model_input(name):
+        # The producer/argument names identify model context, never words in its prose.
+        return bool(re.search(r"(?:^|_)(?:prompt|messages)(?:_|$)", name, re.I))
+
+    def machine_call(node):
+        name = ast.unparse(node.func)
+        return name in machine_calls or name.split(".")[0] in machine_modules
 
     def key_uses(node, scope):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -116,6 +132,17 @@ def _python_literals(path: str, source: str) -> list[Literal]:
                 else [node.slice] if isinstance(node, ast.Subscript) else [])
         if isinstance(node, ast.Call) and ast.unparse(node.func).rsplit(".", 1)[-1] in {"get", "pop", "setdefault", "tr", "t"}:
             keys = node.args[:1]
+        if isinstance(node, ast.Call):
+            if machine_call(node):
+                keys = node.args
+            keys = [*keys, *(kw.value for kw in node.keywords if model_input(kw.arg or ""))]
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(model_input(ast.unparse(target)) for target in targets):
+                keys = [node.value]
+        # Named argv, regexes and model messages are not captions just because
+        # their literals are assigned separately from the consuming call.
+        keys = [part for key in keys if key is not None for part in ast.walk(key)]
         scoped_keys[scope].update(key.id for key in keys if isinstance(key, ast.Name))
         for child in ast.iter_child_nodes(node):
             key_uses(child, scope)
@@ -134,6 +161,8 @@ def _python_literals(path: str, source: str) -> list[Literal]:
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
             return  # docstrings and inert expression strings, never rendered
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if model_input(node.name):
+                return
             if not isinstance(node, ast.ClassDef):
                 for default in [*node.args.defaults, *node.args.kw_defaults]:
                     walk(default, (*place, node.name, "defaults"))
@@ -143,7 +172,7 @@ def _python_literals(path: str, source: str) -> list[Literal]:
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             target = node.targets[0] if isinstance(node, ast.Assign) else node.target
             names = {part.id for part in ast.walk(target) if isinstance(part, ast.Name)}
-            if names and (names <= key_names or "__all__" in names):
+            if names and (names <= key_names or "__all__" in names or any(model_input(name) for name in names)):
                 return
             walk(node.value, (*place, ast.unparse(target)))
             return
@@ -166,22 +195,25 @@ def _python_literals(path: str, source: str) -> list[Literal]:
                 return
             if name.endswith(("Error", "Exception")):
                 return
-            if name in {"re.compile", "re.match", "re.search", "re.fullmatch"}:
+            if machine_call(node):
                 return
             if isinstance(node.func, ast.Attribute):
                 walk(node.func.value, place)
             method = name.rsplit(".", 1)[-1]
             keys = ({0} if method in {"tr", "t", "get", "pop", "setdefault"} else
                     {1} if method in {"getattr", "hasattr", "setattr", "delattr"} else key_args.get(name, set()))
+            if method in {"encode", "decode", "startswith", "endswith", "child_by_field_name", "get_parser"}:
+                keys = set(range(len(node.args)))
             for index, arg in enumerate(node.args):
                 if index not in keys:
                     walk(arg, place)
             for keyword in node.keywords:
-                walk(keyword.value, (*place, keyword.arg or "**"))
+                if keyword.arg not in {"encoding", "errors"} and not model_input(keyword.arg or ""):
+                    walk(keyword.value, (*place, keyword.arg or "**"))
             return
         text = _python_text(node)
         if text is not None:
-            if _prose(text, require_space=False) and not re.fullmatch(r"\w*_\w*", text):
+            if _prose(text) and (any(c.isspace() for c in text.strip()) or text[:1].isupper()):
                 found.append(Literal(path, ".".join(place) or "module", node.lineno, text))
             # Conditional literal words inside an interpolation are words too.
             for child in ast.walk(node):
@@ -285,19 +317,23 @@ def _javascript_literals(path: str, source: str, line=1) -> list[Literal]:
         kind = node.type
         if kind in {"comment", "regex", "import_statement", "throw_statement"}:
             return
+        if kind == "binary_expression" and text(node.child_by_field_name("operator")) in {"===", "!==", "==", "!="}:
+            return
         if kind in {"function_declaration", "method_definition", "class_declaration"}:
             place = (*place, text(node.child_by_field_name("name")))
         if kind in {"variable_declarator", "pair", "assignment_expression"}:
             key = node.child_by_field_name({"variable_declarator": "name", "pair": "key", "assignment_expression": "left"}[kind])
             name = text(key).strip("\"'")
-            if name in {"style", "className", "selector"} or ".style." in name or name.endswith((".cssText", ".className")):
+            if (name in {"style", "className", "selector"} or ".style." in name or ".dataset." in name
+                    or name.endswith((".cssText", ".className"))):
                 return
             value = node.child_by_field_name("right" if kind == "assignment_expression" else "value")
             if value:
                 walk(value, (*place, name))
             return
         if kind == "call_expression":
-            name = text(node.child_by_field_name("function"))
+            function = node.child_by_field_name("function")
+            name = text(function)
             args = node.child_by_field_name("arguments")
             if not args or re.search(r"(?:^|\.)(?:console|log|logger)\.", name):
                 return
@@ -305,7 +341,11 @@ def _javascript_literals(path: str, source: str, line=1) -> list[Literal]:
                 if name != "css":
                     walk(args, place)
                 return
-            if name.rsplit(".", 1)[-1] in {"querySelector", "querySelectorAll", "matches", "closest", "insertRule"}:
+            # A chained call's receiver owns callbacks and literals too:
+            # slots.map(callback).join('') must visit the map and its callback.
+            walk(function, place)
+            if (name.rsplit(".", 1)[-1] in {"querySelector", "querySelectorAll", "matches", "closest", "insertRule"}
+                    or ".classList." in name):
                 return
             children = args.named_children
             if name.endswith("setAttribute") and children and text(children[0]).strip("\"'") in {"class", "style", "id"}:
@@ -333,13 +373,14 @@ def _javascript_literals(path: str, source: str, line=1) -> list[Literal]:
 
 
 def source_literals(path: str, source: str) -> list[Literal]:
-    if path.startswith(("ouroboros/", "supervisor/")) and path.endswith(".py"):
+    if "tests" in path.replace("\\", "/").split("/"):
+        return []
+    if path.endswith(".py"):
         return _python_literals(path, source)
-    if path.startswith("web/") and "/tests/" not in path:
-        if path.endswith(".js"):
-            return _javascript_literals(path, source)
-        if path.endswith(".html"):
-            return _html_literals(path, source)
+    if path.endswith(".js"):
+        return _javascript_literals(path, source)
+    if path.endswith(".html"):
+        return _html_literals(path, source)
     return []
 
 
@@ -437,10 +478,9 @@ def words_for_diff(repo_dir, diff: str) -> ReviewWords:
                 except UnicodeError:
                     pass  # core.quotePath=false keeps non-ASCII characters literal
             path = path[2:]
-            if not (path.startswith("web/") and path.endswith((".js", ".html"))
-                    or path.startswith(("ouroboros/", "supervisor/")) and path.endswith(".py")):
+            if not path.endswith((".py", ".js", ".html")):
                 continue
-            if "/tests/" in path or "@@ " not in block:
+            if "tests" in path.split("/") or "@@ " not in block:
                 continue
             index = re.search(r"(?m)^index ([0-9a-f]+)\.\.([0-9a-f]+)(?: (\d+))?$", block)
             if not index:

@@ -148,6 +148,74 @@ const cssText = css`p { color: red; }`;
     assert pairs(compare_sources([("web/view.html", "", html)])) == [(None, "Choose a name"), (None, "Read the result")]
 
 
+@pytest.mark.parametrize("source", [
+    "const label = 'Save';", "const label = tr('state.paused', 'Save');",
+    "const labels = {done: 'Save'};", "node.textContent = 'Save';",
+    "const html = `<button aria-label=\"Save\">Save</button>`;",
+])
+def test_js_single_word_labels_are_paired(source):
+    after = source.replace("Save", "Resume")
+    for before, after in ((source, after), (after, source)):
+        changes = pairs(compare_sources([("client.js", before, after)]))
+        assert changes and all(old in {"Save", "Resume"} and new in {"Save", "Resume"} and old != new
+                               for old, new in changes)
+        assert not compare_sources([("client.js", before, before)]).changes
+
+
+def test_chained_js_calls_keep_receiver_callbacks_and_literal_receivers():
+    source = '''function rows(slots) {
+      return slots.map(slot => `<button>${tr('save', 'Save changes')}</button>`).join('');
+    }
+    const caption = 'Work done'.trim();
+    node.classList.add('hidden'); node.querySelector('.hidden').closest('section');
+    const same = node.dataset.mode === 'paused';
+    '''
+    after = source.replace("Save changes", "Resume work").replace("Work done", "Work paused")
+    assert pairs(compare_sources([("web/view.js", source, after)])) == [("Save changes", "Resume work"), ("Work done", "Work paused")]
+    assert pairs(compare_sources([("web/view.js", after, source)])) == [("Resume work", "Save changes"), ("Work paused", "Work done")]
+    assert not compare_sources([("web/view.js", source, source)]).changes
+
+
+def test_python_filters_machine_literals_and_model_inputs_by_use():
+    source = r'''
+import re as regex
+from re import sub as substitute
+import subprocess as proc
+CLI = ['git', '-o', '--no-sandbox', 'some command argument']
+proc.run(CLI)
+pattern = r'words (with groups)'
+regex.findall(pattern, value)
+substitute(r'other (groups)', 'replacement text', value)
+PROMPT = 'Decide what the user should do next'
+messages = [{'role': 'system', 'content': PROMPT}, {'role': 'user', 'content': 'Read the input carefully'}]
+llm.chat(messages=messages)
+def build_prompt():
+    return 'Produce a detailed answer'
+def label():
+    return 'Resume'
+LABEL = 'Decide what the user should do next'
+TITLE = 'Saved!'
+tokens = ['-o', '--no-sandbox', 'utf-8', 'install.json', 'dir/file.py', r'C:\output\file.txt',
+          'snake_case', 'ERR_BUSY', 'D06']
+'''
+    assert pairs(compare_sources([(PATH, "", source)])) == [
+        (None, "Resume"), (None, "Decide what the user should do next"), (None, "Saved!")]
+
+
+@pytest.mark.parametrize("path,source", [
+    ("app.py", 'LABEL = "Resume"'),
+    ("src/client.js", "const label = 'Resume';"),
+    ("templates/index.html", '<button aria-label="Resume">Resume</button>'),
+])
+def test_foreign_layouts_extract_source_and_git_deltas(repo, path, source):
+    after = source.replace("Resume", "Continue")
+    diff = changed_repo(repo, source, after, path=path)
+    expected = [("Resume", "Continue")] * (2 if path.endswith(".html") else 1)
+    assert pairs(compare_sources([(path, source, after)])) == expected
+    assert pairs(words_for_diff(repo, diff)) == expected
+    assert not compare_sources([(path, source, source)]).changes
+
+
 @pytest.mark.parametrize("unified", [0, 3])
 def test_diff_uses_its_blobs_not_current_checkout(repo, unified):
     changed_repo(repo)
