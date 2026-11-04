@@ -129,14 +129,11 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
     /** The live activity a card's controls act on when its work runs in another chat (its room). */
     const activity = (record) => (isPortal(record) ? record.portalActivity || undefined : undefined);
 
-    // The census line was the work's present, not its result. When the work leaves the census the portal
-    // lets it go, so a settled portal reads the same whether this page watched the work or opened after
-    // it: a cause line for warnings or failure (the outcome writes it), none for a clean Done (the result
-    // is the author's final row in the feed).
+    // Replace the live census line with the closing sentence or held cause, as on the finished card.
     function dropLine(record) {
-        if (!record.collapsedActivity) return false;
-        record.collapsedActivity = '';
-        return renderCollapsedActivity(record, '');
+        const line = record.causeHeld ? record.collapsedActivity : !record.isSubagent ? record.wakeSummary || '' : '';
+        record.collapsedActivity = line;
+        return renderCollapsedActivity(record, line);
     }
 
     // A portal's title is renamed by its naming owner (task_episodes.js `renamed`), and any other writer is met at the

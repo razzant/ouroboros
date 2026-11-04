@@ -722,3 +722,21 @@ test('W3: an unrelated work in the same Project, or a claim still bound, leaves 
         } finally { f.close(); }
     }
 });
+
+for (const [words, expected] of [
+    [{ wakeSummary: 'Export fixed.' }, 'Export fixed.'],
+    [{ wakeSummary: 'Export fixed.', causeHeld: true, collapsedActivity: 'The upload failed.' }, 'The upload failed.'],
+    [{}, ''],
+]) test(`a portal leaving the census keeps its closing words (${expected})`, () => {
+    const { prior, mount } = installDom();
+    try {
+        const root = document.createElement('div'); mount.appendChild(root); root.dataset.portal = '1';
+        const activityEl = document.createElement('div'); root.appendChild(activityEl);
+        const record = { root, groupId: 'w-1', activityEl, collapsedActivity: 'Old activity.', ...words };
+        const portals = createWorkPortals({ isMain: true, feed: mount, records: new Map([['w-1', record]]),
+            onDomWrite: write => write(), card: new Proxy({}, { get: () => () => false }) });
+        portals.sync({ supervisor_ready: true, active_chat_activities_complete: true, active_chat_activities: [] });
+        assert.equal(record.collapsedActivity, expected);
+        assert.equal(activityEl.textContent, expected);
+    } finally { restoreDom(prior); }
+});

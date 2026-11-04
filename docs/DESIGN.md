@@ -1428,9 +1428,9 @@ or `until you resume it` after Panic; a Continue's earlier helper is just
 `paused`), with no new control or turn; helpers an earlier attempt left running
 read as `Working`, with their count; an
 access wait is not an answer wait, and unknown stays unknown. Under the state a
-live work shows its own focus line, what Ouroboros says it is doing (stage ·
-done · left, written by it through `update_focus`), led by the time it wrote it, quieter and at most two
-lines; a work without one shows none, and a finished row drops it.
+live work shows its authored focus (`update_focus`: stage · done · left), led by its time,
+quiet and at most two lines. A finished row shows the author’s closing sentence,
+a held cause taking precedence, else nothing; never the old focus (01.11 A, extended 04.11).
 The name goes to the work's message wherever
 it lies, finished work included: its card or the owner's message when loaded, else
 the room reads the page of its history around the work's first message there and
@@ -1733,18 +1733,16 @@ Unavailable canonical refresh retains text, references and drafts but disables a
 
 **One message in two rooms.** Main is the owner's own conversation, where a work's expected results, decisions and substantial changes arrive promptly, even with no action needed; the rest stays in its room, routine progress on its card and focus line, in Main too. A Project room is its work's whole conversation. What its work says in Main, or answers in the room a note came from, also stands there at its time: the same words, address, Reply and Copy, never a copy or a link, and one notification (owner 28.10, A). Presence's private contact stands there too, never in its place; work a place started answers in its Project too, with its Done row, while the place hears only its own reply (owner 31.10). Host refusals and move receipts stay where issued.
 
-**Work portal.** A work living in a Project room keeps its one Main card at the
-request's place, whoever moved it (Turn into project, the mind's move, a
-binding); a Project start or transfer row only says where it went, never a
-second entry. The card is the work's portal: status chip and quiet fact, title,
+**Work portal.** Project work keeps its Main card at the request’s place, whoever
+moved it; a start or transfer row names its destination without a second entry. Its portal: status chip and quiet fact, title,
 one latest line (two lines, cut on a word), the meta line (tool calls · money ·
 updated), one action row: the Project reference, then `[Reply] [Resume] [Stop…]`
 with one primary (owner 26.10, B). Timeline, Reviews and children live
-in the room; the summary is reading content, not a disclosure. The room's census
-row supplies the present (its last line, tool calls, `in background` for
-detached work); a missing fact leaves the card as it was, never a guessed line
-or count. When the work ends the line goes and the chip states the outcome from
-the final's typed outcome or the durable detail. An undurable Main receipt keeps
+in the room; the summary is reading content. The room’s census supplies the present
+(last line, tool calls, `in background` for detached work); missing facts leave the card unchanged.
+At the end, the author’s closing sentence replaces that line, a held cause taking
+precedence, else nothing (01.11 A, extended 04.11). The chip reads the final’s typed
+outcome or durable detail. An undurable Main receipt keeps
 a dashed border and a plain warning; the binding holds. The owner's routing line
 under his message steps aside while that work's portal stands in the feed; words
 passed on to the work later keep theirs. A Continue is the same card: the

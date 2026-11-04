@@ -1071,8 +1071,10 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
     summary = " ".join((summary or "").split())
     if silent and action != "finish":
         return None, "silent requires action=finish"
-    if (summary and not self_started) or (silent and not self_started and not reply_carrier(metadata)):
-        return None, ("silent and summary are available only on a self-started run: "
+    if summary and not (self_started or resolve_ctx_lineage(ctx)["is_root_task"]):
+        return None, "summary is available only on a root task or a self-started run"
+    if silent and not self_started and not reply_carrier(metadata):
+        return None, ("silent is available only on a self-started run: "
                       "a consciousness wake's own turn, or a schedule-born root without a Presence binding; "
                       "silent also on a task answering its own place conversation")
     if silent and answer is None and not selector:
