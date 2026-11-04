@@ -14,7 +14,7 @@ import os
 import pathlib
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from ouroboros import budget_pause
 from ouroboros.tool_custody import submit_tool_future
@@ -1160,19 +1160,77 @@ def handle_tool_calls(
     delivered under the measured frame. Without them results are delivered
     whole, best effort, and no cap is invented.
     """
-    from ouroboros.openai_chat_dispatch import (
-        custom_tool_argument_error,
-        custom_validation_by_call_id,
-    )
+    initial_count = len(llm_trace.get("tool_calls") or [])
+    results = execute_tool_calls(tool_calls, tools, drive_logs, task_id, stateful_executor, llm_trace)
+    errors = process_tool_results(results, messages, llm_trace, emit_progress, tools=tools,
+                                  fit_candidate=fit_candidate, tool_schemas=tool_schemas, project_results=project_results)
+    if substantive_tool_calls(llm_trace.get("tool_calls", [])[initial_count:]):
+        tools._ctx._skill_finalization_injected = False
+    return errors
 
+
+def _batch_error_result(tools: ToolRegistry, tc: Dict[str, Any], text: str) -> Dict[str, Any]:
+    """A result only the batch can state about one of its calls, in the shape of any other."""
+    fn_name = str(tc.get("function", {}).get("name", "unknown") or "").strip()
+    tool_result = ToolResult(status="error", code="EXECUTOR_ERROR", text=text)
+    return {
+        "round_id": getattr(tools._ctx, "_current_llm_call_meta", {}).get("round_id"),
+        "tool_call_id": tc.get("id", ""),
+        "fn_name": fn_name,
+        "result": text,
+        "is_error": True,
+        "tool_args": {},
+        "args_for_log": {},
+        "is_code_tool": fn_name in tools.CODE_TOOLS,
+        "result_meta": _typed_result_metadata(fn_name, text, True, tool_result),
+        "tool_result": tool_result,
+    }
+
+
+def _unexpected_batch_error(tools: ToolRegistry, tc: Dict[str, Any], exc: BaseException) -> Dict[str, Any]:
+    return _batch_error_result(tools, tc, f"⚠️ TOOL_ERROR: Unexpected error: {sanitize_tool_result_for_log(str(exc))}")
+
+
+def _left_by_control(tools: ToolRegistry, tc: Dict[str, Any], control: BaseException, *, started: bool) -> Dict[str, Any]:
+    """What ending the batch left of one call. Only a never-entered call can say its effect did not happen."""
+    fn_name = str(tc.get("function", {}).get("name", "unknown") or "").strip()
+    reason = getattr(control, "control_reason", "") or type(control).__name__
+    return _batch_error_result(tools, tc, (
+        f"⚠️ TOOL_ERROR ({fn_name}): {reason} interrupted this call before it returned. Its effect may have "
+        "happened and may still finish; check before repeating it." if started else
+        f"⚠️ TOOL_ERROR ({fn_name}): NOT STARTED: {reason} ended this batch before the handler was entered."))
+
+
+def _sibling_after_control(tools: ToolRegistry, tc: Dict[str, Any], future: Any, control: BaseException) -> Dict[str, Any]:
+    """A parallel call once its pool has settled: the shutdown cancelled only those still queued."""
+    if future.cancelled():
+        return _left_by_control(tools, tc, control, started=False)
+    error = future.exception()
+    if isinstance(error, (UsageAccountingError, ModelWaitInterrupted)):
+        return _left_by_control(tools, tc, error, started=not getattr(error, "invocation_not_started", False))
+    return future.result() if error is None else _unexpected_batch_error(tools, tc, error)
+
+
+def execute_tool_calls(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, drive_logs: pathlib.Path, task_id: str,
+                       stateful_executor: StatefulToolExecutor, llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Run one batch's effects and return their results; ``process_tool_results`` records them."""
+    results, control = execute_tool_batch(tool_calls, tools, drive_logs, task_id, stateful_executor, llm_trace)
+    if control is not None:
+        raise control
+    return results
+
+
+def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, drive_logs: pathlib.Path, task_id: str,
+                       stateful_executor: StatefulToolExecutor, llm_trace: Dict[str, Any],
+                       ) -> Tuple[List[Dict[str, Any]], Optional[Exception]]:
+    """``execute_tool_calls`` for a caller that records a batch cut short: one result per call, exact where it
+    finished, beside the exception that ended the batch, which that caller raises after recording them."""
+    from ouroboros.openai_chat_dispatch import custom_tool_argument_error, custom_validation_by_call_id
     from ouroboros.loop_delivery import completion_observation
     if not isinstance(getattr(tools._ctx, "_completion_observation", None), dict):
         tools._ctx._completion_observation = completion_observation(tools._ctx, llm_trace)
     tools._ctx._completion_conflict = False
-    initial_count = len(llm_trace.get("tool_calls") or [])
-    validation = tuple(
-        getattr(tools._ctx, "_request_wire_custom_receipts", ()) or ()
-    )
+    validation = tuple(getattr(tools._ctx, "_request_wire_custom_receipts", ()) or ())
     tools._ctx._request_wire_custom_receipts = ()
     validation_by_id = custom_validation_by_call_id(validation)
 
@@ -1212,9 +1270,17 @@ def handle_tool_calls(
         return result
 
     can_parallel = tool_calls_can_run_parallel(tool_calls)
+    results: List[Any] = [None] * len(tool_calls)
+    control: Optional[Exception] = None
 
     if not can_parallel:
-        results = [_execute(tc) for tc in tool_calls]
+        for idx, tc in enumerate(tool_calls):
+            try:
+                results[idx] = _execute(tc)
+            except Exception as exc:
+                control = exc
+                results[idx] = _left_by_control(tools, tc, exc, started=not getattr(exc, "invocation_not_started", False))
+                break
     else:
         max_workers = min(len(tool_calls), 8)
         executor = ThreadPoolExecutor(max_workers=max_workers)
@@ -1227,50 +1293,31 @@ def handle_tool_calls(
                 ): idx
                 for idx, tc in enumerate(tool_calls)
             }
-            results = [None] * len(tool_calls)
             batch_raised = True
             for future in as_completed(future_to_index):
                 idx = future_to_index[future]
                 try:
                     results[idx] = future.result()
-                except (UsageAccountingError, ModelWaitInterrupted):
-                    raise
+                except (UsageAccountingError, ModelWaitInterrupted) as exc:
+                    control = exc
+                    break
                 except Exception as exc:
-                    tc = tool_calls[idx]
-                    requested_fn_name = tc.get("function", {}).get("name", "unknown")
-                    fn_name = str(requested_fn_name or "").strip()
-                    safe_error = sanitize_tool_result_for_log(str(exc))
-                    result = f"⚠️ TOOL_ERROR: Unexpected error: {safe_error}"
-                    tool_result = ToolResult(
-                        status="error",
-                        code="EXECUTOR_ERROR",
-                        text=result,
-                    )
-                    results[idx] = {
-                        "round_id": getattr(tools._ctx, "_current_llm_call_meta", {}).get("round_id"),
-                        "tool_call_id": tc.get("id", ""),
-                        "fn_name": fn_name,
-                        "result": result,
-                        "is_error": True,
-                        "tool_args": {},
-                        "args_for_log": {},
-                        "is_code_tool": fn_name in tools.CODE_TOOLS,
-                        "result_meta": _typed_result_metadata(fn_name, result, True, tool_result),
-                        "tool_result": tool_result,
-                    }
-            batch_raised = False
+                    results[idx] = _unexpected_batch_error(tools, tool_calls[idx], exc)
+            else:
+                batch_raised = False
         finally:
             # A batch leaving on an exception (BudgetExceeded) must not strand an
             # already-running wrapper that has not yet registered its inner future
             # with budget-pause quiescence: cancel the queued ones, WAIT for the
             # started ones (each bounded by its own tool timeout) (#1196, Astra #4).
             executor.shutdown(wait=batch_raised, cancel_futures=True)
-
-    errors = process_tool_results(results, messages, llm_trace, emit_progress, tools=tools,
-                                  fit_candidate=fit_candidate, tool_schemas=tool_schemas, project_results=project_results)
-    if substantive_tool_calls(llm_trace.get("tool_calls", [])[initial_count:]):
-        tools._ctx._skill_finalization_injected = False
-    return errors
+        if control is not None:
+            for future, idx in future_to_index.items():
+                if results[idx] is None:
+                    results[idx] = _sibling_after_control(tools, tool_calls[idx], future, control)
+    if control is not None:  # a sequential batch's remainder was never entered
+        results = [row or _left_by_control(tools, tc, control, started=False) for row, tc in zip(results, tool_calls)]
+    return results, control
 
 
 def _maybe_auto_attach_image(

@@ -14,8 +14,9 @@ Provider events (``LiveEvent.kind`` and its ``data``):
   audio            {item_id, rate, pcm}
   caption          {speaker: "owner"|"ouroboros", item_id, text, final, replace?, incomplete?}
   speech_started   {}: someone spoke over the answer (only where interruptions are on)
-  input_started    {} / input_done {}: native input boundaries (VAD, transcription), the
-                   only evidence that the input side is quiet; a sent frame is not
+  input_started    {response_id?} / input_done {}: native input boundaries (VAD, transcription),
+                   the only evidence that the input side is quiet; a sent frame is not.
+                   response_id: a response already begun for these words, its transcript lagging
   response_started {response_id}
   response_done    {response_id, usage: {USAGE_AXES...}, raw_usage, status, continues}
                    status: completed | interrupted | cancelled | failed | incomplete;
@@ -174,6 +175,9 @@ class LiveSession(Protocol):
     # names says which native obligations hold it false; the call's end-of-call
     # offer-wait fact reports them.
     renewal_ready: bool
+    # Optional: words being said, or said and not yet recognised, apart from any open call.
+    # A forced switch waits for it; a loss with it set leaves a hearing-gap fact. Absent: VAD events alone.
+    input_pending: bool
 
     def final_captions(self) -> list[LiveEvent]: ...
     async def open(self) -> None: ...
@@ -247,7 +251,9 @@ class LiveHost(Protocol):
         The host refits the canonical history and tools at every call (never the
         first plan), adds its output-bound evidence to ``options`` and seals the
         provider's wire before dispatch. A known overflow the window ladder cannot
-        fit refuses with a typed reason instead of cutting anything.
+        fit refuses with a typed reason instead of cutting anything. A resume that
+        history outran while opening raises ``prepared_stale``: its handle is spent,
+        so the feature continues fresh.
         """
 
     async def mailbox(self) -> list[dict]:
@@ -260,6 +266,13 @@ class LiveHost(Protocol):
         """
         return False
 
+    def take_mail_rows(self) -> list[dict]:
+        """What a cancelled ``mailbox`` waiter would have received, once: canonical rows no connection was given.
+
+        A fresh fit holds them; a native resume must write them. Older hosts keep none.
+        """
+        return []
+
     async def prepare_session(self, options: LiveOptions) -> Any:
         """Optionally open a silent fitted successor while this connection serves.
 
@@ -270,8 +283,17 @@ class LiveHost(Protocol):
         """
         return None
 
+    async def tool_requested(self, call: dict) -> None:
+        """Record that the engine requested this call, as a host fact before its effect; an id seen before
+        records nothing. Older hosts return None and record nothing."""
+        return None
+
     async def tool_batch(self, calls: Sequence[dict]) -> list[dict]:
-        """Run ordinary and call tools on the serialized lane; return the history changes."""
+        """Run ordinary and call tools on the serialized lane; return the history changes.
+
+        History stays writable while an effect runs; its call and results are then written as one unit.
+        A control ending the batch is raised after that unit states each call's result or unknown outcome.
+        """
 
     def context_view_pending(self) -> bool:
         """An authored view is queued; a cached check with no store read."""
@@ -298,6 +320,14 @@ class LiveHost(Protocol):
 
     async def observe_context(self, row: dict) -> None:
         """Add a peer's observation to history as a labelled row, never as owner words."""
+
+    async def record_fact(self, text: str) -> None:
+        """Add the call's own observation (a peer joined, a hearing gap) to history as a host fact.
+
+        A call tool's handler may record too; delivery stays the feature's, by an offer or the next fit.
+        A host without its own record keeps the fact through ``observe_context``.
+        """
+        await self.observe_context({"role": "user", "content": "[Host fact; not owner words]\n" + text})
 
     def response_started(self, response_id: str) -> None:
         """Reserve this response once per call, across resumed connections; refusal ends the call."""

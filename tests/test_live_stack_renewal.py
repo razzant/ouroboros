@@ -144,11 +144,11 @@ def test_full_stack_loss_during_a_tool_result_respects_the_native_handle(host_wo
         async with stack(host_world, monkeypatch, 'gemini', thinking=thinking) as live:
             native = live.call.session
             send, recv = native.ws.send, native.ws.recv
-            if resumable:
-                live.wire.put({'sessionResumptionUpdate': {'resumable': True, 'newHandle': 'synthetic-tool-handle'}})
-                await live.wait(lambda: live.host.state.get('resume_handle') == 'synthetic-tool-handle')
             async def close_before_result(raw):
                 if 'toolResponse' in json.loads(raw):
+                    if resumable:  # issued after the call arrived, the handle resumes a conversation holding it
+                        live.wire.put({'sessionResumptionUpdate': {'resumable': True, 'newHandle': 'synthetic-tool-handle'}})
+                        await live.wait(lambda: live.host.state.get('resume_handle') == 'synthetic-tool-handle')
                     closing = asyncio.run_coroutine_threadsafe(
                         live.wire.websocket.close(code=1012, reason='synthetic service restart'), loop)
                     await asyncio.wrap_future(closing)

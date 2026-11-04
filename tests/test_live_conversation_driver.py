@@ -421,9 +421,10 @@ def test_tool_finishing_during_resume_goes_to_the_new_session():
         task, first = await started(host)
         try:
             first.emit('ready', input_rate=24000, output_rate=24000)
-            first.emit('resumable', handle='tool-continuation')
             first.emit('tool_call', call_id='work', name='slow_tool', arguments='{}')
             await running.wait()
+            # Published after the call, this handle resumes a conversation that holds it.
+            first.emit('resumable', handle='tool-continuation')
             first.emit('closed', resumable=True, reason='transport_lost')
             await until(lambda: len(host.sessions) == 2)
             release.set()
@@ -604,28 +605,16 @@ def test_malformed_final_cannot_poison_valid_teardown_words(speaker):
 
 
 @pytest.mark.parametrize('source', ['host', 'provider'])
-@pytest.mark.parametrize('barrier', ['response', 'input', 'tools', 'playback', 'caption', 'native'])
+@pytest.mark.parametrize('barrier', ['response', 'input', 'playback', 'caption', 'native'])
 def test_fresh_renewal_waits_for_every_quiet_barrier(source, barrier):
     async def scenario():
         host = Host()
-        released, running = asyncio.Event(), asyncio.Event()
-        batches = []
-        async def batch(calls):
-            batches.append(calls)
-            running.set()
-            await released.wait()
-            return Batch(silent=[call['id'] for call in calls])
-        host.tool_batch = batch
         task, first = await started(host)
         try:
             first.emit('ready', input_rate=24000, output_rate=24000)
             first.emit('resumable', handle='must-not-refit-with-this')
             if barrier == 'response': first.emit('response_started', response_id='busy')
             if barrier == 'input': first.emit('input_started')
-            if barrier == 'tools':
-                first.emit('tool_call', call_id='one', name='work', arguments='{}')
-                await running.wait()
-                first.emit('tool_call', call_id='two', name='work', arguments='{}')
             if barrier == 'playback': first.emit('audio', item_id='spoken', rate=24000, pcm=b'\0' * 48000)
             if barrier == 'caption': first.emit('caption', speaker='ouroboros', item_id='spoken', text='Waiting for audio', final=True)
             if barrier == 'native': first.renewal_ready = False
@@ -636,7 +625,6 @@ def test_fresh_renewal_waits_for_every_quiet_barrier(source, barrier):
             assert len(host.sessions) == 1
             if barrier == 'response': first.emit('response_done', response_id='busy', usage={}, raw_usage={}, status='completed', continues=False)
             if barrier == 'input': first.emit('input_done')
-            if barrier == 'tools': released.set()
             if barrier == 'caption': first.emit('audio', item_id='spoken', rate=24000, pcm=b'\0' * 48000)
             if barrier in {'caption', 'playback'}:
                 # A peer can acknowledge only PCM the driver has delivered.
@@ -646,9 +634,7 @@ def test_fresh_renewal_waits_for_every_quiet_barrier(source, barrier):
             if barrier == 'native': first.renewal_ready = True
             await until(lambda: len(host.sessions) == 2)
             assert host.options[1].resume_handle == ''
-            if barrier == 'tools': assert [c['id'] for batch in batches for c in batch] == ['one', 'two']
         finally:
-            released.set()
             host.hub.ended_by_owner = True
             if not task.done(): await asyncio.wait_for(task, 2)
     asyncio.run(scenario())
@@ -682,17 +668,21 @@ def test_goaway_without_a_current_handle_does_not_claim_a_resume(revoked):
             session.emit('resumable', handle='stale')
             session.emit('resumable', handle='')
         session.emit('renew', within_s=2, resume=True, reason='go_away')
-        with pytest.raises(RealtimeSetupError, match='resume_unavailable'):
-            await asyncio.wait_for(task, 2)
-        assert len(host.sessions) == 1
+        try:
+            # The engine cannot resume this conversation: a fresh fit continues it instead of ending the call.
+            await until(lambda: len(host.sessions) == 2 or task.done())
+            assert not task.done() and host.options[1].resume_handle == ''
+        finally:
+            host.hub.ended_by_owner = True
+            if not task.done(): await asyncio.wait_for(task, 2)
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize('trigger', ['host', 'provider', 'provider_resume_with_handle', 'provider_resume_without_handle'])
-def test_a_renewal_waits_for_quiet_past_its_deadline_unless_nothing_can_resume(trigger):
+def test_a_renewal_waits_for_quiet_past_its_deadline(trigger):
     """28.10: a Gemini call ended mid-sentence ("session expired while work was pending") when the talk
-    left no quiet moment within 30 s of an audio-span renewal. Only a provider renewal that nothing can
-    resume ends the call at its deadline; every other renewal waits for the next quiet moment."""
+    left no quiet moment within 30 s of an audio-span renewal. Every renewal waits for the next quiet
+    moment; a requested resume that no handle can serve becomes a fresh one instead of ending the call."""
     async def scenario():
         host = Host()
         task, first = await started(host)
@@ -712,19 +702,15 @@ def test_a_renewal_waits_for_quiet_past_its_deadline_unless_nothing_can_resume(t
                        reason='audio_span' if trigger == 'provider' else 'go_away')
         try:
             await asyncio.sleep(.06)
-            if trigger == 'provider_resume_without_handle':
-                with pytest.raises(RealtimeSetupError, match='renewal_pending_work'): await asyncio.wait_for(task, 2)
-                assert len(host.sessions) == 1
-            else:
-                assert not task.done() and len(host.sessions) == 1
-                first.emit('input_started')
-                await asyncio.sleep(.03)
-                first.renewal_ready = True
-                await asyncio.sleep(.03)
-                assert not task.done() and len(host.sessions) == 1, 'expired deadline cannot cut owner speech'
-                first.emit('input_done')
-                await until(lambda: len(host.sessions) == 2)
-                assert host.options[1].resume_handle == ('kept' if trigger == 'provider_resume_with_handle' else '')
+            assert not task.done() and len(host.sessions) == 1
+            first.emit('input_started')
+            await asyncio.sleep(.03)
+            first.renewal_ready = True
+            await asyncio.sleep(.03)
+            assert not task.done() and len(host.sessions) == 1, 'expired deadline cannot cut owner speech'
+            first.emit('input_done')
+            await until(lambda: len(host.sessions) == 2)
+            assert host.options[1].resume_handle == ('kept' if trigger == 'provider_resume_with_handle' else '')
             if trigger == 'provider_resume_with_handle':
                 assert host.options[1].resume_handle == 'kept'  # the engine's own session goes on
             else:
