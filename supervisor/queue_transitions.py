@@ -382,7 +382,7 @@ def queued_admitted_dispatch(task: Any) -> bool:
 
 def pending_member_replay_safe(q: Any, member: Dict[str, Any]) -> Tuple[bool, str]:
     """Whether one PENDING row genuinely never dispatched (zero physical calls)."""
-    from supervisor.restart_retention import never_started
+    from supervisor.restart_retention import never_started, returned_before_body
     from ouroboros.owner_wait import governing_continuation
     from supervisor.schedule_occurrence import restore_allowed
 
@@ -414,7 +414,7 @@ def pending_member_replay_safe(q: Any, member: Dict[str, Any]) -> Tuple[bool, st
                      and pause.get("task_attempt") == 1
                      and int(member.get("_attempt") or 1) == 1 and pause.get("replay_safe") is True
                      and pause.get("physical_calls") == 0 and pause.get("cause") == "owner_pause")
-    if not never_started(member) and not legacy_saved_zero and not prestart_zero:
+    if not (never_started(member) or legacy_saved_zero or prestart_zero or returned_before_body(member)):  # #2555
         return False, "dispatch_outcome_unknown"
     member_id = str(member.get("id") or "")
     cost_fields = q.reconstruct_task_cost(

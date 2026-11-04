@@ -783,7 +783,8 @@ def prepare_restart_returns(drive_root: Any, running: Dict[str, Any], pending: L
         if not task_id or _cancel_intent_active(root, task_id):
             continue
         try:
-            if never_started(task) or ("_working_recovery" in task and _working_resume_granted(task, root)):
+            if (never_started(task) or returned_before_body(task)
+                    or "_working_recovery" in task and _working_resume_granted(task, root)):
                 queue_ids.append(task_id)
         except Exception:
             log.warning("Saved queued work of %s could not authorize a Restart return", task_id, exc_info=True)
@@ -949,12 +950,31 @@ def recover_saved_running(rows: Iterable[Dict[str, Any]], drive_root: Any, *,
     return recovered
 
 
-def hold_stopped_queue(task: Dict[str, Any], drive_root: Any, cause: str) -> Dict[str, Any]:
-    """Boot after a holding stop: accepted, never-started work waits for Resume at any age."""
-    from supervisor.events_budget import HOLD_SAVED_WORK, hold_budget_row
+def returned_before_body(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Pre-body proof, empty when unproven, None when unreadable: retain custody for recheck."""
+    from supervisor.task_admission import prestart_returned_unsent
 
-    hold_budget_row(task, reason=HOLD_SAVED_WORK, result_root=pathlib.Path(task.get("budget_drive_root") or drive_root),
+    try:
+        return prestart_returned_unsent(task)
+    except (OSError, ValueError, TypeError, RuntimeError):
+        log.warning("Pre-body return of %s is unreadable; held", task.get("id"), exc_info=True)
+        return None
+
+
+def hold_stopped_queue(task: Dict[str, Any], drive_root: Any, cause: str, *,
+                       proof: Optional[dict] = None, persist_result: bool = True) -> Dict[str, Any]:
+    """Boot after a holding stop: accepted, never-started work waits for Resume at any age.
+
+    ``proof``: a lane turn's pre-body return (``task_admission.prestart_returned_unsent``); this hold
+    replaces the result's record of it, so the hold carries it by value. An unreadable
+    proof keeps only the queue hold: its result must survive until recheck/Resume."""
+    from supervisor.events_budget import HOLD_SAVED_WORK, hold_budget_row
+    from supervisor.task_admission import PRESTART_PROOF
+
+    hold_budget_row(task, reason=HOLD_SAVED_WORK,
+                    result_root=pathlib.Path(task.get("budget_drive_root") or drive_root) if persist_result else None,
                     existing_result_only=True,
                     detail=f"accepted before the application stopped ({cause}); starts after an explicit Resume",
-                    extra={"root_task_id": str(task.get("root_task_id") or task.get("id") or ""), "door": cause})
+                    extra={"root_task_id": str(task.get("root_task_id") or task.get("id") or ""), "door": cause,
+                           **({PRESTART_PROOF: dict(proof)} if proof else {})})
     return task

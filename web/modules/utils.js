@@ -89,7 +89,7 @@ const readDate = (value) => {
     const date = value ? new Date(value) : null;
     return date && !Number.isNaN(date.getTime()) ? date : null;
 };
-const absoluteTime = (value, zone = false) => readDate(value)?.toLocaleString(undefined, {
+export const absoluteTime = (value, zone = false) => readDate(value)?.toLocaleString(undefined, {
     year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
     ...(zone ? { timeZoneName: 'short' } : {}),
 }) || '';

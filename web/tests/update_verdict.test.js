@@ -97,7 +97,7 @@ test('commits ahead with no content of their own are history, not a caution (#17
 test('an active assisted resolution is visible on re-entry and blocks the button', () => {
     const verdict = updateVerdict({
         managed: true, check_ok: true, available: true,
-        update_tx: { active: true, phase: 'assisted_running', task_id: 'task-7' },
+        update_tx: { active: true, phase: 'assisted_resolution', task_id: 'task-7' },
     }, '');
     assert.equal(verdict.state, 'resolving');
     assert.equal(verdict.action, null);
