@@ -229,12 +229,17 @@ def inject_relay(ctx, entry: dict, messages: list) -> None:
     """Only exact owner rows enter the owner corpus, carried from the teller (no reply owed); the note has its
     own voice."""
     from ouroboros import loop
+    from ouroboros.owner_words import reply_target
+    from ouroboros.tool_access import canonical_data_root
+
+    root = canonical_data_root(ctx) if getattr(ctx, "drive_root", None) else None
     for row in entry.get("owner_rows") or []:
         retain_owner_message(ctx, row)
         address = format_address(row_address(row))
         loop._record_owner_directive(ctx, source="owner_mailbox", content=owner_text(row), msg_id=address, carried=True,
                                      origin={"source_task_id": entry.get("source_task_id"),
-                                             "client_message_id": row.get("client_message_id")})
+                                             "client_message_id": row.get("client_message_id")},
+                                     reply_to=reply_target(root, row.get("reply_to")) or None)
         body = f"[Owner words quoted verbatim; handle {address}]\n{owner_text(row)}"
         if isinstance(row.get("reply_to"), dict) and row["reply_to"]:
             body += ("\n[Host reference: the message these owner words reply to; context, not the owner's words]\n"

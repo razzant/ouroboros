@@ -290,12 +290,16 @@ def _drain_incoming_messages(
                 model_msg = card_press_model_text(str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root,
                                                   entry.get("card_press"), dmsg)
             owner_content = _owner_content({**entry, "text": model_msg}, drive_root, task_id)
+            from ouroboros.owner_words import reply_target
+
+            chats = str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root  # the room's rows
             _loop()._record_owner_directive(
                 owner_ctx,
                 source="owner_mailbox",
                 content=_owner_content(entry, drive_root, task_id),
                 msg_id=str(entry.get("msg_id") or ""),
                 origin={"client_message_id": entry.get("client_message_id")},  # the same message relayed: one row
+                reply_to=reply_target(chats, entry.get("reply_reference")) or None,
             )
             _stamp_owner_delivery(
                 owner_ctx,

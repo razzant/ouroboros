@@ -544,7 +544,8 @@ def test_an_owner_screenshot_sent_while_main_runs_survives_the_start_the_restart
             events.append(copy.deepcopy(evt)), _handle_promote_chat_to_task(evt, sup))))
     assert _start_task(tool, "Research the market", title="Market research", workspace="none").startswith("OK")
     [root] = workers.PENDING
-    expected = [{"source": "origin_message", "content": words}, {"source": "direct_incoming", "content": projection}]
+    expected = [{"client_message_id": "owner-msg-1", "source": "origin_message", "content": words},  # by its id
+                {"source": "direct_incoming", "content": projection}]
     receipt = load_task_result(tmp_path, root["id"])
     assert receipt["status"] == "scheduled"
     assert queue.persist_queue_snapshot(reason="test_owner_screenshot") is True
@@ -628,7 +629,7 @@ def test_the_producer_records_owner_images_by_reference_in_each_opening_state():
             ({}, "initial_text", []),
             ({"origin_suppressed": True}, "initial_user", [{"source": "initial_user", "content": projection}]),
             ({"origin_message_ref": {"chat_id": 1, "client_message_id": "m"}, "origin_message_text": "words"},
-             "initial_user", [{"source": "origin_message", "content": "words"}])):
+             "initial_user", [{"client_message_id": "m", "source": "origin_message", "content": "words"}])):
         # The run's first row is labelled as ``_initialize_owner_directives`` labels it for this opening.
         directives = [{"source": first, "content": copy.deepcopy(pixels)},
                       {"source": "owner_mailbox", "content": copy.deepcopy(pixels), "msg_id": "m-2"}, dict(answer),

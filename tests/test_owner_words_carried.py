@@ -56,7 +56,8 @@ def test_a_place_reply_names_its_target_by_address_when_the_connector_gave_no_wo
                        "ref": "platform message m-41 in this room", "author": "author not recorded"}
     text = render_owner_words(rows, audience="child")
     assert "author not recorded: the message my human replied to, not my human's words" in text
-    assert "(its words are not carried here; this address reads them)" in text
+    assert "(its words are not carried: the connector named only its platform message id, no host address)" in text
+    assert "this address reads them" not in text, "no host address reads a platform message id"
 
 
 def _owner_root(tmp_path, metadata=None):

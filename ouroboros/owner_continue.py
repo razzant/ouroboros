@@ -54,7 +54,7 @@ import pathlib
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.owner_words import OWNER_SOURCES
+from ouroboros.owner_words import OWNER_SOURCES, reply_target
 from ouroboros.utils import utc_now_iso
 from ouroboros.task_store import patch_document
 
@@ -110,9 +110,9 @@ OWNER_SOURCE_KINDS = frozenset({"owner_text", "quiz_answer", "quiz_closed", "car
 CORPUS_INITIAL_SOURCES = frozenset({"origin_message", "initial_user", "initial_text", "initial_text_transcript"})
 CORPUS_OWNER_SOURCES = OWNER_SOURCES - CORPUS_INITIAL_SOURCES
 CORPUS_TASK_SOURCES = frozenset({"principal_task_message", "relayed_peer_message"})
-# The typed ids an owner-source row may carry, each a string when present: its message,
-# a task message's sender and relaying sibling, an owner answer's card.
-ROW_IDS = ("msg_id", "source_task_id", "relayed_from_task_id", "quiz_id")
+# The typed ids an owner-source row may carry, each a string when present: its message, a task message's sender and
+# relaying sibling, an owner answer's card, the chat row it is; its ``reply_to`` (a mapping) rides beside them.
+ROW_IDS = ("msg_id", "source_task_id", "relayed_from_task_id", "quiz_id", "client_message_id")
 # What a successor reads of an answered card beside the owner's words (``answered_card``).
 CARD_FIELDS = ("quiz_id", "question", "options", "answered_index", "comment", "asked_at", "answered_at")
 # The binding's copy of the work's explicit execution budget (``execution_carry``).
@@ -535,8 +535,10 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
             if source not in CORPUS_INITIAL_SOURCES | CORPUS_OWNER_SOURCES | CORPUS_TASK_SOURCES:
                 gaps.append("owner_source_provenance_unknown")
                 continue
-            if source in CORPUS_INITIAL_SOURCES:
-                continue  # the run's first text is the original's own projection
+            if source in CORPUS_INITIAL_SOURCES:  # the run's first text is the original's own projection
+                if original is not None and isinstance(row.get("reply_to"), dict):
+                    original.setdefault("reply_to", row["reply_to"])  # and the message it replies to
+                continue
             if msg_id and msg_id in seen:
                 if (seen[msg_id][1] != (source in CORPUS_OWNER_SOURCES) or
                         (seen[msg_id][0] != text and msg_id not in late_framed)):
@@ -548,7 +550,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                 seen[msg_id] = (text, source in CORPUS_OWNER_SOURCES)
             texts[source in CORPUS_OWNER_SOURCES].add(text)
             if source in CORPUS_OWNER_SOURCES:
-                ids = {key: row[key] for key in ROW_IDS[1:] if row.get(key)}
+                ids = {key: row[key] for key in (*ROW_IDS[1:], "reply_to") if row.get(key)}
                 # An answer to the predecessor's own card reads that card from its own record.
                 card = (answered_card(quizzes.get(ids.get("quiz_id", "")), text)
                         if source == "owner_quiz_answer" and ids.get("source_task_id") == task_id else None)
@@ -629,6 +631,8 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
             row = {"source": "owner_quiz_answer" if kind == "quiz_answer" else "owner_mailbox",
                    "content": str(entry.get("text") or ""), "msg_id": msg_id,
                    "ts": str(entry.get("ts") or ""), "exact_row": entry["_exact_row"]}
+            if target := reply_target(root, entry.get("reply_reference")):  # the message these words reply to
+                row["reply_to"] = target
             delivery = entry.get("quiz_delivery") if kind == "quiz_answer" else None
             card = answered_card(delivery.get("answer_snapshot"), row["content"]) if isinstance(delivery, dict) else None
             if card and all(isinstance(delivery.get(key), str) and delivery[key] for key in ("task_id", "quiz_id")):
@@ -711,16 +715,15 @@ def carried_execution_fields(binding: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def owner_corpus_rows(sources: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """The successor's seeded owner corpus (``_initialize_owner_directives``): exact words
-    with their typed ids, the start's answers first; a card's question never enters it."""
+    """The successor's seeded owner corpus (``_initialize_owner_directives``): exact words with their typed ids and
+    reply targets, the start's answers first; a card's question never enters it."""
     rows: List[Dict[str, Any]] = []
-    if isinstance(sources.get("original"), dict) and str(sources["original"].get("content") or "").strip():
-        rows.append({"source": "origin_message", "content": sources["original"]["content"]})
+    original = sources.get("original") if isinstance(sources.get("original"), dict) else {}
     start = sources.get("start") if isinstance(sources.get("start"), dict) else {}
-    for row in [*(start.get("answers") or []), *(sources.get("later") or [])]:
-        if isinstance(row, dict) and row.get("content"):
+    for row in [{**original, "source": "origin_message"}, *(start.get("answers") or []), *(sources.get("later") or [])]:
+        if isinstance(row, dict) and str(row.get("content") or "").strip():
             rows.append({"source": row.get("source") or "owner_mailbox", "content": row["content"],
-                         **{key: row[key] for key in ROW_IDS if row.get(key)}})
+                         **{key: row[key] for key in (*ROW_IDS, "reply_to") if row.get(key)}})
     return rows
 
 
@@ -776,17 +779,13 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
                     drive_mode: str = "", stop_note: str = "") -> str:
     """The successor's first message: host-authored FACTS, the owner's words verbatim.
 
-    It frames nothing as a decision: the model judges whether and how to go on
-    and asks the owner in this conversation when it cannot tell. The request
-    names no actor (an action nonce proves the action, not who pressed it).
-    ``authority_source`` is the exact pointer the successor's start materializes
-    into its context as the predecessor's brief (or refuses to start), so the
-    work order names it as the exact reader of the complete record, never a
-    second copy to fetch; without it the pointer is the only route to that
-    result. Messages other tasks addressed to the predecessor ride as their
-    count, size and senders plus the exact reader of the successor's own
-    ``metadata.continuation.peer_context`` (``successor_task_id``), never as
-    bodies inside the assignment.
+    It frames nothing as a decision: the model judges whether and how to go on and asks the owner in this
+    conversation when it cannot tell; the request names no actor (an action nonce proves the action, not who
+    pressed it). ``authority_source`` is the exact pointer the successor's start materializes as the predecessor's
+    brief (or refuses to start), so the work order names it as the complete record's exact reader, never a second
+    copy to fetch; without it the pointer is the only route to that result. Messages other tasks addressed to the
+    predecessor ride as their count, size and senders plus the exact reader of the successor's own
+    ``metadata.continuation.peer_context`` (``successor_task_id``), never as bodies inside the assignment.
     """
     if authority_source:
         arguments = authority_source.get("arguments") or {}

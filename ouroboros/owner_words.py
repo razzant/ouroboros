@@ -44,6 +44,8 @@ FIELD, ABSENT_FIELD = "governing_owner_words", "governing_owner_words_absent"
 NOT_RECORDED = "not_recorded"
 REPLY_TARGET = "reply_target"  # the message my human replied to: its author's words beside theirs, never theirs
 UNREAD_TARGET = "(its words are not carried here; this address reads them)"
+# A place connector names the replied message by its platform id alone: nothing the host stores answers to it.
+UNREAD_PLATFORM = "(its words are not carried: the connector named only its platform message id, no host address)"
 ROW_KEYS = ("text", "source", "carrier", "task_id", "ts", "ref", "author")
 _RUN_ORIGIN_MARKERS = ("initiator", "source", "task_type")
 _ANNOTATED_ACTS = frozenset({"promote_chat_to_task", "route_to_project", "steer_task", "mailbox_delivery"})
@@ -198,18 +200,24 @@ def carried_owner_corpus(ctx: Any, source_text: Any = "") -> List[Dict[str, Any]
 
     Every row the run admitted as my human's words, as the retained corpus's text (an image by reference
     beside its original's path, never its base64), their typed ids and reply target kept. ``source_text``:
-    the owner message a routed start names, the door's own record of it, first. Without one, a
-    suppressed (never-logged) origin's words live only in the run's first row and ride only under the
-    door's stamp (``initial_user``): an unstamped first turn (``initial_text``) is never owner words.
+    the owner message a routed start names, the door's own record of it, first, with the reply target and
+    message id of the door's row it stands for. Without one, a suppressed (never-logged) origin's words live
+    only in the run's first row and ride only under the door's stamp (``initial_user``): an unstamped first
+    turn (``initial_text``) is never owner words.
     """
     from ouroboros.review_evidence_sections import _owner_content_projection
 
     directives = [dict(row) for row in getattr(ctx, "_owner_directives", None) or [] if isinstance(row, dict)]
     rows = [row for row in directives if row.get("source") in OWNER_SOURCES - {"initial_user"}]
+    door = next((row for row in directives if row.get("source") == "initial_user"), None)  # the run's first row
+    client_id = str(_mapping(_ctx_metadata(ctx).get("origin_message_ref")).get("client_message_id") or "")
+    if door is not None and client_id:
+        door = {"client_message_id": client_id, **door}  # the door's message, by its typed id
     if source_text and not any(row.get("source") == "origin_message" for row in rows):
-        rows.insert(0, {"source": "origin_message", "content": source_text})
-    elif not source_text:
-        rows[:0] = [row for row in directives if row.get("source") == "initial_user"]
+        ids = {key: door[key] for key in ("reply_to", "client_message_id") if door and key in door}
+        rows.insert(0, {**ids, "source": "origin_message", "content": source_text})
+    elif not source_text and door is not None:
+        rows.insert(0, door)
     rows = [{**row, "content": _owner_content_projection(row.get("content"))} for row in rows]
     return [row for row in rows if row["content"].strip()]
 
@@ -438,10 +446,16 @@ def render_owner_words(rows: Any, absent: str = "", *, audience: str, root_task_
     origin = _ORIGIN.format(root=root_task_id) if root_task_id else ""
     blocks = []
     for row in rows:
-        text = str(row.get("text") or "") or (UNREAD_TARGET if row.get("source") == REPLY_TARGET else "")
+        text = str(row.get("text") or "") or (unread_target(row) if row.get("source") == REPLY_TARGET else "")
         words = "\n".join(indent + line if line else line for line in text.split("\n"))
         blocks.append(words_stamp(row) + "\n" + words)
     return f"{_HEADINGS[audience]}\n{_FRAMES[audience].format(origin=origin)}\n" + "\n\n".join(blocks)
+
+
+def unread_target(row: Mapping[str, Any]) -> str:
+    """What stands for a reply target's words the host did not carry: the host address that reads them, or the
+    honest fact that the connector gave only a platform message id."""
+    return UNREAD_TARGET if str(row.get("ref") or "").startswith("row:") else UNREAD_PLATFORM
 
 
 def words_stamp(row: Mapping[str, Any]) -> str:

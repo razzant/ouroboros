@@ -286,12 +286,12 @@ def _owner_content_projection(content: Any) -> str:
     return "\n".join(parts)
 
 
-def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Dict[str, str]]:
+def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Dict[str, Any]]:
     """Collect the task-local canonical owner corpus without semantic inference."""
-    rows: List[Dict[str, str]] = []
+    rows: List[Dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
 
-    def add(source: str, content: Any, msg_id: str = "", origin: Any = None) -> None:
+    def add(source: str, content: Any, msg_id: str = "", origin: Any = None, reply_to: Any = None) -> None:
         text = _owner_content_projection(content)
         if not text.strip():
             return
@@ -306,6 +306,8 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
         # the sibling it was relayed from, an owner answer's card) travels with the row:
         # every reader of this one corpus sees a relayed proposal as such, without inferring it from the text.
         row.update({key: str(value) for key, value in (origin or {}).items() if value})
+        if isinstance(reply_to, dict) and reply_to:  # the message these words reply to, never counted as them
+            row["reply_to"] = dict(reply_to)
         rows.append(row)
 
     recorded = getattr(ctx, "_owner_directives", None)
@@ -316,7 +318,9 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
                     str(item.get("source") or "task_local"),
                     item.get("content"),
                     str(item.get("msg_id") or ""),
-                    {key: item.get(key) for key in ("source_task_id", "relayed_from_task_id", "quiz_id")},
+                    {key: item.get(key) for key in ("source_task_id", "relayed_from_task_id", "quiz_id",
+                                                    "client_message_id")},
+                    item.get("reply_to"),
                 )
 
     messages = getattr(ctx, "messages", None)

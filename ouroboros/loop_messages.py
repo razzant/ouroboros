@@ -265,7 +265,8 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
                 _loop()._record_owner_directive(
                     ctx, source=str(row["source"]), content=row.get("content"),
                     msg_id=str(row.get("msg_id") or ""),
-                    origin={key: row[key] for key in ("source_task_id", "relayed_from_task_id", "quiz_id") if row.get(key)},
+                    origin={key: row[key] for key in ("source_task_id", "relayed_from_task_id", "quiz_id",
+                                                      "client_message_id") if row.get(key)},
                     reply_to=row.get("reply_to") if isinstance(row.get("reply_to"), dict) else None, carried=True,
                 )
         return  # The task-drafted objective is never an owner directive.
