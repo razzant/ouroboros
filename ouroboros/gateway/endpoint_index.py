@@ -466,7 +466,7 @@ HTTP_SHAPES: dict[str, Shape] = {
                                                       "ScheduleActionRequest"),
     "DELETE /api/schedules/{schedule_id}": Shape("200:ScheduleActionResponse 400:ErrorResponse"),
     "POST /api/command": Shape(
-        "200:CommandResponse 400,409,503:ErrorResponse", "CommandRequest",
+        "200:CommandResponse 400,409:CommandRefusal 503:ErrorResponse", "CommandRequest",
         note="queued, not done, except /panic: accepted immediately, never queued; /panic and /restart may end the connection before or after the answer"),
     "POST /api/reset": Shape("200:ResetResponse 409:ErrorResponse",
                              note="irreversible: deletes data and settings, then restarts; never resend"),

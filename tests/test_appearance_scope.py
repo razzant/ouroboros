@@ -71,7 +71,7 @@ def test_theme_js_reads_exactly_the_scope_the_core_names():
 def gate(tmp_path, monkeypatch):
     """The real entry pages behind the real gate, as a peer beyond loopback sees them."""
     monkeypatch.setattr("ouroboros.server_process.record_applied_restart_settings", lambda settings: None)
-    monkeypatch.setattr(onboarding_host, "_live_setup", lambda: ({}, {}))
+    monkeypatch.setattr(onboarding_host, "_live_setup", lambda _request: ({}, {}))
     monkeypatch.setattr(server_auth, "get_configured_network_password", lambda: "secret")
 
     def build(ui_dir: str = "", root: pathlib.Path | None = None) -> TestClient:

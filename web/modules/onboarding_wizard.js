@@ -23,6 +23,7 @@ import { MODEL_CATALOG_TIMEOUT_MS, mergeModelCatalog, catalogReadState, summariz
 import { accountRows } from './claudexor_status_store.js';
 import { accountRowFacts } from './harness_accounts.js';
 import { createStarterSkillsRow } from './onboarding_starter_skills.js';
+import { createConsciousnessOffer } from './onboarding_consciousness.js';
 import { createConnectionsEditor } from './settings_connections.js';
 import { PROVIDER_CARDS, providerSettingsCard } from './settings_provider_cards.js';
 import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
@@ -119,6 +120,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     let compatibleCatalogs = {};
     const compatibleCard = PROVIDER_CARDS.find((card) => card.kind === 'openai-compatible');
     const starterSkills = createStarterSkillsRow(); // the Summary's Starter skills row keeps its ticks across renders
+    const consciousness = createConsciousnessOffer(bootstrap.consciousnessOffer, { onChange: () => render() }); // its one Start waits for the confirmed save
     const modelRoles = createModelRolesEditor({ hostId: 'onboarding-model-roles', onChange: (settings, { slot } = {}) => {
         if (slot === 'vision') suggestedVisionModel = null;
         adoptModelSettings(settings);
@@ -587,7 +589,8 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                 ['Total API budget', formatUsd(state.totalBudget)],
                 ['Per-task API cap', formatUsd(state.perTaskCostUsd)],
             ] : [['Budget', 'Subscription quota · wait and auto-continue on reset']]),
-            ...MODEL_SLOTS.map((slot) => [slot.label.replace(/ Model$/, ''), modelSummary(slot)]),
+            // The Consciousness offer above already uses that word alone (#1603); its model row says what it is.
+            ...MODEL_SLOTS.map((slot) => [slot.slot === 'consciousness' ? 'Consciousness model' : slot.label.replace(/ Model$/, ''), modelSummary(slot)]),
         ];
         const compatible = compatibleEndpoint(draftSettings());
         const keys = [
@@ -965,7 +968,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                     <p class="step-copy">${escapeHtml(STEP_META.summary.copy)}</p>
                 </div>
             </div>
-            <div class="summary-card"><div data-starter-skills></div><div class="summary-card-rows">${summaryRowsHtml()}</div></div>
+            <div class="summary-card"><div data-starter-skills></div><div data-consciousness-offer></div><div class="summary-card-rows">${summaryRowsHtml()}</div></div>
             ${state.reviewEnforcement === 'blocking' && trim(state.runtimeMode) !== 'cyber_pro' && packetOnlyReviewPool(catalogDraft())
                 ? `<div class="wizard-inline-note" data-tone="warn" data-review-pool-warning>${escapeHtml(PACKET_ONLY_POOL_WARNING)}</div>` : ''}
             ${languageBlockHtml({ onboarding: true })}
@@ -994,6 +997,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     }
 
     function renderStepContent() {
+        if (consciousness.running()) return consciousness.screenHtml();
         if (state.currentStep === 'accounts') return renderAccountsStep();
         if (state.completedRestartMode) return renderRestartRequiredScreen();
         if (state.currentStep === 'models') return renderModelsStep();
@@ -1036,7 +1040,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                 <div class="wizard-steps" role="group" aria-label="Step ${index + 1} of ${STEP_ORDER.length}">${stepCards()}</div>
                 <div class="wizard-content">
                     ${renderStepContent()}
-                    ${state.completedRestartMode ? '' : `
+                    ${state.completedRestartMode || consciousness.running() ? '' : `
                     <div class="wizard-footer">
                         <div class="wizard-error" role="status">${escapeHtml(state.error)}</div>
                         <div class="footer-copy">${escapeHtml(saveUnknown ? 'The last save did not return a confirmed result.' : meta.footer)}</div>
@@ -1058,8 +1062,9 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         `;
         bindEvents();
         starterSkills.mount(root.querySelector('[data-starter-skills]'));
+        consciousness.mount(root.querySelector('[data-consciousness-offer]'));
         disposeLanguage?.();   // the Language block lives on the summary step only; its binder owns its listeners
-        disposeLanguage = state.currentStep === 'summary' && !state.completedRestartMode ? bindLanguageSettings(root, { staged: state.languageChoice, stage: (value) => { state.languageChoice = value; } }) : null;
+        disposeLanguage = state.currentStep === 'summary' && !state.completedRestartMode && !consciousness.running() ? bindLanguageSettings(root, { staged: state.languageChoice, stage: (value) => { state.languageChoice = value; } }) : null;
         renderLocalStatus();
         observeFooter();
         revealCurrentStep();
@@ -1421,7 +1426,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         state.saveAttempt = '';
         await agentsStep?.disposeForCompletion();
         agentsStep = null;
-        if (!disposed) announceCompletion(outcome.receipt);
+        if (!disposed) await consciousness.afterSave({ isDisposed: () => disposed, announce: () => announceCompletion(outcome.receipt) });
     }
 
     async function completeOnboardingAtomically(payload) {
@@ -1449,11 +1454,13 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     }
 
     async function saveWizardPayload(payload) {
+        await consciousness.beforeSave();
+        if (disposed) return 'cancelled';
         const result = await completeOnboardingAtomically(payload);
         await applyStagedLanguage();
         await agentsStep?.disposeForCompletion();
         agentsStep = null;
-        announceCompletion(result);
+        await consciousness.afterSave({ isDisposed: () => disposed, announce: () => announceCompletion(result) });
         return 'ok';
     }
 
@@ -1528,6 +1535,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     }
 
     function bindEvents() {
+        if (consciousness.running()) return consciousness.bindScreen(root);
         if (state.completedRestartMode) {
             document.getElementById('open-app-btn')?.addEventListener('click', () => {
                 window.location.replace('/');
@@ -1569,8 +1577,10 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     applyModelDefaults(false);
     root.addEventListener('focusin', clearFooterOnFocus);
     window.addEventListener('pagehide', (event) => {
+        consciousness.leave();  // every departure retires a Start not sent yet; the form itself survives the back/forward cache
         if (event.persisted) return;
         disposed = true;
+        consciousness.dispose();
         root.removeEventListener('focusin', clearFooterOnFocus);
         disposeLanguage?.();
         catalogGeneration += 1;

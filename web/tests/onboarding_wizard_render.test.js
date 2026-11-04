@@ -659,7 +659,8 @@ test('the summary step stages the language and applies it only after the complet
     assert.match(source, /stage: \(value\) => \{ state\.languageChoice = value; \} \}\)/);
     const complete = source.indexOf('const result = await completeOnboardingAtomically(payload);');
     const apply = source.indexOf('await applyStagedLanguage();', complete);
-    const announce = source.indexOf('announceCompletion(result);', complete);
+    // The hand-off runs through the Consciousness row's afterSave (#1603), which announces last.
+    const announce = source.indexOf('announce: () => announceCompletion(result)', complete);
     assert.ok(complete > 0 && apply > complete && announce > apply, 'complete → apply the staged language → announce');
     assert.match(source, /await saveLanguageChoice\(choice\)/, 'the shared writer, not a second path');
     // The other verified-success path — an unknown save whose own receipt the attempt read-back returned —

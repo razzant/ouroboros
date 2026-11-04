@@ -42,7 +42,7 @@ from ouroboros.gateway.owner_settings import (
     settings_document_digest,
     unsaved_error,
 )
-from ouroboros.onboarding_wizard import build_onboarding_html
+from ouroboros.onboarding_wizard import render_onboarding_html
 from ouroboros.platform_layer import is_container_env
 from ouroboros.provider_connections import connection_references, connections_meta, normalize_connections
 from ouroboros.provider_models import CONNECTIONS_KEY, normalize_builtin_choices
@@ -904,13 +904,16 @@ async def api_onboarding(request: Request) -> Response:
     install-time preset and the ``light`` safety default both depend on, and
     (b) made a page load the author of provider defaults the owner never saw.
     The save paths (POST /api/settings, POST /api/onboarding/complete, the
-    desktop wizard bridge) keep the same normalization and persist it."""
-    from ouroboros.config import SETTINGS_PATH
+    desktop wizard bridge) keep the same normalization and persist it.
+    The settings view and the wizard body come from the one live Setup derivation
+    that ``/onboarding`` and ``/api/onboarding/bootstrap`` serve, so this body shows
+    the consciousness control as the state does too."""
+    from ouroboros.gateway import onboarding_host
 
-    settings, _changed, _keys = apply_runtime_provider_defaults(load_settings())
+    settings, bootstrap = onboarding_host._live_setup(request)
     if has_startup_ready_provider(settings):
         return Response(status_code=204)
-    return HTMLResponse(build_onboarding_html(settings, host_mode="web", fresh_install=not SETTINGS_PATH.exists()))
+    return HTMLResponse(render_onboarding_html(bootstrap))
 
 
 def _apply_settings_save_side_effects(

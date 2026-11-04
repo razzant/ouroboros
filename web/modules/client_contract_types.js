@@ -175,6 +175,16 @@
  */
 
 /**
+ * `settings_setup_contract.consciousness_offer`: the Summary's optional, unticked Consciousness row.
+ * @typedef {Object} SetupConsciousnessOffer
+ * @property {boolean} offered  // setup has never completed on this install; a completed setup shows no row
+ * @property {?boolean} enabled  // the control as the state shows it; null = unknown
+ * @property {'observe'|'act'|'full'} autonomy
+ * @property {number} dailyUsd  // rolling-24h recorded-spend allowance; subscription quota is separate
+ * @property {number} maxTasks  // how many of its own tasks may run at once; 0 = it starts none
+ */
+
+/**
  * `settings_setup_contract.build_setup_bootstrap`: what the builtin wizard page embeds.
  * @typedef {Object} SetupBootstrap
  * @property {'web'|'desktop'} hostMode
@@ -187,6 +197,7 @@
  * @property {string} secretPlaceholder  // a prefilled credential that is configured holds this marker
  * @property {SetupContract} contract
  * @property {SetupInitialState} initialState
+ * @property {SetupConsciousnessOffer} consciousnessOffer  // display; a ticked row sends the ordinary Start after the save
  */
 
 /**

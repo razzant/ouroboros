@@ -960,6 +960,7 @@ class CommandRequest(TypedDict):
     adds a system row; the same ``visible_task_id`` within 5 seconds is answered as deduped."""
 
     cmd: str
+    if_boot: NotRequired[str]  # optional boot.since precondition, before queueing; Panic ignores it
     client_surface: NotRequired[Dict[str, Any]]
     visible_text: NotRequired[str]
     visible_task_id: NotRequired[str]
@@ -973,6 +974,16 @@ class CommandResponse(TypedDict, total=False):
     ok: bool
     deduped: bool
     task_id: str
+
+
+class CommandRefusal(TypedDict):
+    """``POST /api/command`` 400/409: ``accepted: false`` is present only when the door refused before queueing
+    (an invalid ``reply_to`` or ``if_boot``, a changed boot, no command queue yet), so nothing was queued.
+    Without it the outcome stays unknown: an error raised after enqueue does not undo the command."""
+
+    error: str
+    accepted: NotRequired[bool]  # always false when present
+    reason_code: NotRequired[str]  # boot_changed: ``if_boot`` named an earlier server
 
 
 class GitRollbackRequest(TypedDict):
@@ -1046,6 +1057,6 @@ __all__ = [
     "LocalModelTestResponse", "McpListingAttempt", "McpServerStatus", "McpStatusResponse", "McpRefreshRequest",
     "McpRefreshResponse", "McpTestRequest", "McpTestResponse",
     "UpdateProgress", "UpdateLetter", "UpdateTransactionState", "UpdateStatusResponse",
-    "CommandRequest", "CommandResponse", "GitRollbackRequest", "GitRollbackResponse", "GitPromoteResponse",
+    "CommandRequest", "CommandResponse", "CommandRefusal", "GitRollbackRequest", "GitRollbackResponse", "GitPromoteResponse",
     "ResetResponse", "CostBreakdownResponse",
 ]
