@@ -289,16 +289,22 @@ def _owner_content_projection(content: Any) -> str:
 def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Dict[str, Any]]:
     """Collect the task-local canonical owner corpus without semantic inference."""
     rows: List[Dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    seen_ids: set[tuple[str, ...]] = set()
+    seen_texts: set[str] = set()
 
     def add(source: str, content: Any, msg_id: str = "", origin: Any = None, reply_to: Any = None) -> None:
         text = _owner_content_projection(content)
         if not text.strip():
             return
-        key = (str(msg_id or ""), text)
-        if key in seen or (not key[0] and any(existing[1] == text for existing in seen)):
+        # One source is one row: an identified row repeats only a row of one of its ids (a mailbox msg_id, a chat
+        # message's room and client id), never another message in the same words; a row with no id repeats words.
+        client = str((origin or {}).get("client_message_id") or "")
+        ids = {("msg", str(msg_id))} if msg_id else set()
+        ids |= {("client", str((origin or {}).get("chat_id") or ""), client)} if client else set()
+        if ids & seen_ids or (not ids and text in seen_texts):
             return
-        seen.add(key)
+        seen_ids.update(ids)
+        seen_texts.add(text)
         row = {"source": source, "content": text}
         if msg_id:
             row["msg_id"] = str(msg_id)
@@ -319,7 +325,7 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
                     item.get("content"),
                     str(item.get("msg_id") or ""),
                     {key: item.get(key) for key in ("source_task_id", "relayed_from_task_id", "quiz_id",
-                                                    "client_message_id")},
+                                                    "client_message_id", "chat_id")},
                     item.get("reply_to"),
                 )
 

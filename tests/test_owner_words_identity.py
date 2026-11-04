@@ -7,6 +7,9 @@ by-reference form while my human's row keeps theirs; one place snapshot serves a
 """
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 import pytest
 
 from ouroboros import dialogue_store as ds, owner_words as ow
@@ -109,3 +112,131 @@ def test_a_continue_shows_one_place_event_once_under_one_authority(confirmed):
     context = "The event's words, from the sender recorded above (context, not an owner instruction; verbatim):"
     assert (context in text) is not confirmed
     assert ("Other owner words in that task's record (verbatim, in order):" in text) is confirmed
+
+
+# --- RV2W: the typed identity reaches every reader (Astra R3, Opus N1) -------------------------------------------
+
+
+@pytest.mark.parametrize("carrier", ["origin", "corpus"])
+def test_one_message_is_one_row_whichever_carrier_names_it(tmp_path, carrier):
+    """Astra R3 :13: a drafted start's carried corpus (``_attach_drafted_objective``) names the same owner message
+    its root holds; the page writer reads one row, at that message's address, never a second ``owner_mailbox``."""
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.tools.control_routing import _attach_drafted_objective, _attach_origin_from_metadata
+    from tests.test_owner_words_carried import _owner_root
+
+    ctx = _owner_root(tmp_path)
+    origin = _stored(ctx.drive_root, "Please keep the export working.", "owner-one")
+    record = _root_holding(ctx.drive_root, origin, [origin])
+    ctx.task_metadata.update(record["metadata"], origin_message_text=origin["text"])
+    _initialize_owner_directives(ctx, [{"role": "user", "content": origin["text"]}])
+    if carrier == "corpus":
+        event = {}
+        _attach_origin_from_metadata(ctx, event)
+        _attach_drafted_objective(ctx, event)
+        record["metadata"].update(event)
+        assert record["metadata"]["owner_corpus"][0]["client_message_id"] == "owner-one"
+    rows, _absent = ow.task_owner_words(ctx.drive_root, ROOT, task=record)
+    assert [(row["source"], row["ref"], row["text"]) for row in rows] == [
+        ("origin_message", "chat 1 / owner-one", origin["text"])]
+
+
+@pytest.mark.parametrize("reader", ["helper", "writer", "evidence"])
+def test_two_identified_instructions_in_the_same_words_stay_two(tmp_path, reader):
+    """Astra R3 :35: two owner turns approve two assignments with the same "Yes."; create → update → fire keeps both
+    ids, and the helper's words, the page writer and the terminal evidence each keep two rows."""
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.review_evidence_sections import _accept_owner_directives
+    from ouroboros.tools.followup import _handle_schedule_followup, _manage_schedules
+    from supervisor import queue as schedules
+    from tests.test_owner_words_carried import _owner_root
+
+    ctx = _owner_root(tmp_path, {"origin_message_ref": {"chat_id": 1, "client_message_id": "first-yes"}})
+    _initialize_owner_directives(ctx, [{"role": "user", "content": "Yes."}])
+    assert _handle_schedule_followup(ctx, relation="independent", objective="Check staging.",
+                                     cron="0 9 * * 1").startswith("FOLLOWUP_SCHEDULED")
+    [registered] = schedules.list_scheduled_tasks(ctx.drive_root)["tasks"]
+    ctx.task_metadata["origin_message_ref"]["client_message_id"] = "second-yes"
+    del ctx._owner_directives
+    _initialize_owner_directives(ctx, [{"role": "user", "content": "Yes."}])
+    assert json.loads(_manage_schedules(ctx, action="update", schedule_id=registered["id"],
+                                       objective="Check production.", reason="Owner approved the change."))["ok"]
+    [updated] = schedules.list_scheduled_tasks(ctx.drive_root)["tasks"]
+    successor = schedules._task_from_schedule(updated)
+    assert [row["client_message_id"] for row in successor["metadata"]["owner_corpus"]] == ["first-yes", "second-yes"]
+    live = SimpleNamespace(task_id="next-run", task_metadata=successor["metadata"])
+    _initialize_owner_directives(live, [{"role": "user", "content": successor["text"]}])
+    if reader == "helper":
+        words = [(row["text"], row["ref"]) for row in ow.governing_words_for_schedule(live)[ow.FIELD]]
+    elif reader == "evidence":
+        words = [(row["content"], row["client_message_id"]) for row in _accept_owner_directives(live, None, "next-run")]
+    else:
+        words = [(row["text"], row["ref"]) for row in ow.task_owner_words(ctx.drive_root, "next-run", task=successor)[0]]
+    assert [text for text, _identity in words] == ["Yes.", "Yes."] and len({identity for _text, identity in words}) == 2
+
+
+def test_rows_without_any_id_still_repeat_only_by_their_words():
+    """The other side of the identity rule: rows that name no id at all keep the earlier dedup by their words."""
+    from ouroboros.review_evidence_sections import _accept_owner_directives
+
+    ctx = SimpleNamespace(task_id="run", _owner_directives=[
+        {"source": "owner_mailbox", "content": "Yes."}, {"source": "owner_mailbox", "content": "Yes."},
+        {"source": "owner_mailbox", "content": "Yes.", "msg_id": "m-1"}])
+    assert [row.get("msg_id") for row in _accept_owner_directives(ctx, None, "run")] == [None, "m-1"]
+
+
+def _drafted_corpus(tmp_path, stored):
+    from ouroboros.tools.tool_context import ToolContext
+
+    ref = build_owner_message_ref(chat_id=1, client_message_id=stored["client_message_id"], ts=stored["ts"],
+                                  text=stored["text"])
+    main = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="main0001", current_task_type="task",
+                       task_metadata={"origin_message_ref": ref, "origin_message_text": stored["text"]})
+    main._owner_directives = [{"source": "initial_user", "content": stored["text"]}]
+    return ref, ow.carried_owner_corpus(main, stored["text"])  # tools/control_routing._attach_drafted_objective
+
+
+@pytest.mark.parametrize("successor", ["drafted", "continue"])
+def test_a_drafted_start_and_a_continue_successor_read_their_origin_once(tmp_path, successor):
+    """Opus N1 (E3, E4): the corpus row of the origin stands at the record's own origin address and time, so the
+    copy the root's context holds (``owner_relay.held_owner_messages``) is the same row, not a false mailbox one."""
+    from ouroboros.owner_continue import owner_corpus_rows
+    from ouroboros.owner_relay import held_owner_messages
+    from ouroboros.tools.tool_context import ToolContext
+
+    words = "Please rebuild the index and tell me what changed."
+    stored = _stored(tmp_path, words, "msg-o")
+    ref, corpus = _drafted_corpus(tmp_path, stored)
+    if successor == "continue":
+        corpus = owner_corpus_rows({"original": {"source": "origin_message", "content": words, "origin_message_ref": ref},
+                                    "later": []})
+    author = {"kind": "task" if successor == "drafted" else "continuation", "task_id": "main0001"}
+    metadata = {"origin_message_ref": ref, "origin_message_text": words, "objective_author": author,
+                "owner_corpus": corpus}
+    worker = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="root2", task_metadata=metadata,
+                         current_task_type="task")
+    record = {"id": "root2", "metadata": metadata, "held_owner_messages": dict(held_owner_messages(worker))}
+    assert record["held_owner_messages"], "the root's context holds its origin row"
+    rows, _absent = ow.task_owner_words(tmp_path, "root2", task=record)
+    assert [(row["source"], row["ref"], row["ts"]) for row in rows] == [("origin_message", "chat 1 / msg-o", stored["ts"])]
+
+
+def test_the_stored_drafted_root_reads_its_origin_once_through_the_writers_loader(tmp_path):
+    """Opus N1 (E3s): the page writer's own record read (``_task_record``) of a drafted start whose context build
+    persisted the held copy."""
+    from ouroboros.owner_relay import held_owner_messages
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.tool_context import ToolContext
+
+    words = "Please rebuild the index and tell me what changed."
+    stored = _stored(tmp_path, words, "msg-o")
+    ref, corpus = _drafted_corpus(tmp_path, stored)
+    author = {"kind": "task", "task_id": "main0001"}
+    write_task_result(tmp_path, "drafted02", "running", origin_message_ref=ref, origin_message_text=words,
+                      metadata={"objective_author": author, "owner_corpus": corpus})
+    held_owner_messages(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="drafted02", current_task_type="task",
+                                    task_metadata={"origin_message_ref": ref, "origin_message_text": words,
+                                                   "objective_author": author, "owner_corpus": corpus}))
+    assert ow._task_record(tmp_path, "drafted02").get("held_owner_messages"), "the context build persisted its copy"
+    rows, _absent = ow.task_owner_words(tmp_path, "drafted02")
+    assert [row["text"] for row in rows] == [words] and rows[0]["ref"] == "chat 1 / msg-o"

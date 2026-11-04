@@ -113,8 +113,8 @@ CORPUS_OWNER_SOURCES = OWNER_SOURCES - CORPUS_INITIAL_SOURCES
 CARRIED_DOOR_SOURCES = frozenset({"origin_message", "initial_user"})
 CORPUS_TASK_SOURCES = frozenset({"principal_task_message", "relayed_peer_message"})
 # The typed ids an owner-source row may carry, each a string when present: its message, a task message's sender and
-# relaying sibling, an owner answer's card, the chat row it is; its ``reply_to`` (a mapping) rides beside them.
-ROW_IDS = ("msg_id", "source_task_id", "relayed_from_task_id", "quiz_id", "client_message_id")
+# relaying sibling, an owner answer's card, the chat row it is and that id's room; its ``reply_to`` rides beside them.
+ROW_IDS = ("msg_id", "source_task_id", "relayed_from_task_id", "quiz_id", "client_message_id", "chat_id")
 # What a successor reads of an answered card beside the owner's words (``answered_card``).
 CARD_FIELDS = ("quiz_id", "question", "options", "answered_index", "comment", "asked_at", "answered_at")
 # The binding's copy of the work's explicit execution budget (``execution_carry``).
@@ -534,7 +534,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                 continue
             msg_id, source, text = str(row.get("msg_id") or ""), str(row.get("source") or ""), row["content"]
             client = str(row.get("client_message_id") or "")
-            identity = msg_id or (f"client {client}" if client else "")
+            identity = msg_id or (f"client {row.get('chat_id') or ''} / {client}" if client else "")
             if source not in CORPUS_INITIAL_SOURCES | CORPUS_OWNER_SOURCES | CORPUS_TASK_SOURCES:
                 gaps.append("owner_source_provenance_unknown")
                 continue

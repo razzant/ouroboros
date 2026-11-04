@@ -238,7 +238,8 @@ def inject_relay(ctx, entry: dict, messages: list) -> None:
         address = format_address(row_address(row))
         loop._record_owner_directive(ctx, source="owner_mailbox", content=owner_text(row), msg_id=address, carried=True,
                                      origin={"source_task_id": entry.get("source_task_id"),
-                                             "client_message_id": row.get("client_message_id")},
+                                             "client_message_id": row.get("client_message_id"),
+                                             "chat_id": row.get("chat_id")},
                                      reply_to=reply_target(root, row.get("reply_to")) or None)
         body = f"[Owner words quoted verbatim; handle {address}]\n{owner_text(row)}"
         if isinstance(row.get("reply_to"), dict) and row["reply_to"]:

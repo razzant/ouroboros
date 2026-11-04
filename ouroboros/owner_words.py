@@ -94,6 +94,18 @@ def _chat_ref(source: Mapping[str, Any]) -> str:
     return f"chat {source.get('chat_id', 1)}" + (f" / {client_id}" if client_id else "")
 
 
+def row_ref(item: Mapping[str, Any]) -> str:
+    """A corpus item's typed identity as every reader prints it: a chat message by its room and client id, as its
+    carriers name it (``_chat_ref``); else its mailbox ``msg_id``; else its client id alone, never under a room it did
+    not name. One message is one reference whichever carrier holds it, and two messages are two even in one word."""
+    client, chat, msg_id = (str(item.get(key) or "") for key in ("client_message_id", "chat_id", "msg_id"))
+    if client and chat:
+        return _chat_ref({"chat_id": chat, "client_message_id": client})
+    if msg_id:
+        return f"msg {msg_id}"
+    return f"message {client}" if client else ""
+
+
 def _deduped(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
     """Drop empty rows and repeats of one source: its reference, else (none recorded) its whitespace-normalized
     text. Similar words under different references are not copies (BIBLE P1): two "yes" stay two."""
@@ -159,14 +171,12 @@ def objective_author_text(ctx: Any) -> str:
 
 def _words_rows(item: Mapping[str, Any], *, carrier: str, task_id: str, content: Any = None, ts: Any = "",
                 ref: str = "") -> List[Dict[str, str]]:
-    """One corpus item's rows: its words verbatim (images by reference), then the message they reply to, under
-    that message's own author."""
+    """One corpus item's rows: its words verbatim (images by reference) under its typed identity (``row_ref``), then
+    the message they reply to, under that message's own author."""
     from ouroboros.review_evidence_sections import _owner_content_projection
 
-    msg_id = str(item.get("msg_id") or "")
     rows = [_row(_owner_content_projection(item.get("content") if content is None else content),
-                 source=item["source"], carrier=carrier, task_id=task_id, ts=ts,
-                 ref=ref or (f"msg {msg_id}" if msg_id else ""))]
+                 source=item["source"], carrier=carrier, task_id=task_id, ts=ts, ref=ref or row_ref(item))]
     if (target := _mapping(item.get("reply_to"))).get("address"):
         rows.append(_row(target.get("text"), source=REPLY_TARGET, carrier=carrier, task_id=task_id,
                          ref=target["address"], author=target.get("author") or "author not recorded"))
@@ -213,10 +223,11 @@ def carried_owner_corpus(ctx: Any, source_text: Any = "") -> List[Dict[str, Any]
     door = next((row for row in owner if row.get("source") == "initial_user" and not row.get("carried")), None)
     rest = [row for row in owner if row is not door]
     client_id = str(_mapping(_ctx_metadata(ctx).get("origin_message_ref")).get("client_message_id") or "")
-    if door is not None and client_id:
-        door = {"client_message_id": client_id, **door}  # the door's message, by its typed id
+    if door is not None and client_id:  # the door's message, by its typed id and the room that id belongs to
+        chat = _mapping(_ctx_metadata(ctx).get("origin_message_ref")).get("chat_id")
+        door = {"client_message_id": client_id, **({"chat_id": str(chat)} if chat is not None else {}), **door}
     if source_text and not any(row.get("source") == "origin_message" for row in rest):
-        ids = {key: door[key] for key in ("reply_to", "client_message_id") if door and key in door}
+        ids = {key: door[key] for key in ("reply_to", "client_message_id", "chat_id") if door and key in door}
         rows = [{**ids, "source": "origin_message", "content": source_text}, *rest]
     else:
         rows = [*([door] if door is not None and not source_text else []), *rest]
@@ -346,11 +357,15 @@ def _message_rows(drive_root: Any, task_id: str, text: Any, ref: Any, carrier: s
 
 
 def _corpus_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], accounts: Any) -> List[Dict[str, str]]:
-    """The words a follow-up, a drafted start or a Continue carries by value, as its producer recorded them."""
+    """The words a follow-up, a drafted start or a Continue carries by value, as its producer recorded them; its
+    ``origin_message`` row at the record's own origin address and time, as the door's row is stamped."""
     corpus = _mapping(record.get("metadata")).get("owner_corpus") or record.get("owner_corpus")
+    origin = _mapping(record.get("origin_message_ref") or _mapping(record.get("metadata")).get("origin_message_ref"))
+    stamp = {"ts": origin.get("ts"), "ref": _chat_ref(origin)} if origin else {}
     return [row for item in (corpus if isinstance(corpus, list) else [])
             if isinstance(item, Mapping) and item.get("source") in OWNER_SOURCES
-            for row in _words_rows(item, carrier="owner_corpus", task_id=task_id)]
+            for row in _words_rows(item, carrier="owner_corpus", task_id=task_id,
+                                   **(stamp if item.get("source") == "origin_message" else {}))]
 
 
 def _origin_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], accounts: Any) -> List[Dict[str, str]]:
