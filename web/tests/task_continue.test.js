@@ -25,7 +25,7 @@ test('an author-stopped card keeps its reason and Continue in the Stopped phase'
         const card = settledRootCard('stopped-root');
         card.phase = taskTerminalPhase(detail);
         assert.equal(card.phase, 'cancelled');
-        assert.equal(taskReasonDetail(detail), 'Ouroboros stopped with unfinished work; the reviewers had not signed it off · The export is unfinished.');
+        assert.equal(taskReasonDetail(detail), 'Ouroboros stopped with unfinished work · The export is unfinished.');
         syncContinueAction(card, detail);
         assert.equal(card.root.querySelector('[data-continue-task]')?.textContent, 'Continue');
     } finally { restoreDom(prior); }

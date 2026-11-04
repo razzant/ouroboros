@@ -642,7 +642,7 @@ Status, owner action, and urgent notification are separate product concepts:
   met. Stop now reads `Stopped` whatever it kept (answer and files stay shown);
   a Wrap up reads `Done` over its final answer and `Stopped` without one; failed
   file preservation beside Wrap up reads `Failed`; the cause names the button.
-  Explicit `task_completion/author_stop` reads `Stopped`, keeping its cause and Continue (03.11, 23:15Z), including records since 30.09.
+  Explicit `task_completion/author_stop` reads `Stopped`, keeping its cause and Continue, including saved records.
   A record naming no button keeps its recorded word (owner 25.10, A).
 - **Owner action** exists only when the responsible domain exposes a current
   concrete continuation, such as Resume, Retry, Connect, Repair, Grant access,
@@ -1431,7 +1431,7 @@ read as `Working`, with their count; an
 access wait is not an answer wait, and unknown stays unknown. Under the state a
 live work shows its authored focus (`update_focus`: stage · done · left), led by its time,
 quiet, at most two lines. A finished row shows the author’s closing sentence,
-unless already the title; a held cause wins, else nothing, never old focus (01.11 A, extended 04.11).
+unless already the title; a held cause wins, else nothing, never old focus.
 The name opens the work's message, even when finished: its loaded card or
 owner message, else the room reads history around the work's first message and
 lands there with the list open. Until then a row claims nothing
@@ -1743,7 +1743,7 @@ with one primary (owner 26.10, B). Timeline, Reviews and children live
 in the room; the summary is reading content, not a disclosure. The room’s census supplies
 last line, tool calls and `in background` for detached work; missing facts change nothing.
 At the end, show the closing sentence unless it repeats the title; a held cause
-wins, else nothing (01.11 A, extended 04.11). The chip reads typed final outcome
+wins, else nothing. The chip reads typed final outcome
 or durable detail. An undurable Main receipt keeps
 a dashed border and plain warning; its binding holds. The owner's routing line under his message hides while its portal is in the
 feed; later words passed to the work keep theirs. A Continue is the same card: the

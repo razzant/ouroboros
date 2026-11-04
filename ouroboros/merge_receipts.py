@@ -250,10 +250,11 @@ def review_settlement_words(receipts: List[Dict[str, Any]], room_id: Optional[st
         location = "" if in_room else f"Room {room_id or 'unconfirmed'}: "
         pr = f"PR #{receipt['number']}" if receipt.get("number") else "PR (number unrecorded)"
         settlement = f", {revision} at settlement" if revision is not None else ""
+        label, sentence = coverage_reading(receipt)
         lines.append(f"{location}{pr} was already merged as "
             f"{outcome.get('merge_sha') or 'unrecorded commit'} at {outcome.get('merged_at') or 'unrecorded time'} "
             f"(receipt revision {receipt.get('revision', 'unrecorded')}; "
-            f"review revision {review.get('revision', 'unrecorded')} at merge{settlement}). {coverage_words(receipt)} "
+            f"review revision {review.get('revision', 'unrecorded')} at merge{settlement}). {sentence or label + '.'} "
             f"Coverage: {(receipt.get('coverage') or {}).get('status', 'unknown')}.")
     return lines
 

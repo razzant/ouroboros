@@ -128,7 +128,8 @@ export function buildTimelineItemHtml(item, record) {
     const loadingFull = expanded && Boolean(item.truncated && item.fullRef && !item.fetchedFull && !item.fullReadError);
     // A late-review row offers its exact applied review record (`cardRowSummary`).
     const evidenceHtml = evidenceLinkHtml(item.evidenceRef);
-    const bodyHtml = !displayBody ? '' : item.bodyFormat === 'text'
+    const plainBody = item.bodyFormat === 'text' || item.cardReview?.kind === 'merge_review';
+    const bodyHtml = !displayBody ? '' : plainBody
         ? escapeHtml(displayBody) : renderMarkdown(displayBody, { inlineHeadingBreaks: true });
     const isProgressLine = item.phase === 'working' || item.phase === 'thinking';
     const bodyId = `chat-live-line-body-${String(record.groupId || 'task').replace(/[^A-Za-z0-9_-]/g, '-')}-${String(item.lineKey || '').replace(/[^A-Za-z0-9_-]/g, '-')}`;
@@ -161,7 +162,7 @@ export function buildTimelineItemHtml(item, record) {
         >
             ${headHtml}
             ${delegated ? `<div class="chat-live-line-body chat-delegated-activity" id="${escapeHtmlAttr(bodyId)}">${delegatedActivityBodyHtml(delegated, { expanded })}</div>`
-        : displayBody || evidenceHtml ? `<div class="chat-live-line-body${showingFetched ? ' chat-live-line-body-full' : ''}"${item.bodyFormat === 'text' ? ' data-body-format="text"' : ''} id="${escapeHtmlAttr(bodyId)}">${bodyHtml}${evidenceHtml}${loadingFull ? '<div class="chat-live-line-loading">Loading full output…</div>' : ''}</div>` : ''}
+        : displayBody || evidenceHtml ? `<div class="chat-live-line-body${showingFetched ? ' chat-live-line-body-full' : ''}"${plainBody ? ' data-body-format="text"' : ''} id="${escapeHtmlAttr(bodyId)}">${bodyHtml}${evidenceHtml}${loadingFull ? '<div class="chat-live-line-loading">Loading full output…</div>' : ''}</div>` : ''}
         </div>
     `;
 }

@@ -683,7 +683,8 @@ test('a retained merge row refreshes its later review and report without another
         ? JSON.parse(readFileSync(process.env.LATE_MERGE_PROJECTION, 'utf8')) : null;
     const old = supplied?.before || { task_id: 'merge-task', role: 'system', system_type: 'host_progress',
         is_progress: true, card_row: 'reviews', card_row_id: 'merge-receipt:r', card_row_revision: 2,
-        history_id: 'h-receipt', ts: '2026-09-16T00:01:00Z', text: 'PR #7 merge: merged. Review pending.' };
+        history_id: 'h-receipt', ts: '2026-09-16T00:01:00Z',
+        text: 'PR #7 merge: merged · earlier version reviewed\nThis review was for earlier code; it does not cover what merged.' };
     const current = supplied?.after || { ...old, text: old.text + '\nIts later review: FAIL.',
         late_evidence: { kind: 'merge_review', record_id: 'review', revision: 2, verdict: 'FAIL',
             review_source: { task_id: 'merge-task', record_id: 'review', seat_id: 'critic',
@@ -701,8 +702,18 @@ test('a retained merge row refreshes its later review and report without another
         assert.equal(walkCard(replay.messages(), 'merge-task'), card);
         const rendered = markup().at(-1);
         assert.match(rendered, /Its later review: FAIL/);
+        assert.match(rendered, /data-body-format="text"/, 'coverage and later review keep their visible line break');
         assert.match(rendered, /href="\/api\/tasks\/[^" ]+\/reviews\/[^" ]+"/);
         assert.ok(rendered.indexOf('merge: merged') < rendered.indexOf('Its later review: FAIL'));
+        const [head, detail] = old.text.split('\n');
+        assert.ok(rendered.includes(`class="chat-live-line-title">${head}</span>`), 'the receipt keeps its head');
+        const label = head.split(' · ')[1];
+        assert.ok(label);
+        assert.equal(rendered.split(label).length - 1, 1, 'coverage is labelled once, in the head');
+        if (detail) {
+            assert.ok(rendered.indexOf('chat-live-line-body') < rendered.indexOf(detail), 'coverage stays in details');
+            assert.ok(rendered.indexOf(detail) < rendered.indexOf('Its later review: FAIL'), 'the late FAIL follows coverage');
+        }
         assert.equal(phasedLines(card, 'result').length, 1);
         assert.equal(systemBubbles(replay.messages()).length, 0);
         rows[1] = { ...current, chat_id: 1, text: old.text,

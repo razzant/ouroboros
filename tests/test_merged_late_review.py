@@ -64,9 +64,9 @@ def _history(root, chat_id=7):
     return json.loads(asyncio.run(make_chat_history_endpoint(root)(SimpleNamespace(query_params={"chat_id": str(chat_id)}))).body)
 
 
-@pytest.mark.parametrize("case", ["late_fail", "no_source", "pass", "pending", "other_record", "queued", "fail_at_merge"])
+@pytest.mark.parametrize("case", ["late_fail", "late_fail_changed_head", "no_source", "pass", "pending", "other_record", "queued", "fail_at_merge"])
 def test_card_history_reads_later_fail_with_a_working_saved_report_link_and_no_publication(world, case):
-    record = _record(world.root, "merge-task")
+    record = _record(world.root, "merge-task", head="e" * 40 if case == "late_fail_changed_head" else merges.HEAD)
     if case == "fail_at_merge":
         record = _fail(world.root, record)
     world.gh.merge = "queued" if case == "queued" else "ok"
@@ -92,8 +92,15 @@ def test_card_history_reads_later_fail_with_a_working_saved_report_link_and_no_p
     row, = [row for row in after["messages"] if row.get("card_row_id")]
     assert len(after["messages"]) == len(before["messages"])
     assert all(row[key] == old[key] for key in ("history_id", "card_row_id", "card_row_revision", "ts"))
-    if case == "late_fail":
+    agent_text = merge_receipts.card_row_text(receipts[0], codes=True)
+    assert merge_receipts.card_row_text(receipts[0], codes=True, later_review=row.get("late_evidence")) == agent_text
+    if case in {"late_fail", "late_fail_changed_head"}:
         assert row["text"].startswith(old["text"] + "\nIts later review: FAIL")
+        if case == "late_fail_changed_head":
+            head, detail, later = row["text"].splitlines()
+            assert head.endswith(" · earlier version reviewed") and row["text"].count("earlier version reviewed") == 1
+            assert "earlier code" in detail and "does not cover what merged" in detail
+            assert later == "Its later review: FAIL."
         selected = row["late_evidence"]["review_source"]
         assert selected["record_id"] == record["record_id"] and selected["seat_id"] == "critic"
         path = "/".join(quote(selected[key], safe="") for key in ("task_id", "record_id", "seat_id"))
