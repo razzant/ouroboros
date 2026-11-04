@@ -1026,7 +1026,6 @@ class OuroborosAgent:
             from supervisor.state import budget_remaining, load_state
             from supervisor.worker_assignment import needs_paid_admission
             from ouroboros.llm_attempt import PhysicalDispatchInterrupted
-
             if retry_presend(lambda: budget_remaining(load_state(), strict=True),
                              check=False, before_task_start=True) <= 0 and needs_paid_admission(task):
                 raise PhysicalDispatchInterrupted("budget_exhausted")  # a $0 route still answers at the limit
