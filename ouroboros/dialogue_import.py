@@ -847,12 +847,18 @@ def _export_stream(root: pathlib.Path, stream: str) -> Dict[str, Any]:
 def expand_for_older_body(root: Any, *, batch: int = 200) -> Dict[str, Any]:
     """Store every row held with its provider thread by reference as its exact line again (``ds.whole_line``), root
     and every descendant drive with a store: a body whose ``dialogue_store`` does not name ``ds.THREAD_FORMAT``
-    reads ``dialog.sqlite`` but no reference. Run with the writers stopped (the switch seam); ``shared`` stays."""
+    reads ``dialog.sqlite`` but no reference. Only a drive whose every such row is whole gets its header back to
+    the version that body opens (``ds.release_shared_version``); a failure before leaves the one it refuses. Run
+    with the writers stopped (the switch seam); ``shared`` stays."""
     from ouroboros.store_import import descendant_drives
 
     root = pathlib.Path(root)
-    return {str(drive): {stream: _expand_stream(drive, stream, batch) for stream in ds.STREAMS}
-            for drive in (root, *descendant_drives(root)) if ds.present(drive)}
+    report: Dict[str, Any] = {}
+    for drive in (root, *descendant_drives(root)):
+        if ds.present(drive):
+            report[str(drive)] = {stream: _expand_stream(drive, stream, batch) for stream in ds.STREAMS}
+            ds.release_shared_version(drive)
+    return report
 
 
 def _expand_stream(root: pathlib.Path, stream: str, batch: int) -> Dict[str, Any]:
