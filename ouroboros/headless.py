@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from ouroboros.contracts.task_constraint import normalize_task_constraint  # noqa: F401
 from ouroboros.post_task_checkpoint import CANONICAL_CUSTODY_FIELDS, project_replica_task_result_fields
+from ouroboros.delegate_named_evidence import published_workspace_evidence
 from ouroboros.workspace_file_outputs import _directory_direct_artifacts
 from ouroboros.task_results import (
     cancellation_blocks_child_result, load_task_result, validate_task_id, write_task_result,
@@ -995,9 +996,19 @@ def _finalize_task_artifacts_locked(parent_drive_root: pathlib.Path, task: Dict[
                 patch_artifacts = [_file_artifact("workspace_patch_manifest", manifest_path)]
             else:
                 direct = _directory_direct_artifacts(workspace_root, artifact_dir, task, existing)
+                # The task's own copy has no run to retain its evidence folder: this capture retains it once
+                # (reusing the last published generation while unchanged) and holds it out of the patch (#2711).
                 patch_artifacts, manifest = direct if direct is not None else write_workspace_patch_artifacts(
                     workspace_root, artifact_dir, task=task, scratch_dir=artifact_base,
+                    retain_evidence_dir=artifact_dir / "named_evidence",
+                    retained_evidence=published_workspace_evidence(existing),
                 )
+                summary_path = (manifest.get("named_evidence") or {}).get("summary_path")
+                if summary_path and manifest["named_evidence"].get("status") == "retained":
+                    patch_artifacts.append(_file_artifact("named_evidence_manifest", pathlib.Path(summary_path),
+                                                          workspace_root=str(workspace_root),
+                                                          files=manifest["named_evidence"]["files"],
+                                                          evidence_dir=manifest["named_evidence"]["evidence_dir"]))
             if existing.get("native_capture_pending"):
                 from ouroboros.delegate_custody_current import run
                 sources = {key: dict(value) for key, value in existing["native_capture_pending"].items()}
@@ -1124,7 +1135,8 @@ def _finalize_task_artifacts_locked(parent_drive_root: pathlib.Path, task: Dict[
     return artifacts
 
 
-_CAPTURE_KINDS = {"workspace_patch", "workspace_patch_manifest", "workspace_file_outputs_manifest", "workspace_file_outputs"}
+_CAPTURE_KINDS = {"workspace_patch", "workspace_patch_manifest", "workspace_file_outputs_manifest", "workspace_file_outputs",
+                  "named_evidence_manifest"}
 
 
 def current_workspace_manifest(root: pathlib.Path, task_id: str, result: Dict[str, Any]) -> pathlib.Path:

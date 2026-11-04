@@ -8,6 +8,7 @@ vetoes, and the acting-base-sha manifest contract.
 from __future__ import annotations
 
 import json
+import pathlib
 import subprocess
 
 import pytest
@@ -559,3 +560,128 @@ def test_an_untracked_symlink_loop_never_fails_the_capture(tmp_path):
         assert manifest["status"] == ARTIFACT_STATUS_READY_WITH_CHANGES, (name, manifest.get("errors"))
         patch = (artifacts / "workspace.patch").read_text(encoding="utf-8")
         assert "kept.txt" in patch and "new file mode 120000" in patch, name
+
+
+# --- #2711: the copy's evidence folder is held out of every capture by one name and retained once ---
+
+def _git(repo, *args):
+    return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _evidence_copy(tmp_path, *, tracked_evidence=False):
+    """A task's own copy holding a product change and a session's test runs under ``.review-evidence/``."""
+    repo = tmp_path / "repo"
+    _init_repo_with_file(repo)
+    if tracked_evidence:
+        (repo / ".review-evidence").mkdir()
+        (repo / ".review-evidence" / "keep.txt").write_text("the project's own file\n", encoding="utf-8")
+        _git(repo, "add", ".review-evidence")
+        _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "tracked evidence")
+    head = _git(repo, "rev-parse", "HEAD")
+    (repo / "feature.py").write_text("VALUE = 1\n", encoding="utf-8")
+    run = repo / ".review-evidence" / "safe-test-evidence" / "run-1"
+    run.mkdir(parents=True)
+    expected = {".review-evidence/safe-test-evidence/run-1/result.json": b'{"returncode": 0}\r\n',
+                ".review-evidence/safe-test-evidence/run-1/trace.bin": b"\x7fELF\x00\x01" + bytes(range(256)) * 8}
+    for name, payload in expected.items():
+        (repo / name).write_bytes(payload)
+    task = {"id": "task-evidence", "workspace_root": str(repo), "metadata": {"workspace_preflight": {"git": {"head": head}}}}
+    return repo, task, expected
+
+
+def _retained_files(summary_path):
+    root = pathlib.Path(summary_path).parent / "files"
+    return {path.relative_to(root).as_posix(): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+def test_the_copys_evidence_folder_is_retained_once_and_held_out_of_the_patch_and_file_outputs(tmp_path):
+    """#2711: at task finalization the session's test runs under ``.review-evidence/`` reach the task record once,
+    as retained evidence files, never again inside ``workspace.patch`` (text) and a file-outputs zip (binaries);
+    a second finalization of the unchanged copy copies nothing again."""
+    from ouroboros.workspace_patch_rules import NAMED_EVIDENCE_EXCLUSION
+
+    parent = tmp_path / "data"
+    parent.mkdir()
+    repo, task, expected = _evidence_copy(tmp_path)
+    write_task_result(parent, task["id"], "completed", workspace_root=str(repo), artifact_status="finalizing")
+    finalize_task_artifacts(parent, task)
+    result = read_result(parent, task["id"])
+    assert result["artifact_status"] == ARTIFACT_STATUS_READY_WITH_CHANGES
+    kinds = [row["kind"] for row in result["artifacts"]]
+    assert kinds.count("named_evidence_manifest") == 1 and "workspace_file_outputs" not in kinds, kinds
+    base = task_artifacts_dir(parent, task["id"])
+    manifest = json.loads((base / "workspace_patch.json").read_text(encoding="utf-8"))
+    assert {row["path"]: row["reason"] for row in manifest["untracked_excluded"]} == dict.fromkeys(expected, NAMED_EVIDENCE_EXCLUSION)
+    assert manifest["untracked_included"] == ["feature.py"] and manifest["file_outputs"] == []
+    patch = (base / "workspace.patch").read_text(encoding="utf-8")
+    assert "feature.py" in patch and ".review-evidence" not in patch
+    evidence = manifest["named_evidence"]
+    assert (evidence["status"], evidence["files"], evidence["gaps"]) == ("retained", 2, 0)
+    assert _retained_files(evidence["summary_path"]) == expected
+    [row] = [row for row in result["artifacts"] if row["kind"] == "named_evidence_manifest"]
+    assert row["path"] == evidence["summary_path"] and row["files"] == 2 and row.get("sha256")
+    witness = json.loads(pathlib.Path(evidence["summary_path"]).read_text(encoding="utf-8"))["witness"]
+    stamps = {path: path.lstat().st_mtime_ns for path in (pathlib.Path(evidence["summary_path"]).parent / "files").rglob("*")}
+    finalize_task_artifacts(parent, {**task, **read_result(parent, task["id"])})  # the copy is unchanged
+    again = json.loads((base / "workspace_patch.json").read_text(encoding="utf-8"))["named_evidence"]
+    assert again["summary_path"] == evidence["summary_path"] and _retained_files(again["summary_path"]) == expected
+    assert json.loads(pathlib.Path(again["summary_path"]).read_text(encoding="utf-8"))["witness"] == witness
+    assert {path: path.lstat().st_mtime_ns for path in (pathlib.Path(again["summary_path"]).parent / "files").rglob("*")} == stamps
+    assert len(list(base.glob("**/named_evidence*"))) == 1  # one copy, never two
+    assert [row["kind"] for row in read_result(parent, task["id"])["artifacts"]].count("named_evidence_manifest") == 1
+
+
+
+def test_a_baseline_tracked_path_under_the_evidence_name_stays_product_and_is_not_retained(tmp_path):
+    """A path the recorded baseline holds there (Git, or a supplied ``file_baseline``) is the project's own:
+    edited, it stays in the patch; only a file new since the baseline is evidence (astra R3's reverse test)."""
+    from hashlib import sha256
+
+    parent = tmp_path / "data"
+    parent.mkdir()
+    repo, task, expected = _evidence_copy(tmp_path, tracked_evidence=True)
+    (repo / ".review-evidence" / "keep.txt").write_text("the project's own file, edited\n", encoding="utf-8")
+    (repo / ".gitignore").write_text("*.csv\n", encoding="utf-8")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "ignore csv")
+    task["metadata"]["workspace_preflight"]["git"]["head"] = _git(repo, "rev-parse", "HEAD")
+    before = b"a,b\n1,2\n"
+    (repo / ".review-evidence" / "supplied.csv").write_bytes(before)  # a copied input under the evidence name
+    supplied = {"kind": "file", "size": len(before), "sha256": sha256(before).hexdigest(), "mode": 0o644}
+    task["metadata"]["file_baseline"] = {".review-evidence/supplied.csv": supplied}
+    (repo / ".review-evidence" / "supplied.csv").write_bytes(before + b"3,4\n")
+    write_task_result(parent, task["id"], "completed", workspace_root=str(repo), artifact_status="finalizing")
+    finalize_task_artifacts(parent, task)
+    base = task_artifacts_dir(parent, task["id"])
+    manifest = json.loads((base / "workspace_patch.json").read_text(encoding="utf-8"))
+    assert ".review-evidence/keep.txt" in manifest["tracked_changed"]
+    assert {row["path"] for row in manifest["untracked_excluded"]} == set(expected)
+    assert [row["path"] for row in manifest["file_output_changes"]] == [".review-evidence/supplied.csv"]
+    patch = (base / "workspace.patch").read_text(encoding="utf-8")
+    assert "edited" in patch and "safe-test-evidence" not in patch
+    assert _retained_files(manifest["named_evidence"]["summary_path"]) == expected  # neither product path is evidence
+
+
+def test_a_failed_evidence_retention_keeps_the_files_in_the_capture(tmp_path, monkeypatch):
+    """Never zero copies: when the folder cannot be retained, its files ride the patch and the outputs as before,
+    and the manifest says why."""
+    from ouroboros import delegate_named_evidence
+
+    parent = tmp_path / "data"
+    parent.mkdir()
+    repo, task, expected = _evidence_copy(tmp_path)
+
+    def refused(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(delegate_named_evidence, "retain_named_evidence", refused)
+    write_task_result(parent, task["id"], "completed", workspace_root=str(repo), artifact_status="finalizing")
+    finalize_task_artifacts(parent, task)
+    result = read_result(parent, task["id"])
+    base = task_artifacts_dir(parent, task["id"])
+    manifest = json.loads((base / "workspace_patch.json").read_text(encoding="utf-8"))
+    assert manifest["named_evidence"]["status"] == "capture_failed" and "No space left" in manifest["named_evidence"]["error"]
+    assert ".review-evidence/safe-test-evidence/run-1/result.json" in manifest["untracked_included"]
+    assert ".review-evidence/safe-test-evidence/run-1/trace.bin" in [row["path"] for row in manifest["file_output_changes"]]
+    assert "named_evidence_manifest" not in [row["kind"] for row in result["artifacts"]]
+    assert not list(base.glob("**/named_evidence*")) and not list(base.glob("**/.named_evidence*"))

@@ -13,12 +13,29 @@ import tempfile
 from pathlib import Path
 
 
+def _short_temp_platform() -> bool:
+    return sys.platform == "darwin" or sys.platform.startswith("linux")
+
+
 def default_temp_parent() -> Path:
     """A short root keeps nested multiprocessing sockets inside AF_UNIX's path limit (104 bytes
     on macOS, 108 on Linux): rooted in an inherited, already nested TMPDIR, a nested forkserver
-    or manager address outgrew it (#2110). Other platforms keep their temporary directory."""
-    short = sys.platform == "darwin" or sys.platform.startswith("linux")
-    return Path("/tmp") if short else Path(tempfile.gettempdir())
+    or manager address outgrew it (#2110). Other platforms keep their temporary directory.
+
+    The parent of preflight, commit-admission and safe_test roots, whose deliberately retained
+    trees have no ownership record: the OS cleaners of ``/tmp`` are still their only remover."""
+    return Path("/tmp") if _short_temp_platform() else Path(tempfile.gettempdir())
+
+
+def session_scratch_parent() -> Path:
+    """Where a writable session's recorded scratch (``workspace_preflight._session_scratch``) lives:
+    ``/var/tmp`` on macOS and Linux, four bytes longer than ``default_temp_parent()`` and still
+    inside the socket bound (the deepest nested layout measures 95 of 104 bytes under
+    ``/private/var/tmp``), and outside both macOS cleaners (``tmp_cleaner`` ages only ``/tmp``;
+    the boot ``dirs_cleaner`` swaps out ``/tmp``) and Linux ``tmpfs``: its holder's release is the
+    one remover of a recorded scratch, never a day count or a reboot. Other platforms keep their
+    temporary directory."""
+    return Path("/var/tmp") if _short_temp_platform() else Path(tempfile.gettempdir())
 
 
 def git_ancestor(path: Path):
