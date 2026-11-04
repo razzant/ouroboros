@@ -181,10 +181,11 @@ def dispatch_presence_turn(execution: PresenceTurnExecution, *, drive_root: Path
     """
     from supervisor import queue, workers
     from supervisor.conversation_lane import LANE_CONVERSATION, admit_turn, armed, dispatch_admitted_turn
-    from supervisor.conversation_lane import replenish_after_claim
+    from supervisor.conversation_lane import replenish_after_claim, spawn_refusal
     from supervisor.inline_carrier import InlineExecutorUnavailable
 
-    if not armed() and queue.owns_live_queue(drive_root):
+    # A server whose carrier spawn failed keeps the disclosed degraded executor (the observed physical fact).
+    if not armed() and queue.owns_live_queue(drive_root) and not spawn_refusal():
         raise PresenceTurnNotStarted("the worker pool of this server has not started yet; retry the event")
     if not gate_wait:
         # Version 2 never waits in the gate, and a busy gate costs no lane admission (no row, no barrier, no

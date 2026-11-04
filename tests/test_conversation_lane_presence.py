@@ -177,15 +177,22 @@ def test_a_remote_author_accepts_mail_only_while_its_durable_intake_is_open(tmp_
 _REAL_THREAD = __import__("threading").Thread  # the pool fixture stubs the lifecycle's threads; the inline carrier needs one
 
 
-def test_a_host_serving_alone_runs_the_turn_on_the_disclosed_degraded_executor(pool, tmp_path, monkeypatch):
+@pytest.mark.parametrize("server", [False, True], ids=["host_alone", "server_whose_boot_spawn_failed"])
+def test_a_host_serving_alone_runs_the_turn_on_the_disclosed_degraded_executor(pool, tmp_path, monkeypatch, server):
     """A Host serving without a supervisor queue of its own (no ``queue.init`` in this process) has no pool
     generation to wait for: that physical fact (2A) runs the body on this process's thread as
     ``inline_degraded``, disclosed in the row and the vitals, and its own frames resolve the Host's waiter.
-    A SERVER before its pool arms is the typed refusal below, never this executor."""
+    A SERVER before its pool arms is the typed refusal below, never this executor; a server whose boot spawn
+    failed is that same physical fact (no supervisor loop will retry it), disclosed with its own reason."""
+    import os
+
     from supervisor import inline_carrier, message_bus, queue
 
     monkeypatch.setattr(conversation_lane, "_ARMED_TABLE", None)  # no generation is armed here
-    monkeypatch.setattr(queue, "INITIALIZED", False)  # a Host serving alone owns no live queue
+    monkeypatch.setattr(queue, "INITIALIZED", server)  # a Host serving alone owns no live queue
+    monkeypatch.setattr(queue, "OWNER_PID", os.getpid())
+    monkeypatch.setattr(conversation_lane, "_SPAWN_REFUSED", ["carrier_spawn_refused:OSError" if server else ""])
+    assert queue.owns_live_queue(pool.root) is server
     monkeypatch.setattr(workers, "_get_chat_agent", lambda: pytest.fail("a Presence body needs no native agent"))
     monkeypatch.setattr(inline_carrier, "threading", SimpleNamespace(Thread=_REAL_THREAD))
     monkeypatch.setattr(inline_carrier, "_INLINE", type(inline_carrier._INLINE)(maxlen=50))
@@ -224,7 +231,8 @@ def test_a_host_serving_alone_runs_the_turn_on_the_disclosed_degraded_executor(p
         assert ran and ran[0]["carrier_owner"]["executor"] == "inline_degraded"
         assert turn_id not in workers.RUNNING and registry.find(turn_id) is None
         vitals = inline_carrier.inline_vitals()
-        assert vitals["degraded_total"] == 1 and vitals["inline_executions"][-1]["reason"] == "pool_not_started"
+        assert vitals["degraded_total"] == 1 and vitals["inline_executions"][-1]["reason"] == (
+            "carrier_spawn_refused:OSError" if server else "pool_not_started")
         assert vitals["inline_executions"][-1]["task_id"] == turn_id
     finally:
         presence_carrier.set_presence_runner(pool.root, None)

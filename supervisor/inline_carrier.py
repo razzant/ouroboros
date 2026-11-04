@@ -319,7 +319,7 @@ def refused_carrier_reason() -> str:
     from supervisor.worker_chat_lane import marker_window_closed
 
     if not armed():
-        return "pool_not_started"  # no pool generation keeps a carrier for the lane: a Host without a pool
+        return spawn_refusal() or "pool_not_started"  # a failed boot spawn, or a Host without a pool
     if marker_window_closed():
         return "repo_writer_gate_closed"
     if any(getattr(slot, "readiness_exhausted", False) for slot in lane_carriers()):
