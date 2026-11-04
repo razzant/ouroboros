@@ -539,8 +539,8 @@ export function taskReasonDetail(evt, codes = []) {
     const reason = ['', 'final_message'].includes(storedReason) && typedReason !== CUSTODY_DEBT_REASON
         ? (typedReason || storedReason) : storedReason;
     const origin = record.cancel_origin;
-    const held = severity === 'error' && String(objective?.source || '').startsWith('plan_review_');
-    const authorStop = completion?.action === 'stop' && severity !== 'cancelled';  // the author's own, never the owner's
+    const held = objective?.status === 'fail' && String(objective?.source || '').startsWith('plan_review_');
+    const authorStop = completion?.action === 'stop' && record.outcome_axes?.execution?.status !== 'cancelled' && !Object.keys(origin || {}).length;
     const reviewCause = !taskStoppedWithSummary(evt) && decision?.status
         && (decision.status !== 'accepted' || Object.hasOwn(TASK_CAUSE_PHRASES, decisionCause))
         && (['done', 'warn'].includes(severity) || explicitAuthorStop(decision)
@@ -625,9 +625,7 @@ export function taskOutcomeSeverity(evt) {
     // 'cancel_requested' as a STATUS is legacy replay only (phase A moved cancel
     // intent to the durable cancel_state projection); old task_done frames and
     // pre-redesign history rows keep resolving as cancelled.
-    if (lifecycle === 'cancelled' || lifecycle === 'cancel_requested') {
-        return 'cancelled';
-    }
+    if (lifecycle === 'cancelled' || lifecycle === 'cancel_requested') return 'cancelled';
     const [command, ending] = ownerStopEnding(record);  // Stop now is Stopped whatever it kept
     if (command === 'stop_now') return 'cancelled';
     const unanswered = ending === 'stop';  // a Wrap up without an answer: its own failure is the stop
@@ -636,19 +634,21 @@ export function taskOutcomeSeverity(evt) {
         : String(record.outcome_axes?.objective?.status || '').toLowerCase();
     const review = String(record.outcome_axes?.review?.status || record.review_status?.status || '').toLowerCase();
     const authorFinished = objective === 'pass' && record.outcome_axes?.objective?.source === 'author_acceptance';
+    const authorStopped = record.outcome_axes?.objective?.source === 'task_completion'
+        && record.outcome_axes?.objective?.reason === 'author_stop';
     const artifacts = String(record.outcome_axes?.artifacts?.status || record.artifact_bundle?.status || record.artifact_status || '').toLowerCase();
     const artifactStatus = String(record.artifact_bundle?.status || record.artifact_status || '').toLowerCase();
     if (
         ((lifecycle === 'failed' || execution === 'failed') && !unanswered)
         || execution === 'infra_failed'
-        || objective === 'fail'
+        || (objective === 'fail' && !authorStopped)
         || (review === 'fail' && !authorFinished)
         || ['failed', 'missing'].includes(artifacts)
         || artifactStatus === 'failed'
     ) {
         return 'error';
     }
-    if (unanswered) return 'cancelled';
+    if (unanswered || authorStopped) return 'cancelled';
     // A Wrap up's answer is a best_effort SUCCESS, not "Done with warnings".
     if (taskStoppedWithSummary(evt)) {
         return 'done';

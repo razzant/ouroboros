@@ -514,7 +514,7 @@ test("an author's stop never says the work went on, and an unreadable plan recor
     const held = 'The objection stands; stopping with the draft.';
     // Blocking held the answer over an open objection and the author stopped: the stop, its reason, the open review.
     assert.equal(taskReasonDetail(planExit('objections_open', { stop: held })),
-        `${STOPPED} · The objection stands; stopping with the draft · The plan review was still open when this answer was delivered`);
+        `${STOPPED} · The objection stands; stopping with the draft · The plan review was still open when this answer was delivered.`);
     // The same objection over an ordinary delivery: the work went on with it.
     assert.equal(taskReasonDetail(planExit('objections_open')),
         'Objections to the plan were still open when this answer was delivered; the work went on with them disclosed.');
@@ -533,7 +533,7 @@ test("an author's stop never says the work went on, and an unreadable plan recor
     // An older stop over a class whose sentence says the work went on, or over none, reads the stop and the open review.
     for (const plan_review of ['unanswered', '']) {
         assert.equal(taskReasonDetail({ ...planExit(plan_review, { stop: held }), terminal_plan_review_open: true }),
-            `${STOPPED} · The objection stands; stopping with the draft · The plan review was still open when this answer was delivered`);
+            `${STOPPED} · The objection stands; stopping with the draft · The plan review was still open when this answer was delivered.`);
     }
     for (const line of [taskReasonDetail(planExit('objections_open', { stop: held })), taskReasonDetail(unread)]) {
         assert.doesNotMatch(line, /went on|proceeded/);
@@ -592,7 +592,7 @@ test('an unfinished child keeps the complete authored result and its stop cause 
     const view = summarizeChatLiveEvent({ type: 'send_message', is_progress: true, delegation_role: 'subagent',
         subagent_task_id: 'child', parent_task_id: 'root', subagent_event: 'completed',
         status: 'completed', reason_code: 'final_message', outcome_axes, result });
-    assert.equal(view.phase, 'error');
+    assert.equal(view.phase, 'cancelled');
     assert.equal(view.activityPreview, `${STOPPED} · The export still fails on empty input.`);
     assert.ok(view.fullBody.includes(result));
 });

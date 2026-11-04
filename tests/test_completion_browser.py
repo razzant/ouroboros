@@ -229,7 +229,7 @@ def _presentation(page, feed, task_id, answer, case, project, *, managed=False):
         if case != "unfinished_stop":
             assert card.locator(":scope > [data-live-summary-button] [data-live-title]").inner_text().strip()
         if case == "unfinished_stop":
-            assert card.locator(":scope > [data-live-summary-button] [data-live-phase]").inner_text() == "Failed"
+            assert card.locator(":scope > [data-live-summary-button] [data-live-phase]").inner_text() == "Stopped"
             if card.get_attribute("data-expanded") != "1":
                 card.locator(":scope > [data-live-summary-button] [data-live-disclosure]").click()
             assert _STOP_REASON in card.inner_text()

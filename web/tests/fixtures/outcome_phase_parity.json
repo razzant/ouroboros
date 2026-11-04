@@ -774,15 +774,15 @@
     {
       "name": "an author's stop over a held plan objection names the stop and the review still open, never work that went on",
       "record": {"status": "completed", "reason_code": "plan_review_advisory", "terminal_plan_review_open": true, "outcome_axes": {"execution": {"status": "degraded", "reason_code": "plan_review_advisory", "plan_review": "objections_open", "task_completion": {"action": "stop", "rationale": "The objection stands; stopping with the draft."}}, "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}, "review": {"status": "skipped"}}},
-      "phase": "error",
-      "headline": "Failed",
+      "phase": "cancelled",
+      "headline": "Stopped",
       "acceptance_clause": "Ouroboros stopped with unfinished work · The objection stands; stopping with the draft · The plan review was still open when this answer was delivered."
     },
     {
       "name": "an author's stop over an unreadable plan record names the stop and keeps the plan review's state unknown",
       "record": {"status": "completed", "reason_code": "plan_review_advisory", "terminal_plan_review_open": true, "outcome_axes": {"execution": {"status": "degraded", "reason_code": "plan_review_advisory", "plan_review": "unreadable", "task_completion": {"action": "stop", "rationale": "The plan record cannot be read; stopping with the draft."}}, "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}, "review": {"status": "skipped"}}},
-      "phase": "error",
-      "headline": "Failed",
+      "phase": "cancelled",
+      "headline": "Stopped",
       "acceptance_clause": "Ouroboros stopped with unfinished work · The plan record cannot be read; stopping with the draft · The plan record could not be read, so the state of the plan review is unknown."
     },
     {
@@ -1009,7 +1009,7 @@
       "headline": "Failed",
       "acceptance_clause": "The deep self-review stopped on an error."
     },
-    {"name": "generic unfinished stop states its own rationale without an acceptance decision", "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "task_completion": {"action": "stop", "rationale": "The **export** still fails on empty input."}}, "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}, "review": {"status": "skipped"}}}, "phase": "error", "headline": "Failed", "acceptance_clause": "Ouroboros stopped with unfinished work · The export still fails on empty input."},
+    {"name": "generic unfinished stop states its own rationale without an acceptance decision", "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "task_completion": {"action": "stop", "rationale": "The **export** still fails on empty input."}}, "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}, "review": {"status": "skipped"}}}, "phase": "cancelled", "headline": "Stopped", "acceptance_clause": "Ouroboros stopped with unfinished work · The export still fails on empty input."},
     {"name": "a generic stop preserves a stronger failure", "record": {"status": "failed", "reason_code": "provider_failure", "outcome_axes": {"execution": {"status": "infra_failed", "task_completion": {"action": "stop", "rationale": "The **export** still fails on empty input."}}, "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}, "review": {"status": "skipped"}}}, "phase": "error", "headline": "Failed", "acceptance_clause": "The model provider failed to answer, so the task could not finish · The export still fails on empty input."},
     {"name": "a generic stop preserves a stronger cancellation", "record": {"status": "cancelled", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "cancelled", "task_completion": {"action": "stop", "rationale": "The **export** still fails on empty input."}}, "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}, "review": {"status": "skipped"}}}, "phase": "cancelled", "headline": "Stopped", "acceptance_clause": "The export still fails on empty input."},
     {

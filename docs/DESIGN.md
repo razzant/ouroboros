@@ -642,7 +642,7 @@ Status, owner action, and urgent notification are separate product concepts:
   met. Stop now reads `Stopped` whatever it kept (answer and files stay shown);
   a Wrap up reads `Done` over its final answer and `Stopped` without one; failed
   file preservation beside Wrap up reads `Failed`; the cause names the button.
-  A record naming no button keeps its recorded word (owner 25.10, A).
+  Live author stops read `Stopped`, keeping `author_stop` and Continue (03.11, 23:15Z); older rows keep their word (25.10 A).
 - **Owner action** exists only when the responsible domain exposes a current
   concrete continuation, such as Resume, Retry, Connect, Repair, Grant access,
   or Restart: a real adjacent control, which severity alone never manufactures.
@@ -795,13 +795,12 @@ card in another chat keeps the excerpt.
   referenced by nothing, so every surface invented its own literal instead. They
   are gone; the vocabulary above is the whole vocabulary.)
 
-Current completion and independent criticism are separate facts. An informed Advisory
-author finish may complete the current subject while its original review remains
+Completion and criticism are separate facts. An informed Advisory
+author finish may complete the subject while its original review remains
 FAIL or DEGRADED; the old critic alone must not paint that completion Failed.
-Independent execution, artifact, verification or publication failures still apply.
+Execution, artifact, verification or publication failures still apply.
 Blocking corrections saved without fresh approval and an explicit unfinished stop
-remain unaccepted; show the retained work and reason through the existing five-word
-status family and details, without inventing reviewer PASS or a new status badge.
+remain unaccepted; live `task_completion` / `author_stop` reads `Stopped` absent independent failure, keeping its reason and work, never inventing PASS.
 An older task-acceptance fail that was only an explicit Advisory host declining a
 second panel over an unchanged answer, its verdict short of FAIL, reads `Done with
 warnings` with that sentence; the stored fail stays beside it, a published Main row

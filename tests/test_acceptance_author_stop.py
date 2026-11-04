@@ -174,7 +174,7 @@ def test_a_stop_survives_service_teardown_without_another_model_round(tmp_path, 
     assert axes["objective"]["status"] == "fail" and axes["objective"]["reason"] == "author_stop"
     record = {"status": "completed", "reason_code": str(outcome.get("reason_code") or "final_message"),
               "outcome_axes": axes}
-    assert completion_status_label(record, {}) == "Failed"
+    assert completion_status_label(record, {}) == "Stopped"
     verdict = _completion_verdict(record, {})
     assert STOP_RATIONALE.rstrip(".") in verdict, verdict
     assert verdict.startswith("Ouroboros stopped with unfinished work")
