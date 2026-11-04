@@ -107,8 +107,10 @@ OWNER_SOURCE_KINDS = frozenset({"owner_text", "quiz_answer", "quiz_closed", "car
 # ``source`` (``loop_messages._record_owner_directive``): my human's later words (the one owner list less
 # the first text; the successor's seeding set), the run's first text (a projection of the original, never a
 # later message) and a task's words (context). A row whose label is none of these is not promoted to owner text.
+# The door's labels in words carried by value (a follow-up's, a drafted start's ``owner_corpus``) are my human's.
 CORPUS_INITIAL_SOURCES = frozenset({"origin_message", "initial_user", "initial_text", "initial_text_transcript"})
 CORPUS_OWNER_SOURCES = OWNER_SOURCES - CORPUS_INITIAL_SOURCES
+CARRIED_DOOR_SOURCES = frozenset({"origin_message", "initial_user"})
 CORPUS_TASK_SOURCES = frozenset({"principal_task_message", "relayed_peer_message"})
 # The typed ids an owner-source row may carry, each a string when present: its message, a task message's sender and
 # relaying sibling, an owner answer's card, the chat row it is; its ``reply_to`` (a mapping) rides beside them.
@@ -416,16 +418,13 @@ def inputs_text(predecessor_task_id: str, copied: List[Dict[str, Any]], authorit
 def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict[str, Any]:
     """The predecessor's owner sources, authored note pointer and peer context, apart.
 
-    The opening is one of the recorded states: the owner's message (``original``); a
-    frozen ``schedule``; ``start``, which ``start_task`` recorded without one
-    (``_drafted_start``); ``wake``, a consciousness wake's own clock or place focus
-    (``_wake_opening``); ``api``, the request the task API saved (``_api_opening``); or none,
-    a lost or legacy source and a gap. Only the producer's own fact marks absence. An empty
-    field or a false ``owner_ingress`` never stands in for it, and a wake, start or API
-    opening never seeds owner words. ``gaps`` names every
-    required source that could not be read, and every row whose shape or provenance its
-    producer never writes (a non-text body, an unknown source label): the admission
-    refuses on any gap rather than reconstructing, promoting or silently dropping owner text.
+    The opening is one recorded state: the owner's message (``original``), a frozen ``schedule``, ``start``
+    (``start_task`` recorded none, ``_drafted_start``), ``wake`` (a consciousness wake's own clock or place focus,
+    ``_wake_opening``), ``api`` (the request the task API saved, ``_api_opening``), or none: a lost or legacy source
+    and a gap. Only the producer's own fact marks absence (never an empty field or a false ``owner_ingress``), and a
+    wake, start or API opening never seeds owner words. ``gaps`` names every unreadable required source and every
+    row its producer never writes (a non-text body, an unknown source label): admission refuses on any gap rather
+    than reconstructing, promoting or silently dropping owner text.
     """
     root = pathlib.Path(drive_root)
     gaps: List[str] = []
@@ -496,7 +495,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
         gaps.append(gap if isinstance(gap, str) and gap else "chained_owner_source_malformed")
     # Validate identities before deduplication: a dict comprehension would hide rivals.
     for key, target, text_key, source_key, sources in (
-        ("later", later, "content", "source", CORPUS_OWNER_SOURCES),
+        ("later", later, "content", "source", CORPUS_OWNER_SOURCES | CARRIED_DOOR_SOURCES),
         ("peer_context", peers, "text", "provenance", None),
     ):
         for row in container(continuation if key == "peer_context" else chained, key, list,
@@ -519,12 +518,14 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
     late_framed: set = set()  # ids whose exact row carries typed late-answer provenance
     quizzes = result.get("owner_quiz") if isinstance(result.get("owner_quiz"), dict) else {}
 
-    def corpus_pass(rows: List[Any], malformed: str) -> None:
-        """A recorded corpus under the one identity rule: a msg_id names one text, the run's
-        first text is the original's projection, a task's words are context and an unknown
-        label is never promoted to owner text."""
+    def corpus_pass(rows: List[Any], malformed: str, *, carried: bool = False) -> None:
+        """A recorded corpus under the one identity rule (a msg_id, else a client_message_id, names one text): the
+        run's first text is the original's projection; a door row the start carried by value (``carried``) is my
+        human's words unless it repeats that original; a task's words are context and an unknown label is never
+        promoted to owner text."""
         texts = {True: {row["content"] for row in later} | {str((original or {}).get("content") or "")},
                  False: {row["text"] for row in peers}}
+        original_id = str(((original or {}).get("origin_message_ref") or {}).get("client_message_id") or "")
         for row in rows:
             # The recorder writes a non-empty text body, a source label and string ids.
             if not (isinstance(row, dict) and isinstance(row.get("content"), str) and row["content"].strip()
@@ -532,24 +533,29 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                 gaps.append(malformed)
                 continue
             msg_id, source, text = str(row.get("msg_id") or ""), str(row.get("source") or ""), row["content"]
+            client = str(row.get("client_message_id") or "")
+            identity = msg_id or (f"client {client}" if client else "")
             if source not in CORPUS_INITIAL_SOURCES | CORPUS_OWNER_SOURCES | CORPUS_TASK_SOURCES:
                 gaps.append("owner_source_provenance_unknown")
                 continue
-            if source in CORPUS_INITIAL_SOURCES:  # the run's first text is the original's own projection
+            door = carried and source in CARRIED_DOOR_SOURCES
+            if door and original is not None:  # a carried copy of the original's own message is that message
+                door = not (client == original_id if client and original_id else text == original.get("content"))
+            if source in CORPUS_INITIAL_SOURCES and not door:  # the run's first text: the original's own projection
                 if original is not None and isinstance(row.get("reply_to"), dict):
                     original.setdefault("reply_to", row["reply_to"])  # and the message it replies to
                 continue
-            if msg_id and msg_id in seen:
-                if (seen[msg_id][1] != (source in CORPUS_OWNER_SOURCES) or
-                        (seen[msg_id][0] != text and msg_id not in late_framed)):
+            owner = source in CORPUS_OWNER_SOURCES or door
+            if identity and identity in seen:
+                if seen[identity][1] != owner or (seen[identity][0] != text and identity not in late_framed):
                     gaps.append("owner_message_identity_conflict")
                 continue
-            if not msg_id and text in texts[source in CORPUS_OWNER_SOURCES]:
+            if not identity and text in texts[owner]:
                 continue
-            if msg_id:
-                seen[msg_id] = (text, source in CORPUS_OWNER_SOURCES)
-            texts[source in CORPUS_OWNER_SOURCES].add(text)
-            if source in CORPUS_OWNER_SOURCES:
+            if identity:
+                seen[identity] = (text, owner)
+            texts[owner].add(text)
+            if owner:
                 ids = {key: row[key] for key in (*ROW_IDS[1:], "reply_to") if row.get(key)}
                 # An answer to the predecessor's own card reads that card from its own record.
                 card = (answered_card(quizzes.get(ids.get("quiz_id", "")), text)
@@ -567,7 +573,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
     # The start's own corpus (``metadata.owner_corpus``, which the producer persisted) keeps
     # the owner words this root began with even when no terminal corpus was captured.
     corpus_pass(container(metadata, "owner_corpus", list, "start_owner_corpus_malformed"),
-                "start_owner_corpus_row_malformed")
+                "start_owner_corpus_row_malformed", carried=True)
     # Deferred history leaves the child's exact mailbox in custody. A canonical
     # terminal capture is not proof that this retained source has no later words.
     from ouroboros.task_custody import own_child_drives, task_artifact_stores
@@ -684,13 +690,11 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
 def continuation_room(drive_root: Any, predecessor_task_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """The room a FRESH Continue is admitted to: ``{"chat_id", "project_id"}``.
 
-    "Turn into project" writes only the immutable task<->Project binding, the one
-    truth about a task's room (owner decision B4=A); the interrupted worker's own
-    result keeps the chat and project copy it started with. The binding therefore
-    outranks that copy, and unbound work keeps its own row. Only the room moves:
-    the original owner message, its ref and the prepared folder stay the
-    predecessor's. An unreadable store or a malformed row raises, so the caller
-    refuses before its claim instead of admitting the work to Main.
+    "Turn into project" writes only the immutable task<->Project binding, the one truth about a task's room (owner
+    decision B4=A); the interrupted worker's own result keeps the chat and project copy it started with, so the
+    binding outranks that copy and unbound work keeps its own row. Only the room moves: the original owner message,
+    its ref and the prepared folder stay the predecessor's. An unreadable store or a malformed row raises, so the
+    caller refuses before its claim instead of admitting the work to Main.
     """
     from ouroboros.projects_registry import project_binding_for_task
 
@@ -744,14 +748,11 @@ def _card_lines(row: Dict[str, Any]) -> List[str]:
 def recorded_system_checkout(result: Dict[str, Any]) -> Dict[str, str]:
     """The predecessor's recorded system-checkout observations, each dated by its own capture.
 
-    The only per-task fact is the mutation baseline's ``system_repo`` surface:
-    ``rev-parse HEAD`` at that surface's ``captured_at``. The task's own
-    attributed commit or an accepted fast-forward re-anchors the surface (new
-    SHA, new timestamp), so it is an observation at that moment — never the
-    task's start, the code its process imported, or the checkout now. A
-    retained terminal snapshot of the same surface is a second dated
-    observation. A body candidate's row (``candidate``) is not the checkout:
-    its base may be the copy's creation, not HEAD then. Nothing recorded: ``{}``.
+    The only per-task fact is the mutation baseline's ``system_repo`` surface: ``rev-parse HEAD`` at its
+    ``captured_at``. The task's own attributed commit or an accepted fast-forward re-anchors it (new SHA, new time),
+    so it is an observation at that moment — never the task's start, the code its process imported, or the checkout
+    now. A retained terminal snapshot of the same surface is a second dated observation; a body candidate's row
+    (``candidate``) is not the checkout (its base may be the copy's creation, not HEAD then). Nothing recorded: ``{}``.
     """
     evidence = result.get("mutation_evidence") if isinstance(result.get("mutation_evidence"), dict) else {}
     baseline = evidence.get("baseline") if isinstance(evidence.get("baseline"), dict) else {}

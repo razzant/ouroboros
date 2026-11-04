@@ -85,16 +85,44 @@ def test_a_reply_target_rides_the_requirements_into_a_continue_successor(tmp_pat
     assert [row.get("client_message_id") for row in successor._owner_directives] == [None, "owner-2"]
 
 
-def test_a_follow_up_carries_its_reply_target_into_a_continue(tmp_path):
-    from ouroboros.owner_continue import owner_corpus_rows
+@pytest.mark.parametrize("source", ["initial_user", "owner_mailbox"])
+def test_a_scheduled_run_continues_with_the_words_and_reply_target_it_carried(tmp_path, source):
+    """RV2W Astra R1: a follow-up root has no door of its own, so its carried door rows are my human's words, not
+    its first text: the real registration, fired run, terminal evidence and Continue seed keep them and their target."""
+    from ouroboros.owner_continue import owner_corpus_rows, owner_sources, work_order_text
+    from ouroboros.review_evidence_sections import _accept_owner_directives
+    from ouroboros.tools.followup import _handle_schedule_followup
+    from supervisor import queue as schedules
+    from tests.test_schedule_continue_basis import receipt
 
-    target = {"address": "row:1@2026-11-04T09:00:00+00:00#0123456789ab", "author": "Ouroboros", "text": PROPOSAL}
-    later = [{"source": "owner_mailbox", "content": "Check it weekly.", "msg_id": "mail-1", "reply_to": target}]
+    ctx = _door_run(tmp_path)
+    if source == "owner_mailbox":
+        reply = ctx._owner_directives[0]["reply_to"]
+        ctx._owner_directives = []
+        _record_owner_directive(ctx, source=source, content="Do this.", msg_id="mail-1", reply_to=reply)
+    assert _handle_schedule_followup(ctx, relation="independent", objective="Check the plan weekly.",
+                                     cron="0 9 * * 1").startswith("FOLLOWUP_SCHEDULED")
+    [registered] = schedules.list_scheduled_tasks(ctx.drive_root)["tasks"]
+    fired = schedules._task_from_schedule(registered)
+    live = SimpleNamespace(task_id="root", task_metadata=fired["metadata"])
+    _initialize_owner_directives(live, [{"role": "user", "content": fired["text"]}])
+    assert _targets(live) == [PROPOSAL] and owner_input_revision(live) == 0
+    record = receipt()  # the scheduler's accepted receipt shape, holding the generated task and its metadata
+    scheduled = record["schedule_admission"]["task"]
+    scheduled.update(text=fired["text"])
+    scheduled["metadata"].update(fired["metadata"])
+    record.update(metadata=scheduled["metadata"], owner_mailbox={"rows": [], "read_complete": True},
+                  review_evidence={"task_inputs": {"owner_requirements_and_decisions":
+                                                  _accept_owner_directives(live, None, "root")}})
+    sources = owner_sources(ctx.drive_root, record, "root")
+    assert sources["gaps"] == [] and [row["content"] for row in sources["later"]] == ["Do this."]
+    assert "Do this." in work_order_text("root", "interrupted_retry_lost", sources)
     successor = SimpleNamespace(task_id="successor", task_metadata={
-        "objective_author": {"kind": "continuation", "predecessor_task_id": "followup-1"},
-        "owner_corpus": owner_corpus_rows({"later": later})})
+        "objective_author": {"kind": "continuation", "predecessor_task_id": "root"},
+        "owner_corpus": owner_corpus_rows(sources)})
     _initialize_owner_directives(successor, [{"role": "user", "content": "[CONTINUE] work order"}])
-    assert _targets(successor) == [PROPOSAL]
+    assert _targets(successor) == [PROPOSAL], "the successor reads the message my human replied to"
+    assert [row["content"] for row in successor._owner_directives] == ["Do this."]
 
 
 def test_mail_into_running_work_keeps_the_message_it_replies_to(tmp_path):
