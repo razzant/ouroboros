@@ -546,6 +546,28 @@ jobs:
           base="$(python -c 'import sys; print(sys._base_executable, end="")')"
           uv sync --locked --extra browser --group dev --no-install-project --python "$base"
           "$UV_PROJECT_ENVIRONMENT/Scripts/python.exe" -m playwright install chromium
+          "$UV_PROJECT_ENVIRONMENT/Scripts/python.exe" -m ouroboros.chromium_runtime install
+      - name: Verify sandboxed Chromium inside a tracked Windows command (normal, Stop, Panic)
+        id: tracked_chromium
+        timeout-minutes: 20
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.attachment_browser_install.outcome == 'success' && matrix.shard == 1 }}
+        shell: bash
+        env:
+          OUROBOROS_RUN_UI_SMOKE: "1"
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/attachment-browsers
+          ATTACHMENT_PYTHON: ${{ runner.temp }}/attachment-env/Scripts/python.exe
+        run: |
+          "$ATTACHMENT_PYTHON" -I -S scripts/safe_test.py -- "$ATTACHMENT_PYTHON" -m pytest tests/test_tracked_chromium_smoke.py -m browser -q --tb=short -rs --ci-evidence-dir="$RUNNER_TEMP/ci-evidence/tracked-chromium" --junitxml="$RUNNER_TEMP/ci-private/tracked-chromium.xml"
+          python -c "import sys, xml.etree.ElementTree as E; s = next(E.parse(sys.argv[1]).getroot().iter('testsuite')); n, k, f, e = [int(s.get(key, 0)) for key in ('tests', 'skipped', 'failures', 'errors')]; print(f'{n} ran, {k} skipped, {f} failed, {e} errors'); sys.exit(n != 3 or k > 0 or f > 0 or e > 0)" "$RUNNER_TEMP/ci-private/tracked-chromium.xml"
+      - name: Preserve the Windows tracked Chromium evidence
+        if: ${{ !cancelled() && runner.os == 'Windows' && matrix.shard == 1 && steps.tracked_chromium.outcome != 'skipped' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tracked-chromium-windows-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-evidence/tracked-chromium/
+          if-no-files-found: error
+          retention-days: 30
       - name: Run the owner-attachment browser test on Windows (Chromium)
         id: attachment_browser
         timeout-minutes: 30
@@ -1334,7 +1356,8 @@ jobs:
     # stand's own worst case is 2 x (task + ready) + 30 min of bounded waits
     # ~= 190 min; this bound adds provisioning, so the stand ends the run with
     # its own verdict and traces, never a job kill.
-    timeout-minutes: 210
+    # Keep the paid stand's allowance, plus one separately bounded keyless rehearsal.
+    timeout-minutes: 325
     env:
       HAS_E2E_LIVE_KEY: ${{ secrets.OUROBOROS_E2E_LIVE_OPENROUTER_KEY != '' && 'true' || 'false' }}
     steps:
@@ -1364,13 +1387,26 @@ jobs:
       - name: Install the UI probe browser (Playwright Chromium)
         if: env.HAS_E2E_LIVE_KEY == 'true'
         run: python -m playwright install --with-deps chromium
+      - name: Rehearse SM1 with the keyless scripted model
+        id: rehearsal
+        if: env.HAS_E2E_LIVE_KEY == 'true'
+        timeout-minutes: 115
+        # The scripted author still runs real pre/post-commit tests; it gets the
+        # same task allowance as live SM1 rather than a shortened correctness deadline.
+        # No provider key reaches this step. Direct adoption is rehearsed; the
+        # separate post-task evolution is left to the one paid attempt below.
+        run: |
+          python -m devtools.e2e_live.run_live_lanes \
+            --stub --source-repo "$GITHUB_WORKSPACE" --seed HEAD --out "$RUNNER_TEMP/e2e_stub" \
+            --scenarios SM1 --attempts 1 --pass-of 1 --lanes 1 \
+            --task-timeout 4500 --ready-timeout 300 --watch-interval 60
       # The key reaches the stand by NAME (--key-env) and this step's env only;
       # the stand redacts the run-level settings template and writes the value
       # solely into the lane's 0600 settings file, disclosed by fingerprint.
       # --seed HEAD is the checked-out commit (the dispatched sha); the stand
       # resolves it and records the sha in the manifest.
       - name: Run the live E2E stand (SM1 x1, $30 cap, self-mod)
-        if: env.HAS_E2E_LIVE_KEY == 'true'
+        if: success() && env.HAS_E2E_LIVE_KEY == 'true' && steps.rehearsal.outcome == 'success'
         env:
           OUROBOROS_E2E_LIVE_OPENROUTER_KEY: ${{ secrets.OUROBOROS_E2E_LIVE_OPENROUTER_KEY }}
         run: |
@@ -1388,6 +1424,8 @@ jobs:
       # reports, it never fails on its own: the stand's exit is the verdict.
       - name: Summarize the run
         if: always() && env.HAS_E2E_LIVE_KEY == 'true'
+        env:
+          E2E_REHEARSAL_OUTCOME: ${{ steps.rehearsal.outcome }}
         run: |
           python - <<'PY'
           import json, os, pathlib
@@ -1395,6 +1433,10 @@ jobs:
           lines = ["## e2e-live: SM1 x1 — the largest subset feasible under the $30 cap "
                    "(per-task $15 x (roots + the self-mod evolution root): SM1 x1 = $30; "
                    "the full SM1/SW1/SK1 x3 set needs $225)"]
+          lines.append(f"keyless rehearsal: {os.environ.get('E2E_REHEARSAL_OUTCOME', 'unknown')}; "
+                       "scripted machinery check, not a live-model verdict")
+          if os.environ.get("E2E_REHEARSAL_OUTCOME") not in (None, "success"):
+              lines.append("paid step was not admitted because the rehearsal did not succeed")
           try:
               if not manifest.exists():
                   lines.append("no run_manifest.json: the stand never reached admission (see the step log)")
@@ -1454,6 +1496,11 @@ jobs:
             ${{ runner.temp }}/e2e_live/lanes/*/result.json
             ${{ runner.temp }}/e2e_live/lanes/*/shots/*.png
             ${{ runner.temp }}/e2e_live/lanes/*/traces/**
+            ${{ runner.temp }}/e2e_stub/run_manifest.json
+            ${{ runner.temp }}/e2e_stub/result_index.jsonl
+            ${{ runner.temp }}/e2e_stub/lanes/*/result.json
+            ${{ runner.temp }}/e2e_stub/lanes/*/shots/*.png
+            ${{ runner.temp }}/e2e_stub/lanes/*/traces/**
           if-no-files-found: warn
           retention-days: 30
 

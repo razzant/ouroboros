@@ -60,6 +60,9 @@ def test_official_fetch_timeout_kills_the_process_tree(monkeypatch):
     calls = []
 
     class FakeProcess:
+        def poll(self):
+            return self.returncode
+
         returncode = 1
         stdin = stdout = stderr = None  # the runner closes an exited child's pipes; this fake opens none
 
@@ -74,6 +77,8 @@ def test_official_fetch_timeout_kills_the_process_tree(monkeypatch):
             return "", "still running"
 
     proc = FakeProcess()
+    from tests.test_tracked_tree_containment import fake_tree_read
+    fake_tree_read(monkeypatch, proc, remains=False)
     monkeypatch.setattr(git_ops.subprocess, "Popen", lambda *args, **kwargs: proc)
     monkeypatch.setattr(
         platform_layer,
@@ -105,6 +110,9 @@ def test_dependency_sync_is_panic_tracked_and_killed_on_timeout(monkeypatch, tmp
     killed = []
 
     class HungProcess:
+        def poll(self):
+            return self.returncode
+
         returncode = 1
 
         def __init__(self):
@@ -118,6 +126,8 @@ def test_dependency_sync_is_panic_tracked_and_killed_on_timeout(monkeypatch, tmp
             return -9
 
     proc = HungProcess()
+    from tests.test_tracked_tree_containment import fake_tree_read
+    fake_tree_read(monkeypatch, proc, remains=False)
     monkeypatch.setattr(git_ops.subprocess, "Popen", lambda *_a, **_k: proc)
     monkeypatch.setattr(platform_layer, "kill_process_tree", lambda value: killed.append(value))
 

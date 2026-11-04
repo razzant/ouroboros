@@ -592,8 +592,8 @@ not to accelerate evolution, but to become oneself.
 ## Principle 9: Versioning and Releases
 
 Each commit has one coherent intent. A numbered
-release advances the version and updates all release carriers together.
-Ordinary body commits use that form; the exceptions below are explicit.
+release advances the version and updates all carriers together.
+Ordinary body commits use that form, save the exceptions below.
 Reassess iterations that produce no concrete result. Review of my body follows P3; checkpoints in
 other repositories do not inherit that obligation.
 
@@ -603,28 +603,28 @@ All carriers describe the same version, with PEP 440 canonical form where requir
 `ouroboros/tools/release_sync.py::VERSION_CARRIER_SPANS` inventories them,
 `release_metadata_findings` checks them and DEVELOPMENT explains the workflow. A partial
 bump is a defect. README history retains at most 2 major, 5 minor and 5 patch
-rows; older history remains in Git. Breaking philosophy or architecture is
+rows; older rows remain in Git. Breaking philosophy or architecture is
 MAJOR, a new capability MINOR, anything else or unsure PATCH.
 Every numbered release gets the annotated tag `v{VERSION}` after commit;
-versioned commit messages never claim a version below the current VERSION.
+versioned commit messages never claim a version below VERSION.
 
 ### Explicit exceptions
 
 Between releases the official line keeps one fixed `X.Y.Z-alpha.0` marker of a
 greater base, never a release: all carriers follow it but download links and
-history, which stay on the last published release; no tag or installer.
+history, which stay on the last release; no tag or installer.
 Contributions keep carriers byte-identical and untagged, the exact commit identifying
-any build; maintainers cut a selected candidate as plain `X.Y.Z`. Stable promotion
+any build or installation; maintainers cut a selected candidate as plain `X.Y.Z`. Stable promotion
 waits until the line holds it under a greater marker.
 A reviewed contribution in a body candidate may be deliberately adopted locally without a bump or
-tag; a numbered local release is the explicit alternative. Outside Cyber Pro a constitutional amendment takes
+tag; a numbered local release is the alternative. Outside Cyber Pro a constitutional amendment takes
 effect only through an explicit reviewed release, never this neutral adoption or a marker.
 Cyber Pro application follows P0/P3.
 
-Managed-update resolution keeps the official target's release metadata;
-it assigns no new local version.
+Managed-update resolution keeps the official target's release metadata under
+its existing authority; it assigns no new local version.
 
-Forensic recovery snapshots on dedicated recovery refs are rescue artifacts,
+Forensic recovery snapshots on dedicated refs are rescue artifacts,
 never a published line, version bump or tag.
 
 Mechanical rollbacks (restore to HEAD, revert, rollback

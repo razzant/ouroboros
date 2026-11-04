@@ -357,6 +357,7 @@ def _handle_budget_pause(evt: Dict[str, Any], ctx: Any) -> None:
             resumed_task = park_record(task, ctx.DRIVE_ROOT, evt.get("task"))
         resumed_task["_budget_pause"] = dict(pause)
         if prestart:
+            resumed_task["_attempt"] = attempt  # the fresh attempt this event was just checked against
             resumed_task["_execution_handoff_sec"] = pause["execution_consumed_sec"]
         if direct:
             resumed_task.setdefault("priority", 1)
@@ -555,6 +556,7 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
                 except Exception:
                     paused_task["priority"] = 1
             paused_task.setdefault("queued_at", utc_now_iso())
+            paused_task["_attempt"] = attempt  # the attempt this pause row was just checked against
             paused_task["_is_direct_chat"] = True
         if not any(str(item.get("id") or "") == task_id for item in ctx.PENDING):
             ctx.PENDING.append(paused_task)
@@ -1329,9 +1331,14 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
         return {"ok": False, "error": "snapshot_not_persisted" if refused == "snapshot_not_persisted"
                 else "selection_owner_held", **({"detail": refused} if completing else {})}
     try:
+        from supervisor.task_admission import PRESTART_PROOF, prestart_returned_unsent
+
+        proof = prestart_returned_unsent(task)  # a read gap at restore left the proof in its original result
         write_task_result(result_root, task_id, STATUS_SCHEDULED, reason_code="",
                           resource_limit={"status": "resumed", "auto_resume": False,
-                                          "exact_continuation": False, **selection})
+                                          "exact_continuation": False, **selection,
+                                          # a held pre-body return keeps its proof for a later stop (#2555)
+                                          **({PRESTART_PROOF: proof} if proof else {})})
     except Exception:
         log.debug("Failed to project held-row selection for %s", task_id, exc_info=True)
     q.append_jsonl(

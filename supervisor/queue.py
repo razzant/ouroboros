@@ -293,7 +293,7 @@ def enqueue_task(
     metadata["work_kind"] = work_kind({"origin_message_ref": t.get("origin_message_ref"), **metadata})
     t["metadata"] = metadata
     if not restoring_snapshot:
-        t.pop("_project_scope_none", None)  # Only this host admission can attest absence.
+        t.pop("_project_scope_none", None)  # A caller's mark proves nothing: this admission attests absence anew.
         t.pop("_consciousness_continuation", None)  # never a caller-supplied marker
         if continuation:
             t["_consciousness_continuation"] = True

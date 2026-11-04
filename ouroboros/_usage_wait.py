@@ -29,12 +29,13 @@ ACQUISITION_SLICE_SEC = 0.25
 class _PresendWait:
     """One caller's local admission episode. Nothing here repeats a provider or tool body."""
 
-    def __init__(self, check=True, *, before_task_start=False):
+    def __init__(self, check=True, *, before_task_start=False, controls=None):
         from ouroboros.model_wait import current_model_wait, dispatch_deadline_remaining_sec
         from ouroboros.config import get_task_idle_timeout_sec
 
         self.check = check
         self.before_task_start = before_task_start
+        self.controls = controls  # a caller context whose bounds this wait's own control check reads
         self.owner = current_model_wait()
         self.owned = self.owner is not None or dispatch_deadline_remaining_sec() is not None
         self.interactive_bound = (float(get_task_idle_timeout_sec()) if self.owner is not None
@@ -69,8 +70,9 @@ class _PresendWait:
                     _check()
                 elif self.owner is not None:
                     from ouroboros.model_wait import dispatch_control_reason
-                    reason = (dispatch_control_reason(self.owner, before_task_start=True)
-                              if self.before_task_start else self.owner.control_reason())
+                    reason = (dispatch_control_reason(self.owner, before_task_start=True) if self.before_task_start
+                              else self.controls.copy().run(self.owner.control_reason) if self.controls is not None
+                              else self.owner.control_reason())
                     if reason:
                         from ouroboros.llm_attempt import PhysicalDispatchInterrupted
                         raise PhysicalDispatchInterrupted(reason)
@@ -116,7 +118,7 @@ class _PresendWait:
             _hold(self.owner, "ended", self.started, self.episode_id)
 
 
-def retry_presend(function, *, check=True, before_task_start=False):
+def retry_presend(function, *, check=True, before_task_start=False, controls=None):
     """Retry only a supplied unsent preparation/transaction AFTER it unwound its locks.
 
     The caller must keep invocation identity outside the callback and must stop using
@@ -126,11 +128,13 @@ def retry_presend(function, *, check=True, before_task_start=False):
     2026-10-21, A: an unstarted message waits for storage and starts once): no direct-turn
     idle window ends it; Stop, Panic, deadlines and the execution ceiling still do. A readable
     accepted Pause ends preparation before the body, for its existing zero-dispatch park.
+    ``controls``: the context whose bounds the waits' own control checks read (a nested start's caller); the
+    function, its locks and this loop stay in the current one.
     """
     from ouroboros.store import admission_acquisition
     from ouroboros import queue_observation
 
-    episode = _PresendWait(check, before_task_start=before_task_start)
+    episode = _PresendWait(check, before_task_start=before_task_start, controls=controls)
     try:
         while True:
             try:

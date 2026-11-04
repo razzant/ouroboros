@@ -11,7 +11,7 @@ proposal's own copy (D31), so a checkout that already contains the proposal is
 refused. Contributor mode makes its review drive its whole private data root
 before any config load, under an explicit ``--run-cap-usd``
 (review_run_isolation.py). READY_FOR_INTEGRATION is evidence, never merge
-authority: maintainers allocate release metadata and run the production gate on
+authority: maintainers land it version-neutral and run the production gate on
 the exact landing tree.
 
 Exit codes:
@@ -150,9 +150,9 @@ _CONTRIBUTOR_CONTRACT = {
         "those changes normally."
     ),
     "landing_rule": (
-        "A maintainer must apply the proposal onto current ouroboros, allocate "
-        "collision-free release metadata, and run the production review gate on "
-        "the exact landing tree before commit/tag/push."
+        "A maintainer must apply the proposal onto current ouroboros, leave release "
+        "metadata unchanged (maintainers open cycles and cut releases separately), and "
+        "run the production review gate on the exact landing tree before commit/push."
     ),
 }
 
@@ -337,7 +337,7 @@ def _contributor_proposal(base_ref: str, head_ref: str) -> dict:
         changed = ", ".join(release_sensitive["carrier_fields"])
         raise RuntimeError(
             "contributor proposals must not change release-version carriers "
-            f"({changed}); maintainers allocate them on the final landing"
+            f"({changed}); maintainers move them only to open a cycle or cut a release"
         )
     target_version = _git_text(["show", f"{base_sha}:VERSION"]).strip()
     substrate_changed = sorted(set(changed_paths) & _REVIEW_SUBSTRATE_PATHS)
@@ -955,8 +955,8 @@ def _apply_contributor_landing_obligations(
     return {
         "status": "passed",
         "message": (
-            "Contributor readiness passed with release metadata deferred to the "
-            "maintainer-owned final landing."
+            "Contributor readiness passed; release metadata stays with the maintainers' "
+            "cycle and release cut."
         ),
         "block_reason": "",
         "pre_fingerprint": outcome.get("pre_fingerprint", {}),

@@ -272,17 +272,18 @@ def _answer_locators(drive_root: Any, row: Any) -> Dict[str, Any]:
     return facts
 
 
-def terminal_custody_notice(result: Mapping[str, Any], *, owner_row: bool = False) -> str:
+def terminal_custody_notice(result: Mapping[str, Any], *, owner_row: bool = False, include_empty: bool = False) -> str:
     """Render current stored custody beside unchanged model-authored history.
 
     No live join, lifecycle mutation or inference from a missing run: only the
     audit's separate execution/invocation/patch and confirmed terminal facts. A run
     confirmed terminal whose accounting is not settled stays in the audit's open
     list (custody unchanged) and reads as terminal with that fact, never as live.
-    ``owner_row`` is the owner's task-card row, which lists only the categories
-    holding something and leaves Wrap up's receipt to its own row
-    (``owner_stop_receipt.retained_work_fields``); the model, CLI and
-    child-result-hash text keeps every category and the receipt.
+    Every reader sees only the categories holding something (#1403). ``owner_row``
+    is the owner's task-card row, which leaves Wrap up's receipt to its own row
+    (``owner_stop_receipt.retained_work_fields``); all other text keeps the receipt.
+    ``include_empty`` is the pre-#1403 text, for what is bound to its bytes and never
+    shown: the child-result hash and recognising a Presence body composed with it.
     """
     audit = result.get("delegate_terminal_reconciliation")
     if not isinstance(audit, Mapping) or not audit:
@@ -319,7 +320,7 @@ def terminal_custody_notice(result: Mapping[str, Any], *, owner_row: bool = Fals
                      + (f" (+{omitted} more in task details)" if omitted > 0 else "") + ".")
     for label, raw in groups:
         values = [str(value) for value in raw] if isinstance(raw, list) else []
-        if owner_row and not values:
+        if not raw and not include_empty:  # present but unreadable is not empty: it keeps its line
             continue
         shown = ", ".join(values[:10]) or "none recorded by the current audit"
         omitted = len(values) - 10

@@ -91,8 +91,8 @@ def notice_text(notice: dict) -> str:
     authority = notice.get("reason") == "authority"
     cause = ("a technical fault: its billing or control authority could not be read, which says nothing about "
              "money left") if authority else "its budget limit"
-    resume = "Fix the cause, then use Resume on the task when available" if authority else (
-        "Use Resume on the task when available")
+    resume = ("Use Resume on the task when available; it rechecks the conditions before continuing" if authority
+              else "Use Resume on the task when available")
     return f"The task paused because of {cause}. Its work is retained. {resume}."
 
 

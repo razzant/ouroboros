@@ -1,7 +1,7 @@
 ---
 name: openai_realtime
 description: OpenAI native Realtime audio, images and tools over the host's ordinary selected context.
-version: 0.1.9
+version: 0.1.10
 type: extension
 runtime: python3
 entry: plugin.py

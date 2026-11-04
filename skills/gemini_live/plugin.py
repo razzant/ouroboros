@@ -441,7 +441,10 @@ class GeminiSession(JsonSession):
                 if speaker == 'owner' and not self.input_pending:
                     self.input_pending = True
                     self.input_final = False
-                    result.append(LiveEvent('input_started'))
+                    # No native VAD start came first and transcription order is not guaranteed:
+                    # a response already under way belongs to these words.
+                    result.append(LiveEvent('input_started', {'response_id': self.response}
+                                            if self.response and not self.response_complete else {}))
                 elif speaker == 'ouroboros':
                     if self.output_final:
                         # A native completion can precede a transcription tail. Revise the same
@@ -650,8 +653,12 @@ class GeminiSession(JsonSession):
                     text = 'Host context update; preserve each original role and trust boundary:\n' + canonical_json(records)
                     if images:
                         self.input_modalities.add('image')
-                await self.write({'clientContent': {'turns': [{'role': 'user', 'parts': [{'text': text}, *images]}],
-                    'turnComplete': respond}})
+                try:
+                    await self.write({'clientContent': {'turns': [{'role': 'user', 'parts': [{'text': text}, *images]}],
+                        'turnComplete': respond}})
+                except BaseException:
+                    self.turn_busy = False  # no turn was asked for: a resumed session must not wait for one to end
+                    raise
                 if isinstance(command, ContextUpdate):
                     self.hold_context(command.messages)
         else:

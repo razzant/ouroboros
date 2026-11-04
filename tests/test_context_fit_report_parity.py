@@ -107,11 +107,12 @@ def test_retained_scale_candidate_matches_live_admission(tmp_path, monkeypatch, 
 
 @pytest.mark.parametrize('provider', ['gemini_live', 'grok_realtime', 'openai_realtime'])
 def test_bundled_session_diagnostic_is_offline_and_discloses_its_inputs(tmp_path, monkeypatch, provider):
-    import socket
     from devtools._context_fit_session import report_session
     from ouroboros.tools.registry import ToolRegistry
+    from tests._socket_seal import block_network_except_socketpair
 
-    monkeypatch.setattr(socket.socket, 'connect', lambda *a, **kw: pytest.fail('provider connection'))
+    # The diagnostic ends its host on an event loop, which Windows builds through connect(): only that self-pipe passes.
+    block_network_except_socketpair(monkeypatch, lambda *a, **kw: pytest.fail('provider connection'))
     result = report_session(scale.core(tmp_path / 'captures'), ToolRegistry(REPO, tmp_path), root=tmp_path,
                             scratch=tmp_path / 'scratch', window=1000000, reserve=10000, mode='max', provider=provider)
     assert result['verdict'] == 'fits', result

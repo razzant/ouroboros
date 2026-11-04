@@ -42,6 +42,7 @@ from ouroboros.context_input_selection import (
     development_required,
     development_resident,
     required_book_unavailable,
+    wake_start_checkpoint,
 )
 from ouroboros.context_health import (
     _iter_recent_jsonl as _iter_recent_jsonl,
@@ -998,18 +999,23 @@ def _capture_context_core(
     try:
         from ouroboros.consciousness_authority import is_focus_wake
         from ouroboros.place_reply import reply_carrier
-        from ouroboros.presence_context import build_presence_context_section
+        from ouroboros.presence_context import ROUTELESS, UNKNOWN, build_presence_context_section, final_route
 
         inline = bool(task.get("_presence_turn")) or is_focus_wake(task_metadata)
         scheduled = bool(task_metadata.get("schedule_occurrence")) and not task.get("_presence_turn")
+        # The same carrier that speaks this root's final names its audience, as far as the published
+        # references settle whether a connector reads it (FOCUS does inline).
+        spoken = not inline and not scheduled and bool(reply_carrier(task_metadata))
+        route, why = final_route(canonical_root, task_metadata, str(task.get("id") or "")) if spoken else ("", "")
         presence_section = build_presence_context_section(
             pathlib.Path(env.drive_root),
             task_metadata.get("presence"),
             str(task.get("id") or ""),
             status_root=canonical_root,  # a forked promoted root finds its binding's work canonically
             scheduled=scheduled,
-            # The same carrier that speaks this root's final names its audience (FOCUS does inline).
-            answers_conversation=not inline and not scheduled and bool(reply_carrier(task_metadata)),
+            answers_conversation=spoken and route != ROUTELESS,
+            unsettled=why if route == UNKNOWN else "",
+            routeless=why if spoken and route == ROUTELESS else "",
         )
         if presence_section:
             dynamic_parts.append(presence_section)
@@ -1184,6 +1190,10 @@ def build_llm_messages(
     view_facts = _record_memory_view(env, memory, task, ctx, plan)
     if view_facts:
         cap_info["memory_view"] = view_facts
+    if (checkpoint := wake_start_checkpoint(task, plan)) is not None:  # the round boundary's record, made at the start
+        from ouroboros.loop_messages import _emit_checkpoint_event
+        _emit_checkpoint_event(getattr(ctx, "event_queue", None), str(task.get("id") or ""),
+                               pathlib.Path(env.drive_root) / "logs", checkpoint)
     if refusal := required_book_unavailable(plan.core):  # the task's own requirement, not its view, decides
         cap_info["authority_source_unavailable"] = refusal
     return messages, cap_info

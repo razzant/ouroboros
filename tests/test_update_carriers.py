@@ -593,6 +593,9 @@ def test_carrier_postcondition_names_a_web_package_lock_the_sync_cannot_fix(tmp_
 def _marker_update_scene(tmp_path, monkeypatch):
     """Base at the published 7.9.0 with every carrier; ``remote-sim`` opens the marker; HEAD stays the fork."""
     repo, head = tua._init_repo(tmp_path)
+    # The repository's LF text policy, as in every real checkout: what this scene's writers produce (CRLF in
+    # Windows text mode, the release sync included) reaches the index stages the resolver reads as LF.
+    (repo / ".gitattributes").write_bytes((REPO_ROOT / ".gitattributes").read_bytes())
     _make_repo(repo, "7.9.0")
     sync_release_metadata(str(repo))
     _git(repo, "add", "-A")

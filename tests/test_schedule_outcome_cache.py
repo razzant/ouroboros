@@ -57,6 +57,28 @@ def test_settled_outcomes_are_strictly_read_off_lock_on_disabled_consumed_rows(q
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before and len(reads) == 1
 
 
+_FAILED_RUN = {"audit_status": "ok", "open_run_ids": [], "pending_invocation_ids": [], "undisposed_patch_run_ids": [],
+               "terminal_runs": [{"run_id": "run-7c1", "state": "failed", "model": "leaf-m"}]}
+_FAILED_LINE = "Confirmed delegated terminal receipts: run-7c1: failed on leaf-m."
+
+
+@pytest.mark.parametrize("audit,notice,line", [
+    (_FAILED_RUN, "", _FAILED_LINE),  # the failed run itself, never an empty custody category
+    (_FAILED_RUN, "Host cause.\nSecond detail.", "Host cause."),
+    ({**_FAILED_RUN, "terminal_runs": [], "open_run_ids": ["run-a"], "undisposed_patch_run_ids": ["run-b"]}, "",
+     "Open delegated execution: run-a."),
+    (None, "\nHost cause.\n", "Host cause."),
+], ids=["custody-only", "host-cause-first", "first-debt", "surrounding-blank"])
+def test_a_host_notice_gives_the_schedule_its_first_meaningful_line(q, audit, notice, line):  # noqa: F811
+    history(q)
+    write_task_result(q.root, "last", "failed", result="Private first line\nOwn final line",
+                      terminal_host_notice=notice, _terminal_observed=True,
+                      **({"delegate_terminal_reconciliation": audit} if audit else {}))
+    q.queue.check_scheduled_tasks()
+    outcome = _rows(q)["s1"]["last_outcome"]
+    assert outcome["notice"] is True and outcome["line"] == line
+
+
 @pytest.mark.parametrize("initial", ["interrupted", "running", "scheduled", "missing", "error"])
 def test_unobserved_results_retry_under_the_same_id(q, monkeypatch, initial):  # noqa: F811
     history(q)

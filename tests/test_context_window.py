@@ -148,6 +148,58 @@ def test_start_and_in_task_admission_share_the_input_bound(tmp_path, monkeypatch
         assert (refusal is not None) is (usable is not None and size > usable)
 
 
+@pytest.mark.parametrize("account_refusal", [False, True])
+@pytest.mark.parametrize("kind", ["input", "total", "unknown"])
+@pytest.mark.parametrize("mode", ["nano", "low"])
+def test_a_rebind_keeps_the_route_window_for_the_final_admission(tmp_path, monkeypatch, mode, kind, account_refusal):
+    """3 Nov 2026 witness: a same-route rebind under Nano dropped an input-only 240K route's record and admitted
+    297,344 input tokens until a provider refusal; Low kept it only because its reserve equals the ceiling.
+    The record and its own frame survive in every mode: an input bound stays, a total keeps T - R, the account
+    scope's refusal still binds and an unknown window stays unknown."""
+    from types import SimpleNamespace
+    from ouroboros import context, context_fit as cf, loop
+    from ouroboros.llm_attempt import main_context_fit_refusal
+    from ouroboros.usage_accounting import AttemptRequest
+    from tests.test_context_fit_integration import _plan, _projection
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    monkeypatch.setattr(ce, "resolve_main_token_density", lambda *_a, **_kw: (1.0, "cold_estimate"))
+    evidence = (ce.CapabilityEvidence(0, "unprobeable", "none", "rebind-route") if kind == "unknown" else
+                ce.CapabilityEvidence(240_000, "confirmed", "metadata", "rebind-route", window_kind=kind))
+    if account_refusal:  # the serving account's own numbered input refusal, under its observation scope
+        record_observation(tmp_path, "account-scope", refused=230_000, kind="input")
+    model = "openai::rebind-fixture"
+    monkeypatch.setattr(context, "_context_fit_route", lambda *_a, **_kw: (
+        {"provider": "openai", "model": model, "window_observation_fp": "account-scope"}, evidence))
+    start = resolve_window(evidence, 8_192 if mode == "nano" else 65_536, observation_fp="account-scope")
+    plan = replace(_plan(preferred=mode, window=start.total_equivalent), model=model, route_fp="rebind-route",
+                   status=evidence.status, window_record=start, nano_projection=_projection("nano"))
+    tools = SimpleNamespace(_ctx=SimpleNamespace(task_metadata={}, _accumulated_usage={}))
+    messages = plan.messages_for(mode)
+    rebound, effective = loop._rebind_context_fit_plan(plan, tools, messages, model=model, use_local=False,
+                                                       preferred_mode=mode, start_mode=mode, tool_schemas=[])
+    ctx = SimpleNamespace(context_fit_plan=rebound, active_context_mode=effective, active_model=model, messages=messages,
+                          tool_schemas=[], active_effort="", accumulated_usage={}, tools=tools, round_idx=1)
+    disposition = loop._measure_round_main_fit(ctx, automatic_pass_used=False)
+    fit, physical = disposition.measurement, loop._physical_context_for_fit(disposition)
+
+    def admitted(size):
+        return main_context_fit_refusal(AttemptRequest(model=model, provider="openai", prompt_tokens_bounded_estimate=size,
+                                                       physical_context=physical)) is None
+
+    usable = {"input": 240_000, "total": 240_000 - fit.response_reserve_tokens, "unknown": None}[kind]
+    if account_refusal:
+        usable = min(230_000, usable or 230_000)
+    assert effective == mode and fit.response_reserve_tokens == (8_192 if mode == "nano" else 65_536)
+    if usable is None:
+        assert fit.capacity_total_tokens is None and admitted(10 ** 6)  # nothing invents a number
+    else:
+        assert rebound.window_record is not None and rebound.window_record.route_fp == "account-scope"
+        assert fit.capacity_total_tokens - fit.response_reserve_tokens == usable
+        assert (admitted(usable), admitted(usable + 1)) == (True, False)
+
+
 @pytest.mark.parametrize("model,key", [
     ("openai::model", "OPENAI_API_KEY"), ("anthropic::model", "ANTHROPIC_API_KEY"),
     ("deepseek::model", "DEEPSEEK_API_KEY"), ("zai::model", "ZAI_API_KEY"),
@@ -181,7 +233,7 @@ def test_direct_account_scope_survives_same_key_but_not_key_rotation(tmp_path, m
         {"prompt_tokens": 700_000}, drive_root_resolver=lambda root: root)
     usage = {"_last_round_cache_usage": {"prompt_tokens": 700_000, "provider": first.provider},
              "_context_raw_input_tokens": 700_000}
-    record_input_anchor(usage, first, round_idx=1)
+    record_input_anchor(usage, first, round_idx=1, estimate_tokens=700_000)
     same = start()
     assert same.window_record.usable == 700_000
     assert main_input_anchor(usage, same)[1] == 700_000
@@ -229,7 +281,7 @@ def test_a_claudexor_account_reads_the_acceptances_its_receipts_wrote(tmp_path, 
         record_input_anchor({"_model_route": {"source": "codex", "model": "gpt-fixture", "accountFingerprint": f"fp-{catalog['account']}",
                                               "credentialProfileId": f"profile-{catalog['account']}"},
                              "_last_round_cache_usage": {"prompt_tokens": tokens, "provider": "claudexor"},
-                             "_context_raw_input_tokens": tokens}, plan, round_idx=1)
+                             "_context_raw_input_tokens": tokens}, plan, round_idx=1, estimate_tokens=tokens)
 
     estimate = cf.estimate_context_prompt_tokens
 

@@ -1332,9 +1332,10 @@ def artifact_bundle_from_result(result: Dict[str, Any]) -> Dict[str, Any]:
                       + ([str(item["copy_error"])] if item.get("copy_error") else []),
         }
         records.append(record | ({"relpath": str(item["relpath"])} if item.get("relpath") else {}))
-    if old_status == ARTIFACT_STATUS_FAILED or any(item["status"] == ARTIFACT_STATUS_FAILED for item in records):
+    current_records = [item for item in records if item["kind"] != "workspace_capture_history"]
+    if old_status == ARTIFACT_STATUS_FAILED or any(item["status"] == ARTIFACT_STATUS_FAILED for item in current_records):
         status = ARTIFACT_STATUS_FAILED
-    elif status != ARTIFACT_STATUS_FAILED and any(item["status"] == "missing" for item in records):
+    elif status != ARTIFACT_STATUS_FAILED and any(item["status"] == "missing" for item in current_records):
         status = "missing"
     errors = []
     if result.get("artifact_error"):

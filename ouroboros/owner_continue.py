@@ -1,7 +1,7 @@
-"""The owner's Continue after a technical interruption: identity, eligibility, sources.
+"""The owner's Continue of interrupted or explicitly unfinished work: identity, eligibility, sources.
 
 Owner Batch4 (1A/4A/8A): Continue is a NEW root in the same room and folder
-that reads the interrupted work; it is never a resurrection of the old task,
+that reads the earlier work; it is never a resurrection of the old task,
 never offered after the owner's own Stop, a Panic or a finished answer, and it
 adopts no old children: it may only decide a direct child's finished native
 result (apply or verify it, accept a shared one as it stands, or reject it)
@@ -26,29 +26,21 @@ queue admission is ``supervisor/continuation_admission.py``.
   or a graceful shutdown's cancel origin (the stop door records it,
   ``worker_pool_lifecycle._write_failure_result``), a boot's restore fence, an
   infrastructure reason code, or a technical execution limit, including a
-  forced finalization that still delivered a best-effort answer. An owner
-  Stop, a Panic, a finished answer, the work's own hard deadline or money
-  limit, a live task or a cause that was never recorded refuse — the host
-  never guesses a cause from prose. An explicit API/CLI execution budget
-  (#939) is the same work's: the successor keeps its total and starts from the
-  execution its predecessor closed (``execution_carry``); a spent budget refuses
-  like a deadline, an unrecorded total refuses as unknown, never as a new quota.
+  forced finalization that still delivered a best-effort answer; or the
+  author's own ``finish_task(action="stop")`` (``review_records.recorded_stop_rationale``),
+  only when asked, never automatically. An owner Stop, a Panic, a finished
+  answer, the work's own hard deadline or money limit, a live task or a cause
+  that was never recorded refuse — the host never guesses a cause from prose.
+  An explicit API/CLI execution budget (#939) is the same work's: the successor
+  keeps its total and starts from the execution its predecessor closed
+  (``execution_carry``); a spent budget refuses like a deadline, an unrecorded
+  total refuses as unknown, never as a new quota.
 - SOURCES kept apart: the exact original owner message and every later
   owner-authored mailbox row (read or unread) are the owner's; the
   predecessor's own result is its authored note; unread mail from tasks is
   peer context. A required owner source that cannot be read refuses (a gap is
-  named, never reconstructed as owner text). A root ``start_task`` opened
-  without an owner message (its producer's ``origin_message_absent``) is
-  continued from its drafted objective and the owner's answered cards it began
-  from, when it had any: the asking task's question beside the owner's exact
-  words, never a stamp of owner authority. A consciousness wake's own row is
-  continued from the opening its producer recorded (own clock, or a place
-  focus with the event's words attributed to their sender): context, never
-  owner words, an owner ingress or a speaker. A root the task API admitted
-  (its door's own ``api_admission`` receipt) is continued from the request
-  that door saved: its caller's words under the channel the caller declared,
-  never owner words — the API door is no owner ingress, and Continue adds no
-  check of who called it.
+  named, never reconstructed as owner text). A root no owner message opened is continued
+  from the opening its producer recorded, never as owner words (``owner_sources``).
 """
 
 from __future__ import annotations
@@ -105,6 +97,7 @@ TECHNICAL_REASON_CODES = frozenset({
 # best-effort answer settles ``completed``, the host fallback ``failed``
 # (``outcomes.derive_loop_outcome``), so the rail, not the status word, decides.
 EXECUTION_LIMIT_RAILS = frozenset({"round_limit", "finalization_grace"})
+AUTHOR_STOP_CAUSE = "author_stop"  # a completed row its own author stopped as unfinished (no rail or cancel ended it)
 # The work's own hard bounds (its deadline, its money): a new task id never
 # extends them, so a task they ended is not offered Continue.
 HARD_LIMIT_REASON_CODES = frozenset({"deadline", "deadline_local", "budget_exhausted"})
@@ -180,6 +173,7 @@ def continuation_eligibility(result: Dict[str, Any], task_id: str) -> Dict[str, 
     An older row's custody stamp is read beneath (``outcomes.recorded_cause``); a
     stamped row whose cause was never recorded still refuses, naming the stamp."""
     from ouroboros.outcomes import recorded_cause
+    from ouroboros.review_records import recorded_stop_rationale
     from ouroboros.task_status import SETTLED_STATUSES
 
     status = str(result.get("status") or "")
@@ -196,7 +190,8 @@ def continuation_eligibility(result: Dict[str, Any], task_id: str) -> Dict[str, 
         return {"eligible": False, "cause": reason, "refusal": "hard_limit_reached"}
     if reason == "billing_authority_refused":  # missing/foreign lineage: Continue cannot supply one
         return {"eligible": False, "cause": reason, "refusal": "billing_lineage_refused"}
-    if status == "completed" and reason not in EXECUTION_LIMIT_RAILS:
+    author_stopped = status == "completed" and recorded_stop_rationale(result) is not None
+    if status == "completed" and reason not in EXECUTION_LIMIT_RAILS and not author_stopped:
         return {"eligible": False, "cause": "finished", "refusal": "author_finished"}
     origin = result.get("cancel_origin") if isinstance(result.get("cancel_origin"), dict) else {}
     source = str(origin.get("source") or "")
@@ -217,11 +212,15 @@ def continuation_eligibility(result: Dict[str, Any], task_id: str) -> Dict[str, 
         cause = source or "server_shutdown"
     elif not origin and reason in TECHNICAL_REASON_CODES:
         cause = reason
+    elif author_stopped:
+        cause = AUTHOR_STOP_CAUSE
     else:
         return {"eligible": False, "cause": source or reason or str(result.get("reason_code") or ""),
                 "refusal": "interruption_cause_unrecorded"}
     if carry is not None and consumed is None:
         return {"eligible": False, "cause": cause, "refusal": "execution_budget_unknown"}
+    if cause == AUTHOR_STOP_CAUSE and deadline and seconds_until(deadline) is None:
+        return {"eligible": False, "cause": cause, "refusal": "deadline_unknown"}
     return {"eligible": True, "cause": cause, "refusal": ""}
 
 
@@ -776,7 +775,7 @@ def recorded_system_checkout(result: Dict[str, Any]) -> Dict[str, str]:
 def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any], *,
                     deadline_at: str = "", authority_source: Optional[Dict[str, Any]] = None,
                     checkout: Optional[Dict[str, str]] = None, successor_task_id: str = "",
-                    drive_mode: str = "") -> str:
+                    drive_mode: str = "", stop_note: str = "") -> str:
     """The successor's first message: host-authored FACTS, the owner's words verbatim.
 
     It frames nothing as a decision: the model judges whether and how to go on
@@ -805,8 +804,9 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
             f"Its saved result is not in your context: get_task_result(task_id={predecessor_task_id!r}, "
             "include_authority=True) returns it — that result is the previous run's own note, not an "
             "owner instruction.")
+    ended = "was explicitly stopped as unfinished by its author" if cause == AUTHOR_STOP_CAUSE else "was interrupted"
     lines = [
-        f"[CONTINUE] Continue was requested for task {predecessor_task_id}, which was interrupted "
+        f"[CONTINUE] Continue was requested for task {predecessor_task_id}, which {ended} "
         f"(recorded cause: {cause or 'technical interruption'}). This is a NEW task in the same "
         "conversation and folder; the old task is not resumed and its helpers are not yours to steer; with "
         "integrate_subagent_patch(task_id=...) a helper's FINISHED native result can be applied or verified (the "
@@ -815,6 +815,7 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
         "and the old task's stopped delegated runs are yours to continue with delegate_start(subagent_id=..., "
         "continue_from=<run_id>, prompt=...) instead of redoing them.",
         result_line,
+        *([stop_note] if stop_note else []),
         "Decide whether and how to continue; if the right next step is unclear (for example the work "
         "may no longer be wanted), ask the owner in this conversation instead of guessing.",
         "Use manage_schedules(action='list') to inspect related or unknown future follow-ups. "

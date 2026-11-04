@@ -597,12 +597,14 @@ def _finish_task_done_dispatch(
             log.warning("Failed to release budget root fence for %s", task_id, exc_info=True)
         if tree_root:
             try:
-                from supervisor.owner_pause_control import refresh_owner_pause_tree
+                from supervisor.owner_pause_control import mark_tree_changed, refresh_owner_pause_tree
 
                 # A member that finished while its tree was pausing may be the
                 # last one the owner's Pause was waiting for — or the last writer
                 # an owner's Continue of that tree was held behind. The root's own
                 # terminal counts too: its late phase ended, or the Pause ended it.
+                # What it left running has no transition of its own: the pass looks.
+                mark_tree_changed(tree_root)
                 refresh_owner_pause_tree(tree_root)
                 from supervisor.continuation_admission import release_settled_continuations
 

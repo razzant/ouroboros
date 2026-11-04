@@ -77,10 +77,11 @@ def presence_result_from_stored(stored: Mapping[str, Any], task_id: str, drive_r
     text = metadata["presence_result_text"] if "presence_result_text" in metadata else stored.get("result")
     origin = str(stored.get("terminal_origin") or "")
     if origin == TERMINAL_ORIGIN_MODEL_FINAL and text and "result" in stored:
-        raw, notice = str(stored["result"] or ""), terminal_notice_text(stored)
-        # Undo only the recorded host composition. Older explicit reply bodies
-        # could differ from the raw final; neither they nor deliberate emptiness are guessed away.
-        if notice and text == provider_terminal_body(raw, notice):
+        raw = str(stored["result"] or "")
+        # Undo only the recorded host composition, in either custody rendering. Older explicit reply
+        # bodies could differ from the raw final; neither they nor deliberate emptiness are guessed away.
+        notices = (terminal_notice_text(stored), terminal_notice_text(stored, include_empty=True))
+        if any(notice and text == provider_terminal_body(raw, notice) for notice in notices):
             text = raw
     # Unknown-origin compatibility covers completed rows only: a failed row may
     # carry host text (an orphan reconcile or exception notice), never a reply.

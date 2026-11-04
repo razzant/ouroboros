@@ -43,7 +43,7 @@
   },
   {
    "name": "authority",
-   "text": "The task paused because of a technical fault: its billing or control authority could not be read, which says nothing about money left. Its work is retained. Fix the cause, then use Resume on the task when available.",
+   "text": "The task paused because of a technical fault: its billing or control authority could not be read, which says nothing about money left. Its work is retained. Use Resume on the task when available; it rechecks the conditions before continuing.",
    "words": null
   }
  ]

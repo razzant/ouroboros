@@ -81,25 +81,25 @@ def set_terminal_plan_review_open(usage: Dict[str, Any], plan_suffix: str) -> No
         usage.pop("terminal_plan_review_open", None)
 
 
-def terminal_host_notice_text(result: Dict[str, Any]) -> str:
-    """Host notices plus the latest stored delegated receipt, without rewriting history."""
+def terminal_host_notice_text(result: Dict[str, Any], *, include_empty: bool = False) -> str:
+    """Join host notices and the stored receipt without changing history or its hash.
+    Replace only this audit's exact alternate suffix; preserve all other host text.
+    ``include_empty`` has the meaning of ``terminal_custody_notice``.
+    """
     from ouroboros.delegate_terminal import terminal_custody_notice
 
     base = str(result.get("terminal_host_notice") or "")
-    custody = terminal_custody_notice(result)
+    custody = terminal_custody_notice(result, include_empty=include_empty)
+    other = base and terminal_custody_notice(result, include_empty=not include_empty)
+    if other and other != custody and (base == other or base.endswith("\n\n" + other)):
+        base = base[:-len(other)].removesuffix("\n\n")
     if not custody or base == custody or base.endswith("\n\n" + custody):
         return base
     return "\n\n".join(part for part in (base, custody) if part)
 
 
 def terminal_custody_notice_text(result: Dict[str, Any]) -> str:
-    """The stored delegated-custody receipt, on its own, for the event builders.
-
-    Issue #1006: the custody fact is a typed row of the task card, so the live
-    send and the outbox replay carry it as its own field instead of folding it
-    into the host notice's text. Single-body transports keep the joined text.
-    That row is read by the owner, so it omits empty categories (#1403).
-    """
+    """Live/replayed card rows carry custody separately; single-body transports use the joined notice."""
     from ouroboros.delegate_terminal import terminal_custody_notice
 
     return terminal_custody_notice(result, owner_row=True)
@@ -132,10 +132,11 @@ def wake_cause_title(metadata: Dict[str, Any]) -> str:
     return ""
 
 
-def terminal_notice_text(result: Dict[str, Any]) -> str:
+def terminal_notice_text(result: Dict[str, Any], *, include_empty: bool = False) -> str:
     """The same terminal notices on transports with one text body or no event stream."""
     return "\n\n".join(part for part in (
-        str(result.get("terminal_provider_notice") or ""), terminal_host_notice_text(result),
+        str(result.get("terminal_provider_notice") or ""),
+        terminal_host_notice_text(result, include_empty=include_empty),
     ) if part)
 
 

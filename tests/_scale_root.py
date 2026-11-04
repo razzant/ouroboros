@@ -664,6 +664,21 @@ def _forget_metrics_cursor(root: pathlib.Path) -> None:
         txn.conn.execute("DELETE FROM meta WHERE key=?", (CURSOR,))
 
 
+def heartbeats(root: pathlib.Path) -> None:
+    """The running tasks' workers' heartbeats, as a live install's would be: a stamp of now on each of their rows.
+
+    The rows keep the ``ts`` they were written with, and one older than ``task_status._ORPHAN_RUNNING_GRACE_SECONDS``
+    goes down the stale-orphan check, which parses the events tail while the queue snapshot is fresh. That is the path of
+    an orphaned row (a live worker's row is younger than the grace), and counting is not timing: which path a boot takes
+    must not follow how long the build or the boot took, which grows with k. The build stamps the rows last; the driver
+    stamps them again before the boundaries that read them."""
+    from ouroboros.task_results import write_task_result
+    from ouroboros.utils import utc_now_iso
+
+    for task_id in CURRENT["running"]:
+        write_task_result(root, task_id, "running", ts=utc_now_iso())
+
+
 def build(root: Any, k: int) -> Dict[str, Any]:
     """Build the published root (see the module docstring); returns its facts."""
     from ouroboros.startup_migrations import prepare_startup_state
@@ -705,6 +720,7 @@ def build(root: Any, k: int) -> Dict[str, Any]:
     facts["plan_asks"] = step("plan_asks", lambda: _plan_asks(root, k))
     step("metrics_cursor", lambda: _forget_metrics_cursor(root))
     facts["budget"] = _budget(root)
+    step("heartbeats", lambda: heartbeats(root))  # last: the history above takes longer the larger k is
     facts["build_seconds"] = round(time.monotonic() - started, 2)
     facts["build_steps"] = steps
     return facts

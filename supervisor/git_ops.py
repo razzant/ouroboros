@@ -245,8 +245,8 @@ def _run_git_process_bounded(
     from ouroboros.platform_layer import kill_process_tree, subprocess_new_group_kwargs
     from ouroboros.tools.shell_process import (
         CommandAdmissionClosed,
-        _active_subprocesses,
-        _subprocess_lock,
+        contained_popen,
+        retire_tracked,
         tracked_start,
     )
 
@@ -255,8 +255,8 @@ def _run_git_process_bounded(
     empty = "" if text else b""
     try:
         with tracked_start() as publish:
-            proc = publish(subprocess.Popen(
-                cmd,
+            proc = publish(contained_popen(
+                subprocess.Popen, cmd,
                 cwd=str(cwd or current_repo_dir()),
                 stdin=subprocess.PIPE if input_data is not None else None,
                 stdout=subprocess.PIPE,
@@ -310,9 +310,8 @@ def _run_git_process_bounded(
             stderr if stderr is not None else empty,
         )
     finally:
+        retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
         if proc.returncode is not None:
-            with _subprocess_lock:
-                _active_subprocesses.discard(proc)
             for pipe in (proc.stdin, proc.stdout, proc.stderr):
                 if pipe is not None:
                     try:

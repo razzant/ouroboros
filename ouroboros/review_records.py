@@ -136,6 +136,35 @@ def recorded_author_stop(decision: Any) -> bool:
         and isinstance(author, dict) and author.get("action") == "stop")
 
 
+def recorded_stop_rationale(result: Any) -> Optional[str]:
+    """A terminal row's own explicit author stop: its recorded rationale (``""``: none), or ``None``.
+
+    Read from typed facts only, never prose: ``finish_task(action="stop")``'s ``task_completion`` under
+    ``outcome_axes.execution``, the objective it fails (``outcomes.derive_loop_outcome``; a plan exit too), or a
+    historical stop decision (``recorded_author_stop``). A row an owner's Stop or Wrap up ended is never the author's:
+    any recorded cancel origin or the owner's finalization reason answers ``None``, whatever its final turn selected.
+    """
+    from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
+
+    def fields(value: Any) -> Dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    row = fields(result)
+    axes = fields(row.get("outcome_axes"))
+    execution, objective = fields(axes.get("execution")), fields(axes.get("objective"))
+    if row.get("cancel_origin") or REASON_OWNER_REQUESTED_FINALIZATION in {row.get("reason_code"), execution.get("reason_code")}:
+        return None
+    decisions = [fields(holder).get("acceptance_decision") for holder in (row.get("review_status"), axes.get("review"))]
+    stops = [fields(decision.get("author_disposition")) for decision in decisions if recorded_author_stop(decision)]
+    completion = fields(row.get("task_completion", execution.get("task_completion")))
+    if completion.get("action") == "stop":
+        stops.insert(0, completion)
+    elif not stops and not (objective.get("status") == "fail" and objective.get("reason") == "author_stop"):
+        return None
+    return next((str(stop["rationale"]) for stop in stops if isinstance(stop.get("rationale"), str)
+                 and stop["rationale"].strip()), "")
+
+
 def build_author_disposition_from_mapping(
     value: Any, *, subject_hash: str, reviewer_signal: str = "", enforcement: str = "",
 ) -> Dict[str, Any]:

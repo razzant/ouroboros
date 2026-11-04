@@ -738,11 +738,11 @@ def enqueue_assisted_resolution_task(tx: Dict[str, Any]) -> str:
 
 def _run_update_smoke(cmd: List[str], timeout_sec: float = 120.0) -> Dict[str, Any]:
     from ouroboros.platform_layer import kill_process_tree, subprocess_new_group_kwargs
-    from ouroboros.tools.shell_process import _active_subprocesses, _subprocess_lock, tracked_start
+    from ouroboros.tools.shell_process import contained_popen, retire_tracked, tracked_start
 
     with tracked_start() as publish:
-        proc = publish(subprocess.Popen(
-            cmd,
+        proc = publish(contained_popen(
+            subprocess.Popen, cmd,
             cwd=str(_g.REPO_DIR),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -771,8 +771,7 @@ def _run_update_smoke(cmd: List[str], timeout_sec: float = 120.0) -> Dict[str, A
             "returncode": proc.returncode,
         }
     finally:
-        with _subprocess_lock:
-            _active_subprocesses.discard(proc)
+        retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
 
 
 def update_restart_smoke() -> Dict[str, Any]:
@@ -832,6 +831,15 @@ def _observed(tx: Dict[str, Any], outcome: str) -> Dict[str, Any]:
                          "commit": str(commit or "")}}
 
 
+def _rollback_incomplete(tx: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
+    """A boot branch's own report that its rollback did not finish becomes that transaction's known
+    failure, naming no checkout; its ``msg``/``stash_note`` stay the cause and recovery detail."""
+    if result.get("rolled_back") is not False or "observed" in result:
+        return result
+    return {**result, "observed": {"outcome": "failed", "attempt_id": str(tx.get("attempt_id") or ""),
+                                   "reason": "rollback_incomplete"}}
+
+
 def _cleanup_observed(tx: Dict[str, Any]) -> Dict[str, Any]:
     """Recover only meanings the completed branch already established before cleanup failed."""
     restore = tx.get("stash_restore") or {}
@@ -869,22 +877,42 @@ def _complete_stash_recovery(
     return {**result, **disclosure}
 
 
+def rollback_managed_update_on_boot(reason: str) -> Tuple[bool, str]:
+    """Keep a raised rollback attempt reportable without classifying unrelated boot failures.
+
+    The caller already owns the strict transaction and update lock. No retry or new
+    permission follows: even a failed intent write leaves its original marker intact.
+    """
+    try:
+        return rollback_managed_update(reason, reopen_writer_admission=False)
+    except Exception as exc:
+        return _rollback_raised(exc)
+
+
+def _rollback_raised(exc: Exception) -> Tuple[bool, str]:
+    """A boot rollback door that raised: an unfinished rollback naming its cause."""
+    _g.log.warning("boot rollback failed", exc_info=True)
+    return False, f"rollback raised {type(exc).__name__}: {exc}"
+
+
 def _boot_smoke_rollback(tx: Dict[str, Any], reason: str) -> Tuple[bool, str]:
     """The boot-smoke door: a pre-update tree WITHOUT the store is reached through the authority
     switch (intent now, export and reset at the restart exit the caller requests); one with it
     through today's restore. A second intent before the restart is a refusal, not a reset."""
-    from ouroboros.store_switch import switch_or_reset
-
     pre = str(tx.get("pre_update_sha") or "")
     if not pre:
-        return rollback_managed_update(reason, reopen_writer_admission=False)  # its own typed refusal
+        return rollback_managed_update_on_boot(reason)  # its own typed refusal
     try:
+        from ouroboros.store_switch import switch_or_reset
+
         ok, msg, _deferred = switch_or_reset(
             _g.DRIVE_ROOT, _g.REPO_DIR, target_sha=pre, target_ref=str(tx.get("pre_update_branch") or pre),
             reason=reason, door="boot_smoke_rollback",
-            reset=lambda: rollback_managed_update(reason, reopen_writer_admission=False))
+            reset=lambda: rollback_managed_update_on_boot(reason))
     except RuntimeError as exc:
-        return False, str(exc)
+        return False, str(exc)  # the switch's own refusal, e.g. an intent already recorded
+    except Exception as exc:  # the whole door, its Git probes and intent write included
+        return _rollback_raised(exc)
     return ok, msg
 
 
@@ -952,9 +980,7 @@ def _recover_assisted_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dic
         snapshot = str(tx.get("local_snapshot") or "")
         pre = str(tx.get("pre_update_sha") or "")
         if rc_h == 0 and snapshot and snapshot != pre and head == snapshot:
-            ok, msg = rollback_managed_update(
-                "assisted_materialization_interrupted", reopen_writer_admission=False
-            )
+            ok, msg = rollback_managed_update_on_boot("assisted_materialization_interrupted")
             _log_supervisor({"type": "managed_update_assisted_materialization_interrupted",
                              "ok": ok, "msg": msg})
             return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
@@ -974,9 +1000,7 @@ def _recover_assisted_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dic
         # Only pending_boot_smoke proves that exact-binding verification, post-commit
         # tests, and the pre-restart smoke all passed. A commit found under an assisted
         # phase died inside those gates, so preserve it on failed-update-* and roll back.
-        ok, msg = rollback_managed_update(
-            "assisted_commit_gates_interrupted", reopen_writer_admission=False
-        )
+        ok, msg = rollback_managed_update_on_boot("assisted_commit_gates_interrupted")
         _log_supervisor({"type": "managed_update_assisted_commit_unproven",
                          "ok": ok, "msg": msg})
         return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
@@ -993,9 +1017,7 @@ def _recover_assisted_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dic
     if state == "in_progress":
         attempts = int(tx.get("resolution_attempts") or 0) + 1
         if attempts > _ASSISTED_BOOT_ATTEMPT_CAP:
-            ok, msg = rollback_managed_update(
-                "assisted_resolution_expired", reopen_writer_admission=False
-            )
+            ok, msg = rollback_managed_update_on_boot("assisted_resolution_expired")
             _log_supervisor({"type": "managed_update_assisted_expired", "ok": ok, "msg": msg})
             return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
         # Re-establish the merge state if the restart/rescue wiped it; preserve partial
@@ -1015,9 +1037,7 @@ def _recover_assisted_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dic
                         str(tx.get("target_sha") or "")
                     )
                     if not ok_bp:
-                        rb_ok, rb_msg = rollback_managed_update(
-                            "backfill_projection_failed", reopen_writer_admission=False
-                        )
+                        rb_ok, rb_msg = rollback_managed_update_on_boot("backfill_projection_failed")
                         _log_supervisor({"type": "managed_update_backfill_projection_failed",
                                          "error": bp_error, "rollback": rb_msg})
                         return {"finalized": False, "rolled_back": rb_ok, "msg": bp_error, "stash_note": rb_msg}
@@ -1065,9 +1085,7 @@ def _recover_assisted_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dic
                 tx["m0_tree"] = m0_tree
             if not ok:
                 # Could not re-stage the merge — fail closed to a clean pre-update state.
-                rb_ok, rb_msg = rollback_managed_update(
-                    "assisted_rematerialize_failed", reopen_writer_admission=False
-                )
+                rb_ok, rb_msg = rollback_managed_update_on_boot("assisted_rematerialize_failed")
                 _log_supervisor({"type": "managed_update_assisted_rematerialize_failed",
                                  "materialize_msg": msg, "rollback": rb_msg})
                 return {"finalized": False, "rolled_back": rb_ok, "msg": msg, "stash_note": rb_msg}
@@ -1307,7 +1325,7 @@ def _recover_replace_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dict
             abandoned = abandon_unapplied_replace(head)
             return {**abandoned, **_observed(tx, "not_applied")} if abandoned.get("abandoned") else abandoned
         reason = "replace_apply_interrupted"
-    ok, msg = rollback_managed_update(reason, reopen_writer_admission=False)
+    ok, msg = rollback_managed_update_on_boot(reason)
     return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
 
 
@@ -1394,17 +1412,14 @@ def _finalize_managed_update_locked(supervisor_ready: bool) -> Dict[str, Any]:
             {"type": "managed_update_stash_recovered_on_boot"},
         )
     if phase == "pending_boot_smoke":
-        return _finalize_pending_boot_smoke(tx, supervisor_ready)
+        return _rollback_incomplete(tx, _finalize_pending_boot_smoke(tx, supervisor_ready))
     if phase == "applying_replace":
-        return _recover_replace_on_boot(tx, supervisor_ready)
+        return _rollback_incomplete(tx, _recover_replace_on_boot(tx, supervisor_ready))
     if phase == "rolling_back":
-        ok, msg = rollback_managed_update(
-            str(tx.get("rollback_reason") or "boot_rollback_resume"),
-            reopen_writer_admission=False,
-        )
-        return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
+        ok, msg = rollback_managed_update_on_boot(str(tx.get("rollback_reason") or "boot_rollback_resume"))
+        return _rollback_incomplete(tx, {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg})
     if phase in _ASSISTED_PHASES:
-        return _recover_assisted_on_boot(tx, supervisor_ready)
+        return _rollback_incomplete(tx, _recover_assisted_on_boot(tx, supervisor_ready))
     if phase == MARKER_CLEANUP_RETRY_PHASE:
         # This includes completed rollback crossing a process restart:
         # bootstrap kept the files, so ONLY unlink, never reset/reapply.
@@ -1420,9 +1435,6 @@ def _finalize_managed_update_locked(supervisor_ready: bool) -> Dict[str, Any]:
         return {"finalized": False, "reason": "marker cleanup still failing",
                 **({"stash_note": stash_note} if stash_note else {})}
     if phase == GATE_BLOCKED_PHASE:
-        ok, msg = rollback_managed_update(
-            str(tx.get("gate_blocked_reason") or "boot_gate_recovery"),
-            reopen_writer_admission=False,
-        )
-        return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
+        ok, msg = rollback_managed_update_on_boot(str(tx.get("gate_blocked_reason") or "boot_gate_recovery"))
+        return _rollback_incomplete(tx, {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg})
     return {"finalized": False, "reason": f"unhandled phase {phase}"}

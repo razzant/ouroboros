@@ -183,11 +183,13 @@ def owe_late_review(drive_root: Any, record: Mapping[str, Any]) -> LateReviewMar
                           mark_id)
 
 
-def owe_after_end(drive_root: Any, duty_id: str, duty: Mapping[str, Any]) -> bool:
+def owe_after_end(drive_root: Any, duty_id: str, duty: Mapping[str, Any], *, replace: bool = True) -> bool:
     """Persist one producer duty (``left_review``: immutable facts naming ``task_id``) that only its author's
     ended task can discharge; the replay hands it back to its producer. False when the store refused (the
-    caller's own path still holds the duty)."""
-    return _owed(drive_root, duty_id, {**json.loads(json.dumps(dict(duty), default=str)), "after_end": True})
+    caller's own path still holds the duty). ``replace=False`` keeps an existing duty: unread-only feedback
+    cannot weaken a left wave's independent room obligation."""
+    return _owed(drive_root, duty_id, {**json.loads(json.dumps(dict(duty), default=str)), "after_end": True},
+                 replace=replace)
 
 
 def update_wait_cursors(drive_root: Any, duty_id: str, waiting: Mapping[str, Any]) -> None:
@@ -283,7 +285,7 @@ def _settle_owed(drive_root: Any, duty_id: str, row: Mapping[str, Any]) -> str:
     return "settled"
 
 
-def _owed(drive_root: Any, mark_id: str, row: Optional[Dict[str, Any]]) -> bool:
+def _owed(drive_root: Any, mark_id: str, row: Optional[Dict[str, Any]], *, replace: bool = True) -> bool:
     """Write (``row``) or discharge (``None``) one owed publication; False when the store refused."""
     from ouroboros import store  # D15->D17 is lazy-only
 
@@ -295,7 +297,7 @@ def _owed(drive_root: Any, mark_id: str, row: Optional[Dict[str, Any]]) -> bool:
         with store.open_store(drive_root, write=True) as txn:
             if row is None:
                 txn.delete_row(OWED_SET, mark_id)
-            else:
+            elif replace or txn.get_row(OWED_SET, mark_id) is None:
                 txn.put_row(OWED_SET, mark_id, row)
         return True
     except Exception:

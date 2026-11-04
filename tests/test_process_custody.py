@@ -107,14 +107,16 @@ def _spawn_service_from_worker_process(drive_root: str, result_queue) -> None:
     result_queue.put(proc.pid)
 
 
-# Both doors of a child process; ``psutil.Process(pid)`` only reads one that already exists.
-_SPAWN_PATTERN = re.compile(r"subprocess\.Popen\(|[^.\w]Popen\(|(?<!psutil)\.Process\(|[^.\w]Process\(")
+# Both doors of a child process, and the tracked start's Popen door (``shell_process.contained_popen``);
+# ``psutil.Process(pid)`` only reads one that already exists.
+_SPAWN_PATTERN = re.compile(
+    r"subprocess\.Popen\(|[^.\w]Popen\(|(?<!psutil)\.Process\(|[^.\w]Process\(|contained_popen\(")
 
 
 @pytest.mark.parametrize("line, spawns", [
     ("subprocess.Popen(cmd)", True), (" Popen(cmd)", True), ("mp.Process(target=run)", True), (" Process(target=run)", True),
     ("ctx.Process(target=run)", True), ("multiprocessing.Process(target=run)", True),
-    ("psutil.Process(pid)", False), ("ChildProcess(x)", False)])
+    ("contained_popen(subprocess.Popen, cmd)", True), ("psutil.Process(pid)", False), ("ChildProcess(x)", False)])
 def test_the_spawn_pattern_catches_both_doors(line, spawns):
     assert bool(_SPAWN_PATTERN.search(line)) is spawns
 

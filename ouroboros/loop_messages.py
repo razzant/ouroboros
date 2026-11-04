@@ -624,7 +624,7 @@ CONTEXT_FACTS_HEADER = "[CONTEXT_FACTS]"
 def subagents_fact_line() -> str:
     """The room's current delegation choice belongs only to the round's dynamic tail."""
     from ouroboros import config
-    from ouroboros.settings_integrity import live_subagents_mode, room_subagents_mode_applies
+    from ouroboros.settings_integrity import actor_is_scheduled, live_subagents_mode, room_subagents_mode_applies
     from ouroboros.subagent_runtime import subagents_availability
 
     if not room_subagents_mode_applies():
@@ -633,7 +633,10 @@ def subagents_fact_line() -> str:
         settings = config.load_settings()
         if subagents_availability(settings) != "available":
             return "Subagents: Off — off in Settings"
-        return f"Subagents: {live_subagents_mode(settings=settings).title()} — set by my human for this chat"
+        mode = live_subagents_mode(settings=settings)
+        if mode == "auto" and actor_is_scheduled():
+            return "Subagents: Auto — scheduled work"
+        return f"Subagents: {mode.title()} — set by my human for this chat"
     except Exception:
         log.debug("Subagents fact unavailable for the facts line", exc_info=True)
         return "Subagents: unknown (room settings unavailable)"

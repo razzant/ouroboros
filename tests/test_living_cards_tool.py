@@ -98,7 +98,8 @@ def test_a_component_card_is_stored_before_its_event_leaves_the_task(tmp_path):
     receipt = json.loads(_show_card(ctx, title="Flights", fallback_text="A 9:00 or B 12:00",
                                     components=[ACTION, {"type": "table", "path": "rows", "columns": [{"path": "t"}]}],
                                     data={"rows": [{"t": "9:00"}]}))
-    assert receipt == {"card_id": receipt["card_id"], "revision": 1, "shown": True}
+    assert receipt == {"card_id": receipt["card_id"], "revision": 1,
+                       "delivery": "OK: card accepted for delivery to owner chat."}
     card = load_card(tmp_path, receipt["card_id"])
     assert card["kind"] == "components" and card["chat_id"] == 1 and card["task_id"] == "task-1"
     assert card["data"] == {"rows": [{"t": "9:00"}]} and card["submissions"] == [] and card["revision"] == 1
@@ -112,7 +113,8 @@ def test_a_display_only_card_is_not_interactive_and_a_queued_card_says_so(tmp_pa
     ctx = _ctx(tmp_path, live=False)
     receipt = json.loads(_show_card(ctx, title="Status", fallback_text="All green",
                                     components=[{"type": "metric", "label": "Uptime", "value": "99.9"}]))
-    assert receipt["shown"] is False and receipt["queued"] is True
+    assert receipt["delivery"] == "OK: card queued for delivery to owner." and receipt["queued"] is True
+    assert "shown" not in receipt
     [event] = _events(ctx)
     assert event["interactive"] is False
 

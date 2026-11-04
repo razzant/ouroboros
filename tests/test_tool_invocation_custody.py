@@ -1,5 +1,6 @@
 """Local invocation lifetime and independent physical custody through consumers."""
 import multiprocessing
+import os
 import queue as stdqueue
 import subprocess
 import sys
@@ -97,7 +98,9 @@ def test_exception_after_spawn_keeps_live_process_then_releases_after_join(tmp_p
     original = subprocess.Popen
     owned = []
     def popen(cmd, **kw):
-        proc = original(cmd, **kw)
+        proc = (shell_process.contained_popen(original, cmd, **kw)
+                if executor_kind is None and (kw.get("start_new_session") or os.name == "nt")
+                else original(cmd, **kw))
         if cmd == [sys.executable, '-c', 'import time; time.sleep(30)']:
             owned.append(proc)
             def fail(**_kwargs):
@@ -123,7 +126,8 @@ def test_exception_after_spawn_keeps_live_process_then_releases_after_join(tmp_p
             if proc.poll() is None:
                 proc.kill()
             proc.wait(timeout=5)
-            shell_process._active_subprocesses.discard(proc)
+            if proc in shell_process._active_subprocesses:
+                assert shell_process.retire_tracked(proc)
 
 
 @pytest.mark.parametrize('receipt_token', ['exact-token', 'other-token'])

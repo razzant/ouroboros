@@ -44,6 +44,7 @@ class Api:
 
 
 class Client:
+    bot_id = ""
     updates: list = []
     edit_result = True
 
@@ -144,7 +145,7 @@ def test_open_question_is_a_plain_message_with_a_reply_address(tmp_path, monkeyp
     assert first.panels == []
     assert first.sent == [(42, "Question: Which db?\nWaiting for your answer; Stop and the task deadline still apply."
                                 "\nReply to this message with your answer.")]
-    record = plugin.telegram_quiz.quiz_for_message(api, 42, 1)
+    record = plugin.telegram_quiz.quiz_for_message(api, "", 42, 1)
     assert record and record["options"] == []
     Client.updates = [{"update_id": 100, "message": {
         "message_id": 1001, "chat": {"id": 42, "type": "private"}, "from": {"id": 42},
@@ -153,7 +154,7 @@ def test_open_question_is_a_plain_message_with_a_reply_address(tmp_path, monkeyp
     posts = []
     assert _run_poller(plugin, api, monkeypatch, posts) == []
     assert posts == [("/chat/decision", {
-        "request_id": "tg:100", "decision_id": "quiz:task-1:q1", "comment": "Try a different database",
+        "request_id": "tg:m:42:1001", "decision_id": "quiz:task-1:q1", "comment": "Try a different database",
     })]
 
 
@@ -170,7 +171,7 @@ def test_tapped_option_reaches_the_decision_ingress_and_settles_the_card(tmp_pat
                            reply=(200, {"ok": True, "state": "answered", "answered_index": 1}))
 
     assert posts == [("/chat/decision", {
-        "request_id": "tg:7", "decision_id": "quiz:task-1:q1", "option_index": 1,
+        "request_id": "tg:cb:cb", "decision_id": "quiz:task-1:q1", "option_index": 1,
     })]
     assert injected == [], "an answer is a decision, never a new chat turn"
     # The toast and the settled card come from the last constructed client. A reply that
@@ -224,7 +225,7 @@ def test_reply_to_the_card_is_the_owners_own_answer(tmp_path, monkeypatch, answe
                            reply=(200, {"ok": True, "state": "answered", "comment": answer_text}))
 
     assert posts == [("/chat/decision", {
-        "request_id": "tg:8", "decision_id": "quiz:task-1:q1", "comment": answer_text,
+        "request_id": "tg:m:42:600", "decision_id": "quiz:task-1:q1", "comment": answer_text,
     })]
     assert injected == []
     last = _LAST_CLIENT[-1]
@@ -346,13 +347,13 @@ def test_remembered_cards_are_bounded(tmp_path):
     plugin = _load_plugin()
     api = Api(tmp_path)
     for index in range(60):
-        plugin.telegram_quiz.remember_quiz(api, f"tok{index}", {"task_id": "t", "quiz_id": f"q{index}",
+        plugin.telegram_quiz.remember_quiz(api, "", f"tok{index}", {"task_id": "t", "quiz_id": f"q{index}",
                                                                  "chat_id": 42, "message_id": index, "options": []})
     state = json.loads((tmp_path / "quiz_state.json").read_text(encoding="utf-8"))
     assert len(state["quizzes"]) == 50
     assert "tok0" not in state["quizzes"] and "tok59" in state["quizzes"]
-    assert plugin.telegram_quiz.quiz_for_message(api, 42, 59)["quiz_id"] == "q59"
-    assert plugin.telegram_quiz.quiz_for_message(api, 42, 0) is None
+    assert plugin.telegram_quiz.quiz_for_message(api, "", 42, 59)["quiz_id"] == "q59"
+    assert plugin.telegram_quiz.quiz_for_message(api, "", 42, 0) is None
 
 
 _LAST_CLIENT: list = []
@@ -594,7 +595,7 @@ def test_overflowing_card_answers_through_its_keyboard_message(tmp_path, monkeyp
     _run_poller(plugin, api, monkeypatch, posts,
                 reply=(200, {"ok": True, "state": "answered", "answered_index": 1}))
     assert posts == [("/chat/decision", {
-        "request_id": "tg:21", "decision_id": "quiz:task-1:q1", "option_index": 1,
+        "request_id": "tg:cb:cb", "decision_id": "quiz:task-1:q1", "option_index": 1,
     })]
     assert _LAST_CLIENT[-1].edits == [(42, keyboard_id,
                                        "Project: Alpha site\n1. sqlite\n2. ★ postgres\nAnswered: 2. ★ postgres",
@@ -608,7 +609,7 @@ def test_overflowing_card_answers_through_its_keyboard_message(tmp_path, monkeyp
     posts = []
     assert _run_poller(plugin, api, monkeypatch, posts) == []
     assert posts == [("/chat/decision", {
-        "request_id": "tg:22", "decision_id": "quiz:task-1:q1", "comment": "postgres, but later",
+        "request_id": "tg:m:42:900", "decision_id": "quiz:task-1:q1", "comment": "postgres, but later",
     })]
 
     # ... while a reply to an earlier explanation part is an ordinary owner message.
@@ -627,7 +628,7 @@ def test_record_without_details_from_an_older_skill_still_answers(tmp_path, monk
     _settings(tmp_path)
     api = Api(tmp_path)
     token = plugin.telegram_quiz.mint_token("task-1", "q1")
-    plugin.telegram_quiz.remember_quiz(api, token, {
+    plugin.telegram_quiz.remember_quiz(api, "", token, {
         "task_id": "task-1", "quiz_id": "q1", "chat_id": 42, "message_id": 555,
         "options": ["sqlite", "★ postgres"], "text": "Question: Which db?\n1. sqlite\n2. ★ postgres",
     })

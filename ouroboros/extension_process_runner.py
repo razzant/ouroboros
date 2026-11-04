@@ -39,8 +39,8 @@ from ouroboros.platform_layer import (
 from ouroboros.skill_loader import find_skill, grant_status_for_skill, skill_state_dir
 from ouroboros.tools.process_facts import publish_process_facts
 from ouroboros.tools.registry import ToolContext
-from ouroboros.tools.shell import _active_subprocesses, _kill_process_group, _subprocess_lock
-from ouroboros.tools.shell_process import tracked_start
+from ouroboros.tools.shell import _kill_process_group
+from ouroboros.tools.shell_process import contained_popen, retire_tracked, tracked_start
 from ouroboros.tools.skill_exec import _scrub_env
 from ouroboros.usage_accounting import current_usage_scope, record_unmetered_external_dispatch
 from ouroboros.utils import sanitize_tool_result_for_log
@@ -473,7 +473,7 @@ def _child_process(
         from ouroboros.owner_pause import operation_start
         confirmed = external_handoff("extension_process")
         with tracked_start() as publish, operation_start():
-            proc = subprocess.Popen(cmd, **kwargs)  # noqa: S603 - argv is host-constructed
+            proc = contained_popen(subprocess.Popen, cmd, **kwargs)  # noqa: S603 - argv is host-constructed
             publish(proc)
     except BaseException as exc:
         if proc is not None:
@@ -519,8 +519,7 @@ def _child_process(
                 pass
             if proc.poll() is not None:
                 confirmed()
-            with _subprocess_lock:
-                _active_subprocesses.discard(proc)
+            retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
             try:
                 input_path.unlink(missing_ok=True)
             except OSError:

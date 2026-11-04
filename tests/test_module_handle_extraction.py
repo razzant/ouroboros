@@ -280,8 +280,9 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     })),
     "ouroboros/tools/subagent_integration_delegated.py": ("ouroboros/tools/subagent_integration.py", "_si", frozenset({
         "_baseline_drifted_paths", "_capture_at_disposition", "_locked_apply",
-        "_patch_touched_paths", "_sha256_file", "_stageable_paths",
+        "_patch_touched_paths", "_sha256_file",
         "_target_is_system_repo", "_write_verdict", "_integration_runtime_mode",
+        "_shared_read_refusal", "load_task_result",
     })),
     "ouroboros/tools/control_scheduling.py": ("ouroboros/tools/control.py", "_ctl", frozenset({
         "load_settings",

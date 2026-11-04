@@ -376,7 +376,7 @@ def test_bundled_telegram_reseed_delivers_the_current_version(tmp_path, monkeypa
     installed = _write_skill(drive_root / "skills" / "native", "telegram", version="1.2.0")
     (installed / ".seed-origin").write_text("seeded_from=test\n", encoding="utf-8")
     assert _reseed(seed_dir, drive_root) == 1
-    assert "version: 1.4.2" in (installed / "SKILL.md").read_text(encoding="utf-8")
+    assert "version: 1.4.3" in (installed / "SKILL.md").read_text(encoding="utf-8")
     for path in ("plugin.py", "lib/telegram_api.py", "lib/telegram_quiz.py", "lib/telegram_state.py"):
         assert (installed / path).read_bytes() == (seed_dir / "telegram" / path).read_bytes()
 
@@ -468,7 +468,7 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
         assert compute_content_hash(installed) == previous_hash
         assert read_install_record(drive, name) == previous_record
     else:
-        version = {'live_conversation': '0.1.30', 'grok_realtime': '0.1.11', 'gemini_live': '0.1.20', 'openai_realtime': '0.1.9',
+        version = {'live_conversation': '0.1.31', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.21', 'openai_realtime': '0.1.10',
                    'unix_computer_use': '0.7.1'}.get(name, '0.1.1')
         assert f"version: {version}\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
         assert compute_content_hash(installed) == compute_content_hash(repo / "skills" / name)

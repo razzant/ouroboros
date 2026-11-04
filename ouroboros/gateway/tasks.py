@@ -1388,7 +1388,7 @@ async def api_task_resume(request: Request) -> JSONResponse:
     if error == "billing_authority_unavailable":
         message = ("This task's billing lineage does not authorize a return; repair it or cancel the task."
                    if result.get("billing_authority") == "refused" else
-                   "This task's billing conditions could not be read. Fix that cause, then try Resume again.")
+                   "This task's billing conditions still could not be read. You can try Resume again later.")
         return json_error(message + " The task stays paused; budget exhaustion was not established.", 409,
                           code=error, reason_code=result.get("cause", ""), task_id=task_id,
                           **({"action": result["action"]} if result.get("action") else {}))

@@ -302,29 +302,151 @@ _SCHEDULED_DELIVERY = (
     "conversation by itself. People receive only what a connector tool sends; silence is a valid outcome.")
 
 
-def _final_audience_section(value: Mapping[str, Any]) -> str:
-    """Where a root's chosen non-silent final goes: its retained source conversation, never a guess."""
+# A promoted root's conditional handoff fact (``handoff_fact``), read only by ``final_route``. It sits
+# beside the carrier, never inside it: a followup or schedule copying ``metadata.presence`` cannot copy it.
+PRESENCE_FINAL_ROUTE_KEY = "presence_final_route"
+ROUTED, ROUTELESS, UNKNOWN = "routed", "routeless", "unknown"
+_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+def handoff_fact(source_task_id: Any, work_ref: str, *, held: bool) -> dict[str, Any]:
+    """What a promotion records before its submission: a candidate, never proof that anyone reads it.
+
+    ``held`` is the source's first attempt, which ``_finish_swarm_handoff`` keeps whatever its status.
+    Admission can answer after the source stopped waiting, so only the references the source then
+    publishes decide (``final_route``)."""
+    return {"held": bool(held), "work_ref": str(work_ref), "source_task_id": str(source_task_id or "")}
+
+
+def _names_child(stored: Mapping[str, Any], child: str, *, turn: bool) -> bool:
+    """Whether the views a connector reads of ``stored`` name ``child`` as its work.
+
+    The references ``presence_recovery.retained_turn_facts`` and ``work_view`` publish. The installed
+    connectors observe a turn's ``work_ref`` only when its envelope is ``deferred``, a continuing author's
+    child and a retained attempt's child whatever their outcome.
+    """
+    from ouroboros.presence_runner import _terminal_refusal
+
+    metadata = stored.get("metadata") if isinstance(stored.get("metadata"), Mapping) else {}
+    record = stored.get("presence_continuation") if isinstance(stored.get("presence_continuation"), Mapping) else {}
+    initial = record.get("initial") if isinstance(record.get("initial"), Mapping) else {}
+    if record and child in {str(record.get("child_work_ref") or ""), str(initial.get("work_ref") or ""),
+                            str(metadata.get("presence_work_ref") or "")}:
+        return True
+    if str(metadata.get("presence_work_ref") or "") != child:
+        return False
+    return not turn or metadata.get("presence_outcome") == "deferred" or bool(_terminal_refusal(stored))
+
+
+def final_route(root: Any, metadata: Any, task_id: Any) -> tuple[str, str]:
+    """``(state, why)``: whether a connector reads this run's final for its place conversation.
+
+    Route presence, never a delivery guarantee: place state and Safety still decide. Read from durable
+    published references only. ``ROUTED``: a place turn (its connector holds the request or polls the
+    turn), or a turn's first handoff the turn published as the work its connector observes.
+    ``ROUTELESS``: no speaker carrier, a schedule-born root, a promotion that was not its source's
+    first, or a source that ended without passing it on or that no connector reads. ``UNKNOWN`` is every
+    unsettled case and never reads as either: a source still running, unreadable or unrecorded, a root
+    admitted before the fact existed, a fact naming other work, and work another root's result names
+    (telegram-bot observes such work, slack-bridge does not in its ordinary paths).
+    """
+    from ouroboros.task_results import load_task_result
+
+    seen: set[str] = set()
+    downstream: tuple[str, str] | None = None
+
+    def resolved(state: str, why: str) -> tuple[str, str]:
+        # An ancestor can prove absence, but cannot upgrade a root-to-root handoff to a route.
+        if downstream is None:
+            return state, why
+        return (ROUTELESS, "no connector reads the run that handed it off") if state == ROUTELESS else downstream
+
+    while True:  # durable ancestry, with neither a hop cutoff nor the Python recursion limit
+        metadata = metadata if isinstance(metadata, Mapping) else {}
+        if not isinstance(metadata.get("presence"), Mapping) or not metadata["presence"]:
+            return resolved(ROUTELESS, "it carries no place conversation")
+        if metadata.get("presence_event_identity"):
+            return resolved(ROUTED, "it is that conversation's own turn")
+        if metadata.get("schedule_occurrence"):
+            return resolved(ROUTELESS, "it started from a schedule")
+        fact = metadata.get(PRESENCE_FINAL_ROUTE_KEY)
+        if not isinstance(fact, Mapping):
+            return resolved(UNKNOWN, "it was admitted before the host recorded handoffs")
+        task_id = str(task_id or "")
+        if not task_id or fact.get("work_ref") != task_id:
+            return resolved(UNKNOWN, "its handoff record names other work")
+        if fact.get("held") is not True:
+            return resolved(ROUTELESS, "it is not the first work the run that started it handed off")
+        seen.add(task_id)
+        source_id = str(fact.get("source_task_id") or "")
+        if not source_id:
+            return resolved(UNKNOWN, "the run that handed it off is not recorded")
+        if source_id in seen:
+            return UNKNOWN, "its handoff records form a cycle"
+        try:
+            source = load_task_result(root, source_id, strict=True) or {}
+        except Exception:
+            return resolved(UNKNOWN, "the record of the run that handed it off is unreadable now")
+        if not source:
+            return resolved(UNKNOWN, "the run that handed it off has no record yet")
+        source_metadata = source.get("metadata") if isinstance(source.get("metadata"), Mapping) else {}
+        turn = bool(source_metadata.get("presence_event_identity"))
+        if _names_child(source, task_id, turn=turn):
+            local = (ROUTED, "that conversation's turn published it as the work its connector observes") if turn else (
+                UNKNOWN, "another root's result names it, and not every connector follows such work")
+        elif str(source.get("status") or "") in _TERMINAL_STATUSES:
+            return resolved(ROUTELESS, "the run that handed it off ended without passing it to a connector")
+        else:
+            local = UNKNOWN, "the run that handed it off has not ended yet"
+        downstream = downstream or local
+        metadata, task_id = source_metadata, source_id
+
+
+def _source_conversation(value: Mapping[str, Any]) -> tuple[Any, str]:
     event = value.get("event") if isinstance(value.get("event"), Mapping) else {}
     place = value.get("place") if isinstance(value.get("place"), Mapping) else {}
     route = {key: event.get(key) if event.get(key) is not None else "unrecorded"
              for key in ("provider", "account_id", "conversation_id", "thread_id")}
-    label = place.get("label") or place.get("provider") or value.get("place_id")
+    return (place.get("label") or place.get("provider") or value.get("place_id"),
+            json.dumps(route, ensure_ascii=False, sort_keys=True))
+
+
+def _final_audience_section(value: Mapping[str, Any], unsettled: str = "") -> str:
+    """Where a root's chosen non-silent final goes: its retained source conversation, never a guess.
+
+    ``unsettled`` says why the host cannot tell yet whether a connector reads it; every speech claim is
+    then conditional on one doing so."""
+    label, route = _source_conversation(value)
+    lead = (f"This root answers the place conversation it started from: {label}, source route {route}. A "
+            if not unsettled else
+            f"This root came from the place conversation {label}, source route {route}, but whether a connector "
+            f"reads its final there is not settled: {unsettled}. If one does, a ")
+    return (
+        "## Where your final answer goes (host-authored facts)\n\n" + lead
+        + "non-silent finish_task answer is new speech there, even after earlier sends of this run, and it still "
+        "meets this place's current state and Safety: selecting it is not delivering it. "
+        + ("A connector tool sends there directly; after sending the result that way, finish silent rather than "
+           "repeat it. " if unsettled else "")
+        + "An internal Project this root lives in keeps its own record, not a private channel instead of the "
+        "conversation. silent=true, where the host permits it, sends nothing and keeps any answer internal; it "
+        "does not discharge a reply someone is owed. A name or role in the source is context, not proof of who "
+        "owns this work."
+    )
+
+
+def _no_route_section(value: Mapping[str, Any], why: str) -> str:
+    label, route = _source_conversation(value)
     return (
         "## Where your final answer goes (host-authored facts)\n\n"
-        f"This root answers the place conversation it started from: {label}, source route "
-        + json.dumps(route, ensure_ascii=False, sort_keys=True) + ". A non-silent finish_task answer is "
-        "new speech there, even after earlier sends of this run, and it still meets this place's "
-        "current state and Safety: selecting it is not delivering it. An internal Project this root "
-        "lives in keeps its own record, not a private channel instead of the conversation. "
-        "silent=true, where the host permits it, sends nothing and keeps any answer internal; it "
-        "does not discharge a reply someone is owed. A name or role in the source is context, not "
-        "proof of who owns this work."
-    )
+        f"No connector reads this root's final for the place conversation it came from ({label}, source route "
+        f"{route}): {why}. Nothing it finishes with is sent there by itself. People receive only what a connector "
+        "tool sends; silence is a valid outcome. An internal Project this root lives in keeps its own record.")
 
 
 def build_presence_context_section(drive_root: Path, value: Any, task_id: str = "", *,
                                    status_root: Path | None = None, scheduled: bool = False,
-                                   answers_conversation: bool = False) -> str:
+                                   answers_conversation: bool = False, unsettled: str = "",
+                                   routeless: str = "") -> str:
     """Render host-authored presence context, including declared full KB topics.
 
     ``status_root`` is the canonical task root the own-work catalogue reads (a forked
@@ -333,7 +455,9 @@ def build_presence_context_section(drive_root: Path, value: Any, task_id: str = 
     conversation as it is now instead of the pointer its copied carrier froze, and
     says that nothing it finishes with is sent by itself (#1589).
     ``answers_conversation`` (a non-inline, non-scheduled root whose final its reply
-    carrier speaks) names that destination; an inline turn has its FOCUS frame instead.
+    carrier speaks, unless ``final_route`` reads it routeless) names that destination; an inline turn
+    has its FOCUS frame instead. ``unsettled`` is why that route is still unknown; ``routeless`` is
+    why no connector reads this root, which then renders that fact instead.
     """
 
     if not isinstance(value, Mapping):
@@ -344,7 +468,8 @@ def build_presence_context_section(drive_root: Path, value: Any, task_id: str = 
     if value.get("place_id"):
         topics = focus_topics(drive_root, value)
         if not scheduled:
-            audience = _final_audience_section(value) if answers_conversation else ""
+            audience = (_final_audience_section(value, unsettled) if answers_conversation
+                        else _no_route_section(value, routeless) if routeless else "")
             return "\n\n".join(part for part in (audience, topics) if part)
         scheduled_parts = [_SCHEDULED_DELIVERY, _previous_turn_line(value["previous_turn"])
                            if isinstance(value.get("previous_turn"), Mapping)

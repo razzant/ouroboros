@@ -194,7 +194,7 @@ ouroboros/ — agent core and shared runtime (§6)
   transport_custody.py — typed transport facts for the physical-attempt custody seam
   openrouter_attribution.py — canonical OpenRouter application attribution, centralized so forks do not compete under one identity (§7)
   openai_chat_custom.py, openai_chat_dispatch.py — direct-OpenAI Chat function→custom codec and its dispatch policy: custom first, exact-dialect fallback, task-local `none` last
-  request_wire_contract.py, request_wire_resolution.py, request_wire_receipts.py, request_wire_attempt.py, request_wire_custom_validation.py, request_wire_recovery.py, effort_evidence.py — exact-route wire compatibility, one concern each as named (§6 Context fitting, retry, and compaction; §10 invariant 13)
+  request_wire_contract.py, request_wire_resolution.py, request_wire_receipts.py, request_wire_attempt.py, request_wire_custom_validation.py, request_wire_recovery.py, request_wire_temperature.py, effort_evidence.py — exact-route wire compatibility (§6 Context fitting, retry, and compaction; §10 invariant 13)
   anthropic_native_custody.py — whole-block replay custody for Anthropic native reasoning on the same route
   reasoning_artifacts.py — sealed-vs-portable reasoning-artifact classification, fail-closed; `SIGNED_PORTABLE` is a decaying external fact, extended only by a fresh cross-provider replay probe (inventory: docs/DEVELOPMENT.md)
   llm_observability.py — public call projections persisted; private sidecars stripped from durable records
@@ -226,7 +226,7 @@ ouroboros/ — agent core and shared runtime (§6)
   owner_words.py — the owner's words that caused a work tree, rendered verbatim for children, sessions and reviewers
   project_lease.py — one-writer-per-project lease in `assign_tasks`; same-project swarms exempt (§6 Project registry and lease)
   context.py, context_timing.py — Main context, timing, subagent catalog (§6)
-  context_input_selection.py — declared-source composition and first/latest usable author-input exhibits, distinct from current criteria (§6 Selected first-input sources)
+  context_input_selection.py — declared inputs, historical author views (not criteria), first-build overflow rescue (§6 Selected first-input sources; Context fitting)
   main_context_authority.py — Main's authority view and helpers' idempotent predecessor briefs (§6)
   client_surface.py — bounded client-surface normalizer; identity excludes viewport/narrow_layout (§4 WebSocket protocol)
   context_fit.py — immutable Max/Low/Nano views, typed reclaim deficit, transcript cache seal; no routing/retry authority (§6 Context fitting)
@@ -355,6 +355,7 @@ ouroboros/ — agent core and shared runtime (§6)
   extension_plugin_api.py, extension_registry_state.py, extension_liveness.py, extension_child_catalog.py, extension_import_staging.py, extension_surface_names.py — the extension runtime's leaves: the `PluginAPI`, live-surface registries, liveness, child-catalog validation, staged import trees, surface naming
   live_conversation.py — Ordinary actor host port: common context, tools, history, money and Stop (§13)
   live_timing.py — Renewal boundaries assembled into the existing call timing journal (§13)
+  live_tool_lane.py — Call effect lane: request facts, unlocked effects, whole call/result units (§13)
   realtime_session.py — Joined native socket teardown and JSON transport mechanics
   realtime_item_echo.py — Shared item acknowledgement comparison: image parts by type, other payloads exact
   call_peers.py, call_protocol.py — Media peers, PCM mixing and the companion codec (§12)
@@ -510,7 +511,7 @@ ouroboros/ — agent core and shared runtime (§6)
     shell_process.py, shell_effects.py, shell_outputs.py — the command-running substrate: execution, working-tree effects, declared outputs and per-path export eligibility
     plan_review_artifacts.py, plan_author_history.py — Earlier-schema waves and author lineage for history views and the importer
     evolution_stats.py — sampled Git metrics as a local task artifact; no remote commit
-    owner_delivery.py — Owner event delivery: live queue or the `pending_events` fallback with sticky deferral
+    owner_delivery.py — Owner events: live queue or sticky `pending_events`; room-naming receipts
     deliverables_shell.py — cp/mv/ln into deliverables with symlink checks
     shell_audit.py — Post-exec custody audit for process tools
     process_facts.py — Per-call selected environment, secret egress masking and typed process/runtime facts for loop_tool_execution.py; `run_script` cites its script's redacted dispatch record (`get_task_result` reads it)
@@ -570,7 +571,7 @@ ouroboros/ — agent core and shared runtime (§6)
     delegate_integration.py — Delegated mutation authority, snapshots and terminal capture; skill-payload CAS apply with extension reconciliation (§6 Snapshots, capture and disposition)
     delegate_payload_patch.py, delegate_terminal_evidence.py, subagent_integration_delegated.py — Delegation leaves: the skill-payload patch pipeline, the terminal story of one delegated run, `integrate_delegated_patch`
     subagent_integration.py — integrate_subagent_patch (sha256, 3-way --index, protected-path gated, genesis refused), external-workspace audited verdict, compare_subagent_patches
-    patch_verdict.py — the one verdict writer for both patch pipelines: writer-minted subjects (`run_<rid>`); artifact plus typed `delegate_run_patch_verdict` custody row
+    patch_verdict.py, patch_staging.py — both patch pipelines' verdict writer (`run_<rid>` subjects; artifact plus typed `delegate_run_patch_verdict` custody row) and index staging
   delegate_start_claims.py — Serializes custody recheck and `START_REQUESTED`; transport/run waits are outside locks. Unsent retries may hold actor/payload locks, never root/store locks
   process_containment.py, process_lifeline.py, process_overload.py — Token/Job custody, POSIX owner-death guardian and pressure stop; unconfirmed cleanup blocks; not a quota (DEVELOPMENT §9)
   process_scope.py, process_census.py — work scopes (membership, records, task-end/Panic reap, engine index); kernel-state readers (§9)
@@ -579,7 +580,7 @@ ouroboros/ — agent core and shared runtime (§6)
   startup_migrations.py, startup_task_files.py — Explicit inherited-state import/repair and addressed file recovery
   delegate_custody_current.py — Custody on the store: run rows, pending invocations, outbox, importer's fold
   owned_shutdown.py — the ownership set, the one bounded exit stop with its next-start retry and entry `state/shutdown_entry.json` (§9)
-  platform_layer.py, platform_win32_abi.py, platform_darwin_abi.py, process_identity.py — OS process/lock helpers, descendant seam, private Win32/Darwin ABI, birth tokens (Platform substrate below)
+  platform_layer.py, platform_win32_abi.py, platform_darwin_abi.py, platform_process_target.py, process_identity.py — OS locks/processes, native ABI, held targets and birth tokens (Platform substrate below)
   verified_download.py — Shared exact-size/digest verification and atomic cached byte delivery
   node_runtime.py — Execution-probed Node runtime health (`node_runtime_health`; a missing binary is never cached), `select_skill_node_runtime`, `skill_node_emergency_path_dir`
 
@@ -641,7 +642,7 @@ The APK's `MainActivity` hosts the SPA. `CoreService` and `BootReceiver` live in
 
 `platform_layer.py` owns OS observations and lock/process primitives; callers own policy. Its shared lock accepts non-blocking probes on read-only descriptors. `kernel_file_locks_enforced` probes each directory once, never from a failed live acquisition: unsupported locks and `ENOLCK` select a recorded name-only tier; an unprobeable directory stays enforced for that call, other errors fail closed. The name tier uses O_EXCL plus identity recheck without kernel exclusion; callers may refuse it (money does). A won lock needs readable descriptor and path inode identities; unreadable is no proof. Recovery skips stale-age grace after confirmed owner death and keeps live writers; unknown metadata keeps grace; permission denial proves no death. Refresh returns ownership: losing it means abandoning protected work. Release unlinks only the held identity (ordering, bounded unlink retry and the `LockFileEx` byte: `platform_layer.py`).
 
-Birth identity is separate from PID presence. Linux mints boot-qualified ticks, then the ps wall-clock token, then bare ticks with a disclosed cross-boot collision limit; the custody ledger keeps the `start_time` spelling and an optional boot-qualified sibling: an older reader meeting an unknown token after rollback would prune every row without a kill. macOS adds kernel `p_starttime` (`process_identity`); death proof, worker readiness and review controllers compare it before ps. Windows uses the exact creation FILETIME, checks presence through non-signalling handles and treats access-denied or unknown presence as no licence to clean up; Win32 calls declare full-width HANDLE arguments (omitted declarations truncate 64-bit handles), and Job termination treats a false BOOL return as failure, so survivors stay disclosed. Bundled resources use the CLI / Headless Boundary lookup order; `node_runtime` owns Node health and selection (re-exported lazily by the platform layer). TCP keepalive: §6 Context fitting, retry, and compaction.
+Birth differs from PID presence. Linux uses boot-qualified ticks, then ps time, then bare ticks (cross-boot collisions disclosed). The ledger keeps `start_time` plus an optional qualified sibling for rollback readers. macOS `process_identity` reads kernel `p_starttime`; Windows uses creation FILETIME and non-signalling handles. Unknown grants no kill. Full-width Win32 HANDLE declarations prevent truncation; false Job termination BOOL is failure. `shell_process.contained_popen` starts tracked Windows children suspended in non-breakaway Jobs before resume; POSIX leaders remain waitable with WNOWAIT until `retire_tracked` measures the group empty. Root results return normally. Panic uses the held group/Job; unknown membership retains custody and prevents idle-worker exit. A group record transfers no Job handle. Bundled lookup: CLI / Headless Boundary; Node selection: `node_runtime`, lazily re-exported here. TCP keepalive: §6 Context fitting.
 
 ### Data layout (`~/Ouroboros/`)
 

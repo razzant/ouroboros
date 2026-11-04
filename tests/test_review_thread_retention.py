@@ -546,6 +546,19 @@ def test_the_real_continuation_reader_lets_a_finished_root_go_and_holds_a_contin
     assert world.run()["accepted"] == 1  # the owner can no longer Continue a finished root
 
 
+def test_the_real_continuation_reader_lets_an_author_stopped_root_go_with_its_offer_standing(world, monkeypatch):
+    """Continue stays offered, yet a stop keeps a finished root's ordinary retention: no thread waits on the offer."""
+    from ouroboros.owner_continue import continuation_offer
+    from ouroboros.task_store import read_document
+
+    monkeypatch.setattr(delegate_continuation, "still_continuable", REAL_CONTINUABLE)
+    patch_document(world.root, TASK, lambda current: {
+        **current, "status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {
+            "status": "ok", "task_completion": {"action": "stop", "rationale": "Not ready."}}}})
+    assert continuation_offer(read_document(world.root, TASK), TASK)["cause"] == "author_stop"
+    assert world.run()["accepted"] == 1
+
+
 def _revision(root):
     with store.open_store(root, write=False) as txn:
         return txn.revision()

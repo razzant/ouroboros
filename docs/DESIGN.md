@@ -522,10 +522,17 @@ never shown as saved.
 
 **What Swarm leaves behind.** An owner message the host accepted while its room was on Swarm says `Swarm`
 before its time: a request, never proof that helpers ran. A Swarm root's card says one line, first in its foot,
-from its receipt: helpers started (counted from recorded starts; while none is recorded, the helpers requested),
-models, `$X known + N not final`, subscription sessions, or
-`Swarm requested · no helpers started`; never minds, waves, families, peaks, percentages or one sum the facts
-do not make, and an unknown amount is a word, never $0 (`web/modules/swarm_presentation.js`).
+from its receipt: helpers started (counted from recorded starts, a child's own runs with that child), `N helpers requested ·
+K started` where requests outnumber starts, or while none is recorded the helpers requested, with `none started` only
+from a receipt that knows its whole tree; then every refused start (`N helper starts failed`) and every start nobody has
+confirmed or denied that no started helper holds (`N helper starts unconfirmed`), side by side with the starts, or
+`helpers unknown`; then models, `$X known + N not final`, subscription sessions; never minds, waves, families, peaks,
+percentages or one sum the facts do not make, and an unknown amount is a word, never $0. Only a root the record proves
+tried no helper has no line and adds nothing to its foot: no fan-out observed and a receipt that knows its whole tree
+(complete coverage, its actors, the refusals it read) holding only the root and its reviews. The observation alone, an
+older or partial receipt is no proof and keeps its line; a later read that proves it takes the line away
+(`web/modules/swarm_presentation.js`). Scheduled work runs on Auto whoever wrote the schedule, so it carries no Swarm line
+at all (owner 03.11).
 
 **"+" holds the composer's actions.** Where the paperclip stood, "+" (More actions, a
 finger-sized target that keeps the row's height) opens a menu sheet above itself: Attach
@@ -1430,8 +1437,9 @@ goes to the exact waited question and answers nothing. A row offers exactly the
 controls the server lists for its work, each at its exact task, on the shared
 task controls: Stop ends the whole work (every episode still running, the newest
 first), `Stop earlier attempt` only what earlier attempts left running, and
-Pause, Resume, Hurry and Wrap up act on the current episode. A control its door
-would refuse is never offered: a Continue waiting for its earlier attempt says
+Pause, Resume, Hurry and Wrap up act on the current episode. Known refusals hide controls.
+An author-stop Continue offer reads saved facts; its press checks money and explains a refusal
+(owner 04.11, explicit unfinished work under unchanged limits). A Continue waiting for its earlier attempt says
 what it waits for, offers no Resume and starts by itself once that work
 settles. A paused or saved Continue offers Resume; when all of its earlier
 attempt's remaining work is observed running or queued, Resume returns it to

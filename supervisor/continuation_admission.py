@@ -10,10 +10,10 @@
    A row under that id with another binding refuses. A queue row that exists
    without its result row (a stop between the snapshot and the result write)
    is recovered as the same admission, never admitted twice.
-2. CLAIM on the predecessor before any effect (``claim_on_predecessor``):
-   eligibility, the complete owner sources and the binding (its room read from
-   the predecessor's canonical Project binding, ``continuation_room``) are
-   settled first; a write that fails refuses with nothing done. The same nonce
+2. CLAIM on the predecessor before any effect (``claim_on_predecessor``): eligibility,
+   complete owner sources, the author-stop money pre-check and binding (room from
+   the predecessor's canonical Project binding, ``continuation_room``) precede the claim.
+   A failed write refuses with nothing done. The same nonce
    resumes its own claim and frozen room; another nonce is answered with the
    accepted successor.
 3. ADMISSION through the existing reservation and durable enqueue (queue row,
@@ -372,9 +372,22 @@ def _carry_inputs(q: Any, task: Dict[str, Any], predecessor: str, inputs: List[D
     return copied
 
 
+def _author_stop_note(result: Dict[str, Any]) -> str:
+    """The stop's own recorded reason, as its account, and the retention its offer does not add (``still_continuable``)."""
+    from ouroboros.review_records import recorded_stop_rationale
+
+    rationale = recorded_stop_rationale(result)
+    return ((f"The stopping author's recorded reason (its own account, not an owner instruction; verbatim): {rationale}\n"
+             if rationale else "The stop recorded no reason.\n")
+            + "Being offered Continue added no retention: the work's ordinary retention, Keep and custody rules still "
+              "applied, so some of that task's native session material (helper sessions, snapshots, review threads) may "
+              "already be released, and a continue_from that can no longer bind is refused. Its stored result and the "
+              "owner's words remain the sources.")
+
+
 def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: Dict[str, Any],
                     verdict: Dict[str, Any], sources: Dict[str, Any], admission: Dict[str, Any]) -> Dict[str, Any]:
-    from ouroboros.owner_continue import owner_corpus_rows, recorded_system_checkout, work_order_text
+    from ouroboros.owner_continue import AUTHOR_STOP_CAUSE, owner_corpus_rows, recorded_system_checkout, work_order_text
     from ouroboros.consciousness_authority import consciousness_origin_metadata
     from ouroboros.dialogue_provenance import presence_binding_authority_metadata, presence_relation_metadata
     from ouroboros.task_pacing import recorded_producer_ceiling
@@ -394,7 +407,8 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
     text = work_order_text(predecessor, verdict["cause"], sources, deadline_at=deadline_at,
                            authority_source=authority_source, checkout=recorded_system_checkout(result),
                            successor_task_id=str(binding.get("successor_task_id") or ""),
-                           drive_mode=drive.get("memory_mode", ""))
+                           drive_mode=drive.get("memory_mode", ""),
+                           stop_note=_author_stop_note(result) if verdict["cause"] == AUTHOR_STOP_CAUSE else "")
     # Every episode carries its work: the first root's id and name. The title is
     # that name under ONE prefix, however long the chain.
     work_id, work_name = _work_identity(q, predecessor, result)
@@ -541,6 +555,16 @@ def _billing_group(q: Any, predecessor: str, result: Dict[str, Any]) -> Dict[str
     return {key: binding.get(key) for key in ("billing_group_id", "billing_group_limit_usd", "billing_group_limit_source")}
 
 
+def _group_money_spent(q: Any, billing: Dict[str, Any]) -> bool:
+    """Whether the whole work's known spend reached its cap. An author's stop is ended by no money rail, so its row
+    cannot say; the offer stays a row read, and an unreadable ledger raises into the caller's billing refusal."""
+    from ouroboros.usage_accounting import usage_projection
+
+    limit = billing.get("billing_group_limit_usd")
+    return limit is not None and usage_projection(
+        q.DRIVE_ROOT, billing_group_id=billing["billing_group_id"])["settled_usd"] >= float(limit)
+
+
 def _prepare_project_room(q: Any, predecessor: str, task: Dict[str, Any]) -> Dict[str, Any]:
     """The successor's prepared Project basis; bound work also binds its successor.
 
@@ -567,9 +591,9 @@ def _prepare_project_room(q: Any, predecessor: str, task: Dict[str, Any]) -> Dic
 
 
 def admit_continuation(predecessor_task_id: str, *, action_nonce: str) -> Dict[str, Any]:
-    """Admit (or replay) the owner's Continue of one interrupted root (module docstring)."""
+    """Admit (or replay) Continue of one eligible root (module docstring)."""
     from ouroboros.owner_continue import (
-        VERB, BINDING_VERSION, binding_sha, carried_execution_fields, claim_on_predecessor, continuation_eligibility,
+        AUTHOR_STOP_CAUSE, VERB, BINDING_VERSION, binding_sha, carried_execution_fields, claim_on_predecessor, continuation_eligibility,
         continuation_room, declared_inputs, execution_carry, owner_sources, successor_id, valid_nonce,
     )
     from ouroboros.task_results import STATUS_SCHEDULED, load_task_result, validate_task_id, write_task_result
@@ -609,6 +633,8 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str) -> Dict[s
         return {"ok": False, "error": str(exc)}
     try:
         billing = {} if claim else _billing_group(q, predecessor, result)
+        if billing and verdict["cause"] == AUTHOR_STOP_CAUSE and _group_money_spent(q, billing):
+            return {"ok": False, "error": "hard_limit_reached", "cause": "budget_exhausted"}
     except Exception:
         return {"ok": False, "error": "billing_authority_unavailable"}
     try:
@@ -706,7 +732,7 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str) -> Dict[s
                     **({"reason_code": HOLD_CONTINUATION_WRITER,
                         "resource_limit": {"status": "budget_hold", "auto_resume": False, "exact_continuation": False,
                                            **task["_budget_pause_hold"]}} if blockers else {}),
-                    result=("Continue accepted; held until the interrupted task's own work is settled."
+                    result=("Continue accepted; held until the previous attempt's own work is settled."
                             if blockers else "Continue accepted and durably scheduled."))
             except Exception as exc:  # the queue row and its snapshot are durable: the drive stays with them
                 return {"ok": False, "error": "continuation_publication_unconfirmed",

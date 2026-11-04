@@ -820,27 +820,49 @@ def reserved_project_chat_ids(drive_root: Any, *, strict: bool = False) -> set:
 _THREAD_LENS_CACHE: Dict[str, tuple] = {}
 
 
-def project_thread_chat_ids(drive_root: Any) -> frozenset:
-    """Per-frame lens over :func:`reserved_project_chat_ids` for the live bus.
+def _project_thread_lens(drive_root: Any) -> tuple[frozenset, dict]:
+    """Share membership and labels at one file identity, without sorting rooms.
 
-    The broadcast choke (``supervisor.message_bus``) stamps every outbound
-    frame whose final ``chat_id`` is a reserved Project thread, so the browser
-    can keep a project it has not learned yet out of Main. One ``stat`` per
-    frame; the set is rebuilt only when the registry file changes.
+    Display's lenient row handling remains; read failures are never memoized.
+    The private label map stays inside this owner, not execution authority.
     """
     path = _registry_path(drive_root)
     try:
-        st = path.stat()
-        stamp: Any = (st.st_mtime_ns, st.st_size)
-    except OSError:
-        stamp = None
+        stamp = utils.file_identity(path.stat())
+    except FileNotFoundError:
+        if _registry_witness_path(drive_root).exists():
+            raise
+        return frozenset(), {}
     key = str(path)
     cached = _THREAD_LENS_CACHE.get(key)
     if cached is not None and cached[0] == stamp:
-        return cached[1]
-    ids = frozenset(reserved_project_chat_ids(drive_root))
-    _THREAD_LENS_CACHE[key] = (stamp, ids)
-    return ids
+        return cached[1], cached[2]
+    names = {}
+    for row in display_registry_snapshot(drive_root)["projects"]:
+        chat = row["chat_id"]
+        names[chat] = None if chat in names else str(row.get("name") or row["id"])
+    ids = frozenset(names)
+    if utils.file_identity(path.stat()) == stamp:
+        _THREAD_LENS_CACHE[key] = (stamp, ids, names)
+    return ids, names
+
+
+def project_thread_chat_ids(drive_root: Any) -> frozenset:
+    """Per-frame membership for the live bus; unavailable reads keep its lenient contract."""
+    try:
+        return _project_thread_lens(drive_root)[0]
+    except Exception:
+        log.debug("Project thread lens failed", exc_info=True)
+        return frozenset()
+
+
+def project_thread_name(drive_root: Any, chat_id: Any) -> Optional[str]:
+    """Receipt label, None for a non-Project; unreadable/ambiguous sources raise."""
+    ids, names = _project_thread_lens(drive_root)
+    name = names.get(chat_id)
+    if chat_id in ids and name is None:
+        raise ValueError("Project chat reservation is ambiguous")
+    return name
 
 
 def stamp_project_thread(drive_root: Any, payload: Dict[str, Any]) -> None:
