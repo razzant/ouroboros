@@ -898,17 +898,22 @@ def assign_tasks() -> None:
                     and not bool(cost_fields.get("ledger_integrity_degraded"))
                     and not retry_lineage
                 )
+                # Owner 4A: a row that already dispatched is HELD, nonterminal, when it carries saved work to
+                # continue (its Resume and launch revalidate that source). Holding grants no replay: a row with
+                # nothing saved keeps the honest terminal below.
+                held = not replay_safe and "_working_recovery" in task
                 pause = {
-                    "status": "paused_before_dispatch" if replay_safe else "resource_limited",
+                    "status": "paused_before_dispatch" if replay_safe or held else "resource_limited",
                     "scope": "global",
                     "physical_calls": int(cost_fields.get("total_rounds") or 0),
                     "replay_safe": replay_safe,
+                    **({"continuation": "working"} if held else {}),
                     "auto_resume": False,
-                    "resume_policy": "manual_same_generation" if replay_safe else "cancel_or_new_run",
+                    "resume_policy": "manual_same_generation" if replay_safe or held else "cancel_or_new_run",
                     "paused_at": _pool().utc_now_iso(),
                 }
                 planned.append((task, pause, cost_fields))
-            newly_paused, terminal_ids = [], []
+            newly_paused, held_ids, terminal_ids = [], [], []
             for task, pause, cost_fields in planned:
                 task_id = str(task.get("id") or "")
                 result_root = pathlib.Path(task.get("budget_drive_root") or _pool().DRIVE_ROOT)
@@ -921,6 +926,16 @@ def assign_tasks() -> None:
                         write_task_result(
                             result_root, task_id, STATUS_SCHEDULED,
                             reason_code="budget_exhausted", resource_limit=pause,
+                        )
+                    elif pause.get("continuation"):
+                        task["_budget_pause"] = pause
+                        held_ids.append(task_id)
+                        write_task_result(
+                            result_root, task_id, STATUS_SCHEDULED,
+                            reason_code="budget_exhausted", resource_limit=pause,
+                            result=("Budget limit reached after prior dispatch; the saved work is held and an "
+                                    "explicit Resume continues the same task."),
+                            **cost_fields,
                         )
                     else:
                         write_task_result(
@@ -939,14 +954,15 @@ def assign_tasks() -> None:
             if terminal_ids:
                 terminal = set(terminal_ids)
                 _pool().PENDING[:] = [task for task in _pool().PENDING if str(task.get("id") or "") not in terminal]
-            if newly_paused or terminal_ids:
+            if newly_paused or held_ids or terminal_ids:
                 _pool().append_jsonl(
                     _pool().DRIVE_ROOT / "logs" / "events.jsonl",
                     {
                         "ts": _pool().utc_now_iso(),
                         "type": "budget_tasks_paused",
                         "scope": "global",
-                        "task_ids": newly_paused,
+                        "task_ids": newly_paused + held_ids,
+                        "held_saved_work_task_ids": held_ids,
                         "resource_limited_task_ids": terminal_ids,
                         "auto_resume": False,
                     },

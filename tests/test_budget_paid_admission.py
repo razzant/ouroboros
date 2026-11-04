@@ -166,3 +166,49 @@ def test_at_the_limit_the_queue_pauses_only_work_that_needs_paid_admission(
         assert [task["id"] for task in sent] == ["root"] and workers.PENDING == []
     else:
         assert sent == [] and workers.PENDING[0]["_budget_pause"]["status"] == "paused_before_dispatch"
+
+
+def _prior_dispatch(tmp_path, task_id):
+    held = ua.reserve_attempt(ua.AttemptRequest(model="openai/gpt-5.2", provider="openai", reservation_usd=0.1,
+                                                drive_root=tmp_path, task_id=task_id, root_task_id=task_id,
+                                                global_limit_usd=100.0))
+    ua.mark_dispatched(held)
+    ua.settle_attempt(held, {}, cost_usd=0.1, cost_final=True)
+
+
+def test_a_dispatched_row_with_saved_work_is_held_and_resumes_not_failed(tmp_path, monkeypatch):
+    from ouroboros.task_results import load_task_result
+    from supervisor import task_admission
+
+    queue, _state, workers, sent = _install_queue(tmp_path, monkeypatch)
+    _prior_dispatch(tmp_path, "saved")
+    workers.PENDING.append({"id": "saved", "type": "task", "chat_id": 0, "priority": 1, "_attempt": 2,
+                            "_working_recovery": {"source_task_id": "saved", "from_attempt": 1}})
+    workers.assign_tasks()
+    [row] = workers.PENDING
+    pause = row["_budget_pause"]
+    assert sent == [] and pause["status"] == "paused_before_dispatch" and pause["continuation"] == "working"
+    assert pause["replay_safe"] is False and pause["physical_calls"] == 1 and pause["auto_resume"] is False
+    assert load_task_result(tmp_path, "saved")["status"] == "scheduled"  # nonterminal, never FAILED
+
+    # The existing Resume door revalidates the saved source: unreadable keeps the hold, valid releases it.
+    monkeypatch.setattr(task_admission, "_working_resume_granted", lambda *_a, **_k: False)
+    refused = queue.resume_budget_paused_task("saved")
+    assert refused["ok"] is False and refused["error"] == "dispatch_outcome_unknown"
+    assert "_budget_pause" in workers.PENDING[0]
+    monkeypatch.setattr(task_admission, "_working_resume_granted", lambda *_a, **_k: True)
+    assert queue.resume_budget_paused_task("saved")["ok"] is True
+    assert "_budget_pause" not in workers.PENDING[0] and workers.PENDING[0]["_working_recovery"]
+
+
+def test_a_dispatched_row_with_nothing_saved_keeps_the_honest_terminal(tmp_path, monkeypatch):
+    from ouroboros.task_results import load_task_result
+
+    _queue, _state, workers, sent = _install_queue(tmp_path, monkeypatch)
+    _prior_dispatch(tmp_path, "retry")
+    workers.PENDING.append({"id": "retry", "type": "task", "chat_id": 0, "priority": 1, "_attempt": 2,
+                            "timeout_retry_from": "retry"})
+    workers.assign_tasks()
+    stored = load_task_result(tmp_path, "retry")
+    assert sent == [] and workers.PENDING == []
+    assert stored["status"] == "failed" and "after prior dispatch" in stored["result"]
