@@ -1288,8 +1288,10 @@ def task_settlement_liveness(task_id: str) -> Optional[bool]:
     """The probe a destructive custody settlement asks (``task_custody.settle_child_drive``):
     True while ``task_has_live_ownership`` holds or the id waits in PENDING, None while a
     reap of this task (its slot or a queued/deferred reap job) makes absence inconclusive
-    or the queue cannot be read, False only for proven absence. Callers without the
-    supervisor's live maps have no such probe, so they never delete."""
+    or the queue cannot be read, a ``ProbeUnknown`` naming ``store_busy``/``canonical_changed``
+    when the locked re-check of the prepared row could not prove it unchanged (unknown, never
+    a live task), False only for proven absence. Callers without the supervisor's live maps have
+    no such probe, so they never delete."""
     q = _queue_module()
     from supervisor import task_reaper, workers
 
@@ -1307,7 +1309,7 @@ def task_settlement_liveness(task_id: str) -> Optional[bool]:
             task_has_live_ownership(task_id, ownership=reads)  # Prepare before the mutation lock.
         with q._queue_lock:
             if task_has_live_ownership(task_id, ownership=reads) or any(str(row.get("id") or "") == task_id for row in q.PENDING):
-                return True
+                return reads.unknown or True  # a busy or moved read is unknown ownership with its cause, not a live task
             with q._reap_queue.mutex:
                 jobs = [*q._reap_queue.queue, *task_reaper._deferred_reap_jobs]
             if any(worker.reaping and worker.busy_task_id == task_id for worker in workers.WORKERS.values()) \
