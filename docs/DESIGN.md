@@ -702,8 +702,7 @@ keeps the host's typed disclosure that the review was still open (the
 the same fact as its cause sentence, and no second chat bubble carries it; a
 card that reads `Done with warnings` or `Failed` for another reason keeps that
 reason, with the open review stated beside it when the result records it. For a result review the card's
-cause sentence already says whether the reviewers signed the answer off or
-Ouroboros delivered it on its own judgement. A real
+cause sentence already says when a delivered answer lacks the reviewers' sign-off. A real
 outcome keeps its word: no reviewer quorum, a failed, refused or unresolved
 slot, a collected blocking finding, a reviewer verdict nobody closed, a rail or
 a blocking exit still read `Done with warnings` or `Failed`.
