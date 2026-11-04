@@ -947,6 +947,7 @@ def record_subscription_session(
         "credential_profile_id": str(credential_profile_id or ""),
         "access_profile": str(access_profile or ""),
         "session_id_sha256": identity,
+        "run_id": stable_id,
         **({"effort_resolution": copy.deepcopy(effort_resolution)} if isinstance(effort_resolution, dict) else {}),
         # Present only when the harness reported a complete, valid object.
         **({"input_token_usage": input_counters} if input_counters is not None else {}),
