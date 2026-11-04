@@ -80,7 +80,7 @@ supervisor/ — background thread inside server.py (§5)
   task_dispatch.py, workspace_preparation.py — admitted worker payload; off-loop preparation with durable phases (§5)
   log_addressing.py — audience of task-scoped log events: project binding wins, chat id 0 is `HIDDEN_CHAT_ID`, A2A frames are dropped at the `push_log` choke (§4 WebSocket protocol; §12)
   steering.py — running-task mailbox steering, keyed on the host-minted `issuer`, refused during pending cancellation (§6 Owner routing verbs)
-  direct_roots.py — retired: no writer or reader; an old file is folded and removed at boot (§5)
+  direct_roots.py — retired: an old file is folded and removed at boot (§5)
   telemetry_events.py — rare typed telemetry-only worker events: durable appends exclude high-rate narration
   git_ops.py — git operations (clone, checkout, rescue, rollback, push, credential helper) and the bounded local-Git runner
   git_ops_remotes.py, git_ops_rescue.py, git_ops_reset.py, git_ops_updates.py — leaves re-exported through `git_ops.py`: remotes and push, the rescue snapshot before destructive tree movement (§2), checkout/reset admission, managed-update status
@@ -120,7 +120,7 @@ ouroboros/ — agent core and shared runtime (§6)
   places.py, conversation_lease.py — the host place record (state, wake list, notes, owner accounts, folder, model) and one author per place conversation with the physical conversation bound (§12)
   dialogue_provenance.py — exact transport-provenance rendering for history, memory and consolidation
   extension_companion.py, extension_reconcile_queue.py — host-supervised companion processes for transport skills; durable worker→server reconcile markers (§12; §13)
-  event_bus.py — typed in-process event bus for skill subscriptions (§13)
+  event_bus.py — typed in-process event bus for skill subscriptions
   event_usage.py, event_token_totals.py — event token counters, offline totals (§11.4)
   evolution_checkpoints.py, evolution_fingerprint.py — append-only campaign checkpoint ledger; canonical objective fingerprint for repeat counts
   improvement_backlog.py — the authored backlog note's complete current text for the evolution chooser and context; no host writer (§6 Post-task work)
@@ -143,7 +143,7 @@ ouroboros/ — agent core and shared runtime (§6)
   ui_language.py, i18n_memory.py — the interface-language fact and one translation memory per language, `state/i18n/<tag>.json`: owner > imported > generated (§7)
   loop_tool_execution.py, tool_call_log.py, late_tool_results.py — tool dispatch, results, per-invocation counting
   deadline_utils.py — deadline parsing and the transport-vs-logical wait seam
-  observability.py, source_retention.py, shared_values.py — private CAS: elements stored once (`$shared`), gzip-1, hardlinks (§10)
+  observability.py, source_retention.py, shared_values.py — private CAS: elements stored once, gzip-1, hardlinks (§10)
   evidence_packs.py, evidence_packer.py — per-task xz packs (maintenance job, §5); verified addressed reads, missing ≠ `evidence_corrupt` (PERSISTENCE)
   finalization_timing.py — final-event phase fields and `task_finalization_timing` (§6)
   process_logging.py — per-process logging bootstrap; the server is the sole `server.log` writer; the launcher copies the server pipe, byte-capped, into `agent_stdout.log`
