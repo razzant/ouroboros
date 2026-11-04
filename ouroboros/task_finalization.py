@@ -113,8 +113,7 @@ def quiet_finish(row: Dict[str, Any]) -> bool:
 def work_label(*rows: Any) -> Dict[str, str]:
     """``{"target_label": name}`` a finished task's notifications say (rows in hand, no read); ``{}``, never a placeholder."""
     from ouroboros.projects_registry import task_presentation_name
-    name = task_presentation_name(*rows, fallback="")
-    return {"target_label": name} if name else {}
+    return {"target_label": name} if (name := task_presentation_name(*rows, fallback="")) else {}
 
 
 def wake_cause_title(metadata: Dict[str, Any]) -> str:
