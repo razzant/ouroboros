@@ -77,11 +77,12 @@ def _plan(*, preferred="max"):
     return plan
 
 
-def _lowered_from_max(plan, messages):
+def _lowered_from_max(plan, messages, *, measured_input_tokens=None):
     """The one rebind the floor makes when memory alone did not save the target: Low books from the level Max showed."""
     plan.reproject_for_route.assert_called_once_with(
         window_tokens=500_000, known_window=True, ratio=1.0, output_reserve=65_536,
-        tool_schemas=[], start_mode="max", current_messages=messages, select_mode="low")
+        tool_schemas=[], start_mode="max", current_messages=messages, select_mode="low",
+        measured_input_tokens=measured_input_tokens)
     assert plan.reproject_for_route.call_args.kwargs["current_messages"] is messages  # actual transcript, not a copy
 
 
@@ -509,7 +510,7 @@ def test_the_floor_keeps_books_when_memory_alone_saved_the_target_and_drops_them
         context.context_fit_plan.reproject_for_route.assert_not_called()
     else:
         assert mode == "low" and context.messages[0]["content"] == "LOW_SYSTEM"
-        _lowered_from_max(context.context_fit_plan, context.messages)
+        _lowered_from_max(context.context_fit_plan, context.messages, measured_input_tokens=500_000)
 
 
 def test_already_low_overflow_never_emits_max_to_low_toast(tmp_path, monkeypatch):

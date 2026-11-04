@@ -33,7 +33,9 @@ class MainFitMeasurement:
     round_id: str
     profile: ContextProfile
     rendered_mode: Literal["max", "low", "nano"]
-    estimated_input_tokens: int  # provider density applied, or raw for an estimator window
+    # Anchored: the accepted input carried to this transcript, U + (P' - P) * U / B (``InputAnchor.measure``);
+    # otherwise raw_input_tokens at measurement_density (a refusal's, a fresh witness's or cold; 1 on an estimator window).
+    estimated_input_tokens: int
     response_reserve_tokens: int  # the mode's reply floor, raised by any declared working reserve
     target_total_tokens: Optional[int]
     capacity_total_tokens: Optional[int]
@@ -45,7 +47,7 @@ class MainFitMeasurement:
     # Low-water margin the goal carries ABOVE the deficit (0 without a deficit):
     # the pass is deficit-triggered but sized to land below the boundary.
     low_water_margin_tokens: int = 0
-    raw_input_tokens: int = 0  # the same estimate before the density
+    raw_input_tokens: int = 0  # P': the fit estimator's count of this transcript (images at the proxy), no density
     # The reply allowance Main PLANS for this candidate (``context_budget.reply_allowance_tokens``);
     # the send finalizer computes the sent value on the sealed candidate with the same rule.
     reply_allowance_tokens: int = 0
@@ -64,6 +66,17 @@ class MainFitMeasurement:
     # What a directly required handbook adds to this candidate, its start note included (density applied): it
     # counts against the window, while nothing automatic narrows or shrinks for it and no owner target sizes it.
     required_book_tokens: int = 0
+
+    @property
+    def reprojection_input_tokens(self) -> Optional[int]:
+        """Carry the anchored input into the floor's estimator units, rounding conservatively.
+
+        Unanchored, refused-density and estimator-window measurements already price the
+        transcript directly; they need no preparation offset at reprojection.
+        """
+        if self.anchor_input_tokens is None or self.measurement_basis != "fresh_route_usage":
+            return None
+        return math.ceil(self.estimated_input_tokens / self.measurement_density)
 
 
 @dataclass(frozen=True)
@@ -119,8 +132,8 @@ def measure_main_fit(
 ) -> MainFitDisposition:
     """Measure one sealed Main candidate against owner target T and route W.
 
-    The estimate is this conversation's own: ``anchor`` (``context_anchor.main_input_anchor``) scales the raw
-    estimate by the last accepted request on this route; while a size refusal's passes, and a renewal after
+    The estimate is this conversation's own: ``anchor`` (``context_anchor.main_input_anchor``) carries the last
+    accepted request's input forward (``InputAnchor.measure``); while a size refusal's passes, and a renewal after
     them, size that refusal, its own ``refused_density`` (``context_anchor.refused_request_density``, never
     recorded) does instead. Without either, a fresh exact-route witness
     of comparable input size calibrates it; absent that, it stays cold. Estimator windows
@@ -141,12 +154,14 @@ def measure_main_fit(
     )
 
     raw_input = int(estimate_context_prompt_tokens(messages, tools, provider=plan.provider, reasoning_effort=reasoning_effort))
+    anchored = anchor is not None and plan.window_basis != "estimator" and not refused_density
     density, basis = ((1.0, "cold_estimate") if plan.window_basis == "estimator" else
                       (float(refused_density), "refused_input") if refused_density else
                      (float(anchor.density), "fresh_route_usage") if anchor is not None else
                       resolve_main_token_density(canonical_evidence_root(), plan.route_fp, plan.model,
                                                  estimate_tokens=raw_input, view_kind=plan.view_kind))
-    estimated_input = int(math.ceil(raw_input * density))
+    # The anchor carries its accepted U: a send's image preparation stays counted, never priced twice.
+    estimated_input = anchor.measure(raw_input) if anchored else int(math.ceil(raw_input * density))
     ceiling = int(plan.output_reserve_tokens or 0)
     nano = profile.endswith("_nano")
     reserve_args = ({"working_reserve_tokens": plan.working_reserve_tokens}

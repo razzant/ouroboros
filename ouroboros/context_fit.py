@@ -118,9 +118,9 @@ class ContextFitPlan:
                             refused_tokens: int = 0, select_mode: Optional[str] = None,
                             measured_input_tokens: Optional[int] = None, start_work: bool = False,
                             slack_tokens: int = 0) -> "ContextFitPlan":
-        """Fit shown bytes; an actual envelope's raw estimate also prices its extra framing.
+        """Fit shown bytes; the prepared envelope's raw estimate includes its signed size difference.
 
-        The measurement belongs to this candidate, includes tools and excludes the reply.
+        The measurement belongs to this candidate, includes tools and excludes the reply; withholding an image can shrink it.
         A requested saving alone does not establish pressure on held owner words or notes.
         ``slack_tokens`` asks room beyond the measured or refused excess: memory and ordinary host forms may pay it,
         a whole-or-outline section never (``memory_floor._host_steps``).
@@ -157,7 +157,7 @@ class ContextFitPlan:
                                    shown.user_content_json or self.user_content_json,
                                    supplementary_messages_json=self.core.supplementary_messages_json,
                                    current_messages=current_messages) + tool_schema_tokens(list(sent)))
-            overhead = max(0, int(measured_input_tokens or 0) - raw)
+            overhead = int(measured_input_tokens) - raw if measured_input_tokens is not None else 0
             request = math.ceil((raw + overhead) * ratio)
             request += context_mode_limits(start, self.preferred_mode, output_reserve, **reserve_args)[1]
             if start_work and known_window:

@@ -209,7 +209,7 @@ def _wire(monkeypatch, messages):
     return [m for m in payload["messages"] if m["role"] == "system"]
 
 
-def _rebind(monkeypatch, root, plan, messages, *, window, ratio=1.0, status="asserted", usage=None):
+def _rebind(monkeypatch, root, plan, messages, *, window, ratio=1.0, status="asserted", usage=None, facts=None):
     import ouroboros.context
     from ouroboros import context_fit
     from ouroboros.loop_model_call import _rebind_context_fit_plan
@@ -218,7 +218,8 @@ def _rebind(monkeypatch, root, plan, messages, *, window, ratio=1.0, status="ass
     root.mkdir(parents=True, exist_ok=True)
     registry = ToolRegistry(repo_dir=root, drive_root=root)
     registry._ctx._accumulated_usage = usage
-    evidence = SimpleNamespace(route_fp=f"r-{window}", status=status, stale=status != "asserted", window_tokens=window)
+    evidence = SimpleNamespace(route_fp=f"r-{window}", status=status, stale=status != "asserted", window_tokens=window,
+                               route_facts=facts or {})  # a declared window's RouteFacts (its units)
     monkeypatch.setattr(ouroboros.context, "_context_fit_route", lambda *_a, **_kw: ({"model": "m2", "provider": "p"}, evidence))
     monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: ratio)
     rebound, mode = _rebind_context_fit_plan(plan, registry, messages, model="m2", use_local=False, start_mode="low",
@@ -295,7 +296,7 @@ def test_a_rebind_uses_only_the_exact_routes_accepted_lower_bound(tmp_path, monk
     usage = {"_last_round_cache_usage": {"prompt_tokens": accepted, "provider": "p"},
              "_context_raw_input_tokens": accepted}
     record_input_anchor(usage, SimpleNamespace(model="m2", provider="p", output_reserve_tokens=65_536,
-        route_fp=f"r-{tight}" if same_route else "another-account"), round_idx=7)
+        route_fp=f"r-{tight}" if same_route else "another-account"), round_idx=7, estimate_tokens=accepted)
     old = low.projection("low").memory_facts["floor"]
     rebound, mode, event = _rebind(monkeypatch, tmp_path / "n", low, messages, window=tight, usage=usage)
     assert mode == "low" and event["view_kept"] is same_route
@@ -303,6 +304,53 @@ def test_a_rebind_uses_only_the_exact_routes_accepted_lower_bound(tmp_path, monk
     assert rebound.window_tokens == (accepted + 65_536 if same_route else tight)
     assert rebound.projection("low").memory_facts["floor"]["steps"] == old["steps"]
     assert bool(rebound.projection("low").memory_facts.get("host_sections_addressed")) is not same_route
+
+
+@pytest.mark.parametrize("route,prepared,slack", [
+    ("same", 30_000, 15_000), ("same", -5_000, -2_500), ("same", -5_000, -10_000), ("another-account", 30_000, 15_000),
+    ("estimator", 30_000, 15_000), ("unknown", 30_000, 15_000)],
+    ids=["caption-added", "image-withheld", "image-withheld-narrow", "another-account", "estimator-window", "unknown-window"])
+def test_a_rebind_keeps_a_view_exactly_when_the_rounds_carried_input_fits_it(tmp_path, monkeypatch, route, prepared,
+                                                                             slack):
+    """Review rl-20261104T011620, on a hand-written anchor (no VLM, caption model or provider runs): the accepted
+    send's preparation put ``prepared`` estimator tokens between its bytes (B = U) and its transcript's P, as a
+    caption longer than the image proxy (+30,000) or a withheld image or shorter caption (-5,000) would. The rebind
+    sized the view at P' * U / B: it kept a Low view the round's own U + (P' - P) * U / B overfilled by 15,006, or
+    lowered Low to Nano where that estimate fits. A view is kept exactly when the round's measurement of it fits, and
+    what is sent fits; an added caption stays tokens at U / B, never a density. Another account's anchor, an
+    estimator window (raw, as the round) and an unknown window change nothing."""
+    from ouroboros import capability_evidence as ce, loop
+    from ouroboros.context_anchor import record_input_anchor
+    from tests.test_memory_view_modes import _built
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path / "evidence")
+    _core, plan = _built(tmp_path / "w", monkeypatch)
+    low = plan(1_000_000, preferred="low", tool_schemas=[])
+    messages = _long_tail(low)
+    shown = copy.deepcopy(messages)
+    raw = low.reproject_for_route(window_tokens=1_000_000, known_window=True, ratio=1.0, output_reserve=65_536, tool_schemas=[],
+                                  start_mode="low", current_messages=messages).projection("low").estimated_tokens
+    window = 0 if route == "unknown" else raw + 65_536 + slack  # between the shown bytes and the input carried
+    usage = {"_last_round_cache_usage": {"prompt_tokens": raw + prepared, "provider": "p"}, "_context_raw_input_tokens": raw}
+    record_input_anchor(usage, SimpleNamespace(model="m2", provider="p", output_reserve_tokens=65_536, route_fp=(
+        "another-account" if route == "another-account" else f"r-{window}")), round_idx=7, estimate_tokens=raw + prepared)
+    rebound, mode, event = _rebind(monkeypatch, tmp_path / "n", low, messages, window=window, usage=usage,
+                                   status="failed" if route == "unknown" else "asserted",
+                                   facts={"basis": "estimator"} if route == "estimator" else None)
+
+    def round_fit(transcript, rendered):  # the loop's own measurement of a round on the rebound route
+        return loop._measure_round_main_fit(SimpleNamespace(
+            context_fit_plan=rebound, active_context_mode=rendered, active_model="m2", messages=transcript, tool_schemas=[],
+            active_effort="", accumulated_usage=copy.deepcopy(usage), tools=SimpleNamespace(_ctx=None), round_idx=8),
+            automatic_pass_used=False)
+
+    kept, sent = round_fit(shown, "low"), round_fit(messages, mode)
+    assert kept.predicted_capacity_miss is (route == "same" and prepared > slack)
+    assert event["view_kept"] is not kept.predicted_capacity_miss and not sent.predicted_capacity_miss
+    assert (sent.measurement.capacity_total_tokens is None) is (route == "unknown")
+    if route == "same":
+        # Preparation changes the input by a signed offset, not the learned tokenizer density.
+        assert rebound.projection(mode).calibration_ratio == sent.measurement.measurement_density == 1.0
 
 
 @pytest.mark.parametrize("owner,ran,mode", [
