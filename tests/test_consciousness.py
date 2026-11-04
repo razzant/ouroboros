@@ -271,7 +271,7 @@ def test_restored_boundary_reaches_the_launched_wake_text(clock):
               status="completed")
     later = BackgroundConsciousness(clock.root, clock.root / "repo", lambda: 7, now=T0)
     assert later.tick(T0 + FLOOR + 1) == "launched"
-    assert "- task settled completed" in clock.launches[-1]["text"]
+    assert "- task settled Done" in clock.launches[-1]["text"]
     assert "older" not in clock.launches[-1]["text"]
     assert "no wake since this process started" not in clock.launches[-1]["text"]
 
@@ -287,7 +287,7 @@ def test_an_accepted_wake_advances_the_observation_boundary_and_a_refused_one_do
     clock.clock._next_wake_at = T0 + FLOOR + 2
     assert clock.clock.tick(T0 + FLOOR + 2) == "launched"
     assert clock.launches[-1]["admitted_text"] == "[Wake-up · heartbeat]"  # the clock admits a placeholder
-    assert '"first"' in clock.launches[-1]["text"]  # the refused window is observed again, whole, by the carrier
+    assert '] first' in clock.launches[-1]["text"]  # the refused window is observed again, whole, by the carrier
     # The carrier bound the observation to the admitted wake before its turn could run, and accepted
     # the boundary on the task; the clock persists nothing until the wake's terminal carries it.
     bound = clock.launches[-1]["task"]["metadata"]["wake_observation"]
@@ -304,7 +304,7 @@ def test_an_accepted_wake_advances_the_observation_boundary_and_a_refused_one_do
     clock.clock._next_wake_at = T0 + 2 * FLOOR
     assert clock.clock.tick(T0 + 2 * FLOOR) == "launched"
     text = clock.launches[-1]["text"]
-    assert '"second"' in text and '"first"' not in text
+    assert '] second' in text and '] first' not in text
 
 
 def test_a_refused_wake_consumes_no_transition_and_the_admitted_one_persists_observed_identities(clock):
@@ -334,7 +334,7 @@ def test_a_refused_wake_consumes_no_transition_and_the_admitted_one_persists_obs
     clock.receipt.update({"admitted": True, "task_id": "wake0002", "reason": ""})
     clock.clock._next_wake_at = T0 + 3 * FLOOR
     assert clock.clock.tick(T0 + 3 * FLOOR) == "launched"
-    assert "- task kid failed, completion time not recorded" in clock.launches[-1]["text"]
+    assert "- task kid Failed, completion time not recorded" in clock.launches[-1]["text"]
     clock.finish("wake0002", True)
     source = clock.store[OBSERVATION_STATE_KEY]["transitions"]['source_ref']
     header = json.loads(read_actor_source_bytes(clock.root, source['task_id'], source).splitlines()[0])
@@ -397,7 +397,7 @@ def test_inline_inventory_migrates_to_the_source_bound_transitions(clock, versio
         prior['transitions'] = {'version': 1, 'inventory': {}, 'observed': [], 'scan_at': _iso(T0)}
     clock.store[OBSERVATION_STATE_KEY] = prior
     assert clock.clock.tick(T0 + FLOOR + 1) == 'launched'
-    assert ('task old completed' in clock.launches[-1]['text']) is (version == 1)
+    assert ('task old Done' in clock.launches[-1]['text']) is (version == 1)
     clock.finish('wake0001', True)
     accepted = clock.store[OBSERVATION_STATE_KEY]['transitions']
     assert set(accepted) == {'version', 'source_ref'} and accepted['version'] == 2
@@ -442,14 +442,14 @@ def test_first_failed_source_preserves_intervening_events(clock, monkeypatch, fa
     clock.receipt['task_id'] = 'wake0002'
     assert alarm.tick(alarm.next_wake_at) == 'launched'
     assert 'during first wake' in clock.launches[-1]['text']
-    assert 'task intervening completed' in clock.launches[-1]['text']
+    assert 'task intervening Done' in clock.launches[-1]['text']
     assert 'before bootstrap' not in clock.launches[-1]['text']
     clock.finish('wake0002', True, alarm=alarm)
     assert clock.store[OBSERVATION_STATE_KEY]
     clock.receipt['task_id'] = 'wake0003'
     assert alarm.tick(alarm.next_wake_at + DEFAULT) == 'launched'
     assert 'during first wake' not in clock.launches[-1]['text']
-    assert 'task intervening completed' not in clock.launches[-1]['text']
+    assert 'task intervening Done' not in clock.launches[-1]['text']
 
 
 def test_full_inventory_moves_out_of_hot_state_without_forgetting_closed_tasks(clock):
@@ -470,13 +470,13 @@ def test_full_inventory_moves_out_of_hot_state_without_forgetting_closed_tasks(c
     clock.receipt['task_id'] = 'wake0002'
     clock.clock._next_wake_at = T0 + 2 * FLOOR
     assert clock.clock.tick(T0 + 2 * FLOOR) == 'launched'
-    assert 'new-old completed' in clock.launches[-1]['text']
-    assert 'closed-0 completed' not in clock.launches[-1]['text']
+    assert 'new-old Done' in clock.launches[-1]['text']
+    assert 'closed-0 Done' not in clock.launches[-1]['text']
     clock.finish('wake0002', True)
     clock.receipt['task_id'] = 'wake0003'
     clock.clock._next_wake_at = T0 + 3 * FLOOR
     assert clock.clock.tick(T0 + 3 * FLOOR) == 'launched'
-    assert 'new-old completed' not in clock.launches[-1]['text']
+    assert 'new-old Done' not in clock.launches[-1]['text']
 
 
 def test_legacy_inbox_is_archived_once_without_being_read(clock):

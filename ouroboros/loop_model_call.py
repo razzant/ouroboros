@@ -1245,8 +1245,8 @@ def _project_wake_input(ctx: _RoundModelCallContext, *, overflowed: bool = False
     and route of THIS call, so a grown tool set or a switched route is measured
     again), the answer reserve and one clock line against a KNOWN capacity.
     Unknown capacity sends the whole input, as any call does; a real provider
-    overflow may apply the delivery before consumption, as the one retry the
-    strict-shrink predicate admits only when it is actually smaller. Once a
+    overflow may apply the delivery (the bare ``pointer_text`` when bound) before consumption,
+    as the one retry the strict-shrink predicate admits only when smaller. Once a
     response followed the input, the transcript is history and stays as sent.
     Only the delivered first user message changes; the task text, the owner
     corpus and the stored source keep the complete observation (``consciousness_wake``).
@@ -1264,7 +1264,7 @@ def _project_wake_input(ctx: _RoundModelCallContext, *, overflowed: bool = False
         from ouroboros.context_input_selection import whole_wake_input
         tool_ctx._wake_input_full_message = whole_wake_input(ctx.messages[index], ctx.context_fit_plan, wake)
     full = tool_ctx._wake_input_full_message
-    delivery = {"role": "user", "content": str(wake["projection_text"])}
+    delivery = {"role": "user", "content": str(overflowed and wake.get("pointer_text") or wake["projection_text"])}
     if len(json.dumps(delivery, ensure_ascii=False)) >= len(json.dumps(full, ensure_ascii=False)):
         return False  # a pointer must actually save space
     projected = overflowed
