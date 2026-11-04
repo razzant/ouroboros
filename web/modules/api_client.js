@@ -29,8 +29,9 @@ const stateReadEnded = (reason) => Object.assign(new Error(`state read ${reason}
 
 /** Run `read(transportSignal)`, request and body, within one lifetime: the caller's `signal` ends it with
  * `aborted()` (an already aborted one sends nothing), the lifetime with a `StateReadEnded` `expired`. Either end
- * cancels the transport, and the read settles then even when the transport ignores the cancellation. */
-function withinStateLifetime(read, { signal = null, lifetimeMs = STATE_READ_LIFETIME_MS,
+ * cancels the transport and settles the caller even when transport ignores cancellation. This never undoes
+ * an effect a write may already have sent; its caller must retain an unknown outcome. */
+export function withinRequestLifetime(read, { signal = null, lifetimeMs = STATE_READ_LIFETIME_MS,
     aborted = () => stateReadEnded('aborted') } = {}) {
     if (signal?.aborted) return Promise.reject(aborted());
     const transport = new AbortController();
@@ -54,7 +55,7 @@ function withinStateLifetime(read, { signal = null, lifetimeMs = STATE_READ_LIFE
  * body) or `aborted` (the caller's `signal`; an already aborted one sends nothing).
  */
 export function readState(path = '/api/state', { signal = null, lifetimeMs = STATE_READ_LIFETIME_MS } = {}) {
-    return withinStateLifetime(async (transport) => {
+    return withinRequestLifetime(async (transport) => {
         const response = await apiFetch(path, { cache: 'no-store', signal: transport });
         if (!response.ok) return { response, state: undefined };
         try {
@@ -73,7 +74,7 @@ export function readState(path = '/api/state', { signal = null, lifetimeMs = STA
  */
 export function readStateJson(init = {}) {
     const { signal = null, ...rest } = init;
-    return withinStateLifetime((transport) => fetchJson('/api/state', { cache: 'no-store', ...rest, signal: transport }),
+    return withinRequestLifetime((transport) => fetchJson('/api/state', { cache: 'no-store', ...rest, signal: transport }),
         { signal, aborted: () => signal.reason ?? new DOMException('This operation was aborted', 'AbortError') });
 }
 

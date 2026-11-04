@@ -432,7 +432,7 @@ Ownership` section is delivered beside them.
 | 23 | gateway_parity | If the diff changes any browser-facing endpoint, WebSocket message, or frontend API call, are `ouroboros/gateway/contracts.py`, `ouroboros/gateway/router.py`, `web/modules/api_client.js`, `web/modules/api_types.js`, and `tests/test_gateway_parity.py` still aligned? Missing alignment is advisory unless it also breaks a frozen contract, safety guard, release metadata, or runtime behavior. | advisory |
 | 24 | cache_friendliness | If the diff builds or reorders LLM prompt/context content (context builders, review prompt assembly, message construction in `llm.py` callers): does it keep prompt caching intact — stable governance/policy content BEFORE dynamic evidence, no dynamic values (timestamps, hashes, round counters, task ids) injected into a stable cached prefix, no ordinary step rewriting sent history (DEVELOPMENT 06 "Cache-friendliness invariant"), and no removal/breakage of existing `cache_control` markers or session/cache affinity keys? A change that fragments or rewrites an existing cached prefix loses the reuse of everything after the provider's last stored boundary before it, on every repeat call; measurements of the route, not the size or position of the edit, set that cost. (PASS with "Not applicable" if no prompt/context assembly changed.) | advisory |
 | 25 | display_identity_replay | If the diff changes routing, steering, task cards, or history replay, does it preserve the event-time human `Project › Task` presentation snapshot in both live and replay paths while keeping opaque IDs as internal/debug facts? | advisory when applicable |
-| 26 | web_design_system | If the diff touches `web/` (modules, stylesheets, `index.html`, onboarding assets) or backend producers/delivery of owner-facing UI messages: when the subject carries frames, first say what the person sees, understands and can do; then, does it conform to `docs/DESIGN.md`, first to its design bible (does each new or changed element take one of its roles: the plain room, an object or tray, a capsule tone, one height per role with states in colour; is a deliberate departure named in the commit message, not introduced silently?), then to its type scale, foreground roles, status pairs and spacing tokens, and to the engineering rules in DEVELOPMENT.md "Design System" (no new inline visual styles, values live in `web/ui.css` tokens, shared components over page-local copies)? When the diff ADDS a UI control, chip, card, dialog, or visual pattern, does it reuse an existing shared frontend primitive (name it — the registry is ARCHITECTURE.md §3 "Navigation and shared UI contracts") or state in one line why none covers the need — and, because reuse alone does not show that two controls agree, does a control for an owner intent that already has a door come from that door (DESIGN "References and actions"), with the neighbouring rows of `docs/inventories/UI_CONTROL_TEXT_INVENTORY.md` named when control text is added or changed? If the diff edits a DESIGN rule, does the new wording cite the owner's decision it rests on, and does the PR show the old and new sentence with a shot of the state it describes? Wording that goes beyond what the owner chose is a question for the owner, not a rule. A status or notice it adds names what ends it (DESIGN §4); a floating surface carries its own paint, and a shell change opens every surface that borrowed its backing in both themes (DESIGN principle 2). Check host/model authorship, explicit role/type and their preservation through live delivery and history against DESIGN's "Chat authorship and System rows"; Python producers are part of this surface. (PASS with "Not applicable" if neither frontend nor backend UI-message behavior changes.) | advisory |
+| 26 | web_design_system | If the diff touches `web/` (modules, stylesheets, `index.html`, onboarding assets) or backend producers/delivery of owner-facing UI messages: when the subject carries frames, look at them at the viewer's size and first say what the person sees, understands and can do, and whether it does its job; geometry and code come after. For each phrase read first (read "Words to the owner: before → after" first when supplied), say what changes without it; words that change neither understanding nor action belong in details or the record, and a DESIGN rule added by this change is no ground for its own words. Then, does it conform to `docs/DESIGN.md`, first to its design bible (does each new or changed element take one of its roles: the plain room, an object or tray, a capsule tone, one height per role with states in colour; is a deliberate departure named in the commit message, not introduced silently?), then to its type scale, foreground roles, status pairs and spacing tokens, and to the engineering rules in DEVELOPMENT.md "Design System" (no new inline visual styles, values live in `web/ui.css` tokens, shared components over page-local copies)? When the diff ADDS a UI control, chip, card, dialog, or visual pattern, does it reuse an existing shared frontend primitive (name it — the registry is ARCHITECTURE.md §3 "Navigation and shared UI contracts") or state in one line why none covers the need — and, because reuse alone does not show that two controls agree, does a control for an owner intent that already has a door come from that door (DESIGN "References and actions"), with the neighbouring rows of `docs/inventories/UI_CONTROL_TEXT_INVENTORY.md` named when control text is added or changed? If the diff edits a DESIGN rule, do the PR and its commit message cite the owner's decision it rests on (new rule text adds no date), and does the PR show the old and new sentence with a shot of the state it describes? Wording that goes beyond what the owner chose is a question for the owner, not a rule. A status or notice it adds names what ends it (DESIGN §4); a floating surface carries its own paint, and a shell change opens every surface that borrowed its backing in both themes (DESIGN principle 2). Check host/model authorship, explicit role/type and their preservation through live delivery and history against DESIGN's "Chat authorship and System rows"; Python producers are part of this surface. (PASS with "Not applicable" if neither frontend nor backend UI-message behavior changes.) | advisory |
 | 27 | size_cap_paydown | If the diff was shaped by a size limit (module cap, function gate, byte debt, or a reference book's size — added book text is paid by shortening the same book, the pairwise contribution-base rule): was it paid by making the code simpler where it lives? A reduction is honest when the reader holds fewer concepts, branches and state afterwards — dead code and duplicates removed, an existing owner reused; the same logic in fewer lines or tighter formatting is not one. An extraction is honest only when each resulting file has one responsibility you can state in one sentence without naming the other file, and the files have no mutual imports. A cap-driven bucket, a one-caller passthrough, or bytes bought by deleting contract-bearing comments, docstrings, messages or tests is a defect to report, not a paydown (BIBLE P7 «first simplify what exists»; DEVELOPMENT.md "Paying down a size cap"). | advisory when applicable |
 | 28 | capability_placement | Does the change add to the body a capability or a control that a setting, a declarative contribution or a skill could carry? If it opens a seam, does the seam ship with its first consumer, and does core consume the contract without naming a skill or vendor (DEVELOPMENT "Capability placement")? An honest answer is advice for the author, never a block. | advisory |
 | 29 | copy_mechanism | Does the change add or change a mechanism that copies a project, workspace or store (a checkout, clone, snapshot, retained view or scratch tree)? Does it name its job, the fault it prevents, its size on a small install and its remover (DEVELOPMENT "Live subagents")? A new kind of copy is a plan-review question. An honest answer is advice for the author, never a block. | advisory |
@@ -605,7 +605,14 @@ Scope of a skill review pack:
   `bin/run.sh`), and manifest-declared extension entry modules (e.g.
   `plugin.py`). Hidden files that are NOT VCS/cache metadata (e.g.
   `.hidden_helper.py`) are hashed + reviewed for the same reason — a
-  skill could still ``import`` them.
+  skill could still ``import`` them. A credential-like name never excludes or
+  refuses a file: `.env` and its variants, `credentials.json`, `id_rsa`, `.netrc`,
+  certificates and key containers are ordinary payload in every mode, also
+  through delegation, install, update and the publication capture. A real
+  key placed there reaches the selected reviewers, private copies and an
+  authorized publication candidate; the existing publication scan judges
+  those bytes without proving them secret-free, and item 18
+  (`payload_credentials`) judges such a key.
 - The manifest's declared `permissions` list, for comparison against
   what the code actually does.
 - Any declared `scheduled_tasks` suggestions, for comparison against the
@@ -619,28 +626,6 @@ review pack:
   `.idea`, `.vscode`, `.tox`, `__pycache__`, `node_modules`, `.DS_Store`
   (silently excluded — a byte-flip in a cache file does not
   invalidate a PASS review).
-- **Exact credential file names HARD-BLOCK the skill**: the shared
-  `_SENSITIVE_NAMES` policy (`.env` and its explicitly listed runtime
-  variants, `credentials.json`, `service-account.json`, `secrets.yaml`,
-  `secrets.json`, `id_rsa` and the other SSH private-key names,
-  `.git-credentials`, `.netrc`, `.npmrc`, `.pypirc`) plus the `.env` tail in
-  `_SENSITIVE_EXTENSIONS`, which covers spellings such as `prod.env`.
-  (Reused from `ouroboros.tools.review_helpers._SENSITIVE_EXTENSIONS`
-  + `_SENSITIVE_NAMES`.) The loader raises `SkillPayloadUnreadable`
-  on first discovery and the skill shows up in `list_skills` with a
-  non-empty `load_error` — neither reviewable nor executable until
-  the operator renames or relocates the file outside the skill
-  tree. Rationale: silently excluding the file would leave it
-  runtime-reachable via `open('.env').read()`, so a reviewed skill
-  could still exfiltrate credentials the reviewer never saw.
-  `.pem`, `.key`, `.p12`, `.pfx`, `.jks`, `.keystore`, `.kdbx`, `.gpg` and
-  `.asc` are NOT credential shapes: they are ordinary reviewed payload and are
-  SHOWN to the reviewer. A name rule never bought what the rationale above
-  promises anyway, since a real `.env` renamed to `config.txt` walks straight
-  through it, while a public certificate or a release signature used to break
-  the whole skill (owner decision, 2026-09-11).
-  `.env.example` is ordinary reviewed payload: its bytes remain in the
-  freshness hash and the existing publication scan.
 - Symlinks whose targets resolve outside `skill_dir` (confinement
   guard — otherwise a symlink to `/etc/passwd` would leak into the
   review pack sent to external reviewer models).
@@ -830,6 +815,7 @@ the reviewer's word.
 | 15 | bug_hunting | Are there obvious runtime bugs in reviewed code: wrong filenames, mismatched manifest script names, missing imports, impossible arguments, JSON/schema mismatches, blocking calls in async handlers, or untested happy-path assumptions? For every FAIL, cite the concrete runtime bug and state how you propose to fix it (file/symbol/change), so the author can apply the correction instead of guessing. Concrete likely runtime breakage should use `severity=critical`; latent issues, provider fragility, minor cleanup, or dead-code concerns should use `severity=advisory`. | severity-driven |
 | 16 | completion_notification | For long-running or user-visible work, does the skill emit or document a completion/failure notification path (for example a host event, `events.jsonl` append, or clear stdout marker consumed by Ouroboros)? A skill that must reach the owner directly (a reminder, a finished external job) declares `notify_owner` and hands the host one bounded sentence through `POST /notify`, shown as a signed System row in the owner's chat — judged as under item 9: attributable, bounded, user-facing, and never a way to inject conversation. Not applicable for tiny synchronous utilities — return nothing for it. | advisory |
 | 17 | context_snapshot_discipline | For `context_snapshot`: are the declared local snapshots compact deterministic facts, with honest dates/units/unknowns, no instructions, secrets or relative-age counters? Check atomic publication, the complete UTF-8 file bound and withdrawal on expiry/revocation (CREATING_SKILLS “Passive context snapshots”); no network, model or refresh belongs on prompt preparation. Not applicable for other skills — return nothing for it. | severity-driven when applicable |
+| 18 | payload_credentials | Does the evidence show a working credential stored in the payload (a live token, a private key, a filled-in `.env`) rather than a fixture, template, schema or placeholder? A file name or a secret-like pattern alone proves nothing: `.env.example`, test fixtures and documented placeholders are ordinary content. A FAIL names where the value belongs: a Settings secret the skill reads through `env_from_settings` and asks for with `secret_fields` (CREATING_SKILLS "Asking the owner for a secret"); a grant authorizes reading a key, never storing one. This judges bytes the reviewers already received; it is no scanner and no proof that nothing secret leaves. Sending a secret to an unrelated party or mishandling the host token stays a FAIL of the item that owns it (e.g. `host_token_handling`), at that item's severity. | advisory |
 
 ### Severity rules
 
@@ -1026,7 +1012,7 @@ stay stable across revisions.
 
 | # | item | what to check |
 |---|------|---------------|
-| 1 | the bar | Does `done_when` capture what the ask needs? For a vague ask ("make it good"), is it the bar a demanding person who made the request would mean — nothing obviously missing, nothing met trivially? Is each claim an observable outcome a third party could check, or a method the owner fixed for this work — not a method of the mind's own choosing? When work changes what a person sees, does the plan apply the product's information-placement rules to each fact, including text added within existing components, and does a claim reach that changed view rather than only its data or API? |
+| 1 | the bar | Does `done_when` capture what the ask needs? For a vague ask ("make it good"), is it the bar a demanding person who made the request would mean — nothing obviously missing, nothing met trivially? Is each claim an observable outcome a third party could check, or a method the owner fixed for this work — not a method of the mind's own choosing? When work changes what a person sees, does the plan apply the product's information-placement rules to each fact, including text added within existing components, and does a claim reach that changed view rather than only its data or API, naming what the person must understand or do there rather than the interface's verbatim strings? |
 | 2 | load-bearing decisions | Are the decisions that are expensive to reverse explicit, with their rejected alternatives and why? |
 | 3 | constraints and invariants | Are the real constraints named — budget, deadline, safety, irreversibility, commitments to others? |
 | 4 | deferrals | Is anything deferred that will be expensive to change once the work has started? |
@@ -1096,7 +1082,10 @@ and content hash) and the host-attested verification receipts.
 - Read the produced files you can reach; a claim about a file must match its content.
 - When what was produced is something a person will look at, look at it (the frames the subject carries,
   at the viewer's size) and say first what a person sees there and whether it does its job; its geometry
-  and its code come after.
+  and its code come after. For each phrase a person reads there first (when the subject carries "Words to
+  the owner: before → after", read that section first), say what they would understand or do differently
+  without it: one that changes neither belongs in details or the record (DESIGN principle 7), and a DESIGN
+  rule the same change adds is no ground for its own words.
 - A finding names the concrete gap, where it is, and what would close it.
 
 ### Severity rules

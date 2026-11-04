@@ -1158,7 +1158,7 @@ def _copy_payload_inventory(target: Path, dest: Path, *, manifest_entry: str = "
     """Copy the exact skill-loader-visible inventory of ``target`` into ``dest``.
 
     The loader inventory is the SSOT walk (cache/control-dir exclusions, symlink
-    escape exclusion, credential-shape refusal) — no second filesystem walk is
+    escape exclusion; a credential-like name refuses nothing) — no second walk is
     invented; a declared manifest entry or script joins it even under an excluded
     folder, exactly as it joins the content hash. A file reached through a
     symlinked ancestor directory reproduces the ancestor LINK once instead of

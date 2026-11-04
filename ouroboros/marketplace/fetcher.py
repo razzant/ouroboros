@@ -57,21 +57,6 @@ class StagedSkill:
             )
 
 
-def _is_sensitive(path: pathlib.PurePosixPath) -> bool:
-    """Use the review denylist so marketplace cannot import sensitive filenames."""
-    try:
-        from ouroboros.tools.review_helpers import (
-            _SENSITIVE_EXTENSIONS,
-            _SENSITIVE_NAMES,
-        )
-    except Exception:  # pragma: no cover — defensive, the module exists
-        return False
-    name_lower = path.name.lower()
-    if name_lower in _SENSITIVE_NAMES:
-        return True
-    return any(name_lower.endswith(ext) for ext in _SENSITIVE_EXTENSIONS)
-
-
 def _is_loadable_binary(path: pathlib.PurePosixPath) -> bool:
     try:
         from ouroboros.skill_review_packs import _LOADABLE_BINARY_EXTENSIONS
@@ -180,8 +165,8 @@ def stage(
                             rel_path = pathlib.PurePosixPath(*parts[1:])
                             if not rel_path.parts:
                                 continue
+                    # A credential-like name (`.env`, `credentials.json`) refuses nothing: review judges its bytes.
                     for finding, reason in (
-                        (_is_sensitive(rel_path), f"Archive contains sensitive-shape filename {rel_path}"),
                         (_has_review_opaque_dir(rel_path), f"Archive contains review-opaque dependency directory {rel_path}"),
                         (_is_loadable_binary(rel_path), f"Archive contains loadable-binary file {rel_path}"),
                     ):
@@ -272,15 +257,11 @@ def copy_tree_checked(source: pathlib.Path, staging_dir: pathlib.Path) -> int:
                 if path.is_dir():
                     pending.append(path)
                     continue
-                for finding, reason in (
-                    (_is_sensitive(rel), f"Skill contains sensitive-shape filename {rel}"),
-                    (_is_loadable_binary(rel), f"Skill contains loadable-binary file {rel}"),
-                ):
-                    if finding:
-                        if advisory:
-                            log.warning("Cyber Pro skill copy advice: %s", reason)
-                        else:
-                            raise FetchError(reason)
+                if _is_loadable_binary(rel):
+                    reason = f"Skill contains loadable-binary file {rel}"
+                    if not advisory:
+                        raise FetchError(reason)
+                    log.warning("Cyber Pro skill copy advice: %s", reason)
                 size = path.stat().st_size
                 _reject_if(size > _MAX_PER_FILE_BYTES, f"Skill file {rel} is {size} bytes (cap {_MAX_PER_FILE_BYTES})")
                 total += size

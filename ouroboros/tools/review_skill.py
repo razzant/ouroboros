@@ -48,7 +48,7 @@ SKILL_REVIEW_ITEMS = (
     "timeout_and_output_discipline", "extension_namespace_discipline", "widget_module_safety",
     "inject_chat_minimization", "event_subscription_minimization", "companion_process_safety",
     "host_token_handling", "error_handling", "integration_preflight", "bug_hunting",
-    "completion_notification", "context_snapshot_discipline",
+    "completion_notification", "context_snapshot_discipline", "payload_credentials",
 )
 MAX_DIFF_LINES_PER_FILE = 400
 # The earlier verdict's findings shown in the brief: a bound, and every cut named with the record that keeps the whole.

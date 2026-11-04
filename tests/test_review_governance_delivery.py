@@ -113,7 +113,7 @@ def test_two_part_brief_carries_the_shared_section_once_in_part_one(candidate, m
     coupling_checklist = load_checklist_section(brief_mod.COUPLING_CHECKLIST_SECTION)
     assert task.count(SHARED) == 1 and PROPOSAL_RULE not in task
     assert task.count(CRITICAL_FINDING_CALIBRATION) == 1
-    assert task.index(SHARED) < task.index("### Staged diff") < task.index("## Part 2 — Coupling questions")
+    assert task.index(SHARED) < task.index("## Staged diff") < task.index("## Part 2 — Coupling questions")
     assert task.index("## Part 2 — Coupling questions") < task.index(coupling_checklist)
     assert manifest["parts"] == ["change", "coupling"]
     row = next(row for row in manifest["governance_manifest"] if row["path"] == SHARED_ROW)

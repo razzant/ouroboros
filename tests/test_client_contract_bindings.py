@@ -213,6 +213,13 @@ def test_model_mcp_and_control_routes_answer_their_published_shapes(client, monk
     assert catalog.status_code == 400 and assert_bound("GET /api/model-catalog", catalog)
     queued = client.post("/api/command", json={"cmd": ""})
     assert assert_bound("POST /api/command", queued) == "CommandResponse" and queued.json() == {"status": "ok"}
+    # A refusal before enqueue says so on the shape its status is bound to (#1603); no queue exists here.
+    monkeypatch.setattr("supervisor.message_bus._BRIDGE", None)
+    for body, reason in (({"cmd": "/bg start", "if_boot": "an-earlier-boot"}, "boot_changed"), ({"cmd": "/bg start"}, None)):
+        refused = client.post("/api/command", json=body)
+        assert refused.status_code == 409 and assert_bound("POST /api/command", refused) == "CommandRefusal"
+        assert refused.json()["accepted"] is False and refused.json().get("reason_code") == reason
+    assert {"accepted", "reason_code"} <= _declared("CommandRefusal")
     resumed = client.post("/api/tasks/nothing-here/resume")
     assert resumed.status_code in {404, 409} and assert_bound("POST /api/tasks/{task_id}/resume", resumed)
     rollback = client.post("/api/git/rollback", json={})

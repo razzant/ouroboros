@@ -601,15 +601,15 @@ def test_onboarding_page_is_served_without_a_provider_or_a_supervisor(monkeypatc
 
 
 def test_onboarding_readiness_probe_still_gates_the_blocking_overlay(monkeypatch, tmp_path):
-    from ouroboros.gateway import settings as gw_settings
+    from ouroboros.gateway import onboarding_host  # the probe reads the one live Setup derivation
 
-    monkeypatch.setattr(gw_settings, "load_settings", lambda: {})
+    monkeypatch.setattr(onboarding_host, "load_settings", lambda: {})
     with TestClient(_routes_app(tmp_path)) as client:
         unconfigured = client.get("/api/onboarding")
     assert unconfigured.status_code == 200
 
     monkeypatch.setattr(
-        gw_settings, "load_settings", lambda: {"OPENROUTER_API_KEY": "sk-or-v1-configured"}
+        onboarding_host, "load_settings", lambda: {"OPENROUTER_API_KEY": "sk-or-v1-configured"}
     )
     with TestClient(_routes_app(tmp_path)) as client:
         configured = client.get("/api/onboarding")
@@ -647,7 +647,7 @@ def test_the_readiness_probe_never_authors_settings_json(monkeypatch, tmp_path):
     default are both gated on.
     """
     from ouroboros.config import SETTINGS_DEFAULTS
-    from ouroboros.gateway import settings as gw_settings
+    from ouroboros.gateway import onboarding_host, settings as gw_settings
     from ouroboros.server_runtime import apply_runtime_provider_defaults
 
     settings_path = tmp_path / "settings.json"
@@ -661,7 +661,7 @@ def test_the_readiness_probe_never_authors_settings_json(monkeypatch, tmp_path):
     _normalized, changed, _keys = apply_runtime_provider_defaults(dict(fresh_local_first))
     assert changed is True
 
-    monkeypatch.setattr(gw_settings, "load_settings", lambda: dict(fresh_local_first))
+    monkeypatch.setattr(onboarding_host, "load_settings", lambda: dict(fresh_local_first))
     monkeypatch.setattr(
         gw_settings, "save_settings",
         lambda *a, **k: (saves.append(a), settings_path.write_text("{}", encoding="utf-8")),
@@ -725,10 +725,10 @@ def test_the_readiness_probe_body_serves_no_stored_credential(monkeypatch, tmp_p
     stored credential reachable through its wizard body is one that does not
     satisfy that gate — an OpenAI-compatible KEY with no base URL. Same class,
     second route."""
-    from ouroboros.gateway import settings as gw_settings
+    from ouroboros.gateway import onboarding_host
 
     stored = {"OPENAI_COMPATIBLE_API_KEY": _SECRET_CANARIES["OPENAI_COMPATIBLE_API_KEY"]}
-    monkeypatch.setattr(gw_settings, "load_settings", lambda: dict(stored))
+    monkeypatch.setattr(onboarding_host, "load_settings", lambda: dict(stored))
     with _onboarding_client(tmp_path) as client:
         response = client.get("/api/onboarding")
 

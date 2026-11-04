@@ -29,6 +29,7 @@ RESULT_LAYER = "result"
 RESULT_KIND = "result"
 RESULT_ROOT_KIND = "task_result"
 RESULT_USER_TURN = "Review the task result against its request, as the instructions above describe."
+RESULT_WORDS_SOURCE = "the produced files named above by path and content hash"
 # The rules a result wave is judged by: this section of docs/CHECKLISTS.md, read from the install as every
 # other review surface reads its own section (owner, 18.10: the rubric lives with the other checklists).
 RESULT_CHECKLIST_SECTION = "Result Review Checklist"
@@ -86,13 +87,15 @@ def result_contract_words() -> Tuple[list, list, list]:
     the packet's and a retrieving seat's composition). The rubric (a guide), the request, the reply, the produced
     material and the receipts are data."""
     from ouroboros.owner_words import reviewer_words_material
+    from ouroboros.review_words import words_material
     from ouroboros.tools.review_multi_model import triad_stable_head
 
     heads = [_brief_head(goal=words, scope=words, review_rebuttal=words, rubric="⟨rubric⟩") for words in ("⟨words⟩", "")]
     produced = {"files": [{"path": "⟨path⟩", "kind": "⟨kind⟩", "sha256": "⟨sha⟩", "size": 1}], "issues": ["⟨issue⟩"],
-                "effects": [{"tool": "⟨tool⟩", "receipt": "⟨receipt⟩", "host_notes": ["⟨note⟩"]}]}
+                "effects": [{"tool": "⟨tool⟩", "receipt": "⟨receipt⟩", "host_notes": ["⟨note⟩"]}],
+                "words_section": "⟨source words⟩"}
     own = [RESULT_CHECKLIST_SECTION, *heads, _SUBJECT_HEAD, *_ASK_WORDS.values(), *reviewer_words_material(),
-           *(answer_text(reply=reply, produced=material, verification="⟨verification⟩")
+           *words_material(RESULT_WORDS_SOURCE), *(answer_text(reply=reply, produced=material, verification="⟨verification⟩")
              for reply, material in (("⟨reply⟩", produced), ("", {})))]
     return (own, [RESULT_USER_TURN, triad_stable_head(RESULT_LAYER, ""), _packet_prompt("⟨head⟩", "⟨subject⟩")],
             [_retrieving_task("⟨head⟩", source, "⟨subject⟩") for source in ("⟨source⟩", None)])
@@ -149,12 +152,68 @@ def produced_material(ctx: Any) -> Dict[str, Any]:
                 out["files"].append({"path": str(path), "kind": "workspace change", **_file_identity(path)})
             if candidates:
                 out["workspace"] = str(pathlib.Path(str(repo)).resolve(strict=False))
+                from ouroboros.review_words import ReviewWords, section_budget
+
+                try:
+                    out["words_section"] = _workspace_words(repo, snapshot, candidates, _result_words_budget())
+                except Exception as exc:
+                    out["words_section"] = ReviewWords(gaps=(
+                        f"workspace words ({type(exc).__name__}: {exc})",)).render(section_budget(), RESULT_WORDS_SOURCE)
             elif snapshot.get("blockers") and snapshot.get("blockers") != ["baseline_missing"]:
                 out["issues"].append("workspace changes not attributed: " + ", ".join(map(str, snapshot["blockers"])))
     except Exception as exc:
         out["issues"].append(f"workspace changes could not be attributed ({type(exc).__name__}: {exc})")
     out["effects"] = _declared_effects(ctx, root, task_id, out["issues"])
     return out
+
+
+def _result_words_budget() -> int:
+    """The words share a change packet takes, sized against this panel's seats: the one subject reaches every seat,
+    inline for a packet seat and in a retrieving seat's brief."""
+    from ouroboros.review_records import ReviewSlot
+    from ouroboros.review_words import section_budget
+    from ouroboros.reviewer_slot_config import commit_triad_delivery
+    from ouroboros.tools.review import _triad_governance_usable_window
+    from ouroboros.tools.review_admission import seat_vectors
+
+    try:
+        plan = seat_vectors(commit_triad_delivery())
+    except ValueError:  # the wave refuses this pool itself; the subject keeps the global bound
+        return section_budget()
+    slots = [ReviewSlot(slot_id=plan["slot_ids"][i], model=plan["models"][i],
+                        session_profile=plan["session_profiles"][i], use_local=plan["use_local"][i])
+             for i in range(len(plan.get("models") or []))]
+    if not slots:
+        return section_budget()
+    return section_budget(_triad_governance_usable_window([slot.model for slot in slots], slots))
+
+
+def _workspace_words(repo: Any, snapshot: dict, candidates: list[str], budget: int) -> str:
+    """Extract bounded words from attributed changes; the diff is transient, never retained."""
+    from ouroboros.review_words import has_words, words_for_diff
+    from ouroboros.tools.review_subject import _HARDENED_DIFF_FLAGS, _decode_diff, _git_bytes
+
+    base = snapshot.get("base_tree") or snapshot.get("base_commit")
+    if not base:
+        raise ValueError("workspace diff has no recorded baseline")
+    paths = [f":(literal){path}" for path in candidates if has_words(path)]
+    if not paths:
+        return ""
+    rc, raw, error = _git_bytes(repo, ["diff", *_HARDENED_DIFF_FLAGS, "--full-index", str(base), "--", *paths])
+    if rc:
+        raise ValueError(f"workspace diff capture failed: {error}")
+    rc, untracked, error = _git_bytes(repo, ["ls-files", "--others", "--exclude-standard", "-z", "--", *paths])
+    if rc:
+        raise ValueError(f"workspace new files could not be listed: {error}")
+    for path in untracked.decode("utf-8").split("\0"):
+        if not path:
+            continue
+        rc, added, error = _git_bytes(repo, ["diff", "--no-index", *_HARDENED_DIFF_FLAGS, "--full-index", "--", "/dev/null", path])
+        if rc not in (0, 1):
+            raise ValueError(f"workspace new file diff failed: {error}")
+        raw += added
+    diff = _decode_diff(raw)
+    return words_for_diff(repo, diff).render(budget, RESULT_WORDS_SOURCE)
 
 
 def _declared_effects(ctx: Any, root: Any, task_id: str, issues: List[str]) -> List[Dict[str, Any]]:
@@ -269,6 +328,7 @@ def answer_text(*, reply: str, produced: Dict[str, Any], verification: str) -> s
         *(["Effect receipts are the tool producer's reports of execution, not proof of a UI change or goal success.", ""]
           if effects else []),
         *(files + effects + gaps or ["(nothing produced beyond the reply)"]), "",
+        *([produced["words_section"], ""] if produced.get("words_section") else []),
         "## Host-attested verification", "", verification, "",
     ])
 

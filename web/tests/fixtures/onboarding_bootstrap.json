@@ -1,4 +1,11 @@
 {
+  "consciousnessOffer": {
+    "autonomy": "act",
+    "dailyUsd": 20.0,
+    "enabled": null,
+    "maxTasks": 2,
+    "offered": true
+  },
   "contract": {
     "budgetFields": [
       {

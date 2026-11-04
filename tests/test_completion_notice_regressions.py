@@ -22,7 +22,7 @@ def test_an_old_author_closure_renders_by_its_recorded_host_trigger(mode, adviso
     axes["review"] = {"status": "degraded", "trigger": trigger, "acceptance_decision": {
         "status": "finalized_unaccepted", "reason": "author_finish", "enforcement": "advisory"}}
     assert terminal_projection.completion_notice(record)["neutral"] is (mode == "auto")
-    assert "had not signed it off" in project_dialogue._completion_verdict(record, {})
+    assert project_dialogue.TASK_CAUSE_PHRASES["author_finish"].rstrip(".") in project_dialogue._completion_verdict(record, {})
 
 
 def test_a_rail_keeps_its_cause_and_the_notice_explains_current_debt():

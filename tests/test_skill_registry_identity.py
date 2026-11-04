@@ -14,7 +14,7 @@ from ouroboros.skill_publish_snapshot import capture_skill_publish_candidate
 from ouroboros.skill_review_packs import frozen_payload_files, payload_pack
 
 
-def _registry(tmp_path, monkeypatch, dependencies):
+def _registry(tmp_path, monkeypatch, dependencies, files=None):
     from ouroboros.marketplace import install
     from ouroboros.marketplace.clawhub import ClawHubArchive, ClawHubSkillSummary
     drive = tmp_path / 'data'
@@ -35,6 +35,8 @@ def _registry(tmp_path, monkeypatch, dependencies):
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, 'w') as archive:
             archive.writestr('SKILL.md', '---\n' + json.dumps(front) + '\n---\nDemo.\n')
+            for rel, body in (files or {}).items():
+                archive.writestr(rel, body)
         content = buffer.getvalue()
         return ClawHubArchive(slug=slug, version=version, content=content,
                               sha256=hashlib.sha256(content).hexdigest())
@@ -67,6 +69,27 @@ def test_registry_rejection_records_the_digest_actually_reviewed(tmp_path, monke
     save_review_state(drive, 'demo', SkillReviewState(status='blockers', content_hash=digest))
     assert installer.settle_pending_update(drive, 'demo')['status'] == 'restored'
     assert read_install_record(drive, 'demo')['update_rejected']['digest'] == digest
+
+
+def test_registry_install_and_update_keep_credential_like_payload_files(tmp_path, monkeypatch):
+    """The archive owner refuses no credential-like name: a release's `.env`/`credentials.json`/`id_rsa`
+    land with their exact bytes on install and on update, inside the release digest the record and the
+    pending review bind."""
+    from ouroboros import skill_source_install as installer
+    files = {'.env': b'TOKEN=synthetic-first\n', 'config/prod.env': b'MODE=fixture\n',
+             'credentials.json': b'{"fixture": true}\n', 'id_rsa': b'SYNTHETIC KEY FIXTURE\n'}
+    drive, storage, latest = _registry(tmp_path, monkeypatch, False, files=files)
+    assert storage.install_skill(drive, tmp_path, slug='demo', auto_review=False).ok
+    installed = find_skill(drive, 'demo')
+    assert not installed.load_error
+    assert {rel: (installed.skill_dir / rel).read_bytes() for rel in files} == files
+    assert read_install_record(drive, 'demo')['release']['digest'] == installed.content_hash
+    files['.env'] = b'TOKEN=synthetic-second\n'
+    latest['version'] = '2.0.0'
+    assert installer.update_installed(drive, 'demo', mode='replace')['needs_review']
+    updated = find_skill(drive, 'demo')
+    assert not updated.load_error and updated.content_hash != installed.content_hash
+    assert {rel: (updated.skill_dir / rel).read_bytes() for rel in files} == files
 
 
 @pytest.mark.parametrize('dependencies', [False, True], ids=['no-dependencies', 'declared-dependencies'])

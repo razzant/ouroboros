@@ -21,7 +21,7 @@ one (that is what the installer used), else the manifest's own ``install_specs``
 ``install`` / ``dependencies``. A source index computes the same value from the same
 manifest, so a source digest and an installed digest agree byte for byte.
 
-The file walk, confinement and sensitive-file policy are the loader's own
+The file walk and its confinement are the loader's own
 (``skill_loader._iter_payload_files``); this module only decides what a release is.
 """
 

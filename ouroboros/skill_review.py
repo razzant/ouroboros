@@ -180,7 +180,7 @@ def _run_deterministic_preflight(
         skill.review = review_state
         # Record what the skill requests (transparency in the review block) but
         # NEVER auto-grant a skill that FAILED the deterministic preflight gate
-        # (invalid manifest, sensitive-shaped file, binary payload, path escape).
+        # (invalid manifest, binary payload, path escape).
         from ouroboros.skill_loader import requested_core_setting_keys, requested_skill_permissions
 
         manifest = getattr(skill, "manifest", None)

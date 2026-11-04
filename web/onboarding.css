@@ -1532,9 +1532,12 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
    public hub rows' trust choices. The house edge fade and 6px scrollbar are named here so this list does not
    depend on style.css. */
 .summary-card-rows { display: flex; flex-direction: column; gap: 10px; }
-.skills-starter-summary { display: grid; gap: 2px; min-width: 0; }
-.skills-starter-value { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
-.skills-starter-sub { display: block; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+/* The Consciousness row (#1603) beside it shares the value and note ink; its label holds the one checkbox. */
+.skills-starter-summary, .consciousness-offer { display: grid; gap: 2px; min-width: 0; }
+.skills-starter-value, .consciousness-offer-value, .consciousness-offer-choice { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
+.skills-starter-sub, .consciousness-offer-sub { display: block; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.consciousness-offer-choice { display: inline-flex; align-items: center; gap: var(--space-2); justify-self: start; cursor: pointer; }
+[data-consciousness-offer]:empty { display: none; } /* no row offered: no extra gap in the card */
 .skills-starter-change,
 .skills-starter-bulk button {
   padding: 0;
