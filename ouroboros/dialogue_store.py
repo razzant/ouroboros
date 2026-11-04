@@ -37,7 +37,8 @@ log = logging.getLogger(__name__)
 STORE_REL = pathlib.Path("state/dialog.sqlite")
 LOCK_NAME = "dialog.lock"  # the name tier's one lock around every access
 IMPORT_LOCK_NAME = "dialog_import.lock"  # creation, cutover, tier changes
-SCHEMA_VERSION = 2  # the file's ``user_version``; a file of another version is refused, never replaced
+SCHEMA_VERSION = 2  # the file's ``user_version``; a file of any version but these two is refused, never replaced
+SHARED_VERSION = 3  # the same file while a row holds its provider thread by reference: a body that reads none refuses it
 STREAMS = ("chat", "progress")
 LIVE_REL = {"chat": pathlib.Path("logs/chat.jsonl"), "progress": pathlib.Path("logs/progress.jsonl")}  # the frozen chains
 WAIT_SEC = store.STORE_WAIT_SEC
@@ -181,17 +182,18 @@ def _tier(root: pathlib.Path, identity: Optional[tuple] = None) -> str:
 
 def _open(path: pathlib.Path, tier: str, **kwargs: Any) -> sqlite3.Connection:
     """``store.connect`` plus the schema gate: the header's ``user_version`` is this body's
-    ``SCHEMA_VERSION`` or the file is refused typed (``StoreLost``) -- there is no migration of a
-    dialogue store; it is never replaced either."""
+    ``SCHEMA_VERSION`` or ``SHARED_VERSION`` or the file is refused typed (``StoreLost``) -- there is
+    no migration of a dialogue store; it is never replaced either."""
     conn = store.connect(path, tier, **kwargs)
     try:
         version = int(conn.execute("PRAGMA user_version").fetchone()[0])
     except sqlite3.Error:
         conn.close()
         raise
-    if version != SCHEMA_VERSION:
+    if version not in (SCHEMA_VERSION, SHARED_VERSION):
         conn.close()
-        raise StoreLost(f"dialogue store schema {version}, this body needs {SCHEMA_VERSION}, never replaced: {path}")
+        raise StoreLost(f"dialogue store schema {version}, this body reads {SCHEMA_VERSION} and {SHARED_VERSION}, "
+                        f"never replaced: {path}")
     return conn
 
 
@@ -505,8 +507,10 @@ def _unstamped(row: Dict[str, Any]) -> Dict[str, Any]:
 # A body reads such rows only when its copy of this module names ``THREAD_FORMAT`` (``store_switch.switch_needs``
 # looks for it): before a body that does not takes the file, every row held by reference is written whole again,
 # from its stream's first one (``SHARED_FROM``, set by ``append``; ``dialogue_import.expand_for_older_body``).
+# Until then the header says ``SHARED_VERSION``, set with the first such row, which a body that reads none refuses
+# typed: an expansion that failed or never ran leaves a refusal, never a thread of references.
 SHARED_DDL = "CREATE TABLE IF NOT EXISTS shared (sha256 TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID"
-THREAD_FORMAT = "dialogue_shared_v1"
+THREAD_FORMAT = "dialogue_shared_v2"  # v2: the header says SHARED_VERSION while such a row remains
 SHARED_FROM = "shared_from:"  # + stream: the meta key of the coordinate of the stream's first row held by reference
 _MARKER = re.compile(rb', "\$row_sha256": "[0-9a-f]{64}"\}\Z')
 
@@ -615,6 +619,20 @@ def whole_rows(root: Any, rows: Iterable["Row"]) -> List["Row"]:
     return [entry._replace(row=_whole_row(entry.row, resolve)) for entry in rows]
 
 
+def release_shared_version(root: Any) -> int:
+    """The header back to ``SCHEMA_VERSION`` once no stream marks a row held by reference (``SHARED_FROM``: the
+    rollback expansion removes a stream's mark with its last such row written whole), so a body that reads no
+    reference opens the file again; a mark still held keeps ``SHARED_VERSION``. Returns the version."""
+    with transaction(root, write=True) as conn:
+        held = conn.execute(f"SELECT 1 FROM meta WHERE key IN ({','.join('?' * len(STREAMS))}) LIMIT 1",
+                            [SHARED_FROM + stream for stream in STREAMS]).fetchone()
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if held is None and version != SCHEMA_VERSION:
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            version = SCHEMA_VERSION
+        return version
+
+
 def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Dict[str, Any]] = None,
            feed: bool = False, wait_sec: float = WAIT_SEC, idempotent: bool = False,
            emit_live: bool = True, also_feed: Iterable[int] = (), room_revisions: bool = False,
@@ -683,6 +701,8 @@ def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Di
             conn.execute(SHARED_DDL)
             conn.executemany("INSERT OR IGNORE INTO shared (sha256, value) VALUES (?, ?)", sorted(parts.items()))
             conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)", (SHARED_FROM + stream, json.dumps(seq)))
+            if conn.execute("PRAGMA user_version").fetchone()[0] != SHARED_VERSION:
+                conn.execute(f"PRAGMA user_version = {SHARED_VERSION}")
         for chat in others:
             touch_room(conn, chat, None, columns["ts"], 1)
         keys = sorted(set(appearances)) if appearances is not None else []

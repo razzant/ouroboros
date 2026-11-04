@@ -4,13 +4,18 @@ The release before threads were held once (``BASE``) has the dialogue store, sch
 of a reference: handed a new Slack, GitHub or transport-queue row as stored, it would rebuild the event with
 ``{"$shared": …}`` objects where the messages were. The switch seam therefore names that tree's need
 (``store_switch.switch_needs``: ``threads``) and, before the file is handed over, writes every row held by
-reference back as its exact line (``dialogue_import.expand_for_older_body``). These tests run the real readers
-of ``BASE``, read from Git, over the rows this body wrote.
+reference back as its exact line (``dialogue_import.expand_for_older_body``). While such a row remains the
+header says ``SHARED_VERSION``, which that body's schema gate refuses: an expansion that failed leaves a typed
+refusal, never a thread of references. These tests run the real code of ``BASE``, read from Git, over the rows
+this body wrote.
 """
 from __future__ import annotations
 
+import contextlib
+import errno
 import os
 import pathlib
+import sqlite3
 import subprocess
 import sys
 import types
@@ -68,18 +73,29 @@ def _bodies(root: pathlib.Path):
         return [record["body"] for record in conn.execute("SELECT body FROM dialogue WHERE stream='chat' ORDER BY seq")]
 
 
+def _version(root: pathlib.Path) -> int:
+    """The dialogue file's header version, read past every body's schema gate."""
+    with contextlib.closing(sqlite3.connect(ds.path(root))) as raw:
+        return raw.execute("PRAGMA user_version").fetchone()[0]
+
+
+def _base_module(name: str) -> types.ModuleType:
+    """``ouroboros/<name>.py`` of ``BASE``, loaded into a module of its own."""
+    module = types.ModuleType(f"ouroboros.{name}")
+    module.__package__, module.__file__ = "ouroboros", f"{BASE}:ouroboros/{name}.py"
+    exec(compile(_base_source(f"ouroboros/{name}.py"), module.__file__, "exec"), module.__dict__)
+    return module
+
+
 def _base_readers(monkeypatch):
     """``dialogue_store``, ``presence_events`` and ``place_intake`` of ``BASE``, bound where that body's own imports
-    find them (``from ouroboros import dialogue_store``, ``presence_runner.PresenceTurnEvent``)."""
+    find them (``from ouroboros import dialogue_store``, ``presence_runner.PresenceTurnEvent``). That body is
+    another process: it opens the file through its own gate, with none of this process's cached handles."""
     import ouroboros
     from ouroboros import presence_runner
 
-    loaded = {}
-    for name in ("dialogue_store", "presence_events", "place_intake"):
-        module = types.ModuleType(f"ouroboros.{name}")
-        module.__package__, module.__file__ = "ouroboros", f"{BASE}:ouroboros/{name}.py"
-        exec(compile(_base_source(f"ouroboros/{name}.py"), module.__file__, "exec"), module.__dict__)
-        loaded[name] = module
+    store.close_connections()
+    loaded = {name: _base_module(name) for name in ("dialogue_store", "presence_events", "place_intake")}
     monkeypatch.setitem(sys.modules, "ouroboros.dialogue_store", loaded["dialogue_store"])
     monkeypatch.setattr(ouroboros, "dialogue_store", loaded["dialogue_store"])
     monkeypatch.setattr(presence_runner, "PresenceTurnEvent", loaded["presence_events"].PresenceTurnEvent)
@@ -100,6 +116,7 @@ def test_a_switch_to_a_body_that_reads_no_reference_hands_its_real_readers_every
     root = tmp_path / "data"
     rows = _thread_rows(root)
     assert all(ds.ROW_SHA_KEY in ds.decode(body) for body in _bodies(root)[:3]), "the threads are held by reference"
+    assert _version(root) == ds.SHARED_VERSION, "a body that reads no reference refuses this file as it stands"
     repo, older, _current = _trees(tmp_path)
     assert store_switch.switch_needs(repo, older) == {
         "facts": False, "money": False, "handles": False, "dialogue": False, "threads": True}
@@ -110,7 +127,7 @@ def test_a_switch_to_a_body_that_reads_no_reference_hands_its_real_readers_every
     outcome = store_switch.run_switch_seam(root, repo_dir=repo, owner=_checkout(repo))
     assert outcome["status"] == "switched" and outcome["needs"]["threads"], outcome
     assert _bodies(root) == [ds.encode(row) for row in rows], "each row is its exact line again"
-    assert ds.meta(root, ds.SHARED_FROM + "chat") is None
+    assert ds.meta(root, ds.SHARED_FROM + "chat") is None and _version(root) == ds.SCHEMA_VERSION
 
     base = _base_readers(monkeypatch)
     for shape, row in zip(sorted(SHAPES), rows):
@@ -145,6 +162,7 @@ def test_a_checkout_that_already_reads_no_reference_gets_the_rows_whole_at_the_r
     outcome = store_switch.switch_at_restart(root, repo, census)
     assert outcome["status"] == "switched" and outcome["needs"]["threads"], outcome
     assert _bodies(root) == [ds.encode(row) for row in rows] and store_switch.read_switch_intent(root) is None
+    assert _version(root) == ds.SCHEMA_VERSION
     _git(repo, "checkout", "-q", "--detach", current)
     assert store_switch.switch_at_restart(root, repo, census) == {"status": "no_intent"}, "a tree that reads them"
 
@@ -183,8 +201,10 @@ def test_the_expansion_writes_each_held_row_as_its_line_batch_by_batch(tmp_path)
     assert dialogue_test.chat_rows(tmp_path) == rows
     assert [chat_chain.source_row_id(row) for row in rows] == [
         chat_chain.source_row_id(ds.decode(body)) for body in _bodies(tmp_path)]
-    assert ds.meta(tmp_path, ds.SHARED_FROM + "chat") is None
+    assert ds.meta(tmp_path, ds.SHARED_FROM + "chat") is None and _version(tmp_path) == ds.SCHEMA_VERSION
     assert di.expand_for_older_body(tmp_path)[str(tmp_path)]["chat"] == {"rows": 0}, "nothing left to expand"
+    ds.append(tmp_path, "chat", presence_row(slack(5), cmid="m-forward", ts="2026-11-04T10:01:00+00:00"))
+    assert _version(tmp_path) == ds.SHARED_VERSION, "forward again: the next row held by reference marks the file"
 
 
 def test_a_part_the_store_does_not_hold_fails_the_switch_typed_and_no_row_is_shorter(tmp_path):
@@ -200,14 +220,73 @@ def test_a_part_the_store_does_not_hold_fails_the_switch_typed_and_no_row_is_sho
     after = _bodies(root)
     assert after[0] == ds.encode(rows[0]), "the batch before the lost part is whole"
     assert after[1:] == stored[1:], "the row naming the lost part and every later one stay as stored"
+    assert _version(root) == ds.SHARED_VERSION, "a body that reads no reference still refuses the file"
     repo, older, _current = _trees(tmp_path)
     store_switch.record_switch_intent(root, target_sha=older, target_ref="older", reason="test", door="ui_rollback")
     outcome = store_switch.run_switch_seam(root, repo_dir=repo, owner=_checkout(repo))
     assert outcome["status"] == "failed" and "StoreLost" in outcome["error"], outcome
     assert store_switch.read_switch_intent(root) is not None and _git(repo, "rev-parse", "HEAD") != older
-    assert _bodies(root)[1:] == stored[1:]
+    assert _bodies(root)[1:] == stored[1:] and _version(root) == ds.SHARED_VERSION
     # The part found again: the next attempt resumes at the row it stopped at and finishes.
     with ds.transaction(root, write=True) as conn:
         conn.execute("INSERT INTO shared (sha256, value) VALUES (?, ?)", (lost, part))
     assert di.expand_for_older_body(root, batch=1)[str(root)]["chat"] == {"rows": 2}
-    assert _bodies(root) == [ds.encode(row) for row in rows]
+    assert _bodies(root) == [ds.encode(row) for row in rows] and _version(root) == ds.SCHEMA_VERSION
+
+
+def test_a_checkout_whose_expansion_failed_hands_the_older_body_a_typed_refusal_never_a_reference(tmp_path, monkeypatch):
+    """Astra rv2 F1: HEAD already holds the older tree (T2), the expansion fails (the disk is full) and the exit
+    restarts anyway (``server._check_restart`` ignores the seam's status). The older body's own boot resume consumes
+    the intent with no ``threads`` need; its schema gate then refuses the file, which still says SHARED_VERSION."""
+    root = tmp_path / "data"
+    _thread_rows(root)
+    repo, older, _current = _trees(tmp_path)
+    _git(repo, "checkout", "-q", "--detach", older)
+
+    def disk_full(*_args, **_kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(di, "_expand_stream", disk_full)
+    census = {"worker_exits": {"unconfirmed": []}, "live_children": [], "owned_stop": {"state": "completed"}}
+    outcome = store_switch.switch_at_restart(root, repo, census)
+    assert outcome["status"] == "failed" and "No space left" in outcome["error"], outcome
+    assert _git(repo, "rev-parse", "HEAD") == older and _version(root) == ds.SHARED_VERSION
+    resumed = _base_module("store_switch").resume_pending_switch(
+        root, repo_dir=repo, owner=lambda intent: (True, "the checkout already is the older tree"))
+    assert resumed["status"] == "switched" and "threads" not in resumed["needs"], resumed
+    base = _base_readers(monkeypatch)
+    with pytest.raises(store.StoreLost, match=f"schema {ds.SHARED_VERSION}"):
+        base.place_intake._captured_arrival(root, {"focus": {"place_id": "place-1"}}, "turn-slack", "e" * 64, None)
+    with pytest.raises(store.StoreLost, match=f"schema {ds.SHARED_VERSION}"):
+        base.dialogue_store.newest(root, "chat", limit=10)
+
+
+def test_a_store_without_a_row_held_by_reference_keeps_the_version_every_body_reads(tmp_path):
+    ds.append(tmp_path, "chat", {"ts": TS, "direction": "in", "chat_id": 5, "text": "plain"})
+    ds.append(tmp_path, "chat", presence_row({"title": "#general"}, cmid="no-elements"))
+    ds.append(tmp_path, "chat", presence_row({**slack(2), "meta": {"$shared": "c" * 64}}, cmid="reads-as-reference",
+                                             ts="2026-11-04T10:00:01+00:00"))
+    assert all(ds.ROW_SHA_KEY not in ds.decode(body) for body in _bodies(tmp_path)), "every row is stored whole"
+    assert _version(tmp_path) == ds.SCHEMA_VERSION and ds.meta(tmp_path, ds.SHARED_FROM + "chat") is None
+
+
+def test_the_first_row_held_by_reference_and_the_version_commit_together(tmp_path, monkeypatch):
+    real = ds.touch_room
+
+    def fails_after_the_parts(conn, chat_id, *args):
+        if chat_id == 999:  # the other room the row is fed to: touched after its parts, mark and version
+            raise sqlite3.OperationalError("disk I/O error after the row's parts")
+        return real(conn, chat_id, *args)
+
+    monkeypatch.setattr(ds, "touch_room", fails_after_the_parts)
+    row = presence_row(slack(3), cmid="first-shared")
+    with pytest.raises(store.StoreError):
+        ds.append(tmp_path, "chat", row, feed=True, also_feed=[999])
+    with ds.transaction(tmp_path, write=False) as conn:
+        assert conn.execute("SELECT count(*) FROM dialogue").fetchone()[0] == 0
+        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='shared'").fetchone()
+    assert _version(tmp_path) == ds.SCHEMA_VERSION and ds.meta(tmp_path, ds.SHARED_FROM + "chat") is None
+    monkeypatch.setattr(ds, "touch_room", real)
+    receipt = ds.append(tmp_path, "chat", row, feed=True, also_feed=[999])
+    assert ds.ROW_SHA_KEY in ds.decode(_bodies(tmp_path)[0])
+    assert _version(tmp_path) == ds.SHARED_VERSION and ds.meta(tmp_path, ds.SHARED_FROM + "chat") == receipt.seq
