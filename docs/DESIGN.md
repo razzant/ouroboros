@@ -1629,9 +1629,8 @@ Anatomy, top to bottom:
    roles: owner blue in dark, the existing meta/ok treatment in light; unknown delivery retains its owner-action mark;
    `Replaced by a newer question` and `Question closed` use the disabled dot; an unreadable source
    reads `Status unavailable`, never an invented invitation. While the asking task is a paused member of its work
-   (the browser's work projection), a waiting question adds `· its work is paused; it reads this after Resume` and a
-   saved answer reads `Answer saved · its work is paused; it reads this after Resume`; a queued or held task keeps the
-   plain words, and nothing resumes it for the owner. No answer-deadline
+   (the browser's work projection), a waiting question or a saved answer says it is read after Resume; a queued or
+   held task keeps the plain words, and nothing resumes it for the owner. No answer-deadline
    countdown: task completion closes its mailbox, not the question's answerability.
    Pressing immediately shows `Sending…` and the brand-marked choice, keeping the
    full form and focus, the head's mark neutral until the answer is confirmed; inert controls are faded in light (in
