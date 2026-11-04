@@ -375,7 +375,8 @@ def _budget_refused(monkeypatch, r, press, stop_at):
         if h.calls == 2:
             return {"content": HELD_ANSWER, "tool_calls": []}
         try:
-            reserve_attempt(AttemptRequest(model="budget-refusal", provider="local", reservation_usd=0,
+            # A priced reservation: a reached global limit refuses paid admission only (owner 2A).
+            reserve_attempt(AttemptRequest(model="budget-refusal", provider="openai", reservation_usd=0.01,
                                            global_limit_usd=0, allow_live_fetch=False))
         except BudgetExceeded as refused:
             seen.refusals.append(refused.limit_scope)
