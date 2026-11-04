@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.2
+version: 1.4.3
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -151,6 +151,10 @@ content still arrives. Ordinary replies, files and questions are independent, as
 `TELEGRAM_SILENT_MODE` (replies without sound). IDs observed while Off
 remain seen, so enabling does not replay that backlog. Older summary rows without
 the host's compact cause projection retain their original reason text when On.
+
+The Mini App queues finite asset bursts within its bounded upstream connection pool,
+closes responses even when downstream header delivery fails, and paints its connecting
+page while the Telegram SDK loads. Its authentication checks remain unchanged.
 
 The Mini App exposes the unchanged Ouroboros SPA through the established
 owner-authenticated sidecar and a pinned Cloudflare Quick Tunnel. It is enabled
