@@ -240,3 +240,51 @@ def test_an_unreadable_frozen_mark_does_not_recompose_or_lose_its_pending_public
         fail.setattr(late.ChronicleStore, "get", unreadable)
         assert late.replay_settled_late_review(world.root, review_pause._left_mark_id(left)).status == "failed"
     assert review_pause.ended_left_review(left) == "saved"
+
+
+@pytest.mark.parametrize("merged", [False, True])
+@pytest.mark.parametrize("room_state", ["unreadable", "unproven"])
+def test_room_read_failure_keeps_the_mark_owed_but_proven_absence_discharges_it(world, monkeypatch, merged, room_state):
+    from ouroboros import late_review_marks as late, review_operation, store
+
+    record = _record(world.root, "merge-task")
+    if merged:
+        merges._merge(world, review_record_id=record["record_id"])
+    _fail(world.root, record)
+    write_task_result(world.root, "merge-task", "completed", chat_id=1)
+    left = {"surface": "commit", "task_id": "merge-task", "record_id": record["record_id"], "retry_key": "left",
+            "drive_root": str(world.root), "attempt": 1}
+    mark_id = review_pause._left_mark_id(left)
+    assert review_pause._owe_left_review(left)
+    monkeypatch.setattr(review_operation, "controller_state", lambda *_: "dead")
+
+    def owed():
+        with store.open_store(world.root, write=False) as txn:
+            return txn.get_row(late.OWED_SET, mark_id)
+
+    def room(*args, **kwargs):
+        if room_state == "unreadable":
+            raise OSError("room registry temporarily unreadable")
+        return None  # a successful read that proves no owning room
+
+    with monkeypatch.context() as fault:
+        fault.setattr(late, "owning_room", room)
+        outcome = late.replay_owed_late_reviews(world.root)
+    assert receptive._late_marks(world.root) == []
+    if room_state == "unproven":
+        assert outcome == {"settled": 1, "waiting": 0, "retired": 0, "failed": 0}
+        assert owed() is None
+        assert late.replay_owed_late_reviews(world.root)["settled"] == 0
+        assert receptive._late_marks(world.root) == []
+        return
+
+    assert outcome == {"settled": 0, "waiting": 0, "retired": 0, "failed": 1}
+    frozen = owed()["record"]
+    assert "room_id" not in frozen, "a failed lookup is not an observed absence"
+    source = read_actor_source_bytes(world.root, "merge-task", frozen["source_ref"])
+    assert "room_id" not in json.loads(source)
+    assert late.replay_owed_late_reviews(world.root) == {"settled": 1, "waiting": 0, "retired": 0, "failed": 0}
+    mark, = receptive._late_marks(world.root)
+    assert mark["room_id"] == "1" and mark["target_ref"]["sha256"] == frozen["source_ref"]["sha256"]
+    assert read_actor_source_bytes(world.root, "merge-task", mark["target_ref"]) == source
+    assert owed() is None and late.replay_owed_late_reviews(world.root)["settled"] == 0

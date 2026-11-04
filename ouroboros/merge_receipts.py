@@ -227,18 +227,18 @@ def merged_under_record(drive_root: Any, task_id: str, record_id: str) -> List[D
 
 
 def review_settlement_facts(root: Any, task_id: str, record_id: str, revision: Any, *, in_room: bool = False) -> tuple:
-    """Optional merge enrichment cannot prevent the review's own notice or retained settlement."""
+    """Optional merge enrichment; room proof is absent on a failed read, never a frozen negative."""
     from ouroboros.late_review_marks import owning_room
     import logging
 
-    room = None
+    room_facts = {}
     try:
-        room = owning_room(root, task_id, None)
+        room_facts["room_id"] = owning_room(root, task_id, None)
         receipts = merged_under_record(root, task_id, record_id)
-        return receipts, room, review_settlement_words(receipts, room, revision, in_room=in_room)
+        return receipts, room_facts, review_settlement_words(receipts, room_facts["room_id"], revision, in_room=in_room)
     except Exception:
         logging.getLogger(__name__).warning("Merge facts unavailable for review %s", record_id, exc_info=True)
-        return [], room, []
+        return [], room_facts, []
 
 
 def review_settlement_words(receipts: List[Dict[str, Any]], room_id: Optional[str], revision: Any,

@@ -935,9 +935,9 @@ def _left_review_mark(record: Dict[str, Any], attempt: Any, seats: List[Dict[str
     root = record.get("canonical_root") or record["drive_root"]
     attempt_no = int(record.get("attempt") or 0)
     revision = (settled or {}).get("revision")
-    merged, room, merge_words = review_settlement_facts(root, task_id, str(record.get("record_id") or ""), revision, in_room=True)
+    merged, room_facts, merge_words = review_settlement_facts(root, task_id, str(record.get("record_id") or ""), revision, in_room=True)
     source = {"kind": "left_review_settlement", "gap": gap, "seats": seats, "merged_under_record": merged,
-              "room_id": room, "review_revision": revision,
+              **room_facts, "review_revision": revision,
               **{key: record.get(key) for key in ("surface", "task_id", "attempt", "record_id", "retry_key",
                                                   "unknown_seats", "msg_id", "left")},
               "attempt_row": {key: getattr(attempt, key, None) for key in (
@@ -963,7 +963,7 @@ def _left_review_mark(record: Dict[str, Any], attempt: Any, seats: List[Dict[str
     if unknown:
         head += f" {len(unknown)} seat(s) have no retained outcome and stay unknown; nothing is sent again."
     return {"surface": _LEFT_SURFACES.get(surface, surface), "task_id": task_id, "source_ref": ref,
-            "publication_id": _left_publication_id(record), "room_id": room,
+            "publication_id": _left_publication_id(record), **room_facts,
             "lines": [head, *merge_words, *(f"- {seat.get('model') or 'reviewer'} (seat {seat['slot_id']}): {_seat_words(seat)}"
                               for seat in seats)],
             "subject": {"retry_key": retry_key, "attempt": attempt_no, "record_id": str(record.get("record_id") or ""),
