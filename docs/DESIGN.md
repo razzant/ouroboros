@@ -3070,7 +3070,7 @@ the consciousness chip, Restart, Panic and the budget; whenever the bar itself i
 narrow window, Restart and the budget are the work list's last rows `Restart` and `Budget` — the same controls,
 placed by the bar's width. A Project's bar holds its name and status, the same chip and Panic
 (`web/modules/chat_header.js`); the chip leads the end group, so a status word never moves it. The chip is
-the brain and a future next attempt's time (the allowance reset when exhausted),
+the brain and a future next attempt's time (the allowance reset when exhausted, or the sooner retry a changed limit brings),
 or `since HH:MM` only for `due` (appointment, `due` if unknown), with the `still` mark.
 Its word uses the viewer's zone and a short date when not today; passed explained
 outcomes and passed allowance resets show no time.
