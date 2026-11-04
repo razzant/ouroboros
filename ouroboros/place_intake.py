@@ -402,14 +402,15 @@ def offer_arrival(root, task: dict, event, *, wake: bool) -> tuple[str, str]:
 
 
 def _captured_arrival(root, metadata: dict, captured: str, identity: str, facts):
-    """``(task, event)`` of one captured arrival rebuilt from its immutable room row, as the Host offered it."""
+    """``(task, event)`` of one captured arrival rebuilt from its immutable room row, as the Host offered it
+    (its provider thread whole: ``dialogue_store.whole_body``)."""
     from ouroboros import dialogue_store
     from ouroboros.place_arrivals import _record
     from ouroboros.presence_runner import PresenceTurnEvent
 
     with dialogue_store.transaction(root, write=False) as conn:
         row = _record(conn, captured)
-    body = dialogue_store.decode(row["body"]) if row is not None else {}
+        body = dialogue_store.whole_body(conn, row["body"]) if row is not None else {}
     if not identity or body.get("presence_event_identity") != identity:
         return None
     transport = body.get("transport") or {}

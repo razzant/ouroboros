@@ -631,9 +631,9 @@ def test_an_arrival_reaches_the_model_with_its_message_conversation_and_attachme
     source = arrival["context_source_ref"]  # a locator of the arrival's own retained source, as row readers print it
     assert "memory_read(source_ref=" in queue["events"] and source["task_id"] == turn_ref(h, 2)
     assert source["kind"] == "task_source" and not {"read", "canonical_root"} & set(source)
-    room_row, = [entry.row for entry in dialogue_store.iter_rows(h.root, "chat")
+    room_row, = [entry.row for entry in dialogue_store.whole_rows(h.root, dialogue_store.iter_rows(h.root, "chat"))
                  if entry.row.get("client_message_id") == "chat:a:2" and entry.row.get("direction") == "in"]
-    assert room_row["transport"]["conversation"]["transport_queue"] == inbox  # the exact snapshot, kept
+    assert room_row["transport"]["conversation"]["transport_queue"] == inbox  # the exact snapshot, kept (read as written)
     assert room_row["transport"]["message"] == message
     # The author's own registered readers resolve that reference: one retained source, and the room row's
     # reference in its chat history and memory rows. No history scan, no other store.

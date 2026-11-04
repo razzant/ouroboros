@@ -20,9 +20,15 @@ def import_all(root: Any) -> None:
     run_dialogue_import(pathlib.Path(root))
 
 
+def _written(root: Any, stream: str) -> List[Any]:
+    """Every stored row of ``stream`` in chain order, as it was written (a thread held once expanded)."""
+    root = pathlib.Path(root)
+    return dialogue_store.whole_rows(root, dialogue_store.newest(root, stream, limit=1 << 40))
+
+
 def rows(root: Any, stream: str = "chat") -> List[Dict[str, Any]]:
-    """Every stored row of ``stream`` in chain order (the decoded bodies)."""
-    return [entry.row for entry in dialogue_store.newest(pathlib.Path(root), stream, limit=1 << 40)]
+    """Every stored row of ``stream`` in chain order (the decoded rows as written)."""
+    return [entry.row for entry in _written(root, stream)]
 
 
 def chat_rows(root: Any) -> List[Dict[str, Any]]:
@@ -35,7 +41,7 @@ def progress_rows(root: Any) -> List[Dict[str, Any]]:
 
 def lines(root: Any, stream: str = "chat") -> List[str]:
     """The exact line texts (what the chain file would hold, without newlines)."""
-    return [dialogue_store.encode(entry.row) for entry in dialogue_store.newest(pathlib.Path(root), stream, limit=1 << 40)]
+    return [dialogue_store.encode(entry.row) for entry in _written(root, stream)]
 
 
 def log_rows(address: Any) -> List[Dict[str, Any]]:

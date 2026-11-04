@@ -42,7 +42,8 @@ def _observed_event():
 
 
 def _rows(root):
-    return [row for _address, row, _pos in chat_chain.iter_rows(root) if row.get("direction") in {"in", "out"}]
+    """The room's rows as written (a provider thread the store keeps once, expanded)."""
+    return [row for row in dialogue_test.chat_rows(root) if row.get("direction") in {"in", "out"}]
 
 
 def _context_ref(text):
@@ -127,7 +128,7 @@ def test_next_presence_reads_the_same_source_through_its_selected_memory_tool(tm
     second = turn(replace(event, source_event_id="telegram:bot-1:43", text="A later observation.",
                           conversation={"title": "Community"}, message={"message_id": "43"}))
     assert second.outcome == "silent" and second.task_id != first.task_id and len(reads) == 1
-    assert chat_chain.resolve_row(data, address)[0] == original
+    assert chat_chain.source_row_id(chat_chain.resolve_row(data, address)[0]) == chat_chain.source_row_id(original)
     assert [row["text"] for row in _rows(data)] == [event.text, "A later observation."]
 
 

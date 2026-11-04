@@ -157,9 +157,9 @@ def retain_focus_source(root, task_id):
     from ouroboros import chat_chain
     with dialogue_store.transaction(root, write=False) as conn:
         row = _record(conn, task_id)
+        body = dialogue_store.whole_body(conn, row['body']) if row is not None else None
     if row is None:
         raise ValueError('Focus requires its captured event')
-    body = dialogue_store.decode(row['body'])
     facts = json.loads(row['dispatch_input'] or '{}')
     if body.get('context_source_ref') or facts.get('place_context_source_ref'):
         return body.get('context_source_ref') or facts['place_context_source_ref']
