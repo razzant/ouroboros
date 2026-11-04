@@ -247,7 +247,8 @@ def _delegated_receipt_counts(value: Any) -> tuple[int, int] | None:
 
 # Local custody rows are written only by their owners and the retirement writers on the canonical
 # result (``tool_custody``, ``local_custody_repair``); a child's replica carries results, not custody.
-CANONICAL_CUSTODY_FIELDS = ("launch_handoffs", "retired_tool_invocations", "retired_model_consumers")
+CANONICAL_CUSTODY_FIELDS = ("launch_handoffs", "retired_tool_invocations", "retired_model_consumers",
+                          "native_capture_pending", "received_file_outputs")
 
 
 def project_replica_task_result_fields(

@@ -714,7 +714,10 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
         return None  # the review owner compares against its frozen subject, never a product baseline
     from ouroboros.delegate_directory import in_place_block, is_in_place_run
     if is_in_place_run(entry):
-        return in_place_block(entry)  # its edits are already in its starter's folder: nothing to capture
+        from ouroboros.headless import refresh_in_place_native_capture
+        note = refresh_in_place_native_capture(drive, entry)
+        block = in_place_block(entry)  # no run patch, disposition or fictitious apply
+        return {**block, "native_capture": note} if note else block
 
     def finish(block, transport=None):
         return retain_run_evidence(drive, entry, block, transport) if retain_investigation and publish else block

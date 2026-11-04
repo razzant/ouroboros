@@ -2512,6 +2512,10 @@
      "since": null,
      "controls": [
       {
+       "action": "pause",
+       "target": "x"
+      },
+      {
        "action": "stop",
        "target": "x",
        "scope": "cascade"

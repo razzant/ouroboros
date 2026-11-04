@@ -368,7 +368,7 @@ def test_every_unknown_is_named_and_a_natural_completion_is_not_called_a_stop(tm
     assert "the engine reported no resumable block" in done
     assert "output retained (complete, read)" in done and "patch captured, awaiting apply or reject" in done
     bad = lines["- run run-bad (codex)"]
-    assert "failed local verification (ValueError)" in bad and 'read_file(root="artifact_store", path="' in bad
+    assert "failed local verification (ValueError)" in bad and 'delegate_wait(run_id="run-bad")' in bad
     assert "it may be continued" in bad, "a terminal observed is continuable even when its retained copy is damaged"
     assert "custody closed it without a recorded engine terminal" in lines["- run run-gone"]
     assert "continue_from" not in lines["- run run-gone"]

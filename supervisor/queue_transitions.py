@@ -270,8 +270,8 @@ def clear_budget_root_fence_for_settled_tree(task: dict) -> bool:
     or RUNNING members stays: only the last settling member clears it.
     Without this, cancelling a paused tree left the fence latched forever
     (and the snapshot restore would resurrect it after a restart). An owner
-    Pause latch also stays while the answered root's late phase still runs:
-    that upkeep is the tree's last member until the Pause ends it.
+    Pause latch also stays while its census names an answered root's running
+    upkeep or a run an ended member left: a terminal result is not ended execution.
     """
     q = _queue_module()
     if not isinstance(task, dict):
@@ -279,14 +279,14 @@ def clear_budget_root_fence_for_settled_tree(task: dict) -> bool:
     root_id = str(task.get("root_task_id") or task.get("id") or "").strip()
     if not root_id:
         return False
-    from ouroboros.post_task_checkpoint import late_phase_state
+    from supervisor.owner_pause_control import owner_latch_holds
 
-    late = late_phase_state(q.DRIVE_ROOT, root_id) if (q.BUDGET_ROOT_FENCES.get(root_id) or {}).get(
-        "cause") == "owner_pause" else ""
+    held = (q.BUDGET_ROOT_FENCES.get(root_id) or {}).get(
+        "cause") == "owner_pause" and owner_latch_holds(q, root_id)
     with q._queue_lock:
         if root_id not in q.BUDGET_ROOT_FENCES:
             return False
-        if late and (q.BUDGET_ROOT_FENCES.get(root_id) or {}).get("cause") == "owner_pause":
+        if held and (q.BUDGET_ROOT_FENCES.get(root_id) or {}).get("cause") == "owner_pause":
             return False
 
         def _member(row) -> bool:
@@ -313,16 +313,14 @@ def sweep_orphaned_budget_fences(pending, fences, drive_root) -> list:
     cannot outlive its tree across restarts.
     """
     try:
-        from ouroboros.post_task_checkpoint import late_phase_state
+        from supervisor.owner_pause_control import owner_latch_holds
 
-        live_roots = {
-            str(t.get("root_task_id") or t.get("id") or "")
-            for t in pending if isinstance(t, dict)
-        }
-        # A running late phase is the owner-paused tree's member across Restart until
-        # recovery settles it (the census then releases the Pause).
+        live_roots = {str(t.get("root_task_id") or t.get("id") or "") for t in pending if isinstance(t, dict)}
+        # A running late phase or a run an ended member left is the owner-paused tree's
+        # member across Restart until settled (the census then releases the Pause).
+        q = _queue_module()
         orphaned = [root for root in list(fences) if root not in live_roots and not (
-            (fences.get(root) or {}).get("cause") == "owner_pause" and late_phase_state(drive_root, root))]
+            (fences.get(root) or {}).get("cause") == "owner_pause" and owner_latch_holds(q, root, drive_root))]
         for root in orphaned:
             fences.pop(root, None)
         if orphaned:

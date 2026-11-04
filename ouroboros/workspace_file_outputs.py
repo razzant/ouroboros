@@ -18,7 +18,11 @@ def _path(root, relative):
     if not relative or rel.is_absolute() or ".." in rel.parts or "\\" in relative:
         raise ValueError(f"invalid file-result path: {relative!r}")
     path = Path(root) / relative
-    if not path.parent.resolve().is_relative_to(Path(root).resolve()):
+    try:
+        inside = path.parent.resolve().is_relative_to(Path(root).resolve())
+    except RuntimeError as exc:  # a symlink loop above the name before Python 3.13
+        raise ValueError(f"file-result path cannot be resolved: {relative!r}: {exc}") from exc
+    if not inside:
         raise ValueError(f"file-result path escapes target: {relative!r}")
     return path
 
@@ -121,12 +125,18 @@ def _archive_files(records, cap_dir):
     return files
 
 
-def changed_file_inputs(root, file_baseline):
-    """Compare only materialized inputs, including files subsequently deleted."""
+def changed_file_inputs(root, file_baseline, *, base_ref=None, received=()):
+    """Compare selected inputs with their copied-file or original Git preimages."""
+    if not isinstance(file_baseline, dict):
+        raise ValueError("snapshot file baseline is not a path map")
+    if received and not base_ref:
+        raise ValueError("received file inputs require their original Git basis")
     changed = []
-    for relative, before in file_baseline.items():
+    for relative in [*file_baseline, *sorted(set(received) - file_baseline.keys())]:
+        copied = relative in file_baseline
+        before = file_baseline[relative] if copied else _git_side(root, base_ref, relative)
         _validate_side(before)
-        if not _matches(_side(_path(root, relative)), before, exact_mode=True):
+        if not _matches(_side(_path(root, relative)), before, exact_mode=copied):
             changed.append(relative)
     return changed
 

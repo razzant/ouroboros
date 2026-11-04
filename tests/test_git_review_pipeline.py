@@ -134,7 +134,7 @@ def test_a_reviewed_gitlink_whose_checkout_lost_its_repository_lands_its_pointer
     """Entry evidence: the reviewed submodule pointer is staged again as reviewed, and its checkout then loses its
     repository. The index's gitlink is still the one entry Git stages there, so omitted paths land that pointer,
     never its deletion, and nothing the plain directory holds."""
-    import shutil
+    from ouroboros.force_remove import force_rmtree
 
     repo, sub = task.repo_dir, task.repo_dir / "sub"
     sub.mkdir()
@@ -148,7 +148,8 @@ def test_a_reviewed_gitlink_whose_checkout_lost_its_repository_lands_its_pointer
     reference = _advisory_review(task, monkeypatch, ["sub"])
     _git(repo, "add", "sub")
     pointer = _git(repo, "ls-files", "-s", "sub").split()[1]
-    shutil.rmtree(sub / ".git")
+    force_rmtree(sub / ".git")
+    assert not (sub / ".git").exists()
 
     _fresh, result, _notes = _continue(task, monkeypatch, reference)
 

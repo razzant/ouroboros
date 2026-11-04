@@ -107,6 +107,29 @@ def assert_unabsorbed(drive):
     assert not load_effective_task_result(drive, "child").get("child_result_disposition")
 
 
+@pytest.mark.parametrize("direct", [False, True])
+@pytest.mark.parametrize("decision", ["apply", "accept", "reject"])
+def test_shared_decision_does_not_absorb_a_result_published_after_capture_read(env, monkeypatch, direct, decision):
+    from ouroboros.tools import subagent_integration as integration
+    from ouroboros.tools.join_ledger import _current_child_result_disposition
+
+    parent, _, b, drive = env
+    capture(parent, b, drive, direct=direct, outputs=("a.txt",))
+    locate = integration._locate_child_patch
+
+    def read_then_publish(ctx, tid):
+        consumed = locate(ctx, tid)
+        write_task_result(drive, tid, "completed", result="A later corrected final report")
+        return consumed
+
+    monkeypatch.setattr(integration, "_locate_child_patch", read_then_publish)
+    out = invoke(parent, decision=decision, reason="decide the capture just read")
+    assert "INTEGRATE_DISPOSITION_FAILED" in out and "CHILD_RESULT_STALE" in out, out
+    assert not _current_child_result_disposition(load_effective_task_result(drive, "child"))
+    assert verdict(drive)["outcome"] in {"verified_shared_workspace", "verified_registered_outputs",
+                                        "accepted_shared_workspace", "rejected"}
+
+
 @pytest.mark.parametrize("kind", ["different_repo", "linked", "no_external", "unavailable_a", "same_root"])
 def test_public_verifies_at_b_without_transfer(env, monkeypatch, kind):
     parent, a, b, drive = env
@@ -323,19 +346,84 @@ def test_task_disabled_tool_cannot_gain_authority_from_child_assignment(env):
     assert_unabsorbed(drive)
 
 
-def test_symlink_path_escape_is_rejected_without_reading_destination(env, monkeypatch):
+def nested_edit(b):
+    return lambda: ((b / "sub").mkdir(), (b / "sub" / "a.txt").write_bytes(b"one\nchanged\nthree\n"))
+
+
+def link_out(path, outside):
+    """Move PATH outside B (same bytes) and leave a symlink to it in its place."""
+    path.rename(outside)
+    try:
+        path.symlink_to(outside)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+
+@pytest.mark.parametrize("link", ["leaf", "folder"])
+def test_a_link_is_checked_as_a_link_and_only_a_folder_can_leave_b(env, monkeypatch, link):
+    """A captured file later replaced by a link out of B is a changed entry, never followed: its destination
+    holds the captured bytes exactly, so following it would have verified. A symlinked folder that leaves B
+    is an escape refused before any read."""
     parent, _, b, drive = env
-    art = capture(parent, b, drive)
-    outside = b.parent / "outside.txt"
-    outside.write_bytes(b"private sentinel\n")
-    (b / "a.txt").unlink()
-    (b / "a.txt").symlink_to(outside)
-    monkeypatch.setattr("ouroboros.tools.subagent_integration._verify_shared_external_workspace",
-                        lambda *a, **k: pytest.fail("escaped source was read"))
-    assert "WORKSPACE_MISSING" in invoke(parent)
-    assert outside.read_bytes() == b"private sentinel\n"
+    art = capture(parent, b, drive, edit=nested_edit(b) if link == "folder" else None)
+    outside = b.parent / "outside"
+    link_out(b / ("sub" if link == "folder" else "a.txt"), outside)
+    if link == "folder":
+        monkeypatch.setattr("ouroboros.tools.subagent_integration._verify_shared_external_workspace",
+                            lambda *a, **k: pytest.fail("escaped source was read"))
+    out = invoke(parent)
+    if link == "folder":
+        assert "WORKSPACE_MISSING" in out and "path(s) outside" in out, out
+    else:
+        assert "INTEGRATE_EXTERNAL_WORKSPACE_MISMATCH" in out and "changed 1: a.txt" in out, out
+        assert {row["path"]: row["state"] for row in verdict(drive)["path_findings"]} == {"a.txt": "changed"}
+    expected = b"one\nchanged\nthree\n"
+    assert (outside / "a.txt" if link == "folder" else outside).read_bytes() == expected
     assert (art / "workspace.patch").is_file()
     assert_unabsorbed(drive)
+
+
+@pytest.mark.parametrize("authority", ["presence_on_b", "policy_on_link", "policy_on_destination"])
+@pytest.mark.parametrize("executor", [False, True, "backend_policy"])
+def test_a_link_out_of_b_is_judged_by_its_own_path(env, authority, executor):
+    """A child's link to a file outside B is an entry of B: a Presence grant on B covers it although its
+    destination lies outside the grant, a task policy naming the link itself still refuses, and a policy on
+    the destination never applies because nothing reads the destination."""
+    parent, _, b, drive = env
+    outside = b.parent / "outside.txt"
+    outside.write_bytes(b"private sentinel\n")
+
+    def edit():
+        (b / "a.txt").write_bytes(b"one\nchanged\nthree\n")
+        try:
+            (b / "link").symlink_to(outside)
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+    capture(parent, b, drive, edit=edit)
+    if executor:
+        parent.executor_ref = {"type": "local", "id": "mapped", "workspace_host_path": str(b.parent),
+                               "workspace_backend_path": "/workspace"}
+    if authority == "presence_on_b":
+        ceiling(parent, "user_files", b.name)
+    else:
+        protected = b / "link" if authority == "policy_on_link" else outside
+        if executor == "backend_policy":
+            protected = "/workspace/" + protected.relative_to(b.parent).as_posix()
+        parent.task_contract = {"resource_policy": {"protected_artifacts": [{
+            "id": "black-box", "paths": [str(protected)], "deny": ["read_bytes", "hash"]}]}}
+    out = invoke(parent)
+    if authority == "policy_on_link":
+        assert "INTEGRATE_TARGET_FORBIDDEN" in out and "RESOURCE_POLICY_BLOCKED" in out, out
+        assert_unabsorbed(drive)
+    else:
+        assert "Verified external_workspace child" in out, out
+        assert {row["path"]: row["state"] for row in verdict(drive)["path_findings"]} == {
+            "a.txt": "unchanged", "link": "unchanged"}
+    assert outside.read_bytes() == b"private sentinel\n"
+    if authority == "policy_on_destination":
+        from ouroboros.protected_artifacts import block_reason_for_path
+        assert "RESOURCE_POLICY_BLOCKED" in block_reason_for_path(parent, b / "link", "read_bytes")
 
 
 def test_capture_under_ancestor_repo_cannot_hide_patch_paths_from_policy(env):
@@ -386,7 +474,7 @@ def dispositions(drive):
                                      "path_policy", "path_escape", "unparseable_patch"])
 def test_early_refusals_keep_verdict_and_custody_without_absorption(env, refusal):
     parent, a, b, drive = env
-    art = capture(parent, b, drive)
+    art = capture(parent, b, drive, edit=nested_edit(b) if refusal == "path_escape" else None)
     args = {}
     if refusal == "missing_assignment":
         row = read_result(drive, "child")
@@ -400,10 +488,8 @@ def test_early_refusals_keep_verdict_and_custody_without_absorption(env, refusal
     elif refusal == "path_policy":
         parent.task_contract = {"resource_policy": {"protected_artifacts": [{
             "id": "black-box", "paths": [str(b / "a.txt")], "deny": ["read_bytes"]}]}}
-    elif refusal == "path_escape":
-        (b.parent / "outside.txt").write_bytes(b"private sentinel\n")
-        (b / "a.txt").unlink()
-        (b / "a.txt").symlink_to(b.parent / "outside.txt")
+    elif refusal == "path_escape":  # the captured file's folder now leaves B
+        link_out(b / "sub", b.parent / "outside")
     else:
         from hashlib import sha256
         (art / "workspace.patch").write_bytes(b"not a patch\n")

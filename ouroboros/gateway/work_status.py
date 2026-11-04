@@ -155,12 +155,12 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
     (``pause_by``, ``control_actor.pause_author``), the members that Pause already parked and the task's
     own identity facts (see ``work_projection``), ``running`` when the queue runs it, its current worker ``owner_wait``,
     ``sent_review`` while a review it sent from a warm park still runs, ``cancel_pending`` while a live inline
-    turn's recorded Stop waits for its next stop check, and the latest Resume attempt its record keeps
-    (``resume_attempt``). Returns the member's own state only; ``live`` says whether the member itself executes now:
-    under a settling Pause only a running member the Pause has not parked does, never a queued one or one that
-    already saved its place. A held member's refused attempt about the control holding it now is ``last_resume``:
-    dated history beside the reason, never one, except the host's own start of a Continue whose earlier work
-    settled: that refusal, not the wait, is then why it has not started."""
+    turn's recorded Stop waits for its next stop check, the latest ``resume_attempt``, and ``tail_unknown`` while only
+    what nobody can confirm holds an answered root's requested Pause. Returns the member's own state only; ``live``
+    says whether the member itself executes now: under a settling Pause only a running member the Pause has not
+    parked does, never a queued one or one that already saved its place. A held member's refused attempt about the
+    control holding it now is ``last_resume``: dated history beside the reason, never one, except the host's own
+    start of a Continue whose earlier work settled: that refusal, not the wait, is then why it has not started."""
     raw = raw or {}
     task_id = str(row.get("activity_id") or "")
     phase = str(row.get("phase") or "unknown")
@@ -189,6 +189,10 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
         if phase == "budget_pausing" and not view["waiting"] and raw.get("running", row.get("live")) \
                 and task_id not in set(raw.get("parked") or ()):
             state.update(activity="working", transition="pausing", live=True)
+        if raw.get("tail_unknown"):
+            # An answered root whose requested Pause only what nobody can confirm holds (``gateway/state.py``): its
+            # word is unknown, never running nor a settled Pause; Resume refuses until that tail ends.
+            state.update(activity="unknown", release="none", resumable=False)
         state["reviews_finishing"] = bool(row.get("finishing_reviews") or raw.get("sent_review"))
         state["model_handoffs"] = list(raw.get("model_handoffs") or ())
         if _owner_actions({**row, "stop": view["stop"], "refusal": view["refusal"]})[1]:

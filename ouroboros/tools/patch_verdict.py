@@ -103,14 +103,16 @@ def write_patch_verdict(
     protected: List[str],
     target: str = "",
     lineage: Dict[str, str] | None = None,
+    child_result_sha256: str = "",
     observation: Dict[str, Any] | None = None,
     failures: List[str] | None = None,
 ) -> str:
     """``parent_task_id`` names the deciding task. An owner-Continue successor deciding
-    its predecessor's child adds ``lineage``: the authority, the child's recorded parent
-    and the exact result hash it judged. The child's own records are never rewritten.
-    ``observation`` keeps what the check saw beside the decision (``observed_outcome``,
-    ``path_findings``, ``path_findings_note``); only ``observed_outcome`` also rides the
+    its predecessor's child adds ``lineage``: the authority and the child's recorded parent.
+    ``child_result_sha256`` identifies the consumed native result for every parent,
+    independently of Continue authority. Legacy/run-only callers may omit it.
+    ``observation`` keeps what the check or apply saw beside the decision (``observed_outcome``,
+    ``path_findings``, ``path_findings_note``, ``unindexed``); only ``observed_outcome`` also rides the
     custody row. An earlier verdict on the same child stays readable beside this one.
     ``failures`` receives this write's own failure facts, the names its records use
     (``verdict_artifact_write_failed``, ``custody_row_write_failed``), for the caller to report."""
@@ -131,6 +133,7 @@ def write_patch_verdict(
         "conflicts": list(conflicts or []),
         "patch_sha256": str((manifest or {}).get("sha256") or ""),
         "diffstat": str((manifest or {}).get("diffstat") or ""),
+        **({"child_result_sha256": child_result_sha256} if child_result_sha256 else {}),
         **(observation or {}),
         **(lineage or {}),
     }
@@ -168,6 +171,7 @@ def write_patch_verdict(
             "applied": bool(applied),
             "reason": str(reason or "")[:600],
             "patch_sha256": str(verdict.get("patch_sha256") or ""),
+            **({"child_result_sha256": verdict["child_result_sha256"]} if verdict.get("child_result_sha256") else {}),
             "verdict_artifact_write_failed": artifact_write_failed,
             # Where the verdict was judged (a shared child folder need not be the
             # parent's); absent when no target is known, as on legacy rows.
