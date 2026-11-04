@@ -1,8 +1,9 @@
 """One author fact for a place row: the account its place confirms now is my human's, read by every reader.
 
-Each guard is checked both ways: a row from the confirmed account reads as my human's, and the same row
-from a shared account, an unauthenticated actor, another account, an imported message or a participant
-does not — on the full stored row and on the facts the memory inventory keeps beside it (``row_meta``).
+Each guard is checked both ways: a row from the confirmed account reads as my human's, also on a place where I
+write from that same account, and the same row from an unauthenticated actor, another account, an imported
+message, a participant or a bot account of mine does not — on the full stored row and on the facts the memory
+inventory keeps beside it (``row_meta``).
 """
 from __future__ import annotations
 
