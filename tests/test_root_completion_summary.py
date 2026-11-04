@@ -27,10 +27,13 @@ def test_an_unnamed_ordinary_root_is_not_renamed_by_its_sentence():
 
 
 @pytest.mark.parametrize("title", ["", "Fix the export"])
-def test_owner_root_sentence_reaches_storage_without_replacing_its_answer_or_title(wake, title):
+@pytest.mark.parametrize("metadata", [{}, quiet.SCHEDULE, {**quiet.SCHEDULE, "presence": {"binding_id": "b1"}}],
+                         ids=["owner", "schedule", "bound-schedule"])
+def test_root_sentence_names_only_an_unnamed_self_started_run(wake, title, metadata):
     answer, summary = "Full answer.\n\nThe test results.", "Экспорт исправлен."
-    text, usage, trace, bus = wake.run([quiet.finish(answer, summary=summary)], metadata={})
-    task = {"id": quiet.TASK_ID, "type": "task", "chat_id": 1, "text": "Fix the export", "metadata": {}, "title": title}
+    wake.ctx.is_direct_chat = False
+    text, usage, trace, bus = wake.run([quiet.finish(answer, summary=summary)], metadata=metadata)
+    task = {"id": quiet.TASK_ID, "type": "task", "chat_id": 1, "text": "Fix the export", "metadata": metadata, "title": title}
     _, stored = quiet.emit(wake, text, usage, trace, bus=bus, task=task)
     assert stored["wake_summary"] == summary and stored["result"] == answer
-    assert stored.get("suggested_name") != summary
+    assert (stored.get("suggested_name") == summary) == (metadata == quiet.SCHEDULE and not title)

@@ -438,6 +438,8 @@ def test_schedule_marker_does_not_bypass_quiet_authority(wake, extra, occurrence
     wake.ctx.parent_task_id = parent
     wake.ctx.task_metadata = {**extra, "schedule_occurrence": occurrence}
     assert "COMPLETION_ARGUMENT" in _finish_task(wake.ctx, action="finish", silent=True)
+    if parent or extra.get("delegation_role") == "subagent" or extra.get("root_task_id"):
+        assert "COMPLETION_ARGUMENT" in _finish_task(wake.ctx, action="finish", answer="Answer.", summary="A line.")
     assert getattr(wake.ctx, "_completion_request", None) is None
     assert "completion_requested" in _finish_task(wake.ctx, action="finish", answer="Ordinary answer.")
 

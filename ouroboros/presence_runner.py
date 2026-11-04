@@ -1098,9 +1098,9 @@ def finish_turn(drive_root: Path, task: Mapping[str, Any], task_id: str, identit
                                      event=event, task=task, task_id=task_id)
     # Only the durable terminal proves the outcome; a draft or RUNNING row cannot authorize acknowledgement.
     terminal = _stored_turn(Path(drive_root), task_id, identity)
-    if terminal.get("wake_summary"):
+    if terminal.get("wake_summary") and terminal.get("suggested_name") and not terminal.get("title"):
         from supervisor.worker_chat_lane import _broadcast_task_named
-        _broadcast_task_named({"type": "task_named", "task_id": task_id, "suggested_name": terminal["wake_summary"]})
+        _broadcast_task_named({"type": "task_named", "task_id": task_id, "suggested_name": terminal["suggested_name"]})
     row = next((item for item in events if item.get("type") == "presence_result"), None)
     refusal = _terminal_refusal(terminal)
     if refusal:
