@@ -738,11 +738,11 @@ def enqueue_assisted_resolution_task(tx: Dict[str, Any]) -> str:
 
 def _run_update_smoke(cmd: List[str], timeout_sec: float = 120.0) -> Dict[str, Any]:
     from ouroboros.platform_layer import kill_process_tree, subprocess_new_group_kwargs
-    from ouroboros.tools.shell_process import _active_subprocesses, _subprocess_lock, tracked_start
+    from ouroboros.tools.shell_process import contained_popen, retire_tracked, tracked_start
 
     with tracked_start() as publish:
-        proc = publish(subprocess.Popen(
-            cmd,
+        proc = publish(contained_popen(
+            subprocess.Popen, cmd,
             cwd=str(_g.REPO_DIR),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -771,8 +771,7 @@ def _run_update_smoke(cmd: List[str], timeout_sec: float = 120.0) -> Dict[str, A
             "returncode": proc.returncode,
         }
     finally:
-        with _subprocess_lock:
-            _active_subprocesses.discard(proc)
+        retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
 
 
 def update_restart_smoke() -> Dict[str, Any]:

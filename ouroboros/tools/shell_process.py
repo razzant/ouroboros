@@ -1,7 +1,7 @@
 """Process-execution substrate shared by every command-running tool.
 
 Owns the tracked subprocess registry, the one admission/publication protocol
-its producers start children through (``tracked_start``) and the restart
+its producers start/retire children through (``tracked_start``, ``retire_tracked``) and the restart
 exit's own finalization scope (``exit_finalization``), its panic-time
 request and the ordinary stop's tree kill, the one command wait that also
 reads an in-process turn's Stop now (``communicate_or_stop``), the
@@ -23,12 +23,27 @@ import math
 import os
 import pathlib
 import subprocess
+import sys
 import threading
 import time
+import weakref
 from contextlib import contextmanager
 from typing import Any, Callable, List, Mapping, Optional
 
 from ouroboros.platform_layer import kill_process_tree, request_process_tree_kill, scrub_repo_from_pythonpath, subprocess_new_group_kwargs
+from ouroboros.process_identity import process_kernel_birth
+from ouroboros.platform_layer import (
+    IS_WINDOWS,
+    WINDOWS_CREATE_SUSPENDED,
+    assign_pid_to_job,
+    close_job,
+    create_kill_on_close_job,
+    job_has_running_member,
+    observe_child_exit,
+    retained_child_group,
+    resume_process,
+    terminate_job,
+)
 from ouroboros.config import SETTINGS_DEFAULTS, load_settings, runtime_environ
 from ouroboros.owned_shutdown import stop_begun
 from ouroboros.tools.registry import ToolContext
@@ -163,6 +178,7 @@ def tracked_start():
     stopping: list = []
 
     def publish(proc):
+        _record_group(proc)  # before Panic can name it: its request then reaches the whole tree
         _active_subprocesses.add(proc)
         if _panic_requested or (stop_begun() and not finalizing):
             stopping.append(proc)
@@ -225,14 +241,16 @@ def _tracked_subprocess_run(cmd, **kwargs):
     from ouroboros.tool_custody import external_handoff
     confirmed = external_handoff("shell_process")
     proc = None
+
     try:
         from ouroboros.owner_pause import operation_start
 
         with tracked_start() as publish, operation_start():
             try:
-                proc = subprocess.Popen(cmd, **kwargs)
+                proc = contained_popen(subprocess.Popen, cmd, **kwargs)
             except (OSError, ValueError) as exc:
-                exc.process_not_started = True
+                if not hasattr(exc, "process_not_started"):
+                    exc.process_not_started = True
                 raise
             publish(proc)  # before the spawning owner can exit
         from ouroboros.workspace_executor import _register_process
@@ -243,10 +261,12 @@ def _tracked_subprocess_run(cmd, **kwargs):
                 "record_type": "foreground", "executor_type": "local", "executor_id": "host",
                 "host_pid": proc.pid})
             if record_path is not None:
-                confirmed()
+                confirmed()  # root receipt; retained tree custody stays with this process
     except BaseException:
         if proc is None:
             confirmed()
+        else:
+            retire_tracked(proc)
         raise
     try:
         stdout, stderr = communicate_or_stop(proc, timeout, stop, lambda: _kill_process_group(proc))
@@ -256,45 +276,215 @@ def _tracked_subprocess_run(cmd, **kwargs):
         proc.wait(timeout=5)
         raise
     finally:
+        retire_tracked(proc)
         if proc.poll() is not None:
             confirmed()
             from ouroboros.workspace_executor import _forget_process
-            _active_subprocesses.discard(proc)
             _forget_process(record_path)
 
 
+def _held(proc) -> dict:
+    return getattr(proc, "__dict__", {})
+
+
+_GENUINE_POPEN = subprocess.Popen  # the stdlib class itself: a test's patched name, wrapper or subclass is not it
+
+
+class _RetainedPopen(subprocess.Popen):
+    """Return the root's status without relinquishing its POSIX group identity.
+
+    waitid(WNOWAIT) leaves the exited leader waitable: its PID cannot be
+    recycled while this owner retains it. The same Popen waits/communicates
+    and returns the same status; only whole-tree retirement consumes it.
+    """
+
+    def __init__(self, *args, **kwargs):
+        self._ouroboros_group_lock = threading.Lock()
+        self._ouroboros_group_held = False
+        self._ouroboros_group_birth = ""
+        super().__init__(*args, **kwargs)
+        self._ouroboros_group_birth = process_kernel_birth(self.pid)
+        self._ouroboros_group_held = True  # contained_popen supplied start_new_session
+        self._ouroboros_pgid = self.pid
+
+    def _observe(self, pid, flags):
+        try:
+            return observe_child_exit(pid, flags)
+        except ChildProcessError:
+            self._ouroboros_group_held = False
+            raise
+
+    def _internal_poll(self, _deadstate=None):
+        # Keep Popen's nonblocking wait lock and status semantics, using our
+        # observer directly. Its private _internal_poll arguments vary between
+        # supported CPython versions (3.14 no longer accepts _waitpid).
+        if self.returncode is not None or not self._waitpid_lock.acquire(False):
+            return self.returncode
+        try:
+            if self.returncode is None:
+                try:
+                    pid, status = self._observe(self.pid, os.WNOHANG)
+                    if pid == self.pid:
+                        self._handle_exitstatus(status)
+                except OSError as exc:
+                    if _deadstate is not None:
+                        self.returncode = _deadstate
+                    elif isinstance(exc, ChildProcessError):
+                        self.returncode = 0  # same missing-status result as Popen
+        finally:
+            self._waitpid_lock.release()
+        return self.returncode
+
+    def _try_wait(self, wait_flags):
+        try:
+            return self._observe(self.pid, wait_flags)
+        except ChildProcessError:
+            return self.pid, 0  # stdlib's missing-status result; tree ownership stays unknown
+
+    def __del__(self, _is_finalizing=sys.is_finalizing):
+        # Published live/unknown trees have a strong registry reference. This
+        # covers an unpublished caller's disposal and failed Popen construction.
+        # At interpreter teardown the kernel will consume our waitable children;
+        # Python's import machinery may already be gone (including in cyclic GC).
+        if _is_finalizing():
+            return
+        super().__del__()
+        if getattr(self, "returncode", None) is not None and self._ouroboros_group_held:
+            retained_child_group(self, release=True)
+
+
+class _ContainedPopen(subprocess.Popen):
+    """A Windows tracked child born into its own Job (``contained_popen``): created suspended, assigned to a Job
+    that refuses breakaway and does not kill on close, then resumed, so nothing it starts runs outside that Job,
+    whatever its parent chain. An MSYS2/Cygwin exec ends the Windows process that started the next program, which
+    a ``taskkill /T`` walk cannot pass, and every MSYS2 spawn breaks away from a Job that permits it (ARCHITECTURE
+    §1). A child its Job cannot hold still runs, its tree's end unknown (``_tree_remains``); one that cannot be
+    resumed never runs: its end is requested (or disclosed unconfirmed) and its start refused."""
+
+    def _execute_child(self, *args, **kwargs):
+        super()._execute_child(*args, **kwargs)
+        self._ouroboros_containment_attempted = True
+        job = create_kill_on_close_job(kill_on_close=False)  # leftovers outlive the command, as a group's do
+        if job is not None and assign_pid_to_job(job, self.pid):
+            self._ouroboros_job = job
+            weakref.finalize(self, close_job, job)
+        else:
+            close_job(job)
+            log.warning("Tracked child %d runs without its own Job; its tree's end stays unknown", self.pid)
+        if not resume_process(self.pid):  # it never ran: end it and refuse the start
+            # Popen will raise before the caller can publish this already-created child.
+            # Keep its handle for Panic/settlement even if the first end request fails.
+            _active_subprocesses.add(self)
+            receipt = request_process_tree_kill(self)
+            end = ("its end was requested before it ran" if receipt.get("requested") else
+                   f"its end is unconfirmed ({receipt.get('error', 'no request issued')})")
+            log.error("Tracked child %d could not be resumed; %s", self.pid, end)
+            error = OSError(f"tracked child {self.pid} could not be resumed; {end}")
+            error.process_not_started = False  # Created but never resumed is not a failed CreateProcess.
+            raise error
+
+
+def contained_popen(popen_cls, *args, **kwargs):
+    """Start a tracked child: ``popen_cls(*args, **kwargs)``, born contained on Windows (``_ContainedPopen``):
+    CREATE_SUSPENDED alone joins the producer's own flags, so no process group or console changes with it. POSIX
+    retains the new session leader with WNOWAIT until its tree settles. Both platforms pass patched classes
+    through unchanged; test doubles must supply an explicit containment measurement."""
+    if popen_cls is not _GENUINE_POPEN:
+        return popen_cls(*args, **kwargs)
+    if not IS_WINDOWS:
+        if not kwargs.get("start_new_session"):
+            raise ValueError("tracked POSIX children require their own session")
+        return _RetainedPopen(*args, **kwargs)
+    return _ContainedPopen(*args, **{**kwargs, "creationflags": kwargs.get("creationflags", 0) | WINDOWS_CREATE_SUSPENDED})
+
+
+def _record_group(proc) -> None:
+    """Publish the containment witness established at birth by ``contained_popen``."""
+    # A raw Popen or a numeric PGID is not a retained containment witness.
+    # contained_popen establishes the group at birth, including fast exits.
+    if _held(proc).get("_ouroboros_group_held"):
+        proc._ouroboros_pgid = proc.pid
+
+
 def _kill_process_group(proc):
-    """Kill a subprocess tree."""
+    """Kill a subprocess tree through the tree owner (a tracked Windows child: its own Job)."""
     kill_process_tree(proc)
+
+
+def _tree_remains(proc) -> Optional[bool]:
+    """After its root's exit: whether what its containment holds still runs (its recorded group, or its Job's
+    members). None when nothing measured holds it, so an exited root never stands for its tree."""
+    held = _held(proc)
+    if held.get("_ouroboros_tree_settled"):
+        return False
+    if held.get("_ouroboros_pgid"):
+        if "_ouroboros_group_held" not in held or not retained_child_group(proc):
+            return None  # an unknown/reaped/recycled leader cannot vouch for this number
+        from ouroboros.process_containment import process_group_has_live_members
+        return process_group_has_live_members(held["_ouroboros_pgid"])
+    if held.get("_ouroboros_job") is None:
+        return None
+    return job_has_running_member(held["_ouroboros_job"])
+
+
+def retire_tracked(proc) -> bool:
+    """Release only an exited root AND a measured empty tree; otherwise retain it.
+
+    A task-group record is discovery, not transfer of this live OS witness.
+    Foreground/external receipts describe the root separately. Idle workers
+    keep this registry alive; stop/idle probes retire naturally ended trees.
+    """
+    held = _held(proc)
+    if proc.poll() is None or _tree_remains(proc) is not False:
+        return False
+    held["_ouroboros_tree_settled"] = True
+    if held.get("_ouroboros_group_held") and not retained_child_group(proc, release=True):
+        return False
+    _active_subprocesses.discard(proc)
+    return True
+
+
+def _end_tree(proc) -> None:
+    """Request a held group/Job's end even after root exit. Unknown Job membership
+    is no obstacle to terminating that owned Job; no numeric fallback for lost groups."""
+    if "_ouroboros_group_held" in _held(proc):
+        _kill_process_group(proc)
+    elif (job := _held(proc).get("_ouroboros_job")) is not None:
+        if job_has_running_member(job) is not False:
+            terminate_job(job)  # the handle is authority even when the membership read failed
+    elif proc.poll() is None:
+        _kill_process_group(proc)
 
 
 def kill_all_tracked_subprocesses(*, request_only=False, deadline=None):
     """Request owned kills without locks (Panic), or stop the tracked children (ordinary cleanup).
 
-    The ordinary stop kills its snapshot through the tree owner. With the generation stop's
-    ``deadline`` (admission is already closed) it also waits, until then, for starts still in flight,
-    stops what they published and confirms each exit; without one it adds no wait. Only handles whose
-    exit it observed leave the registry: a concurrent publication or an unconfirmed kill keeps its
-    name. Returns ``None`` when every child it addressed exited, else the live ``pids`` and the
-    ``unpublished`` starts it could not see, which no durable record names."""
+    The ordinary stop kills its snapshot through the tree owner (``_end_tree``). With the generation
+    stop's ``deadline`` (admission is already closed) it also waits, until then, for starts still in
+    flight, stops what they published and confirms each exit; without one it adds no wait. An exit is
+    the root's and, measured, its contained tree's (``_tree_remains``): a dead root whose descendants
+    may still hold its pipes has not exited. Only handles whose exit it observed leave the registry: a
+    concurrent publication or an unconfirmed kill keeps its name. Returns ``None`` when every child it
+    addressed exited, else the live ``pids`` and the ``unpublished`` starts it could not see, which no
+    durable record names."""
     global _panic_requested
     if request_only:
         _panic_requested = True
         return [request_process_tree_kill(proc) for proc in _active_subprocesses.copy()]
     procs = list(_active_subprocesses.copy())  # whole-set copies and updates: no publisher waits on this stop
     for proc in procs:
-        if proc.poll() is None:  # a reaped handle's PID may already name another process
-            _kill_process_group(proc)
+        _end_tree(proc)
     if deadline is not None:
         with _start_settled:
             _start_settled.wait_for(lambda: not _spawning_subprocesses, max(0.0, deadline - time.monotonic()))
         late = [proc for proc in _active_subprocesses.copy() if proc not in procs]
         for proc in late:  # its starter already handed it to the tree kill; this stop confirms the exit
-            if proc.poll() is None:
-                _kill_process_group(proc)
+            _end_tree(proc)
         procs += late
     alive = [proc for proc in procs if not _exit_observed(proc, deadline)]
-    _active_subprocesses.difference_update([proc for proc in procs if proc not in alive])
+    for proc in procs:
+        if proc not in alive:
+            retire_tracked(proc)
     with _start_settled:
         unpublished = _spawning_subprocesses
     if alive or unpublished:
@@ -306,15 +496,20 @@ def _exit_observed(proc, deadline) -> bool:
     try:
         if deadline is not None:
             proc.wait(timeout=max(0.0, deadline - time.monotonic()))
-        return proc.poll() is not None
+        if proc.poll() is None:
+            return False
     except subprocess.TimeoutExpired:
         return False
+    while (remains := _tree_remains(proc)) is True and deadline is not None and time.monotonic() < deadline:
+        time.sleep(0.05)  # its killed members' exits, until the stop's own deadline
+    return remains is False
 
 
 def unsettled_tracked_children() -> Optional[dict]:
-    """What a joined stop must still disclose, without a wait: tracked children still alive and starts
-    still in flight (a publication after the stop ran is stopped by its starter, not confirmed)."""
-    alive = sorted(proc.pid for proc in _active_subprocesses.copy() if proc.poll() is None)
+    """What a joined stop must still disclose, without a wait: tracked children whose root or contained
+    tree may still run, and starts still in flight (a publication after the stop ran is stopped by its
+    starter, not confirmed)."""
+    alive = sorted(proc.pid for proc in _active_subprocesses.copy() if not retire_tracked(proc))
     with _start_settled:
         unpublished = _spawning_subprocesses
     return {"state": "unconfirmed", "pids": alive, "unpublished": unpublished} if alive or unpublished else None

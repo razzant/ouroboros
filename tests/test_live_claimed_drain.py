@@ -21,7 +21,7 @@ from ouroboros.realtime_setup import rows_for_engine
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
 from tests.test_live_conversation import host_world as host_world
 from tests.test_live_conversation_driver import Host, until
-from tests.test_live_deferred_custody import MAIL, READY, answer, holding_result, mail_updates, outputs, pointers, successor
+from tests.test_live_deferred_custody import MAIL, answer, holding_result, mail_updates, outputs, pointers, successor
 from tests.test_live_delivery_owner import ROOM_POINTER, Socket, never, opened, position, room_pointers
 from tests.test_live_delivery_owner_stack import RESTART, close_on_write, handle, live_frames, spoken, written
 from tests.test_live_host_joined import mailbox_host

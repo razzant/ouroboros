@@ -22,9 +22,10 @@ import pytest
 
 from ouroboros import delegate_custody as dc
 from tests._budget_pause_exact_helpers import _install_queue
+from tests._delegate_capture_child import idle_maintenance_child  # noqa: F401
 from tests.test_owner_continue import NONCE, _interrupted
 
-pytestmark = pytest.mark.serial  # module-global latches and the delegate custody cache
+pytestmark = [pytest.mark.serial, pytest.mark.usefixtures("idle_maintenance_child")]  # module-global latches and the delegate custody cache
 
 PRED = "pred-1"
 DUTY = "held_continuation_recheck"

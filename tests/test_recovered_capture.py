@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -267,6 +268,11 @@ def test_supervisor_reaches_ready_and_real_assignment_while_both_captures_are_bl
     drain = server._check_pending_restart_drain
     migrate_usage = usage_store.migrate_from_journal
     rec = _supervisor_harness(monkeypatch, root, ["ok"] * 1000)
+    # The harness stubs the loop's sleep out, so its scripted ticks spin: a thousand of them take about a second, and the
+    # stop that ends them closes the preparation generation, which refuses a launch whose lane has not yet committed it
+    # (one store collision costs that lane a 0.25 s slice). A real pause per healthy tick (``rec.stop.wait`` is a fake that
+    # returns at once) makes the budget time, not iterations.
+    monkeypatch.setattr(server.time, "sleep", lambda seconds: time.sleep(min(seconds, 0.02)))
     monkeypatch.setattr(usage_store, "migrate_from_journal", migrate_usage)
     _queue, _state, workers = _install_queue(root, monkeypatch)
     monkeypatch.setattr(server, "_startup_custody_sweep", maintenance._startup_custody_sweep)

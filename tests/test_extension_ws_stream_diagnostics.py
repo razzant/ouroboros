@@ -78,7 +78,8 @@ def register(api):
         assert not [row for row in caplog.records if "WS relay failures" in row.getMessage()]
     assert len(requests) == (5 if isinstance(status, int) else 0)
     assert not list((drive / "state" / "skills" / skill.name / "extension_calls").glob("*.result.json"))
-    assert not runner._active_subprocesses
+    from ouroboros.tools import shell_process
+    assert not shell_process._active_subprocesses
 
 
 def test_legacy_empty_completion_frame_remains_compatible():

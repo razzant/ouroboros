@@ -353,11 +353,13 @@ def local_producers_settled() -> bool:
     """
     from ouroboros import budget_pause, custody_owed
     from ouroboros._usage_wait import _ABANDONED_SENDS
+    from ouroboros.tools.shell_process import unsettled_tracked_children
 
     with budget_pause._TOOL_LOCK:
         unsettled = any(not row["settled"].is_set()
                         for rows in budget_pause._TOOL_FUTURES.values() for row in rows.values())
-    return not unsettled and not _ABANDONED_SENDS and not custody_owed.pending()
+    return (unsettled_tracked_children() is None and not unsettled
+            and not _ABANDONED_SENDS and not custody_owed.pending())
 
 
 def retain_unconfirmed_host_operation(reason: str) -> None:
@@ -561,6 +563,7 @@ def task_process_blockers(drive_root: Any, task_ids: set[str]) -> list[dict]:
     """
     import pathlib
     from ouroboros.platform_layer import pid_provably_gone
+    from ouroboros.process_containment import pid_is_zombie
     from ouroboros.workspace_executor import _PROCESS_STATE_DIR, _load_process_record, _valid_process_record
 
     folder = pathlib.Path(drive_root) / "state" / _PROCESS_STATE_DIR
@@ -586,7 +589,9 @@ def task_process_blockers(drive_root: Any, task_ids: set[str]) -> list[dict]:
         if record.get("executor_type") == "local":
             if pid <= 0:
                 raise ValueError("workspace_executor_custody_invalid")
-            if pid_provably_gone(pid):
+            if pid_provably_gone(pid) or (record.get("record_type") == "foreground" and pid_is_zombie(pid)):
+                # A WNOWAIT leader has returned. This receipt describes the
+                # root; task scope and the live registry still own its tree.
                 continue
         elif record.get("backend_completed") is True and (pid <= 0 or pid_provably_gone(pid)):
             continue

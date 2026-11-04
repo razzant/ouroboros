@@ -214,7 +214,7 @@ def test_every_os_runs_whole_file_shards_of_both_passes_and_its_checks_once(tmp_
     assert {"issues": "read"}.items() <= job["permissions"].items()
     for name in ("setup_node", "posix_tools", "select_posix_tools"):
         assert "matrix.shard" not in steps[name]["if"]  # Every runner needs the utilities and node.
-    for name in ("book_mode", "tests_size", "attachment_browser_install", "attachment_browser", "composer_browser"):
+    for name in ("book_mode", "tests_size", "attachment_browser_install", "attachment_browser", "composer_browser", "tracked_chromium"):
         assert "matrix.shard == 1" in steps[name]["if"]
     for step in job["steps"]:
         if "run_tests.py --node" in step.get("run", "") or "test_no_core_a2a_telegram_imports.py" in step.get("run", ""):

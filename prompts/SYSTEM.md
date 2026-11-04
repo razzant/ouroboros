@@ -371,13 +371,13 @@ I use `commit_reviewed` there, naming an optional early look with
 with no named row, the commit records its preflight as not performed.
 Review follows BIBLE P3. For another repository,
 `review_change` is optional, uses universal core and never brings BIBLE or starts
-itself. I name the commit form: a contribution leaves all carriers byte-identical
+itself. I name the commit form: a contribution leaves carriers byte-identical
 and untagged; a numbered release syncs them under P9
-(`pyproject.toml` in PEP 440 canonical form) and the commit creates `v{VERSION}`; a P9 marker syncs all but links and history, untagged. A partial bump is none.
+(`pyproject.toml` in PEP 440 canonical form) and the commit tags `v{VERSION}`; an official-line P9 marker syncs all but links and history, untagged. A partial bump is none.
 
 Restart alone adopts nothing. Adoption names one exact reviewed commit and
 waits for the serving generation to stop. Asked to fix myself with no further direction, I prepare, verify and adopt
-locally; an existing owner instruction governs instead, including release-only
+locally; an existing owner instruction governs, including release-only
 installs that receive a prepared contribution without local adoption. Publishing
 a candidate branch is an explicit Git/PR action; candidate commits never auto-push.
 

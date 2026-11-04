@@ -179,8 +179,8 @@ def _pipe_tail(pipe: Any, out: Dict[str, bytes], key: str, max_bytes: int) -> No
 def _run(cmd: List[str], *, cwd: pathlib.Path, env: Dict[str, str], timeout_sec: int) -> Dict[str, Any]:
     from subprocess import Popen
     from ouroboros.platform_layer import merge_hidden_kwargs, subprocess_new_group_kwargs
-    from ouroboros.tools.shell import _active_subprocesses, _kill_process_group, _subprocess_lock
-    from ouroboros.tools.shell_process import tracked_start
+    from ouroboros.tools.shell import _kill_process_group
+    from ouroboros.tools.shell_process import contained_popen, retire_tracked, tracked_start
 
     stderr_tail: Dict[str, bytes] = {}
     kwargs: Dict[str, Any] = {
@@ -192,7 +192,8 @@ def _run(cmd: List[str], *, cwd: pathlib.Path, env: Dict[str, str], timeout_sec:
     }
     kwargs.update(subprocess_new_group_kwargs())
     with tracked_start() as publish:  # published before the reader thread, the first step that can fail
-        proc = publish(Popen(cmd, **merge_hidden_kwargs(kwargs)))  # noqa: S603 - argv template is controlled.
+        proc = publish(contained_popen(  # noqa: S603 - argv template is controlled.
+            Popen, cmd, **merge_hidden_kwargs(kwargs)))
     stderr_thread = None
     try:
         if getattr(proc, "stderr", None) is not None:
@@ -207,8 +208,7 @@ def _run(cmd: List[str], *, cwd: pathlib.Path, env: Dict[str, str], timeout_sec:
         _kill_process_group(proc)
         raise
     finally:
-        with _subprocess_lock:
-            _active_subprocesses.discard(proc)
+        retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
         if stderr_thread is not None:
             stderr_thread.join(timeout=1)
     result = {"cmd": cmd[:2] + ["..."] if len(cmd) > 2 else list(cmd), "returncode": proc.returncode}

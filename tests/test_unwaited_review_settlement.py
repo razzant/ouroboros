@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from ouroboros import review_ledger as rl
 from ouroboros import review_pause
 from tests.test_review_ledger import _facts, _raw
@@ -74,17 +76,32 @@ def test_an_unwaited_review_settles_its_record_once_its_author_ended(tmp_path, m
     assert "kept here because its author's task ended" in head and "addressed message" not in head
 
 
-def test_an_unwaited_review_its_author_collected_while_running_needs_no_mark(tmp_path, monkeypatch):
+@pytest.mark.parametrize("delivery", ["whole", "partial", "cursor_only", "checkpoint_lost"])
+def test_an_unwaited_review_its_author_collected_while_running_needs_no_mark(tmp_path, monkeypatch, delivery):
+    from ouroboros import review_waiting, working_checkpoint
+    from tests.test_review_waiting import _receipt
+
     data = _data(tmp_path)
-    record_id = _record(data, pending=False)  # the author's own re-issue already settled it
+    record_id = _record(data, pending=False)
     row = _owe(data, record_id)
+    ctx = SimpleNamespace(task_id=TASK, drive_root=data, budget_drive_root=None)
+    record = rl.load_record(data, record_id)
+    rendered = None if delivery == "cursor_only" else record["rows"][:1] if delivery == "partial" else record["rows"]
+    receipt = _receipt(ctx, record, rendered)
+    review_waiting.acknowledge_delivery(ctx, receipt)
+    if delivery != "checkpoint_lost":
+        working_checkpoint.flush_content_acks(ctx)
+    before = rl.load_record(data, record_id)
     published = []
     monkeypatch.setattr(review_pause, "_left_seats", lambda record: (None, _seats(), ""))
     monkeypatch.setattr("ouroboros.late_review_marks.publish_late_review",
                         lambda root, mark: published.append(mark) or SimpleNamespace(status="saved"))
 
-    assert review_pause.ended_left_review(row["left_review"]) == "collected"
-    assert published == [] and rl.load_record(data, record_id)["revision"] == 1
+    # No next delivery: Stop, a budget exit or the forced final may end the author here.
+    assert review_pause.ended_left_review(row["left_review"]) == ("collected" if delivery == "whole" else "saved")
+    assert len(published) == (0 if delivery == "whole" else 1)
+    after = rl.load_record(data, record_id)
+    assert (after["rows"], after["verdict"], after["revision"]) == (before["rows"], before["verdict"], before["revision"])
 
 
 def test_a_left_review_whose_seats_still_run_keeps_its_record_pending_in_process(tmp_path, monkeypatch):

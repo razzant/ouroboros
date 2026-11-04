@@ -680,12 +680,18 @@ def _outcome_received(ctx: Any, llm_trace: Dict[str, Any], record: Dict[str, Any
     return _outcome_keys(record) <= seen
 
 
-def _show(ctx: Any, hold: Any, text: str, record: Dict[str, Any], cause: str) -> bool:
-    """Hold the delivery once to hand this outcome to its author; ``_result_review_shown`` keeps its identity."""
-    shown = getattr(ctx, "_result_review_shown", None) or []
-    ctx._result_review_shown = list(dict.fromkeys([*shown, *sorted(_outcome_keys(record))]))
+def _show(ctx: Any, hold: Any, text: str, record: Dict[str, Any], cause: str, *, outcome: bool = True) -> bool:
+    """Insert the handback, then stage its receipt for the transcript checkpoint, like a whole tool return.
+    A question about changed owner words alone certifies no newly rendered outcome."""
     ctx._completion_hold_cause = cause  # each hold names its cause to the delivery owner
     hold(text)
+    if outcome:
+        from ouroboros.review_waiting import acknowledge_delivery, outcome_states
+
+        shown = getattr(ctx, "_result_review_shown", None) or []
+        ctx._result_review_shown = list(dict.fromkeys([*shown, *sorted(_outcome_keys(record))]))
+        acknowledge_delivery(ctx, {"record_id": str(record.get("record_id") or ""),
+                                   "outcome_states": outcome_states(record)})
     return True
 
 
@@ -721,28 +727,59 @@ def _after_refusal(llm_trace: Dict[str, Any], subject_sha: str) -> bool:
     return False
 
 
+def _presence_turn_speech(ctx: Any) -> bool:
+    """A Presence turn delivering its own speech, known before any review: the host built the turn for one
+    connector event and stamped its ``presence_event_identity`` (``presence_runner._build_task``; the carrier
+    stamps it again). A promoted or follow-up root keeps only ``metadata.presence``
+    (``dialogue_provenance.presence_root_carrier``) and is reviewed like any root, whatever completion its
+    context holds: a focus records one (``_presence_completion``) only after this step
+    (``place_reply.prepare_focus_reply``), for a promoted root of a place too."""
+    metadata = getattr(ctx, "task_metadata", None)
+    return isinstance(metadata, dict) and bool(metadata.get("presence_event_identity"))
+
+
 def _presence_result_review(ctx: Any, content: str, llm_trace: Dict[str, Any], subject: Any,
                             record: Optional[Dict[str, Any]], *, owed: bool) -> bool:
     """Presence speech is never held. A Required review of its result still runs: its author departs at
     once (``review_pause.departed_binding``), nobody waits for the seats, and the outcome settles as a late
-    mark in the room the work came from (#1738); a review that settled at once is bound like any other."""
+    mark in the room the work came from (#1738); a review that settled at once, and a $0 refusal (the result
+    reviews' paid-cycle allowance is spent), are bound like any other. An outcome that settled unread owes that
+    mark itself (``left="unread"``) until a saved whole receipt of it ends the duty
+    (``review_waiting.acknowledge_delivery``)."""
     if record is None and owed:
         from ouroboros import review_pause
         from ouroboros.tools.review_change import ReviewChangeArgumentError, run_review_change
 
         try:
             with review_pause.receptive_author(review_pause.departed_binding(ctx)):
-                run_review_change(ctx, subject="result", answer=str(content or ""), _frozen_result=subject,
-                                  reason="Required: the host's review of a Presence result with produced work",
-                                  _chosen_by="host")
+                outcome = run_review_change(ctx, subject="result", answer=str(content or ""), _frozen_result=subject,
+                                            reason="Required: the host's review of a Presence result with produced work",
+                                            _chosen_by="host")
         except ReviewChangeArgumentError as exc:
             log.warning("Required result review of Presence %s not dispatched: %s", getattr(ctx, "task_id", ""), exc)
             return False
         record = settled_result_record(ctx, subject.diff_sha)
+        if record is None and outcome.get("state") != "pending" and outcome.get("record_id"):
+            from ouroboros import review_ledger as ledger
+
+            try:  # the refusal, read from its own record as the ordinary delivery reads it
+                record = ledger.load_record(ledger.ledger_root(ctx), str(outcome["record_id"]))
+            except ValueError:
+                record = None
     if record is not None:
         earlier = str((record.get("subject") or {}).get("diff_sha") or "") != subject.diff_sha
         _bind_review_run(llm_trace, record, subject.diff_sha, "blocking" if _blocking_enforcement() else "advisory",
                          earlier_request=earlier)
+        if str((record.get("verdict") or {}).get("aggregate") or "") == "NOT_DISPATCHED":
+            ctx._result_review_refused = {**(getattr(ctx, "_result_review_refused", None) or {}), subject.diff_sha: {
+                "ceiling": _ceiling(), "record_id": str(record.get("record_id") or "")}}
+        elif not _outcome_received(ctx, llm_trace, record):
+            # ``waiting`` may hold only cursors. Keep an existing wave duty; otherwise owe its unread outcome.
+            from ouroboros import review_pause
+
+            review_pause.owe_unwaited_review(ctx, surface=RESULT_KIND, left="unread",
+                                             record_id=str(record.get("record_id") or ""),
+                                             retry_key=str((record.get("fingerprints") or {}).get("retry_key") or ""))
     return False
 
 
@@ -787,9 +824,14 @@ def result_review_at_delivery(ctx: Any, content: str, llm_trace: Dict[str, Any],
     record = settled_result_record(ctx, subject.diff_sha, rows)
     refused = getattr(ctx, "_result_review_refused", None) or {}
     if record is None and subject.diff_sha in refused:
-        if not (required and _blocking_enforcement()):
+        if _presence_turn_speech(ctx):
+            if refused[subject.diff_sha]["ceiling"] == _ceiling():
+                from ouroboros import review_ledger as ledger
+
+                record = ledger.load_record(ledger.ledger_root(ctx), refused[subject.diff_sha]["record_id"])
+        elif not (required and _blocking_enforcement()):
             return _after_refusal(llm_trace, subject.diff_sha)
-        if refused[subject.diff_sha]["ceiling"] == _ceiling():  # still spent: the refusal shown stands, nothing is written
+        elif refused[subject.diff_sha]["ceiling"] == _ceiling():  # still spent: the refusal shown stands, nothing is written
             return _hold_refused(ctx, refused[subject.diff_sha]["record_id"], hold)
         # A raised ceiling lets the owed review run now (below).
     # The only review of this exact answer may have judged an earlier request (the owner's words changed since):
@@ -802,7 +844,7 @@ def result_review_at_delivery(ctx: Any, content: str, llm_trace: Dict[str, Any],
             running, collect = str(pending[0].get("record_id") or ""), pending[1]
         elif (settled := earlier_request_subject(ctx, subject, rows, state="settled")) is not None:
             earlier = settled_result_record(ctx, settled[1].diff_sha, rows)
-    if getattr(ctx, "_presence_completion", None):
+    if _presence_turn_speech(ctx):
         return _presence_result_review(ctx, content, llm_trace, subject, record or earlier,
                                        owed=required and not running and earlier is None)
     if running:
@@ -864,10 +906,12 @@ def result_review_at_delivery(ctx: Any, content: str, llm_trace: Dict[str, Any],
     if stands_for_earlier:
         asked = getattr(ctx, "_result_review_request_asked", None) or []
         if [record_id, subject.diff_sha] not in asked:
-            ctx._result_review_request_asked = [*asked, [record_id, subject.diff_sha]]
             # The one question carries that review's outcome too when its author has not received it yet.
-            text = _request_changed_text(ctx, record, outcome=not _outcome_received(ctx, llm_trace, record))
-            return _show(ctx, hold, text, record, "earlier_request")
+            outcome = not _outcome_received(ctx, llm_trace, record)
+            text = _request_changed_text(ctx, record, outcome=outcome)
+            _show(ctx, hold, text, record, "earlier_request", outcome=outcome)
+            ctx._result_review_request_asked = [*asked, [record_id, subject.diff_sha]]
+            return True
         # Delivered again: the mind judged the new words leave what was asked as it was.
     enforcement = "blocking" if _blocking_enforcement() else "advisory"
     run = _bind_review_run(llm_trace, record, subject.diff_sha, enforcement, earlier_request=stands_for_earlier)

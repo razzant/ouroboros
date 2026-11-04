@@ -152,10 +152,10 @@ def release_metadata_diagnostics(
 
     Explicit forms, told apart by the diff itself (``report["form"]``): a
     ``numbered`` release touches VERSION and must sync every carrier in the same
-    diff; a ``development_marker`` commit opens a cycle the same way, but keeps the
-    published download links and takes no history row or tag, and later moves those
-    links and that history forward to a release published since, VERSION untouched;
-    a ``neutral`` contribution (VERSION untouched) must leave every
+    diff; a ``development_marker`` commit, admitted only where the neutral form is,
+    opens a cycle the same way, but keeps the download links and takes no history
+    row or tag, and later moves those links and that history forward to a later
+    release, VERSION untouched; a ``neutral`` contribution (VERSION untouched) must leave every
     version carrier span byte-identical to HEAD, and takes no tag. P9 admits the
     neutral form for a contribution to the official line (the prepared index lane)
     and for a body candidate or authorized managed update (``neutral_allowed``,
@@ -220,7 +220,13 @@ def release_metadata_diagnostics(
         texts = carrier_texts()
         findings.extend(release_metadata_findings(texts))
         if is_development_marker(texts.get("VERSION", "")):
-            report["form"] = "development_marker"
+            if neutral_ok:
+                report["form"] = "development_marker"
+            else:
+                findings.append(
+                    f"VERSION is the development marker {texts['VERSION'].strip()}, which opens a cycle on the "
+                    "official line through a contribution or a body candidate. BIBLE.md P9 makes a commit on the "
+                    "serving checkout a numbered release.")
     elif touched:
         report["form"] = "neutral"
         if neutral_ok:

@@ -370,6 +370,39 @@ def test_a_received_outcome_survives_the_checkpoint_and_shown_keeps_its_string_s
     assert result_review_at_delivery(host, ANSWER, trace, shown.append) is True and len(shown) == 2
 
 
+@pytest.mark.parametrize("handback", ["whole", "request_only", "insertion_failed"])
+def test_host_handback_acknowledges_only_inserted_outcome_text_at_its_checkpoint(tmp_path, handback):
+    from ouroboros import review_ledger
+    from ouroboros.review_pause import owe_unwaited_review
+    from ouroboros.tools.review_result import _findings_text, _show
+    from ouroboros.working_checkpoint import flush_content_acks
+    from tests.test_review_waiting import _author, _duties, _result_record
+
+    ctx = _author(tmp_path)
+    record = _result_record(tmp_path, settled=("a", "b"))
+    assert owe_unwaited_review(ctx, surface="result", retry_key="same-wave", record_id=record["record_id"], left="unread")
+    shown = []
+
+    def insert(text):
+        if handback == "insertion_failed":
+            raise RuntimeError("transcript insertion failed")
+        shown.append(text)
+
+    text = "New owner words only" if handback == "request_only" else _findings_text(record, blocking=False)
+    if handback == "insertion_failed":
+        with pytest.raises(RuntimeError, match="transcript insertion failed"):
+            _show(ctx, insert, text, record, "findings")
+        assert not getattr(ctx, "_result_review_shown", None)
+    else:
+        assert _show(ctx, insert, text, record, "findings", outcome=handback == "whole")
+        assert shown == [text]
+    assert _duties(tmp_path) == [(record["record_id"], "unread")], "insertion alone is not a saved receipt"
+    flush_content_acks(ctx)
+    saved = review_ledger.load_record(tmp_path, record["record_id"])
+    assert bool((saved.get("waiting") or {}).get("seen_outcome_states")) is (handback == "whole")
+    assert _duties(tmp_path) == ([] if handback == "whole" else [(record["record_id"], "unread")])
+
+
 def test_presence_speech_and_an_explicit_pending_finish_are_never_held_for_a_pass(tmp_path, monkeypatch):
     import ouroboros.tools.review_change as review_change_mod
 
@@ -377,7 +410,9 @@ def test_presence_speech_and_an_explicit_pending_finish_are_never_held_for_a_pas
     _produced_answer_protocol(monkeypatch)
     sends = []
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
-    presence._presence_completion = {"outcome": "spoken"}
+    # The host stamps a Presence turn before any review (``presence_runner._build_task``).
+    presence.task_metadata = {**dict(getattr(presence, "task_metadata", None) or {}),
+                              "presence_event_identity": "event-1"}
     trace, shown = {"tool_calls": []}, []
     assert result_review_at_delivery(presence, ANSWER, trace, shown.append) is False and shown == []
     assert len(sends) == 3 and trace["review_runs"][0]["aggregate_signal"] == "PASS"
