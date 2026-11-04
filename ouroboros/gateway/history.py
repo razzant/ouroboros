@@ -828,7 +828,7 @@ def _collect_chat_rows(
                     if isinstance(entry.get(key), dict):
                         rec[key] = dict(entry[key])
                 for key in ("project_id", "project_name", "task_name", "target_label", "status", "completion_answer",
-                            "completion_reason", "delivery_id", "handoff_id"):
+                            "completion_reason", "delivery_id", "handoff_id", "wake_summary"):
                     if key in entry:
                         rec[key] = str(entry.get(key) or "")
             annotation = _user_annotation(role, rec["client_message_id"], chat_annotations)

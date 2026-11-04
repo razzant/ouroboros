@@ -227,6 +227,27 @@ test('the author\'s final settles the portal from its typed outcome; without one
     } finally { f.close(); }
 });
 
+test('the completion row carries the root\'s closing sentence to its portal; without one the old line goes', async () => {
+    const f = fixture();
+    try {
+        for (const id of ['w-6', 'w-7']) f.narrate(id, 'Copying the export presets into the v3 store.');
+        f.state({ task_bindings: { 'w-6': { project_id: 'p-1' }, 'w-7': { project_id: 'p-1' } },
+            active_chat_activities: [room({ activity_id: 'w-6' }), room({ activity_id: 'w-7' })] });
+        await settle();
+        const done = { role: 'system', system_type: 'project_completion_summary', project_id: 'p-1', project_name: 'Audit',
+            outcome_axes: { lifecycle: { status: 'completed' }, execution: { status: 'ok' } }, status: 'completed' };
+        f.frame({ ...done, task_id: 'w-6', content: 'Audit › Export · Done', ts: '2026-10-10T13:00:00Z',
+            wake_summary: 'The export settings moved to v3; nothing needed you.' });
+        f.frame({ ...done, task_id: 'w-7', content: 'Audit › Export · Done', ts: '2026-10-10T13:00:01Z' });
+        await settle();
+        assert.equal(f.part('w-6', 'live-phase').textContent, 'Done');
+        assert.equal(f.part('w-6', 'live-activity').textContent, 'The export settings moved to v3; nothing needed you.',
+            'the row\'s own closing sentence replaces the census line');
+        assert.equal(f.part('w-7', 'live-activity').textContent, '', 'no recorded sentence: nothing, never the old census line');
+        assert.ok(!f.reads.includes('w-6'), 'the row carries the sentence: no record read');
+    } finally { f.close(); }
+});
+
 test('Main only: a Project room\'s portals bind nothing and read nothing', () => {
     const records = new Map([['w-1', { groupId: 'w-1', root: { dataset: {}, isConnected: true } }]]);
     const calls = [];
