@@ -92,16 +92,15 @@ def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
     if not actual_b64 or len(actual_b64) < 100:
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text="⚠️ Image data is empty or too short."))
 
-    from ouroboros.tools.owner_delivery import deliver_owner_event
-    mode = deliver_owner_event(ctx, {
+    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt
+    event = {
         "type": "send_photo",
         "chat_id": _photo_chat_id,
         "image_base64": actual_b64,
         "mime": mime,
         "caption": caption or "",
-    })
-    text = "OK: photo accepted for delivery to owner chat." if mode == "live" else "OK: photo queued for delivery to owner."
-    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text))
+    }
+    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), "photo")
 
 
 _MAX_VIDEO_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
@@ -142,16 +141,15 @@ def _send_video(ctx: ToolContext, file_path: str = "", caption: str = "") -> str
     except Exception as e:
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ Failed to read video file: {e}"))
 
-    from ouroboros.tools.owner_delivery import deliver_owner_event
-    mode = deliver_owner_event(ctx, {
+    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt
+    event = {
         "type": "send_video",
         "chat_id": chat_id,
         "video_base64": actual_b64,
         "mime": mime,
         "caption": caption or "",
-    })
-    text = "OK: video accepted for delivery to owner chat." if mode == "live" else "OK: video queued for delivery to owner."
-    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text))
+    }
+    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), "video")
 
 
 _MAX_DOCUMENT_FILE_BYTES = 50 * 1024 * 1024  # 50 MB (Telegram bot sendDocument limit)
@@ -224,8 +222,8 @@ def _send_file(ctx: ToolContext, file_path: str = "", caption: str = "") -> str:
     except ValueError as exc:
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ Failed to capture file: {exc}"))
 
-    from ouroboros.tools.owner_delivery import deliver_owner_event
-    mode = deliver_owner_event(ctx, {
+    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt
+    event = {
         "type": "send_document",
         "chat_id": chat_id,
         "file_base64": actual_b64,
@@ -235,10 +233,8 @@ def _send_file(ctx: ToolContext, file_path: str = "", caption: str = "") -> str:
         "download_url": download_url,
         "download_url_compat": compat_url,
         "file_ref": file_ref,
-    })
-    text = (f"OK: file '{fp.name}' accepted for delivery to owner chat." if mode == "live"
-            else f"OK: file '{fp.name}' queued for delivery to owner.")
-    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text))
+    }
+    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), f"file '{fp.name}'")
 
 
 _MAX_LINK_ACTIONS = 12
@@ -549,16 +545,14 @@ def _send_links(
 
         return _publish_tool_result(ctx, LegacyTextResultAdapter.from_text(
             "send_links", f"⚠️ {exc.code}: {exc} No links were sent."))
-    from ouroboros.tools.owner_delivery import deliver_owner_event
-    mode = deliver_owner_event(ctx, {
+    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt
+    event = {
         "type": "send_links",
         "chat_id": chat_id,
         "title": str(title or "")[:240],
         "actions": actions,
-    })
-    if mode == "live":
-        return "OK: link buttons accepted for delivery to owner chat."
-    return "OK: link buttons queued for delivery to owner."
+    }
+    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), "link buttons")
 
 
 def _quiz_host_facts(ctx: ToolContext, canonical_root: pathlib.Path, task_id: str, chat_id: int) -> str:

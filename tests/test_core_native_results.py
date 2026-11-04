@@ -244,8 +244,9 @@ def test_user_files_path_refusal_stays_a_policy_denial(tmp_path, monkeypatch):
         )
 
 
-def _media_ctx(chat_id=123):
+def _media_ctx(drive_root, chat_id=123):
     return types.SimpleNamespace(
+        drive_root=drive_root,
         current_chat_id=chat_id,
         pending_events=[],
         browser_state=types.SimpleNamespace(last_screenshot_b64=""),
@@ -292,8 +293,8 @@ def test_owner_chat_delivery_terminals_are_native(tmp_path, label, tool, code, t
     `unavailable` surface it describes; everything else that prevented a delivery
     is an `error`. The text is unchanged, so only the code moved.
     """
-    chatty = _media_ctx()
-    chatless = _media_ctx(chat_id=None)
+    chatty = _media_ctx(tmp_path)
+    chatless = _media_ctx(tmp_path, chat_id=None)
     missing_video = str(tmp_path / "missing" / "clip.mp4")
     missing_file = str(tmp_path / "missing" / "report.md")
     text = text.format(missing_video=missing_video, missing_file=missing_file)

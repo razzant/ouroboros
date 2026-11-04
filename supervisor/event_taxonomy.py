@@ -224,6 +224,10 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
     "plan_task_deadline_skip": _telemetry(
         "ouroboros/tools/plan_review_runtime.py",
         note="the fact that a spent deadline (less the finalization reserve) left a plan ask no dispatch"),
+    "presence_result": _telemetry(
+        "ouroboros/presence_runner.py",
+        note="a pooled Presence-bound root's result frame: its own handler records ids and sizes only, because "
+             "the words stay on the task result; an inline turn reads its copy in process, before any bus"),
     "quiz_answer_injected": _telemetry(
         "ouroboros/owner_mailbox.py"),
     "review_density_probe": _telemetry(

@@ -166,8 +166,10 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # proposal as a fork source and makes a set-aside position one of the options; nothing else changed.
     # Rolled for #2577: the send_photo, send_video and send_file `file_path` descriptions now say the path
     # is relative to the active workspace or absolute; nothing else changed (c624c58e... before).
+    # Rolled again for #2633: send_photo, send_video, send_file, send_links and show_card name this work's
+    # room and say that for Presence-bound work it is local, not the place conversation.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "7d991f0bddf319856037e5648a5906428126937e10c481285968a3a0b96db9ed"
+        "1a3dfcea20968da1ea9dc84a81abba50de7f449867bdf43800a44076891a84a8"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

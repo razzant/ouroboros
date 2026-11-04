@@ -603,6 +603,7 @@ def _apply_presence_promotion_authority(
     binding's related work under the same ceiling and never a speaker.
     """
     from ouroboros.dialogue_provenance import presence_root_carrier, presence_root_relation
+    from ouroboros.presence_context import PRESENCE_FINAL_ROUTE_KEY
 
     contract = evt.get("task_contract") if isinstance(evt.get("task_contract"), dict) else {}
     carrier = presence_root_carrier(evt, task_contract=contract)
@@ -613,6 +614,9 @@ def _apply_presence_promotion_authority(
         task["_presence_origin"] = True
     task["source"] = "presence_promote"
     task.setdefault("metadata", {}).update(carrier)
+    route_fact = evt.get(PRESENCE_FINAL_ROUTE_KEY)
+    if "presence" in carrier and isinstance(route_fact, dict):
+        task["metadata"][PRESENCE_FINAL_ROUTE_KEY] = dict(route_fact)
     inherited_manifest = [
         dict(row) for row in (contract.get("attachment_manifest") or [])
         if isinstance(row, dict)

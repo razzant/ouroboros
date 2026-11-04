@@ -357,16 +357,16 @@ def get_tools() -> List[ToolEntry]:
             "description": "Send a separate reply to the owner while work continues: the first "
                            "line of longer work (what I am about to do and why), or a mid-work "
                            "insight, a question, or an invitation to collaborate. It appears in "
-                           "the conversation as a normal reply and leaves the work running; later "
-                           "progress stays in the card and the final answer is delivered "
-                           "automatically.",
+                           "this work's room as a normal reply and leaves the work running; later progress stays in the "
+                           "card. For Presence-bound work that room is local, not the place conversation: a connector "
+                           "tool reaches that, and your final answer only where your context names that route.",
             "parameters": {"type": "object", "properties": {
                 "text": {"type": "string", "description": "Message text"},
                 "reason": {"type": "string", "description": "Why you're reaching out (logged, not sent)"},
                 "request_id": {"type": "string", "description": "Presence Main contact retry key (at most 128 characters). Reuse the same key and words after uncertain delivery; a new key permits a distinct identical report. Omitted: identical words from this work rejoin."},
                 "reply_to_relay": {"type": "string", "description": "Reply to a drained relay in its source room; this work's Project shows the same answer. Empty selects the single open relay; omit for an ordinary room message."},
                 "destination": {"type": "string", "enum": ["current", "main"], "default": "current",
-                                "description": "'current' (default): this conversation's room. 'main': also the "
+                                "description": "'current' (default): this work's room. 'main': also the "
                                                "owner's main chat, for a substantive message that needs the owner "
                                                "there while this work lives in an owner-visible Project room. One "
                                                "message: the Project shows it too, and it is read once; it is not "
