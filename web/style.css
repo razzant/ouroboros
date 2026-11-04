@@ -8578,9 +8578,9 @@ html[data-layout="stack"] .project-panel.open {
     transform: translateY(0);
 }
 
-/* With the keyboard up a Project room shrinks to the visible viewport, as Main does (body.keyboard-open #page-chat):
-   its composer, with the room's ☰, stays above the keyboard instead of behind it. */
-body.keyboard-open .project-panel {
+/* A stack Project follows the visible height even while keyboard dismissal has
+   removed focus but the native viewport is still closing. */
+html[data-layout="stack"] .project-panel {
     height: var(--vvh);
     max-height: var(--vvh);
 }

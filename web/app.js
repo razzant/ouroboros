@@ -1564,6 +1564,8 @@ if (hashPage && hashPage !== state.activePage) showPage(hashPage);
             if (revision !== focusRevision || focusedKeyboardEditable()) return;
             applyKeyboardState(false);
             focusBaselineHeight = 0;
+            // Native dismissal can restore the viewport without a second resize.
+            updateVvh();
         });
     });
 
