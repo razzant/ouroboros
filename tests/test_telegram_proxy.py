@@ -215,6 +215,7 @@ def test_socks_proxy_receives_the_telegram_host_name_and_credentials(scheme):
 
 
 class _RecordingClient:
+    bot_id = "123456"
     built: list = []
 
     def __init__(self, token, **kwargs):

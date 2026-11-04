@@ -94,8 +94,8 @@ def phone(tmp_path, monkeypatch):
     def owner(mid, text=ASK, *, accept=True):
         """One owner message of this Telegram chat, through the bridge's map and the real ingress."""
         message = {"message_id": mid, "chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": text}
-        state._owner_message_seen(api, 42, mid)
-        fields = state._owner_ingress_fields(api, 42, message, mid)
+        state._owner_message_seen(api, "", 42, mid)
+        fields = state._owner_ingress_fields(api, "", 42, message, mid)
         if not accept:
             return fields
         receiver = SimpleNamespace(enqueue_local_message=lambda *_a, **_k: None)

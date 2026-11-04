@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.2
+version: 1.4.3
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -39,10 +39,7 @@ being prepared by Ouroboros or a working helper; it stops for Pause, Stop now an
 after the answer, and a question waiting for you, a model-access wait or background work
 never keep it on (DESIGN §9). A quiz card is
 answered by tapping an option or by replying to the card with a free-form
-answer; both reach the same host decision ingress as the web UI. The bridge speaks
-the install's interface language (Settings → Appearance → Language, or `/language`
-here): its own lines are English source translated by the install's translation
-memory, so the bot ships no dictionary and follows any language the owner chooses. Owner `/panic`
+answer; both reach the same host decision ingress as the web UI. Owner `/panic`
 is available in every command mode, including strict: it sends once through the emergency door,
 never queues or replays. Telegram dates before the host's whole-second import time are refused;
 their previous outcome is unknown. This assumes aligned clocks: a host ahead rejects fresh Panic
@@ -55,16 +52,14 @@ notices, in a bounded durable message map. Replying passes its host row or work
 reference through normal chat; Ouroboros decides what it means. Unknown or
 evicted ids add nothing. Answers to an earlier owner message from this Telegram
 chat use a native reply; answers to its latest owner message stay unquoted.
-Silent mode replaces a progress note only within one task episode and reply
-origin; Continue episodes remain separate messages. Relay success stays silent; a host-reported
-failure arrives as one line. A relayed row quotes the owner's words verbatim as
+Relay success stays silent; a host-reported failure arrives as one line. A relayed row quotes the owner's words verbatim as
 plain text, under where he wrote them and with the file names, above the note; a
 note between works that quotes none of his words stays in its room.
 Quiz buttons and replies keep their decision path; earlier parts of a long
 question carry ordinary references.
 
-The bridge warns when the derived reference map cannot be saved, without
-blocking an owner message or later outbound parts. Completion notifications
+A derived reference map that cannot be saved only warns, blocking no owner message
+or later outbound part. Completion notifications
 reference their work, not an authored answer shown only in Main.
 A finished root task's notice uses the task card's cost words for
 its whole tree: `$3.42` when final, `up to $3.42` while costs may still arrive,
@@ -76,8 +71,9 @@ The bridge paints the Mini App's connecting page in the interface's light or dar
 the Mini App's saved Light or Dark, else Telegram's own, as the page that follows it does.
 Silent mode means no sound: replies, the final answer and progress,
 Ouroboros's own technical notes included, arrive without sound, every authored message
-stays its own message, and only a one-message progress note is replaced by the next one
-of its episode; questions, files and problems keep their sound. A question card is the
+stays its own message, and only a one-message progress note is replaced, by the next one
+of its task episode and reply origin (Continue episodes stay separate); questions, files
+and problems keep their sound. A question card is the
 answer's receipt: it shows the answer Ouroboros recorded, never the words or option sent
 from here, and whether its delivery is saved for the task, pending or unknown; no line
 says the task read it. A tap also gets a toast. A tap or a text answer gets one message
@@ -90,11 +86,13 @@ needed, then the files that were not attached. The System line the web shows for
 refusal comes here only when no acknowledgement carried the reason, and an accepted
 request stays silent.
 
-The bridge can use a Bot API server you already run instead of the cloud
-(`TELEGRAM_API_BASE`, `TELEGRAM_API_FILES_DIR`, below). The polling position
-belongs to one server and one bot: a newly chosen server or another bot's token
-is read from its oldest pending update, and a batch already handled is not
-handled again.
+The polling position belongs to one server and one bot, and message ids, replies and
+edits to the bot that polled or sent: a newly chosen server or another bot's token is
+read from its oldest pending update, and a batch already handled is not handled again.
+Records saved before 1.4.3 name no bot and anchor nothing: a reply at an old card's
+number (one of the last 50) stays here, pointing to the card, even if another
+message was meant; another reply to an old message arrives unlinked, with a note. A
+batch unconfirmed at the upgrade may repeat a turn.
 
 Version 1.4.1 declares `secret_fields` (`botToken` → `TELEGRAM_BOT_TOKEN`), so setup can
 ask for the bot token with `showSecretHitl('telegram', ['botToken'])`: the owner types it
@@ -129,12 +127,13 @@ The bridge also forwards the owner's notes and skill notices (`reminder` and
 `skill_notice` System rows, written for the owner) to the pinned chat when the
 mirror mode is `telegram_only`; mode `all` already mirrored them.
 
-The bridge speaks the install's interface language: `/language` lists English
-and the languages the install already has, `/language <name or tag>` chooses one
-for the whole installation through the host's one writer, and the bridge's own
-menu, buttons, card hints and notifications are read through the install's
-translation memory (a line it lacks is generated like a browser miss). The
-retired bridge-only `TELEGRAM_LANGUAGE` setting is migrated once.
+The bridge speaks the install's interface language (Settings → Appearance → Language):
+`/language` lists English and the languages the install already has,
+`/language <name or tag>` chooses one for the whole installation through the host's
+one writer, and the bridge's own menu, buttons, card hints and notifications are
+English source read through the install's translation memory (a line it lacks is
+generated like a browser miss), so the bot ships no dictionary and follows any
+chosen language. The retired bridge-only `TELEGRAM_LANGUAGE` setting is migrated once.
 
 The bridge starts the Mini App when the Ouroboros server is a container's
 PID 1 without an init. PID 1 counts as the server only when the host named
