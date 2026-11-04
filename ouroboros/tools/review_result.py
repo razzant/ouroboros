@@ -29,6 +29,7 @@ RESULT_LAYER = "result"
 RESULT_KIND = "result"
 RESULT_ROOT_KIND = "task_result"
 RESULT_USER_TURN = "Review the task result against its request, as the instructions above describe."
+RESULT_WORDS_SOURCE = "the produced files named above by path and content hash"
 # The rules a result wave is judged by: this section of docs/CHECKLISTS.md, read from the install as every
 # other review surface reads its own section (owner, 18.10: the rubric lives with the other checklists).
 RESULT_CHECKLIST_SECTION = "Result Review Checklist"
@@ -92,9 +93,9 @@ def result_contract_words() -> Tuple[list, list, list]:
     heads = [_brief_head(goal=words, scope=words, review_rebuttal=words, rubric="⟨rubric⟩") for words in ("⟨words⟩", "")]
     produced = {"files": [{"path": "⟨path⟩", "kind": "⟨kind⟩", "sha256": "⟨sha⟩", "size": 1}], "issues": ["⟨issue⟩"],
                 "effects": [{"tool": "⟨tool⟩", "receipt": "⟨receipt⟩", "host_notes": ["⟨note⟩"]}],
-                "diff_text": "⟨diff⟩", "words_section": "⟨source words⟩"}
+                "words_section": "⟨source words⟩"}
     own = [RESULT_CHECKLIST_SECTION, *heads, _SUBJECT_HEAD, *_ASK_WORDS.values(), *reviewer_words_material(),
-           *words_material(), *(answer_text(reply=reply, produced=material, verification="⟨verification⟩")
+           *words_material(RESULT_WORDS_SOURCE), *(answer_text(reply=reply, produced=material, verification="⟨verification⟩")
              for reply, material in (("⟨reply⟩", produced), ("", {})))]
     return (own, [RESULT_USER_TURN, triad_stable_head(RESULT_LAYER, ""), _packet_prompt("⟨head⟩", "⟨subject⟩")],
             [_retrieving_task("⟨head⟩", source, "⟨subject⟩") for source in ("⟨source⟩", None)])
@@ -151,7 +152,13 @@ def produced_material(ctx: Any) -> Dict[str, Any]:
                 out["files"].append({"path": str(path), "kind": "workspace change", **_file_identity(path)})
             if candidates:
                 out["workspace"] = str(pathlib.Path(str(repo)).resolve(strict=False))
-                out.update(_workspace_diff(repo, snapshot, candidates))
+                from ouroboros.review_words import ReviewWords, section_budget
+
+                try:
+                    out["words_section"] = _workspace_words(repo, snapshot, candidates)
+                except Exception as exc:
+                    out["words_section"] = ReviewWords(gaps=(
+                        f"workspace words ({type(exc).__name__}: {exc})",)).render(section_budget(), RESULT_WORDS_SOURCE)
             elif snapshot.get("blockers") and snapshot.get("blockers") != ["baseline_missing"]:
                 out["issues"].append("workspace changes not attributed: " + ", ".join(map(str, snapshot["blockers"])))
     except Exception as exc:
@@ -160,15 +167,17 @@ def produced_material(ctx: Any) -> Dict[str, Any]:
     return out
 
 
-def _workspace_diff(repo: Any, snapshot: dict, candidates: list[str]) -> dict:
-    """Freeze only attributed paths against their recorded baseline, untracked files included."""
+def _workspace_words(repo: Any, snapshot: dict, candidates: list[str]) -> str:
+    """Extract bounded words from attributed changes; the diff is transient, never retained."""
     from ouroboros.review_words import section_budget, words_for_diff
     from ouroboros.tools.review_subject import _HARDENED_DIFF_FLAGS, _decode_diff, _git_bytes
 
     base = snapshot.get("base_tree") or snapshot.get("base_commit")
     if not base:
         raise ValueError("workspace diff has no recorded baseline")
-    paths = [f":(literal){path}" for path in candidates]
+    paths = [f":(literal){path}" for path in candidates if path.endswith((".py", ".js", ".html"))]
+    if not paths:
+        return ""
     rc, raw, error = _git_bytes(repo, ["diff", *_HARDENED_DIFF_FLAGS, "--full-index", str(base), "--", *paths])
     if rc:
         raise ValueError(f"workspace diff capture failed: {error}")
@@ -183,7 +192,7 @@ def _workspace_diff(repo: Any, snapshot: dict, candidates: list[str]) -> dict:
             raise ValueError(f"workspace new file diff failed: {error}")
         raw += added
     diff = _decode_diff(raw)
-    return {"diff_text": diff, "words_section": words_for_diff(repo, diff).render(section_budget())}
+    return words_for_diff(repo, diff).render(section_budget(), RESULT_WORDS_SOURCE)
 
 
 def _declared_effects(ctx: Any, root: Any, task_id: str, issues: List[str]) -> List[Dict[str, Any]]:
@@ -298,8 +307,7 @@ def answer_text(*, reply: str, produced: Dict[str, Any], verification: str) -> s
         *(["Effect receipts are the tool producer's reports of execution, not proof of a UI change or goal success.", ""]
           if effects else []),
         *(files + effects + gaps or ["(nothing produced beyond the reply)"]), "",
-        *([produced.get("words_section") or "", "", "## Workspace diff", "", produced["diff_text"], ""]
-          if produced.get("diff_text") else []),
+        *([produced["words_section"], ""] if produced.get("words_section") else []),
         "## Host-attested verification", "", verification, "",
     ])
 

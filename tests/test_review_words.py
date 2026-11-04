@@ -309,7 +309,7 @@ def test_real_change_briefs_put_words_before_diff_and_deliver_design_for_python(
             assert text.index(HEADING) >= packet["stable_prefix_len"]
 
 
-def test_result_capture_keeps_attributed_diff_and_words_frozen_before_it(repo, tmp_path, monkeypatch):
+def test_result_capture_keeps_only_attributed_paths_hashes_and_frozen_words(repo, tmp_path, monkeypatch):
     from ouroboros import mutation_attribution
     from ouroboros.tools import review_result
 
@@ -318,17 +318,44 @@ def test_result_capture_keeps_attributed_diff_and_words_frozen_before_it(repo, t
     extra.parent.mkdir()
     extra.write_text('NOTE = "New visible notice"\n')
     (repo / "foreign.py").write_text('NOTE = "Somebody else wrote this"\n')
-    snapshot = {"candidates": [PATH, "supervisor/new.py"], "base_commit": git(repo, "rev-parse", "HEAD").strip()}
+    large = repo / "data.csv"
+    large.write_text("machine,data,not,owner,words\n" * 50_000, encoding="utf-8")
+    snapshot = {"candidates": [PATH, "supervisor/new.py", "data.csv"], "base_commit": git(repo, "rev-parse", "HEAD").strip()}
     monkeypatch.setattr(mutation_attribution, "attributed_git_candidates", lambda *a, **k: snapshot)
     ctx = SimpleNamespace(drive_root=tmp_path / "drive", repo_dir=repo, task_id="words", task_contract={})
     produced = review_result.produced_material(ctx)
     assert not produced["issues"]
+    assert "diff_text" not in produced
+    assert produced == review_result.produced_material(ctx)
+    git(repo, "add", "supervisor/new.py", "data.csv")
+    assert produced == review_result.produced_material(ctx)
     subject = review_result.result_subject(ctx, SimpleNamespace(answer="Done"), governance_root=repo, produced=produced)
     (repo / PATH).write_text('NOTE = "Later checkout words"')
     for prompt in (review_result._packet_prompt("rules", subject.diff_text),
                    review_result._retrieving_task("rules", "source", subject.diff_text)):
-        assert prompt.index(HEADING) < prompt.index("## Workspace diff")
+        assert HEADING in prompt and "## Workspace diff" not in prompt
+        assert "diff --git" not in prompt and "machine,data" not in prompt
+        assert "Full sources: the produced files" in prompt and "diff's file/blob" not in prompt
+        assert str(large) in prompt and produced["files"][-1]["sha256"] in prompt
+        assert len(prompt) < 10_000
         assert "New visible notice" in prompt and "Review needs your answer" in prompt
         assert "Somebody else wrote this" not in prompt and "Later checkout words" not in prompt
     no_diff = review_result.compose_subject(ask="Explain", reply="Explanation", produced={}, verification="none")
     assert HEADING not in no_diff and "## Workspace diff" not in no_diff
+
+
+def test_result_word_capture_failure_does_not_undo_attribution(repo, tmp_path, monkeypatch):
+    from ouroboros import mutation_attribution
+    from ouroboros.tools import review_result, review_subject
+
+    changed_repo(repo)
+    snapshot = {"candidates": [PATH], "base_commit": git(repo, "rev-parse", "HEAD").strip()}
+    monkeypatch.setattr(mutation_attribution, "attributed_git_candidates", lambda *a, **k: snapshot)
+    ctx = SimpleNamespace(drive_root=tmp_path / "drive", repo_dir=repo, task_id="words", task_contract={})
+    good = review_result.produced_material(ctx)
+    monkeypatch.setattr(review_subject, "_git_bytes", lambda *a, **k: (1, b"", "test capture failure"))
+    failed = review_result.produced_material(ctx)
+    assert failed["files"] == good["files"] and not failed["issues"]
+    assert "Extraction unavailable" in failed["words_section"]
+    assert "workspace words" in failed["words_section"]
+    assert "could not be attributed" not in str(failed)

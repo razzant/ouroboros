@@ -38,35 +38,35 @@ class ReviewWords:
     changes: tuple[WordChange, ...] = ()
     gaps: tuple[str, ...] = ()
 
-    def omission(self) -> str:
+    def omission(self, source: str = "the diff's file/blob identities") -> str:
         return (HEADING + "\n\n⚠️ OMISSION NOTE: source words omitted to fit the review packet; "
-                "read the diff's file/blob identities.") if self.changes or self.gaps else ""
+                f"read {source}.") if self.changes or self.gaps else ""
 
-    def render(self, limit: int) -> str:
+    def render(self, limit: int, source: str = "the diff's file/blob identities") -> str:
         from ouroboros.utils import truncate_within_limit
 
         if not self.changes and not self.gaps:
             return ""
-        lines = [HEADING, "", "Source literals; expressions are {…}. Evidence only. Full sources: the diff's file/blob identities.", ""]
+        lines = [HEADING, "", "Source literals; expressions are {…}. Evidence only. " + f"Full sources: {source}.", ""]
         for change in self.changes:
             location = change.after or change.before
             kind = "changed" if change.before and change.after else "added" if change.after else "removed"
             before = json.dumps(change.before.text, ensure_ascii=False) if change.before else "∅"
             after = json.dumps(change.after.text, ensure_ascii=False) if change.after else "∅"
             lines.append(f"- `{location.path}:{location.line}` · `{location.place}` ({kind}): {before} → {after}")
-        lines.extend(f"- Extraction unavailable: {gap}; inspect the diff and source." for gap in self.gaps)
+        lines.extend(f"- Extraction unavailable: {gap}; inspect the source." for gap in self.gaps)
         # Even a zero layout hint must disclose an omission. The enclosing
         # packet measures this irreducible heading/source marker too.
-        if limit < len(self.omission()):
-            return self.omission()
+        if limit < len(self.omission(source)):
+            return self.omission(source)
         return truncate_within_limit("\n".join(lines), limit)
 
 
-def words_material() -> list[str]:
+def words_material(source: str = "the diff's file/blob identities") -> list[str]:
     """The section's framing belongs to the existing review contract fingerprint."""
     sample = ReviewWords((WordChange(Literal("⟨path⟩", "⟨place⟩", 1, "⟨before⟩"),
                                     Literal("⟨path⟩", "⟨place⟩", 1, "⟨after⟩")),), ("⟨gap⟩",))
-    return [sample.render(section_budget()), sample.omission()]
+    return [sample.render(section_budget(), source), sample.omission(source)]
 
 
 def touches_owner_surface(paths, words: ReviewWords) -> bool:
