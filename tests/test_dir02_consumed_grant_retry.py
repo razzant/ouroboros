@@ -1,5 +1,4 @@
 # tests/test_dir02_consumed_grant_retry.py
-import json
 import queue as stdqueue
 from types import SimpleNamespace
 
@@ -80,7 +79,7 @@ def test_consumed_g1_selection_after_recovery(
     meta = workers.RUNNING["held"]
     dead_attempt = meta["attempt"]
     assert (dead_attempt != exact["task_attempt"]) is return_first
-    saved = json.loads(wc.checkpoint_path(host.root, "held", dead_attempt).read_text())
+    saved = wc.read_working(host.root, "held", dead_attempt)[1]
     assert saved["working"]["boundary"] == ("post_batch" if return_first else "resumed")
     workers.WORKERS[0] = _make_worker(busy_task_id="held", exitcode=1)
     jobs = stdqueue.Queue()

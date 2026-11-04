@@ -265,10 +265,10 @@ def _after_worker_death(tmp_path, monkeypatch, first, then, *, legacy=False, tas
         with pytest.raises(_WorkerDeath):
             attempt(1, first, 'author-task')
     path = wc.checkpoint_path(tmp_path, 'author-task', 1)
-    state = json.loads(path.read_bytes())
+    state = wc.read_working(tmp_path, 'author-task', 1)[1]  # the file is a skeleton over CAS parts
     if legacy:
         state['delivery'].pop('_completion_conflict', None)
-        path.write_text(json.dumps(state), encoding='utf-8')
+        path.write_text(json.dumps(state), encoding='utf-8')  # a whole legacy state: the reader takes both forms
     task = {'id': 'author-task'}
     assert wc.attach_recovery(tmp_path, task, source_task_id='author-task', from_attempt=1, cause='worker_crash')
     if task_id != 'author-task':
