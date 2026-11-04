@@ -45,7 +45,9 @@ released. No timer, poller or retry count: a waiting task is asked again wheneve
 (``owed``), never a reason to start one. A pass its caller stops between tasks or between a task's operations (a
 delegate capture arrived) leaves the rest waiting for that next run. Why the engine could not be asked at all
 (``engine_hold``) stands on the job row beside the tasks it leaves waiting, written when it changes. A pass reports what
-it newly saved of the engine's answers as ``observed``, which its caller logs.
+it newly saved of the engine's answers as ``observed``, which its caller logs. Each candidate also owes the engine one
+``taken`` decision per finished delegated result it holds whole, under the same tree proof (``delegate_result_taken``);
+the task waits while either duty does.
 """
 from __future__ import annotations
 
@@ -924,6 +926,7 @@ def retire_finished_review_threads(root: Any, *, engine: Any = None, live: Optio
     keeps the rest waiting (reported ``stopped``), which the maintenance child's next run takes up (``owed``). A pass
     that changed neither the cursor, the waiting tasks nor the engine's hold writes nothing."""
     from ouroboros import maintenance_jobs, store
+    from ouroboros.delegate_result_taken import tell_engine
     from ouroboros.maintenance_retirement import JOB
     from ouroboros.task_status import task_has_live_queue_ownership
     from ouroboros.task_store import terminal_writes_since
@@ -951,7 +954,8 @@ def retire_finished_review_threads(root: Any, *, engine: Any = None, live: Optio
                 break
             run.report["tasks"] += 1
             try:
-                if run.task(task_id) == WAIT:
+                held = run.task(task_id) == WAIT
+                if run.stopped or tell_engine(run, task_id) == WAIT or held:
                     waiting.append(task_id)
             except Exception as exc:  # one unreadable task never stops the pass; it is asked again
                 waiting.append(task_id)

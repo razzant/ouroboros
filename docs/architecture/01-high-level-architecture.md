@@ -259,7 +259,7 @@ ouroboros/ — agent core and shared runtime (§6)
   subagent_work_order.py, subagent_bootstrap.py, delegate_start_instructions.py — owner-word-preserving work orders, host pre-start, stable instructions with a separately hashed coordination appendix (§6 Delegated subagents)
   delegate_supervision.py — event-only sleeping-nanny loop (§6 Supervision, activity and recovery)
   delegate_recovery.py, delegate_continuation.py, delegate_pending.py — exact-leaf recovery, `continue_from` after any stop, pending-invocation replay with the original key (§6 Delegated subagents)
-  delegate_registration_policy.py, delegate_readonly_inputs.py, delegate_documents.py — registration, STARTED fields; lineage/selected files (§6 Selected input files); documents
+  delegate_registration_policy.py, delegate_result_taken.py, delegate_readonly_inputs.py, delegate_documents.py — registration, `taken`, STARTED fields; lineage/selected files (§6 Selected input files); documents
   delegate_terminal.py, owner_stop_receipt.py — terminal reconciliation, audit-only custody persistence, typed custody card rows, Wrap up's saved-work receipt (§6 Delegated subagents)
   subagent_dispatch_notes.py — executor-note exports shared with `agent.py`; `agent_dispatch.py` implements the note/blocked-outcome pair
   subagent_messages.py, subagents.py, subagent_history.py, subagent_metrics.py, subagent_metric_events.py — child messages, dispatch, dated row measurements, no admission policy (§6)

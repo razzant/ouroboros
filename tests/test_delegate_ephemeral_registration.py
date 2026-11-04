@@ -1,9 +1,11 @@
 """Host-minted roots register nothing; other roots register with the engine's ``created``.
 
-A root Ouroboros mints for one task, run or review declares ``scope.ephemeral`` on an
-engine that accepts it and never becomes a permanent engine project. Every other root
-keeps its registration, read with one keyed POST once the engine's answers carry
-``created``; an engine whose answers lack it keeps the previous GET-then-POST flow.
+A root Ouroboros mints for one task, run or review (a folder inside a task's own drive
+included) declares ``scope.ephemeral`` on an engine that accepts it and never becomes a
+permanent engine project; a delegated plan thread on it does the same from
+``CLAUDEXOR_EPHEMERAL_THREAD_MIN_VERSION``. Every other root keeps its registration, read
+with one keyed POST once the engine's answers carry ``created``; an engine whose answers
+lack it keeps the previous GET-then-POST flow.
 """
 
 from __future__ import annotations
@@ -139,8 +141,9 @@ def test_the_gateway_reads_created_by_field_presence(answer, created):
 
 # -- the delegated start, on the wire -------------------------------------------------
 
-def _start(tmp_path, monkeypatch, *, version, register_root=False, folderless=False):
-    """One read-only ``_delegate_start`` against a recording engine double."""
+def _start(tmp_path, monkeypatch, *, version, register_root=False, folderless=False, under=()):
+    """One read-only ``_delegate_start`` against a recording engine double; ``under`` moves the
+    started folder below the data root (``tmp_path``, the custody drive)."""
     from ouroboros import delegate_readonly_inputs
     from ouroboros.subagent_worktrees import _put_record
     from ouroboros.tools import delegate
@@ -148,6 +151,9 @@ def _start(tmp_path, monkeypatch, *, version, register_root=False, folderless=Fa
     data = tmp_path / "data"
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(data))
     ctx = _delegating_ctx(tmp_path, acting=False, task_id="t-ephemeral")
+    if under:
+        ctx.repo_dir = tmp_path.joinpath(*under)
+        ctx.repo_dir.mkdir(parents=True)
     _select_transport_access(monkeypatch, "readonly")  # technical access decides the shape
     if register_root:  # the host's own copy record names the root: a child's copy
         _put_record({"path": str(ctx.repo_dir)}, data)
@@ -204,3 +210,61 @@ def test_a_user_root_keeps_its_registration_and_wire(tmp_path, monkeypatch):
     scope, calls, row, root = _start(tmp_path, monkeypatch, version="3.25.1")
     assert scope == {"kind": "project", "root": str(root)}
     assert calls[0] == ("GET", str(root)) and (row.project_id, row.project_owned) == ("prj-user", False)
+
+
+@pytest.mark.parametrize("under,minted", [
+    (("task_drives", "t-ephemeral", "work", "repo"), True),
+    (("state", "headless_tasks", "t-child", "data", "repo"), True),
+    (("projects", "p-1"), False),  # an owner's project under the data root is an identity
+    (("task_drives",), False),  # the drives' parent is no task's drive
+])
+def test_a_folder_inside_a_task_drive_starts_ephemeral(tmp_path, monkeypatch, under, minted):
+    scope, calls, row, root = _start(tmp_path, monkeypatch, version="3.25.1", under=under)
+    if minted:  # the drive custody pass retires the folder with its task: no engine identity
+        assert scope == {"kind": "project", "root": str(root), "ephemeral": True}
+        assert calls == [] and (row.project_id, row.project_owned, row.project_persistent) == ("", False, False)
+    else:
+        assert scope == {"kind": "project", "root": str(root)} and calls[0] == ("GET", str(root))
+
+
+def test_minted_root_names_the_host_layouts_and_follows_links(tmp_path):
+    data = tmp_path / "data"
+    outside = tmp_path / "owner-project"
+    outside.mkdir()
+    (data / "task_drives" / "t-1").mkdir(parents=True)
+    (data / "task_drives" / "t-1" / "link").symlink_to(outside)
+    assert policy.minted_root(str(data / "task_drives" / "t-1" / "work"), data)
+    assert policy.minted_root(str(data / "task_drives" / "t-1"), data)
+    assert policy.minted_root(str(data / "state" / "headless_tasks" / "t-2" / "data"), data)
+    assert policy.minted_root(str(data / "state" / "review_checkouts" / "tok" / "repo"), data)
+    for root in (data, data / "task_drives", data / "state" / "headless_tasks", data / "projects" / "p-1",
+                 data / "task_drives" / "t-1" / "link", outside):
+        assert not policy.minted_root(str(root), data), root  # a link names where it leads
+
+
+@pytest.mark.parametrize("version,scope,ephemeral", [
+    ("5.1.0", {"ephemeral": True}, True),
+    ("5.0.1", {"ephemeral": True}, False),  # the engine cannot sweep the lanes such a thread leaves
+    ("5.1.0", {}, False),  # a root that is not minted keeps the registration its thread binds
+])
+def test_a_delegated_plan_thread_on_a_minted_root_is_ephemeral_from_the_thread_floor(
+        monkeypatch, version, scope, ephemeral):
+    from types import SimpleNamespace
+
+    from ouroboros import config
+    from ouroboros.delegate_plan import bind_thread
+
+    monkeypatch.setattr(config, "CLAUDEXOR_EPHEMERAL_THREAD_MIN_VERSION", "5.1.0")
+    created = []
+
+    class Engine:
+        engine_version = version
+
+        def create_thread(self, request, *, idempotency_key):
+            created.append(request)
+            return {"id": "thread-1"}
+
+    request = {"scope": {"kind": "project", "root": "/w/copy", **scope}, "mode": "plan", "access": "readonly"}
+    assert bind_thread(Engine(), request, SimpleNamespace(route_id="r", profile_id=""), "inv-1") == {
+        "thread_id": "thread-1"}
+    assert created[0]["scope"] == {"kind": "project", "root": "/w/copy", **({"ephemeral": True} if ephemeral else {})}
