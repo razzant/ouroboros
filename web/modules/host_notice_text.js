@@ -8,7 +8,7 @@
 // mark and its space. Every other row renders as stored: another type, an untyped or
 // pre-typing row, authored words (reminder, skill notice, Project mirrors), a prefix
 // not listed here. Future producer changes must keep this display mapping in sync.
-import { tr } from './i18n.js';
+import { fmt, tr, tx } from './i18n.js';
 
 export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
     startup_notice: ['♻️ Restored pending queue: ', '♻️ Settling '],
@@ -83,6 +83,22 @@ export function hostNoticeDisplayText(text, systemType, shown = text) {
     // The receipt's leading mark also carries severity; keep that meaning in words.
     if (prefix === '⚠️ PR #' && display.startsWith(mark)) return `${tr('task.host.warning', 'Warning')}: ${display.slice(mark.length)}`;
     return display.startsWith(mark) ? display.slice(mark.length) : display;
+}
+
+// A pause notice's heads before the words its press recorded, which run up to the notice's retained clause
+// (ouroboros/pause_notices.py notice_text; web/tests/fixtures/pause_notice_parity.json pins both sides). The words
+// are their author's: never translated (DESIGN "Language").
+const PAUSE_HEADS = ['You paused this task: ', 'Ouroboros paused this task: '];
+const PAUSE_RETAINED = ' Its work is retained; Resume continues it.';
+
+/** A relayed host sentence in the install's language: by its exact text (`tx`), except a pause notice's recorded words,
+ *  filled unchanged into its translated frame (`fmt`). */
+export function hostSentenceText(text) {
+    const source = String(text ?? '');
+    const head = PAUSE_HEADS.find((entry) => source.startsWith(entry));
+    const end = head ? source.lastIndexOf(PAUSE_RETAINED) : -1;
+    if (!head || end <= head.length) return tx(source);
+    return fmt(`${head}{words}${source.slice(end)}`, { words: source.slice(head.length, end) });
 }
 
 // Authored narration outranks a stale host type, on both bubble and timeline paths.

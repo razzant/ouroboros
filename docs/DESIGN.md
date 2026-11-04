@@ -1027,8 +1027,11 @@ row of its card, a fact about the owner's message is the typed annotation on tha
 message, and a landed act publishes no row (its receipt or card already says it).
 A standalone System row exists only where nothing else can carry the fact: no mind
 can speak, no mind will read the message, the owner's own direct act, the
-runtime's state, Main's Project lifecycle, or words signed by their author (a
-reminder, a skill notice). It is one short typed mark in owner words, never a
+runtime's state (a settings change saved outside the app: one
+`settings_changed` row per save, `Main model: {old} → {new}. Changed via
+{surface}; declared actor: {actor}.`; the app's own Save publishes none),
+Main's Project lifecycle, or words signed by their author (a reminder, a
+skill notice). It is one short typed mark in owner words, never a
 paragraph or text written for a model. `tests/test_host_message_voice.py` keeps
 every host type stamped as a literal at its send site in one of these classes, with
 its counted producer sites. Room status carries connection loss; reconnecting adds
@@ -1409,17 +1412,19 @@ Failed red). The word is the current episode's alone; the line says its reason, 
 what still runs beside it (helpers, external runs, review work beside a task that is not
 running, such as the review a Pause lets finish, a run nobody can confirm); a work card's chip says the same word with the same line
 beside it, and the sidebar's name says both. An outcome stays beside `Finalizing…`; `Paused` stays until Resume, its
-line saying who or what paused it (the owner's press with its time, Ouroboros in its
-own sentence, nobody when a press declared no one);
-`Waiting` says what it waits for and goes on by itself when that happens,
-unless a helper its sleep chose is paused: the line then says so and who resumes
+line saying who or what paused it (the owner's press with its time, Ouroboros, nobody when a press declared no one),
+the words the declaring press recorded following its head verbatim whoever declared it (`You paused it: …`);
+`Waiting` says what it waits for and goes on by itself when that happens (a sleep: each source it chose, joined by
+`or` — the helper by its name, else how many, its external run, a service, a reviewer, a sender by its name, else a
+message — and its time last, in the viewer's clock, a time alone also waking on a message; a record
+that saved no choice reads `until it is woken`), unless a helper its sleep chose is paused: the line then says so and who resumes
 that helper (`… until Ouroboros resumes it` only when this episode may ask for it,
 or `until you resume it` after Panic; a Continue's earlier helper is just
 `paused`), with no new control or turn; helpers an earlier attempt left running
 read as `Working`, with their count; an
 access wait is not an answer wait, and unknown stays unknown. Under the state a
 live work shows its own focus line, what Ouroboros says it is doing (stage ·
-done · left, written by it through `update_focus`), quieter and at most two
+done · left, written by it through `update_focus`), led by the time it wrote it, quieter and at most two
 lines; a work without one shows none, and a finished row drops it.
 The name goes to the work's message wherever
 it lies, finished work included: its card or the owner's message when loaded, else
@@ -1524,6 +1529,11 @@ reviews create child tasks or prove execution.
   unrecorded tree or a cut adopted range reads as not recorded, and a commit the
   task's record does not name reads only as committed, which denies no adoption
   (one the task failed to record stays unnamed here).
+- A merge receipt row in its task's card says the merge's outcome, then its review
+  coverage in one sentence of the same family (`The review passed exactly what
+  merged.`, `This review was for earlier code; it does not cover what merged.`, `No
+  review was declared for this merge.`; `this head` while nothing merged); the
+  coverage codes stay in the receipt, the PR body and the merging agent's result.
 - Read opens the selected saved answer in the document reader (Markdown, Source
   exact; a failure note as plain text) and never regenerates a review or
   switches sources after an update; limits, Download, timeout and focus follow
@@ -1613,7 +1623,10 @@ Anatomy, top to bottom:
    answerability (a late answer arrives as the owner's message); `You answered` uses the recorded-answer word and mark
    roles: owner blue in dark, the existing meta/ok treatment in light; unknown delivery retains its owner-action mark;
    `Replaced by a newer question` and `Question closed` use the disabled dot; an unreadable source
-   reads `Status unavailable`, never an invented invitation. No answer-deadline
+   reads `Status unavailable`, never an invented invitation. While the asking task is a paused member of its work
+   (the browser's work projection), a waiting question adds `· its work is paused; it reads this after Resume` and a
+   saved answer reads `Answer saved · its work is paused; it reads this after Resume`; a queued or held task keeps the
+   plain words, and nothing resumes it for the owner. No answer-deadline
    countdown: task completion closes its mailbox, not the question's answerability.
    Pressing immediately shows `Sending…` and the brand-marked choice, keeping the
    full form and focus, the head's mark neutral until the answer is confirmed; inert controls are faded in light (in
@@ -2518,7 +2531,9 @@ instead, and let the status text carry the claim.
 Accounts is the common connection surface for subscriptions and API keys. An API key is a row of its provider's card (the built-in Default, then the keys added with the card's Add key) in the account-row anatomy: name and status, a meta line naming the roles that use it, Test, Disable/Enable and Remove (on Default it clears the key). A role names the key it uses; keys never rotate. Open sign-in link hands off to the current desktop, browser or Telegram host while retaining the wizard; Copy is separate. An unavailable host opener reports a retryable failure; a copy fallback says it copied, never an open.
 Models and Agents edit assignments; a new connection adds choices without
 replacing them. A model role uses one compact
-Source / Model / Account row. The account is a property of that role: Auto
+Source / Model / Account row. Under Main, Settings (not the wizard or a wait
+picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; it forecasts no tokens
+or cost. The account is a property of that role: Auto
 rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned
 independently. Fallbacks use the same row in their saved order, with adjacent
@@ -2749,12 +2764,12 @@ one arriving over an external transport, is treated as the owner's exactly as
 the Main thread itself treats it.
 
 **A terminal is not always an ending.** An update or restart teardown reports a
-task as interrupted and then requeues it; that is not a finished task and does
-not notify, so the task's real completion still can.
+task as interrupted and then requeues it: no finished task, no notification, so
+its real completion still can.
 
 **One ending, one notification.** An ordinary reply and the terminal of the same
-task are one event, not two: whichever arrives first rings, and the other is
-collapsed. The same holds for the several wire shapes a finished task has.
+task are one event, as are a finished task's several wire shapes: whichever
+arrives first rings, and the others collapse.
 
 **System notifications first.** Where the desktop app offers them, an alert is
 handed to the operating system's own notifications: sent even while the window
@@ -2817,8 +2832,13 @@ Windows' list included, opens the newest balloon's source; when that is the
 fallback banner the indicator shows for a hidden window (no system
 notification shown), the click opens the window as it was left, no navigation.
 
-**Content is private by default.** Only the kind of event is shown until the
-owner turns message text on, because a banner can appear on a shared screen.
+**Content is private by default.** Only the kind of event shows until the
+owner turns message text on: a banner can appear on a shared screen. With it on,
+a finished task says its work's name and outcome word (`Release notes · Done
+with warnings`) on either wire shape, the word alone without a name, then the
+cause its record holds (`Failed: <cause>`), never the host sentence with its
+task id; Telegram's completion line names the work alike, its short id only
+when it has no name.
 
 **Deliberately absent.** No numeric badge, repeated reminder, inline reply,
 Telegram escalation or attention after quitting. A current desktop launcher may
@@ -3050,7 +3070,7 @@ the consciousness chip, Restart, Panic and the budget; whenever the bar itself i
 narrow window, Restart and the budget are the work list's last rows `Restart` and `Budget` — the same controls,
 placed by the bar's width. A Project's bar holds its name and status, the same chip and Panic
 (`web/modules/chat_header.js`); the chip leads the end group, so a status word never moves it. The chip is
-the brain and a future next attempt's time (the allowance reset when exhausted),
+the brain and a future next attempt's time (the allowance reset when exhausted, or the sooner retry a changed limit brings),
 or `since HH:MM` only for `due` (appointment, `due` if unknown), with the `still` mark.
 Its word uses the viewer's zone and a short date when not today; passed explained
 outcomes and passed allowance resets show no time.

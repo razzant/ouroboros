@@ -218,11 +218,6 @@ WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW = "residual_tool_errors_without_review"
 # write/edit deliverable). A BINARY transparency flag that keeps the result solved
 # (never a downgrade — anti-oscillation), surfaced loudly on the objective axis.
 WARN_RECEIPT_ABSENT = "receipt_absent"
-# M2 zero-grounding: the task declared a TYPED expected_output, finished cleanly,
-# but the agent did literally no tool work and produced no structured FINAL ANSWER —
-# a structural overclaim. Advisory flag (keeps solved); conservative so a normal
-# text-answer or tool-using task is never false-flagged.
-WARN_EXPECTED_OUTPUT_UNGROUNDED = "expected_output_ungrounded"
 # Receipt statuses that count as host-attested grounding (suppress receipt_absent):
 # a verify_and_record pass, an observed artifact, or an honest no_visible_machine_contract
 # declaration. NOT a fail (that is an overclaim signal, not grounding). A trivial write/
@@ -350,18 +345,17 @@ def should_nudge_verification(
 
 def apply_receipt_absent_flag(
     loop_outcome: Dict[str, Any], llm_trace: Dict[str, Any], drive_root: Any, task_id: str,
-    *, expected_output: str = "", receipts: Optional[List[Dict[str, Any]]] = None,
+    *, receipts: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
-    """FR3 flag (+ M2) — run by the host AFTER ``derive_loop_outcome`` and BEFORE the
+    """FR3 flag — run by the host AFTER ``derive_loop_outcome`` and BEFORE the
     verification ledger. Inject durable verify_and_record receipts into the trace so
     the ledger records them, then on a clean turn (execution ok — NOT best_effort/
-    degraded/failed) flag one of two structural transparency signals on the objective
-    axis: ``receipt_absent`` (real reviewable effects but no host-attested grounding)
-    or, when there were no effects at all, the M2 ``expected_output_ungrounded`` zero-
-    grounding signal (a TYPED expected_output was declared yet the agent did no tool
-    work and produced no structured FINAL ANSWER). Both are BINARY warnings that keep
-    the result solved (never a downgrade — anti-oscillation). Applied before
-    ``outcome_axes`` is normalized so the persisted axes and the ledger agree."""
+    degraded/failed) with real reviewable effects but no host-attested grounding flag
+    ``receipt_absent`` on the objective axis: a BINARY warning that keeps the result
+    solved (never a downgrade — anti-oscillation). A turn without effects is never
+    flagged: how many tools an answer used is not a judgment of the answer (plain prose
+    can itself be the deliverable). Applied before ``outcome_axes`` is normalized so the
+    persisted axes and the ledger agree."""
     receipt_rows = (
         receipts if isinstance(receipts, list)
         else read_verification_receipts(drive_root, task_id)
@@ -376,13 +370,6 @@ def apply_receipt_absent_flag(
     if str(execution.get("status") or "") != EXECUTION_OK:
         return
     if not turn_has_reviewable_effects(llm_trace):
-        # M2 zero-grounding: a declared deliverable, no tool work, no structured answer.
-        if (
-            str(expected_output or "").strip()
-            and not (llm_trace.get("tool_calls") or [])
-            and not str(loop_outcome.get("final_answer") or "").strip()
-        ):
-            _merge_objective_warning(objective, WARN_EXPECTED_OUTPUT_UNGROUNDED)
         return
     if verification_grounding_present(
         llm_trace, drive_root, task_id, receipts=receipt_rows,

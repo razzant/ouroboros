@@ -160,6 +160,17 @@ def _evidence_author(item: Mapping[str, Any]) -> str:
     return "file content; its author is not attested by the host"
 
 
+DENIED_ATTACH_HINT = ("Runtime data and the live settings file cannot be attached directly. Use task:<id> for a "
+                      "helper's saved result, chat:<id> for dialogue, or an allowed workspace file for other evidence.")
+
+
+def omission_hint(omissions: Sequence[Mapping[str, Any]]) -> str:
+    """What to attach instead, once per list, when a locator met a deny root (``denied_path``); the code and the
+    deny itself are unchanged. Both renders print it: the author's read (``plan_review.render_record``) and the
+    participant's packet (``render_evidence``)."""
+    return DENIED_ATTACH_HINT if any(o.get("reason") == "denied_path" for o in omissions) else ""
+
+
 def render_evidence(manifest: Mapping[str, Any]) -> str:
     """The attached evidence, each item labelled with whose words it carries, every absence named."""
     declared = list(manifest.get("declared") or [])
@@ -181,6 +192,9 @@ def render_evidence(manifest: Mapping[str, Any]) -> str:
         lines.append("| locator | reason |\n|---|---|")
         lines.extend(f"| {_cell(o.get('locator'))} | {_cell(o.get('reason'))} |" for o in omissions)
         lines.append("")
+        hint = omission_hint(omissions)
+        if hint:
+            lines.append(hint + "\n")
     else:
         lines.append("none\n")
     return "\n".join(lines)

@@ -907,8 +907,8 @@ def _bounded_presentation_name(value: Any, *, fallback: str = "") -> str:
     return name if len(name) <= PROJECT_NAME_MAX else name[: PROJECT_NAME_MAX - 1].rstrip() + "…"
 
 
-def task_presentation_name(*sources: Any) -> str:
-    """Plain work title from structured task/result rows, without storage reads.
+def task_presentation_name(*sources: Any, fallback: str = "Task") -> str:
+    """Plain work title from structured task/result rows, without storage reads (``fallback`` when none names it).
 
     A title or coined name is shown whole; a bare request shows its first line, the
     one derivation admission gives every run (``project_naming.admission_names``)."""
@@ -923,7 +923,7 @@ def task_presentation_name(*sources: Any) -> str:
                     else clean_model_title(text, max_len=PROJECT_NAME_MAX))
             if name:
                 return name
-    return "Task"
+    return fallback
 
 
 def task_presentation_snapshot(drive_root: Any, task_id: str, *, task: Any = None,

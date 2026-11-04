@@ -6,8 +6,7 @@ import { bindScrollFade } from './scroll_fade.js';
 import { createRoomHeader, mainHeaderActionsHtml } from './chat_header.js';
 import { pageLabel } from './pages.js';
 import { showToast } from './toast.js';
-import { tx } from './i18n.js';
-import { hostRowDisplayText } from './host_notice_text.js';
+import { hostRowDisplayText, hostSentenceText } from './host_notice_text.js';
 import { ORIGIN_ADDRESSED_NOTICE_TYPES, childRowPlacement, replayConcludesTask } from './chat_row_placement.js';
 import { appendProjectRow, decorateProjectRow, PROJECT_ROW_TYPES, refreshProjectAnswerFold, syncSavedProjectContext } from './project_answer.js';
 import { createWorkPortals, isPortal, reconcilePortalNotes } from './work_portal.js';
@@ -612,6 +611,7 @@ export function createChatInstance({
         workState = reconcileWorkState(workState, data, chatId, ws.isConnected?.() !== false);
         if (Array.isArray(data?.works)) settleAbsentChildren(snapshotRequestedAt);
         applyCardWorkViews(liveCardRecords, workState);
+        chatDecision.syncWorks(workState);
         changedOffers(liveCardRecords, before, workState).forEach(syncCancelRunButton);
         syncHeaderControlState(data ?? { accounting: { available: false } });
         portals.sync(data);
@@ -2231,7 +2231,7 @@ export function createChatInstance({
         stampHistoryNode(bubble, opts.historyId, opts.historyPosition);
 
         const stored = text;
-        if (role === 'system' && ['task_pause_notice', 'legacy_memory_notice'].includes(systemType)) text = tx(text);
+        if (role === 'system' && ['task_pause_notice', 'legacy_memory_notice'].includes(systemType)) text = hostSentenceText(text);
         // Render-only: Copy below keeps `shown`, the pre-cleanup sentence.
         const painted = hostRowDisplayText({ text: stored, role, system_type: systemType, narration: opts.narration }, text);
         const skillReview = role === 'system' && systemType === 'skill_review' && opts.narration !== true;

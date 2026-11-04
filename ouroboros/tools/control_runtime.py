@@ -786,6 +786,7 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
     from ouroboros.config import get_bg_wakeup_max_sec, get_bg_wakeup_min_sec
     from ouroboros.consciousness import (
         INTERVAL_STATE_KEY,
+        LAST_SKIP_STATE_KEY,
         LAST_WAKE_STATE_KEY,
         NEXT_WAKE_STATE_KEY,
         _iso,
@@ -814,7 +815,8 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
             gap = "" if stored is not None else "corrupt: the file is not a JSON object"
     facts = {"source": str(path), "observed_at": utc_now_iso()}
     fields = (("enabled", "bg_consciousness_enabled"), ("stored_next_wake_at", NEXT_WAKE_STATE_KEY),
-              ("last_wake_ended_at", LAST_WAKE_STATE_KEY), ("chosen_interval_sec", INTERVAL_STATE_KEY))
+              ("last_wake_ended_at", LAST_WAKE_STATE_KEY), ("chosen_interval_sec", INTERVAL_STATE_KEY),
+              ("last_skip", LAST_SKIP_STATE_KEY))
     if stored is None:
         facts.update(read_gap=gap, not_read=[name for name, _key in fields])
     else:
@@ -839,9 +841,11 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
                                       "source": "owner settings, not the state file"}
     facts["notes"] = [
         "stored_next_wake_at is the last time the clock persisted and fires only while enabled; the running "
-        "clock keeps it no sooner than MIN after boot, and no event moves it.",
-        "Not in this read (held in the supervisor's memory): the last wake outcome and error, failure "
-        "backoff, the allowance window and a live wake task."]
+        "clock keeps it no sooner than MIN after boot, and no event moves it; a changed daily limit retries "
+        "an allowance_exhausted last_skip MIN after that skip and after boot instead of at its reset.",
+        "last_skip is the newest skipped wake with the allowance window it met (null is unknown). Not in this "
+        "read (held in the supervisor's memory): other wake outcomes and errors, failure backoff, the current "
+        "allowance window and a live wake task."]
     return json.dumps(facts, ensure_ascii=False, indent=2)
 
 

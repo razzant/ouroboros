@@ -22,14 +22,27 @@ class WorkReason(TypedDict):
     ids: NotRequired[List[str]]
     since: NotRequired[Any]
     by: NotRequired["PauseAuthor"]
+    wake: NotRequired[List["SleepWake"]]
 
 
 class PauseAuthor(TypedDict):
-    """The declared author of a decided Pause (``control_actor.pause_author``): ``owner`` or ``ouroboros``."""
+    """The declared author of a decided Pause (``control_actor.pause_author``): ``owner`` or ``ouroboros``, with the
+    words the press recorded (``""`` for a press without words), said verbatim after its head."""
 
     actor: str
     text: str
     at: Any
+
+
+class SleepWake(TypedDict):
+    """One clause of what a ``sleeping`` reason waits for (``work_status.sleep_wake``): a ``kind`` of its own selection,
+    with a task's census ``name``, a ``count`` or the chosen instant ``at`` (said in the viewer's clock). A reason's
+    clauses are joined by "or", its time last."""
+
+    kind: str  # task | task_or_writes | tasks | all_tasks | runs | service | reviewer | sender | mail | time
+    name: NotRequired[str]
+    count: NotRequired[int]
+    at: NotRequired[str]
 
 
 class LastResumeBy(TypedDict):

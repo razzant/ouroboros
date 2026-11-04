@@ -492,4 +492,6 @@ async def _api_presence_place(request: Request) -> JSONResponse:
     except host.HostServiceAuthError as exc:
         return _presence_error(str(exc), 403, "presence_auth_blocked", "blocked")
     except (ValueError, OSError) as exc:
-        return _presence_error(str(exc), 503, "places_unavailable", "retry")
+        # The words a connector's Held row repeats; the exception stays a diagnostic beside them.
+        return _presence_error("Ouroboros could not read whether this place allows sending right now.", 503,
+                               "places_unavailable", "retry", detail=str(exc))

@@ -16,10 +16,10 @@ import { markView } from '../modules/status_mark.js';
 import { summarizeRoom } from '../modules/project_activity.js';
 import {
     OUTCOME_TONES, activityWord, applyCardWorkViews, cardControls, cardMenuActions, cardWorkView, clock, emptyWorkState,
-    memberState, ownStopPress, reasonText, reconcileWorkState, resumeAttemptClause, resumeAttemptWords, resumeTargets,
-    roomStatusView, workControls, workLine, workMenuActions, workQuestion, workRowView,
+    memberPaused, memberState, ownStopPress, reasonText, reconcileWorkState, resumeAttemptClause, resumeAttemptWords,
+    resumeTargets, roomStatusView, workControls, workLine, workMenuActions, workQuestion, workRowView,
 } from '../modules/work_status.js';
-import { SERVER_REASONS, room, serverMark, work as builtWork } from './work_fixture.js';
+import { SERVER_REASONS, SERVER_SLEEPS, room, serverMark, work as builtWork } from './work_fixture.js';
 
 setMissTransport(() => Promise.resolve(null));
 const CASES = JSON.parse(readFileSync(new URL('./fixtures/work_projection_cases.json', import.meta.url), 'utf8')).cases;
@@ -216,7 +216,7 @@ test('a sleep whose chosen helper still awaits its own Resume says so beside Wai
     const state = stateOf('sleeping_on_paused_helper');
     const row = workRowView(state.works[0]);
     assert.deepEqual(row, { word: 'Waiting', tone: 'held', mark: 'still', owner: false, outcome: '', focus: '',
-        secondary: 'Sleeping until it is woken · 1 helper it waits for is paused until Ouroboros resumes it' });
+        secondary: 'Sleeping until the task it chose finishes or a message arrives · 1 helper it waits for is paused until Ouroboros resumes it' });
     // The sleeping root keeps exactly its own controls; the helper's Resume stays Ouroboros's selection.
     const grouped = workControls(state.works[0]);
     assert.deepEqual(grouped, { stop: ['sw'], stopEarlier: [], pause: 'sw', resume: '', hurry: 'sw', wrapUp: 'sw' });
@@ -350,11 +350,80 @@ test('the test builders name the marks the server names', () => {
     assert.equal(builtWork({ activity_id: 'x' }, { confirmed: false }).mark, 'moving', 'work observed running moves');
 });
 
-test('the focus line is the work\'s own update_focus text under its state, and none without one', () => {
-    const focused = { ...work('working_call'), focus: { text: '  Release 7.7 · code merged · waiting for 7 signed files ', at: 1 } };
-    assert.equal(workRowView(focused).focus, 'Release 7.7 · code merged · waiting for 7 signed files');
+test('the focus line is the work\'s own update_focus text under its state, led by when it was written, and none without one', () => {
+    const at = '2026-10-17T15:20:00Z';
+    const focused = { ...work('working_call'), focus: { text: '  Release 7.7 · code merged · waiting for 7 signed files ', at } };
+    assert.equal(workRowView(focused).focus, `${clock(at)} · Release 7.7 · code merged · waiting for 7 signed files`);
+    // A line the server sent without its time says none: no stale word, no guess.
+    assert.equal(workRowView({ ...focused, focus: { text: 'Drafting', at: null } }).focus, 'Drafting');
     assert.equal(workRowView(work('working_call')).focus, '');
-    assert.equal(workRowView({ ...work('working_call'), focus: { text: '   ', at: 1 } }).focus, '');
+    assert.equal(workRowView({ ...work('working_call'), focus: { text: '   ', at } }).focus, '');
+});
+
+test('a sleep says every source it chose in the server\'s words, joined by "or", a chosen time last in the viewer\'s clock', () => {
+    assert.ok(Object.keys(SERVER_SLEEPS).length >= 16);
+    for (const [name, reason] of Object.entries(SERVER_SLEEPS)) {
+        const at = (reason.wake || []).find((clause) => clause.kind === 'time')?.at;
+        assert.equal(reasonText(reason), at ? reason.text.replace(at, clock(at)) : reason.text, name);
+    }
+    assert.equal(reasonText(SERVER_SLEEPS.unrecorded), 'Sleeping until it is woken', 'a record without a selection');
+    const at = '2026-10-17T18:05:00+00:00';
+    assert.equal(reasonText(SERVER_SLEEPS.every_kind), 'Sleeping until all 2 tasks it chose finish or its external run '
+        + `finishes or a service it started stops or a reviewer answers or Draft the release notes writes or ${clock(at)}`);
+    // A time alone also wakes on any message; the task it names, chosen as its sender too, finishes or writes.
+    assert.equal(reasonText(SERVER_SLEEPS.time), `Sleeping until a message arrives or ${clock(at)}`);
+    assert.equal(reasonText(SERVER_SLEEPS.time_only), `Sleeping until ${clock(at)}`);
+    assert.equal(reasonText(SERVER_SLEEPS.task_and_sender), 'Sleeping until Draft the release notes finishes or writes');
+    assert.equal(reasonText(SERVER_SLEEPS.task_and_sender_and_time),
+        `Sleeping until Draft the release notes finishes or writes or ${clock(at)}`);
+    // The chosen helper by its census name, never its id; what still runs beside it stays its own fact.
+    assert.equal(workLine(work('sleeping_on_named_helper')),
+        'Sleeping until Draft the release notes finishes or writes · 1 helper still working');
+    assert.equal(workLine(work('sleeping_until_time')), `Sleeping until a message arrives or ${clock(at)}`);
+    assert.ok(!workLine(work('sleeping_on_named_helper')).includes('sn-c'));
+    // A clause this client does not know, or a time it cannot read, keeps the server's sentence whole.
+    for (const wake of [[{ kind: 'mail' }, { kind: 'later' }], [{ kind: 'time', at: 'soon' }], []]) {
+        assert.equal(reasonText({ code: 'sleeping', text: 'Sleeping until x', wake }), 'Sleeping until x');
+    }
+    const prior = currentPayload();
+    try {
+        applyPayload({ language: 'ru', english: false, entries: {
+            'Sleeping until {what}': { text: 'Спит, пока {what}' },
+            '{name} finishes': { text: 'не закончится {name}' },
+            '{a} or {b}': { text: '{a} или {b}' },
+            [CODE_PREFIX + 'work.sleep.reviewer']: { text: 'не ответит ревьюер' } } });
+        // A translation keeps the name as written; a clause it lacks stays the server's English until translated.
+        assert.equal(reasonText(SERVER_SLEEPS.task), 'Спит, пока не закончится Draft the release notes');
+        assert.equal(reasonText(SERVER_SLEEPS.reviewer), 'Спит, пока не ответит ревьюер');
+        assert.equal(reasonText(SERVER_SLEEPS.task_and_time), `Спит, пока не закончится Draft the release notes или ${clock(at)}`);
+        assert.equal(reasonText(SERVER_SLEEPS.task_and_sender), 'Спит, пока Draft the release notes finishes or writes');
+    } finally { applyPayload(prior); }
+});
+
+test('the words a Pause recorded follow its head for any declared author; only the head is translated', () => {
+    const owner = { code: 'paused_by_owner', text: 'You paused it', since: '2026-10-17T15:00:00Z',
+        by: { actor: 'owner', text: 'По прямому распоряжению Антона: stop the export', at: '2026-10-17T15:00:00Z' } };
+    assert.equal(reasonText(owner), 'You paused it: По прямому распоряжению Антона: stop the export');
+    assert.equal(workLine({ because: [owner] }), `You paused it: По прямому распоряжению Антона: stop the export · ${PRESSED}`);
+    // The owner's own button records no words: as before.
+    assert.equal(reasonText({ ...owner, by: { ...owner.by, text: '' } }), 'You paused it');
+    assert.ok(!reasonText(owner).toLowerCase().includes('on your behalf'));
+    const prior = currentPayload();
+    try {
+        applyPayload({ language: 'ru', english: false, entries: {
+            [CODE_PREFIX + 'work.because.paused_by_owner']: { text: 'Вы поставили на паузу' } } });
+        assert.equal(reasonText(owner), 'Вы поставили на паузу: По прямому распоряжению Антона: stop the export');
+    } finally { applyPayload(prior); }
+});
+
+test('a member is paused only where a confirmed work in any room says so', () => {
+    const paused = stateOf('paused_by_owner', 1);  // another room's chat: the work still counts
+    assert.equal(memberPaused(paused, 'o'), true);
+    assert.equal(memberPaused(stateOf('working_call'), 'w'), false);
+    assert.equal(memberPaused(paused, 'absent'), false);
+    assert.equal(memberPaused(emptyWorkState(), 'o'), false);
+    const unconfirmed = { episodes: new Map([['o', { ...work('paused_by_owner'), confirmed: false }]]) };
+    assert.equal(memberPaused(unconfirmed, 'o'), false, 'an unconfirmed work proves nothing');
 });
 
 test('controls group by action with exact targets; Resume is a button, a pending Stop leaves its escalation', () => {

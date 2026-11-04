@@ -77,18 +77,16 @@ def gap_words(gaps: Any, lead: str = "The Pause did not wait for") -> str:
 
 
 def notice_text(notice: dict) -> str:
-    """The sentence one owed notice says; an owner Pause names the author its own fence declared."""
+    """The sentence one owed notice says; an owner Pause names the author its own fence declared, and the words that
+    press recorded follow its head verbatim, whoever declared it (a press without words says none)."""
     if notice.get("reason") == "owner":
         by = notice.get("by") if isinstance(notice.get("by"), dict) else {}  # a notice saved before ``by``: nobody
         said = " ".join(str(by.get("text") or "").split())
-        if by.get("actor") == "owner":
-            head = "You paused this task."
-        elif by.get("actor") == "ouroboros" and said:
-            head = "Ouroboros paused this task: " + (said if said.endswith((".", "!", "?", "…")) else f"{said}.")
-        elif by.get("actor") == "ouroboros":
-            head = "Ouroboros paused this task."
+        actor = {"owner": "You", "ouroboros": "Ouroboros"}.get(str(by.get("actor") or ""))
+        if actor and said:
+            head = f"{actor} paused this task: " + (said if said.endswith((".", "!", "?", "…")) else f"{said}.")
         else:
-            head = "This task was paused."
+            head = f"{actor} paused this task." if actor else "This task was paused."
         return f"{head} {_RETAINED}{gap_words(notice.get('membership_gaps'))}"
     authority = notice.get("reason") == "authority"
     cause = ("a technical fault: its billing or control authority could not be read, which says nothing about "

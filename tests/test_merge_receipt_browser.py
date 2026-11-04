@@ -20,9 +20,15 @@ subscription_ui = ui_fixture.subscription_ui
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 
 
+# The card says its review coverage in words; the codes stay in the receipt, the PR body and the agent's result.
+_COVERAGE_WORDS = {"declaration": "A review was declared; Ouroboros holds no record of it.",
+                   "record": "The review passed exactly what merged."}
+
+
 def assert_review_source(text, source):
     other = "record" if source == "declaration" else "declaration"
-    assert f"review source: {source}" in text and f"review source: {other}" not in text
+    assert _COVERAGE_WORDS[source] in text and _COVERAGE_WORDS[other] not in text
+    assert "review source" not in text and "review coverage" not in text
 
 
 @pytest.mark.parametrize("source", ["declaration", "record", "closed"])

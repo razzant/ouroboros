@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { buildTimelineItemHtml, cardRowSummary } from '../modules/chat_activity.js';
@@ -68,4 +69,49 @@ for (const history of [false, true]) test(`pause notice without a card translate
         assert.ok(speech.innerHTML.includes(ENGLISH), 'typed metadata never turns model words into host copy');
         assert.equal(speech.innerHTML.includes(TRANSLATED), false);
     } finally { instance?.destroy(); applyPayload({ language: 'en', english: true }); restoreDom(env.prior); }
+});
+
+// A press that recorded words (an agent's for the owner, or Ouroboros's own): the head and the retained clause are the
+// host's frame, translated as one template; the words are their author's, filled in unchanged (DESIGN "Language").
+const SAID = 'You paused this task: По просьбе Антона: stop the export. Its work is retained; Resume continues it.';
+const FRAME = 'You paused this task: {words} Its work is retained; Resume continues it.';
+const said = { ...notice, card_row_id: 'pause:paused-root:said', text: SAID, content: SAID };
+
+test('the words a pause recorded stay as written on both paths; only the frame around them is translated', async () => {
+    const { hostSentenceText } = await import('../modules/host_notice_text.js');
+    const { pendingMisses } = await import('../modules/i18n.js');
+    const env = installDom();
+    try {
+        applyPayload({ language: 'ru', english: false, entries: {
+            [FRAME]: { text: 'Вы приостановили задачу: {words} Работа сохранена; Resume продолжит её.', provenance: 'imported' } } });
+        const shown = 'Вы приостановили задачу: По просьбе Антона: stop the export. Работа сохранена; Resume продолжит её.';
+        assert.equal(hostSentenceText(SAID), shown);
+        assert.equal(cardRowSummary(said, 'warn', said.ts).headline, shown);
+        assert.equal(hostSentenceText(ENGLISH), ENGLISH, 'a press without words is still one exact sentence');
+        // A frame the memory lacks shows the English and reports the frame alone, never the author's words.
+        applyPayload({ language: 'ru', english: false, entries: {} });
+        assert.equal(hostSentenceText(SAID), SAID);
+        assert.ok(pendingMisses().includes(FRAME));
+        assert.ok(!pendingMisses().some((key) => key.includes('stop the export')));
+        // Ouroboros's own sentence rides the same frame; the English reads exactly as stored.
+        applyPayload({ language: 'en', english: true });
+        const mind = 'Ouroboros paused this task: Freeing the worker. Its work is retained; Resume continues it.';
+        assert.equal(hostSentenceText(mind), mind);
+        assert.equal(hostSentenceText(SAID), SAID);
+    } finally { applyPayload({ language: 'en', english: true }); restoreDom(env.prior); }
+});
+
+test('every pause sentence the server writes is cut at the words its press recorded (pause_notice_parity.json)', async () => {
+    const { hostSentenceText } = await import('../modules/host_notice_text.js');
+    const { cases } = JSON.parse(readFileSync(new URL('./fixtures/pause_notice_parity.json', import.meta.url), 'utf8'));
+    assert.ok(cases.some(({ words }) => words === null) && cases.filter(({ words }) => words !== null).length >= 4);
+    try {
+        for (const { name, text, words } of cases) {
+            // The frame is the sentence with the recorded words as its one parameter; any other is one exact sentence.
+            const key = words === null ? text : text.replace(words, '{words}');
+            applyPayload({ language: 'ru', english: false,
+                entries: { [key]: { text: words === null ? '⟨sentence⟩' : '⟨{words}⟩', provenance: 'imported' } } });
+            assert.equal(hostSentenceText(text), words === null ? '⟨sentence⟩' : `⟨${words}⟩`, name);
+        }
+    } finally { applyPayload({ language: 'en', english: true }); }
 });

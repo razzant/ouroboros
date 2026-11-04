@@ -40,7 +40,7 @@ from ouroboros.review_slot_cancel import (  # noqa: F401 — re-exported seam su
 from ouroboros.review_dispatch import bind_api_review_paid_stamp, invoke_late_review_paid_stamp, invoke_review_paid_stamp
 from ouroboros.usage_accounting import POSITIVE_PHYSICAL_ATTEMPT_STATES, BillingAuthorityUnavailable
 from ouroboros.delegate_custody_usage import (
-    observe_failed_review_send, observe_review_usage, observe_session_usage, run_names,
+    model_identity_delta, observe_failed_review_send, observe_review_usage, observe_session_usage, run_names,
 )
 from ouroboros.triad_review import (
     TWO_PART_SESSION_OUTPUT_SCHEMA,
@@ -1208,12 +1208,7 @@ def session_identity_deltas(slot: Any, facts: Dict[str, Any]) -> List[Dict[str, 
         slot_model and facts["model"]
         and normalize_model_identity(slot_model) != normalize_model_identity(facts["model"])
     ):
-        deltas.append({
-            "kind": "capability_delta",
-            "requested": f"model {slot_model}",
-            "effective": f"model {facts['model']}",
-            "reason": "session_route_resolves_its_own_model",
-        })
+        deltas.append(model_identity_delta(slot_model, facts["model"]))
     return deltas
 
 

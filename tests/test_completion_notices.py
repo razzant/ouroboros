@@ -66,7 +66,7 @@ def _record(case):
     ("delivery_control", "final delivery instruction could not be read"),
     ("verification_output", "A tool this task used failed"),
     ("partial", "The result is partial"),
-    ("mixed", "declared output has no recorded tool work"),
+    ("mixed", "A retired check recorded no tool calls"),
     ("unknown_warning", "future_warning"),
     ("artifact_missing", "result files are missing"),
     ("unknown_delivery", "Delivery of the final answer could not be confirmed"),

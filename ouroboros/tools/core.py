@@ -394,9 +394,9 @@ def _data_write(
             matches = True
     if matches and not cyber:
         return (
-            "⚠️ DATA_WRITE_BLOCKED: settings.json is the canonical owner-edited "
-            "file. Tool-level writes must route through /api/settings (which "
-            "applies key-by-key policy — OUROBOROS_RUNTIME_MODE is owner-only "
+            "⚠️ DATA_WRITE_BLOCKED: settings.json is the canonical owner-edited file. Tool-level writes must route "
+            "through /api/settings, declaring headers X-Ouroboros-Actor: ouroboros and X-Ouroboros-Task-Id: <your "
+            "task id> (it applies key-by-key policy — OUROBOROS_RUNTIME_MODE is owner-only "
             "and dropped on POST; other keys flow through normally). To change "
             "owner-only values, stop the agent, edit ~/Ouroboros/data/settings.json "
             "directly, then restart."

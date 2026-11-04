@@ -438,7 +438,7 @@ def test_stale_live_transport_returns_unconfirmed_not_ok(monkeypatch, tmp_path):
         out = control._start_task(ctx, "Never drained", title="Undrained promote")
         event = stale_queue.get(timeout=10)
         assert event["type"] == "promote_chat_to_task"
-        assert out.startswith("Accepted, waiting to start:")
+        assert out.startswith("Not confirmed yet:")
         assert "complete intent is durable" in out
         # #1160: the id is durably PENDING, never scheduled - the emitted stub is
         # exactly the reconciliation read the refusal names, and it grants nothing.
@@ -464,12 +464,12 @@ def test_stale_task_result_and_receipt_cannot_confirm_new_admission_token(tmp_pa
         promotion_admission={"status": "scheduled", "routing_token": old_token},
     )
     ctx = types.SimpleNamespace(drive_root=tmp_path)
-    assert _wait_for_promotion_admission(
-        ctx, "deadbeef", new_token, timeout_sec=0.0,
-    ) == {
+    receipt = _wait_for_promotion_admission(ctx, "deadbeef", new_token, timeout_sec=0.0)
+    assert receipt == {
         "status": "unconfirmed",
         "reason": "confirmation_timeout",
-    }
+        "waited_sec": receipt["waited_sec"],  # the wait it measured, not the configured bound
+    } and isinstance(receipt["waited_sec"], float)
 
 
 def test_unpicklable_control_event_fails_before_feeder_thread(tmp_path):

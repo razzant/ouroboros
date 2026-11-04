@@ -223,6 +223,22 @@ def test_focus_published_before_the_handoff_survives_it_and_is_revised_after(dir
     assert after["text"] == "After the handoff" and after["authored_at"] > before["authored_at"]
 
 
+def test_only_the_handed_off_turn_hears_that_no_line_shows(direct, host, monkeypatch):
+    """The round's facts read the carrier, not the origin: the live direct turn answers in chat and hears nothing of an
+    absent line; the same work in the pool has a card, so it hears that nothing shows under its name."""
+    from ouroboros.loop_messages import _own_focus_fact
+
+    def said(ctx):
+        return _own_focus_fact(SimpleNamespace(tools=SimpleNamespace(_ctx=ctx), task_id=TASK_ID), 0.0)
+
+    assert direct.ctx.is_direct_chat is True and execution_kind(direct.ctx) == "direct"
+    assert said(direct.ctx) == ("absent", "")
+    pooled = _started_in_pool(direct, host, monkeypatch)
+    assert pooled.ctx.is_direct_chat is True and execution_kind(pooled.ctx) == "pooled"
+    assert _focus(host.root) is None
+    assert said(pooled.ctx) == ("absent", "self-authored focus: none; my human reads nothing under this work's name")
+
+
 def test_superseded_direct_actor_cannot_publish_beside_its_pooled_successor(pooled, host):
     """The registry's absence ends the OLD carrier; it never turns that carrier into a pooled one."""
     assert _publish(pooled.actor, "From the current attempt").startswith("OK:")

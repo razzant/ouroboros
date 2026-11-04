@@ -41,7 +41,7 @@ def test_start_crash_retains_intent_and_boot_never_admits_it(host, monkeypatch, 
     reply = _start_task(ctx, "Separate work", title="Separate", workspace="none")
     [event] = ctx.pending_events
     tid = event["task_id"]
-    assert "Accepted, waiting to start" in reply and not host.pending
+    assert "Not confirmed yet:" in reply and not host.pending
     if cut == "admitting":
         def crash_before_enqueue(*args, **kwargs):
             assert load_task_result(host.root, tid)["promotion_admission"]["phase"] == "admitting"

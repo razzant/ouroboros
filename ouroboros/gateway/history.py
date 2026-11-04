@@ -315,7 +315,7 @@ def _copy_task_summary_metadata(rec: Dict[str, Any], entry: Dict[str, Any]) -> N
     for key in ("model_execution", "review_projection", "history_retention", "terminal_time", "cancel_origin"):
         if isinstance(entry.get(key), dict):
             rec[key] = dict(entry[key])
-    for key in ("suggested_name", "wake_summary", "schedule_name"):
+    for key in ("suggested_name", "wake_summary", "schedule_name", "target_label"):
         if entry.get(key): rec[key] = str(entry[key])
     for key in ("tool_calls", "rounds", "tool_errors", "routing_tool_calls", "completion_tool_calls"):
         if key in entry:

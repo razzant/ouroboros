@@ -552,7 +552,7 @@ def test_presence_unconfirmed_promotion_records_handoff_for_reconciliation(tmp_p
     )
     ctx = _managed_swarm_ctx(tmp_path, task_metadata={"presence": {"binding_id": "presence-binding"}})
     out = _start_task(ctx, "Audit and fix the issue", title="Issue audit and fix")
-    assert out.startswith("Accepted, waiting to start:")
+    assert out.startswith("Not confirmed yet:")
     assert len(ctx.pending_events) == 1
     assert ctx._swarm_handoff_attempt["task_id"] == ctx.pending_events[0]["task_id"]
     assert ctx._swarm_handoff_attempt["status"] == "unconfirmed"

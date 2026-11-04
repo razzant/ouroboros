@@ -11,7 +11,8 @@ export const WAIT_FIELDS = ['wait_for_answer', 'wait_ended_at', 'owner_wait_stat
 // keeps the lifecycle context after it. The Python pointer fallback
 // (ouroboros/project_dialogue.py::QUESTION_STATUS) emits the same words; the shared
 // fixture web/tests/fixtures/question_presentation_parity.json pins both sides on the
-// rows Python actually emits.
+// rows Python actually emits. Whether the question's task is a paused member of its work is the
+// browser's own work projection (`paused`, work_status.memberPaused), so only this side says it.
 const STATUS = {
     waiting: 'Waiting for your answer',
     open: 'Unanswered',
@@ -52,7 +53,14 @@ function lifecycleKey(row) {
         : waiting ? 'waiting' : resumed ? 'resumed' : 'open';
 }
 
-export function questionPresentation(row = {}) {
+// A paused task reads its mail only after its Resume, which nobody presses for the owner (owner 07.10): an answer it
+// waits for, or one saved in its mailbox, says so while its work is paused. A queued or held one keeps the plain words.
+const PAUSED_STATUS = {
+    waiting: 'Waiting for your answer · its work is paused; it reads this after Resume',
+    answer_saved: 'Answer saved · its work is paused; it reads this after Resume',
+};
+
+export function questionPresentation(row = {}, { paused = false } = {}) {
     if (deliveryOwed(row)) {
         if ((row.quiz_state || row.state) !== 'answered') {
             return { status: tr('question.status.closure_pending', 'Question closed · update pending') };
@@ -62,11 +70,14 @@ export function questionPresentation(row = {}) {
         const reason = row.question_delivery.reason_code;
         return { status: reason === 'late_answer_delivery_unknown'
             ? tr('question.status.answer_unknown', 'Answer recorded · delivery unknown')
-            : reason === 'awaiting_recipient_read'
-                ? tr('question.status.answer_saved', 'Answer saved · the task reads it when it continues')
-                : tr('question.status.answer_pending', 'Answer recorded · delivery pending') };
+            : reason === 'awaiting_recipient_read' && paused
+                ? tr('question.status.answer_saved_paused', PAUSED_STATUS.answer_saved)
+                : reason === 'awaiting_recipient_read'
+                    ? tr('question.status.answer_saved', 'Answer saved · the task reads it when it continues')
+                    : tr('question.status.answer_pending', 'Answer recorded · delivery pending') };
     }
     const key = lifecycleKey(row);
+    if (paused && key === 'waiting') return { status: tr('question.status.waiting_paused', PAUSED_STATUS.waiting) };
     // The English words stay the source (and the Python twin's); the install language reads
     // them by the lifecycle code (web/modules/i18n.js).
     return { status: tr(`question.status.${key}`, STATUS[key]) };

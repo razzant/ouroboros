@@ -4,7 +4,7 @@ Extracted whole from ``context.py`` at its module ceiling (v7 leaf) so the
 facts the runtime section renders keep one home: the project room a task sits in,
 the budget rails it runs under, how the run learns the time (its capture instant
 labels the Recent/Drive snapshots), the body's own dated facts (``vitals_fact``, beside
-``storage_fact``), and the
+``storage_fact``; ``admission_observation`` beside an unconfirmed start's receipt), and the
 configured delegation route with its honestly-labeled historical observations.
 Each returns a plain projection and reads no context state, so nothing here can
 change what the section MEANS — only what it reports. ``context`` re-exports the
@@ -728,6 +728,35 @@ def vitals_fact(data_root: Any, *, observed_at: str, captured_at: Optional[str] 
         log.debug("vitals fact unavailable", exc_info=True)
         return None
     return fact
+
+
+def admission_observation(data_root: Any, *, observed_at: str) -> str:
+    """The body as recorded beside an admission not confirmed in time, each source with its own clock: the
+    published queue's running and waiting counts (``_queue_context_fact``; a correspondent's Presence turn
+    is not the owner's work) at the snapshot's stamp and age, and the newest ``supervisor_load`` row's worst
+    event wait in its window (``_supervisor_tail``: a past window's maximum, not the lag now). The bounded
+    readers a context build uses, once per receipt; no HTTP, no history scan, no verdict; an absent source
+    is unknown, never zero. Never raises."""
+    def at(stamp: Any) -> str:
+        clock = _clock(stamp, observed_at)
+        return f"at {clock} UTC" if clock else "at an unreadable time"
+
+    root = pathlib.Path(data_root)
+    try:
+        queue = _queue_context_fact({"budget_drive_root": str(root)})
+        running, waiting, age = queue.get("running_count"), queue.get("pending_count"), queue.get("age_sec")
+        when = f"{at(queue.get('ts'))} ({_sec(age)} old)" if age is not None else "at an unreadable time"
+        parts = ["Queue: unknown (no readable snapshot)." if running is None else
+                 f"Queue as recorded {when}: {running} running, {'unknown' if waiting is None else waiting} waiting."]
+        load = _supervisor_tail(root).get("load")
+        parts.append(f"Newest server load row {at(load.get('ts'))}: events waited up to "
+                     f"{_sec(load.get('max_event_lag_sec'))} for the supervisor in its {_sec(load.get('window_sec'))} "
+                     "window." if isinstance(load, dict)
+                     else "Server load: unknown (no supervisor_load row in the journal's recent tail).")
+    except Exception:  # a fact beside a receipt never breaks the receipt
+        log.debug("admission observation unavailable", exc_info=True)
+        return "Queue and server load: unknown (unreadable)."
+    return " ".join(parts)
 
 
 def body_facts(data_root: Any, *, observed_at: str) -> Dict[str, Any]:

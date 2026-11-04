@@ -11,10 +11,10 @@ import { fitText, fullText } from './text_fit.js';
 import { delegatedActivityBodyHtml, delegatedHeadline, delegatedLineView } from './delegated_activity.js';
 import { REUSABLE_TASK_IDS } from './task_control_menu.js';
 import { ownLiveDetail, paintLiveDetail } from './task_phase_chip.js';
-import { fmt, tr, tx } from './i18n.js';
+import { fmt, tr } from './i18n.js';
 import { formatMsgTime } from './utils.js';
 import { placeIngressNote } from './chat_attachments.js';
-import { hostRowDisplayText } from './host_notice_text.js';
+import { hostRowDisplayText, hostSentenceText } from './host_notice_text.js';
 export { bootPhase, startingStatus, supervisorReady } from './host_starting_status.js';
 import {
     projectMarkdownLines, MARKDOWN_FENCED_CODE, accountedUpperBound,
@@ -102,7 +102,7 @@ export function evidenceLinkHtml(evidenceRef) {
 // retain their record link. Only typed host pause copy enters the translator.
 export function cardRowSummary(msg, phase, rawTs = '') {
     const text = String(msg.text ?? msg.content ?? '');
-    const lines = hostRowDisplayText(msg, msg.role === 'system' && msg.system_type === 'task_pause_notice' ? tx(text) : text).split('\n');
+    const lines = hostRowDisplayText(msg, msg.role === 'system' && msg.system_type === 'task_pause_notice' ? hostSentenceText(text) : text).split('\n');
     const rowId = String(msg.card_row_id || '').trim() || `${String(msg.system_type || '').trim()}|${rawTs}`;
     return {
         phase, headline: lines[0].trim(), body: lines.slice(1).join('\n').trim(), dedupeKey: `cardrow|${rowId}`,

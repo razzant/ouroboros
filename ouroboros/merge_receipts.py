@@ -441,23 +441,72 @@ def upsert_body(body: str, block: str) -> str:
     return body + ("\n\n" if body else "") + block + "\n"
 
 
-def card_row_text(receipt: Dict[str, Any]) -> str:
+# The coverage gap a card says when several are named, first match wins (codes: ``review_coverage``,
+# ``_recompute_coverage``): other code than the reviewed tree is earlier code (DESIGN, owner 29.10 A), then what the
+# review read, the record, the base, its named tasks; any other gap is an unrecorded fact.
+_GAP_WORDS = (
+    ({"merged_tree_differs_from_reviewed_head", "merged_head_differs"},
+     "This review was for earlier code; it does not cover {what}."),
+    ({"subject_kind_not_committed"}, "The review read uncommitted files; whether it saw {what} is not recorded."),
+    ({"reviewed_head_not_recorded", "reviewed_head_not_declared"}, "The review did not record which version it read."),
+    ({"no_host_observed_review_record"}, "A review was declared; Ouroboros holds no record of it."),
+    ({"reviewed_base_differs", "base_changed_since_review"}, "The review read it against a different base."),
+)
+
+
+def coverage_words(receipt: Dict[str, Any]) -> str:
+    """The receipt's review coverage as one owner sentence; the codes stay in the receipt, the PR body and the
+    merging agent's tool result. ``{what}`` is what merged, else the head this request named."""
     outcome, coverage = receipt.get("outcome") or {}, receipt.get("coverage") or {}
-    review = receipt.get("review") or {}
+    record = (receipt.get("review") or {}).get("record") or {}
+    what = "what merged" if outcome.get("status") == "merged" else "this head"
+    gaps = [str(gap).split(":")[0] for gap in coverage.get("gaps") or ()]
+    status = "unknown" if gaps and coverage.get("status") == "covers_head" else coverage.get("status")
+    verdict = (record.get("verdict") or {}).get("aggregate") if record.get("state") == "settled" else ""
+    words = {
+        # Only a host record can cover a head; a receipt stored before that rule may hold a declaration's.
+        "covers_head": ("A review was declared; Ouroboros holds no record of it." if not record
+                        else "The review passed exactly {what}." if record_approves(record)
+                        else "This review rejected {what}." if verdict == "FAIL"
+                        else "This review gave no verdict on {what}."),
+        "changes_after_review": "This review was for earlier code; it does not cover {what}.",
+        "delta_only": "The review read only the latest changes, not the whole pull request.",
+        "not_declared": "No review was declared for this merge.",
+    }.get(str(status))
+    for codes, sentence in _GAP_WORDS if words is None else ():
+        if codes & set(gaps):
+            words = sentence
+            break
+    task = next((gap for gap in gaps if gap.startswith("review_task_")), "")
+    if words is None and task:
+        words = f"A named review task did not complete ({task.removeprefix('review_task_')})."
+    return (words or "Whether the review covers {what} is not recorded.").format(what=what)
+
+
+def coverage_codes(receipt: Dict[str, Any]) -> str:
+    """The same coverage in its typed codes, with the review source: the merging agent's tool result."""
+    coverage, review = receipt.get("coverage") or {}, receipt.get("review") or {}
     record = review.get("record") or {}
-    # Green needs observed approval: a settled PASS record covering the merged head.
-    loud = "⚠️ " if (coverage.get("status") != "covers_head" or coverage.get("gaps") or no_effect_request(receipt)
-                     or outcome.get("status") != "merged" or not record_approves(record)) else "✅ "
     if record:
         source = f"; review source: record, verdict {(record.get('verdict') or {}).get('aggregate') or 'unknown'}" + (
             "" if record.get("state") == "settled" else f" ({record.get('state') or 'unknown'})")
     else:
         source = "; review source: declaration" if review.get("declared") else ""
-    note = outcome_note(receipt)
-    return (f"{loud}PR #{receipt['number']} merge: {outcome.get('status', 'unknown')}" + (f" {note}" if note else "")
-            + (f" as {outcome['merge_sha'][:12]}" if outcome.get("merge_sha") else "")
-            + f"; review coverage {coverage.get('status', 'unknown')}"
+    return (f"review coverage {coverage.get('status', 'unknown')}"
             + (f" ({', '.join(coverage['gaps'])})" if coverage.get("gaps") else "") + source)
+
+
+def card_row_text(receipt: Dict[str, Any], *, codes: bool = False) -> str:
+    """The merge's card row: its outcome, then its coverage in words (``codes`` for the agent's own result)."""
+    outcome, coverage = receipt.get("outcome") or {}, receipt.get("coverage") or {}
+    record = (receipt.get("review") or {}).get("record") or {}
+    # Green needs observed approval: a settled PASS record covering the merged head.
+    loud = "⚠️ " if (coverage.get("status") != "covers_head" or coverage.get("gaps") or no_effect_request(receipt)
+                     or outcome.get("status") != "merged" or not record_approves(record)) else "✅ "
+    note = outcome_note(receipt)
+    head = (f"{loud}PR #{receipt['number']} merge: {outcome.get('status', 'unknown')}" + (f" {note}" if note else "")
+            + (f" as {outcome['merge_sha'][:12]}" if outcome.get("merge_sha") else ""))
+    return f"{head}; {coverage_codes(receipt)}" if codes else f"{head}. {coverage_words(receipt)}"
 
 
 # --- orchestration ---------------------------------------------------------------------

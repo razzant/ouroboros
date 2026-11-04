@@ -292,14 +292,15 @@ function ownerAnswer(data, what) {
     return data;
 }
 
-/** A safety level for one kind (`your_work`, the frozen request without `kind`, or `consciousness`). */
-export async function saveSafetyLevel(level, kind = 'your_work') {
+/** A safety level for one kind (`your_work`, the frozen request without `kind`, or `consciousness`). Each owner
+ *  safety write takes the caller's declared origin as `headers` (`api_client.APP_SETTINGS_ORIGIN` from Settings). */
+export async function saveSafetyLevel(level, kind = 'your_work', { headers } = {}) {
     const body = kind === 'consciousness' ? { mode: level, kind } : { mode: level };
-    return ownerAnswer(await jsonPost('/api/owner/safety-mode', body), 'The safety level');
+    return ownerAnswer(await jsonPost('/api/owner/safety-mode', body, { headers }), 'The safety level');
 }
 
-export async function saveSafetyRules(rules) {
-    return ownerAnswer(await jsonPost('/api/owner/safety-rules', { rules: String(rules ?? '') }), 'Your rules');
+export async function saveSafetyRules(rules, { headers } = {}) {
+    return ownerAnswer(await jsonPost('/api/owner/safety-rules', { rules: String(rules ?? '') }, { headers }), 'Your rules');
 }
 
 /**
@@ -316,9 +317,9 @@ export const SAFETY_MODEL_KEYS = Object.freeze([
 
 /** One owner transaction for any of SAFETY_MODEL_KEYS; a refusal throws the server's sentence. A roster that
  *  leaves no reviewer saves only with the owner's confirmation, sent beside the settings as the generic save does. */
-export async function saveCheckerSettings(settings, { allowEmptyReviewPool = false } = {}) {
+export async function saveCheckerSettings(settings, { allowEmptyReviewPool = false, headers } = {}) {
     const body = allowEmptyReviewPool ? { settings, allow_empty_review_pool: true } : { settings };
-    return ownerAnswer(await jsonPost('/api/owner/safety-model', body), 'The change');
+    return ownerAnswer(await jsonPost('/api/owner/safety-model', body, { headers }), 'The change');
 }
 
 /** The Agents roster as saved (`OUROBOROS_SUBAGENTS`, a JSON string or object), or null when unreadable. */
