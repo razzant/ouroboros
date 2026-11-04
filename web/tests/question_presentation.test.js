@@ -46,15 +46,17 @@ test('waiting needs positive evidence and a closed bound ends it', () => {
 test('a question whose task is a paused member of its work says that its answer waits for Resume', () => {
     const waiting = { state: 'open', owner_wait_state: 'waiting' };
     const saved = { quiz_state: 'answered', question_delivery: { state: 'owed', reason_code: 'awaiting_recipient_read' } };
-    const lead = (status) => status.split(' · ')[0];
-    // The lead word stays the plain one (is there a question for me?), and one clause after it names Resume.
-    for (const row of [waiting, saved]) {
+    // Facts, not form (DESIGN principle 7): the status still says whether the answer is awaited or saved and names
+    // Resume; that the work is paused is its own card's line. How the words are joined is review's.
+    const [awaited, kept] = [/\bwaiting\b/i, /\bsaved\b/i];
+    for (const [row, state, other] of [[waiting, awaited, kept], [saved, kept, awaited]]) {
         const plain = questionPresentation(row).status;
         const paused = questionPresentation(row, { paused: true }).status;
-        assert.equal(lead(paused), lead(plain), JSON.stringify(row));
-        assert.match(paused, /\bResume\b/);
-        assert.equal(paused.split(' · ').length, 2, paused);
-        assert.doesNotMatch(paused, /;/, 'one clause, not a sentence with its reasons');
+        assert.match(plain, state, plain);
+        assert.match(paused, state, paused);
+        assert.doesNotMatch(paused, other, paused);
+        assert.match(paused, /\bResume\b/, paused);
+        assert.doesNotMatch(paused, /\bpaused\b/i, paused);
         // After its Resume (or never paused) the plain words return; a queued or held recipient keeps them too.
         assert.doesNotMatch(plain, /\bResume\b/);
         assert.equal(questionPresentation(row, { paused: false }).status, plain);
