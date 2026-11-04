@@ -541,7 +541,7 @@ def answer_format_section(parts: Sequence[str]) -> str:
 
 # Part 1's heading and its subject slot (the touched manifest, then the diff section).
 _PART_ONE = "## Part 1 — The change\n\n"
-_SUBJECT_SLOT = "## Subject — the staged change\n\n{touched}\n\n### Staged diff\n\n{diff}"
+_SUBJECT_SLOT = "## Subject — the staged change\n\n{touched}\n\n{words}### Staged diff\n\n{diff}"
 
 
 def build_retrieving_brief(
@@ -586,6 +586,11 @@ def build_retrieving_brief(
     coupling_history_section = build_coupling_history_section(intent.coupling_history, history_section)
 
     bound = first_send_bound(brief)
+    from ouroboros.review_words import section_budget, words_for_diff
+
+    header, body, unavailable = _staged_diff(repo_dir, brief)
+    words = words_for_diff(repo_dir, body)
+    words_section = words.render(section_budget(bound // _CHARS_PER_ESTIMATED_TOKEN))
     governance = governance_context(
         pathlib.Path(brief.governance_repo_dir or repo_dir),
         surface="triad",
@@ -596,6 +601,7 @@ def build_retrieving_brief(
         already_inline=("docs/CHECKLISTS_ARCHIVE.md",) if layer == "body" else (),
         layer=layer,
         subject_root=repo_dir if layer != "body" else None,
+        review_words=words,
     )
     from ouroboros.tools.scope_required_sources import required_sources_ref, with_inline_sources
 
@@ -637,7 +643,8 @@ def build_retrieving_brief(
             review_history_section=history_section, governance=governance,
             subject=brief.managed_subject, layer=layer,
             subject_root=repo_dir if layer != "body" else None,
-            subject_section=_SUBJECT_SLOT.format(touched=touched_slot, diff=diff_slot),
+            subject_section=_SUBJECT_SLOT.format(touched=touched_slot, diff=diff_slot,
+                                                 words=words_section + "\n\n" if words_section else ""),
         )
         if brief.task_evidence_section.strip():
             part1 += f"\n\n{brief.task_evidence_section}"
@@ -647,7 +654,6 @@ def build_retrieving_brief(
         ) if PART_COUPLING in parts else ""
         return "\n\n".join(p for p in (part1, part2, answer_format) if p.strip()), part1, part2
 
-    header, body, unavailable = _staged_diff(repo_dir, brief)
     delivery: Dict[str, Any] = {"diff_chars": len(body)}
     if unavailable:
         diff_slot = _retrieval_slot(brief, unavailable)

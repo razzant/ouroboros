@@ -107,6 +107,21 @@ def test_inline_design_is_content_without_duplicate_map(governance_repo):
     assert "Interaction meaning" not in context.navigation
 
 
+@pytest.mark.parametrize("window,inline", [(0, False), (1_000_000, True)])
+@pytest.mark.parametrize("changed", [False, True])
+def test_python_word_evidence_uses_the_existing_design_share(governance_repo, window, inline, changed):
+    from ouroboros.review_words import compare_sources
+
+    _design(governance_repo)
+    before = 'TEXT = "Read the result"'
+    after = 'TEXT = "Read the updated result"' if changed else before + "\n# comment only\n"
+    words = compare_sources([("ouroboros/notice.py", before, after)])
+    context = governance_context(governance_repo, surface="triad", touched_paths=["ouroboros/notice.py"],
+                                 usable_window_tokens=window, review_words=words)
+    assert ("docs/DESIGN.md" in context.inline_whole_documents) is (inline and changed)
+    assert ("Interaction meaning" in context.navigation) is not (inline and changed)
+
+
 @pytest.mark.parametrize("layer", ["body", "core"])
 def test_final_packet_preserves_design_delivery_and_omission_facts(governance_repo, layer):
     from ouroboros.tools.review_admission import assemble_packet_prompt

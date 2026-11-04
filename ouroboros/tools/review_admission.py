@@ -416,7 +416,7 @@ PACKET_TEMPLATE_DYNAMIC = """\
 def assemble_packet_prompt(*, layer: str, checklist_section: str, governance: Any, goal_section: str,
                            scope_section: str, files_section: str, diff_text: str, changed_files: str,
                            rebuttal_section: str = "", review_history_section: str = "",
-                           task_evidence_section: str = "") -> Tuple[str, int]:
+                           task_evidence_section: str = "", words_section: str = "") -> Tuple[str, int]:
     """The packet seat's Part-1 prompt: ``(prompt, stable_prefix_len)``. The stable
     governance prefix is byte-identical across rounds and becomes the cache-marked
     block; the change-class governance block opens the dynamic half."""
@@ -432,7 +432,8 @@ def assemble_packet_prompt(*, layer: str, checklist_section: str, governance: An
         checklist_section=checklist_section,
     ) + (f"\n{stable_inline}\n" if stable_inline.strip() else "")
     dynamic = (f"{tail}\n\n" if tail else "") + PACKET_TEMPLATE_DYNAMIC.format(
-        goal_section=goal_section, scope_section=scope_section, current_files_section=files_section,
+        goal_section=goal_section, scope_section=scope_section,
+        current_files_section=files_section + ("\n\n" + words_section if words_section else ""),
         rebuttal_section=rebuttal_section, review_history_section=review_history_section,
         diff_text=diff_text, changed_files=changed_files, task_evidence_section=task_evidence_section,
     )
@@ -449,6 +450,7 @@ def change_brief_words(layer: str, *, packet: bool = True, retrieving: bool = Tr
     from types import SimpleNamespace
 
     from ouroboros.owner_words import reviewer_words_material
+    from ouroboros.review_words import words_material
     from ouroboros.preflight_receipts import execution_material
     from ouroboros.reference_books import BOOK_GROWTH_RULE
     from ouroboros.review import DIFF_PULSE_QUESTION
@@ -462,7 +464,7 @@ def change_brief_words(layer: str, *, packet: bool = True, retrieving: bool = Tr
     from ouroboros.tools.review_prompt_text import round_material
     from ouroboros.tools.review_subject import managed_material
 
-    every = [*intent_material(), *wave_label_material(), *round_material(), *history_material(),
+    every = [*intent_material(), *wave_label_material(), *round_material(), *history_material(), *words_material(),
              *reviewer_words_material(), *execution_material(), *managed_material((True,)),
              *((DIFF_PULSE_QUESTION, BOOK_GROWTH_RULE) if layer == "body" else ())]
     if not packet:
@@ -757,14 +759,18 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
                 "delivery": "retrieving", "manifest": manifest, "stable_prefix_len": 0}
     # A packet seat: the assembled change evidence, fit to the seat's window.
     from ouroboros.tools.review_file_pack import build_touched_file_pack, pack_omission_note, triad_pack_exclusions
+    from ouroboros.review_words import section_budget, words_for_diff
+
+    words = words_for_diff(review_root, frozen_subject.diff_text)
 
     touched_paths = [path for _status, path in frozen_subject.name_status] if frozen_subject.name_status else [
         p.strip() for p in str(_rv.run_cmd(["git", "diff", "--cached", "--name-only"], cwd=review_root) or "").splitlines() if p.strip()]
     slot = ReviewSlot(slot_id=slot_id, model=model, session_profile=str(_field("session_profile") or ""),
                       use_local=_field("use_local", None))
+    words_section = words.render(section_budget(_rv._triad_governance_usable_window([model], [slot])))
     governance = _rv._triad_governance_context(
         None, touched_paths, checklist_section, [model], [slot], governance_root=governance_root, layer=layer,
-        subject_root=review_root if layer != "body" else None)
+        subject_root=review_root if layer != "body" else None, review_words=words)
     managed = frozen_subject.managed
     exclude_paths, exclusion_note = (set(), "") if managed is not None else triad_pack_exclusions(
         review_root, touched_paths, prefix_texts=dict(governance.inline_whole_documents))
@@ -783,7 +789,13 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
             layer=layer, checklist_section=checklist_section, governance=governance, goal_section=goal_section,
             scope_section=scope_section, files_section=files or "(no touched files could be read)", diff_text=diff,
             changed_files=changed, rebuttal_section=rebuttal_section, review_history_section=history_section,
-            task_evidence_section=task_evidence_section)
+            task_evidence_section=task_evidence_section, words_section=words_section)
+
+    def _compact_words():
+        nonlocal words_section
+        words_section = words.omission()
+    if words_section:
+        _assemble.compact_optional_evidence = _compact_words
 
     prompt, stable_len, fit_error = fit_triad_prompt(
         [model], _assemble, files_section, frozen_subject.diff_text, changed, str(review_root), ctx=None,

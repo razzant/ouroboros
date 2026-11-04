@@ -76,8 +76,6 @@ DEVELOPMENT_BOOK_ID = "development"
 ARCHITECTURE_BOOK_ID = "architecture"
 # Always relevant: it is the protocol the reviewer is executing right now.
 REVIEW_PROTOCOL_CHAPTER = "docs/development/05-review-and-commit-protocol.md"
-# Existing whole-DESIGN inline selection; the heading map is body-wide.
-DESIGN_CHANGE_CLASS_PREFIX = "web/"
 
 PACKET_DELIVERY = "packet"
 RETRIEVING_DELIVERY = "retrieving"
@@ -531,6 +529,7 @@ def governance_context(
     layer: str = BODY_LAYER,
     subject_root: Any = None,
     manifest_facts: Any = None,
+    review_words: Any = None,
 ) -> GovernanceContext:
     """Tier the governance corpus for ONE reviewer of ONE change.
 
@@ -547,6 +546,7 @@ def governance_context(
     runs :func:`_skill_layer_context` over ``manifest_facts`` (``type`` and the
     manifest's ``declares``)."""
     from ouroboros.tools.review_helpers import load_checklist_section, load_governance_doc
+    from ouroboros.review_words import ReviewWords, touches_owner_surface
 
     if layer not in GOVERNANCE_LAYERS:
         raise ValueError(f"unknown governance layer {layer!r}; expected one of {GOVERNANCE_LAYERS}")
@@ -638,7 +638,7 @@ def governance_context(
             rows.append(_row(path, 2, "navigation", len(chapter.text),
                              "no touched file mentioned"))
 
-    design_touched = any(path.startswith(DESIGN_CHANGE_CLASS_PREFIX) for path in touched)
+    design_touched = touches_owner_surface(touched, review_words or ReviewWords())
     design_text = load_governance_doc(root, DESIGN_PATH, on_missing="explicit")
     design_missing = design_text.startswith("[⚠️ OMISSION") or not design_text.strip()
     if design_missing:
@@ -646,10 +646,10 @@ def governance_context(
                          design_text or "DESIGN source is empty; content not delivered"))
     elif design_touched:
         candidates.append(((1, 0, DESIGN_PATH), DESIGN_PATH, DESIGN_PATH,
-                           f"a touched path is under {DESIGN_CHANGE_CLASS_PREFIX}"))
+                           "the change touches what the owner sees (web/ or source words)"))
     else:
         rows.append(_row(DESIGN_PATH, 2, "navigation", len(design_text),
-                         "heading map only; no touched path under " + DESIGN_CHANGE_CLASS_PREFIX))
+                         "heading map only; no frontend path or changed source words"))
 
     chapter_text = {chapter.source_path: chapter.text for chapter in dev_chapters}
     chapter_text[DESIGN_PATH] = design_text
