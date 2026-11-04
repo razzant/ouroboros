@@ -101,7 +101,51 @@ def test_only_outermost_acquisitions_are_measured_with_their_wait_hold_and_site(
     assert facts["wait_max_sec"] >= 0.1, "the contended acquisition waited for the holder"
     assert facts["hold_max_sec"] >= 0.2 and facts["hold_max_site"].endswith(" in _hold")
     assert lock.drain() == {"count": 0, "wait_total_sec": 0.0, "wait_max_sec": 0.0,
-                            "hold_total_sec": 0.0, "hold_max_sec": 0.0, "hold_max_site": None}
+                            "hold_total_sec": 0.0, "hold_max_sec": 0.0, "hold_max_site": None, "hold_by_site": {}}
+
+
+def test_each_site_keeps_its_own_count_total_and_longest_hold():
+    """The per-site table says whether a minute's hold time is one long hold or many short ones: two sites,
+    one holding once for long and one holding often for little, each with its own count, total and longest;
+    the table is keyed without the line (one function is one site however many ``with`` it holds), ordered
+    by total, and a drain starts it afresh."""
+    lock = MeasuredRLock()
+
+    def once_long():
+        with lock:
+            time.sleep(0.06)
+
+    def often_short():
+        for _ in range(5):
+            with lock:
+                pass
+        with lock:  # a second lexical site of the same function: the same row
+            pass
+
+    once_long()
+    often_short()
+    facts = lock.drain()
+    by_site = facts["hold_by_site"]
+    long_key = "tests/test_queue_lock_timing.py in once_long"
+    short_key = "tests/test_queue_lock_timing.py in often_short"
+    assert list(by_site) == [long_key, short_key], "the heaviest total first"
+    assert by_site[long_key]["count"] == 1 and by_site[long_key]["hold_total_sec"] >= 0.05
+    assert by_site[long_key]["hold_max_sec"] == by_site[long_key]["hold_total_sec"]
+    assert by_site[short_key]["count"] == 6 and by_site[short_key]["hold_max_sec"] <= by_site[short_key]["hold_total_sec"] < 0.05
+    assert facts["count"] == 7 and sum(row["count"] for row in by_site.values()) == facts["count"]
+    assert abs(sum(row["hold_total_sec"] for row in by_site.values()) - facts["hold_total_sec"]) < 0.01
+    assert facts["hold_max_site"].endswith(" in once_long")
+    entered = threading.Event()
+    holder = threading.Thread(target=_hold, args=(lock, 0.1, entered))
+    holder.start()
+    assert entered.wait(5)
+    with lock:  # waits for the holder: the wait lands on this site's row, the hold on the holder's
+        pass
+    holder.join(5)
+    facts = lock.drain()
+    waiter = facts["hold_by_site"]["tests/test_queue_lock_timing.py in test_each_site_keeps_its_own_count_total_and_longest_hold"]
+    assert waiter["wait_total_sec"] >= 0.05 and facts["hold_by_site"]["tests/test_queue_lock_timing.py in _hold"]["hold_total_sec"] >= 0.1
+    assert lock.drain()["hold_by_site"] == {}
 
 
 def test_the_reader_drains_while_another_thread_holds_q():
