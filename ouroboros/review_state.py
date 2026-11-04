@@ -340,13 +340,11 @@ def _project_roster(rows: Any) -> Any:
 
 
 def _project_scope(scope: Any) -> Any:
-    if not isinstance(scope, dict) or not scope:
-        return scope
-    raw = scope.get("raw_results")
+    raw = scope.get("raw_results") if isinstance(scope, dict) else None
     if isinstance(raw, list):
         projected = _project_roster(raw)
         return scope if projected is raw else {**scope, "raw_results": projected}
-    return _project_named_evidence(scope) if "raw_results" not in scope else scope
+    return _project_named_evidence(scope) if isinstance(scope, dict) and scope and "raw_results" not in scope else scope
 
 
 def _project_saved_evidence(attempts: Any) -> None:
