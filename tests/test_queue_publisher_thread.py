@@ -1,0 +1,217 @@
+"""The tick's own write leaves the supervisor thread (S4 step 4; ARCHITECTURE §5 "Tick and locks", §10.24).
+
+``publish_queue_changes`` captures under Q as before; with the writer started (``start_queue_writer``, the server's
+loop right after ``tick_publisher_started``) the capture is handed to one daemon thread that encodes and writes it,
+so event dispatch never waits on ``rename`` and ``open``. The tick answers the outcome of the last write that landed:
+a failure shows one tick later and that tick's capture is the complete rewrite (FU1/R2 unchanged). The writer holds
+the newest capture only (a slow disk never queues a backlog), an older capture a barrier overtook is skipped under
+the publish lock, a capture of an ended generation is never written, and the writer ends with the loop that fed it
+(``stop_queue_writer``): the doors after the loop publish synchronously where they stand. Without the writer
+(startup, shutdown, tests) every path is the synchronous one it was.
+"""
+
+from __future__ import annotations
+
+import inspect
+import threading
+
+
+from supervisor import queue, queue_publication
+from tests.test_queue_publication_followup4 import _read, _seed, _task, published as published  # noqa: F401 -- fixture
+
+WRITER = "queue-publisher"
+
+
+class _Gate:
+    """The writer thread stops at the gate (``reached`` tells the test it is there) until the test releases it."""
+
+    def __init__(self) -> None:
+        self.reached, self.release = threading.Event(), threading.Event()
+
+    def hold(self) -> None:
+        if threading.current_thread().name == WRITER and not self.reached.is_set():
+            self.reached.set()
+            assert self.release.wait(5), "the test released the gate"
+
+    def passed(self) -> None:
+        assert self.reached.wait(5), "the writer thread reached the gate"
+
+
+def _gated_encoder(monkeypatch) -> _Gate:
+    """The writer thread holds at the gate while encoding its capture (before the publish lock)."""
+    gate, documents = _Gate(), queue_publication._documents
+
+    def encode(capture):
+        gate.hold()
+        return documents(capture)
+
+    monkeypatch.setattr(queue_publication, "_documents", encode)
+    return gate
+
+
+def _recording_writes(monkeypatch, *, gate=None, fail_once=False):
+    """Every document write: (name, thread). ``gate``: the writer thread holds at it before its first write.
+    ``fail_once``: the first write answers False (a failed publication)."""
+    writes, real = [], queue.atomic_write_text
+    state = {"failed": False}
+
+    def write(target, content, *args, **kwargs):
+        if gate is not None:
+            gate.hold()
+        writes.append((target.name, threading.current_thread().name))
+        if fail_once and not state["failed"]:
+            state["failed"] = True
+            return False
+        return real(target, content, *args, **kwargs)
+
+    monkeypatch.setattr(queue, "atomic_write_text", write)
+    return writes
+
+
+def _snapshot_writes(writes):
+    return [thread for name, thread in writes if name == "queue_snapshot.json"]
+
+
+def test_with_the_writer_the_tick_hands_its_capture_over_and_the_document_lands_off_the_loop(published, monkeypatch):
+    root, _now = _seed(published)
+    writes = _recording_writes(monkeypatch)
+    queue_publication.start_queue_writer()
+    assert queue_publication.writer_alive()
+    queue.PENDING.append(_task("p1"))
+    assert queue.persist_queue_snapshot("admitted") is None, "a mark with a live tick publisher"
+    assert queue_publication.publish_queue_changes() is True
+    assert queue_publication.drain_writer()
+    assert _snapshot_writes(writes) == [WRITER], "written by the publisher thread, not the loop"
+    assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == ["p1"]
+    assert _read(root, "queue.alive")["generation"] == _read(root, "queue_snapshot.json")["generation"]
+
+
+def test_without_the_writer_the_tick_writes_where_it_stands(published, monkeypatch):
+    root, _now = _seed(published)
+    writes = _recording_writes(monkeypatch)
+    assert not queue_publication.writer_alive()
+    queue.PENDING.append(_task("p1"))
+    queue.persist_queue_snapshot("admitted")
+    assert queue_publication.publish_queue_changes() is True
+    assert _snapshot_writes(writes) == [threading.current_thread().name]
+    assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == ["p1"]
+
+
+def test_a_slow_disk_never_queues_a_backlog_the_newest_capture_lands(published, monkeypatch):
+    """Three ticks while the first write is still on the disk: the writer holds one capture (the newest), writes
+    it once the first lands, and the loop never waited."""
+    root, _now = _seed(published)
+    gate = _Gate()
+    writes = _recording_writes(monkeypatch, gate=gate)
+    queue_publication.start_queue_writer()
+    queue.PENDING.append(_task("p1"))
+    queue.persist_queue_snapshot("one")
+    assert queue_publication.publish_queue_changes() is True  # the writer takes it and holds at the gate
+    gate.passed()
+    for task_id in ("p2", "p3"):
+        queue.PENDING.append(_task(task_id))
+        queue.persist_queue_snapshot(task_id)
+        assert queue_publication.publish_queue_changes() is True  # answered at once: no wait on the disk
+    assert queue_publication._WRITER.capture is not None and queue_publication._WRITER.capture["reason"] == "p3"
+    gate.release.set()
+    assert queue_publication.drain_writer()
+    assert _snapshot_writes(writes) == [WRITER, WRITER], "the first capture, then the newest; p2's was superseded"
+    assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == ["p1", "p2", "p3"]
+
+
+def test_a_failed_write_shows_one_tick_later_and_that_ticks_capture_is_the_complete_rewrite(published, monkeypatch):
+    root, _now = _seed(published)
+    writes = _recording_writes(monkeypatch, fail_once=True)
+    queue_publication.start_queue_writer()
+    queue.PENDING.append(_task("p1"))
+    queue.persist_queue_snapshot("admitted")
+    assert queue_publication.publish_queue_changes() is True, "the capture is the writer's; nothing landed yet"
+    assert queue_publication.drain_writer()
+    assert queue_publication._STATE["write_failed"] and not (root / "state/queue.alive").exists(), "revoked, unknown"
+    assert queue_publication.publish_queue_changes() is False, "the failure shows on the next tick, whose capture retries"
+    assert queue_publication.drain_writer()
+    assert not queue_publication._STATE["write_failed"]
+    rewritten = [name for name, thread in writes[1:] if thread == WRITER]
+    assert set(rewritten) >= {"queue_snapshot.json", "queue_dispatch.json"}, "every document, under a new generation"
+    assert _read(root, "queue.alive")["generation"] == _read(root, "queue_snapshot.json")["generation"]
+    assert queue_publication.publish_queue_changes() is True
+
+
+def test_a_barrier_that_overtakes_a_tick_capture_leaves_the_older_capture_unwritten(published, monkeypatch):
+    """The writer is encoding capture N when a barrier publishes N+1 where its caller stands: N is skipped under the
+    publish lock (``published_seq``), the disk shows N+1, and nothing older ever overwrites it."""
+    root, _now = _seed(published)
+    writes = _recording_writes(monkeypatch)
+    gate = _gated_encoder(monkeypatch)
+    queue_publication.start_queue_writer()
+    queue.PENDING.append(_task("p1"))
+    queue.persist_queue_snapshot("tick")
+    assert queue_publication.publish_queue_changes() is True  # the writer takes N and holds in the encoder
+    gate.passed()
+    queue.PENDING.append(_task("p2"))
+    assert queue.publish_queue_snapshot(reason="barrier") is True  # N+1, synchronous, on this thread
+    gate.release.set()
+    assert queue_publication.drain_writer()
+    assert _snapshot_writes(writes) == [threading.current_thread().name], "N was never written"
+    assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == ["p1", "p2"]
+
+
+def test_a_capture_of_an_ended_generation_is_never_written(published, monkeypatch):
+    """``reset`` (a new queue generation) while the writer still holds the old generation's capture: the write is
+    refused under the publish lock and the documents stay the ones the next generation owns."""
+    root, _now = _seed(published)
+    writes = _recording_writes(monkeypatch)
+    before = (root / "state/queue_snapshot.json").read_bytes()
+    gate = _gated_encoder(monkeypatch)
+    queue_publication.start_queue_writer()
+    old_writer = queue_publication._WRITER
+    queue.PENDING.append(_task("p1"))
+    queue.persist_queue_snapshot("tick")
+    assert queue_publication.publish_queue_changes() is True
+    gate.passed()  # the writer holds the ended generation's capture, encoding it
+    ending = threading.Thread(target=queue_publication.reset)  # ``queue.init``: the generation ends, the writer stops
+    ending.start()
+    gate.release.set()
+    ending.join(5)
+    assert not ending.is_alive() and not old_writer.alive() and queue_publication._WRITER is not old_writer
+    assert _snapshot_writes(writes) == [] and (root / "state/queue_snapshot.json").read_bytes() == before
+
+
+def test_a_quiet_tick_refreshes_the_certificate_on_the_writer(published, monkeypatch):
+    root, now = _seed(published)
+    refreshed, real = [], queue_publication._write_alive
+    monkeypatch.setattr(queue_publication, "_write_alive",
+                        lambda path, content: refreshed.append(threading.current_thread().name) or real(path, content))
+    queue_publication.start_queue_writer()
+    assert queue_publication.publish_queue_changes() is True and queue_publication.drain_writer()
+    assert refreshed == [], "nothing moved and the certificate is fresh: nothing to write"
+    now[0] += queue_publication.QUEUE_ALIVE_REFRESH_SEC + 1
+    assert queue_publication.publish_queue_changes() is True and queue_publication.drain_writer()
+    assert refreshed == [WRITER]
+    assert _read(root, "queue.alive")["generation"] == _read(root, "queue_snapshot.json")["generation"]
+
+
+def test_stopping_the_writer_returns_the_tick_to_its_synchronous_write(published, monkeypatch):
+    root, _now = _seed(published)
+    writes = _recording_writes(monkeypatch)
+    queue_publication.start_queue_writer()
+    thread = queue_publication._WRITER.thread
+    queue_publication.stop_queue_writer()
+    assert not queue_publication.writer_alive() and not thread.is_alive(), "joined: nothing leaks past the loop"
+    queue.PENDING.append(_task("p1"))
+    queue.persist_queue_snapshot("admitted")
+    assert queue_publication.publish_queue_changes() is True
+    assert _snapshot_writes(writes) == [threading.current_thread().name]
+    assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == ["p1"]
+
+
+def test_the_supervisor_loop_starts_the_writer_with_its_tick_publisher_and_stops_it_at_every_exit():
+    """Source-order pin (the shutdown tests' style): the writer starts right after the tick publisher is named and
+    stops on the shared exit line every loop exit reaches (restart, shutdown, crash death), beside the watchdog."""
+    import server
+
+    source = inspect.getsource(server._run_supervisor)
+    loop = source.index("while not _restart_requested.is_set()")
+    exit_line = source.index("_watchdog_stop.set()  # every ordinary exit")
+    assert source.index("tick_publisher_started()") < source.index("start_queue_writer()") < loop
+    assert loop < exit_line < source.index("stop_queue_writer()") < source.rindex("_supervisor_thread = None")

@@ -980,6 +980,8 @@ from supervisor.queue_publication import (  # noqa: E402, F401 -- intentional pu
     persist_queue_snapshot,
     publish_queue_changes,
     publish_queue_snapshot,
+    start_queue_writer,
+    stop_queue_writer,
     tick_publisher_started,
 )
 from supervisor.queue_timeouts import (  # noqa: E402, F401 -- intentional public re-exports
