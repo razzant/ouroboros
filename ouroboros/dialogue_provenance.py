@@ -651,8 +651,10 @@ def relation_text(entry: Mapping[str, Any]) -> str:
     def reference(ref: Mapping[str, Any]) -> str:
         if ref.get("unresolved"):
             return f"[Reply to {_text(ref.get('address'))}: not resolved]"
+        chars = ref.get("chars")  # a cut preview's whole length: the model reads how much the address holds
+        size = f" [{chars} chars in full]" if isinstance(chars, int) and not isinstance(chars, bool) and chars else ""
         return (f"[Reply to {_text(ref.get('author_label')) or 'a message'} {_text(ref.get('address'))}"
-                f" ({_text(ref.get('kind')) or 'message'}): {_text(ref.get('snippet'))}]")
+                f" ({_text(ref.get('kind')) or 'message'}): {_text(ref.get('snippet'))}{size}]")
 
     lines = []
     if _mapping(entry.get("reply_to")):

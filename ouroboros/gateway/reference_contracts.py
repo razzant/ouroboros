@@ -11,6 +11,7 @@ class ChatReplyReference(TypedDict, total=False):
     author_label: str
     kind: str
     snippet: str
+    chars: int  # the quoted text's whole length, present when ``snippet`` cuts it
     ts: str
     task_id: str
     target_home: Literal["work", "room", "none"]  # what decides the quoted row's room; an older reference lacks it

@@ -17,8 +17,8 @@ def test_reply_is_host_resolved_and_replay_uses_the_same_address(tmp_path, monke
     address = format_address(row_address(original))
     bridge.handle_web_message("this one", client_message_id="reply", task_metadata={"reply_to": address})
     row = dialogue_test.chat_rows(tmp_path)[-1]
-    assert row["reply_to"]["snippet"] == (  # a cut preview says so, and how long the whole message is
-        ("One " + "word " * 80)[:160].rstrip() + f"… [{len(original['text'])} chars in full]")
+    assert row["reply_to"]["snippet"] == ("One " + "word " * 80)[:160].rstrip() + "…"  # a cut preview says so
+    assert row["reply_to"]["chars"] == len(original["text"]), "and the reference keeps how long the whole message is"
     assert row["reply_to"]["role"] == "assistant"
     assert echoes[-1]["reply_to"] == row["reply_to"]
     assert echoes[-1]["row_address"] == format_address(row_address(row))
@@ -102,7 +102,7 @@ def test_reply_to_authored_completion_mirror_quotes_the_shown_answer(tmp_path, m
     address, reference = _reply_to(bridge, stored, "mirror-reply")
     assert reference["address"] == address and reference["kind"] == "completion"
     assert reference["role"] == "assistant" and reference["author_label"] == "Ouroboros"
-    assert reference["snippet"] == " ".join(answer.split())[:160].rstrip() + f"… [{len(answer)} chars in full]"
+    assert reference["snippet"] == " ".join(answer.split())[:160].rstrip() + "…" and reference["chars"] == len(answer)
     assert echoes[-1]["reply_to"] == reference
     replay = next(r for r in _history(tmp_path) if r.get("client_message_id") == "mirror-reply")
     assert replay["reply_to"] == reference

@@ -1,5 +1,6 @@
-"""Two smaller cuts of people's words: a Reply's preview says when it is cut (its address reads the rest), and a
-result review's question about a changed request lists every new word of my human whole.
+"""Two smaller cuts of people's words: a Reply's preview says when it is cut (its address reads the rest; the model
+also reads how long the whole message is, while the stored preview stays the contract's), and a result review's
+question about a changed request lists every new word of my human whole.
 
 Both are checked both ways: a short text stays as it is, a long one is marked; every word arrives, none twice,
 and the message my human replied to is never listed as their words.
@@ -14,11 +15,14 @@ LONG = "Keep the export path for finance; " * 30 + "and ship only after the revi
 
 
 def test_a_reply_preview_marks_its_cut_and_leaves_a_short_text_alone():
+    from ouroboros.dialogue_provenance import relation_text
+
     long = reference_from_row({"direction": "in", "chat_id": 1, "ts": "2026-11-04T10:00:00Z", "text": LONG})
-    preview, mark = long["snippet"].split("… ", 1)
-    assert len(preview) == 160 and LONG.startswith(preview) and mark == f"[{len(LONG)} chars in full]"
+    assert long["snippet"] == LONG[:160].rstrip() + "…" and len(long["snippet"]) <= 161, "the contract's preview"
+    assert long["chars"] == len(LONG) and relation_text({"reply_to": long}).endswith(
+        f": {long['snippet']} [{len(LONG)} chars in full]]"), "only the model's reading states the whole size"
     short = reference_from_row({"direction": "in", "chat_id": 1, "ts": "2026-11-04T10:00:00Z", "text": "  yes \n "})
-    assert short["snippet"] == "yes"
+    assert short["snippet"] == "yes" and "chars" not in short and "chars in full" not in relation_text({"reply_to": short})
 
 
 def test_a_changed_request_question_lists_every_new_word_of_my_human_whole(monkeypatch):

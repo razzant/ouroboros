@@ -31,11 +31,16 @@ def projection_fields(row: dict) -> dict:
 
 
 def _snippet(text) -> str:
-    """A Reply's one-line preview: the first 160 characters, a longer text visibly cut with its full size; the
-    address reads it all."""
+    """A Reply's one-line preview: the first 160 characters, a longer text visibly cut; the address reads it all."""
+    words = " ".join(str(text or "").split())
+    return words if len(words) <= 160 else words[:160].rstrip() + "…"
+
+
+def _preview(text) -> dict:
+    """``snippet`` and, when it cuts the text, ``chars``: the whole text's length, which only the model's reading of
+    the reference states (``dialogue_provenance.relation_text``); the stored snippet stays the contract's."""
     full = str(text or "")
-    words = " ".join(full.split())
-    return words if len(words) <= 160 else words[:160].rstrip() + f"… [{len(full)} chars in full]"
+    return {"snippet": _snippet(full), **({"chars": len(full)} if len(" ".join(full.split())) > 160 else {})}
 
 
 def reference_from_row(row: dict) -> dict:
@@ -54,7 +59,7 @@ def reference_from_row(row: dict) -> dict:
     return {"address": format_address(row_address(row)), "chat_id": int(row.get("chat_id", 1)),
             "role": role, "author_label": (str(row.get("sender_label") or "You") if role == "user"
                                              else {"assistant": "Ouroboros", "system": "System"}[role]),
-            "kind": kind, "snippet": _snippet(answer or row.get("text") or row.get("caption")),
+            "kind": kind, **_preview(answer or row.get("text") or row.get("caption")),
             "ts": str(row.get("ts") or ""), "task_id": str(row.get("task_id") or ""),
             "target_home": reply_target_home(row)}
 
@@ -72,7 +77,7 @@ def resolve_reply(root, address: str) -> dict:
         if task:
             return {"address": address, "chat_id": int(task.get("chat_id") or 1), "role": "assistant",
                     "author_label": "Ouroboros", "kind": "work_card",
-                    "snippet": _snippet(task.get("title") or task.get("text")),
+                    **_preview(task.get("title") or task.get("text")),
                     "ts": str(task.get("updated_at") or task.get("started_at") or ""), "task_id": task_id,
                     "target_home": "work"}
     else:
