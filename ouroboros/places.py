@@ -211,35 +211,42 @@ def _read(drive_root: Any) -> dict:
 
 
 def paused_places_sentence(drive_root: Any) -> str:
-    """Name current pauses without migrating, writing or changing any place."""
+    """Name current pauses, including legacy imports in memory, without writing."""
     try:
-        rows = _read(drive_root)["places"]
-    except (PlaceError, OSError):
+        current = _migrated_document(drive_root, _read(drive_root))
+        rows = current["places"]
+    except (PlaceError, OSError, ValueError):
         return "Paused places: unknown (place records could not be read)."
     labels = [row.get("label") or key for key, row in sorted(rows.items()) if row.get("state") == STATE_PAUSED]
-    return "Places still paused: " + ", ".join(labels) + "." if labels else ""
+    sentence = "Places still paused: " + ", ".join(labels) + "." if labels else ""
+    if current.get("migration", {}).get("problems"):
+        sentence += " Paused legacy places: unknown (some old connections could not be read)."
+    return sentence.strip()
+
+
+def _migrated_document(drive_root: Any, current: dict) -> dict:
+    """Apply the legacy import in memory for both display and the durable migration."""
+    from ouroboros.places_migration import legacy_places
+
+    current = _document(current or None)
+    if current.get("migration", {}).get("presence_bindings_v1"):
+        return current
+    rows = dict(current["places"])
+    imported, problems = legacy_places(Path(drive_root))
+    known = {bid for row in rows.values() for bid in row.get("legacy_binding_ids", ())}
+    for place in imported:
+        if not known.intersection(place.legacy_binding_ids):
+            rows.setdefault(place.place_id, place_summary(place))
+    return {**current, "places": rows, "revision": current["revision"] + 1,
+            "migration": {"presence_bindings_v1": True, "at": utc_now_iso(), "problems": problems}}
 
 
 def migrate_places(drive_root: Any) -> dict:
     """Atomically import each binding once; a failed import leaves all source bytes intact."""
-    from ouroboros.places_migration import legacy_places
     path = places_path(drive_root)
-
-    def migrate(current: dict) -> dict:
-        current = _document(current or None)
-        if current.get("migration", {}).get("presence_bindings_v1"):
-            return current
-        rows = dict(current["places"])
-        imported, problems = legacy_places(Path(drive_root))
-        known = {bid for row in rows.values() for bid in row.get("legacy_binding_ids", ())}
-        for place in imported:
-            if not known.intersection(place.legacy_binding_ids):
-                rows.setdefault(place.place_id, place_summary(place))
-        return {**current, "places": rows, "revision": current["revision"] + 1,
-                "migration": {"presence_bindings_v1": True, "at": utc_now_iso(), "problems": problems}}
-
     try:
-        return update_json_locked(path, migrate, strict_existing_dict=True, reject_existing_empty_dict=True)
+        return update_json_locked(path, lambda current: _migrated_document(drive_root, current),
+                                  strict_existing_dict=True, reject_existing_empty_dict=True)
     except PlaceError:
         raise
     except (OSError, ValueError, TimeoutError) as exc:

@@ -94,6 +94,9 @@ def test_migration_exact_sources_and_idempotence(tmp_path, monkeypatch, enabled)
                               PresenceEndpoint("slack", "team", "elsewhere"), enabled)
     save_presence_binding(root, binding)
     source = (root / "state" / "presence_bindings.json").read_bytes()
+    assert p.paused_places_sentence(root) == ("" if enabled else "Places still paused: slack.")
+    assert not p.places_path(root).exists()
+    assert (root / "state" / "presence_bindings.json").read_bytes() == source
     place, = p.load_places(root)
     assert place.state == ("active" if enabled else "paused") and place.legacy_binding_ids == (binding.binding_id,)
     assert place.notes[0] == p.NoteEntry("Keep these exact words.\n", "migration")
@@ -103,6 +106,7 @@ def test_migration_exact_sources_and_idempotence(tmp_path, monkeypatch, enabled)
     assert "connected_revision" not in json.loads(p.places_path(root).read_text(encoding="utf-8"))["places"][place.place_id]
     saved = p.edit_place(root, place.place_id, "set_state", author="owner", state="silent")
     assert p.load_places(root) == [saved]
+    assert p.paused_places_sentence(root) == ""
     assert (root / "state" / "presence_bindings.json").read_bytes() == source
 
 
@@ -113,6 +117,7 @@ def test_empty_and_malformed_sources_preserved(tmp_path):
     path = other / "state" / "presence_bindings.json"
     path.parent.mkdir(parents=True)
     path.write_text("{broken")
+    assert p.paused_places_sentence(other) == "Paused places: unknown (place records could not be read)."
     with pytest.raises(p.PlaceError, match="repair"):
         p.load_places(other)
     assert path.read_text(encoding="utf-8") == "{broken"
