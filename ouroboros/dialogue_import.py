@@ -406,7 +406,7 @@ def _continues_store(root: pathlib.Path, conn: Any, stream: str, segment: Dict[s
                           (stream, segment["base"])).fetchone()
     line = next(iter(segment_rows(first, segment["base"])), None)
     return (stored is not None and line is not None and line.row is not None
-            and line.length == stored["length"] and line.row == ds.decode(stored["body"]))
+            and line.length == stored["length"] and line.row == ds.whole_body(conn, stored["body"]))
 
 
 # --- importing segments ----------------------------------------------------------------------
@@ -766,12 +766,14 @@ def _export_stream(root: pathlib.Path, stream: str) -> Dict[str, Any]:
             # line its skipped interval): the record is stale and this export starts afresh.
             begun = None
         upper = int(begun["to"]) if begun else int(marks["next_seq"])
-        # The rows the files do not hold: appended after ``files_seq`` and not inside an imported segment.
-        records = conn.execute(
+        # The rows the files do not hold: appended after ``files_seq`` and not inside an imported segment, each
+        # as the exact line it was written as (a provider thread held once is spliced back: ``ds.whole_line``).
+        records = [{"seq": record["seq"], "length": record["length"], "line": ds.whole_line(conn, record["body"])}
+                   for record in conn.execute(
             "SELECT seq, length, body FROM dialogue WHERE stream=? AND seq>=? AND seq<? AND NOT EXISTS (SELECT 1 FROM import_ledger "
             "WHERE import_ledger.stream=dialogue.stream AND state='done' AND base<=seq AND seq<base+size) ORDER BY seq",
-            (stream, marks["files_seq"], upper)).fetchall()
-    data = b"".join(record["body"].encode("utf-8") + b"\n" for record in records)
+            (stream, marks["files_seq"], upper)).fetchall()]
+    data = b"".join(record["line"].encode("utf-8") + b"\n" for record in records)
     live = root / ds.LIVE_REL[stream]
     if records:
         live.parent.mkdir(parents=True, exist_ok=True)
@@ -801,7 +803,7 @@ def _export_stream(root: pathlib.Path, stream: str) -> Dict[str, Any]:
                     generation = _gen(data)
                 coordinates = []
                 for record in records:
-                    raw = record["body"].encode("utf-8") + b"\n"
+                    raw = record["line"].encode("utf-8") + b"\n"
                     coordinates.append([offset, record["seq"], record["length"], len(raw), hashlib.sha256(raw).hexdigest()])
                     offset += len(raw)
                 with ds.transaction(root, write=True) as conn:

@@ -389,7 +389,9 @@ def test_a_view_reads_the_same_from_whole_transports_and_from_their_facts_stored
     from ouroboros import memory_view as mv
 
     rooms = shared.world(tmp_path)
-    place = str(place_rows(tmp_path))
+    with monkeypatch.context() as earlier:  # rows an earlier body wrote: each holds its thread whole, and stays so
+        earlier.setattr(ds, "_by_reference", lambda row, body: (body, {}))
+        place = str(place_rows(tmp_path))
     task = {"id": "turn0001", "chat_id": 1}
     specs = {"main": ("integrator", "1"), "place": ("integrator", place), "wake": ("consciousness", "1"),
              "presence": ("presence", place), "child": ("child", str(rooms["alpha"]))}

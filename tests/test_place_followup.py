@@ -162,9 +162,10 @@ def test_heard_only_replay_has_no_task_or_source_blob(focus, monkeypatch, state,
         retain_focus_source(root, next_task['id'])
     assert settle_heard(root, next_task, next_event, 'off') is None
     assert load_task_result(root, next_task['id'])['status'] == 'running'
-    assert list(dialogue_store.iter_rows(root, 'chat'))[-1].row['context_source_ref']
-    assert chat_chain.row_address(list(dialogue_store.iter_rows(root, 'chat'))[-1].row) == address
-    assert list((root/'task_results').rglob('presence-event-*.json'))
+    after = list(dialogue_store.iter_rows(root, 'chat'))[-1].row  # the arrival names its own row, no copy
+    assert after['context_source_ref'] == chat_chain.context_address(before_source.row)
+    assert chat_chain.row_address(after) == address
+    assert not list((root/'task_results').rglob('presence-event-*.json'))
 
 
 def test_room_and_activity_indexes_are_independent_of_heard_history(focus, monkeypatch):

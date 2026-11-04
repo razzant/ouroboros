@@ -1203,9 +1203,9 @@ never to another work.
 Paused, Off/Panic and a bot event without a bot wake item stay heard only. The mail carries the
 arrival's text, source event id, exact `message` and `conversation` facts, observed `facts` and
 attachments. An attached `transport_queue` keeps every fact but its `events` there, completeness
-included. The mail's `context_source_ref` then names the arrival's retained exact facts:
-`memory_read(source_ref=…)` returns them, the whole snapshot included, and the arrival's room row
-shows the same reference in `chat_history` and `memory_read` rows. The host
+included. The mail's `context_source_ref` then names the arrival's room row by its exact address:
+`memory_read(source_ref=…)` returns the facts recorded with it, the whole snapshot included, and the
+room row shows the same reference in `chat_history` and `memory_read` rows. The host
 acknowledges this handoff (`completed`, `silent`) only while that recipient accepts intake under
 its final-drain lock, or when a retry finds the arrival already held by it after the earlier
 answer was lost; a closed or ended one leaves the event eligible for ordinary admission. A retry
