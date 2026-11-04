@@ -420,7 +420,10 @@ def handle_wake_direct(
         remaining = budget_remaining(current, strict=True)
     except Exception:
         return {"admitted": False, "task_id": "", "reason": "cost_accounting_unavailable"}
-    if remaining <= 0:
+    from supervisor.worker_assignment import needs_paid_admission
+
+    # A reached global limit refuses paid admission only: a wake on a $0 subscription or local route runs.
+    if remaining <= 0 and needs_paid_admission({"metadata": dict(task_metadata or {})}):
         return {"admitted": False, "task_id": "", "reason": "budget_exhausted"}
     task = _seed_task(int(chat_id), str(text or ""), None, None, dict(task_metadata or {}))
     task_id = str(task["id"])

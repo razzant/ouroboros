@@ -873,6 +873,10 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
         accounting_available = False
     # Cents are for display; the status is classified on the amount admission itself reads.
     remaining = None if actual_remaining is None else round(actual_remaining, 2)
+    from supervisor.worker_assignment import needs_paid_admission
+
+    # A reached limit blocks only paid admission: an evolution task opens on Main.
+    exhausted = actual_remaining is not None and actual_remaining <= 0 and needs_paid_admission({"metadata": {}})
     queued_task = next((t for t in PENDING if str(t.get("type") or "") == "evolution"), None)
     running_task = next(
         (
@@ -914,7 +918,7 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
     elif enabled and not owner_chat_id:
         status = "waiting_for_owner_chat"
         detail = "Waiting for the first owner chat binding before scheduling evolution."
-    elif enabled and actual_remaining is not None and actual_remaining <= 0:
+    elif enabled and exhausted:
         status = "budget_blocked"
         detail = "Global budget exhausted: no new cycle starts until the limit allows one. The campaign stays on."
     elif enabled and (PENDING or project):

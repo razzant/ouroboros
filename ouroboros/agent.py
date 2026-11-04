@@ -1024,11 +1024,12 @@ class OuroborosAgent:
 
         if task.get("_is_direct_chat"):
             from supervisor.state import budget_remaining, load_state
+            from supervisor.worker_assignment import needs_paid_admission
             from ouroboros.llm_attempt import PhysicalDispatchInterrupted
 
             if retry_presend(lambda: budget_remaining(load_state(), strict=True),
-                             check=False, before_task_start=True) <= 0:
-                raise PhysicalDispatchInterrupted("budget_exhausted")
+                             check=False, before_task_start=True) <= 0 and needs_paid_admission(task):
+                raise PhysicalDispatchInterrupted("budget_exhausted")  # a $0 route still answers at the limit
         settings_snapshot = retry_presend(lambda: actor_settings_snapshot(
             start_settings, task, getattr(self.env, "budget_drive_root", None) or self.env.drive_root),
             check=False, before_task_start=True)

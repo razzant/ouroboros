@@ -200,7 +200,9 @@ def enqueue_evolution_task_if_needed() -> None:
             "action": "dispatch_deferred", "owner_visible": True,
         })
         return
-    if remaining <= 0:
+    from supervisor.worker_assignment import needs_paid_admission
+
+    if remaining <= 0 and needs_paid_admission({"metadata": {}}):  # an evolution task opens on Main
         return  # the limit refuses new paid admission; the campaign and its switch stay as they are
     cycle = int(st.get("evolution_cycle") or 0) + 1
     tid = uuid.uuid4().hex[:8]

@@ -90,6 +90,18 @@ def test_evolution_status_names_no_count_stop_or_reserve(monkeypatch, enabled, f
     assert snapshot["budget_reserve_usd"] == 0.0
 
 
+def test_a_subscription_main_is_not_budget_blocked_at_the_reached_limit(monkeypatch):
+    from supervisor import queue as queue_module
+
+    monkeypatch.setenv("OUROBOROS_MODEL", "claudexor::codex=gpt-6-astra")
+    monkeypatch.setattr(queue_module, "PENDING", [])
+    monkeypatch.setattr(queue_module, "RUNNING", {})
+    monkeypatch.setattr(queue_module, "load_state", lambda: {
+        "evolution_mode_enabled": True, "owner_chat_id": 7, "evolution_cycle": 6})
+    monkeypatch.setattr(queue_module, "budget_remaining", lambda st, **_kwargs: 0.0)
+    assert queue_module.get_evolution_status_snapshot()["status"] == "idle_ready"
+
+
 @pytest.mark.parametrize("case,settled,status,shown,admitted", [
     ("positive_subcent", 4.997, "idle_ready", 0.0, True),
     ("zero", 5.0, "budget_blocked", 0.0, False),

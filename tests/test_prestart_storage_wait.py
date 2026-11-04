@@ -981,6 +981,17 @@ def test_global_money_is_rechecked_after_prestart_contention(lane, remaining):
         assert lane.errors == []
 
 
+def test_a_subscription_main_still_answers_at_the_reached_global_limit(lane, monkeypatch):
+    """A reached global limit refuses paid admission only: a direct turn whose Main is a $0
+    subscription route starts its body; its paid sends would still meet their reservation."""
+    from supervisor import state
+
+    monkeypatch.setenv("OUROBOROS_MODEL", "claudexor::codex=gpt-6-astra")
+    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 0.0)
+    assert lane.run() is True
+    assert lane.body == [lane.task] and lane.errors == []
+
+
 @pytest.mark.parametrize("rollback_confirmed", [False, True])
 def test_unconfirmed_money_outcome_never_retries_prestart(lane, monkeypatch, rollback_confirmed):
     from ouroboros.usage_ledger import UsageLockUnavailable

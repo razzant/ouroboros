@@ -427,8 +427,14 @@ def review_wave_admission(
                 continue
             total += float(bound)
         result["estimated_wave_usd"] = round(total, 6)
-        # The reservation's equality: no room once known spend reached the limit.
-        result["fits"] = remaining > 1e-9
+        # The reservation's equality: no room once known spend reached the limit. A reached GLOBAL limit
+        # refuses paid admission only (``usage_accounting.paid_admission``): a wave none of whose seats
+        # needs it still fits; a root or group cap binds every seat.
+        from ouroboros.provider_models import provider_for_model
+
+        result["fits"] = remaining > 1e-9 or (result["binding_axis"] == "global" and not any(
+            ua.paid_admission(provider_for_model(str(model or "")), bound)
+            for model, bound in zip(models, result["slot_bounds"])))
         return result
     except BillingAuthorityUnavailable as exc:
         # Not money: no seat could reserve. The kind says whether rereading can help.

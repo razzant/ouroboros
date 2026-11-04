@@ -55,6 +55,16 @@ def _server_web_allowed_by_task(ctx: Any) -> bool:
     return not any(resources.get(name) is False for name in forbidden_names)
 
 
+def _next_round_pays(ctx: Any) -> bool:
+    """A reached global limit stops this loop only when its next round needs paid admission
+    (``usage_accounting.paid_admission`` on the round's route); a $0 subscription or local round
+    continues, and every send still meets its reservation, which refuses a paid one."""
+    from ouroboros.provider_models import provider_for_model
+    from ouroboros.usage_accounting import paid_admission
+
+    return paid_admission("local" if ctx.active_use_local else provider_for_model(str(ctx.active_model or "")), None)
+
+
 def _check_budget_limits(
     ctx: "_RoundLimitContext",
     budget_remaining_usd: Optional[float],
@@ -71,7 +81,7 @@ def _check_budget_limits(
     raw_task_cost = accumulated_usage.get("cost")
     task_cost = float(raw_task_cost) if raw_task_cost is not None else None
 
-    if budget_remaining_usd is not None and budget_remaining_usd <= 0:
+    if budget_remaining_usd is not None and budget_remaining_usd <= 0 and _next_round_pays(ctx):
         finish_reason = "🚫 Task rejected. Total budget exhausted. Please increase TOTAL_BUDGET in settings."
         accumulated_usage["execution_status"] = "failed"
         accumulated_usage["reason_code"] = "budget_exhausted"

@@ -239,7 +239,7 @@ def resume_warm_owner_pause_root(task_id: str, *, selected_by: str = "",
     if blockers:
         return {"ok": False, "error": "owner_pause_effects_unsettled", "blockers": blockers,
                 "action": "wait_for_effect_settlement"}
-    refusal = _global_money_refusal(q, budget_remaining) or _root_money_refusal(result_root, task, root_task_id)
+    refusal = _global_money_refusal(q, budget_remaining, task) or _root_money_refusal(result_root, task, root_task_id)
     if refusal:
         return refusal
     try:
@@ -330,13 +330,17 @@ def resume_warm_owner_pause_root(task_id: str, *, selected_by: str = "",
             "grant_id": grant["grant_id"], "held_siblings": held_siblings, "snapshot_persisted": bool(persisted)}
 
 
-def _global_money_refusal(q: Any, budget_remaining: Any) -> Optional[Dict[str, Any]]:
+def _global_money_refusal(q: Any, budget_remaining: Any, task: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     try:
         # Authoritative, never the admit-only stale snapshot: a grant is money.
         remaining = budget_remaining(q.load_state(), strict=True, allow_stale=False)
     except Exception:
         return {"ok": False, "error": "monetary_authority_unavailable"}
-    if remaining <= 0:
+    from supervisor.worker_assignment import needs_paid_admission
+
+    # A reached global limit refuses paid admission only: a $0 route's Resume proceeds and its every send
+    # still meets the reservation. Without ``task`` (a money pause names a refused paid send) it refuses.
+    if remaining <= 0 and (task is None or needs_paid_admission(task)):
         return {"ok": False, "error": "budget_still_exhausted", "action": "increase_budget_then_resume"}
     return None
 
@@ -545,7 +549,7 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
     ceiling = resolve_task_execution_timeout_sec(task)  # None = unlimited; 0 = exhausted
     if ceiling is not None and started and executed_sec >= float(ceiling):
         return {"ok": False, "error": "lifetime_exhausted", "executed_sec": round(executed_sec, 1)}
-    if refusal := _global_money_refusal(q, budget_remaining):
+    if refusal := _global_money_refusal(q, budget_remaining, None if str(row.get("reason") or "budget") == "budget" else task):
         return refusal
     # The grant binds to the queue row's own lineage (``root_task_id`` above), the
     # one ``budget_resume_dispatch_allowed`` revalidates: a saved pause's root field
