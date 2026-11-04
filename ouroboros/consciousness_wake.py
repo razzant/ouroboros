@@ -12,8 +12,8 @@ identities (``_transitions_since``) and the last journal sequence, never the ala
 during a wake or late under an older stamp reaches the next one; a wake never activates the journal.
 ``bind_wake_observation`` stores the whole observation as an exact source under the registered wake; a request that
 cannot fit it gets composition, window, coverage, that pointer, my human's words whole and every other person's row by
-author, size and address, else the bare pointer (first build: ``context_input_selection.rescued_start``; rounds:
-``loop_model_call``).
+author, size and address, else only my human's words with the others counted, else the bare pointer (first build:
+``context_input_selection.rescued_start``; rounds: ``loop_model_call``).
 ``wake_task_metadata`` is the wake's origin/authority envelope for ``handle_wake_direct`` (``consciousness_authority``).
 """
 
@@ -65,12 +65,10 @@ _FALLBACK_TEMPLATE = "[Wake-up · {reason}] No request started this turn: it is 
 def wake_task_metadata(level: Any, reason: str, *, root_cost_ceiling_usd: Optional[float] = None) -> Dict[str, Any]:
     """The wake's ``task_metadata``: origin label, ledger category, level and its consequences.
 
-    ``root_cost_ceiling_usd`` is the wake tree's GRACEFUL ceiling (what is left of the
-    allowance, at most the per-task cap): ``task_pacing.resolve_cost_ceiling`` honors it for
-    the root itself and the members inherit the resolved number, while the ledger fence stays
-    at the owner's per-task cap. Only a strictly positive ceiling is stamped — a wake with
-    nothing left of its allowance is skipped by the alarm, never started under a $0 ceiling.
-    """
+    ``root_cost_ceiling_usd`` is the wake tree's GRACEFUL ceiling (the allowance left, at most the per-task cap): the
+    root's own by ``task_pacing.resolve_cost_ceiling``, inherited resolved by the members, the ledger fence staying at
+    the owner's per-task cap. Only a strictly positive ceiling is stamped: a wake with nothing left is skipped by the
+    alarm, never started under a $0 ceiling."""
     normalized = normalize_level(level)
     metadata: Dict[str, Any] = {
         "initiator": CONSCIOUSNESS_INITIATOR, "usage_category": CONSCIOUSNESS_CATEGORY,
@@ -671,9 +669,9 @@ class WakeObservation:
             lines.extend(self.outstanding)
         return ("\n" + "\n".join(lines)) if lines else "nothing new"
 
-    def overview_text(self, source: Dict[str, Any], *, inline: bool = True) -> str:
-        """Composition, window, coverage and the exact pointer; ``inline`` adds my human's words whole, a card answer's
-        too, and every other person's row by author, size and exact address. Nothing else."""
+    def overview_text(self, source: Dict[str, Any], *, mine: bool = True, others: bool = True) -> str:
+        """Composition, window, coverage and the exact pointer; ``mine`` adds my human's words whole, a card answer's
+        too, ``others`` every other person's row by author, size and exact address. Nothing else."""
         lines = [self.trigger] if self.trigger else []
         lines.append(
             "The complete observation of this wake does not fit this request beside the tools and the "
@@ -686,12 +684,12 @@ class WakeObservation:
             f"order, then transitions no chat row announced, then memory changes; then outstanding cards), sha256 "
             f"{source.get('sha256')}. Read the ranges you need; this pointer is neither a summary nor a "
             "priority order.")
-        mine = [line for kind, _offset, line in self.events if kind in {"owner_message", "card_answer"}]
-        others = [pointer for kind, _address, pointer in self.whole_rows if kind != "owner_message"]
-        if inline and mine:
-            lines += ["My human's words in this window, whole (every other event stays at the source):", *mine]
-        if inline and others:
-            lines += ["Every other person's words in this window, by author, size and exact address:", *others]
+        own = [line for kind, _offset, line in self.events if kind in {"owner_message", "card_answer"}]
+        people = [pointer for kind, _address, pointer in self.whole_rows if kind != "owner_message"]
+        if mine and own:
+            lines += ["My human's words in this window, whole (every other event stays at the source):", *own]
+        if others and people:
+            lines += ["Every other person's words in this window, by author, size and exact address:", *people]
         return "\n" + "\n".join(lines)
 
     def source_bytes(self) -> bytes:
@@ -923,13 +921,12 @@ def prepare_wake(task: Dict[str, Any], drive_root: Any) -> None:
 
 def bind_wake_observation(drive_root: Any, task: Dict[str, Any], observation: WakeObservation,
                           render: Any) -> Optional[Dict[str, Any]]:
-    """Store the whole observation under the registered wake and name its projection and bare pointer.
+    """Store the whole observation under the registered wake and name its fallback forms (``overview_text``).
 
     Runs after the wake is registered and before its thread starts. The task's text stays the complete observation
-    (the original host input); the stored source and its two overview forms only let the context fit deliver it by
+    (the original host input); the stored source and its overview forms only let the context fit deliver it by
     reference when it cannot fit (``loop_model_call``). Only exact source readback permits accepting a compact
-    boundary; a failure leaves the full input and no advance.
-    """
+    boundary; a failure leaves the full input and no advance."""
     from ouroboros.chat_chain import retain_memory_source
     from ouroboros.artifacts import read_actor_source_bytes
     from types import SimpleNamespace
@@ -947,9 +944,12 @@ def bind_wake_observation(drive_root: Any, task: Dict[str, Any], observation: Wa
         source = {**source, "lines": data.count(b"\n")}
         owner = sorted({address for kind, address, _pointer in observation.whole_rows if kind == "owner_message"})
         projection = render(observation.overview_text(source))
-        pointer = render(observation.overview_text(source, inline=False))
+        mine = render(observation.overview_text(source, others=False))  # a busy window's step: the others counted
+        pointer = render(observation.overview_text(source, mine=False, others=False))
         facts.update(source=source, whole_rows=sorted({address for _kind, address, _pointer in observation.whole_rows}),
                      inline_rows_in_fallback=owner, projection_text=projection)
+        if mine not in (projection, pointer):  # bound only when it is a step between them
+            facts["owner_projection_text"] = mine
         if pointer != projection:  # the start's and a real overflow's guarantee: the bare pointer
             facts["pointer_text"] = pointer
         if observation.boundary is not None and (observation.boundary.get("transitions") or {}).get("version") == TRANSITIONS_VERSION:

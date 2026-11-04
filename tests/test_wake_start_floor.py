@@ -114,6 +114,9 @@ def test_every_delivery_record_names_the_form_the_request_carried():
 
     assert form(bound, None) == "whole" and form(bound, bound["projection_text"]) == "projection"
     assert form(bound, bound["pointer_text"]) == "pointer", "nothing inline: no coverage claim applies"
+    busy = {**bound, "owner_projection_text": "pointer + my human's words, the others counted"}
+    assert form(busy, busy["owner_projection_text"]) == "projection", "my human's words inline here too"
+    assert form(busy, busy["pointer_text"]) == "pointer"
     assert form(plain, plain["projection_text"]) == "pointer", "a projection with no words of mine is the bare pointer"
     assert wake_input_checkpoint(bound, None, round_idx=1, after_overflow=False)["checkpoint_kind"] == "wake_input_inline"
 
@@ -163,3 +166,40 @@ def test_a_projection_that_saves_nothing_never_stops_the_pointer_or_the_whole_in
         expected, form = ALL_WHOLE, ("wake_input_inline", "whole")
     assert _project_wake_input(ctx) is True and ctx.messages[1]["content"] == expected
     assert [(event["checkpoint_kind"], event["form"]) for event in events] == [form]
+
+
+def test_a_busy_window_starts_with_my_humans_words_and_the_others_counted(tmp_path, monkeypatch):
+    """Opus N2: thousands of short messages of a participant make each pointer line almost as long as its message,
+    so the projection cannot fit; the middle form, my human's words whole with everyone else counted, starts instead
+    of the bare pointer, chosen by its fit alone."""
+    from ouroboros import dialogue_store as ds, places
+    from ouroboros.consciousness_wake import bind_wake_observation, observe_wake
+    from tests.test_consciousness_wake import _iso
+
+    env, memory, task, _observation, registry = _start_wake(tmp_path, monkeypatch, lines=0)
+    place = places.connect_place(env.drive_root, connector="bridge", provider="chat", account_id="qa", label="Team")
+    words = "Please stop the deploy and keep the database as it is until I say otherwise."
+    ds.append(env.drive_root, "chat", _owner(words, T0 - 3500, cmid="owner-1"))
+    for index in range(6000):
+        ts = _iso(T0 - 3000 + index * 0.4)
+        ds.append(env.drive_root, "chat", {
+            "ts": ts, "direction": "in", "chat_id": 2 ** 41 + 23, "text": f"message number {index} " + "s" * 60,
+            "source": "presence:chat", "sender_label": "Sasha", "client_message_id": f"ev-sasha-{ts}",
+            "transport": {"provider": "chat", "account_id": "qa", "conversation_id": "c",
+                          "actor": {"platform_actor_id": "sasha", "display_name": "Sasha"}},
+            "presence_provenance": {"place_id": place.place_id}, "place_id": place.place_id})
+    observation = observe_wake(env.drive_root, boundary=None, since=T0 - 3600, now=T0, reason="heartbeat")
+
+    def render(events):
+        return "[Wake-up] " + events
+
+    task["text"] = render(observation.full_text())
+    bind_wake_observation(env.drive_root, task, observation, render)
+    registry._ctx.task_metadata = dict(task["metadata"])
+    wake = task["metadata"]["wake_observation"]
+    middle = wake["owner_projection_text"]
+    assert words in middle and "message number 17 " not in middle and "6000 messages in places" in middle
+    assert len(wake["pointer_text"]) < len(middle) < len(wake["projection_text"])
+    messages, _capture = _first_build(env, memory, task, registry, monkeypatch, "max")
+    assert messages[1]["content"] == middle, "my human's words reach the first request"
+    assert _delivery_records(env) == [("wake_input_by_source", 0, "projection")]

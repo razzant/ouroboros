@@ -331,9 +331,12 @@ def task_input_pointer(env: Any, task: Dict[str, Any], user_content_json: str) -
 
 
 def _wake_forms(wake: Dict[str, Any]) -> List[str]:
-    """A wake's bound deliveries in rescue order: the projection (my human's words whole beside the exact pointer),
-    then the bare pointer when the producer bound one apart from it (``consciousness_wake.bind_wake_observation``)."""
-    return [text for text in dict.fromkeys((wake.get("projection_text"), wake.get("pointer_text"))) if text]
+    """A wake's bound deliveries in rescue order (``consciousness_wake.bind_wake_observation``): the projection (my
+    human's words whole and every other person's row by address, beside the exact pointer), then my human's words
+    alone with the others counted when bound apart from it (a busy window), then the bare pointer when bound apart.
+    The choice among them is only ever their actual fit."""
+    keys = ("projection_text", "owner_projection_text", "pointer_text")
+    return [text for text in dict.fromkeys(wake.get(key) for key in keys) if text]
 
 
 def wake_deliveries(wake: Dict[str, Any], full: Dict[str, Any]) -> List[Dict[str, Any]]:
