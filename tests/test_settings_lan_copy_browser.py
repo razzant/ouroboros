@@ -127,6 +127,39 @@ def test_settings_lan_url_has_one_copy_button_that_copies_the_current_address(su
     assert toasts.count() == 0
 
 
+def test_lan_result_reflows_with_its_container_and_keeps_the_full_address(subscription_ui):
+    from playwright.sync_api import expect
+
+    ui, page = subscription_ui, subscription_ui["page"]
+    address = FIRST + "/" + "long-deployment-prefix-" * 5
+    ui["settings"]["_meta"].update(reachability="lan_reachable", recommended_url=address, warning=WARNING)
+    page.add_init_script(INSTALL)
+    page.set_viewport_size({"width": 1100, "height": 750})
+    page.goto(ui["url"] + "/#settings")
+    hint = page.locator("#settings-lan-hint")
+    button = hint.get_by_role("button", name="Copy link")
+    expect(button).to_be_visible()
+    row = button.locator("..")
+    row.evaluate("e => { e.style.width = '320px'; e.style.maxWidth = '100%'; }")
+    hint.scroll_into_view_if_needed()
+    capture(page, "settings-lan-readable-inline")
+    # At 320px the short action can share readable text space; at 280px it
+    # cannot. Preserve the full-line assertion at the actual wrapping boundary.
+    row.evaluate("e => e.style.width = '280px'")
+    text_box, action_box, row_box = row.locator(":scope > span").bounding_box(), button.bounding_box(), row.bounding_box()
+    assert text_box["width"] >= row_box["width"] - 2
+    assert action_box["y"] >= text_box["y"] + text_box["height"] - 1
+    assert row.evaluate("e => e.scrollWidth <= e.clientWidth + 1")
+    expect(hint.get_by_role("link", name=address)).to_have_attribute("href", address)
+    assert WARNING in hint.inner_text()
+    button.focus()
+    button.press("Enter")
+    expect(page.locator("#toast-stack .toast").last).to_have_text("LAN URL copied.")
+    assert recorded(page)["writes"] == [address]
+    expect(button).to_be_focused()
+    capture(page, "settings-lan-container-reflow")
+
+
 def test_settings_lan_url_in_a_translated_ui_keeps_the_link_and_its_label(subscription_ui):
     """With a non-English dictionary the overlay translates the sentence around the link as one inline composite and
     the button as chrome; the link keeps its own label and address, and the button still copies the read's address,

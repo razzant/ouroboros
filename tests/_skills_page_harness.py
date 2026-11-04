@@ -26,7 +26,7 @@ def fixture(name: str):
 
 
 def _document() -> str:
-    sheets = "".join(f'<link rel="stylesheet" href="/static/{name}">' for name in ("ui.css", "style.css")
+    sheets = "".join(f'<link rel="stylesheet" href="/static/{name}">' for name in ("ui.css", "style.css", "settings.css")
                      if (WEB / name).exists())
     return (
         f'<!doctype html><html><head>{sheets}</head><body><main id="content"></main>'

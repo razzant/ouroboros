@@ -220,6 +220,21 @@ def test_timeout_before_receipt_survives_session_storage_loss_and_recovers_same_
     page.locator("[data-confirm-ok]").click()
     expect(row).to_contain_text("Reset outcome is unconfirmed")
     original = ui["reset_calls"][0]
+    # The recovery result is multiline and its action is optional. Narrow the
+    # real row inside a wide window: zero overflow alone missed text starvation.
+    result_row = row.locator(".settings-action-row").filter(has=page.locator("[data-recover-reset]"))
+    result_row.evaluate("e => { e.style.width = '320px'; e.style.maxWidth = '100%'; }")
+    result_row.scroll_into_view_if_needed()
+    copy_box = result_row.locator(".settings-action-copy").bounding_box()
+    recovery = row.locator("[data-recover-reset]")
+    action_box = recovery.bounding_box()
+    available = result_row.evaluate("e => { const s = getComputedStyle(e); return e.clientWidth - parseFloat(s.paddingLeft) - parseFloat(s.paddingRight); }")
+    assert copy_box["width"] >= available - 2
+    assert action_box["y"] >= copy_box["y"] + copy_box["height"] - 1
+    assert result_row.evaluate("e => e.scrollWidth <= e.clientWidth + 1")
+    recovery.focus()
+    expect(recovery).to_be_focused()
+    capture(page, "resources-recovery-container-reflow")
     # Closing an embedded client loses session storage; durable references must survive.
     page.evaluate("sessionStorage.clear()")
     ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)

@@ -6770,7 +6770,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     transform: translate(var(--masonry-x, 0px), var(--masonry-y, 0px));
 }
 .skills-head-card { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-4) 18px; min-width: 0; overflow-wrap: anywhere; }
-.skills-card-action-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); margin-top: auto; padding-top: var(--space-1); }
+.skills-card-action-row { margin-top: auto; padding-top: var(--space-1); }
 .skills-card-actions-end { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
 
 /* Sources: rows on the Accounts anatomy (DESIGN §6); the trust value is a setting, the health a status sentence. */
