@@ -27,9 +27,10 @@ spans memory only). The tick's own write leaves the supervisor thread: the serve
 publisher thread (``start_queue_writer``, ended with the loop by ``stop_queue_writer``) that
 writes the tick's captures and certificate refreshes, so event dispatch never waits on the
 disk; it holds the newest capture only (a slow disk never queues a backlog), the tick answers
-the outcome of the last write that landed (a failure shows one tick later and that tick's
-capture is the complete rewrite, FU1's rule unchanged), an older capture a barrier overtook is
-skipped, and a capture of an ended generation (``reset``) is never written.
+False once for each failed write the writer completed (on the tick after it, whose capture is
+the complete rewrite, FU1's rule unchanged) and True while a retry is still on the disk, an
+older capture a barrier overtook is skipped, and a capture of an ended generation (``reset``)
+is never written.
 A process with no live tick publisher (startup before the loop, shutdown after it, tests)
 publishes synchronously from every mark, so the boot and exit doors keep their semantics
 without a second protocol. A process-ending door (``pre_restart_exit``; the shutdown kill as
@@ -95,8 +96,11 @@ _REPORTED_TASK_FACTS = ("model_waits", "focus")
 # (torn or old) with its certificate revoked: from then on the publisher owes a fresh capture and a
 # complete rewrite of every document under a new generation, whatever the bytes say against the last
 # cache, and ``write_failed`` clears only when that write lands; no certificate is written meanwhile.
+# Failed writes are counted (``failed_writes``) so the tick answers each one once (``failures_answered``:
+# the count it has answered), never a retry still on the disk.
 _STATE: Dict[str, Any] = {"revision": 0, "published": 0, "reason": "", "kept": None, "census": None,
                           "capture_seq": 0, "published_seq": 0, "write_failed": False,
+                          "failed_writes": 0, "failures_answered": 0,
                           "alive_heartbeats": None, "alive_written_at": 0.0}
 _PUBLISHER: Optional[threading.Thread] = None
 _PUBLISH_LOCK = threading.Lock()
@@ -190,7 +194,7 @@ def reset() -> None:
     """A new queue generation (``queue.init``): nothing marked, nothing published, no tick publisher, no writer."""
     global _PUBLISHER, _WRITER
     _STATE.update(revision=0, published=0, reason="", kept=None, census=None, capture_seq=0, published_seq=0,
-                  write_failed=False, alive_heartbeats=None, alive_written_at=0.0)
+                  write_failed=False, failed_writes=0, failures_answered=0, alive_heartbeats=None, alive_written_at=0.0)
     _PUBLISHER = None
     ended, _WRITER = _WRITER, _TickWriter()  # rebound first: a capture of the ended generation is refused by identity
     ended.stop()
@@ -293,9 +297,11 @@ def publish_queue_changes() -> Optional[bool]:
     uncustodied saved queue, or nothing of this process certified yet), False when a write
     failed: the loop treats False as its own crash (``server._run_supervisor``), None as a
     quiet tick. With the writer thread running (``start_queue_writer``) the capture is
-    handed to it and the tick answers the outcome of the last write that landed: a failure
-    shows one tick later, and that tick's capture (the bundle is unknown until a complete
-    rewrite, R2) is the retry; True then means the writer holds the newest capture.
+    handed to it and the tick answers False once for each failed write the writer completed
+    since the tick last asked (one tick later; that tick's capture, the bundle being unknown
+    until a complete rewrite lands, R2, is the retry), never again for a retry still on the
+    disk: one failed write is one crash, three consecutive failed writes end the loop.
+    True otherwise means the writer holds the newest capture.
     """
     if not _queue().INITIALIZED:
         return None
@@ -310,18 +316,23 @@ def publish_queue_changes() -> Optional[bool]:
         moved = (_STATE["revision"] != _STATE["published"] or census != _STATE["census"] or _STATE["write_failed"])
         capture = _capture(_STATE["reason"] or "main_loop", census=census) if moved else None
     if not _WRITER.alive():
-        if not moved:
-            return _refresh_alive()
-        return None if capture is None else _publish(capture)
+        # Written where the tick stands: the outcome answers for this tick's own write, so every failure so
+        # far is answered with it.
+        outcome = _refresh_alive() if not moved else (None if capture is None else _publish(capture))
+        _STATE["failures_answered"] = _STATE["failed_writes"]
+        return outcome
     # The writer thread lands it (the newest capture replaces one it has not taken yet); a quiet tick asks it for
-    # the certificate refresh; the tick answers the last landed outcome, and a kept saved queue stays None.
+    # the certificate refresh; the tick answers the writer's failures since it last asked, and a kept saved queue
+    # stays None.
     if capture is not None:
         _WRITER.offer(capture)
     elif not moved and _queue().QUEUE_PUBLICATION is not None:
         _WRITER.ask_refresh()
     else:
         return None  # kept, or nothing of this process certified yet
-    return False if _STATE["write_failed"] else True
+    failed, answered = _STATE["failed_writes"], _STATE["failures_answered"]
+    _STATE["failures_answered"] = failed
+    return failed == answered
 
 
 def _frozen(value: Any) -> Any:
@@ -588,6 +599,7 @@ def _publish(capture: Dict[str, Any], *, writer: Optional[_TickWriter] = None) -
             # The census stays the last WRITTEN one: the next tick captures and retries this change; and
             # the stale document on disk is not certified again until a publication lands (N9).
             _STATE["write_failed"] = True
+            _STATE["failed_writes"] += 1  # one completed failed write: the tick answers it once
             log.warning("Failed to persist queue snapshot (reason=%s)", capture["reason"], exc_info=True)
             return False
 
