@@ -416,3 +416,65 @@ def test_a_view_reads_the_same_from_whole_transports_and_from_their_facts_stored
     facts = _tail_meta(tmp_path)
     assert len(facts) == len(whole) and sum(map(len, facts)) * 5 < sum(map(len, whole))
     assert any("thread line" in meta for meta in whole) and not any("thread line" in meta for meta in facts)
+
+
+def _forget_lineage(root):
+    """A fresh process's lineage: nothing remembered for this root (``projects_registry``'s per-process memos)."""
+    from ouroboros import projects_registry as registry
+
+    for key in [key for key in registry._TASK_LINEAGE if key[0] == str(root)]:
+        del registry._TASK_LINEAGE[key]
+    registry._ROOM_ANSWERS.clear()
+
+
+def test_a_focus_start_sees_the_same_reading_no_thread_copy_no_task_body_and_no_whole_tail(tmp_path, monkeypatch):
+    """The three read repairs against the reads before them (whole transports, every admitted chat from its task's
+    body, the whole tail in one answer), over Presence-shaped rows, an imported earlier message, a room converted
+    after its rows were written, a task admitted in a Project's chat whose rows were written in Main, and rows whose
+    task the store does not know: byte-identical integrator, wake, Presence and child views. The cost contract: no
+    stored row holds a thread copy, the tail arrives in pages, and the room rule parses no derived task's body (each
+    is malformed then, failing any parse of it; a wake's directory reads each shown room's latest focus from its
+    tasks' documents by design, so that read is left out of the damaged pass)."""
+    from ouroboros import chronicle_store, memory_view as mv, store_hot_facts as hot
+    from ouroboros.projects_registry import bind_task_to_project
+    from ouroboros.task_results import write_task_result
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    rooms = shared.world(tmp_path)
+    place, beta = str(place_rows(tmp_path)), str(rooms["beta"])
+    ds.append(tmp_path, "chat", shared.msg("2026-09-06T00:00:00+00:00", "beta's work, said in Main", direction="out",
+                                           task_id="conv1"))
+    for task_id, chat in (("t2", 1), ("pturn1", int(place)), ("conv1", rooms["beta"])):
+        write_task_result(tmp_path, task_id, "completed", result="done", chat_id=chat)
+    bind_task_to_project(tmp_path, "t2", "alpha", origin={"absent": "post_hoc_unresolved"})  # converted after its rows
+    task = {"id": "turn0001", "chat_id": 1}
+    specs = {"main": ("integrator", "1"), "beta": ("integrator", beta), "place": ("integrator", place),
+             "wake": ("consciousness", "1"), "presence": ("presence", place), "child": ("child", beta)}
+
+    def views():
+        _forget_lineage(tmp_path)
+        captured = {}
+        for name, (role, room) in specs.items():
+            view = mv.capture_memory_view(tmp_path, task, dataclasses.replace(mv.ROLE_DEFAULTS[role], room_id=room))
+            assert view.active and "tail_facts" not in view.store_status, name
+            captured[name] = (mv.snapshot_json(view), mv.render_story(view), mv.render_room(view))
+        return captured
+
+    with monkeypatch.context() as before:
+        before.setattr(mi, "_transport_facts", dict)
+        before.setattr(mi, "_META_VERSION", 4)
+        before.setattr(chronicle_store, "_TAIL_PAGE", 1 << 30)
+        with store.open_store(tmp_path, write=True) as txn:
+            txn.conn.execute("UPDATE tasks SET chat_id=NULL")  # each admitted chat read from its task's body
+        assert _fill(tmp_path)["state"] == "done"
+        reference = views()
+    assert "beta's work, said in Main" in reference["beta"][2] and "Place slack C42" in reference["main"][0]
+    assert hot.run_hot_facts(tmp_path)["state"] == "done" and _fill(tmp_path)["state"] == "done"
+    monkeypatch.setattr(chronicle_store, "_TAIL_PAGE", 4)  # the stored tail in many pages
+    assert views() == reference
+    assert not any("thread line" in meta for meta in _tail_meta(tmp_path))
+    with store.open_store(tmp_path, write=True) as txn:
+        assert txn.row("conv1", "chat_id") == beta
+        txn.conn.execute("UPDATE task_bodies SET body='{' WHERE task_id IN ('t2', 'pturn1', 'conv1')")
+    del specs["wake"]
+    assert views() == {name: reference[name] for name in specs}
