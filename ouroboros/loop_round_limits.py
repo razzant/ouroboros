@@ -295,6 +295,7 @@ def _drain_incoming_messages(
                 source="owner_mailbox",
                 content=_owner_content(entry, drive_root, task_id),
                 msg_id=str(entry.get("msg_id") or ""),
+                origin={"client_message_id": entry.get("client_message_id")},  # the same message relayed: one row
             )
             _stamp_owner_delivery(
                 owner_ctx,

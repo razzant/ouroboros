@@ -591,7 +591,8 @@ def test_a_drafted_start_keeps_an_owner_mailbox_image_by_reference_through_resta
     assert original.read_bytes() == shot
     projection = _owner_content_projection(recorded["content"])
     assert SHOT_WORDS in projection and str(original) in projection
-    row = {"source": "owner_mailbox", "content": projection, "msg_id": "owner-shot-1803"}
+    row = {"source": "owner_mailbox", "content": projection, "msg_id": "owner-shot-1803",
+           "client_message_id": "owner-shot"}  # the owner message the mail delivered: one row if also relayed
     assert root["metadata"]["origin_message_absent"] is True and row in root["metadata"]["owner_corpus"]
     _run_interrupted_by_restart(tmp_path, monkeypatch, queue, workers, bridge, root, own_card=False)
     stored = load_task_result(tmp_path, root["id"])

@@ -37,7 +37,7 @@ def _place_turn(tmp_path, *, addressed=True, confirmed=True, reply_to_message_id
 def test_an_addressed_place_turn_from_my_human_carries_their_exact_words(tmp_path):
     ctx = _place_turn(tmp_path)
     place, frame = ctx._owner_directives
-    assert place == {"source": "place_owner", "content": LONG, "msg_id": f"chat {2 ** 41 + 3} / ev-9"}
+    assert place == {"source": "place_owner", "content": LONG, "msg_id": f"chat {2 ** 41 + 3} / ev-9", "carried": True}
     assert frame["source"] == "initial_text", "the event frame stays the first text Safety reads"
     words = governing_words_for_schedule(ctx)[FIELD]
     assert [row["text"] for row in words] == [LONG], "a helper gets the whole words, not a cut"

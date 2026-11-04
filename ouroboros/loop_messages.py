@@ -176,6 +176,7 @@ def _record_owner_directive(
     msg_id: str = "",
     origin: Optional[Dict[str, str]] = None,
     reply_to: Optional[Dict[str, str]] = None,
+    carried: bool = False,
 ) -> None:
     """Retain the task-local owner corpus across transcript compaction.
 
@@ -190,6 +191,9 @@ def _record_owner_directive(
     proposal, and find an answer's question, without inferring it from the text.
     ``reply_to`` is the message these words reply to (``owner_words.reply_target``): its
     author's words beside them, carried with the row, never counted as my human's.
+    ``carried``: words that reached this run unaddressed (a relayed quote, a drafted objective's
+    corpus, a place event), kept but owing no reply. One source is one row (the same id or owner
+    message); my human's direct delivery of words first carried makes that row owed.
     """
     if ctx is None:
         return
@@ -202,11 +206,13 @@ def _record_owner_directive(
         directives = []
         setattr(ctx, "_owner_directives", directives)
     stable_id = str(msg_id or "").strip()
-    if stable_id and any(
-        isinstance(row, dict) and str(row.get("msg_id") or "") == stable_id
-        for row in directives
-    ):
-        return
+    message_id = str((origin or {}).get("client_message_id") or "")
+    for known in directives:
+        if isinstance(known, dict) and ((stable_id and str(known.get("msg_id") or "") == stable_id) or (
+                message_id and str(known.get("client_message_id") or "") == message_id)):
+            if not carried:
+                known.pop("carried", None)
+            return
     try:
         frozen_content = json.loads(json.dumps(content, ensure_ascii=False, default=str))
     except (TypeError, ValueError):
@@ -217,6 +223,8 @@ def _record_owner_directive(
     row.update({key: str(value) for key, value in (origin or {}).items() if value})
     if reply_to:
         row["reply_to"] = dict(reply_to)
+    if carried:
+        row["carried"] = True
     directives.append(row)
 
 
@@ -258,7 +266,7 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
                     ctx, source=str(row["source"]), content=row.get("content"),
                     msg_id=str(row.get("msg_id") or ""),
                     origin={key: row[key] for key in ("source_task_id", "relayed_from_task_id", "quiz_id") if row.get(key)},
-                    reply_to=row.get("reply_to") if isinstance(row.get("reply_to"), dict) else None,
+                    reply_to=row.get("reply_to") if isinstance(row.get("reply_to"), dict) else None, carried=True,
                 )
         return  # The task-drafted objective is never an owner directive.
     focus, presence = metadata.get("focus") or {}, metadata.get("presence") or {}
@@ -268,10 +276,9 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
         # words, beside the event frame (``initial_text``, which Safety reads); an unaddressed one is not work.
         event = presence.get("event") or {}
         replied = str((event.get("message") or {}).get("reply_to_message_id") or "")
-        _loop()._record_owner_directive(
-            ctx, source="place_owner", content=presence["observed_text"],
-            msg_id=f"chat {focus.get('room_chat_id')} / {event.get('source_event_id') or ''}",
-            reply_to={"address": f"platform message {replied} in this room", "author": "", "text": ""} if replied else None)
+        target = {"address": f"platform message {replied} in this room", "author": "", "text": ""} if replied else None
+        _loop()._record_owner_directive(ctx, source="place_owner", content=presence["observed_text"], carried=True,
+            msg_id=f"chat {focus.get('room_chat_id')} / {event.get('source_event_id') or ''}", reply_to=target)
     for message in messages:
         if isinstance(message, dict) and str(message.get("role") or "") == "user":
             from ouroboros.dialogue_provenance import run_origin
@@ -295,10 +302,10 @@ def owner_source_sha256(ctx: Any) -> str:
 
 
 def owner_input_revision(ctx: Any) -> int:
-    """How many of the owner's own rows this run has admitted (``initial_text`` and peers are not theirs)."""
+    """How many of the owner's own rows were delivered to this run (never ``initial_text``, peers or carried words)."""
     from ouroboros.owner_words import OWNER_SOURCES
 
-    return sum(isinstance(row, dict) and row.get("source") in OWNER_SOURCES
+    return sum(isinstance(row, dict) and row.get("source") in OWNER_SOURCES and not row.get("carried")
                for row in getattr(ctx, "_owner_directives", None) or [])
 
 
