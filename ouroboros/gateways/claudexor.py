@@ -911,9 +911,10 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
     def ensure_full_access(self, root: str) -> Dict[str, Any]:
         """Create a missing scoped full grant; the caller owns when to request it.
 
-        Scoped GET also returns default false for an absent trust file. The
-        actual-file list distinguishes absence from an explicit refusal; its
-        path remains authoritative when a legacy record has no repoRoot.
+        A daemon that names ``source`` distinguishes absence (``default``, grant)
+        from an explicit refusal (``file``). An older daemon omits ``source``;
+        the file list still distinguishes them, and its path stays authoritative
+        when a legacy record has no repoRoot.
         """
         target = str(root)
         body = self._request("GET", f"/v2/trust?repoRoot={quote(target, safe='')}")
@@ -925,20 +926,26 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
             raise ClaudexorUnavailable("malformed_response", "Scoped trust lookup returned a different root")
         if state["allowFullAccess"]:
             return state
-        body = self._request("GET", "/v2/trust")
-        entries = body.get("entries") if isinstance(body, dict) else None
-        if not isinstance(entries, list):
-            raise ClaudexorUnavailable("malformed_response", "Trust listing returned no entries")
-        for entry in entries:
-            entry = _trust_state(entry)
-            if entry["path"] == state["path"]:
-                if entry["allowFullAccess"]:
-                    return entry
-                raise ClaudexorUnavailable(
-                    "trust_full_access_required", "Full access is disabled for this scope; its existing choice was preserved. "
-                    "Lower this call with access=workspace_write or select Working files on the actor row.",
-                    status_code=403,
-                )
+        refusal = ClaudexorUnavailable(
+            "trust_full_access_required", "Full access is disabled for this scope; its existing choice was preserved. "
+            "Lower this call with access=workspace_write or select Working files on the actor row.",
+            status_code=403,
+        )
+        # An unrecognized source keeps the list: only the two named values skip it.
+        source = state.get("source")
+        if source == "file":
+            raise refusal
+        if source != "default":
+            body = self._request("GET", "/v2/trust")
+            entries = body.get("entries") if isinstance(body, dict) else None
+            if not isinstance(entries, list):
+                raise ClaudexorUnavailable("malformed_response", "Trust listing returned no entries")
+            for entry in entries:
+                entry = _trust_state(entry)
+                if entry["path"] == state["path"]:
+                    if entry["allowFullAccess"]:
+                        return entry
+                    raise refusal
         granted = _trust_state(self._request(
             "POST", "/v2/trust", json_body={"repoRoot": target, "allowFullAccess": True},
         ))

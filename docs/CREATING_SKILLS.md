@@ -837,9 +837,9 @@ calls and runtime behaviours:
 | `live_conversation` | The skill may register the in-process Live Conversation feature (PluginAPI 2.1); the host retains admission, tools, memory, budget and Stop. |
 | `call_peer` | A reviewed companion may join an admitted media call through the Host Service; Presence admission still requires its binding and `presence` grant. External speech conveys no owner authority. |
 | `read_settings` | The skill may call `api.get_settings([...])`. |
-| `supervised_task` | The skill may register an in-process host-supervised async task. |
+| `supervised_task` | The skill may register an in-process host-supervised async task. It runs on the shared host extension loop, not the HTTP loop. |
 | `companion_process` | The skill may register a manifest-declared companion subprocess supervised by the host. |
-| `subscribe_event` | The skill may subscribe to manifest-declared host event topics such as `chat.outbound` or `skill.lifecycle`. Chat topics require owner permission grants; `skill.lifecycle` does not. |
+| `subscribe_event` | The skill may subscribe to manifest-declared host event topics such as `chat.outbound` or `skill.lifecycle`. An async subscriber runs on the shared host extension loop; a synchronous subscriber runs on the publisher's thread. Chat topics require owner permission grants; `skill.lifecycle` does not. |
 | `inject_chat` | With the owner's `inject_chat` grant, `POST /chat/inject` accepts text, an inline image or `attachments` (`[{path, name?, mime?}]`: up to 25 regular files confined to the skill's state root, copied without the former 50 MiB cap to `data/uploads` and staged for the task; file-only messages need no text). Optional `reply_to` carries a host row or `task:<task_id>` address as a reference, never routing. The same grant lets the skill relay the owner's decision-card answer through `POST /chat/decision` (`{request_id, decision_id, option_index?, comment?}`, the `POST /api/decisions` contract). A message that carries a `client_message_id` becomes an addressable operation: the host answers with its `operation_ref` (`<chat_id>:<client_message_id>`) on 202, 200 and 504; a repeated delivery of the same message — the same words AND the same ordered attachment content (inline image and files, compared by bytes and name, not by the host's stored copy) — rejoins it instead of enqueueing again (a different message under a reused id is refused with 409); an inline image and the attachments also appear in the owner's chat bubble from the host's stored copy, while the image still reaches the model as before (inline bytes that are not a proven image are kept as an ordinary file and never sent as an image; base64 over 50 MiB decoded is refused with 413); `GET /chat/operations/{operation_ref}` reports the skill's own accepted message (`pending`, `running` with its task or turn, the durable answer, a terminal task status, or `lost` after a host restart or when the host's own acceptance write failed); and `POST /chat/cancel` (`{operation_ref, reason?}`) runs the existing cancellation owner on work that message started, answering `cancelled`, `already_terminal`, `unresolved` or `cancel_unsupported` — never a cancellation that did not happen. |
 | `presence` | A reviewed transport skill may submit authenticated non-owner conversation events to the Host Service Presence boundary and poll only their correlated late work. Requires an explicit content-hash-bound owner grant. |
 | `notify_owner` | The skill may tell the owner one thing through `POST /notify` after an explicit owner permission grant (see "Telling the owner something" below): one bounded plain sentence the host shows in the owner's chat as a System row signed with the skill's name. It wakes no model; narrower than `inject_chat`. |
@@ -849,6 +849,8 @@ reply or an exactly-once start. The bundled Telegram bridge reads the internal
 `ouroboros.gateway.reply_preparation` projection; no stable PluginAPI or Host
 Service reader is exposed to third-party skills yet. A live activity may be
 waiting, stopped or doing post-answer work.
+
+The host extension loop is one thread shared by every in-process supervised task and every async event subscriber. It is not the HTTP or WebSocket loop. Blocking I/O there delays other extensions on that loop; it does not queue the window, Stop, Pause or ordinary HTTP replies behind it. Async route and WebSocket handlers still run on the HTTP loop, so synchronous I/O in those handlers goes through `asyncio.to_thread`. The host cancels the extension loop on shutdown and restart, and a task's `finally` runs then.
 
 A missing permission causes the matching `register_*` call to raise
 `ExtensionRegistrationError`, surfaced as a skill load error in the
@@ -1840,7 +1842,7 @@ It answers with the installation's whole memory under host authority, never the 
 view: a tool or route that passes answers on hands that memory to its caller. No memory source is
 written or activated (the chronicle's derived index may catch up); a refusal raises
 `MemoryReadError` with a `code`. It is synchronous I/O: call it from a sync handler or through
-`asyncio.to_thread`, never inside an `async` handler, which runs on the server loop. `catalog`
+`asyncio.to_thread`, never inside an `async` route or WebSocket handler, which runs on the server loop. `catalog`
 pages an `area` (pass `next` as `cursor` until `complete`; a filtered page may be short) and
 `document` reads an address by code-point range; a `next` bound to a revision or fingerprint (a
 note, file, the story, a note's links, nested changes) is refused once its source changed, never
@@ -1856,6 +1858,10 @@ the registry detects coroutines and runs them on a helper thread with
 a fresh event loop under `asyncio.wait_for(timeout_sec)`. They do not
 execute on the server's main event loop, so do not rely on loop-local
 state captured at registration time, as for HTTP routes and WS handlers.
+Supervised tasks and async event subscribers share the host extension loop
+instead; do not share loop-local objects between that loop and a route or
+WebSocket handler. Blocking I/O on the extension loop still delays other
+extensions.
 
 ```python
 async def do_search(ctx, query: str = ""):

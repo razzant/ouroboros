@@ -312,6 +312,53 @@ def compute_obligation_semantic_redirects(
         return {}
 
 
+_EVIDENCE_REF_KEYS = frozenset({"retained_in", "sha256", "bytes", "file_count"})
+
+
+def _project_named_evidence(row: Any) -> Any:
+    """Copy a roster row, keeping its inventory only as a ref to the producer payload."""
+    ref = row.get("response_ref") if isinstance(row, dict) else None
+    usage = row.get("usage") if ref and not (isinstance(ref, str) and not ref.strip()) else None
+    evidence = usage.get("checking_evidence") if isinstance(usage, dict) else None
+    named = evidence.get("named_evidence") if isinstance(evidence, dict) else None
+    already = (isinstance(named, dict) and set(named) == _EVIDENCE_REF_KEYS
+               and isinstance(named.get("sha256"), str) and len(named["sha256"]) == 64
+               and type(named.get("bytes")) is int and type(named.get("file_count")) is int)
+    if not named or already:
+        return row
+    canonical = json.dumps(named, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    projected = {"retained_in": ref, "sha256": hashlib.sha256(canonical).hexdigest(),
+                 "bytes": len(canonical), "file_count": len(named) if isinstance(named, list) else 0}
+    return {**row, "usage": {**usage, "checking_evidence": {**evidence, "named_evidence": projected}}}
+
+
+def _project_roster(rows: Any) -> Any:
+    if not isinstance(rows, list):
+        return rows
+    projected = [_project_named_evidence(row) for row in rows]
+    return rows if all(new is old for new, old in zip(projected, rows)) else projected
+
+
+def _project_scope(scope: Any) -> Any:
+    if not isinstance(scope, dict) or not scope:
+        return scope
+    raw = scope.get("raw_results")
+    if isinstance(raw, list):
+        projected = _project_roster(raw)
+        return scope if projected is raw else {**scope, "raw_results": projected}
+    return _project_named_evidence(scope) if "raw_results" not in scope else scope
+
+
+def _project_saved_evidence(attempts: Any) -> None:
+    for attempt in attempts if isinstance(attempts, list) else ():
+        if not isinstance(attempt, dict):
+            continue
+        for key, project in (("triad_raw_results", _project_roster), ("scope_raw_result", _project_scope)):
+            projected = project(attempt.get(key))
+            if projected is not attempt.get(key):
+                attempt[key] = projected
+
+
 def _save_state_unlocked(
     drive_root: pathlib.Path, state: AdvisoryReviewState, *, unchanged_from: tuple[str, Any] | None = None,
 ) -> None:
@@ -343,6 +390,7 @@ def _save_state_unlocked(
         **({"earlier_stale_markers": earlier_markers} if earlier_markers else {}),
         "saved_at": unchanged_from[1] if unchanged_from is not None else _utc_now(),
     }
+    _project_saved_evidence(data.get("attempts"))
     content = json.dumps(
         data, ensure_ascii=False, separators=(",", ":"), default=_dataclass_mapping,
     )
