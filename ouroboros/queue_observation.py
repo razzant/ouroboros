@@ -122,7 +122,13 @@ def load_queue_document(drive_root, name="queue_snapshot.json", *, fresh: bool =
     if document is None:
         return {"_snapshot_invalid" if path.exists() else "_snapshot_missing": True}
     document = document if fresh else _view(document)
-    document["_queue_alive"] = read_json_dict(path.parent / "queue.alive") or {}
+    alive = read_json_dict(path.parent / "queue.alive") or {}
+    # The certificate names each document's own generation: the snapshot's as ``generation``, another
+    # document's under ``documents`` when it was not rewritten with the snapshot (its bytes had not changed).
+    others = alive.get("documents")
+    if name != "queue_snapshot.json" and isinstance(others, dict) and name in others:
+        alive = {**alive, "generation": others[name]}
+    document["_queue_alive"] = alive
     if name == "queue_snapshot.json":
         from ouroboros.model_wait import execution_elapsed_seconds, quota_waited_seconds
 

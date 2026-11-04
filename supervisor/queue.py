@@ -76,7 +76,7 @@ SCHEDULED_TASKS_FILE = pathlib.Path("state") / "scheduled_tasks.json"
 # OWNER_PID names that process: a child forked after ``init`` inherits INITIALIZED, not the pid.
 INITIALIZED = False
 OWNER_PID: Optional[int] = None
-QUEUE_PUBLICATION = None  # (path, encoded documents, generation) of the last successful publication.
+QUEUE_PUBLICATION = None  # (path, encoded documents, snapshot generation, generation per document) of the last successful publication.
 
 
 def owns_live_queue(drive_root: Any) -> bool:

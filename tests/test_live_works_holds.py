@@ -12,7 +12,6 @@ from tests._shared import write_queue_document
 def _snapshot(root, *, running=(), pending=()):
     stamp = utc_now_iso()
     write_queue_document(root / "state/queue_snapshot.json", {"ts": stamp, "running": list(running), "pending": list(pending)})
-    write_queue_document(root / "state/direct_roots.json", {"ts": stamp, "incomplete": False, "roots": []})
 
 
 def test_a_writer_held_continue_reads_as_held_for_the_earlier_attempt(tmp_path):

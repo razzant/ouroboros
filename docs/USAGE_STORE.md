@@ -406,10 +406,9 @@ uncertainty grants no continuation rights. Applying a price to an unresolved att
 
 Standalone command custody uses the selected data root's existing current queue
 snapshot, never the imported process's empty maps. Missing or stale ownership
-evidence refuses task-backed mutation. The existing direct-root projection
-also protects listed owners; incomplete or unreadable projections retain
-custody. Absent/empty direct-root projections carry no proof that every direct
-stack ended. Explicit `system:<source>` accounting
+evidence refuses task-backed mutation. Every live focus, a direct turn included,
+is a row of that snapshot (the retired direct-roots fragment is read by nothing);
+its absence or staleness carries no proof that every stack ended. Explicit `system:<source>` accounting
 scopes from one-shot provider/capability probes are not task-backed review
 owners; real review task IDs still require review-operation custody. The final
 ownership recheck and monetary revision CAS cannot atomically fence a task

@@ -10,10 +10,16 @@ content address (``$shared``), so the document carries the owner's words once; `
 expands them in memory, so every reader still sees the whole row.
 
 The publication order a reader relies on is kept: the old ``queue.alive`` certificate is
-revoked, the documents land (fsync), the new certificate names them (no fsync).
-``queue.alive`` is rewritten only when its generation or heartbeat map changed or its stamp
-aged past ``QUEUE_ALIVE_REFRESH_SEC``; a process that never published writes none (the
-uncustodied saved queue rule, ``queue_snapshot._keeps_saved_queue``).
+revoked, the documents land (fsync), the new certificate names them (no fsync). Two
+documents: the snapshot and the dispatch projection (``queue_dispatch.json``, the money
+paths' fence authority). Only a document whose bytes changed is rewritten, under the new
+generation; one whose bytes did not keeps the generation it was written under, and the
+certificate names each document's own generation (``generation`` is the snapshot's,
+``documents`` the others'), so a reader certifies a document by its own generation
+(``queue_observation.load_queue_document``) and a torn bundle is still unknown as a whole.
+``queue.alive`` is rewritten only when a document's generation or the heartbeat map changed
+or its stamp aged past ``QUEUE_ALIVE_REFRESH_SEC``; a process that never published writes
+none (the uncustodied saved queue rule, ``queue_snapshot._keeps_saved_queue``).
 
 Durability before an effect is an explicit barrier (``publish_queue_snapshot``), used only
 where a caller acts on the publication. A process with no live tick publisher (startup
@@ -61,6 +67,7 @@ _FORCED_REASONS = frozenset({"startup", "pre_restart_exit", "server_shutdown"})
 #: so an older body restores it after a rollback (the restart exit; the shutdown kill of every door).
 _EXPORT_REASONS = frozenset({"pre_restart_exit", "server_shutdown"})
 _ALIVE_NAME = "queue.alive"
+_SNAPSHOT_NAME = "queue_snapshot.json"
 #: The RUNNING-row facts a publication carries besides the task. The capture writes exactly these and
 #: the tick's census watches exactly these, so a fact a worker report changes under Q without a mark
 #: (a silence episode, the quota clock, an owner wait) is published by the next tick, and a fact added
@@ -156,19 +163,16 @@ def _publish_now(reason: str) -> Optional[bool]:
     if not _queue().INITIALIZED:
         log.info("Queue snapshot not published (reason=%s): no supervisor queue in this process", reason)
         return None
-    from supervisor.direct_roots import collect_direct_roots
-
-    direct = collect_direct_roots()  # Never wait for an actor while holding Q.
     with _queue()._queue_lock:
         _STATE["revision"] += 1
-        capture = _capture(reason, direct)
+        capture = _capture(reason)
     if capture is None:
         return None
     return _publish(capture)
 
 
 def publish_queue_changes() -> Optional[bool]:
-    """The tick: publish when the revision or the direct roster moved, else refresh the certificate.
+    """The tick: publish when the revision or the census moved, else refresh the certificate.
 
     True when published or refreshed, None when the documents on disk are kept (an
     uncustodied saved queue, or nothing of this process certified yet), False when a write
@@ -177,11 +181,6 @@ def publish_queue_changes() -> Optional[bool]:
     """
     if not _queue().INITIALIZED:
         return None
-    from supervisor.direct_roots import collect_direct_roots
-
-    direct = collect_direct_roots()
-    published = _queue().QUEUE_PUBLICATION
-    direct_moved = published is not None and published[1].get("direct_roots.json") != machine_json(direct)
     with _queue()._queue_lock:
         if _kept_by_memo():
             return None  # the saved queue is still kept: decided once, not copied or counted again
@@ -190,9 +189,8 @@ def publish_queue_changes() -> Optional[bool]:
         # live set still captures, serializes and writes nothing. A failed write is itself a reason to
         # publish: the bundle on disk is unknown until a complete rewrite lands (R2).
         census = _census()
-        moved = (_STATE["revision"] != _STATE["published"] or direct_moved or census != _STATE["census"]
-                 or _STATE["write_failed"])
-        capture = _capture(_STATE["reason"] or "main_loop", direct, census=census) if moved else None
+        moved = (_STATE["revision"] != _STATE["published"] or census != _STATE["census"] or _STATE["write_failed"])
+        capture = _capture(_STATE["reason"] or "main_loop", census=census) if moved else None
     if not moved:
         return _refresh_alive()
     return None if capture is None else _publish(capture)
@@ -254,7 +252,7 @@ def _kept_by_memo() -> bool:
     return _STATE["kept"] is not None and _STATE["kept"] == _custody_key()
 
 
-def _capture(reason: str, direct: Dict[str, Any], *, census: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def _capture(reason: str, *, census: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Under Q: the thin rows and queue facts of this revision; None when the saved queue is kept."""
     if _kept_by_memo():
         return None
@@ -265,7 +263,7 @@ def _capture(reason: str, direct: Dict[str, Any], *, census: Optional[str] = Non
     acceptance_fences = [_frozen(row) for row in _queue().ACCEPTANCE_FENCES.values()]
     budget_root_fences = [_frozen(row) for row in _queue().BUDGET_ROOT_FENCES.values()]
     if _keeps_saved_queue(_queue().QUEUE_SNAPSHOT_PATH, pending_items, running_items,
-                          acceptance_fences, budget_root_fences, (direct or {}).get("roots")):
+                          acceptance_fences, budget_root_fences):
         log.info("Queue snapshot kept (reason=%s): this process has not taken the saved queue into custody", reason)
         _STATE["kept"] = _custody_key()
         return None
@@ -293,7 +291,7 @@ def _capture(reason: str, direct: Dict[str, Any], *, census: Optional[str] = Non
         "forced": reason in _FORCED_REASONS,
         "pending": pending_rows, "running": running_rows,
         "acceptance_fences": acceptance_fences, "budget_root_fences": budget_root_fences,
-        "pool": _pool_counts(), "direct": direct,
+        "pool": _pool_counts(),
         "restart_intent": agent_restart_snapshot(), "restart_reply": dict(_AGENT_RESTART_REPLY),
         "heartbeats": {tid: meta.get("last_heartbeat_at") for tid, meta in running_items},
     }
@@ -332,7 +330,7 @@ def _pool_counts() -> Dict[str, Any]:
 
 
 def _documents(capture: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """Outside Q: the three documents of this capture; task values interned unless rollback-readable."""
+    """Outside Q: the two documents of this capture; task values interned unless rollback-readable."""
     from ouroboros.budget_pause import BUDGET_HOLD_KEY
 
     payload = {
@@ -365,9 +363,8 @@ def _documents(capture: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
             members[str(task.get("id") or "")] = member
     if not capture["rollback_readable"]:
         payload[SHARED_KEY] = _share_replicated(payload)
-    return {"queue_snapshot.json": payload,
-            "queue_dispatch.json": {"budget_root_fences": capture["budget_root_fences"], "members": members},
-            "direct_roots.json": capture["direct"]}
+    return {_SNAPSHOT_NAME: payload,
+            "queue_dispatch.json": {"budget_root_fences": capture["budget_root_fences"], "members": members}}
 
 
 def _share_replicated(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -414,7 +411,7 @@ def _digest(value: Any) -> str:
 
 
 def _publish(capture: Dict[str, Any]) -> bool:
-    """Outside Q, one writer at a time: encode, compare, then revoke -> documents -> certify."""
+    """Outside Q, one writer at a time: encode, compare, then revoke -> changed documents -> certify."""
     documents = _documents(capture)
     encoded = {name: machine_json(document) for name, document in documents.items()}
     with _PUBLISH_LOCK:
@@ -425,21 +422,29 @@ def _publish(capture: Dict[str, Any]) -> bool:
             return not _STATE["write_failed"]
         # After a failed write the bundle on disk is unknown: byte equality with the last cache proves nothing,
         # so every document is rewritten under a new generation and certified (R2/R3-A).
-        changed = (previous is None or previous[:2] != (_queue().QUEUE_SNAPSHOT_PATH, encoded) or capture["forced"]
-                   or _STATE["write_failed"])
-        generation = uuid.uuid4().hex if changed else previous[2]
+        if (previous is None or previous[0] != _queue().QUEUE_SNAPSHOT_PATH or capture["forced"]
+                or _STATE["write_failed"]):
+            stale = list(documents)
+        else:
+            stale = [name for name in documents if previous[1].get(name) != encoded[name]]
+        changed = bool(stale)
+        generations = dict(previous[3]) if previous is not None else {}
+        if changed:
+            generations.update(dict.fromkeys(stale, uuid.uuid4().hex))
         state = _queue().QUEUE_SNAPSHOT_PATH.parent
         try:
             if changed:
                 _revoke_alive(state)  # A partial publish must not certify the old no-fence document.
-                for name, document in documents.items():
-                    published = {**document, "generation": generation, "ts": utc_now_iso(), "reason": capture["reason"]}
+                for name in stale:
+                    published = {**documents[name], "generation": generations[name], "ts": utc_now_iso(),
+                                 "reason": capture["reason"]}
                     if _queue().atomic_write_text(state / name, machine_json(published)) is False:
                         raise OSError(f"queue publication failed: {name}")
             if changed or _alive_due(capture["heartbeats"]):
-                _certify(state, generation, capture["heartbeats"])
+                _certify(state, generations, capture["heartbeats"])
             if changed:
-                _queue().QUEUE_PUBLICATION = (_queue().QUEUE_SNAPSHOT_PATH, encoded, generation)
+                _queue().QUEUE_PUBLICATION = (_queue().QUEUE_SNAPSHOT_PATH, encoded, generations[_SNAPSHOT_NAME],
+                                              generations)
             _STATE["published"] = max(_STATE["published"], capture["revision"])
             _STATE["published_seq"] = max(_STATE["published_seq"], capture["seq"])
             _STATE["census"] = capture["census"]  # written, so the tick's next census compares against it
@@ -471,7 +476,7 @@ def _refresh_alive() -> Optional[bool]:
         if _queue().QUEUE_PUBLICATION is not published:
             return True  # a publication landed meanwhile and certified itself
         try:
-            _certify(_queue().QUEUE_SNAPSHOT_PATH.parent, published[2], heartbeats)
+            _certify(_queue().QUEUE_SNAPSHOT_PATH.parent, published[3], heartbeats)
         except Exception:
             log.warning("Failed to refresh queue liveness", exc_info=True)
             return False
@@ -494,9 +499,13 @@ def _revoke_alive(state) -> None:
             time.sleep(0.01)  # Windows readers briefly deny delete sharing.
 
 
-def _certify(state, generation: str, heartbeats: Dict[str, Any]) -> None:
-    """``queue.alive`` names the generation on disk; written without fsync (a crash loses only freshness)."""
-    alive = {"generation": generation, "ts": utc_now_iso(), "heartbeats": heartbeats}
+def _certify(state, generations: Dict[str, str], heartbeats: Dict[str, Any]) -> None:
+    """``queue.alive`` names each document's generation on disk (``generation``: the snapshot's; ``documents``: the
+    others', absent when they share it); written without fsync (a crash loses only freshness)."""
+    others = {name: generation for name, generation in generations.items()
+              if name != _SNAPSHOT_NAME and generation != generations[_SNAPSHOT_NAME]}
+    alive = {"generation": generations[_SNAPSHOT_NAME], "ts": utc_now_iso(), "heartbeats": heartbeats,
+             **({"documents": others} if others else {})}
     if _write_alive(state / _ALIVE_NAME, json.dumps(alive, separators=(",", ":"))) is False:
         raise OSError("queue liveness publication failed")
     _STATE["alive_heartbeats"] = dict(heartbeats)

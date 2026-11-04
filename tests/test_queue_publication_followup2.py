@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import queue_observation, task_status
-from supervisor import direct_roots, queue, queue_publication, queue_snapshot
+from supervisor import queue, queue_publication, queue_snapshot
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 MARK = "persist_queue_snapshot"
@@ -38,7 +38,6 @@ def published(tmp_path, monkeypatch):
         monkeypatch.setattr(queue, name, value)
     monkeypatch.setattr(queue_snapshot, "_RESTORED", set())
     monkeypatch.setattr(queue_snapshot, "_RESTORING", {})
-    monkeypatch.setattr(direct_roots, "collect_direct_roots", lambda: {"roots": [], "incomplete": False})
     monkeypatch.setattr(queue_publication, "utc_now_iso", lambda: datetime.fromtimestamp(now[0], timezone.utc).isoformat())
     monkeypatch.setattr(queue_publication, "time", SimpleNamespace(monotonic=lambda: now[0], sleep=lambda _s: None))
     for module in (queue_observation, task_status):

@@ -324,10 +324,7 @@ def test_queue_init_hands_the_direct_root_roster_over_and_clears_it(qenv):
 
     assert qenv.q.PRIOR_DIRECT_ROOTS["task_ids"] == ["handed-over"]
     assert qenv.q.PRIOR_DIRECT_ROOTS["incomplete"] is False
-    payload = json.loads(
-        (qenv.drive / "state" / "direct_roots.json").read_text(encoding="utf-8")
-    )
-    assert payload["roots"] == [] and payload["incomplete"] is False
+    assert not (qenv.drive / "state" / "direct_roots.json").exists(), "taken over and removed: nothing rewrites it"
 
 
 def test_startup_takes_the_roster_over_before_restore_reads_it():

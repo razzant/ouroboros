@@ -80,19 +80,20 @@ def test_genuinely_orphaned_pool_still_settles_across_processes(tmp_path, fields
     assert load_task_result(tmp_path, "pooled")["reason_code"] == "orphaned_running_after_worker_restart"
 
 
-@pytest.mark.parametrize("evidence", ["missing", "stale", "incomplete", "unreadable", "fresh"])
-def test_direct_fragment_is_only_positive_evidence(tmp_path, evidence):
+@pytest.mark.parametrize("leftover", ["missing", "fresh_listing", "unreadable"])
+def test_a_leftover_direct_fragment_is_no_evidence(tmp_path, leftover):
+    """Every live focus is a RUNNING row of the queue snapshot; the retired ``direct_roots.json`` is read by
+    nothing, so a fresh leftover of an older body listing the task proves no live turn (and an unreadable one
+    breaks nothing): the observation stays unknown, which settles no task."""
     _seed(tmp_path, "direct", "direct", _is_direct_chat=True)
     path = tmp_path / "state" / "direct_roots.json"
-    if evidence == "unreadable":
+    if leftover == "unreadable":
         path.write_text("{", encoding="utf-8")
-    elif evidence != "missing":
-        write_queue_document(path, {"ts": _stamp(time.time() - (20 if evidence == "stale" else 0)),
-                                  "incomplete": evidence == "incomplete",
-                                  "roots": [] if evidence == "incomplete" else [{"task_id": "direct"}]})
+    elif leftover == "fresh_listing":
+        write_queue_document(path, {"ts": _stamp(time.time()), "incomplete": False, "roots": [{"task_id": "direct"}]})
     row = load_effective_task_result(tmp_path, "direct", materialize_artifacts=False)
     assert row["status"] == "running"
-    assert row["execution_observation"]["state"] == ("active" if evidence == "fresh" else "unknown")
+    assert row["execution_observation"]["state"] == "unknown" and "direct_roots" not in row["execution_observation"]
     assert reconcile_orphaned_running_tasks(tmp_path) == 0
     write_task_result(tmp_path, "direct", "completed", result="done")
     assert load_effective_task_result(tmp_path, "direct")["execution_observation"]["state"] == "terminal"
