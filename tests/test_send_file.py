@@ -4,6 +4,8 @@ import types
 
 import pytest
 
+from tests.test_main_notice import host as host  # real supervisor/bus fixture
+
 from ouroboros.tools.core import _MAX_LINK_ACTIONS, _send_links
 from ouroboros.tools.core_artifacts import _send_file, _detect_document_mime, _MAX_DOCUMENT_FILE_BYTES
 from ouroboros.gateway.files import download_url_for_local_file
@@ -20,6 +22,59 @@ def _make_ctx(chat_id=123, drive_root=None):
 
 
 class TestSendFile:
+    @pytest.mark.parametrize("bind_before_send", [True, False])
+    def test_delivered_document_follows_its_work_not_the_project_named_in_its_filename(
+        self, tmp_path, host, bind_before_send,
+    ):
+        import queue
+
+        from tests.test_room_appearances import _project, _born_in, _ctx, _read
+        from ouroboros import dialogue_store as ds
+        from ouroboros.projects_registry import bind_task_to_project
+        from ouroboros.tools.core_artifacts import _send_file
+        from supervisor.events_chat_delivery import _handle_send_document
+        from supervisor.message_bus import get_bridge
+
+        host.ctx.bridge = get_bridge()
+        project = _project(tmp_path, "circles")
+        other = _project(tmp_path, "other")
+        _born_in(tmp_path, "audit-root", 1)
+
+        def bind():
+            bind_task_to_project(tmp_path, "audit-root", "circles", project,
+                                 origin={"absent": "system"})
+
+        if bind_before_send:
+            bind()
+        source = tmp_path / "Circles-now.html"
+        source.write_text("<p>A project-specific audit.</p>", encoding="utf-8")
+        q = queue.Queue()
+        ctx = _ctx(tmp_path, "audit-root", 1, q)
+        assert _send_file(ctx, file_path=str(source), caption="Audit preview").startswith("OK:")
+        event = q.get_nowait()
+        _handle_send_document(event, host.ctx)
+        documents = [frame for frame in host.frames if frame.get("type") == "document"]
+        assert len(documents) == 1
+        frame = documents[0]
+        assert frame["chat_id"] == (project if bind_before_send else 1)
+
+        def delivered_in(chat):
+            return [row for row in _read(tmp_path, chat)[1]["messages"]
+                    if row.get("msg_type") == "document"]
+
+        if not bind_before_send:
+            # Merely naming Circles cannot pull a personal Main artifact into that room.
+            assert len(delivered_in(1)) == 1
+            assert not delivered_in(project)
+            bind()
+        # Placement also makes an earlier delivery readable without sending its bytes again.
+        (document,) = delivered_in(project)
+        assert document["filename"] == "Circles-now.html"
+        assert document["download_url"] == frame["download_url"]
+        assert not delivered_in(1) and not delivered_in(other)
+        assert len([entry for entry in ds.iter_rows(tmp_path, "chat")
+                    if entry.row.get("type") == "document"]) == 1
+
     def test_file_path_reads_document(self, tmp_path):
         doc = tmp_path / "report.csv"
         doc.write_text("a,b,c\n1,2,3\n", encoding="utf-8")

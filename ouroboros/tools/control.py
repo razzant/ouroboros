@@ -367,8 +367,11 @@ def get_tools() -> List[ToolEntry]:
                 "reply_to_relay": {"type": "string", "description": "Reply to a drained relay in its source room; this work's Project shows the same answer. Empty selects the single open relay; omit for an ordinary room message."},
                 "destination": {"type": "string", "enum": ["current", "main"], "default": "current",
                                 "description": "'current' (default): this work's room. 'main': also the "
-                                               "owner's main chat, for a substantive message that needs the owner "
-                                               "there while this work lives in an owner-visible Project room. One "
+                                               "owner's main chat while this work lives in an owner-visible Project "
+                                               "room, for an expected result, a decision or a substantial change to "
+                                               "what the owner relies on (such as lost promised verification or "
+                                               "unique data, risk to shared work, a correction of a reported "
+                                               "result), even when a workaround means they need not act. One "
                                                "message: the Project shows it too, and it is read once; it is not "
                                                "this task's answer. A Presence root reports privately, with host-bound "
                                                "source attribution, including from Silent places: Main keeps its "
