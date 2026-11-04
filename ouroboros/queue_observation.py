@@ -12,13 +12,13 @@ import threading
 import time
 from typing import Any, Dict, Optional
 
+from ouroboros.shared_values import SHARED_KEY, SharedValueMissing, token_digest
 from ouroboros.utils import read_json_dict
 
 _sleep = time.sleep  # the in-flight re-read's pause, kept apart from frozen test clocks
 _monotonic = time.monotonic
 
-#: The publisher's table of shared task values and the key of a row's reference into it.
-SHARED_KEY = "$shared"
+#: ``SHARED_KEY`` (``shared_values``) names the publisher's table of shared task values and a row's reference into it.
 #: A ``queue.alive`` stamp older than this proves no live supervisor to its readers (``task_status``);
 #: the publisher refreshes it well inside this bound.
 QUEUE_ALIVE_FRESH_SEC = 10.0
@@ -38,20 +38,21 @@ def queue_stamp(document: dict, *, boot: bool = False) -> dict:
 def expand_shared(document: dict) -> dict:
     """Resolve every ``{"$shared": address}`` in the rows from the document's own table, in place.
 
-    A reference the table does not answer is a malformed document (``ValueError``): a row
-    with a hole is never handed to a reader as the task it names.
+    A reference the table does not answer is a malformed document (``SharedValueMissing``, a
+    ``ValueError``): a row with a hole is never handed to a reader as the task it names.
     """
     shared = document.pop(SHARED_KEY, None)
     if not isinstance(shared, dict):
         return document
 
     def value_of(item: Any) -> Any:
-        if isinstance(item, dict) and len(item) == 1 and SHARED_KEY in item:
-            try:
-                return shared[item[SHARED_KEY]]
-            except (KeyError, TypeError):
-                raise ValueError(f"queue document names a shared value it does not carry: {item[SHARED_KEY]!r}")
-        return item
+        digest = token_digest(item)
+        if not digest:
+            return item
+        try:
+            return shared[digest]
+        except KeyError:
+            raise SharedValueMissing(digest, "queue document") from None
 
     for lane in ("pending", "running"):
         for row in document.get(lane) or []:

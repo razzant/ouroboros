@@ -6,8 +6,8 @@ captures the rows under Q when the revision moved and serializes and writes them
 Q. The capture copies containers only (``_frozen``): strings are shared, so the owner's
 text is never copied under the lock. A large task value that appears in more than one place (the
 owner's message in twenty rows, the task contract twice per row) is published once, by
-content address (``$shared``), so the document carries the owner's words once; ``queue_observation.load_queue_document``
-expands them in memory, so every reader still sees the whole row.
+content address (``$shared``, the reference ``ouroboros/shared_values.py`` owns), so the document carries the owner's
+words once; ``queue_observation.load_queue_document`` expands them in memory, so every reader still sees the whole row.
 
 The publication order a reader relies on is kept: the old ``queue.alive`` certificate is
 revoked, the documents land (fsync), the new certificate names them (no fsync). Two
@@ -50,6 +50,7 @@ from typing import Any, Dict, Optional
 from ouroboros.contracts.schema_versions import SCHEMA_VERSION_KEY
 from ouroboros.project_admission import carried_basis
 from ouroboros.queue_observation import QUEUE_ALIVE_FRESH_SEC, SHARED_KEY
+from ouroboros.shared_values import token
 from ouroboros.subagents import subagent_intent_fields
 from ouroboros.utils import machine_json, utc_now_iso, write_text_atomic
 from supervisor.queue_snapshot import QUEUE_SNAPSHOT_SCHEMA_VERSION, _PENDING_FIELDS, _keeps_saved_queue
@@ -518,7 +519,7 @@ def _share_replicated(payload: Dict[str, Any]) -> Dict[str, Any]:
         value, count = seen[digest]
         if count > 1:
             shared.setdefault(digest, value)
-            container[key] = {SHARED_KEY: digest}
+            container[key] = token(digest)
     return shared
 
 
