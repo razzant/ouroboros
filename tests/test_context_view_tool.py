@@ -4,6 +4,8 @@ import copy
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from ouroboros.tools.compact_context import _compact_context, record_context_view
 from ouroboros.loop_round_limits import _CompactionRoundContext, _run_round_compaction
 
@@ -105,3 +107,65 @@ def test_omitted_revision_binds_this_actors_actual_send_without_inspection(tmp_p
     assert current[-1] in result
     assert other._last_context_observation["messages"][0]["content"] == "Another actor"
     assert _compact_context(ctx, expected_view_revision="unrelated", working_note="stale", keep_unit_ids=[]).startswith("Context view mismatch")
+
+
+@pytest.mark.parametrize("outcome", ["applied", "fit_rejected", "no_op", "store_error"])
+def test_checkpoint_event_keeps_final_facts_and_resolves_saved_structures(tmp_path, monkeypatch, outcome):
+    from ouroboros import artifacts, loop
+    from ouroboros.loop_round_limits import _run_authored_context_view
+    from ouroboros.tools.chronicle import _memory_read
+
+    ctx = SimpleNamespace(active_context_mode="low")
+    messages, schemas, events = _source(), [], []
+    record_context_view(ctx, messages, schemas)
+    _compact_context(ctx, working_note="" if outcome == "no_op" else "I retain the conclusion.")
+
+    def fit(candidate, tools):
+        last = candidate[-1].get("content")
+        final = isinstance(last, str) and last.startswith("[Context view receipt]")
+        return {"accepted": not (outcome == "fit_rejected" and final), "measured_final": final}
+
+    frame = _context(tmp_path, ctx, schemas, monkeypatch, fit)
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda q, t, logs, event: events.append(copy.deepcopy(event)))
+    store = artifacts.store_actor_source_bytes
+
+    def save(*args, **kwargs):
+        if outcome == "store_error" and json.loads(kwargs["data"]).get("stage") == "candidate_materialization":
+            raise OSError("receipt storage unavailable")
+        return store(*args, **kwargs)
+
+    monkeypatch.setattr(artifacts, "store_actor_source_bytes", save)
+    candidate = _run_authored_context_view(messages, frame, ctx._pending_compaction, None)
+    event, = events
+    receipt = ctx._context_view_receipt
+    assert event["status"] == receipt["status"] == ("applied" if outcome == "store_error" else outcome)
+    assert event["checkpoint_kind"] == "context_view" and event["round"] == 1
+    if outcome in ("no_op", "store_error"):
+        assert "receipt_source" not in event and "at_source" not in event
+        assert event == {"checkpoint_kind": "context_view", "round": 1, **receipt}
+        if outcome == "no_op":
+            assert candidate is messages
+        else:
+            assert '"receipt_source": "unavailable"' in candidate[-1]["content"]
+        return
+
+    source = event["receipt_source"]
+    assert source["task_id"] == "view-task" and source["read"]["tool"] == "memory_read"
+    reader = SimpleNamespace(task_id="another-reader", drive_root=tmp_path, budget_drive_root=tmp_path)
+    text = _memory_read(reader, **source["read"]["arguments"])
+    saved = json.loads(text.split("\n", 2)[2])
+    assert saved["stage"] == event["receipt_stage"] == "candidate_materialization"
+    assert saved["published"] is False and saved["receipt"]["status"] == "applied"
+    assert event["at_source"]["source_refs"] == len(saved["receipt"]["source_refs"]) > 0
+    for key, count in event["at_source"].items():
+        assert key not in event
+        assert saved["receipt"][key] == json.loads(json.dumps(receipt[key]))
+        assert count == len(saved["receipt"][key])
+    if outcome == "fit_rejected":
+        assert candidate is messages and event["fit"] == {"accepted": False, "measured_final": True}
+    else:
+        assert event["view_revision"] == event["after_transcript_sha256"] == receipt["view_revision"]
+        assert event["fit_after"] == {"accepted": True, "measured_final": True}
+        model_notice = json.loads(candidate[-1]["content"].split("\n", 1)[1])
+        assert "task_id" not in model_notice["receipt_source"]
+        assert model_notice["receipt_source"]["read"]["tool"] == "read_file"
