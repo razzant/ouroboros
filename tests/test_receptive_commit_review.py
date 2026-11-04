@@ -201,6 +201,20 @@ def _commit(a, outcome, key="result", message="Change value", paths=("change.py"
     return _produce(a, run)
 
 
+def _collected_at_zero(a, reference, settled):
+    """What collecting a settled round at $0 owes (``settle_completed_round``, #2410), on the wave's own rows: the
+    call's own row names the settled record yet bought nothing (unpaid, no custody), the settled row keeps its paid
+    outcome with no custody left, and no third row names that record."""
+    from ouroboros.review_state import _attempt_has_active_review_custody
+
+    rows = {row.attempt: row for row in load_state(a.data).attempts if row.review_record_id == settled.review_record_id}
+    own, old = rows[reference["attempt"]], rows[settled.attempt]
+    assert sorted(rows) == sorted({own.attempt, old.attempt}) and own.attempt != old.attempt, rows
+    assert not own.paid and not _attempt_has_active_review_custody(own), own
+    assert old.paid and (old.status, old.phase) == ("reviewed", "review_only"), old
+    assert not _attempt_has_active_review_custody(old), old
+
+
 def _read_mail(a):
     """The loop's round-top drain: before its next call the author has read every message."""
     drain_owner_entries(a.data, TASK, a.ctx._loop_mailbox_seen_ids, 1)
@@ -253,7 +267,9 @@ def test_mail_ends_the_author_wait_reviewers_continue_over_frozen_bytes_and_git_
     assert again["result"].startswith("Review outcome returned before commit."), again["result"]
     assert sorted(a.reviewer.rounds) == ["m1", "m2"], "no second paid send"
     reference = json.loads(again["result"].split("\n", 1)[1])["review_reference"]
-    assert reference["attempt"] == attempt.attempt
+    # Settled, the wave is a completed round: the call collects ITS record at $0 under its own row (#2587/#2590).
+    assert reference["review_record_id"] == attempt.review_record_id
+    _collected_at_zero(a, reference, attempt)
     # Only the explicit continuation commits, over the current bytes.
     (a.repo / "change.py").write_text("value = 3\n", encoding="utf-8")
     final = {}
@@ -557,7 +573,8 @@ def test_a_late_settlement_after_another_call_touches_only_its_own_attempt(autho
     again = {}
     _join(_commit(a, again))
     assert again["result"].startswith("Review outcome returned before commit."), again["result"]
-    assert json.loads(again["result"].split("\n", 1)[1])["review_reference"]["attempt"] == left.attempt
+    assert json.loads(again["result"].split("\n", 1)[1])["review_reference"]["review_record_id"] == left.review_record_id
+    _collected_at_zero(a, json.loads(again["result"].split("\n", 1)[1])["review_reference"], left)
     collected = next(row for row in load_state(a.data).attempts if row.attempt == left.attempt)
     assert {row["slot_id"] for row in collected.triad_raw_results} >= {"first", "second"}
     assert sorted(a.reviewer.rounds) == ["m1", "m1", "m2", "m2"] and _commit_count(a) == 1
@@ -606,7 +623,8 @@ def test_a_distinct_candidate_gets_its_own_panel_while_the_left_wave_keeps_custo
     again = {}
     _join(_commit(a, again))
     assert again["result"].startswith("Review outcome returned before commit."), again["result"]
-    assert json.loads(again["result"].split("\n", 1)[1])["review_reference"]["attempt"] == a_attempt.attempt
+    assert json.loads(again["result"].split("\n", 1)[1])["review_reference"]["review_record_id"] == a_attempt.review_record_id
+    _collected_at_zero(a, json.loads(again["result"].split("\n", 1)[1])["review_reference"], a_attempt)
     assert len(a.reviewer.rounds) == rounds == 4, "the exact A identity was collected, not re-bought"
     assert _commit_count(a) == 1
 
@@ -937,12 +955,12 @@ def test_a_failed_settled_duty_write_recovers_from_retained_seats_while_controll
     a = author
     real_owe, written, refused = late_review_marks.owe_after_end, [], []
 
-    def refuse_rewrites(drive_root, duty_id, duty):
+    def refuse_rewrites(drive_root, duty_id, duty, *, replace=True):
         if duty_id in written:
             refused.append(dict(duty))
             return False
         written.append(duty_id)
-        return real_owe(drive_root, duty_id, duty)
+        return real_owe(drive_root, duty_id, duty, replace=replace)
 
     with monkeypatch.context() as fault:
         fault.setattr(late_review_marks, "owe_after_end", refuse_rewrites)
@@ -1112,3 +1130,75 @@ def test_refused_author_continuation_preserves_source_and_corrected_reference(au
                   author_disposition=decision))
     assert "REVIEW_AUTHOR_CONTINUATION_INVALID" not in out["corrected"], out["corrected"]
     assert a.reviewer.rounds == rounds
+
+
+@pytest.mark.parametrize("mode,enforcement", [("pro", "advisory"), ("pro", "blocking"), ("cyber_pro", "advisory")])
+def test_a_settled_left_wave_frees_the_corrected_candidate_and_reads_back_without_its_bytes(author, monkeypatch,
+                                                                                            mode, enforcement):
+    """#2587/#2590 through the public tool, under ordinary Advisory, Blocking and Cyber Pro. The first wave finds a
+    critical bug; mail releases the author and the wave settles FAIL in the background. The unchanged identical call
+    collects that FAIL at $0 with no Git effect. With the settled round's checkout released, its reference returns
+    the whole old outcome read-only without reverting the author's correction; the corrected candidate gets its own
+    panel instead of waiting on finished work, and the old record keeps its FAIL."""
+    import shutil
+
+    from ouroboros import config
+    from ouroboros.review_ledger import load_record
+    from ouroboros.tools.review_subject import round_checkout_repo
+
+    config.reset_runtime_mode_baseline_for_tests()
+    config.initialize_runtime_mode_baseline(mode)
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
+    a, outcome, answered, chat = author, {}, {}, author.reviewer.chat
+
+    def first_wave_fails(messages, model, model_role="", **kwargs):
+        response, usage = chat(messages, model, model_role, **kwargs)
+        answered[model] = answered.get(model, 0) + 1
+        if answered[model] == 1:  # the first wave finds a critical bug; later waves judge the correction
+            answer = json.loads(response["content"])
+            answer.update(change_clean=False, change=[{"item": "bug", "verdict": "FAIL", "severity": "critical",
+                                                       "reason": "change.py sets the wrong value"}])
+            response = {"content": json.dumps(answer)}
+        return response, usage
+    a.reviewer.chat = first_wave_fails
+    head = _git(a.repo, "rev-parse", "HEAD")
+    thread = _commit(a, outcome)
+    assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
+    write_owner_message(a.data, "How is the commit going?", TASK)
+    _join(thread)
+    left = load_state(a.data).attempts[-1]
+    reference = {"surface": "commit", "review_record_id": left.review_record_id, **{key: getattr(left, key) for key in (
+        "repo_key", "task_id", "tool_name", "attempt", "pre_review_fingerprint")}}
+    a.reviewer.release()
+    until(lambda: _notices(a))
+    settled = next(row for row in load_state(a.data).attempts if row.attempt == left.attempt)
+    assert (settled.status, settled.phase, settled.late_result_pending) == ("reviewed", "review_only", False)
+    assert load_record(a.data, left.review_record_id)["verdict"]["aggregate"] == "FAIL"
+    _read_mail(a)
+    unchanged = {}
+    _join(_commit(a, unchanged))  # the same bytes and intent: the settled FAIL, collected at $0
+    assert sorted(a.reviewer.rounds) == ["m1", "m2"] and _git(a.repo, "rev-parse", "HEAD") == head, unchanged
+    assert "REVIEWED_ATTEMPT_IN_PROGRESS" not in unchanged["result"], unchanged["result"]
+    shutil.rmtree(round_checkout_repo(a.ctx, left.review_retry_key, TASK).parent, ignore_errors=True)
+    (a.repo / "change.py").write_text("value = 3\n", encoding="utf-8")  # the author's correction, staged
+    _git(a.repo, "add", "change.py")
+    index = _git(a.repo, "ls-files", "-s")
+
+    with _parent(a):
+        read = a.git._commit_reviewed(a.ctx, review_reference=reference)
+
+    assert read.startswith("Review outcome already settled, returned read-only"), read
+    shown = json.JSONDecoder().raw_decode(read, read.index("{"))[0]
+    assert shown["aggregate"] == "FAIL" and shown["findings"]["critical_findings"] and len(shown["rows"]) == 2, shown
+    assert (a.repo / "change.py").read_text(encoding="utf-8") == "value = 3\n" and _git(a.repo, "ls-files", "-s") == index
+    assert _git(a.repo, "rev-parse", "HEAD") == head and sorted(a.reviewer.rounds) == ["m1", "m2"]
+    corrected = {}
+    _join(_commit(a, corrected))
+    result = corrected["result"]
+    assert "REVIEWED_ATTEMPT_IN_PROGRESS" not in result and "this other intent waits" not in result, result
+    assert sorted(a.reviewer.rounds) == ["m1", "m1", "m2", "m2"], "the corrected candidate got its own panel"
+    if (mode, enforcement) == ("pro", "blocking"):
+        assert _git(a.repo, "show", "HEAD:change.py") == "value = 3", result
+    else:
+        assert result.startswith("Review outcome returned before commit."), result
+    assert load_record(a.data, left.review_record_id)["verdict"]["aggregate"] == "FAIL"

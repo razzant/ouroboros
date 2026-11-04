@@ -434,6 +434,7 @@ def _stage_candidate_for_review(
         return fail(_publish_git_error(ctx, f"⚠️ GIT_ERROR ({label}): {_sanitize_git_error(str(exc))}"))
 
     staged: Dict[str, str] = {}
+    gone: List[str] = []  # reviewed entries Git now stages as none (``replaced_by_directories``): only their removal
     if paths is not None:
         try:
             paths = [_git().safe_relpath(path) for path in paths if str(path).strip()]
@@ -441,11 +442,13 @@ def _stage_candidate_for_review(
             return fail(f"⚠️ PATH_ERROR: {exc}")
         if not paths:
             return fail("⚠️ PATH_ERROR: paths names no file, so nothing was staged; name the files, or omit paths.")
+        from ouroboros.tools.release_sync import CARRIER_SPAN_PATHS
+        from ouroboros.tools.review_collection import replaced_by_directories
+
         try:
-            staged = _git()._staged_index(ctx.repo_dir)
+            staged, gone = _git()._staged_index(ctx.repo_dir), replaced_by_directories(ctx, paths)
         except Exception as exc:
             return git_failure("staged-status", exc)
-        from ouroboros.tools.release_sync import CARRIER_SPAN_PATHS
 
         allowed = set(paths) | (set(CARRIER_SPAN_PATHS) if "VERSION" in paths else set())
         if rejoin and attribution is not None:
@@ -469,12 +472,14 @@ def _stage_candidate_for_review(
             _git()._ensure_gitignore(ctx.repo_dir)
             add_cmd = ["git", "add", "-A"]
         else:
-            names = [path for path in paths if staged.get(path) != "D" or os.path.lexists(repo / path)]
+            names = [path for path in paths if path not in gone and (staged.get(path) != "D" or os.path.lexists(repo / path))]
             add_cmd = ["git", "--literal-pathspecs", "add", "--", *names] if names else []
         ctx._staged_selection = WHOLE_INDEX if paths is None else sorted(set(paths) | set(staged))
         try:
             if add_cmd:
                 _git().run_cmd(add_cmd, cwd=ctx.repo_dir)
+            if gone:  # exact entries, never pathspecs: nothing below them is added
+                _git().run_cmd(["git", "update-index", "--force-remove", "--", *gone], cwd=ctx.repo_dir)
         except Exception as exc:
             return git_failure("add", exc)
         if paths is None and not _git()._authorized_managed_update_resolver(ctx):
@@ -550,7 +555,7 @@ def _reset_commit_review_state(ctx):
     ctx._review_custody_lost = False
     ctx._current_review_attempt_number = None
     ctx._collect_commit_source = ctx._review_collected_peer = None  # the reference or exact peer this call collects
-    ctx._author_commit_source = None
+    ctx._author_commit_source = ctx._author_commit_scope = None  # the reference's reviewed subject (``author_scope``)
     ctx._author_commit_decision = None
     ctx._author_commit_record = None
     ctx._commit_review_status = "unknown"
@@ -656,22 +661,18 @@ def _reviewed_stage_cycle(
     pre_fingerprint = _git()._fingerprint_staged_diff(pathlib.Path(ctx.repo_dir))
     if not pre_fingerprint.get("ok"):
         if bool(getattr(ctx, "_review_resume_pending", False)):
-            return {
-                "status": "blocked",
-                "message": "⚠️ REVIEW_BINDING_UNAVAILABLE: cannot verify the exact pending review identity; no new dispatch was started.",
-                "block_reason": "fingerprint_unavailable",
-                "pre_fingerprint": pre_fingerprint,
-                "post_fingerprint": {},
-            }
-        return {
-            "status": "blocked",
-            "message": _git()._handle_revalidation_failure(
+            message = "⚠️ REVIEW_BINDING_UNAVAILABLE: cannot verify the exact pending review identity; no new dispatch was started."
+        else:
+            message = _git()._handle_revalidation_failure(
                 ctx,
                 commit_message,
                 commit_start,
                 pre_fingerprint=pre_fingerprint,
                 kind="fingerprint_unavailable",
-            ),
+            )
+        return {
+            "status": "blocked",
+            "message": message,
             "block_reason": "fingerprint_unavailable",
             "pre_fingerprint": pre_fingerprint,
             "post_fingerprint": {},

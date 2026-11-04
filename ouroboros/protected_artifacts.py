@@ -249,7 +249,9 @@ def _operation_denied(record: Dict[str, Any], operation: str) -> bool:
     return str(record.get("role") or "") == "black_box_reference" and operation in _DEFAULT_DENIED_OPERATIONS
 
 
-def _matches(candidate: pathlib.Path, protected_path: pathlib.Path) -> bool:
+def _matches(candidate: pathlib.Path, protected_path: pathlib.Path, *, lexical: bool = False) -> bool:
+    """``lexical``: an asked address, which may not exist, is covered at or below a protected address whether or not
+    a directory exists there (``ResolvedResourceBinding.requested_path``)."""
     try:
         candidate_resolved = pathlib.Path(candidate).expanduser().resolve(strict=False)
         protected_resolved = pathlib.Path(protected_path).expanduser().resolve(strict=False)
@@ -257,7 +259,7 @@ def _matches(candidate: pathlib.Path, protected_path: pathlib.Path) -> bool:
         return False
     if candidate_resolved == protected_resolved:
         return True
-    if protected_resolved.is_dir():
+    if lexical or protected_resolved.is_dir():
         try:
             candidate_resolved.relative_to(protected_resolved)
             return True
@@ -295,18 +297,24 @@ def block_reason_for_path(
     operation: str,
     binding: ResolvedResourceBinding | None = None,
 ) -> str:
+    # A re-anchored READ (a capture or source opened where its writer kept it) keeps the policy of the address it
+    # asked for as well as of the target it opened (``ResolvedResourceBinding.requested_path``). The asked address
+    # moved because nothing exists there, so a protected directory covers it lexically.
+    asked = getattr(binding, "requested_path", None)
+    targets = [(pathlib.Path(target), False)] + ([(pathlib.Path(asked), True)] if asked is not None and pathlib.Path(
+        target) == getattr(binding, "target_path", None) else [])
     for record in _artifact_records(ctx):
         if not _operation_denied(record, operation):
             continue
         for raw_path in record.get("paths") or []:
             protected_path = _resolve_policy_path(ctx, str(raw_path), binding)
             protected_spellings = _policy_backend_spellings(ctx, str(raw_path), protected_path)
-            target_backend_spellings = _backend_spellings_for_host_path(ctx, pathlib.Path(target))
-            if (
+            if any(
                 protected_path is not None
-                and _matches(pathlib.Path(target), protected_path)
-                or _backend_spelling_matches(pathlib.Path(target), protected_spellings)
-                or bool(protected_spellings & target_backend_spellings)
+                and _matches(candidate, protected_path, lexical=lexical)
+                or _backend_spelling_matches(candidate, protected_spellings)
+                or bool(protected_spellings & _backend_spellings_for_host_path(ctx, candidate))
+                for candidate, lexical in targets
             ):
                 artifact_id = str(record.get("id") or pathlib.Path(str(raw_path)).name or "protected artifact")
                 return (

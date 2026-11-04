@@ -93,6 +93,66 @@ def _attempt_has_active_review_custody(item: "CommitAttemptRecord") -> bool:
     )
 
 
+def counted_roster_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The seats whose answers count for the verdict: every row but an additional adviser's."""
+    return [row for row in rows if not (row.get("additional") or (row.get("review_plan") or {}).get("additional"))]
+
+
+def attempt_counted_seats_closed(item: "CommitAttemptRecord") -> bool:
+    """Whether every counted seat of this attempt reached its outcome, whatever an additional seat still does: the
+    row left ``reviewing`` and no counted seat is pending or holds a start token. An adviser's physical custody stays
+    ``_attempt_has_active_review_custody``'s separate fact and never decides the counted outcome."""
+    from ouroboros.review_custody import _row_is_pending
+    from ouroboros.review_ledger import counted_pending
+
+    rows = _attempt_review_roster_rows(item)
+    counted = counted_roster_rows(rows)
+    return bool(counted) and item.status != "reviewing" and not counted_pending(rows) and not any(
+        _row_is_pending(row) or row.get("pending_invocation_id") for row in counted)
+
+
+def _row_operation(row: Dict[str, Any]) -> tuple:
+    return str(row.get("slot_id") or row.get("slot") or ""), str(row.get("operation_id") or "")
+
+
+def _open(row: Dict[str, Any]) -> bool:
+    return _review_roster_row_is_pending(row) or str(row.get("operation_state") or "") == "pending_dispatch"
+
+
+def _non_send(row: Dict[str, Any]) -> bool:
+    """A definite non-send (``not_dispatched``): no outcome, so a later send of that same operation may follow it."""
+    return "not_dispatched" in (str(row.get("status") or ""), str(row.get("operation_state") or ""))
+
+
+def late_write_outlived(existing: "CommitAttemptRecord | None", triad: Any, scope: Any,
+                        settled_operations: Any = None) -> bool:
+    """Whether a ``reviewing/late_wait`` write by a call still holding its pending snapshot adds nothing to its row,
+    because a collector already closed that row's counted seats (#2587): every row it names is one the row holds
+    under the same operation, settled or still running (an additional adviser). Written, it would reopen the
+    settled phase or open a second row that never expires. A row compacted out of the recent history keeps no rows:
+    the ``(slot, operation)`` pairs its bound settled record confirms closed stand for them (read outside the lock,
+    ``review_change_custody.late_write_check``). A new operation, a row naming none, a definite non-send or a row not
+    positively closed is written as before."""
+    from types import SimpleNamespace
+
+    if existing is not None and existing.raw_stripped and settled_operations is not None and existing.status != "reviewing":
+        known = set(settled_operations)
+    elif existing is not None and attempt_counted_seats_closed(existing):
+        known = {_row_operation(row) for row in _attempt_review_roster_rows(existing) if not _non_send(row)}
+    else:
+        return False
+    rows = _attempt_review_roster_rows(SimpleNamespace(triad_raw_results=triad or [], scope_raw_result=scope or {}))
+    return bool(rows) and all(_row_operation(row)[1] and _row_operation(row) in known for row in rows)
+
+
+def settled_row_outlives(old: Dict[str, Any], row: Dict[str, Any]) -> bool:
+    """A seat's own outcome keeps its row against a late snapshot of the SAME operation still open (#2587): that
+    writer read the seat before its collector settled it. A reopened seat names a new operation, and a definite
+    non-send is no outcome, so a later send of its operation is written."""
+    return (bool(_row_operation(row)[1]) and _row_operation(row) == _row_operation(old) and _open(row)
+            and not _open(old) and not _non_send(old))
+
+
 def checkpoint_pending_review_invocation(
     drive_root: pathlib.Path,
     *,
@@ -212,15 +272,19 @@ def settle_completed_round(
 ) -> "CommitAttemptRecord | None":
     """What a new explicit call of a review round owes the newest earlier attempt of that round (#2410).
 
-    Only a closed attempt whose every seat settled is decided, by ONE exact read of its own ledger record
-    (``review_record_id``): a settled usable verdict (PASS/FAIL) is returned, for the caller to collect with
-    that attempt's own roster instead of reserving a new wave; a settled wave without one has its process-local
-    replays (``review_custody``'s ``_review_settled_attempts``) retired, so the explicit call is a new physical
-    attempt rather than a replay of old operations under a fresh roster. An open, lost or unknown seat, or an
-    unreadable state or record, keeps every replay and returns nothing; ``_NO_RESEND`` and live workers are never
-    touched. ``exclude_attempt`` is the caller's own row. Custody's lock is taken after the reads, never inside."""
+    Only an attempt whose every counted seat settled is decided, by ONE exact read of its own ledger record
+    (``review_record_id``): a usable counted verdict (PASS/FAIL) is returned, for the caller to collect with
+    that attempt's own roster instead of reserving a new wave, even while an additional seat still runs (its
+    physical custody is its own; it never vetoes the counted outcome); a settled wave without one has its
+    process-local replays (``review_custody``'s ``_review_settled_attempts``) retired, so the explicit call is a
+    new physical attempt rather than a replay of old operations under a fresh roster. An open, lost or unknown
+    counted seat, or an unreadable state or record, keeps every replay and returns nothing; ``_NO_RESEND`` and
+    live workers are never touched. A row an earlier collector settled without its lifecycle projection gets its
+    exact repair first (``review_change_custody.repair_settled_attempt``). ``exclude_attempt`` is the caller's
+    own row. Custody's lock is taken after the reads, never inside."""
     from ouroboros.review_custody import _ACTIVE, _ACTIVE_LOCK, _NO_RESEND, _row_is_pending
-    from ouroboros.review_ledger import STATE_SETTLED, VERDICT_FAIL, VERDICT_PASS, ledger_root, load_record
+    from ouroboros.review_ledger import STATE_SETTLED, VERDICT_FAIL, VERDICT_PASS, counted_pending, ledger_root, load_record
+    from ouroboros.tools.review_change_custody import repair_settled_attempt
 
     try:
         attempts = [item for item in _rs().load_state(pathlib.Path(drive_root)).filter_attempts(
@@ -228,18 +292,21 @@ def settle_completed_round(
                     if review_retry_key and item.review_retry_key == review_retry_key
                     and int(item.attempt or 0) != int(exclude_attempt or 0)]
         attempt = max(attempts, key=lambda item: int(item.attempt or 0), default=None)
+        if attempt is not None and _attempt_has_active_review_custody(attempt):
+            attempt = repair_settled_attempt(drive_root, ledger_root(usage_ctx), attempt) or attempt
         rows = _attempt_review_roster_rows(attempt) if attempt is not None else []
-        if not rows or _attempt_has_active_review_custody(attempt) or any(
-                _row_is_pending(row) or row.get("pending_invocation_id") for row in rows):
+        if attempt is None or not attempt_counted_seats_closed(attempt):
             return None
         record = load_record(ledger_root(usage_ctx), attempt.review_record_id) if attempt.review_record_id else None
     except Exception:
         log.warning("the round's earlier review attempt is unreadable; its settled replays stay", exc_info=True)
         return None
-    if not record or record.get("state") != STATE_SETTLED:
+    if not record or counted_pending(record.get("rows") or []):
         return None
     if (record.get("verdict") or {}).get("aggregate") in (VERDICT_PASS, VERDICT_FAIL):
         return attempt
+    if record.get("state") != STATE_SETTLED or any(_row_is_pending(row) or row.get("pending_invocation_id") for row in rows):
+        return None  # retiring replays needs the whole wave closed, its additional seats included
     operations = {str(row.get("operation_id") or "") for row in rows} - {""}
     settled = getattr(usage_ctx, "_review_settled_attempts", None)
     with _ACTIVE_LOCK:

@@ -215,20 +215,23 @@ def build_review_status_payload(projection: Dict[str, Any], *, next_step: str, i
         "status_summary": _review_status_message(projection),
         "next_step": next_step,
     }
-    if selected_attempt is not None and selected_attempt.phase in {"review_only", "late_wait"}:
+    # A bound settled record (``selected_settled``, read by the caller) offers the same reference before a consumer
+    # repairs the row's own projection; this read-only diagnostic writes nothing.
+    settled = bool(projection.get("selected_settled"))
+    if selected_attempt is not None and (settled or selected_attempt.phase in {"review_only", "late_wait"}):
         from ouroboros.config import get_review_enforcement
         from ouroboros.review_records import review_outcome_received
 
-        received = review_outcome_received(
+        received = settled or review_outcome_received(
             [*selected_attempt.triad_raw_results, selected_attempt.scope_raw_result],
             findings=[*selected_attempt.critical_findings, *selected_attempt.advisory_findings],
             terminal=selected_attempt.phase == "review_only" and selected_attempt.status == "reviewed",
         )
         if get_review_enforcement() == "advisory" and received:
             payload["review_reference"] = {"surface": "commit", **{key: getattr(selected_attempt, key) for key in
-                ("repo_key", "task_id", "tool_name", "attempt", "pre_review_fingerprint")}}
+                ("repo_key", "task_id", "tool_name", "attempt", "pre_review_fingerprint", "review_record_id")}}
             payload["next_step"] = ("Read the returned findings. You may revise and request another permitted review, stop, or call "
-                "commit_reviewed with this review_reference and an explicit author_disposition/rationale to commit the current attributed candidate without a new panel. Independent checks still apply.")
+                "commit_reviewed with this review_reference and an explicit author_disposition/rationale to commit the current bytes of the paths it reviewed (or the paths you name) without a new panel. Independent checks still apply.")
     if projection.get("canonical_attempts_unreadable"):
         payload["canonical_attempts_unreadable"] = projection["canonical_attempts_unreadable"]
     if projection.get("advisory_run_archive"):

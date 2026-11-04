@@ -768,6 +768,7 @@ def ended_left_review(record: Dict[str, Any]) -> str:
         attempt, seats, gap = _left_seats(record)
         prior = _left_record(record)
         settled = None if gap else _settle_left_record(record, seats, final=True)
+        _settle_left_attempt(record, attempt, seats, settled, quiet=True)  # the mark never waits on the attempt row
         if settled and settled.get("state") == "pending":
             return "waiting"
         if record.get("left") == "unwaited" and _carries_whole(settled or prior, {
@@ -886,12 +887,34 @@ def _settled_aggregate(record: Dict[str, Any]) -> str:
     attempt, seats, gap = _left_seats(record)
     settled = None if gap else _settle_left_record(record, seats, final=False)
     if not settled or settled.get("state") != "settled":
+        _settle_left_attempt(record, attempt, seats, settled, quiet=True)  # counted completion, an adviser still running
         return ""
-    from ouroboros.tools.review_change_custody import settle_collected_attempt
-
-    settle_collected_attempt(_left_review_root(record), attempt, seats, settled)
+    _settle_left_attempt(record, attempt, seats, settled)
     record["revision"] = settled["revision"]
     return str((settled.get("verdict") or {}).get("aggregate") or "")
+
+
+def _settle_left_attempt(record: Dict[str, Any], attempt: Any, seats: List[Dict[str, Any]],
+                         settled: Optional[Dict[str, Any]], *, quiet: bool = False) -> None:
+    """The attempt row takes the seats its record just settled from, through the one shared writer
+    (``review_change_custody.settle_collected_attempt``): counted completion ends its review phase while an
+    additional seat still running keeps its own custody, and the whole-wave notice stays the settled record's.
+    Only seats with an outcome are handed over: a running, unsent or unknown seat keeps its row exactly as
+    recorded, the binding its next collection rejoins. ``quiet``: where the producer's own outcome never
+    depended on this row, a failure is logged instead of raised."""
+    from ouroboros.review_custody import _row_is_pending
+
+    closed = [seat for seat in seats if not _row_is_pending(seat)]
+    if not settled or attempt is None or not closed:
+        return
+    from ouroboros.tools.review_change_custody import settle_collected_attempt
+
+    try:
+        settle_collected_attempt(_left_review_root(record), attempt, closed, settled)
+    except Exception:
+        if not quiet:
+            raise
+        log.warning("left review %s: its attempt row keeps its custody as recorded", record.get("retry_key"), exc_info=True)
 
 
 def _left_review_mark(record: Dict[str, Any], attempt: Any, seats: List[Dict[str, Any]], gap: str,

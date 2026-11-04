@@ -1,9 +1,11 @@
-"""Collect an existing paid review by identity, before consulting mutable inputs."""
+"""Collect an existing paid review by identity, before consulting mutable inputs. An author continuation's
+reference names the subject that review covered the same way: its paths stay the default scope (#2680)."""
 from __future__ import annotations
 
 import concurrent.futures
 import contextvars
 import copy
+import os
 import pathlib
 
 
@@ -30,8 +32,11 @@ def resolve_reference(ctx, reference, *, commit=False):
     if not record or record.get("task_id") != str(ctx.task_id):
         raise ValueError("review_reference does not name this author's review record")
     root = pathlib.Path(ctx.drive_root) if commit else review_state_root(ctx)
-    attempt = next((row for row in reversed(load_state(root).attempts)
-                    if row.review_record_id == record_id and row.task_id == str(ctx.task_id)), None)
+    # A commit reference names its own attempt: a later call that collected the same settled record at $0 under
+    # its own row (``settle_completed_round``) leaves the original reference resolving to its original attempt.
+    named = reference.get("attempt") if commit and type(reference.get("attempt")) is int else None
+    attempt = next((row for row in reversed(load_state(root).attempts) if row.review_record_id == record_id
+                    and row.task_id == str(ctx.task_id) and named in (None, row.attempt)), None)
     # A wave reserves its roster before any seat sends and is paid only at its first send (#2410): the
     # reserved operations are the custody this reference collects, whether or not one was sent yet.
     reserved = attempt is not None and any(row.get("operation_id") for row in _attempt_review_roster_rows(attempt))
@@ -221,6 +226,18 @@ def commit_offer(ctx, record_id):
                                            "continuable_seats": offers}, ensure_ascii=False, default=str))
 
 
+def collect_commit_reference(ctx, reference, **request):
+    """The commit tools' collection by reference (``prepare_commit_collection``): the attempt this call resumes, or
+    its whole outcome before anything is staged, a refused reference (``TOOL_ARG_ERROR``) or a settled outcome
+    read back (``settled_read``)."""
+    from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+
+    try:
+        return prepare_commit_collection(ctx, reference, **request)
+    except ValueError as exc:
+        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=str(exc)))
+
+
 def prepare_commit_collection(ctx, reference, *, commit_message="", mutations=(), continue_seats=None):
     """Separate from Advisory author continuation: resume the paid gate itself (``continue_seats``: and its
     chosen stopped seats, armed only after the staged bytes match, ``bind_commit_collection``)."""
@@ -232,6 +249,10 @@ def prepare_commit_collection(ctx, reference, *, commit_message="", mutations=()
     ctx._collect_commit_continue_seats = None if continue_seats is None else (parse_selections(continue_seats) and continue_seats)
     if attempt.status == "succeeded":
         raise ValueError("this paid attempt already committed; collection cannot commit it again")
+    if continue_seats is None and (read := settled_read(ctx, attempt, record)):
+        return read
+    if attempt.raw_stripped:  # a compacted row keeps no roster to rejoin, and custody is never rebuilt from it
+        raise ValueError("the returned review outcome is missing or no longer has its exact evidence")
     ctx._collect_commit_source = attempt
     ctx._review_resume_pending = True
     ctx._pending_review_attempt = attempt
@@ -239,6 +260,183 @@ def prepare_commit_collection(ctx, reference, *, commit_message="", mutations=()
     ctx._current_review_record_id = record["record_id"]
     ctx._left_review_wait = copy.deepcopy(record.get("waiting") or {})
     return attempt
+
+
+def settled_read(ctx, attempt, record):
+    """Reading a settled commit review needs none of its old bytes back and rebuilds no custody: when its bound record
+    settled its counted seats (``review_change_custody.settled_record``) and either the index no longer holds the
+    staged bytes it reviewed or its attempt row was compacted out of the recent history (no rows left to rejoin), the
+    collection returns that whole recorded outcome before anything is staged, rendered as every review record is
+    (``review_change.review_result``: each seat's answer and findings) and published with its delivery receipt, the
+    files and index as they are. Nothing is collected, committed or inherited, and the record keeps its verdict:
+    a Blocking PASS stays the reviewed bytes' own. ``""`` when it does not apply."""
+    import json
+
+    from ouroboros.review_ledger import ledger_root
+    from ouroboros.review_waiting import publish_delivery
+    from ouroboros.tools import git as git_mod
+    from ouroboros.tools.review_change import review_result
+    from ouroboros.tools.review_change_custody import settled_record
+
+    settled = settled_record(ledger_root(ctx), attempt, record)
+    exact = git_mod._fingerprint_staged_diff(pathlib.Path(ctx.repo_dir)).get("fingerprint") == attempt.pre_review_fingerprint
+    if settled is None or (exact and not attempt.raw_stripped):
+        return ""
+    why = ("its attempt row was compacted out of the recent review history, so its custody is not rebuilt" if exact
+           else "the index no longer holds the bytes it reviewed")
+    payload = {**review_result(settled, reused=True), "review_reference": reference_for(settled, attempt)}
+    text = (f"Review outcome already settled, returned read-only: {why}, so nothing was staged, collected, committed, "
+            "tagged or pushed, and the files and index are unchanged. To land the current candidate, continue with this "
+            "review_reference and an author_disposition (Advisory or Cyber Pro), or ask for a new review.\n"
+            + json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    return publish_delivery(ctx, text, settled, rendered_rows=payload["rows"])
+
+
+def reviewed_subject(ctx, source):
+    """What the review an author continuation names covered: its record's base and tree, read once and bound to the
+    reference's own fingerprint, and their concrete paths in this repository (``diff-tree --no-renames -z``: rename
+    sides apart, names literal). ``{"error": ...}`` when that composition cannot be recovered."""
+    from ouroboros.mutation_attribution import _run_git
+    from ouroboros.review_ledger import ledger_root, load_record
+
+    record_id = str(getattr(source, "review_record_id", "") or "")
+    try:
+        record = load_record(ledger_root(ctx), record_id) if record_id else None
+    except ValueError as exc:
+        return {"error": f"its review record is unreadable ({exc})"}
+    subject = (record or {}).get("subject") or {}
+    base, tree = str(subject.get("base") or ""), str(subject.get("tree_sha") or "")
+    if record is None:
+        return {"error": "the review record it names is missing" if record_id else "this older review has no review record"}
+    if (record.get("fingerprints") or {}).get("binding") != source.pre_review_fingerprint or not (base and tree):
+        return {"error": "its review record does not bind the reviewed subject"}
+    try:
+        names = _run_git(pathlib.Path(ctx.repo_dir), "diff-tree", "-r", "--no-renames", "--name-only", "-z", base, tree)
+    except (OSError, RuntimeError) as exc:
+        return {"error": f"the reviewed trees are not readable in this repository ({exc})"}
+    paths = [name for name in names.split("\0") if name]
+    return {"base": base, "tree": tree, "paths": paths} if paths else {"error": "its review record names no changed path"}
+
+
+def _directories_without_entry(repo, names):
+    """Of ``names``, those whose path is a directory Git stages as no entry of its own. Git's evidence decides, never
+    the directory's shape: a gitlink indexed at the name is one entry (``git add`` keeps or moves it), and so is a
+    repository Git resolves there (``rev-parse --resolve-git-dir``) while nothing is indexed below the name; a
+    ``.git`` marker alone proves nothing. The files any other such directory holds are other paths."""
+    from ouroboros.mutation_attribution import _run_git
+
+    found = [name for name in names if (repo / name).is_dir() and not (repo / name).is_symlink()]
+    if not found:
+        return []
+    rows = [row.split("\t", 1) for row in _run_git(
+        repo, "--literal-pathspecs", "ls-files", "--stage", "-z", "--", *found).split("\0") if "\t" in row]
+    gitlinks = {path for entry, path in rows if entry.startswith("160000 ")}
+    below = {name for name in found for _entry, path in rows if path.startswith(f"{name}/")}
+
+    def repository(name):
+        try:
+            return os.path.lexists(repo / name / ".git") and bool(_run_git(repo, "rev-parse", "--resolve-git-dir",
+                                                                           f"{name}/.git").strip())
+        except RuntimeError:  # not a gitdir: a marker, an empty directory or a gitfile that resolves nowhere
+            return False
+    return [name for name in found if name not in gitlinks and (name in below or not repository(name))]
+
+
+def _unchanged_now(repo, names):
+    """Of ``names``, those that differ from HEAD neither in the index nor on disk: tracked and clean, or absent from
+    both (a directory Git stages as no entry there is none, ``_directories_without_entry``). An ignored file on disk
+    still differs, so staging answers for it as for any explicit selection."""
+    from ouroboros.mutation_attribution import _git_status_paths, _run_git
+
+    changed, tracked = set(_git_status_paths(repo)), set(_run_git(repo, "ls-files", "-z").split("\0"))
+    gone = set(_directories_without_entry(repo, [name for name in names if name not in changed and name not in tracked]))
+    return [name for name in names if name not in changed
+            and (name in tracked or not os.path.lexists(repo / name) or name in gone)]
+
+
+def replaced_by_directories(ctx, paths):
+    """Of the paths about to be staged, the reviewed entries an author continuation selected with paths omitted
+    (``author_scope``) whose names now hold a directory Git stages as no entry (``_directories_without_entry``):
+    staging removes each exact entry and adds nothing the directory holds, paths its review never named. An explicit
+    selection keeps Git's meaning of a directory."""
+    selected = set((getattr(ctx, "_author_commit_scope", None) or {}).get("selected") or ())
+    return _directories_without_entry(pathlib.Path(ctx.repo_dir), [path for path in paths if path in selected])
+
+
+def author_scope(ctx, *, paths_omitted):
+    """Read the subject an author continuation's reference reviewed once (``ctx._author_commit_scope``). With paths
+    omitted, its paths are the selection, never every attributed candidate (#2680): those that no longer differ from
+    HEAD are named and left out, and nothing else is added. Before anything is staged, a composition that cannot be
+    recovered asks for explicit paths, and one with nothing left to land says so; ``None`` lets the call continue."""
+    from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+
+    scope = ctx._author_commit_scope = reviewed_subject(ctx, ctx._author_commit_source)
+    if not paths_omitted:
+        return None
+    if not scope.get("error"):
+        try:
+            scope["unchanged"] = _unchanged_now(pathlib.Path(ctx.repo_dir), scope["paths"])
+            scope["selected"] = sorted(set(scope["paths"]) - set(scope["unchanged"]))
+        except (OSError, RuntimeError) as exc:
+            scope["error"] = f"which of its paths still differ from HEAD is unreadable ({exc})"
+    if scope.get("error"):
+        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
+            "ERROR: REVIEWED_PATHS_UNAVAILABLE: omitted paths mean the paths this review_reference reviewed, and "
+            f"{scope['error']}. Name the paths to land in paths: an explicit selection continues without a new "
+            "review. Nothing was staged or committed.")))
+    if not scope["selected"]:
+        return (f"⚠️ GIT_NO_CHANGES: no reviewed path differs from HEAD now ({', '.join(scope['unchanged'])}); "
+                "nothing was staged or committed, and no other path was taken in their place.")
+    return None
+
+
+def _listed(names, limit=20):
+    return ", ".join(names[:limit]) + (f" and {len(names) - limit} more" if len(names) > limit else "")
+
+
+def disclose_subject_delta(ctx, pre_fingerprint):
+    """Compare, once, the staged subject an author continuation is about to land with the subject its reference
+    reviewed, and publish the comparison before tests and Git: a progress note now, the same text in the result, and
+    the returned fact for the author's decision record. The note names the paths that differ in bytes or
+    composition; the four trees keep everything else recoverable."""
+    from ouroboros.mutation_attribution import _run_git
+
+    scope = getattr(ctx, "_author_commit_scope", None) or reviewed_subject(ctx, ctx._author_commit_source)
+    binding = pre_fingerprint.get("binding") or {}
+    staged, head = str(binding.get("tree_sha") or ""), str((binding.get("parents") or [""])[0])
+    base, tree = str(scope.get("base") or ""), str(scope.get("tree") or "")
+    fact = {"relation": "unknown", "reviewed_base": base, "reviewed_tree": tree, "staged_base": head, "staged_tree": staged}
+    error = str(scope.get("error") or "")
+    if not error and (staged, head) == (tree, base):
+        fact["relation"], text = "same", f"staged tree {staged[:12]} is exactly the reviewed tree."
+    elif not error:
+        def paths(a, b):
+            return {name for name in _run_git(pathlib.Path(ctx.repo_dir), "diff-tree", "-r", "--no-renames",
+                                              "--name-only", "-z", a, b).split("\0") if name}
+        try:
+            reviewed, current, changed = set(scope["paths"]), paths(head, staged), paths(tree, staged)
+        except (OSError, RuntimeError) as exc:
+            error = f"the trees are not comparable here ({exc})"
+        else:
+            unchanged = set(scope.get("unchanged") or ())
+            clauses = [f"{label}: {_listed(sorted(names))}" for label, names in (
+                ("changed since review", changed & reviewed & current), ("not in the reviewed paths", current - reviewed),
+                ("reviewed but no longer different from HEAD", (reviewed - current) & unchanged),
+                ("reviewed but left out", reviewed - current - unchanged)) if names]
+            clauses += [f"HEAD moved from {base[:12]} to {head[:12]}"] if head != base else []
+            fact["relation"] = "different"
+            text = f"staged tree {staged[:12]} differs from the reviewed tree {tree[:12]}: " + "; ".join(clauses) + "."
+    if error:
+        text = f"the reviewed tree is unavailable ({error}), so staged tree {staged[:12]} cannot be compared with it."
+    fact["text"] = text = "Author continuation: " + text
+    advisory = getattr(ctx, "_review_advisory", None)
+    if isinstance(advisory, list):
+        advisory.append(text)
+    try:
+        ctx.emit_progress_fn(text)
+    except Exception:
+        pass
+    return fact
 
 
 def collected_open_peer(ctx, commit_message, goal, scope, review_rebuttal, paths):
@@ -294,16 +492,18 @@ def _continuation_block(exc):
 
 
 def decided_round_attempts(ctx, repo_key):
-    """This task's settled commit attempts whose record holds a recorded continuation no projection carried yet."""
+    """This task's settled commit attempts (an additional seat may still run) whose record holds a recorded
+    continuation no projection carried yet."""
     from ouroboros.review_continuation import current_decisions
     from ouroboros.review_ledger import ledger_root, load_record
-    from ouroboros.review_state import _attempt_has_active_review_custody, load_state
+    from ouroboros.review_state import _attempt_has_active_review_custody, attempt_counted_seats_closed, load_state
     from ouroboros.tools.commit_gate import _current_review_tool_name
 
     found = []
     for attempt in load_state(pathlib.Path(ctx.drive_root)).filter_attempts(
             repo_key=repo_key, tool_name=_current_review_tool_name(ctx), task_id=str(getattr(ctx, "task_id", "") or "")):
-        if attempt.review_record_id and attempt.review_retry_key and not _attempt_has_active_review_custody(attempt):
+        if attempt.review_record_id and attempt.review_retry_key and (
+                not _attempt_has_active_review_custody(attempt) or attempt_counted_seats_closed(attempt)):
             try:
                 record = load_record(ledger_root(ctx), attempt.review_record_id)
             except ValueError:

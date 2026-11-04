@@ -118,8 +118,11 @@ def test_git_catalog_schema_bytes_and_handler_owners_are_stable():
     # staged or not; that description is the only change from 86389708….
     # Explicit continuation (#2677): both reviewed-commit aliases add continue_seats and say what review_reference
     # does with and without author_disposition; those two properties are the only change from 4bb35274….
+    # #2680: both aliases' paths say omitted paths with author_disposition mean the reviewed paths, and their
+    # author_disposition accepts the candidate the call stages (omitted paths: the reviewed ones), not the current
+    # attributed candidate; those two descriptions are the only change from aa615be1….
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "aa615be195f44087d99ce7394f4bdf4fcd63d3d6f522d8c092dd121c00fe3cd7"
+        "a4ff0c92cbb238357007db0ea605c81b2188b349fda7ee2d3e29e3c4daef5770"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

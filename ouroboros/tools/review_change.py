@@ -488,7 +488,7 @@ _CTX_FIELDS = (
     "_last_review_structured", "_review_degraded_reasons", "_current_review_tool_name",
     "_current_review_retry_key", "_current_review_record_id", "_review_reconcile_only",
     "_review_frozen_rows", "_review_custody_lost", "_current_review_attempt_number",
-    "_author_commit_source", "_author_commit_decision", "_author_commit_record", "_commit_review_status",
+    "_author_commit_source", "_author_commit_scope", "_author_commit_decision", "_author_commit_record", "_commit_review_status",
     "_current_review_rebuttal_sha256", "_current_review_contract_fingerprint", "_review_history",
     "_review_iteration_count", "_coupling_review_history", "_coupling_review_history_rounds",
     "_triad_withheld_seat_records",

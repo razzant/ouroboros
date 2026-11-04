@@ -58,9 +58,7 @@ def _continuation_source(status: str, *, late_result_pending: bool) -> str:
 
 
 def _attempt_accepts_reviewing_update(existing: Any) -> bool:
-    if existing is None:
-        return False
-    return _attempt_has_active_review_custody(existing)
+    return existing is not None and _attempt_has_active_review_custody(existing)
 
 
 # Max Review Cycles semantics on the commit gate (owner Q12/Q16/Q22/Q23):
@@ -532,12 +530,17 @@ def resolve_commit_review_reference(ctx: ToolContext, reference: Any, *, state: 
         raise ValueError("review_reference belongs to another task or repository")
     if reference.get("tool_name") not in {"commit_reviewed", "vcs_commit_reviewed"} or type(reference.get("attempt")) is not int:
         raise ValueError("review_reference has no exact commit attempt")
-    state = state if state is not None else _load_state_unlocked(pathlib.Path(ctx.drive_root), strict_attempt_authority=True)
+    from ouroboros.tools.review_change_custody import repaired_commit_source, stripped_source_bound
+    locked = state is not None  # the caller holds the state lock: nothing is repaired and no record is read
+    if not locked:
+        state = _load_state_unlocked(pathlib.Path(ctx.drive_root), strict_attempt_authority=True)
     source = state.latest_attempt_for(repo_key=repo_key, task_id=reference["task_id"],
         tool_name=reference["tool_name"], attempt=reference["attempt"])
+    if not locked and source is not None and source.status == "reviewing" and source.phase not in {"review_only", "late_wait"}:
+        source = repaired_commit_source(ctx, source)
     if (source is None or source.phase not in {"review_only", "late_wait"}
             or not source.pre_review_fingerprint or source.pre_review_fingerprint != reference.get("pre_review_fingerprint")
-            or source.raw_stripped):
+            or (source.raw_stripped and not stripped_source_bound(ctx, source, locked=locked))):
         raise ValueError("the returned review outcome is missing or no longer has its exact evidence")
     from ouroboros.review_records import review_outcome_received
 
@@ -648,6 +651,9 @@ def _record_commit_attempt(
                 log.debug("obligation semantic dedup skipped: %s", _dedup_exc)
                 _obligation_redirects = {}
 
+        from ouroboros.tools.review_change_custody import late_write_check
+        outlived = late_write_check(ctx, phase if status == "reviewing" else "", review_record_id, triad_raw_results, scope_raw_result)
+
         def _mutate(state):
             state.expire_stale_attempts()
             attempt_no = int(getattr(ctx, "_current_review_attempt_number", 0) or 0)
@@ -662,6 +668,8 @@ def _record_commit_attempt(
                 else None
             )
             if status == "reviewing":
+                if outlived(existing):
+                    return  # its collector settled this wave first: a stale pending write opens no second row (#2587)
                 if not _attempt_accepts_reviewing_update(existing) and getattr(ctx, "_collect_commit_source", None) is None:
                     attempt_no = state.next_attempt_number(repo_key, tool_name, task_id)
                     existing = None
@@ -672,13 +680,6 @@ def _record_commit_attempt(
                 attempt_no = state.next_attempt_number(repo_key, tool_name, task_id)
                 existing = None
                 ctx._current_review_attempt_number = attempt_no
-            else:
-                existing = state.latest_attempt_for(
-                    repo_key=repo_key,
-                    tool_name=tool_name,
-                    task_id=task_id,
-                    attempt=attempt_no,
-                )
 
             from ouroboros.review_records import validate_author_disposition
             from ouroboros.config import get_review_enforcement
@@ -859,6 +860,8 @@ def _check_overlapping_review_attempt(ctx: ToolContext) -> Optional[str]:
     )
     from ouroboros.tool_capabilities import REVIEWED_MUTATIVE_TOOLS
 
+    from ouroboros.tools.review_change_custody import repair_held_commit_attempts
+    repair_held_commit_attempts(ctx)  # outside the lock: a settled row an earlier collector left held, repaired exactly
     repo_key = make_repo_key(pathlib.Path(ctx.repo_dir))
     expiration_window = _REVIEW_ATTEMPT_TTL_SEC + _REVIEW_ATTEMPT_GRACE_SEC
     ctx._review_resume_pending = False
@@ -1277,8 +1280,8 @@ def bind_author_commit_candidate(ctx: ToolContext, commit_message: str, pre_fing
 
     author = enrich_author_commit(
         author,
-        actors=[*(getattr(author_source, "triad_raw_results", None) or []),
-                getattr(author_source, "scope_raw_result", None) or {}],
+        actors=list(record.get("rows") or []) if getattr(author_source, "raw_stripped", False) else [  # compacted: its record's seats
+            *(getattr(author_source, "triad_raw_results", None) or []), getattr(author_source, "scope_raw_result", None) or {}],
         prior_decision=record.get("author_decision") if isinstance(record.get("author_decision"), dict) else None,
         record_id=str(record.get("record_id") or getattr(author_source, "review_record_id", "") or ""),
         revision=int(record.get("revision") or 0),
@@ -1287,6 +1290,8 @@ def bind_author_commit_candidate(ctx: ToolContext, commit_message: str, pre_fing
         observed_at=utc_now_iso(),
         review_reference=ctx._author_commit_reference,
     )
+    from ouroboros.tools.review_collection import disclose_subject_delta
+    author["subject_delta"] = disclose_subject_delta(ctx, pre_fingerprint)  # published before the tests and Git
     ctx._author_commit_record = author
     staged = git_mod.run_cmd(["git", "diff", "--cached", "--name-status"], cwd=ctx.repo_dir)
     return _preflight_check(commit_message, format_name_status_for_preflight(staged), ctx.repo_dir,
@@ -1339,8 +1344,10 @@ def record_bound_commit_success(ctx: ToolContext, commit_message: str, started_a
             "author_subject": subject if authored else ""} if commit_sha else None)
 
 
-def prepare_author_commit_request(ctx: ToolContext, review_reference: Any, author_disposition: Any, review_rebuttal: str) -> Optional[str]:
-    """Validate the explicit free continuation before touching a Git candidate."""
+def prepare_author_commit_request(ctx: ToolContext, review_reference: Any, author_disposition: Any, review_rebuttal: str,
+                                  *, paths_omitted: bool = False) -> Optional[str]:
+    """Validate the explicit free continuation before touching a Git candidate; its reviewed subject is read
+    once, and omitted paths select that subject's paths (``review_collection.author_scope``)."""
     from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
     if review_reference is not None or author_disposition is not None:
         from ouroboros.review_records import build_author_disposition_from_mapping
@@ -1352,6 +1359,8 @@ def prepare_author_commit_request(ctx: ToolContext, review_reference: Any, autho
             ctx._author_commit_reference, ctx._author_commit_decision = dict(review_reference), dict(author_disposition)
         except (OSError, ValueError) as exc:
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=f"ERROR: REVIEW_AUTHOR_CONTINUATION_INVALID: {exc}"))
+        from ouroboros.tools.review_collection import author_scope
+        return author_scope(ctx, paths_omitted=paths_omitted)
     return None
 
 
