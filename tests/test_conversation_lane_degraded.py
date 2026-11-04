@@ -179,9 +179,13 @@ def test_a_degraded_executor_whose_thread_cannot_start_leaves_the_row_admitted_a
             raise RuntimeError("can't start new thread")
 
     monkeypatch.setattr(inline_carrier, "threading", SimpleNamespace(Thread=Refusing))
+    from supervisor.conversation_lane import publish_awaiting_rows
+
     task = {"id": "t-unstarted", "chat_id": 1, "text": "hello", "metadata": {}}
     with workers._queue_lock:
         meta = admit_turn(task, chat_id=1, client_message_id="cm-u")
+    assert publish_awaiting_rows()  # the admission's barrier, outside Q, before any executor may hold the row
+    with workers._queue_lock:
         with pytest.raises(inline_carrier.InlineExecutorUnavailable):
             inline_carrier.start_inline_turn(meta, executor=EXECUTOR_INLINE_DEGRADED, reason="pool_not_started")
     assert workers.RUNNING["t-unstarted"] is meta and meta["worker_id"] is None and "executor" not in meta

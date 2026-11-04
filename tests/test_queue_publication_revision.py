@@ -484,6 +484,30 @@ def test_a_grant_restores_the_newer_work_whether_or_not_its_mark_was_published(p
     assert facts["wait_id"] in (None, ""), "the newer work, never the old grant"
 
 
+@pytest.mark.parametrize("lands", [True, False], ids=["lands", "fails"])
+def test_an_admission_while_a_restart_is_pending_publishes_its_barrier_outside_q(published, monkeypatch, lands):
+    """``enqueue_task``'s own barrier (durable before the reply while a restart is pending, t2 §1.2 queue.py:519)
+    runs after the function's own hold, outside Q; a failed one withdraws the row under Q again and the reply is
+    the typed refusal, as before."""
+    from ouroboros import server_restart
+
+    root, _now = published
+    queue_publication.tick_publisher_started()
+    monkeypatch.setattr(server_restart, "agent_restart_pending", lambda: True)
+    seen, real = [], queue.publish_queue_snapshot
+    monkeypatch.setattr(queue, "publish_queue_snapshot", lambda reason="": seen.append((reason, queue._queue_lock._is_owned()))
+                        or (real(reason=reason) if lands or reason != "agent_restart_admission" else False))
+    admitted = queue.enqueue_task(_task("restart-row"))
+    if lands:
+        assert not admitted.get("_admission_blocked") and seen == [("agent_restart_admission", False)]
+        assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == ["restart-row"]
+        assert [row["id"] for row in queue.PENDING] == ["restart-row"]
+    else:
+        assert admitted["_admission_blocked"] == "restart_admission_unconfirmed"
+        assert seen == [("agent_restart_admission", False), ("agent_restart_admission_unconfirmed", False)]
+        assert queue.PENDING == [] and _read(root, "queue_snapshot.json")["pending"] == []
+
+
 def test_embedded_and_shared_rows_restore_alike(tmp_path, monkeypatch):
     """Format 1 (every row embedded) and format 2 (shared values) restore the same parked task."""
     from tests._budget_pause_exact_helpers import _install_queue, _parked
