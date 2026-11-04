@@ -533,7 +533,7 @@ ouroboros/ — agent core and shared runtime (§6)
     plan_ask.py — One ask: participants, body predicate, delivery, continuation, dispatch, settlement
     plan_review_runtime.py — Review-slot runtime of an ask (`run_plan_review_slots`, `plan_review_slots`, fit, deadline)
     plan_spec.py — `resolve_constitutional` and path normalization; earlier-schema spec reads; no I/O
-    plan_evidence.py — Bounded plan-evidence manifest; the runtime data plane is denied
+    plan_evidence.py — Evidence manifest
     plan_packet.py — Delivery builder and `PLAN_REPLY_CONTRACT`
     plan_delivery.py — A repeat participant's cross-talk and retained texts
     review.py — Multi-model review and the unified pre-commit review gate (§6 Review stack)

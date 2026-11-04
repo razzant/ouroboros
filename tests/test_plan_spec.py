@@ -379,6 +379,94 @@ def test_live_settings_are_never_attachable_as_evidence(tmp_path):
     assert "sk-live-secret" not in json.dumps(manifest)
 
 
+def test_an_admission_decides_every_file_and_opens_only_own_stores_beneath_a_deny_root(tmp_path):
+    """#2756: the caller's admission decides every file that reached the read, typed by its own store's root or None
+    elsewhere (its refusal is the omission). A typed own store beneath a deny root passes its files on to the ordinary
+    checks; a deny entry at or inside the store (a settings file placed there) still denies. Without an admission
+    nothing beneath a deny root attaches and an ordinary file attaches as before."""
+    data = tmp_path / "data"
+    store = data / "task_results" / "artifacts" / "t1"
+    for name in ("plan.md", "held.md", "settings.json"):
+        _write(store / name, f"{name}\n")
+    _write(store / "secrets.json", "{}")
+    _write(data / "memory" / "identity.md", "who\n")
+    _write(tmp_path / "ws.md", "workspace\n")
+    seen = []
+
+    def admit(root, path):
+        seen.append((root, path.name))
+        return "read_blocked:RESOURCE_POLICY_BLOCKED" if path.name == "held.md" else ""
+
+    locators = [str(store / name) for name in ("plan.md", "held.md", "settings.json", "secrets.json", "absent.md")]
+    locators += [str(data / "memory" / "identity.md"), "ws.md"]
+    common = dict(active_root=tmp_path, allowed_roots=[tmp_path], deny_paths=[data, store / "settings.json"],
+                  own_stores=[("artifact_store", store)])
+    manifest = plan_evidence.resolve_evidence(locators, admit=admit, **common)
+    assert [(a["locator"], a["text"]) for a in manifest["attached"]] == [
+        (str(store / "plan.md"), "plan.md\n"), ("ws.md", "workspace\n")]
+    assert manifest["omissions"] == [
+        {"locator": str(store / "held.md"), "reason": "read_blocked:RESOURCE_POLICY_BLOCKED"},
+        {"locator": str(store / "settings.json"), "reason": "denied_path"},
+        {"locator": str(store / "secrets.json"), "reason": "sensitive"},
+        {"locator": str(store / "absent.md"), "reason": "missing"},
+        {"locator": str(data / "memory" / "identity.md"), "reason": "denied_path"}]
+    assert seen == [("artifact_store", "plan.md"), ("artifact_store", "held.md"), (None, "ws.md")]
+    blind = plan_evidence.resolve_evidence(locators, **common)
+    assert [a["locator"] for a in blind["attached"]] == ["ws.md"]
+    assert {o["reason"] for o in blind["omissions"]} == {"denied_path"}
+
+
+def test_an_own_store_file_seen_in_part_is_retained_from_the_bytes_its_part_was_read_from(tmp_path):
+    """#2756: ``retain`` receives exactly the bytes an own-store file's head or selection and its hash were read
+    from, its result rides that row (``ref``, ``file``); a part that does not fit the budget, a file seen whole,
+    a workspace file and a refused one are never retained, and a failure keeps the part and names the absence."""
+    import hashlib
+
+    data = tmp_path / "data"
+    store = data / "task_drives" / "t1"
+    long_raw, lines_raw = b"L" * 70 + b"\n", b"one\r\ntwo\r\nthree\r\n"
+    for name, raw in (("long.md", long_raw), ("lines.md", lines_raw), ("short.md", b"short\n"),
+                      ("refused.md", long_raw), ("fails.md", b"F" * 80), ("blob.bin", b"\x00" * 90),
+                      ("late.md", b"Z" * 90)):
+        _write(store / name, raw)
+    _write(tmp_path / "ws.md", b"W" * 90)
+    kept = []
+
+    def retain(raw):
+        kept.append(raw)
+        if raw.startswith(b"F"):
+            raise RuntimeError("store closed")
+        return {"ref": {"kind": "task_source", "sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw)},
+                "file": f"/held/{len(kept)}"}
+
+    locators = [str(store / n) for n in ("long.md", "short.md", "refused.md", "fails.md", "blob.bin")]
+    locators[1:1] = [f"{store / 'lines.md'}::lines=2-2"]
+    locators += ["ws.md", str(store / "late.md")]
+    manifest = plan_evidence.resolve_evidence(
+        locators, active_root=tmp_path, allowed_roots=[tmp_path], deny_paths=[data], per_item_bytes=64,
+        total_bytes=64 + 5 + 6 + 64 + 64, own_stores=[("task_drive", store)], retain=retain,
+        admit=lambda _root, path: "read_blocked:RESOURCE_POLICY_BLOCKED" if path.name == "refused.md" else "")
+    assert kept == [long_raw, lines_raw, b"F" * 80]
+    rows = {row["locator"]: row for row in manifest["attached"]}
+    assert list(rows) == [str(store / "long.md"), f"{store / 'lines.md'}::lines=2-2", str(store / "short.md"),
+                          str(store / "fails.md"), "ws.md"]
+    for locator, raw, file in ((str(store / "long.md"), long_raw, "/held/1"),
+                               (f"{store / 'lines.md'}::lines=2-2", lines_raw, "/held/2")):
+        assert (rows[locator]["sha256"], rows[locator]["bytes"]) == (hashlib.sha256(raw).hexdigest(), len(raw))
+        assert (rows[locator]["ref"]["sha256"], rows[locator]["file"]) == (rows[locator]["sha256"], file)
+    assert rows[f"{store / 'lines.md'}::lines=2-2"]["text"] == "two\r\n"
+    assert not any("ref" in rows[name] or "file" in rows[name] for name in (str(store / "short.md"), "ws.md"))
+    assert "ref" not in rows[str(store / "fails.md")] and rows[str(store / "fails.md")]["text"] == "F" * 64
+    assert manifest["omissions"] == [
+        {"locator": str(store / "long.md"), "reason": "truncated_to_64"},
+        {"locator": str(store / "refused.md"), "reason": "read_blocked:RESOURCE_POLICY_BLOCKED"},
+        {"locator": str(store / "fails.md"), "reason": "truncated_to_64"},
+        {"locator": str(store / "fails.md"), "reason": "source_unretained:RuntimeError"},
+        {"locator": str(store / "blob.bin"), "reason": "binary"},
+        {"locator": "ws.md", "reason": "truncated_to_64"},
+        {"locator": str(store / "late.md"), "reason": "budget_exhausted"}]
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_evidence_content_reaches_reviewers_as_the_source_wrote_it(tmp_path, newline):
     """Admission is decided by path, root and deny rules; content is never rewritten by pattern

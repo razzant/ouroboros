@@ -47,12 +47,11 @@
   tmp+rename; orphan temps wait for `temp_sweep`. `json_update_lock` owns the sidecar shared by
   `update_json_locked` and stores with custom load/save. `append_jsonl`: O_APPEND plus sidecar lock unless noted.
 - **Evidence pack** — `ouroboros/evidence_packs.py`: a task is PACKABLE once its row is
-  terminal and no review of it is open (`task_packable`: the row's `review_collection_pending`
-  fact, 1 for an open review operation of any surface or an uncollected acceptance, whose
-  agent-session reader holds a retained handle's absolute path; a NULL row predates the
-  selector and has no such reader); no
+  terminal and neither review nor council is pending (`task_packable`: indexed
+  `review_collection_pending`/`plan_collection_pending` facts). Session readers hold loose
+  source paths even after the author finishes; NULL predates the selector. No
   duty, money or delivery fact is consulted, and nothing written for it later is lost: it
-  becomes the task's next generation. A blob a live or reviewed task's manifests reference
+  becomes the task's next generation. A blob a live or still-reading task's manifests reference
   stays loose until that task's own pass; a folder with no store row is neither packed nor
   kept, only counted. The maintenance child (`ouroboros/maintenance.py`, job
   `evidence_packing`, passes in `ouroboros/evidence_packer.py`; never at boot) writes per-task
