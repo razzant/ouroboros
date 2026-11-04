@@ -371,6 +371,16 @@ that cache. Native compilation can take more than ten minutes; the contained
 platform operation allows up to one hour. A pending startup notice does not mean
 that preparation has failed or that the core is already ready.
 
+Android bootstrap still provisions Playwright's Chromium archives. Browser tools
+do not launch them: their first Chromium use obtains the separate reviewed pin
+from `ouroboros/chromium_runtime.py`, an additional download. A pin change is
+resolved at browser use, not by the platform-preparation fingerprint. The rooted
+userspace must meet Chromium's sandbox requirements; otherwise the call refuses.
+An administrator may explicitly accept the risk with
+`OUROBOROS_CHROMIUM_SANDBOX=off` in the runtime environment; launch warnings and
+browser-condition annotations disclose it. There is no automatic root exception
+or old-browser fallback. This browser change has not been qualified on a phone.
+
 Local Pixel qualification changed the Android 36 SDK to the ext19 archive and
 restored the previous SDK through ordinary Restart. The new core and SDK were
 adopted, APK versionCode advanced 4 → 5 → 6 with the same signing key, and AAPT2

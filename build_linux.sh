@@ -104,9 +104,13 @@ echo "--- Installing Chromium/WebKit for browser tools (bundled into python-stan
 if [ "${OUROBOROS_SKIP_PLAYWRIGHT_INSTALL_DEPS:-0}" = "1" ]; then
     echo "Skipping Playwright host-library installation by request."
 else
+    # Playwright's Chromium library list also serves the pinned headless shell.
     "$PORTABLE_PYTHON" -m playwright install-deps chromium webkit
 fi
-PLAYWRIGHT_BROWSERS_PATH=0 "$PORTABLE_PYTHON" -m playwright install chromium webkit
+# WebKit is Playwright's own build; Chromium is the Chrome for Testing headless shell
+# ouroboros/chromium_runtime.py pins, never Playwright's Chromium.
+PLAYWRIGHT_BROWSERS_PATH=0 "$PORTABLE_PYTHON" -m playwright install webkit
+PLAYWRIGHT_BROWSERS_PATH=0 "$PORTABLE_PYTHON" -m ouroboros.chromium_runtime install
 
 echo "--- Building embedded managed repo bundle ---"
 "$HOST_PYTHON_CMD" scripts/build_repo_bundle.py --source-branch "$MANAGED_SOURCE_BRANCH"

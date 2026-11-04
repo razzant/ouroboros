@@ -141,8 +141,10 @@ removing and recreating the container keeps body, packages, data, work and
 the repository itself: bootstrap refuses a mount point without a checkout and
 moves nothing. At exit 42, changed launcher helpers imported from `/app` hand off to the volume
 checkout, as at cold start; server-only changes keep the shell. A new image supplies
-the startup shell and seed for future first boots; a new Python, system package or browser build still needs a new image, and
-a venv created by another Python is refused untouched with the recovery step
+the startup shell and seed for future first boots. New Python or system dependencies
+require a new image; WebKit follows the image too. The managed body's Chromium pin
+can instead be downloaded into `/ms-playwright` on first use. A venv created by
+another Python is refused untouched with the recovery step
 (move it aside; the next start prepares a fresh one). Git rollback restores code
 and its lock, not data or the exact package set.
 
@@ -159,6 +161,14 @@ nonzero, so `on-failure` retries it with Docker's growing delay until the cause 
 fixed; a second managed container sharing the data volume loses the launcher lock
 and exits 0. `init: true` reaps orphans the launcher or server cannot. See
 Docker's [restart policy documentation](https://docs.docker.com/engine/containers/start-containers-automatically/).
+
+**Browser sandbox.** Browser tools launch only the pinned Chromium (`ouroboros/chromium_runtime.py`)
+inside its own sandbox. The images run as root, for whom Chromium refuses its sandbox (Docker's
+default seccomp profile also restricts the user namespaces it uses), so by default Chromium is
+refused with `BROWSER_CHROMIUM_SANDBOX_UNAVAILABLE`; WebKit stays available. An administrator who accepts
+running web content without that sandbox sets `OUROBOROS_CHROMIUM_SANDBOX=off` in the container
+environment: each launch logs a warning, and browser-condition annotations on page, screenshot
+and evaluate observations disclose the opt-out. Unrecognized values are refused; boolean aliases are accepted. Nothing turns the sandbox off on its own.
 
 **Boot health.** Each recipe probes `GET /api/health` inside the container. The
 probe succeeds while the process is alive and `boot.phase` is not `failed`,
