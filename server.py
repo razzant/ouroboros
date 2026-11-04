@@ -1333,6 +1333,7 @@ async def lifespan(app):
         except Exception:
             pass
         stop_owned_work(lifespan_drive_root)  # the generation's one bounded stop; a started one is joined
+        server_boot.stop_extension_loop()
         try:
             from ouroboros.extension_companion import get_global_supervisor
             supervisor = get_global_supervisor()
