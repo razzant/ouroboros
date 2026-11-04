@@ -153,8 +153,8 @@ remain seen, so enabling does not replay that backlog. Older summary rows withou
 the host's compact cause projection retain their original reason text when On.
 
 The Mini App queues finite asset bursts within its bounded upstream connection pool,
-closes responses even when downstream header delivery fails, and paints its connecting
-page while the Telegram SDK loads. Its authentication checks remain unchanged.
+and closes responses even when downstream header delivery fails. Authentication
+and prepaint appearance initialization remain unchanged.
 
 The Mini App exposes the unchanged Ouroboros SPA through the established
 owner-authenticated sidecar and a pinned Cloudflare Quick Tunnel. It is enabled

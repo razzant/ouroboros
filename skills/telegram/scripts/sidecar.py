@@ -114,8 +114,8 @@ _BOOTSTRAP_HTML = """<!doctype html>
     main{height:100%;display:grid;place-items:center;text-align:center;padding:24px;box-sizing:border-box}
     #status{max-width:28rem}
   </style>
-  <script defer src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script defer src="/__telegram/bootstrap.js"></script>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="/__telegram/bootstrap.js"></script>
 </head>
 <body><main><div id="status" role="status">Connecting to Ouroboros…</div></main></body>
 </html>
