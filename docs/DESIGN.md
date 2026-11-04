@@ -1035,9 +1035,8 @@ message, and a landed act publishes no row (its receipt or card already says it)
 A standalone System row exists only where nothing else can carry the fact: no mind
 can speak, no mind will read the message, the owner's own direct act, the
 runtime's state (a settings change saved outside the app: one
-`settings_changed` row per save, `Main model: {old} → {new}. Changed via
-{surface}; declared actor: {actor}.`; the app's own Save publishes none),
-Main's Project lifecycle, or words signed by their author (a reminder, a
+`settings_changed` row per save, what changed and who changed it; the app's own
+Save publishes none), Main's Project lifecycle, or words signed by their author (a reminder, a
 skill notice). It is one short typed mark in owner words, never a
 paragraph or text written for a model. `tests/test_host_message_voice.py` keeps
 every host type stamped as a literal at its send site in one of these classes, with
