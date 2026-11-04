@@ -478,9 +478,15 @@ APPEARANCES_CONTACT_REPLIES = "room_appearances_contact_replies"
 APPEARANCES_COVERED = "room_appearances_covered"
 
 
+# A stored row whose provider thread is held by reference names the identity of its whole row under this
+# key, its last (``chat_chain.source_row_id`` answers it unexpanded); no caller's row carries it.
+ROW_SHA_KEY = "$row_sha256"
+
+
 def _unstamped(row: Dict[str, Any]) -> Dict[str, Any]:
-    """A row's content identity without its in-transaction revision stamp (``room_revisions``)."""
-    return {key: value for key, value in row.items() if key != "room_revisions"}
+    """A row's content identity without its in-transaction revision stamp (``room_revisions``) and without a
+    stored row's own identity (``ROW_SHA_KEY``)."""
+    return {key: value for key, value in row.items() if key not in ("room_revisions", ROW_SHA_KEY)}
 
 
 def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Dict[str, Any]] = None,

@@ -22,6 +22,7 @@ from ouroboros.deadline_utils import parse_deadline_ts
 
 _TEXT_ADDRESS = re.compile(r"row:(-?\d+)@(.*)#([0-9a-f]{12,64})")
 _DIGEST = re.compile(r"[0-9a-f]{12,64}")
+_FULL_DIGEST = re.compile(r"[0-9a-f]{64}")
 _HINT_FIELDS = ("task_id", "client_message_id", "type")
 _ADDRESS_PAGE = 500  # rows whose ordinals and legacy hints one read looks up (``dp.ordinals_of`` pages at 500)
 _LINEAGE_FIELDS = ("task_id", "parent_task_id", "root_task_id")
@@ -47,10 +48,15 @@ class RowAddressError(LookupError):
 
 
 def source_row_id(row: Dict[str, Any]) -> str:
-    """Identity of an original raw chat row, before any room/view projection adds fields."""
+    """Identity of an original raw chat row, before any room/view projection adds fields. A row stored with
+    its provider thread by reference carries the identity of its whole row (``dialogue_store.ROW_SHA_KEY``),
+    so every address of it is the one its whole row (and an older body's exported line) has, unexpanded."""
     from ouroboros.place_arrivals import SourceProjection
     if isinstance(row, SourceProjection):
         row = row.source_body
+    stored = row.get(ds.ROW_SHA_KEY)
+    if isinstance(stored, str) and _FULL_DIGEST.fullmatch(stored):
+        return stored
     payload = json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
