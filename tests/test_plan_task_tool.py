@@ -7,6 +7,7 @@ intention ledger record; only the raiser's withdrawal releases a Blocking hold."
 from __future__ import annotations
 
 import json
+import pathlib
 import queue
 from types import SimpleNamespace
 
@@ -578,9 +579,9 @@ def test_the_runtime_data_plane_is_never_attached_whatever_root_the_ask_names(ha
         assert (f"  evidence omitted: live_data/settings.json (denied_path)\n  {DENIED_ATTACH_HINT}\n" in shown
                 and shown.count(DENIED_ATTACH_HINT) == 1), shown
     assert "| live_data/settings.json | denied_path |" in packets and DENIED_ATTACH_HINT in packets
-    assert DENIED_ATTACH_HINT.startswith("Runtime data and the live settings file cannot be attached directly. Use "
-                                         "task:<id> for a helper's saved result, chat:<id> for dialogue, or an "
-                                         "allowed workspace file for other evidence.")
+    assert DENIED_ATTACH_HINT.startswith("Settings and runtime files outside your own task stores cannot be attached "
+                                         "directly. Use task:<id> for a helper's saved result, chat:<id> for dialogue, "
+                                         "or a readable file in your own task_drive/artifact_store or workspace ")
 
 
 @pytest.mark.parametrize("reason", ["missing", "outside_allowed_roots", "sensitive", "truncated_to_40000"])
@@ -594,6 +595,284 @@ def test_only_a_deny_root_says_what_to_attach_instead(reason):
     assert "cannot be attached directly" not in render_evidence({"declared": ["x"], "omissions": omissions})
     denied = omissions + [{"locator": "y", "reason": "denied_path"}, {"locator": "z", "reason": "denied_path"}]
     assert render_evidence({"declared": ["x", "y", "z"], "omissions": denied}).count("cannot be attached directly") == 1
+
+
+def _own_store(ctx, label):
+    from ouroboros.tool_access import resource_root_path
+
+    base = resource_root_path(ctx, label)
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def test_own_task_store_files_attach_their_exact_bytes_for_packet_and_session_seats(harness):
+    """#2756: the caller's own ``artifact_store`` and ``task_drive`` lie beneath the denied runtime data root, and
+    their files still attach through ``read_file``'s read admission exactly as a workspace file does: the source's
+    own bytes (CRLF and a secret-shaped line unchanged), its full hash, a line selection, a named cut and named
+    absences, for a packet seat and a retrieving session seat alike."""
+    import hashlib
+
+    from ouroboros.tools.plan_evidence import EVIDENCE_PER_ITEM_BYTES
+
+    raw = b"own planning evidence\r\nOPENROUTER_API_KEY=sk-or-FAKEFIXTURE-not-a-real-key\r\nthird line\r\n"
+    big = b"y" * (EVIDENCE_PER_ITEM_BYTES + 7)
+    ctx = harness.make_ctx()
+    art, drv = _own_store(ctx, "artifact_store"), _own_store(ctx, "task_drive")
+    for base in (art, drv):
+        (base / "plan-notes.md").write_bytes(raw)
+    (art / "big.md").write_bytes(big)
+    (drv / "drafts").mkdir()
+    a, d = str(art / "plan-notes.md"), str(drv / "plan-notes.md")
+    harness.state["slots"] = _slots(("api1", "m/a"), ("sess1", "cursor=grok", "session"))
+    sub = harness.install({})
+    _write(ctx, ask="council", attach=[a, d, f"{d}::lines=2-2", str(art / "big.md"), str(drv / "drafts"),
+                                       str(drv / "absent.md"), "notes.md"])
+    ask = _record(harness)["asks"][0]
+    digest = hashlib.sha256(raw).hexdigest()
+    assert [(row["locator"], row["sha256"], row["bytes"]) for row in ask["attached"]] == [
+        (a, digest, len(raw)), (d, digest, len(raw)), (f"{d}::lines=2-2", digest, len(raw)),
+        (str(art / "big.md"), hashlib.sha256(big).hexdigest(), len(big)),
+        ("notes.md", hashlib.sha256(b"deck notes\n").hexdigest(), len(b"deck notes\n"))]
+    assert ask["omissions"] == [
+        {"locator": str(art / "big.md"), "reason": f"truncated_to_{EVIDENCE_PER_ITEM_BYTES}"},
+        {"locator": str(drv / "drafts"), "reason": "directory"},
+        {"locator": str(drv / "absent.md"), "reason": "missing"}]
+    request = sub.calls[0]["request"]
+    packet = _user_text(request.slot_messages["api1"][-1]["content"])
+    for delivery in (packet, str(request.slot_session_tasks["sess1"])):
+        for locator in (a, d):
+            assert f"----- BEGIN {locator} -----\n{raw.decode()}\n----- END {locator} -----" in delivery
+        selected = f"----- BEGIN {d}::lines=2-2 -----\nOPENROUTER_API_KEY=sk-or-FAKEFIXTURE-not-a-real-key\r\n\n"
+        assert selected in delivery and "REDACTED" not in delivery and "denied_path" not in delivery
+
+
+@pytest.mark.parametrize("layout", ["host_child_drive", "external_execution_drive"])
+def test_beneath_the_runtime_data_roots_only_the_callers_own_stores_attach(harness, monkeypatch, layout):
+    """A forked task's own stores attach from its canonical and its execution drive. Everything else beneath a runtime
+    data root (``runtime_data_roots``: the execution drive, either the host's child layout inside the canonical own
+    ``task_drive`` or a drive outside every other root, which is itself a readable ``runtime_data`` root; the canonical
+    budget drive; the configured data root) stays ``denied_path``: settings, memory and state, a sibling's store, the
+    parent's store (which ``read_file`` reads by lineage) and a symlink out of an own store. An execution
+    copy the read authority binds to its canonical copy is refused as such (that copy attaches by its own address).
+    Sensitive names, lexical or resolved, are refused as anywhere; a real ``resource_policy`` protected artifact,
+    outside Cyber Pro, by the read admission under its own code."""
+    from ouroboros import config as cfg
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.runtime_mode_policy import runtime_mode_at_least
+    from ouroboros.tools.core_file_tools import read_admission
+
+    assert not runtime_mode_at_least(cfg.get_runtime_mode(), "cyber_pro")
+
+    configured = harness.workspace / "live_data"
+    (configured / "state").mkdir(parents=True)
+    (configured / "settings.json").write_text('{"OPENROUTER_API_KEY": "sk-live-x"}', encoding="utf-8")
+    (configured / "state" / "state.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(cfg, "DATA_DIR", configured, raising=False)
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", configured / "settings.json", raising=False)
+    canonical = harness.drive
+    external = harness.workspace.parent / "exec" / "data"
+    child = canonical / "task_drives" / "task-1" if layout == "host_child_drive" else external
+    ctx = harness.make_ctx()
+    ctx.drive_root, ctx.budget_drive_root = child, str(canonical)
+    ctx.task_metadata.update(budget_drive_root=str(canonical), parent_task_id="parent-1")
+    own_canonical, own_exec = task_artifact_dir_path(canonical, "task-1"), _own_store(ctx, "task_drive")
+    capture = pathlib.Path("delegated_runs", "r1", "out.md")
+    files = {"canonical": own_canonical / "canon.md", "execution": own_exec / "exec.md",
+             "canonical_capture": own_canonical / capture,
+             "execution_capture": _own_store(ctx, "artifact_store") / capture,
+             "memory_exec": child / "memory" / "scratchpad.md", "memory_canon": canonical / "memory" / "identity.md",
+             "sibling": canonical / "task_drives" / "task-2" / "plan.md",
+             "parent": task_artifact_dir_path(canonical, "parent-1") / "plan.md",
+             "env": own_canonical / ".env", "oracle": own_canonical / "oracle.md"}
+    for name, path in files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{name} bytes\n", encoding="utf-8")
+    for link, target in (("escape.md", "memory_canon"), ("alias.md", "env"), ("id_rsa", "execution")):
+        (own_exec / link).symlink_to(files[target])
+    ctx.task_contract["resource_policy"] = {"protected_artifacts": [
+        {"id": "oracle", "role": "black_box_reference", "paths": [str(files["oracle"])]}]}
+    assert read_admission(ctx, "artifact_store", str(files["parent"]))[2] is None  # readable by lineage, not attachable
+    sub = harness.install({})
+    links = [str(own_exec / link) for link in ("escape.md", "alias.md", "id_rsa")]
+    _write(ctx, ask=["s1"], attach=[*map(str, files.values()), *links, str(configured / "settings.json"),
+                                    str(configured / "state" / "state.json"), "notes.md"])
+    ask = _record(harness)["asks"][0]
+    assert [row["locator"] for row in ask["attached"]] == [
+        str(files["canonical"]), str(files["execution"]), str(files["canonical_capture"]), "notes.md"]
+    denied = ("memory_exec", "memory_canon", "sibling", "parent")
+    assert {row["locator"]: row["reason"] for row in ask["omissions"]} == {
+        **{str(files[name]): "denied_path" for name in denied}, str(files["execution_capture"]): "read_target_differs",
+        str(files["env"]): "sensitive", str(files["oracle"]): "read_blocked:RESOURCE_POLICY_BLOCKED",
+        links[0]: "denied_path", links[1]: "sensitive", links[2]: "sensitive",
+        str(configured / "settings.json"): "denied_path", str(configured / "state" / "state.json"): "denied_path"}
+    packet = _user_text(sub.calls[0]["request"].slot_messages["s1"][-1]["content"])
+    assert "canonical_capture bytes" in packet and "sk-live-x" not in packet
+    assert not any(f"{name} bytes" in packet for name in (*denied, "execution_capture", "env", "oracle"))
+
+
+def test_a_protected_workspace_file_is_refused_while_its_neighbour_attaches(harness):
+    """Every file locator goes through ``read_file``'s read admission, workspace files included: a real
+    ``resource_policy`` protected artifact in the workspace, outside Cyber Pro, is refused under the admission's own
+    code, and the ordinary file beside it attaches its bytes as before."""
+    from ouroboros import config as cfg
+    from ouroboros.runtime_mode_policy import runtime_mode_at_least
+
+    assert not runtime_mode_at_least(cfg.get_runtime_mode(), "cyber_pro")
+    (harness.workspace / "oracle.py").write_text("ANSWER = 42\n", encoding="utf-8")
+    ctx = harness.make_ctx()
+    ctx.task_contract["resource_policy"] = {"protected_artifacts": [
+        {"id": "oracle", "role": "black_box_reference", "paths": ["oracle.py"]}]}
+    sub = harness.install({})
+    _write(ctx, ask=["s1"], attach=["oracle.py", "notes.md"])
+    ask = _record(harness)["asks"][0]
+    assert [row["locator"] for row in ask["attached"]] == ["notes.md"]
+    assert ask["omissions"] == [{"locator": "oracle.py", "reason": "read_blocked:RESOURCE_POLICY_BLOCKED"}]
+    packet = _user_text(sub.calls[0]["request"].slot_messages["s1"][-1]["content"])
+    assert "ANSWER = 42" not in packet
+    assert "----- BEGIN notes.md -----\ndeck notes\n\n----- END notes.md -----" in packet
+
+
+def test_a_bound_candidate_keeps_serving_governance_files_attachable_with_their_own_bytes(harness):
+    """With a body candidate bound, ``system_repo`` names the candidate while ``planning_roots`` keeps the serving
+    checkout as the governance root, which attachments have always reached. A serving file attaches its own bytes,
+    never the candidate's same-named file, through an exact ``system_repo`` binding to that root that the read
+    admission still checks: a protected serving file and a sensitive name are refused, a link from the serving root
+    into the data root stays denied, and the candidate's file attaches by its own address."""
+    import hashlib
+
+    from ouroboros.tools import plan_evidence
+
+    serving, candidate = harness.system, harness.workspace.parent / "candidate"
+    candidate.mkdir()
+    (candidate / "BIBLE.md").write_bytes(b"# BIBLE.md\n\ncandidate wording\n")
+    (serving / "oracle.md").write_text("serving oracle\n", encoding="utf-8")
+    (serving / ".env").write_text("X=1\n", encoding="utf-8")
+    (harness.drive / "memory").mkdir()
+    (harness.drive / "memory" / "identity.md").write_text("identity-private-bytes\n", encoding="utf-8")
+    (serving / "data-link.md").symlink_to(harness.drive / "memory" / "identity.md")
+    ctx = harness.make_ctx()
+    ctx.serving_repo_dir, ctx.repo_dir, ctx.system_repo_dir = serving, candidate, candidate  # as body_candidate.bind
+    ctx.task_metadata["body_candidate"] = {"candidate_id": "c1", "path": str(candidate), "branch": "candidate",
+                                           "base_sha": "0" * 40, "repo_dir": str(serving)}
+    ctx.task_contract["resource_policy"] = {"protected_artifacts": [
+        {"id": "oracle", "role": "black_box_reference", "paths": [str(serving / "oracle.md")]}]}
+    serving_bible, candidate_bible = serving / "BIBLE.md", candidate / "BIBLE.md"
+    # read_file's own root selection cannot reach the serving checkout while the candidate is system_repo
+    assert plan_evidence.evidence_read_admission(ctx)(None, serving_bible.resolve()).startswith("read_blocked:")
+    sub = harness.install({})
+    _write(ctx, ask=["s1"], attach=[str(serving_bible), str(candidate_bible), str(serving / "oracle.md"),
+                                    str(serving / ".env"), str(serving / "data-link.md")])
+    ask = _record(harness)["asks"][0]
+    assert [(row["locator"], row["sha256"]) for row in ask["attached"]] == [
+        (str(serving_bible), hashlib.sha256(serving_bible.read_bytes()).hexdigest()),
+        (str(candidate_bible), hashlib.sha256(candidate_bible.read_bytes()).hexdigest())]
+    assert ask["omissions"] == [
+        {"locator": str(serving / "oracle.md"), "reason": "read_blocked:RESOURCE_POLICY_BLOCKED"},
+        {"locator": str(serving / ".env"), "reason": "sensitive"},
+        {"locator": str(serving / "data-link.md"), "reason": "denied_path"}]
+    packet = _user_text(sub.calls[0]["request"].slot_messages["s1"][-1]["content"])
+    assert f"----- BEGIN {serving_bible} -----\n{serving_bible.read_text(encoding='utf-8')}\n----- END" in packet
+    assert f"----- BEGIN {candidate_bible} -----\n# BIBLE.md\n\ncandidate wording\n\n----- END" in packet
+    assert "serving oracle" not in packet and "identity-private-bytes" not in packet
+
+
+@pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
+def test_a_serving_file_attaches_beside_a_bound_candidate_as_read_file_binds_it(harness, mode):
+    """With a candidate bound, ``read_file``'s own selection decides a serving file first; the exact ``system_repo``
+    binding to the serving root decides only what that selection does not admit as itself. In Cyber Pro
+    ``user_files`` holds the checkout, so a Presence ceiling granting reads there and none of ``system_repo``
+    attaches the serving file exactly as ``read_file`` reads it; in Advanced the checkout is no user file and both
+    refuse. The candidate's same-named file stays refused in both: the ceiling grants no ``system_repo`` read."""
+    from ouroboros.presence_authority import (PresenceCapabilityCeiling, PresenceResourceGrant, PresenceToolGrant,
+                                             presence_ceiling_payload)
+    from ouroboros.tools.registry import ToolRegistry
+
+    harness.monkeypatch.setattr("ouroboros.config._BOOT_RUNTIME_MODE", mode)
+    harness.monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(harness.system.parent))
+    serving, candidate = harness.system, harness.workspace.parent / "candidate"
+    candidate.mkdir()
+    (candidate / "BIBLE.md").write_bytes(b"# BIBLE.md\n\ncandidate wording\n")
+    ctx = harness.make_ctx()
+    ctx.serving_repo_dir, ctx.repo_dir, ctx.system_repo_dir = serving, candidate, candidate  # as body_candidate.bind
+    ctx.task_metadata["body_candidate"] = {"candidate_id": "c1", "path": str(candidate), "branch": "candidate",
+                                           "base_sha": "0" * 40, "repo_dir": str(serving)}
+    ceiling = PresenceCapabilityCeiling("helper", "a" * 64, "b" * 64, "c" * 64, "d" * 64, "main", 10,
+                                        (PresenceToolGrant("read_file"), PresenceToolGrant("plan_task")),
+                                        (PresenceResourceGrant("user_files", ("read",), "."),), "0" * 64)
+    ctx.task_contract["capability_ceiling"] = presence_ceiling_payload(ceiling)
+    bible = (serving / "BIBLE.md").resolve()
+    registry = ToolRegistry(repo_dir=candidate, drive_root=harness.drive)
+    registry.set_context(ctx)
+    read = registry.execute("read_file", {"path": str(bible)})
+    governance, subject = plan_ask.planning_roots(ctx)
+    manifest = plan_ask.attachment_manifest(ctx, [str(bible), str(candidate / "BIBLE.md")], state_root=harness.drive,
+                                            task_id="task-1", system_root=governance, active_root=subject)
+    refused = {"locator": str(candidate / "BIBLE.md"), "reason": "read_blocked:ACCESS_BLOCKED"}
+    if mode == "cyber_pro":
+        assert "Principle 0: Agency" in read, read
+        assert [(row["locator"], row["text"]) for row in manifest["attached"]] == [(str(bible), bible.read_text("utf-8"))]
+        assert manifest["omissions"] == [refused]
+    else:
+        assert read.startswith("⚠️ USER_FILES_PATH_BLOCKED"), read
+        assert manifest["attached"] == []
+        assert manifest["omissions"] == [{"locator": str(bible), "reason": "read_blocked:ACCESS_BLOCKED"}, refused]
+
+
+def test_a_presence_ceiling_decides_attachments_as_it_decides_their_reads(harness):
+    """The read admission carries the Presence ceiling, for own stores and ordinary files alike: with only
+    ``artifact_store`` reads granted, that store's file attaches; the ungranted ``task_drive`` file and a workspace
+    file are refused with the admission's own code."""
+    from ouroboros.presence_authority import PresenceCapabilityCeiling, PresenceResourceGrant, presence_ceiling_payload
+
+    ctx = harness.make_ctx()
+    ceiling = PresenceCapabilityCeiling("helper", "a" * 64, "b" * 64, "c" * 64, "d" * 64, "main", 10, (),
+                                        (PresenceResourceGrant("artifact_store", ("read",), "."),), "0" * 64)
+    ctx.task_contract["capability_ceiling"] = presence_ceiling_payload(ceiling)
+    art, drv = _own_store(ctx, "artifact_store"), _own_store(ctx, "task_drive")
+    (art / "granted.md").write_text("granted\n", encoding="utf-8")
+    (drv / "ungranted.md").write_text("ungranted\n", encoding="utf-8")
+    manifest = plan_ask.attachment_manifest(ctx, [str(art / "granted.md"), str(drv / "ungranted.md"), "notes.md"],
+                                            state_root=harness.drive, task_id="task-1", system_root=harness.system,
+                                            active_root=harness.workspace)
+    assert [row["text"] for row in manifest["attached"]] == ["granted\n"]
+    assert manifest["omissions"] == [{"locator": str(drv / "ungranted.md"), "reason": "read_blocked:ACCESS_BLOCKED"},
+                                     {"locator": "notes.md", "reason": "read_blocked:ACCESS_BLOCKED"}]
+
+
+def test_a_folderless_task_attaches_relative_locators_from_its_own_task_drive(harness):
+    """Project work without a folder has its own ``task_drive`` as the subject (``folderless_scratch_dir``): a
+    relative locator resolves there and reaches the packet with its own bytes, while a relative step out of the
+    store into the data root stays ``denied_path``."""
+    ctx = harness.make_ctx(active_workspace=False)
+    ctx.project_id = "p1"
+    drv = _own_store(ctx, "task_drive")
+    (drv / "draft.md").write_bytes(b"folderless draft\r\n")
+    (harness.drive / "memory").mkdir()
+    (harness.drive / "memory" / "identity.md").write_text("identity-private-bytes\n", encoding="utf-8")
+    sub = harness.install({})
+    _write(ctx, ask=["s1"], attach=["draft.md", "../../memory/identity.md"])
+    ask = _record(harness)["asks"][0]
+    assert [row["locator"] for row in ask["attached"]] == ["draft.md"]
+    assert ask["omissions"] == [{"locator": "../../memory/identity.md", "reason": "denied_path"}]
+    request = sub.calls[0]["request"]
+    packet = _user_text(request.slot_messages["s1"][-1]["content"])
+    assert request.session_root == str(drv)
+    assert "----- BEGIN draft.md -----\nfolderless draft\r\n\n----- END draft.md -----" in packet
+    assert "identity-private-bytes" not in packet
+
+
+def test_an_own_store_a_symlink_moved_admits_nothing_beneath_the_data_root(harness):
+    """Only the host's own address of the store counts: a ``task_drive`` replaced by a symlink into the data root
+    does not make what it points at attachable."""
+    memory = harness.drive / "memory"
+    memory.mkdir()
+    (memory / "identity.md").write_text("who I am\n", encoding="utf-8")
+    (harness.drive / "task_drives").mkdir()
+    (harness.drive / "task_drives" / "task-1").symlink_to(memory, target_is_directory=True)
+    locator = str(harness.drive / "task_drives" / "task-1" / "identity.md")
+    manifest = plan_ask.attachment_manifest(harness.make_ctx(), [locator], state_root=harness.drive, task_id="task-1",
+                                            system_root=harness.system, active_root=harness.workspace)
+    assert manifest["attached"] == [] and manifest["omissions"] == [{"locator": locator, "reason": "denied_path"}]
 
 
 def test_an_asks_reviewer_effort_orders_the_pool_of_that_ask_only(harness, monkeypatch):
