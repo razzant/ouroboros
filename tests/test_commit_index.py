@@ -6,12 +6,18 @@ An attributed commit whose index already stages paths outside its selection is r
 any metadata sync or staging, and the exits that unstage after staging touch only the paths the
 call selected. Attribution, staging, fingerprint, the tests gate and the Git commit are real;
 only the reviewers, the tests runner and publication are stand-ins.
+
+#2680: an author continuation without paths lands the paths its referenced review covered, never
+every attributed candidate, and says before Git how the staged tree differs from the reviewed one.
 """
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 import subprocess
+import sys
+import uuid
 
 import pytest
 
@@ -75,7 +81,8 @@ def _commit(ctx, monkeypatch, paths=None, *, verdict="PASS", tests=None, calls=N
         invoke_review_paid_stamp(ctx._review_paid_stamp)
         if calls is not None:
             calls.append(_index(ctx.repo_dir))
-        ctx._last_triad_raw_results = [{"slot_id": "critic", "status": "responded", "raw_text": verdict}]
+        ctx._last_triad_raw_results = [{"slot_id": "critic", "status": "responded", "raw_text": verdict,  # a production seat
+                                        "operation_id": f"op-critic-{uuid.uuid4().hex[:12]}", "operation_state": "settled"}]
         if verdict == "FAIL":
             ctx._last_review_critical_findings = [
                 {"item": "x", "severity": "critical", "verdict": "FAIL", "reason": "inert critic"}]
@@ -533,3 +540,453 @@ def test_rejoined_index_must_stay_inside_the_task_candidates(task):
     classified, _snapshot, error = git._stage_candidate_for_review(
         task, "candidate", 0.0, paths=["own.txt"], came_from_detached_checkout=False, attribution=evidence)
     assert error is None and classified == ["own.txt"]
+
+
+# --- #2680: an author continuation lands what its reference reviewed ---------------------------
+
+def _advisory_review(ctx, monkeypatch, paths, *, calls=None) -> dict:
+    """The first public call under Advisory: the outcome and its exact reference return before Git."""
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+    first = _commit(ctx, monkeypatch, paths=paths, calls=calls)
+    assert first.startswith("Review outcome returned before commit"), first
+    return json.loads(first.split("\n", 1)[1])["review_reference"]
+
+
+def _continue(ctx, monkeypatch, reference, **kwargs):
+    """The author's continuation from a FRESH context, as a later turn makes it: only durable records carry
+    the review. Every progress note keeps the HEAD it was published at; no reviewer may be bought."""
+    fresh = ToolContext(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root, task_id=ctx.task_id)
+    fresh.branch_dev = ctx.branch_dev
+    notes = []
+    fresh.emit_progress_fn = lambda text, *_a, **_kw: notes.append((str(text), _git(ctx.repo_dir, "rev-parse", "HEAD")))
+    monkeypatch.setattr(git, "_run_parallel_review", lambda *_a, **_kw: pytest.fail("an author continuation buys no reviewer"))
+    result = git._repo_commit_push(fresh, "candidate", review_reference=reference, author_disposition={
+        "disposition": "accepted", "rationale": "I read the returned review; this candidate is my decision."}, **kwargs)
+    return fresh, result, [note for note in notes if "reviewed tree" in note[0].lower()]
+
+
+@pytest.mark.parametrize("selection", ["omitted", "explicit_original", "explicit_broader", "revised"])
+def test_an_author_continuation_lands_the_reviewed_paths_unless_it_names_others(task, monkeypatch, selection):
+    """The review covered own.txt; local QA beside it, and QA written after the review, is attributed to the
+    task too. Omitted paths land the reviewed paths only; an explicit new scope or revised bytes still land in
+    the same call, and the staged tree's difference from the reviewed one is published before Git, then
+    repeated in the result and the author's decision. No reviewer is bought and the verdict stays as it was."""
+    from ouroboros import review_ledger
+    from ouroboros.review_state import load_state
+
+    repo = task.repo_dir
+    _baseline(task)
+    (repo / "own.txt").write_text("product change\n", encoding="utf-8")
+    (repo / "local-qa.txt").write_text("private synthetic evidence\n", encoding="utf-8")
+    calls = []
+    reference = _advisory_review(task, monkeypatch, ["own.txt"], calls=calls)
+    (repo / "qa").mkdir()
+    (repo / "qa" / "late.txt").write_text("private evidence written after the review\n", encoding="utf-8")
+    if selection == "revised":
+        (repo / "own.txt").write_text("product change, revised after review\n", encoding="utf-8")
+    ledger = review_ledger.ledger_root(task)
+    reviewed = review_ledger.load_record(ledger, reference["review_record_id"])
+    head = _git(repo, "rev-parse", "HEAD")
+    named = {"explicit_original": ["own.txt"], "explicit_broader": ["own.txt", "local-qa.txt"]}.get(selection)
+
+    _fresh, result, notes = _continue(task, monkeypatch, reference, **({"paths": named} if named else {}))
+
+    assert _git(repo, "rev-parse", "HEAD") != head, result
+    assert _committed(repo) == {"own.txt": "M", **({"local-qa.txt": "A"} if selection == "explicit_broader" else {})}
+    assert calls == [{"own.txt": "M"}]
+    assert (repo / "local-qa.txt").is_file() and (repo / "qa" / "late.txt").is_file()
+    [(disclosure, published_at)] = notes
+    assert published_at == head, "the difference is published before the commit exists"
+    if selection in {"omitted", "explicit_original"}:
+        assert "is exactly the reviewed tree" in disclosure, disclosure
+    else:
+        assert "differs from the reviewed tree" in disclosure, disclosure
+        assert ("not in the reviewed paths: local-qa.txt" if selection == "explicit_broader"
+                else "changed since review: own.txt") in disclosure, disclosure
+    assert "qa/late.txt" not in disclosure and disclosure in result, result
+    author = load_state(task.drive_root).attempts[-1].author_disposition
+    assert author["subject_delta"]["text"] == disclosure
+    after = review_ledger.load_record(ledger, reference["review_record_id"])
+    assert after["author_decision"]["subject_delta"] == author["subject_delta"]
+    assert after["verdict"] == reviewed["verdict"] and after["subject"] == reviewed["subject"]
+
+
+def test_explicit_empty_paths_never_take_the_reviewed_paths(task, monkeypatch):
+    repo = task.repo_dir
+    _baseline(task)
+    (repo / "own.txt").write_text("product change\n", encoding="utf-8")
+    reference = _advisory_review(task, monkeypatch, ["own.txt"])
+    head = _git(repo, "rev-parse", "HEAD")
+
+    _fresh, result, notes = _continue(task, monkeypatch, reference, paths=[])
+
+    assert "GIT_NO_ATTRIBUTED_CHANGES" in result and notes == [], result
+    assert _git(repo, "rev-parse", "HEAD") == head and _index(repo) == {}
+
+
+@pytest.mark.parametrize("reverted", ["one", "all"])
+def test_reviewed_paths_that_no_longer_differ_are_named_and_left_out(task, monkeypatch, reverted):
+    """A reviewed path restored to HEAD is left out and named; nothing else is discovered in its place."""
+    repo = task.repo_dir
+    _baseline(task)
+    for name in ("own.txt", "a.txt"):
+        (repo / name).write_text(f"{name} change\n", encoding="utf-8")
+    (repo / "local-qa.txt").write_text("private synthetic evidence\n", encoding="utf-8")
+    reference = _advisory_review(task, monkeypatch, ["own.txt", "a.txt"])
+    _git(repo, "checkout", "--", *(["a.txt"] if reverted == "one" else ["a.txt", "own.txt"]))
+    head = _git(repo, "rev-parse", "HEAD")
+
+    _fresh, result, notes = _continue(task, monkeypatch, reference)
+
+    if reverted == "all":
+        assert "GIT_NO_CHANGES" in result and "a.txt, own.txt" in result and notes == [], result
+        assert _git(repo, "rev-parse", "HEAD") == head and _index(repo) == {}
+        return
+    assert _committed(repo) == {"own.txt": "M"}, result
+    [(disclosure, _at)] = notes
+    assert "reviewed but no longer different from HEAD: a.txt" in disclosure, disclosure
+    assert "local-qa.txt" not in disclosure
+
+
+def test_a_reviewed_path_that_is_now_foreign_is_refused_never_dropped(task, monkeypatch):
+    """Reviewed before the task had a baseline; the baseline then records both paths as earlier dirt."""
+    repo = task.repo_dir
+    for name in ("own.txt", "foreign.txt"):
+        (repo / name).write_text(f"{name} change\n", encoding="utf-8")
+    reference = _advisory_review(task, monkeypatch, ["own.txt", "foreign.txt"])
+    _baseline(task)
+    head = _git(repo, "rev-parse", "HEAD")
+
+    _fresh, result, _notes = _continue(task, monkeypatch, reference)
+
+    assert "GIT_ATTRIBUTION_BLOCKED" in result and "foreign.txt, own.txt" in result, result
+    assert _git(repo, "rev-parse", "HEAD") == head and _index(repo) == {}
+
+
+@pytest.mark.parametrize("loss", ["record_missing", "binding_mismatch", "tree_pruned"])
+def test_an_unavailable_reviewed_composition_asks_for_explicit_paths_before_staging(task, monkeypatch, loss):
+    """Without its bound subject the reference names no composition: the call refuses before staging (the
+    staged QA keeps its entry), and an explicit selection still continues without another review."""
+    from ouroboros import review_ledger
+
+    repo = task.repo_dir
+    _baseline(task)
+    (repo / "own.txt").write_text("product change\n", encoding="utf-8")
+    (repo / "local-qa.txt").write_text("private synthetic evidence\n", encoding="utf-8")
+    reference = _advisory_review(task, monkeypatch, ["own.txt"])
+    ledger, record_id = review_ledger.ledger_root(task), reference["review_record_id"]
+    if loss == "record_missing":
+        review_ledger.record_path(ledger, record_id).unlink()
+    elif loss == "binding_mismatch":
+        review_ledger.revise_record(ledger, record_id, lambda payload: {
+            **payload, "fingerprints": {**payload["fingerprints"], "binding": "another-subject"}})
+    else:  # Git's own pruning of the unreachable reviewed tree (the handback unstaged it)
+        _git(repo, "reflog", "expire", "--expire=now", "--all")
+        _git(repo, "prune", "--expire=now")
+        tree = review_ledger.load_record(ledger, record_id)["subject"]["tree_sha"]
+        assert subprocess.run(["git", "cat-file", "-e", f"{tree}^{{tree}}"], cwd=repo, capture_output=True).returncode != 0
+    _git(repo, "add", "local-qa.txt")
+    entries, head = _git(repo, "ls-files", "-s", "-z"), _git(repo, "rev-parse", "HEAD")
+
+    _fresh, refused, notes = _continue(task, monkeypatch, reference)
+
+    assert "REVIEWED_PATHS_UNAVAILABLE" in refused and "paths" in refused and notes == [], refused
+    assert _git(repo, "ls-files", "-s", "-z") == entries and _git(repo, "rev-parse", "HEAD") == head
+    _git(repo, "reset", "-q", "HEAD", "--", "local-qa.txt")
+
+    _fresh, landed, notes = _continue(task, monkeypatch, reference, paths=["own.txt"])
+
+    assert _committed(repo) == {"own.txt": "M"}, landed
+    [(disclosure, _at)] = notes
+    assert "reviewed tree is unavailable" in disclosure, disclosure
+
+
+def test_the_reviewed_paths_keep_renames_deletions_and_literal_names(task, monkeypatch):
+    repo = task.repo_dir
+    _baseline(task)
+    _git(repo, "mv", "old.txt", "new.txt")
+    (repo / "gone.txt").unlink()
+    (repo / "own.txt").write_text("product change\n", encoding="utf-8")
+    names = ["[ab].txt", "-lead.txt"] + ([] if sys.platform == "win32" else ["line\nbreak.txt"])
+    for name in names:
+        (repo / name).write_text("task file\n", encoding="utf-8")
+    (repo / "local-qa.txt").write_text("private synthetic evidence\n", encoding="utf-8")
+    reference = _advisory_review(task, monkeypatch, ["old.txt", "new.txt", "gone.txt", "own.txt", *names])
+
+    _fresh, result, notes = _continue(task, monkeypatch, reference)
+
+    assert _committed(repo) == {"old.txt": "D", "new.txt": "A", "gone.txt": "D", "own.txt": "M",
+                                **{name: "A" for name in names}}, result
+    [(disclosure, _at)] = notes
+    assert "is exactly the reviewed tree" in disclosure, disclosure
+    assert "local-qa.txt" not in _git(repo, "ls-files") and (repo / "local-qa.txt").is_file()
+
+
+@pytest.mark.parametrize("case", ["omitted", "explicit_descendant", "explicit_directory", "new_file"])
+def test_a_reviewed_file_now_a_directory_lands_only_reviewed_entries(task, monkeypatch, case):
+    """Independent review, critical: a reviewed file is later replaced by a directory of local QA. Omitted paths land
+    that exact reviewed entry, its deletion, and nothing the directory holds; a reviewed NEW file whose name now holds
+    only a directory is no entry on either side, so it is named and left out. A selection naming the descendant, or
+    the replaced name itself, keeps Git's own meaning of those paths."""
+    repo, name = task.repo_dir, "new.txt" if case == "new_file" else "own.txt"
+    _baseline(task)
+    for reviewed in {"own.txt", name}:
+        (repo / reviewed).write_text("reviewed change\n", encoding="utf-8")
+    reference = _advisory_review(task, monkeypatch, sorted({"own.txt", name}))
+    (repo / name).unlink()
+    (repo / name).mkdir()
+    (repo / name / "local-qa.txt").write_text("unreviewed local evidence\n", encoding="utf-8")
+    named = {"explicit_descendant": [name, f"{name}/local-qa.txt"], "explicit_directory": [name]}.get(case)
+
+    _fresh, result, notes = _continue(task, monkeypatch, reference, **({"paths": named} if named else {}))
+
+    assert _committed(repo) == ({"own.txt": "M"} if case == "new_file" else {"own.txt": "D"} if not named
+                                else {"own.txt": "D", "own.txt/local-qa.txt": "A"}), result
+    if named:
+        return
+    assert (repo / name / "local-qa.txt").is_file() and "local-qa" not in _git(repo, "ls-files"), result
+    [(disclosure, _at)] = notes
+    assert ("reviewed but no longer different from HEAD: new.txt" if case == "new_file"
+            else "changed since review: own.txt") in disclosure and "local-qa" not in disclosure, disclosure
+
+
+def test_a_staged_unreviewed_path_refuses_the_continuation_unchanged(task, monkeypatch):
+    repo = task.repo_dir
+    _baseline(task)
+    (repo / "own.txt").write_text("product change\n", encoding="utf-8")
+    (repo / "local-qa.txt").write_text("private synthetic evidence\n", encoding="utf-8")
+    reference = _advisory_review(task, monkeypatch, ["own.txt"])
+    _git(repo, "add", "local-qa.txt")
+    entries, head = _git(repo, "ls-files", "-s", "-z"), _git(repo, "rev-parse", "HEAD")
+
+    _fresh, result, _notes = _continue(task, monkeypatch, reference)
+
+    assert "GIT_INDEX_OUTSIDE_SELECTION_BLOCKED" in result and "local-qa.txt" in result, result
+    assert _git(repo, "ls-files", "-s", "-z") == entries and _git(repo, "rev-parse", "HEAD") == head
+
+
+@pytest.mark.parametrize("compacted", ["before_the_call", "by_its_own_append", "old_writer_row_by_its_own_append"])
+def test_a_compacted_review_source_keeps_its_continuation_and_author_record(task, monkeypatch, compacted):
+    """A settled source outside the newest-50 history window keeps the explicit continuation through its exact
+    settled record (#2587/#2590), whether it was compacted before the call or by the call's own history append,
+    and the landed row keeps the author's decision naming that reference. An old writer's row there (still
+    ``reviewing`` with its closed seat's start token, so never compacted) is repaired from that record first and
+    then compacted by the call's own append, keeping the same continuation."""
+    from ouroboros.review_state import CommitAttemptRecord, _utc_now, load_state, update_state
+    from ouroboros.review_state_custody import _strip_attempt_heavy_payload
+
+    repo = task.repo_dir
+    _baseline(task)
+    (repo / "own.txt").write_text("product change\n", encoding="utf-8")
+    reference = _advisory_review(task, monkeypatch, ["own.txt"])
+    source = load_state(task.drive_root).attempts[-1]
+
+    def age(state):  # another task's paid rows are never evicted: the source falls outside the newest 50
+        for number in range(1, 52):
+            state.attempts.append(CommitAttemptRecord(  # newer than the source, so it is the one outside the window
+                ts=_utc_now(), commit_message="other", status="blocked", task_id="another-task",
+                repo_key=source.repo_key, tool_name="commit_reviewed", attempt=number, paid=True))
+        own = next(row for row in state.attempts if row.attempt == source.attempt and row.task_id == task.task_id)
+        if compacted == "before_the_call":
+            _strip_attempt_heavy_payload(own)
+        elif compacted == "old_writer_row_by_its_own_append":  # the pre-fix writer's shape: its phase and token stayed
+            own.status, own.phase = "reviewing", "review"
+            own.triad_raw_results[0]["pending_invocation_id"] = "inv-left-by-the-old-writer"
+    update_state(task.drive_root, age)
+
+    _fresh, result, _notes = _continue(task, monkeypatch, reference)
+
+    assert _committed(repo) == {"own.txt": "M"}, result
+    rows = [row for row in load_state(task.drive_root).attempts if row.task_id == task.task_id]
+    kept = next(row for row in rows if row.attempt == source.attempt)
+    assert kept.raw_stripped and (kept.status, kept.phase) == ("reviewed", "review_only"), kept
+    landed = next(row for row in rows if row.status == "succeeded")
+    assert landed.author_disposition.get("review_reference") == reference, landed.author_disposition
+
+
+def _rejected_review(task, monkeypatch, *, operation=True):
+    """A Blocking review that FAILs through the public tool; ``operation``: its seat names its operation, as every
+    production seat does (a record without it proves no settlement)."""
+    from ouroboros.review_dispatch import invoke_review_paid_stamp
+    from tests.test_review_commit_landing import REJECTING
+    from tests.test_review_ledger import CRITICAL
+
+    seats = [{**REJECTING[0], **({"operation_id": f"op-critic-{uuid.uuid4().hex[:12]}", "operation_state": "settled"}
+                                 if operation else {})}]
+
+    def rejected(ctx, *_a, **_kw):
+        invoke_review_paid_stamp(ctx._review_paid_stamp)
+        ctx._last_triad_raw_results = seats
+        ctx._last_review_critical_findings = [CRITICAL]
+        return "Critical feedback", None, "critical_findings", []
+    monkeypatch.setattr(git, "_run_parallel_review", rejected)
+    monkeypatch.setattr(git, "_run_review_preflight_tests", lambda *_a, **_kw: None)
+    monkeypatch.setattr(git, "_post_commit_result", lambda *_a, **_kw: None)
+    monkeypatch.setattr(git, "_auto_push", lambda *_a, **_kw: "")
+    return git._repo_commit_push(task, "candidate", paths=["own.txt"], skip_advisory_review=True)
+
+
+@pytest.mark.parametrize("evidence", ["settled_record", "record_naming_no_operation"])
+def test_a_compacted_attempt_collected_with_its_exact_bytes_returns_its_outcome_without_rebuilding_custody(
+        task, monkeypatch, evidence):
+    """Independent review (regression surface): a Blocking FAIL whose attempt row history compaction stripped, then
+    collected through its reference with the exact reviewed bytes staged, returns its whole recorded outcome
+    read-only from its bound settled record (every seat's answer). No custody is rebuilt from the stripped row, the
+    FAIL is never rewritten (it became QUORUM_FAILED), nothing is dispatched, staged or committed. A record whose
+    seat names no operation proves nothing: the reference is refused, the record untouched."""
+    from ouroboros import review_ledger
+    from ouroboros.review_state import load_state, update_state
+    from ouroboros.review_state_custody import _strip_attempt_heavy_payload
+    from ouroboros.tools.review_collection import reference_for
+
+    _baseline(task)
+    (task.repo_dir / "own.txt").write_text("change\n", encoding="utf-8")
+    first = _rejected_review(task, monkeypatch, operation=evidence == "settled_record")
+    source = load_state(task.drive_root).attempts[-1]
+    ledger = review_ledger.ledger_root(task)
+    record = review_ledger.load_record(ledger, source.review_record_id)
+    assert record["verdict"]["aggregate"] == "FAIL", (first, record["verdict"])
+    reference = reference_for(record, source)
+    update_state(task.drive_root, lambda state: _strip_attempt_heavy_payload(state.attempts[-1]))
+    assert load_state(task.drive_root).attempts[-1].raw_stripped
+    _git(task.repo_dir, "add", "own.txt")
+    assert git._fingerprint_staged_diff(task.repo_dir)["fingerprint"] == source.pre_review_fingerprint
+    head, index = _git(task.repo_dir, "rev-parse", "HEAD"), _git(task.repo_dir, "ls-files", "-s")
+    fresh = ToolContext(repo_dir=task.repo_dir, drive_root=task.drive_root, task_id=task.task_id)
+    fresh.branch_dev = task.branch_dev
+    monkeypatch.setattr(git, "_run_parallel_review", lambda *_a, **_kw: pytest.fail("reading an old outcome buys nothing"))
+
+    result = git._commit_reviewed(fresh, review_reference=reference)
+
+    assert _git(task.repo_dir, "rev-parse", "HEAD") == head and _git(task.repo_dir, "ls-files", "-s") == index, result
+    assert review_ledger.load_record(ledger, source.review_record_id)["verdict"] == record["verdict"], result
+    assert "REVIEW_CUSTODY_LOST" not in result
+    if evidence == "settled_record":
+        assert result.startswith("Review outcome already settled, returned read-only: its attempt row was compacted"), result
+        shown = json.JSONDecoder().raw_decode(result, result.index("{"))[0]
+        assert shown["aggregate"] == "FAIL" and shown["review_reference"] == reference, shown
+        assert [row["seat_id"] for row in shown["rows"]] == ["critic"] and shown["findings"]["critical_findings"], shown
+    else:
+        assert "missing or no longer has its exact evidence" in result, result
+
+
+def _reshape(task, attempt_no, rows, *, record_seats=(), aggregate=None, **fields):
+    """The persisted shape an incident left (synthetic, no owner data): attempt ``attempt_no``'s roster and fields,
+    and extra seats (and verdict word) on its bound ledger record."""
+    from ouroboros import review_ledger
+    from ouroboros.review_state import update_state
+
+    def shape(state):
+        row = next(item for item in state.attempts if item.attempt == attempt_no and item.tool_name == "commit_reviewed")
+        row.triad_raw_results = rows
+        for name, value in fields.items():
+            setattr(row, name, value)
+        return row.review_record_id
+    record_id = update_state(task.drive_root, shape)
+
+    def seats(payload):
+        verdict = {**payload["verdict"], **({"aggregate": aggregate} if aggregate else {})}
+        return {**payload, "rows": [*payload["rows"], *record_seats], "verdict": verdict}
+    review_ledger.revise_record(review_ledger.ledger_root(task), record_id, seats)
+
+
+@pytest.mark.parametrize("mode", ["cyber_pro", "pro"])
+@pytest.mark.parametrize("shape", ["landed_late_settled_token", "quorum_failed_unsent_and_late_token",
+                                   "terminal_adviser_token", "live_adviser"])
+def test_a_finished_review_holding_a_stale_start_token_admits_the_authors_next_intent(task, monkeypatch, request,
+                                                                                      shape, mode):
+    """Three incidents of 2026-11-04 (synthetic shapes): a finished commit review whose row kept a seat's start token
+    after that seat's terminal outcome (a landed late_settled PASS; a QUORUM_FAILED wave with an unsent seat beside a
+    late_settled one; an additional adviser's terminal row) read as live custody, so the author's next, different
+    intent was refused (Cyber "this other intent waits", Blocking REVIEWED_ATTEMPT_IN_PROGRESS). The next public
+    commit call now repairs that row from its exact bound record and buys the new intent its own panel; the old
+    verdict, history text and landing stay. A still-running adviser keeps its own custody yet holds nothing."""
+    from ouroboros import config, review_checking_prune, review_ledger
+    from ouroboros.review_state import _attempt_has_active_review_custody, load_state
+    from ouroboros.tools.review_subject import checkout_token
+
+    config.reset_runtime_mode_baseline_for_tests()
+    config.initialize_runtime_mode_baseline(mode)
+    request.addfinalizer(config.reset_runtime_mode_baseline_for_tests)
+    repo = task.repo_dir
+    _baseline(task)
+    (repo / "own.txt").write_text("product change\n", encoding="utf-8")
+    calls = []
+    reference = _advisory_review(task, monkeypatch, ["own.txt"], calls=calls)
+    if shape == "landed_late_settled_token":
+        _continue(task, monkeypatch, reference)
+        assert _committed(repo) == {"own.txt": "M"}
+    source = next(row for row in load_state(task.drive_root).attempts if row.attempt == reference["attempt"])
+    critic = dict(source.triad_raw_results[0])
+    late_token = {"status": "ok", "operation_state": "late_settled", "late_result_pending": False,
+                  "pending_invocation_id": "inv-left-on-a-finished-seat", "usage": {}}
+    seat = review_ledger.load_record(review_ledger.ledger_root(task), source.review_record_id)["rows"][0]
+    adviser_seat = {**seat, "seat_id": "adviser", "operation_id": "op-adviser", "additional": True}
+    adviser = {"slot_id": "adviser", "model_id": "adviser-model", "operation_id": "op-adviser",
+               "review_plan": {"additional": True}}
+    if shape == "landed_late_settled_token":
+        _reshape(task, source.attempt, [{**critic, **late_token}], block_reason="author_decision_required",
+                 block_details="⚠️ REVIEW_PENDING: physical reviewer work remains in flight.")
+    elif shape == "quorum_failed_unsent_and_late_token":
+        unsent = {"slot_id": "astra", "model_id": "astra-model", "status": "not_dispatched",
+                  "operation_state": "not_dispatched", "operation_id": "op-astra", "late_result_pending": False}
+        _reshape(task, source.attempt, [unsent, {**critic, **late_token}], aggregate="QUORUM_FAILED", record_seats=[
+            {**seat, "seat_id": "astra", "operation_id": "op-astra", "status": "not_dispatched",
+             "operation_state": "not_dispatched"}], block_reason="review_quorum",
+            block_details="⚠️ REVIEW_PENDING: physical reviewer work remains in flight.")
+    elif shape == "terminal_adviser_token":
+        _reshape(task, source.attempt, [critic, {**adviser, **late_token}], record_seats=[adviser_seat])
+    else:
+        live = {"status": "in_flight", "operation_state": "in_flight", "late_result_pending": True,
+                "pending_invocation_id": "inv-adviser-running"}
+        _reshape(task, source.attempt, [critic, {**adviser, **live}], record_seats=[
+            {**adviser_seat, "status": "pending", "operation_state": "in_flight"}])
+    before = next(row for row in load_state(task.drive_root).attempts if row.attempt == source.attempt)
+    verdict = review_ledger.load_record(review_ledger.ledger_root(task), source.review_record_id)["verdict"]
+    assert _attempt_has_active_review_custody(before), "the incident shape reads as live custody"
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory" if mode == "cyber_pro" else "blocking")
+    (repo / "a.txt").write_text("the author's next intent\n", encoding="utf-8")
+    head = _git(repo, "rev-parse", "HEAD")
+
+    result = _commit(task, monkeypatch, paths=["a.txt"], calls=calls)
+
+    assert "this other intent waits" not in result and "REVIEWED_ATTEMPT_IN_PROGRESS" not in result, result
+    assert len(calls) == 2 and calls[-1] == {"a.txt": "M"}, "the new intent got its own panel"
+    if mode == "pro":
+        assert _committed(repo) == {"a.txt": "M"} and _git(repo, "rev-parse", "HEAD") != head, result
+    else:
+        assert result.startswith("Review outcome returned before commit") and _git(repo, "rev-parse", "HEAD") == head
+    after = next(row for row in load_state(task.drive_root).attempts if row.attempt == source.attempt)
+    assert (after.status, after.phase, after.block_details) == (before.status, before.phase, before.block_details)
+    assert review_ledger.load_record(review_ledger.ledger_root(task), source.review_record_id)["verdict"] == verdict
+    running = [row.get("pending_invocation_id") for row in after.triad_raw_results if row.get("pending_invocation_id")]
+    if shape == "live_adviser":
+        assert running == ["inv-adviser-running"] and _attempt_has_active_review_custody(after)
+        active, _owners = review_checking_prune._review_rounds(task.drive_root)
+        assert checkout_token(after.review_retry_key, task_id=task.task_id) in active, "its checkout stays held"
+    else:
+        assert running == [] and not _attempt_has_active_review_custody(after), after.triad_raw_results
+
+
+def test_a_compacted_source_whose_record_names_no_counted_seat_continues_nothing(task, monkeypatch):
+    """A record with no counted seat proves no settlement, whatever ``counted_pending`` says of an empty roster: a
+    compacted source bound to such a record is refused for the explicit continuation before anything is staged, and
+    nothing is committed or bought."""
+    from ouroboros import review_ledger
+    from ouroboros.review_state import load_state, update_state
+    from ouroboros.review_state_custody import _strip_attempt_heavy_payload
+
+    repo = task.repo_dir
+    _baseline(task)
+    (repo / "own.txt").write_text("product change\n", encoding="utf-8")
+    reference = _advisory_review(task, monkeypatch, ["own.txt"])
+    update_state(task.drive_root, lambda state: _strip_attempt_heavy_payload(state.attempts[-1]))
+    assert load_state(task.drive_root).attempts[-1].raw_stripped
+    review_ledger.revise_record(review_ledger.ledger_root(task), reference["review_record_id"],
+                                lambda payload: {**payload, "rows": []})
+    head, index = _git(repo, "rev-parse", "HEAD"), _git(repo, "ls-files", "-s")
+
+    _fresh, result, _notes = _continue(task, monkeypatch, reference)
+
+    assert "missing or no longer has its exact evidence" in result, result
+    assert _git(repo, "rev-parse", "HEAD") == head and _git(repo, "ls-files", "-s") == index

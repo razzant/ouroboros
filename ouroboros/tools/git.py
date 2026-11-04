@@ -1151,14 +1151,13 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
     ctx._left_review_wait = None  # a new commit act is the author's explicit next choice
     continuation = review_reference is not None or author_disposition is not None
     collecting_reference = review_reference is not None and author_disposition is None
-    from ouroboros.tools.review_collection import collected_open_peer, prepare_commit_collection
+    from ouroboros.tools.review_collection import collect_commit_reference, collected_open_peer
     if collecting_reference or continue_seats is not None:
-        try:
-            source = prepare_commit_collection(ctx, review_reference, commit_message=commit_message, continue_seats=continue_seats,
-                mutations=(review_rebuttal, goal, scope, reviewers, reason, preflight_reviewer, ctx._review_since, author_disposition))
-            commit_message = source.commit_message
-        except ValueError as exc:
-            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=str(exc)))
+        source = collect_commit_reference(ctx, review_reference, commit_message=commit_message, continue_seats=continue_seats,
+            mutations=(review_rebuttal, goal, scope, reviewers, reason, preflight_reviewer, ctx._review_since, author_disposition))
+        if isinstance(source, str):  # refused, or a settled outcome read back: no staging, no Git effect
+            return source
+        commit_message = source.commit_message
     # A managed marker authorizes exactly one reviewed two-parent resolution.
     from supervisor.update_merge import managed_assisted_tx_for
     _managed_tx, _managed_block = managed_assisted_tx_for(getattr(ctx, "task_id", ""), getattr(ctx, "task_metadata", None))
@@ -1167,8 +1166,8 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
     # An empty message is refused below as an argument error before any state read.
     if (commit_message.strip() and str(root or "system_repo") == "system_repo"
             and not (preflight_reviewer and (skip_advisory_pre_review or continuation))):
-        error = None if collecting_reference else prepare_author_commit_request(
-            ctx, review_reference, author_disposition, review_rebuttal)
+        error = None if collecting_reference else prepare_author_commit_request(  # a managed merge keeps its whole index
+            ctx, review_reference, author_disposition, review_rebuttal, paths_omitted=paths is None and not _managed_tx)
         if error:
             return error
         if not managed_resume and not collecting_reference:
@@ -1195,8 +1194,9 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
     attribution_binding, attribution_error = None, ""
     if _managed_tx:
         paths = None  # a managed merge always stages the WHOLE resolved tree (ignore paths)
-    else:
-        paths, _attribution, attribution_error, attribution_binding = _task_attributed_commit_paths(ctx, paths)
+    else:  # an author continuation's omitted paths are the paths its reference reviewed (``review_collection.author_scope``)
+        paths, _attribution, attribution_error, attribution_binding = _task_attributed_commit_paths(
+            ctx, (getattr(ctx, "_author_commit_scope", None) or {}).get("selected", paths))
     for block_reason, error in (("mutation_attribution", attribution_error), ("overlap_guard", overlap_err)):
         if error:
             _record_commit_attempt(
@@ -1464,7 +1464,7 @@ def get_tools() -> List[ToolEntry]:
         **widening_properties(),
         "root": {"type": "string", "enum": ["system_repo"], "default": "system_repo", "description": "The reviewed commit lands in Ouroboros's own body only; review any other root with review_change and commit it with ordinary git."},
         "commit_message": {"type": "string"},
-        "paths": {"type": "array", "items": {"type": "string"}, "description": "Optional subset of task-attributed paths. Omitted computes candidates; empty never stages the whole tree."},
+        "paths": {"type": "array", "items": {"type": "string"}, "description": "Optional subset of task-attributed paths. Omitted computes candidates (with author_disposition: the reviewed paths); empty never stages the whole tree."},
         "skip_tests": {"type": "boolean", "default": False, "description": "Skip pre-commit tests."},
         "review_rebuttal": {"type": "string", "default": "", "description": "A NEW content-hashed counter-argument buys one paid re-review within capacity; repeating it is free-refused."},
         "preflight_reviewer": {"type": "string", "default": "", "description": "One ENABLED catalog row (id or handle; a review-pool member or not) for an early informational look at the worktree before the panel; unknown or disabled, or named beside skip_advisory_review=True or an author continuation, is TOOL_ARG_ERROR before anything is staged."},

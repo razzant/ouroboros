@@ -107,8 +107,9 @@ def test_blocking_reference_resume_keeps_byte_gate(author, monkeypatch, changed)
     with _parent(a):
         text = a.git._commit_reviewed(a.ctx, review_reference=ref)
     assert sorted(a.reviewer.rounds) == ["m1", "m2"]
-    if changed:
-        assert "REVIEW_BINDING_BLOCKED" in text and _commit_count(a) == 1
+    if changed:  # the settled outcome reads back without the old bytes; changed bytes never inherit its PASS
+        assert text.startswith("Review outcome already settled, returned read-only") and _commit_count(a) == 1, text
+        assert "value = 3" in _git(a.repo, "diff", "--cached"), "the author's staged change is left as it was"
     else:
         assert _commit_count(a) == 2, text
 

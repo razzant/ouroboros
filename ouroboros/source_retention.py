@@ -143,21 +143,28 @@ def retry_lineage_owns(root, task_id, owner) -> bool:
     return any(found == owner for _root, found in _source_locations(root, task_id))
 
 
-def retained_actor_source_read_target(root, task_id, relative):
-    """Placement alias for an advertised immutable source read, not write authority."""
+def source_handle_digest(relative) -> str:
+    """The sha256 an artifact-relative ``source_handles/<category>/<name>-<sha256>.<ext>`` address names, else ``""``."""
     import re
-    from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path
 
     rel = pathlib.PurePosixPath(relative)
     match = re.fullmatch(r".+-([0-9a-f]{64})\.[A-Za-z0-9]+", rel.name)
-    if len(rel.parts) != 3 or rel.parts[0] != "source_handles" or not match:
+    return match[1] if len(rel.parts) == 3 and rel.parts[0] == "source_handles" and match else ""
+
+
+def retained_actor_source_read_target(root, task_id, relative):
+    """Placement alias for an advertised immutable source read, not write authority."""
+    from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path
+
+    digest = source_handle_digest(relative)
+    if not digest:
         return None
     for source_root, owner in _source_locations(root, task_id):
         path = task_artifact_dir_path(source_root, owner, create=False) / relative
         if not (path.exists() or path.is_symlink()) and packs.materialize_handle(source_root, owner, relative) is None:
             continue  # a packed handle is written back beside its name first
         ref = {"kind": "task_source", "root": "artifact_store", "path": relative,
-               "size": path.stat().st_size, "sha256": match[1]}
+               "size": path.stat().st_size, "sha256": digest}
         read_actor_source_bytes(source_root, owner, ref)
         return path.resolve(strict=True)
     return None
