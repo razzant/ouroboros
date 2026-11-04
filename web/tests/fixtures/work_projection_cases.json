@@ -2126,14 +2126,11 @@
      "because": [
       {
        "code": "sleeping",
-       "text": "Sleeping until Draft the release notes finishes or a message arrives",
+       "text": "Sleeping until Draft the release notes finishes or writes",
        "wake": [
         {
-         "kind": "task",
+         "kind": "task_or_writes",
          "name": "Draft the release notes"
-        },
-        {
-         "kind": "mail"
         }
        ]
       }
@@ -2172,14 +2169,11 @@
         "because": [
          {
           "code": "sleeping",
-          "text": "Sleeping until Draft the release notes finishes or a message arrives",
+          "text": "Sleeping until Draft the release notes finishes or writes",
           "wake": [
            {
-            "kind": "task",
+            "kind": "task_or_writes",
             "name": "Draft the release notes"
-           },
-           {
-            "kind": "mail"
            }
           ]
          }
@@ -3316,14 +3310,25 @@
   },
   "task_and_sender": {
    "code": "sleeping",
-   "text": "Sleeping until Draft the release notes finishes or a message arrives",
+   "text": "Sleeping until Draft the release notes finishes or writes",
    "wake": [
     {
-     "kind": "task",
+     "kind": "task_or_writes",
+     "name": "Draft the release notes"
+    }
+   ]
+  },
+  "task_and_sender_and_time": {
+   "code": "sleeping",
+   "text": "Sleeping until Draft the release notes finishes or writes or 2026-10-17T18:05:00+00:00",
+   "wake": [
+    {
+     "kind": "task_or_writes",
      "name": "Draft the release notes"
     },
     {
-     "kind": "mail"
+     "kind": "time",
+     "at": "2026-10-17T18:05:00+00:00"
     }
    ]
   },

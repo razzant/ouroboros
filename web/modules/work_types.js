@@ -20,7 +20,7 @@
  */
 /**
  * @typedef {Object} SleepWake
- * @property {string} kind  // task | tasks | all_tasks | runs | service | reviewer | sender | mail | time
+ * @property {string} kind  // task | task_or_writes | tasks | all_tasks | runs | service | reviewer | sender | mail | time
  * @property {string=} name  // a chosen task's or sender's work name, as the census holds it
  * @property {number=} count
  * @property {string=} at  // the chosen wake instant, said in the viewer's clock

@@ -201,6 +201,7 @@ SLEEPS = {
     "sender_unnamed": {"senders": ["elsewhere"]}, "mail": {"any_mail": True}, "time_only": {"wake_at": _AT},
     "time": {"wake_at": _AT, "any_mail": True}, "task_and_time": {"tasks": ["named"], "wake_at": _AT},
     "task_and_sender": {"tasks": ["named"], "senders": ["named"]},
+    "task_and_sender_and_time": {"tasks": ["named"], "senders": ["named"], "wake_at": _AT},
     "every_kind": {"tasks": ["a", "b"], "task_wait": {"mode": "all_terminal"}, "runs": ["r1"],
                    "services": [{"name": "preview"}], "reviewer_slots": ["s1"], "senders": ["named"], "wake_at": _AT},
     "unrecorded": {},

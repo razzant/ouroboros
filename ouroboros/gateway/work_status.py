@@ -78,10 +78,11 @@ _CALL_STEPS = ("requested", "dispatched")  # its Main call started (supervisor.a
 
 # What a sleep waits for: one short clause per kind of its own selection (``model_sleep.selectors``), in this order and
 # joined by "or" after "Sleeping until", its chosen time last; a sleep that chose only a time also wakes on any message
-# and says so. A record that saved no selection keeps STOP_TEXT's "until it is woken". Browser twin: work_status.js
-# SLEEP_CLAUSES (the web fixture pins both).
+# and says so, and the one task it names, chosen as its sender too, finishes or writes. A record that saved no selection
+# keeps STOP_TEXT's "until it is woken". Browser twin: work_status.js SLEEP_CLAUSES (the web fixture pins both).
 SLEEP_CLAUSES = {
     "task": "{name} finishes",
+    "task_or_writes": "{name} finishes or writes",
     "tasks": ("the task it chose finishes", "one of {count} tasks finishes"),
     "all_tasks": "all {count} tasks it chose finish",
     "runs": ("its external run finishes", "one of {count} external runs finishes"),
@@ -97,22 +98,24 @@ def sleep_wake(sleep: Any, names: Mapping[str, str]) -> List[Dict[str, Any]]:
     """The clauses a saved sleep is said by, ``{kind, name|count|at}`` per kind it chose; ``[]`` when it saved none.
 
     A chosen task or sender is named only by the census row the projection already holds (``names``), never by its
-    id, and only once: a task it cannot name, or several, read as a count; such a sender, or one the task clause
-    already named, as a message."""
+    id, and only once: a task it cannot name, or several, read as a count; such a sender as a message; the one task it
+    named, chosen as its sender too, as that task finishing or writing."""
     sleep = sleep if isinstance(sleep, Mapping) else {}
     tasks = [str(task) for task in sleep.get("tasks") or () if task]
     senders = [str(task) for task in sleep.get("senders") or () if task]
     wake: List[Dict[str, Any]] = []
+    name = names.get(tasks[0]) if len(tasks) == 1 else ""
+    writes = bool(name) and senders == tasks  # its one sender is the task it names: said once, by that task
     if len(tasks) > 1 and (sleep.get("task_wait") or {}).get("mode") == "all_terminal":
         wake.append({"kind": "all_tasks", "count": len(tasks)})
     elif tasks:
-        name = names.get(tasks[0]) if len(tasks) == 1 else ""
-        wake.append({"kind": "task", "name": name} if name else {"kind": "tasks", "count": len(tasks)})
+        wake.append({"kind": "task_or_writes" if writes else "task", "name": name} if name
+                    else {"kind": "tasks", "count": len(tasks)})
     for key, kind in (("runs", "runs"), ("services", "service"), ("reviewer_slots", "reviewer")):
         if sleep.get(key):
             wake.append({"kind": kind, "count": len(sleep["runs"])} if kind == "runs" else {"kind": kind})
     sender = names.get(senders[0]) if len(senders) == 1 and senders != tasks else ""  # the one task said it
-    if senders or sleep.get("any_mail") is True:
+    if (senders and not writes) or sleep.get("any_mail") is True:
         wake.append({"kind": "sender", "name": sender} if sender else {"kind": "mail"})
     if sleep.get("wake_at"):
         wake.append({"kind": "time", "at": str(sleep["wake_at"])})

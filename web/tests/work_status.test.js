@@ -370,13 +370,15 @@ test('a sleep says every source it chose in the server\'s words, joined by "or",
     const at = '2026-10-17T18:05:00+00:00';
     assert.equal(reasonText(SERVER_SLEEPS.every_kind), 'Sleeping until all 2 tasks it chose finish or its external run '
         + `finishes or a service it started stops or a reviewer answers or Draft the release notes writes or ${clock(at)}`);
-    // A time alone also wakes on any message; a sender the task clause named is said as a message, never twice.
+    // A time alone also wakes on any message; the task it names, chosen as its sender too, finishes or writes.
     assert.equal(reasonText(SERVER_SLEEPS.time), `Sleeping until a message arrives or ${clock(at)}`);
     assert.equal(reasonText(SERVER_SLEEPS.time_only), `Sleeping until ${clock(at)}`);
-    assert.equal(reasonText(SERVER_SLEEPS.task_and_sender), 'Sleeping until Draft the release notes finishes or a message arrives');
+    assert.equal(reasonText(SERVER_SLEEPS.task_and_sender), 'Sleeping until Draft the release notes finishes or writes');
+    assert.equal(reasonText(SERVER_SLEEPS.task_and_sender_and_time),
+        `Sleeping until Draft the release notes finishes or writes or ${clock(at)}`);
     // The chosen helper by its census name, never its id; what still runs beside it stays its own fact.
     assert.equal(workLine(work('sleeping_on_named_helper')),
-        'Sleeping until Draft the release notes finishes or a message arrives · 1 helper still working');
+        'Sleeping until Draft the release notes finishes or writes · 1 helper still working');
     assert.equal(workLine(work('sleeping_until_time')), `Sleeping until a message arrives or ${clock(at)}`);
     assert.ok(!workLine(work('sleeping_on_named_helper')).includes('sn-c'));
     // A clause this client does not know, or a time it cannot read, keeps the server's sentence whole.
@@ -393,8 +395,8 @@ test('a sleep says every source it chose in the server\'s words, joined by "or",
         // A translation keeps the name as written; a clause it lacks stays the server's English until translated.
         assert.equal(reasonText(SERVER_SLEEPS.task), 'Спит, пока не закончится Draft the release notes');
         assert.equal(reasonText(SERVER_SLEEPS.reviewer), 'Спит, пока не ответит ревьюер');
-        assert.equal(reasonText(SERVER_SLEEPS.task_and_sender),
-            'Спит, пока не закончится Draft the release notes или a message arrives');
+        assert.equal(reasonText(SERVER_SLEEPS.task_and_time), `Спит, пока не закончится Draft the release notes или ${clock(at)}`);
+        assert.equal(reasonText(SERVER_SLEEPS.task_and_sender), 'Спит, пока Draft the release notes finishes or writes');
     } finally { applyPayload(prior); }
 });
 

@@ -39,7 +39,7 @@ class SleepWake(TypedDict):
     with a task's census ``name``, a ``count`` or the chosen instant ``at`` (said in the viewer's clock). A reason's
     clauses are joined by "or", its time last."""
 
-    kind: str  # task | tasks | all_tasks | runs | service | reviewer | sender | mail | time
+    kind: str  # task | task_or_writes | tasks | all_tasks | runs | service | reviewer | sender | mail | time
     name: NotRequired[str]
     count: NotRequired[int]
     at: NotRequired[str]

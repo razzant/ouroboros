@@ -119,6 +119,7 @@ const COUNTED_REASONS = {
 // chosen time reads in the viewer's clock.
 const SLEEP_CLAUSES = {
     task: ({ name }) => fmt('{name} finishes', { name }),
+    task_or_writes: ({ name }) => fmt('{name} finishes or writes', { name }),
     tasks: ({ count: n }) => (n === 1 ? tr('work.sleep.task', 'the task it chose finishes')
         : fmt('one of {count} tasks finishes', { count: n, n })),
     all_tasks: ({ count: n }) => fmt('all {count} tasks it chose finish', { count: n, n }),

@@ -183,6 +183,7 @@ def test_a_warm_sleep_names_only_the_helpers_it_chose_that_a_stop_holds_and_who_
 
 _AT = "2026-11-03T18:05:00+00:00"
 _NAMED, _TIME = {"kind": "task", "name": "Draft the notes"}, {"kind": "time", "at": _AT}
+_WRITES = {"kind": "task_or_writes", "name": "Draft the notes"}
 
 
 @pytest.mark.parametrize(("sleep", "text", "wake"), [
@@ -202,9 +203,14 @@ _NAMED, _TIME = {"kind": "task", "name": "Draft the notes"}, {"kind": "time", "a
     ({"wake_at": _AT, "any_mail": True}, f"Sleeping until a message arrives or {_AT}", [{"kind": "mail"}, _TIME]),
     ({"wake_at": _AT}, f"Sleeping until {_AT}", [_TIME]),
     ({"tasks": ["kid"], "wake_at": _AT}, f"Sleeping until Draft the notes finishes or {_AT}", [_NAMED, _TIME]),
-    # A sender the task clause already named is said as a message, not named twice.
-    ({"tasks": ["kid"], "senders": ["kid"]}, "Sleeping until Draft the notes finishes or a message arrives",
-     [_NAMED, {"kind": "mail"}]),
+    # The one task it names, chosen as its sender too, finishes or writes: named once, never widened to any message,
+    # its clause first beside other sources; a task it cannot name reads its writing as a message.
+    ({"tasks": ["kid"], "senders": ["kid"]}, "Sleeping until Draft the notes finishes or writes", [_WRITES]),
+    ({"tasks": ["kid"], "senders": ["kid"], "runs": ["r1"], "wake_at": _AT},
+     f"Sleeping until Draft the notes finishes or writes or its external run finishes or {_AT}",
+     [_WRITES, {"kind": "runs", "count": 1}, _TIME]),
+    ({"tasks": ["gone"], "senders": ["gone"]}, "Sleeping until the task it chose finishes or a message arrives",
+     [{"kind": "tasks", "count": 1}, {"kind": "mail"}]),
     ({"tasks": ["kid", "gone"], "senders": ["kid"], "task_wait": {"mode": "all_terminal"}},
      "Sleeping until all 2 tasks it chose finish or Draft the notes writes",
      [{"kind": "all_tasks", "count": 2}, {"kind": "sender", "name": "Draft the notes"}]),
@@ -239,8 +245,8 @@ def test_the_projection_names_a_sleeps_helper_from_its_own_census_row():
                                                     "sleep": sleep}},
            "kid": {"running": True, "suggested_name": "Continue: Draft the notes"}}
     (work,) = work_fields(owners, raw)["works"]
-    assert work["because"] == [{"code": "sleeping", "text": "Sleeping until Draft the notes finishes or a message arrives",
-                                "wake": [{"kind": "task", "name": "Draft the notes"}, {"kind": "mail"}]}]
+    assert work["because"] == [{"code": "sleeping", "text": "Sleeping until Draft the notes finishes or writes",
+                                "wake": [{"kind": "task_or_writes", "name": "Draft the notes"}]}]
     # A helper the census does not hold is counted, never named by its id.
     (work,) = work_fields(owners[:1], {"root": raw["root"]})["works"]
     assert work["because"][0]["text"] == "Sleeping until the task it chose finishes or a message arrives"
