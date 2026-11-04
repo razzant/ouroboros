@@ -22,13 +22,14 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from ouroboros import task_pacing
 from ouroboros import loop_output_exhaustion as output_recovery
-from ouroboros.context_anchor import main_input_anchor, measured_units, refused_request_density
+from ouroboros.context_anchor import main_input_anchor, measured_units, record_input_anchor, refused_request_density
 from ouroboros.context_budget import WHOLE_CATEGORY
 from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import REBOUND_PHYSICAL_CONTEXT_KEY, REFUSED_CANDIDATE_KEY, TIMEOUT_REPEAT_KEY, TRANSPORT_DEATHS_KEY
 from ouroboros.loop_round_limits import _coarsen_memory_view, _run_emergency_address_pass
 from ouroboros.observability import new_execution_id
 from ouroboros.tools.registry import ToolRegistry
+from ouroboros.transcript_prefix import rewrite_epoch
 from ouroboros.usage_accounting import PhysicalAttemptContext, PhysicalAttemptPreconditionFailed, invalidate_task_cache_splits
 
 
@@ -582,25 +583,25 @@ def _rebind_context_fit_plan(
     except Exception:
         log.debug("Route-switch capability probe failed; preserving unknown Max", exc_info=True)
         route, evidence = _failed_route_evidence(task)
-    # Account/server changes have their own anchors and durable window observations.
-    anchor, _accepted = main_input_anchor(getattr(tools._ctx, "_accumulated_usage", None), SimpleNamespace(
-        model=str(route.get("model") or model), provider=str(route.get("provider") or ""),
-        route_fp=route.get("window_observation_fp", evidence.route_fp)))
-    ratio = anchor.density if anchor is not None else _route_calibration_ratio(
-        None,  # canonical evidence root (one observation store)
-        str(getattr(evidence, "route_fp", "") or ""),
-        str(route.get("model") or model),
-        estimate_context_prompt_tokens(messages, tool_schemas, provider=str(route.get("provider") or "")),
-        view_kind=plan.view_kind,
-    )
     from ouroboros.context_window import estimator_ratio, resolve_window, route_window_kwargs
-    output_reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local", use_local)), evidence=evidence)
+    # Account/server changes have their own anchors and durable window observations.
     scope = route.get("window_observation_fp", evidence.route_fp)
+    anchor, _accepted = main_input_anchor(getattr(tools._ctx, "_accumulated_usage", None), SimpleNamespace(
+        model=str(route.get("model") or model), provider=str(route.get("provider") or ""), route_fp=scope))
+    preferred = preferred_mode or getattr(plan, "preferred_mode", "")
+    preferred = preferred if preferred in {"low", "max", "nano"} else "max"
+    ratio, carried = anchor.density if anchor is not None else _route_calibration_ratio(
+        None,  # canonical evidence root (one observation store)
+        str(getattr(evidence, "route_fp", "") or ""), str(route.get("model") or model),
+        estimate_context_prompt_tokens(messages, tool_schemas, provider=str(route.get("provider") or "")),
+        view_kind=plan.view_kind), None
+    if anchor is not None and route_window_kwargs(evidence)["window_basis"] != "estimator":  # that stays raw, as in a round
+        ratio, carried = anchor.view_terms(estimate_context_prompt_tokens(  # the view sized below, not the one last shown
+            plan.reproject_transcript(messages, start_mode or preferred), tool_schemas, provider=str(route.get("provider") or "")))
+    output_reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local", use_local)), evidence=evidence)
     bound = bool(scope) and (route.get("provider") != "claudexor" or bool((route.get("options") or {}).get("account_fingerprint")))
     window = resolve_window(evidence, output_reserve, bound=bound, observation_fp=scope)
     window_tokens, known_window = window.total_equivalent, window.usable is not None
-    preferred = preferred_mode or getattr(plan, "preferred_mode", "")
-    preferred = preferred if preferred in {"low", "max", "nano"} else "max"
     rebound = replace(
         plan,
         preferred_mode=preferred,
@@ -617,10 +618,10 @@ def _rebind_context_fit_plan(
             "accountFingerprint": str(getattr(evidence, "account_fingerprint", "") or ""),
         } if route.get("provider") == "claudexor" else {},
         evidence_source=str(getattr(evidence, "source", "") or ""),
-        **route_window_kwargs(evidence),
-        window_record=window, window_witness_bound=bound, route_base_url=str(route.get("base_url") or ""),
+        **route_window_kwargs(evidence), window_record=window, window_tokens=window_tokens,  # with its own frame
+        window_witness_bound=bound, route_base_url=str(route.get("base_url") or ""),
     ).reproject_for_route(  # the shown view kept while it fits this route's window, else narrowed
-        window_tokens=window_tokens, known_window=known_window, ratio=estimator_ratio(evidence, ratio),
+        window_tokens=window_tokens, known_window=known_window, ratio=estimator_ratio(evidence, ratio), measured_input_tokens=carried,
         output_reserve=output_reserve, tool_schemas=tool_schemas, start_mode=start_mode, current_messages=messages)
     mode = rebound.initial_mode
     projected_prompt_tokens = rebound.projected_tokens_with_tools(mode, tool_schemas)
@@ -802,7 +803,6 @@ def _measure_round_main_fit(
     if plan is None or str(ctx.active_model or "") != str(getattr(plan, "model", "") or ""):
         return None
     from ouroboros.context_fit import measure_main_fit
-    from ouroboros.transcript_prefix import rewrite_epoch
 
     rendered_mode = str(ctx.active_context_mode) if str(ctx.active_context_mode) in {"max", "low", "nano"} else "max"
     anchor, accepted = main_input_anchor(ctx.accumulated_usage, plan, rewrite_epoch=rewrite_epoch(ctx.tools._ctx))
@@ -850,15 +850,17 @@ def _measure_main_context_view(plan, messages, schemas, mode, effort, round_id, 
 
 
 @contextlib.contextmanager
-def _presend_context_fit(ctx: _RoundModelCallContext | None = None):
-    """Use the final physical candidate for the existing strict-shrink recovery, without a paid send."""
+def _presend_context_fit(ctx: _RoundModelCallContext | None = None, admitted: Optional[Dict[str, int]] = None):
+    """Use the final physical candidate for the existing strict-shrink recovery, without a paid send;
+    ``admitted`` keeps each admitted candidate's estimator count by its bytes, an exact local one's too."""
     from ouroboros.llm_attempt import main_context_fit_refusal
 
     refused = None
 
     def admit(request):
         nonlocal refused
-        refused = main_context_fit_refusal(request)
+        if (refused := main_context_fit_refusal(request)) is None and admitted is not None and request.candidate_raw_sha256:
+            admitted[request.candidate_raw_sha256] = int(request.prompt_tokens_bounded_estimate or 0)
         return refused is None
 
     try:
@@ -920,8 +922,8 @@ def _dispatch_round_model(
     trace = getattr(ctx.tools._ctx, "_execution_trace", None) or {}
     ctx.tools._ctx._completion_observation = completion_observation(ctx.tools._ctx, trace)
 
-    result = (None, 0.0)
-    with contextlib.ExitStack() as binding, _presend_context_fit(ctx) as admit:
+    result, admitted = (None, 0.0), {}
+    with contextlib.ExitStack() as binding, _presend_context_fit(ctx, admitted) as admit:
         deferral = None
         if waiter is not None:
             from ouroboros.loop_llm_call import classify_llm_exception
@@ -955,13 +957,12 @@ def _dispatch_round_model(
             **({"max_tokens": int(max_tokens)} if max_tokens else {}),
         )
     ctx.accumulated_usage.pop(REBOUND_PHYSICAL_CONTEXT_KEY, None)  # consumed by the call's later attempts, if any
-    if result[0] is not None:  # an accepted request is this conversation's next size anchor
-        from ouroboros.context_anchor import record_input_anchor
-        from ouroboros.transcript_prefix import rewrite_epoch
+    capture = _loop().last_physical_attempt_capture()  # the answer's own receipt, as ``send_clock`` reads it
+    if result[0] is not None:  # an accepted request is this conversation's next size anchor: the bytes it answered
         ctx.accumulated_usage.pop(CONTEXT_REFUSAL_ROUND_KEY, None)  # an answer ends the round's refusal (review r2)
+        sent = admitted.get(capture.candidate_raw_sha256) if getattr(capture, "state", "") in {"settled", "dispatched"} else None
         record_input_anchor(ctx.accumulated_usage, ctx.context_fit_plan, round_idx=ctx.round_idx,
-                            rewrite_epoch=rewrite_epoch(ctx.tools._ctx))
-    capture = _loop().last_physical_attempt_capture()
+                            rewrite_epoch=rewrite_epoch(ctx.tools._ctx), estimate_tokens=sent)
     if primary and deferral is not None and deferral.fact and result[0] is None:
         ctx.tools._ctx._deferred_resource_refusal = deferral
         if not waiter.waits_allowed:  # typed at once: the terminal may come before any chain
@@ -1089,8 +1090,7 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
 def _reproject_actual_overflow_low(ctx: _RoundModelCallContext) -> None:
     """Size recovery lowers Max's books; a smaller physical frame may require Nano.
 
-    Only the books change: Low shows my memory from the level the refused Max view showed, never the
-    Low view prepared at startup and not sent (``ContextFitPlan.reproject_for_route``, ``select_mode``)."""
+    Low keeps the refused Max view's memory level, never its unsent startup view (``select_mode``)."""
     if ctx.active_context_mode != "max" or ctx.context_fit_plan is None:
         return
     plan = ctx.context_fit_plan
@@ -1099,7 +1099,8 @@ def _reproject_actual_overflow_low(ctx: _RoundModelCallContext) -> None:
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan.reproject_for_route(
         window_tokens=window or 0, known_window=window is not None,
         ratio=fit.measurement.measurement_density, output_reserve=int(plan.output_reserve_tokens),
-        tool_schemas=ctx.tool_schemas, start_mode="max", current_messages=ctx.messages, select_mode="low")
+        tool_schemas=ctx.tool_schemas, start_mode="max", current_messages=ctx.messages, select_mode="low",
+        measured_input_tokens=fit.measurement.reprojection_input_tokens)
     mode = ctx.context_fit_plan.initial_mode
     ctx.messages[:] = ctx.context_fit_plan.reproject_transcript(ctx.messages, mode)
     invalidate_task_cache_splits(ctx.task_id)

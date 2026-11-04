@@ -182,6 +182,86 @@ def test_books_to_maps_reprojects_at_the_refusal_density(tmp_path, monkeypatch, 
     monkeypatch.setattr(context_fit.ContextFitPlan, "reproject_for_route", lambda self, **kw: seen.append(kw) or self)
     lmc._reproject_actual_overflow_low(ctx)
     assert [(kw["ratio"], kw["select_mode"]) for kw in seen] == [(density or 1.0, "low")]
+    assert seen[0]["measured_input_tokens"] is None  # no accepted preparation offset on this measurement
+
+
+@pytest.mark.parametrize("mode", ["low", "max"])
+@pytest.mark.parametrize("image_mode", ["off", "caption"])
+def test_recovery_prices_the_prepared_input_not_the_canonical_image_proxy(tmp_path, monkeypatch, mode, image_mode):
+    """Real image preparation, then 500 tokens of excess: both recovery consumers keep Low.
+
+    A ratio-only recovery after Off preparation saw a phantom 21,870-token excess and
+    changed Low to Nano. Caption expansion has the opposite sign; both belong in the floor.
+    The provider count is controlled, not a new model call or tokenizer qualification.
+    """
+    from ouroboros import memory_view, vision_routing
+    from ouroboros.context_anchor import InputAnchor
+    from tests import _memory_view_synthetic as syn
+
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
+    monkeypatch.setattr(vision_routing, "get_image_input_mode", lambda: image_mode)
+    monkeypatch.setattr(vision_routing, "resolve_vision_caption_model", lambda *_a, **_kw: "fixture/vision")
+    client = SimpleNamespace(vision_query=lambda *_a, **_kw: ("caption " * 7500, {}))
+    room = syn.room(notes=1)
+    room["notes"][0]["text"] = "Held note. " + "n" * 8000
+    core = context_fit.ContextCore("Core", "BIBLE", "", "", "Identity", "Facts", '"Assignment"', False,
+        memory_view_json=memory_view.snapshot_json(syn.snapshot(room_facts=room, story=[], live=[])))
+    plan = context_fit.build_context_fit_plan(None, core, {"id": "recovery", "_is_direct_chat": True},
+        preferred_mode=mode, tool_schemas=[], route_resolver=lambda *_a, **_kw: (
+            {"provider": "fixture", "model": "fixture"},
+            SimpleNamespace(route_fp="", status="confirmed", stale=False, window_tokens=1_000_000)))
+    routing = vision_routing.VisionRoutingContext(model="openai::fixture", llm=client, accumulated_usage={}, drive_root=tmp_path)
+    prior = [*plan.messages_for(mode), {"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,eA=="}}
+        for _ in range(20 if image_mode == "off" else 1)]}]
+    growth = {"role": "user", "content": "x" * 4000}
+    def estimate(rows):
+        return context_fit.estimate_context_prompt_tokens(rows, [])
+
+    def prepare(rows):
+        return vision_routing.prepare_messages_for_send(rows, routing=routing)
+    window = 131_072 if image_mode == "off" else 262_144
+    prior[1]["content"] += "p" * (4 * (window - REPLY + 500 - estimate(prepare([*prior, growth]))))
+    raw, prepared = estimate(prior), estimate(prepare(prior))
+    anchor = InputAnchor(input_tokens=prepared, estimate_tokens=prepared, transcript_tokens=raw, round=1)
+    assert (prepared < raw) is (image_mode == "off")
+    plan = replace(plan, window_tokens=window, window_record=None)
+    ctx = _round(tmp_path, plan, mode=mode)
+    ctx.messages[:] = [*prior, growth]
+
+    def measure(c, **_kw):
+        return context_fit.measure_main_fit(c.context_fit_plan, c.messages, [], profile="owner_" + c.active_context_mode,
+            rendered_mode=c.active_context_mode, round_id="recovery:2", anchor=anchor)
+
+    monkeypatch.setattr(loop, "_measure_round_main_fit", measure)
+    fit = measure(ctx)
+    deficit = fit.measurement.capacity_deficit_tokens
+    assert estimate(prepare(ctx.messages)) + REPLY - window == 500  # actual prepared bytes
+    assert 499 <= deficit <= 500  # carrying rounded prior counts may differ by one estimator token
+    if mode == "low":
+        slack = context_fit.reclaim_low_water_margin(None, window)
+        lmc._apply_refusal_step(ctx, "floor", fit, target=deficit + slack, slack=slack)
+    else:
+        lmc._reproject_actual_overflow_low(ctx)
+    assert ctx.active_context_mode == "low" and ctx.context_fit_plan.window_tokens == window
+    assert measure(ctx).measurement.response_reserve_tokens == REPLY
+    assert not measure(ctx).predicted_capacity_miss
+
+
+@pytest.mark.parametrize("basis", ["provider", "estimator", "refused"])
+def test_recovery_offset_uses_the_effective_measurement_basis(basis):
+    from ouroboros.context_anchor import InputAnchor
+
+    plan = replace(_real_plan(), window_basis="estimator" if basis == "estimator" else "")
+    anchor = InputAnchor(input_tokens=120_000, estimate_tokens=100_000, transcript_tokens=80_000, round=1)
+    fit = context_fit.measure_main_fit(plan, plan.messages_for("low"), [], profile="owner_low", rendered_mode="low",
+        round_id="basis", anchor=anchor, refused_density=1.5 if basis == "refused" else None).measurement
+    if basis == "provider":
+        assert fit.reprojection_input_tokens == math.ceil(fit.estimated_input_tokens / 1.2)
+    else:
+        assert fit.reprojection_input_tokens is None
+        assert fit.measurement_density == (1.0 if basis == "estimator" else 1.5)
 
 
 @pytest.mark.parametrize("density", [None, DENSITY])
