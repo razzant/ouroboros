@@ -92,15 +92,9 @@ def _emit_checkpoint_event(
 
 def _extract_plain_text_from_content(content: Any) -> str:
     """Extract text from strings or multipart content for transcript sealing."""
-    if isinstance(content, str):
-        return content
     if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, dict):
-                parts.append(block.get("text", ""))
-        return "".join(parts)
-    return str(content) if content is not None else ""
+        return "".join(block.get("text", "") for block in content if isinstance(block, dict))
+    return content if isinstance(content, str) else "" if content is None else str(content)
 
 
 def _append_or_merge_user_message(
@@ -278,10 +272,8 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
 def owner_source_sha256(ctx: Any) -> str:
     """Address the retained exact owner corpus, independently of its meaning."""
     rows = getattr(ctx, "_owner_directives", [])
-    return hashlib.sha256(json.dumps(
-        rows if isinstance(rows, list) else [], ensure_ascii=False,
-        sort_keys=True, separators=(",", ":"), default=str,
-    ).encode("utf-8")).hexdigest()
+    return hashlib.sha256(json.dumps(rows if isinstance(rows, list) else [], ensure_ascii=False, sort_keys=True,
+                                     separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
 
 
 def owner_input_revision(ctx: Any) -> int:
@@ -354,13 +346,9 @@ def owner_authority_kinds(entries: List[Dict[str, Any]]) -> List[str]:
 
     kinds: List[str] = []
     for entry in entries:
-        kind = str(entry.get("kind") or KIND_OWNER_TEXT)
-        if kind == KIND_TASK_MESSAGE:
-            provenance = str(entry.get("provenance") or "ancestor_task")
-            if provenance in CONTEXT_ONLY_TASK_PROVENANCES:
-                continue
-            kind = f"{kind}:{provenance}"
-        kinds.append(kind)
+        kind, provenance = str(entry.get("kind") or KIND_OWNER_TEXT), str(entry.get("provenance") or "ancestor_task")
+        if kind != KIND_TASK_MESSAGE or provenance not in CONTEXT_ONLY_TASK_PROVENANCES:
+            kinds.append(f"{kind}:{provenance}" if kind == KIND_TASK_MESSAGE else kind)
     return kinds
 
 
@@ -575,17 +563,10 @@ def _visible_round_text(content: Any) -> str:
     visible text' (narration falls back to readable reasoning)."""
     if isinstance(content, str):
         return content.strip()
-    if isinstance(content, list):
-        out: List[str] = []
-        for b in content:
-            if not isinstance(b, dict):
-                continue
-            if str(b.get("type") or "") in ("thinking", "reasoning", "redacted_thinking") or b.get("thought") is True:
-                continue  # reasoning/thinking blocks are display reasoning, not visible answer text
-            txt = b.get("text")
-            if isinstance(txt, str):
-                out.append(txt)
-        return "".join(out).strip()
+    if isinstance(content, list):  # reasoning/thinking blocks are display reasoning, not visible answer text
+        return "".join(b["text"] for b in content if isinstance(b, dict) and isinstance(b.get("text"), str)
+                       and str(b.get("type") or "") not in ("thinking", "reasoning", "redacted_thinking")
+                       and b.get("thought") is not True).strip()
     return ""
 
 
