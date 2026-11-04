@@ -897,6 +897,8 @@ def _record_llm_call_error(
 ) -> bool:
     """Classify an LLM-round exception, emit live/durable evidence and mark usage infra-failed.
     Return whether the caller must stop retrying the unchanged request."""
+    from ouroboros.llm_claudexor import ClaudexorModelNotDispatched
+
     safe_error = sanitize_tool_result_for_log(repr(error))
     classification = classify_llm_exception(error, safe_error)
     if ctx.task_type == "presence":  # stays True only while every attempt so far provably never started
@@ -964,6 +966,9 @@ def _record_llm_call_error(
     if (owner := canonical_owner_root(ctx.drive_logs.parent)) != ctx.drive_logs.parent.resolve(strict=False):
         append_jsonl(owner / "logs" / "events.jsonl", error_event, live=False)  # REPLICA_RULE: the drive goes, the charge stays
     failure = {"error": _short_error_text(display_error), "resource_refusal": model_wait_reason(error),
+        "operation_id": str(getattr(error, "operation_id", "") or ""),
+        "not_dispatched_provider": (getattr(getattr(error, "physical_attempt_capture", None), "provider", "")
+                                    if isinstance(error, ClaudexorModelNotDispatched) else ""),
         **{key: error_event[key] for key in ("ts", "llm_call_id", "model", "requested_profile", "observed_route", "status_code", "provider_code")},
         "failure_code": classification.kind, "reset_at": classification.reset_at, **{key: value for key, value in custody_fields.items()
             if key in ("physical_attempt_id", "attempt_custody_state", "generation_id", "explicit_timeout", "model_output_received")}}
@@ -1011,20 +1016,23 @@ def _stop_after_llm_error(ctx: _LlmErrorContext) -> bool:
     not-delivered burst does): permanent classes stopped earlier, so a stop here means "the same-model wall is spent"."""
     accumulated_usage = ctx.accumulated_usage
     error_kind = str(accumulated_usage.get("_last_llm_error_kind") or "")
+    failure = accumulated_usage.get("_last_llm_failure") or {}
+    daemon_not_delivered = (failure.get("not_dispatched_provider") == "claudexor"
+        and failure.get("operation_id") == "" and failure.get("provider_code") in {
+            "daemon_unreachable", "daemon_not_answering", "daemon_starting", "daemon_descriptor_changed"})
     if TIMEOUT_REPEAT_KEY in accumulated_usage:
         return True  # its repeat failed, whatever the class: the no-call terminal reads the record and this row
     if error_kind == "transport_unavailable" and (
-            (accumulated_usage.get("_last_llm_failure") or {}).get("provider_code") != "transport_not_delivered"
+            (failure.get("provider_code") != "transport_not_delivered" and not daemon_not_delivered)
             or accumulated_usage.get(TRANSPORT_WAIT_REDIAL_KEY) or isinstance(accumulated_usage.get(TRANSPORT_DEATHS_KEY), dict)):
         # One free attempt: configured routes and the round's episode own an unreachable route's recovery, an open episode
-        # paces its own redials and a held paid repeat sends nothing more. Only the engine's receipt that the request was
-        # not delivered first repeats on its route within the ordinary bound below, as an overloaded route does.
+        # paces its own redials and a held paid repeat sends nothing more. The engine's not-delivered receipt and a typed
+        # Claudexor prepare failure before create first repeat within the ordinary bound, as an overloaded route does.
         return True
     if error_kind == "provider_outcome_unknown":
         from ouroboros.loop_transport import wait_transport_repeat
         return wait_transport_repeat(ctx)
     is_transient = error_kind in _TRANSIENT_RETRY_KINDS
-    failure = accumulated_usage.get("_last_llm_failure") or {}
     timed_out = ctx.configured_api_child and failure.get("explicit_timeout") and failure.get("model_output_received")
     # Non-transient retryables: max_retries capped by the loop ceiling (primary: no-op); a timeout after output: one.
     attempt_budget = (min(ctx.transient_budget, ctx.attempt + 2) if timed_out else ctx.transient_budget if is_transient

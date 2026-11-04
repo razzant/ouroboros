@@ -65,10 +65,10 @@ def replay(tmp_path, monkeypatch):
     monkeypatch.setattr(wire.ClaudexorGateway, "__init__", initialize)
     upload = wire.ClaudexorGateway.upload_model_request
 
-    def upload_record(gateway, payload, *, idempotency_key):
-        uploads.append(deepcopy(payload))
+    def upload_record(gateway, payload, *, idempotency_key, **prepared):
+        uploads.append(json.loads(payload) if isinstance(payload, bytes) else deepcopy(payload))
         ids.append(idempotency_key)
-        return upload(gateway, payload, idempotency_key=idempotency_key)
+        return upload(gateway, payload, idempotency_key=idempotency_key, **prepared)
 
     monkeypatch.setattr(wire.ClaudexorGateway, "upload_model_request", upload_record)
 

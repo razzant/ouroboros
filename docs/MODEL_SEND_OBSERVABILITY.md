@@ -55,6 +55,12 @@ establish whether the durable record matches either copy.
 reconstruction against the wire-bound serialization, emitting a **typed durable
 fact** on any inequality (§3.2 — a fact, not a refusal).
 
+### Claudexor
+
+The pre-dispatch gate compares exact raw/context identities without repeating token, clock or image measurement. Claudexor uploads those validated canonical bytes with their measured hash and length; the defensive send copy remains, and mutation after measurement refuses dispatch. Claudexor acceptance merges the operation identity and capture facts into its existing operational request manifest without rereading or serializing the payload. Raw/projection references and prior metadata survive; the separate pre-dispatch physical manifest and send seal remain immutable.
+
+A released Claudexor prepare failure repeats on the primary within `max_retries` (three sends, 4 s then 8 s) only with `ClaudexorModelNotDispatched`, provider `claudexor`, an empty operation ID and gateway code `daemon_unreachable`, `daemon_not_answering`, `daemon_starting` or `daemon_descriptor_changed`. The configured-route walk follows a spent bound. An open transport wait or held unknown-repeat record still prevents a new burst. Direct-API connect failures, undated credential-pool refusals and local slot refusals retain one attempt; a lost create reply remains unknown and rejoins the same invocation.
+
 ## 3. The contract
 
 ### 3.1 Sealed record (`model_send` seal, v1)

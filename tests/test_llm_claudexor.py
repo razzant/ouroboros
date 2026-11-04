@@ -127,6 +127,7 @@ class Gateway:
         self.results = results or [result()]
         self.dispatch = dispatch or ["response_received"] * len(self.results)
         self.uploads = []
+        self.uploaded_bytes = []
         self.accepted_operations = {}
         self.creates = []
         self.reads = []
@@ -149,6 +150,7 @@ class Gateway:
     def upload_model_request(self, payload, *, idempotency_key, sha256, size_bytes):
         assert isinstance(payload, bytes)
         assert hashlib.sha256(payload).hexdigest() == sha256 and len(payload) == size_bytes
+        self.uploaded_bytes.append(payload)
         payload = json.loads(payload)
         self.uploads.append((deepcopy(payload), idempotency_key))
         return REF
@@ -961,6 +963,16 @@ def test_acceptance_updates_only_receipt_and_preserves_physical_seal(setup, monk
     assert len(gateway.accepted_operations) == 1
 
 
+def test_uploaded_bytes_match_the_immutable_send_seal(setup):
+    root, gateway, client = setup
+    client.chat([{"role": "user", "content": "exact bytes 🐍"}], MODEL)
+    [raw], [row] = gateway.uploaded_bytes, ledger(root)
+    path = root / "observability" / "calls" / "task-one" / f'{row["attempt_id"]}.json'
+    seal = json.loads(path.read_text())["model_send_seal"]
+    assert hashlib.sha256(raw).hexdigest() == seal["pre_redaction_sha256"] == row["candidate_raw_sha256"]
+    assert len(raw) == seal["size_bytes"] == row["candidate_raw_size_bytes"]
+
+
 def test_equal_payloads_remain_separate_invocations(setup, monkeypatch):
     root, gateway, client = setup
     monkeypatch.setattr(transport, "stamp_clock_note", lambda payload: deepcopy(payload))
@@ -1193,6 +1205,47 @@ def test_missing_old_account_drops_the_continuation_without_claiming_a_reset(set
     assert "nativeContinuation" not in gateway.uploads[1][0]["messages"][0]
     event = json.loads((root / "logs/events.jsonl").read_text().splitlines()[-1])
     assert event["routes"] == [{"old_route": {"source": "codex", "model": "exact-model"}, "new_route": {}}]
+
+
+@pytest.mark.parametrize("phase", ["upload", "create"])
+def test_daemon_read_timeout_repeats_only_before_create(setup, monkeypatch, phase):
+    from ouroboros.loop_llm_call import call_llm_with_retry
+
+    root, _gateway, client = setup
+    sends, slept = [], []
+
+    def fail(request):
+        assert request.url.path == ("/v2/uploads" if phase == "upload" else "/v2/model-operations")
+        sends.append(request.headers["Idempotency-Key"])
+        raise httpx.ReadTimeout("Lost daemon reply", request=request)
+
+    def connect(**_kwargs):
+        gateway = object.__new__(ClaudexorGateway)
+        gateway._client = httpx.Client(base_url="http://daemon.test", transport=httpx.MockTransport(fail))
+        gateway.operations = lambda **_kwargs: []
+        if phase == "create":
+            gateway.upload_model_request = lambda *_args, **_kwargs: REF
+        return gateway
+
+    monkeypatch.setattr(transport, "ensure_owned_gateway", connect)
+    monkeypatch.setattr(transport, "llm_transport_timeout_sec", lambda _timeout: 0.01)
+    monkeypatch.setattr(transport.time, "sleep", slept.append)
+    usage = {}
+    answer, _ = call_llm_with_retry(client, [{"role": "user", "content": "hello"}], MODEL, None, "high", 3,
+                                  root / "logs", "task-one", 1, None, usage)
+    assert answer is None
+    rows = ledger(root)
+    if phase == "upload":
+        assert len(sends) == len(set(sends)) == len(rows) == 3
+        assert slept == [4.0, 8.0]
+        assert {row["state"] for row in rows} == {"released"}
+        assert usage["_last_llm_failure"]["operation_id"] == ""
+        assert usage["_last_llm_error_kind"] == "transport_unavailable"
+    else:
+        assert len(rows) == len(set(sends)) == 1  # control re-POSTs retain the invocation key
+        assert rows[0]["state"] == "unresolved"
+        assert usage["_last_llm_error_kind"] == "provider_outcome_unknown"
+        assert 4.0 not in slept and 8.0 not in slept
 
 
 def test_caller_control_before_create_proves_no_dispatch(setup):

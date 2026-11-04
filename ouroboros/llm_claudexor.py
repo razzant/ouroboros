@@ -132,7 +132,7 @@ class ClaudexorModelError(RuntimeError):
 
 
 class ClaudexorModelNotDispatched(ClaudexorModelError, ProviderNotDispatched):
-    """Only a terminal engine receipt proving dispatch.state=not_started mints this."""
+    """A failed prepare before create, or an engine receipt proving dispatch.state=not_started."""
 
 
 def presence_refusal_unstarted(error: Exception, round_idx: int) -> bool:

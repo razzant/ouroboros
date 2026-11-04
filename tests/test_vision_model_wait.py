@@ -41,8 +41,8 @@ def _install_child_fixture(mode, events_path):
         def operations(self, **_kwargs):
             return []  # Legacy model-operation catalog.
 
-        def upload_model_request(self, payload, *, idempotency_key):
-            event("upload", key=idempotency_key, payload=payload)
+        def upload_model_request(self, payload, *, idempotency_key, **_prepared):
+            event("upload", key=idempotency_key, payload=json.loads(payload))
             return REF
 
         def create_model_operation(self, ref, *, idempotency_key):
