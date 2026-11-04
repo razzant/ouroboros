@@ -139,16 +139,25 @@ def test_an_unreviewed_merge_is_loud_and_still_merges(world):
     assert receipt["outcome"]["status"] == "merged" and receipt["coverage"]["status"] == "not_declared"
     assert out.startswith("⚠️") and "no_review_declared" in out
     assert "No review was declared" in world.gh.pr["body"]
+    # The card's head names that known state, never an unknown coverage (DESIGN principle 7).
+    label = merge_receipts.coverage_reading(receipt)[0]
+    assert "unknown" not in label and label == merge_receipts._UNDECLARED
+    assert merge_receipts.card_row_text(receipt).partition("\n")[0].endswith(f" · {label}")
 
 
-@pytest.mark.parametrize(("kw", "status"), [
-    ({"reviewed_head_sha": "e" * 40}, "changes_after_review"),
-    ({"reviewed_head_sha": HEAD, "review_scope": "delta"}, "delta_only"),
-    ({"review_task_ids": ["missing-review"]}, "unknown"),
+@pytest.mark.parametrize(("kw", "status", "label"), [
+    ({"reviewed_head_sha": "e" * 40}, "changes_after_review", "_EARLIER"),
+    ({"reviewed_head_sha": HEAD, "review_scope": "delta"}, "delta_only", "_LATEST_ONLY"),
+    ({"review_task_ids": ["missing-review"]}, "unknown", "_UNKNOWN"),
 ])
-def test_coverage_never_claims_more_than_was_declared(world, kw, status):
+def test_coverage_never_claims_more_than_was_declared(world, kw, status, label):
     _merge(world, **kw)
-    assert _receipts(world)[0]["coverage"]["status"] == status
+    (receipt,) = _receipts(world)
+    assert receipt["coverage"]["status"] == status
+    # The card's head names a known coverage, a partial one too; only one nothing resolves reads as unknown.
+    said = merge_receipts.coverage_reading(receipt)[0]
+    assert ("unknown" in said) is (status == "unknown") and said == getattr(merge_receipts, label)
+    assert merge_receipts.card_row_text(receipt).partition("\n")[0].endswith(f" · {said}")
 
 
 def test_a_moved_head_or_closed_pr_merges_nothing_and_writes_nothing(world):

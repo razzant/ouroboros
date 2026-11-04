@@ -442,10 +442,12 @@ def upsert_body(body: str, block: str) -> str:
 
 
 # The card's head says a short coverage label unless the review passed exactly what merged; its sentence is the
-# row's detail (DESIGN principle 7, owner 04.11 1A). Other code than the reviewed tree is earlier code (DESIGN
-# "Reviews inside task cards", owner 29.10 A); every other gap leaves the coverage unknown.
+# row's detail (DESIGN principle 7, owner 04.11 1A). A label names a known state: no review declared, only the
+# latest changes reviewed, other code than the reviewed tree as earlier code (DESIGN "Reviews inside task cards",
+# owner 29.10 A); every other gap leaves the coverage unknown.
 _EARLIER, _UNKNOWN = "earlier version reviewed", "review coverage unknown"
 _REJECTED, _NO_VERDICT = "review rejected it", "no review verdict"
+_UNDECLARED, _LATEST_ONLY = "no review declared", "only latest changes reviewed"
 # The coverage gap a card says when several are named, first match wins (codes: ``review_coverage``,
 # ``_recompute_coverage``): earlier code, then what the review read, the record, the base, its named tasks; any
 # other gap is an unrecorded fact.
@@ -478,8 +480,8 @@ def coverage_reading(receipt: Dict[str, Any]) -> Tuple[str, str]:
                         else (_REJECTED, "This review rejected {what}.") if verdict == "FAIL"
                         else (_NO_VERDICT, "This review gave no verdict on {what}.")),
         "changes_after_review": (_EARLIER, "This review was for earlier code; it does not cover {what}."),
-        "delta_only": (_UNKNOWN, "The review read only the latest changes, not the whole pull request."),
-        "not_declared": (_UNKNOWN, "No review was declared for this merge."),
+        "delta_only": (_LATEST_ONLY, "The review read only the latest changes, not the whole pull request."),
+        "not_declared": (_UNDECLARED, "No review was declared for this merge."),
     }.get(str(status))
     for codes, label, sentence in _GAP_WORDS if reading is None else ():
         if codes & set(gaps):
