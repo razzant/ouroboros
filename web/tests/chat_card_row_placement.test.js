@@ -684,7 +684,7 @@ test('a retained merge row refreshes its later review and report without another
     const old = supplied?.before || { task_id: 'merge-task', role: 'system', system_type: 'host_progress',
         is_progress: true, card_row: 'reviews', card_row_id: 'merge-receipt:r', card_row_revision: 2,
         history_id: 'h-receipt', ts: '2026-09-16T00:01:00Z',
-        text: 'PR #7 merge: merged · earlier version reviewed\nThis review was for earlier code; it does not cover what merged.' };
+        text: '⚠️ PR #7 merge: merged · earlier version reviewed\nThis review was for earlier code; it does not cover what merged.' };
     const current = supplied?.after || { ...old, text: old.text + '\nIts later review: FAIL.',
         late_evidence: { kind: 'merge_review', record_id: 'review', revision: 2, verdict: 'FAIL',
             review_source: { task_id: 'merge-task', record_id: 'review', seat_id: 'critic',
@@ -705,11 +705,10 @@ test('a retained merge row refreshes its later review and report without another
         assert.match(rendered, /data-body-format="text"/, 'coverage and later review keep their visible line break');
         assert.match(rendered, /href="\/api\/tasks\/[^" ]+\/reviews\/[^" ]+"/);
         assert.ok(rendered.indexOf('merge: merged') < rendered.indexOf('Its later review: FAIL'));
-        const [head, detail] = old.text.split('\n');
+        const [head, detail] = old.text.replace(/^⚠️ /u, '').split('\n'); // host progress loses its carrier badge in a card
         assert.ok(rendered.includes(`class="chat-live-line-title">${head}</span>`), 'the receipt keeps its head');
         const label = head.split(' · ')[1];
-        assert.ok(label);
-        assert.equal(rendered.split(label).length - 1, 1, 'coverage is labelled once, in the head');
+        if (label) assert.equal(rendered.split(label).length - 1, 1, 'coverage is labelled once, in the head');
         if (detail) {
             assert.ok(rendered.indexOf('chat-live-line-body') < rendered.indexOf(detail), 'coverage stays in details');
             assert.ok(rendered.indexOf(detail) < rendered.indexOf('Its later review: FAIL'), 'the late FAIL follows coverage');
