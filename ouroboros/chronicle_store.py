@@ -271,8 +271,7 @@ class _IndexLookups:
                                % ",".join("?" * len(HEAD_KINDS)), (str(room), *HEAD_KINDS)).fetchone()[0]
 
     def tail(self, terminal_only=False):
-        sql = _TAIL_SQL + (_TERMINAL if terminal_only else "")
-        return sorted(json.loads(self.db.execute(sql).fetchone()[0] or "[]"))
+        return _tail_rows(self.db, terminal_only)
 
     def acting_pages(self, room=None):
         """``[sequence, room, id, author kind, ts, covered end]`` of the acting pages (one room's), in order."""
@@ -290,8 +289,12 @@ class _IndexLookups:
         return [str(member) for member in json.loads(row[0] or "[]")] if row else []
 
 
-_TAIL_SQL = "SELECT json_group_array(json_array(pos,seq,row_sha256,json(legacy),json(meta),terminal)) FROM tail_rows"
-_TERMINAL = " WHERE terminal IS NOT NULL"
+# One page of the stored tail facts after a position (``_tail_rows``): its rows [pos, seq, row_sha256, legacy, meta,
+# terminal] and its last position. ``_TAIL_PAGE`` rows a page is an I/O size, never a bound on the rows read.
+_TAIL_PAGE_SQL = ("SELECT json_group_array(json_array(pos,seq,row_sha256,json(legacy),json(meta),terminal)), max(pos) "
+                  "FROM (SELECT * FROM tail_rows WHERE pos>?{terminal} ORDER BY pos LIMIT ?)")
+_TERMINAL = " AND terminal IS NOT NULL"
+_TAIL_PAGE = 2_000
 # The acting pages are those whose rows a seal holds (``page_rows``: a final page, a draft not rejected, an adopted
 # candidate); the parts that fold (``folded``) act unless ``_status`` names them a candidate. No body is read whole.
 _ACTING_PAGES = ("SELECT json_group_array(json_array(sequence,room,id,json_extract(body,'$.author.kind'),"
@@ -309,15 +312,28 @@ _SNAPSHOT_SQL = ("SELECT json_group_array(json_array(sequence,id,kind,room,targe
                  "SELECT json_group_array(json_array(room,row_ref)) FROM page_rows",
                  "SELECT json_group_array(json_array(sequence,room,scope,body)) FROM active_marks",
                  "SELECT json_group_array(json_array(key,value)) FROM state", _ACTING_PAGES, _ACTING_PARTS)
-_TAIL_SCOPES = {"all": (_TAIL_SQL,), "terminal": (_TAIL_SQL + _TERMINAL,), "none": ()}
+_TAIL_SCOPES = {"all": False, "terminal": True, "none": None}  # a view's tail: every row, terminal rows only, none
 _SELECTION_FREE = ("membership", "tail", "terminal_tail", "legacy_pointers")  # memo facts a selection never changes
+
+
+def _tail_rows(db, terminal_only: bool) -> List[List[Any]]:
+    """The stored tail facts (only those with a terminal status: ``terminal_only``) by position, read on the
+    caller's one read transaction a page at a time: one statement and one step a page, parsed as it arrives,
+    so no answer is a string the size of the tail (whose one astral character would widen all of it)."""
+    sql, rows, after = _TAIL_PAGE_SQL.format(terminal=_TERMINAL if terminal_only else ""), [], -(1 << 63)
+    while True:
+        text, last = db.execute(sql, (after, _TAIL_PAGE)).fetchone()
+        if last is None:
+            return rows
+        rows.extend(sorted(json.loads(text)))  # SQLite promises no aggregate order; the pages are in order
+        after = last
 
 
 class _Snapshot:
     """``_IndexLookups`` answered from one state of the index (``_SNAPSHOT_SQL``, parsed after its read
-    transaction closed): the same filters and order and no statement. Each record handed out is parsed
-    anew from its stored text, as the index returns it; ``memo`` holds facts one capture derives once.
-    Of the stored tail facts it holds what its view reads (``tail_scope``); a proposal's capture extends its ``tables``."""
+    transaction closed, and the stored tail facts its view reads, ``_tail_rows``): the same filters and order
+    and no statement. Each record handed out is parsed anew from its stored text, as the index returns it;
+    ``memo`` holds facts one capture derives once. A proposal's capture extends its ``tables``."""
     proposed = False  # a proposal's capture: it reads an unsaved record as published (``stored_state``)
 
     def __init__(self, tables, tail_scope, memo=()):
@@ -399,14 +415,15 @@ _CAPTURE: ContextVar[Optional[Tuple[str, _Snapshot]]] = ContextVar("chronicle_ca
 def capture(data_root: Any, *, tail: str = "all", proposed: Optional[Mapping[str, Any]] = None):
     """One state of this installation's chronicle for every reader inside the block (one capture).
 
-    The index is read once (``_SNAPSHOT_SQL`` in one read transaction, closed before any reader runs, so a
-    publisher never waits on a capture) and pinned for the block; inside a capture of the same chronicle
-    this is that capture. Of the stored tail facts it reads what its view reads (``tail``: every row,
-    ``"terminal"`` rows or ``"none"``); a reader asking for more reads the index. It yields the facts its
-    readers derive once (``capture_memo``); without a journal nothing is pinned and it yields None. A
-    publication inside the block is not seen by its readers. With ``proposed`` (a checked, unsaved
-    selection) it is a capture of its own where every reader reads that selection as acting: inside a capture, of
-    that state and the memo facts no selection changes (``_SELECTION_FREE``), never read anew.
+    The index is read once (``_SNAPSHOT_SQL`` and, page by page, the stored tail facts its view reads, in one
+    read transaction closed before any reader runs, so a publisher never waits on a capture's readers) and
+    pinned for the block; inside a capture of the same chronicle this is that capture. Of the stored tail
+    facts it reads what its view reads (``tail``: every row, ``"terminal"`` rows or ``"none"``); a reader
+    asking for more reads the index. It yields the facts its readers derive once (``capture_memo``);
+    without a journal nothing is pinned and it yields None. A publication inside the block is not seen
+    by its readers. With ``proposed`` (a checked, unsaved selection) it is a capture of its own where
+    every reader reads that selection as acting: inside a capture, of that state and the memo facts no
+    selection changes (``_SELECTION_FREE``), never read anew.
     """
     store = ChronicleStore(data_root)
     snapshot = store._pinned()
@@ -414,9 +431,11 @@ def capture(data_root: Any, *, tail: str = "all", proposed: Optional[Mapping[str
         yield None if snapshot is None else snapshot.memo
         return
     if snapshot is None:
+        terminal_only = _TAIL_SCOPES[tail]
         with store._index() as db:
-            texts = [db.execute(sql).fetchone()[0] for sql in (*_SNAPSHOT_SQL, *_TAIL_SCOPES[tail])]
-        snapshot = _Snapshot([json.loads(text or "[]") for text in texts], tail)
+            texts = [db.execute(sql).fetchone()[0] for sql in _SNAPSHOT_SQL]
+            held = () if terminal_only is None else (_tail_rows(db, terminal_only),)
+        snapshot = _Snapshot([*(json.loads(text or "[]") for text in texts), *held], tail)
     if proposed is not None:  # read as published after every record: [sequence, id, kind, room, target, body]
         rows, kept = snapshot.tables[0], {key: snapshot.memo[key] for key in _SELECTION_FREE if key in snapshot.memo}
         snapshot = _Snapshot([[*rows, [max((row[0] for row in rows), default=0) + 1, proposed["id"], proposed["kind"],

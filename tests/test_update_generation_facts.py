@@ -7,6 +7,7 @@ import itertools
 import json
 import os
 import queue
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -182,3 +183,40 @@ def test_unknown_rss_and_unobserved_dispatch_are_not_zero(monkeypatch):
     assert row["cpu_percent"] is None
     facts.observe_direct_dispatch(task_id="bad-clock", accepted_at=2, dispatched_at=1)
     assert facts.sample()["direct_message_first_dispatch"] is None
+
+
+# --- the memory a sample names: now where the platform says, the lifetime peak named as peak -----------------
+
+_MEASURED = facts._rss  # the real reader; the autouse fixture stands in for it in every other test
+
+
+@pytest.mark.skipif(sys.platform not in ("darwin", "linux"), reason="the POSIX platforms with an in-process measure")
+def test_memory_is_measured_now_and_an_unmapped_block_leaves_it(monkeypatch):
+    import mmap
+
+    monkeypatch.setitem(sys.modules, "psutil", None)  # the POSIX builds ship none: its import fails
+    block = mmap.mmap(-1, 128 << 20)  # a mapping of its own: unmapped on close, never kept in an allocator's cache
+    for offset in range(0, len(block), mmap.PAGESIZE):
+        block[offset] = 1  # written, so charged to the process
+    held, measure = _MEASURED()
+    block.close()
+    freed, again = _MEASURED()
+    assert measure == again == ("footprint" if sys.platform == "darwin" else "current")
+    assert held - freed >= 64 << 20  # a lifetime high-water mark never falls; this measure does
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX: Windows ships psutil")
+def test_psutil_or_the_platform_measures_now_and_otherwise_the_peak_is_named_peak(monkeypatch, tmp_path):
+    process = SimpleNamespace(memory_info=lambda: SimpleNamespace(rss=7 << 20))
+    monkeypatch.setitem(sys.modules, "psutil", SimpleNamespace(Process=lambda: process))
+    assert _MEASURED() == (7 << 20, "current")
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    statm = tmp_path / "statm"
+    statm.write_text("9000 250 100 1 0 300 0\n", encoding="ascii")
+    monkeypatch.setattr(facts, "_STATM", str(statm))
+    monkeypatch.setattr(facts, "sys", SimpleNamespace(platform="linux"))
+    assert _MEASURED() == (250 * os.sysconf("SC_PAGE_SIZE"), "current")
+    statm.write_text("", encoding="ascii")  # a size that cannot be read: the high-water mark, named as such
+    assert _MEASURED()[1] == "peak"
+    monkeypatch.setattr(facts, "sys", SimpleNamespace(platform="sunos5"))
+    assert _MEASURED()[1] == "peak"
