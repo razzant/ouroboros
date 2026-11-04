@@ -188,12 +188,15 @@ def replay_settled_late_review(drive_root: Any, mark_id: str) -> Optional[LateRe
     from ouroboros import store
     from ouroboros.chronicle_store import is_late_review_mark
 
-    mark = ChronicleStore(drive_root).get(mark_id)  # includes released marks: a replay cannot resurrect one
-    if mark is not None:
-        _owed(drive_root, mark_id, None)
-        return LateReviewMark("unchanged" if is_late_review_mark(mark) else "conflict", mark_id, mark.get("room_id", ""))
-    with store.open_store(drive_root, write=False) as txn:
-        owed = txn.get_row(OWED_SET, mark_id) or {}
+    try:
+        mark = ChronicleStore(drive_root).get(mark_id)  # includes released marks: a replay cannot resurrect one
+        if mark is not None:
+            _owed(drive_root, mark_id, None)
+            return LateReviewMark("unchanged" if is_late_review_mark(mark) else "conflict", mark_id, mark.get("room_id", ""))
+        with store.open_store(drive_root, write=False) as txn:
+            owed = txn.get_row(OWED_SET, mark_id) or {}
+    except (OSError, ValueError, TimeoutError, sqlite3.Error) as exc:
+        return LateReviewMark("failed", mark_id, "", f"frozen settlement unreadable: {type(exc).__name__}: {exc}")
     return publish_late_review(drive_root, owed["record"]) if isinstance(owed.get("record"), dict) else None
 
 

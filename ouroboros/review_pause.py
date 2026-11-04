@@ -500,8 +500,7 @@ def watch_left_review(ctx: Any, *, surface: str, retry_key: str, reissue: str, a
 
     def notify(unknown: int) -> None:
         from ouroboros.owner_mailbox import mailbox_drain_ended, write_task_message
-        from ouroboros.merge_receipts import merged_under_record, review_settlement_words
-        from ouroboros.late_review_marks import owning_room
+        from ouroboros.merge_receipts import review_settlement_facts
 
         record.update(unknown_seats=int(unknown))
         verdict = _settled_aggregate(record)
@@ -512,13 +511,13 @@ def watch_left_review(ctx: Any, *, surface: str, retry_key: str, reissue: str, a
                 + (f"; durable revision {record.get('revision')} reads {verdict}" if verdict else "") + ". "
                 f"That review call committed or applied nothing. Re-issue {reissue} to collect its outcome at $0 "
                 "(no second dispatch), or choose another course.")
-        root = record.get("canonical_root") or drive_root
-        merged = merged_under_record(root, task_id, str(record.get("record_id") or ""))
-        if merged:
-            text += "\n" + "\n".join(review_settlement_words(merged, owning_room(root, task_id, None), record.get("revision")))
         if unknown:
             text += (f" {unknown} seat(s) had already left this process's live custody without a retained "
                      "outcome; they stay unknown until that call collects what was recorded.")
+        _, _, merge_words = review_settlement_facts(record.get("canonical_root") or drive_root,
+                                                  task_id, str(record.get("record_id") or ""), record.get("revision"))
+        if merge_words:
+            text += "\n" + "\n".join(merge_words)
         if mailbox_drain_ended(drive_root, task_id):
             wait.update(done=True, noticed=False, unknown_seats=int(unknown), notice=text)
             ended_left_review(record)
@@ -930,14 +929,13 @@ def _left_review_mark(record: Dict[str, Any], attempt: Any, seats: List[Dict[str
                       settled: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """The late-review record of one left wave, composed from its attempt row and retained source."""
     from ouroboros.artifacts import store_actor_source_bytes
-    from ouroboros.merge_receipts import merged_under_record, review_settlement_words
-    from ouroboros.late_review_marks import owning_room
+    from ouroboros.merge_receipts import review_settlement_facts
 
     surface, task_id, retry_key = str(record["surface"]), str(record["task_id"]), str(record["retry_key"])
     drive, attempt_no = pathlib.Path(record["drive_root"]), int(record.get("attempt") or 0)
     root = record.get("canonical_root") or drive
-    merged = merged_under_record(root, task_id, str(record.get("record_id") or ""))
-    room, revision = owning_room(root, task_id, None), (settled or {}).get("revision")
+    revision = (settled or {}).get("revision")
+    merged, room, merge_words = review_settlement_facts(root, task_id, str(record.get("record_id") or ""), revision, in_room=True)
     source = {"kind": "left_review_settlement", "gap": gap, "seats": seats, "merged_under_record": merged,
               "room_id": room, "review_revision": revision,
               **{key: record.get(key) for key in ("surface", "task_id", "attempt", "record_id", "retry_key",
@@ -967,7 +965,7 @@ def _left_review_mark(record: Dict[str, Any], attempt: Any, seats: List[Dict[str
         head += f" {len(unknown)} seat(s) have no retained outcome and stay unknown; nothing is sent again."
     return {"surface": _LEFT_SURFACES.get(surface, surface), "task_id": task_id, "source_ref": ref,
             "publication_id": _left_publication_id(record), "room_id": room,
-            "lines": [head, *review_settlement_words(merged, room, revision), *(f"- {seat.get('model') or 'reviewer'} (seat {seat['slot_id']}): {_seat_words(seat)}"
+            "lines": [head, *merge_words, *(f"- {seat.get('model') or 'reviewer'} (seat {seat['slot_id']}): {_seat_words(seat)}"
                               for seat in seats)],
             "subject": {"retry_key": retry_key, "attempt": attempt_no, "record_id": str(record.get("record_id") or ""),
                         "reviewed_fingerprint": str(getattr(attempt, "pre_review_fingerprint", "") or "")}}

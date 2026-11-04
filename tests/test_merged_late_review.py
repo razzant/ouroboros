@@ -76,7 +76,9 @@ def test_card_history_reads_later_fail_with_a_working_saved_report_link_and_no_p
     before = _history(world.root)
     if case == "other_record":
         _fail(world.root, _record(world.root, "merge-task", "unrelated-review"))
-    elif case != "fail_at_merge":
+    elif case == "fail_at_merge":
+        review_ledger.revise_record(world.root, record["record_id"], lambda now: {**now, "waiting": {"seen": True}})
+    else:
         _fail(world.root, record)
         if case == "no_source":
             review_ledger.revise_record(world.root, record["record_id"], lambda now: {**now,
@@ -147,6 +149,7 @@ def test_late_fail_names_the_merge_in_mail_and_the_frozen_room_mark(author, monk
         from ouroboros.late_review_marks import replay_owed_late_reviews
         replay_owed_late_reviews(a.data)
     mark, = receptive.until(lambda: receptive._late_marks(a.data))
+    assert f"Room {room}" not in mark["text"]
     assert mark["room_id"] == room and "PR #7" in mark["text"] and "Its record now reads FAIL" in mark["text"]
     frozen = read_actor_source_bytes(a.data, receptive.TASK, mark["target_ref"])
     source = json.loads(frozen)
@@ -182,3 +185,58 @@ def test_failed_publication_replays_the_frozen_source_and_room_before_reading_ne
     assert mark["room_id"] == "1" and mark["target_ref"] == {**frozen["source_ref"], "task_id": "merge-task"}
     source = json.loads(read_actor_source_bytes(world.root, "merge-task", mark["target_ref"]))
     assert len(source["merged_under_record"]) == 1
+
+
+@pytest.mark.parametrize("fault", ["room", "receipts", "missing-number"])
+def test_merge_enrichment_cannot_lose_the_reviewers_mail(author, monkeypatch, fault):
+    from ouroboros import late_review_marks as late
+
+    a = author
+    wait, _ = receptive._leave_wave_by_mail(a)
+    fake = merges.FakeGh(a.data)
+    monkeypatch.setattr(github, "_gh_run", fake)
+    ctx = SimpleNamespace(task_id=receptive.TASK, drive_root=a.data, task_metadata={}, repo_dir=a.repo,
+                          current_chat_id=1, pending_events=[])
+    github._pr_merge(ctx, number=7, method="squash", expected_head_sha=merges.HEAD, review_record_id=wait["record_id"])
+    def unreadable(*args, **kwargs):
+        raise OSError("unreadable review enrichment")
+    if fault == "room":
+        monkeypatch.setattr(late, "owning_room", unreadable)
+    elif fault == "receipts":
+        monkeypatch.setattr(merge_receipts, "merged_under_record", unreadable)
+    else:
+        patch_document(a.data, receptive.TASK, lambda row: {**row,
+            "merge_receipts": [{k: v for k, v in r.items() if k != "number"} for r in row["merge_receipts"]]})
+    a.reviewer.release()
+    notice, = receptive.until(lambda: receptive._notices(a))
+    assert "[Review settled]" in notice["text"] and "Re-issue" in notice["text"]
+    if fault != "missing-number":
+        assert "was already merged" not in notice["text"]
+    receptive.until(lambda: wait.get("noticed") is True)
+
+
+def test_unsettled_merge_words_do_not_invent_a_settlement_revision(world):
+    record = _record(world.root, "merge-task")
+    merges._merge(world, review_record_id=record["record_id"])
+    words = merge_receipts.review_settlement_words(merges._receipts(world), None, None)
+    assert "Room unconfirmed" in words[0] and "None" not in words[0] and "at settlement" not in words[0]
+
+
+def test_an_unreadable_frozen_mark_does_not_recompose_or_lose_its_pending_publication(world, monkeypatch):
+    from ouroboros import late_review_marks as late
+
+    record = _record(world.root, "merge-task")
+    write_task_result(world.root, "merge-task", "completed", chat_id=1)
+    left = {"surface": "commit", "task_id": "merge-task", "record_id": record["record_id"], "retry_key": "left",
+            "drive_root": str(world.root), "attempt": 1}
+    frozen = review_pause._left_review_mark(left, None, [], "", _fail(world.root, record))
+    with monkeypatch.context() as fail:
+        fail.setattr(late, "_publish", lambda root, mark_id, facts: late.LateReviewMark("failed", mark_id))
+        assert late.publish_late_review(world.root, frozen).status == "failed"
+    monkeypatch.setattr(review_pause, "_left_seats", lambda *_: pytest.fail("unreadable custody must not be recomposed"))
+    with monkeypatch.context() as fail:
+        def unreadable(*args, **kwargs):
+            raise OSError("unreadable mark")
+        fail.setattr(late.ChronicleStore, "get", unreadable)
+        assert late.replay_settled_late_review(world.root, review_pause._left_mark_id(left)).status == "failed"
+    assert review_pause.ended_left_review(left) == "saved"

@@ -226,15 +226,34 @@ def merged_under_record(drive_root: Any, task_id: str, record_id: str) -> List[D
             and ((receipt.get("review") or {}).get("record") or {}).get("record_id") == record_id]
 
 
-def review_settlement_words(receipts: List[Dict[str, Any]], room_id: Optional[str], revision: Any) -> List[str]:
+def review_settlement_facts(root: Any, task_id: str, record_id: str, revision: Any, *, in_room: bool = False) -> tuple:
+    """Optional merge enrichment cannot prevent the review's own notice or retained settlement."""
+    from ouroboros.late_review_marks import owning_room
+    import logging
+
+    room = None
+    try:
+        room = owning_room(root, task_id, None)
+        receipts = merged_under_record(root, task_id, record_id)
+        return receipts, room, review_settlement_words(receipts, room, revision, in_room=in_room)
+    except Exception:
+        logging.getLogger(__name__).warning("Merge facts unavailable for review %s", record_id, exc_info=True)
+        return [], room, []
+
+
+def review_settlement_words(receipts: List[Dict[str, Any]], room_id: Optional[str], revision: Any,
+                            *, in_room: bool = False) -> List[str]:
     """Merge facts beside a late review, shared by its mailbox notice and retained room mark."""
     lines = []
     for receipt in receipts:
         outcome, review = receipt.get("outcome") or {}, (receipt.get("review") or {}).get("record") or {}
-        lines.append(f"Room {room_id or 'unconfirmed'}: PR #{receipt['number']} was already merged as "
+        location = "" if in_room else f"Room {room_id or 'unconfirmed'}: "
+        pr = f"PR #{receipt['number']}" if receipt.get("number") else "PR (number unrecorded)"
+        settlement = f", {revision} at settlement" if revision is not None else ""
+        lines.append(f"{location}{pr} was already merged as "
             f"{outcome.get('merge_sha') or 'unrecorded commit'} at {outcome.get('merged_at') or 'unrecorded time'} "
-            f"(receipt revision {receipt.get('revision')}; review revision {review.get('revision')} at merge, "
-            f"{revision} at settlement). {coverage_words(receipt)} "
+            f"(receipt revision {receipt.get('revision', 'unrecorded')}; "
+            f"review revision {review.get('revision', 'unrecorded')} at merge{settlement}). {coverage_words(receipt)} "
             f"Coverage: {(receipt.get('coverage') or {}).get('status', 'unknown')}.")
     return lines
 
@@ -554,7 +573,8 @@ def card_row_projection(drive_root: Any, receipt: Dict[str, Any]) -> Dict[str, A
 def _later_review(drive_root: Any, receipt: Dict[str, Any]) -> Dict[str, Any]:
     """The named record's newer revision and, on FAIL, an exact saved reviewer report for the existing reader."""
     frozen = (receipt.get("review") or {}).get("record") or {}
-    if (receipt.get("outcome") or {}).get("status") != "merged" or not frozen.get("record_id"):
+    if ((receipt.get("outcome") or {}).get("status") != "merged" or not frozen.get("record_id")
+            or (frozen.get("state") == "settled" and (frozen.get("verdict") or {}).get("aggregate") == "FAIL")):
         return {}
     try:
         current = review_ledger.load_record(drive_root, frozen["record_id"]) or {}
