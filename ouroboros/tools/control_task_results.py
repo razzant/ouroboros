@@ -333,8 +333,6 @@ def _get_task_result(
     notice = promotion_intent_notice(task_id, data)
     if notice:
         return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE", text=notice))
-    if authority_fields is None and not include_authority:
-        data = current_cost(data, status_drive_root)
     if authority_fields is not None or source_only and include_authority and not other_source:
         from ouroboros.tools.task_result_views import authority_selection_response
 
@@ -476,6 +474,9 @@ def _get_task_result(
     # the stored result no longer crashes the f-string with a TypeError).
     from ouroboros.cost_projection import cost_display
 
+    if selected_view in ("summary", "evidence") or (
+            known_result_sha256 == child_result_sha256 and selected_view != "answer"):
+        data = current_cost(data, status_drive_root)
     if selected_view and selected_view != "full":
         from ouroboros.tools.task_result_views import render_result_view
 

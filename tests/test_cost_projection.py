@@ -192,6 +192,37 @@ def test_live_authority_pages_survive_new_usage_rows(root):
     assert json.loads(_get_task_result(ctx, "child", view="summary"))["cost"]["accounted_upper_bound_usd"] == 3.5
 
 
+@pytest.mark.parametrize("selector", [
+    {"call_id": "missing", "manifest_sha256": "a" * 64}, {"presence_reentry_sha256": "a" * 64},
+    {"delegated_output_sha256": "a" * 64}, {"review_source_sha256": "a" * 64},
+    {"include_work_order_source": True}, {"include_completion_source": True},
+    {"include_focus_source": True}, {"include_authority": True}, {"authority_fields": []},
+    {"view": "answer"}, {"view": "full"},
+])
+def test_source_and_non_cost_views_do_not_read_live_accounting(root, monkeypatch, selector):
+    from ouroboros import usage_accounting as ua
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.control_task_results import _get_task_result
+
+    write_task_result(root, "parent", "running", root_task_id="parent")
+    write_task_result(root, "child", "scheduled", parent_task_id="parent", root_task_id="parent")
+    ctx = SimpleNamespace(drive_root=root, budget_drive_root=root, task_id="parent",
+                          task_metadata={"root_task_id": "parent"})
+    reads, real_read = [], ua.usage_breakdown
+
+    def counted(*args, **kwargs):
+        reads.append(kwargs)
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(ua, "usage_breakdown", counted)
+    _get_task_result(ctx, "child", **selector)
+    assert reads == []
+    for view in ("summary", "evidence"):
+        reads.clear()
+        _get_task_result(ctx, "child", view=view)
+        assert len(reads) == 1
+
+
 class TestAliases:
     def test_legacy_spelling_resolves_but_is_never_emitted(self):
         out = with_cost_aliases({"cost_usd": 1.5})
