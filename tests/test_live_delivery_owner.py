@@ -108,7 +108,7 @@ def test_the_reader_and_the_microphone_go_on_while_a_delivery_is_measured(resume
     """A slow measure holds up nothing else: events are read, audio goes up, words are recorded."""
     async def scenario():
         async with opened(holds=holding_result) as world:
-            host, call, session = world.host, world.call, world.first
+            host, _call, session = world.host, world.call, world.first
             host.due = True
             session.emit('tool_call', call_id='kept', name='quick_tool', arguments='{}')
             await asyncio.wait_for(world.entered.wait(), 2)

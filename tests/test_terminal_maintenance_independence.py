@@ -7,7 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-pytestmark = pytest.mark.serial
+from tests._delegate_capture_child import idle_maintenance_child  # noqa: F401
+
+pytestmark = [pytest.mark.serial, pytest.mark.usefixtures("idle_maintenance_child")]
 
 STEPS = ("cancel", "delivery", "questions", "notice", "usage")
 THREADS = {"cancel": "cancel_intent_sweep", "delivery": "terminal_delivery_replay",

@@ -226,8 +226,12 @@ def session_spy(monkeypatch):
     from ouroboros.tool_capabilities import CORE_TOOL_NAMES, META_TOOL_NAMES
     from ouroboros.tools import registry as registry_module
     from skills.live_conversation.driver import INITIAL_TOOLS
+    from tests._socket_seal import block_network_except_socketpair
 
-    monkeypatch.setattr(socket.socket, 'connect', lambda *a, **kw: pytest.fail('provider connection'))
+    # The offline call ends its host on an event loop. Windows builds one through connect() (a TCP socketpair,
+    # simulated here on every OS), so only that self-pipe may pass the guard.
+    monkeypatch.setattr(socket, 'socketpair', getattr(socket, '_fallback_socketpair', socket.socketpair))
+    block_network_except_socketpair(monkeypatch, lambda *a, **kw: pytest.fail('provider connection'))
     spy = SimpleNamespace(registries=[], plans=[], bounds=[], hosts=[])
 
     class Registry(registry_module.ToolRegistry):
@@ -264,6 +268,8 @@ def session_spy(monkeypatch):
 
 
 def test_call_path_plans_and_hosts_the_capture_task_with_the_initial_selection(source, session_spy, capsys):
+    from ouroboros import live_conversation
+
     root, folder, chat = source
     before = fingerprint(root)
     code, out, _err = cli(capsys, root, '--json', '--session-provider', 'gemini_live', room=chat, mode='max',
@@ -273,6 +279,8 @@ def test_call_path_plans_and_hosts_the_capture_task_with_the_initial_selection(s
     withheld = registry.on_demand_schema_names()
     # The plan site gets the initial selection: the registry's listing is two on-demand schemas longer.
     assert code == 0 and len(withheld) == 2 and not withheld & set(plan.tools)
+    # The report ends the host it built: a live call left registered is met by the next settings write in this process.
+    assert host not in live_conversation._active_hosts
     # One task, the capture's own folder-bound room, for the plan, the host and the host's tool context.
     assert plan.task['project_id'] == 'fit-folder' and plan.task['metadata'] == {'_project_room_dir': str(folder)}
     assert host.task == plan.task and host.ctx.project_id == 'fit-folder'

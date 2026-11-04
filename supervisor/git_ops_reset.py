@@ -613,11 +613,11 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
         if synced == fingerprint:
             return True, "unchanged:" + source
         from ouroboros.platform_layer import kill_process_tree, subprocess_new_group_kwargs
-        from ouroboros.tools.shell_process import _active_subprocesses, _subprocess_lock, tracked_start
+        from ouroboros.tools.shell_process import contained_popen, retire_tracked, tracked_start
 
         with tracked_start() as publish:
-            proc = publish(subprocess.Popen(
-                cmd, cwd=str(_go().REPO_DIR), **subprocess_new_group_kwargs()
+            proc = publish(contained_popen(
+                subprocess.Popen, cmd, cwd=str(_go().REPO_DIR), **subprocess_new_group_kwargs()
             ))
         try:
             returncode = proc.wait(timeout=120)
@@ -626,8 +626,7 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
             proc.wait(timeout=10)
             raise
         finally:
-            with _subprocess_lock:
-                _active_subprocesses.discard(proc)
+            retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
         if returncode != 0:
             raise subprocess.CalledProcessError(returncode, cmd)
         try:

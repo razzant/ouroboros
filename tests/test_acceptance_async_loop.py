@@ -212,21 +212,87 @@ def _terminal_record(trace):
                              "objective": outcomes._objective_axis(review)}}
 
 
+HANDED_BACK = "[Result review] Your result was reviewed before delivery (record {}): PASS."
+SHOWN = "Result review outcome shown before delivery."
+
+
 def test_automatic_completion_is_reviewed_once_through_the_real_seam_before_delivery(full_loop, monkeypatch):
     """A plain final answer with produced work, under Required: the host reviews the result
-    once through the ordinary review machinery, binds the PASS and delivers on it, with no
-    further author round and no park."""
+    once through the ordinary review machinery and binds the PASS. Its author has not received
+    that outcome, so it is handed back once, whole, before delivery (ARCHITECTURE §6 "Result
+    review", owner 2 Nov); the author's next answer delivers on the same review: no second wave,
+    no second hand-back and no park."""
     f = full_loop
     def main(_llm, messages, *_a, **_kw):
         f.model_inputs.append(copy.deepcopy(messages))
         f.model_step += 1
-        assert f.model_step == 1, f.progress
-        return {"content": ANSWER}, 0.0
+        assert f.model_step <= 2, f.progress
+        # After the hand-back the author keeps its retained answer by explicit selection.
+        return ({"content": ANSWER} if f.model_step == 1 else keep(f)), 0.0
     monkeypatch.setattr(loop, "call_llm_with_retry", main)
     result, _usage, trace = f.run()
-    assert result == ANSWER and len(f.review_sends) == 1 and not f.waits
+    assert result == ANSWER and f.model_step == 2 and len(f.review_sends) == 1 and not f.waits
     [run] = trace["review_runs"]
     assert (run["surface"], run["authority"], run["aggregate_signal"]) == ("result", "host_root", "PASS")
+    # The one extra round is that outcome reaching its author, named by its record, exactly once.
+    first, second = (json.dumps(messages, ensure_ascii=False) for messages in f.model_inputs)
+    assert HANDED_BACK.format(run["record_id"]) in second and second.count("[Result review]") == 1
+    assert "[Result review]" not in first and f.progress.count(SHOWN) == 1
     record = _terminal_record(trace)
     assert record["outcome_axes"]["review"]["source"] == "result_review"
     assert record["outcome_axes"]["objective"]["status"] == "pass"
+
+
+def test_an_outcome_the_author_received_whole_is_not_handed_back_again(full_loop, monkeypatch):
+    """The falsifying side of the hand-back: when Main asked for the result review itself, the tool
+    returned that outcome whole into its transcript, so the same answer delivers on that record with
+    no hand-back round and no second wave."""
+    f = full_loop
+    def main(_llm, messages, *_a, **_kw):
+        f.model_inputs.append(copy.deepcopy(messages))
+        f.model_step += 1
+        assert f.model_step <= 2, f.progress
+        if f.model_step == 1:
+            return {"content": None, "tool_calls": [call("review_change", {
+                "subject": "result", "answer": ANSWER, "reason": "Check the report before it is sent."}, "review")]}, 0.0
+        return {"content": ANSWER}, 0.0
+    monkeypatch.setattr(loop, "call_llm_with_retry", main)
+    result, _usage, trace = f.run()
+    assert result == ANSWER and f.model_step == 2 and len(f.review_sends) == 1 and not f.waits
+    [run] = trace["review_runs"]
+    assert (run["surface"], run["aggregate_signal"]) == ("result", "PASS")
+    tool_rows = [row for row in f.model_inputs[1] if row.get("role") == "tool"]
+    assert any(run["record_id"] in str(row.get("content")) for row in tool_rows)  # returned whole by its own call
+    assert "[Result review]" not in json.dumps(f.model_inputs, ensure_ascii=False) and SHOWN not in f.progress
+
+
+@pytest.mark.parametrize("origin, completion", [("promoted_root", False), ("promoted_root", True), ("presence_turn", False)],
+                         ids=["promoted_root", "promoted_root_with_a_completion_record", "presence_turn"])
+def test_only_a_presence_turn_known_before_review_is_never_held(full_loop, monkeypatch, origin, completion):
+    """Presence speech is never held (ARCHITECTURE §6 "Result review"), decided from the host's own turn fact known
+    before the review (``presence_event_identity``), never from the completion record a focus turn writes after it.
+    A promoted root keeps the speaker's ``metadata.presence`` but no event identity: reviewed and handed back like
+    any root, even with a completion record on its context at the review step (``place_reply.reply_carrier`` also
+    serves a promoted root of a place). The owed review still runs for the turn; only the delivery does not wait."""
+    from ouroboros.dialogue_provenance import presence_root_carrier
+
+    f = full_loop
+    turn = {"presence": {"binding_id": "binding-1", "event": {"conversation_key": "chat:a:r", "source_event_id": "event1"}},
+            "presence_event_identity": "presence-event-identity-1"}
+    # A root promoted from that turn carries exactly what the real carrier hands on.
+    f.ctx.task_metadata = {**(f.ctx.task_metadata or {}), **(turn if origin == "presence_turn" else presence_root_carrier(turn))}
+    def main(_llm, messages, *_a, **_kw):
+        f.model_inputs.append(copy.deepcopy(messages))
+        f.model_step += 1
+        assert f.model_step <= 2, f.progress
+        if completion and f.model_step == 1:  # present when the answer reaches the review step
+            f.ctx._presence_completion = {"outcome": "message", "message": ANSWER}
+        return ({"content": ANSWER} if f.model_step == 1 else keep(f)), 0.0
+    monkeypatch.setattr(loop, "call_llm_with_retry", main)
+    result, _usage, _trace = f.run()
+    assert result == ANSWER and len(f.review_sends) == 1 and not f.waits
+    inputs = json.dumps(f.model_inputs, ensure_ascii=False)
+    if origin == "promoted_root":
+        assert f.model_step == 2 and inputs.count("[Result review]") == 1 and SHOWN in f.progress
+    else:
+        assert f.model_step == 1 and "[Result review]" not in inputs and SHOWN not in f.progress

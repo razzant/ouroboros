@@ -992,6 +992,9 @@ def test_restart_smoke_timeout_kills_process_tree(monkeypatch):
     killed = []
 
     class HungProcess:
+        def poll(self):
+            return self.returncode
+
         returncode = 1
 
         def __init__(self):
@@ -1005,6 +1008,8 @@ def test_restart_smoke_timeout_kills_process_tree(monkeypatch):
             return "", ""
 
     proc = HungProcess()
+    from tests.test_tracked_tree_containment import fake_tree_read
+    fake_tree_read(monkeypatch, proc, remains=False)
     monkeypatch.setattr(update_merge.subprocess, "Popen", lambda *_a, **_k: proc)
     monkeypatch.setattr(platform_layer, "kill_process_tree", lambda value: killed.append(value))
 

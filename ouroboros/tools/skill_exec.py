@@ -43,12 +43,8 @@ from ouroboros.tool_access import (
 )
 from ouroboros.tools.process_facts import publish_process_facts as _publish_process_facts
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.tools.shell import (
-    _active_subprocesses,
-    _kill_process_group,
-    _subprocess_lock,
-)
-from ouroboros.tools.shell_process import tracked_start
+from ouroboros.tools.shell import _kill_process_group
+from ouroboros.tools.shell_process import contained_popen, retire_tracked, tracked_start
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
 from ouroboros.usage_accounting import current_usage_scope, record_unmetered_external_dispatch
 from ouroboros.utils import append_jsonl, utc_now_iso
@@ -217,7 +213,7 @@ def _run_skill_subprocess(
     proc = None
     try:
         with tracked_start() as publish, operation_start():
-            proc = Popen(cmd, **popen_kwargs)  # noqa: S603 — cmd is a vetted list, not shell
+            proc = contained_popen(Popen, cmd, **popen_kwargs)  # noqa: S603 — cmd is a vetted list, not shell
             publish(proc)
     except OSError as exc:
         if proc is None:
@@ -248,8 +244,7 @@ def _run_skill_subprocess(
             pass
         if proc.poll() is not None:
             confirmed()
-        with _subprocess_lock:
-            _active_subprocesses.discard(proc)
+        retire_tracked(proc)  # unconfirmed: a running root or live tree stays named
         for pipe in (proc.stdout, proc.stderr):
             try:
                 if pipe:
@@ -301,8 +296,7 @@ def _run_skill_subprocess(
     finally:
         if proc.poll() is not None:
             confirmed()
-        with _subprocess_lock:
-            _active_subprocesses.discard(proc)
+        retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
         try:
             if proc.stdout:
                 proc.stdout.close()

@@ -87,6 +87,8 @@ def _end_pids(*pids) -> None:
 def _own_cleanup_threads():
     yield
     ps.wait_for_cleanups(15)
+    from ouroboros.tools.shell_process import unsettled_tracked_children
+    assert unsettled_tracked_children() is None
 
 
 @pytest.mark.parametrize("task_id", ["t-end", "manual"])
