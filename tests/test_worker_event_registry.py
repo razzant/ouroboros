@@ -155,8 +155,8 @@ def _emitted_types(trees=None, constants=None, *, commands=False):
             for arg in candidates:
                 built = builders.get(_call_name(arg.func), ()) if isinstance(arg, ast.Call) else ()
                 for event_type in {_dict_type(arg, constants), *built} - {None}:
-                    emitted.setdefault(event_type, []).append(
-                        f"{path.relative_to(REPO)}:{node.lineno}"
+                    emitted.setdefault(event_type, []).append(  # one spelling on every OS
+                        f"{path.relative_to(REPO).as_posix()}:{node.lineno}"
                     )
     return MappingProxyType({kind: tuple(sites) for kind, sites in emitted.items()})
 
@@ -238,6 +238,16 @@ def test_the_scan_sees_an_event_a_function_builds(event_index):
     path = REPO / "server.py"  # any repository path: only its relative form is reported
     assert list(_emitted_types({path: ast.parse(source)}, {})) == ["built_by_a_function"]
     assert len(_emitted_types({path: ast.parse(source)}, {})["built_by_a_function"]) == 2
+
+
+def test_the_scan_reports_a_site_in_one_spelling_on_every_os(monkeypatch):
+    """Windows reported ``ouroboros\\agent_task_pipeline.py:935`` and the witness above, which reads the POSIX
+    spelling, failed there only (post-merge run 41792459443). A Windows-spelled checkout keeps that visible here."""
+    windows_checkout = pathlib.PureWindowsPath("D:/a/ouroboros/ouroboros")
+    monkeypatch.setitem(globals(), "REPO", windows_checkout)
+    tree = ast.parse('def emit(q):\n    q.put({"type": "spelled_once"})\n')
+    sites = _emitted_types({windows_checkout / "ouroboros" / "agent_task_pipeline.py": tree}, {})
+    assert sites["spelled_once"] == ("ouroboros/agent_task_pipeline.py:2",)
 
 
 def test_allowlist_entries_stay_emitted(event_index):
