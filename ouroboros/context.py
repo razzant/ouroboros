@@ -42,6 +42,7 @@ from ouroboros.context_input_selection import (
     development_required,
     development_resident,
     required_book_unavailable,
+    wake_start_checkpoint,
 )
 from ouroboros.context_health import (
     _iter_recent_jsonl as _iter_recent_jsonl,
@@ -1189,6 +1190,10 @@ def build_llm_messages(
     view_facts = _record_memory_view(env, memory, task, ctx, plan)
     if view_facts:
         cap_info["memory_view"] = view_facts
+    if (checkpoint := wake_start_checkpoint(task, plan)) is not None:  # the round boundary's record, made at the start
+        from ouroboros.loop_messages import _emit_checkpoint_event
+        _emit_checkpoint_event(getattr(ctx, "event_queue", None), str(task.get("id") or ""),
+                               pathlib.Path(env.drive_root) / "logs", checkpoint)
     if refusal := required_book_unavailable(plan.core):  # the task's own requirement, not its view, decides
         cap_info["authority_source_unavailable"] = refusal
     return messages, cap_info
