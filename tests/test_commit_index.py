@@ -898,9 +898,9 @@ def test_a_finished_review_holding_a_stale_start_token_admits_the_authors_next_i
     """Three incidents of 2026-11-04 (synthetic shapes): a finished commit review whose row kept a seat's start token
     after that seat's terminal outcome (a landed late_settled PASS; a QUORUM_FAILED wave with an unsent seat beside a
     late_settled one; an additional adviser's terminal row) read as live custody, so the author's next, different
-    intent was refused (Cyber "this other intent waits", Blocking REVIEWED_ATTEMPT_IN_PROGRESS). The next public
-    commit call now repairs that row from its exact bound record and buys the new intent its own panel; the old
-    verdict, history text and landing stay. A still-running adviser keeps its own custody yet holds nothing."""
+    intent was refused (Cyber "this other intent waits", Blocking REVIEWED_ATTEMPT_IN_PROGRESS). A settled seat's
+    leftover token now holds nothing (#2710), so the new intent buys its own panel; the old verdict, history text
+    and landing stay. A still-running adviser keeps its own custody yet holds nothing."""
     from ouroboros import config, review_checking_prune, review_ledger
     from ouroboros.review_state import _attempt_has_active_review_custody, load_state
     from ouroboros.tools.review_subject import checkout_token
@@ -943,7 +943,7 @@ def test_a_finished_review_holding_a_stale_start_token_admits_the_authors_next_i
             {**adviser_seat, "status": "pending", "operation_state": "in_flight"}])
     before = next(row for row in load_state(task.drive_root).attempts if row.attempt == source.attempt)
     verdict = review_ledger.load_record(review_ledger.ledger_root(task), source.review_record_id)["verdict"]
-    assert _attempt_has_active_review_custody(before), "the incident shape reads as live custody"
+    assert _attempt_has_active_review_custody(before) == (shape == "live_adviser"), "only a running seat holds"
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory" if mode == "cyber_pro" else "blocking")
     (repo / "a.txt").write_text("the author's next intent\n", encoding="utf-8")
     head = _git(repo, "rev-parse", "HEAD")
@@ -965,7 +965,7 @@ def test_a_finished_review_holding_a_stale_start_token_admits_the_authors_next_i
         active, _owners = review_checking_prune._review_rounds(task.drive_root)
         assert checkout_token(after.review_retry_key, task_id=task.task_id) in active, "its checkout stays held"
     else:
-        assert running == [] and not _attempt_has_active_review_custody(after), after.triad_raw_results
+        assert running == ["inv-left-on-a-finished-seat"] and not _attempt_has_active_review_custody(after), running
 
 
 def test_a_compacted_source_whose_record_names_no_counted_seat_continues_nothing(task, monkeypatch):

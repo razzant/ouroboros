@@ -461,14 +461,15 @@ def _merge_seat(rows, incoming):
 
 def _settled_row(current, seats, record):
     """``current`` with each collected seat merged: a scope seat onto the scope roster, every other seat onto the
-    triad (``_merge_seat``). Once every counted seat is terminal with no start token left, a row still ``reviewing``
+    triad (``_merge_seat``). Once every counted seat is terminal with no start token holding (a settled seat's
+    leftover token holds nothing, ``review_state_custody._start_token_open``), a row still ``reviewing``
     takes its tool's settled projection (``_SETTLED_PROJECTION``): counted completion ends the review phase, while an
     additional seat still running keeps its own physical custody (the late flag). Pure, so a row it leaves equal
     needs no save."""
     from dataclasses import replace
     from ouroboros.review_custody import _row_is_pending
     from ouroboros.review_ledger import counted_pending
-    from ouroboros.review_state import _utc_now, counted_roster_rows
+    from ouroboros.review_state import _review_roster_row_is_pending, _utc_now, counted_roster_rows
 
     rows = {str(row.get("slot_id") or ""): copy.deepcopy(row) for row in current.triad_raw_results}
     wrapper = copy.deepcopy(current.scope_raw_result) if isinstance(current.scope_raw_result, dict) else {}
@@ -485,7 +486,7 @@ def _settled_row(current, seats, record):
     roster = [*rows.values(), *scope.values()]
     status, phase = ((_SETTLED_PROJECTION.get(current.tool_name, ("reviewed", "review")))
                      if roster and current.status == "reviewing" and not counted_pending(roster)
-                     and not any(row.get("pending_invocation_id") for row in counted_roster_rows(roster))
+                     and not any(_review_roster_row_is_pending(row) for row in counted_roster_rows(roster))
                      else (current.status, current.phase))
     return replace(current, triad_raw_results=list(rows.values()), scope_raw_result=wrapper,
                    late_result_pending=any(_row_is_pending(row) for row in roster), status=status, phase=phase,
