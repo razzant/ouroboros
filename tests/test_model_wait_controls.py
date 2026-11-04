@@ -591,6 +591,58 @@ def test_web_and_host_wait_decisions_share_saved_replay_and_attempt_fences(live_
 
 
 @pytest.mark.serial
+@pytest.mark.parametrize("declared", [True, False])
+@pytest.mark.parametrize("persist_role", [True, False])
+def test_a_main_model_saved_on_a_wait_card_is_recorded_like_a_settings_save(live_wait, monkeypatch, declared,
+                                                                             persist_role):
+    """ORDER item 4: the card's saved choice records the writer's receipt as one ``settings_changed`` with the origin
+    its client declared; the app's card declares itself and puts no row in Main, an undeclared caller gets one. A
+    choice for this task only writes and records nothing."""
+    import supervisor.message_bus as bus
+    import supervisor.state as state
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+    from ouroboros import config
+    from ouroboros.gateway.task_decision import api_decision_answer
+
+    root, _gateway, _client, owner, _events, _decide = live_wait
+    sent = []
+    monkeypatch.setattr(bus, "send_with_budget", lambda *args, **kwargs: sent.append((args, kwargs)))
+    monkeypatch.setattr(state, "load_state", lambda: {"owner_chat_id": 77})
+    monkeypatch.setattr(config, "SETTINGS_PATH", root / "settings.json")
+    config.SETTINGS_PATH.write_text(json.dumps({"OUROBOROS_MODEL": "openrouter/old-main"}), encoding="utf-8")
+    row = {"wait_id": "wait-one", "revision": 1, "task_attempt": 1, "state": "waiting", "role": "main"}
+    model_wait.mutate_wait(root, "task-one", "wait-one", lambda _: row)
+    owner.waits["wait-one"], owner.revision = dict(row), 1
+    web = Starlette(routes=[Route("/api/decisions", api_decision_answer, methods=["POST"])])
+    web.state.drive_root = root
+    with TestClient(web) as client:
+        response = client.post("/api/decisions", headers={"X-Ouroboros-Surface": "app", "X-Ouroboros-Actor": "owner"}
+                               if declared else {}, json={
+            "request_id": "main-saved", "decision_id": "model_wait:task-one:wait-one", "revision": 1,
+            "action": "switch", "model": MODEL, "credential_profile_id": "", "use_local": False,
+            "persist_role": persist_role})
+    assert response.status_code == 202 and response.json()["saved"] is persist_role
+    events = root / "logs" / "events.jsonl"
+    records = [entry for entry in map(json.loads, events.read_text(encoding="utf-8").splitlines())
+               if entry.get("action") == "settings_changed"] if events.exists() else []
+    if not persist_role:
+        assert records == [] and sent == []
+        return
+    [record] = records
+    assert record["changes"]["OUROBOROS_MODEL"] == {"old": "openrouter/old-main", "new": MODEL}
+    assert (record["surface"], record["actor"]) == (("app", "owner") if declared else ("api", "not declared"))
+    if declared:
+        assert sent == []
+    else:
+        [((chat, text), kwargs)] = sent
+        assert chat == 77 and kwargs == {"role": "system", "system_type": "settings_changed"}
+        assert text.startswith(f"Main model: openrouter/old-main → {MODEL}.")
+        assert text.endswith("Changed via api; declared actor: not declared."), text
+
+
+@pytest.mark.serial
 @pytest.mark.parametrize("surface", ["web", "host"])
 def test_wait_decision_preserves_existing_settings_timeout_receipt(live_wait, monkeypatch, surface):
     import threading

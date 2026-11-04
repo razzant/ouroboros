@@ -6,7 +6,7 @@ import { fmt, tr } from './i18n.js';
 export const TASK_CAUSE_PHRASES = {
     previous_revision_accepted: "The reviewers approved an earlier version of this answer; the current version was not re-reviewed.",
     admission_close_unconfirmed: "Reviewers approved this answer; the supervisor did not confirm that task admission was closed.",
-    author_stop: "Ouroboros stopped with unfinished work; no review approval was granted.",
+    author_stop: "Ouroboros stopped with unfinished work; the reviewers had not signed it off.",
     review_outcome_received: "Ouroboros received the reviewers' outcome and finished on that.",
     author_finish: "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off.",
     review_degraded: "The reviewers did not reach a verdict on this answer.",
@@ -79,8 +79,8 @@ export const TASK_CAUSE_PHRASES = {
     child_results_deferred: "Some sub-task results were deferred instead of being folded into this answer",
     tool_failure: "A tool this task used failed and nothing recovered it",
     receipt_absent: "No host verification receipt was recorded; this does not establish whether other checks ran.",
-    expected_output_ungrounded: "The declared output has no recorded tool work or structured final answer to support it.",
-    residual_tool_errors_without_review: "Tool errors remain in the record and the result has not been evaluated.",
+    expected_output_ungrounded: "A retired check recorded no tool calls or structured answer; it does not assess the written result.",
+    residual_tool_errors_without_review: "Tool errors remain in the record; no review checked the result.",
     artifacts_unavailable: "Some result files are missing or could not be preserved.",
     partial_result: "The result is partial; remaining work is described in task details.",
     task_exception: "The task stopped on an internal error",
@@ -150,7 +150,7 @@ export function residualToolErrorsPhrase(execution = {}) {
     const tail = unresolved.length >= LISTED || cosmetic.length >= LISTED ? tr('task.tool_error.more_capped', ', plus more tool errors')
         : more === 1 ? tr('task.tool_error.more_one', ', plus 1 more tool error')
             : more ? fmt(', plus {n} more tool errors', { n: more }) : '';
-    return fmt('{subject}{tail}; the result has not been evaluated.', { subject, tail });
+    return fmt('{subject}{tail}; no review checked the result.', { subject, tail });
 }
 
 // Details retain unknown codes once, in order; their visible cause never guesses. Twin: project_dialogue._cause_phrase.

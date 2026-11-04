@@ -49,7 +49,7 @@ test('a typed cause with no sentence yet says so; its exact code is the details\
     const stop = { status: 'completed', reason_code: 'final_message', outcome_axes: {
         execution: { status: 'ok', task_completion: { action: 'stop', rationale: 'The export still fails on empty input.' } },
         objective: { status: 'fail', source: 'task_completion', reason: 'author_stop', warnings: ['partial coverage'] } } };
-    assert.equal(taskReasonDetail(stop), 'Ouroboros stopped with unfinished work; no review approval was granted'
+    assert.equal(taskReasonDetail(stop), 'Ouroboros stopped with unfinished work; the reviewers had not signed it off'
         + ' · partial coverage · The export still fails on empty input.');
     assert.deepEqual(taskReasonCodes(stop), [], 'a legacy warning may be authored prose, not a typed reason code');
     // The card's collapsed line says the sentence; its details name the code.
@@ -473,7 +473,7 @@ test('a held task states why it was held and never that the work went on', () =>
     assert.equal(held('plan_review_cycles_exhausted', 'review_cycles_exhausted'),
         'The task used up its review rounds before the answer was signed off.');
     assert.equal(held('plan_review_author_stop', 'author_stop'),
-        'Ouroboros stopped with unfinished work; no review approval was granted.');
+        'Ouroboros stopped with unfinished work; the reviewers had not signed it off.');
     for (const line of [held('plan_review_quorum_unreachable', 'plan_review_quorum_unreachable')]) {
         assert.doesNotMatch(line, /went on/);
     }
@@ -484,7 +484,7 @@ test('a held task states why it was held and never that the work went on', () =>
 // An exit as the loop records it (tests/test_terminal_provenance.py): the plan class, the reason its notice stamped,
 // and the author's stop when it ended the work. A stop is the primary cause and no plan sentence says the work went
 // on; an unreadable record stays unknown beside a stop, a rail or a clean finish.
-const STOPPED = 'Ouroboros stopped with unfinished work; no review approval was granted';
+const STOPPED = 'Ouroboros stopped with unfinished work; the reviewers had not signed it off';
 const UNKNOWN = 'The plan record could not be read, so the state of the plan review is unknown.';
 const planExit = (plan_review, { reason = 'plan_review_advisory', status = 'degraded', stop = '' } = {}) => ({
     status: 'completed', reason_code: reason,
@@ -579,6 +579,6 @@ test('an unfinished child keeps the complete authored result and its stop cause 
         subagent_task_id: 'child', parent_task_id: 'root', subagent_event: 'completed',
         status: 'completed', reason_code: 'final_message', outcome_axes, result });
     assert.equal(view.phase, 'error');
-    assert.equal(view.activityPreview, 'Ouroboros stopped with unfinished work; no review approval was granted · The export still fails on empty input.');
+    assert.equal(view.activityPreview, 'Ouroboros stopped with unfinished work; the reviewers had not signed it off · The export still fails on empty input.');
     assert.ok(view.fullBody.includes(result));
 });

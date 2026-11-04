@@ -1207,3 +1207,25 @@ test('settled native history needs no recovery reads, and missing exact room pro
         assert.equal(fx.calls.length, 0);
     } finally { fx.decision.destroy(); fx.restore(); }
 });
+
+test('a question card says its work is paused from the instance\'s works and returns to its words after Resume', () => {
+    const fx = fixture();
+    try {
+        const card = fx.decision.buildQuizCard({ ...WS_MSG, options: ['Yes', 'No'], owner_wait_state: 'waiting' });
+        const status = () => card.querySelector('.chat-quiz-status-text').textContent;
+        assert.equal(status(), 'Waiting for your answer');
+        const works = (activity) => ({ episodes: new Map([['root', { work_id: 'root', confirmed: true, episode: { task_id: 'root' },
+            members: { ids: ['root', 't-1'], states: { 't-1': { activity } } } }]]) });
+        fx.decision.syncWorks(works('paused'));
+        assert.equal(status(), 'Waiting for your answer · its work is paused; it reads this after Resume');
+        assert.deepEqual(markOf(card), ['dot', 'owner', false], 'the owner\'s answer is still wanted');
+        fx.decision.syncWorks(works('working'));
+        assert.equal(status(), 'Waiting for your answer');
+        // An answer in flight keeps its own words until it settles.
+        fx.decision.syncWorks(works('paused'));
+        card.dataset.submission = 'sending';
+        card.querySelector('.chat-quiz-status-text').textContent = 'Sending…';
+        fx.decision.syncWorks(works('working'));
+        assert.equal(status(), 'Sending…');
+    } finally { fx.restore(); }
+});

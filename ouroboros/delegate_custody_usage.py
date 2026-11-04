@@ -111,6 +111,15 @@ def disclosed_spend(summary: Dict[str, Any], *, attempt_execution: Any = None) -
     return facts["cost_usd"], facts["cost_usd"] is not None and not facts["cost_final"]
 
 
+def model_identity_delta(requested: str, applied: str) -> Dict[str, Any]:
+    """The one record of a delegated session that names its model differently from the request (a review
+    seat's and a delegate run's): the engine writes its own alias, so the note says what was not compared."""
+    return {"kind": "capability_delta", "requested": f"model {requested}", "effective": f"model {applied}",
+            "reason": "session_route_resolves_its_own_model",
+            "note": "The engine names the model it ran by its own alias; the names differ, capabilities were "
+                    "not compared. A disclosure, not a failure."}
+
+
 def session_attempt_id(session_id: str) -> str:
     """The existing one-shot ledger identity, also used by coverage readers."""
     return "session-" + hashlib.sha256(str(session_id or "").strip().encode("utf-8")).hexdigest()[:24]

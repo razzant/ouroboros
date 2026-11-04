@@ -214,7 +214,7 @@ def completion_event_view(root: Any, event: dict, record: dict) -> dict:
 def _project_row(tid: str, row: dict, event: dict, ready: dict, *, delivery: dict | None = None) -> dict:
     from ouroboros import project_dialogue as dialogue
     from ouroboros.project_facts import resolve_project_id
-    from ouroboros.task_finalization import quiet_finish
+    from ouroboros.task_finalization import quiet_finish, work_label
 
     quiet = quiet_finish(row)
     lineage = _lineage(tid, row)
@@ -270,7 +270,7 @@ def _project_row(tid: str, row: dict, event: dict, ready: dict, *, delivery: dic
         if "result" in row else row.get("_result_text_present") is True,
         "terminal_origin": str(row.get("terminal_origin") or ""),
         **({"cancel_origin": dict(row["cancel_origin"])} if isinstance(row.get("cancel_origin"), dict) else {}),
-        "result_ref": {"kind": "task_result", "task_id": tid, "reader": "get_task_result"}, "text": text,
+        "result_ref": {"kind": "task_result", "task_id": tid, "reader": "get_task_result"}, "text": text, **work_label(row),
         **({"reason_detail": verdict} if verdict else {}),
         "completion_notice": notice,
         **({"terminal_projection_token": ready["token"]} if ready.get("token") else {}),

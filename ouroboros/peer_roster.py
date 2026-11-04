@@ -187,11 +187,10 @@ def _owner_wait_fact(wait: Dict[str, Any]) -> Dict[str, Any]:
 
 def _pause_by(fence: Any) -> str:
     """Who declared the tree's Pause, in words, read as the owner's card reads it (``control_actor.pause_author``):
-    ``owner`` for the owner's press, Ouroboros's own sentence for its ``pause_task``, ``""`` when it declared nobody."""
+    ``owner`` or ``Ouroboros``, then the words the press recorded, whoever declared it; ``""`` when it declared nobody."""
     author = pause_author(fence)
-    if author["actor"] == "ouroboros":
-        return f"Ouroboros: {author['text']}" if author["text"] else "Ouroboros"
-    return author["actor"]
+    head = "Ouroboros" if author["actor"] == "ouroboros" else author["actor"]
+    return f"{head}: {author['text']}" if head and author["text"] else head
 
 
 def _pause_fact(pause: Dict[str, Any], fence: Any) -> Dict[str, Any]:

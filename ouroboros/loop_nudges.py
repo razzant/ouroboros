@@ -615,7 +615,7 @@ def _maybe_inject_finalization_nudges(
         )
     # No "expected output but nothing attempted" re-loop (A3, removed for #1748): plain
     # prose can itself be the requested deliverable, and the transcript already shows
-    # the model its own calls; the outcome keeps its expected_output_ungrounded signal.
+    # the model its own calls.
     from ouroboros.tool_capabilities import substantive_tool_calls
     work_calls = substantive_tool_calls(llm_trace.get("tool_calls"))
     # P2 one-shot final-answer-marker nudge: real work + prose, no FINAL ANSWER

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { composeModelSource, createModelRolesEditor, inheritTargetOf, modelContextNote,
+import { MAIN_FOLLOW_NOTE, composeModelSource, createModelRolesEditor, inheritTargetOf, modelContextNote,
     modelSourceGroups, parseModelSource, sourceChoice, sourceFromChoice } from '../modules/model_roles.js';
 import { configuredApiProviders, routeChoiceGroups } from '../modules/route_editor_primitives.js';
 
@@ -161,4 +161,34 @@ test('an empty role names the slot it uses: Main, and the Light model for the Sa
     const source = readFileSync(new URL('../modules/model_roles.js', import.meta.url), 'utf8');
     assert.match(source, /`Empty uses the \$\{inheritName\(row\)\} model`/);
     assert.match(source, /`Uses \$\{inheritName\(row\)\}\.`/);
+});
+
+/** An element stub that accepts every property, call and query (the house idiom: no jsdom). */
+function inertNode() {
+    return new Proxy(function () {}, {
+        get: (target, key) => (key === Symbol.iterator ? function* () {} : key === Symbol.toPrimitive ? () => ''
+            : key === 'then' ? undefined : key in target ? target[key] : inertNode()),
+        set: (target, key, value) => { target[key] = value; return true; },
+        apply: () => inertNode(),
+    });
+}
+
+test('Settings says under Main, before Save, what a new Main does to running work; no other host does', () => {
+    assert.equal(MAIN_FOLLOW_NOTE, 'Running work that follows Main uses this model at its next call. '
+        + 'The new route may need to read its full context again; work with its own model keeps it.');
+    const rendered = (mainNote) => {
+        const host = inertNode();
+        const editor = createModelRolesEditor({ hostId: 'roles', doc: { getElementById: () => host }, showContext: false, mainNote });
+        editor.load({ OUROBOROS_MODEL: 'openai::main', OUROBOROS_MODEL_FALLBACKS: 'openai::reserve' }, contract);
+        editor.destroy();
+        return String(host.innerHTML);
+    };
+    const html = rendered(true);
+    const main = html.slice(html.indexOf('data-model-role-group="main"'), html.indexOf('data-model-role-group="light"'));
+    assert.ok(main.includes(`<p class="model-role-copy" id="roles-main-note" data-main-follow-note>${MAIN_FOLLOW_NOTE}</p>`));
+    assert.match(main, /data-model-role-model aria-label="Main Model" aria-describedby="roles-main-note"/);
+    assert.equal(html.split('data-main-follow-note').length, 2, 'one note, under Main and not under Fallback');
+    assert.ok(!rendered(false).includes('data-main-follow-note'), 'the wizard and the wait card never show it');
+    const settings = readFileSync(new URL('../modules/settings.js', import.meta.url), 'utf8');
+    assert.match(settings, /createModelRolesEditor\(\{ hostId: 'settings-model-roles', mainNote: true,/);
 });

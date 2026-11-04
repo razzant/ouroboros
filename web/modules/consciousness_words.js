@@ -177,8 +177,10 @@ export function deadlineWords(snapshot, now = Date.now()) {
     if (snapshot.liveWakeTaskId || snapshot.liveWakeHeld || snapshot.enabled === false || snapshot.enabled === null) {
         return '';
     }
-    const nextAt = snapshot.status === 'allowance_exhausted'
-        ? snapshot.allowanceResetsAt || snapshot.nextWakeAt : snapshot.nextWakeAt;
+    // An exhausted allowance is checked at its reset, or sooner once a changed daily limit moved the next attempt.
+    const wake = Date.parse(snapshot.nextWakeAt);
+    const nextAt = snapshot.status === 'allowance_exhausted' && snapshot.allowanceResetsAt
+        && !(wake > now && wake < Date.parse(snapshot.allowanceResetsAt)) ? snapshot.allowanceResetsAt : snapshot.nextWakeAt;
     const next = Date.parse(nextAt);
     if (!Number.isFinite(next)) return '';
     const due = next <= now;

@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 import json
 import pathlib
 import queue
+import time
 
 from typing import Any, Dict, List, Optional, Tuple
 from ouroboros.llm import LLMClient
@@ -641,13 +642,14 @@ def subagents_fact_line() -> str:
         return "Subagents: unknown (room settings unavailable)"
 
 
-def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None,
-                       measured: bool = True, focus_fact: str = "", subagents_fact: Optional[str] = None) -> str:
+def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None, measured: bool = True,
+                       focus_fact: str = "", subagents_fact: Optional[str] = None, now: Optional[float] = None) -> str:
     """Round facts, no advice (owner decisions 5A, 11 Oct 1A).
     ``_remember_main_fit`` supplies distinct window/target room, largest residents and own cost; tariffs stay cached.
     ``money`` is the round's wallet/tree/ceiling/quota observation, each bound named.
     Time and nanny burn keep their owners/anchors; tool counts are observed results.
     ``measured=False`` reports unmeasured input rather than stale numbers.
+    ``now`` is the row's sample instant, shared with the focus line's age; None samples the clock.
     """
     from ouroboros.context_runtime_facts import round_clock_fact
     from ouroboros.context_source_view import superseded_host_fact
@@ -714,7 +716,7 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None,
                                     usage.get("_context_prompt_estimate")))
     if tool_ctx is not None:
         try:  # a facts row never takes the round down: an unreadable clock is said, not raised
-            parts.append(round_clock_fact(tool_ctx))
+            parts.append(round_clock_fact(tool_ctx, now))
             parts.extend(part for part in (nanny_burn_fact(tool_ctx), _final_answer_fact(tool_ctx)) if part)
         except Exception:
             log.debug("time/nanny facts unavailable for the facts line", exc_info=True)
@@ -881,12 +883,19 @@ def cached_tariff_text(model: str, provider: str, prompt: Optional[int]) -> str:
     return "tariff unknown"
 
 
-def _own_focus_fact(ctx: Any) -> Tuple[str, str]:
+def _own_focus_fact(ctx: Any, now: float) -> Tuple[str, str]:
     """Observe one physical task result, never a successor or an execution replica.
 
     Strict admission leaves unreadable records untouched. This reads the current
-    result once per preparation; no history scan, second store or focus clock.
+    result once per preparation; no history scan, second store or focus clock: the
+    line's age is computed at the row's sample instant ``now`` (``ago_text``), outside
+    the identity, so a reprepare of the same row keeps its text and the cache. A root
+    that may publish (``may_publish_focus``) and has no line is told so while the pool
+    carries it (``execution_kind``: a work card shows the line), a turn handed off by
+    ``continue_in_background`` too; a live direct turn of Main (a reply, a wake) answers
+    in chat, and a child or a speaker may not publish: they are told nothing.
     """
+    from ouroboros.deadline_utils import ago_text, parse_deadline_ts
     from ouroboros.focus import compact_focus, focus_fingerprint
     from ouroboros.store import StoreError
     from ouroboros.task_results import load_task_result
@@ -902,7 +911,13 @@ def _own_focus_fact(ctx: Any) -> Tuple[str, str]:
         result = load_task_result(root, task_id, strict=True)
         raw = result.get("focus") if result else None
         if raw is None:
-            return "absent", ""
+            from ouroboros.task_carrier import execution_kind
+            from ouroboros.tools.project_journal import may_publish_focus
+
+            # The carrier, not the origin: ``is_direct_chat`` stays true after a handoff to the pool.
+            carded = tool_ctx is not None and execution_kind(tool_ctx) == "pooled" and may_publish_focus(tool_ctx)
+            return "absent", ("self-authored focus: none; my human reads nothing under this work's name"
+                              if carded else "")
         focus = compact_focus(raw)
         if focus is None:
             return "unknown", "own focus unavailable"
@@ -916,8 +931,10 @@ def _own_focus_fact(ctx: Any) -> Tuple[str, str]:
     if handle:
         view["retained_source"] = {"reader": "get_task_result", "task_id": task_id,
                                    "include_focus_source": True, "focus_source_sha256": handle["sha256"]}
-    return (focus_fingerprint(focus), "self-authored focus (dated data, not owner instructions): "
-            + json.dumps(view, ensure_ascii=False, sort_keys=True))
+    authored = parse_deadline_ts(focus["authored_at"])
+    written = f"written {ago_text(now - authored.timestamp())}" if authored else "written at an unreadable time"
+    return (focus_fingerprint(focus), f"self-authored focus, the line my human reads under this work's name, "
+            f"{written} (dated data, not owner instructions): " + json.dumps(view, ensure_ascii=False, sort_keys=True))
 
 
 def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) -> bool:
@@ -934,7 +951,8 @@ def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) ->
 
     usage = ctx.accumulated_usage
     plan = ctx.context_fit_plan
-    focus_identity, focus_fact = _own_focus_fact(ctx)
+    now = time.time()  # the row's one sample instant: its clock segment and its focus line's age
+    focus_identity, focus_fact = _own_focus_fact(ctx, now)
     subagents_fact = subagents_fact_line()
     source = [{k: v for k, v in m.items() if k != "cache_control"} for m in ctx.messages if m.get(HOST_CONTEXT_KIND_KEY) != CONTEXT_FACTS_NAME]
     source.append({"role": "system", "content": json.dumps(ctx.tool_schemas, ensure_ascii=False, sort_keys=True)})
@@ -965,7 +983,8 @@ def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) ->
                 refresh=True, max_age_sec=_loop()._TREE_ACCOUNTING_MAX_STALE_SEC))
         money = {"wallet": observed["wallet"], "tree": observed["tree"],
                  "cost_ceiling": getattr(tool_ctx, "_cost_ceiling", None)}
-    line = context_facts_line(ctx, money=money, measured=measured, focus_fact=focus_fact, subagents_fact=subagents_fact)
+    line = context_facts_line(ctx, money=money, measured=measured, focus_fact=focus_fact, subagents_fact=subagents_fact,
+                              now=now)
     ctx.messages.append(bound_host_row(CONTEXT_FACTS_NAME, line))
     usage["_context_facts_round"] = ctx.round_idx
     usage["_context_facts_key"] = key

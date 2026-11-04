@@ -301,7 +301,7 @@ def test_a_pending_late_answer_start_is_readable_by_its_place_and_its_record_out
                                                "answer_snapshot": {"task_id": "source", "quiz": block}}})
 
     started = _start_task(owner, "Investigate the source", title="Source research")
-    assert started.startswith("Accepted, waiting to start:"), started
+    assert started.startswith("Not confirmed yet:"), started
     [event] = emitted
     assert event["presence_binding_relation"] == {"binding_id": BINDING} and "task_contract" not in event
     stub = load_task_result(tmp_path, event["task_id"])

@@ -461,10 +461,12 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
         entry["roots"].add(root_id)
         entry["name"] = entry["name"] or name
     works: List[Dict[str, Any]] = []
+    # The census rows' own names: what a sleep waits for is said by them, never by an id or a new read.
+    names = {task_id: _first_name(facts) for task_id, facts in raw.items()}
     for work_id, entry in groups.items():
         members, live_roots, owners_by_root, starts = [], [], {}, set()
         for row, facts, root_id in entry["rows"]:
-            member = ws.classify_member(row, _member_raw(row, facts, obs, root_id))
+            member = ws.classify_member(row, _member_raw(row, facts, obs, root_id), names)
             members.append(member)
             owners_by_root.setdefault(root_id, []).append(member)
             if _episode_row(row, facts, root_id):

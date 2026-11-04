@@ -418,8 +418,8 @@ def _start_task(
         return _finish_swarm_handoff(
             ctx, evt, response, status="rejected", reason=shown_reason or "admission_rejected",
         )
+    root = Path(str(getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
     try:
-        root = Path(str(getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
         append_jsonl(
             root / "logs" / "supervisor.jsonl",
             {
@@ -433,9 +433,17 @@ def _start_task(
         )
     except Exception:
         log.debug("Failed to record unconfirmed promote", exc_info=True)
+    # A live wait that timed out says what it measured and the body as recorded, each with its own clock;
+    # a deferred emission was never waited for (its admission comes after this turn).
+    waited, observed = confirmation.get("waited_sec"), ""
+    if mode == "live" and isinstance(waited, (int, float)):
+        from ouroboros.context_runtime_facts import admission_observation
+
+        observed = (f" No confirmation came in {float(waited):.1f} s of waiting. "
+                    + admission_observation(root, observed_at=utc_now_iso()))
     response = (
-        f"Accepted, waiting to start: separate task {tid}. Its complete intent is durable; "
-        f"admission to {_requested_scope_label(display_name, pid)} is pending ({mode}). "
+        f"Not confirmed yet: separate task {tid} is waiting to start. Its complete intent is durable; "
+        f"admission to {_requested_scope_label(display_name, pid)} is pending ({mode}).{observed} "
         "A [ROUTING_RECEIPTS] row reports its recorded outcome. "
         f"Use get_task_result({tid}) to reconcile it before an explicit retry."
     )

@@ -569,7 +569,7 @@ def _pr_merge(ctx: ToolContext, number: int, expected_head_sha: str, method: str
     after = ("GitHub shows the PR merged by another request." if status == "merged" else
              "A new pr_merge call for the PR's current head may send one." if status == "refused" else
              "Until GitHub shows the PR open without a queue, repeat calls only read it back.")
-    lines = [card_row_text(receipt), f"receipt_id={receipt['receipt_id']} (task result: merge_receipts)"]
+    lines = [card_row_text(receipt, codes=True), f"receipt_id={receipt['receipt_id']} (task result: merge_receipts)"]
     prior = receipt.get("prior_status", "unknown") if receipt.get("readback_only") else None
     if prior == "merged":
         lines.append("This PR's merge is already recorded in this receipt, so this call only read GitHub back "

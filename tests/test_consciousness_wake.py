@@ -732,7 +732,8 @@ def test_projection_names_every_honest_status(describe):
     first = describe({**BASE, "last_wake_outcome": "skipped:waiting_for_first_conversation"})
     assert first["status"] == "waiting_for_first_conversation"
     exhausted = describe({**BASE, "last_wake_outcome": "skipped:allowance_exhausted", "spent_24h_usd": 21.5,
-                          "allowance_resets_at": "2027-01-15T18:00:00+00:00"})
+                          "allowance_resets_at": "2027-01-15T18:00:00+00:00",
+                          "next_wake_at": "2027-01-15T18:00:00+00:00"})  # a real skip waits no sooner than its reset
     assert exhausted["status"] == "allowance_exhausted"
     assert "$21.50 of $20.00" in exhausted["detail"] and server._clock_of("2027-01-15T18:00:00+00:00") in exhausted["detail"]
     assert "at least" not in exhausted["detail"] and "degraded" not in exhausted["detail"]

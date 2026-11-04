@@ -11,6 +11,7 @@ import { ANSWERABLE_QUIZ_STATES, QUIZ_LIFECYCLE, questionMark, questionPresentat
     appendQuestionReplyControls, paintChosenAnswer } from './question_presentation.js';
 import { fmt, tr, tx } from './i18n.js';
 import { syncQuestionMaterials } from './result_files.js';
+import { memberPaused } from './work_status.js';
 import { createSecretRequestForms } from './secret_hitl.js';
 import { createStatusMark, paintStatusMark } from './status_mark.js';
 
@@ -23,6 +24,16 @@ function paintQuestionHead(card, row = HEAD_ROWS.get(card)) {
     const inFlight = ['sending', 'unknown', 'checking'].includes(card.dataset.submission);
     return paintStatusMark(card.querySelector('.chat-quiz-mark'),
         inFlight ? { shape: 'dot', hue: 'neutral' } : questionMark(row || {}));
+}
+
+// The status beside the head: the lifecycle's words, saying so when the question's task is a paused member of its
+// work (`paused`, from the instance's work projection): its answer waits for that task's Resume.
+function paintStatusText(card, row, paused) {
+    const status = card.querySelector('.chat-quiz-status-text');
+    const next = questionPresentation(row, { paused }).status;
+    if (!status || status.textContent === next) return false;
+    status.textContent = next;
+    return true;
 }
 
 // What one observation of a question carries: its identity, lifecycle, recorded answer and wait facts.
@@ -78,6 +89,7 @@ export function createChatDecision({
     const detailReads = new Map();
     const questionKey = (taskId, quizId) => JSON.stringify([String(taskId || ''), String(quizId || '')]);
     let disposed = false;
+    let pausedMember = () => false;  // the instance's works (syncWorks): is this task a paused member of its work?
     let questionNavigation = 0;
     let connected = true, epoch = 0;  // the socket's state and how many closes voided reads (revalidateMirror)
     // The memory is bounded: the question touched least recently goes first. Once one has gone,
@@ -649,12 +661,7 @@ export function createChatDecision({
                 const ended = card.querySelector('.chat-quiz-wait-ended');
                 if (ended) { ended.remove(); changed = true; }
             }
-            const status = card.querySelector('.chat-quiz-status-text');
-            const nextStatus = questionPresentation(current).status;
-            if (status && status.textContent !== nextStatus) {
-                status.textContent = nextStatus;
-                changed = true;
-            }
+            if (paintStatusText(card, current, pausedMember(current.task_id))) changed = true;
             if (paintQuestionHead(card, current)) changed = true;
             // An accepted late answer whose delivery became unknown: Main's copy lets the owner
             // stop counting it as pending. Nothing is resent; the answer and its record stay.
@@ -1079,6 +1086,14 @@ export function createChatDecision({
 
     return { buildQuizCard, buildQuestionPointer, appendQuestionPointer, appendActivityQuestion, syncCurrentQuestions, observedQuestion, readQuestion, revealQuestion, setCardState, applyQuizStateFrame, renderRoutingDecision,
         releaseViews,
+        // The instance's reconciled work state (work_status.reconcileWorkState): a question whose task is paused, or
+        // resumed, says so at once; an answer still in flight keeps its own words until it settles.
+        syncWorks(state) {
+            pausedMember = (taskId) => memberPaused(state, taskId);
+            return onDomWrite(() => [...quizViews.values()].reduce((changed, card) => (HEAD_ROWS.has(card)
+                && !['sending', 'unknown', 'checking'].includes(card.dataset.submission)
+                && paintStatusText(card, HEAD_ROWS.get(card), pausedMember(card.dataset.taskId))) || changed, false));
+        },
         setConnected(value) {
             connected = value;
             if (value || !isMain) return;  // reconnection alone is no census
