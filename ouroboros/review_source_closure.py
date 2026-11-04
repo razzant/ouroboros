@@ -79,14 +79,16 @@ def source_carrier(value: dict, key: str, carrier: str) -> str:
         return 'call_request' if key == 'kwargs' else 'message'
     if carrier == 'plan_state':
         return {'waves': 'plan_wave', 'current_attempt': 'plan_attempt'}.get(key, '')
-    # The planning organ's record: exact revision texts and each participant's retained
-    # delivery/reply (``plan_record``), every one a task source the closure follows.
+    # The planning organ's record: exact revision texts, each participant's retained
+    # delivery/reply and the whole source of an attachment seen in part (``plan_record``),
+    # every one a task source the closure follows.
     if carrier == 'plan_record':
         return {'revisions': 'plan_revisions', 'asks': 'plan_asks'}.get(key, '')
     if carrier == 'plan_revisions':
         return 'metadata' if key == 'text_ref' else ''
     if carrier == 'plan_asks':
-        return {'participants': 'plan_participants', 'dialogue_ref': 'plan_source_entry'}.get(key, '')
+        return {'participants': 'plan_participants', 'dialogue_ref': 'plan_source_entry',
+                'attached': 'plan_source_entry'}.get(key, '')
     if carrier == 'plan_participants':
         return {'delivery_ref': 'plan_source_entry', 'reply_ref': 'plan_source_entry',
                 'prompt_ref': 'metadata', 'response_ref': 'metadata'}.get(key, '')

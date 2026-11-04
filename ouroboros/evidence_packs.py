@@ -841,23 +841,21 @@ def pending_restore_bytes(root: Any) -> int:
 
 
 
-def row_packable(status: Any, review_pending: Any) -> bool:
-    """The packing rule over a row's two indexed facts: the status is terminal, and no review of the
-    task may still read its loose files (``review_collection_pending`` 1 names an open review
-    operation, whose agent-session reader holds a retained handle's absolute path, or a row an older
-    body flagged for its acceptance collection until the maintenance pass writes it back
-    (``task_store.reclassify_review_collection``); NULL is a row no body with the selector ever wrote, so no such
-    reader exists, and the selector stays a derived fact, never a retention duty). No duty, money or
-    delivery fact is consulted (packing moves verified bytes, never content: a later write becomes
-    the next generation)."""
+def row_packable(status: Any, review_pending: Any, plan_pending: Any) -> bool:
+    """The indexed status is terminal and no review or council may still read loose sources.
+    ``review_collection_pending`` names open operations or older acceptance collection;
+    ``plan_collection_pending`` names pending council replies, even after the author finishes.
+    Their session readers hold retained handles' absolute paths. A NULL predates the selector,
+    not an active reader. Both are derived facts, never retention duties. Money and delivery
+    are unrelated: packing moves verified bytes; a later write becomes the next generation."""
     from ouroboros.task_status import SETTLED_STATUSES
 
-    return status is not None and str(status) in SETTLED_STATUSES and review_pending != 1
+    return status is not None and str(status) in SETTLED_STATUSES and review_pending != 1 and plan_pending != 1
 
 
 def task_packable(txn: store.Txn, task_id: str) -> bool:
     """``row_packable`` over the task's row (``False`` without one)."""
-    row = txn.row(str(task_id), "status", "review_collection_pending")
+    row = txn.row(str(task_id), "status", "review_collection_pending", "plan_collection_pending")
     return row is not None and row_packable(*row)
 
 

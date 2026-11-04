@@ -472,7 +472,9 @@ def test_the_few_current_rows_cost_the_same_over_any_history_once_analyzed(tmp_p
     for history in (10, 300):
         root = tmp_path / f"history-{history}"
         publish(root, *({"task_id": f"done-{n}", "status": "completed", "_schema_version": 1} for n in range(history)),
-                *({"task_id": f"live-{n}", "status": "running", "_schema_version": 1} for n in range(3)))
+                *({"task_id": f"live-{n}", "status": "running", "_schema_version": 1} for n in range(3)),
+                {"task_id": "planning", "status": "completed", "_schema_version": 1,
+                 "plan_record": {"schema_version": 3, "asks": [{"participants": [{"status": "pending"}]}]}})
         custody.emit(root, custody.STARTED, {"run_id": "run-template", "task_id": "done-0"})
         custody.emit(root, custody.SETTLED, {"run_id": "run-template", "task_id": "done-0", "state": "succeeded"})
         obligations.remove(root, "delegated_runs", "done-0")  # its closing receipt acknowledged, as the scale root does
@@ -493,7 +495,7 @@ def test_the_few_current_rows_cost_the_same_over_any_history_once_analyzed(tmp_p
         assert sorted(held) == [f"run-live-{n}" for n in range(3)], sorted(held)
         assert {f"live-{n}" for n in range(3)} <= set(live) and not set(live) & {"done-0", "done-1"}, sorted(live)
         assert sorted(health) == ["run-closed-1", *sorted(held)], sorted(health)
-        assert sorted(keep) == [f"live-{n}" for n in range(3)], sorted(keep)
+        assert sorted(keep) == [*[f"live-{n}" for n in range(3)], "planning"], sorted(keep)
         tags = ("held", "live", "health", "keep")
         steps[history] = {tag: meter.snapshot(tag)["counts"].get("vm_steps", 0) for tag in tags}
     assert all(steps[300][tag] - steps[10][tag] <= VM_STEP for tag in tags), steps
