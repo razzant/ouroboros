@@ -22,7 +22,7 @@ pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 
 def assert_coverage_placed(line, receipt):
     """The card says the receipt's own coverage reading: its short label (none when the review passed exactly what
-    merged) ends the row's head, its sentence is the row's detail line, and no code reaches either; the codes stay
+    merged) ends the row's head, its sentence is the row's second line, and no code reaches either; the codes stay
     in the receipt, the PR body and the agent's result (DESIGN principle 7)."""
     from ouroboros.merge_receipts import coverage_reading
 

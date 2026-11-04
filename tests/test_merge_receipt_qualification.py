@@ -655,7 +655,7 @@ def test_a_record_written_by_the_review_ledger_covers_the_head_through_the_real_
     assert receipt["review"]["record"]["subject"]["kind"] == "base..head" and receipt["review"]["declared_only"] is False
     assert out.startswith("✅ PR #7 merge: merged") and "review source: record, verdict PASS" in out
     # The card says it in words; the codes stay in the agent's result above. A review that passed exactly what
-    # merged adds no label to the head: the row's detail says so.
+    # merged adds no label to the head: the row's second line says so.
     head, detail = card_lines(receipt)
     assert head.startswith("✅ PR #7 merge: merged") and " · " not in head
     assert (merge_receipts.coverage_reading(receipt)) == ("", detail) and detail not in head
@@ -672,18 +672,21 @@ def test_an_uncommitted_record_at_the_same_head_is_a_named_gap_and_still_merges(
     assert out.startswith("⚠️ PR #7 merge: merged") and "subject_kind_not_committed" in out
     assert f"`{kind}` subject" in world.gh.pr["body"] and "gaps: subject_kind_not_committed" in world.gh.pr["body"]
     assert gap_only_in_detail(receipt, "subject_kind_not_committed") == merge_receipts._UNKNOWN
+    # The second line names the gap, what the review read; the head's label already says the coverage is unknown.
+    detail = card_lines(receipt)[1]
+    assert "uncommitted" in detail and "not recorded" not in detail, detail
 
 
 def card_lines(receipt):
     """The merge row as its card shows it (web/modules/chat_activity.js ``cardRowSummary``): the first line heads
-    the row, the rest is the row's detail."""
+    the row, the rest is its second line, inside the card's Details."""
     head, _, detail = merge_receipts.card_row_text(receipt).partition("\n")
     return head, detail
 
 
 def gap_only_in_detail(receipt, *codes):
     """Coverage the review did not prove reads as one short label at the end of the head, its sentence as the
-    row's detail and its codes in the receipt alone (DESIGN principle 7); returns the label."""
+    row's second line and its codes in the receipt alone (DESIGN principle 7); returns the label."""
     head, detail = card_lines(receipt)
     label, sentence = merge_receipts.coverage_reading(receipt)
     assert label and head.startswith("⚠️ PR #7 merge: ") and head.endswith(f" · {label}"), head
@@ -707,8 +710,8 @@ def test_covers_head_needs_the_record_head_base_and_tree(world, monkeypatch, fac
     assert receipt["outcome"]["status"] == "merged"
     assert (receipt["coverage"]["status"], receipt["coverage"]["gaps"]) == (status, gaps)
     assert out.startswith("⚠️ PR #7 merge: merged") and f"review coverage {status}" in out
-    # The owner's card heads with a short label and no code, its sentence is the row's detail; the receipt, the body
-    # and the result keep the codes. Other code than what merged reads as an earlier version, never as unknown.
+    # The owner's card heads with a short label and no code, its sentence is the row's second line; the receipt, the
+    # body and the result keep the codes. Other code than what merged reads as an earlier version, never as unknown.
     label = gap_only_in_detail(receipt, *[code for code in (status, *gaps) if "_" in code])
     assert label == (merge_receipts._EARLIER if earlier else merge_receipts._UNKNOWN)
 

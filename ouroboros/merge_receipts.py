@@ -442,9 +442,10 @@ def upsert_body(body: str, block: str) -> str:
 
 
 # The card's head says a short coverage label unless the review passed exactly what merged; its sentence is the
-# row's detail (DESIGN principle 7, owner 04.11 1A). A label names a known state: no review declared, only the
-# latest changes reviewed, other code than the reviewed tree as earlier code (DESIGN "Reviews inside task cards",
-# owner 29.10 A); every other gap leaves the coverage unknown.
+# row's second line, inside the card's Details (DESIGN principle 7, owner 04.11 1A). A label names a known state:
+# no review declared, only the latest changes reviewed, other code than the reviewed tree as earlier code (DESIGN
+# "Reviews inside task cards", owner 29.10 A); every other gap leaves the coverage unknown, which a gap's sentence
+# need not say again: it names the gap.
 _EARLIER, _UNKNOWN = "earlier version reviewed", "review coverage unknown"
 _REJECTED, _NO_VERDICT = "review rejected it", "no review verdict"
 _UNDECLARED, _LATEST_ONLY = "no review declared", "only latest changes reviewed"
@@ -454,8 +455,7 @@ _UNDECLARED, _LATEST_ONLY = "no review declared", "only latest changes reviewed"
 _GAP_WORDS = (
     ({"merged_tree_differs_from_reviewed_head", "merged_head_differs"},
      _EARLIER, "This review was for earlier code; it does not cover {what}."),
-    ({"subject_kind_not_committed"}, _UNKNOWN,
-     "The review read uncommitted files; whether it saw {what} is not recorded."),
+    ({"subject_kind_not_committed"}, _UNKNOWN, "The review read uncommitted files."),
     ({"reviewed_head_not_recorded", "reviewed_head_not_declared"}, _UNKNOWN,
      "The review did not record which version it read."),
     ({"no_host_observed_review_record"}, _UNKNOWN, "A review was declared; Ouroboros holds no record of it."),
@@ -465,8 +465,8 @@ _GAP_WORDS = (
 
 def coverage_reading(receipt: Dict[str, Any]) -> Tuple[str, str]:
     """The receipt's review coverage for the owner: the card head's short label (``""`` when the review passed
-    exactly what it covers) and one sentence for the row's detail. The codes stay in the receipt, the PR body and
-    the merging agent's tool result. ``{what}`` is what merged, else the head this request named."""
+    exactly what it covers) and one sentence for the row's second line. The codes stay in the receipt, the PR body
+    and the merging agent's tool result. ``{what}`` is what merged, else the head this request named."""
     outcome, coverage = receipt.get("outcome") or {}, receipt.get("coverage") or {}
     record = (receipt.get("review") or {}).get("record") or {}
     what = "what merged" if outcome.get("status") == "merged" else "this head"
@@ -509,7 +509,7 @@ def coverage_codes(receipt: Dict[str, Any]) -> str:
 
 def card_row_text(receipt: Dict[str, Any], *, codes: bool = False) -> str:
     """The merge's card row: its outcome and coverage label on the first line, the coverage sentence on the next,
-    which the card shows as the row's detail (``codes``: the agent's own result, one line with the typed codes)."""
+    which the card shows below the head (``codes``: the agent's own result, one line with the typed codes)."""
     outcome, coverage = receipt.get("outcome") or {}, receipt.get("coverage") or {}
     record = (receipt.get("review") or {}).get("record") or {}
     # Green needs observed approval: a settled PASS record covering the merged head.
