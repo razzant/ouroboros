@@ -168,6 +168,67 @@ def test_at_the_limit_the_queue_pauses_only_work_that_needs_paid_admission(
         assert sent == [] and workers.PENDING[0]["_budget_pause"]["status"] == "paused_before_dispatch"
 
 
+def _scheduled_child(kind, target, parent_route, tid="child", root="root"):
+    """A configured child exactly as the scheduler queues it (``build_scheduled_task_payload``): its frozen row and
+    the parent's frozen cognition, no resolved model (dispatch resolves it later)."""
+    import json
+    from ouroboros.subagent_runtime import select_subagent_snapshot
+    from ouroboros.supervisor_route import validate_cognitive_route
+    from supervisor.task_dispatch import build_scheduled_task_payload
+
+    row = {"subagent_id": "builder", "name": "Builder", "recommended_use": "Exact actor.", "effort": "high",
+           "route": {"kind": kind, "target_id": target, **({"credential_profile_id": "p"} if kind == "agent_session"
+                                                           else {})}}
+    snapshot = select_subagent_snapshot({"OUROBOROS_SUBAGENTS": json.dumps({"enabled": True, "items": [row]})},
+                                        subagent_id="builder")[0]
+    model, chosen_by = parent_route
+    cognition = validate_cognitive_route({
+        "schema": 2, "model": model, "effort": "high", "use_local_model": False, "source_role": "main",
+        "credential_profile_id": "", "processing_preference": "", "chosen_by": chosen_by,
+        "follows_role": "main" if chosen_by == "inherited" else ""})
+    return build_scheduled_task_payload({"tid": tid, "parent_id": root, "root_task_id": root, "depth": 1,
+                                         "delegation_role": "subagent", "configured_subagent": snapshot,
+                                         "parent_cognitive_route": cognition})
+
+
+@pytest.mark.parametrize("main, kind, target, parent_route, paid", [
+    ("openai/gpt-5.2", "api_model", SUBSCRIPTION, ("openai/gpt-5.2", "inherited"), False),
+    ("openai/gpt-5.2", "api_model", "small-model (local)", ("openai/gpt-5.2", "inherited"), False),
+    (SUBSCRIPTION, "api_model", "openai/gpt-5.2", (SUBSCRIPTION, "inherited"), True),
+    # A nanny supervises its run on the parent's cognition: a parent that chose its own route hands that route down.
+    ("openai/gpt-5.2", "agent_session", "codex=gpt-6-astra", (SUBSCRIPTION, "parent_switch"), False),
+    (SUBSCRIPTION, "agent_session", "codex=gpt-6-astra", ("openai/gpt-5.2", "parent_switch"), True),
+    # ... a parent following Main hands Main down, live.
+    ("openai/gpt-5.2", "agent_session", "codex=gpt-6-astra", ("openai/gpt-5.2", "inherited"), True),
+])
+def test_a_queued_childs_paid_admission_is_its_own_routes_not_mains(monkeypatch, main, kind, target, parent_route,
+                                                                    paid):
+    """The pre-worker gate reads the route the child's dispatch will resolve from its frozen row, so a free child of
+    a paid Main runs at the reached limit and a paid child of a free Main is held before dispatch."""
+    from ouroboros.provider_models import provider_for_model
+    from ouroboros.subagent_runtime import resolve_configured_actor_dispatch
+    from supervisor.worker_assignment import needs_paid_admission
+
+    monkeypatch.setenv("OUROBOROS_MODEL", main)
+    monkeypatch.setenv("USE_LOCAL_MAIN", "")
+    child = _scheduled_child(kind, target, parent_route)
+    assert "model" not in child["metadata"] and "model" not in child  # the queue holds intent only
+    assert needs_paid_admission(child) is paid
+    if kind == "api_model":  # the same route the worker's own dispatch resolves
+        lane = resolve_configured_actor_dispatch(child, task_type="task").lane
+        assert ua.paid_admission("local" if lane.use_local_model else provider_for_model(lane.model), None) is paid
+
+
+def test_at_the_limit_the_queue_runs_a_free_child_of_a_paid_main(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai/gpt-5.2")
+    monkeypatch.setenv("USE_LOCAL_MAIN", "")
+    _queue, _state, workers, sent = _install_queue(tmp_path, monkeypatch)
+    free = _scheduled_child("api_model", SUBSCRIPTION, ("openai/gpt-5.2", "inherited"))
+    workers.PENDING.append({**free, "admitted_dispatch": "none", "priority": 1})
+    workers.assign_tasks()
+    assert [task["id"] for task in sent] == ["child"] and workers.PENDING == []
+
+
 def _prior_dispatch(tmp_path, task_id):
     held = ua.reserve_attempt(ua.AttemptRequest(model="openai/gpt-5.2", provider="openai", reservation_usd=0.1,
                                                 drive_root=tmp_path, task_id=task_id, root_task_id=task_id,
@@ -212,3 +273,4 @@ def test_a_dispatched_row_with_nothing_saved_keeps_the_honest_terminal(tmp_path,
     stored = load_task_result(tmp_path, "retry")
     assert sent == [] and workers.PENDING == []
     assert stored["status"] == "failed" and "after prior dispatch" in stored["result"]
+
