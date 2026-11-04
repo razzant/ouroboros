@@ -425,19 +425,21 @@ def spawn_turn_namer(
         log.debug("turn namer thread spawn failed for %s", task_id, exc_info=True)
 
 
-def summary_names_run(metadata: Any) -> bool:
+def summary_names_run(metadata: Any, task_contract: Any = None) -> bool:
     """An accepted closing sentence names a wake or an unbound schedule run.
 
     Completion admission already excludes children; an ordinary root's sentence is only its closing line.
     """
     from ouroboros.consciousness_authority import is_focus_wake, is_own_clock_wake
-    from ouroboros.dialogue_provenance import presence_metadata_binding
+    from ouroboros.dialogue_provenance import presence_caller_binding
+    from types import SimpleNamespace
 
     meta = metadata if isinstance(metadata, dict) else {}
     occurrence = meta.get("schedule_occurrence")
+    binding = presence_caller_binding(SimpleNamespace(task_metadata=meta, task_contract=task_contract))
     return (is_own_clock_wake(meta) or is_focus_wake(meta)
             or (isinstance(occurrence, dict) and bool(str(occurrence.get("schedule_id") or "").strip())
-                and bool(str(occurrence.get("token") or "").strip()) and presence_metadata_binding(meta) is None))
+                and bool(str(occurrence.get("token") or "").strip()) and binding is None))
 
 
 def admission_names(body: Dict[str, Any], description: str) -> tuple:

@@ -27,13 +27,19 @@ def test_an_unnamed_ordinary_root_is_not_renamed_by_its_sentence():
 
 
 @pytest.mark.parametrize("title", ["", "Fix the export"])
-@pytest.mark.parametrize("metadata", [{}, quiet.SCHEDULE, {**quiet.SCHEDULE, "presence": {"binding_id": "b1"}}],
-                         ids=["owner", "schedule", "bound-schedule"])
-def test_root_sentence_names_only_an_unnamed_self_started_run(wake, title, metadata):
+@pytest.mark.parametrize("metadata,contract", [({}, {}), (quiet.SCHEDULE, {}),
+    ({**quiet.SCHEDULE, "presence": {"binding_id": "b1"}}, {}), (quiet.SCHEDULE, {"capability_ceiling": {}})],
+                         ids=["owner", "schedule", "bound-schedule", "presence-ceiling"])
+def test_root_sentence_names_only_an_unnamed_self_started_run(wake, title, metadata, contract):
     answer, summary = "Full answer.\n\nThe test results.", "Экспорт исправлен."
     wake.ctx.is_direct_chat = False
+    if contract:
+        from ouroboros.presence_authority import presence_ceiling_payload
+        from tests.test_presence_runner import _admission
+        contract = {"capability_ceiling": presence_ceiling_payload(_admission().capability_ceiling)}
+    wake.ctx.task_contract = contract
     text, usage, trace, bus = wake.run([quiet.finish(answer, summary=summary)], metadata=metadata)
-    task = {"id": quiet.TASK_ID, "type": "task", "chat_id": 1, "text": "Fix the export", "metadata": metadata, "title": title}
+    task = {"id": quiet.TASK_ID, "type": "task", "chat_id": 1, "text": "Fix the export", "metadata": metadata, "title": title, "task_contract": contract}
     _, stored = quiet.emit(wake, text, usage, trace, bus=bus, task=task)
     assert stored["wake_summary"] == summary and stored["result"] == answer
-    assert (stored.get("suggested_name") == summary) == (metadata == quiet.SCHEDULE and not title)
+    assert (stored.get("suggested_name") == summary) == (metadata == quiet.SCHEDULE and not contract and not title)

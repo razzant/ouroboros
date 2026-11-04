@@ -225,11 +225,13 @@ test('an ordinary root says its closing sentence once; a held cause keeps the se
     }
 });
 
-test('a later terminal detail without a sentence clears the previous attempt on the same card', async () => {
+for (const [type, status] of [['task_started', 'running'], ['task_done', 'completed']]) test(`a new attempt clears its previous sentence (${type})`, async () => {
     await replay({ messages: [checkpoint('retry'), terminal('retry', { suggested_name: 'Owner work', wake_summary: SENTENCE,
         task_attempt: 1 })], window: { complete: true } }, (feed, handlers) => {
         assert.equal(view(feed, 'retry').line, SENTENCE);
-        handlers.get('log')({ chat_id: 1, data: { type: 'task_done', task_id: 'retry', status: 'completed',
+        handlers.get('log')({ chat_id: 1, data: { type: 'task_metrics_event', task_id: 'retry', rounds: 2 } });
+        assert.equal(view(feed, 'retry').line, SENTENCE, 'a partial same-attempt update does not erase the sentence');
+        handlers.get('log')({ chat_id: 1, data: { type, task_id: 'retry', status,
             task_attempt: 2, ts: '2026-10-28T07:00:00+00:00' } });
         assert.notEqual(view(feed, 'retry').line, SENTENCE);
         assert.ok(!view(feed, 'retry').facts.includes(SENTENCE));
