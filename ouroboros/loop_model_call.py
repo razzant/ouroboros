@@ -1260,8 +1260,9 @@ def _project_wake_input(ctx: _RoundModelCallContext, *, overflowed: bool = False
     if index is None or any(isinstance(message, dict) and message.get("role") == "assistant"
                             for message in ctx.messages[index + 1:]):
         return False  # a response already followed the wake input: consumed history, never rewritten
-    if not hasattr(tool_ctx, "_wake_input_full_message"):
-        tool_ctx._wake_input_full_message = copy.deepcopy(ctx.messages[index])
+    if not hasattr(tool_ctx, "_wake_input_full_message"):  # a projected start's whole input is its plan's
+        from ouroboros.context_input_selection import whole_wake_input
+        tool_ctx._wake_input_full_message = whole_wake_input(ctx.messages[index], ctx.context_fit_plan, wake)
     full = tool_ctx._wake_input_full_message
     delivery = {"role": "user", "content": str(wake["projection_text"])}
     if len(json.dumps(delivery, ensure_ascii=False)) >= len(json.dumps(full, ensure_ascii=False)):
@@ -1287,7 +1288,6 @@ def _project_wake_input(ctx: _RoundModelCallContext, *, overflowed: bool = False
                          and measurement.estimated_input_tokens + measurement.response_reserve_tokens + clock
                          > measurement.capacity_total_tokens)
     from ouroboros.context_fit import extract_plain_text_from_content
-
     desired = delivery if projected else full
     # Cross-family fallbacks copy the transcript, then restore it on failure.
     # Projection belongs to THESE bytes, never a flag on the shared tool context.

@@ -59,7 +59,7 @@ from ouroboros.config import (
 )
 from ouroboros.consciousness_allowance import STATUS_EXHAUSTED, STATUS_UNKNOWN, allowance_window
 from ouroboros.consciousness_authority import is_consciousness_origin, is_own_clock_wake
-from ouroboros.consciousness_wake import WAKE_OBSERVATION_KEY, wake_task_metadata
+from ouroboros.consciousness_wake import WAKE_OBSERVATION_KEY, wake_continuity, wake_continuity_after, wake_task_metadata
 from ouroboros.deadline_utils import parse_deadline_ts
 from ouroboros.utils import append_jsonl, utc_now_iso
 
@@ -72,6 +72,7 @@ APPOINTMENT_STATE_KEY = "consciousness_appointment_at"  # the scheduled time; sk
 OWN_WAKE_STATE_KEY = "consciousness_own_wake"  # the admitted clock actor, retained across carrier changes/restart
 OBSERVATION_STATE_KEY = "consciousness_observation_boundary"  # chat position + transition state the last ACCEPTED wake observed
 OBSERVATION_BOOTSTRAP_STATE_KEY = "consciousness_observation_bootstrap_since"
+CONTINUITY_STATE_KEY = "consciousness_wake_continuity"  # notes the next wake carries when its predecessor's row cannot say
 LEGACY_INBOX_REL = pathlib.Path("state") / "consciousness_observations.jsonl"
 ARCHIVED_INBOX_REL = pathlib.Path("archive") / "consciousness_observations.jsonl"
 HEARTBEAT = "heartbeat"
@@ -140,6 +141,7 @@ class BackgroundConsciousness:
         admitted = state.get(OWN_WAKE_STATE_KEY)
         self._own_wake = dict(admitted) if isinstance(admitted, dict) else {}
         self._last_wake_task_id = str(self._own_wake.get("task_id") or "")
+        self._continuity = wake_continuity(state.get(CONTINUITY_STATE_KEY))
         try:
             bootstrap = float(state.get(OBSERVATION_BOOTSTRAP_STATE_KEY, persisted_last_wake or self._booted_at))
             if not math.isfinite(bootstrap) or not 0 <= bootstrap <= self._booted_at:
@@ -279,14 +281,28 @@ class BackgroundConsciousness:
             row = load_task_result(self._drive_root, task_id, strict=True) or {}
         except Exception:
             log.debug("Own wake %s is unreadable; its terminal stays unknown", task_id, exc_info=True)
+            self._note_continuity(task_id, None)
             return False
         ok = pooled_terminal_ok(row)
         if ok is None or row.get("status") == "cancelled":
+            self._note_continuity(task_id, row)  # the next start replaces it
             return False
         if task_settlement_liveness(task_id) is not False:
             return True
         self._wake_finished(task_id, ok, pooled=True)
         return False
+
+    def _note_continuity(self, task_id: str, row: Any) -> None:
+        """The notes past an own wake the next start replaces, from the row this clock already read (``None``:
+        unreadable); a wake that settles writes them with its settlement (``_settle_wake``)."""
+        from supervisor import state
+
+        self._continuity = wake_continuity_after(row, task_id, self._continuity)
+        carried = dict(self._continuity)
+        try:
+            state.update_state(lambda st: st.__setitem__(CONTINUITY_STATE_KEY, carried))
+        except Exception:  # the next wake's carrier still reads that row's own facts (``previous_wake_text``)
+            log.debug("consciousness: notes past %s not persisted", task_id, exc_info=True)
 
     def _skip(self, reason: str, next_at: float, *, now: float, error: str = "") -> str:
         self._last_wake_outcome, self._last_error = f"skipped:{reason}", error
@@ -325,10 +341,12 @@ class BackgroundConsciousness:
         # Only the facts that live in this process travel with the admission.
         from supervisor.queue import live_consciousness_roots
 
+        persisted = self._read_state()
         preparation = {
-            "boundary": self._read_state().get(OBSERVATION_STATE_KEY), "since": self._observation_bootstrap_since,
+            "boundary": persisted.get(OBSERVATION_STATE_KEY), "since": self._observation_bootstrap_since,
             "now": now, "reason": reason, "level": level, "repo_dir": str(self._repo_dir),
             "last_wake_at": self._last_wake_at, "last_wake_task_id": self._last_wake_task_id,
+            "continuity": dict(self._continuity),
             "disabled_tools": list(metadata.get("disabled_tools") or []),
             "window": {key: window.get(key) for key in ("settled_usd", "unknown_unmetered", "limit_usd", "spend_by_cause")},
             "counted_roots": live_consciousness_roots(), "max_tasks": get_consciousness_max_tasks(),
@@ -449,6 +467,8 @@ class BackgroundConsciousness:
             now = time.time()
             self._last_wake_at, self._last_wake_task_id = now, str(task_id)
             self._own_wake = {**self._own_wake, "finished": True}
+            # Like the predecessor id, retain this computation when the state write fails.
+            self._continuity = wake_continuity_after(row, task_id, self._continuity)
             if ok:
                 self._backoff, self._last_wake_outcome, self._last_error = 1, outcome, ""
             else:
@@ -456,11 +476,12 @@ class BackgroundConsciousness:
                 self._last_error = f"wake-up {task_id} failed in its runner (see the chat and events.jsonl)"
             self._next_wake_at = self._appointment_at = now + min(self.ceiling, self._interval() * self._backoff)
             from supervisor import state
-            try:
+            try:  # the notes past it (``None``: an unreadable row) persist with the settlement itself
                 state.update_state(lambda st: st.update({OWN_WAKE_STATE_KEY: self._own_wake,
                     LAST_WAKE_STATE_KEY: now, NEXT_WAKE_STATE_KEY: self._next_wake_at,
                     APPOINTMENT_STATE_KEY: self._appointment_at,
-                    OBSERVATION_BOOTSTRAP_STATE_KEY: self._observation_bootstrap_since}))
+                    OBSERVATION_BOOTSTRAP_STATE_KEY: self._observation_bootstrap_since,
+                    CONTINUITY_STATE_KEY: dict(self._continuity)}))
             except Exception:
                 log.debug("consciousness: wake completion not persisted", exc_info=True)
         if (row or {}).get("wake_summary"):
