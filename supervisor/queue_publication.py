@@ -28,9 +28,10 @@ publisher thread (``start_queue_writer``, ended with the loop by ``stop_queue_wr
 writes the tick's captures and certificate refreshes, so event dispatch never waits on the
 disk; it holds the newest capture only (a slow disk never queues a backlog), the tick answers
 False once for each failed write the writer completed (on the tick after it, whose capture is
-the complete rewrite, FU1's rule unchanged) and True while a retry is still on the disk, an
-older capture a barrier overtook is skipped, and a capture of an ended generation (``reset``)
-is never written.
+the complete rewrite, FU1's rule unchanged), True while a retry is still on the disk until
+``LOOP_CRASH_LIMIT`` writes failed in a row and False on every tick from then until one lands,
+an older capture a barrier overtook is skipped, and a capture of an ended generation
+(``reset``) is never written.
 A process with no live tick publisher (startup before the loop, shutdown after it, tests)
 publishes synchronously from every mark, so the boot and exit doors keep their semantics
 without a second protocol. A process-ending door (``pre_restart_exit``; the shutdown kill as
@@ -97,11 +98,17 @@ _REPORTED_TASK_FACTS = ("model_waits", "focus")
 # complete rewrite of every document under a new generation, whatever the bytes say against the last
 # cache, and ``write_failed`` clears only when that write lands; no certificate is written meanwhile.
 # Failed writes are counted (``failed_writes``) so the tick answers each one once (``failures_answered``:
-# the count it has answered), never a retry still on the disk.
+# the count it has answered), never a retry still on the disk; ``failed_streak`` is the run of failed writes
+# with no landed write between them, and once it reaches the loop's own limit every tick is a crash.
 _STATE: Dict[str, Any] = {"revision": 0, "published": 0, "reason": "", "kept": None, "census": None,
                           "capture_seq": 0, "published_seq": 0, "write_failed": False,
-                          "failed_writes": 0, "failures_answered": 0,
+                          "failed_writes": 0, "failures_answered": 0, "failed_streak": 0,
                           "alive_heartbeats": None, "alive_written_at": 0.0}
+#: Consecutive failed writes after which the tick answers False on every tick until a write lands: the supervisor
+#: loop's own ending rule (``server._run_supervisor`` dies after three consecutive crashes), so a disk that fails
+#: every write slowly ends the loop as one that fails fast does, instead of resetting the loop's count on each tick
+#: a retry spends on the disk.
+LOOP_CRASH_LIMIT = 3
 _PUBLISHER: Optional[threading.Thread] = None
 _PUBLISH_LOCK = threading.Lock()
 
@@ -194,7 +201,8 @@ def reset() -> None:
     """A new queue generation (``queue.init``): nothing marked, nothing published, no tick publisher, no writer."""
     global _PUBLISHER, _WRITER
     _STATE.update(revision=0, published=0, reason="", kept=None, census=None, capture_seq=0, published_seq=0,
-                  write_failed=False, failed_writes=0, failures_answered=0, alive_heartbeats=None, alive_written_at=0.0)
+                  write_failed=False, failed_writes=0, failures_answered=0, failed_streak=0, alive_heartbeats=None,
+                  alive_written_at=0.0)
     _PUBLISHER = None
     ended, _WRITER = _WRITER, _TickWriter()  # rebound first: a capture of the ended generation is refused by identity
     ended.stop()
@@ -299,9 +307,12 @@ def publish_queue_changes() -> Optional[bool]:
     quiet tick. With the writer thread running (``start_queue_writer``) the capture is
     handed to it and the tick answers False once for each failed write the writer completed
     since the tick last asked (one tick later; that tick's capture, the bundle being unknown
-    until a complete rewrite lands, R2, is the retry), never again for a retry still on the
-    disk: one failed write is one crash, three consecutive failed writes end the loop.
-    True otherwise means the writer holds the newest capture.
+    until a complete rewrite lands, R2, is the retry), and not for a retry still on the disk
+    while fewer than ``LOOP_CRASH_LIMIT`` writes failed in a row: one failed write is one
+    crash, a slow retry that lands is none. Once that many failed in a row with nothing landed
+    between them, every tick answers False until a write lands, so a disk that fails every
+    write ends the loop whether its writes fail fast (three ticks) or slowly (the ticks the
+    next attempt spends on the disk). True otherwise means the writer holds the newest capture.
     """
     if not _queue().INITIALIZED:
         return None
@@ -332,7 +343,7 @@ def publish_queue_changes() -> Optional[bool]:
         return None  # kept, or nothing of this process certified yet
     failed, answered = _STATE["failed_writes"], _STATE["failures_answered"]
     _STATE["failures_answered"] = failed
-    return failed == answered
+    return failed == answered and _STATE["failed_streak"] < LOOP_CRASH_LIMIT
 
 
 def _frozen(value: Any) -> Any:
@@ -594,12 +605,14 @@ def _publish(capture: Dict[str, Any], *, writer: Optional[_TickWriter] = None) -
             _STATE["published_seq"] = max(_STATE["published_seq"], capture["seq"])
             _STATE["census"] = capture["census"]  # written, so the tick's next census compares against it
             _STATE["write_failed"] = False
+            _STATE["failed_streak"] = 0  # a landed write ends the run of failures
             return True
         except Exception:
             # The census stays the last WRITTEN one: the next tick captures and retries this change; and
             # the stale document on disk is not certified again until a publication lands (N9).
             _STATE["write_failed"] = True
             _STATE["failed_writes"] += 1  # one completed failed write: the tick answers it once
+            _STATE["failed_streak"] += 1  # ...and at the loop's limit, on every tick until a write lands
             log.warning("Failed to persist queue snapshot (reason=%s)", capture["reason"], exc_info=True)
             return False
 
