@@ -262,7 +262,7 @@ def _compose_subagent_text(
     parts.extend([
         "",
         "[HANDOFF CONTRACT]",
-        "Return a concise final answer with sections: summary, findings, evidence, blockers, recommended_parent_action.",
+        "Your final answer goes to your parent as the handoff [EXPECTED_OUTPUT] asks for, in its form.",
     ])
     # The `[CAPABILITY DELTA]` block used to be composed HERE, from a delta the
     # scheduling tool call had already resolved. It moved to dispatch in v6.87.28
