@@ -54,7 +54,7 @@ test('the chip says the next wake, Off or Evolving, beside one mark of the statu
 });
 
 test('amber only for the owner\'s move; a failure is the outcome\'s red dot, an unconfirmed state a ring', () => {
-    const spent = chipView(answer({ status: 'allowance_exhausted', allowance_resets_at: at(15, 5),
+    const spent = chipView(answer({ status: 'allowance_exhausted', allowance_resets_at: at(15, 5), next_wake_at: at(15, 5),
         detail: 'Daily allowance spent ($20.00 of $20.00 in the last 24 h); next check at 15:05.' }));
     assert.deepEqual([spent.word, shapeOf(spent)], ['15:05', 'dot/owner'], 'stopped by its spending limit: the time it frees');
     assert.match(spent.said, /next check at 15:05\. · waits for you$/);

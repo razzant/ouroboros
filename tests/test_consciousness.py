@@ -624,11 +624,18 @@ def test_a_changed_daily_limit_retries_a_money_skip_after_min(clock, monkeypatch
     assert clock.clock.tick(now + FLOOR) == "skipped:allowance_exhausted"
     assert clock.store[LAST_SKIP_STATE_KEY]["allowance"]["limit_usd"] == 19.0
     assert clock.clock.tick(now + FLOOR + 60) == "not_due" and len(window.reads) == 2
-    # the status shows the time the clock will act on: the reset while the limit stands ...
+    # the status and its line show the time the clock will act on: the reset while the limit stands ...
+    from ouroboros import consciousness_view as view
+
+    monkeypatch.setattr(view, "time", SimpleNamespace(time=lambda: now + FLOOR + 60))
     assert clock.clock.status_snapshot()["next_wake_at"] == clock_module._iso(parse_deadline_ts(resets_at).timestamp())
+    line = view.describe_consciousness_state(clock.clock.status_snapshot(), True)["detail"]
+    assert line.endswith(f"next check {view._when(resets_at)}."), line
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "50")  # raised: MIN after the repeated skip, not the reset
     # ... and MIN after the skip once the limit changed
     assert clock.clock.status_snapshot()["next_wake_at"] == clock_module._iso(now + 2 * FLOOR)
+    line = view.describe_consciousness_state(clock.clock.status_snapshot(), True)["detail"]
+    assert line.endswith(f"next check {view._when(clock_module._iso(now + 2 * FLOOR))}."), line
     assert clock.clock.tick(now + 2 * FLOOR - 1) == "not_due" and len(window.reads) == 2
     assert clock.clock.tick(now + 2 * FLOOR) == "launched"
     assert clock.launches[-1]["metadata"]["root_cost_ceiling_usd"] == pytest.approx(29.6)
