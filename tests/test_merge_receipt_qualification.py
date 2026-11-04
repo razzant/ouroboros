@@ -685,12 +685,12 @@ def card_lines(receipt):
 
 
 def gap_only_in_detail(receipt, *codes):
-    """Coverage the review did not prove reads as one short label at the end of the head, its sentence as the
-    row's second line and its codes in the receipt alone (DESIGN principle 7); returns the label."""
+    """Coverage the review did not prove reads as one short label at the end of the head, a sentence that says more
+    as the row's second line and its codes in the receipt alone (DESIGN principle 7); returns the label."""
     head, detail = card_lines(receipt)
     label, sentence = merge_receipts.coverage_reading(receipt)
     assert label and head.startswith("⚠️ PR #7 merge: ") and head.endswith(f" · {label}"), head
-    assert detail == sentence and sentence not in head and "\n" not in detail
+    assert detail == sentence and (not sentence or sentence not in head) and "\n" not in detail
     assert not any(code in head + detail for code in (*codes, "review source", "PASS", "FAIL")), (head, detail)
     return label
 

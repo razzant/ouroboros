@@ -143,6 +143,7 @@ def test_an_unreviewed_merge_is_loud_and_still_merges(world):
     label = merge_receipts.coverage_reading(receipt)[0]
     assert "unknown" not in label and label == merge_receipts._UNDECLARED
     assert merge_receipts.card_row_text(receipt).partition("\n")[0].endswith(f" · {label}")
+    assert "\n" not in merge_receipts.card_row_text(receipt)  # the label says it all: no second line repeats it
 
 
 @pytest.mark.parametrize(("kw", "status", "label"), [
@@ -158,6 +159,8 @@ def test_coverage_never_claims_more_than_was_declared(world, kw, status, label):
     said = merge_receipts.coverage_reading(receipt)[0]
     assert ("unknown" in said) is (status == "unknown") and said == getattr(merge_receipts, label)
     assert merge_receipts.card_row_text(receipt).partition("\n")[0].endswith(f" · {said}")
+    # A second line only where it says more than the label: why the coverage is unknown, or that it was earlier code.
+    assert ("\n" in merge_receipts.card_row_text(receipt)) is (status != "delta_only")
 
 
 def test_a_moved_head_or_closed_pr_merges_nothing_and_writes_nothing(world):

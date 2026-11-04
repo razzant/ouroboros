@@ -22,14 +22,15 @@ pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 
 def assert_coverage_placed(line, receipt):
     """The card says the receipt's own coverage reading: its short label (none when the review passed exactly what
-    merged) ends the row's head, its sentence is the row's second line, and no code reaches either; the codes stay
-    in the receipt, the PR body and the agent's result (DESIGN principle 7)."""
+    merged) ends the row's head, a sentence that says more is the row's second line, and no code reaches either;
+    the codes stay in the receipt, the PR body and the agent's result (DESIGN principle 7)."""
     from ouroboros.merge_receipts import coverage_reading
 
     label, sentence = coverage_reading(receipt)
     head = line.locator(".chat-live-line-title").inner_text().strip()
-    detail = line.locator(".chat-live-line-body").inner_text().strip()
-    assert detail == sentence and sentence not in head, (head, detail)
+    body = line.locator(".chat-live-line-body")
+    detail = body.inner_text().strip() if body.count() else ""
+    assert detail == sentence and (not sentence or sentence not in head), (head, detail)
     assert head.endswith(f" · {label}") if label else " · " not in head, head
     codes = ("review source", "covers_head", "changes_after_review", "no_host_observed_review_record", "declaration")
     assert not any(code in head + detail for code in codes), (head, detail)

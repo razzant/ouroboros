@@ -1536,9 +1536,9 @@ reviews create child tasks or prove execution.
   task's record does not name reads only as committed, which denies no adoption
   (one the task failed to record stays unnamed here).
 - A merge receipt row in its task's card says the merge's outcome and, unless its
-  review passed exactly what merged, a short coverage label; its coverage sentence is
-  the row's second line inside the card's Details, its codes stay in the receipt, the
-  PR body and the merging agent's result.
+  review passed exactly what merged, a short coverage label; a coverage sentence that
+  says more than the label is the row's second line inside the card's Details, its
+  codes stay in the receipt, the PR body and the merging agent's result.
 - Read opens the selected saved answer in the document reader (Markdown, Source
   exact; a failure note as plain text) and never regenerates a review or
   switches sources after an update; limits, Download, timeout and focus follow

@@ -441,11 +441,11 @@ def upsert_body(body: str, block: str) -> str:
     return body + ("\n\n" if body else "") + block + "\n"
 
 
-# The card's head says a short coverage label unless the review passed exactly what merged; its sentence is the
-# row's second line, inside the card's Details (DESIGN principle 7, owner 04.11 1A). A label names a known state:
-# no review declared, only the latest changes reviewed, other code than the reviewed tree as earlier code (DESIGN
-# "Reviews inside task cards", owner 29.10 A); every other gap leaves the coverage unknown, which a gap's sentence
-# need not say again: it names the gap.
+# The card's head says a short coverage label unless the review passed exactly what merged; a sentence that says
+# more than the label is the row's second line, inside the card's Details (DESIGN principle 7, owner 04.11 1A).
+# A label names a known state: no review declared, only the latest changes reviewed, other code than the reviewed
+# tree as earlier code (DESIGN "Reviews inside task cards", owner 29.10 A); every other gap leaves the coverage
+# unknown, which a gap's sentence need not say again: it names the gap.
 _EARLIER, _UNKNOWN = "earlier version reviewed", "review coverage unknown"
 _REJECTED, _NO_VERDICT = "review rejected it", "no review verdict"
 _UNDECLARED, _LATEST_ONLY = "no review declared", "only latest changes reviewed"
@@ -465,8 +465,9 @@ _GAP_WORDS = (
 
 def coverage_reading(receipt: Dict[str, Any]) -> Tuple[str, str]:
     """The receipt's review coverage for the owner: the card head's short label (``""`` when the review passed
-    exactly what it covers) and one sentence for the row's second line. The codes stay in the receipt, the PR body
-    and the merging agent's tool result. ``{what}`` is what merged, else the head this request named."""
+    exactly what it covers) and the row's second line (``""`` when the label says it all). The codes stay in the
+    receipt, the PR body and the merging agent's tool result. ``{what}`` is what merged, else the head this request
+    named."""
     outcome, coverage = receipt.get("outcome") or {}, receipt.get("coverage") or {}
     record = (receipt.get("review") or {}).get("record") or {}
     what = "what merged" if outcome.get("status") == "merged" else "this head"
@@ -477,11 +478,10 @@ def coverage_reading(receipt: Dict[str, Any]) -> Tuple[str, str]:
         # Only a host record can cover a head; a receipt stored before that rule may hold a declaration's.
         "covers_head": ((_UNKNOWN, "A review was declared; Ouroboros holds no record of it.") if not record
                         else ("", "The review passed exactly {what}.") if record_approves(record)
-                        else (_REJECTED, "This review rejected {what}.") if verdict == "FAIL"
-                        else (_NO_VERDICT, "This review gave no verdict on {what}.")),
+                        else (_REJECTED, "") if verdict == "FAIL" else (_NO_VERDICT, "")),
         "changes_after_review": (_EARLIER, "This review was for earlier code; it does not cover {what}."),
-        "delta_only": (_LATEST_ONLY, "The review read only the latest changes, not the whole pull request."),
-        "not_declared": (_UNDECLARED, "No review was declared for this merge."),
+        "delta_only": (_LATEST_ONLY, ""),
+        "not_declared": (_UNDECLARED, ""),
     }.get(str(status))
     for codes, label, sentence in _GAP_WORDS if reading is None else ():
         if codes & set(gaps):
@@ -521,7 +521,7 @@ def card_row_text(receipt: Dict[str, Any], *, codes: bool = False) -> str:
     if codes:
         return f"{head}; {coverage_codes(receipt)}"
     label, sentence = coverage_reading(receipt)
-    return f"{head}{f' · {label}' if label else ''}\n{sentence}"
+    return f"{head}{f' · {label}' if label else ''}" + (f"\n{sentence}" if sentence else "")
 
 
 # --- orchestration ---------------------------------------------------------------------
