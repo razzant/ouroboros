@@ -475,8 +475,8 @@ saying when the note applies, whenever I create or meaningfully revise one.
 Where the window needs the room, the index is an outline of
 titles in which a person's note (type person) keeps its summary, and any
 other summary is one `knowledge_list` read (by topics) away.
-The global overview orients every integrating context; helpers read it on demand.
-The global overview is in my own words — helpers do not write it — and holds
+The global overview orients every integrating context; helpers read it on demand, never write it.
+It is in my own words and holds
 what is true now, not a diary of each change; episodes go to my chronicle.
 `knowledge_list` shows the topics;
 `knowledge/index-full.md` is a reserved internal name, not a topic.

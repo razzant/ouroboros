@@ -129,6 +129,23 @@ def test_each_block_shows_the_sha256_of_its_exact_stored_json(install):
     assert _digests_in_view(env, memory) == [_canonical_sha(block) for block in reversed(stored)]
 
 
+def test_several_free_form_intentions_from_any_focus_are_resident_whole_in_the_next_request(install):
+    env, memory, registry = install
+    agenda = ("Still thinking about why the review pool felt slow, and whether it is my reading of it.\n"
+              "Owe my human the comparison I promised.\n\nA question I want to come back to: what do they mean by quiet?")
+    registry._ctx.task_id, registry._ctx.task_metadata = "wake1", {"usage_category": "consciousness"}
+    assert _tool(registry, content=agenda).status == "ok"
+    registry._ctx.task_id, registry._ctx.task_metadata = "root1", {}
+    assert _tool(registry, content="Waiting for the reply on the shared decision before the merge.").status == "ok"
+    section = _scratchpad_section(_next_request(env, memory))
+    assert agenda in section and "Waiting for the reply on the shared decision" in section
+    schema = registry.get_schema_by_name("update_scratchpad")
+    description = schema.get("function", schema)["description"]
+    assert "intentions, concerns, questions, debts, waits" in description and "in any form" in description
+    assert "active tasks" not in description and "stands in its own facts" in description
+    assert "one working memory in every room" in description
+
+
 def test_the_tool_schema_offers_the_fold_and_promises_no_eviction(install):
     _env, _memory, registry = install
     schema = registry.get_schema_by_name("update_scratchpad")

@@ -111,12 +111,11 @@ def _assignment_form(value: Any) -> str:
 def _assignment_reference(objective: str, task: Mapping[str, Any]) -> Dict[str, Any]:
     """The objective as a reference to the assignment as a request actually delivers it.
 
-    The first user turn carries the assignment whole, or, when the whole input cannot fit a
-    request, a pointer to its exact stored source: a wake's observation
-    (``loop_model_call._project_wake_input``), an owner-Nano input
-    (``context_input_selection.task_input_pointer``). This view is captured before either
-    decision, so the rule names both deliveries, and a wake whose observation is already
-    bound names that stored source itself (``consciousness_wake.bind_wake_observation``).
+    The first user turn carries the assignment whole or, after a physical nonfit, its exact
+    source pointer: a wake's observation (``context_input_selection.rescued_start`` at first
+    build, ``loop_model_call._project_wake_input`` later), or an owner-Nano input
+    (``context_input_selection.task_input_pointer``). This view precedes those decisions;
+    an already-bound wake names its source (``consciousness_wake.bind_wake_observation``).
     """
     from ouroboros.consciousness_wake import WAKE_OBSERVATION_KEY
 

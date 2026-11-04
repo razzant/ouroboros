@@ -339,12 +339,12 @@ def get_tools() -> List[ToolEntry]:
         }, _chat_history),
         ToolEntry("update_scratchpad", {
             "name": "update_scratchpad",
-            "description": "Write working memory (scratchpad): append a timestamped block, or with replaces fold the "
-                           "named blocks (the sha256 after each heading; an earlier fold too) into one text you "
-                           "accept, placed where the oldest was. Originals are journaled first, unnamed blocks stay, a "
-                           "stale or ambiguous selection changes nothing; nothing leaves by count, size or age. Write "
-                           "what matters NOW — active tasks, decisions, observations. Persists across sessions, read "
-                           "whole at every task start. Project rooms included: one working memory in every room.",
+            "description": "Write working memory (scratchpad): append a timestamped block, or with replaces fold the named blocks (the sha256 after each heading; an "
+                           "earlier fold too) into one text you accept, placed where the oldest was. Originals are journaled first, unnamed blocks stay, a stale or "
+                           "ambiguous selection changes nothing; nothing leaves by count, size or age. Write what you carry now, in any form: intentions, concerns, "
+                           "questions, debts, waits, decisions that coordinate work, and why you would return; several can stand side by side. Another work's status "
+                           "stands in its own facts: repeat it only where it changes what you intend. Persists across sessions, read whole at every task start. Project "
+                           "rooms included: one working memory in every room.",
             "parameters": {"type": "object", "properties": {
                 "content": {"type": "string", "description": "The new block, or the accepted text of a fold"},
                 "replaces": {"type": "array", "items": {"type": "string"}, "description": "Fold: sha256 of each "
