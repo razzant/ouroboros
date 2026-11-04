@@ -146,7 +146,10 @@ class Gateway:
         self.catalog_reads += 1
         return deepcopy(self.operation_catalog)
 
-    def upload_model_request(self, payload, *, idempotency_key):
+    def upload_model_request(self, payload, *, idempotency_key, sha256, size_bytes):
+        assert isinstance(payload, bytes)
+        assert hashlib.sha256(payload).hexdigest() == sha256 and len(payload) == size_bytes
+        payload = json.loads(payload)
         self.uploads.append((deepcopy(payload), idempotency_key))
         return REF
 

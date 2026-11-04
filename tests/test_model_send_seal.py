@@ -372,8 +372,8 @@ def test_dispatch_persists_once_without_a_readback_projection(data_root, monkeyp
         lambda value: redact_calls.append(1) or real_redact(value),
     )
     _dispatch(data_root, "task-cost-shape")
-    # 2 per _attempt_request (raw + context) × 2 builds (request + seam
-    # identity re-check) — verification adds ZERO raw serializations.
+    # 2 for measurement (raw + context), 2 for the seam's identity re-check;
+    # the seam builds no second AttemptRequest or token/clock/image observations.
     assert len(canonical_calls) == 4, len(canonical_calls)
     # persist_call redacts once for the CAS write; verification reconstructs
     # once. Nothing else may redact this candidate.
