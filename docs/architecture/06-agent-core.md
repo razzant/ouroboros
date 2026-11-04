@@ -1,6 +1,6 @@
 # 6. Agent Core
 
-`loop.py` runs tasks/direct turns/wakes; review/post-task settlement is separate.
+`loop.py` runs tasks/direct turns/wakes.
 
 ### Task lifecycle
 
@@ -209,7 +209,7 @@ Outside Cyber Pro, shell git reads anywhere but mutates only resolved targets ou
 
 `review_native_episode.py::NativeToolRoundReviewExecutor` serves native API and deep self-review rows. Reads keep canonical roots under `local_readonly_subagent`, network off. `review_native_images.py` stages `view_image` pixels after all tool replies; abandoned calls cannot attach. Round sources reference retained pixels by hash; projections never replace canonical context observations. Commit/change/preflight use two-part briefs. The assignment and source manifest share one cache marker.
 
-P13 permits no round or character cap. Sends keep deadlines, tool timeouts, ledger admission and provider limits. Layout hints choose inline versus paged sources, never execution permission. `native_context` records serialized characters (images included), window evidence, previous usage/route/view and output allowance, never free tokens. Image receipts distinguish source path/hash, delivered pixel hash and unavailable input; attachment or captions do not attest inspection. Receipts record `ctx.last_read_view` / `display_map` ranges, not full coverage (§6 The coupling question).
+P13 permits no round or character cap. Sends keep deadlines, tool timeouts, ledger admission and provider limits. Layout hints choose inline versus paged sources, never execution permission. `native_context` records serialized characters (images included), window evidence, previous usage/route/view and output allowance, never free tokens. Image receipts distinguish source path/hash, delivered pixel hash and unavailable input; attachment or captions do not attest inspection. `compact_context` keeps authored views. Receipts record `ctx.last_read_view` / `display_map` ranges, not full coverage (§6 The coupling question).
 
 Unavailable schemas produce `not_dispatched` at $0. Unsupported image routes or provider window refusals leave named gaps and originals; the episode continues with text. Text-only overflow still fails. Episodes leave custody and usage; a paid send is never relabelled unstarted; historical failures stay readable. `triad_review.default_output_contract` supplies the default surface shape.
 
