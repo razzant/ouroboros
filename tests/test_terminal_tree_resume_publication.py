@@ -84,7 +84,7 @@ def test_tree_resume_publication_and_retry_after_real_boot(tmp_path, monkeypatch
 def test_old_released_tree_grant_does_not_ack_a_contradicting_restored_latch(tmp_path, monkeypatch):
     q, workers = _park_tree(tmp_path, monkeypatch)
     publications = {path: path.read_bytes() for path in (tmp_path / "state").iterdir()
-                    if path.name in {"queue_snapshot.json", "queue_dispatch.json", "direct_roots.json", "queue.alive"}}
+                    if path.name in {"queue_snapshot.json", "queue_dispatch.json", "queue.alive"}}
     assert q.resume_budget_paused_task("root-1")["ok"]
     # The old implementation could release the durable fence without publishing Q.
     for path, content in publications.items():

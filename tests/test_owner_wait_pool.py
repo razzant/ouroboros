@@ -133,11 +133,56 @@ def test_park_is_durable_before_ack_and_preserves_running_ownership(pool):
     assert snap["running_count"] == 1 and not workers.PENDING
 
 
-def test_snapshot_failure_never_lends_capacity_or_confirms_park(pool, monkeypatch):
-    monkeypatch.setattr(queue, "publish_queue_snapshot", lambda **kw: False)
+def test_a_park_stands_on_its_store_commit_and_marks_the_queue_outside_q(pool, monkeypatch):
+    """The park's authority is the task result (every restore reader takes the wait from it); the queue is
+    marked, never published as a barrier, so a publication that fails or is late neither refuses the park nor
+    withholds the lent capacity: the tick publishes the row (a crash before it restores from the store, the
+    kill-after-each-step proof in tests/test_queue_publication_revision.py). The store write itself runs
+    outside Q; only memory changes under it."""
+    marks, writes = [], []
+    real_write = worker_owner_wait.set_owner_wait
+
+    def write(*args, **kwargs):
+        writes.append(queue._queue_lock._is_owned())
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(worker_owner_wait, "set_owner_wait", write)
+    monkeypatch.setattr(queue, "persist_queue_snapshot", lambda **kw: marks.append(kw["reason"]) or False)
+    monkeypatch.setattr(queue, "publish_queue_snapshot", lambda **kw: pytest.fail("a park publishes no barrier"))
+    worker_owner_wait.handle_owner_wait(pool.event, workers)
+    assert pool.original.in_q.get_nowait()["phase"] == "parked"
+    assert not pool.original.active_capacity and not pool.created
+    assert writes == [False], "the durable park is written outside Q"
+    assert marks == ["owner_wait_parked"]
+    assert load_task_result(pool.root, "owner")["owner_wait"] == {**pool.wait, "state": "waiting"}
+    assert workers.RUNNING["owner"]["owner_wait"]["state"] == "waiting"
+
+
+def test_a_store_write_failure_refuses_the_park(pool, monkeypatch):
+    def fail(*_a, **_k):
+        raise OSError("state unavailable")
+
+    monkeypatch.setattr(worker_owner_wait, "set_owner_wait", fail)
     worker_owner_wait.handle_owner_wait(pool.event, workers)
     assert pool.original.in_q.get_nowait()["phase"] == "refused"
     assert pool.original.active_capacity and not pool.created
+    assert not load_task_result(pool.root, "owner").get("owner_wait")
+
+
+def test_a_park_whose_stack_moved_on_during_the_write_acknowledges_nothing(pool, monkeypatch):
+    """Between the two holds the row may leave RUNNING (a Stop's custody took it): the written park stands in
+    the store as saved work, nothing lends capacity, no acknowledgement reaches a stack that is gone."""
+    real_write = worker_owner_wait.set_owner_wait
+
+    def write_then_stop(*args, **kwargs):
+        written = real_write(*args, **kwargs)
+        workers.RUNNING.pop("owner")
+        return written
+
+    monkeypatch.setattr(worker_owner_wait, "set_owner_wait", write_then_stop)
+    worker_owner_wait.handle_owner_wait(pool.event, workers)
+    assert pool.original.in_q.empty() and pool.original.active_capacity
+    assert load_task_result(pool.root, "owner")["owner_wait"]["state"] == "waiting"
 
 
 def test_replacement_readiness_and_same_stack_resume(pool):
@@ -204,13 +249,18 @@ def test_owner_wait_spares_only_idle_timeout(pool, monkeypatch, hard_axis):
         assert reaps.empty() and "owner" in workers.RUNNING
 
 
-def test_resume_snapshot_failure_keeps_original_parked(pool, monkeypatch):
+def test_a_grant_stands_on_its_store_commit_and_marks_the_queue(pool, monkeypatch):
+    """The grant's authority is the store's ``resumed`` row: a failed or late publication withholds nothing;
+    the second hold is memory only, and the mark lets the tick publish the row."""
     park(pool)
     worker_owner_wait.handle_owner_wait({**pool.event, "phase": "resume"}, workers)
-    monkeypatch.setattr(queue, "publish_queue_snapshot", lambda **kw: False)
+    marks = []
+    monkeypatch.setattr(queue, "persist_queue_snapshot", lambda **kw: marks.append(kw["reason"]) or False)
+    monkeypatch.setattr(queue, "publish_queue_snapshot", lambda **kw: pytest.fail("a grant publishes no barrier"))
     maintain_capacity()
-    assert not pool.original.active_capacity and pool.original.in_q.empty()
-    assert load_task_result(pool.root, "owner")["owner_wait"]["state"] == "waiting"
+    assert pool.original.active_capacity and pool.original.in_q.get_nowait()["phase"] == "resume_granted"
+    assert marks == ["owner_wait_resumed"]
+    assert load_task_result(pool.root, "owner")["owner_wait"]["state"] == "resumed"
 
 
 def test_ordinary_pool_does_not_grow_to_configured_max(pool, monkeypatch):
@@ -242,7 +292,7 @@ def test_same_stack_reclaims_exhausted_replacement_without_new_spawn(pool):
     assert replacement.in_q.closed
 
 
-@pytest.mark.parametrize("failure", ["state", "snapshot", "command"])
+@pytest.mark.parametrize("failure", ["state", "command"])
 def test_exhausted_reservation_and_original_rollback_together(pool, monkeypatch, failure):
     replacement = exhausted_replacement(pool)
     worker_owner_wait.handle_owner_wait({**pool.event, "phase": "resume"}, workers)
@@ -257,8 +307,6 @@ def test_exhausted_reservation_and_original_rollback_together(pool, monkeypatch,
             return original(*a, **k)
 
         monkeypatch.setattr(worker_owner_wait, "set_owner_wait", fail_first)
-    elif failure == "snapshot":
-        monkeypatch.setattr(queue, "publish_queue_snapshot", lambda **k: False)
     else:
         def fail_command(*a, **k):
             raise OSError("command unavailable")
@@ -498,18 +546,18 @@ def test_grant_consumes_old_cold_marker_before_publishing_snapshot(pool):
     assert row["owner_wait"]["state"] == "resumed"
 
 
-@pytest.mark.parametrize("failure", ["snapshot", "command"])
-def test_failed_grant_rolls_back_marker_and_wait_together(pool, monkeypatch, failure):
+def test_failed_grant_rolls_back_marker_and_wait_together(pool, monkeypatch):
+    """A grant whose command never reached the stack rolls the marker and the wait back together (the mark
+    on the queue is no failure case: the store's row is the grant's authority, ``test_a_grant_stands_on_its_store_commit_and_marks_the_queue``)."""
     marker = {**pool.wait, "restart_transaction_id": "tx"}
     pool.meta["task"]["_owner_wait_resume"] = marker
     park(pool)
     worker_owner_wait.handle_owner_wait({**pool.event, "phase": "resume"}, workers)
-    if failure == "snapshot":
-        monkeypatch.setattr(queue, "publish_queue_snapshot", lambda **kw: False)
-    else:
-        def fail_command(*args, **kwargs):
-            raise OSError("input queue unavailable")
-        monkeypatch.setattr(worker_owner_wait, "_command", fail_command)
+
+    def fail_command(*args, **kwargs):
+        raise OSError("input queue unavailable")
+
+    monkeypatch.setattr(worker_owner_wait, "_command", fail_command)
     maintain_capacity()
     assert not pool.original.active_capacity and pool.original.in_q.empty()
     assert pool.meta["task"]["_owner_wait_resume"] == marker

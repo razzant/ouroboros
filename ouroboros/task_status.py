@@ -363,17 +363,7 @@ def task_execution_observation(
             return {**observation, "kind": "direct", "state": "active", "source": "local_direct", "reason": "local_execution"}
     except Exception:
         pass  # absence of a positive witness is never a negative observation
-    fragment = load_queue_document(root, "direct_roots.json")
-    # Both existing supervisor fragments use the same 10s ownership freshness
-    # (peer_roster._projection_observation); retain the distinct source name.
-    direct_seen = {**queue_snapshot_observation(fragment), "source": "state/direct_roots.json"}
-    rows = fragment.get("roots")
-    if direct_seen["fresh"] and isinstance(rows, list) and any(
-        isinstance(row, dict) and str(row.get("task_id") or "") == tid for row in rows
-    ):
-        return {**observation, **direct_seen, "kind": "direct", "state": "active", "reason": "listed_direct"}
-    return {**observation, "queue_snapshot": queue_seen,
-            "direct_roots": {**direct_seen, "incomplete": bool(fragment.get("incomplete"))}}
+    return {**observation, "queue_snapshot": queue_seen}
 
 
 def task_has_live_queue_ownership(drive_root: pathlib.Path, task_id: str) -> bool:

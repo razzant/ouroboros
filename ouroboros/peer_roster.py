@@ -2,13 +2,11 @@
 
 A task may message any active independent root the host lists -- pooled,
 Swarm, project or headless (``chat_id`` 0) roots included -- and the list is
-read from the supervisor's own durable projections, never rebuilt by the
-worker: pooled roots from ``state/queue_snapshot.json`` (the same file the
-cancel and scheduling receipts already read, dated by
-``task_status.queue_snapshot_observation``), direct-chat roots from the small
-fragment the supervisor main loop writes off its actor locks
-(``supervisor/direct_roots.py``).  No roster service, cache or timer: each
-read is one pair of small JSON reads.
+read from the supervisor's own durable projection, never rebuilt by the
+worker: every root, the owner's conversation turns included, is a row of
+``state/queue_snapshot.json`` (the same file the cancel and scheduling receipts
+already read, dated by ``task_status.queue_snapshot_observation``).  No roster
+service, cache or timer: each read is one small JSON read.
 
 Beside id, title, room and queue status a row carries only facts the host
 already recorded, each absent when unrecorded: the suggested name, the start,
@@ -21,8 +19,7 @@ pause; an unrecognized reason stays ``unknown`` with that reason) -- for a root
 that waits, its ``tails`` (what of its tree still runs, typed and worded as the
 owner's card says it, ``gateway/work_status.py``) -- and the dated authored
 focus of any root that has not settled.  The task result is read per row; the
-direct fragment carries a live turn's facts until that result exists; the open
-delegated runs are one custody read per roster.  A source a row's read could not
+open delegated runs are one custody read per roster.  A source a row's read could not
 open is named on that row (``unavailable``): the facts it holds are unknown at
 that read, never absent, and its queue facts stay.
 
@@ -47,12 +44,9 @@ from ouroboros.focus import compact_focus, focus_fingerprint
 from ouroboros.task_status import SETTLED_STATUSES, _load_queue_snapshot, queue_snapshot_observation
 from ouroboros.task_carrier import execution_kind
 from ouroboros.task_results import load_task_results
-from ouroboros.queue_observation import load_queue_document
 
 log = logging.getLogger(__name__)
 
-#: The supervisor's off-lock projection of live direct-chat roots.
-DIRECT_ROOTS_FRAGMENT = pathlib.Path("state") / "direct_roots.json"
 #: How many rows the transcript note shows; the gate reads all of them.
 ROSTER_NOTE_CAP = 40
 # The first line of every roster note; `_latest_roster_note` finds a note by it.
@@ -358,7 +352,7 @@ def _presence_task(task: Dict[str, Any]) -> bool:
     return bool(task.get("_presence_turn") or task.get("source") == "presence" or isinstance(m.get("presence"), dict))
 
 
-def _compact_root(task_id: str, task: Dict[str, Any], *, status: str, direct: bool = False,
+def _compact_root(task_id: str, task: Dict[str, Any], *, status: str,
                   canonical_root: Optional[pathlib.Path] = None,
                   queue_row: Optional[Dict[str, Any]] = None,
                   trees: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -372,7 +366,7 @@ def _compact_root(task_id: str, task: Dict[str, Any], *, status: str, direct: bo
         "status": status,
         "drive_root": str(task.get("child_drive_root") or task.get("drive_root") or ""),
         # The owner's live conversation wherever it runs: not a Presence turn, not a turn handed to the pool.
-        "direct_chat": bool(direct or (execution_kind(task) == "direct" and not _presence_task(task))),
+        "direct_chat": bool(execution_kind(task) == "direct" and not _presence_task(task)),
     }
     queue_row = queue_row if isinstance(queue_row, dict) else {}
     # Focus is durably written before the supervisor projection event.  Read
@@ -446,16 +440,16 @@ def _compact_root(task_id: str, task: Dict[str, Any], *, status: str, direct: bo
 def independent_roots(drive_root: pathlib.Path) -> Dict[str, Any]:
     """Every host-listed active independent root, compact (id, title, room, status).
 
-    Pooled rows come from the queue snapshot (running, then pending), inline moved authors from the Presence census.
+    Rows come from the queue snapshot (running, then pending), inline moved authors from the Presence census.
     Subagents (a parent or the subagent role) are not independent roots. ``incomplete`` combines missing/unreadable/stale
-    snapshots, incomplete direct/Presence observations, unreadable bindings and delegated custody. Never raises.
+    snapshots, incomplete Presence observations, unreadable bindings and delegated custody. Never raises.
     """
     root = pathlib.Path(drive_root)
     snapshot = _load_queue_snapshot(root)
     observation = queue_snapshot_observation(snapshot)
     gaps: List[str] = []
     trees = _live_trees(root, snapshot, gaps)
-    listed: List[tuple] = []  # (task_id, task, status, direct, queue_row), in roster order
+    listed: List[tuple] = []  # (task_id, task, status, queue_row), in roster order
     seen: set[str] = set()
     if not (snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid")):
         for status_key in ("running", "pending"):
@@ -475,16 +469,7 @@ def independent_roots(drive_root: pathlib.Path) -> Dict[str, Any]:
                 ):
                     continue
                 seen.add(task_id)
-                listed.append((task_id, task, status_key, False, row))
-    fragment = load_queue_document(root, DIRECT_ROOTS_FRAGMENT.name)
-    direct_observation = {**queue_snapshot_observation(fragment), "source": "state/direct_roots.json"}
-    for row in fragment.get("roots") or []:
-        if not isinstance(row, dict):
-            continue
-        task_id = str(row.get("task_id") or "").strip()
-        if task_id and task_id not in seen:
-            seen.add(task_id)
-            listed.append((task_id, row, "running", True, None))
+                listed.append((task_id, task, status_key, row))
     from ouroboros.conversation_lease import resolved_presence_turns
 
     # Live Presence authors moved to a Project join the ONE read of every listed root's result (B10 L3).
@@ -492,17 +477,14 @@ def independent_roots(drive_root: pathlib.Path) -> Dict[str, Any]:
     moved = [fact["task_id"] for fact in presence["roots"] if fact["state"] == "running" and fact["task_id"] not in seen]
     results = load_task_results(root, [task_id for task_id, *_rest in listed] + moved)
     rows: List[Dict[str, Any]] = [
-        _compact_root(task_id, task, status=status, direct=direct, canonical_root=root, queue_row=queue_row,
-                      trees=trees, results=results)
-        for task_id, task, status, direct, queue_row in listed]
+        _compact_root(task_id, task, status=status, canonical_root=root, queue_row=queue_row, trees=trees, results=results)
+        for task_id, task, status, queue_row in listed]
     rows += _moved_presence_roots(root, presence, seen, trees, gaps, results=results)
     return {
         "roots": rows,
         "presence_turns": presence["roots"],
-        "incomplete": bool(fragment.get("incomplete")) or not bool(observation.get("fresh"))
-        or not bool(direct_observation.get("fresh")) or bool(gaps) or any(row.get("unavailable") for row in rows),
+        "incomplete": not bool(observation.get("fresh")) or bool(gaps) or any(row.get("unavailable") for row in rows),
         "queue_snapshot": observation,
-        "direct_roots": direct_observation,
     }
 
 
@@ -589,7 +571,6 @@ def host_listed_independent_root(drive_root: pathlib.Path, task_id: str) -> Opti
             # remains authoritative for exact-live messaging.
             return {**row, "projection_observation": {
                 "queue_snapshot": roster.get("queue_snapshot"),
-                "direct_roots": roster.get("direct_roots"),
                 "incomplete": bool(roster.get("incomplete")),
             }}
         return None
@@ -755,7 +736,6 @@ def live_root_catalogue(drive_root: pathlib.Path, *, limit: int = 20, offset: in
             "remaining": max(0, len(rows) - skip), "snapshot": token,
             "observation": {
                 "queue_snapshot": roster.get("queue_snapshot"),
-                "direct_roots": roster.get("direct_roots"),
                 "incomplete": roster.get("incomplete"),
                 "coherence": "independent_projection_reads",
                 "global_atomic": False,

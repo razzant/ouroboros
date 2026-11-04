@@ -16,6 +16,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ouroboros import store_import
+from ouroboros.gateway import tasks
 from ouroboros.gateway.tasks import (
     _compose_task_text,
     _resolve_workspace_root,
@@ -170,6 +171,42 @@ def test_task_api_admission_refusal_is_terminal_not_scheduled_phantom(tmp_path, 
     assert result["reason_code"] == "project_routing_fence"
     assert result["admission_cleanup"] == {"child_drive_removed": True}
     assert not (data / "state" / "headless_tasks" / "blocked-root").exists()
+
+
+def test_task_api_publishes_its_admission_outside_q_and_writes_the_receipt_with_the_row_still_queued(tmp_path, monkeypatch):
+    """Q spans memory only: the row is enqueued under Q, the snapshot that makes it durable before the 202 is
+    published outside Q, and the receipt is written under Q again with the row revalidated still queued."""
+    import supervisor.queue as queue
+    from ouroboros.task_results import load_task_result
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    data = tmp_path / "data"
+    (data / "memory").mkdir(parents=True)
+    pending = []
+    monkeypatch.setattr(queue, "DRIVE_ROOT", data)
+    monkeypatch.setattr(queue, "PENDING", pending)
+    monkeypatch.setattr(queue, "RUNNING", {})
+    seen = []
+    real_write = tasks.write_task_result
+
+    def persist(reason=""):
+        seen.append((reason, queue._queue_lock._is_owned(), [row["id"] for row in pending]))
+        return True
+
+    def write(root, task_id, status, **fields):
+        seen.append(("receipt", queue._queue_lock._is_owned(), [row["id"] for row in pending]))
+        return real_write(root, task_id, status, **fields)
+
+    monkeypatch.setattr(queue, "persist_queue_snapshot", persist)
+    monkeypatch.setattr(tasks, "write_task_result", write)
+    app = Starlette(routes=[Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"])])
+    app.state.drive_root = data
+    app.state.repo_dir = repo
+    response = TestClient(app).post("/api/tasks", json={"description": "durable", "task_id": "outside-q", "memory_mode": "empty"})
+    assert response.status_code == 200 and response.json()["status"] == "scheduled"
+    assert seen == [("api_task_create", False, ["outside-q"]), ("receipt", True, ["outside-q"])]
+    assert load_task_result(data, "outside-q")["api_admission"]["status"] == "accepted"
 
 
 def test_task_api_retains_possible_admission_when_snapshot_is_unconfirmed(tmp_path, monkeypatch):

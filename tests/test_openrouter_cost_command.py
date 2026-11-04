@@ -310,9 +310,10 @@ def test_real_system_probe_scope_can_fetch_then_apply(env, capsys, monkeypatch, 
     assert len(gets) == 1 and current(env, row["attempt_id"]) == final
 
 
-@pytest.mark.parametrize("snapshot", ["running", "missing", "stale", "invalid", "empty",
-                                      "direct", "direct_incomplete", "direct_invalid", "direct_empty"])
+@pytest.mark.parametrize("snapshot", ["running", "missing", "stale", "invalid", "empty", "leftover_fragment"])
 def test_standalone_cli_observes_selected_data_root_custody(env, snapshot):
+    """The selected root's queue snapshot is the custody evidence; a leftover ``direct_roots.json`` of an older
+    body (``leftover_fragment``: it lists the child beside an empty snapshot) is read by nothing."""
     from ouroboros.test_environment import isolated_environment
     from ouroboros.utils import utc_now_iso
     from tests._shared import write_queue_document
@@ -330,24 +331,17 @@ def test_standalone_cli_observes_selected_data_root_custody(env, snapshot):
         snapshot_path.write_text("unreadable", encoding="utf-8")
     elif snapshot != "missing":
         write_queue_document(snapshot_path, observed)
-    if snapshot.startswith("direct"):
-        direct = {"ts": utc_now_iso(), "roots": [{"task_id": "child"}] if snapshot == "direct" else [],
-                  "incomplete": snapshot == "direct_incomplete"}
-        direct_path = selected / "state" / "direct_roots.json"
-        if snapshot == "direct_invalid":
-            direct_path.write_text("unreadable", encoding="utf-8")
-        else:
-            write_queue_document(direct_path, direct)
+    if snapshot == "leftover_fragment":
+        write_queue_document(selected / "state" / "direct_roots.json",
+                             {"ts": utc_now_iso(), "roots": [{"task_id": "child"}], "incomplete": False})
     # A different configured root has the opposite observation. Imported
     # supervisor maps in this fresh process are empty and cannot prove death.
     child_env = isolated_environment(env / "cli", command.REPO_ROOT, source=os.environ)
     configured = env / "configured"
     (configured / "state").mkdir(parents=True)
-    applicable = snapshot in {"empty", "direct_empty"}
+    applicable = snapshot in {"empty", "leftover_fragment"}
     write_queue_document(configured / "state" / "queue_snapshot.json", {
         "ts": utc_now_iso(), "running": [{"id": "child"}] if applicable else [], "pending": []})
-    write_queue_document(configured / "state" / "direct_roots.json", {
-        "ts": utc_now_iso(), "roots": [{"task_id": "child"}] if applicable else [], "incomplete": False})
     child_env["OUROBOROS_DATA_DIR"] = str(configured)
     process = subprocess.run([sys.executable, str(command.REPO_ROOT / "scripts" / "reconcile_openrouter_cost.py"),
         "--data-root", str(selected), "--attempt-id", row["attempt_id"], "--apply"],

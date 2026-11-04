@@ -10,17 +10,31 @@ content address (``$shared``), so the document carries the owner's words once; `
 expands them in memory, so every reader still sees the whole row.
 
 The publication order a reader relies on is kept: the old ``queue.alive`` certificate is
-revoked, the documents land (fsync), the new certificate names them (no fsync).
-``queue.alive`` is rewritten only when its generation or heartbeat map changed or its stamp
-aged past ``QUEUE_ALIVE_REFRESH_SEC``; a process that never published writes none (the
-uncustodied saved queue rule, ``queue_snapshot._keeps_saved_queue``).
+revoked, the documents land (fsync), the new certificate names them (no fsync). Two
+documents: the snapshot and the dispatch projection (``queue_dispatch.json``, the money
+paths' fence authority). Only a document whose bytes changed is rewritten, under the new
+generation; one whose bytes did not keeps the generation it was written under, and the
+certificate names each document's own generation (``generation`` is the snapshot's,
+``documents`` the others'), so a reader certifies a document by its own generation
+(``queue_observation.load_queue_document``) and a torn bundle is still unknown as a whole.
+``queue.alive`` is rewritten only when a document's generation or the heartbeat map changed
+or its stamp aged past ``QUEUE_ALIVE_REFRESH_SEC``; a process that never published writes
+none (the uncustodied saved queue rule, ``queue_snapshot._keeps_saved_queue``).
 
 Durability before an effect is an explicit barrier (``publish_queue_snapshot``), used only
-where a caller acts on the publication. A process with no live tick publisher (startup
-before the loop, shutdown after it, tests) publishes synchronously from every mark, so the
-boot and exit doors keep their semantics without a second protocol. A process-ending door
-(``pre_restart_exit``; the shutdown kill as ``server_shutdown``) publishes embedded rows
-without the shared table, so an older body restores after a rollback.
+where a caller acts on the publication; it publishes where its caller stands, outside Q (Q
+spans memory only). The tick's own write leaves the supervisor thread: the server starts one
+publisher thread (``start_queue_writer``, ended with the loop by ``stop_queue_writer``) that
+writes the tick's captures and certificate refreshes, so event dispatch never waits on the
+disk; it holds the newest capture only (a slow disk never queues a backlog), the tick answers
+the outcome of the last write that landed (a failure shows one tick later and that tick's
+capture is the complete rewrite, FU1's rule unchanged), an older capture a barrier overtook is
+skipped, and a capture of an ended generation (``reset``) is never written.
+A process with no live tick publisher (startup before the loop, shutdown after it, tests)
+publishes synchronously from every mark, so the boot and exit doors keep their semantics
+without a second protocol. A process-ending door (``pre_restart_exit``; the shutdown kill as
+``server_shutdown``) publishes embedded rows without the shared table, so an older body
+restores after a rollback.
 """
 
 from __future__ import annotations
@@ -61,6 +75,7 @@ _FORCED_REASONS = frozenset({"startup", "pre_restart_exit", "server_shutdown"})
 #: so an older body restores it after a rollback (the restart exit; the shutdown kill of every door).
 _EXPORT_REASONS = frozenset({"pre_restart_exit", "server_shutdown"})
 _ALIVE_NAME = "queue.alive"
+_SNAPSHOT_NAME = "queue_snapshot.json"
 #: The RUNNING-row facts a publication carries besides the task. The capture writes exactly these and
 #: the tick's census watches exactly these, so a fact a worker report changes under Q without a mark
 #: (a silence episode, the quota clock, an owner wait) is published by the next tick, and a fact added
@@ -86,12 +101,118 @@ _PUBLISHER: Optional[threading.Thread] = None
 _PUBLISH_LOCK = threading.Lock()
 
 
+class _TickWriter:
+    """The publisher thread of one queue generation: it writes the tick's captures and certificate refreshes.
+
+    The tick offers its capture (``offer``) and goes on; a capture the thread has not taken yet is replaced by a
+    newer one, so a slow disk never queues a backlog and the write that lands is the newest state (an older
+    capture a barrier overtook is skipped by ``_publish`` all the same). A quiet tick asks for a certificate
+    refresh (``refresh``). ``drain`` waits for everything offered before it (tests, a door that wants the
+    tick's last capture down before its own export). ``stop`` ends the thread with the loop that fed it:
+    the doors after the loop publish synchronously where they stand.
+    """
+
+    def __init__(self) -> None:
+        self.thread: Optional[threading.Thread] = None
+        self.wake = threading.Condition()
+        self.capture: Optional[Dict[str, Any]] = None  # the newest capture not taken yet
+        self.refresh = False
+        self.syncs: list = []
+        self.closed = False
+
+    def start(self) -> None:
+        with self.wake:
+            if self.closed or (self.thread is not None and self.thread.is_alive()):
+                return
+            self.thread = threading.Thread(target=self._run, name="queue-publisher", daemon=True)
+            self.thread.start()
+
+    def alive(self) -> bool:
+        thread = self.thread
+        return thread is not None and thread.is_alive() and not self.closed
+
+    def offer(self, capture: Dict[str, Any]) -> None:
+        with self.wake:
+            self.capture = capture  # a capture not taken yet is superseded: the newest state is what lands
+            self.wake.notify()
+
+    def ask_refresh(self) -> None:
+        with self.wake:
+            self.refresh = True
+            self.wake.notify()
+
+    def drain(self, timeout: float) -> bool:
+        if not self.alive():
+            return True
+        done = threading.Event()
+        with self.wake:
+            self.syncs.append(done)
+            self.wake.notify()
+        return done.wait(timeout)
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """End the thread once it wrote what it holds (``reset`` rebinds the module's writer first, so an ended
+        generation's capture is refused by ``_publish`` instead)."""
+        with self.wake:
+            self.closed = True
+            self.wake.notify_all()
+        thread = self.thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout)
+
+    def _run(self) -> None:
+        while True:
+            with self.wake:
+                while not (self.closed or self.capture is not None or self.refresh or self.syncs):
+                    self.wake.wait()
+                capture, refresh, syncs = self.capture, self.refresh, self.syncs
+                self.capture, self.refresh, self.syncs = None, False, []
+                if capture is None and not refresh and self.closed:  # stopped: what it still held was written first
+                    for done in syncs:
+                        done.set()
+                    return
+            try:
+                if capture is not None:
+                    _publish(capture, writer=self)  # a publication certifies too: the refresh is subsumed
+                elif refresh:
+                    _refresh_alive()
+            except Exception:
+                log.warning("queue publisher thread: the write failed", exc_info=True)
+            for done in syncs:
+                done.set()
+
+
+_WRITER = _TickWriter()
+
+
 def reset() -> None:
-    """A new queue generation (``queue.init``): nothing marked, nothing published, no tick publisher."""
-    global _PUBLISHER
+    """A new queue generation (``queue.init``): nothing marked, nothing published, no tick publisher, no writer."""
+    global _PUBLISHER, _WRITER
     _STATE.update(revision=0, published=0, reason="", kept=None, census=None, capture_seq=0, published_seq=0,
                   write_failed=False, alive_heartbeats=None, alive_written_at=0.0)
     _PUBLISHER = None
+    ended, _WRITER = _WRITER, _TickWriter()  # rebound first: a capture of the ended generation is refused by identity
+    ended.stop()
+
+
+def start_queue_writer() -> None:
+    """The server's loop, after ``tick_publisher_started``: the tick's captures are written on this daemon thread."""
+    _WRITER.start()
+
+
+def stop_queue_writer(timeout: float = 5.0) -> None:
+    """The loop's every exit: the writer ends with the tick that fed it (the doors after it publish synchronously)."""
+    _WRITER.stop(timeout)
+
+
+def writer_alive() -> bool:
+    return _WRITER.alive()
+
+
+def drain_writer(timeout: float = 5.0) -> bool:
+    """Wait until everything offered to the writer before this call was written (or failed); True when it drained
+    in time, True at once without a writer."""
+    return _WRITER.drain(timeout)
 
 
 def tick_publisher_started() -> None:
@@ -156,32 +277,27 @@ def _publish_now(reason: str) -> Optional[bool]:
     if not _queue().INITIALIZED:
         log.info("Queue snapshot not published (reason=%s): no supervisor queue in this process", reason)
         return None
-    from supervisor.direct_roots import collect_direct_roots
-
-    direct = collect_direct_roots()  # Never wait for an actor while holding Q.
     with _queue()._queue_lock:
         _STATE["revision"] += 1
-        capture = _capture(reason, direct)
+        capture = _capture(reason)
     if capture is None:
         return None
     return _publish(capture)
 
 
 def publish_queue_changes() -> Optional[bool]:
-    """The tick: publish when the revision or the direct roster moved, else refresh the certificate.
+    """The tick: publish when the revision or the census moved, else refresh the certificate.
 
     True when published or refreshed, None when the documents on disk are kept (an
     uncustodied saved queue, or nothing of this process certified yet), False when a write
     failed: the loop treats False as its own crash (``server._run_supervisor``), None as a
-    quiet tick.
+    quiet tick. With the writer thread running (``start_queue_writer``) the capture is
+    handed to it and the tick answers the outcome of the last write that landed: a failure
+    shows one tick later, and that tick's capture (the bundle is unknown until a complete
+    rewrite, R2) is the retry; True then means the writer holds the newest capture.
     """
     if not _queue().INITIALIZED:
         return None
-    from supervisor.direct_roots import collect_direct_roots
-
-    direct = collect_direct_roots()
-    published = _queue().QUEUE_PUBLICATION
-    direct_moved = published is not None and published[1].get("direct_roots.json") != machine_json(direct)
     with _queue()._queue_lock:
         if _kept_by_memo():
             return None  # the saved queue is still kept: decided once, not copied or counted again
@@ -190,12 +306,21 @@ def publish_queue_changes() -> Optional[bool]:
         # live set still captures, serializes and writes nothing. A failed write is itself a reason to
         # publish: the bundle on disk is unknown until a complete rewrite lands (R2).
         census = _census()
-        moved = (_STATE["revision"] != _STATE["published"] or direct_moved or census != _STATE["census"]
-                 or _STATE["write_failed"])
-        capture = _capture(_STATE["reason"] or "main_loop", direct, census=census) if moved else None
-    if not moved:
-        return _refresh_alive()
-    return None if capture is None else _publish(capture)
+        moved = (_STATE["revision"] != _STATE["published"] or census != _STATE["census"] or _STATE["write_failed"])
+        capture = _capture(_STATE["reason"] or "main_loop", census=census) if moved else None
+    if not _WRITER.alive():
+        if not moved:
+            return _refresh_alive()
+        return None if capture is None else _publish(capture)
+    # The writer thread lands it (the newest capture replaces one it has not taken yet); a quiet tick asks it for
+    # the certificate refresh; the tick answers the last landed outcome, and a kept saved queue stays None.
+    if capture is not None:
+        _WRITER.offer(capture)
+    elif not moved and _queue().QUEUE_PUBLICATION is not None:
+        _WRITER.ask_refresh()
+    else:
+        return None  # kept, or nothing of this process certified yet
+    return False if _STATE["write_failed"] else True
 
 
 def _frozen(value: Any) -> Any:
@@ -254,7 +379,7 @@ def _kept_by_memo() -> bool:
     return _STATE["kept"] is not None and _STATE["kept"] == _custody_key()
 
 
-def _capture(reason: str, direct: Dict[str, Any], *, census: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def _capture(reason: str, *, census: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Under Q: the thin rows and queue facts of this revision; None when the saved queue is kept."""
     if _kept_by_memo():
         return None
@@ -265,7 +390,7 @@ def _capture(reason: str, direct: Dict[str, Any], *, census: Optional[str] = Non
     acceptance_fences = [_frozen(row) for row in _queue().ACCEPTANCE_FENCES.values()]
     budget_root_fences = [_frozen(row) for row in _queue().BUDGET_ROOT_FENCES.values()]
     if _keeps_saved_queue(_queue().QUEUE_SNAPSHOT_PATH, pending_items, running_items,
-                          acceptance_fences, budget_root_fences, (direct or {}).get("roots")):
+                          acceptance_fences, budget_root_fences):
         log.info("Queue snapshot kept (reason=%s): this process has not taken the saved queue into custody", reason)
         _STATE["kept"] = _custody_key()
         return None
@@ -293,7 +418,7 @@ def _capture(reason: str, direct: Dict[str, Any], *, census: Optional[str] = Non
         "forced": reason in _FORCED_REASONS,
         "pending": pending_rows, "running": running_rows,
         "acceptance_fences": acceptance_fences, "budget_root_fences": budget_root_fences,
-        "pool": _pool_counts(), "direct": direct,
+        "pool": _pool_counts(),
         "restart_intent": agent_restart_snapshot(), "restart_reply": dict(_AGENT_RESTART_REPLY),
         "heartbeats": {tid: meta.get("last_heartbeat_at") for tid, meta in running_items},
     }
@@ -332,7 +457,7 @@ def _pool_counts() -> Dict[str, Any]:
 
 
 def _documents(capture: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """Outside Q: the three documents of this capture; task values interned unless rollback-readable."""
+    """Outside Q: the two documents of this capture; task values interned unless rollback-readable."""
     from ouroboros.budget_pause import BUDGET_HOLD_KEY
 
     payload = {
@@ -365,9 +490,8 @@ def _documents(capture: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
             members[str(task.get("id") or "")] = member
     if not capture["rollback_readable"]:
         payload[SHARED_KEY] = _share_replicated(payload)
-    return {"queue_snapshot.json": payload,
-            "queue_dispatch.json": {"budget_root_fences": capture["budget_root_fences"], "members": members},
-            "direct_roots.json": capture["direct"]}
+    return {_SNAPSHOT_NAME: payload,
+            "queue_dispatch.json": {"budget_root_fences": capture["budget_root_fences"], "members": members}}
 
 
 def _share_replicated(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -413,11 +537,17 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _publish(capture: Dict[str, Any]) -> bool:
-    """Outside Q, one writer at a time: encode, compare, then revoke -> documents -> certify."""
+def _publish(capture: Dict[str, Any], *, writer: Optional[_TickWriter] = None) -> bool:
+    """Outside Q, one writer at a time: encode, compare, then revoke -> changed documents -> certify.
+
+    ``writer``: the tick's thread names itself, so a capture of a generation that ended while it was encoding
+    (``reset`` replaced the writer) is never written over the next generation's documents.
+    """
     documents = _documents(capture)
     encoded = {name: machine_json(document) for name, document in documents.items()}
     with _PUBLISH_LOCK:
+        if writer is not None and writer is not _WRITER:
+            return False  # an ended generation's capture: the next generation owns the documents now
         previous = _queue().QUEUE_PUBLICATION
         if previous is not None and _STATE["published_seq"] > capture["seq"] and not capture["forced"]:
             # A later capture already published newer documents; while a later write failed, the bundle on
@@ -425,21 +555,29 @@ def _publish(capture: Dict[str, Any]) -> bool:
             return not _STATE["write_failed"]
         # After a failed write the bundle on disk is unknown: byte equality with the last cache proves nothing,
         # so every document is rewritten under a new generation and certified (R2/R3-A).
-        changed = (previous is None or previous[:2] != (_queue().QUEUE_SNAPSHOT_PATH, encoded) or capture["forced"]
-                   or _STATE["write_failed"])
-        generation = uuid.uuid4().hex if changed else previous[2]
+        if (previous is None or previous[0] != _queue().QUEUE_SNAPSHOT_PATH or capture["forced"]
+                or _STATE["write_failed"]):
+            stale = list(documents)
+        else:
+            stale = [name for name in documents if previous[1].get(name) != encoded[name]]
+        changed = bool(stale)
+        generations = dict(previous[3]) if previous is not None else {}
+        if changed:
+            generations.update(dict.fromkeys(stale, uuid.uuid4().hex))
         state = _queue().QUEUE_SNAPSHOT_PATH.parent
         try:
             if changed:
                 _revoke_alive(state)  # A partial publish must not certify the old no-fence document.
-                for name, document in documents.items():
-                    published = {**document, "generation": generation, "ts": utc_now_iso(), "reason": capture["reason"]}
+                for name in stale:
+                    published = {**documents[name], "generation": generations[name], "ts": utc_now_iso(),
+                                 "reason": capture["reason"]}
                     if _queue().atomic_write_text(state / name, machine_json(published)) is False:
                         raise OSError(f"queue publication failed: {name}")
             if changed or _alive_due(capture["heartbeats"]):
-                _certify(state, generation, capture["heartbeats"])
+                _certify(state, generations, capture["heartbeats"])
             if changed:
-                _queue().QUEUE_PUBLICATION = (_queue().QUEUE_SNAPSHOT_PATH, encoded, generation)
+                _queue().QUEUE_PUBLICATION = (_queue().QUEUE_SNAPSHOT_PATH, encoded, generations[_SNAPSHOT_NAME],
+                                              generations)
             _STATE["published"] = max(_STATE["published"], capture["revision"])
             _STATE["published_seq"] = max(_STATE["published_seq"], capture["seq"])
             _STATE["census"] = capture["census"]  # written, so the tick's next census compares against it
@@ -471,7 +609,7 @@ def _refresh_alive() -> Optional[bool]:
         if _queue().QUEUE_PUBLICATION is not published:
             return True  # a publication landed meanwhile and certified itself
         try:
-            _certify(_queue().QUEUE_SNAPSHOT_PATH.parent, published[2], heartbeats)
+            _certify(_queue().QUEUE_SNAPSHOT_PATH.parent, published[3], heartbeats)
         except Exception:
             log.warning("Failed to refresh queue liveness", exc_info=True)
             return False
@@ -494,9 +632,13 @@ def _revoke_alive(state) -> None:
             time.sleep(0.01)  # Windows readers briefly deny delete sharing.
 
 
-def _certify(state, generation: str, heartbeats: Dict[str, Any]) -> None:
-    """``queue.alive`` names the generation on disk; written without fsync (a crash loses only freshness)."""
-    alive = {"generation": generation, "ts": utc_now_iso(), "heartbeats": heartbeats}
+def _certify(state, generations: Dict[str, str], heartbeats: Dict[str, Any]) -> None:
+    """``queue.alive`` names each document's generation on disk (``generation``: the snapshot's; ``documents``: the
+    others', absent when they share it); written without fsync (a crash loses only freshness)."""
+    others = {name: generation for name, generation in generations.items()
+              if name != _SNAPSHOT_NAME and generation != generations[_SNAPSHOT_NAME]}
+    alive = {"generation": generations[_SNAPSHOT_NAME], "ts": utc_now_iso(), "heartbeats": heartbeats,
+             **({"documents": others} if others else {})}
     if _write_alive(state / _ALIVE_NAME, json.dumps(alive, separators=(",", ":"))) is False:
         raise OSError("queue liveness publication failed")
     _STATE["alive_heartbeats"] = dict(heartbeats)

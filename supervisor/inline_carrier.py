@@ -344,7 +344,7 @@ def run_inline_turn(
     from ouroboros.server_restart import agent_restart_pending
     from supervisor import queue
     from supervisor.active_activity import reply_expected
-    from supervisor.conversation_lane import admit_turn
+    from supervisor.conversation_lane import admit_turn, publish_awaiting_rows
     from supervisor.worker_chat_lane import (
         _announce_turn_start, _client_message_id, _defer_chat_for_restart, _host_operation_failure,
         _report_direct_chat_error, _seed_task, owner_conversation_admitted,
@@ -368,27 +368,32 @@ def run_inline_turn(
                 _pool().send_with_budget(chat_id, "Restart intake is closed. This turn was not accepted; send it after Restart.",
                     **_host_operation_failure(task_metadata), role="system", system_type="task_not_started")
                 return None
-            if agent_restart_pending():
-                deferred = True
-            else:
-                deferred = False
-                meta = admit_turn(task, chat_id=chat_id, client_message_id=client_msg_id, quiet=False,
-                                  reply_expected=reply_expected({"metadata": task_metadata or {}}),
-                                  hold_carrier=True)
-                admitted = {"task": task, "chat_id": chat_id, "client_msg_id": client_msg_id, "kind": "direct_chat",
-                            "task_metadata": task_metadata, "realtime_turn": realtime_turn, "agent": None}
-                try:
+            deferred = agent_restart_pending()
+            meta = None if deferred else admit_turn(task, chat_id=chat_id, client_message_id=client_msg_id, quiet=False,
+                                                    reply_expected=reply_expected({"metadata": task_metadata or {}}))
+        if meta is not None:
+            admitted = {"task": task, "chat_id": chat_id, "client_msg_id": client_msg_id, "kind": "direct_chat",
+                        "task_metadata": task_metadata, "realtime_turn": realtime_turn, "agent": None}
+            try:
+                # The row's barrier outside Q (Q spans memory only); the process-local executor binds it under Q
+                # again, and only a row on disk (``start_inline_turn`` refuses an unpublished one).
+                publish_awaiting_rows()
+                with queue._queue_lock, _pool()._repo_writer_gate_lock:
+                    if _pool().RUNNING.get(str(task["id"])) is not meta:
+                        raise RuntimeError(f"conversation turn {task['id']} left the queue before its executor started")
                     start_inline_turn(
                         meta, executor=executor, reason="live_call" if realtime_turn is not None else "degraded",
                         realtime_turn=realtime_turn,
                         on_failure=lambda runner, error: _inline_failure({**admitted, "agent": runner}, error),
                     )
-                except Exception:
-                    # The body never started here and no carrier may take a process-local turn:
-                    # the row leaves with the refusal (reported below), never awaiting a carrier.
-                    _pool().RUNNING.pop(str(task.get("id") or ""), None)
+            except Exception:
+                # The body never started here and no carrier may take a process-local turn:
+                # the row leaves with the refusal (reported below), never awaiting a carrier.
+                with queue._queue_lock:
+                    if _pool().RUNNING.get(str(task["id"])) is meta:
+                        _pool().RUNNING.pop(str(task["id"]))
                     queue.persist_queue_snapshot(reason="conversation_turn_inline_refused")
-                    raise
+                raise
         if deferred:
             _defer_chat_for_restart(task, chat_id, task_metadata)
             return None
