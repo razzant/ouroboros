@@ -97,13 +97,15 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    progress signal; nothing else animates by itself, and a state change never moves a
    neighbour, resizes a bar or changes a height.
 7. **Words serve the next step.** The main view says the state and what its reader
-   needs to understand or do next, in owner words; provenance, caveats, codes and
-   gaps (`not recorded`, `not declared`, `not confirmed`) are facts of the record and of
-   details that pointer, touch and keyboard open, never hover alone. A phrase stays on
-   the main view only if without it its reader would understand or act differently;
-   clarity comes from placement, never from smaller text or a line quota. This book
-   keeps principles and roles; exact strings, templates and their history live with the
-   code and its tests, the owner's reactions in the installation's knowledge.
+   needs to understand or do next, in owner words. A phrase stays there only if without
+   it its reader would understand or act differently, so a gap that changes either stays
+   visible (an unconfirmed Panic; a message not confirmed as saved, beside Send again);
+   provenance, caveats, codes and gaps that change neither (`not recorded`,
+   `not declared`, `not confirmed`) are facts of the record and of details that pointer,
+   touch and keyboard open, never hover alone. Clarity comes from placement, never from
+   smaller text or a line quota. This book keeps principles and roles; exact strings,
+   templates and their history live in the code, its tests hold their facts and places,
+   and the owner's reactions live in the installation's knowledge.
 
 **Seed (light | dark)**
 
@@ -729,8 +731,7 @@ origin-addressed routing notices stay ordinary rows by design. Local diagnostic
 failures stay inspectable in details and Logs but do not relabel the whole
 still-working task. A failed child keeps a compact factual `Failed` marker
 inside its parent while the root continues under its own authoritative status.
-A card says a cause in the owner's words, its reason code in details, diagnostics
-and the record (bible principle 7). In root ending summaries, episodes and Main completion rows, a typed cause
+In root ending summaries, episodes and Main completion rows, a typed cause
 without a sentence reads "The recorded reason has no description yet", with
 its exact code in accessible details. Authored warning prose and raw host text
 stay intact; never infer meaning from spelling. The loop's forced-finalization rails
@@ -2501,10 +2502,10 @@ a server entry):
    rendered at secondary ink reads as disabled: its label is `--text-primary` (a
    setting's name and an unchosen option take the secondary ink, bible principle 4).
 
-**A row's words follow bible principle 7.** Its primary choices, owner actions and each
-exception that changes the next action or the state's name (an explicit store failure)
-stay visible, a value keeps its honest form (`up to`, `Tracked:`, unknown), and the rest
-opens in details (Accounts: metrics under Diagnostics, exact program text under Details).
+**A row's words follow bible principle 7.** Its primary choices and owner actions stay
+visible and a value keeps its honest form (`up to`, `Tracked:`, unknown). Accounts keeps
+an explicit store failure in view, metrics under Diagnostics and exact program text under
+Details.
 A rule every row shares is said once for the section, an unsaved draft once by the editor
 or its host page, and a checked box is not re-said beside it. A conditional line never
 moves the control that caused it: controls own stable slots, and a line an edit toggles
