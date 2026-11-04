@@ -915,6 +915,7 @@ D20 = "Presence"
 "ouroboros/jsonl_tail.py" = "D18"
 "ouroboros/temp_sweep.py" = "D18"
 "ouroboros/utils.py" = "D18"
+"ouroboros/shared_values.py" = "D18"  # one $shared token helper: queue documents, the observability CAS and the dialogue journal store a repeated element once
 "ouroboros/verified_download.py" = "D18"
 "ouroboros/version.py" = "D10"
 "ouroboros/vision_routing.py" = "D02"
