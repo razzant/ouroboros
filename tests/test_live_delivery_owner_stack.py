@@ -12,7 +12,7 @@ import pytest
 from ouroboros import call_protocol as cp
 from ouroboros.contracts.realtime import RealtimeSetupError
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_live_tool_continuity import Held, POINTER, unit_at
 from tests.test_live_tool_continuity_stack import answered_while_held, native_output, page_state
 

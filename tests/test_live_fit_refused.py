@@ -15,7 +15,7 @@ from ouroboros import call_protocol as cp, realtime_session
 from ouroboros.contracts.live_conversation import ContextUpdate, ToolOutputs
 from ouroboros.contracts.realtime import RealtimeSetupError
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_live_conversation_driver import Host, Session, started, until
 from tests.test_live_delivery_owner_stack import RESTART, handle
 from tests.test_live_tool_continuity import POINTER, Held, held_batch

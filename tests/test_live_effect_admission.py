@@ -19,7 +19,7 @@ from ouroboros.live_conversation import end_feature_calls
 from ouroboros.llm_attempt import PhysicalDispatchInterrupted
 from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, write_owner_message
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_live_conversation_driver import Batch, Host, until
 from tests.test_live_tool_continuity import invocation, is_request, reached, unit_at
 

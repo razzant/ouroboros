@@ -6,7 +6,7 @@ import pytest
 
 from ouroboros.contracts.live_conversation import LiveOptions
 from ouroboros.realtime_setup import measure_session_wire, session_candidate
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 @pytest.mark.parametrize('first', [False, True])

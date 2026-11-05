@@ -5,7 +5,7 @@ import queue
 import time
 from types import SimpleNamespace
 
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 def test_started_task_result_reaches_live_call_but_other_room_does_not(host_world, monkeypatch):

@@ -10,7 +10,8 @@ from ouroboros.context_budget import bound_host_row
 from ouroboros.context_fit import estimate_context_prompt_tokens as tokens
 from ouroboros.context_renewal import physical_window_cut
 from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path
-from tests.test_live_conversation import host_world as host_world, packages as packages
+from tests._live_world import host_world as host_world
+from tests.test_live_conversation import packages as packages
 
 
 @pytest.mark.parametrize('shape', ['meeting', 'autonomous', 'chat', 'mixed'])

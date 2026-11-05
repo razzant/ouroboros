@@ -14,6 +14,7 @@ import pytest
 from ouroboros.test_environment import SCRATCH_MARKER
 from tests import _contributor_packet_shared as shared
 from tests import _worlds
+from tests._live_world import _own_installation, installation_template
 from tests._worlds import clone, run_folder, world
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -204,3 +205,14 @@ def test_a_cloned_checkout_is_stat_clean_and_its_own_repository(run_root, tmp_pa
     assert shared.git(template, "rev-parse", "HEAD") == shared.git(sibling, "rev-parse", "HEAD") == fixture["base_sha"]
     assert shared.git(template, "branch", "--list", "only-here") == shared.git(sibling, "branch", "--list", "only-here") == ""
     assert shared.git(sibling, "status", "--porcelain") == ""
+
+
+def test_the_installation_a_host_starts_from_is_a_private_copy(run_root, tmp_path):
+    env, memory, rooms = _own_installation(tmp_path / "one", books=False)
+    other, _memory, same = _own_installation(tmp_path / "two", books=False)
+    template = installation_template(books=False) / "world"
+    before = _tree(template)
+    assert rooms == same and set(rooms) == {"alpha", "beta"} and env.drive_root != other.drive_root
+    memory.scratchpad_path().write_text("this test's scratchpad", encoding="utf-8")
+    assert (other.drive_root / "memory" / "scratchpad.md").read_text(encoding="utf-8") == "scratch"
+    assert _tree(template) == before

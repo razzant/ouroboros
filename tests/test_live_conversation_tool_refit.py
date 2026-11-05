@@ -9,7 +9,7 @@ from ouroboros.contracts.live_conversation import ContextUpdate, LiveEvent, Live
 from ouroboros.contracts.realtime import RealtimeSetupError
 from ouroboros import call_protocol as cp
 from skills.live_conversation.driver import _Call
-from tests.test_live_conversation import host_world as host_world  # noqa: F401
+from tests._live_world import host_world as host_world  # noqa: F401
 from tests.test_live_conversation_driver import Batch, Host, Hub, install_tools, started, until
 from tests.test_live_usage import token_usage
 

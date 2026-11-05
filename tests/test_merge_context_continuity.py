@@ -6,7 +6,7 @@ import queue
 
 import pytest
 
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_scratchpad_fold import install as install
 
 

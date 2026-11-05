@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_call_task_lifecycle import direct_call as direct_call
 
 

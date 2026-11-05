@@ -6,7 +6,7 @@ import pytest
 
 from ouroboros import call_peers, call_protocol as cp
 from ouroboros.contracts.realtime import RealtimeSetupError
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 def drop_evidence(samples, rate):
