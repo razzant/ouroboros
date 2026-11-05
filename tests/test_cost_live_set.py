@@ -29,15 +29,16 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterator, List
 
 import pytest
 
 from tests._cost_driver import name_owed, refused
 from tests._live_set import STAGES
-from tests.test_cost_contract import BYTE_JITTER, DUTY_NAMES, contract_breaches, measure, rest_breaches, vm_allowance
+from tests._stand_cache import STAND_MARKS, measuring
+from tests.test_cost_contract import BYTE_JITTER, DUTY_NAMES, contract_breaches, rest_breaches, vm_allowance
 
-pytestmark = pytest.mark.scale
+pytestmark = [pytest.mark.scale, *STAND_MARKS]
 
 K_SMALL, K_LARGE = 1, 30
 AXES = STAGES[1:]
@@ -64,8 +65,9 @@ def _gap(table: Dict[Any, str], key: Any) -> tuple:
 
 
 @pytest.fixture(scope="module")
-def live(tmp_path_factory) -> Dict[int, Dict[str, Any]]:
-    return {k: measure(tmp_path_factory.mktemp("live"), k, plan="live_set") for k in (K_SMALL, K_LARGE)}
+def live() -> Iterator[Dict[int, Dict[str, Any]]]:
+    with measuring(K_SMALL, plan="live_set") as small, measuring(K_LARGE, plan="live_set") as large:
+        yield {K_SMALL: small, K_LARGE: large}
 
 
 def judged_pass(measured: Dict[str, Any], stage: str, name: str, phase: str = "rest", where: str = "") -> Dict[str, Any]:

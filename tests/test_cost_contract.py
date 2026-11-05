@@ -63,20 +63,18 @@ import os
 import pathlib
 import sqlite3
 import sys
-from typing import Any, Callable, Dict, Hashable, Iterable, List, Tuple
+from typing import Any, Callable, Dict, Hashable, Iterable, Iterator, List, Tuple
 
 import pytest
 
 from tests._cost_driver import ACTIVITIES, name_owed, refused, schedule_child_job
 from tests._cost_meter import EXECUTION, HISTORY, VM_STEP, CostMeter, tagged
-from tests._scale_root import worktree_root
+from tests._stand_cache import STAND_MARKS, measuring
 from tests._turn_law import hold_turn_law, readers_of, turn_gap
 
-pytestmark = pytest.mark.scale
+pytestmark = [pytest.mark.scale, *STAND_MARKS]
 
-REPO = pathlib.Path(__file__).resolve().parents[1]
 K_SMALL = 1
-CHILD_TIMEOUT_SEC = 900  # a transport bound for one child, not a judgment about the boot
 LOCATIONS = ("root", *HISTORY, EXECUTION)
 # Counted per location; lock files (``lock``) are left out: how often a lock is probed and retried
 # follows the contention between this process's threads at that instant, not the history. Its
@@ -115,49 +113,25 @@ def _gap(table: Dict[Any, str], name: Hashable) -> tuple:
 
 # ---- measurement -------------------------------------------------------------------------------
 
-def _child(module: str, args: List[str], env: Dict[str, str], log: pathlib.Path) -> None:
-    """One fresh interpreter; a timeout or an interrupt stops its whole process tree (tests/group_run.py)."""
-    from tests.group_run import run_in_group
-
-    done = run_in_group([sys.executable, "-m", module, *args], timeout=CHILD_TIMEOUT_SEC, cwd=REPO, env=env)
-    log.write_text(done.stdout + done.stderr, encoding="utf-8")
-    if done.returncode != 0:
-        raise RuntimeError(f"{module} exited {done.returncode}:\n{(done.stdout + done.stderr)[-6000:]}")
-
-
-def measure(base: pathlib.Path, k: int, **plan: Any) -> Dict[str, Any]:
-    """Build the k-root in one interpreter, then boot and query it in another (cold); ``plan``: what the driver
-    measures instead of the contract's boundaries (the live-set axis, tests/test_cost_live_set.py)."""
-    home = base / f"k{k:03d}"
-    root, repo = home / "data", home / "repo"
-    root.mkdir(parents=True)
-    repo.mkdir()
-    # The delegated copies live under the worktree root the build and the boot both name (tests/_scale_root.py).
-    env = {**os.environ, "OUROBOROS_DATA_DIR": str(root), "OUROBOROS_SETTINGS_PATH": str(root / "settings.json"),
-           "OUROBOROS_REPO_DIR": str(repo), "OUROBOROS_HOST_SERVICE_PORT": "0",
-           "OUROBOROS_SUBAGENT_WORKTREE_ROOT": str(worktree_root(root)), "COST_STORE_JOURNAL": str(plan.get("journal") or "")}
-    facts_path, spec_path, out_path = home / "facts.json", home / "spec.json", home / "measured.json"
-    _child("tests._scale_root", [str(root), str(k), str(facts_path)], env, home / "build.log")
-    facts = json.loads(facts_path.read_text(encoding="utf-8"))
-    spec_path.write_text(json.dumps({"root": str(root), "facts": facts, **plan}), encoding="utf-8")
-    _child("tests._cost_driver", [str(spec_path), str(out_path)], env, home / "drive.log")
-    measured = json.loads(out_path.read_text(encoding="utf-8"))
-    if measured["errors"]:  # a broken measurement is not an expected performance assertion
-        raise RuntimeError(f"k={k}: the driver failed:\n" + "\n".join(measured["errors"]))
-    measured["root"] = str(root)
-    return measured
+@pytest.fixture(scope="module")
+def built_small() -> Dict[str, Any]:
+    """The first drive of the stand, over the build itself where this module comes first, as it does in collection order."""
+    with measuring(K_SMALL) as counted:
+        return counted
 
 
 @pytest.fixture(scope="module")
-def small(tmp_path_factory) -> Dict[str, Any]:
-    return measure(tmp_path_factory.mktemp("cost"), K_SMALL)
+def small(built_small) -> Iterator[Dict[str, Any]]:
+    with measuring(K_SMALL) as counted:
+        yield counted
 
 
 @pytest.fixture(scope="module", params=[pytest.param(30, id="k30"),
                                         pytest.param(100, id="k100", marks=pytest.mark.integration)])
-def measured(request, small, tmp_path_factory) -> Dict[int, Dict[str, Any]]:
+def measured(request, small) -> Iterator[Dict[Any, Any]]:
     large = request.param
-    return {K_SMALL: small, large: measure(tmp_path_factory.mktemp("cost"), large), "large": large}
+    with measuring(large) as counted:
+        yield {K_SMALL: small, large: counted, "large": large}
 
 
 # ---- the comparison ----------------------------------------------------------------------------
@@ -173,6 +147,17 @@ def contract_breaches(small: Dict[str, int], large: Dict[str, int], k_large: int
     if large.get("vm_steps", 0) > small.get("vm_steps", 0) + allowed:
         breaches["vm_steps"] = (small.get("vm_steps", 0), large.get("vm_steps", 0), f"allowance {allowed}")
     return breaches
+
+
+def test_a_restored_stand_measures_what_its_build_measured(built_small, small):
+    """``small`` drives what ``_restore`` (tests/_stand_cache.py) put back. Were that a copy, the boot would meet new inodes under
+    the recorded file identities and list the history they exist to spare, and the count would say so here. A turn's counts
+    (``T:``) differ between any two drives, even of two fresh builds; B10 holds them to its own law."""
+    tags = [tag for tag, entry in small.items() if isinstance(entry, dict) and "counts" in entry and not tag.startswith("T:")]
+    assert {"B1", "B2_ready", "B3", "B5", "R_late"} <= set(tags)
+    for tag in tags:
+        assert not contract_breaches(built_small[tag]["counts"], small[tag]["counts"], K_SMALL), tag
+        assert not contract_breaches(small[tag]["counts"], built_small[tag]["counts"], K_SMALL), tag
 
 
 def boundary(measured: Dict[Any, Any], tag: str, k: int) -> Dict[str, Any]:
