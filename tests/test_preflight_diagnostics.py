@@ -36,11 +36,11 @@ def test_samples_are_whole_and_stop_with_a_finite_join(tmp_path, monkeypatch):
 def test_a_failed_exit_event_still_stops_the_sampler(tmp_path, preflight_timeout_diagnostics):
     """The probe's own exit handler stops and joins its sampler even when its last event cannot be written."""
     preflight_timeout_diagnostics(dump_after=60)
-    module = preflight_runner._install_worker_probe(tmp_path)
+    module = preflight_runner.install_worker_probe(tmp_path)
     script = ("import atexit, sys, threading\n"  # registered first, so it runs after the probe's handler
               "atexit.register(lambda: print('sampler alive:', any(t.name == 'preflight-stack-sampler'"
               " for t in threading.enumerate())))\n"
-              f"sys.path.insert(0, {str(preflight_runner._probe_dir(tmp_path))!r})\n"
+              f"sys.path.insert(0, {str(preflight_runner.probe_dir(tmp_path))!r})\n"
               f"__import__({module!r})._trace.close()\n")
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0 and "sampler alive: False" in result.stdout, result.stdout + result.stderr

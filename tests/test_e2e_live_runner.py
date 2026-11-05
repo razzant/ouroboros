@@ -197,7 +197,7 @@ def test_preflight_worker_cap_reaches_every_lane_and_is_recorded(tmp_path, monke
     from ouroboros import preflight_probe, preflight_runner, test_parallelism
     _short_tmp(monkeypatch)
     assert run_live_lanes.PREFLIGHT_WORKERS_ENV == test_parallelism.WORKERS_ENV
-    assert run_live_lanes.PREFLIGHT_WORKERS_FLOOR == preflight_runner._MIN_PREFLIGHT_WORKERS
+    assert run_live_lanes.PREFLIGHT_WORKERS_FLOOR == preflight_runner.MIN_PREFLIGHT_WORKERS
     assert run_live_lanes.parse_args(["--stub", "--lanes", "1"]).preflight_test_workers == 16
     assert run_live_lanes.parse_args(["--stub", "--lanes", "4"]).preflight_test_workers == 4
     assert run_live_lanes.parse_args(["--stub", "--lanes", "6"]).preflight_test_workers == 2   # floor at MAX_LANES

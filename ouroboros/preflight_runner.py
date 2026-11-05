@@ -12,9 +12,9 @@ import sys
 import time
 from typing import NamedTuple, Optional, Sequence
 
-from ouroboros.preflight_probe import (  # the gate's plugin in the candidate run, and the admission beside it
-    _MIN_PREFLIGHT_WORKERS, _WORKER_PROBE_MODULE, _allocated_worker_count, _install_worker_probe, _observed_worker_ids,
-    _probe_dir, _recorded_admission, _recorded_session,
+from ouroboros.preflight_probe import (  # the gate's plugin in the candidate run and the admission beside it: its public contract
+    MIN_PREFLIGHT_WORKERS, WORKER_PROBE_MODULE, allocated_worker_count, install_worker_probe, observed_worker_ids,
+    probe_dir, recorded_admission, recorded_session,
 )
 
 # Node lane of the gate (`run_hermetic_pytest` calls it once the candidate is
@@ -231,7 +231,7 @@ def _preflight_pass_specs(
     argv at all changes the discovery target and the output flags rather than
     preserving any caller contract.
 
-    ``probe_module`` is the NONCE name ``_install_worker_probe`` actually wrote.
+    ``probe_module`` is the NONCE name ``install_worker_probe`` actually wrote.
     It must be threaded through: ``-p name`` is an ordinary import, so a parallel
     pass built against the bare stem loads a module no file is named after and
     pytest exits ``EXIT_USAGEERROR`` before collecting a single test. The stem is
@@ -258,14 +258,14 @@ def _preflight_pass_specs(
                 # neither — the caller's argv is forwarded verbatim, and the
                 # worker-count check keys on the probe flag being present.
                 *_FORCED_PLUGIN_FLAGS,
-                "-p", probe_module or _WORKER_PROBE_MODULE,
+                "-p", probe_module or WORKER_PROBE_MODULE,
                 *output_flags,
             ],
         ),
         _make_pass(
             "serial",
             [target, "-m", f"{EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}", *SERIAL_PASS_FLAGS,
-             *_FORCED_SERIAL_PLUGIN_FLAGS, "-p", probe_module or _WORKER_PROBE_MODULE, *output_flags],
+             *_FORCED_SERIAL_PLUGIN_FLAGS, "-p", probe_module or WORKER_PROBE_MODULE, *output_flags],
         ),
     ]
 
@@ -491,11 +491,11 @@ def _preflight_env(temp_root: pathlib.Path, repo_worktree: pathlib.Path, *, crea
     # PREPENDED, so `-p ouroboros_preflight_probe` resolves to the gate's own
     # worker-count plugin and not to anything the candidate tree or the
     # operator's PYTHONPATH happens to shadow it with.
-    env["PYTHONPATH"] = str(_probe_dir(temp_root))
+    env["PYTHONPATH"] = str(probe_dir(temp_root))
     # Re-injected AFTER the scrub, so `-n auto` resolves to a count this process
     # chose rather than one the operator environment happened to carry. Inert for
     # the serial/legacy passes, which pass no `-n` at all.
-    env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = str(_allocated_worker_count(temp_root) if workers is None else workers)
+    env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = str(allocated_worker_count(temp_root) if workers is None else workers)
     env[NESTED_WORKERS_ENV] = env["PYTEST_XDIST_AUTO_NUM_WORKERS"]
     from ouroboros.test_evidence import DURATIONS_POINTER, EVIDENCE_ENV, EVIDENCE_POINTER, TEST_DURATIONS_ENV
     pointer = temp_root / EVIDENCE_POINTER
@@ -558,7 +558,7 @@ print(json.dumps(problems))
 
 def _probe_plugins(
     agent_python: str,
-    probe_dir: pathlib.Path,
+    probe_root: pathlib.Path,
     *,
     isolated: bool,
     spec: Optional[Sequence[tuple]] = None,
@@ -574,7 +574,7 @@ def _probe_plugins(
     argv = [agent_python] + (["-I"] if isolated else []) + ["-c", _PLUGIN_PROBE_SOURCE, payload]
     try:
         proc = subprocess.run(
-            argv, cwd=str(probe_dir), capture_output=True, text=True, timeout=60
+            argv, cwd=str(probe_root), capture_output=True, text=True, timeout=60
         )
     except FileNotFoundError:
         # The caller already renders a precise "no such interpreter" message.
@@ -591,7 +591,7 @@ def _probe_plugins(
     return [str(problem) for problem in problems]
 
 
-def _verify_preflight_plugins(agent_python: str, probe_dir: pathlib.Path) -> list[str]:
+def _verify_preflight_plugins(agent_python: str, probe_root: pathlib.Path) -> list[str]:
     """Prove the SELECTED interpreter really carries the parallel-pass plugins.
 
     Independent of the candidate on purpose. Inferring "the plugins are there"
@@ -602,20 +602,20 @@ def _verify_preflight_plugins(agent_python: str, probe_dir: pathlib.Path) -> lis
     proving nothing.
 
     The candidate-controlled import surface is the working directory, so the
-    probe runs from ``probe_dir`` — the disposable temp root, before the
+    probe runs from ``probe_root`` — the disposable temp root, before the
     worktree even exists — and never from the diff-applied tree. No candidate
     conftest, sitecustomize or plugin can run before the answer is known.
 
     Returns the list of problems; an empty list means verified.
     """
-    problems = _probe_plugins(agent_python, probe_dir, isolated=True)
+    problems = _probe_plugins(agent_python, probe_root, isolated=True)
     if not problems:
         return []
     # `-I` additionally drops PYTHONPATH and the user site directory, which the
     # real pass DOES honour. Neither is candidate-controlled — both come from the
     # operator's own environment — so a strict miss is re-confirmed without them
     # rather than hard-blocking every commit on a legitimate `pip install --user`.
-    return _probe_plugins(agent_python, probe_dir, isolated=False)
+    return _probe_plugins(agent_python, probe_root, isolated=False)
 
 
 def _plugin_missing_remediation(agent_python: str, rejected: str = "") -> str:
@@ -651,7 +651,8 @@ def _resolve_preflight_timeout(timeout: Optional[int] = None, *, full: bool = Fa
     caller's own, then `_DEFAULT_PREFLIGHT_TIMEOUT_SEC`. The full suite takes only a caller's own: how long the
     whole suite honestly takes is this install's to find, and a constant below it makes every full proof red, so
     a full run ends by its tests' own 300 s bound, the containment proof and the owner's Stop, and records how
-    long it took."""
+    long it took. The residual of that choice (owner 5A): nothing bounds a full run's collection or its bytecode
+    warm, so a candidate whose test import blocks holds a full gate until Stop."""
     raw = None if full else os.environ.get("OUROBOROS_PREFLIGHT_TIMEOUT_SEC")
     if raw:
         try:
@@ -738,48 +739,37 @@ def _controller_diagnostics(output_root) -> str:
     return "\n".join(found.values()) + ("\n" if found else "")
 
 
-def _execute_pytest_pass(
-    agent_python: str,
-    worktree: pathlib.Path,
-    temp_root: pathlib.Path,
-    args: Sequence[str],
-    timeout: Optional[float],
-) -> tuple[Optional[int], str, str]:
-    """Run ONE pytest invocation in the prepared worktree.
+def _execute_lane(argv: Sequence[str], worktree: pathlib.Path, temp_root: pathlib.Path,
+                  timeout: Optional[float], lane: str):
+    """Run ONE contained lane of the gate (a pytest pass, the bytecode warm) in the prepared worktree.
 
-    ``timeout`` is the caller's exact remaining share of the TOTAL budget and
-    stays a float — rounding it up would let the last pass outlive the total;
-    None when the run has no total budget (the full suite).
+    ``timeout`` is the caller's exact remaining share of the TOTAL budget and stays a float — rounding it up
+    would let the last lane outlive the total; None when the run has no total budget (the full suite).
 
-    Returns ``(returncode, combined_output, containment_error)``.
-    ``returncode is None`` means the pass exhausted its slice of the budget and
-    its whole process tree was reaped. The output of a timed-out pass is whatever
-    the child had flushed before the kill. Both passes carry the same 300 s
-    per-test timeout; a kill of the whole pass budget leaves that flushed output
-    as the only evidence of WHICH test was running.
+    Returns a ``CapturedPass``: ``(returncode, combined_output, containment_error)`` plus the lane's own
+    diagnostic errors and container token. ``returncode is None`` means the lane exhausted its slice of the
+    budget and its whole process tree was reaped; its output is whatever the child had flushed before the
+    kill, the only evidence of WHICH test was running.
 
-    A NON-EMPTY ``containment_error`` is a hard block the caller must not accept
-    as green, whatever the return code says: the container's post-pass SCAN found
-    a process the pass spawned still alive, or could not determine whether one is
-    (which counts the same), so a green pass may be sitting on top of a live tree
-    that survives into pass 2 and past teardown. The reap therefore happens before
-    the return rather than in the `finally` below, which cannot alter an
-    already-computed tuple; only the handle release stays unconditional.
+    A NON-EMPTY ``containment_error`` is a hard block the caller must not accept as green, whatever the return
+    code says: the container's post-lane SCAN found a process the lane spawned still alive, or could not
+    determine whether one is (which counts the same), so a green lane may be sitting on top of a live tree
+    that survives into the next lane and past teardown. The reap therefore happens before the return rather
+    than in the `finally` below, which cannot alter an already-computed tuple; only the handle release stays
+    unconditional. The lane's tree runs behind the owner's work (``background=True``).
     """
     from ouroboros.process_containment import ProcessContainer
 
-    from ouroboros.preflight_inventory import launch_args, note_lane_process
+    from ouroboros.preflight_inventory import note_lane_process
     from ouroboros.test_evidence import CapturedPass, FileOutput
 
-    args = launch_args(args)  # a selected scope is carried by its inventory plugin, not by the command line
+    argv = list(argv)
     container = ProcessContainer(lifeline=True, overload=True)
-    output = FileOutput(temp_root, "pytest")
+    output = FileOutput(temp_root, lane)
     proc = None
     try:
-        proc = container.spawn(  # the owner's work keeps the foreground: the gate's tree runs behind it
-            [agent_python, "-m", "pytest", *args], background=True, cwd=str(worktree),
-            env=_preflight_env(temp_root, worktree), stdout=output.stdout, stderr=output.stderr,
-        )
+        proc = container.spawn(argv, background=True, cwd=str(worktree), env=_preflight_env(temp_root, worktree),
+                               stdout=output.stdout, stderr=output.stderr)
         try:
             returncode: Optional[int] = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -792,13 +782,13 @@ def _execute_pytest_pass(
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                reap_error = reap_error or "direct pytest process did not exit after reap"
-        preview = output.finish(returncode=returncode, containment_error=reap_error,
-                                argv=[agent_python, "-m", "pytest", *args])
-        try:
-            preview = _controller_diagnostics(output.root) + preview
-        except OSError as exc:
-            output.failed("controller diagnostics", exc)
+                reap_error = reap_error or f"direct {lane} process did not exit after reap"
+        preview = output.finish(returncode=returncode, containment_error=reap_error, argv=argv)
+        if lane == "pytest":
+            try:
+                preview = _controller_diagnostics(output.root) + preview
+            except OSError as exc:
+                output.failed("controller diagnostics", exc)
         return CapturedPass(returncode, preview, reap_error, output.errors, container.token)
     except BaseException as exc:
         if proc is not None and proc.poll() is None:
@@ -812,6 +802,21 @@ def _execute_pytest_pass(
         container.close()
         output.close()
 
+
+def _execute_pytest_pass(
+    agent_python: str,
+    worktree: pathlib.Path,
+    temp_root: pathlib.Path,
+    args: Sequence[str],
+    timeout: Optional[float],
+) -> tuple[Optional[int], str, str]:
+    """Run ONE pytest invocation in the prepared worktree: ``_execute_lane`` with pytest's argv (a selected scope
+    travels in its inventory plugin, not on the command line) and the controller's diagnostics ahead of the
+    output. Both passes carry the same 300 s per-test timeout; a kill of the whole pass budget leaves the
+    flushed output as the only evidence of which test was running."""
+    from ouroboros.preflight_inventory import launch_args
+
+    return _execute_lane([agent_python, "-m", "pytest", *launch_args(args)], worktree, temp_root, timeout, "pytest")
 
 _TRUNCATION_MARKER = "\n...(truncated)..."
 
@@ -904,7 +909,7 @@ def _crash_remediation(recorded: Optional[dict] = None) -> str:
     """The instruction line for a dead worker — it depends on WHY it died.
 
     The label and the hard block are identical either way; only this line changes.
-    ``recorded`` is this pass's own results.json (``_recorded_session``). The timeout
+    ``recorded`` is this pass's own results.json (``recorded_session``). The timeout
     instruction needs the worker the session recorded dead among its crash rows and
     every crash row naming its worker and a matched timeout; anything less, a missing
     or unreadable record included, is diagnosed before any fix is chosen.
@@ -1088,9 +1093,33 @@ def _with_retention_notice(verdict: str, unproven: str, worktree: pathlib.Path, 
 
 
 def _warm_bytecode(agent_python, worktree, temp_root, evidence, timeout, files=()) -> str:
-    from ouroboros.test_bytecode import warm_lane
+    """The gate's warm before its passes (ouroboros/test_bytecode.py): one contained root compiles the candidate
+    and collects its tests, or a selection's modules, in as many shards as the gate admitted workers; its facts
+    join the run's lanes. Returns a hard-block diagnosis only when the warm's tree outlived it (containment),
+    never for a warm that failed or ran out of ``timeout`` (what the run's budget still held, None for none;
+    the passes are charged nothing for it): those leave the passes cold, recorded as such."""
+    from ouroboros.test_bytecode import command
 
-    return warm_lane(agent_python, worktree, temp_root, evidence, timeout, files)
+    files_from = None
+    if files:
+        files_from = probe_dir(temp_root) / "warm-files.txt"
+        files_from.write_text("\n".join(files) + "\n", encoding="utf-8")
+    argv = command(agent_python, worktree, workers=allocated_worker_count(temp_root), files_from=files_from)
+    started = time.monotonic()
+    returncode, preview, reap_error = result = _execute_lane(argv, worktree, temp_root, timeout, "warm")
+    facts = next((line.removeprefix("WARM_BYTECODE ").strip() for line in preview.splitlines()
+                  if line.startswith("WARM_BYTECODE ")), "")
+    _record_lane(evidence, "warm", {"evidence_errors": result.evidence_errors}, returncode=returncode,
+                 containment_error=reap_error, seconds=round(time.monotonic() - started, 1),
+                 facts=json.loads(facts) if facts else None)
+    if reap_error:
+        return _diagnosis(
+            "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_CONTAINMENT_FAILED (hard block): the warm ran, but processes it "
+            "spawned were still alive afterwards (or could not be determined to be gone)",
+            "The bytecode warm collects the candidate's test tree once; a tree it leaves alive survives into the "
+            "passes and past teardown, so its verdict is not accepted. Find what the candidate's collection starts "
+            "and does not wait for.", reap_error, 8000)
+    return ""
 
 
 def _durations_target(ctx) -> Optional[pathlib.Path]:
@@ -1291,15 +1320,16 @@ def _run_hermetic_pytest(
     selection, subject, inventory, lease = None, None, {}, None
     try:
         from ouroboros.test_evidence import DURATIONS_POINTER, EVIDENCE_POINTER
-        from ouroboros.test_parallelism import SlotLease
+        from ouroboros.test_parallelism import reserve
         (temp_root / EVIDENCE_POINTER).write_text(str(evidence["path"]), encoding="utf-8")
         if (durations := _durations_target(ctx)) is not None:  # every session of this gate keeps it current
             (temp_root / DURATIONS_POINTER).write_text(str(durations), encoding="utf-8")
+        # One reservation under the ledger's lock: the admission and this run's row, which stays leased in the
+        # host ledger until the run ends, whatever the verdict.
+        admitted, lease = reserve("hermetic gate")
         # Install before compiling specs: -p must name the actual nonce module.
-        probe_module = _install_worker_probe(temp_root)
-        # The admitted workers stay leased in the host ledger until this run ends, whatever the verdict.
-        lease = SlotLease(_allocated_worker_count(temp_root), "hermetic gate")
-        evidence["workers"] = _recorded_admission(temp_root)
+        probe_module = install_worker_probe(temp_root, admitted)
+        evidence["workers"] = recorded_admission(temp_root)
         passes = _preflight_pass_specs(pytest_args, probe_module=probe_module)
         # Before ANY candidate code is on disk, let alone imported.
         if any(spec.parallel for spec in passes):
@@ -1413,6 +1443,8 @@ def _run_hermetic_pytest(
                     f"⚠️ PRE_PUSH_TEST_ERROR: the {spec.label} pass never started — the "
                     f"total budget of {timeout} seconds was exhausted by the earlier pass(es)"
                 )
+            if lease is not None and not spec.parallel:
+                lease.hold(1)  # a one-process pass holds one slot: the admitted count went with the xdist pass
             # Headers report this pass, not cumulative shared-budget time.
             pass_started = time.monotonic()
             unproven_teardown = f"the {spec.label} pass did not return, so its teardown is unconfirmed"
@@ -1443,7 +1475,7 @@ def _run_hermetic_pytest(
                 )
             if inventory_error and returncode in (0, _PYTEST_EXIT_NO_TESTS):
                 return f"⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_INVENTORY: {spec.label}: {inventory_error}"
-            recorded = _recorded_session(temp_root) if probe_module in spec.args else None
+            recorded = recorded_session(temp_root) if probe_module in spec.args else None
             # A candidate's own default-lane plugin (tests/default_lane.py) ends a pass that holds none of the
             # selection's tests with 0 and says so; its record still shows what it collected: nothing.
             if returncode == _PYTEST_EXIT_NO_TESTS or (returncode == 0 and _collected_nothing(recorded)):
@@ -1452,8 +1484,8 @@ def _run_hermetic_pytest(
             if returncode == 0 and spec.parallel and probe_module in spec.args:
                 # Use the actual nonce flag, not the stem or spec.parallel:
                 # custom argv gets no host probe; red/empty lanes need no count.
-                observed = _observed_worker_ids(temp_root)
-                if len(observed) < (required := min(_MIN_PREFLIGHT_WORKERS, _allocated_worker_count(temp_root))):
+                observed = observed_worker_ids(temp_root)
+                if len(observed) < (required := min(MIN_PREFLIGHT_WORKERS, allocated_worker_count(temp_root))):
                     return _diagnosis(
                         "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_PARALLELISM_LOST (hard block): "
                         f"the {spec.label} pass returned green on {len(observed)} xdist "

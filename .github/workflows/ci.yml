@@ -832,9 +832,12 @@ jobs:
   # The next run's shard weights: every default-lane and UI shard's recorded
   # durations, per OS. Written even after a red run (a red test still took its
   # time); a run without proofs writes nothing and the next run packs by count.
+  # A `scope=tests` dispatch (Ubuntu + Windows, no UI lane) publishes nothing:
+  # `shard-plan` takes the newest table, and one that never measured macOS or
+  # the UI shards would pack the next release run's by count.
   ci-durations:
     needs: [full-test, ui-smoke]
-    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) }}
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) && inputs.scope != 'tests' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -1121,16 +1124,25 @@ jobs:
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         run: |
           set -euo pipefail
-          # `serial` names the host resource a test cannot isolate (tests/conftest.py groups
-          # the xdist pass by it). If a refactor dropped every mark the groups would silently
-          # vanish. `--collect-only -m serial` reproduces that selection: an empty lane makes
-          # pytest exit 5 (EXIT_NOTESTSCOLLECTED), which
-          # `set -o pipefail` surfaces through `| tee` to fail this step. The positive anchor
-          # grep is the working assertion — under -q pytest prints NO "no tests collected"
-          # text, so a `! grep` on it is a false-green no-op; instead we pin a known-stable
-          # serial file as a deliberate canary (rename it -> update this line).
+          # `serial("<resource>")` names the host resource a test cannot isolate (tests/conftest.py
+          # groups the xdist pass by it; `_SERIAL_RESOURCES` marks whole files). If a refactor
+          # dropped every mark the groups would silently vanish. `--collect-only -m serial`
+          # reproduces that selection: an empty lane makes pytest exit 5, which `set -o pipefail`
+          # surfaces through `| tee`. Under -q pytest prints no "no tests collected" text, so the
+          # working assertion is positive: every file `_SERIAL_RESOURCES` names must be in the
+          # collection, read from the same source of truth (no canary to rename by hand).
           python -m pytest tests/ --collect-only -m serial -q | tee /tmp/serial-collect.txt
-          grep -q "tests/test_workspace_executor.py" /tmp/serial-collect.txt
+          python - <<'PY'
+          import ast, pathlib
+          tree = ast.parse(pathlib.Path("tests/conftest.py").read_text(encoding="utf-8"))
+          [node] = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                    and any(getattr(target, "id", "") == "_SERIAL_RESOURCES" for target in n.targets)]
+          names = sorted(ast.literal_eval(node.value))
+          collected = pathlib.Path("/tmp/serial-collect.txt").read_text(encoding="utf-8")
+          missing = [name for name in names if f"tests/{name}" not in collected]
+          assert names and not missing, f"the serial lane misses {missing} of _SERIAL_RESOURCES {names}"
+          print(f"the serial lane holds every file _SERIAL_RESOURCES names ({len(names)})")
+          PY
       - name: Guard non-empty skill_smoke marker lane
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         run: |

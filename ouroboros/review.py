@@ -1165,21 +1165,58 @@ def _recorded_test_seconds(paths: list[str]) -> tuple[float, int] | None:
     return sum(recorded) / 1000, len(paths) - len(recorded)
 
 
+def _blob_texts(root: pathlib.Path, specs: list[str]) -> dict[str, str | None]:
+    """The text of every git object spec (`rev:path`, `:path`), None where it is missing: one
+    `git cat-file --batch` for all of them (a spec holding whitespace is read with its own `git show`)."""
+    from ouroboros.reference_books import _git_bytes
+
+    texts: dict[str, str | None] = {}
+    batched = [spec for spec in specs if not any(char.isspace() for char in spec)]
+    for spec in specs:
+        if spec not in batched:
+            raw = _git_bytes(root, "--no-optional-locks", "show", spec)
+            texts[spec] = None if raw is None else raw.decode("utf-8", "replace")
+    if not batched:
+        return texts
+    try:
+        done = subprocess.run(["git", "--no-optional-locks", "cat-file", "--batch"], cwd=str(root), timeout=120,
+                              input="".join(spec + "\n" for spec in batched).encode("utf-8"), capture_output=True)
+        out = done.stdout if done.returncode == 0 else b""
+    except (OSError, subprocess.SubprocessError):
+        out = b""
+    position = 0
+    for spec in batched:  # `<oid> <type> <size>\n<bytes>\n`, or `<spec> missing\n`, in input order
+        end = out.find(b"\n", position)
+        if end < 0:
+            texts[spec] = None
+            continue
+        header = out[position:end].split()
+        position = end + 1
+        if len(header) == 3 and header[2].isdigit():
+            size = int(header[2])
+            texts[spec] = out[position:position + size].decode("utf-8", "replace")
+            position += size + 1
+        else:
+            texts[spec] = None
+    return texts
+
+
 def _suite_facts(
     root: pathlib.Path, base: str, staged: bool, rows: Mapping[str, tuple[int, int]], new: Iterable[str],
 ) -> tuple[str, list[str]]:
     """The fact line's text on the suite and the sizes of ``rows``, the changed test sources
     with their added and removed lines: test modules left the module band, not the pulse."""
-    from ouroboros.reference_books import _git_bytes
     from ouroboros.test_selection import is_test_module
 
-    def text_at(spec: str) -> str | None:
-        raw = _git_bytes(root, "--no-optional-locks", "show", spec)
-        return None if raw is None else raw.decode("utf-8", "replace")
+    tests = [path for path in rows if is_test_module(path)]
+    # One `git cat-file --batch` per side: a `git show` per changed test module cost a large PR's commit
+    # fifty seconds of pulse. A spec with whitespace would split in batch input; it is read alone.
+    at_base = _blob_texts(root, [f"{base}:{path}" for path in tests])
+    in_index = _blob_texts(root, [f":{path}" for path in tests]) if staged else {}
 
     def current(path: str) -> str | None:
         if staged:
-            return text_at(f":{path}")
+            return in_index.get(f":{path}")
         try:
             return (root / path).read_bytes().decode("utf-8", "replace")
         except OSError:
@@ -1196,7 +1233,7 @@ def _suite_facts(
         if not is_test_module(path):
             continue
         try:
-            items, had = _declared_tests(text_at(f"{base}:{path}") or "", path)
+            items, had = _declared_tests(at_base.get(f"{base}:{path}") or "", path)
             count, has = _declared_tests(text or "", path)
         except (SyntaxError, ValueError):  # mid-edit text: unread, never counted as none
             unreadable += 1

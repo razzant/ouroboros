@@ -75,11 +75,10 @@ def test_durations_sum_each_file_per_system_and_each_ui_node(tmp_path):
         _row(a, 0.7, subtest=True),  # Within its test's call: never counted twice.
         _row("tests/test_a.py::test_two", None), _row("tests/test_b.py::TestC::test_three", 0.0004)],
         attempt="2", default_parallel=_block("parallel", [1, 2]))
-    # A resource group's test (`@serial:<resource>`) is the file's serial part, whichever pass it ran in; a copy of
-    # the projection in a second artifact counts once; the one-process pass of `serial("exclusive")` tests is not
-    # serial time (its tests join no group).
+    # The one-process pass's time joins its files' totals (ids stay plain: no part of the table is "serial");
+    # a copy of the projection in a second artifact counts once.
     for artifact in ("default-ci-shard-Windows-1-a2", "ci-evidence-full-test-windows-shard-1-a2"):
-        _projection(root / artifact / "serial", [_row("tests/test_a.py::test_s@serial:db", 2.0),
+        _projection(root / artifact / "serial", [_row("tests/test_a.py::test_s", 2.0),
                                                  _row("tests/test_x.py::test_alone", 1.0)], attempt="2",
                     default_serial=_block("serial", [1, 2]))
     # Another system; a manifest, a retry round, another producer and an unknown system add nothing.
@@ -97,7 +96,6 @@ def test_durations_sum_each_file_per_system_and_each_ui_node(tmp_path):
                 system="Linux", ui_browser={"full": [], "shard": [1, 8], "assigned": []})
     table = {"format": 1, "platforms": {"darwin": {"tests/test_m.py": 125}, "linux": {"tests/test_a.py": 500},
                                         "windows": {"tests/test_a.py": 4000, "tests/test_b.py": 0, "tests/test_x.py": 1000}},
-             "serial": {"windows": {"tests/test_a.py": 2000}},
              "source": {"run_id": RUN, "sha": SHA}, "ui_nodes": {"tests/test_ui.py::page[chromium]": 5000}}
     assert collect_durations(root, run_id=RUN, sha=SHA) == table
     out, payloads = tmp_path / "out" / "ci-durations.json", []
@@ -113,22 +111,9 @@ def test_durations_sum_each_file_per_system_and_each_ui_node(tmp_path):
     assert empty.returncode == 0 and "::warning::" in empty.stdout and _json(out)["platforms"] == {}
 
 
-def test_the_battery_records_the_time_of_its_resource_groups(tmp_path):
-    """The xdist pass of scripts/run_tests.py's battery pins a named resource's tests to its ``serial:<resource>``
-    xdist group: their time is their file's serial part; a test in a file or class group is not serial."""
-    root = tmp_path / "evidence"
-    _projection(root / "run-1" / "pytest" / "parallel", [
-        _row("tests/test_s.py::test_one@serial:port", 2.0), _row("tests/test_s.py::test_one@serial:port", 0.5, "teardown"),
-        _row("tests/test_p.py::test_two@tests/test_p.py", 1.0),
-        _row("tests/test_q.py::TestK::test_three@tests/test_q.py::TestK", 0.25)], system="Darwin")
-    table = collect_durations(root, run_id=RUN, sha=SHA)
-    assert table["platforms"] == {"darwin": {"tests/test_p.py": 1000, "tests/test_q.py": 250, "tests/test_s.py": 2500}}
-    assert table["serial"] == {"darwin": {"tests/test_s.py": 2500}}
-
-
 def test_an_owned_session_folds_its_whole_file_times_into_the_owners_table(tmp_path, monkeypatch):
-    """Each session replaces its files' entries for its system (a file no longer serial leaves `serial`), drops
-    files the tree no longer has and files a crashed worker left partial, keeps the other systems' entries, and
+    """Each session replaces its files' entries for its system, drops files the tree no longer has and files a
+    crashed worker left partial, keeps the other systems' entries (a legacy `serial` part is dropped), and
     starts afresh over an unreadable table. `durations_table` reads the owner's table when CI names none; a table
     no session wrote yet is no table and no reason; CI's table wins."""
     assert TEST_DURATIONS_ENV == OWNERS_TABLE_KEY  # the stdlib reader and the product spell one key
@@ -140,23 +125,22 @@ def test_an_owned_session_folds_its_whole_file_times_into_the_owners_table(tmp_p
     _write(table, "{garbage")
     first = [_row("tests/test_a.py::test_one", 0.25, "setup"), _row("tests/test_a.py::test_one", 1.5),
              _row("tests/test_a.py::test_one", 0.7, subtest=True),  # within its test's call: never counted twice
-             _row("tests/test_s.py::test_s@serial:port", 2.0), _row("tests/test_gone.py::test_g", 9.0),
+             _row("tests/test_s.py::test_s", 2.0), _row("tests/test_gone.py::test_g", 9.0),
              _row("tests/test_n.py::test_crash", 1.0), _row("tests/test_n.py::test_crash", 0.0, "crash", "failed")]
     assert record_session_durations(table, first, system="Darwin", rootpath=tree, run_id="session 1") == ""
     assert _json(table) == {"format": 1, "platforms": {"darwin": {"tests/test_a.py": 1750, "tests/test_s.py": 2000}},
-                            "serial": {"darwin": {"tests/test_s.py": 2000}}, "source": {"run_id": "session 1", "sha": ""},
-                            "ui_nodes": {}}
-    # A resource group measures a file as serial, a later ungrouped run takes it back out; another system stays.
-    assert record_session_durations(table, [_row("tests/test_a.py::test_one@serial:db", 3.0)], system="Darwin",
+                            "source": {"run_id": "session 1", "sha": ""}, "ui_nodes": {}}
+    # A later session replaces a file's entry; another system stays; a legacy `serial` part is dropped.
+    _write(table, {**_json(table), "serial": {"darwin": {"tests/test_s.py": 2000}}})
+    assert record_session_durations(table, [_row("tests/test_a.py::test_one", 3.0)], system="Darwin",
                                     rootpath=tree, run_id="session 2") == ""
     assert record_session_durations(table, [_row("tests/test_s.py::test_s", 1.0)], system="Linux",
                                     rootpath=tree, run_id="session 3", sha="abc") == ""
     assert _json(table)["platforms"] == {"darwin": {"tests/test_a.py": 3000, "tests/test_s.py": 2000},
                                          "linux": {"tests/test_s.py": 1000}}
-    assert _json(table)["serial"] == {"darwin": {"tests/test_a.py": 3000, "tests/test_s.py": 2000}, "linux": {}}
+    assert "serial" not in _json(table)
     assert record_session_durations(table, [_row("tests/test_a.py::test_one", 1.0)], system="Darwin",
                                     rootpath=tree, run_id="session 4") == ""
-    assert _json(table)["serial"]["darwin"] == {"tests/test_s.py": 2000}
     assert _json(table)["source"] == {"run_id": "session 4", "sha": ""}
     assert record_session_durations(table, [_row("tests/test_n.py::t", 1.0, "crash")], system="Darwin",
                                     rootpath=tree, run_id="session 5") == "no whole test file ran"
@@ -283,7 +267,7 @@ def test_an_owned_session_records_its_durations_at_its_end_and_a_narrowed_one_do
     _session(tmp_path, suite, entry, "parallel", tmp_path / "public", env={TEST_DURATIONS_ENV: str(table)})
     recorded = _json(table)
     assert set(recorded["platforms"][SYSTEM]) == {"tests/test_a.py", "tests/test_b.py"}
-    assert recorded["serial"][SYSTEM] == {} and recorded["source"]["run_id"].startswith("session ")
+    assert "serial" not in recorded and recorded["source"]["run_id"].startswith("session ")
     narrowed = tmp_path / "owner" / "narrowed.json"
     _session(tmp_path, suite, entry, "parallel", tmp_path / "public-k", "-k", "two", env={TEST_DURATIONS_ENV: str(narrowed)})
     assert not narrowed.exists()

@@ -143,6 +143,12 @@ def main() -> int:
         # root (tests/conftest.py): pytest deletes an EXISTING --basetemp, so no two
         # invocations — e.g. run_tests.py's two passes — may ever share one.
         env["OUROBOROS_TEST_TEMP_ROOT"] = str(root)
+        # The command's Python children write their bytecode under this prefix (test processes, nested
+        # runners); only a warm declared it, so a green focused run whose child wrote one .pyc ended
+        # RETAINED. Declared here, the release at the end takes it with the root.
+        prefix = Path(env["PYTHONPYCACHEPREFIX"])
+        prefix.mkdir(parents=True, exist_ok=True)
+        environment["declare_scratch"](prefix, "bytecode-prefix", owner="the bytecode prefix of one scripts/safe_test.py command")
         print("SAFE_TEST_BOUNDARY " + json.dumps({key: value for key, value in env.items()
               if key in {"HOME", "PYTHONUSERBASE", "PYTHONPYCACHEPREFIX"}
               or key.startswith("OUROBOROS_")}), flush=True)

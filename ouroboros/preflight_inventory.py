@@ -88,7 +88,7 @@ def selection_passes(selection, *, probe_module="", temp_root=None, inventory_di
     begins with ``tests/`` for a selected scope, so no reader takes it for the full one.
     ``launch_args`` is what a process is started with: the plugin written here carries the scope.
     """
-    from ouroboros import preflight_runner as pr
+    from ouroboros import preflight_probe, preflight_runner as pr
 
     names = [] if selection.tier == "full" else list(selection.files)
     scope = [*(f"{SELECT}={path}" for path in names), "tests/"]
@@ -97,7 +97,7 @@ def selection_passes(selection, *, probe_module="", temp_root=None, inventory_di
         module = MODULE
         if temp_root is not None:
             module += "_" + uuid.uuid4().hex
-            probe = pr._probe_dir(Path(temp_root))
+            probe = preflight_probe.probe_dir(Path(temp_root))
             probe.mkdir(parents=True, exist_ok=True)
             result = Path(inventory_dir or temp_root) / f"inventory-{spec.label}.jsonl"
             result.write_text("", encoding="utf-8")

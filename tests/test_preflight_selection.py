@@ -275,7 +275,7 @@ def test_a_selected_pass_walks_tests_once_and_collects_exactly_its_modules(tmp_p
     # A process is started with the scope off the command line, in the plugin it loads: the same walk.
     done = run_in_group([sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
                          *inventory.launch_args(scope), "-p", first.args[-1]], timeout=120, cwd=repo,
-                        env={**os.environ, "PYTHONPATH": str(pr._probe_dir(scratch))})
+                        env={**os.environ, "PYTHONPATH": str(pr.probe_dir(scratch))})
     expected = inventory.read_inventory(scratch, "parallel")[0].get("expected")
     if selected[0].startswith("tests/node_modules"):
         assert done.returncode != 0 and "never reached" in done.stdout + done.stderr, done.stdout + done.stderr
@@ -293,7 +293,7 @@ def test_the_inventory_plugin_carries_any_scope_exactly_and_the_launch_leaves_it
 
     from ouroboros import preflight_inventory as inventory, preflight_probe
     # TEMPLATE_FIELDS must stay every field either template has, or "spells every field" below stops being true.
-    assert sorted(set(re.findall(r"__[A-Z]+(?:_[A-Z]+)*__", inventory.SOURCE + preflight_probe._WORKER_PROBE_SOURCE))) == sorted(
+    assert sorted(set(re.findall(r"__[A-Z]+(?:_[A-Z]+)*__", inventory.SOURCE + preflight_probe.WORKER_PROBE_SOURCE))) == sorted(
         TEMPLATE_FIELDS)
 
     paths = ["tests/test_a.py", "tests/a dir/test_b.py", "tests/проверки/test_ü.py", "tests/日本語/test_c.py", "tests/test_😀.py",
@@ -309,7 +309,7 @@ def test_the_inventory_plugin_carries_any_scope_exactly_and_the_launch_leaves_it
                 assert named == [f"{inventory.SELECT}={path}" for path in files]
                 launched = inventory.launch_args(spec.args)
                 assert launched == [arg for arg in spec.args if arg not in named] and launched[0] == "tests/"
-                plugin = plugin_values(launched, pr._probe_dir(kept["temp_root"]))
+                plugin = plugin_values(launched, pr.probe_dir(kept["temp_root"]))
                 assert plugin["_scope"] == list(files)
                 assert plugin["_path"] == results / f"inventory-{spec.label}.jsonl"
 
@@ -323,8 +323,8 @@ def test_the_worker_probe_reads_back_its_directories_where_the_root_spells_templ
     from ouroboros import preflight_probe
 
     root = tmp_path.joinpath(*TEMPLATE_FIELDS)
-    module = pr._install_worker_probe(root)
-    probe = runpy.run_path(str(pr._probe_dir(root) / f"{module}.py"))
+    module = pr.install_worker_probe(root)
+    probe = runpy.run_path(str(pr.probe_dir(root) / f"{module}.py"))
     assert (probe["_LOG"], probe["_RESULTS"]) == (preflight_probe._worker_log_dir(root), preflight_probe._results_pointer(root))
 
 

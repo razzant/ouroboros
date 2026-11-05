@@ -28,6 +28,8 @@ from ouroboros.platform_layer import probe_node_version, resolve_bundled_node
 
 # Version floor for the browser-module suite: the object form of
 # `t.mock.timers.enable({apis: [...]})` used by web/tests needs Node >= 20.11.
+# The bound of one Node test, the pytest passes' `--timeout=300` in milliseconds (`--test-timeout`: Node >= 20.11).
+NODE_TEST_TIMEOUT_FLAG = "--test-timeout=300000"
 # CI provisions 22; the bundled runtime is 24.x.
 NODE_MIN_VERSION = (20, 11)
 
@@ -177,7 +179,9 @@ def run_node_tests(
 
     capture = FileOutput(temp_root, "node")
     proc = None
-    argv = [node, "--test", f"--test-concurrency={env['PYTEST_XDIST_AUTO_NUM_WORKERS']}", *files]
+    # `--test-timeout` (Node >= 20.11): the per-test bound the pytest passes have (`--timeout=300`), so a hung
+    # web test ends that test, not a full run that has no total deadline (owner 5A).
+    argv = [node, "--test", NODE_TEST_TIMEOUT_FLAG, f"--test-concurrency={env['PYTEST_XDIST_AUTO_NUM_WORKERS']}", *files]
     try:
         proc = container.spawn(argv, background=True, cwd=str(pathlib.Path(worktree) / WEB_DIR),
                                env=env, stdout=capture.stdout, stderr=capture.stderr)

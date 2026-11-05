@@ -179,12 +179,12 @@ def preflight_timeout_diagnostics(request, monkeypatch, tmp_path):
 
     def install(*, dump_after=90):
         trace_dir.mkdir(exist_ok=True)
-        original_probe = preflight_runner._install_worker_probe
+        original_probe = preflight_runner.install_worker_probe
         original_kill = preflight_runner._terminate_preflight_tree
 
-        def probe(temp_root):
-            module = original_probe(temp_root)
-            path = preflight_runner._probe_dir(temp_root) / (module + ".py")
+        def probe(temp_root, *args, **kwargs):
+            module = original_probe(temp_root, *args, **kwargs)
+            path = preflight_runner.probe_dir(temp_root) / (module + ".py")
             # GIL-held stack samples (tests/stack_samples.py says what they cannot see), each
             # process's in its own file beside its event log: one writer per file, whole lines.
             shutil.copyfile(stack_samples.__file__, path.with_name(module + "_samples.py"))
@@ -237,7 +237,7 @@ def pytest_testnodedown(node, error):
             finally:
                 original_kill(proc, temp_root)
 
-        monkeypatch.setattr(preflight_runner, "_install_worker_probe", probe)
+        monkeypatch.setattr(preflight_runner, "install_worker_probe", probe)
         monkeypatch.setattr(preflight_runner, "_terminate_preflight_tree", before_kill)
         return trace_dir
 

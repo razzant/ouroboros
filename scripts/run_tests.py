@@ -46,16 +46,34 @@ _OUTER_WORKER_KEYS = ("PYTEST_XDIST_WORKER", "PYTEST_XDIST_TESTRUNUID", "PYTEST_
 _INTERRUPT_EXPORT_SEC, _INTERRUPT_TERM_SEC = 7, 2  # busy xdist workers already spend ~5 s in teardown
 
 
-def _admission():
-    """xdist's CPU default within the physical and inherited allocation, minus what other runs hold."""
-    from ouroboros.test_parallelism import admission
-
-    try:  # xdist prefers physical cores whenever psutil is importable
+def _cpu_default() -> int:
+    """xdist's own CPU default: physical cores whenever psutil is importable, else the logical count."""
+    try:
         import psutil
         physical = psutil.cpu_count(logical=False)
     except Exception:
         physical = None
-    return admission(physical or os.cpu_count() or 1)
+    return physical or os.cpu_count() or 1
+
+
+def _admission():
+    """xdist's CPU default within the physical and inherited allocation, minus what other runs hold."""
+    from ouroboros.test_parallelism import admission
+
+    return admission(_cpu_default())
+
+
+def _pass_slots(argv: list[str], workers: int) -> int:
+    """The slots one pass really uses, for its ledger row: the admitted workers for an xdist pass (`-n`), a Node
+    lane's `--test-concurrency` or the warm's `--workers` within them, one for the one-process pass."""
+    if "-n" in argv:
+        return workers
+    for index, arg in enumerate(argv):
+        if arg.startswith("--test-concurrency=") and arg.partition("=")[2].isdecimal():
+            return min(int(arg.partition("=")[2]), workers)
+        if arg == "--workers" and index + 1 < len(argv) and argv[index + 1].isdecimal():
+            return min(int(argv[index + 1]), workers)
+    return 1
 
 
 def _workers() -> int:
@@ -99,13 +117,15 @@ def battery_commands() -> list[tuple[str, list[str]]]:
 def _run(label: str, argv: list[str], cwd: pathlib.Path) -> int:
     from ouroboros.preflight_node import node_environment
     from ouroboros.process_containment import ProcessContainer
-    from ouroboros.test_parallelism import NESTED_WORKERS_ENV, SlotLease, bounded_test_command
+    from ouroboros.test_parallelism import NESTED_WORKERS_ENV, bounded_test_command, reserve
 
     started = time.monotonic()
     env = node_environment(os.environ)
     for key in _OUTER_WORKER_KEYS:  # a battery is a run of its own, never a worker of the session that started it
         env.pop(key, None)
-    admitted = _admission()
+    # One reservation under the ledger's lock: the admission, and this pass's row holding what the pass uses.
+    admitted, lease = reserve(f"run_tests.py {label}", _cpu_default(),
+                              slots=lambda admitted: _pass_slots(argv, admitted.workers))
     env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = str(admitted.workers)
     env[NESTED_WORKERS_ENV] = env["PYTEST_XDIST_AUTO_NUM_WORKERS"]
     argv = bounded_test_command(argv, env)
@@ -113,7 +133,6 @@ def _run(label: str, argv: list[str], cwd: pathlib.Path) -> int:
     if disclosure := admitted.host.disclosure():
         print(f"=== {label}: {admitted.workers} worker(s); {disclosure}", flush=True)
     container = ProcessContainer(lifeline=True, overload=True)
-    lease = SlotLease(admitted.workers, f"run_tests.py {label}")  # this run's row in the host ledger
     proc = None
     try:
         proc = container.spawn(argv, cwd=str(cwd), env=env)
@@ -186,12 +205,14 @@ def _node_lane() -> int:
         print(f"\n=== node: NOT_RUN — {found}; the web lane needs node >= {floor}, so this is not the full "
               "battery: install node or pass focused targets", flush=True)
         return 1
-    return _run("node", [node, "--test", f"--test-concurrency={_workers()}", *files], REPO / WEB_DIR)
+    from ouroboros.preflight_node import NODE_TEST_TIMEOUT_FLAG
+
+    return _run("node", [node, "--test", NODE_TEST_TIMEOUT_FLAG, f"--test-concurrency={_workers()}", *files], REPO / WEB_DIR)
 
 
 def _selected(args, evidence) -> int:
     from ouroboros.preflight_inventory import inventory_problem, launch_args, read_inventory, selection_passes
-    from ouroboros.preflight_runner import _probe_dir, _install_worker_probe
+    from ouroboros.preflight_probe import install_worker_probe, probe_dir
     from ouroboros.test_selection import select_tests
 
     try:
@@ -222,9 +243,9 @@ def _selected(args, evidence) -> int:
     red = code  # with --keep-going a later lane runs on, but never hides an earlier red
     previous = os.environ.get("PYTHONPATH")
     completed = False
-    os.environ["PYTHONPATH"] = os.pathsep.join(filter(None, (str(_probe_dir(root)), previous)))
+    os.environ["PYTHONPATH"] = os.pathsep.join(filter(None, (str(probe_dir(root)), previous)))
     try:
-        probe = _install_worker_probe(root)
+        probe = install_worker_probe(root)
         for spec in selection_passes(selection, probe_module=probe, temp_root=root) if code == 0 or args.keep_going else []:
             command = [sys.executable, "-m", "pytest", *launch_args(spec.args),
                        "--ci-evidence-dir", str(root / spec.label)]
@@ -322,6 +343,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{REPO} is not an Ouroboros checkout (no tests/conftest.py)", file=sys.stderr)
         return 2
     point_at_durations()
+    if not args.selected and (args.base or args.extra_test or args.full_tests or args.test_reason or args.defer_full
+                              or args.keep_going):
+        parser.error("--base, --defer-full, --keep-going and widening options require --selected")
     if args.node:
         if args.selected or pytest_args:
             parser.error("--node runs only the Node lane")
@@ -330,8 +354,6 @@ def main(argv: list[str] | None = None) -> int:
         if pytest_args:
             parser.error("--selected cannot be combined with arbitrary pytest arguments")
         return _selected(args, evidence)
-    if args.base or args.extra_test or args.full_tests or args.test_reason or args.defer_full or args.keep_going:
-        parser.error("--base, --defer-full, --keep-going and widening options require --selected")
     if pytest_args:
         if evidence is not None:
             pytest_args = ["--ci-evidence-dir", str(evidence / "focused"), *pytest_args]

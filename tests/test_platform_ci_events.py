@@ -17,9 +17,11 @@ WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding
 
 
 THREE_SYSTEMS = ["ubuntu-latest", "macos-latest", "windows-latest"]
-# The jobs a `scope=tests` dispatch runs: the operators' battery before a PR's review freeze
+# The jobs a `scope=tests` dispatch runs: the operators' battery before a PR's review freeze. `ci-durations`
+# is not among them: a run without macOS and the UI lane must not replace the complete table of the last
+# release run, which the next release run's `shard-plan` packs by.
 # (owner 6A/7A, 2026-11-05). Every other job keeps the release graph a tag or a plain dispatch runs.
-BATTERY = ("shard-plan", "lint", "full-test-runs", "journal-persist", "full-test", "ci-durations", "test-verdict")
+BATTERY = ("shard-plan", "lint", "full-test-runs", "journal-persist", "full-test", "test-verdict")
 DISPATCH_ONLY = ("quick-test", "sqlite-floor", "betterleaks-platform-smoke")
 TAG_ONLY = ("android-build", "release-preflight", "build", "windows-proof", "vendor-package-smoke", "release")
 

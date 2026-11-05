@@ -590,7 +590,7 @@ def stubbed_lanes(monkeypatch):
     binds and what may be written, not about the lanes themselves."""
     calls = []
     monkeypatch.setattr(pr, "_execute_pytest_pass", lambda *args: calls.append(list(args[3])) or (0, "green", ""))
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *_args: {"gw0", "gw1"})
+    monkeypatch.setattr(pr, "observed_worker_ids", lambda *_args: {"gw0", "gw1"})
     monkeypatch.setattr(pr, "run_node_tests",
                         lambda *_args: calls.append(["node"]) or {"returncode": 0, "error": None, "reap_error": ""})
     return calls
@@ -650,7 +650,7 @@ def test_a_red_hung_leaking_or_partial_run_never_mints(tmp_path, monkeypatch, ou
              "workers_lost": {}, "parallel_empty": {"parallel": (5, "no tests ran", "")}}[outcome]
     monkeypatch.setattr(pr, "_execute_pytest_pass", lambda python, worktree, temp, args, timeout: fixed.get(
         "parallel" if "-n" in args else "serial", (0, "green", "")))
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *_a: {"gw0"} if outcome == "workers_lost" else {"gw0", "gw1"})
+    monkeypatch.setattr(pr, "observed_worker_ids", lambda *_a: {"gw0"} if outcome == "workers_lost" else {"gw0", "gw1"})
     ctx = _ctx(repo, canonical)
     temp_root = (tmp_path / "preflight-root").resolve()
     temp_root.mkdir()

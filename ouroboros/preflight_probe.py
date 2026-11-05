@@ -23,7 +23,7 @@ from typing import Optional
 # or an explicit parent allocation may admit one worker; that is not proof of
 # concurrency. The host freezes its admitted count beside the nonce probe, so
 # a later memory sample cannot change the pass's expected evidence.
-_MIN_PREFLIGHT_WORKERS = 2
+MIN_PREFLIGHT_WORKERS = 2
 
 
 def _preflight_admission():
@@ -37,9 +37,9 @@ def _preflight_worker_count() -> int:
     return _preflight_admission().workers
 
 
-def _allocated_worker_count(temp_root: pathlib.Path) -> int:
+def allocated_worker_count(temp_root: pathlib.Path) -> int:
     try:
-        return int((_probe_dir(temp_root) / "admitted-workers").read_text(encoding="utf-8"))
+        return int((probe_dir(temp_root) / "admitted-workers").read_text(encoding="utf-8"))
     except FileNotFoundError:
         return _preflight_worker_count()
 
@@ -57,16 +57,16 @@ def _allocated_worker_count(temp_root: pathlib.Path) -> int:
 # evidence by writing worker-named files into the gate's temp root — nothing
 # in-process can be, since the candidate suite runs with the same privileges.
 #
-# The name is only a STEM: `_install_worker_probe` appends a per-run nonce. `-p
+# The name is only a STEM: `install_worker_probe` appends a per-run nonce. `-p
 # name` resolves through `sys.path`, and `python -m pytest` puts the candidate
 # worktree at `sys.path[0]`, AHEAD of the PYTHONPATH entry the gate prepends. A
 # repository that happens to contain a top-level module of the fixed name would
 # therefore shadow the probe, report zero workers, and hard-block every green
 # parallel run as PREFLIGHT_PARALLELISM_LOST. The nonce cannot be predicted by a
 # committed file, so the gate's own module always wins.
-_WORKER_PROBE_MODULE = "ouroboros_preflight_probe"
+WORKER_PROBE_MODULE = "ouroboros_preflight_probe"
 
-_WORKER_PROBE_SOURCE = '''"""Written by the Ouroboros preflight gate; not part of the repository under test."""
+WORKER_PROBE_SOURCE = '''"""Written by the Ouroboros preflight gate; not part of the repository under test."""
 import os
 import pathlib
 
@@ -108,7 +108,7 @@ def pytest_configure(config):
 '''
 
 
-def _probe_dir(temp_root: pathlib.Path) -> pathlib.Path:
+def probe_dir(temp_root: pathlib.Path) -> pathlib.Path:
     return pathlib.Path(temp_root) / "probe"
 
 
@@ -120,7 +120,7 @@ def _results_pointer(temp_root: pathlib.Path) -> pathlib.Path:
     return pathlib.Path(temp_root) / "ci-evidence-dir"
 
 
-def _recorded_session(temp_root: pathlib.Path) -> Optional[dict]:
+def recorded_session(temp_root: pathlib.Path) -> Optional[dict]:
     """This pass's own results.json, as its controller located it; None when absent or unreadable."""
     try:
         directory = _results_pointer(temp_root).read_text(encoding="utf-8")
@@ -130,16 +130,18 @@ def _recorded_session(temp_root: pathlib.Path) -> Optional[dict]:
     return recorded if isinstance(recorded, dict) else None
 
 
-def _install_worker_probe(temp_root: pathlib.Path) -> str:
+def install_worker_probe(temp_root: pathlib.Path, admitted=None) -> str:
     """Write the worker-count plugin and return the nonce module name to load.
 
     The nonce is what makes the probe candidate-independent: see the note on
-    ``_WORKER_PROBE_MODULE``. Callers must pass the RETURNED name to `-p`.
+    ``WORKER_PROBE_MODULE``. Callers must pass the RETURNED name to `-p`.
+    ``admitted`` is the admission the caller reserved (the gate's, with its ledger row); without one the
+    probe admits here.
     """
-    module = f"{_WORKER_PROBE_MODULE}_{uuid.uuid4().hex}"
-    probe = _probe_dir(temp_root)
+    module = f"{WORKER_PROBE_MODULE}_{uuid.uuid4().hex}"
+    probe = probe_dir(temp_root)
     probe.mkdir(parents=True, exist_ok=True)
-    admitted = _preflight_admission()
+    admitted = _preflight_admission() if admitted is None else admitted
     (probe / "admitted-workers").write_text(str(admitted.workers), encoding="utf-8")
     # The admission's facts for the run's evidence: what the host's other runs held when the gate admitted.
     (probe / "admission.json").write_text(json.dumps({
@@ -151,18 +153,18 @@ def _install_worker_probe(temp_root: pathlib.Path) -> str:
     fields = {"__WORKER_LOG__": repr(str(_worker_log_dir(temp_root))),
               "__RESULTS_POINTER__": repr(str(_results_pointer(temp_root)))}
     (probe / f"{module}.py").write_text(
-        re.sub("|".join(fields), lambda match: fields[match[0]], _WORKER_PROBE_SOURCE), encoding="utf-8")
+        re.sub("|".join(fields), lambda match: fields[match[0]], WORKER_PROBE_SOURCE), encoding="utf-8")
     return module
 
 
-def _recorded_admission(temp_root: pathlib.Path) -> Optional[dict]:
+def recorded_admission(temp_root: pathlib.Path) -> Optional[dict]:
     try:
-        return json.loads((_probe_dir(temp_root) / "admission.json").read_text(encoding="utf-8"))
+        return json.loads((probe_dir(temp_root) / "admission.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
 
 
-def _observed_worker_ids(temp_root: pathlib.Path) -> set:
+def observed_worker_ids(temp_root: pathlib.Path) -> set:
     """Distinct xdist worker ids that reported during the parallel pass."""
     try:
         return {entry.name for entry in _worker_log_dir(temp_root).iterdir() if entry.is_file()}

@@ -183,7 +183,7 @@ def test_proof_logging_failure_does_not_change_runner_authority(candidate, monke
 
     monkeypatch.setattr("ouroboros.commit_admission.append_jsonl", unavailable_log)
     monkeypatch.setattr(pr, "_execute_pytest_pass", lambda *a: (0, "green fixture", ""))
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a: {"gw0", "gw1"})
+    monkeypatch.setattr(pr, "observed_worker_ids", lambda *a: {"gw0", "gw1"})
     with caplog.at_level(logging.WARNING, logger="ouroboros.commit_admission"):
         assert pr.run_hermetic_pytest(candidate.repo_dir, ctx=candidate) is None
         proof = candidate._preflight_test_proof
@@ -308,7 +308,7 @@ def test_nonproof_outcomes_never_mint_a_receipt(candidate, monkeypatch, outcome)
 def test_workload_changes_invalidate_proof(candidate, monkeypatch, change):
     ctx = candidate
     monkeypatch.setattr(pr, "_execute_pytest_pass", lambda *a: (0, "green", ""))
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a: {"gw0", "gw1"})
+    monkeypatch.setattr(pr, "observed_worker_ids", lambda *a: {"gw0", "gw1"})
     assert pr.run_hermetic_pytest(ctx.repo_dir, ctx=ctx) is None
     proof = ctx._preflight_test_proof
     assert proof and preflight_test_proof_matches(ctx, ctx.repo_dir)
@@ -344,7 +344,7 @@ def test_proof_names_tested_checkout_not_later_live_tree(candidate, monkeypatch)
         return 0, "green", ""
 
     monkeypatch.setattr(pr, "_execute_pytest_pass", late_edit)
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a: {"gw0", "gw1"})
+    monkeypatch.setattr(pr, "observed_worker_ids", lambda *a: {"gw0", "gw1"})
     assert run_tests_preflight_with_proof(ctx, runner=_run_review_preflight_tests) is None
     assert ctx._preflight_test_proof.tree == before.tree
     assert not preflight_test_proof_matches(ctx, ctx.repo_dir)
@@ -377,7 +377,7 @@ def test_free_memory_does_not_change_test_workload(candidate, monkeypatch):
     monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(64 * gib, 48 * gib))
     before = capture_preflight_test_subject(candidate.repo_dir)
     monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(64 * gib, 7 * gib))
-    assert budget.worker_budget(os.cpu_count()) == 1  # the tight sample really admits fewer workers
+    assert budget.admission(os.cpu_count()).workers == 1  # the tight sample really admits fewer workers
     assert before.covers(capture_preflight_test_subject(candidate.repo_dir))
 
 

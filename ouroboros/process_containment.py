@@ -307,11 +307,9 @@ class ProcessContainer:
         inherits: POSIX nice +10 set on the root's new process group right after it exists (argv stays
         the caller's, no fork hook runs in a threaded owner), Windows ``BELOW_NORMAL_PRIORITY_CLASS``."""
         kwargs = dict(popen_kwargs)
-        group_kwargs = dict(_pl.subprocess_new_group_kwargs())
+        group_kwargs = dict(_pl.subprocess_new_group_kwargs(background=background))
         flags = int(kwargs.pop("creationflags", 0)) | int(group_kwargs.pop("creationflags", 0))
         kwargs.update(group_kwargs)
-        if background and _pl.IS_WINDOWS:
-            flags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x4000)
         env = kwargs.get("env")
         env = dict(os.environ if env is None else env)
         # Explicit child environments must not sever an enclosing run's custody.
@@ -345,12 +343,8 @@ class ProcessContainer:
         self._root = int(getattr(proc, "pid", 0) or 0)
         pgid = _pl.process_group_id(self._root)
         self._pgid = pgid if pgid and pgid == self._root else 0
-        if background and not _pl.IS_WINDOWS:
-            try:  # the root is still starting: everything it forks from here inherits the group's priority
-                os.setpriority(os.PRIO_PGRP if self._pgid else os.PRIO_PROCESS, self._pgid or self._root,
-                               min(os.getpriority(os.PRIO_PROCESS, 0) + 10, 19))
-            except (OSError, AttributeError):
-                pass  # a root already gone, or no such call here: the tree runs at the caller's priority
+        if background:  # the root is still starting: everything it forks from here inherits the group's priority
+            _pl.lower_tree_priority(self._root, self._pgid)
         self._start_ticks = _pl._proc_start_ticks(self._root)
         self.adopt(proc)
         try:
