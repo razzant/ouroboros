@@ -37,8 +37,8 @@ from ouroboros.tool_capabilities import (
     requested_result_view, routing_action_for_tool, completion_control_call, substantive_tool_calls,
 )
 from ouroboros.tool_result_delivery import (
-    FitCandidate, prepare_producer_sources, project_tool_result_batch, reader_text, render_result_view,
-    split_allowance, typed_result_facts, with_delivery_note, with_producer_source,
+    FitCandidate, first_show_bound, prepare_producer_sources, project_tool_result_batch, reader_text,
+    render_result_view, split_allowance, typed_result_facts, with_delivery_note, with_producer_source,
 )
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY, make_tool_result_record
 from ouroboros.tools.registry import ToolRegistry
@@ -1450,7 +1450,8 @@ def process_tool_results(
     # A mark the mind tied to an action trails what the mind sees of that call, once per task: a
     # delivery note measured with the batch and kept beside the retained producer payload, so the
     # host readers below (acknowledgements, receipts, result review) parse the result without it.
-    notes = [anchored_note(ctx, row["fn_name"], row.get("tool_args") or {}) for row in results]
+    from ouroboros.tools.tool_discovery import gateway_target  # a gateway call meets marks on the MCP tool it names
+    notes = [anchored_note(ctx, *gateway_target(row["fn_name"], row.get("tool_args") or {})) for row in results]
     results = prepare_producer_sources(with_knowledge_index(ctx, results), getattr(ctx, "drive_root", None),
                                        task_id_for_artifacts(ctx) if ctx is not None else "", notes)
     review_updates, review_pending = [], {}
@@ -1493,14 +1494,14 @@ def process_tool_results(
         truncated_result = with_producer_source(exec_result, truncated_result)
         shown_result = with_delivery_note(exec_result, truncated_result)
 
-        messages.append({
-            "role": "tool",
-            "tool_call_id": exec_result["tool_call_id"],
-            "content": shown_result,
-            TOOL_RESULT_RECORD_KEY: make_tool_result_record(
-                exec_result, shown_result, facts=typed_result_facts(exec_result),
-                source_ref=result_source_ref),
-        })
+        record = make_tool_result_record(exec_result, shown_result, facts=typed_result_facts(exec_result),
+                                         source_ref=result_source_ref)
+        if first_show_bound(exec_result, view):
+            record["first_show_bound"] = True  # host readers below credit this view: no later refit cuts it
+        if shown_result != str(view["result"]):  # a producer locator or a mark's note trails the view once
+            record["first_show_trailer"] = shown_result[len(str(view["result"])):]
+        messages.append({"role": "tool", "tool_call_id": exec_result["tool_call_id"], "content": shown_result,
+                         TOOL_RESULT_RECORD_KEY: record})
         published = (exec_result.get("result_meta") or {}).get("tool_result_meta") or {}
         if ctx is not None and published.get("sleep_question_notice") and not (is_error or result_partial):
             from ouroboros.model_sleep import acknowledge_question_delivery

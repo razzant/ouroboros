@@ -602,6 +602,24 @@ def _measured_frame(
     return rows, {**receipt, "status": status, "fit": final}
 
 
+#: Published facts whose host reader credits the delivered view when the batch is delivered, not when it is sent.
+_FIRST_SHOW_READERS = ("sleep_question_notice", "held_dependency_notice", "review_delivery", "supervision_wake_id",
+                       "read_view")
+
+
+def first_show_bound(row: Mapping[str, Any], view: Mapping[str, Any]) -> bool:
+    """Whether a later refit must keep this first show: a host reader already credited the delivered view
+    (sleep questions, held dependencies, review receipts, delegate wakes, staged or inline delegated output)."""
+    typed, meta = row.get("tool_result"), (row.get("result_meta") or {}).get("tool_result_meta") or {}
+    text = str(view.get("result") or "")
+    if any(meta.get(key) for key in _FIRST_SHOW_READERS) or (getattr(typed, "meta", None) or {}).get("read_view"):
+        return True
+    try:
+        return text.startswith("{") and '"output_delivery"' in text and json.loads(text).get("status") == "terminal"
+    except (ValueError, AttributeError):
+        return False
+
+
 def refit_unsent_results(
     messages: List[Dict[str, Any]], first_unsent: int, tool_schemas: list, *,
     drive_root: pathlib.Path, task_id: str, measure: Callable[[List[Dict[str, Any]]], Mapping[str, Any]],
@@ -626,16 +644,17 @@ def refit_unsent_results(
                 except (TypeError, ValueError):
                     args = {}
                 calls[str(call["id"])] = (str(function.get("name") or ""), args if isinstance(args, dict) else {})
-    rows, positions = [], {}
+    rows, positions, trailers = [], {}, {}
     for index in range(max(0, first_unsent), len(messages)):
         message = messages[index]
         record, text = message.get(TOOL_RESULT_RECORD_KEY), logical_tool_result_text(message.get("content"))
         call_id = str(message.get("tool_call_id") or "")
         if (message.get("role") != "tool" or call_id not in calls or text is None
-                or not isinstance(record, Mapping) or record.get("source_ref")):
-            continue  # an already partial view, an unrecorded row or a non-text result keeps its first show
-        facts = dict(record.get("facts") or {})
-        rows.append({"tool_call_id": call_id, "result": text, "fn_name": calls[call_id][0],
+                or not isinstance(record, Mapping) or record.get("source_ref") or record.get("first_show_bound")):
+            continue  # a partial, unrecorded, non-text or host-credited row keeps its first show (``first_show_bound``)
+        facts, trailer = dict(record.get("facts") or {}), str(record.get("first_show_trailer") or "")
+        trailers[call_id] = trailer if trailer and text.endswith(trailer) else ""  # stays outside the view
+        rows.append({"tool_call_id": call_id, "result": text[:len(text) - len(trailers[call_id])], "fn_name": calls[call_id][0],
                      "tool_args": calls[call_id][1], "is_error": facts.get("is_error"),
                      "result_meta": {**facts, "tool_result_code": facts.get("code")}})
         positions[call_id] = index
@@ -644,7 +663,7 @@ def refit_unsent_results(
     refit = set(positions.values())
 
     def fit(candidate: list, _schemas: list) -> Mapping[str, Any]:
-        shown = {row["tool_call_id"]: row["content"] for row in candidate}
+        shown = {row["tool_call_id"]: row["content"] + trailers[row["tool_call_id"]] for row in candidate}
         return measure([{**message, "content": shown[message["tool_call_id"]]} if index in refit else message
                         for index, message in enumerate(messages)])
 
@@ -656,10 +675,10 @@ def refit_unsent_results(
     rebuilt = list(messages)
     for row in changed:
         index = positions[row["tool_call_id"]]
-        record = dict(rebuilt[index][TOOL_RESULT_RECORD_KEY])
-        record.update(content_sha256=hashlib.sha256(str(row["result"]).encode("utf-8")).hexdigest(),
+        record, content = dict(rebuilt[index][TOOL_RESULT_RECORD_KEY]), str(row["result"]) + trailers[row["tool_call_id"]]
+        record.update(content_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
                       source_ref=dict(row.get("result_source_ref") or {}))
-        rebuilt[index] = {**rebuilt[index], "content": row["result"], TOOL_RESULT_RECORD_KEY: record}
+        rebuilt[index] = {**rebuilt[index], "content": content, TOOL_RESULT_RECORD_KEY: record}
     receipt["reclaimed_tokens"] = max(0, int(receipt.get("whole_tokens") or 0) - _tokens(receipt.get("fit") or {}))
     receipt["refit_call_ids"] = [row["tool_call_id"] for row in changed]
     return rebuilt, receipt

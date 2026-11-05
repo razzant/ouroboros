@@ -599,7 +599,7 @@ def test_refit_unsent_results_cuts_only_unasked_bodies_past_the_last_send(tmp_pa
     """Size recovery's first step: rows the provider accepted keep their bytes (its whole-request prompt
     cache), this round's unasked result leaves for an exact reader, a chosen read stays whole, and a
     fitting candidate changes nothing."""
-    from ouroboros.tool_result_delivery import FULL_SOURCE_MARKER, RESULT_VIEW_MARKER, refit_unsent_results
+    from ouroboros.tool_result_delivery import FULL_SOURCE_MARKER, RESULT_VIEW_MARKER, first_show_bound, refit_unsent_results
     from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
 
     def record(call_id, text):
@@ -609,16 +609,21 @@ def test_refit_unsent_results_cuts_only_unasked_bodies_past_the_last_send(tmp_pa
     def call(call_id, args):
         return {"id": call_id, "type": "function", "function": {"name": "read_file", "arguments": json.dumps(args)}}
 
-    old, fresh, chosen = "old body\n" * 4000, "fresh body\n" * 4000, "chosen body\n" * 300
+    old, fresh, chosen, held = "old body\n" * 4000, "fresh body\n" * 4000, "chosen body\n" * 300, "held body\n" * 4000
+    trailer = "\n\n⚠️ Mark I tied to read_file (m1): a note delivered once, outside the view"
     messages = [{"role": "system", "content": "core"},
                 {"role": "assistant", "content": "", "tool_calls": [call("old", {"path": "o"})]},
                 {"role": "tool", "tool_call_id": "old", "content": old, TOOL_RESULT_RECORD_KEY: record("old", old)},
                 {"role": "assistant", "content": "",
                  "tool_calls": [call("fresh", {"path": "f"}), call("chosen", {"path": "c", "max_lines": 300})]},
-                {"role": "tool", "tool_call_id": "fresh", "content": fresh, TOOL_RESULT_RECORD_KEY: record("fresh", fresh)},
+                {"role": "tool", "tool_call_id": "fresh", "content": fresh + trailer,
+                 TOOL_RESULT_RECORD_KEY: {**record("fresh", fresh + trailer), "first_show_trailer": trailer}},
                 {"role": "tool", "tool_call_id": "chosen", "content": chosen,
                  TOOL_RESULT_RECORD_KEY: record("chosen", chosen)},
-                {"role": "user", "content": "[CONTEXT_FACTS] the host row that follows the results"}]
+                {"role": "user", "content": "[CONTEXT_FACTS] the host row that follows the results"},
+                {"role": "assistant", "content": "", "tool_calls": [call("held", {"path": "h"})]},
+                {"role": "tool", "tool_call_id": "held", "content": held,  # a host reader credited this first show
+                 TOOL_RESULT_RECORD_KEY: {**record("held", held), "first_show_bound": True}}]
     whole = sum(len(str(row["content"])) for row in messages) // 4
 
     def measure(capacity):
@@ -629,7 +634,13 @@ def test_refit_unsent_results_cuts_only_unasked_bodies_past_the_last_send(tmp_pa
     assert refit_unsent_results(messages, 3, [], drive_root=tmp_path, task_id="t", measure=measure(whole * 9))[0] is None
     rebuilt, receipt = refit_unsent_results(messages, 3, [], drive_root=tmp_path, task_id="t", measure=measure(whole - 5_000))
     assert rebuilt[:4] == messages[:4] and rebuilt[5:] == messages[5:] and receipt["refit_call_ids"] == ["fresh"]
+    plain = {"result_meta": {}, "tool_result": ToolResult(status="ok", code="OK", text="x")}
+    terminal = json.dumps({"status": "terminal", "output_delivery": {"complete": True}})
+    assert not first_show_bound(plain, {"result": "x"})
+    assert first_show_bound({**plain, "result_meta": {"tool_result_meta": {"review_delivery": {"id": 1}}}}, {"result": "x"})
+    assert first_show_bound(plain, {"result": terminal})  # inline delegated output credited whole
     assert RESULT_VIEW_MARKER in rebuilt[4]["content"] and FULL_SOURCE_MARKER in rebuilt[4]["content"]
+    assert rebuilt[4]["content"].endswith(trailer) and rebuilt[4]["content"].count(trailer) == 1
     assert len(rebuilt[4]["content"]) < len(fresh) and rebuilt[4][TOOL_RESULT_RECORD_KEY]["source_ref"]
     assert rebuilt[4][TOOL_RESULT_RECORD_KEY]["content_sha256"] == hashlib.sha256(
         rebuilt[4]["content"].encode()).hexdigest()

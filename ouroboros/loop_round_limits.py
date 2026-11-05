@@ -1147,32 +1147,44 @@ def _measure_trial_candidate(ctx: Any, messages: list) -> Any:
     return _loop()._measure_round_main_fit(trial, automatic_pass_used=True)
 
 
+def admission_offset(measurement: Any, predicted_free: int) -> int:
+    """Tokens the round's own measure of a candidate misses against the admission that predicted
+    ``predicted_free`` for it (negative: an excess); 0 when the round's measure is the larger."""
+    own_free = measurement.capacity_total_tokens - measurement.response_reserve_tokens - measurement.estimated_input_tokens
+    return max(0, own_free - predicted_free)
+
+
 def refit_unsent_results_first(ctx: Any, disposition: Any, failed_capture: Any) -> bool:
     """Re-deliver this round's unsent results inside the final candidate before any sent row changes.
 
     Rows past the last answered send are outside the provider's cached prefix: cutting their unasked
     bodies to an exact reader keeps the whole-request prompt cache that every refusal pass loses
-    (DEVELOPMENT 06 "Cache-friendliness invariant"); chosen reads stay whole (owner 2A). A prediction's
-    measured excess sizes every candidate the round's own measure undercounts; a provider's refusal
-    is sized by the window alone. True when a row changed (the caller retries it before the passes)."""
+    (DEVELOPMENT 06 "Cache-friendliness invariant"); chosen reads stay whole (owner 2A). Only a prediction
+    is refit, its measured excess sizing every candidate the round's own measure undercounts: a provider's
+    refusal first records the refused request's own size (``_refusal_target``), and a send that already
+    departs from the recorded one has no unsent tail to keep. True when a row changed (retried first)."""
     from ouroboros.tool_result_delivery import refit_unsent_results
-    from ouroboros.transcript_prefix import DIGEST_ATTR
+    from ouroboros.transcript_prefix import DIGEST_ATTR, departure
 
     sent, measurement = getattr(ctx.tools._ctx, DIGEST_ATTR, None), getattr(disposition, "measurement", None)
-    if not isinstance(sent, list) or not sent or measurement is None or measurement.capacity_total_tokens is None:
-        return False
     predicted = getattr(failed_capture, "predicted_free_tokens", None)
-    seen = measurement.estimated_input_tokens + measurement.response_reserve_tokens - measurement.capacity_total_tokens
-    offset = max(0, -int(predicted) - max(0, seen)) if predicted is not None else 0
+    if (predicted is None or not isinstance(sent, list) or not sent or measurement is None
+            or measurement.capacity_total_tokens is None or departure(ctx.tools._ctx, ctx.messages, ctx.tool_schemas)):
+        return False
+    offset = admission_offset(measurement, int(predicted))
 
     def measure(messages: list) -> Dict[str, Any]:
         measured = _measure_trial_candidate(ctx, messages)
         facts = asdict(measured.measurement) if measured is not None else {}
         return {**facts, "estimated_input_tokens": int(facts.get("estimated_input_tokens") or 0) + offset}
 
-    rebuilt, receipt = refit_unsent_results(ctx.messages, len(sent), list(ctx.tool_schemas or []),
-                                            drive_root=pathlib.Path(ctx.drive_root or ctx.drive_logs.parent),
-                                            task_id=ctx.task_id, measure=measure)
+    from ouroboros.artifacts import task_id_for_artifacts
+
+    tool_ctx = ctx.tools._ctx  # the first show's store, which the tool row's reader resolves against
+    rebuilt, receipt = refit_unsent_results(
+        ctx.messages, len(sent), list(ctx.tool_schemas or []), task_id=task_id_for_artifacts(tool_ctx),
+        drive_root=pathlib.Path(getattr(tool_ctx, "drive_root", None) or ctx.drive_root or ctx.drive_logs.parent),
+        measure=measure)
     if rebuilt is None:
         return False
     ctx.messages[:] = rebuilt  # unsent rows only: no sanctioned rewrite, the sent prefix keeps its bytes

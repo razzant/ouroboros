@@ -263,3 +263,28 @@ def test_an_anchored_publication_keeps_its_receipt_and_its_pass(tmp_path, monkey
     assert outcome["outcome_axes"]["objective"]["status"] == "pass"
     # The mark itself is still shown to the mind with that call.
     assert "Check the license field before publishing." in anchored_note(ctx, "submit_skill_to_hub", {"skill": "demo"})
+
+
+def test_a_mark_on_an_mcp_tool_meets_its_gateway_call_and_holds_the_first_show(tmp_path):
+    """Main calls an on-demand MCP tool through call_mcp_tool: a mark tied to that MCP tool meets the call
+    (another MCP tool through the same gateway does not), and the note is recorded as the row's trailer,
+    which a later refit keeps outside the view."""
+    from types import SimpleNamespace
+
+    from ouroboros.loop_tool_execution import process_tool_results
+    from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
+    from tests._tool_result_delivery_shared import measured_fit
+
+    ctx = ctx_for(tmp_path)
+    assert mark(ctx, "GMAIL_LESSON: confirm the recipient.", {"tool": "mcp_gmail__send_email"})["ok"]
+    rows = [{"fn_name": "call_mcp_tool", "tool_call_id": call_id, "result": "done", "is_error": False,
+             "tool_args": {"name": name, "arguments": {"to": "a"}}, "args_for_log": {"name": name}, "result_meta": {},
+             "tool_result": ToolResult(status="ok", code="OK", text="done")}
+            for call_id, name in (("c1", "mcp_slack__history"), ("c2", "mcp_gmail__send_email"))]
+    messages, trace = [], {"tool_calls": []}
+    process_tool_results(rows, messages, trace, lambda *_a: None, SimpleNamespace(_ctx=ctx),
+                         fit_candidate=measured_fit(window=200_000, reserve=1_000), tool_schemas=[])
+    assert "GMAIL_LESSON" not in messages[0]["content"] and "GMAIL_LESSON" in messages[1]["content"]
+    trailer = messages[1][TOOL_RESULT_RECORD_KEY]["first_show_trailer"]
+    assert "GMAIL_LESSON" in trailer and messages[1]["content"].endswith(trailer)
+    assert "GMAIL_LESSON" not in messages[0][TOOL_RESULT_RECORD_KEY].get("first_show_trailer", "")

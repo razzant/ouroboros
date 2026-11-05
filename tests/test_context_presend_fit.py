@@ -89,6 +89,33 @@ def test_a_prediction_first_refits_this_rounds_unsent_results_and_keeps_the_sent
         assert rungs == ["fresh_results"] and RESULT_VIEW_MARKER in shown and shown in sent and big not in sent
 
 
+def test_only_a_prediction_on_an_unbroken_send_refits_and_its_offset_meets_the_admission(monkeypatch):
+    """A provider's refusal records its own refused size before any change, and a send that already departs
+    has no unsent tail to keep, so neither refits; the trial measure is shifted by what it misses against the
+    admission, room it shows included."""
+    from types import SimpleNamespace
+    from ouroboros import loop_round_limits, tool_result_delivery
+    from ouroboros.transcript_prefix import DIGEST_ATTR, message_digest
+
+    def measured(estimated):
+        return SimpleNamespace(capacity_total_tokens=1_000, response_reserve_tokens=100, estimated_input_tokens=estimated)
+
+    assert loop_round_limits.admission_offset(measured(850), -50) == 100  # its own 50 free tokens plus the 50 excess
+    assert loop_round_limits.admission_offset(measured(950), -60) == 10 and loop_round_limits.admission_offset(measured(950), -40) == 0
+    sent = [{"role": "system", "content": "core"}]
+    tool_ctx = SimpleNamespace(**{DIGEST_ATTR: [message_digest(sent[0])]})
+    ctx = SimpleNamespace(tools=SimpleNamespace(_ctx=tool_ctx), tool_schemas=[], drive_root="/nonexistent", task_id="t",
+                          messages=[*sent, {"role": "assistant", "content": "", "tool_calls": []}])
+    calls = []
+    monkeypatch.setattr(tool_result_delivery, "refit_unsent_results",
+                        lambda messages, first_unsent, *_a, **_kw: calls.append(first_unsent) or (None, {}))
+    disposition, prediction = SimpleNamespace(measurement=measured(950)), SimpleNamespace(predicted_free_tokens=-60)
+    assert not loop_round_limits.refit_unsent_results_first(ctx, disposition, SimpleNamespace()) and calls == []
+    assert not loop_round_limits.refit_unsent_results_first(ctx, disposition, prediction) and calls == [1]
+    ctx.messages[0] = {"role": "system", "content": "a rebuilt core"}
+    assert not loop_round_limits.refit_unsent_results_first(ctx, disposition, prediction) and calls == [1]
+
+
 @pytest.mark.parametrize("known,stale", [(False, False), (True, True)])
 def test_unknown_or_stale_window_sends_the_first_full_request(main_call, known, stale):
     ctx, gateway, *_ = main_call

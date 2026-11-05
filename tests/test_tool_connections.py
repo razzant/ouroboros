@@ -146,7 +146,7 @@ def test_main_shows_mcp_schemas_for_the_gateway_and_its_request_tools_keep_their
 
     _servers()
     resident = initial_tool_schemas(registry)
-    loop_module._setup_dynamic_tools(registry, resident, [])
+    loop_module._setup_dynamic_tools(registry, resident, [], gateway=True)
     before = _names(resident)
     receipt = registry.execute("enable_tools", {"tools": "mcp_gitlab"})
     assert "call_mcp_tool" in before and _names(resident) == before
@@ -172,12 +172,13 @@ def test_main_shows_mcp_schemas_for_the_gateway_and_its_request_tools_keep_their
 
 
 def test_enable_tools_loads_a_whole_server_and_says_what_the_next_request_carries(registry):
-    """An actor whose request does not carry the gateway (Nano, a voice session, a narrowed child) loads."""
+    """Any binding but Main's text loop loads (a voice session, Nano, a narrowed child), the gateway resident or not."""
     from ouroboros import loop as loop_module
 
     _servers()
-    resident = [schema for schema in initial_tool_schemas(registry) if schema["function"]["name"] != "call_mcp_tool"]
+    resident = initial_tool_schemas(registry)
     loop_module._setup_dynamic_tools(registry, resident, [])
+    assert "call_mcp_tool" in _names(resident)
     receipt = registry.execute("enable_tools", {"tools": "mcp_gitlab"})
     assert "Call schemas loaded (≈" in receipt and "mcp_gitlab (all 2 tools)" in receipt
     assert {"mcp_gitlab__create_issue", "mcp_gitlab__get_merge_request"} <= set(_names(resident))
