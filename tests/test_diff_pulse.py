@@ -5,6 +5,7 @@ reviewer's brief of a body subject; never a threshold, a warning or a block
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -120,6 +121,95 @@ def test_list_bounds_are_presentation_and_count_what_they_leave_out(tmp_path):
     assert "ouroboros/m2.py 3 (+3/-0), ouroboros/m1.py 2 (+2/-0) (+1 more)." in bounded  # most grown first
     whole = diff_pulse(repo)
     assert "new files: ouroboros/m0.py, ouroboros/m1.py, ouroboros/m2.py;" in whole and "more" not in whole
+
+
+SUITE = """import pytest
+
+
+@pytest.mark.serial
+def test_kept():
+    pass
+
+
+@pytest.mark.parametrize("value", [1, 2, 3])
+def test_rows(value):
+    pass
+"""
+
+
+def _suite_repo(root: Path) -> Path:
+    """A body whose official ref holds a test module with four declared items and one with two."""
+    repo = _body(root)
+    _write(repo, "tests/test_old.py", 1, SUITE)
+    _write(repo, "tests/test_gone.py", 1, "def test_a():\n    pass\n\n\ndef test_b():\n    pass\n")
+    _write(repo, "tests/_world.py", 1, "world = 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "suite")
+    _git(repo, "update-ref", "refs/remotes/canonical/ouroboros", "HEAD")
+    return repo
+
+
+def test_a_changed_test_source_adds_what_the_suite_declares_and_records(tmp_path, monkeypatch):
+    from ouroboros import config
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
+    repo = _suite_repo(tmp_path / "body")
+    grown = SUITE.replace("[1, 2, 3]", "[1, 2, 3, 4]") + "\n\n@pytest.mark.parametrize('x', range(9))\ndef test_computed(x):\n    pass\n"
+    _write(repo, "tests/test_old.py", 1, grown)  # one row and one computed list: +2 items
+    (repo / "tests/test_gone.py").unlink()  # -2 items
+    _write(repo, "tests/test_new.py", 1, 'import pytest\n\npytestmark = pytest.mark.serial("cost-stand")\n'
+                                         '@pytest.mark.parametrize("a", [1, 2])\n@pytest.mark.parametrize("b", [1, 2, 3])\n'
+                                         'def test_x(a, b):\n    pass\n# @pytest.mark.serial("a comment")\n')  # +6 items
+    _write(repo, "web/tests/view.test.js", 2, "test();\n")
+    _write(repo, "tests/_world.py", 3, "world = 1\n")
+    _write(repo, "ouroboros/core.py", 11)
+
+    fact, *_ = diff_pulse(repo).split("\n")
+    assert "module lines (target 1000, cap 1600): ouroboros/core.py 11 (+1/-0); tests: items +8/-2, new modules 2, " in fact
+    assert "serial marks +1 (cost-stand), recorded test-seconds unknown, test module lines: " in fact
+    assert fact.endswith("test module lines: tests/test_new.py 8 (+8/-0), tests/test_old.py 16 (+6/-1), "
+                         "tests/_world.py 3 (+2/-0), web/tests/view.test.js 2 (+2/-0).")  # a deleted module has no size
+
+    # The table of the last complete battery: the slowest system it saw, and what it never saw.
+    state = tmp_path / "data" / "state"
+    state.mkdir(parents=True)
+    table = state / "test-durations.json"
+    table.write_text(json.dumps({"format": 1, "platforms": {
+        "darwin": {"tests/test_old.py": 2500}, "linux": {"tests/test_old.py": 1000, "tests/test_gone.py": 1500}}}),
+        encoding="utf-8")
+    assert "4 recorded test-seconds of changed modules (1 not recorded), test module lines: " in diff_pulse(repo)
+    table.write_text("{", encoding="utf-8")
+    assert "recorded test-seconds unknown" in diff_pulse(repo)  # unknown is never zero
+    table.unlink()
+
+    # An edit shows its own files, and a shown file outside the suite adds nothing.
+    assert "tests: items +2/-0, new modules 0, serial marks +0, " in diff_pulse(repo, ["tests/test_old.py"])
+    assert "; tests:" not in diff_pulse(repo, ["ouroboros/core.py"])
+    # The index a commit or a review subject holds, not the worktree.
+    _git(repo, "add", "tests/test_gone.py")
+    assert "tests: items +0/-2, new modules 0," in diff_pulse(repo, staged=True)
+    # A test module that does not parse mid-edit is unread, never counted as empty.
+    _write(repo, "tests/test_old.py", 1, "def broken(:\n")
+    assert "tests: items +0/-0 (1 unreadable)," in diff_pulse(repo, ["tests/test_old.py"])
+
+
+def test_a_bare_mark_shows_and_a_mark_kept_or_moved_adds_nothing(tmp_path):
+    repo = _suite_repo(tmp_path / "body")
+    _write(repo, "tests/test_old.py", 1, SUITE.replace("def test_rows", "@pytest.mark.serial\ndef test_rows"))
+    assert "serial marks +1 (bare), " in diff_pulse(repo)
+    _write(repo, "tests/test_old.py", 1, SUITE + "\n\ndef test_more():\n    pass\n")
+    assert "tests: items +1/-0, new modules 0, serial marks +0, " in diff_pulse(repo)
+
+
+def test_test_lines_are_a_fact_for_any_size_and_no_module_limit_names_them(tmp_path):
+    shapes = []
+    for name, rows in (("small", 1), ("huge", 3000)):
+        repo = _suite_repo(tmp_path / name)
+        _write(repo, "tests/test_old.py", 1, SUITE + "\n\ndef test_more():\n    pass\n" * rows)
+        pulse = diff_pulse(repo)
+        assert "⚠" not in pulse and "module lines (target 1000, cap 1600): none; tests:" in pulse
+        shapes.append(re.sub(r"\d+", "N", re.sub(r"merge-base [0-9a-f]{12}", "merge-base SHA", pulse)))
+    assert shapes[0] == shapes[1]
 
 
 CODE = {

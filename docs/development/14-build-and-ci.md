@@ -15,23 +15,32 @@ Default local pytest excludes seven costly or environment-dependent lanes — `i
 - `skill_smoke` (`tests/test_skill_smoke_official.py`): pinned live official catalog, three OSes, real network/pip; investigate RED, never skip. Ubuntu review legs alone hold keys; missing fails. One author calls `skill_review`; no payload edits; two paid cycles count infra, the second one grounded rebuttal or one retry of a verdictless review. Pending stays RED. Only persisted independent acceptance passes; reap the key-bearing tree before enable (ARCHITECTURE §8).
 - `size_ratchet` carries the live-repo size gates and is the only blocking surface for repository size (rules under "Module Size & Complexity"; base fallback and the fail-closed rule: ARCHITECTURE §8 "CI topology").
 
-`skill_smoke` and `size_ratchet` tests never also carry the `serial` marker or join `_SERIAL_TEST_FILES`: the `and not <lane>` markexprs are the lane barrier, and single-lane assignment keeps each test's placement unambiguous. A new opt-in lane registers its marker in `pyproject.toml`, adds a collect-only zero-test guard in CI, and keeps the default local addopts free of network and Docker requirements.
+`skill_smoke` and `size_ratchet` tests never also carry the `serial` marker: the `and not <lane>` markexprs are the lane barrier, and single-lane assignment keeps each test's placement unambiguous. A new opt-in lane registers its marker in `pyproject.toml`, adds a collect-only zero-test guard in CI, and keeps the default local addopts free of network and Docker requirements.
 
-### Retiring tests
+### Retiring and merging tests
 
-Each removed or rewritten test gets a verdict line in PR evidence, not a ledger:
-obsolete (what ended it), wording owned by review (which item), rewritten, or merged
-(the survivor). Wording pins retire by class: a re-runnable rule and a sampled
-independent read; a structural scan of a live rule is rewritten into behaviour or
-kept. A merge runs its survivor and one falsifying negative per failure mode.
-CHECKLISTS Body item 11(d) owns the review.
+For a module or a class of tests answer four questions: what must stay true; who can
+break it on a supported install and what would they see; where is its one home; what
+does it cost against what it protects. Verdicts: `keep`, `extend <home>`, `merge into
+<home>` (survivor named, one falsifying negative per failure mode), `delete: obsolete
+(<what ended it>)`, `delete: review owns (<item>)`, `rewrite onto <seam>`. A class
+retires by a re-runnable rule (`devtools/test_census.py`) plus a sampled independent
+read; the PR evidence carries the rule and the generated manifest, one line per module
+or class, never a ledger in the tree. A test named in a post-merge-red, FLAKY or
+ACCEPTED record of the current release cycle stays: never deleted or trimmed, and folded
+only with every case and its real process intact; a real-child test is never moved onto
+an in-process double. CHECKLISTS Body item 11(d) owns the review.
 
 ### Parallel CI and the `serial` marker
 
-CI uses `scripts/run_tests.py` behind `scripts/ci_retry.py` for the default-suite passes (jobs: ARCHITECTURE §8): parallel `-m "not serial and <seven lane exclusions>"` with `PARALLEL_PASS_FLAGS` (`-n auto --dist loadscope --max-worker-restart=0 --timeout=300`), then serial `-m "serial and <same exclusions>"` with `SERIAL_PASS_FLAGS` (`--timeout=300`: POSIX SIGALRM fails the hung test; Windows' thread method stops its worker). Each OS adds `--default-suite-shard=K/N`; `tests/default_lane.py` packs whole files by recorded duration, else count. Shard 1 adds unsharded manifests. Keep this split:
+CI (`scripts/run_tests.py` behind `scripts/ci_retry.py`; jobs: ARCHITECTURE §8) and the commit gate run the default suite as one xdist pass with `PARALLEL_PASS_FLAGS` under `-m "<seven lane exclusions>"`: tests sharing a named resource form one `xdist_group`, longest groups first by recorded duration. A resource group stops no other worker, so a short one-process pass then runs `serial("exclusive")`, the tests that harm live siblings. The 300 s per-test timeout holds in both: POSIX SIGALRM fails the hung test; Windows' thread method stops its worker. Each OS adds `--default-suite-shard=K/N`; `tests/default_lane.py` packs whole files by recorded duration, else count. Shard 1 adds unsharded manifests. Keep this split:
 
-- Mark `@pytest.mark.serial` (or list the file in `_SERIAL_TEST_FILES` in `tests/conftest.py`) only for a shared resource the test cannot isolate: a fixed port, a real daemon, a process-global its fixture cannot restore. An owned child, a private root or port 0 is not one. Under `-n` such a test flakes on kill/reap or port-reclaim timing or crashes its worker, and with `--max-worker-restart=0` a dead worker fails its co-located batch. A merely slow test is made faster or split, never `serial`.
+- `@pytest.mark.serial("<resource>")` names the one host resource a test cannot isolate: a fixed port, a real daemon, a process-global its fixture cannot restore. An owned child, a private root or port 0 is not one; a bare `serial` is a collection error. An unnamed sharer flakes on kill/reap or port-reclaim timing or crashes its worker, and with `--max-worker-restart=0` a dead worker fails its co-located batch. A merely slow test is made faster or split, never `serial`.
 - Keep every other test parallel-safe: `tmp_path` (never a fixed path), `monkeypatch.setenv`/`delenv`/`setattr`, no execution-order assumptions; a fixture-restored global stays parallel (`tests/conftest.py::_isolate_workspace_executor_globals`).
+
+### Test design
+
+A test starts a real process only for a claim that lives at the process boundary: signal delivery, exit status and teardown order, environment and interpreter flags at exec, stdio encoding, cross-process locks, sockets and pipes, containment and reaping, or an external binary's own behaviour. Each entry point keeps one real-process witness per such claim; its other scenarios call it in-process (`main(argv)`, `runpy.run_path(..., run_name="__main__")`) or through its public seam, never by patching internal names. A world a test only reads or starts from is built once per run and cloned (`tests/_worlds.py`); a test's folder goes when the test ends with its processes gone. `serial` names the host resource it serializes.
 
 ### The local battery entry point
 
@@ -70,11 +79,11 @@ OUROBOROS_RUN_UI_SMOKE=1 OUROBOROS_EXPECT_BROWSER_ENGINES=chromium,webkit \
 
 `commit_reviewed` selects `test_selection.FLOOR_TESTS`, changed tests, direct AST importers of changed code/tests and authored widening. Missing/empty floor modules block. Selection is scope, not execution: `LANE_EXCLUSION_EXPR` still skips opt-in markers (`ui_browser`). Include dirty/untracked candidate files against `HEAD` pre-commit and `HEAD~1` post-commit (body candidates: their serving fork). Automatic CI follows ARCHITECTURE §8; local checks and review remain.
 
-Imports are a minimum: `extra_tests` covers indirect/dynamic, prompt, skill and cross-language consumers; `full_tests`, unresolved impact. Both need `test_reason`, retained until adoption. Verifier/cutover changes force full: runner/selector, floor, shared helpers/data, pytest configuration, non-version dependency edits and `_CUTOVER`. No product fan-out threshold. Records bind tier, candidate/base/policy, reasons and execution counts; missing/duplicate execution blocks.
+Imports are a minimum: `extra_tests` covers indirect/dynamic, prompt, skill and cross-language consumers; `full_tests`, unresolved impact. Both need `test_reason`, retained until adoption. Verifier/cutover changes force full: runner/selector, floor, pytest configuration and its plugins, fixture data, non-version dependency edits and `_CUTOVER`; a shared Python helper under `tests/` selects its importers, through other helpers (one that configuration imports or nothing imports forces full). No product fan-out threshold. Records bind tier, candidate/base/policy, reasons and execution counts; missing/duplicate execution blocks.
 
 Full is required for managed updates (their forced run), non-candidate evolution publication, post-adoption boot push and tag/dispatch CI. Local adoption also accepts an exact selected run against the serving HEAD, under the loaded policy, covering the reviewed switch delta and declared widening; it withholds both branch and tag. Ordinary serving-checkout commits and `promote_to_stable` have no tier gate: a later push can publish a withheld adoption. New HEAD needs new evidence; skip/`None` proves nothing. Post-commit failures retain ordinary commits with warnings; evolution withholds publication, managed updates roll back or retain `gate_blocked`.
 
-`preflight_runner.run_hermetic_pytest` runs Node, parallel `not serial`, then timed `serial` in one disposable checkout; `LANE_EXCLUSION_EXPR`/`*_PASS_FLAGS` own exclusions/flags. Missing Node/plugins blocks. `preflight_node.node_environment` fingerprints bundled-first Node on gate/CLI child PATH; other environments keep their policy. Acorn (`web/tests/no_undef.test.js`) and lockfile-frozen CI ESLint stay independent. Gate temp defaults match `safe_test`, without `--temp-parent`; small/noexec `/tmp` can fail.
+`preflight_runner.run_hermetic_pytest` runs Node, one xdist pass, then a short one-process `serial("exclusive")` pass in one disposable checkout; `LANE_EXCLUSION_EXPR`/`*_PASS_FLAGS` own exclusions/flags. Missing Node/plugins blocks. `preflight_node.node_environment` fingerprints bundled-first Node on gate/CLI child PATH; other environments keep their policy. Acorn (`web/tests/no_undef.test.js`) and lockfile-frozen CI ESLint stay independent. Gate temp defaults match `safe_test`, without `--temp-parent`; small/noexec `/tmp` can fail.
 
 Candidate capture uses one hardened worktree-vs-`HEAD` binary diff; assembly failure is `PREFLIGHT_CANDIDATE_ASSEMBLY`. It scrubs `PYTEST_*`, `NODE_OPTIONS`, settings and credentials; plugin probes run outside candidate control. Post-commit baselines include `HEAD~1` to catch suite deletion; exit status owns the verdict. `OUROBOROS_PREFLIGHT_SERIAL=1` is an explicit rollback lever, never silent fallback.
 

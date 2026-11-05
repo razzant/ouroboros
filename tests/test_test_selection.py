@@ -34,7 +34,7 @@ def test_leaf_selects_only_direct_importers_and_changed_tests_above_floor(repo):
 
 
 @pytest.mark.parametrize("path", [
-    "tests/conftest.py", "tests/_shared.py", "tests/support.py", "tests/nested/conftest.py",
+    "tests/conftest.py", "tests/nested/conftest.py", "tests/ci_evidence.py", "tests/default_lane.py",
     "tests/test_floor.py", "pyproject.toml", "uv.lock", "requirements-runtime.lock", "site/pnpm-lock.yaml",
     "ouroboros/preflight_runner.py", "ouroboros/test_selection.py", "scripts/run_tests.py",
     "ouroboros/process_containment.py", "ouroboros/process_lifeline.py",
@@ -45,6 +45,57 @@ def test_verification_changes_require_full(repo, path):
     assert result.tier == "full"
     assert len(result.files) == result.available
     assert (path, "verification apparatus changed") in result.reasons
+
+
+def test_a_changed_helper_selects_what_reaches_it_through_other_helpers_and_nothing_else(repo):
+    write(repo, "tests/_world.py", "world = 1\n")
+    write(repo, "tests/_stand.py", "from tests._world import world\n")
+    write(repo, "tests/fixtures/rows.py", "from tests import _stand\n")
+    write(repo, "tests/_other.py", "other = 1\n")
+    importers = {
+        "tests/test_direct.py": "from tests._world import world\n",
+        "tests/test_through.py": "from tests._stand import world\n",
+        "tests/test_deep.py": "def test_x():\n    from tests.fixtures import rows\n",
+    }
+    for path, source in {**importers, "tests/test_other.py": "from tests._other import other\n"}.items():
+        write(repo, path, source)
+    result = selection.select_from_paths(repo, ["tests/_world.py"], base="base")
+    assert result.tier == "selected"
+    assert set(result.files) == {"tests/test_floor.py", *importers}
+    assert ("tests/test_through.py", "direct import: tests._stand") in result.reasons
+
+
+@pytest.mark.parametrize("configuration", ["tests/conftest.py", "tests/system_e2e/conftest.py", "tests/ci_evidence.py"])
+def test_a_helper_pytest_configuration_loads_is_full_and_a_test_only_helper_is_not(repo, configuration):
+    """The fixture a configuration file reaches runs for every test, through another helper too."""
+    write(repo, "tests/_guard.py", "guard = 1\n")
+    write(repo, "tests/_bridge.py", "from tests._guard import guard\n")
+    write(repo, "tests/test_guarded.py", "from tests._guard import guard\n")
+    assert selection.select_from_paths(repo, ["tests/_guard.py"], base="base").tier == "selected"
+    write(repo, configuration, "from tests._bridge import guard\n")
+    result = selection.select_from_paths(repo, ["tests/_guard.py"], base="base")
+    assert result.tier == "full" and ("tests/_guard.py", "verification apparatus changed") in result.reasons
+
+
+def test_a_child_script_nothing_imports_is_full_and_a_deleted_helper_selects_stale_importers(repo):
+    """A test starts it by path: its consumers cannot be traced, and the floor alone would prove nothing."""
+    write(repo, "tests/_child.py", "print('started by path')\n")
+    write(repo, "tests/_only_for_child.py", "value = 1\n")
+    write(repo, "tests/s1_host.py", "from tests._only_for_child import value\n")
+    for path in ("tests/_child.py", "tests/_only_for_child.py"):
+        assert selection.select_from_paths(repo, [path], base="base").tier == "full"
+    write(repo, "tests/test_stale.py", "from tests._gone import helper\n")
+    result = selection.select_from_paths(repo, ["tests/_gone.py"], base="base")
+    assert result.tier == "selected" and "tests/test_stale.py" in result.files
+
+
+def test_a_broken_helper_refuses_the_graph_only_when_a_helper_must_be_traced(repo):
+    write(repo, "tests/_broken.py", "def broken(:\n")
+    write(repo, "tests/_fine.py", "fine = 1\n")
+    assert selection.select_from_paths(repo, ["ouroboros/leaf.py"], base="base").tier == "selected"
+    with pytest.raises(ValueError, match="import scan unavailable for tests/_broken.py"):
+        selection.select_from_paths(repo, ["tests/_fine.py"], base="base")
+    assert selection.select_from_paths(repo, ["tests/_fine.py", "pyproject.toml"], base="base").tier == "full"
 
 
 def test_no_product_hub_or_fraction_threshold(repo):
