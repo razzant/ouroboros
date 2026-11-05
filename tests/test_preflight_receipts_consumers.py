@@ -621,16 +621,18 @@ def _tier_run(repo, ctx, monkeypatch, tier, **kwargs):
 
 
 @pytest.mark.parametrize("failure", ["no_process", "custody_failed"])
-@pytest.mark.parametrize("lane,tier", [("pytest", "full"), ("pytest", "selected"), ("node", "full")])
+@pytest.mark.parametrize("lane,tier", [("pytest", "full"), ("pytest", "selected"), ("warm", "full"), ("node", "full")])
 def test_a_first_lane_whose_launch_failed_is_never_reported_started_or_passed(tmp_path, monkeypatch, lane, tier,
                                                                              failure):
     """The first lane's launch fails: the OS refuses its process (EAGAIN: none is created),
     or the process is created but the container cannot take custody of it and stops it
     at launch. The first is NOT STARTED, the second START UNKNOWN; neither claims a lane
-    started (INTERRUPTED), and neither is ever proof."""
+    started (INTERRUPTED), and neither is ever proof. The bytecode warm is the lane before
+    the passes: a pytest pass whose launch fails is a later lane that never started, after
+    a warm that ran (INTERRUPTED, the warm its only lane), and still never proof."""
     import errno
 
-    from ouroboros import preflight_node, process_containment
+    from ouroboros import preflight_node, process_containment, test_bytecode
     from ouroboros.process_overload import OverloadWatch
     from tests.test_preflight_receipts import _ctx
     from tests.test_preflight_runner import _pin_preflight_root
@@ -641,7 +643,7 @@ def test_a_first_lane_whose_launch_failed_is_never_reported_started_or_passed(tm
         monkeypatch.setattr(preflight_node, "resolve_node", lambda: sys.executable)
         monkeypatch.setattr(preflight_node, "probe_node_version", lambda _node: "99.0.0")
     if failure == "no_process":
-        lane_argv = {"pytest": ("-m", "pytest"), "node": ("--test",)}[lane]
+        lane_argv = {"pytest": ("-m", "pytest"), "node": ("--test",), "warm": (str(test_bytecode.MODULE_PATH),)}[lane]
 
         def popen(argv, *args, **kwargs):
             if all(part in argv for part in lane_argv):
@@ -652,8 +654,13 @@ def test_a_first_lane_whose_launch_failed_is_never_reported_started_or_passed(tm
         monkeypatch.setattr(process_containment, "subprocess", SimpleNamespace(**{
             **{name: getattr(subprocess, name) for name in dir(subprocess) if not name.startswith("__")}, "Popen": popen}))
     else:
-        def refused(_watch):
-            raise RuntimeError("can't start new thread")
+        real_start, watches = OverloadWatch.start, []
+
+        def refused(watch, *args, **kwargs):  # the pytest pass's watch is the second one started: the warm's is first
+            watches.append(watch)
+            if lane != "pytest" or len(watches) > 1:
+                raise RuntimeError("can't start new thread")
+            return real_start(watch, *args, **kwargs)
 
         monkeypatch.setattr(OverloadWatch, "start", refused)
 
@@ -667,15 +674,21 @@ def test_a_first_lane_whose_launch_failed_is_never_reported_started_or_passed(tm
     assert verdict and "hermetic preflight failed" in verdict, verdict
     terminal = json.loads((pathlib.Path(ctx._preflight_test_evidence) / "result.json").read_text(encoding="utf-8"))
     execution, outcome = {"no_process": ("not_run", "not_started"), "custody_failed": ("attempted", "start_unknown")}[failure]
-    assert (terminal["execution"], terminal["lanes"], ctx._preflight_test_disclosure["outcome"]) == (execution, [], outcome)
+    lanes = []
+    if lane == "pytest":  # the warm ran and returned; the pass after it never started
+        execution, lanes, outcome = ("executed" if failure == "no_process" else "attempted"), ["warm"], "interrupted"
+    assert (terminal["execution"], [row["lane"] for row in terminal["lanes"]],
+            ctx._preflight_test_disclosure["outcome"]) == (execution, lanes, outcome)
     assert (terminal["cleanup"], terminal["retention_reason"]) == ("released", "") and not temp_root.exists()
     assert getattr(ctx, "_preflight_tests_passed", None) is not True and getattr(ctx, "_preflight_test_proof", None) is None
     exhibit = receipts.execution_exhibit(ctx, otherwise="tests preflight did not pass")
     [run] = exhibit["observed"]
     assert (exhibit["status"], run["outcome"], run["tier"]) == ("not_run", outcome, tier)
     section = receipts.execution_section(exhibit)
-    assert ("NOT STARTED" if failure == "no_process" else "START UNKNOWN") in section
-    assert "INTERRUPTED" not in section and "a lane process started" not in section and "PASSED" not in section
+    assert {"not_started": "NOT STARTED", "start_unknown": "START UNKNOWN", "interrupted": "INTERRUPTED"}[outcome] in section
+    assert "PASSED" not in section
+    if lane != "pytest":
+        assert "INTERRUPTED" not in section and "a lane process started" not in section
 
 
 def test_a_preparation_finding_reaches_the_seats_whole_as_quoted_data_with_credentials_redacted():
