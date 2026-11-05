@@ -57,65 +57,6 @@ def test_known_window_folds_before_first_provider_send(main_call, monkeypatch):
     assert not any(row.get("type") in {"llm_api_error", "remote_context_overflow"} for row in rows)
 
 
-@pytest.mark.parametrize("window", [900_000, 200_000])
-def test_a_prediction_first_refits_this_rounds_unsent_results_and_keeps_the_sent_prefix(main_call, window):
-    """A fresh result that does not fit leaves for an exact reader before any sent row changes: the request
-    stays a pure extension of the last answered send (the provider's whole-request prompt cache survives)
-    and no refusal pass runs. A fitting round sends the same result whole."""
-    import hashlib
-    from ouroboros import transcript_prefix
-    from ouroboros.tool_result_delivery import RESULT_VIEW_MARKER
-    from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
-
-    ctx, gateway, *_ = main_call
-    plan = replace(ctx.context_fit_plan, window_tokens=window, status="confirmed", stale=False)
-    ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan
-    transcript_prefix.observe_send(ctx.tools._ctx, ctx.messages[:-3], round_idx=0, tools=ctx.tool_schemas)
-    big = "fresh output line\n" * 30_000
-    row = ctx.messages[-2]
-    row.update({"content": big, TOOL_RESULT_RECORD_KEY: {
-        "version": 1, "content_sha256": hashlib.sha256(big.encode()).hexdigest(), "facts": {}, "trace_ref": {},
-        "invocation": {"tool_call_id": "a", "invocation_id": "inv-a"}, "source_ref": {}}})
-    answer, _, _mode = loop._call_round_model(ctx)
-    assert answer and len(gateway.creates) == 1
-    assert transcript_prefix.departure(ctx.tools._ctx, ctx.messages, ctx.tool_schemas) is None
-    rows = [json.loads(line) for line in (ctx.drive_logs / "events.jsonl").read_text().splitlines()]
-    rungs = [row.get("rung") for row in rows if row.get("type") == "context_reclaim"]
-    [shown] = [row["content"] for row in ctx.messages if row.get("tool_call_id") == "a"]
-    sent = [row.get("content") for row in gateway.uploads[0][0]["messages"]]
-    if window == 900_000:
-        assert rungs == [] and shown == big and big in sent
-    else:
-        assert rungs == ["fresh_results"] and RESULT_VIEW_MARKER in shown and shown in sent and big not in sent
-
-
-def test_only_a_prediction_on_an_unbroken_send_refits_and_its_offset_meets_the_admission(monkeypatch):
-    """A provider's refusal records its own refused size before any change, and a send that already departs
-    has no unsent tail to keep, so neither refits; the trial measure is shifted by what it misses against the
-    admission, room it shows included."""
-    from types import SimpleNamespace
-    from ouroboros import loop_round_limits, tool_result_delivery
-    from ouroboros.transcript_prefix import DIGEST_ATTR, message_digest
-
-    def measured(estimated):
-        return SimpleNamespace(capacity_total_tokens=1_000, response_reserve_tokens=100, estimated_input_tokens=estimated)
-
-    assert loop_round_limits.admission_offset(measured(850), -50) == 100  # its own 50 free tokens plus the 50 excess
-    assert loop_round_limits.admission_offset(measured(950), -60) == 10 and loop_round_limits.admission_offset(measured(950), -40) == 0
-    sent = [{"role": "system", "content": "core"}]
-    tool_ctx = SimpleNamespace(**{DIGEST_ATTR: [message_digest(sent[0])]})
-    ctx = SimpleNamespace(tools=SimpleNamespace(_ctx=tool_ctx), tool_schemas=[], drive_root="/nonexistent", task_id="t",
-                          messages=[*sent, {"role": "assistant", "content": "", "tool_calls": []}])
-    calls = []
-    monkeypatch.setattr(tool_result_delivery, "refit_unsent_results",
-                        lambda messages, first_unsent, *_a, **_kw: calls.append(first_unsent) or (None, {}))
-    disposition, prediction = SimpleNamespace(measurement=measured(950)), SimpleNamespace(predicted_free_tokens=-60)
-    assert not loop_round_limits.refit_unsent_results_first(ctx, disposition, SimpleNamespace()) and calls == []
-    assert not loop_round_limits.refit_unsent_results_first(ctx, disposition, prediction) and calls == [1]
-    ctx.messages[0] = {"role": "system", "content": "a rebuilt core"}
-    assert not loop_round_limits.refit_unsent_results_first(ctx, disposition, prediction) and calls == [1]
-
-
 @pytest.mark.parametrize("known,stale", [(False, False), (True, True)])
 def test_unknown_or_stale_window_sends_the_first_full_request(main_call, known, stale):
     ctx, gateway, *_ = main_call

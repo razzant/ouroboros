@@ -37,8 +37,8 @@ from ouroboros.tool_capabilities import (
     requested_result_view, routing_action_for_tool, completion_control_call, substantive_tool_calls,
 )
 from ouroboros.tool_result_delivery import (
-    FitCandidate, first_show_bound, prepare_producer_sources, project_tool_result_batch, reader_text,
-    render_result_view, split_allowance, typed_result_facts, with_delivery_note, with_producer_source,
+    FitCandidate, prepare_producer_sources, project_tool_result_batch, reader_text, render_result_view,
+    split_allowance, typed_result_facts, with_delivery_note, with_producer_source,
 )
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY, make_tool_result_record
 from ouroboros.tools.registry import ToolRegistry
@@ -1494,14 +1494,14 @@ def process_tool_results(
         truncated_result = with_producer_source(exec_result, truncated_result)
         shown_result = with_delivery_note(exec_result, truncated_result)
 
-        record = make_tool_result_record(exec_result, shown_result, facts=typed_result_facts(exec_result),
-                                         source_ref=result_source_ref)
-        if first_show_bound(exec_result, view):
-            record["first_show_bound"] = True  # host readers below credit this view: no later refit cuts it
-        if shown_result != str(view["result"]):  # a producer locator or a mark's note trails the view once
-            record["first_show_trailer"] = shown_result[len(str(view["result"])):]
-        messages.append({"role": "tool", "tool_call_id": exec_result["tool_call_id"], "content": shown_result,
-                         TOOL_RESULT_RECORD_KEY: record})
+        messages.append({
+            "role": "tool",
+            "tool_call_id": exec_result["tool_call_id"],
+            "content": shown_result,
+            TOOL_RESULT_RECORD_KEY: make_tool_result_record(
+                exec_result, shown_result, facts=typed_result_facts(exec_result),
+                source_ref=result_source_ref),
+        })
         published = (exec_result.get("result_meta") or {}).get("tool_result_meta") or {}
         if ctx is not None and published.get("sleep_question_notice") and not (is_error or result_partial):
             from ouroboros.model_sleep import acknowledge_question_delivery
