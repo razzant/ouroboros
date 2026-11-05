@@ -220,9 +220,11 @@ def task_hold(data_root: Any, task_id: str, live: Any) -> str:
     delegated run is open. The decision is ``subagent_worktrees._task_proven_over`` and
     ``workspace_preflight._runs_still_open``; the typed word names which of their facts failed
     (the order they read them in): ``task_not_terminal``, ``task_live``, ``liveness_unknown``,
+    ``store_busy`` (the probe met a contended store: this task's hold, never the pass's end),
     ``owner_processes_live``, ``run_open``, ``custody_unreadable``."""
     from ouroboros.body_candidate import _recorded_terminal
     from ouroboros.delegate_custody_current import task_snapshot
+    from ouroboros.store import StoreBusy
     from ouroboros.subagent_worktrees import _task_proven_over
     from ouroboros.workspace_preflight import _runs_still_open
 
@@ -230,7 +232,10 @@ def task_hold(data_root: Any, task_id: str, live: Any) -> str:
     if not _task_proven_over(task_id, root, live):
         if not _recorded_terminal(task_id, root):
             return "task_not_terminal"
-        probe = live(task_id) if live is not None else None
+        try:
+            probe = live(task_id) if live is not None else None
+        except StoreBusy:
+            return "store_busy"
         return "task_live" if probe is True else "liveness_unknown" if probe is not False else "owner_processes_live"
     if _runs_still_open(root, task_id):
         try:

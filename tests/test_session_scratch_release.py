@@ -283,6 +283,28 @@ def test_a_task_not_proven_over_keeps_its_scratch_for_its_next_start(tmp_path, s
     assert _prepare(tmp_path, _Catalog(GRANTED)).scratch == str(scratch)  # the same task and key reuse it
 
 
+def test_a_busy_probe_holds_only_its_own_task_and_the_pass_goes_on(tmp_path):
+    """The supervisor's probe raises ``StoreBusy`` when the store is contended (its contract): the task it was
+    asked about holds its scratch as ``store_busy`` and the pass goes on, so a later finished task still
+    releases; once the store answers, the held one releases too."""
+    from ouroboros.store import StoreBusy
+
+    data, held = _started(tmp_path)
+    _data, other = _started(tmp_path, task_id="task-2")
+
+    def probe(task_id):
+        if task_id == "task-1":
+            raise StoreBusy("ownership re-check found the store busy", reason="contention")
+        return False
+
+    report = release_finished_scratch(data, probe)
+    assert report == {"released": [str(_record(data, "task-2").parent.resolve())], "holds": [_hold(data, "store_busy")],
+                      "errors": []}
+    assert _notes(data) == ["task-1/snap-1.json"] and _record(data).is_file()
+    assert release_finished_scratch(data, OVER)["released"] == [str(_record(data).parent.resolve())]
+    assert task_custody.remove_custody_trash(data)["removed"] == 2 and not held.exists() and not other.exists()
+
+
 def test_the_owner_keep_holds_a_finished_tasks_scratch_until_released(tmp_path, monkeypatch):
     from contextlib import contextmanager
 
