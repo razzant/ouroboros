@@ -158,7 +158,8 @@ def release_trash_entry(data_root: Any, entry: pathlib.Path) -> Tuple[bool, List
     """Release the scratch one custody trash ENTRY's records name (its ``data/`` and nested layouts too) and
     hand each record a retention marker keeps to an entry of its own (``workspace_preflight._retire_record``)
     unless ENTRY is such a handoff already, which then stays: ``(stays, the retained rows)``. Every failure
-    raises, so ``task_custody.remove_custody_trash`` keeps the entry and every record still in it."""
+    raises, so ``task_custody.remove_custody_trash`` keeps the entry and every record still in it; a failed
+    handoff carries the retained rows (``retained``), whose scratch stands whether its record moved or not."""
     from ouroboros.workspace_preflight import _RELEASE_MARK, _retire_record
 
     retained: List[Dict[str, Any]] = []
@@ -167,9 +168,13 @@ def release_trash_entry(data_root: Any, entry: pathlib.Path) -> Tuple[bool, List
         if (entry / "data").is_dir() and not (entry / "data").is_symlink():
             retained += release_session_scratch(entry / "data")
     stays = bool(retained) and _RELEASE_MARK in entry.name
-    for row in [] if stays else retained:
-        if not _retire_record(pathlib.Path(data_root), entry.name.split("+", 1)[0].rsplit("-", 1)[0], row["owner"]):
-            raise OSError(f"retained scratch record not handed on: {row['owner']}")
+    try:
+        for row in [] if stays else retained:
+            if not _retire_record(pathlib.Path(data_root), entry.name.split("+", 1)[0].rsplit("-", 1)[0], row["owner"]):
+                raise OSError(f"retained scratch record not handed on: {row['owner']}")
+    except Exception as exc:
+        exc.retained = retained  # an earlier record may already sit in its own entry, unseen by this pass
+        raise
     return stays, retained
 
 

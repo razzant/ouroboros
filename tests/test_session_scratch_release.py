@@ -514,7 +514,8 @@ def test_a_failed_release_or_handoff_keeps_the_trash_entry_and_every_record_in_i
     """A trash entry goes only once its scratch is released and each marked record has moved into its own
     entry: an invalid or unreadable ownership record, or a record that could not move, keeps the moved drive
     whole with its records, held as ``removal_failed``, and leaves the trash as it was (the unchanged entry
-    spawns no child); once the fault is gone the next run releases the drive and hands the marked record on."""
+    spawns no child), with a failed handoff's marked scratch still held; once the fault is gone the next run
+    releases the drive and hands the marked record on."""
     from ouroboros import maintenance, maintenance_jobs
     from ouroboros.session_scratch import _iso
 
@@ -561,8 +562,10 @@ def test_a_failed_release_or_handoff_keeps_the_trash_entry_and_every_record_in_i
     row, seen = maintenance_jobs.job(data, "custody_trash"), entry.lstat()
     failure = "PermissionError" if fault == "unreadable_record" else "OSError"
     assert row["stuck"] == {entry.name: [seen.st_ino, seen.st_mtime_ns]}
-    assert row["holds"] == [{"class": "removal_failed", "count": 1, "example": f"{entry.name}: {failure}",
-                             "since": _iso(seen.st_mtime)}]
+    assert [hold for hold in row["holds"] if hold["class"] == "removal_failed"] == [
+        {"class": "removal_failed", "count": 1, "example": f"{entry.name}: {failure}", "since": _iso(seen.st_mtime)}]
+    assert [hold["class"] for hold in row["holds"] if hold["class"] != "removal_failed"] == (
+        ["producer_retained"] if fault == "failed_handoff" else []), "a marked scratch stands whether its record moved"
     assert maintenance.due(data) == [], "an unchanged kept entry spawns no child"
     monkeypatch.setattr(os, "replace", real_replace)
     (records / "snap-2" / "scratch.json").write_text(good, encoding="utf-8")

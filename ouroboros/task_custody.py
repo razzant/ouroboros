@@ -1485,6 +1485,7 @@ def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], boo
             holding, retained = release_trash_entry(canonical_root, entry)
         except Exception as exc:  # whatever failed, the entry and every record still in it wait
             failed = f"{entry.name}: {type(exc).__name__}"
+            held += [(row["class"], row["example"], row["since"]) for row in getattr(exc, "retained", ())]
             log.warning("Custody trash entry %s kept: its scratch release did not complete", entry.name, exc_info=True)
         else:
             held += [(row["class"], row["example"], row["since"]) for row in retained]
