@@ -566,8 +566,6 @@ def test_detached_child_left_nothing():
 @pytest.mark.skipif(os.name == "nt", reason="no census there: a detached child's folder waits for the run")
 def test_detached_child_left_a_descendant():
     subprocess.run([PYTHON, "-c", LEAVE_A_DESCENDANT, str(PIDS)], start_new_session=True, check=True)
-    while not PIDS.exists() or not PIDS.read_text():
-        time.sleep(0.01)
 
 
 @pytest.mark.parametrize("case", ["first", "second"])

@@ -4,10 +4,8 @@
 # Cross-module helpers that are not pytest fixtures (e.g. SDK mock, extension
 # runtime cleanup) live in ``tests/_shared.py`` instead.
 import asyncio
-import collections
 import functools
 import json
-import multiprocessing
 import os
 import pathlib
 import shutil
@@ -17,8 +15,6 @@ import sys
 import tempfile
 import threading
 import time
-import types
-import uuid
 
 _PYTEST_DATA_DIR = None
 _PYTEST_ROOT = None
@@ -91,6 +87,7 @@ pytest_plugins = ["tests.browser_lane", "tests.ci_evidence", "tests.default_lane
 from tests._shared import (  # noqa: E402
     _PROVIDER_CATALOG_PRISTINE, _provider_catalog_snapshot, _restore_provider_catalog, offline_provider_catalog,
 )
+from tests import _test_folders  # noqa: E402
 
 
 def _provider_catalog_class():
@@ -249,9 +246,6 @@ def pytest_testnodedown(node, error):
 _ORIGINAL_POPEN_INIT = subprocess.Popen.__init__
 _PYTEST_CHILD_LIVE_ROOT = os.environ.get("OUROBOROS_TEST_LIVE_DATA_ROOT", "")
 _PYTEST_POPEN_PATCHED = False
-# The test in progress in this process (``_begin_test_custody``): what its folder's release must
-# know. ``token`` marks every child it starts; ``children`` holds (Popen, started detached).
-_TEST_CUSTODY = types.SimpleNamespace(token="", children=[], before=frozenset(), failed=False)
 
 
 def _isolated_child_env(value) -> dict:
@@ -285,8 +279,7 @@ def _isolated_child_env(value) -> dict:
     # test child that changes its process group escapes the owner's token scan.
     child_env.update({key: value for key, value in os.environ.items()
                       if key.startswith(CONTAINMENT_ENV_PREFIX)})
-    if _TEST_CUSTODY.token:
-        child_env[_TEST_CUSTODY.token] = "1"
+    child_env.update(_test_folders.child_env())
     child_env[NESTED_WORKERS_ENV] = str(nested_workers(child_env))
     child_env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = child_env[NESTED_WORKERS_ENV]
     return child_env
@@ -314,18 +307,10 @@ def _install_pytest_child_isolation() -> None:
         elif "args" in kwargs:
             kwargs["args"] = bounded_test_command(kwargs["args"], env)
         _ORIGINAL_POPEN_INIT(self, *positional, **kwargs)
-        _TEST_CUSTODY.children.append((self, _starts_detached(positional, kwargs)))
+        _test_folders.note_child(self, positional, kwargs)
 
     subprocess.Popen.__init__ = isolated_init
     _PYTEST_POPEN_PATCHED = True
-
-
-def _starts_detached(positional, kwargs) -> bool:
-    """Whether a child may outlive what ends with it: a new session or group, or whatever a
-    ``preexec_fn`` does (Popen takes all of these at position 6 or later)."""
-    return bool(len(positional) > 6 or kwargs.get("start_new_session") or kwargs.get("preexec_fn")
-                or kwargs.get("process_group") is not None
-                or int(kwargs.get("creationflags") or 0) & 0x208)  # CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS
 
 
 def _restore_pytest_child_isolation() -> None:
@@ -571,8 +556,8 @@ def _guard_test_tree_deletion(config) -> None:
 
     Tests start servers, workers and git in tmp_path, and a test's exit does not prove
     them gone. The "failed"/"none" retention policies delete tmp_path after passing
-    tests with no such proof (``_release_passed_test_folder`` does, with it), and an
-    explicit --basetemp is emptied before the session starts. pytest's
+    tests with no such proof (``_test_folders`` does, with it), and an explicit
+    --basetemp is emptied before the session starts. pytest's
     OWN numbered basetemp is never used either: its exit hook deletes earlier
     sessions' trees and, with tmp_path_retention_count=0, the current one — whatever
     the policy says — so every controller, bare or not, claims a fresh explicit one.
@@ -628,30 +613,11 @@ def _claim_fresh_basetemp(root: pathlib.Path) -> str:
     raise pytest.UsageError(f"no free basetemp claim beneath {root}")
 
 
-def _number_test_folders_once(config) -> None:
-    """A released test's number stays spent, so no path comes back within a process.
-
-    pytest numbers a folder from what the basetemp still holds. With passed tests' folders gone, the
-    next test of that name would get the same path, and process-global state keyed by path
-    (``install_identity``, ``store``, ``queue_observation``) would take it for the earlier test's.
-    """
-    factory, spent = config._tmp_path_factory, collections.Counter()
-    mktemp = factory.mktemp
-
-    def numbered_once(basename, numbered=True):
-        if not numbered:
-            return mktemp(basename, numbered=False)
-        spent[basename] += 1
-        return mktemp(f"{basename}{spent[basename] - 1}", numbered=False)
-
-    factory.mktemp = numbered_once
-
-
 def pytest_sessionstart(session):  # noqa: ARG001
     from ouroboros.test_parallelism import NESTED_WORKERS_ENV
 
     session.config._ouroboros_session = session
-    _number_test_folders_once(session.config)
+    _test_folders.number_once(session.config)
     # This process already owns its allocation. Test-created runners begin with
     # one slot; tests of real concurrency opt in by setting their child's key.
     os.environ[NESTED_WORKERS_ENV] = "1"
@@ -698,7 +664,7 @@ def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
     workeroutput = getattr(session.config, "workeroutput", None)
     if workeroutput is not None:  # xdist worker: hand the leak list to the controller
         workeroutput["thread_leaks"] = list(_THREAD_LEAKS)
-        workeroutput["test_folders"] = dict(_TEST_FOLDERS)
+        workeroutput["test_folders"] = dict(_test_folders.counts)
     # The per-process session tree (unique mkdtemp per controller/worker) is RETAINED,
     # never deleted here: a finished session does not prove that every process its
     # tests started is gone, and nothing at this layer can prove it. The terminal
@@ -729,7 +695,7 @@ def pytest_runtest_protocol(item, nextitem):  # noqa: ARG001
         item.stash[_PHASE_EVENT_LOOPS] = loops
         if _SAFE_TEMP_ROOT:
             item.stash[_RETENTION_BEFORE_ITEM] = _basetemp_witness(item)
-        _begin_test_custody()
+        _test_folders.begin()
         yield
     finally:
         # The call and teardown hooks close their loops and fail that phase if a close raises;
@@ -1366,8 +1332,7 @@ def pytest_runtest_teardown(item, nextitem):  # noqa: ARG001
     asyncio.get_event_loop() after a test that used asyncio.run(), they
     would raise RuntimeError because pytest_runtest_call already cleared
     the loop.  This hook installs a temporary loop for teardown and
-    closes it afterwards. Last, with every hygiene check passed, a passed
-    test's folder goes (``_release_passed_test_folder``).
+    closes it afterwards. Last, a passed test's folder goes (``_test_folders``).
     """
     teardown_loop = item.stash[_PHASE_EVENT_LOOPS][1]
     asyncio.set_event_loop(teardown_loop)
@@ -1385,7 +1350,7 @@ def pytest_runtest_teardown(item, nextitem):  # noqa: ARG001
         _fail_if_a_thread_leaked(item)
         _fail_if_retention_was_left(item, tmp)
         if outcome is not None and outcome.excinfo is None:
-            _release_passed_test_folder(tmp)
+            _test_folders.release_passed(tmp, run_root=_SAFE_TEMP_ROOT, child_seam=_PYTEST_POPEN_PATCHED)
 
 
 _PRISTINE_PASSWORD_RESOLVER = None
@@ -1430,7 +1395,6 @@ def _fail_if_the_password_resolver_leaked(item):
 # session report line.
 _THREADS_BEFORE_ITEM = pytest.StashKey()
 _THREAD_LEAKS: list = []  # (nodeid, [thread names]) — session-scoped, merged onto the controller
-_TEST_FOLDERS: collections.Counter = collections.Counter()  # released, waited, censuses; merged the same way
 _THREAD_LEAK_GRACE_SEC = 2.0
 # By-design detached threads, listed by name prefix — each entry names its owner and why.
 _DETACHED_THREAD_NAME_PREFIXES = (
@@ -1512,64 +1476,11 @@ def _fail_if_retention_was_left(item, tmp):
                     pytrace=False)
 
 
-# ---- a passed test's folder goes with the test (owner 05.11) ----
-#
-# Each test's tmp_path used to wait for the run's end: 16-17 GiB per full pass, all of it left behind by
-# one marker or a stopped run. It waits only when something still needs it; see the proof below.
-def _begin_test_custody() -> None:
-    from ouroboros.process_containment import CONTAINMENT_ENV_PREFIX
-
-    _TEST_CUSTODY.token = CONTAINMENT_ENV_PREFIX + uuid.uuid4().hex
-    _TEST_CUSTODY.children = []
-    _TEST_CUSTODY.before = frozenset(multiprocessing.active_children())
-    _TEST_CUSTODY.failed = False
-
-
-def _test_processes_gone() -> bool:
-    """Whether what the test started has ended: every Popen child and multiprocessing child, and,
-    only if a child was started detached, every carrier of the test's token by one census (about
-    0.3 s; Windows has none, so such a folder waits). A descendant that double-forks inside its
-    parent's group is not seen here; the run's containment still finds it and goes red."""
-    token, _TEST_CUSTODY.token = _TEST_CUSTODY.token, ""  # the census's own `ps` must not carry it
-    if any(child.poll() is None for child, _detached in _TEST_CUSTODY.children):
-        return False
-    if set(multiprocessing.active_children()) - _TEST_CUSTODY.before:
-        return False
-    if not any(detached for _child, detached in _TEST_CUSTODY.children):
-        return True
-    from ouroboros.process_containment import pids_with_env_marker
-
-    _TEST_FOLDERS["censuses"] += 1
-    return os.name != "nt" and pids_with_env_marker(token) == []
-
-
-def _release_passed_test_folder(tmp) -> None:
-    """Remove a passed test's ``tmp_path`` once its processes are proven gone (``_test_processes_gone``).
-
-    Anything else waits for the run's own containment proof and release: a failed phase or
-    subtest (its folder is the diagnosis), retention in the folder or at the run's root (a debug
-    ``--keep`` writes one there first), a run with no child seam (live data), a folder the OS will
-    not let go (a Windows sharing violation). ``tmp_path_factory`` folders are never touched."""
-    from ouroboros.test_environment import RETENTION_MARKER, retention_markers
-    from ouroboros.test_evidence import remove_scratch_tree
-
-    if (not isinstance(tmp, pathlib.Path) or _TEST_CUSTODY.failed or not _PYTEST_POPEN_PATCHED
-            or (_SAFE_TEMP_ROOT and os.path.lexists(os.path.join(_SAFE_TEMP_ROOT, RETENTION_MARKER)))
-            or retention_markers(tmp) or not _test_processes_gone()):
-        _TEST_FOLDERS["waited"] += isinstance(tmp, pathlib.Path)
-        return
-    try:
-        remove_scratch_tree(tmp)
-        _TEST_FOLDERS["released"] += 1
-    except OSError:
-        _TEST_FOLDERS["waited"] += 1
-
-
 @pytest.hookimpl(optionalhook=True, trylast=True)
 def pytest_testnodedown(node, error):  # noqa: ARG001
     # pytest-xdist controller: merge each worker's leak list (shipped via workeroutput below).
     _THREAD_LEAKS.extend(getattr(node, "workeroutput", {}).get("thread_leaks", []))
-    _TEST_FOLDERS.update(getattr(node, "workeroutput", {}).get("test_folders", {}))
+    _test_folders.counts.update(getattr(node, "workeroutput", {}).get("test_folders", {}))
     if error is None:
         return
     session = getattr(node.config, "_ouroboros_session", None)
@@ -1626,7 +1537,7 @@ def _record_worker_crash(node, reason, scheduler):
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_logreport(report):
-    _TEST_CUSTODY.failed = _TEST_CUSTODY.failed or report.failed  # a subtest's report comes through here too
+    _test_folders.custody.failed |= report.failed  # a subtest's report comes through here too
     outcome = yield
     node = getattr(report, "node", None)
     config = getattr(node, "config", None)
@@ -1659,8 +1570,7 @@ def pytest_terminal_summary(terminalreporter):
             f"{len(_THREAD_LEAKS)} test(s): {tests}")
     else:
         terminalreporter.write_line("thread hygiene: no leaked threads")
-    terminalreporter.write_line("test folders: " + ", ".join(
-        f"{_TEST_FOLDERS[name]} {name}" for name in ("released", "waited", "censuses")))
+    terminalreporter.write_line(_test_folders.summary())
     retained = [str(path) for path in (_PYTEST_ROOT, _PYTEST_REPO_FALLBACK) if path is not None]
     basetemp = getattr(getattr(terminalreporter.config, "_tmp_path_factory", None), "_basetemp", None)
     if basetemp is not None and not any(pathlib.Path(basetemp).is_relative_to(path) for path in retained):
