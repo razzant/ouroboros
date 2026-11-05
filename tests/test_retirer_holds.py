@@ -124,19 +124,44 @@ def test_copy_retirement_releases_a_finished_copy_and_holds_a_live_one(tmp_path,
 @witness("ouroboros.review_checking_prune.prune_review_checkouts")
 def test_review_checkout_prune_releases_a_settled_seat_and_holds_an_open_run(tmp_path, monkeypatch):
     from ouroboros import review_checking_prune as rp
+    from ouroboros.startup_migrations import prepare_startup_state
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.review_subject import ReviewSubjectSpec, checkout_token, isolated_checkout
     from tests.test_review_checking_prune import _custody
+    from tests.test_review_checkout_retirement import _repo
     from tests.test_review_checkout_lifecycle import _frozen, _seat
+    from types import SimpleNamespace
 
     root, source = _frozen(tmp_path)
     done, running = _seat(root, source, "op-done"), _seat(root, source, "op-running")
     store_import.ensure_current_store(root)
     _custody(monkeypatch, running=[running], settled=[done])
-    report = rp.prune_review_checkouts(root, set())
+
+    prepare_startup_state(root)
+    repo, system = _repo(tmp_path / "checkout-subject"), _repo(tmp_path / "checkout-system")
+    ctx = SimpleNamespace(repo_dir=str(system), drive_root=str(root), task_id="", task_metadata=None)
+    spec = ReviewSubjectSpec(root_kind="active_workspace", root=str(repo), kind="base..head", base="HEAD~1",
+                             head="HEAD", governance_root=str(system), surface="change")
+
+    def retained(task_id):
+        retry_key = f"review:{task_id}"
+        ctx.task_id = task_id
+        with isolated_checkout(ctx, spec, retain=lambda: {"seats": ["late seat"]},
+                               token=lambda _identity: checkout_token(retry_key, task_id=task_id)) as frozen:
+            entry = pathlib.Path(frozen.checkout).parent
+        write_task_result(root, task_id, "completed", result="done")
+        return entry
+
+    checkout_done = retained("checkout-done")
+    checkout_running = retained("checkout-running")
+    live_checkouts = {"checkout-running"}
+    report = rp.prune_review_checkouts(root, live_checkouts)
     assert report["released"] == 1 and not done.exists() and running.is_dir()
-    assert [(hold["class"], hold["count"]) for hold in report["holds"]] == [("run_open", 1)]
+    assert report["checkouts_removed"] == 1 and not checkout_done.exists() and checkout_running.is_dir()
+    assert [(hold["class"], hold["count"]) for hold in report["holds"]] == [("run_open", 1), ("task_live", 1)]
     first = record_pass(root, "review_checkout_prune", report, event="review_checkout_prune")
-    assert first["released"] == 1 and first["holds"][0]["class"] == "run_open"
-    second = rp.prune_review_checkouts(root, set())
+    assert first["released"] == 1 and first["holds"][0]["class"] == "run_open" and first["holds"][1]["class"] == "task_live"
+    second = rp.prune_review_checkouts(root, live_checkouts)
     assert record_pass(root, "review_checkout_prune", second, event="review_checkout_prune") is None, \
         "nothing released, the same hold: silent"
 
