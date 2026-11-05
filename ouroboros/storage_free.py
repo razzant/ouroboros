@@ -237,6 +237,61 @@ def _free_bytes(root: pathlib.Path) -> Optional[int]:
         return None
 
 
+REQUEST_JOB = "storage_free"  # the mind's last Free request and its receipt (``FreeSpace.request``), a job row
+
+
+def maintenance_jobs_receipt(root: pathlib.Path) -> Dict[str, Any]:
+    """The receipt of the last request the mind made (``{}`` when none, or when the store cannot be read)."""
+    from ouroboros import maintenance_jobs
+
+    try:
+        return maintenance_jobs.job(root, REQUEST_JOB) or {}
+    except Exception:
+        return {}
+
+
+def _write_receipt(root: pathlib.Path, receipt: Dict[str, Any]) -> None:
+    from ouroboros import maintenance_jobs, store
+
+    try:
+        with store.open_store(root, write=True) as txn:
+            previous = txn.meta(maintenance_jobs.PREFIX + REQUEST_JOB)
+            if isinstance(previous, dict):  # one request, one receipt: the previous one is history (events.jsonl)
+                maintenance_jobs.forget_in(txn, REQUEST_JOB, *previous)
+            maintenance_jobs.record_in(txn, REQUEST_JOB, **receipt)
+    except Exception:
+        log.warning("storage_free receipt not recorded", exc_info=True)
+
+
+def _request_sentence(receipt: Dict[str, Any]) -> str:
+    """One plain English sentence for Main about a request the mind made; the client renders it as a system row."""
+    who = str(receipt.get("actor") or "the mind")
+    if receipt.get("refusal"):
+        return f"Free space ({who}): not run, {str(receipt['refusal']).replace('_', ' ')}."
+    outcome = receipt.get("outcome")
+    if not isinstance(outcome, dict):
+        preview = (receipt.get("preview") or {}).get("pool") or {}
+        size = preview.get("bytes")
+        return (f"Free space ({who}): looked only; {preview.get('count', 0)} items could go"
+                + (f", {size / 1e9:.1f} GB" if isinstance(size, int) else "") + ".")
+    kept = ", ".join(f"{row['count']} {str(row['reason']).replace('_', ' ')}" for row in outcome.get("kept") or ())
+    freed = outcome.get("removed_bytes") or 0
+    parts = [f"removed {outcome['removed']} ({freed / 1e9:.1f} GB)"] if outcome.get("removed") else []
+    if outcome.get("deleting"):
+        moving = (outcome.get("deleting_bytes") or 0) / 1e9
+        parts.append(f"moved {outcome['deleting']} aside ({moving:.1f} GB), deleted by the next maintenance run")
+    if not parts:
+        parts.append("nothing removed")
+    if kept:
+        parts.append(f"kept {sum(row['count'] for row in outcome.get('kept') or ())}: {kept}")
+    if outcome.get("failed"):
+        parts.append(f"{outcome['failed']} failed")
+    after = outcome.get("free_after")
+    if isinstance(after, int):
+        parts.append(f"free now {after / 1e9:.1f} GB")
+    return f"Free space ({who}): " + "; ".join(parts) + "."
+
+
 def _name_items(root: pathlib.Path, items: List["_Candidate"]) -> None:
     """Every listed object's name: its task's title when it has one, else the folder's; one display read
     (no bulky evidence) per page of ids."""
@@ -281,6 +336,7 @@ class FreeSpace:
         self._run: Optional[Dict[str, Any]] = None
         self._error: Optional[str] = None
         self._progress = {"done": 0, "total": 0}
+        self._request: Optional[Dict[str, Any]] = None  # the mind's request this preview/run serves (``request``)
 
     # ---- the probe and the interlock ------------------------------------------------------
 
@@ -410,6 +466,10 @@ class FreeSpace:
     def _busy(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
+    def _busy_elsewhere(self) -> bool:
+        """``_busy`` as ``start`` asks it: the preview thread handing a request's run on is not busy with itself."""
+        return self._busy() and self._thread is not threading.current_thread()
+
     def preview(self, data_root: Any, repo_dir: Any) -> bool:
         """Start one preview unless one lists or a run runs; False means the caller joined it."""
         with self._lock:
@@ -432,7 +492,7 @@ class FreeSpace:
             return {"started": False, "reason": "selection_conflict"}
         chosen = [str(group) for group in groups] if isinstance(groups, list) else None
         with self._lock:
-            if self._stopped.is_set() or self._busy():
+            if self._stopped.is_set() or self._busy_elsewhere():
                 return {"started": False, "reason": "busy"}
             if self._plan is None or self._state != "ready" or str(plan_id or "") != self._plan["id"]:
                 return {"started": False, "reason": "preview_outdated"}
@@ -492,6 +552,80 @@ class FreeSpace:
         if any(item not in known for item in ids):
             return "unknown_item", set()
         return ("not_offered", set()) if set(ids) - manual_ids(plan) else ("", set(ids))
+
+    # ---- the mind's request (owner Q3 = A, 05.11.2026) --------------------------------------
+
+    def request(self, data_root: Any, repo_dir: Any, *, actor: str, request_id: str, groups: Any = None,
+                dry_run: bool = False, notify: Optional[Callable[[str], Any]] = None) -> Dict[str, Any]:
+        """The same Free the owner presses, asked by the mind (``free_storage``): one preview with the same
+        probes, then a run of the ordinary pool (every work folder, working copy and declared temporary
+        environment the retirers' proofs offer) or of the named saved ``groups``; a ``dry_run`` stops after the
+        preview. The owner's Keep and every retirer proof hold exactly as for the owner. Its receipt is the
+        ``storage_free`` job row (``request_id``, ``actor``, the preview's pool and exclusions, the run's
+        outcome) and ``notify`` is told one sentence for Main when it ends. Refused while a listing or a run
+        is under way (``busy``: the receipt says so) and for a request id already answered."""
+        root = pathlib.Path(data_root)
+        receipt = maintenance_jobs_receipt(root)
+        if receipt.get("request_id") == request_id:
+            return {"started": False, "reason": "duplicate"}
+        with self._lock:
+            if self._stopped.is_set() or self._busy() or self._request is not None:
+                reason = "busy"
+            else:
+                reason = ""
+                self._request = {"request_id": request_id, "actor": actor, "groups": [str(g) for g in (groups or ())],
+                                 "dry_run": bool(dry_run), "notify": notify, "requested_at": utc_now_iso()}
+        if reason:
+            _write_receipt(root, {"request_id": request_id, "actor": actor, "state": "failed", "refusal": reason,
+                                  "requested_at": utc_now_iso()})
+            return {"started": False, "reason": reason}
+        if not self.preview(root, repo_dir):  # a listing started between the lock and here: the receipt says busy
+            with self._lock:
+                self._request = None
+            _write_receipt(root, {"request_id": request_id, "actor": actor, "state": "failed", "refusal": "busy",
+                                  "requested_at": utc_now_iso()})
+            return {"started": False, "reason": "busy"}
+        return {"started": True, "reason": ""}
+
+    def _continue_request(self, root: pathlib.Path, repo_dir: pathlib.Path, plan: Optional[Dict[str, Any]]) -> None:
+        """After the request's preview: start its run, or settle a dry run / an empty pool / a failed listing."""
+        with self._lock:
+            request = self._request
+        if request is None:
+            return
+        if plan is None:
+            self._finish_request(root, {"state": "failed", "refusal": "preview_failed", "error": self._error})
+            return
+        summary = {"pool": pool(plan), "groups": [self._group_view(group) for group in plan["groups"]]}
+        if request["dry_run"]:
+            self._finish_request(root, {"state": "done", "preview": summary})
+            return
+        if request["groups"]:
+            started = self.start(root, repo_dir, plan["id"], request["groups"])
+        else:
+            items = sorted(ordinary_ids(plan))
+            started = self.start(root, repo_dir, plan["id"], None, items=items) if items else {"started": False, "reason": "nothing_selected"}
+        if not started["started"]:
+            self._finish_request(root, {"state": "done", "preview": summary, "refusal": started["reason"]})
+        else:
+            with self._lock:
+                self._request["preview"] = summary
+
+    def _finish_request(self, root: pathlib.Path, facts: Dict[str, Any]) -> None:
+        """Record the request's receipt once, then tell Main (the mind's run is the owner's to see)."""
+        with self._lock:
+            request, self._request = self._request, None
+        if request is None:
+            return
+        notify = request.pop("notify", None)
+        receipt = {**{key: value for key, value in request.items() if key != "preview"},
+                   **({"preview": request["preview"]} if "preview" in request else {}), **facts, "finished_at": utc_now_iso()}
+        _write_receipt(root, receipt)
+        if notify is not None:
+            try:
+                notify(_request_sentence(receipt))
+            except Exception:
+                log.debug("storage_free request notice not delivered", exc_info=True)
 
     def cancel(self) -> bool:
         """Stop the listing (nothing is kept) or the run (what was freed stays freed)."""
@@ -751,9 +885,12 @@ class FreeSpace:
             _name_items(root, [item for group in groups for item in [*group["candidates"], *group["excluded"]]])
             with self._lock:
                 self._plan, self._state = {**plan, "finished_at": utc_now_iso()}, "ready"
+                ready = self._plan
         except _Stopped:
             with self._lock:
                 self._state, self._plan = "idle", None
+            self._finish_request(root, {"state": "failed", "refusal": "stopped"})
+            return
         except Exception as exc:
             from ouroboros.launch_roots import WorkRootUnavailable  # its sentence names the setting that decides
 
@@ -762,6 +899,9 @@ class FreeSpace:
                 self._state, self._plan = "failed", None
                 authored = isinstance(exc, (RuntimeError, WorkRootUnavailable))
                 self._error = str(exc) if authored else f"{type(exc).__name__}"
+            self._continue_request(root, repo_dir, None)
+            return
+        self._continue_request(root, repo_dir, ready)  # the mind's request, if this preview served one
 
     # ---- the run ----------------------------------------------------------------------------
 
@@ -797,17 +937,21 @@ class FreeSpace:
             self._plan = {**plan, "finished_at": utc_now_iso()}
         settled = self._settled(root, run)
         view = self._run_view(root, run, settled)
+        with self._lock:
+            actor = str((self._request or {}).get("actor") or "owner")  # who pressed: the owner, or the mind's task
         self._record(root, view, time.monotonic() - started, settled, list(run["failed"]), dict(run["kept_items"]),
                      {item.key: {"unsaved_count": item.manual["unsaved_count"], "unsaved_bytes": item.manual["unsaved_bytes"]}
-                      for item in manual})
-        supervisor_row(root, "storage_free", {"phase": self._state, "duration_seconds": round(time.monotonic() - started, 2),
+                      for item in manual}, actor=actor)
+        supervisor_row(root, "storage_free", {"phase": self._state, "actor": actor, "duration_seconds": round(time.monotonic() - started, 2),
                                                **{key: view[key] for key in ("groups", "selected", "removed", "removed_bytes",
                                                                              "deleting", "stuck", "kept", "failed", "not_started",
                                                                              "free_before", "free_after")}})
+        self._finish_request(root, {"state": "done", "outcome": {**view, "kept_items": dict(run["kept_items"])}})
 
     @staticmethod
     def _record(root: pathlib.Path, view: StorageFreeRun, seconds: float, settled: Tuple[List[str], ...],
-                failed: List[str], kept_ids: Dict[str, str], discards: Optional[Dict[str, Any]] = None) -> None:
+                failed: List[str], kept_ids: Dict[str, str], discards: Optional[Dict[str, Any]] = None,
+                actor: str = "owner") -> None:
         try:
             from ouroboros.server_maintenance import _prune_event
 
@@ -815,7 +959,7 @@ class FreeSpace:
             # cadence's own prune names what it removed: who removed a task's folder is then one search.
             removed, deleting, stuck = settled
             _prune_event("storage_free", ("removed", "deleting", "kept"), report={
-                **view, "duration_seconds": round(seconds, 2), "removed_ids": removed, "deleting_ids": deleting,
+                **view, "actor": actor, "duration_seconds": round(seconds, 2), "removed_ids": removed, "deleting_ids": deleting,
                 "stuck_ids": stuck, "failed_ids": failed, "kept_ids": kept_ids,
                 **({"manual_discards": discards} if discards else {})})
         except Exception:
