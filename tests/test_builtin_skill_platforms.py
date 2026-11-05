@@ -706,6 +706,10 @@ def test_os_declarations_parse_as_platform_lists():
     unix, windows = skill_builtin._manifest(SEEDS / UNIX), skill_builtin._manifest(SEEDS / WINDOWS)
     assert unix.os == "darwin,linux" and windows.os == "win32"
     assert windows.permissions == ["tool"]
+    # Each permission is enforced where the skill uses it (PluginAPIImpl._require): `net` carries the remote OSWorld
+    # HTTP/SSH backends of the Unix skill, `route` the Telegram bridge's settings and mini-app routes.
+    assert unix.permissions == ["tool", "subprocess", "net"]
+    assert "route" in skill_builtin._manifest(SEEDS / "telegram").permissions
     assert windows.raw_extra["install"] == [{"kind": "pip", "package": "comtypes==1.4.17"}]
 
 
