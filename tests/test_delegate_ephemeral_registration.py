@@ -242,29 +242,25 @@ def test_minted_root_names_the_host_layouts_and_follows_links(tmp_path):
         assert not policy.minted_root(str(root), data), root  # a link names where it leads
 
 
-@pytest.mark.parametrize("version,scope,ephemeral", [
-    ("5.1.0", {"ephemeral": True}, True),
-    ("5.0.1", {"ephemeral": True}, False),  # the engine cannot sweep the lanes such a thread leaves
-    ("5.1.0", {}, False),  # a root that is not minted keeps the registration its thread binds
-])
-def test_a_delegated_plan_thread_on_a_minted_root_is_ephemeral_from_the_thread_floor(
-        monkeypatch, version, scope, ephemeral):
+@pytest.mark.parametrize("scope", [{"ephemeral": True}, {}])
+def test_a_delegated_plan_thread_on_a_minted_root_is_ephemeral_from_the_thread_floor(scope):
     from types import SimpleNamespace
 
     from ouroboros import config
     from ouroboros.delegate_plan import bind_thread
 
-    monkeypatch.setattr(config, "CLAUDEXOR_EPHEMERAL_THREAD_MIN_VERSION", "5.1.0")
     created = []
 
     class Engine:
-        engine_version = version
-
         def create_thread(self, request, *, idempotency_key):
             created.append(request)
             return {"id": "thread-1"}
 
     request = {"scope": {"kind": "project", "root": "/w/copy", **scope}, "mode": "plan", "access": "readonly"}
-    assert bind_thread(Engine(), request, SimpleNamespace(route_id="r", profile_id=""), "inv-1") == {
-        "thread_id": "thread-1"}
-    assert created[0]["scope"] == {"kind": "project", "root": "/w/copy", **({"ephemeral": True} if ephemeral else {})}
+    engine = Engine()
+    for version, allowed in [("5.0.1", False), ("5.1.0", False), (config.CLAUDEXOR_EPHEMERAL_THREAD_MIN_VERSION, True)]:
+        engine.engine_version = version
+        assert bind_thread(engine, request, SimpleNamespace(route_id="r", profile_id=""), "inv-1") == {
+            "thread_id": "thread-1"}
+        assert created[-1]["scope"] == {
+            "kind": "project", "root": "/w/copy", **(scope if allowed else {})}
