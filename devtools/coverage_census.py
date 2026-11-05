@@ -82,8 +82,9 @@ def pytest_sessionstart(session):
 
 
 def _product_file(root: Path, measured: str) -> str:
-    """`ouroboros/x.py` for a file of the checkout or of a copy of it (a hermetic run measures its copy)."""
-    parts = PurePosixPath(measured).parts
+    """`ouroboros/x.py` for a file of the checkout or of a copy of it (a hermetic run measures its copy); coverage
+    records the measuring OS's own separators."""
+    parts = PurePosixPath(measured.replace("\\", "/")).parts
     for start in range(len(parts) - 1, -1, -1):
         if parts[start] in PRODUCT_ROOTS and root.joinpath(*parts[start:]).is_file():
             return "/".join(parts[start:])

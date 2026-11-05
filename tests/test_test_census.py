@@ -235,7 +235,8 @@ def _coverage_file(path, rows):
 def test_the_digest_answers_what_a_deletion_loses(tmp_path):
     source = "import os\n\n\ndef alpha():\n    one = 1\n    return one\n\n\ndef beta():\n    return 2\n"
     _write_tree(tmp_path, {"ouroboros/x.py": source})
-    checkout, copy = str(tmp_path / "ouroboros/x.py"), "/tmp/hermetic/repo/ouroboros/x.py"
+    # A hermetic copy measured on Windows records its own separators.
+    checkout, copy = str(tmp_path / "ouroboros/x.py"), "C:\\hermetic\\repo\\ouroboros\\x.py"
     one, two, three = "tests/test_a.py::test_one", "tests/test_a.py::test_two[1]", "tests/test_b.py::test_three"
     (tmp_path / "shard1").mkdir()
     (tmp_path / "shard2").mkdir()
