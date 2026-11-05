@@ -646,12 +646,13 @@ def _full_tier(selection, pytest_args) -> bool:
 def _resolve_preflight_timeout(timeout: Optional[int] = None, *, full: bool = False) -> Optional[int]:
     """The total budget, in seconds, of the lanes that decide a run (Node, the passes); None is no budget.
 
-    The env override (`OUROBOROS_PREFLIGHT_TIMEOUT_SEC`) comes first for either tier, so the budget is one
-    SSOT across callers; then the caller's own; then the tier's: `_DEFAULT_PREFLIGHT_TIMEOUT_SEC` for a
-    selected run, none for the full suite. How long the whole suite honestly takes is this install's to
-    find, and a constant below it makes every full proof red: a full run ends by its tests' own 300 s
-    bound, the containment proof and the owner's Stop, and records how long it took."""
-    raw = os.environ.get("OUROBOROS_PREFLIGHT_TIMEOUT_SEC")
+    A bounded run (a selected tier, an explicit pytest argv) takes the env override
+    (`OUROBOROS_PREFLIGHT_TIMEOUT_SEC`, one SSOT across callers, the Android entry's slower default), then the
+    caller's own, then `_DEFAULT_PREFLIGHT_TIMEOUT_SEC`. The full suite takes only a caller's own: how long the
+    whole suite honestly takes is this install's to find, and a constant below it makes every full proof red, so
+    a full run ends by its tests' own 300 s bound, the containment proof and the owner's Stop, and records how
+    long it took."""
+    raw = None if full else os.environ.get("OUROBOROS_PREFLIGHT_TIMEOUT_SEC")
     if raw:
         try:
             parsed = int(float(raw))

@@ -2760,8 +2760,9 @@ def test_a_windows_job_teardown_that_does_not_confirm_itself_is_a_containment_fa
 
 
 def test_resolve_preflight_timeout_env_override(monkeypatch):
-    """`OUROBOROS_PREFLIGHT_TIMEOUT_SEC` overrides the TOTAL budget of either tier; without it a caller's own
-    budget stands, and without that the tier's: 1,800 s for a selected run, none for the whole suite."""
+    """`OUROBOROS_PREFLIGHT_TIMEOUT_SEC` overrides the TOTAL budget of a bounded run; without it a caller's own
+    budget stands, and without that 1,800 s. The whole suite has no total budget unless its caller names one: the
+    override (the Android entry sets one by default) never puts a deadline on it."""
     from types import SimpleNamespace
 
     from ouroboros.preflight_runner import _full_tier, _resolve_preflight_timeout
@@ -2772,7 +2773,8 @@ def test_resolve_preflight_timeout_env_override(monkeypatch):
     assert [_full_tier(None, None), _full_tier(None, ["tests/test_a.py"]), _full_tier(SimpleNamespace(tier="full"), None),
             _full_tier(SimpleNamespace(tier="selected"), None)] == [True, False, True, False]
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "450")
-    assert _resolve_preflight_timeout(300) == 450 == _resolve_preflight_timeout(full=True)
+    assert _resolve_preflight_timeout(300) == 450 == _resolve_preflight_timeout()
+    assert _resolve_preflight_timeout(full=True) is None and _resolve_preflight_timeout(300, full=True) == 300
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "not-an-int")
     assert _resolve_preflight_timeout(300) == 300
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "0")
