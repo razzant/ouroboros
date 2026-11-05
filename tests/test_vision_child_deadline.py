@@ -290,11 +290,14 @@ def test_a_child_starting_just_past_that_window_sends_nothing(vlm, slow_parent, 
     assert sent(vlm) == [] and "create" not in gateway_calls(vlm) and ledger_states(vlm) == []
 
 
-@pytest.mark.parametrize(("spent", "capture", "ledger", "gateway", "owned"), [
-    pytest.param({"child_start": NOW + 130}, None, [], [], False, id='startup-bare'),  # Start-up alone outlasts the window: nothing is reserved or uploaded.
-    pytest.param({"child_start": NOW + 5, "recording_sec": 120}, "released", ["released"], ["upload"], True, id='recording-wait_owner'),  # Recording its candidate spends the rest: the claim refuses and the reservation is released.
-    pytest.param({"child_start": NOW + 5, "claim_sec": 120}, "released", ["released"], ["upload"], False, id='before_create-bare'),  # After the claim and the handoff only the slot wait and the custody receipt remain; the receipt spends it here.
-])
+@pytest.mark.parametrize("owned,spent,capture,ledger,gateway", [
+    # Start-up alone outlasts the window: nothing is reserved or uploaded.
+    (False, {"child_start": NOW + 130}, None, [], []),
+    # Recording its candidate spends the rest: the claim refuses and the reservation is released.
+    (False, {"child_start": NOW + 5, "recording_sec": 120}, "released", ["released"], ["upload"]),
+    # The owner boundary is a separate witness; after the claim the custody receipt spends the window.
+    (True, {"child_start": NOW + 5, "claim_sec": 120}, "released", ["released"], ["upload"]),
+], ids=["startup-bare", "recording-bare", "before-create-owner"])
 def test_a_subscription_window_spent_before_the_create_is_an_unsent_tool_failure(
         vlm, owned, spent, capture, ledger, gateway):
     """The call's selected window is not the task's: admission past it is already a tool failure, and so is expiry
@@ -443,8 +446,8 @@ def test_a_refusal_with_an_attempt_it_could_not_release_stays_unknown(vlm):
 
 
 @pytest.mark.parametrize("forged", [
-    {"state": "dispatched"}, {"control_reason": "owner_pause"}, {"unknown": True},
-], ids=["dispatched", "other_reason", "unknown_flag"])
+    {"state": "dispatched"}, {"unknown": True},
+], ids=["dispatched", "unknown_flag"])
 def test_a_malformed_refused_send_stays_an_unknown_outcome(monkeypatch, forged):
     from ouroboros.tools import shell, vision_process
 

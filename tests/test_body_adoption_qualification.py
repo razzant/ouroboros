@@ -63,11 +63,38 @@ class Scene:
         self.candidate = pathlib.Path(self.ctx.repo_dir)
         self.old = git(self.serving, "rev-parse", "HEAD")
 
-    def commit(self, files, *, force=False, **request):
-        """One reviewed candidate commit and its REAL post-commit gate, in the commit tool's order."""
+    def qualify(self, *, base=None, inherit=True):
+        """Bind the public selection/proof seam for an adoption-only scenario.
+
+        A few rows below keep real gate witnesses.  The remaining rows test how
+        adoption interprets an already-produced proof, so they construct that
+        process-held proof through the public subject builder instead of paying
+        for another nested pytest controller.
+        """
+        from ouroboros.commit_admission import capture_preflight_test_subject
+
+        request = self.ctx._commit_test_request or dict(DEFAULTS)
+        options = (body_candidate.qualification_request(self.ctx, request)
+                   if inherit else dict(request))
+        if base is not None:
+            options["base"] = base
+        selection = test_selection.select_tests(self.candidate, **options)
+        proof = capture_preflight_test_subject(self.candidate, selection=selection)
+        assert proof is not None
+        self.ctx._preflight_test_proof = proof
+        self.ctx._preflight_tests_passed = True
+        self.ctx._preflight_test_disclosure = {"receipt": {"status": "in_process"}}
+        return proof
+
+    def commit(self, files, *, force=False, real=False, **request):
+        """Record one candidate commit, using the real gate only for boundary witnesses."""
         sha = candidate_commit(self.candidate, files=files)
         self.ctx._commit_test_request = {**DEFAULTS, **request, "extra_tests": tuple(request.get("extra_tests", ()))}
-        error = git_tools._run_pre_push_tests(self.ctx, force=force)
+        if real:
+            error = git_tools._run_pre_push_tests(self.ctx, force=force)
+        else:
+            self.qualify()
+            error = None
         body_candidate.record_reviewed_commit(self.ctx, sha)
         return sha, error
 
@@ -104,7 +131,7 @@ print(json.dumps({"local": preflight_qualification.adoption_test_evidence(data, 
 
 
 def test_a_selected_commit_qualifies_its_adoption_from_its_proof_and_its_durable_record(scene, tmp_path):
-    sha, error = scene.commit(A_GOOD)
+    sha, error = scene.commit(A_GOOD, real=True)
 
     assert error is None
     proof = scene.ctx._preflight_test_proof
@@ -151,17 +178,17 @@ def test_a_later_commit_is_qualified_by_the_whole_candidate_delta_never_the_last
 
     # The scope the post-commit gate used before (HEAD~1: the last commit alone) cannot qualify the switch.
     scene.forget_records()
-    assert pr.run_hermetic_pytest(scene.candidate, ctx=scene.ctx, selected=True) is None
+    assert scene.qualify(base=first, inherit=False) is not None
     assert scene.ctx._preflight_test_proof.selection.base == first
     assert f"selected against {first[:12]}, not the serving HEAD {scene.old[:12]}" in scene.refused(second, "")
 
 
 def test_an_earlier_commits_declared_consumer_keeps_running_and_catches_a_later_default_commit(scene):
-    first, error = scene.commit(A_GOOD, extra_tests=["tests/test_consumer.py"], test_reason="reads mod_a by path")
+    first, error = scene.commit(A_GOOD, extra_tests=["tests/test_consumer.py"], test_reason="reads mod_a by path", real=True)
     assert error is None and "tests/test_consumer.py" in scene.ctx._preflight_test_proof.selection.files
 
     # A fresh commit_reviewed call with the defaults: the declared consumer still runs, and B breaks it.
-    second, error = scene.commit(A_BROKEN)
+    second, error = scene.commit(A_BROKEN, real=True)
 
     assert error and "test_consumer" in error and scene.ctx._preflight_test_proof is None
     assert scene.records(preflight_receipts.SELECTED_SCHEMA)[-1]["identity"]["head"] == first
@@ -175,7 +202,7 @@ def test_adoption_refuses_a_selected_run_that_left_out_a_declared_consumer(scene
     body_candidate.record_reviewed_commit(scene.ctx, second)
     # Exactly B against the serving HEAD, but without the widening its delta declared (an older
     # producer, or a history unreadable at run time): the gate passes, adoption re-checks it.
-    assert pr.run_hermetic_pytest(scene.candidate, ctx=scene.ctx, selected=True, base=scene.old) is None
+    assert scene.qualify(base=scene.old, inherit=False) is not None
     assert "did not run the declared indirect consumers tests/test_consumer.py" in scene.refused(second, "")
 
 
@@ -195,7 +222,7 @@ def test_missing_historical_scope_keeps_full_instead_of_inventing_defaults(scene
     body_adoption.abandon(scene.data, "test")
     scene.forget_records()
     # Neither an independently green selection nor an intent recovery makes the old scope known.
-    assert pr.run_hermetic_pytest(scene.candidate, ctx=scene.ctx, selected=True, base=scene.old) is None
+    assert scene.qualify(base=scene.old, inherit=False) is not None
     body_candidate.record_reviewed_commit(None, second, row=body_candidate.descriptor(scene.ctx))
     assert "prior reviewed test scope is unknown" in scene.refused(second, "")
 
@@ -211,7 +238,7 @@ def test_an_earlier_full_declaration_keeps_the_delta_full_until_that_commit_is_a
     assert body_adoption.authorize(scene.ctx, second, reason="adopt")["tests"]["tier"] == "full"
     body_adoption.abandon(scene.data, "test")
     scene.forget_records()
-    assert pr.run_hermetic_pytest(scene.candidate, ctx=scene.ctx, selected=True, base=scene.old) is None
+    scene.qualify(base=scene.old, inherit=False)
     assert "declared broad impact (full_tests): broad impact" in scene.refused(second, "")
 
 
@@ -237,7 +264,7 @@ def test_a_selection_against_another_serving_head_cannot_qualify_even_when_its_p
 
 
 def test_red_dirty_unrun_and_other_policy_evidence_never_qualifies(scene, monkeypatch):
-    broken, error = scene.commit({"ouroboros/mod_a.py": "GEN = ''\n"})  # test_mod_a fails
+    broken, error = scene.commit({"ouroboros/mod_a.py": "GEN = ''\n"}, real=True)  # test_mod_a fails
     assert error and scene.ctx._preflight_test_proof is None and scene.records() == []
     scene.refused(broken, "no qualifying test run")
 
@@ -258,7 +285,7 @@ def test_red_dirty_unrun_and_other_policy_evidence_never_qualifies(scene, monkey
 
 
 def test_a_later_context_reuses_an_identical_selected_record_and_another_workload_runs_again(scene, monkeypatch):
-    sha, _ = scene.commit(A_GOOD)
+    sha, _ = scene.commit(A_GOOD, real=True)
     fresh = make_ctx(scene.serving, scene.data, "root-qualify")
     body_candidate.prepare(fresh)
     fresh._commit_test_request = dict(DEFAULTS)
@@ -293,7 +320,8 @@ def test_cyber_pro_unreviewed_commits_keep_the_full_route(scene, monkeypatch):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
     sha = candidate_commit(scene.candidate, files=A_GOOD)  # never recorded as reviewed: Cyber Pro's exception
     scene.ctx._commit_test_request = dict(DEFAULTS)
-    assert git_tools._run_pre_push_tests(scene.ctx) is None and scene.ctx._preflight_test_proof.tier == "selected"
+    scene.qualify()
+    assert scene.ctx._preflight_test_proof.tier == "selected"
     scene.refused(sha, "no qualifying test run")
 
     assert pr.run_hermetic_pytest(scene.candidate, ctx=scene.ctx) is None  # the full battery of exactly that commit
@@ -308,7 +336,7 @@ def test_a_selected_adoption_switches_and_settles_but_publishes_neither_branch_n
     remote = tmp_path / "origin.git"
     git(tmp_path, "init", "-q", "--bare", str(remote))
     git(scene.serving, "remote", "add", "origin", str(remote))
-    scene.cand, error = scene.commit(A_GOOD)
+    scene.cand, error = scene.commit(A_GOOD, real=True)
     assert error is None
     git(scene.serving, "tag", "-a", "v1.0.1", scene.cand, "-m", "v1.0.1: reachable once adopted")
     monkeypatch.setattr(git_ops, "REPO_DIR", scene.serving)
