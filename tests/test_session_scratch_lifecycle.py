@@ -18,6 +18,7 @@ import hashlib
 import os
 import subprocess
 import sys
+import venv
 import zipfile
 from pathlib import Path
 
@@ -71,6 +72,22 @@ def _imports(scratch: Path) -> str:
     return done.stdout.strip() if done.returncode == 0 else ""
 
 
+def _seed_installed(scratch: Path) -> Path:
+    """Prepare an already installed package without paying pip for every lifecycle row.
+
+    The fresh-session branch below keeps the one real venv/pip witness.  The two
+    finished tasks only need an installed import while the test exercises custody
+    and retirement, so their tiny environment is built through Python's in-process
+    venv API and the package is written into its site-packages directory.
+    """
+    venv.EnvBuilder(with_pip=False).create(scratch / "env")
+    site = next((scratch / "env").rglob("site-packages"))
+    package = site / "tinypkg"
+    package.mkdir()
+    (package / "__init__.py").write_text('VALUE = "installed"\n', encoding="utf-8")
+    return package
+
+
 @pytest.fixture
 def world(tmp_path, monkeypatch):
     data, copy, cache = tmp_path / "data", tmp_path / "copy", tmp_path / "downloads"
@@ -99,7 +116,7 @@ def test_install_finish_retire_both_ways_then_an_explicit_reinstall_from_the_sur
     scratches = {}
     for task_id in ("manual", "auto"):
         scratches[task_id] = _scratch(world, task_id, access)
-        assert _install(scratches[task_id], copy / "requirements.txt", cache).returncode == 0
+        assert (_seed_installed(scratches[task_id]) / "__init__.py").is_file()
         assert _imports(scratches[task_id]) == "installed"
     legacy = scratches["auto"].parent / "ob-review-legacy-venv"  # made before the declaration: no record names it
     legacy.mkdir()
