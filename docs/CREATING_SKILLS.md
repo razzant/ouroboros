@@ -1486,8 +1486,9 @@ With reporting enabled, persist the physical provider receipt before reporting
 it through `POST /presence/delivery` under the same skill token and `presence`
 permission. The JSON fields are `schema_version: 1`, the existing outbox
 `delivery_id`, string `part_id`, `state` (`delivered`, `accepted`, `failed`, or
-`uncertain`), `provider`, `account_id`, actual `conversation_id` and `thread_id`,
-exact `text`, `format`, provider facts in `message`, and
+`uncertain`), `provider`, `account_id`, actual `conversation_id`, the `thread_id`
+the `POST /presence/turn` rule gives this send, exact `text`, `format`, provider
+facts in `message`, and
 `origin: {kind: "tool" | "automatic", task_id?, source_event_id?}`. The producer
 sets kind explicitly. A tool handler may use its supported first `ctx` argument
 to retain compact task provenance; never serialize the full context or secrets.
