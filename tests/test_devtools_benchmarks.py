@@ -5809,7 +5809,7 @@ _REFUSAL_CASES = (
 
 @pytest.mark.parametrize(
     "build_case", chosen_rows(_REFUSAL_CASES, 0, 6, 11),
-    ids=[case.__name__[len("_refusal_case_"):] for case in _REFUSAL_CASES],
+    ids=chosen_rows([case.__name__[len("_refusal_case_"):] for case in _REFUSAL_CASES], 0, 6, 11),
 )
 def test_migrated_launcher_exit_status_matches_the_recorded_exit_code(build_case, tmp_path, monkeypatch):
     """The manifest's `exit_code` must BE the status the process exits with, per launcher.

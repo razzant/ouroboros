@@ -221,7 +221,7 @@ CANARY_DRIFTS = {
 }
 
 
-@pytest.mark.parametrize("drift", chosen_rows(CANARY_DRIFTS.values(), 0, 21, 27), ids=list(CANARY_DRIFTS))
+@pytest.mark.parametrize("drift", chosen_rows(CANARY_DRIFTS.values(), 0, 21, 27), ids=chosen_rows(list(CANARY_DRIFTS), 0, 21, 27))
 def test_each_provider_canary_wiring_drift_is_named(drift):
     files = SimpleNamespace(ci=_workflow("ci.yml"), shared=_workflow(CANARY), push=_workflow(CANARY_PUSH))
     drift(files)

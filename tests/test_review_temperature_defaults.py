@@ -599,7 +599,7 @@ UNREADABLE_LISTS = {
 
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
 @pytest.mark.parametrize("node", [("invalid value", {"param": "temperature"}), (KIMI_REFUSAL, {})], ids=["typed", "prose"])
-@pytest.mark.parametrize("values", chosen_rows(UNREADABLE_LISTS.values(), 0, 7), ids=UNREADABLE_LISTS.keys())
+@pytest.mark.parametrize("values", chosen_rows(UNREADABLE_LISTS.values(), 0, 7), ids=chosen_rows(UNREADABLE_LISTS.keys(), 0, 7))
 def test_a_structured_list_it_cannot_read_whole_withdraws_nothing(api, node, values, asynchronous):
     """One unreadable member may be the value that allows the hint: the provider's refusal stands, nothing is learned."""
     message, fields = node

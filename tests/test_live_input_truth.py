@@ -274,7 +274,7 @@ def test_a_forced_switch_reads_input_apart_from_renewal_ready(pending, flag, rea
 
 
 @pytest.mark.parametrize('stage', ['before_answer', 'mid_answer'])
-@pytest.mark.parametrize('engine,thinking', chosen_rows(ROUTES, 0, 2), ids=ROUTE_IDS)
+@pytest.mark.parametrize('engine,thinking', chosen_rows(ROUTES, 0, 2), ids=chosen_rows(ROUTE_IDS, 0, 2))
 def test_real_unanswered_words_are_offered_on_each_fresh_session_until_answered(host_world, monkeypatch, engine, thinking, stage):
     from tests._live_stack import stack
 
