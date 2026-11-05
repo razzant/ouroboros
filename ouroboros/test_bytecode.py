@@ -98,7 +98,8 @@ def warm_lane(agent_python: str, worktree, temp_root, evidence: dict, timeout, f
     """The hermetic gate's warm, before its passes: the root runs contained and behind the owner's work, under
     the gate's env (``_preflight_env``), for as many shards as the gate admitted workers; its facts join the
     run's lanes. Returns a hard-block diagnosis only when the warm's tree outlived it (containment), never for
-    a warm that failed or ran out of the budget: those leave the passes cold, recorded as such."""
+    a warm that failed or ran out of ``timeout`` (what the run's budget still held, None for none; the gate
+    charges the passes nothing for it): those leave the passes cold, recorded as such."""
     from ouroboros import preflight_runner as pr
     from ouroboros.preflight_inventory import note_lane_process
     from ouroboros.process_containment import ProcessContainer

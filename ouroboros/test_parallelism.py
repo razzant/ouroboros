@@ -181,35 +181,6 @@ def worker_budget(cpu_workers: Optional[int] = None, *, env: Optional[Mapping[st
     return admission(cpu_workers, env=env).workers
 
 
-# ── Serial groups of the one xdist pass ─────────────────────────────────────────────────
-_MAX_SERIAL_SHARDS = 4
-
-
-def serial_share(table, system: str):
-    """The serial part of ``system``'s recorded test time, or None when the table does not say."""
-    total = sum(((table or {}).get("platforms") or {}).get(system, {}).values())
-    serial = ((table or {}).get("serial") or {}).get(system)
-    return sum(serial.values()) / total if total and serial is not None else None
-
-
-def serial_shards(workers: int, table=None, system: str = "") -> int:
-    """How many groups of bare-`serial` files may run at once in the one xdist pass (tests/conftest.py).
-
-    With recorded durations that split this system's test time (``serial``, tests/ci_verdicts.py), the serial
-    files get the share of the workers their share of the time needs: at least one group, at most half the
-    workers. Without them, one group per four workers, at most four. Either way three workers or fewer keep
-    ONE group, i.e. serial files never overlap each other there; they only stop waiting for the other tests."""
-    share = serial_share(table, system or _system_name())
-    if share is None:
-        return max(1, min(_MAX_SERIAL_SHARDS, workers // 4))
-    return max(1, min(workers // 2, round(workers * share)))
-
-
-def _system_name() -> str:
-    value = sys.platform.lower()
-    return "linux" if value.startswith("linux") else "windows" if value.startswith(("win", "cygwin")) else value
-
-
 # ── The host ledger and the census ──────────────────────────────────────────────────────
 SLOT_LEDGER_DIR = "ouroboros-test-slots.noindex"
 _TEST_EXECUTABLES = frozenset({"pytest", "py.test", "pytest.exe"})

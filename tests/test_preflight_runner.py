@@ -13,6 +13,7 @@ import time
 
 import pytest
 
+from ouroboros import preflight_probe
 from ouroboros.platform_layer import force_kill_pid, pid_is_alive
 from ouroboros.test_parallelism import WORKERS_ENV
 from ouroboros.settings_defaults import settings_env_keys
@@ -148,7 +149,7 @@ def two_pass_env(monkeypatch, preflight_timeout_diagnostics):
 
 def test_two_pass_specs_mirror_ci(monkeypatch):
     """The gate runs CI's exact split: one xdist pass of everything but `serial("exclusive")` (`--dist loadgroup`:
-    resource groups, bare-serial file groups), then those alone in one process."""
+    resource groups), then those alone in one process."""
     from ouroboros import preflight_runner as pr
 
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
@@ -159,7 +160,6 @@ def test_two_pass_specs_mirror_ci(monkeypatch):
     assert parallel.args[:3] == ["tests/", "-m", f"not exclusive and {pr.LANE_EXCLUSION_EXPR}"]
     for flag in ("-n", "auto", "--dist", "loadgroup", "--max-worker-restart=0", "--timeout=300"):
         assert flag in parallel.args, f"parallel pass lost {flag}"
-    assert "--serial-shards" not in " ".join(parallel.args), "the shared vector names only xdist's own options"
     # pytest-timeout picks its own method: SIGALRM fails one test; the thread method (Windows) stops a worker.
     assert not any(arg.startswith("--timeout-method") for arg in parallel.args)
 
@@ -414,7 +414,6 @@ def test_the_real_spawn_lane_declares_which_tests_go_dark_when_it_skips():
 
 def test_worker_count_respects_physical_room_and_the_parent_allocation(monkeypatch):
     """CPU defaults and operator requests cannot spend unavailable worker slots."""
-    from ouroboros import preflight_runner as pr
     from ouroboros import config, test_parallelism as budget
 
     monkeypatch.delenv(budget.NESTED_WORKERS_ENV, raising=False)
@@ -422,13 +421,13 @@ def test_worker_count_respects_physical_room_and_the_parent_allocation(monkeypat
     monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(10 * peak, 4 * peak))
     monkeypatch.setattr(budget, "other_runs", lambda: budget.HostRuns())  # a quiet host; the ledger has its own test
     monkeypatch.setenv(WORKERS_ENV, "1")
-    assert pr._preflight_worker_count() == 1
+    assert preflight_probe._preflight_worker_count() == 1
     monkeypatch.setenv(WORKERS_ENV, "0")
-    assert pr._preflight_worker_count() == 1
+    assert preflight_probe._preflight_worker_count() == 1
     monkeypatch.setenv(WORKERS_ENV, "16")
-    assert pr._preflight_worker_count() == 3
+    assert preflight_probe._preflight_worker_count() == 3
     monkeypatch.setenv(budget.NESTED_WORKERS_ENV, "2")
-    assert pr._preflight_worker_count() == 2
+    assert preflight_probe._preflight_worker_count() == 2
 
 
 @pytest.mark.parametrize("hostile", [
@@ -712,7 +711,7 @@ def test_a_pass_without_its_own_readable_results_has_no_record(tmp_path):
     from ouroboros import preflight_runner as pr
 
     assert pr._recorded_session(tmp_path) is None  # no controller of this pass located one
-    pr._results_pointer(tmp_path).write_text(str(tmp_path / "evidence"), encoding="utf-8")
+    preflight_probe._results_pointer(tmp_path).write_text(str(tmp_path / "evidence"), encoding="utf-8")
     assert pr._recorded_session(tmp_path) is None  # located, never exported
     (tmp_path / "evidence").mkdir()
     for torn in ("{torn", "[]"):
@@ -1018,6 +1017,65 @@ def test_the_gate_leases_its_workers_and_names_its_durations_table_for_the_whole
         [(os.getpid(), 2, "hermetic gate")]] * 2
     assert tables == [(str(data / "state" / "test-durations.json"),) * 2] * 2
     assert list(ledger.glob("*.json")) == []
+
+
+def test_the_full_suite_has_no_total_budget_and_a_warm_takes_none_of_a_callers(tmp_path, two_pass_env, stub_passes,
+                                                                             monkeypatch, capsys):
+    """The whole suite's honest duration is the install's to find, so a full run starts every lane with no
+    deadline and records how long it took; a caller's budget still bounds Node and the passes. The bytecode
+    warm decides nothing: it is bounded by what the budget held when it started and the passes keep that
+    budget, so a slow warm cannot turn into "the pass never started". The proof's identity names the same
+    budget the run had, tier by tier."""
+    from types import SimpleNamespace
+
+    from ouroboros import commit_admission, preflight_runner as pr
+
+    skew, warm_budgets = [0.0], []
+
+    class Clock:  # the gate's clock: the warm below "takes" 100 s of it while nobody waits
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+        def monotonic(self):
+            return time.monotonic() + skew[0]
+
+    def warm(agent_python, worktree, temp_root, evidence, timeout, files=()):
+        warm_budgets.append(timeout)
+        skew[0] += 100.0
+        return ""
+
+    def record():
+        named = next(line.split(" ", 1)[1] for line in capsys.readouterr().err.splitlines()
+                     if line.startswith("PREFLIGHT_EVIDENCE "))
+        return json.loads((pathlib.Path(named) / "result.json").read_text(encoding="utf-8"))
+
+    monkeypatch.setattr(pr, "time", Clock())
+    monkeypatch.setattr(pr, "_warm_bytecode", warm)
+    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
+
+    events = stub_passes([(0, ""), (0, "")])
+    assert pr.run_hermetic_pytest(repo) is None
+    assert [event[2] for event in events] == [None, None] and warm_budgets == [None]
+    full = record()
+    assert full["budget_seconds"] is None and full["elapsed_seconds"] >= 100, full
+
+    stub_passes([(0, ""), (0, "")])
+    assert pr.run_hermetic_pytest(repo, timeout=60) is None, "the warm's 100 s were charged to the passes"
+    assert 0 < warm_budgets[1] <= 60 and len(events) == 4
+    assert all(0 < event[2] <= 60 for event in events[2:]), events[2:]
+    assert record()["budget_seconds"] == 60
+
+    monkeypatch.setenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "45")  # the owner's lever bounds the full suite too
+    stub_passes([(0, ""), (0, "")])
+    assert pr.run_hermetic_pytest(repo) is None
+    assert all(0 < event[2] <= 45 for event in events[4:]) and record()["budget_seconds"] == 45
+    monkeypatch.delenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC")
+
+    workload = commit_admission.preflight_test_workload
+    assert workload(repo)[1] is None and workload(repo, timeout=60)[1] == 60
+    assert workload(repo, pytest_args=["tests/test_plain.py"])[1] == pr._DEFAULT_PREFLIGHT_TIMEOUT_SEC == 1800
+    assert workload(repo, selection=SimpleNamespace(tier="selected", files=("tests/test_plain.py",)))[1] == 1800
+    assert workload(repo, selection=SimpleNamespace(tier="full", files=()))[1] is None
 
 
 def test_the_gate_warms_its_prefix_once_before_the_passes(tmp_path, two_pass_env, stub_passes, monkeypatch, capsys):
@@ -2702,13 +2760,19 @@ def test_a_windows_job_teardown_that_does_not_confirm_itself_is_a_containment_fa
 
 
 def test_resolve_preflight_timeout_env_override(monkeypatch):
-    """`OUROBOROS_PREFLIGHT_TIMEOUT_SEC` overrides the TOTAL two-pass budget."""
-    from ouroboros.preflight_runner import _resolve_preflight_timeout
+    """`OUROBOROS_PREFLIGHT_TIMEOUT_SEC` overrides the TOTAL budget of either tier; without it a caller's own
+    budget stands, and without that the tier's: 1,800 s for a selected run, none for the whole suite."""
+    from types import SimpleNamespace
+
+    from ouroboros.preflight_runner import _full_tier, _resolve_preflight_timeout
 
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", raising=False)
-    assert _resolve_preflight_timeout(300) == 300
+    assert _resolve_preflight_timeout(300) == 300 == _resolve_preflight_timeout(300, full=True)
+    assert _resolve_preflight_timeout() == 1800 and _resolve_preflight_timeout(full=True) is None
+    assert [_full_tier(None, None), _full_tier(None, ["tests/test_a.py"]), _full_tier(SimpleNamespace(tier="full"), None),
+            _full_tier(SimpleNamespace(tier="selected"), None)] == [True, False, True, False]
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "450")
-    assert _resolve_preflight_timeout(300) == 450
+    assert _resolve_preflight_timeout(300) == 450 == _resolve_preflight_timeout(full=True)
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "not-an-int")
     assert _resolve_preflight_timeout(300) == 300
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "0")

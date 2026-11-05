@@ -194,7 +194,7 @@ def test_preflight_worker_cap_reaches_every_lane_and_is_recorded(tmp_path, monke
     stand must set the runtime's own lever to ``max(2, 16 // lanes)`` in the process every lane
     server inherits, override an ambient value, and record the applied number in the manifest
     and in each lane row. The runtime reads exactly that key (pinned here, not modified)."""
-    from ouroboros import preflight_runner, test_parallelism
+    from ouroboros import preflight_probe, preflight_runner, test_parallelism
     _short_tmp(monkeypatch)
     assert run_live_lanes.PREFLIGHT_WORKERS_ENV == test_parallelism.WORKERS_ENV
     assert run_live_lanes.PREFLIGHT_WORKERS_FLOOR == preflight_runner._MIN_PREFLIGHT_WORKERS
@@ -211,7 +211,7 @@ def test_preflight_worker_cap_reaches_every_lane_and_is_recorded(tmp_path, monke
     def lane(job, args, out, template, stagger, states, seed, budget=None, *, key="", seed_sha=""):
         seen[job] = (os.environ.get(run_live_lanes.PREFLIGHT_WORKERS_ENV),
                      run_live_lanes._lane_row(job, args)["preflight_test_workers"],
-                     preflight_runner._preflight_worker_count())
+                     preflight_probe._preflight_worker_count())
         return _fake_lane(job, args, out, template, stagger, states, seed, budget, key=key, seed_sha=seed_sha)
 
     monkeypatch.setattr(run_live_lanes, "run_lane", lane)

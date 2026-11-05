@@ -70,7 +70,7 @@ _VALUED = frozenset({
     "--ignore", "--ignore-glob", "--override-ini", "--numprocesses", "--maxprocesses",
     "--max-worker-restart", "--maxfail", "--durations", "--durations-min", "--timeout", "--timeout-method",
     "--session-timeout", "--capture", "--import-mode", "--log-level", "--log-file", "--default-suite-shard",
-    "--ui-browser-shard", "--serial-shards", "--evidence-dir", "--temp-parent", "--base", "--extra-test",
+    "--ui-browser-shard", "--evidence-dir", "--temp-parent", "--base", "--extra-test",
     "--test-reason",
 })
 # Whole-lane proofs refuse a subset of their lane (tests/default_lane.py, tests/browser_lane.py),

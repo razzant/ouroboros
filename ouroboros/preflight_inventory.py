@@ -61,13 +61,18 @@ def pytest_collection_finish(session):
     if not _worker and session.items:
         _emit("collection", ids=[item.nodeid for item in session.items])
 
+def _plain(nodeid):
+    # `--dist loadgroup` schedules by a group at the end of an id (`id@group`); a test's name is the id without it.
+    head, at, group = nodeid.rpartition("@")
+    return head if at and "]" not in group else nodeid
+
 @pytest.hookimpl(optionalhook=True)
 def pytest_xdist_node_collection_finished(node, ids):
-    _emit("collection", ids=list(ids))
+    _emit("collection", ids=[_plain(nodeid) for nodeid in ids])
 
 def pytest_runtest_logreport(report):
     if report.when == "teardown" or report.skipped or report.failed:
-        _emit("report", nodeid=report.nodeid, when=report.when, outcome=report.outcome)
+        _emit("report", nodeid=_plain(report.nodeid), when=report.when, outcome=report.outcome)
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_sessionfinish(session, exitstatus):
