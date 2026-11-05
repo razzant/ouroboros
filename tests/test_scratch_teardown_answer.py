@@ -237,6 +237,76 @@ def _registered(repo, temp_root) -> bool:
     return f"worktree {(temp_root / 'repo').as_posix()}\n" in listing
 
 
+def _refuse_lane(monkeypatch, lane):
+    _popen_refusing(monkeypatch, *{"pytest": ("-m", "pytest"), "node": ("--test",)}[lane])
+
+
+@posix_only
+@pytest.mark.parametrize("lane", ["node"])  # a refused pytest lane is now refused after the warm executed
+def test_a_refused_lane_stays_red_and_releases_once_its_guardian_settled(tmp_path, monkeypatch, lane):
+    repo, temp_root, ctx = _gate(tmp_path, monkeypatch, lane)
+    _refuse_lane(monkeypatch, lane)
+
+    verdict = pr.run_hermetic_pytest(repo, ctx=ctx)
+
+    assert verdict and "hermetic preflight failed" in verdict and "RETAINED" not in verdict, verdict
+    terminal = json.loads((pathlib.Path(ctx._preflight_test_evidence) / "result.json").read_text(encoding="utf-8"))
+    assert (terminal["execution"], terminal["cleanup"], terminal["retention_reason"]) == ("not_run", "released", "")
+    assert (terminal["kept"], terminal["containment_tokens"]) == ([], []), "a released run records nothing kept"
+    assert ctx._preflight_test_disclosure["outcome"] == "not_started" and not ctx._preflight_test_proof
+    assert not temp_root.exists() and not _registered(repo, temp_root)
+
+
+@posix_only
+# A refused pytest lane now follows the bytecode warm: its unconfirmed first reap and unsettled guardian are
+# reported as the warm's containment failure, and with lost gate evidence it leaves a retention in tmp_path that
+# the hold's retirement does not cover. Those three holds keep their node row only.
+@pytest.mark.parametrize("hold,lane", [("first_reap_unconfirmed", "node"), ("no_handle_unconfirmed", "pytest"),
+                                       ("no_handle_unconfirmed", "node"), ("guardian_unsettled", "node"),
+                                       ("explicit_keep", "pytest"), ("explicit_keep", "node"),
+                                       ("gate_evidence_lost", "node")])
+def test_every_real_reason_still_holds_a_refused_lanes_tree(tmp_path, monkeypatch, lane, hold):
+    repo, temp_root, ctx = _gate(tmp_path, monkeypatch, lane)
+    reason = {"first_reap_unconfirmed": UNCONFIRMED, "no_handle_unconfirmed": UNCONFIRMED,
+              "guardian_unsettled": GUARDIAN_UNSETTLED, "explicit_keep": "explicit preflight debug retention",
+              "gate_evidence_lost": "gate evidence write failed: controlled evidence loss"}[hold]
+    if hold == "no_handle_unconfirmed":  # a real root is created, stopped, and never handed over
+        def refused(_watch):
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(OverloadWatch, "start", refused)
+    else:
+        _refuse_lane(monkeypatch, lane)
+    if "unconfirmed" in hold:
+        _first_reap_unconfirmed(monkeypatch)
+    elif hold == "guardian_unsettled":
+        _guardian_unsettled(monkeypatch)
+    elif hold == "explicit_keep":
+        monkeypatch.setenv("OUROBOROS_PREFLIGHT_KEEP", "1")
+    elif hold == "gate_evidence_lost":
+        real = test_evidence.write_record
+
+        def lost(path, value):
+            if pathlib.Path(path).name == "result.json":
+                raise OSError("controlled evidence loss")
+            real(path, value)
+
+        monkeypatch.setattr(test_evidence, "write_record", lost)
+    try:
+        verdict = pr.run_hermetic_pytest(repo, ctx=ctx)
+        assert verdict and "hermetic preflight failed" in verdict, verdict
+        assert not ctx._preflight_test_proof
+        assert (temp_root / "repo").is_dir() and _registered(repo, temp_root)
+        assert reason in (temp_root / RETENTION_MARKER).read_text(encoding="utf-8")
+        if hold != "gate_evidence_lost":
+            terminal = json.loads((pathlib.Path(ctx._preflight_test_evidence) / "result.json").read_text(encoding="utf-8"))
+            assert terminal["cleanup"] == "retained" and reason in terminal["retention_reason"]
+            assert terminal["kept"] == [{"path": str(temp_root), "reasons": [terminal["retention_reason"].split("\n")[0]]}]
+            assert [token.split("_")[:3] for token in terminal["containment_tokens"]] == [["OURO", "PROC", "CONTAINER"]]
+    finally:
+        retire_synthetic_gate_hold(repo, temp_root, reason)
+
+
 @pytest.mark.parametrize("in_worktree", [False, True], ids=["test-folder", "worktree"])
 def test_a_marker_beneath_a_proven_gate_root_keeps_its_folder_and_is_held_by_its_tasks_scratch_record(
         tmp_path, monkeypatch, in_worktree):
