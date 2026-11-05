@@ -3,7 +3,7 @@
 
     GH_TOKEN=... python -m devtools.protected_tests [--since 2026-10-22] [--keep-list keep.csv]
 
-The file has three sections, each stricter than `devtools/test_census.py` needs them to be:
+The file has three sections:
 
 files      Whole files: the gate floor (`test_selection.FLOOR_TESTS`, read live), then the release,
            security, process-safety and system witnesses of a keep list. A rerun without
@@ -15,10 +15,11 @@ functions  `file::qualname` -> issue numbers: every function named in a post-mer
 witnesses  `file::qualname` -> issue numbers: functions that cite an issue in their docstring or
            body at this tree. A row of a keep list that only cites an issue is one of these, not
            a whole file. The closest witness of a cited defect stays; its cartesian rows may go.
+           The census finds citations in the source itself; this section is for a reader.
 
-A retirement step subtracts the set mechanically, and the census marks what it spared. The file
-is rewritten in place and bounded by `since` (about 140 KB for one release cycle). `gh` must see
-GH_TOKEN; a failed query fails the run rather than protect less.
+A retirement step subtracts `files` and `functions` mechanically, and the census marks what it
+spared. The file is rewritten in place and bounded by `since` (about 140 KB for one release
+cycle). `gh` must see GH_TOKEN; a failed query fails the run rather than protect less.
 """
 from __future__ import annotations
 

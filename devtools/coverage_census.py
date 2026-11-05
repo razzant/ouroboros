@@ -131,7 +131,9 @@ def fold(data: Path, root: Path) -> dict:
             with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as connection:
                 for measured, context, numbits in connection.execute(LINE_BITS):
                     phase = TEST_PHASE.search(context)
-                    rel = files.setdefault(measured, _product_file(root, measured))
+                    if measured not in files:
+                        files[measured] = _product_file(root, measured)
+                    rel = files[measured]
                     if rel and phase and context.startswith("tests/"):
                         node = nodes.setdefault(context[:phase.start()], len(nodes))
                         if rel not in bodies:
@@ -200,7 +202,7 @@ def digest(folds: list) -> dict:
 
 
 def query(report: dict, deleted: set) -> list:
-    """What must stay if `deleted` node ids go: [{node, lines}], most lost lines' witnesses first.
+    """What must stay if `deleted` node ids go: [{node, lines}], the witness of the most lost sets first.
 
     A greedy hitting set: every kept set whose witnesses are all deleted gets one witness back.
     """
@@ -253,6 +255,8 @@ def main(argv=None) -> int:
     asking.add_argument("--deleted", type=Path, help="node ids deleted, one per line")
     asking.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.command == "query" and not (args.decisions or args.deleted):
+        parser.error("query needs --decisions or --deleted: an empty question has a reassuring answer")
     if args.command == "fold":
         with gzip.open(args.out, "wt", encoding="utf-8") as stream:
             json.dump(fold(args.data, args.root), stream)

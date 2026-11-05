@@ -3,6 +3,8 @@ import json
 import sqlite3
 from contextlib import closing
 
+import pytest
+
 from devtools import coverage_census as cov
 from devtools import protected_tests as protect
 from devtools import test_census as census
@@ -260,6 +262,8 @@ def test_the_digest_answers_what_a_deletion_loses(tmp_path):
                      "--out", str(tmp_path / "returned.csv")]) == 0
     assert (tmp_path / "returned.csv").read_text(encoding="utf-8").splitlines() == [
         "node,cluster,lines", f"{one},D4_wording,ouroboros/x.py:5"]
+    with pytest.raises(SystemExit):  # no candidates is no question, never a clean answer
+        cov.main(["query", str(tmp_path / "digest.json"), "--out", str(tmp_path / "returned.csv")])
 
 
 def test_a_custom_child_environment_still_names_the_test(monkeypatch):
