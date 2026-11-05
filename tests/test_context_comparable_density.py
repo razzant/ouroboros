@@ -16,6 +16,7 @@ from tests.test_context_economy_window import setup as gateway_fixture
 from tests.test_context_fit_integration import _plan
 
 setup, live_wait, main_call = gateway_fixture, wait_fixture, main_fixture
+_OWNER_TEXT = "Owner asks for the complete text. " + "word " * 720_000
 
 
 @pytest.fixture(autouse=True)
@@ -29,9 +30,8 @@ def test_real_start_and_first_send_use_comparable_density(main_call, monkeypatch
                                                          mode, witness_size, expected):
     from ouroboros.tool_policy import initial_tool_schemas
 
-    words = "Owner asks for the complete text. " + "word " * 720_000
     ctx, gateway, tools, events, build, windows = _native(
-        main_call, monkeypatch, tmp_path, task_text=words, owner_mode=mode)
+        main_call, monkeypatch, tmp_path, task_text=_OWNER_TEXT, owner_mode=mode)
     windows["account-a"] = 2_200_000
     ce.record_token_density(ce.canonical_evidence_root(), ce._normalized_density_model(MODEL),
         prompt_chars=witness_size * 4, prompt_tokens=int(witness_size * 1.56),
@@ -40,7 +40,7 @@ def test_real_start_and_first_send_use_comparable_density(main_call, monkeypatch
     assert plan.initial_mode == plan.preferred_mode == mode
     assert plan.projection(mode).calibration_ratio == expected
     ctx.messages[:] = plan.messages_for(mode)
-    assert any(row.get("content") == words for row in ctx.messages)
+    assert any(row.get("content") == _OWNER_TEXT for row in ctx.messages)
     ctx.context_fit_plan, ctx.active_context_mode = plan, mode
     ctx.tool_schemas = initial_tool_schemas(tools, context_mode=mode)
     fit = loop._measure_round_main_fit(ctx, automatic_pass_used=False).measurement
@@ -52,7 +52,7 @@ def test_real_start_and_first_send_use_comparable_density(main_call, monkeypatch
     assert text == "Read." and len(gateway.creates) == 1
     assert usage["_context_measurement_density"] == expected
     assert tools._ctx.active_context_mode == mode
-    assert any(context_fit.extract_plain_text_from_content(row.get("content")) == words
+    assert any(context_fit.extract_plain_text_from_content(row.get("content")) == _OWNER_TEXT
                for row in gateway.uploads[0][0]["messages"])
 
 
@@ -64,7 +64,7 @@ def test_real_route_rebind_sizes_its_running_input(main_call, monkeypatch, tmp_p
         main_call, monkeypatch, tmp_path, owner_mode="nano")
     windows["account-a"] = windows["account-b"] = 2_000_000
     plan = build(windows["account-a"])
-    ctx.messages[:] = [*plan.messages_for("nano"), {"role": "user", "content": "word " * 720_000}]
+    ctx.messages[:] = [*plan.messages_for("nano"), {"role": "user", "content": _OWNER_TEXT}]
     shown = list(ctx.messages)
     ce.record_token_density(ce.canonical_evidence_root(), ce._normalized_density_model(MODEL),
         prompt_chars=witness_size * 4, prompt_tokens=int(witness_size * 1.56),

@@ -21,6 +21,8 @@ from tests.test_transport_b_stream_deadlines import isolated as isolated, chunk,
 
 PRIMARY = "openai-compatible::primary-fixture"
 FALLBACK = "openai-compatible::fallback-fixture"
+_UNSEEN_KEEP = "UNSEEN-KEEP " * 1500
+_OLD_HOST = "OLD-HOST " * 5000
 
 
 @pytest.fixture
@@ -94,8 +96,8 @@ def configured_loop(tmp_path, monkeypatch, client, *, sources=False, exact=False
         # A recorded send carries its tool list too: a missing one would read as a changed one.
         ctx._last_context_observation = {**_observation(kw["messages"]),
                                          "tool_schemas": initial_tool_schemas(kw["tools"], context_mode="max")}
-        kw["messages"] += [*_tool("unseen", invocation="unseen-invocation", text="UNSEEN-KEEP " * 1500),
-            bound_host_row(CONTEXT_FACTS_NAME, "OLD-HOST " * 5000),
+        kw["messages"] += [*_tool("unseen", invocation="unseen-invocation", text=_UNSEEN_KEEP),
+            bound_host_row(CONTEXT_FACTS_NAME, _OLD_HOST),
             bound_host_row(CONTEXT_FACTS_NAME, "CURRENT-HOST-KEEP")]
     return kw, notes
 

@@ -1,6 +1,7 @@
 """The diagnostic and real session seam measure the same retained owner-shaped input."""
 from dataclasses import asdict, replace
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +10,14 @@ from tests import _memory_scale_fixture as scale
 from devtools._context_fit_accounting import cold_density, declared_evidence
 from devtools._context_fit_session import measure_session, session_inputs
 from devtools.context_fit_report import REPO, measure_core
+
+
+_SCALE_CORE_TEMPLATE = scale.core(Path("."), scale.snapshot())
+
+
+def _scale_core(root):
+    """Reuse the immutable scale-shaped sections while rebinding the per-case source root."""
+    return replace(_SCALE_CORE_TEMPLATE, section_root=str(root))
 
 
 @pytest.mark.parametrize('window, extra_chars, fits, producers',
@@ -31,7 +40,7 @@ def test_retained_scale_candidate_matches_live_admission(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(socket.socket, 'connect', lambda *a, **kw: pytest.fail('provider connection'))
     from tests import _nano_context_fixture as nano
-    core = nano.core(tmp_path / 'captures', monkeypatch) if producers else scale.core(tmp_path / 'captures')
+    core = nano.core(tmp_path / 'captures', monkeypatch) if producers else _scale_core(tmp_path / 'captures')
     schemas = nano.tools() if producers else scale.tools()
     core = replace(core, dynamic_sections=(*core.dynamic_sections,
                     HostSection('additional_held_context', scale.text('Other held facts', extra_chars))))
@@ -113,7 +122,7 @@ def test_bundled_session_diagnostic_is_offline_and_discloses_its_inputs(tmp_path
 
     # The diagnostic ends its host on an event loop, which Windows builds through connect(): only that self-pipe passes.
     block_network_except_socketpair(monkeypatch, lambda *a, **kw: pytest.fail('provider connection'))
-    result = report_session(scale.core(tmp_path / 'captures'), ToolRegistry(REPO, tmp_path), root=tmp_path,
+    result = report_session(_scale_core(tmp_path / 'captures'), ToolRegistry(REPO, tmp_path), root=tmp_path,
                             scratch=tmp_path / 'scratch', window=1000000, reserve=10000, mode='max', provider=provider)
     assert result['verdict'] == 'fits', result
     assert result['phase'] == 'session_candidate'
