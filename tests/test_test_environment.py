@@ -324,35 +324,6 @@ def test_safe_test_forwards_interrupt_then_reaps_the_whole_tree(tmp_path, stop):
     assert not survivors
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
-def test_safe_test_forwards_sigterm_then_reaps_the_whole_tree(tmp_path):
-    """TERM requests the tree's stop, the launcher exits 128+15 and a detached child is reaped too.
-
-    Ctrl-C (SIGINT) has its witness in tests/test_test_storage.py; this is the TERM half of the same
-    forwarding (CONSENSUS WP6: signal forwarding 128+N, scratch release)."""
-    stop = signal.SIGTERM
-    pids = tmp_path / "pids"
-    launcher = subprocess.Popen(_LAUNCHER + ["--temp-parent", str(tmp_path), "--timeout", "600", "--",
-                                             sys.executable, "-c", _TREE, str(pids), "obedient"],
-                                cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                start_new_session=True)
-    tree = []
-    try:
-        tree = _recorded_tree(pids)
-        os.kill(launcher.pid, stop)
-        os.kill(launcher.pid, stop)  # a repeated signal cannot cut the teardown short
-        _, stderr = launcher.communicate(timeout=60)
-    finally:
-        if launcher.poll() is None:
-            kill_process_tree(launcher)
-            launcher.wait()
-        survivors = kill_survivors(tree)  # a launcher that failed to stop the tree must not leave it behind
-    assert launcher.returncode == 128 + stop, stderr
-    assert _final_root(stderr)[0] == "SAFE_TEST_RELEASED", stderr
-    assert (tmp_path / "pids.term").read_text(encoding="utf-8") == "TERM"
-    assert not survivors
-
-
 def _live_conftest():
     return next(module for module in list(sys.modules.values())
                 if getattr(module, "__file__", "")
