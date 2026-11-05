@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import pathlib
 import subprocess
+import time
 
 import pytest
 
@@ -23,6 +24,7 @@ from ouroboros.headless import (
     write_workspace_patch_artifacts,
 )
 from ouroboros.task_results import write_task_result
+from ouroboros.utils import utc_now_iso
 
 
 from tests._headless_cli_shared import (  # noqa: F401  (autouse fixture applies on import)
@@ -726,3 +728,11 @@ def test_a_direct_folders_evidence_folder_is_retained_once_beside_its_direct_cap
     assert json.loads((base / "workspace_patch.json").read_text(encoding="utf-8"))["named_evidence"]["summary_path"] == evidence["summary_path"]
     assert len(list(base.glob("**/named_evidence*"))) == 1  # one copy, never two
     assert [row["kind"] for row in read_result(parent, task["id"])["artifacts"]].count("named_evidence_manifest") == 1
+    time.sleep(0.05)  # a later task on the same folder starts after the first one's files were written
+    later = {"id": "task-later", "workspace_root": str(folder), "started_at": utc_now_iso()}
+    time.sleep(0.05)
+    (folder / ".review-evidence" / "later.txt").write_bytes(b"mine\n")
+    write_task_result(parent, later["id"], "completed", workspace_root=str(folder), artifact_status="finalizing")
+    finalize_task_artifacts(parent, later)
+    mine = json.loads((task_artifacts_dir(parent, later["id"]) / "workspace_patch.json").read_text(encoding="utf-8"))["named_evidence"]
+    assert _retained_files(mine["summary_path"]) == {".review-evidence/later.txt": b"mine\n"}, "the first task's evidence stays its own"

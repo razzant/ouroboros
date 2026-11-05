@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime
 from hashlib import sha256
 import json
 import os
@@ -308,10 +309,20 @@ def prepare_file_outputs(rows, target, *, baseline_sha="", file_baseline=None):
         yield PreparedFileOutputs(rows, target, temporary, baseline_sha, file_baseline)
 
 
+def _changed_before(path: Path, started_ns: int) -> bool:
+    """Did PATH last change (content or inode; on Windows creation stands for the inode) before ``started_ns``?"""
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return max(info.st_ctime_ns, info.st_mtime_ns) < started_ns
+
+
 def _direct_named_evidence(root: Path, task: dict, retain_dir: Path, previous: dict | None) -> dict | None:
     """The folder's ``.review-evidence/`` retained once by a copy capture's own rule
     (``workspace_patch_capture._held_named_evidence``): with no Git baseline every path there is new except a
-    supplied ``file_baseline`` one, the folder's own product. It stays in place (nothing is held out of a
+    supplied ``file_baseline`` one, the folder's own product, and one that last changed before the task started
+    (an earlier task's on the same folder, retained by that task). It stays in place (nothing is held out of a
     patch); None when nothing new is there."""
     from ouroboros.delegate_start_instructions import EVIDENCE_DIRNAME
     from ouroboros.workspace_patch_capture import _held_named_evidence
@@ -325,8 +336,14 @@ def _direct_named_evidence(root: Path, task: dict, retain_dir: Path, previous: d
                            for name in [*files, *(d for d in dirs if (Path(current) / d).is_symlink())])
     meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     copy = meta.get("workspace_copy") or task.get("workspace_copy") or {}
-    baseline = meta.get("file_baseline") or copy.get("file_baseline") or {}
-    return _held_named_evidence(root, "", changed, set(baseline), retain_dir, previous)[1]
+    baseline = set(meta.get("file_baseline") or copy.get("file_baseline") or {})
+    try:
+        started_ns = int(datetime.fromisoformat(str(task.get("started_at") or "").replace("Z", "+00:00")).timestamp() * 1e9)
+    except ValueError:  # no start recorded: every path there is this task's, as before
+        started_ns = 0
+    if started_ns:
+        baseline |= {rel for rel in changed if rel != EVIDENCE_DIRNAME and _changed_before(root / rel, started_ns)}
+    return _held_named_evidence(root, "", changed, baseline, retain_dir, previous)[1]
 
 
 def _directory_direct_artifacts(
