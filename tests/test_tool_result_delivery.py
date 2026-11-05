@@ -524,6 +524,31 @@ def test_requested_result_view_classifies_declared_range_parameters():
     assert requested_result_view({"run_id": 7, "page": 2}) is None
     assert requested_result_view({"cursor": "2"}) is None
     assert requested_result_view({"run_id": 7, "tail_lines": 500}) == (None, None)
+    from ouroboros.tool_capabilities import requested_call_view
+    page = {"name": "mcp_slack__history", "arguments": {"channel": "c", "limit": 200}}
+    assert requested_call_view("call_mcp_tool", page) == (None, None)  # the gateway's inner arguments chose a page
+    assert requested_call_view("call_mcp_tool", {**page, "arguments": json.dumps(page["arguments"])}) == (None, None)
+    assert requested_call_view("call_mcp_tool", {"name": "mcp_slack__history", "arguments": {"channel": "c"}}) is None
+    assert requested_call_view("enable_tools", {"tools": "mcp_gmail"}) == (None, None)  # a catalog view the mind asked for
+    assert requested_call_view("read_file", {"path": "a"}) is None
+
+
+def test_a_gateway_page_and_a_catalog_view_stay_protected_from_the_passes():
+    """Size passes spare chosen reads: a page chosen inside call_mcp_tool's arguments and the schema text enable_tools
+    showed are chosen; an unasked MCP result through the same gateway is not."""
+    from ouroboros import context_compaction
+    from ouroboros.context_source_view import chosen_read_units
+
+    calls = (("page", "call_mcp_tool", {"name": "mcp_slack__history", "arguments": {"channel": "c", "limit": 200}}),
+             ("catalog", "enable_tools", {"tools": "mcp_slack"}),
+             ("plain", "call_mcp_tool", {"name": "mcp_slack__history", "arguments": {"channel": "c"}}))
+    messages = [{"role": "user", "content": "go"}]
+    for call_id, name, args in calls:
+        messages += [{"role": "assistant", "content": "", "tool_calls": [{"id": call_id, "type": "function", "function": {
+            "name": name, "arguments": json.dumps(args)}}]}, {"role": "tool", "tool_call_id": call_id, "content": "x" * 400}]
+    units = context_compaction.context_units(messages, scope="tool")
+    protected = {messages[unit.start]["tool_calls"][0]["id"] for unit in units if unit.unit_id in chosen_read_units(messages, units)}
+    assert protected == {"page", "catalog"}
 
 
 @pytest.mark.parametrize("args,explicit", [

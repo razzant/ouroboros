@@ -36,7 +36,7 @@ import math
 import pathlib
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from ouroboros.tool_capabilities import PAGEABLE_TOOL_RESULTS, requested_result_view
+from ouroboros.tool_capabilities import PAGEABLE_TOOL_RESULTS, requested_call_view
 
 log = logging.getLogger(__name__)
 
@@ -384,7 +384,7 @@ def _measured_frame(
     digests = [hashlib.sha256(text.encode("utf-8")).hexdigest() for text in texts]
     names = [str(row.get("fn_name") or row.get("tool") or "") for row in rows]
     facts = [typed_result_facts(row) for row in rows]
-    requests = [requested_result_view(row.get("tool_args")) for row in rows]
+    requests = [requested_call_view(name, row.get("tool_args")) for name, row in zip(names, rows)]
 
     whole = measure(full)
     boundary, reserve, eighth = frame_bounds(whole)

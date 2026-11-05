@@ -266,19 +266,23 @@ def test_an_anchored_publication_keeps_its_receipt_and_its_pass(tmp_path, monkey
 
 
 def test_a_mark_on_an_mcp_tool_meets_its_gateway_call(tmp_path):
-    """Main calls an on-demand MCP tool through call_mcp_tool: a mark tied to that MCP tool meets the call;
-    another MCP tool through the same gateway does not."""
+    """Main calls an on-demand MCP tool through call_mcp_tool: the executor runs the MCP call the envelope names, so
+    a mark tied to that MCP tool meets the call; another MCP tool through the same gateway does not."""
     from types import SimpleNamespace
 
     from ouroboros.loop_tool_execution import process_tool_results
+    from ouroboros.tools.tool_discovery import resolve_gateway_call
     from tests._tool_result_delivery_shared import measured_fit
 
     ctx = ctx_for(tmp_path)
     assert mark(ctx, "GMAIL_LESSON: confirm the recipient.", {"tool": "mcp_gmail__send_email"})["ok"]
-    rows = [{"fn_name": "call_mcp_tool", "tool_call_id": call_id, "result": "done", "is_error": False,
-             "tool_args": {"name": name, "arguments": {"to": "a"}}, "args_for_log": {"name": name}, "result_meta": {},
-             "tool_result": ToolResult(status="ok", code="OK", text="done")}
-            for call_id, name in (("c1", "mcp_slack__history"), ("c2", "mcp_gmail__send_email"))]
+    rows = []
+    for call_id, name in (("c1", "mcp_slack__history"), ("c2", "mcp_gmail__send_email")):
+        call = resolve_gateway_call({"id": call_id, "function": {"name": "call_mcp_tool", "arguments": json.dumps(
+            {"name": name, "arguments": {"to": "a"}})}})
+        rows.append({"fn_name": call["function"]["name"], "tool_call_id": call_id, "result": "done", "is_error": False,
+                     "tool_args": json.loads(call["function"]["arguments"]), "args_for_log": {}, "result_meta": {},
+                     "tool_result": ToolResult(status="ok", code="OK", text="done")})
     messages, trace = [], {"tool_calls": []}
     process_tool_results(rows, messages, trace, lambda *_a: None, SimpleNamespace(_ctx=ctx),
                          fit_candidate=measured_fit(window=200_000, reserve=1_000), tool_schemas=[])

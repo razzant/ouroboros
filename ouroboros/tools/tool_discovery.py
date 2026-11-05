@@ -326,6 +326,40 @@ def gateway_target(name: str, args: Any) -> tuple:
     return args["name"].strip(), inner if isinstance(inner, dict) else {}
 
 
+def resolve_gateway_call(call: Dict[str, Any]) -> Dict[str, Any]:
+    """The MCP call a ``call_mcp_tool`` envelope names, as the executor runs it: custody, timeout, marks, trace,
+    ``CALL_*`` rows and the result view are that tool's own; the envelope stays in the transcript for provider
+    replay, recorded as ``via``. Any other call, or an envelope that names no MCP tool, is returned unchanged."""
+    import json
+    from ouroboros.mcp_client import is_mcp_tool_name
+
+    function = call.get("function") if isinstance(call, dict) else None
+    if not isinstance(function, dict) or function.get("name") != GATEWAY_TOOL:
+        return call
+    try:
+        args = json.loads(function.get("arguments") or "{}")
+    except (TypeError, ValueError):
+        return call
+    name, inner = gateway_target(GATEWAY_TOOL, args if isinstance(args, dict) else {})
+    if name == GATEWAY_TOOL or not is_mcp_tool_name(name):
+        return call
+    resolved = {**function, "name": name, "arguments": json.dumps(inner, ensure_ascii=False)}
+    return {**call, "function": resolved, "via": GATEWAY_TOOL}
+
+
+def with_gateway_schema(registry: "ToolRegistry", name: str, result: Any) -> Any:
+    """A gateway call's typed MCP or argument error carries its tool's catalog schema, so the next call can be
+    composed from it; the typed code decides, no error text is read."""
+    import dataclasses
+
+    if getattr(result, "code", "") not in ("MCP_ERROR", "TOOL_ARG_ERROR"):
+        return result
+    wanted = _load_set(registry, [name])[0]
+    if name not in wanted:
+        return result
+    return dataclasses.replace(result, text=f"{result.text}\n\n{_gateway_schemas({name: wanted[name]}, {})}")
+
+
 def call_mcp_tool(registry: "ToolRegistry", ctx: Any, name: str = "", arguments: Any = None) -> Any:
     """Call one MCP tool by its callable name through ordinary dispatch: its own admission, safety and result."""
     import json
@@ -412,16 +446,9 @@ def update_resident_notice(registry, resident, messages):
     messages[:] = updated
 
 
-def bind_resident_schemas(registry: "ToolRegistry", resident: List[Dict[str, Any]], *, gateway: bool = False,
-                          mode: str = "max") -> set:
-    """Bind the discovery handlers of ``registry`` to one loop's resident schema list (``gateway``: Main's).
-
-    Main's binding adds the gateway a fresh start in ``mode`` would carry when the list lacks it (a
-    continuation saved before it existed): one tools change on resume instead of one per MCP load."""
+def bind_resident_schemas(registry: "ToolRegistry", resident: List[Dict[str, Any]], *, gateway: bool = False) -> set:
+    """Bind the discovery handlers of ``registry`` to one loop's resident schema list (``gateway``: Main's)."""
     enabled_late: set = set()
-    if gateway and GATEWAY_TOOL not in {schema["function"]["name"] for schema in resident}:
-        resident.extend(schema for schema in initial_tool_schemas(registry, context_mode=mode)
-                        if schema["function"]["name"] == GATEWAY_TOOL)
     registry.override_handler(
         "list_available_tools",
         lambda ctx=None, namespace="", **_kwargs: list_available_tools(registry, ctx, resident, namespace),

@@ -192,7 +192,7 @@ def _setup_dynamic_tools(tools_registry, tool_schemas, messages, context_mode="m
     """
     from ouroboros.tools.tool_discovery import bind_resident_schemas
 
-    enabled_extra = bind_resident_schemas(tools_registry, tool_schemas, gateway=gateway, mode=context_mode)  # Main: MCP via call_mcp_tool
+    enabled_extra = bind_resident_schemas(tools_registry, tool_schemas, gateway=gateway)  # Main: MCP via call_mcp_tool
     tools_registry._ctx._actor_loaded_tool_names = enabled_extra  # a route's schema ceiling keeps these
     omissions = (
         tools_registry.capability_omissions()

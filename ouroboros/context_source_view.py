@@ -232,7 +232,7 @@ def _unit_facts(messages: Sequence[Mapping[str, Any]], unit: _AtomicUnit) -> str
 
 def chosen_read_units(messages, units, *, usable_input=None, density=1.0):
     """Explicitly chosen bodies that fit known usable input alone (every chosen body when it is unknown)."""
-    from ouroboros.tool_capabilities import requested_result_view
+    from ouroboros.tool_capabilities import requested_call_view
 
     protected = set()
     for unit in units:
@@ -244,7 +244,7 @@ def chosen_read_units(messages, units, *, usable_input=None, density=1.0):
             except (ValueError, TypeError):
                 continue
             row = results.get(str(call.get("id") or ""))
-            if row is None or requested_result_view(arguments) is None:
+            if row is None or requested_call_view(str(call.get("function", {}).get("name") or ""), arguments) is None:
                 continue
             cost = compaction._context_tokens_for_messages([row], density) - compaction._context_tokens_for_messages(
                 [{**row, "content": ""}], density)

@@ -171,20 +171,32 @@ def test_main_shows_mcp_schemas_for_the_gateway_and_its_request_tools_keep_their
     assert registry.execute_result("call_mcp_tool", {"name": "write_file"}).code == "TOOL_ARG_ERROR" and len(sent) == 1
 
 
-def test_main_binding_restores_the_gateway_a_saved_continuation_lacks(registry):
-    """A continuation saved before the gateway existed resumes with it on Main in Low/Max; Nano, whose fresh
-    start carries no gateway, and any other binding add nothing and keep loading."""
-    from ouroboros import loop as loop_module
+def test_a_gateway_envelope_runs_as_its_mcp_call_and_a_typed_error_carries_the_schema(registry):
+    """The executor resolves call_mcp_tool to the MCP call it names (``via`` records the envelope); an envelope that
+    names no MCP tool, or is not JSON, and any other call stay as sent. A typed MCP or argument error of that call
+    carries the tool's catalog schema; a success does not."""
+    from ouroboros.tools.tool_discovery import resolve_gateway_call, with_gateway_schema
+    from ouroboros.tools.tool_result import ToolResult
 
     _servers()
-    for gateway, mode in ((False, "max"), (True, "nano"), (True, "max")):
-        resident = [schema for schema in initial_tool_schemas(registry, context_mode=mode)
-                    if schema["function"]["name"] != "call_mcp_tool"]
-        loop_module._setup_dynamic_tools(registry, resident, [], context_mode=mode, gateway=gateway)
-        restored = gateway and mode != "nano"
-        assert ("call_mcp_tool" in _names(resident)) is restored
-        receipt = registry.execute("enable_tools", {"tools": "mcp_gitlab__create_issue"})
-        assert ("Call schemas for call_mcp_tool" in receipt) is restored and ("Call schemas loaded" in receipt) is not restored
+
+    def envelope(arguments):
+        return {"id": "c", "function": {"name": "call_mcp_tool", "arguments": arguments}}
+
+    resolved = resolve_gateway_call(envelope(json.dumps({"name": "mcp_gitlab__create_issue", "arguments": {"title": "T"}})))
+    assert resolved["function"]["name"] == "mcp_gitlab__create_issue" and resolved["via"] == "call_mcp_tool"
+    assert json.loads(resolved["function"]["arguments"]) == {"title": "T"}
+    nested = resolve_gateway_call(envelope(json.dumps({"name": "mcp_gitlab__create_issue", "arguments": '{"title": "T"}'})))
+    assert json.loads(nested["function"]["arguments"]) == {"title": "T"}
+    for kept in (envelope(json.dumps({"name": "write_file", "arguments": {}})), envelope("{not json"),
+                 {"id": "c", "function": {"name": "read_file", "arguments": "{}"}}):
+        assert resolve_gateway_call(kept) is kept
+    failed = with_gateway_schema(registry, "mcp_gitlab__create_issue",
+                                 ToolResult(status="error", code="MCP_ERROR", text="bad call"))
+    assert failed.text.startswith("bad call") and "Call schemas for call_mcp_tool" in failed.text
+    assert '"description": "Issue title"' in failed.text
+    done = ToolResult(status="ok", code="OK", text="done")
+    assert with_gateway_schema(registry, "mcp_gitlab__create_issue", done) is done
 
 
 def test_enable_tools_loads_a_whole_server_and_says_what_the_next_request_carries(registry):

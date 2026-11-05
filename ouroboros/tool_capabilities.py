@@ -403,6 +403,24 @@ def requested_result_view(tool_args: Any) -> Optional[tuple[Optional[int], Optio
     return None
 
 
+def requested_call_view(name: str, tool_args: Any) -> Optional[tuple[Optional[int], Optional[int]]]:
+    """``requested_result_view`` of a whole call: the catalog view ``enable_tools`` returns is a form the mind
+    asked for, and a call through the MCP gateway asks for the view its inner arguments name."""
+    if name == "enable_tools":
+        return (None, None)
+    if name == MCP_GATEWAY_TOOL_NAME and isinstance(tool_args, dict):
+        inner = tool_args.get("arguments")
+        if isinstance(inner, str):
+            import json
+
+            try:
+                inner = json.loads(inner or "{}")
+            except ValueError:
+                inner = {}
+        tool_args = inner if isinstance(inner, dict) else {}
+    return requested_result_view(tool_args)
+
+
 def _view_chars(value: Any) -> int:
     try:
         return max(0, int(value or 0))
