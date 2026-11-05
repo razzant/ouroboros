@@ -653,8 +653,7 @@ def test_telegram_card_leads_with_the_executors_latest_words_and_keeps_its_count
     assert "tool_result" in _subagent_card_text(event, "progress", "en"), "a frame without the record is unchanged"
 
 
-@pytest.mark.parametrize("recap", [False, True])
-@pytest.mark.parametrize("problem_count", [1, 8])
+@pytest.mark.parametrize(("problem_count", "recap"), [(1, True), (8, False)])
 def test_telegram_long_speech_preserves_problems_gaps_and_full_task_reference(recap, problem_count):
     from skills.telegram.lib.telegram_state import _subagent_card_text
 

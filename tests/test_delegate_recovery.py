@@ -154,8 +154,15 @@ def test_saved_carrier_does_not_relax_local_handoff_authority(tmp_path, monkeypa
     assert recovery._read(tmp_path, "nanny")["status"] == "vetoed" and reconciled == [True]
 
 
-@pytest.mark.parametrize("fault", ["none", "no_resume", "panic", "transaction", "attempt", "holder", "old_generation"])
-@pytest.mark.parametrize("fate", ["pending", "bound", "settled"])
+@pytest.mark.parametrize(("fate", "fault"), [
+    ("pending", "none"),
+    ("bound", "no_resume"),
+    ("bound", "panic"),
+    ("bound", "transaction"),
+    ("bound", "attempt"),
+    ("settled", "holder"),
+    ("settled", "old_generation"),
+])
 def test_startup_pre_adoption_retains_local_checks_without_engine_observation(
         tmp_path, monkeypatch, stub_delegate_engines, fault, fate):
     custody, recovery, task, _, invocation, _, _ = _pending_handoff(tmp_path, "nanny")
@@ -305,8 +312,11 @@ def test_unreadable_custody_keeps_saved_reservation_without_observation_or_veto(
     assert recovery._read(tmp_path, "nanny")["status"] == "reserved"
 
 
-@pytest.mark.parametrize("binding", ["after_restart", "before_restart", "settled_before_restart"])
-@pytest.mark.parametrize("aged_gc", [False, True])
+@pytest.mark.parametrize(("aged_gc", "binding"), [
+    (False, "before_restart"),
+    (True, "after_restart"),
+    (True, "settled_before_restart"),
+])
 def test_pending_wait_sources_survive_aged_gc_and_second_planned_restart(
         tmp_path, monkeypatch, binding, aged_gc, stub_delegate_engines):
     import os

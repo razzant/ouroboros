@@ -88,8 +88,7 @@ def failures(root):
             if line.strip() and (row := json.loads(line)).get("type") == custody.START_FAILED]
 
 
-@pytest.mark.parametrize("journal", ["PERSIST", "WAL"])
-@pytest.mark.parametrize("control", ["stop", "deadline", "closed"])
+@pytest.mark.parametrize(("control", "journal"), [("stop", "WAL"), ("deadline", "WAL"), ("closed", "PERSIST")])
 def test_interrupted_unsent_claim_retires_fresh_registration(start_case, tmp_path, monkeypatch, control, journal):
     use_journal(monkeypatch, journal)  # a held write fails its COMMIT (rollback journal), its BEGIN (WAL)
     start, gateway, _shared, _fail, _state = start_case

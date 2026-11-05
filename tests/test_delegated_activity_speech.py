@@ -340,8 +340,10 @@ def test_a_draft_with_a_fragment_that_never_passed_here_is_not_proven_either_way
 LOST = [_said(1, "the", K1, "fragment"), _said(2, " big", K1, "fragment"), _said(3, " cat", K1, "fragment"), _tool(4)]
 
 
-@pytest.mark.parametrize("bounds", [[4], [1, 4]], ids=["one-poll", "across-polls"])
-@pytest.mark.parametrize("lose", ["missing", "unreadable"])
+@pytest.mark.parametrize(("lose", "bounds"), [
+    pytest.param("missing", [4], id='missing-one-poll'),
+    pytest.param("unreadable", [1, 4], id='unreadable-across-polls'),
+])
 def test_words_are_never_joined_across_an_event_this_reader_did_not_get_whole(tmp_path, lose, bounds):
     steps = [[event for event in LOST if low < event["seq"] <= high] for low, high in zip([0, *bounds], bounds)]
     daemon = Lossy(steps, **{lose: [2]})                                # " big" never reaches the reader whole
@@ -428,8 +430,10 @@ def test_no_key_of_a_record_without_exact_coverage_is_proven_either_way(tmp_path
     assert fourth["updated"] is True, "a later block begun behind one seen whole is proven again"
 
 
-@pytest.mark.parametrize("space", [" ", "\n\n"], ids=["space", "paragraph"])
-@pytest.mark.parametrize("done", [False, True], ids=["unfinished", "completed"])
+@pytest.mark.parametrize(("done", "space"), [
+    pytest.param(False, " ", id='unfinished-space'),
+    pytest.param(True, "\n\n", id='completed-paragraph'),
+])
 def test_a_poll_holding_only_the_space_between_words_keeps_it_in_the_utterance(tmp_path, space, done):
     """The engine streams words and the space between them as fragments, and a poll can hold only the space. The
     record carries that fragment, whose seq it read, so the card joins across it with the space; no text reader

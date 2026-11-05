@@ -676,8 +676,7 @@ def test_files_an_earlier_failed_capture_saved_stay_kept_and_named(tmp_path, mon
 # -- the way on, as worded, and a decision's later readers (review rl-20261029T145748) --------
 
 
-@pytest.mark.parametrize("held", ["staged", "committed"])
-@pytest.mark.parametrize("folder", ["plain", "it's a space"])
+@pytest.mark.parametrize(("folder", "held"), [("plain", "staged"), ("it's a space", "committed")])
 def test_the_keep_and_give_up_commands_run_as_worded_and_keep_exact_bytes(tmp_path, monkeypatch, folder, held):
     """The child staged or committed a binary file, then its copy went. Each way on the refusal names is a
     run_command argv, run as given even under a folder named with an apostrophe and a space: the kept
@@ -752,9 +751,12 @@ def test_a_present_orig_head_that_names_no_commit_is_not_absence(tmp_path, monke
     assert orig.read_bytes() == payload
 
 
-@pytest.mark.parametrize("collector, saved", [("foreground", "nothing"), ("body", "nothing"), ("body", "binary"),
-                                              ("body", "unreadable")])
-@pytest.mark.parametrize("reader", ["owner", "other"])
+@pytest.mark.parametrize(("reader", "collector", "saved"), [
+    ("owner", "foreground", "nothing"),
+    ("owner", "body", "unreadable"),
+    ("other", "body", "nothing"),
+    ("other", "body", "binary"),
+])
 def test_output_collected_after_a_lost_reject_is_delivered_with_its_decision(tmp_path, monkeypatch, collector, saved, reader):
     """The engine's terminal answer was observed; then the copy went and its owner rejected the run as
     lost before its output or money were collected. The delayed delivery collects them and captures

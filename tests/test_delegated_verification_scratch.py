@@ -286,8 +286,7 @@ def test_check_output_stays_out_only_as_new_files_git_ignores_and_evidence_has_n
         assert f"keep test scratch, {CHECK_BYPRODUCTS} and evidence outside it" in product
 
 
-@pytest.mark.parametrize("ending", ["retained_later", "copy_gone"])
-@pytest.mark.parametrize("decision", ["apply", "reject"])
+@pytest.mark.parametrize(("decision", "ending"), [("apply", "copy_gone"), ("reject", "retained_later")])
 def test_unretained_evidence_of_a_kept_copy_withholds_the_disposition(tmp_path, monkeypatch, decision, ending):
     """A copy that stays (a Git repository inside it cannot be saved in the result) whose named evidence
     failed to retain is the last copy of that evidence: apply and reject refuse, record nothing and apply

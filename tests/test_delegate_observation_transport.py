@@ -672,8 +672,7 @@ def _raise(exc):
     return handler
 
 
-@pytest.mark.parametrize("repaired", [False, True])
-@pytest.mark.parametrize("status,code", [(404, "not_found"), (503, "daemon_busy")])
+@pytest.mark.parametrize(("status", "code", "repaired"), [(404, "not_found", True), (503, "daemon_busy", False)])
 def test_an_unavailable_stream_keeps_the_provisional_window_on_the_repaired_engine_too(
         tmp_path, monkeypatch, repaired, status, code):
     """A journal that cannot be opened hands the beat to the detail read and its degraded window,

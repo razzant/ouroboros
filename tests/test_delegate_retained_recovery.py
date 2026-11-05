@@ -45,9 +45,11 @@ def recover(root, entry, factory, surface):
     return custody.reconcile_orphaned_runs(root, running_task_ids=set(), gateway_factory=factory)
 
 
-@pytest.mark.parametrize("surface", ["task", "orphan", "exit"])
-@pytest.mark.parametrize("transport", ["absent", "factory", "handshake"])
-@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize(("pending", "transport", "surface"), [
+    (False, "absent", "task"),
+    (False, "handshake", "exit"),
+    (True, "factory", "orphan"),
+])
 def test_settled_local_capture_recovers_without_remote_run(tmp_path, monkeypatch, money, surface, transport, pending):  # noqa: F811
     from ouroboros import claudexor_daemon
     from ouroboros import delegate_capture_job

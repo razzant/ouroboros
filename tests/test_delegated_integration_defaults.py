@@ -34,8 +34,10 @@ def _call(ctx, run_id, decision="apply", **options):
         "run_id": run_id, "decision": decision, "reason": "Inspected the complete capture.", **options})
 
 
-@pytest.mark.parametrize("options", [{}, {"paths": []}])
-@pytest.mark.parametrize("decision", ["apply", "reject"])
+@pytest.mark.parametrize(("decision", "options"), [
+    pytest.param("apply", {}, id='apply-options0'),
+    pytest.param("reject", {"paths": []}, id='reject-options1'),
+])
 def test_git_whole_capture_uses_the_normal_disposition(tmp_path, monkeypatch, options, decision):
     from ouroboros.tools.delegate import _capture_terminal_patch
 

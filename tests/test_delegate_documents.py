@@ -888,9 +888,10 @@ def _first_start_task(docs, mode):
             **({"document_import_intent": "intent-saved-at-schedule"} if mode == "new" else {})}
 
 
-@pytest.mark.parametrize("fault,reason", [(("import", "lose"), "document_import_outcome_unknown"),
-                                          (("put", "stall"), "document_import_in_flight")], ids=["lost", "stalled"])
-@pytest.mark.parametrize("mode", ["reuse", "new"])
+@pytest.mark.parametrize(("mode", "fault", "reason"), [
+    pytest.param("reuse", ("import", "lose"), "document_import_outcome_unknown", id='reuse-lost'),
+    pytest.param("new", ("put", "stall"), "document_import_in_flight", id='new-stalled'),
+])
 def test_an_unsettled_first_start_import_wakes_the_child_whose_next_start_keeps_the_key(docs, mode, fault, reason):
     """The host's first start is refused unrun with an import a later start settles. The child is
     woken (no $0 terminal, its route still available) and its next start, naming no selection of

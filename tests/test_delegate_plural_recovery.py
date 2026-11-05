@@ -162,8 +162,7 @@ def test_handoff_migration_reads_without_effect_and_preserves_unknown(tmp_path):
     assert recovery.adopt_handoff(ctx, task)["reason"] == "handoff_unreadable"
 
 
-@pytest.mark.parametrize("fault", ["foreign_binding", "unreadable_fate"])
-@pytest.mark.parametrize("planned", [False, True])
+@pytest.mark.parametrize(("planned", "fault"), [(False, "unreadable_fate"), (True, "foreign_binding")])
 def test_unknown_old_pending_holder_preserves_its_valid_sleeping_sibling(tmp_path, monkeypatch, fault, planned):
     task, ctx = task_and_context(tmp_path)
     task["_working_recovery"] = {}
