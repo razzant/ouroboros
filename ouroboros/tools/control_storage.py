@@ -8,8 +8,9 @@ Storage -> Free uses: the request goes to the server as a control event, the ser
 retirers with the retention wait at zero over exactly the previewed objects, respects the owner's Keep and
 every custody proof (what a retirer refuses stays, with its reason), records the receipt as the
 ``storage_free`` job row and tells the owner in Main. The tool waits a bounded time for that receipt and
-returns it, or says the run is still going. No threshold decides here: when and whether to free is the
-mind's judgment over the facts it already reads.
+returns it, its ``status`` and ``ok`` following the receipt (``done``; ``failed``, ``stopped`` or ``refused``
+are never ok), or says the request is still under way (``requested``, ``queued``: no receipt is written before
+its end). No threshold decides here: when and whether to free is the mind's judgment over the facts it already reads.
 """
 from __future__ import annotations
 
@@ -50,15 +51,17 @@ def _free_storage(ctx: ToolContext, dry_run: bool = False, wait_sec: int = 90) -
             break
         time.sleep(RECEIPT_POLL_SEC)
     if receipt.get("state") in ("done", "failed"):
-        status = "refused" if receipt.get("refusal") else "done"
+        outcome = receipt.get("outcome") if isinstance(receipt.get("outcome"), dict) else {}
+        status = ("refused" if receipt.get("refusal") else "failed" if receipt["state"] == "failed" or outcome.get("error")
+                  else "stopped" if outcome.get("stopped") else "done")
     else:
-        status = "running" if receipt else ("requested" if transport == "live" else "queued")
+        status = "requested" if transport == "live" else "queued"
     return json.dumps({
-        "ok": status != "refused", "status": status, "request_id": request_id, "transport": transport,
+        "ok": status in ("done", "requested", "queued"), "status": status, "request_id": request_id, "transport": transport,
         "receipt": {key: value for key, value in receipt.items() if key not in ("updated_at",)},
         "note": ("The run continues on the server; its receipt lands on the storage_free job row "
                  "(query_data kind=storage reads the removers; the owner sees the outcome in Main)."
-                 if status in ("running", "requested", "queued") else
+                 if status in ("requested", "queued") else
                  "Recorded as a storage_free event with actor=this task and reported to the owner in Main."),
     }, ensure_ascii=False, default=str)
 
@@ -83,7 +86,7 @@ def storage_tool_entries() -> list[ToolEntry]:
             "parameters": {"type": "object", "properties": {
                 "dry_run": {"type": "boolean", "default": False, "description": "Preview only: what would go and what stays, with reasons."},
                 "wait_sec": {"type": "integer", "default": 90, "minimum": 0, "maximum": WAIT_SEC_MAX,
-                             "description": "How long to wait for the receipt before returning 'running'."},
+                             "description": "How long to wait for the receipt before returning 'requested' (the run goes on)."},
             }, "additionalProperties": False},
         }, _free_storage, safety_policy="skip"),  # a trusted built-in: it acts only through the retirers' own proofs
     ]
