@@ -572,8 +572,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                 run_binding = directory_copy_binding_instruction(target_root, binding_fingerprint, investigation=authority.investigation)
             instructions += run_binding  # and the same text in a continuation's prompt, which a resumed session reads (#2513)
             continuation = with_run_binding(continuation, authority, run_binding, execution_root or scope_root, inputs.selection_note)
-            project_id, owned_project_id, project_persistent, ephemeral = resolve_registration(
-                gateway, scope_root, execution_root, authority.access, minted=bool(readonly_root) or minted_root(scope_root, drive))
+            project_id, owned_project_id, project_persistent, ephemeral = resolve_registration(gateway, scope_root, execution_root, authority.access,
+                minted=bool(readonly_root) or minted_root(scope_root, drive), thread=authority.mode == "plan" or bool(continuation.custody.get("thread_id")))
             if directory_options or is_in_place_run({"resource_ref": resource_ref}):
                 project_persistent = True
             if authority.access == "full":

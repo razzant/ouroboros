@@ -260,7 +260,7 @@ def _holders(root: pathlib.Path) -> Iterator[Tuple[str, str, pathlib.Path]]:
                 yield kind, nested.parent.name if nested.name == "data" else nested.name, nested
 
 
-def scratch_records(data_root: Any, live: Any = None) -> List[Dict[str, Any]]:
+def scratch_records(data_root: Any, live: Any = None, *, include_holds: bool = True) -> List[Dict[str, Any]]:
     """Every session scratch ownership record of the install, for Storage's ``session_scratch`` place:
     ``holder`` (one of ``HOLDERS``), ``task_id``, ``key``, ``record`` (the file), ``path`` (the scratch,
     validated as ``recorded_scratch`` does: ``valid`` False and ``problem`` when it names a foreign
@@ -268,7 +268,8 @@ def scratch_records(data_root: Any, live: Any = None) -> List[Dict[str, Any]]:
     reason it is kept: ``task_hold`` words, ``seat_open``, ``owner_keep``, ``producer_retained``;
     ``""`` when its release is due or under way) and ``since`` (ISO, the record's time, or the
     marker's for a producer hold). ``live`` is the supervisor's liveness probe; without one a task's
-    liveness reads unknown. Records only, no temp-root scan; an unreadable holder is one row."""
+    liveness reads unknown. Records only, no temp-root scan; an unreadable holder or record is one row.
+    ``include_holds=False`` validates paths for counting without reading holder/retention proofs."""
     from ouroboros.owner_keep import is_kept
     from ouroboros.workspace_preflight import SEAT_SCRATCH_KEY_PREFIX
 
@@ -295,11 +296,14 @@ def scratch_records(data_root: Any, live: Any = None) -> List[Dict[str, Any]]:
                     row["path"] = str(json.loads(record.read_text(encoding="utf-8"))["path"])
                 rows.append(row)
                 continue
-            except (ValueError, KeyError, TypeError) as exc:
+            except (OSError, ValueError, KeyError, TypeError) as exc:
                 row.update(valid=False, problem=f"{type(exc).__name__}: {exc}")
                 rows.append(row)
                 continue
             row["path"] = str(path)
+            if not include_holds:
+                rows.append(row)
+                continue
             hold = retention_hold(path) if kind in ("trash", "staging") else None
             if hold is not None:
                 row.update(hold=hold["class"], since=_iso(hold["since"]) or row["since"], example=hold["example"])
@@ -339,7 +343,7 @@ def recorded_scratch_roots(data_root: Any) -> List[str]:
     counted Storage place ``session_scratch`` (``storage.PLACES``). Records that are invalid or whose
     directory is gone name no root (``scratch_records`` reports them); no temp-root scan."""
     roots: List[str] = []
-    for row in scratch_records(data_root):
+    for row in scratch_records(data_root, include_holds=False):
         if row["valid"] and not row["missing"] and row["path"] and row["path"] not in roots:
             roots.append(row["path"])
     return roots

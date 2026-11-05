@@ -16,10 +16,10 @@ heal with new input never gets one. The runtime-retirement pass asks for every t
 and every task it left waiting (``review_thread_retention.retire_finished_review_threads``), so no
 timer, sweep or counter decides it. The outcome is one record per run in the task document,
 ``delegated_result_taken``: ``taken``; ``refused`` with the engine's code (a run the engine can still
-continue, a result that is no patch); ``absent`` (the engine has no such run); or
-``route_unavailable`` when the serving engine's decision vocabulary names no ``taken``, so an older
-engine gets no request and the record says why. An unknown answer writes nothing and leaves the task
-waiting; the next pass repeats the same keyed decision, which the engine answers once.
+continue, a result that is no patch); or ``absent`` (the engine has no such run).
+A catalog without ``taken`` holds the task without a decision record; capability is read once per pass.
+An unknown answer also writes nothing and leaves the task
+waiting; the next pass repeats the same key. Interrupted delivery permits one fixed derived-key resend.
 """
 from __future__ import annotations
 
@@ -60,23 +60,40 @@ def owed(entry: Any) -> str:
 
 
 def _decision(engine: Any, run_id: str) -> Dict[str, Any]:
-    """One keyed ``taken`` decision; its record, or ``{}`` when the answer proves nothing."""
+    """A keyed decision, with one derived-key resend for interrupted delivery; only a settled answer records."""
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
     key = hashlib.sha256(f"taken:{run_id}".encode()).hexdigest()
-    try:
-        answer = engine.take_run_result(run_id, idempotency_key=key)
-    except ClaudexorUnavailable as exc:
-        status = int(getattr(exc, "status_code", 0) or 0)
-        if status == 404:
-            return {"state": "absent", "store_id": str(getattr(engine, "store_identity", "") or "")}
-        if 400 <= status < 500 and status not in (408, 429):  # a typed refusal is the engine's settled answer
-            return {"state": "refused", "code": str(exc.code or ""), "status": status}
-        log.info("Taken decision for %s unanswered: %s", run_id, exc)
+    retry_key = hashlib.sha256(f"{key}:interrupted".encode()).hexdigest()
+    for attempt_key in (key, retry_key):
+        try:
+            answer = engine.take_run_result(run_id, idempotency_key=attempt_key)
+        except ClaudexorUnavailable as exc:
+            status = int(getattr(exc, "status_code", 0) or 0)
+            if status == 404:
+                return {"state": "absent", "store_id": str(getattr(engine, "store_identity", "") or "")}
+            if status == 400 or (status == 409 and str(exc.code or "").startswith("run_taken_")):
+                return {"state": "refused", "code": str(exc.code or ""), "status": status}
+            if status == 409 and exc.code == "delivery_interrupted" and attempt_key == key:
+                continue  # the engine answers taken again if the first delivery already landed
+            log.info("Taken decision for %s unanswered: %s", run_id, exc)
+            return {}
+        if isinstance(answer, dict) and answer.get("accepted") is True and answer.get("status") == "taken":
+            return {"state": "taken"}
         return {}
-    if isinstance(answer, dict) and answer.get("accepted") is True and answer.get("status") == "taken":
-        return {"state": "taken"}
-    return {"state": "refused", "code": str((answer or {}).get("status") or "unaccepted")}
+    return {}
+
+
+def _unavailable(run: Any) -> str:
+    """This pass's one capability read: an unsupported or unreadable catalog keeps the duty waiting."""
+    if not hasattr(run, "_taken_unavailable"):
+        engine = run.engine()
+        try:
+            run._taken_unavailable = ("result_engine_unavailable" if engine is None else
+                                      "" if engine.run_result_taken_supported() else "result_taken_unsupported")
+        except Exception:
+            run._taken_unavailable = "result_engine_unavailable"
+    return run._taken_unavailable
 
 
 def tell_engine(run: Any, task_id: str) -> str:
@@ -95,7 +112,7 @@ def tell_engine(run: Any, task_id: str) -> str:
         return DONE
     if is_kept(run.root, task_id):  # the owner keeps this task's materials: its engine copies stay too
         run.hold("result_owner_keep")
-        return DONE
+        return WAIT
     why, held = tree_hold(run.root, task_id, document, live=run.live, census=run.census())
     states = {rid: owed(entry) for rid, entry in held.items() if rid not in recorded}
     if why or "wait" in states.values():
@@ -104,14 +121,11 @@ def tell_engine(run: Any, task_id: str) -> str:
     take = sorted(rid for rid, state in states.items() if state == "take")
     if not take:
         return DONE
-    engine = run.engine()
-    try:
-        supported = engine is not None and engine.run_result_taken_supported()
-    except Exception:  # an unread vocabulary proves no route either way
-        engine = None
-    if engine is None:
-        run.hold("result_engine_unavailable")
+    why = _unavailable(run)
+    if why:
+        run.hold(why)
         return WAIT
+    engine = run.engine()
     answers: Dict[str, Dict[str, Any]] = {}
     verdict, done = DONE, 0
     for rid in take:
@@ -119,8 +133,7 @@ def tell_engine(run: Any, task_id: str) -> str:
             run.stopped, verdict = True, WAIT
             break
         done += 1
-        record = _decision(engine, rid) if supported else {
-            "state": "route_unavailable", "engine_version": str(getattr(engine, "engine_version", "") or "")}
+        record = _decision(engine, rid)
         if not record:
             run.hold("result_taken_unanswered")
             verdict = WAIT

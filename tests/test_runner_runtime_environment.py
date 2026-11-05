@@ -117,8 +117,8 @@ if __name__ == "__main__":  # a spawned manager child re-imports this file
 ''', encoding="utf-8")
     try:
         result = subprocess.run([sys.executable, "-I", "-S", str(REPO / "scripts/safe_test.py"), "--temp-parent",
-                                 str(scratch), "--", sys.executable, str(probe)],
-                                cwd=REPO, text=True, capture_output=True, timeout=180)
+                                 str(scratch), "--timeout", "180", "--", sys.executable, str(probe)],
+                                cwd=REPO, text=True, capture_output=True)
         assert result.returncode == 0, result.stdout + result.stderr
         found = json.loads(result.stdout.splitlines()[-1])
         for layout in ("process", "pytest"):

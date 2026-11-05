@@ -141,7 +141,7 @@ def test_the_gateway_reads_created_by_field_presence(answer, created):
 
 # -- the delegated start, on the wire -------------------------------------------------
 
-def _start(tmp_path, monkeypatch, *, version, register_root=False, folderless=False, under=()):
+def _start(tmp_path, monkeypatch, *, version, register_root=False, folderless=False, under=(), mode=None, known=True):
     """One read-only ``_delegate_start`` against a recording engine double; ``under`` moves the
     started folder below the data root (``tmp_path``, the custody drive)."""
     from ouroboros import delegate_readonly_inputs
@@ -163,19 +163,23 @@ def _start(tmp_path, monkeypatch, *, version, register_root=False, folderless=Fa
         monkeypatch.setattr(delegate_readonly_inputs, "prepare_readonly_inputs",
                             lambda _ctx, _invocation, *_selection, thread_turn=False: delegate_readonly_inputs.ReadonlyInputs(
                                 str(scratch), "\nREADONLY INPUTS\n", [], ""))
-    engine, seen = _Engine(version, known={str(ctx.repo_dir): "prj-user"}), {}
+    engine, seen = _Engine(version, known={str(ctx.repo_dir): "prj-user"} if known else {}), {}
 
     class _Daemon:
         engine_version, engine_build_sha = engine.engine_version, engine.engine_build_sha
 
         def handshake(self, **_kw): return {}
         def agent_capabilities(self):
-            return {"harnesses": [{"id": "some-route", "enabled": True, "status": "ok",
+            return {"modes": ["ask", "plan", "agent"], "harnesses": [{"id": "some-route", "enabled": True, "status": "ok",
+                                   "modes": ["ask", "plan", "agent"],
                                    "accessProfilesSupported": ["readonly"]}]}
         def quota_snapshots(self): return []
         def find_project_id(self, root): return engine.find_project_id(root)
         def project_registration(self, root): return engine.project_registration(root)
         def register_project(self, root): return engine.register_project(root)
+        def create_thread(self, request, *, idempotency_key):
+            seen["thread"] = request
+            return {"id": "thread-ephemeral"}
         def start_run(self, request, *, idempotency_key=""):
             seen["request"] = request
             return {"runId": "run-ephemeral", "runDir": str(tmp_path / "run")}
@@ -183,10 +187,26 @@ def _start(tmp_path, monkeypatch, *, version, register_root=False, folderless=Fa
 
     monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "some-route=weak-model:low")
     monkeypatch.setattr(cx, "ClaudexorGateway", lambda *a, **k: _Daemon())
-    payload = json.loads(delegate._delegate_start(ctx, "survey the tree").text)
+    payload = json.loads(delegate._delegate_start(ctx, "survey the tree", mode=mode).text)
     assert payload["status"] == "started", payload
     row = custody.replay(custody.custody_root(ctx))["run-ephemeral"]
     return seen["request"]["scope"], engine.calls, row, (scratch if folderless else ctx.repo_dir)
+
+
+def test_a_plan_start_keeps_its_owned_registration_below_the_thread_floor(tmp_path, monkeypatch):
+    from ouroboros.config import CLAUDEXOR_EPHEMERAL_THREAD_MIN_VERSION
+
+    for version, ephemeral in [("5.0.1", False), (CLAUDEXOR_EPHEMERAL_THREAD_MIN_VERSION, True)]:
+        case = tmp_path / version
+        case.mkdir()
+        scope, calls, row, root = _start(case, monkeypatch, version=version, known=False, mode="plan",
+                                        under=("task_drives", "task-1", "work"))
+        assert row.thread_id == "thread-ephemeral"
+        if ephemeral:
+            assert scope.get("ephemeral") is True and calls == [] and not row.project_id and not row.project_owned
+        else:
+            assert "ephemeral" not in scope and calls == [("GET", str(root)), ("POST", str(root))]
+            assert row.project_id == "prj-1" and row.project_owned
 
 
 @pytest.mark.parametrize("minted", ["registry_checkout", "folderless_scratch"])
@@ -242,29 +262,25 @@ def test_minted_root_names_the_host_layouts_and_follows_links(tmp_path):
         assert not policy.minted_root(str(root), data), root  # a link names where it leads
 
 
-@pytest.mark.parametrize("version,scope,ephemeral", [
-    ("5.1.0", {"ephemeral": True}, True),
-    ("5.0.1", {"ephemeral": True}, False),  # the engine cannot sweep the lanes such a thread leaves
-    ("5.1.0", {}, False),  # a root that is not minted keeps the registration its thread binds
-])
-def test_a_delegated_plan_thread_on_a_minted_root_is_ephemeral_from_the_thread_floor(
-        monkeypatch, version, scope, ephemeral):
+@pytest.mark.parametrize("scope", [{"ephemeral": True}, {}])
+def test_a_delegated_plan_thread_on_a_minted_root_is_ephemeral_from_the_thread_floor(scope):
     from types import SimpleNamespace
 
     from ouroboros import config
     from ouroboros.delegate_plan import bind_thread
 
-    monkeypatch.setattr(config, "CLAUDEXOR_EPHEMERAL_THREAD_MIN_VERSION", "5.1.0")
     created = []
 
     class Engine:
-        engine_version = version
-
         def create_thread(self, request, *, idempotency_key):
             created.append(request)
             return {"id": "thread-1"}
 
     request = {"scope": {"kind": "project", "root": "/w/copy", **scope}, "mode": "plan", "access": "readonly"}
-    assert bind_thread(Engine(), request, SimpleNamespace(route_id="r", profile_id=""), "inv-1") == {
-        "thread_id": "thread-1"}
-    assert created[0]["scope"] == {"kind": "project", "root": "/w/copy", **({"ephemeral": True} if ephemeral else {})}
+    engine = Engine()
+    for version, allowed in [("5.0.1", False), ("5.1.0", False), (config.CLAUDEXOR_EPHEMERAL_THREAD_MIN_VERSION, True)]:
+        engine.engine_version = version
+        assert bind_thread(engine, request, SimpleNamespace(route_id="r", profile_id=""), "inv-1") == {
+            "thread_id": "thread-1"}
+        assert created[-1]["scope"] == {
+            "kind": "project", "root": "/w/copy", **(scope if allowed else {})}
