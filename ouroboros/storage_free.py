@@ -96,7 +96,7 @@ _KEPT_REASONS = {
     "busy": ("custody_busy", "mailbox_busy", "store_busy", "busy", "record_busy"),
     "unreadable_record": ("task_result_unreadable", "unread_mailbox_unreadable", "record_unreadable", "review_state_unreadable", "marker_unreadable"),
     "capture_unproven": ("capture_unproven", "capture_incomplete"),
-    "retained_evidence": ("retained_process_environment", "undeclared_environment"),
+    "retained_evidence": ("retained_process_environment", "undeclared_environment", "producer_retained"),
     "changed": ("changed", "nothing_unsaved", "nested_repository", "commits_unprotected"),
     "unproven_excluded_inputs": ("unproven_excluded_inputs",),
     "owner_keep": ("owner_keep",),
@@ -338,6 +338,9 @@ def _name_items(root: pathlib.Path, items: List["_Candidate"]) -> None:
         except Exception:
             log.debug("Task titles unreadable: folder names stand", exc_info=True)
     for item in items:
+        if item.layout == "producer_retained":
+            item.name = str(item.row.get("loss") or item.path.name).strip() or item.path.name
+            continue
         document = documents.get(item.task) or {}
         item.name = str(document.get("title") or document.get("suggested_name") or item.task or item.path.name).strip() or item.path.name
 
@@ -704,6 +707,7 @@ class FreeSpace:
         from ouroboros.headless import HEADLESS_TASKS_DIR, TASK_DRIVES_DIR, drive_candidates
         from ouroboros.private_copy_read import _copy_owner, read_records
         from ouroboros.retention import age_cutoff, get_gc_retention_days
+        from ouroboros.session_scratch import PRODUCER_RETAINED, scratch_records
         from ouroboros.subagent_worktrees import (
             _record_file, _record_name, _records_dir, _resolve_root, _task_proven_over, snapshot_released,
         )
@@ -854,6 +858,29 @@ class FreeSpace:
                     if run.is_dir() and not run.is_symlink():
                         _sorted_into(root, group, "offer" if _run_finished(run) else "in_use",
                                      _Candidate(GROUP_SERVICE_FOLDERS, f"test_run:{_record_name(run)}", run, "test_run"))
+            # A producer-retained session scratch is owner-removable only after its marker's
+            # words and the loss are shown in the existing explicit-discard form.  One row per
+            # handoff entry keeps the trash remover's whole-entry boundary intact.
+            producer_entries: Dict[pathlib.Path, List[Dict[str, Any]]] = {}
+            for row in scratch_records(root):
+                if row.get("holder") != "trash" or row.get("hold") != PRODUCER_RETAINED:
+                    continue
+                record = pathlib.Path(str(row.get("record") or ""))
+                if not row.get("valid") or not row.get("path") or len(record.parents) < 3:
+                    continue
+                entry = record.parents[2]
+                if entry.parent.name != "custody_trash" or not entry.is_dir() or entry.is_symlink():
+                    continue
+                producer_entries.setdefault(entry, []).append(row)
+            for entry, rows in sorted(producer_entries.items(), key=lambda pair: pair[0].name):
+                examples = [str(row.get("example") or "producer-retained session scratch") for row in rows]
+                loss = "; ".join(dict.fromkeys(examples))
+                item = _Candidate(GROUP_SERVICE_FOLDERS, f"producer_retained:{entry.name}", entry,
+                                  "producer_retained", row={"loss": loss, "scratch_paths": [row["path"] for row in rows]})
+                item.reason, item.cause = "retained_evidence", PRODUCER_RETAINED
+                item.manual = {"signature": None, "unsaved_count": 0, "unsaved_bytes": 0, "unsaved": [],
+                               "keep_branch": False, "producer_retained": True, "loss": loss}
+                group["excluded"].append(item)
             groups.append(group)
         if GROUP_RESULT_PINS in self._offered:
             # Held by custody (no disposition) while its task is over and its checkout is gone: only the pins remain.
@@ -1144,6 +1171,9 @@ class FreeSpace:
         for item in candidates:
             if self._closed():
                 raise _Stopped()
+            if item.layout == "producer_retained":
+                self._settle(run, item, self._free_producer_retained(root, item))
+                continue
             path, reasons = str(item.row.get("path") or ""), {}
             try:
                 discard_unsaved_copy(item.row, item.manual["signature"], data_dir=root, live=live, reasons=reasons)
@@ -1156,6 +1186,27 @@ class FreeSpace:
             else:
                 self._keep(run, item, reasons.get(path, "other"))
             self._tick(run, run["done"] + 1)
+
+    @staticmethod
+    def _free_producer_retained(root: pathlib.Path, item: _Candidate) -> str:
+        """Accept the owner's explicit loss choice, then use the custody-trash remover.
+
+        The marker is the producer's hold; removing it is the owner's acceptance.  The existing
+        remover then deletes the recorded scratch and its handoff entry with the same custody
+        checks as the maintenance path.  A surviving entry remains a typed ``producer_retained``
+        hold rather than being reported as a successful discard.
+        """
+        from ouroboros import task_custody
+        from ouroboros.test_environment import retention_markers
+
+        try:
+            for scratch in item.row.get("scratch_paths") or ():
+                for marker in retention_markers(pathlib.Path(str(scratch))):
+                    marker.unlink(missing_ok=True)
+            task_custody.remove_custody_trash(root)
+        except OSError:
+            return "other"
+        return "" if not item.path.exists() else "producer_retained"
 
     @staticmethod
     def _copy_stays(root: pathlib.Path, item: _Candidate, task_id: str, live: Callable[[str], Optional[bool]], named: str = "") -> str:
