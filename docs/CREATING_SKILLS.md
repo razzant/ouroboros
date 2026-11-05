@@ -1126,7 +1126,13 @@ Use the connector's ordinary content-hash-bound skill token for:
   `delivery_reporting_version` and `continuation_version`. The event still carries
   `source_event_id`, `provider`, `account_id`, `conversation_id`, `thread_id`,
   `conversation_key`, `actor`, `conversation`, `message` and `text`. The host derives
-  its own canonical conversation key. Files stay confined to the connector's state root.
+  its own canonical conversation key from `provider`, `account_id`, `conversation_id`
+  and `thread_id`, so `thread_id` decides the room. It names the provider's own thread
+  or topic in which this message's exchange continues, and is empty when the exchange
+  continues in the conversation's own flow, as in a direct chat or a group chat without
+  topics. Inside such a flow, never make a thread of one message or a reply chain.
+  Report your own sends (`/presence/delivery`) with the `thread_id` this rule gives
+  them. Files stay confined to the connector's state root.
 - Optional `event.facts`: a list of `direct_message`, `group_dm`, `mention`,
   `reply_to_me`, `my_thread`, `new_issue`, `new_pull_request`, `review_requested`,
   `assigned`, `any_message`, `from_bot`.
