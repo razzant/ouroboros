@@ -179,16 +179,26 @@ def test_a_producer_retained_handoff_is_manual_loss_acceptance_and_not_the_ordin
 
 def test_a_producer_retained_handoff_is_sized_by_the_scratch_it_holds(tmp_path, monkeypatch):
     """The handoff entry is a few KB of record; the owner frees the scratch it holds, so that is its size and the
-    by-hand fact's, and the row names the scratch, while a work folder beside it keeps its own folder's size."""
+    by-hand fact's, and the row names the scratch, while a work folder beside it keeps its own folder's size. The
+    preview reads only the trash's records for it, judging no running task's scratch hold."""
     from ouroboros import storage
     from tests.test_storage_free import _group
 
+    from ouroboros import session_scratch
+    from tests.test_session_scratch_release import _started
+
     data, scratch = _producer_retained(tmp_path, REASON)
     (scratch / "held" / "blob.bin").write_bytes(b"x" * 262_144)
+    _started(tmp_path, task_id="task-2", status="running")  # a task whose own scratch record stays in its drive
+    judged = []
+    real_hold = session_scratch.task_hold
+    monkeypatch.setattr(session_scratch, "task_hold", lambda *args: judged.append(args[1]) or real_hold(*args))
     _fake_sizer(monkeypatch)
     owner = _owner({}, offered=("work_folders", "service_folders"))
     try:
         plan = _preview(owner, data, data.parent)
+        assert judged == [], "the preview keeps trash rows only: no task's scratch hold is judged for them"
+        assert session_scratch.scratch_records(data) and judged == ["task-2"], "the ordinary listing still judges it"
         [row] = _page(owner, (data, data.parent))["items"]
         measured = lambda path: sum(part["bytes"] for part in storage.size_paths([str(path)], sleep=lambda _s: None))  # noqa: E731
         assert [Path(path).resolve() for path in row["manual"]["paths"]] == [scratch.resolve()]

@@ -691,7 +691,7 @@ class FreeSpace:
         from ouroboros.headless import HEADLESS_TASKS_DIR, TASK_DRIVES_DIR, drive_candidates
         from ouroboros.private_copy_read import _copy_owner, read_records
         from ouroboros.retention import age_cutoff, get_gc_retention_days
-        from ouroboros.session_scratch import PRODUCER_RETAINED, scratch_records
+        from ouroboros.session_scratch import PRODUCER_RETAINED, retention_hold, scratch_records
         from ouroboros.subagent_worktrees import (
             _record_file, _record_name, _records_dir, _resolve_root, _task_proven_over, snapshot_released,
         )
@@ -846,16 +846,16 @@ class FreeSpace:
             # words and the loss are shown in the existing explicit-discard form.  One row per
             # handoff entry keeps the trash remover's whole-entry boundary intact.
             producer_entries: Dict[pathlib.Path, List[Dict[str, Any]]] = {}
-            for row in scratch_records(root):
-                if row.get("holder") != "trash" or row.get("hold") != PRODUCER_RETAINED:
-                    continue
+            for row in scratch_records(root, include_holds=False):  # no task's hold is judged for a trash row
                 record = pathlib.Path(str(row.get("record") or ""))
-                if not row.get("valid") or not row.get("path") or len(record.parents) < 3:
+                if row.get("holder") != "trash" or not row.get("valid") or not row.get("path") or len(record.parents) < 3:
                     continue
                 entry = record.parents[2]
                 if entry.parent.name != "custody_trash" or not entry.is_dir() or entry.is_symlink():
                     continue
-                producer_entries.setdefault(entry, []).append(row)
+                hold = retention_hold(pathlib.Path(str(row["path"])))
+                if hold is not None and hold["class"] == PRODUCER_RETAINED:
+                    producer_entries.setdefault(entry, []).append({**row, "example": hold["example"]})
             for entry, held in sorted(producer_entries.items(), key=lambda pair: pair[0].name):  # ``rows`` stays the copies'
                 examples = [str(row.get("example") or "producer-retained session scratch") for row in held]
                 loss = "; ".join(dict.fromkeys(examples))
