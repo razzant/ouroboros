@@ -127,6 +127,8 @@ def _restore(kept: pathlib.Path, home: pathlib.Path) -> None:
                 _remove(path)
     for directory, folders, files in os.walk(built, topdown=False):
         relative = pathlib.Path(directory).relative_to(built)
+        if os.path.lexists(home / relative) and (os.path.islink(home / relative) or not (home / relative).is_dir()):
+            _remove(home / relative)  # a consumer put a file or a link where the stand has a folder
         (home / relative).mkdir(parents=True, exist_ok=True)
         for name in (*files, *(name for name in folders if os.path.islink(pathlib.Path(directory, name)))):
             _restore_file(pathlib.Path(directory, name), kept / "inodes" / relative / name, home / relative / name)
