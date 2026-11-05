@@ -579,6 +579,8 @@ class RetentionWalk:
 
         if source_path.resolve() != target.resolve():
             target.parent.mkdir(parents=True, exist_ok=True)
+            if placement and not verified_destination():
+                self._carry_parts(source_path)
             if not verified_destination():
                 temporary = target.with_name(f".{target.name}.tmp.{uuid.uuid4().hex}")
                 try:
@@ -600,6 +602,23 @@ class RetentionWalk:
         self.state["promoted_ref_count"] += 1
         canonical = target.with_name(f"{ref['sha256']}.{ref['kind']}.gz") if placement else target
         return {**ref, "path": str(canonical), "compressed_size": target.stat().st_size if target.is_file() else 0}
+
+    def _carry_parts(self, placement_path):
+        """A view's parts into the parent before its skeleton placement. A call manifest queues them
+        first; a view referenced from anywhere else (a trace, a usage fact) brings them here."""
+        from ouroboros import observability as obs
+        from ouroboros.shared_values import token_digests
+
+        for digest in token_digests(packs.read_loose_gzip(placement_path)):
+            part = {"sha256": digest, "kind": "json", "encoding": "gzip"}
+            try:
+                packs.blob_bytes(self.parent, part, expected_kind="json")
+                continue  # the parent already holds it
+            except (OSError, ValueError, EOFError, zlib.error):
+                pass
+            _check_open()
+            obs.write_blob_bytes(self.parent, packs.blob_bytes(self.child, part, expected_kind="json"))
+            self.state["promoted_ref_count"] += 1
 
     def _manifest(self, node, data):
         from ouroboros import observability as obs

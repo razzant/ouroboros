@@ -338,3 +338,21 @@ def test_a_child_whose_later_call_sorts_first_is_promoted_complete_in_one_pass(r
     for call, payload in (("llm_z_request", first), ("llm_a_request", later)):
         _manifest, restored, _ = obs.read_call_payload(parent, task_id=task, call_id=call)
         assert restored == json.loads(_json_bytes(obs.redact_projection(payload).value)), call
+
+
+def test_a_view_named_outside_a_manifest_brings_its_parts_and_the_child_can_go(tmp_path):
+    """A request view that a trace or usage fact names directly, with no call manifest listing its parts, is
+    promoted with them: the parent splices the exact whole and the child's drive holds nothing pending."""
+    from ouroboros import headless
+
+    parent, task = tmp_path / "canonical", "promoted"
+    child = headless.prepare_task_drive(parent, task, "empty")
+    payload = _view(_transcript(2))
+    ref = obs.write_shared_blob(child, payload, {})
+    assert packs.shared_placement_path(child, ref["sha256"]).is_file() and token_digests(_skeleton(child, ref))
+    row = {"trace_refs": {"timeout_repeat": {"first": ref}}}  # the task result names the view itself
+    promoted, state = obs.promote_child_task_refs(parent, child, task, row)
+    assert state["status"] == "complete" and state["pending_refs"] == [], state
+    assert promoted["trace_refs"]["timeout_repeat"]["first"]["path"].startswith(str(parent))
+    shutil.rmtree(child)
+    assert packs.blob_bytes(parent, {**ref, "path": ""}) == _json_bytes(payload)
