@@ -58,11 +58,22 @@ def recorded_scratch(record: pathlib.Path) -> pathlib.Path:
     return path
 
 
+def has_record(owner: pathlib.Path) -> bool:
+    """Whether the ownership folder OWNER holds its ``scratch.json``. Only an absent one is an uncompleted
+    preparation: one that cannot be looked at is ``OSError``, never absent (a forced removal of its folder
+    would delete it unread)."""
+    try:
+        os.lstat(owner / "scratch.json")
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def owner_records(holder: pathlib.Path) -> Iterator[pathlib.Path]:
     """The ownership folders of HOLDER (a drive or a seat home): each a real directory under its
     ``session_scratch_owners/``; a link anywhere in that layout, or an owner that is not a directory,
     is ``OSError`` (nothing is read through it). A folder without ``scratch.json`` is an uncompleted
-    preparation and is skipped."""
+    preparation and is skipped (``has_record``)."""
     from ouroboros.workspace_preflight import SESSION_SCRATCH_DIRNAME
 
     if holder.is_symlink():
@@ -75,7 +86,7 @@ def owner_records(holder: pathlib.Path) -> Iterator[pathlib.Path]:
     for owner in sorted(owners.iterdir()):
         if owner.is_symlink() or not owner.is_dir():
             raise OSError(f"invalid scratch owner: {owner}")
-        if os.path.lexists(owner / "scratch.json"):
+        if has_record(owner):
             yield owner
 
 
@@ -141,6 +152,25 @@ def release_session_scratch(drive: pathlib.Path) -> List[Dict[str, Any]]:
     for nested in _nested_drives(drive):
         retained += release_session_scratch(nested)
     return retained
+
+
+def release_trash_entry(data_root: Any, entry: pathlib.Path) -> Tuple[bool, List[Dict[str, Any]]]:
+    """Release the scratch one custody trash ENTRY's records name (its ``data/`` and nested layouts too) and
+    hand each record a retention marker keeps to an entry of its own (``workspace_preflight._retire_record``)
+    unless ENTRY is such a handoff already, which then stays: ``(stays, the retained rows)``. Every failure
+    raises, so ``task_custody.remove_custody_trash`` keeps the entry and every record still in it."""
+    from ouroboros.workspace_preflight import _RELEASE_MARK, _retire_record
+
+    retained: List[Dict[str, Any]] = []
+    if entry.is_dir() and not entry.is_symlink():
+        retained = release_session_scratch(entry)
+        if (entry / "data").is_dir() and not (entry / "data").is_symlink():
+            retained += release_session_scratch(entry / "data")
+    stays = bool(retained) and _RELEASE_MARK in entry.name
+    for row in [] if stays else retained:
+        if not _retire_record(pathlib.Path(data_root), entry.name.split("+", 1)[0].rsplit("-", 1)[0], row["owner"]):
+            raise OSError(f"retained scratch record not handed on: {row['owner']}")
+    return stays, retained
 
 
 def release_seat_scratch(data_root: Any, task_id: str, home: pathlib.Path) -> Dict[str, Any]:
@@ -327,10 +357,12 @@ __all__ = [
     "PRODUCER_RETAINED",
     "SEAT_OPEN",
     "aggregate_holds",
+    "has_record",
     "owner_records",
     "recorded_scratch",
     "release_seat_scratch",
     "release_session_scratch",
+    "release_trash_entry",
     "retention_hold",
     "scratch_records",
     "seat_hold",

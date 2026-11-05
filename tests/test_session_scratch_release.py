@@ -6,10 +6,12 @@ with no delegated run still open, into the custody trash whole, whose remover de
 live, unknown, unfinished or owner-kept task, or one whose spared run still works, keeps its scratch;
 a note whose record already retired with its drive, that names no record of its task, or that sits
 behind a link touches nothing; the owner's Keep never reports a released scratch as kept; a producer's
-retention keeps its scratch in place without holding the trash. Isolated roots only.
+retention keeps its scratch in place without holding the trash; a release or handoff that fails keeps the
+trash entry and its records. Isolated roots only.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import pathlib
@@ -481,6 +483,72 @@ def test_a_retained_sibling_does_not_pin_the_retired_drive_and_keeps_only_its_ow
     [entry] = (data / "state" / "custody_trash").iterdir()
     assert entry.name.startswith("task-1+scratch-") and (entry / SESSION_SCRATCH_DIRNAME / "snap-1" / "scratch.json").is_file()
     assert not (data / "task_drives" / "task-1").exists()
+    assert retire_synthetic_retention(held, reason)
+    assert task_custody.remove_custody_trash(data)["removed"] == 1 and not held.exists()
+
+
+@pytest.mark.parametrize("fault", ["invalid_record", "unreadable_record", "failed_handoff"])
+def test_a_failed_release_or_handoff_keeps_the_trash_entry_and_every_record_in_it(tmp_path, monkeypatch, fault):
+    """A trash entry goes only once its scratch is released and each marked record has moved into its own
+    entry: an invalid or unreadable ownership record, or a record that could not move, keeps the moved drive
+    whole with its records, held as ``removal_failed``, and leaves the trash as it was (the unchanged entry
+    spawns no child); once the fault is gone the next run releases the drive and hands the marked record on."""
+    from ouroboros import maintenance, maintenance_jobs
+    from ouroboros.session_scratch import _iso
+
+    if fault == "unreadable_record":  # a platform or user that searches a folder without its bits cannot fault here
+        (tmp_path / "probe" / "folder").mkdir(parents=True)
+        (tmp_path / "probe" / "folder" / "file").write_text("x", encoding="utf-8")
+        os.chmod(tmp_path / "probe" / "folder", 0o600)
+        try:
+            os.lstat(tmp_path / "probe" / "folder" / "file")
+            pytest.skip("this platform does not deny a folder's search permission")
+        except PermissionError:
+            pass
+        finally:
+            os.chmod(tmp_path / "probe" / "folder", 0o700)
+    data, held = _started(tmp_path)
+    plain = pathlib.Path(_prepare(tmp_path, _Catalog(GRANTED), key="snap-2").scratch)
+    reason = "producer could not prove process exit"
+    assert test_environment.retain_tree(held, reason)
+    assert task_custody.settle_child_drive(data, "task-1", data / "task_drives" / "task-1", live=OVER,
+                                           admission_rollback=True)["status"] == "removed"
+    trash = data / "state" / "custody_trash"
+    [entry] = trash.iterdir()
+    records, real_replace = entry / SESSION_SCRATCH_DIRNAME, os.replace
+    good = (records / "snap-2" / "scratch.json").read_text(encoding="utf-8")
+    if fault == "invalid_record":
+        (records / "snap-2" / "scratch.json").write_text("{torn", encoding="utf-8")
+    elif fault == "unreadable_record":
+        os.chmod(records / "snap-2", 0o600)  # listed, but its record cannot be looked at
+    else:
+        def refused(src, dst):
+            if pathlib.Path(src).name == "scratch.json":
+                raise OSError(errno.ENOSPC, "No space left on device")
+            real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", refused)
+    monkeypatch.setattr(maintenance, "JOBS", {"custody_trash": maintenance.JOBS["custody_trash"]})
+    try:
+        assert maintenance.run_job(data, "custody_trash") == {"state": "failed", "items": 0}
+    finally:
+        if fault == "unreadable_record":
+            os.chmod(records / "snap-2", 0o700)
+    assert list(trash.iterdir()) == [entry] and (records / "snap-1" / "scratch.json").is_file()
+    assert not list((data / "state" / "custody_staging").glob("*+scratch-*")) and held.is_dir()
+    row, seen = maintenance_jobs.job(data, "custody_trash"), entry.lstat()
+    failure = "PermissionError" if fault == "unreadable_record" else "OSError"
+    assert row["stuck"] == {entry.name: [seen.st_ino, seen.st_mtime_ns]}
+    assert row["holds"] == [{"class": "removal_failed", "count": 1, "example": f"{entry.name}: {failure}",
+                             "since": _iso(seen.st_mtime)}]
+    assert maintenance.due(data) == [], "an unchanged kept entry spawns no child"
+    monkeypatch.setattr(os, "replace", real_replace)
+    (records / "snap-2" / "scratch.json").write_text(good, encoding="utf-8")
+    report = task_custody.remove_custody_trash(data)
+    assert (report["removed"], report["stuck"], [hold["class"] for hold in report["holds"]]) == (1, {}, ["producer_retained"])
+    [handoff] = trash.iterdir()
+    assert handoff.name.startswith("task-1+scratch-") and (handoff / SESSION_SCRATCH_DIRNAME / "snap-1" / "scratch.json").is_file()
+    assert not plain.exists() and (held / "env" / "pyvenv.cfg").is_file()
     assert retire_synthetic_retention(held, reason)
     assert task_custody.remove_custody_trash(data)["removed"] == 1 and not held.exists()
 
