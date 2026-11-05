@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import config, preflight_runner, test_parallelism as budget
+from ouroboros import config, preflight_probe, preflight_runner, test_parallelism as budget
 from ouroboros.process_containment import ProcessContainer, pid_is_zombie
 from ouroboros import platform_layer as pl
 from tests import conftest
@@ -165,9 +165,9 @@ def test_the_gate_pins_the_worker_count_it_verified(tmp_path, monkeypatch, capac
 
 def test_preflight_keeps_the_admission_it_measured_before_the_run(tmp_path, monkeypatch):
     host = budget.HostRuns(slots=4, leases=((100, "run_tests.py overlapped"),), strangers=((700, "python3 -m pytest"),))
-    monkeypatch.setattr(preflight_runner, "_preflight_admission", lambda: budget.Admission(2, host))
+    monkeypatch.setattr(preflight_probe, "_preflight_admission", lambda: budget.Admission(2, host))
     preflight_runner._install_worker_probe(tmp_path)
-    monkeypatch.setattr(preflight_runner, "_preflight_admission", lambda: budget.Admission(16, budget.HostRuns()))
+    monkeypatch.setattr(preflight_probe, "_preflight_admission", lambda: budget.Admission(16, budget.HostRuns()))
     env = preflight_runner._preflight_env(tmp_path, tmp_path / "repo")
     assert env["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "2"
     assert env[budget.NESTED_WORKERS_ENV] == "2"

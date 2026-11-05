@@ -16,6 +16,7 @@ import pytest
 from ouroboros.platform_layer import force_kill_pid, pid_is_alive
 from ouroboros.test_parallelism import WORKERS_ENV
 from ouroboros.settings_defaults import settings_env_keys
+from ouroboros import preflight_probe
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -484,7 +485,6 @@ def test_plugin_verification_ignores_the_candidate_working_directory(tmp_path):
 
 def test_worker_count_respects_physical_room_and_the_parent_allocation(monkeypatch):
     """CPU defaults and operator requests cannot spend unavailable worker slots."""
-    from ouroboros import preflight_runner as pr
     from ouroboros import config, test_parallelism as budget
 
     monkeypatch.delenv(budget.NESTED_WORKERS_ENV, raising=False)
@@ -492,13 +492,13 @@ def test_worker_count_respects_physical_room_and_the_parent_allocation(monkeypat
     monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(10 * peak, 4 * peak))
     monkeypatch.setattr(budget, "other_runs", lambda: budget.HostRuns())  # a quiet host; the ledger has its own test
     monkeypatch.setenv(WORKERS_ENV, "1")
-    assert pr._preflight_worker_count() == 1
+    assert preflight_probe._preflight_worker_count() == 1
     monkeypatch.setenv(WORKERS_ENV, "0")
-    assert pr._preflight_worker_count() == 1
+    assert preflight_probe._preflight_worker_count() == 1
     monkeypatch.setenv(WORKERS_ENV, "16")
-    assert pr._preflight_worker_count() == 3
+    assert preflight_probe._preflight_worker_count() == 3
     monkeypatch.setenv(budget.NESTED_WORKERS_ENV, "2")
-    assert pr._preflight_worker_count() == 2
+    assert preflight_probe._preflight_worker_count() == 2
 
 
 @pytest.mark.parametrize("hostile", [
@@ -791,7 +791,7 @@ def test_a_pass_without_its_own_readable_results_has_no_record(tmp_path):
     from ouroboros import preflight_runner as pr
 
     assert pr._recorded_session(tmp_path) is None  # no controller of this pass located one
-    pr._results_pointer(tmp_path).write_text(str(tmp_path / "evidence"), encoding="utf-8")
+    preflight_probe._results_pointer(tmp_path).write_text(str(tmp_path / "evidence"), encoding="utf-8")
     assert pr._recorded_session(tmp_path) is None  # located, never exported
     (tmp_path / "evidence").mkdir()
     for torn in ("{torn", "[]"):

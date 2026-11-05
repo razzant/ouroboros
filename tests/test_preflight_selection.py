@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import commit_admission as admission, preflight_runner as pr, test_selection as selection
+from ouroboros import commit_admission as admission, preflight_probe, preflight_runner as pr, test_selection as selection
 from ouroboros.preflight_qualification import adoption_test_evidence, full_proof_error
 from tests.test_preflight_runner import _make_repo, _commit_all
 from tests.test_preflight_receipts import receipt_python  # noqa: F401 -- dependency-only lane fixture
@@ -287,7 +287,7 @@ def test_the_inventory_plugin_carries_any_scope_exactly_and_the_launch_leaves_it
 
     from ouroboros import preflight_inventory as inventory
     # TEMPLATE_FIELDS must stay every field either template has, or "spells every field" below stops being true.
-    assert sorted(set(re.findall(r"__[A-Z]+(?:_[A-Z]+)*__", inventory.SOURCE + pr._WORKER_PROBE_SOURCE))) == sorted(
+    assert sorted(set(re.findall(r"__[A-Z]+(?:_[A-Z]+)*__", inventory.SOURCE + preflight_probe._WORKER_PROBE_SOURCE))) == sorted(
         TEMPLATE_FIELDS)
 
     paths = ["tests/test_a.py", "tests/a dir/test_b.py", "tests/проверки/test_ü.py", "tests/日本語/test_c.py", "tests/test_😀.py",
@@ -317,7 +317,7 @@ def test_the_worker_probe_reads_back_its_directories_where_the_root_spells_templ
     root = tmp_path.joinpath(*TEMPLATE_FIELDS)
     module = pr._install_worker_probe(root)
     probe = runpy.run_path(str(pr._probe_dir(root) / f"{module}.py"))
-    assert (probe["_LOG"], probe["_RESULTS"]) == (pr._worker_log_dir(root), pr._results_pointer(root))
+    assert (probe["_LOG"], probe["_RESULTS"]) == (preflight_probe._worker_log_dir(root), preflight_probe._results_pointer(root))
 
 
 @pytest.mark.parametrize("mutation", ["missing", "duplicate", "unfinished"])

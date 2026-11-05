@@ -11,8 +11,12 @@ import subprocess
 import sys
 import tempfile
 import time
-import uuid
 from typing import NamedTuple, Optional, Sequence
+
+from ouroboros.preflight_probe import (  # the gate's plugin in the candidate run, and the admission beside it
+    _MIN_PREFLIGHT_WORKERS, _WORKER_PROBE_MODULE, _allocated_worker_count, _install_worker_probe, _observed_worker_ids,
+    _probe_dir, _recorded_admission, _recorded_session,
+)
 
 # Node lane of the gate (`run_hermetic_pytest` calls it once the candidate is
 # assembled, as the first consumer of the shared budget): content-keyed on the
@@ -470,157 +474,6 @@ def _copy_untracked(repo_dir: pathlib.Path, worktree: pathlib.Path) -> None:
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
-
-
-# Require real concurrency when the admitted budget permits it. Physical room
-# or an explicit parent allocation may admit one worker; that is not proof of
-# concurrency. The host freezes its admitted count beside the nonce probe, so
-# a later memory sample cannot change the pass's expected evidence.
-_MIN_PREFLIGHT_WORKERS = 2
-
-
-def _preflight_admission():
-    """CPU-based default, capped by physical room, a parent test allocation and the other runs' slots."""
-    from ouroboros.test_parallelism import admission
-
-    return admission(os.cpu_count() or 1)
-
-
-def _preflight_worker_count() -> int:
-    return _preflight_admission().workers
-
-
-def _allocated_worker_count(temp_root: pathlib.Path) -> int:
-    try:
-        return int((_probe_dir(temp_root) / "admitted-workers").read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return _preflight_worker_count()
-
-
-# Forcing the flags and the plugins still only proves what the gate ASKED for.
-# The pass must actually start min(2, admitted budget) workers, observed inside
-# the run: a tiny plugin the gate writes into its own
-# disposable temp root (never into the candidate worktree) records one file per
-# worker id. Reading it back is the difference between "the argv said -n" and
-# "concurrency actually happened".
-#
-# Scope of the guarantee: this closes the SILENT-DOWNGRADE window (an inherited
-# worker count, a blocked plugin, a conftest swallowing the flags), all of which
-# return green today. It is not a defence against a candidate that forges the
-# evidence by writing worker-named files into the gate's temp root — nothing
-# in-process can be, since the candidate suite runs with the same privileges.
-#
-# The name is only a STEM: `_install_worker_probe` appends a per-run nonce. `-p
-# name` resolves through `sys.path`, and `python -m pytest` puts the candidate
-# worktree at `sys.path[0]`, AHEAD of the PYTHONPATH entry the gate prepends. A
-# repository that happens to contain a top-level module of the fixed name would
-# therefore shadow the probe, report zero workers, and hard-block every green
-# parallel run as PREFLIGHT_PARALLELISM_LOST. The nonce cannot be predicted by a
-# committed file, so the gate's own module always wins.
-_WORKER_PROBE_MODULE = "ouroboros_preflight_probe"
-
-_WORKER_PROBE_SOURCE = '''"""Written by the Ouroboros preflight gate; not part of the repository under test."""
-import os
-import pathlib
-
-import pytest
-
-_LOG = pathlib.Path(__WORKER_LOG__)
-_RESULTS = pathlib.Path(__RESULTS_POINTER__)
-
-
-@pytest.hookimpl(tryfirst=True)
-def pytest_collection_modifyitems(config, items):
-    # The gate's own reading of `serial("exclusive")`, whatever the candidate's conftest knows: the
-    # `exclusive` marker splits the two passes (`-m "not exclusive"`, `-m exclusive`).
-    for item in items:
-        marker = item.get_closest_marker("serial")
-        if marker is not None and marker.args and marker.args[0] == "exclusive":
-            item.add_marker(pytest.mark.exclusive)
-
-
-def pytest_configure(config):
-    config.addinivalue_line("markers", "exclusive: derived from serial('exclusive') by the gate; runs alone")
-    # Runs in the controller too, where the variable is unset — only workers
-    # report, so the file count IS the worker count.
-    worker = os.environ.get("PYTEST_XDIST_WORKER")
-    if not worker:
-        # This pass's own controller: where its evidence plugin writes results.json.
-        directory = getattr(config.option, "ci_evidence_dir", None)
-        try:
-            if directory:
-                _RESULTS.write_text(str(pathlib.Path(directory).resolve()), encoding="utf-8")
-        except OSError:
-            pass
-        return
-    try:
-        _LOG.mkdir(parents=True, exist_ok=True)
-        (_LOG / worker).write_text(worker, encoding="utf-8")
-    except OSError:
-        pass
-'''
-
-
-def _probe_dir(temp_root: pathlib.Path) -> pathlib.Path:
-    return pathlib.Path(temp_root) / "probe"
-
-
-def _worker_log_dir(temp_root: pathlib.Path) -> pathlib.Path:
-    return pathlib.Path(temp_root) / "workers"
-
-
-def _results_pointer(temp_root: pathlib.Path) -> pathlib.Path:
-    return pathlib.Path(temp_root) / "ci-evidence-dir"
-
-
-def _recorded_session(temp_root: pathlib.Path) -> Optional[dict]:
-    """This pass's own results.json, as its controller located it; None when absent or unreadable."""
-    try:
-        directory = _results_pointer(temp_root).read_text(encoding="utf-8")
-        recorded = json.loads((pathlib.Path(directory) / "results.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return recorded if isinstance(recorded, dict) else None
-
-
-def _install_worker_probe(temp_root: pathlib.Path) -> str:
-    """Write the worker-count plugin and return the nonce module name to load.
-
-    The nonce is what makes the probe candidate-independent: see the note on
-    ``_WORKER_PROBE_MODULE``. Callers must pass the RETURNED name to `-p`.
-    """
-    module = f"{_WORKER_PROBE_MODULE}_{uuid.uuid4().hex}"
-    probe = _probe_dir(temp_root)
-    probe.mkdir(parents=True, exist_ok=True)
-    admitted = _preflight_admission()
-    (probe / "admitted-workers").write_text(str(admitted.workers), encoding="utf-8")
-    # The admission's facts for the run's evidence: what the host's other runs held when the gate admitted.
-    (probe / "admission.json").write_text(json.dumps({
-        "workers": admitted.workers, "held_by_other_runs": admitted.host.slots,
-        "leases": [list(lease) for lease in admitted.host.leases],
-        "unleased_roots": [list(root) for root in admitted.host.strangers], "note": admitted.host.note,
-    }), encoding="utf-8")
-    # One pass fills the template's own fields: a root that spells one (a caller's `--evidence-dir`) is not read as one.
-    fields = {"__WORKER_LOG__": repr(str(_worker_log_dir(temp_root))),
-              "__RESULTS_POINTER__": repr(str(_results_pointer(temp_root)))}
-    (probe / f"{module}.py").write_text(
-        re.sub("|".join(fields), lambda match: fields[match[0]], _WORKER_PROBE_SOURCE), encoding="utf-8")
-    return module
-
-
-def _recorded_admission(temp_root: pathlib.Path) -> Optional[dict]:
-    try:
-        return json.loads((_probe_dir(temp_root) / "admission.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-
-
-def _observed_worker_ids(temp_root: pathlib.Path) -> set:
-    """Distinct xdist worker ids that reported during the parallel pass."""
-    try:
-        return {entry.name for entry in _worker_log_dir(temp_root).iterdir() if entry.is_file()}
-    except OSError:
-        return set()
 
 
 def _preflight_env(temp_root: pathlib.Path, repo_worktree: pathlib.Path, *, create=True, cwd=None,
@@ -1306,6 +1159,58 @@ def _record_lane(evidence, lane, result, **facts) -> None:
                                                       else getattr(result, "evidence_errors", ()))
 
 
+def _missing_tests_tree(repo: pathlib.Path, phase: str, max_output: int) -> Optional[str]:
+    """No `tests/` in the candidate: out of scope (None) when the baseline never had one, a hard block when it did.
+
+    Git does not track empty directories, so staging the removal of every test file removes `tests/` with
+    them. An early return here once skipped the passes entirely, so the all-passes-empty hard block never
+    ran and the change that deleted the gate sailed through it.
+    """
+    baseline_refs = _baseline_refs(phase)
+    try:
+        baseline_tracks_tests = _head_tracks_tests(repo, baseline_refs)
+    except (RuntimeError, subprocess.SubprocessError, OSError) as exc:
+        return _diagnosis(
+            "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_TESTS_BASELINE_UNREADABLE (hard block): "
+            f"could not read {' or '.join(baseline_refs)}",
+            "The working tree just lost its tests/ directory and git could not read "
+            "one of the baseline refs well enough to say whether that loss is real. "
+            "Treating an unreadable ref as 'never tracked tests' would let this "
+            "candidate through the gate it exists to trip. This is not a test failure.",
+            str(exc), max_output,
+        )
+    if baseline_tracks_tests:
+        return (
+            "⚠️ PRE_PUSH_TEST_ERROR: the candidate change removes the entire tests/ tree "
+            f"that {' or '.join(baseline_refs)} carries. The preflight cannot verify "
+            "a change that deletes its own gate — restore tests/ (git does not track empty "
+            "directories, so deleting every test file deletes the directory with them)."
+        )
+    return None
+
+
+def _containment_failed(label: str, reap_error: str, max_output: int) -> str:
+    """The pass ran, but the scan says processes it spawned are still alive (or cannot tell): a live tree
+    outlives this whole run, so the pass verdict is not accepted, whatever it was."""
+    return _diagnosis(
+        "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_CONTAINMENT_FAILED (hard block): "
+        f"the {label} pass ran, but processes it spawned were still "
+        "alive afterwards (or could not be determined to be gone)",
+        "The container DETECTS leaked processes; it does not promise to kill "
+        "them, and a process it cannot inspect counts as leaked. The pass "
+        "verdict is not accepted, whatever it was, because a leaked tree "
+        "survives into the next pass and past teardown. Find the test that "
+        "spawns a real process, binds a real port, or daemonises a helper "
+        "and does not wait for it — make it clean up (an owned child it waits "
+        "for marks nothing; a shared host resource is named with "
+        "@pytest.mark.serial(\"<resource>\")); never a "
+        "flake/retry. Kill any pid named below before re-running; when the "
+        "report names none it states the reason instead — read that line, "
+        "since more than one cause leaves no pid to name.",
+        reap_error, max_output,
+    )
+
+
 def _run_hermetic_pytest(
     repo_dir: pathlib.Path | str,
     *,
@@ -1350,33 +1255,7 @@ def _run_hermetic_pytest(
     if not (repo / ".git").exists():
         return None
     if not (repo / "tests").exists():
-        # A repo that never had tests is out of scope; a candidate that DELETES
-        # the whole suite is not. Git does not track empty directories, so
-        # staging the removal of every test file removes `tests/` with them and
-        # reached this early return — skipping the passes entirely, so the
-        # all-passes-empty hard block below never ran and the change that
-        # deleted the gate sailed through it.
-        baseline_refs = _baseline_refs(phase)
-        try:
-            baseline_tracks_tests = _head_tracks_tests(repo, baseline_refs)
-        except (RuntimeError, subprocess.SubprocessError, OSError) as exc:
-            return _diagnosis(
-                "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_TESTS_BASELINE_UNREADABLE (hard block): "
-                f"could not read {' or '.join(baseline_refs)}",
-                "The working tree just lost its tests/ directory and git could not read "
-                "one of the baseline refs well enough to say whether that loss is real. "
-                "Treating an unreadable ref as 'never tracked tests' would let this "
-                "candidate through the gate it exists to trip. This is not a test failure.",
-                str(exc), max_output,
-            )
-        if baseline_tracks_tests:
-            return (
-                "⚠️ PRE_PUSH_TEST_ERROR: the candidate change removes the entire tests/ tree "
-                f"that {' or '.join(baseline_refs)} carries. The preflight cannot verify "
-                "a change that deletes its own gate — restore tests/ (git does not track empty "
-                "directories, so deleting every test file deletes the directory with them)."
-            )
-        return None
+        return _missing_tests_tree(repo, phase, max_output)
     agent_python = os.environ.get("OUROBOROS_AGENT_PYTHON") or sys.executable or "python3"
     source_index_tree, source_index_error = _capture_source_index_tree(repo, max_output)
     if source_index_error is not None:
@@ -1524,28 +1403,10 @@ def _run_hermetic_pytest(
             elapsed = time.monotonic() - pass_started
             timings.append((spec.label, round(elapsed, 1)))
             if reap_error:
-                # Checked BEFORE the exit code, including before the green path:
-                # the scan says processes the pass spawned are still running (or
-                # that it cannot tell), and an exit 0 taken on top of that is
-                # exactly the fail-open the container exists to close. It is also
-                # the more urgent report — a live tree outlives this whole run.
-                return _with_retention_notice(_diagnosis(
-                    "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_CONTAINMENT_FAILED (hard block): "
-                    f"the {spec.label} pass ran, but processes it spawned were still "
-                    "alive afterwards (or could not be determined to be gone)",
-                    "The container DETECTS leaked processes; it does not promise to kill "
-                    "them, and a process it cannot inspect counts as leaked. The pass "
-                    "verdict is not accepted, whatever it was, because a leaked tree "
-                    "survives into the next pass and past teardown. Find the test that "
-                    "spawns a real process, binds a real port, or daemonises a helper "
-                    "and does not wait for it — make it clean up (an owned child it waits "
-                    "for marks nothing; a shared host resource is named with "
-                    "@pytest.mark.serial(\"<resource>\")); never a "
-                    "flake/retry. Kill any pid named below before re-running; when the "
-                    "report names none it states the reason instead — read that line, "
-                    "since more than one cause leaves no pid to name.",
-                    reap_error, max_output,
-                ), unproven_teardown, worktree, max_output)
+                # Checked BEFORE the exit code, including before the green path: an exit 0 taken on top of a
+                # live tree is exactly the fail-open the container exists to close, and the more urgent report.
+                return _with_retention_notice(_containment_failed(spec.label, reap_error, max_output),
+                                              unproven_teardown, worktree, max_output)
             if returncode is None:
                 return _with_timeout_excerpt(
                     f"⚠️ PRE_PUSH_TEST_ERROR: pytest timed out after {remaining:.0f} seconds "
