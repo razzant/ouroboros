@@ -16,9 +16,9 @@ heal with new input never gets one. The runtime-retirement pass asks for every t
 and every task it left waiting (``review_thread_retention.retire_finished_review_threads``), so no
 timer, sweep or counter decides it. The outcome is one record per run in the task document,
 ``delegated_result_taken``: ``taken``; ``refused`` with the engine's code (a run the engine can still
-continue, a result that is no patch); ``absent`` (the engine has no such run); or
-``route_unavailable`` when the serving engine's decision vocabulary names no ``taken``, so an older
-engine gets no request and the record says why. An unknown answer writes nothing and leaves the task
+continue, a result that is no patch); or ``absent`` (the engine has no such run).
+A catalog without ``taken`` holds the task without a decision record; capability is read once per pass.
+An unknown answer also writes nothing and leaves the task
 waiting; the next pass repeats the same keyed decision, which the engine answers once.
 """
 from __future__ import annotations
@@ -79,6 +79,18 @@ def _decision(engine: Any, run_id: str) -> Dict[str, Any]:
     return {"state": "refused", "code": str((answer or {}).get("status") or "unaccepted")}
 
 
+def _unavailable(run: Any) -> str:
+    """This pass's one capability read: an unsupported or unreadable catalog keeps the duty waiting."""
+    if not hasattr(run, "_taken_unavailable"):
+        engine = run.engine()
+        try:
+            run._taken_unavailable = ("result_engine_unavailable" if engine is None else
+                                      "" if engine.run_result_taken_supported() else "result_taken_unsupported")
+        except Exception:
+            run._taken_unavailable = "result_engine_unavailable"
+    return run._taken_unavailable
+
+
 def tell_engine(run: Any, task_id: str) -> str:
     """The runtime-retirement pass's duty for one task's results: ``WAIT`` keeps the task for a later
     pass, ``DONE`` lets it go until its next terminal write. ``run`` is that pass
@@ -104,14 +116,11 @@ def tell_engine(run: Any, task_id: str) -> str:
     take = sorted(rid for rid, state in states.items() if state == "take")
     if not take:
         return DONE
-    engine = run.engine()
-    try:
-        supported = engine is not None and engine.run_result_taken_supported()
-    except Exception:  # an unread vocabulary proves no route either way
-        engine = None
-    if engine is None:
-        run.hold("result_engine_unavailable")
+    why = _unavailable(run)
+    if why:
+        run.hold(why)
         return WAIT
+    engine = run.engine()
     answers: Dict[str, Dict[str, Any]] = {}
     verdict, done = DONE, 0
     for rid in take:
@@ -119,8 +128,7 @@ def tell_engine(run: Any, task_id: str) -> str:
             run.stopped, verdict = True, WAIT
             break
         done += 1
-        record = _decision(engine, rid) if supported else {
-            "state": "route_unavailable", "engine_version": str(getattr(engine, "engine_version", "") or "")}
+        record = _decision(engine, rid)
         if not record:
             run.hold("result_taken_unanswered")
             verdict = WAIT

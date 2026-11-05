@@ -2,8 +2,8 @@
 
 A delegated Git run whose patch Ouroboros captured into its task record, and whose line can no longer be
 continued, gets exactly one typed ``taken`` decision; a continuable, uncaptured, ``files``, in-place, plan or
-review run gets none; an engine whose decision vocabulary names no ``taken`` gets no request and the record says
-so; an unanswered decision is repeated under the same key. The engine is an in-memory MOCK of Claudexor's C7
+review run gets none; an engine whose decision vocabulary names no ``taken`` keeps the task waiting without a
+decision record; an unanswered decision is repeated under the same key. The engine is an in-memory MOCK of Claudexor's C7
 route shape (``POST /v2/runs/:id/decision {"action": "taken", "reason": "captured_result"}``), never the real one.
 """
 from __future__ import annotations
@@ -33,8 +33,10 @@ class Engine:
     def __init__(self, *, supported=True, version="5.1.0"):
         self.supported, self.engine_version, self.store_identity = supported, version, "store-1"
         self.decisions, self.fail = [], []
+        self.capability_reads = 0
 
     def run_result_taken_supported(self):
+        self.capability_reads += 1
         return self.supported
 
     def take_run_result(self, run_id, *, idempotency_key):
@@ -136,13 +138,18 @@ def test_a_collection_still_owed_waits_until_it_lands(world, monkeypatch):
     assert world.tell() == rt.DONE and len(world.engine.decisions) == 1
 
 
-def test_an_engine_without_the_taken_action_gets_no_request_and_the_record_says_so(world):
+def test_an_engine_without_the_taken_action_waits_until_a_later_pass_supports_it(world):
     old = Engine(supported=False, version="5.0.1")
-    assert world.tell(engine=old) == rt.DONE
-    assert old.decisions == []
-    record = world.records()["run-1"]
-    assert (record["state"], record["engine_version"]) == ("route_unavailable", "5.0.1")
-    assert world.tell() == rt.DONE and world.engine.decisions == [], "a recorded run is never sent later"
+    run = _pass(world.root, old)
+    assert taken.tell_engine(run, TASK) == rt.WAIT
+    assert old.decisions == [] and world.records() == {}
+    assert run.report["holds"] == {"result_taken_unsupported": 1}
+    assert taken.tell_engine(run, TASK) == rt.WAIT and old.capability_reads == 1
+    old.supported = True  # an upgrade is read by the next pass, which sends the one keyed decision
+    assert world.tell(engine=old) == rt.DONE and old.capability_reads == 2
+    key = hashlib.sha256(b"taken:run-1").hexdigest()
+    assert old.decisions == [("run-1", key)] and world.records()["run-1"]["state"] == "taken"
+    assert world.tell(engine=old) == rt.DONE and old.decisions == [("run-1", key)]
 
 
 def test_an_unanswered_decision_waits_and_the_next_pass_repeats_the_same_key(world):
@@ -249,6 +256,11 @@ def real(tmp_path):
 
 def test_real_a_finished_root_result_is_taken_once_by_the_runtime_retirement_pass(real):
     real.end("completed")
+    real.engine.supported = False
+    report = real.run()
+    assert report["waiting"] == 1 and report["holds"] == {"result_taken_unsupported": 1}
+    assert real.engine.decisions == [] and real.record() is None
+    real.engine.supported = True  # no new terminal write: the waiting list must retain the duty
     report = real.run()
     assert [rid for rid, _key in real.engine.decisions] == ["run-git-1"] and real.record()["state"] == "taken"
     assert {"task_id": R, "run_id": "run-git-1", "taken": "taken"} in report["observed"]
