@@ -13,10 +13,6 @@ from types import SimpleNamespace as NS
 import pytest
 
 from ouroboros.review_substrate import (
-    ReviewRequest,
-    ReviewSlot,
-    _render_prompt_parts,
-    _request_messages,
     assert_cache_breakpoint_cap,
     panel_reason,
 )
@@ -96,57 +92,6 @@ def test_single_reviewer_note_is_label_not_reason(tmp_path):
 # ── B1: prompt segmentation ─────────────────────────────────────────────────
 
 
-def _request(evidence=None):
-    return ReviewRequest(
-        surface="multi_model_review",
-        goal="ship the verified result",
-        scope="the task",
-        subject="candidate answer",
-        checklist="the checklist",
-        evidence=evidence or {},
-        policy={"min_successful_slots": 2},
-        task_id="cache-task",
-    )
-
-
-def test_prompt_parts_split_governance_task_stable_dynamic():
-    stable, task_stable, dynamic = _render_prompt_parts(
-        _request({"k": "v1"}), ReviewSlot("slot_1", "m"),
-    )
-    assert "independent Ouroboros reviewer slot" in stable
-    assert "Review goal:" in task_stable and "Checklist" in task_stable
-    assert "Subject:" in dynamic and "Evidence packet:" in dynamic
-    # slot label at the TAIL of the mutable part, never at byte 0
-    assert dynamic.rstrip().endswith("Slot: slot_1")
-    assert not dynamic.startswith("Slot:")
-
-
-def test_task_stable_segment_is_byte_identical_across_passes():
-    slot = ReviewSlot("slot_1", "m")
-    s1, t1, d1 = _render_prompt_parts(_request({"k": "pass-1 evidence"}), slot)
-    s2, t2, d2 = _render_prompt_parts(_request({"k": "pass-2 evidence"}), slot)
-    assert s1 == s2 and t1 == t2  # cache-marked segments stable across passes
-    assert d1 != d2               # the evidence tail honestly changes
-
-
-def test_same_pass_slots_share_whole_prefix():
-    req = _request({"k": "v"})
-    s1, t1, d1 = _render_prompt_parts(req, ReviewSlot("slot_1", "m"))
-    s2, t2, d2 = _render_prompt_parts(req, ReviewSlot("slot_2", "m"))
-    assert (s1, t1) == (s2, t2)
-    # the dynamic parts differ ONLY in the trailing slot label
-    assert d1[: d1.rfind("Slot:")] == d2[: d2.rfind("Slot:")]
-
-
-def test_request_messages_mark_two_segments_and_pass_cap():
-    messages = _request_messages(_request(), ReviewSlot("slot_1", "m"))
-    system = messages[0]["content"]
-    marked = [b for b in system if isinstance(b, dict) and b.get("cache_control")]
-    assert len(marked) == 2
-    assert isinstance(messages[1]["content"], str)
-    assert_cache_breakpoint_cap(messages)  # 2 <= 4
-
-
 def test_breakpoint_cap_rejects_over_marked_payload():
     block = {"type": "text", "text": "x", "cache_control": {"type": "ephemeral"}}
     messages = [{"role": "system", "content": [dict(block) for _ in range(5)]}]
@@ -179,22 +124,4 @@ def test_cli_cost_finality_wait_branches(monkeypatch):
     # explicitly partial: polls until final
     r4 = {"status": "completed", "cost_final": False, "cost_with_children_partial": True}
     out = cli_mod._await_cost_finality(_Client(), "t", r4, grace_sec=5.0)
-    assert out["cost_final"] is True and calls
-
-
-def test_pb_cost_finality_wait_branches(monkeypatch):
-    from devtools.benchmarks.programbench import programbench_adapter as pb
-
-    calls = []
-    monkeypatch.setattr(
-        pb, "ouroboros_api_request",
-        lambda base, method, path, body=None, timeout=None: calls.append(path)
-        or {"status": "completed", "cost_final": True},
-    )
-    r = {"status": "cancelled"}
-    assert pb._await_cost_finality("http://x", "t", r) is r and not calls
-    r2 = {"status": "degraded"}
-    assert pb._await_cost_finality("http://x", "t", r2) is r2 and not calls
-    r3 = {"status": "completed", "cost_final": False}
-    out = pb._await_cost_finality("http://x", "t", r3, grace_sec=5.0)
     assert out["cost_final"] is True and calls

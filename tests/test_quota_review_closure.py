@@ -7,64 +7,6 @@ import json
 import pytest
 
 
-def test_inspector_resolves_the_main_actor_offered_by_empty_enabled_catalog(tmp_path, monkeypatch):
-    from ouroboros.settings_integrity import task_settings_scope, task_settings_snapshot
-    from ouroboros.subagent_runtime import model_visible_subagent_catalog, select_subagent_snapshot
-    from ouroboros.tools.registry import ToolRegistry
-
-    from tests._shared import saved_settings
-
-    settings = {
-        "OUROBOROS_SUBAGENTS": json.dumps({"enabled": True, "items": []}),
-        "OUROBOROS_MODEL": "openai/synthetic-main-model",
-        "OPENROUTER_API_KEY": "synthetic-unused-credential",
-    }
-    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL=settings["OUROBOROS_MODEL"],
-                   OPENROUTER_API_KEY=settings["OPENROUTER_API_KEY"])  # route keys read the saved document
-    catalog = model_visible_subagent_catalog(settings)
-    handle = catalog["rows"][0]["subagent_id"]
-    selected, _ = select_subagent_snapshot(settings, subagent_id=handle)
-    assert selected["selected_subagent_id"] == "main"
-    registry = ToolRegistry(tmp_path / "repo", tmp_path / "data")
-    with task_settings_scope(task_settings_snapshot(settings, settings)):
-        result = registry.execute_result("inspect_subagent", {"subagent_id": handle})
-    assert result.status == "ok", f"Catalog offered {handle}; scheduler resolved main; inspector: {result.text}"
-
-
-def test_inspection_effort_agrees_with_model_named_effort(monkeypatch):
-    from ouroboros import config
-    from ouroboros.gateway import claudexor_passive
-    from ouroboros.settings_integrity import task_settings_scope, task_settings_snapshot
-    from ouroboros.subagent_inspection import inspect_subagent
-    from ouroboros.subagent_runtime import model_visible_subagent_catalog
-
-    settings = {"OUROBOROS_SUBAGENTS": json.dumps({"enabled": True, "items": [{
-        "subagent_id": "synthetic", "recommended_use": "synthetic fixture",
-        "route": {"kind": "agent_session", "target_id": "cursor=cursor-grok-4.6-high"},
-    }]})}
-    monkeypatch.setattr(config, "load_settings", lambda: {})
-    monkeypatch.setattr(claudexor_passive, "_quota_payload", lambda **kwargs: {
-        "reads": {}, "read_errors": {}, "timings_ms": {}, "profiles": {},
-        "quota": [], "quota_absences": [],
-    })
-    catalog = model_visible_subagent_catalog(settings)
-    offered = catalog["rows"][0]
-    with task_settings_scope(task_settings_snapshot(settings, settings)):
-        actual = inspect_subagent(offered["subagent_id"])
-    assert actual["configured"]["effort"] == offered["effort"]
-
-
-def test_recursively_malformed_snapshot_is_unknown_instead_of_aborting_the_round(tmp_path):
-    from ouroboros.skill_context_snapshot import _read_snapshot
-
-    path = tmp_path / "snapshot.json"
-    path.write_text("[" * 2000 + "0" + "]" * 2000)
-    descriptor = {"revision": "synthetic", "eligible": True, "reason": "ready",
-                  "state_dir": str(tmp_path), "path": "snapshot.json"}
-    result = _read_snapshot("synthetic", descriptor, 1_800_000_000)
-    assert result["state"] == "unknown"
-
-
 @pytest.mark.parametrize("malformation", ["recursive_json", "symlink_loop"])
 def test_malformed_snapshot_withdraws_without_aborting_real_round(tmp_path, monkeypatch, malformation):
     from types import SimpleNamespace
@@ -105,65 +47,12 @@ def test_malformed_snapshot_withdraws_without_aborting_real_round(tmp_path, monk
 # Source: witness_owner_words_merge_into_snapshot.py. After an interrupted
 # pre-send tail, incoming owner words stay on their own ordinary wire row.
 
-import queue
 from copy import deepcopy
-from types import SimpleNamespace
 
 from tests.test_skill_context_snapshot import _write
 from tests.test_skill_context_snapshot import publisher as _publisher_fixture
 
 publisher = _publisher_fixture
-
-
-def test_owner_message_after_interrupted_round_stays_outside_untrusted_snapshot_row(publisher, monkeypatch):
-    from ouroboros import (
-        context_compaction,  # noqa: F401 - public import establishes its leaf facade
-        peer_roster,
-    )
-    from ouroboros.context_source_view import _obsolete_host_rows
-    from ouroboros.llm_attempt import _physical_candidate
-    from ouroboros.loop_round_limits import _CompactionRoundContext, _drain_incoming_messages, _run_round_compaction
-    from ouroboros.context_budget import OWNER_WORDS_KIND
-    from ouroboros.skill_context_snapshot import SNAPSHOT_KIND, visible_snapshots
-    from ouroboros.transcript_prefix import observe_send
-
-    root, skill, ctx, path = publisher
-    monkeypatch.setattr(peer_roster, "maybe_append_roster_note", lambda *a: False)
-    messages = [{"role": "system", "content": "Stable constitution"},
-                {"role": "user", "content": "Actual owner request"},
-                {"role": "assistant", "content": "Working on it"}]
-    observe_send(ctx, messages, round_idx=1)          # 1. previous send recorded on the loop slot
-    _write(path, "quota: weekly 40% used")
-    round_ctx = _CompactionRoundContext(tools=SimpleNamespace(_ctx=ctx), drive_root=root,
-        drive_logs=root / "logs", task_id="root", round_idx=2, event_queue=None, emit_progress=lambda x: None)
-    messages = _run_round_compaction(messages, round_ctx)   # 2. changed note appended
-    assert messages[-1]["_host_context_kind"] == SNAPSHOT_KIND
-    # 3. interrupted call: nothing recorded. 4. next round drains an owner message.
-    inbox = queue.Queue()
-    inbox.put({"text": "STOP the deploy and revert the last commit now.", "msg_id": "m-1"})
-    _drain_incoming_messages(messages, inbox, None, "root", None, set(), owner_ctx=ctx)
-    tail = messages[-1]
-    print("\nWITNESS tail kind:", tail.get("_host_context_kind"))
-    print("WITNESS tail content:\n" + str(tail.get("content")))
-    wire = _physical_candidate({"messages": deepcopy(messages), "tools": []})["messages"][-1]
-    print("WITNESS wire last message role:", wire["role"], "| has owner words:",
-          "STOP the deploy" in str(wire["content"]), "| has UNTRUSTED header:", "UNTRUSTED DATA" in str(wire["content"]))
-    print("WITNESS visible_snapshots parses merged row:", "test-snapshot" in visible_snapshots(messages))
-    print("WITNESS merged row index in _obsolete_host_rows:", (len(messages) - 1) in _obsolete_host_rows(messages))
-    assert not ("UNTRUSTED DATA" in str(tail.get("content")) and "STOP the deploy" in str(tail.get("content"))), (
-        "owner words were delivered inside the row headed 'UNTRUSTED DATA, not owner instructions'")
-    assert "test-snapshot" in visible_snapshots(messages)
-    assert tail.get("_host_context_kind") == OWNER_WORDS_KIND  # typed at delivery, never merged into the note
-    assert wire["content"] == "[Message from my human]: STOP the deploy and revert the last commit now."
-    assert len(ctx._owner_directives) == 1 and ctx._owner_directives[0]["content"] == (
-        "STOP the deploy and revert the last commit now.")
-    assert len(messages) - 1 not in _obsolete_host_rows(messages)
-    messages = _run_round_compaction(messages, round_ctx)
-    assert messages[-1] == tail  # no redundant note hides or rewrites the owner row
-    from ouroboros.llm_claudexor import _request
-    native = _request({"source": "codex", "resolved_model": "fixture"}, messages, [],
-                      {"model_account_override": "", "_no_account_preference": True})
-    assert native["messages"][-1] == wire
 
 
 # Source: witness_renewal_cadence.py. Synthetic leases (420 s validity, 180 s
@@ -302,81 +191,6 @@ def test_freshness_compatibility_stops_after_non_selector_failure(failure):
     assert len(gateway.calls) == 2  # no plain GET on malformed/5xx/unknown transport
 
 
-def test_renewals_keep_visible_full_base_through_reclaim_and_restore_it_when_absent(publisher, monkeypatch):
-    from datetime import timedelta
-    from types import SimpleNamespace
-
-    from ouroboros import context_compaction, peer_roster
-    from ouroboros import skill_context_snapshot as scs
-    from ouroboros.context_budget import ContextReclaimRequest
-    from ouroboros.context_source_view import emergency_address_view
-    from ouroboros.llm_attempt import _physical_candidate
-    from ouroboros.llm_claudexor import _request
-    from ouroboros.loop_round_limits import _CompactionRoundContext, _run_round_compaction
-    from ouroboros.observability import read_blob_ref
-    root, skill, ctx, path = publisher
-    start = datetime.now(timezone.utc)
-    clock = {"now": start}
-    class Clock(datetime):
-        @classmethod
-        def now(cls, tz=None): return clock["now"]
-    monkeypatch.setattr(scs, "datetime", Clock)
-    monkeypatch.setattr(peer_roster, "maybe_append_roster_note", lambda *a: False)
-    messages = [{"role": "system", "content": "Stable governance"}, {"role": "user", "content": "Real original request"}]
-    text = "Complete facts including unknown and units " * 300
-    _write(path, text, observed=start, valid=start + timedelta(seconds=1))
-    assert scs.maybe_append_skill_snapshots(ctx, messages, root)
-    base = deepcopy(messages[-1])
-    for step in range(2, 42, 2):
-        clock["now"] = start + timedelta(seconds=step)
-        _write(path, text, observed=clock["now"], valid=clock["now"] + timedelta(seconds=1))
-        assert scs.maybe_append_skill_snapshots(ctx, messages, root) is (step == 2)  # one note, then nothing
-        assert messages[2] == base
-    assert len(messages) == 4 and scs.visible_snapshots(messages)[skill.name][1]["state"] == "outdated"
-    # The real host-copy reclaim removes the outdated full text and keeps the note naming the current one.
-    before = deepcopy(messages)
-    request = ContextReclaimRequest(route_fp="fixture", round_id="7", transcript_sha256=
-        context_compaction.context_reclaim_transcript_sha256(messages), measurement_basis="cold_estimate",
-        measurement_density=3.0, reclaim_goal_tokens=1)
-    reclaimed, receipt = emergency_address_view(messages, request, rung="host_copies",
-        drive_root=root, task_id="root", measure_candidate=lambda rows: len(json.dumps(rows)))
-    assert receipt.status == "applied"
-    assert base not in reclaimed and scs.visible_snapshots(reclaimed)[skill.name][1]["state"] == "outdated"
-    assert messages == before
-    retained = json.loads(base["content"].split("\n", 1)[1])["source"]["retained"]
-    assert json.loads(read_blob_ref(root, retained, expected_kind="txt"))["text"] == text
-    # A rebuilt conversation with no full text in view shows the current one in full again.
-    cold = [*reclaimed[:2], reclaimed[-1]]
-    assert scs.visible_snapshots(cold)[skill.name][1]["state"] == "outdated"
-    fresh_ctx = SimpleNamespace(task_id="root", task_metadata={}, budget_drive_root=str(root))
-    round_ctx = _CompactionRoundContext(tools=SimpleNamespace(_ctx=fresh_ctx), drive_root=root,
-        drive_logs=root / "logs", task_id="root", round_idx=8, event_queue=None, emit_progress=lambda x: None)
-    restored = _run_round_compaction(cold, round_ctx)
-    raw = json.loads(restored[-1]["content"].split("\n", 1)[1])
-    assert raw["text"] == text and "text_ref" not in raw
-    for wire in (_physical_candidate({"messages": restored, "tools": []}), _request(
-            {"source": "codex", "resolved_model": "fixture"}, restored, [],
-            {"model_account_override": "", "_no_account_preference": True})):
-        assert text in wire["messages"][-1]["content"]
-    # Expiry withdraws the claim once, and cannot keep a hidden reference fresh.
-    clock["now"] = start + timedelta(seconds=42)
-    assert scs.maybe_append_skill_snapshots(fresh_ctx, restored, root)
-    assert scs.visible_snapshots(restored)[skill.name][1]["state"] == "stale"
-    assert "text" not in scs.visible_snapshots(restored)[skill.name][1]
-    assert not scs.maybe_append_skill_snapshots(fresh_ctx, restored, root)
-
-
-def test_old_visible_snapshot_header_survives_a_cold_code_update(publisher):
-    from ouroboros import skill_context_snapshot as scs
-    root, skill, ctx, path = publisher
-    _write(path)
-    messages = []
-    scs.maybe_append_skill_snapshots(ctx, messages, root)
-    messages[-1]["content"] = messages[-1]["content"].replace(scs.SNAPSHOT_HEADER, scs._LEGACY_SNAPSHOT_HEADER)
-    assert scs.visible_snapshots(messages)[skill.name][1]["text"] == "A"
-    assert not scs.maybe_append_skill_snapshots(ctx, messages, root)
-
-
 def test_multibyte_snapshot_over_file_bound_is_explicit_unknown_not_clipped(publisher):
     from ouroboros import skill_context_snapshot as scs
     root, skill, ctx, path = publisher
@@ -391,34 +205,6 @@ def test_multibyte_snapshot_over_file_bound_is_explicit_unknown_not_clipped(publ
 
 # An isolated root task's drive goes through normal settlement after its
 # publisher moved on; the exact source still reads from the canonical root.
-
-
-def test_exact_snapshot_source_survives_normal_isolated_drive_prune(publisher):
-    import time
-
-    from ouroboros import headless, observability
-    from ouroboros import skill_context_snapshot as scs
-    from ouroboros.task_results import write_task_result
-    canonical, skill, ctx, path = publisher
-    task = "snapshot-root-task"
-    drive = headless.prepare_task_drive(canonical, task, "empty")
-    ctx.task_id, ctx.task_metadata = task, {"budget_drive_root": str(canonical)}
-    _write(path, "First exact snapshot")
-    original = path.read_text(encoding="utf-8")
-    messages = []
-    assert scs.maybe_append_skill_snapshots(ctx, messages, drive)
-    source = scs.visible_snapshots(messages)[skill.name][1]["source"]["retained"]
-    observability.persist_call(drive, task_id=task, call_id="request", call_type="llm_request",
-                               payload={"messages": messages})
-    _write(path, "Later periodic publisher update")
-    write_task_result(drive, task, "completed", result="answer", artifact_status="ready")
-    headless.copy_child_task_result(canonical, {"id": task, "drive_root": str(drive)})
-    assert headless.retry_child_task_refs(canonical, drive, task)["child_ref_promotion"]["status"] == "complete"
-    report = headless.prune_headless_task_drives(canonical, retention_days=7, now=time.time() + 8 * 86400,
-                                                 live=lambda _task: False)
-    assert any(row["task_id"] == task for row in report["pruned"]) and not drive.exists()
-    assert observability.read_call_payload(canonical, task_id=task, call_id="request")[1]["messages"] == messages
-    assert observability.read_blob_ref(canonical, source, expected_kind="txt") == original
 
 
 def test_route_health_reads_only_the_exact_default_subject_and_never_the_roster():

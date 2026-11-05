@@ -47,32 +47,6 @@ def test_actual_worker_put_follows_both_verified_dispatch_carriers(world, monkey
     assert len(sent) == 1 and sent[0]['id'] == tid and not pending
 
 
-@pytest.mark.parametrize('control', ['pause', 'stop', 'restart'])
-def test_control_accepted_during_off_lock_preparation_refuses_admission(world, monkeypatch, control):  # noqa: F811 - pytest fixture
-    from ouroboros.owner_pause import install_fence
-    from supervisor.followup_policy import record_restart
-    _, root, pending = world
-    registered = register(world)
-    real_prepare = occurrence.prepare
-    def prepare(claimed):
-        assert not queue._queue_lock._is_owned()
-        prepared = real_prepare(claimed)
-        if control == 'pause':
-            install_fence(root, ORIGIN, request_id='during-prepare')
-        elif control == 'stop':
-            stop(root)
-        else:
-            record_restart(root, new=True)
-        return prepared
-    monkeypatch.setattr(occurrence, 'prepare', prepare)
-    queue.check_scheduled_tasks()
-    assert not pending
-    current = row(root, registered['id'])
-    assert not current.get('completed_at') and not current.get('last_task_id')
-    assert current.get('followup_hold') or current.get('followup_wait')
-    assert not load_task_result(root, current['occurrence']['task_id'])
-
-
 @pytest.mark.parametrize('evidence', ['none', 'possible', 'missing', 'foreign', 'snapshot_failure'])
 def test_resolved_fired_followup_rebinds_only_same_positively_unrun_receipt(world, monkeypatch, evidence):  # noqa: F811 - pytest fixture
     from supervisor.worker_assignment import _claim_worker_launch

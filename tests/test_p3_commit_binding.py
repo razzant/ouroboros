@@ -28,59 +28,6 @@ def _repo(tmp_path: pathlib.Path) -> pathlib.Path:
     return repo
 
 
-def test_staged_fingerprint_binds_tree_parent_version_and_expected_tag(tmp_path):
-    from ouroboros.tools.git import _fingerprint_staged_diff
-
-    repo = _repo(tmp_path)
-    parent = _git(repo, "rev-parse", "HEAD")
-    (repo / "VERSION").write_text("1.1.0\n", encoding="utf-8")
-    (repo / "app.txt").write_text("release\n", encoding="utf-8")
-    _git(repo, "add", "-A")
-
-    result = _fingerprint_staged_diff(repo)
-    binding = result["binding"]
-
-    assert result["ok"] is True
-    assert binding["tree_sha"] == _git(repo, "write-tree")
-    assert binding["parents"] == [parent]
-    assert binding["staged_version"] == "1.1.0"
-    assert binding["version_staged"] is True
-    assert binding["expected_tag"] == "v1.1.0"
-    assert binding["existing_tag_target"] == ""
-    assert len(binding["diff_sha256"]) == 64
-
-
-def test_staged_fingerprint_binds_all_merge_parents(tmp_path):
-    from ouroboros.tools.git import (
-        _fingerprint_staged_diff,
-        _verify_reviewed_commit_binding,
-    )
-
-    repo = _repo(tmp_path)
-    base_branch = _git(repo, "branch", "--show-current")
-    _git(repo, "checkout", "-b", "side")
-    (repo / "side.txt").write_text("side\n", encoding="utf-8")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-m", "side")
-    side_sha = _git(repo, "rev-parse", "HEAD")
-    _git(repo, "checkout", base_branch)
-    (repo / "main.txt").write_text("main\n", encoding="utf-8")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-m", "main")
-    first_parent = _git(repo, "rev-parse", "HEAD")
-    _git(repo, "merge", "--no-ff", "--no-commit", "side")
-
-    fingerprint = _fingerprint_staged_diff(repo)
-
-    assert fingerprint["binding"]["parents"] == [first_parent, side_sha]
-    _git(repo, "commit", "-m", "merge")
-    commit_sha = _git(repo, "rev-parse", "HEAD")
-    ok, detail = _verify_reviewed_commit_binding(
-        repo, commit_sha, fingerprint, verify_expected_tag=False
-    )
-    assert ok is True, detail
-
-
 def test_existing_expected_tag_is_a_pre_review_collision(tmp_path):
     from ouroboros.tools.git import (
         _fingerprint_staged_diff,

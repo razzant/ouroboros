@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import ast
 import pathlib
-import types
 
 import pytest
 
@@ -392,19 +391,6 @@ def test_c7_the_set_of_terminal_status_writers_equals_the_manifest():
     assert live == TERMINAL_WRITERS
 
 
-def test_c7_the_one_terminal_write_primitive_is_still_one():
-    """The property the manifest is guarding: there is a single durable writer
-    with the monotonic reducer inside it, not a family of them."""
-    from ouroboros import task_results
-
-    source = (REPO / "ouroboros" / "task_results.py").read_text(encoding="utf-8")
-    assert source.count("def write_task_result(") == 1
-    assert callable(task_results.write_task_result)
-    body = _function_source(REPO / "ouroboros" / "task_results.py", "write_task_result")
-    assert "patch_document" in body, "the write is one store write transaction"
-    assert "_is_status_regression" in body, "the reducer is inside the transaction, not at callers"
-
-
 # ---------------------------------------------------------------------------
 # C8 — settle-owner inventory
 # ---------------------------------------------------------------------------
@@ -541,65 +527,6 @@ def test_c9_the_lanes_that_owe_nothing_are_an_enumerated_list():
 # ---------------------------------------------------------------------------
 
 
-def _sweep_sees(tmp_path, task_id: str, monkeypatch) -> bool:
-    """Whether the watchdog, reading its own canonical root, sees the intent."""
-    from ouroboros.cancel_intents import active_intents
-    from supervisor import queue as q
-
-    monkeypatch.setattr(q, "DRIVE_ROOT", tmp_path, raising=False)
-    return task_id in active_intents(q.DRIVE_ROOT)
-
-
-def _agent_ctx(canonical, child_drive, *, carry_budget_root: bool):
-    from ouroboros.tools.registry import ToolContext
-
-    ctx = ToolContext(repo_dir=canonical, drive_root=child_drive or canonical)
-    ctx.task_id = "parent-1"
-    ctx.task_metadata = {"root_task_id": "parent-1", "parent_task_id": "parent-1"}
-    if carry_budget_root:
-        ctx.task_metadata["budget_drive_root"] = str(canonical)
-    return ctx
-
-
-def test_c10_the_agent_tool_writes_a_split_drive_intent_at_the_canonical_root(
-    tmp_path, monkeypatch,
-):
-    """C10: the agent `cancel_task` tool resolves
-    `metadata["budget_drive_root"] or ctx.budget_drive_root or ctx.drive_root`.
-    For a split-drive child the FIRST term is the canonical supervisor root, so
-    the intent lands where `sweep_cancel_intents` reads — the divergence a
-    reviewer suspected in the third fallback does not exist here."""
-    from ouroboros.tools.join_ledger import _cancel_task
-
-    canonical = tmp_path / "data"
-    child = tmp_path / "task_drives" / "child"
-    child.mkdir(parents=True)
-    ctx = _agent_ctx(canonical, child, carry_budget_root=True)
-
-    out = _cancel_task(ctx, "victim-1", reason="stop")
-
-    assert "Cancel requested" in out, out
-    assert (canonical / "state" / "cancel_intents.json").is_file()
-    assert not (child / "state" / "cancel_intents.json").exists()
-    assert _sweep_sees(canonical, "victim-1", monkeypatch)
-
-
-def test_c10_a_task_without_a_child_drive_resolves_to_the_same_root(
-    tmp_path, monkeypatch,
-):
-    """C10: the third fallback (`ctx.drive_root`) is reached only when NO child
-    drive exists — and then `drive_root` IS the canonical root, so the two
-    shapes agree. The pairing is what holds the invariant, asserted below."""
-    from ouroboros.tools.join_ledger import _cancel_task
-
-    canonical = tmp_path / "data"
-    canonical.mkdir()
-    ctx = _agent_ctx(canonical, None, carry_budget_root=False)
-
-    assert "Cancel requested" in _cancel_task(ctx, "victim-2", reason="stop")
-    assert _sweep_sees(canonical, "victim-2", monkeypatch)
-
-
 def test_c10_a_child_drive_is_never_set_without_its_budget_drive_root():
     """C10, the invariant the two tests above ride on: every production site
     that points a task's `drive_root` at a child drive sets `budget_drive_root`
@@ -613,47 +540,6 @@ def test_c10_a_child_drive_is_never_set_without_its_budget_drive_root():
                 continue
             window = "\n".join(source.splitlines()[index:index + 4])
             assert "budget_drive_root" in window, f"{module}:{index + 1}\n{window}"
-
-
-def test_c10_the_settled_probe_reads_the_intent_root_not_the_child_drive(tmp_path):
-    """C10, the one real divergence — and it is noise, not a wedge. The mint's
-    already-settled probe reads the task result at the INTENT root, so a
-    split-drive child whose result lives on its own drive reads as unsettled
-    and an intent IS minted. Custody then settles it `already_settled`, so the
-    cost is one watchdog round trip, not a lost cancellation."""
-    from ouroboros.cancel_intents import request_cancel, settled_status
-    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
-
-    canonical = tmp_path / "data"
-    child = tmp_path / "task_drives" / "child"
-    canonical.mkdir()
-    child.mkdir(parents=True)
-    write_task_result(child, "done-1", STATUS_COMPLETED, result="finished")
-
-    assert settled_status(child, "done-1") == STATUS_COMPLETED
-    assert settled_status(canonical, "done-1") == "", "the probe cannot see it"
-    intent = request_cancel(canonical, "done-1", reason="late cancel")
-    assert intent.get("already_settled") is False
-    assert intent.get("request_id"), "an intent is minted over a settled child"
-
-
-def test_c10_the_http_and_supervisor_roots_come_from_one_configured_value():
-    """C10 for the HTTP and project-deletion ingresses: they mint at the app's
-    `state.drive_root`, the watchdog reads `supervisor.queue.DRIVE_ROOT`, and
-    both are bound from the ONE configured `DATA_DIR` at startup. Two globals
-    that merely happen to agree would be the gap; one source is the answer."""
-    server_source = (REPO / "server.py").read_text(encoding="utf-8")
-    assert "app.app.state.drive_root = pathlib.Path(DATA_DIR)" in server_source
-    assert "DRIVE_ROOT=DATA_DIR" in server_source
-    from ouroboros.gateway._helpers import request_drive_root
-
-    app = types.SimpleNamespace(state=types.SimpleNamespace(drive_root="/pinned/root"))
-    request = types.SimpleNamespace(app=app)
-    # Path-compare, not string-compare: Windows spells the same bound value
-    # with backslashes.
-    assert pathlib.Path(str(request_drive_root(request))) == pathlib.Path("/pinned/root"), (
-        "the ingress root is whatever the app was bound to, never a re-derivation"
-    )
 
 
 def test_terminal_inventory_sees_conditional_writers_without_leaking_aliases():

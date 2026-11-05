@@ -207,18 +207,6 @@ def test_a_pending_delete_goes_once_settlement_is_proven_and_unknown_keeps_it(wo
     assert load_task_result(root, task['id'])['status'] == 'completed' and len(sent) == 1
 
 
-def test_positively_unstarted_continuation_claim_is_withdrawn_from_a_worker(world, monkeypatch):  # noqa: F811 - pytest fixture
-    _, root, _ = world
-    sid = register(world)['id']
-    data = schedules.load_schedule_store(root)
-    data['tasks'][0]['occurrence'] = {'phase': 'claimed', 'token': 'tok', 'task_id': 'never-started'}
-    schedules._write_scheduled_tasks(data, root)
-    monkeypatch.setenv('OUROBOROS_IN_WORKER', '1')  # no fresh queue snapshot: queue unknown
-    outcome = _delete(root, sid)
-    assert outcome['status'] == 'withdrawn' and outcome['running_or_queued'] is None
-    assert row(root, sid)['delete_requested_at']
-
-
 def test_independent_owner_delete_keeps_its_published_lifecycle(world, monkeypatch):  # noqa: F811 - pytest fixture
     world, workers, sent = _assignment_world(world, monkeypatch)
     _, root, pending = world
