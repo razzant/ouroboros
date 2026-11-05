@@ -418,7 +418,7 @@ def test_a_stand_in_use_makes_nobody_wait_and_a_killed_build_publishes_nothing(t
     monkeypatch.setenv("OUROBOROS_TEST_TEMP_ROOT", str(tmp_path))
     monkeypatch.setattr(cache, "build", _stand_build(built))
     with cache.stand(1) as held, cache.stand(1) as private:
-        assert private != held and built == [(1, ""), (1, "")]
+        assert private != held and built == [(1, ""), (1, "")] and len(private.parts) == len(held.parts)
         (private / "data" / "logs.jsonl").write_text("private\n", encoding="utf-8")
         assert (held / "data" / "logs.jsonl").read_text(encoding="utf-8") == "as built\n"
 

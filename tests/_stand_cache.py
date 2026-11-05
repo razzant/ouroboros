@@ -123,12 +123,12 @@ def stand(k: int, journal: str = "") -> Iterator[pathlib.Path]:
     """The stand of ``k`` and ``journal`` at its one path, pristine and this consumer's until it leaves."""
     folder = run_folder("stands") / f"k{k:03d}-{journal}"
     folder.mkdir(exist_ok=True)
-    held = os.open(folder / "lock", os.O_CREAT | os.O_RDWR, 0o600)  # the kernel lets go of a killed holder
+    lock = os.open(folder / "lock", os.O_CREAT | os.O_RDWR, 0o600)  # the kernel lets go of a killed holder
     try:
         try:
-            file_lock_exclusive_nb(held)
+            file_lock_exclusive_nb(lock)
         except OSError:
-            home = pathlib.Path(tempfile.mkdtemp(dir=folder)) / "home"
+            home = pathlib.Path(tempfile.mkdtemp(dir=folder.parent)) / "home"  # as deep: a boot's stats follow the depth
             build(home, k, journal)
             yield home
             return
@@ -145,7 +145,7 @@ def stand(k: int, journal: str = "") -> Iterator[pathlib.Path]:
             os.replace(staging, kept)  # published whole
         yield home
     finally:
-        os.close(held)
+        os.close(lock)
 
 
 @contextlib.contextmanager

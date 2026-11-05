@@ -153,6 +153,8 @@ def test_a_restored_stand_measures_what_its_build_measured(built_small, small):
     """``small`` drives what ``_restore`` (tests/_stand_cache.py) put back. Were that a copy, the boot would meet new inodes under
     the recorded file identities and list the history they exist to spare, and the count would say so here. A turn's counts
     (``T:``) differ between any two drives, even of two fresh builds; B10 holds them to its own law."""
+    if small["root"] != built_small["root"]:
+        pytest.skip("a focused run spread this module over workers: these are two private roots, not one restored")
     tags = [tag for tag, entry in small.items() if isinstance(entry, dict) and "counts" in entry and not tag.startswith("T:")]
     assert {"B1", "B2_ready", "B3", "B5", "R_late"} <= set(tags)
     for tag in tags:

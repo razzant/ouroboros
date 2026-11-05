@@ -1,4 +1,6 @@
-"""Shared worlds (tests/_worlds.py): built once per run, cloned private, and refused when they know their own path."""
+"""Shared worlds (tests/_worlds.py): built once per run, cloned private, refused when they know their own path. Beside
+them, the whole-tree scans' parse (tests/_source_scan.py).
+"""
 from __future__ import annotations
 
 import ast
@@ -146,9 +148,11 @@ def test_the_processes_of_a_run_share_one_build_and_a_killed_builder_holds_nobod
 
     lock = run_folder("worlds") / "killed.lock"
     holder = subprocess.Popen([sys.executable, "-c", _KILLED_BUILDER, str(REPO), str(lock)], stdout=subprocess.PIPE, text=True)
-    assert holder.stdout.readline().strip() == "holding"
-    holder.kill()
-    holder.communicate(timeout=60)
+    try:
+        assert holder.stdout.readline().strip() == "holding"
+    finally:
+        holder.kill()
+        holder.communicate(timeout=60)
     assert (world("killed", _lay_out) / "nested" / "data.txt").is_file()
 
 
