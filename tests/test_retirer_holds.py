@@ -62,6 +62,33 @@ def test_drive_settlement_releases_a_settled_drive_and_holds_a_live_one(tmp_path
         "a second pass with the same hold set and nothing released writes no pass"
 
 
+def test_drive_settlement_does_not_count_a_durable_verdict_twice(tmp_path, monkeypatch):
+    """A skipped row already written to the durable verdict map is one hold; a fresh skipped
+    row remains one hold, proving the duplicate guard is selective."""
+    from ouroboros import headless
+
+    data = tmp_path / "data"
+    data.mkdir()
+    store_import.ensure_current_store(data)
+    monkeypatch.setattr(server_maintenance, "DATA_DIR", data)
+    monkeypatch.setattr(server_maintenance, "settlement_verdicts",
+                        lambda _root: {"held": {"reason": "task_live"}})
+    empty = {"pruned": [], "errors": [], "cursor": "", "arrivals": []}
+    def headless_report(*args, **kwargs):
+        kwargs["rested"]()
+        return {**empty, "skipped": [{"task_id": "held", "reason": "task_live"}]}
+
+    def direct_report(*args, **kwargs):
+        kwargs["rested"]()
+        return {**empty, "skipped": [{"task_id": "fresh", "reason": "store_busy"}]}
+
+    monkeypatch.setattr(headless, "prune_headless_task_drives", headless_report)
+    monkeypatch.setattr(headless, "prune_task_drives", direct_report)
+    server_maintenance._run_drive_custody_pass()
+    holds = {row["class"]: row["count"] for row in maintenance_jobs.job(data, "drive_settlement")["holds"]}
+    assert holds == {"store_busy": 1, "task_live": 1}
+
+
 # ---- private copies ---------------------------------------------------------------------------------------------
 
 @witness("ouroboros.subagent_worktrees.prune_orphans")

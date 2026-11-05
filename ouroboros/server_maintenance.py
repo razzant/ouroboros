@@ -1260,8 +1260,11 @@ def _run_drive_custody_pass(stop_event: Any = None) -> None:
         holds.note(verdict.get("reason") or "other", task_id)
     for report in reports.values():
         for skipped in report.get("skipped") or ():
+            task_id = skipped.get("task_id")
+            if task_id in (loaded.get("map") or {}):
+                continue  # record_rest already put this drive in the durable map this pass
             if skipped.get("reason") not in ("younger_than_retention", "custody_unchanged"):
-                holds.note(skipped.get("reason"), skipped.get("task_id"))
+                holds.note(skipped.get("reason"), task_id)
     released = sum(len(report.get("pruned") or ()) for report in reports.values())
     errors = [f"{row.get('task_id')}: {row.get('error')}" for report in reports.values() for row in report.get("errors") or ()]
     if "map" in loaded or released or errors:
