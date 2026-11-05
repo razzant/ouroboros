@@ -21,7 +21,6 @@ from tests.test_admission_contention import database_reader
 from tests.test_execution_clock_resume_handover import clock  # noqa: F401
 from tests.test_owner_wait_pool import pool as pool
 
-pytestmark = pytest.mark.serial
 
 
 def _context(root, task, started):

@@ -13,7 +13,6 @@ from supervisor import queue, workspace_preparation as prep
 from tests.test_admission_contention import database_reader
 from tests.test_workspace_preparation import env as env, spy_provisions, _WAIT_SEC
 
-pytestmark = pytest.mark.serial
 _PARENT_ROWS = "parent_task_id=? AND delegation_role='subagent'"
 _LIMITS = {"cap": {"max_children": 1}, "fanout": {"may_fan_out": False}}
 

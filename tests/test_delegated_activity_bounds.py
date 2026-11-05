@@ -16,7 +16,6 @@ from ouroboros.gateways import claudexor_run_events as run_events
 from ouroboros.task_results import write_task_result
 from tests.test_delegated_activity import Daemon, _ctx, _gateway, _harness, _records
 
-pytestmark = pytest.mark.serial
 
 
 class Clock:

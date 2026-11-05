@@ -12,7 +12,6 @@ from ouroboros.gateway.state import _chat_activities_snapshot_safe as _real_cens
 from ouroboros.store_import import ensure_current_store
 from ouroboros.tool_call_log import replay_evidence_for_tasks
 
-pytestmark = pytest.mark.serial
 TS = "2026-10-04T09:00:00Z"
 
 

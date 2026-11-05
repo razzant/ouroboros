@@ -10,7 +10,6 @@ from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx
 from tests.test_batch4_repair_compositions import _running
 from tests.test_restart_retention import _pool_events, _restart_door
 
-pytestmark = pytest.mark.serial
 
 
 def _next_generation(monkeypatch):

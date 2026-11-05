@@ -24,7 +24,6 @@ from tests.test_presence_contact_wait import start
 from tests.test_presence_owner_contact import contact_runtime as _contact_runtime, focus  # noqa: F401
 
 contact_runtime = _contact_runtime
-pytestmark = pytest.mark.serial
 
 ANSWER = "Checked twelve sources; the card and the HTML page are both delivered."
 FORCED = "Best answer at the limit: the sources read so far are listed; the rest is unchecked."

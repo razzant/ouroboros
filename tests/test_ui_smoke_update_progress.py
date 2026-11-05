@@ -373,7 +373,6 @@ def test_update_indicator_failure_closes_on_its_notice_and_success_stays_in_the_
             browser.close()
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize('failed_stage', ['preflight', 'apply'])
 def test_definite_failed_request_releases_local_phase(direct_server, failed_stage):

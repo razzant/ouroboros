@@ -9,7 +9,6 @@ import pytest
 from tests._budget_pause_exact_helpers import _install_queue
 from tests.test_batch4_repair_compositions import _running
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("name,args", [

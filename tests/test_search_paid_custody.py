@@ -7,7 +7,6 @@ from ouroboros import net_transport, usage_accounting as ua, usage_ledger as led
 from ouroboros.tools import search
 from tests._usage_store_testing import ledger_rows, request, root as root
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("settlement_fails", [False, True])

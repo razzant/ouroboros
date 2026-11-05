@@ -17,7 +17,6 @@ from starlette.testclient import TestClient
 from ouroboros.gateway.tasks import api_tasks_create
 from ouroboros.task_results import load_task_result
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

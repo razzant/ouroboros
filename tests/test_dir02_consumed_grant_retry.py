@@ -19,7 +19,6 @@ from tests.test_resume_handover import _stop_boot
 from tests.test_swarm_host_admission import host as host  # pytest fixture export
 from tests.test_worker_crash_retry import _make_worker
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("return_first", [False, True],

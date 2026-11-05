@@ -17,7 +17,6 @@ from ouroboros.tools.registry import ToolContext
 from tests.test_reference_book_balance import _registry
 from tests.test_review_change_end_to_end import GOAL, SCOPE, _brief_text, staged_body  # noqa: F401 -- the fixture
 
-pytestmark = pytest.mark.serial  # real git subprocesses
 
 OFFICIAL = "https://github.com/razzant/ouroboros.git"
 

@@ -50,7 +50,6 @@ def refuse_long_pytest_launches(monkeypatch, limit=WINDOWS_COMMAND_LINE):
     return accepted
 
 
-@pytest.mark.serial
 def test_selected_cli_skips_unrelated_collection_and_records_both_lanes(tmp_path, monkeypatch, capsys):
     spec = importlib.util.spec_from_file_location("selected_cli", Path(__file__).resolve().parents[1] / "scripts/run_tests.py")
     cli = importlib.util.module_from_spec(spec)
@@ -93,7 +92,6 @@ def test_selected_cli_skips_unrelated_collection_and_records_both_lanes(tmp_path
     assert node == [True, True]
 
 
-@pytest.mark.serial
 def test_selected_cli_runs_a_changed_test_modules_importers_and_only_selects_opt_in_ones(tmp_path, monkeypatch, capsys):
     """Selection names modules: an importer whose only test is in an excluded lane is scope, not execution."""
     spec = importlib.util.spec_from_file_location("selected_cli", Path(__file__).resolve().parents[1] / "scripts/run_tests.py")
@@ -132,7 +130,6 @@ def test_selected_cli_runs_a_changed_test_modules_importers_and_only_selects_opt
     assert "selected: 4/5 Python modules" in capsys.readouterr().out
 
 
-@pytest.mark.serial
 def test_selected_cli_starts_pytest_with_a_scope_longer_than_one_windows_command_line(tmp_path, monkeypatch, capsys):
     """Windows CI refused the post-merge run before pytest started: 662 ``--select-test`` options made a
     command line past 32,767 characters (WinError 206). The scope now travels in the run's inventory plugin, off
@@ -197,7 +194,6 @@ def test_selected_cli_starts_pytest_with_a_scope_longer_than_one_windows_command
     assert SELECT not in capsys.readouterr().out  # the command the CLI prints no longer lists the scope
 
 
-@pytest.mark.serial
 def test_selected_cli_runs_where_the_evidence_directory_and_a_module_spell_template_fields(tmp_path, monkeypatch):
     """``--evidence-dir`` is the caller's path and the scope is the selection's: spelling a field of either plugin's
     template (``TEMPLATE_FIELDS``) changes neither, so the worker probe and the inventory plugin the run writes
@@ -235,7 +231,6 @@ def test_selected_cli_runs_where_the_evidence_directory_and_a_module_spell_templ
     assert (evidence / "ci-evidence-dir").read_text(encoding="utf-8") == str((evidence / "serial").resolve())
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name == "nt", reason="the fixture links the real package; Windows symlinks need privileges")
 def test_cli_wrapper_owns_a_selected_run_and_keeps_its_full_inventory(tmp_path):
     """The real `python scripts/run_tests.py --selected` path: safe_test owns it, CI's REQUIRE

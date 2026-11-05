@@ -35,7 +35,7 @@ from tests._worlds import clone, run_folder
 REPO = pathlib.Path(__file__).resolve().parents[1]
 CHILD_TIMEOUT_SEC = 900  # a transport bound for one child, not a judgment about the boot
 # The stand's one path is the host resource; a build answers to ``child``'s bound, so the per-test timer leaves fixtures alone.
-STAND_MARKS = [pytest.mark.serial, pytest.mark.timeout(func_only=True)]
+STAND_MARKS = [pytest.mark.timeout(func_only=True)]
 
 
 def child(module: str, args: list, env: Dict[str, str], log: pathlib.Path) -> None:

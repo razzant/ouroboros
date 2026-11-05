@@ -16,7 +16,6 @@ from tests._review_session_route_shared import (
 )
 
 _owned_gateway_uses_each_test_transport = _transport_fixture
-pytestmark = pytest.mark.serial
 SPLIT = {"total_tokens": 20488, "cache_read_tokens": 12738, "cache_write_tokens": 7746}
 
 

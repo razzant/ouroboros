@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import types
 
-import pytest
 
 from ouroboros import cancel_intents as ci
 from ouroboros.task_results import STATUS_COMPLETED, STATUS_RUNNING, load_task_result, write_task_result
@@ -42,7 +41,6 @@ def _replayed(qenv, monkeypatch):
     return sent
 
 
-@pytest.mark.serial
 def test_completion_that_wins_the_custody_window_withdraws_the_provisional_salvage(qenv, monkeypatch):
     from supervisor import terminal_delivery as td
 
@@ -69,7 +67,6 @@ def test_completion_that_wins_the_custody_window_withdraws_the_provisional_salva
     assert texts == ["Hello, the real answer."], "only the kept answer is ever sent, never a 'was stopped' row"
 
 
-@pytest.mark.serial
 def test_a_stop_that_wins_keeps_its_salvage_owed(qenv, monkeypatch):
     """Control: no completion in the window, so the cancelled salvage is the owed answer."""
     from supervisor import terminal_delivery as td

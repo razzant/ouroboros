@@ -19,7 +19,6 @@ from tests.test_session_input_events import (
 from tests.test_review_session_continuation import _engine, record_legacy_successor
 from tests._usage_store_testing import ledger_rows
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture(autouse=True)

@@ -14,7 +14,7 @@ import pytest
 from ouroboros.test_evidence import diagnostic_directory
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 SETUP_WINDOW = (980, 752)
 PHONE = (390, 844)

@@ -15,7 +15,6 @@ from ouroboros.task_results import load_task_result, write_task_result
 from scripts import reconcile_openrouter_cost as command
 from tests._store_shared import release_store_handles
 
-pytestmark = pytest.mark.serial  # Shared queue/capture globals and subprocess export consumers.
 TARGET = {"provider": "openrouter", "base_url": "https://router.example/api/v1", "api_key": "test-original-key"}
 
 

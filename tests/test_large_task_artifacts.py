@@ -604,7 +604,6 @@ def test_immutable_child_copy_back_retains_name_bytes_and_original_identity(tmp_
             record["path"], immutable=True, expected=record)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("method", ["GET", "HEAD"])
 @pytest.mark.parametrize("registered", [True, False])
 def test_file_verification_does_not_run_on_the_asgi_loop(tmp_path, monkeypatch, method, registered):

@@ -23,7 +23,7 @@ from tests.system_e2e.harness import (
 )
 
 wait_clone = clone_fixture
-pytestmark = [pytest.mark.serial, pytest.mark.browser]
+pytestmark = [pytest.mark.browser]
 
 
 def _controls_evidence(tmp_path, name):

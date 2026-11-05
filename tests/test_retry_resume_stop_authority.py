@@ -22,7 +22,6 @@ from tests.test_retry_pause_identity import (
 )
 from tests.test_swarm_host_admission import host as host
 
-pytestmark = pytest.mark.serial
 
 
 class Parked(BaseException):

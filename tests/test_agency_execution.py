@@ -9,7 +9,6 @@ import pytest
 from ouroboros import config, safety
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-pytestmark = pytest.mark.serial
 
 
 def context(tmp_path, monkeypatch, mode, coverage):

@@ -299,7 +299,6 @@ def test_iter_jsonl_chain_objects_chronological(tmp_path):
     assert [row["i"] for row in iter_jsonl_chain_objects(path)] == [0, 1, 2]
 
 
-@pytest.mark.serial
 def test_launcher_stdout_copy_is_size_capped(monkeypatch, tmp_path):
     """CPL4-C5: the launcher drains a real server pipe into a rotated agent_stdout.log.
 

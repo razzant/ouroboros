@@ -56,7 +56,6 @@ RESUMED = "[PRESENCE CONVERSATION RESUMED]"
 SETTLED = "[Review settled] The reviewers finished"
 LEFT = "An addressed message reached you while the reviewers ran"
 KEY = "telegram:bot-1:room-1:topic-1"
-pytestmark = pytest.mark.serial
 
 
 def call(name, arguments, identifier):

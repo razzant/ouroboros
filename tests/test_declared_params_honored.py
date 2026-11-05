@@ -203,7 +203,6 @@ def test_structural_pagination_beyond_page_size_is_real_continuation(tmp_path):
 # D7: a payload item key the tool does NOT read is refused, never dropped
 # ---------------------------------------------------------------------------
 
-@pytest.mark.serial
 def test_write_file_batch_refuses_a_per_item_root_it_cannot_honor(tmp_path):
     """Live defect: write_file(files=[{path, content, root}]) reads only path and
     content, binding every item to the ONE top-level root, so a per-item
@@ -219,7 +218,6 @@ def test_write_file_batch_refuses_a_per_item_root_it_cannot_honor(tmp_path):
     assert not (ctx.drive_root / "scratch.py").exists(), "nor on the drive it named"
 
 
-@pytest.mark.serial
 def test_write_file_batch_item_key_refusal_aborts_the_whole_batch(tmp_path):
     """All-or-nothing, like edit_batch's count mismatch: a clean sibling item is
     not written when another item declares a target this tool cannot honor."""
@@ -233,7 +231,6 @@ def test_write_file_batch_item_key_refusal_aborts_the_whole_batch(tmp_path):
     assert not (ctx.repo_dir / "stray.txt").exists(), out
 
 
-@pytest.mark.serial
 def test_edit_batch_refuses_a_per_item_root_it_cannot_honor(tmp_path):
     """The sibling surface shares the class: edit items declare
     {path, old_str, new_str, count} and one root per call, so a per-item root
@@ -297,7 +294,6 @@ def test_published_item_schema_is_a_copy_the_caller_cannot_corrupt():
     assert item_properties() == {"path": {"type": "string"}, "content": {"type": "string"}}
 
 
-@pytest.mark.serial
 def test_non_dict_batch_item_refuses_the_whole_call_on_every_root(tmp_path):
     """Same class as the per-item root, on the item's own shape rather than its
     keys: a `files` entry that is not an object was silently DROPPED by the
@@ -319,7 +315,6 @@ def test_non_dict_batch_item_refuses_the_whole_call_on_every_root(tmp_path):
     assert not (ctx.drive_root / "kept.txt").exists()
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("root", ["active_workspace", "system_repo", "runtime_data",
                                  "task_drive", "artifact_store", "user_files", "skill_payload"])
 def test_declared_batch_items_keep_write_and_append_on_every_root(tmp_path, monkeypatch, root):
@@ -347,7 +342,6 @@ def test_declared_batch_items_keep_write_and_append_on_every_root(tmp_path, monk
     assert "first second" in _read_file(ctx, "b.txt", root=root, **selectors)
 
 
-@pytest.mark.serial
 def test_declared_edit_batch_items_keep_count_and_sequential_edits(tmp_path):
     ctx = _ctx(tmp_path)
     target = ctx.repo_dir / "edit.txt"
@@ -363,7 +357,6 @@ def test_declared_edit_batch_items_keep_count_and_sequential_edits(tmp_path):
     assert "edit 1.optional=None ignored" in result
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("tool", ["write_file", "edit_batch"])
 def test_batch_feedback_reports_every_problem_once_before_any_effect(tmp_path, monkeypatch, tool):
     ctx = _ctx(tmp_path)
@@ -389,7 +382,6 @@ def test_batch_feedback_reports_every_problem_once_before_any_effect(tmp_path, m
     assert target.read_text(encoding="utf-8") == "after\n"
 
 
-@pytest.mark.serial
 def test_write_file_registry_refuses_json_string_batch_once_and_keeps_list_valid(tmp_path, monkeypatch):
     from ouroboros import safety
 
@@ -410,7 +402,6 @@ def test_write_file_registry_refuses_json_string_batch_once_and_keeps_list_valid
     assert (ctx.drive_root / "batch.txt").read_text(encoding="utf-8") == files[0]["content"]
 
 
-@pytest.mark.serial
 def test_harmless_item_note_preserves_inner_write_refusal(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")

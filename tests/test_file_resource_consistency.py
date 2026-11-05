@@ -11,7 +11,6 @@ from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.tool_access import build_resolved_resource_binding, resource_root_path
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize('location,relative', [

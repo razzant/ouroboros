@@ -24,7 +24,6 @@ from tests._silence_reaper_support import historical_timeout_retry
 from tests.test_retry_pause_identity import _assign, _successors, reaper as reaper
 from tests.test_swarm_host_admission import host as host
 
-pytestmark = pytest.mark.serial
 
 
 def _project_retry(host, tmp_path, monkeypatch, clock, reaper):

@@ -21,7 +21,6 @@ from tests.test_swarm_host_admission import host  # noqa: F401
 from tests._store_shared import delete_result, result_exists, unreadable_result
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

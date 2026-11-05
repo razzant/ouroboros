@@ -16,7 +16,6 @@ from tests.test_preflight_node import requires_node
 from tests.test_preflight_receipts import _git, _tiny_repo
 from tests.test_run_tests_script import run_tests as run_tests
 
-pytestmark = pytest.mark.serial
 REPO = Path(__file__).resolve().parents[1]
 SHORT_TEMP = pytest.mark.skipif(sys.platform != "darwin" and not sys.platform.startswith("linux"),
                                 reason="the short AF_UNIX temp-root default is macOS and Linux")

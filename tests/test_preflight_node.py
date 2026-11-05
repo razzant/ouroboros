@@ -26,7 +26,6 @@ import pytest
 from ouroboros import preflight_node as pn
 
 # Spawns real node/git subprocesses and exercises pass-owned process cleanup.
-pytestmark = pytest.mark.serial
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 

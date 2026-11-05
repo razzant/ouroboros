@@ -43,7 +43,6 @@ def _run(code: str, tmp_path: pathlib.Path, *, script: bool = False) -> subproce
     return subprocess.run(argv, cwd=REPO, env=env, capture_output=True, text=True, timeout=180)
 
 
-@pytest.mark.serial
 def test_server_bootstrap_writes_server_log_through_redacting_handlers(tmp_path):
     logs = tmp_path / "logs"
     completed = _run(f"""
@@ -73,7 +72,6 @@ def test_server_bootstrap_writes_server_log_through_redacting_handlers(tmp_path)
     assert "probe" in server_log and "a" * 64 not in server_log
 
 
-@pytest.mark.serial
 def test_httpx_logger_quieted(tmp_path):
     """httpx logs each request URL at INFO; the bootstrap keeps it at WARNING."""
     completed = _run("""
@@ -87,7 +85,6 @@ def test_httpx_logger_quieted(tmp_path):
     assert all(int(level) >= logging.WARNING for level in levels)
 
 
-@pytest.mark.serial
 def test_uncaught_thread_exception_is_one_log_record_not_a_raw_print(tmp_path):
     logs = tmp_path / "logs"
     completed = _run(f"""
@@ -118,7 +115,6 @@ def test_uncaught_thread_exception_is_one_log_record_not_a_raw_print(tmp_path):
     assert completed.stderr.count("ValueError: thread-boom") == 1
 
 
-@pytest.mark.serial
 def test_uncaught_main_thread_exception_is_logged_and_still_exits_nonzero(tmp_path):
     completed = _run("""
         from ouroboros.process_logging import configure_process_logging
@@ -130,7 +126,6 @@ def test_uncaught_main_thread_exception_is_logged_and_still_exits_nonzero(tmp_pa
     assert completed.stderr.count("RuntimeError: main-boom") == 1
 
 
-@pytest.mark.serial
 def test_a_main_thread_hook_installed_earlier_still_runs_after_the_record(tmp_path):
     completed = _run("""
         import sys
@@ -146,7 +141,6 @@ def test_a_main_thread_hook_installed_earlier_still_runs_after_the_record(tmp_pa
     assert completed.stderr.count("RuntimeError: main-chained") == 1
 
 
-@pytest.mark.serial
 def test_a_hook_installed_earlier_still_runs_after_the_record(tmp_path):
     completed = _run("""
         import threading
@@ -168,7 +162,6 @@ def test_a_hook_installed_earlier_still_runs_after_the_record(tmp_path):
     assert "Uncaught exception in thread chained-thread" in completed.stderr
 
 
-@pytest.mark.serial
 def test_without_any_handler_the_interpreter_print_stays_in_charge(tmp_path):
     completed = _run("""
         import threading
@@ -187,7 +180,6 @@ def test_without_any_handler_the_interpreter_print_stays_in_charge(tmp_path):
     assert "ValueError: unconfigured" in completed.stderr
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("start_method", [
     "spawn",
     pytest.param("forkserver", marks=pytest.mark.skipif(sys.platform == "win32", reason="forkserver is POSIX-only")),
@@ -312,7 +304,6 @@ def test_the_launcher_routes_its_uncaught_exceptions_through_the_shared_hooks():
     assert imports["copy_capped_output"] in start_agent.body  # Unguarded, before the server is spawned.
 
 
-@pytest.mark.serial
 def test_the_module_loads_only_the_standard_library():
     """The launcher drains and records a server whose own imports are broken (the crash
     output agent_stdout.log exists for), so nothing project-owned loads with the copier."""
@@ -326,7 +317,6 @@ def test_the_module_loads_only_the_standard_library():
     assert completed.stdout.strip() == "False", completed.stderr[-2000:]
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("phase", ["init_baseline", "extension_reload"])
 def test_a_nonfatal_worker_startup_failure_keeps_its_exception(worker, monkeypatch, caplog, phase):
     """Both non-fatal startup phases of the real worker loop hand the caught exception

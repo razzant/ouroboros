@@ -12,7 +12,6 @@ from tests.provider_release_floor import required_canary_ids
 from tests.test_ci_diagnostic_workflows import CANARY, ROOT, _run_shell, _steps, _workflow
 
 
-@pytest.mark.serial
 def test_real_canary_collection_is_nonempty_disjoint_and_complete():
     # Collection executes pytest's real parametrization and marker selection, not a
     # second Python filter. Fixtures (and therefore provider calls) never execute.

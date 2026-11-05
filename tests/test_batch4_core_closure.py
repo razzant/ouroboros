@@ -15,7 +15,6 @@ from tests._usage_store_testing import ledger_rows
 from tests.test_owner_continue import NONCE, _interrupted
 from tests._store_shared import seed_result
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])

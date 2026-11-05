@@ -24,7 +24,6 @@ from tests.test_retry_pause_identity import _assign, _fresh_plan, _loop_once
 from tests.test_retry_pause_identity import reaper as reaper  # pytest fixture export
 from tests.test_swarm_host_admission import host as host  # pytest fixture export
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("transition", ["saved_restart", "owner_wait"])

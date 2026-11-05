@@ -46,7 +46,6 @@ from tests.test_presence_owner_stop import FOLLOW_UP, _follow_up_arrives, _holds
 from tests.test_presence_owner_stop import owner_stop as owner_stop
 
 contact_runtime = _contact_runtime
-pytestmark = pytest.mark.serial
 
 SECTION = "## Late review feedback (host)"
 WORDS = [f"LATE-FINDING-{index:02d}" for index in range(15)]  # more than the twelve an earlier view cut

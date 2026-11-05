@@ -31,7 +31,6 @@ from tests.test_imagegen_tool import PNG, _summary, configured as configured, ct
 from tests.test_imagegen_wait_control import _setup
 
 # Real ports and abandoned executor threads require the serial lane.
-pytestmark = pytest.mark.serial
 
 _REAL_SEND = httpx.HTTPTransport.handle_request  # taken before the autouse no-network patch
 _CLAMP_SEC = 15  # the near-deadline executor bound every timed-out call here meets

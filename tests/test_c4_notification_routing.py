@@ -18,7 +18,6 @@ import pytest
 import ouroboros.skill_lifecycle_queue as q
 
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture(autouse=True)

@@ -157,8 +157,8 @@ def test_the_darwin_reader_answers_nothing_off_macos(monkeypatch):
 
 
 def _native(test):
-    """Real processes on this Mac (serial lane: real subprocesses)."""
-    return pytest.mark.serial(pytest.mark.skipif(sys.platform != "darwin", reason="native macOS sysctl ABI")(test))
+    """Real processes on this Mac, each test's own."""
+    return pytest.mark.skipif(sys.platform != "darwin", reason="native macOS sysctl ABI")(test)
 
 
 def _spawn(argv, **kwargs):

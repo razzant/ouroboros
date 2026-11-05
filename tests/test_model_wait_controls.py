@@ -545,7 +545,6 @@ def test_pre_round_terminal_order_keeps_cost_after_stop_and_deadline(monkeypatch
     assert result_value_actual == result_value and calls == expected
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("first", ["web", "host"])
 @pytest.mark.parametrize("persist_role", [False, True])
 def test_web_and_host_wait_decisions_share_saved_replay_and_attempt_fences(live_wait, monkeypatch, first, persist_role):
@@ -590,7 +589,6 @@ def test_web_and_host_wait_decisions_share_saved_replay_and_attempt_fences(live_
             assert saved_bytes is None
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("declared", [True, False])
 @pytest.mark.parametrize("persist_role", [True, False])
 def test_a_main_model_saved_on_a_wait_card_is_recorded_like_a_settings_save(live_wait, monkeypatch, declared,
@@ -644,7 +642,6 @@ def test_a_main_model_saved_on_a_wait_card_is_recorded_like_a_settings_save(live
         assert "openrouter/old-main" in text and MODEL in text and "declared" not in text, text
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("surface", ["web", "host"])
 def test_wait_decision_preserves_existing_settings_timeout_receipt(live_wait, monkeypatch, surface):
     import threading

@@ -19,7 +19,6 @@ MCP = "synthetic-mcp-" + "fedcba9876543210" * 6 + "-END"
 ADDED = "sk-or-v1-SYNTHETIC-added-" + "13579bdf" * 8 + "-END"
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data, engine):
@@ -222,7 +221,6 @@ def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data
             browser.close()
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_settings_paints_and_saves_while_the_installed_skill_list_is_held(direct_server_with_data, engine):

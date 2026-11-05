@@ -38,7 +38,7 @@ from tests.working_checkpoint_kill_host import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-pytestmark = [pytest.mark.serial, pytest.mark.skipif(
+pytestmark = [pytest.mark.skipif(
     os.name != "posix", reason="This fixture qualifies a POSIX SIGKILL of the child's process group only")]
 
 

@@ -14,7 +14,6 @@ from ouroboros import workspace_executor as we
 from ouroboros.tools import shell_process, skill_exec
 from tests.test_task_scope_lifetime import _alive, _bound, _end_pids, _gone
 
-pytestmark = pytest.mark.serial
 
 
 def _launch(kind, root, *, on_spawn=None):

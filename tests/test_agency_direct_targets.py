@@ -15,7 +15,6 @@ from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.tools.shell_guards import direct_utility_target_rows
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

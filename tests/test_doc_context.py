@@ -441,7 +441,6 @@ def test_low_mode_external_workspace_gets_both_book_navigation_views():
     assert "## DEVELOPMENT.md (navigation map)" in external
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("mode", ["max", "low", "nano"])
 def test_promoted_self_body_requirement_reaches_the_contract_and_context_without_becoming_project_state(
     promotion_host, tmp_path, monkeypatch, mode,

@@ -56,7 +56,6 @@ def test_schedule_readonly_choice_survives_custom_projection(tmp_path, constrain
     assert catalog.schema_binding("schedule_subagent").schema() == function["parameters"]
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("name,arguments,invalid_field,invalid_value", [
     ("schedule_subagent", {"subagent_id": "actor-1", "objective": "Inspect interfaces",
                           "expected_output": "Findings", "role": "", "write_surface": "read_only"},

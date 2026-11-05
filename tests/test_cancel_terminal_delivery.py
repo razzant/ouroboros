@@ -443,7 +443,6 @@ def test_fast_settled_reentry_delivers_idempotently_and_settles_with_the_claim(
     )
 
 
-@pytest.mark.serial
 def test_one_cancel_leaves_exactly_one_salvaged_paragraph_in_the_chat(tmp_path, monkeypatch):
     """Owner item spam L: the stop receipt OWNS the preserved paragraph.
 
@@ -501,7 +500,6 @@ def test_one_cancel_leaves_exactly_one_salvaged_paragraph_in_the_chat(tmp_path, 
     assert row["text"].startswith("Stopped. Root task stopped-one.")
 
 
-@pytest.mark.serial
 def test_cascade_receipt_dedups_the_actual_destination_and_preserves_main(qenv, monkeypatch):
     """A settled root borrows child lineage, then send-time binding wins.
 
@@ -579,7 +577,6 @@ def test_cascade_receipt_dedups_the_actual_destination_and_preserves_main(qenv, 
     assert "Open the Project" not in summary["text"], "the row's Project reference is its door"
 
 
-@pytest.mark.serial
 def test_unsent_receipts_and_new_stop_episodes_do_not_inherit_delivery(tmp_path, monkeypatch):
     """An origin address, failed send and duplicate skip prove no new delivery."""
     from ouroboros.project_dialogue import _completion_excerpt, SALVAGE_EXCERPT_LABEL

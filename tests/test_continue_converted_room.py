@@ -22,7 +22,6 @@ import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue
 
-pytestmark = pytest.mark.serial  # installs the process-wide queue/state roots
 
 NONCE = "press-0001-abcdef"
 TEXT = "Write the Friday report"

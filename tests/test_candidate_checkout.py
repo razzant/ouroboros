@@ -9,7 +9,6 @@ import pytest
 
 from tests import candidate_checkout as candidate
 
-pytestmark = pytest.mark.serial
 
 
 def test_ready_flag_does_not_hide_failed_supervisor():

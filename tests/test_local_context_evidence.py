@@ -421,7 +421,6 @@ def test_autostart_guard_admits_only_a_configured_source(offline_manager, monkey
 
 
 
-@pytest.mark.serial
 def test_actual_pooled_worker_reads_the_serving_instance_its_server_process_owns(
     offline_manager, monkeypatch, tmp_path,
 ):
@@ -636,7 +635,6 @@ def test_actual_pooled_worker_reads_the_serving_instance_its_server_process_owns
         stop_socket_sharer()
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("worker", [False, True], ids=["server-owner", "pooled-worker"])
 def test_owned_local_health_never_consults_ambient_proxy_configuration(monkeypatch, worker):
     import json

@@ -15,7 +15,6 @@ from ouroboros.tool_access import resource_root_path
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

@@ -186,7 +186,6 @@ def test_the_owner_restart_kill_closes_the_attempt_it_interrupts(pool):
     assert binding["execution_consumed_sec"] == stored["execution_consumed"]["sec"]
 
 
-@pytest.mark.serial  # a real worker process is killed (tests/_cancel_intents_shared._LiveProc)
 def test_an_owner_restart_cancel_that_wins_the_race_closes_the_attempt(pool):
     """The Restart door records its ``owner_restart`` intent before ``kill_workers``; cancellation
     custody can win that race, kill the worker and release the RUNNING row itself

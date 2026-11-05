@@ -21,7 +21,6 @@ from tests.test_retry_pause_identity import (  # noqa: F401
 from tests.test_swarm_host_admission import host  # noqa: F401
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 
 def _running_actor(host, monkeypatch, clock, reaper, actor):  # noqa: F811

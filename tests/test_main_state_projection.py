@@ -453,7 +453,6 @@ def _settle_owner_fence(root, root_task_id):
     set_fence_state(root, root_task_id, fence_id=fence["fence_id"], state=FENCE_PAUSED)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("settled", [False, True])
 @pytest.mark.parametrize("returning", [False, True])
 @pytest.mark.parametrize("cut", ["after_cas", "after_fence"])
@@ -503,7 +502,6 @@ def test_an_interrupted_owner_resume_of_a_project_member_offers_its_existing_res
     assert sent[0]["_project_admission"] == basis, "with the Project basis its admission froze"
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("change", ["newer_pause", "other_attempt", "revoked", "owner_pause"])
 def test_main_offers_no_member_resume_beyond_its_own_interrupted_grant(host, tmp_path, monkeypatch, change):  # noqa: F811
     from ouroboros import budget_pause
@@ -539,7 +537,6 @@ def test_main_offers_no_member_resume_beyond_its_own_interrupted_grant(host, tmp
     assert not sent
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("settled", [False, True])
 def test_an_unreadable_root_refuses_its_members_resume_at_the_action(
     host, tmp_path, monkeypatch, settled,  # noqa: F811

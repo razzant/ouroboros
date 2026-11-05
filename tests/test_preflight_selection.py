@@ -10,7 +10,6 @@ from tests.test_preflight_runner import _make_repo, _commit_all
 from tests.test_preflight_receipts import receipt_python  # noqa: F401 -- dependency-only lane fixture
 from tests.test_selected_test_cli import TEMPLATE_FIELDS, plugin_values, refuse_long_pytest_launches
 
-pytestmark = pytest.mark.serial  # finite nested pytest controllers; one at a time
 
 
 @pytest.fixture

@@ -12,7 +12,6 @@ pytest_plugins = ("tests.test_ui_smoke_playwright",)
 
 
 @pytest.mark.ui_browser
-@pytest.mark.serial
 def test_accounts_partial_quota_cards(direct_server_with_data):
     from playwright.sync_api import sync_playwright
 

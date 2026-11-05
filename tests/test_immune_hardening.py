@@ -158,7 +158,6 @@ class TestCentralWorktreeInvalidation:
         registry._invalidate_advisory_if_worktree_changed("run_command", " M a.py")
         assert calls["invalidate"] == 1
 
-    @pytest.mark.serial
     def test_worktree_snapshot_reads_real_git_status(self, tmp_path):
         # The test above stubs _worktree_status_snapshot, so it cannot see the
         # snapshot itself failing. This one drives the real method against a real
@@ -220,7 +219,6 @@ class TestCentralWorktreeInvalidation:
         assert (tmp_path / "changed.txt").read_text() == "changed"
         assert len(invalidations) == 1
 
-    @pytest.mark.serial
     def test_run_cmd_accepts_and_honors_timeout(self, tmp_path):
         import subprocess
         import sys

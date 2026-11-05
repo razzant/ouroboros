@@ -16,7 +16,6 @@ import pytest
 from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.tools.registry import ToolContext
 
-pytestmark = pytest.mark.serial
 
 DUE = "2000-01-01T00:00:00+00:00"
 

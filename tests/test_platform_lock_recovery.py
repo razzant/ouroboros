@@ -43,7 +43,6 @@ def test_unproven_or_unrequested_owner_recovery_keeps_age_grace(tmp_path, monkey
     platform.release_exclusive_file_lock(lock, fd)
 
 
-@pytest.mark.serial
 def test_fresh_lock_of_reaped_process_is_recovered_within_caller_budget(tmp_path):
     child = subprocess.Popen([sys.executable, "-c", "pass"])
     child.wait(timeout=10)

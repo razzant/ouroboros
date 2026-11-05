@@ -16,7 +16,6 @@ import pytest
 
 from tests.test_current_stop_readers import _held_tree
 
-pytestmark = pytest.mark.serial  # the queue, its workers and the supervisor seams are module state
 
 
 def _sleep(call_id, **arguments):

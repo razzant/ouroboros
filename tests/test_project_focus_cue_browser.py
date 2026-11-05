@@ -22,7 +22,7 @@ from tests._work_projection_shared import work_fields
 from tests.test_design_system_gate_browser import rest
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 W, H, DPR = 1165, 851, 2
 PROJECTS = [dict(id=pid, name=name, chat_id=chat, lifecycle='active', visible_revision=0) for pid, name, chat in (

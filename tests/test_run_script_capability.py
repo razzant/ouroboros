@@ -12,7 +12,6 @@ from ouroboros.artifacts import registered_task_artifact
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
 
-pytestmark = pytest.mark.serial
 
 _PYTHON = "import sys\nfrom pathlib import Path\nprint(*sys.argv[1:], sep='\\n')\nwith Path('once.txt').open('a', newline='') as f: f.write('once\\n')\n"
 _SCRIPTS = {

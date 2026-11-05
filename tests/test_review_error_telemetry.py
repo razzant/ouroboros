@@ -18,7 +18,6 @@ import pytest
 from ouroboros import triad_review, utils
 from ouroboros.review_records import ReviewActorRecord, ReviewRequest, ReviewSlot
 
-pytestmark = pytest.mark.serial
 
 
 def _ctx(root, **extra):

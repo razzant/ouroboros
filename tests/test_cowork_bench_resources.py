@@ -57,7 +57,6 @@ def recorded(root: pathlib.Path) -> list[str]:
 
 
 @pytest.mark.parametrize("prefix", [("run",), ("create",), ("container", "run"), ("container", "create")])
-@pytest.mark.serial
 def test_every_container_creation_has_limits_and_label(envelope, prefix):
     env, root = envelope
     tail = ["--rm", "image:fixed", "sh", "-c", "printf 'quoted value'"]
@@ -75,7 +74,6 @@ def test_every_container_creation_has_limits_and_label(envelope, prefix):
     assert (root / "bash_env").read_text(encoding="utf-8") == ""
 
 
-@pytest.mark.serial
 def test_discovery_survives_official_path_reset(envelope):
     env, root = envelope
     # These are the upstream runner's actual PATH and DOCKER assignments.
@@ -96,7 +94,6 @@ def test_discovery_survives_official_path_reset(envelope):
     ("network", "rm", "net-1"),
     ("container", "inspect", "agent-1"),
 ])
-@pytest.mark.serial
 def test_noncreation_preserves_exact_arguments_exit_and_stdout(envelope, args):
     env, root = envelope
     env["FAKE_DOCKER_EXIT"] = "7"
@@ -108,7 +105,6 @@ def test_noncreation_preserves_exact_arguments_exit_and_stdout(envelope, args):
     assert recorded(root) == list(args)
 
 
-@pytest.mark.serial
 def test_network_is_labeled_without_container_flags(envelope):
     env, root = envelope
     result = invoke(env, "network", "create", "network with spaces")
@@ -120,7 +116,6 @@ def test_network_is_labeled_without_container_flags(envelope):
 
 
 @pytest.mark.parametrize("prefix", [("run",), ("network", "create")])
-@pytest.mark.serial
 def test_stop_file_refuses_creations_and_preserves_first_reason(envelope, prefix):
     env, root = envelope
     stop = root / "resource_stop"
@@ -132,7 +127,6 @@ def test_stop_file_refuses_creations_and_preserves_first_reason(envelope, prefix
     assert not (root / "argv").exists()
 
 
-@pytest.mark.serial
 def test_low_disk_refuses_before_docker_and_keeps_teardown_available(envelope):
     env, root = envelope
     df = pathlib.Path(env["COWORK_REAL_DOCKER"]).parent / "df"
@@ -177,7 +171,6 @@ EVAL_EXEC = ("exec", "eval-4242-0a1b2c3d", "/opt/venv/bin/python3", "-u", "/work
              "--task_dir", "task one", "--phase", "eval")
 
 
-@pytest.mark.serial
 def test_agent_exec_records_its_exact_task_and_keeps_argv(envelope):
     env, root = envelope
     assert invoke(env, *AGENT_EXEC).returncode == 0
@@ -192,7 +185,6 @@ def test_agent_exec_records_its_exact_task_and_keeps_argv(envelope):
     ("agent-4242-0a1b2c3d\n", "0", "present"),
     ("", "1", "unknown"),
 ])
-@pytest.mark.serial
 def test_eval_exec_receives_only_daemon_proven_agent_removal(envelope, listing, exit_code, state):
     env, root = envelope
     env.update(FAKE_DOCKER_PS=listing, FAKE_DOCKER_PS_EXIT=exit_code)
@@ -201,7 +193,6 @@ def test_eval_exec_receives_only_daemon_proven_agent_removal(envelope, listing, 
 
 
 @pytest.mark.parametrize(("name", "recorded_refusal"), [("eval-4242-0a1b2c3d", True), ("pg-4242-0a1b2c3d", False)])
-@pytest.mark.serial
 def test_refused_eval_container_is_recorded_as_before_eval_evidence(envelope, name, recorded_refusal):
     env, root = envelope
     (root / "resource_stop").write_text("campaign_budget_reserve\n", encoding="utf-8")
@@ -214,7 +205,6 @@ def test_refused_eval_container_is_recorded_as_before_eval_evidence(envelope, na
     assert not (root / "argv").exists()
 
 
-@pytest.mark.serial
 def test_evidence_failure_never_blocks_the_runner_command(envelope):
     env, root = envelope
     blocked = root / "not-a-directory"

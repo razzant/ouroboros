@@ -18,7 +18,6 @@ from supervisor.events_budget import budget_hold_fact
 from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx
 from tests.test_restart_retention import _pool_events
 
-pytestmark = pytest.mark.serial
 
 
 def _park(root, workers, reason, *, direct=False, attempt=1):

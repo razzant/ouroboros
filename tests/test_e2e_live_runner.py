@@ -1459,7 +1459,6 @@ def test_ui_client_prefers_the_suite_interface_when_it_has_this_surface(monkeypa
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_stub_sm1_end_to_end_on_a_real_isolated_server(tmp_path):
     """Real server, loopback stub model, no key: the commit lands through the review organ
     (the shared palette plus the release-carrier bump, no skip flags, through the same hermetic

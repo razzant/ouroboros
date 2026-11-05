@@ -30,7 +30,6 @@ from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
 from tests.test_pause_review_completion import direct_commit, paused_env  # noqa: F401
 from tests.test_review_operation_lifetime import TASK, _parent, env, until  # noqa: F401
 
-pytestmark = pytest.mark.serial
 REVIEWER = "commit-reviewer"
 
 

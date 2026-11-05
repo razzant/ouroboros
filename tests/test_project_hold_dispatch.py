@@ -8,7 +8,6 @@ from supervisor import queue, workers
 from tests.test_project_hold_recovery import accepted, restore_unreadable, resume_after_app_stop, worker
 from tests.test_swarm_host_admission import host  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def test_failed_running_mirror_and_stale_pending_snapshot_cannot_replay(host, tmp_path, monkeypatch):  # noqa: F811

@@ -8,7 +8,6 @@ from ouroboros.task_results import load_task_result
 from ouroboros.tools.control_routing import _start_task
 from tests.test_swarm_host_admission import host  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 class Crash(BaseException):

@@ -21,7 +21,6 @@ from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx
 from tests.test_restart_retention import _pool_events, _queued
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 
 def _working_run(root, workers, task_id, *, attempt=1, parent=""):

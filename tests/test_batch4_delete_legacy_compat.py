@@ -29,7 +29,6 @@ from tests.test_g1_followup_policy import (  # noqa: F401
 )
 from tests._store_shared import delete_result, unreadable_result
 
-pytestmark = pytest.mark.serial
 PAST = '2000-01-01T00:00:00+00:00'
 
 

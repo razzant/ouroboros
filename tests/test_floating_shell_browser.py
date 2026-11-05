@@ -13,7 +13,7 @@ from tests.test_room_work_browser import PROJECT, Transport, activity, progress,
 from tests.test_subscription_setup_browser import capture, subscription_ui as subscription_ui
 from tests.test_window_chrome_browser import record
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.fixture(params=["chromium", "webkit"])

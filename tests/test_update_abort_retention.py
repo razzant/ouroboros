@@ -20,7 +20,6 @@ from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx
 from tests.test_restart_retention import _pool_events, _queued
 from tests.test_restart_saved_work import _working_run
 
-pytestmark = pytest.mark.serial
 
 
 class _Process:

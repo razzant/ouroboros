@@ -33,7 +33,7 @@ from tests.system_e2e.harness import (
 from tests._usage_store_testing import ledger_rows
 
 
-pytestmark = [pytest.mark.serial, pytest.mark.browser]
+pytestmark = [pytest.mark.browser]
 _FORM_TASK = "OWNER_WAIT_FORM_A"
 _OTHER_TASK = "OWNER_WAIT_BROWSER_B"
 _OWNER_ANSWER = "Keep the filled form and submit exactly that draft now."

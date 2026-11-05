@@ -14,7 +14,6 @@ import pytest
 
 from ouroboros.tools.registry import ToolContext
 
-pytestmark = pytest.mark.serial
 
 
 def _room_ctx(tmp_path, *, direct=True, with_room=True, workspace=False):

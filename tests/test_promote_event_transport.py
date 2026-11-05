@@ -17,7 +17,6 @@ from tests.test_swarm_host_admission import host  # noqa: F401
 from tests._store_shared import result_signature, seed_result, unreadable_result
 
 
-pytestmark = pytest.mark.serial
 
 
 def _owner_stamp(client_message_id, text="owner text"):

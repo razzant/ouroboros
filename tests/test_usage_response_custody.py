@@ -15,7 +15,6 @@ from tests.test_physical_candidate_capture import (
 )
 from tests.test_llm_claudexor import setup as setup
 
-pytestmark = pytest.mark.serial
 PHASE_HANG_SEC = 30  # only a hang bound: the 3 s it replaced timed cold reservation and fsync (#1687)
 
 

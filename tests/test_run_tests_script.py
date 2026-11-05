@@ -466,7 +466,6 @@ def test_the_documented_command_is_the_script():
         assert "scripts/run_tests.py" in (REPO / doc).read_text(encoding="utf-8"), doc
 
 
-@pytest.mark.serial
 def test_runner_evidence_stays_with_its_controller_across_nested_and_sequential_pytest(tmp_path):
     """Exercise the runner's real argv; inheriting PYTEST_ADDOPTS used to truncate both files."""
     import json

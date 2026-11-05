@@ -32,7 +32,6 @@ import pytest
 from ouroboros import store
 from tests._store_journal_shared import use_journal
 
-pytestmark = pytest.mark.serial  # another interpreter probes the store's locks
 
 _RESET = ("import sqlite3, sys\n"
           "conn = sqlite3.connect(sys.argv[1], isolation_level=None, timeout=0)\n"

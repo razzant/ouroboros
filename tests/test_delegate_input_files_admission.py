@@ -21,7 +21,6 @@ from tests.test_doc_context import _make_env_and_memory
 from tests.test_scheduled_effort_intent import _admit, _restore, runtime  # noqa: F401
 from tests._delegated_transport_shared import _owned_gateway_uses_each_test_transport  # noqa: F401
 
-pytestmark = pytest.mark.serial  # Production state/queue init rebinds module globals.
 BRIEF, BINARY = b"parent brief\n", b"\xff\x00binary\n"
 SELECTION = [{"root": "task_drive", "path": "brief.md"}, {"root": "task_drive", "path": "fixture.bin"}]
 

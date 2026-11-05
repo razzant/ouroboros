@@ -10,7 +10,7 @@ import pytest
 from ouroboros.test_evidence import diagnostic_directory
 from tests.test_update_letter_browser import BOOT, WEB
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.mark.parametrize('tx, headline', [

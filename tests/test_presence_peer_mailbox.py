@@ -20,7 +20,6 @@ from ouroboros.tools.core import _forward_to_worker
 from ouroboros.tools.registry import ToolContext
 from tests.test_presence_runner import _admission, _event, _terminal
 
-pytestmark = pytest.mark.serial
 
 
 def _inline(root, task_id="inline-turn", **changes):

@@ -17,7 +17,6 @@ from tests.test_receptive_commit_review import (  # noqa: F401
 )
 from tests.test_review_no_verdict_retry import ScriptedTests
 
-pytestmark = pytest.mark.serial
 RED = "FAILED tests/test_change.py::test_value"
 FULL = dict(full_tests=True, test_reason="the value's consumers are unresolved")
 

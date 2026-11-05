@@ -16,7 +16,6 @@ from tests import test_resume_handover as handover
 from tests.test_acceptance_fence_transport import _Supervisor, _pooled_agent
 from tests.test_swarm_host_admission import host  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def _transport(host, monkeypatch, ctx, pid):  # noqa: F811

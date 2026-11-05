@@ -19,7 +19,6 @@ from supervisor import queue, workers
 from tests.test_project_hold_recovery import accepted, restore_unreadable, resume_after_app_stop, worker
 from tests.test_swarm_host_admission import host  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 NONCE = "press-0001-abcdef"
 

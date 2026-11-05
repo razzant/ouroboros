@@ -164,7 +164,6 @@ def test_output_schema_annotations_and_metadata_keys_are_redacted_without_changi
     assert secret not in json.dumps([refreshed, tested, row, manager.status_payload()])
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("transport", ["http", "sse"])
 def test_real_sdk_to_registered_schema_preserves_complete_contract(tmp_path, monkeypatch, transport):
     """Cross the actual SDK/list/manager/registry path, not a synthetic list result."""

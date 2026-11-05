@@ -189,7 +189,6 @@ GAP_WORDS = (" The Pause did not wait for 1 saved task record that could not be 
              "task (stray); whether it belongs here is unknown.")
 
 
-@pytest.mark.serial  # binds the shared chat writer, as tests/test_pause_notices.py does
 def test_the_owner_reads_the_gap_in_the_pause_row_and_keeps_it_after_resume(tmp_path, monkeypatch):
     from ouroboros import pause_notices
     from ouroboros.startup_migrations import prepare_startup_state
@@ -237,7 +236,6 @@ def test_only_a_still_closed_pause_lends_its_gap_to_a_resume(tmp_path):
     assert owner_pause.paused_gap(tmp_path, "solo") == {}  # never lent to a later, different Resume
 
 
-@pytest.mark.serial  # binds the shared chat writer, as tests/test_pause_notices.py does
 def test_a_gap_found_after_the_pause_is_named_by_the_resume_not_rewritten_into_its_notice(tmp_path, monkeypatch):
     from ouroboros import owner_pause, pause_notices
     from ouroboros.startup_migrations import prepare_startup_state

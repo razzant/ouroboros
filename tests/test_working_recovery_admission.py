@@ -19,7 +19,6 @@ from tests.test_project_hold_recovery import accepted, worker
 from tests.test_restart_saved_work import _ack, _stop_and_boot
 from tests.test_swarm_host_admission import host  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def _running(host, tmp_path, monkeypatch, scope):  # noqa: F811

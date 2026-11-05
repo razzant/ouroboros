@@ -28,7 +28,6 @@ from ouroboros import preflight_receipts as receipts
 from ouroboros import preflight_runner as pr
 from tests._worlds import clone, clone_repository, world
 
-pytestmark = pytest.mark.serial
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 GIT_IDENTITY = ["-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"]

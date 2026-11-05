@@ -8,7 +8,6 @@ from tests.test_batch4_repair_compositions import _running
 from tests.test_budget_pause_holds import _idle_worker
 from tests._store_shared import unreadable_result
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("refusal", ["pause", "snapshot", "none", "newer", "same", "newer_scheduled"])

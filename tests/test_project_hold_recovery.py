@@ -16,7 +16,6 @@ from tests.test_swarm_host_admission import host  # noqa: F401
 from tests._store_shared import delete_result, unreadable_result
 from tests.test_pending_deadline_continuations import expiry  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def accepted(host, tmp_path, tid="held"):  # noqa: F811

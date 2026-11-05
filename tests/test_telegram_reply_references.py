@@ -13,7 +13,6 @@ from tests.test_telegram_format_parity import _load_skill
 from tests.test_telegram_routing_notices import phone  # noqa: F401 -- the owner's chat behind the real bus
 
 # The shared native-skill loader replaces its package entries in sys.modules.
-pytestmark = pytest.mark.serial
 
 
 class Api:

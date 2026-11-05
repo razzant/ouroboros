@@ -11,7 +11,6 @@ from tests.test_hurry_initial_lifecycle import pool, _enqueue_origin  # noqa: F4
 from tests._usage_store_testing import ledger_rows
 from tests._store_shared import delete_result, result_exists, result_signature, unreadable_result
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize('tool,args', [

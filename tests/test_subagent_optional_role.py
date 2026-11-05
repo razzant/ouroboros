@@ -19,7 +19,6 @@ from tests._store_shared import result_signature, seed_result, unreadable_result
 
 
 # These consumers patch process-wide routing/configuration and supervisor seams.
-pytestmark = pytest.mark.serial
 
 ROLE_CASES = [
     pytest.param({}, "", id="omitted"),

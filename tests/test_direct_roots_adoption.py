@@ -237,7 +237,6 @@ def _crash_without_projections(tmp_path, monkeypatch, queue):
     return fenced
 
 
-@pytest.mark.serial
 def test_a_saved_owner_pause_waits_for_resume_without_roster_or_snapshot(tmp_path, monkeypatch):
     from ouroboros.task_status import execution_owner_record
     from tests.test_warm_restart_retention import _park
@@ -261,7 +260,6 @@ def test_a_saved_owner_pause_waits_for_resume_without_roster_or_snapshot(tmp_pat
     assert outcome["ok"], outcome
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("attempt", [0, 1])
 def test_saved_working_state_is_held_for_resume_without_roster_or_snapshot(tmp_path, monkeypatch, attempt):
     from ouroboros import working_checkpoint as wc
@@ -296,7 +294,6 @@ def test_saved_working_state_is_held_for_resume_without_roster_or_snapshot(tmp_p
     assert _working_resume_granted(task, tmp_path) is False
 
 
-@pytest.mark.serial
 def test_registered_answer_takes_precedence_over_saved_work(tmp_path, monkeypatch):
     from ouroboros import working_checkpoint as wc
     from ouroboros.task_status import execution_owner_record

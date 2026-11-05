@@ -29,7 +29,6 @@ import pytest
 import supervisor.git_ops as git_ops
 from ouroboros.dialogue_store import THREAD_FORMAT
 
-pytestmark = pytest.mark.serial  # real writer processes and pinned module roots
 _real_sleep = time.sleep  # the fixtures' own polling; the code under test runs with `_no_retry_sleep`
 # A release's dialogue store that reads a thread held by reference: a rollback to its tree resets at once.
 DIALOGUE_STORE = f"THREAD_FORMAT = {THREAD_FORMAT!r}\n"

@@ -292,7 +292,6 @@ print(json.dumps({"server": str(server.DATA_DIR), "process": str(server_process.
 '''
 
 
-@pytest.mark.serial
 def test_a_direct_server_given_only_app_root_refuses_while_home_holds_history(layout, tmp_path):
     historical = layout.historical / "data"
     _write_witness(historical)
@@ -306,7 +305,6 @@ def test_a_direct_server_given_only_app_root_refuses_while_home_holds_history(la
     assert not layout.app.exists() and _tree(historical) == before, "nothing opened or written"
 
 
-@pytest.mark.serial
 def test_a_direct_server_given_only_app_root_uses_its_own_data_when_home_has_none(layout, tmp_path):
     (layout.historical / "data" / "state").mkdir(parents=True)  # bootstrap scaffolding is not memory
     (layout.historical / "data" / "settings.json").write_text("{}", encoding="utf-8")
@@ -386,7 +384,6 @@ def _initialization_facts(data):
             "refused": [row.get("reason") for row in rows if row.get("type") == "state_unavailable_at_boot"]}
 
 
-@pytest.mark.serial
 def test_a_first_session_that_ends_before_setup_leaves_the_root_new(layout, tmp_path):
     """A new root's first start has no provider, so no supervisor runs, and the owner (or a Homebrew
     upgrade) quits before Setup: the configured boot after it initializes the root with the ``app_root``

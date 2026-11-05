@@ -19,7 +19,6 @@ from tests.test_execution_clock_resume_handover import clock  # noqa: F401
 from tests.test_resume_handover import _dispatch_one
 from tests.test_warm_restart_retention import _handoff, _pool_events, _stop_boot
 
-pytestmark = pytest.mark.serial
 
 
 def _event(task_id, checkpoint, *, phase="park"):

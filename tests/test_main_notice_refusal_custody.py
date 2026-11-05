@@ -5,7 +5,6 @@ import pytest
 
 from tests.test_local_refusal_custody import _world, _pause_and_resume
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("case,chat,args,status,code,text", [

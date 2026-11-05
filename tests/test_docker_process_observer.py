@@ -16,7 +16,7 @@ from ouroboros import workspace_executor as executor
 from ouroboros.docker_process_observer import proc_observer_function
 from tests._workspace_executor_shared import fake_docker_cli
 
-pytestmark = [pytest.mark.serial, pytest.mark.skipif(not shutil.which("sh"), reason="POSIX sh required")]
+pytestmark = [pytest.mark.skipif(not shutil.which("sh"), reason="POSIX sh required")]
 
 
 def _stat(root, pid=42, state="S", pgrp=42, comm="a tricky ) process (name)"):

@@ -17,7 +17,6 @@ from tests._store_journal_shared import use_journal
 from tests.test_workspace_preparation import env as env, spy_provisions, _WAIT_SEC
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 
 def request(env, acting, tid="receipt-child"):

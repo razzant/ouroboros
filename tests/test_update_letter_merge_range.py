@@ -6,7 +6,6 @@ from ouroboros import update_letter as ul
 from tests.test_update_description import _registry
 from tests.test_update_letter import _capture_for, _commit, _git, _status, _write_readme
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

@@ -6,7 +6,6 @@ import pytest
 from tests._budget_pause_exact_helpers import _install_queue
 from tests._store_shared import unreadable_result
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("outcome", ["error", "timeout", "exception", "remote_start", "exit_error", "git_error", "legacy_warning"])

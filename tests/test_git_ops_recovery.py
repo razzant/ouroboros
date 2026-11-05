@@ -146,7 +146,6 @@ def test_bounded_writer_bounds_corrupt_index_rebuild(monkeypatch, tmp_path):
     assert all(call[1] == 17 for call in calls)
 
 
-@pytest.mark.serial
 def test_git_capture_times_out_instead_of_hanging(monkeypatch, tmp_path):
     """Issue #182: a hung git process (fsmonitor deadlock, an unresponsive
     filesystem) must not stall the rescue/rollback graph indefinitely. A

@@ -14,7 +14,7 @@ from ouroboros.tools import services
 from ouroboros.tools.registry import ToolContext
 from tests.test_run_command_schema_truth import _bound
 
-pytestmark = [pytest.mark.serial, pytest.mark.skipif(os.name == "nt", reason="task census is POSIX-only")]
+pytestmark = [pytest.mark.skipif(os.name == "nt", reason="task census is POSIX-only")]
 
 
 def test_invocation_coordinates_are_atomic_and_preserve_explicit_non_task(tmp_path):

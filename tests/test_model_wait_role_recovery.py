@@ -16,7 +16,6 @@ from tests.test_model_wait import live_wait as wait_fixture, _action_for
 
 setup = subscription_transport
 live_wait = wait_fixture
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("shared_local", [False, True])

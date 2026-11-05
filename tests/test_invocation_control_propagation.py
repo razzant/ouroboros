@@ -10,7 +10,6 @@ from tests.test_async_invocation_lifetime import extension_case
 from tests.test_batch4_producer_custody import _registry
 from tests.test_invocation_ownership import owner, run
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("family", ["builtin", "extension"])

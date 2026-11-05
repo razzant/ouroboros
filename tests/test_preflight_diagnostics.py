@@ -11,7 +11,6 @@ import pytest
 from ouroboros import preflight_runner
 from tests import stack_samples
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("hang", [False, True])

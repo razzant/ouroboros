@@ -20,7 +20,6 @@ import ouroboros.usage_accounting as ua
 from ouroboros.llm import LLMClient
 from ouroboros.net_transport import openai_client_class
 
-pytestmark = pytest.mark.serial
 
 MODEL = "openai-compatible::stub-model"
 MESSAGES = [{"role": "user", "content": "Reply OK"}]

@@ -23,7 +23,7 @@ from tests._store_shared import seed_result
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _SETTLE_RESTORE_FRAMES, _emit_ws_frame
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 MAIN = "#chat-messages"
 HISTORY_URL = "/api/chat/history"
 _FRAMES = "() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))"

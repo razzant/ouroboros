@@ -10,7 +10,6 @@ import pytest
 
 from tests.test_worker_crash_retry import _isolate_worker_crash_state, _reserved_job  # noqa: F401 - autouse isolation fixture
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize('evidence', ['exact', 'wrong_birth', 'missing_birth', 'wrong_pid', 'wrong_attempt',

@@ -23,7 +23,6 @@ from supervisor import queue, task_lifecycle
 from supervisor import workspace_preparation as prep
 from supervisor.events import dispatch_event
 
-pytestmark = pytest.mark.serial
 
 _WAIT_SEC = 30.0  # bounds only how long a broken run takes to report; passing runs never wait on it
 

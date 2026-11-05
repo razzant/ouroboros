@@ -124,7 +124,6 @@ def _staged_for_main(f, raw, run_id="run-coverage"):
     return target, entry
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("partial", [False, True], ids=["whole-large", "measured-head-tail"])
 def test_the_coverage_ack_binds_to_what_delivery_actually_hands_the_model(main_loop, monkeypatch, partial):
     """Real Main credits the exact read window intersected with its final projection."""
@@ -185,7 +184,6 @@ def test_the_coverage_ack_binds_to_what_delivery_actually_hands_the_model(main_l
     assert consumed[0]["bytes"] == len(raw) and consumed[0]["chars"] == len(content)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("missing", ["read_view", "source_revision", "projection"])
 def test_unknown_delivery_metadata_never_claims_complete(main_loop, missing):
     from ouroboros import delegate_output as output
@@ -310,7 +308,6 @@ def test_a_real_2000_row_read_carries_its_display_map_on_the_bounded_result(tmp_
     assert output._delivered_source_ranges(view, text, {"result": text}, content) == [[0, len(content)]]
 
 
-@pytest.mark.serial
 def test_parallel_main_reads_keep_their_own_source_window(main_loop, monkeypatch):
     import threading
     from ouroboros import delegate_output as output

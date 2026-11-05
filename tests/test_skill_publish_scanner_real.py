@@ -23,7 +23,6 @@ from ouroboros.skill_publish_scanner import (
     scan_named_bytes,
 )
 
-pytestmark = pytest.mark.serial
 
 _FIXTURE_ROOT = pathlib.Path(__file__).parent / "fixtures" / "skill_publish_scanner"
 _CONTEXT_FIXTURES = {

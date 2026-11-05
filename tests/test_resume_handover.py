@@ -35,7 +35,6 @@ from tests.test_swarm_host_admission import host  # noqa: F401
 from tests.test_working_checkpoint import _registry
 from tests.test_working_recovery_admission import _running
 
-pytestmark = pytest.mark.serial
 
 MARK = "EXACT_R29_COGNITION"
 

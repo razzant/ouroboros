@@ -15,7 +15,6 @@ from supervisor import events_schedule_task as schedule, task_admission, task_li
 from supervisor.events import dispatch_event
 from tests.test_workspace_preparation import env as env, _WAIT_SEC
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("cause", ["closed", "thread_start_failed"])

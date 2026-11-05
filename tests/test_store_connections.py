@@ -430,7 +430,6 @@ def test_replaced_file_drops_the_old_cached_connection(tmp_path, monkeypatch):
         old.execute("SELECT 1")
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
 def test_fork_closes_parent_cache_and_child_opens_its_own_connection(tmp_path):
     publish(tmp_path)
@@ -469,7 +468,6 @@ def test_fork_closes_parent_cache_and_child_opens_its_own_connection(tmp_path):
         receiving.close()
 
 
-@pytest.mark.serial
 def test_interpreter_exit_closes_both_stores_before_clearing_module_globals(tmp_path):
     publish(tmp_path)
     usage_store.migrate_from_journal(tmp_path)

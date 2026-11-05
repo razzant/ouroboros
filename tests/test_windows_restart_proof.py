@@ -383,7 +383,6 @@ def real_restart_spawn(monkeypatch, tmp_path):
             successor.wait(timeout=10)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("phase", ["before", "during", "after"])
 def test_panic_around_real_spawn_publication_leaves_no_successor_running(real_restart_spawn, monkeypatch, phase):
     if phase == "before":
@@ -406,7 +405,6 @@ def test_panic_around_real_spawn_publication_leaves_no_successor_running(real_re
     assert successor.wait(timeout=10) is not None
 
 
-@pytest.mark.serial
 def test_panic_stops_a_real_successor_while_its_custody_write_is_blocked(real_restart_spawn, monkeypatch):
     from ouroboros import process_custody
 

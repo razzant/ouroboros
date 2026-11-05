@@ -20,7 +20,6 @@ from tests.test_model_sleep import _ctx
 from tests.test_owner_pause import _live_tree, _owner_park
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial  # the queue, its workers and the supervisor seams are module state
 
 
 def _held_tree(tmp_path, monkeypatch):

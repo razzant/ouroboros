@@ -19,7 +19,6 @@ from ouroboros import projects_registry as pr
 from ouroboros.project_dialogue import ROOM_FIXED_ROW_TYPES, room_membership
 from ouroboros.task_results import write_task_result
 
-pytestmark = pytest.mark.serial
 
 
 def _bus(monkeypatch, root):

@@ -17,7 +17,7 @@ from tests import test_widget_stream_download_ui as widget_fixture
 from tests._shared import producer_evidence_dir
 from tests.test_author_ui_kit import EXAMPLE, _copy_installed_runtime
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 REPO = Path(__file__).resolve().parents[1]
 
 _HOST = """<!doctype html><html><head><meta charset="utf-8">

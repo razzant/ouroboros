@@ -268,7 +268,6 @@ class TestChildDriveSkillPayload:
 # Fix 2: OpenRouter-only budget drift
 # ---------------------------------------------------------------------------
 
-@pytest.mark.serial
 class TestBudgetDriftOpenRouterOnly:
     def _update_budget(self, sup_state, *, expected=True):
         assert sup_state.update_budget_from_usage({}) is expected

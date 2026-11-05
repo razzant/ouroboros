@@ -17,7 +17,6 @@ from supervisor import schedule_occurrence as occurrence
 from tests.test_schedule_occurrence import _row, _rows, q  # noqa: F401
 from tests._store_shared import unreadable_result
 
-pytestmark = pytest.mark.serial
 
 
 def _api(q, payload, *, action=False):  # noqa: F811

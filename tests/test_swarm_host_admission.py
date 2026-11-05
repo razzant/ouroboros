@@ -27,7 +27,6 @@ from tests._socket_seal import block_network_except_socketpair
 from supervisor import git_ops, queue, state, worker_chat_lane as lane, workers
 from supervisor.events import _handle_promote_chat_to_task
 
-pytestmark = pytest.mark.serial
 EXACT_OWNER = "  Исследуй варианты A и B.\nСначала уточни ограничения.  \n"
 WORDLESS = "(image attached)"
 SURFACE = {"channel": "web", "viewport": {"width": 1280, "height": 800}}

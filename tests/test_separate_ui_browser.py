@@ -61,7 +61,7 @@ from tests.separate_ui_support import (
     wait_until,
 )
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 CORE_PREFIXES = ("/api", "/auth", "/onboarding", "/ws")
 

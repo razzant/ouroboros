@@ -26,7 +26,6 @@ from ouroboros.review_evidence import (
 from ouroboros.tools.registry import ToolContext
 from tests._workspace_executor_shared import _init_repo
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

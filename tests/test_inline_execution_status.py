@@ -55,7 +55,6 @@ print(json.dumps({'healed':healed,'status':row['status'],'observation':row['exec
     return json.loads(result.stdout)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("kind", ["direct", "presence"])
 def test_fresh_reader_never_orphans_inline_owner(tmp_path, kind):
     fields = {"_is_direct_chat": True}
@@ -70,7 +69,6 @@ def test_fresh_reader_never_orphans_inline_owner(tmp_path, kind):
     assert load_task_result(tmp_path, "inline")["status"] == "completed"
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("fields", [{}, {"metadata": {"source": "presence_promote", "presence": {"binding_id": "b"}}},
                                     {"_is_direct_chat": True, "budget_pause": {"state": "resumed"}}])
 def test_genuinely_orphaned_pool_still_settles_across_processes(tmp_path, fields):
@@ -276,7 +274,6 @@ def test_orphan_publication_rechecks_execution_kind(tmp_path, kind):
     assert applied == [True]
 
 
-@pytest.mark.serial
 def test_real_presence_completion_survives_foreign_orphan_sweep(tmp_path):
     from ouroboros.presence_runner import run_presence_turn
     from tests.test_presence_runner import _admission, _event

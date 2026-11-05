@@ -50,7 +50,6 @@ from tests.test_budget_pause_lineage_restore import (
     _workers,
 )
 
-pytestmark = pytest.mark.serial
 
 
 def _reserve(tmp_path, task_id, *, request=None, **limits):

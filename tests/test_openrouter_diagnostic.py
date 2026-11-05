@@ -11,7 +11,6 @@ import pytest
 
 from supervisor import state
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

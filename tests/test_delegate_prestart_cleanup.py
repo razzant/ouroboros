@@ -23,7 +23,6 @@ from tests.test_delegated_start_contention import hold_request
 
 _owned_gateway_uses_each_test_transport = _owned_gateway_fixture
 fake_route = _fake_route
-pytestmark = pytest.mark.serial
 
 
 class ToolGateway(_LiveRunStub):

@@ -122,7 +122,6 @@ def _admitted_child(tmp_path, monkeypatch, project: str, ambient: str):
     return repo, drive, elsewhere, task, agent, ctx
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("ambient", ["canonical", "elsewhere"])
 @pytest.mark.parametrize("project", ["", "demo"])
 def test_an_admitted_child_keeps_knowledge_where_every_reader_reads(tmp_path, monkeypatch, project, ambient):
@@ -204,7 +203,6 @@ def register(api):
 '''
 
 
-@pytest.mark.serial
 def test_an_admitted_childs_extension_reads_its_notes_through_the_plugin_api(tmp_path, monkeypatch):
     """The extension producer: ``dispatch_extension_tool_subprocess`` resolves the data root of the admitted
     child's call, the child's own entry (``_child_main``) loads the extension over it and the tool answers
@@ -251,7 +249,6 @@ def test_an_admitted_childs_extension_reads_its_notes_through_the_plugin_api(tmp
     assert {payload["ctx"]["drive_root"] for payload in payloads} == {str(child_drive)}  # the call still names its drive
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("ambient", ["canonical", "elsewhere"])
 @pytest.mark.parametrize("project", ["", "demo"])
 def test_a_root_on_its_installation_drive_keeps_knowledge_on_that_drive(tmp_path, monkeypatch, project, ambient):

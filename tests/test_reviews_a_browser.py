@@ -24,7 +24,7 @@ from tests.test_review_record_card_projection import CRITICAL, _answer, _gate_re
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _emit_ws_frame
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 TASK, QUIET = "reviews-a-browser", "reviews-a-quiet"
 COMBOS = (("dark", 1100, 750), ("light", 1100, 750), ("dark", 390, 844), ("light", 390, 844))
 LIVE = {f"{theme}-{width}": f"reviews-a-live-{theme}-{width}" for theme, width, _height in COMBOS}

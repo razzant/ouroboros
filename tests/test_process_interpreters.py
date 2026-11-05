@@ -434,7 +434,6 @@ def test_run_script_accepts_registry_attested_versioned_agent_python(
     assert not hasattr(ctx, "_active_interpreter_resolution")
 
 
-@pytest.mark.serial
 def test_run_script_reports_a_missing_interpreter_as_a_process_error(tmp_path):
     from ouroboros.tools.shell import _run_script
 

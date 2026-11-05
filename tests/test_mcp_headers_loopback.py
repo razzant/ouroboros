@@ -20,7 +20,6 @@ from pydantic import BaseModel, Field
 from ouroboros import mcp_client
 from tests.test_settings_secret_mask import settings_client  # noqa: F401
 
-pytestmark = pytest.mark.serial  # binds real loopback ports
 
 BEARER = "Bearer synthetic-loopback-0001"
 BASIC = "Basic c3ludGhldGljOmxvb3BiYWNr"

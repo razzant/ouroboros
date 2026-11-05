@@ -22,7 +22,6 @@ from tests.body_candidate_support import (
     rich_commit, run_entry,
 )
 
-pytestmark = pytest.mark.serial  # real cold-entry processes throughout
 
 STOPPED = {"state": "completed", "unconfirmed": []}
 EXITED = {"doomed": [4001, 4002], "dead": [4001, 4002], "unconfirmed": [], "cleanup_ok": True, "snapshot_ok": True}

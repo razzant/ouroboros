@@ -653,7 +653,6 @@ def test_artifact_reservation_is_one_rule_for_every_writer(file_tools, monkeypat
         assert set(landed.values()) == {name == "report.txt" or mode == "cyber_pro"}, (name, landed)
 
 
-@pytest.mark.serial  # a real local HTTP model stand-in
 def test_editor_results_reach_the_actual_keyless_http_model_send(file_tools, tmp_path, monkeypatch):
     import json
     from ouroboros.llm import LLMClient

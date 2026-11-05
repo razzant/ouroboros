@@ -7,7 +7,6 @@ import pytest
 from ouroboros.task_results import write_task_result
 from tests.test_task_done_durable_vs_transport import _mk_ctx
 
-pytestmark = pytest.mark.serial
 
 
 def _rows(root, kind):

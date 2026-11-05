@@ -195,7 +195,6 @@ def test_only_positive_rolled_back_contention_retries(tmp_path, monkeypatch, sta
         bp.end_dispatch_fence("member")
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("fault", ["before_publication", "ambiguous_after_publication"])
 def test_custody_retry_keeps_one_capture_and_the_original_live_run(tmp_path, monkeypatch, fault):
     from ouroboros import owner_wait, sleep_custody as sc

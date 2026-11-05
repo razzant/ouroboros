@@ -180,7 +180,6 @@ def test_a_plain_queue_is_still_read_one_event_at_a_time(monkeypatch):
     assert ctx.dispatched == [0, 1, 2]
 
 
-@pytest.mark.serial
 def test_drain_and_restore_ride_the_real_manager_proxy():
     context = multiprocessing.get_context("spawn")
     with EventQueueManager(ctx=context) as manager:

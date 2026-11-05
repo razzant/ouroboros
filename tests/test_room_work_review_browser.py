@@ -19,7 +19,7 @@ from tests.test_room_work_browser import (
     wait_facts,
 )
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def test_last_cardless_project_turn_returns_focus_to_its_own_trigger(room_ui):

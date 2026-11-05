@@ -13,7 +13,6 @@ from types import SimpleNamespace
 import pytest
 
 
-pytestmark = pytest.mark.serial  # Production state/queue init rebinds module globals.
 _OMITTED = object()
 _TIERS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 _DERIVED = ("reasoning_effort", "effective_model_lane", "effective_executor",

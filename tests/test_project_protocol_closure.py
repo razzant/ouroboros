@@ -12,7 +12,6 @@ from tests.test_project_semantic_admission import room, task  # noqa: F401
 from tests.test_schedule_occurrence import q, _row, _rows  # noqa: F401
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 
 def change_row(root, pid, **fields):

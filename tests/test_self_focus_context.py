@@ -16,7 +16,6 @@ from tests.test_subscription_main_wait import (  # noqa: F401
     MODEL, main_call, live_wait, setup,
 )
 
-pytestmark = pytest.mark.serial
 
 
 def _facts(messages):

@@ -22,7 +22,6 @@ from tests.conversation_carrier_support import lane_row, park_lane_pause
 
 INLINE_WID = 97  # the inline executor's pseudo-slot
 
-pytestmark = pytest.mark.serial
 
 
 def direct(host, monkeypatch):  # noqa: F811

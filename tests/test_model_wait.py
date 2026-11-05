@@ -460,7 +460,6 @@ def test_permanent_switch_uses_existing_owner_writer_once(live_wait, monkeypatch
     assert (root / "settings.json").stat().st_mtime_ns == stamp
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("surface, role, key", [
     ("web", "main", "OUROBOROS_MODEL"), ("host", "reviewer:main", "OUROBOROS_MODEL"),
     ("web", "light", "OUROBOROS_MODEL_LIGHT"), ("host", "fallback:0", "OUROBOROS_MODEL_FALLBACKS")])

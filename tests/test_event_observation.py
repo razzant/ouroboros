@@ -65,7 +65,6 @@ def _produce(bus, accepted, release, phase):
     release.wait(30)
 
 
-@pytest.mark.serial
 def test_original_manager_survives_killed_producer_and_accepts_replacement(tmp_path, monkeypatch):
     from supervisor import workers
 

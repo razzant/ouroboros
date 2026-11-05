@@ -340,7 +340,6 @@ def test_skill_preflight_reports_missing_pluginapi_permissions(tmp_path, monkeyp
     assert {"route", "widget", "read_settings"} <= missing
 
 
-@pytest.mark.serial
 def test_run_shell_writes_a_self_authored_marker_example(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
@@ -359,7 +358,6 @@ def test_run_shell_writes_a_self_authored_marker_example(tmp_path, monkeypatch):
     assert marker.read_bytes() == b"{}"
 
 
-@pytest.mark.serial
 def test_run_shell_blocks_actual_self_authored_marker_write_pre_exec(tmp_path, monkeypatch):
     """The explicit redirect targets the actual runtime skill metadata.
 

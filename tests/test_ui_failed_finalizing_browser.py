@@ -25,7 +25,7 @@ from tests.system_e2e.harness import (
 )
 
 wait_clone = clone_fixture
-pytestmark = [pytest.mark.serial, pytest.mark.browser]
+pytestmark = [pytest.mark.browser]
 
 MARKER = "FAILED_FINALIZING_REAL_ACTOR"
 CHOOSER_MARKER = "You decide whether Ouroboros should run ONE reviewed self-improvement"  # post_task_evolution._DECISION_PROMPT

@@ -23,7 +23,6 @@ from ouroboros.tools.registry import ToolRegistry
 # case) via _tracked_subprocess_run — not parallel-safe under `pytest -n auto` (DEVELOPMENT.md
 # "Parallel CI and the serial marker"). Python invocations use `sys.executable` (cross-platform);
 # the only POSIX-shell-dependent test is skipped when `sh` is unavailable (e.g. Windows).
-pytestmark = pytest.mark.serial
 
 
 # ----------------------------------------------------------------------------- helpers

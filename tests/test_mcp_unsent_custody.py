@@ -10,7 +10,6 @@ from tests.test_batch4_producer_custody import _registry
 from tests.test_invocation_ownership import claims, owner, run
 from tests.test_mcp_client import _settings
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("bound", [False, True])

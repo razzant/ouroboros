@@ -21,7 +21,6 @@ from tests.test_process_environment import process_context as _process_context
 
 process_context = _process_context
 
-pytestmark = pytest.mark.serial  # real child processes (CI serial lane)
 
 _KEYS = {"status", "contract_kind", "expected_match", "check", "check_rendering",
          "criterion_source", "receipt_ts"}

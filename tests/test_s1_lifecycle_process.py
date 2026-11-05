@@ -30,7 +30,7 @@ from tests.s1_lifecycle_process_support import (
 )
 from tests.system_e2e.harness import ArtifactOracle, LANE_MOCK, message_text, require_lane
 
-pytestmark = [pytest.mark.serial, pytest.mark.integration, pytest.mark.skipif(
+pytestmark = [pytest.mark.integration, pytest.mark.skipif(
     os.name != "posix", reason="This harness qualifies local POSIX process facts; Windows remains separate")]
 
 

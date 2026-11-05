@@ -9,7 +9,6 @@ import pytest
 from tests._budget_pause_exact_helpers import _install_queue
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 
 def test_pause_replay_after_resume_and_later_generation_has_no_queue_effect(tmp_path, monkeypatch):

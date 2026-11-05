@@ -21,7 +21,6 @@ from tests.test_native_task_wait import (  # noqa: F401
     _call, _child, _ctx, _drive, _End, _header, _limit, _loop_registry, _note, _notices, _parked_cold,
     _resumed_first_request, _wire_requests, ledger as ledger)
 
-pytestmark = pytest.mark.serial  # cold consumers bind queue module state
 
 
 def _retried(root, original="kid-a", successor="kid-b", *, status="failed", successor_status="scheduled",

@@ -22,7 +22,6 @@ from supervisor import conversation_lane, worker_chat_lane, workers
 from tests.test_owner_wait_pool import InputQueue, Process, pool as pool  # noqa: F401 -- fixture
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 # The processes that may START cognition: the worker body and its inline twin, the Presence body

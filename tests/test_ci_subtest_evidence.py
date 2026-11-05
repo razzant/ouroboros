@@ -12,7 +12,6 @@ import pytest
 from tests import ci_evidence
 from tests.test_ci_evidence import RUN_FACTS, SECRET, _events, _producer, _public_text, _results
 
-pytestmark = pytest.mark.serial
 
 
 def _proof_tree(tmp_path, facts):

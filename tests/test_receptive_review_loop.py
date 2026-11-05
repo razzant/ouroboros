@@ -26,7 +26,6 @@ from tests.test_receptive_commit_review import (  # noqa: F401 -- ``author`` is 
     TASK, _commit_count, _git, _notices, _parent, author, until,
 )
 
-pytestmark = pytest.mark.serial
 COMMIT = {"commit_message": "Change value", "paths": ["change.py"], "skip_advisory_review": True}
 REVIEW = {"root": "system_repo", "subject": "index", "goal": "Raise the value.", "scope": "change.py only"}
 

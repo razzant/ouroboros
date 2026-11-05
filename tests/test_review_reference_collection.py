@@ -14,7 +14,6 @@ from tests.test_receptive_review_loop import (  # noqa: F401
 )
 from tests.test_review_change_tool import h  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def _payload(text):

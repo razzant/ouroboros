@@ -12,7 +12,6 @@ from ouroboros.tools.process_facts import consume_last_process_facts
 from tests.test_tool_api_v2_public_surface import _registry_under_fake_home
 
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

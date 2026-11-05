@@ -19,7 +19,6 @@ from tests.test_restart_saved_work import _stop_and_boot
 from tests.test_swarm_host_admission import host  # noqa: F401
 from tests.test_working_recovery_admission import _running
 
-pytestmark = pytest.mark.serial
 
 
 def _recover(host, tmp_path, monkeypatch, *, new_id=False, legacy=False):  # noqa: F811 - the imported fixture

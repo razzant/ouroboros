@@ -19,7 +19,6 @@ from ouroboros import mcp_client, owner_pause
 from ouroboros.task_results import load_task_result
 from tests.test_batch4_producer_custody import _consumers, _registry
 
-pytestmark = pytest.mark.serial
 
 SERVER = {"id": "demo", "name": "Demo", "enabled": True, "transport": "streamable_http",
           "url": "https://example.com/mcp", "auth_header": "Authorization", "auth_token": "",

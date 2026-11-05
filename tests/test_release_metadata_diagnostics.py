@@ -11,7 +11,6 @@ from ouroboros import commit_admission as admission
 from ouroboros.tools import preflight_review, review
 from ouroboros.tools.release_sync import release_metadata_findings
 
-pytestmark = pytest.mark.serial  # real Git processes and isolated runtime globals
 
 
 def _git(repo, *args):

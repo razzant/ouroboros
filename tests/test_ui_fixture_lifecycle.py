@@ -31,7 +31,6 @@ from tests.candidate_checkout import SENTINEL_PATH, VERSION_PATH, CandidateError
 from tests.test_candidate_checkout import source as source_fixture
 
 
-pytestmark = pytest.mark.serial
 source = source_fixture
 _REPO = Path(__file__).resolve().parents[1]
 

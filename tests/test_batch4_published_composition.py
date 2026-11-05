@@ -5,7 +5,6 @@ from ouroboros import usage_accounting as ua
 from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_billing_group import _scope, _spend
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("case,held", [("arguments", False), ("pre_effect", False), ("timeout_open", True), ("queued", True), ("ok", False)])

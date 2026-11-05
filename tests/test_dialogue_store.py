@@ -665,7 +665,6 @@ def _spawned_writer(root, index, count, done):
         done.put((index, repr(exc)))
 
 
-@pytest.mark.serial
 def test_four_writer_processes_lose_and_duplicate_nothing(tmp_path):
     ds.append(tmp_path, "progress", progress("seed", "seed"))
     ctx = multiprocessing.get_context("spawn")

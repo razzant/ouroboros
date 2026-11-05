@@ -15,7 +15,6 @@ from ouroboros.model_wait import task_model_wait_scope
 from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_admission_contention import database_reader, publish
 
-pytestmark = pytest.mark.serial
 SURFACES = ("ordinary", "run_operation", "submit_tool", "handed_inline_tool", "model_send",
             "model_send_async", "async_operation", "async_preparation")
 

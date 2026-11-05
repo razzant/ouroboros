@@ -13,7 +13,6 @@ from tests.test_schedule_occurrence import q  # noqa: F401
 from tests.test_swarm_host_admission import host  # noqa: F401
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("change", ["own_cas", "occupied", "rebind", "aba", "write_before", "write_after", "no_update"])

@@ -12,7 +12,6 @@ from ouroboros.model_wait import task_model_wait_scope
 from ouroboros.task_results import write_task_result
 from tests._store_journal_shared import exclusive_hold, read_hold, use_journal, write_hold
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

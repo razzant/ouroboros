@@ -26,7 +26,6 @@ from ouroboros import local_custody_repair as repair
 from ouroboros import platform_layer, process_containment, process_custody, process_identity  # noqa: F401
 from ouroboros.task_results import load_task_result, write_task_result
 
-pytestmark = pytest.mark.serial
 
 INCIDENT_BIRTH = "Tue Oct 27 14:57:17 2026"
 

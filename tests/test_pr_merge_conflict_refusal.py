@@ -22,7 +22,6 @@ from ouroboros.tools.registry import ToolContext
 from tests.test_batch4_producer_custody import _consumers
 from tests.test_pr_merge_receipts import HEAD, MERGE, URL, FakeGh
 
-pytestmark = pytest.mark.serial
 
 REPAIRED = "e" * 40
 AUTO = "To have the pull request merged after all the requirements have been met, add the `--auto` flag.\n"

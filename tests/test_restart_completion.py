@@ -11,7 +11,6 @@ from types import SimpleNamespace
 
 import pytest
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("phase", ["publication", "custody", "success", "early-cleanup", "posix-exec"])

@@ -20,7 +20,6 @@ from ouroboros.presence_admission import admit_presence_turn
 from ouroboros.presence_runner import PresenceTurnEvent, _build_task
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-pytestmark = pytest.mark.serial
 
 RUN_AT = "2030-01-01T09:00:00+00:00"
 

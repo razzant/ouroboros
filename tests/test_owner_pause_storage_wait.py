@@ -15,7 +15,6 @@ from ouroboros.task_results import write_task_result
 from tests._budget_pause_exact_helpers import _loop_ctx
 from tests.test_admission_contention import database_reader
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

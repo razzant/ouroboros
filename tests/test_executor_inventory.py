@@ -381,7 +381,6 @@ def test_a_due_wake_prepares_nothing_on_the_tick(alarm):
     _no_door(alarm.started)
 
 
-@pytest.mark.serial  # its fixture rebinds the pool's tables
 def test_a_presence_event_runs_no_turn_body_in_this_process(lane, monkeypatch):
     """The Host's door over a started lane: the body reaches a carrier's queue, and its future resolves from that carrier's
     frames (tests/test_conversation_lane_presence.py); nothing here runs it."""

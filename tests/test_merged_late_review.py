@@ -23,7 +23,6 @@ from tests.test_task_review_sources import client_for
 
 world = merges.world
 author = receptive.author
-pytestmark = pytest.mark.serial
 
 
 def _record(root, task_id, record_id="late-merge-review", *, head=merges.HEAD):

@@ -21,7 +21,6 @@ from tests._budget_pause_exact_helpers import _fast_hold, _install_queue, _loop_
 from tests.test_acceptance_fence_transport import _pooled_agent, _Supervisor
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 TASK = "direct-cold"
 

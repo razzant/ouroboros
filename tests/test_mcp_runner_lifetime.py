@@ -21,7 +21,6 @@ from tests.test_batch4_producer_custody import _consumers, _registry
 from tests.test_invocation_ownership import claims, owner, run
 from tests.test_mcp_call_completion import SERVER, _transport
 
-pytestmark = pytest.mark.serial
 
 ROUTES = ["direct", "future"]
 ACTUAL_JOIN = threading.Thread.join

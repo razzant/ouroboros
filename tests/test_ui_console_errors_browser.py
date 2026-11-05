@@ -13,7 +13,7 @@ import pytest
 from tests import test_subscription_setup_browser as setup_browser
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 BLANK = "<!doctype html><title>Blank</title>"  # a document of the fixture's origin that reads nothing itself
 # Uncaught a moment after the call returns: a page error, where a throw inside evaluate only fails the call.

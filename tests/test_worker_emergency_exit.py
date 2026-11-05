@@ -21,7 +21,6 @@ from ouroboros.process_containment import pid_is_zombie
 from supervisor import worker_process
 from tests._shared import stop_socket_sharer, wait_test_child_stop
 
-pytestmark = pytest.mark.serial
 
 
 def _faulted_entry(mode, incoming, outgoing, repo_dir, drive_root, session_id, stop_socket, transport_no_proxy=None):

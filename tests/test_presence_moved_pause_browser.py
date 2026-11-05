@@ -22,7 +22,7 @@ from tests.test_presence_project_activity_browser import (
     ACTOR_WORDS, FIRST_ANSWER, PROJECT, RESTART_INLINE, SECOND_ANSWER, Consumer, _actions, _row, _sent_to, _work, kind_of,
 )
 
-pytestmark = [pytest.mark.serial, pytest.mark.browser]
+pytestmark = [pytest.mark.browser]
 wait_clone = clone_fixture
 _MENU_ITEMS = "body > .task-control-menu .task-control-item"
 

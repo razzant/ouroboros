@@ -228,7 +228,6 @@ def test_an_imported_compacted_journal_preserves_all_presentation_facts(data_roo
     assert build_cost_presentation(after, scope=COST_SCOPE_ROOT_TREE) == build_cost_presentation(before, scope=COST_SCOPE_ROOT_TREE)
 
 
-@pytest.mark.serial
 def test_producer_to_wire_consumers_keep_tree_scope_and_late_unknown_price(data_root):
     import asyncio
     import json

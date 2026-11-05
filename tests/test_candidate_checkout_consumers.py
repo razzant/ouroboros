@@ -17,7 +17,6 @@ from tests.system_e2e import harness
 from tests.test_candidate_checkout import git, source as source_fixture
 
 
-pytestmark = pytest.mark.serial
 source = source_fixture
 
 

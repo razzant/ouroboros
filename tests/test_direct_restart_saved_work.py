@@ -22,7 +22,6 @@ from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
 from supervisor.restart_retention import fresh_return_transaction, prepare_restart_returns
 from tests.test_restart_saved_work import _install_queue, _pool_events, _queued, _working_run
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

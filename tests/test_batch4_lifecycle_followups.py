@@ -8,7 +8,6 @@ from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx, _parked
 from tests.test_g1_followup_policy import world, register, restore, row, ORIGIN, BINDING  # noqa: F401
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 
 def _worker(workers):

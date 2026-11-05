@@ -10,7 +10,6 @@ from supervisor import git_ops, update_candidate, update_merge
 from tests.test_update_dirty_stash import _git, _init_repo, _point_at
 from tests.test_update_merge_assisted import _stub_worker_gates
 
-pytestmark = pytest.mark.serial
 
 
 class Crash(BaseException):

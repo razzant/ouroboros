@@ -23,7 +23,6 @@ from ouroboros import config, safety
 from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

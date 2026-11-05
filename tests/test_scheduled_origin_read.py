@@ -32,7 +32,6 @@ from tests.test_predecessor_lineage_read import predecessor_envelope
 from tests.test_schedule_followup import _ctx
 from tests.test_swarm_host_admission import host  # noqa: F401
 
-pytestmark = pytest.mark.serial
 ORIGIN, GRAND, STRANGER = "root-1", "pred-0", "other-1"
 BINDING = {"billing_group_id": ORIGIN, "billing_group_limit_usd": 10.0,
            "billing_group_limit_source": "initial_task_admission", "billing_group_limit_revision": "rev-1"}

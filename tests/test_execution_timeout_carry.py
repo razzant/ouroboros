@@ -23,7 +23,6 @@ from tests._execution_clock_seams import agent_start as _agent_start
 from tests.test_retained_work_recovery import _saved
 from tests.test_worker_crash_retry import _isolate_worker_crash_state, _reserved_job  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def _fake_clock(monkeypatch):

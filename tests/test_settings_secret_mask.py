@@ -321,7 +321,6 @@ def test_common_writer_blanks_top_level_masks(tmp_path, monkeypatch):
     assert raw["MY_CUSTOM_TOKEN"] == ""
 
 
-@pytest.mark.serial
 def test_a_stored_mask_never_reaches_the_environment(tmp_path, monkeypatch):
     """apply_settings_to_env writes the real process env, so restore it after."""
     from ouroboros import config as cfg

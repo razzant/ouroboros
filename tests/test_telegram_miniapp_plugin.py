@@ -172,7 +172,6 @@ def test_empty_windows_machine_registration(
         assert status["reason_code"] == "unsupported_platform"
 
 
-@pytest.mark.serial
 def test_real_companion_environment_platform_consumers(tmp_path, monkeypatch, record_property):
     """Run the real interpreter with the core companion's environment construction.
 

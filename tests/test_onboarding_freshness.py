@@ -5,7 +5,6 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("surface", ["page", "readiness"])

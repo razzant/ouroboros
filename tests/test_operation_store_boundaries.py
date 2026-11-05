@@ -8,7 +8,6 @@ from ouroboros import owner_pause, store, task_store, tool_custody
 from tests.test_batch4_producer_custody import _registry
 from tests.test_invocation_ownership import claims, owner, run
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("after_body", [False, True])

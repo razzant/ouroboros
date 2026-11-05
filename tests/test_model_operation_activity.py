@@ -110,7 +110,6 @@ def test_old_engine_queue_does_not_invent_a_wait_reason():
     assert observed[0]["model_activity"] == {"phase": "queued", "operation_id": "existing", "invocation_id": "attempt"}
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("kind,chat_id", [("direct_chat", 1), ("direct_chat", 7), ("managed_task", 7)])
 def test_main_forwarder_reaches_current_census_without_quota_clock(setup, monkeypatch, kind, chat_id):
     root, gateway, client = setup

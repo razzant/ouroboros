@@ -30,7 +30,6 @@ from tests.test_swarm_host_admission import host as host_fixture
 
 q = queue_fixture
 host = host_fixture
-pytestmark = pytest.mark.serial
 FACT_AUTO = "Subagents: Auto — scheduled work"
 FACT_OFF = "Subagents: Off — set by my human for this chat"
 FACT_SETTINGS_OFF = "Subagents: Off — off in Settings"

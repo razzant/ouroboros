@@ -577,7 +577,6 @@ def test_parallel_callers_share_one_atomic_intent(world, monkeypatch):
     assert len(_receipts(world)) == 1
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize(("mode", "status"), [("ok", "merged"), ("accepted_open", "queued"), ("queued", "queued"),
                                               ("refused", "refused")])
 def test_losing_claim_cannot_erase_the_winners_effect_or_settled_outcome(world, monkeypatch, mode, status):
@@ -639,7 +638,6 @@ def test_losing_claim_cannot_erase_the_winners_effect_or_settled_outcome(world, 
         assert all(f"merge: {status}" in event["text"] for event in world.ctx.pending_events)
 
 
-@pytest.mark.serial
 def test_delayed_queue_publication_catches_up_to_the_persisted_merge(world, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event

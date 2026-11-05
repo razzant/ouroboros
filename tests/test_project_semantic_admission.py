@@ -17,7 +17,6 @@ from ouroboros import projects_registry as registry
 from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_schedule_occurrence import q, _row, _rows  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def task(tid="attempt", **extra):

@@ -22,7 +22,6 @@ from tests.test_project_hold_recovery import worker
 from tests.test_swarm_host_admission import host as host
 from tests.conversation_carrier_support import lane_row, park_lane_pause
 
-pytestmark = pytest.mark.serial
 
 TASK_ID = "head"
 INLINE_WID = 97  # the inline executor's pseudo-slot

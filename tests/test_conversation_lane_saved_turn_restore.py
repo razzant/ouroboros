@@ -35,7 +35,6 @@ from tests._budget_pause_exact_helpers import _loop_ctx
 from tests._shared import write_queue_document
 from tests.test_update_abort_retention import _assert_returned, _Process, _system
 
-pytestmark = pytest.mark.serial
 
 TID = "lane-saved-turn"
 

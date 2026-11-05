@@ -32,7 +32,7 @@ from ouroboros import process_census as pc
 from ouroboros import process_scope as ps
 from ouroboros import task_results
 
-pytestmark = [pytest.mark.serial, pytest.mark.skipif(os.name == "nt", reason="the environment census is POSIX-only")]
+pytestmark = [pytest.mark.skipif(os.name == "nt", reason="the environment census is POSIX-only")]
 
 PID, OTHER, MEMBER = 120001, 120002, 120005
 BOOT, HZ, TICKS = 1_700_000_000, 100, 98_765

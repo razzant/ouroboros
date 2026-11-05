@@ -23,7 +23,6 @@ from tests.test_presence_reentry import _read_all
 
 
 KEY = "telegram:bot-1:room-1:topic-1"
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture(autouse=True)

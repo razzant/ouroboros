@@ -497,7 +497,6 @@ def test_gaia_openai_websearch_pin_drops_base_url(monkeypatch):
     assert "OPENAI_BASE_URL" not in env  # dropped so official web_search stays enabled
 
 
-@pytest.mark.serial
 def test_gaia_render_injects_keys_and_free_host_service_port(tmp_path, monkeypatch):
     # Out-of-the-box coexistence with a running desktop app: the rendered settings must
     # carry a FREE Host-Service port (not the default 8767) and the REAL provider key for
