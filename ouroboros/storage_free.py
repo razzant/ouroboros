@@ -777,7 +777,7 @@ class FreeSpace:
             from ouroboros import review_checking_prune as seats
 
             seat_causes: dict = {}
-            homes = seats.finished_seat_homes(root, live, self._closed, causes=seat_causes)  # one proof per seat task for both groups
+            homes = seats.finished_seat_homes(root, live, self._closed, causes=seat_causes)  # one proof per seat task (per home for a pseudo owner) for both groups
             if GROUP_REVIEW_EVIDENCE in self._offered:
                 group = new_group(GROUP_REVIEW_EVIDENCE)
                 for home, verdict, task_id in homes:

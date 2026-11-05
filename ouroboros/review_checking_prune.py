@@ -95,15 +95,15 @@ def _started_after(started: Any, since: Any) -> bool:
         return False  # an unknown start proves nothing about this copy
 
 
-def _copy_run_state(data_root: Any, task_id: str, area: pathlib.Path, created_at: Any) -> tuple:
-    """One custody read: (runs over, continuation window open). False/None terminality
-    retains; only runs born in this copy prove completion. Their recorded start/cap
-    bound continuation; no new deadline is invented for unbounded or unknown timing."""
+def _copy_run_state(data_root: Any, task_id: str, area: pathlib.Path, created_at: Any, snapshot: Any = None) -> tuple:
+    """One custody read (or the caller's ``snapshot`` of the task's custody): (runs over, continuation window
+    open). False/None terminality retains; only runs born in this copy prove completion. Their recorded
+    start/cap bound continuation; no new deadline is invented for unbounded or unknown timing."""
     from ouroboros import delegate_custody_current as current
     from ouroboros.delegate_custody import TERMINAL_STATES
     from ouroboros.deadline_utils import parse_deadline_ts, utc_now
 
-    snapshot = current.task_snapshot(data_root, task_id)
+    snapshot = current.task_snapshot(data_root, task_id) if snapshot is None else snapshot
     target = str(area.resolve(strict=False))
 
     def names(root: Any) -> bool:
@@ -122,7 +122,7 @@ def _copy_run_state(data_root: Any, task_id: str, area: pathlib.Path, created_at
     return (True if own else None), (not ends or min(ends) > utc_now())
 
 
-def _seat_proven_over(data_root: Any, task_id: str, home: pathlib.Path, live: Any) -> bool:
+def _seat_proven_over(data_root: Any, task_id: str, home: pathlib.Path, live: Any, snapshot: Any = None) -> bool:
     """Use a pseudo owner's seat proof when no task row can prove it over."""
     if task_id not in _PSEUDO_SEAT_OWNERS:
         from ouroboros.subagent_worktrees import _task_proven_over
@@ -131,12 +131,32 @@ def _seat_proven_over(data_root: Any, task_id: str, home: pathlib.Path, live: An
     try:
         marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
         for area in (home / "area", home / "area.noindex"):
-            over, _window = _copy_run_state(data_root, task_id, area, marker.get("created_at"))
+            over, _window = _copy_run_state(data_root, task_id, area, marker.get("created_at"), snapshot)
             if over is True:
                 return True
         return False
     except Exception:
         return False
+
+
+def _proven(data_root: Any, proven: Dict[Any, Any], task_id: str, home: pathlib.Path, live: Any) -> bool:
+    """HOME's seat proof, cached in PROVEN: one per task, or one per home for a pseudo owner, whose own copy's
+    runs decide it; such an owner's custody snapshot is read once into PROVEN (an unreadable one proves none)."""
+    if task_id not in _PSEUDO_SEAT_OWNERS:
+        if task_id not in proven:
+            proven[task_id] = _seat_proven_over(data_root, task_id, home, live)
+        return proven[task_id]
+    key, custody = (task_id, home.name), ("custody", task_id)
+    if key not in proven:
+        if custody not in proven:
+            from ouroboros import delegate_custody_current as current
+
+            try:
+                proven[custody] = current.task_snapshot(data_root, task_id)
+            except Exception:
+                proven[custody] = None
+        proven[key] = proven[custody] is not None and _seat_proven_over(data_root, task_id, home, live, proven[custody])
+    return proven[key]
 
 
 def _checkout_entries(base: pathlib.Path) -> list:
@@ -309,11 +329,11 @@ def _seat_hold_cause(home: pathlib.Path, proven: bool) -> str:
 
 
 def finished_seat_homes(data_root: Any, live: Callable[[str], Any], stopped: Callable[[], bool],
-                        proven: Optional[Dict[str, bool]] = None, only: Optional[Any] = None,
+                        proven: Optional[Dict[Any, Any]] = None, only: Optional[Any] = None,
                         *, causes: Optional[Dict[pathlib.Path, str]] = None) -> list:
     """For the owner's Storage -> Free and the ``record_compression`` job: ``(home, verdict, task_id)`` per
     seat home (``only``: these home names), ``offer`` when its copy is gone and its task is proven over
-    (``proven`` caches that per task), else ``in_use`` or ``unreadable``.
+    (``proven`` caches that per task, per home for a pseudo owner: ``_proven``), else ``in_use`` or ``unreadable``.
     Pure: markers and task rows are read, no seat lock is taken (a lock writes a file)."""
     seats, proven, found = pathlib.Path(data_root) / "state" / "review_checkouts" / "seats", {} if proven is None else proven, []
     for home in sorted(seats.iterdir()) if seats.is_dir() else ():
@@ -328,17 +348,16 @@ def finished_seat_homes(data_root: Any, live: Callable[[str], Any], stopped: Cal
                 causes[home] = "marker_unreadable"
             found.append((home, "unreadable", ""))
             continue
-        if task_id not in proven:
-            proven[task_id] = _seat_proven_over(data_root, task_id, home, live)
-        bare = proven[task_id] and not _checking_area_present(unindexed(home, "area"))  # its copy is gone
+        over = _proven(data_root, proven, task_id, home, live)
+        bare = over and not _checking_area_present(unindexed(home, "area"))  # its copy is gone
         if causes is not None and not bare:
-            causes[home] = _seat_hold_cause(home, proven[task_id])
+            causes[home] = _seat_hold_cause(home, over)
         found.append((home, "offer" if bare else "in_use", task_id))
     return found
 
 
 @contextlib.contextmanager
-def finished_home_held(data_root: Any, home: pathlib.Path, live: Callable[[str], Any], proven: Dict[str, bool],
+def finished_home_held(data_root: Any, home: pathlib.Path, live: Callable[[str], Any], proven: Dict[Any, Any],
                        *, causes: Optional[Dict[pathlib.Path, str]] = None):
     """HOME under its seat lock (a thread seat's is its thread's; never waits): yields ``""`` while the home
     is still finished (its copy gone, its task proven over), else ``busy`` or ``in_use``; the lock is held
@@ -351,14 +370,13 @@ def finished_home_held(data_root: Any, home: pathlib.Path, live: Callable[[str],
                 causes[home] = "seat_busy"
             yield "busy"
             return
-        if task_id not in proven:
-            proven[task_id] = _seat_proven_over(data_root, task_id, home, live)
-        if causes is not None and (_checking_area_present(unindexed(home, "area")) or not proven[task_id]):
-            causes[home] = _seat_hold_cause(home, proven[task_id])
-        yield "in_use" if _checking_area_present(unindexed(home, "area")) or not proven[task_id] else ""
+        over = _proven(data_root, proven, task_id, home, live)
+        if causes is not None and (_checking_area_present(unindexed(home, "area")) or not over):
+            causes[home] = _seat_hold_cause(home, over)
+        yield "in_use" if _checking_area_present(unindexed(home, "area")) or not over else ""
 
 
-def retire_seat_home(data_root: Any, home: pathlib.Path, live: Callable[[str], Any], proven: Dict[str, bool]) -> str:
+def retire_seat_home(data_root: Any, home: pathlib.Path, live: Callable[[str], Any], proven: Dict[Any, Any]) -> str:
     """Move one finished seat home (its evidence and marker) into the custody trash the maintenance child
     empties, after re-checking it under the seat lock; returns why it stayed, or ``""``. Its task is proven
     over before the owner's keep gate (the probe takes the supervisor's queue lock, which drive settlement
@@ -366,12 +384,11 @@ def retire_seat_home(data_root: Any, home: pathlib.Path, live: Callable[[str], A
     from ouroboros.body_candidate import _recorded_terminal
     marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
     task_id = str(marker.get("task_id") or "")
-    if task_id not in proven:
-        proven[task_id] = _seat_proven_over(data_root, task_id, home, live)
+    over = _proven(data_root, proven, task_id, home, live)
     with gate(data_root, task_id, timeout_sec=0) as kept:  # outside the seat lock's file: it covers the move too
         if kept:
             return kept
-        if proven[task_id] and task_id not in _PSEUDO_SEAT_OWNERS and not _recorded_terminal(task_id, data_root):
+        if over and task_id not in _PSEUDO_SEAT_OWNERS and not _recorded_terminal(task_id, data_root):
             return "in_use"  # continued since it was proven over: no stale proof deletes it
         with finished_home_held(data_root, home, live, proven) as why:
             if why:
