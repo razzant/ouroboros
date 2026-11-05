@@ -5,7 +5,8 @@ Regressions of the same class are pinned here:
   D1 - read_file(start_char=...) was silently dropped by the active_workspace /
        system_repo / runtime_data branches (only task_drive & co honored it), so a
        long one-line file re-read the identical head forever; the reread-nudge
-       cache also collided two different sub-line windows on those branches.
+       cache (since removed) also collided two different sub-line windows on
+       those branches.
   D2 - write_file(mode="append") silently became overwrite on the repo roots and
        in the generic batch loop, destroying every prior chunk of a chunked
        large-file write while reporting success.
@@ -30,8 +31,6 @@ from ouroboros.tools.core import _data_read, _read_file, _write_file
 from ouroboros.tools.edit_ops import _edit_batch
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-_NUDGE = "This exact view is unchanged"
-
 
 def _ctx(tmp_path):
     repo = tmp_path / "repo"
@@ -53,7 +52,7 @@ def test_read_file_start_char_honored_on_repo_and_data_roots(tmp_path):
     line = "0123456789ABCDEFGHIJ\n"
     for root in ("active_workspace", "system_repo", "runtime_data"):
         # One file per root: active_workspace and system_repo resolve to the same
-        # repo here, and the reread nudge keys on the resolved path.
+        # repo here, so each root reads its own file.
         base = ctx.drive_root if root == "runtime_data" else ctx.repo_dir
         (base / f"one_line_{root}.txt").write_text(line, encoding="utf-8")
         result = _read_file(ctx, f"one_line_{root}.txt", root=root, start_char=10)
@@ -62,19 +61,21 @@ def test_read_file_start_char_honored_on_repo_and_data_roots(tmp_path):
         assert "0123456789" not in result, (root, result)
 
 
-def test_read_file_distinct_start_char_windows_do_not_collide_in_reread_cache(tmp_path):
-    """Two different sub-line windows are different views: the second must NOT be
-    nudged as a re-read (the cache key used to omit start_char on these branches),
-    while a true repeat of the same window still is."""
+def test_read_file_start_char_windows_differ_and_a_repeat_returns_the_same_window(tmp_path):
+    """Two sub-line windows of one line are different views, each with its own
+    text, and the same window read again in the same task returns exactly that
+    window again."""
     ctx = _ctx(tmp_path)
     (ctx.repo_dir / "one_line.txt").write_text("0123456789ABCDEFGHIJ\n", encoding="utf-8")
 
     first = _read_file(ctx, "one_line.txt", root="active_workspace", start_char=0)
-    assert _NUDGE not in first
+    assert first.endswith("\t0123456789ABCDEFGHIJ\n"), first
     advanced = _read_file(ctx, "one_line.txt", root="active_workspace", start_char=10)
-    assert _NUDGE not in advanced, "a different sub-line window is not a re-read"
+    assert "(from char 10 of this window)" in advanced and advanced.endswith("\tABCDEFGHIJ\n"), advanced
+    assert "0123456789" not in advanced and ctx.last_read_view["source_start_char"] == 10, advanced
     repeat = _read_file(ctx, "one_line.txt", root="active_workspace", start_char=10)
-    assert _NUDGE in repeat, "a true repeat of the same window is still nudged"
+    assert repeat == advanced, "a repeat of the same window returns that window, byte for byte"
+    assert ctx.last_read_view["source_start_char"] == 10
 
 
 def test_data_read_cognitive_full_read_shortcut_yields_to_start_char(tmp_path):
