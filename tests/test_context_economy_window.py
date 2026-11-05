@@ -35,6 +35,12 @@ from tests.test_tool_result_delivery import _ctx, _deliver, _row, _source_ref, _
 setup, live_wait, main_call = gateway_fixture, wait_fixture, main_call_fixture
 TARGET, RESERVE = 40_000, 5_000
 OWNER = {"role": "user", "content": "Owner, while the batch ran: keep the old API alive. " * 60}
+_LONG_TAIL_CONTENT = "LATER REAL MATERIAL " * 30_000
+_GIANT_LINE_COUNT = 20_000
+_GIANT_MODULE_OF = "".join(f"row {n:07d} of the giant module: payload payload payload\n" for n in range(_GIANT_LINE_COUNT)) \
+    + "LAST LINE: keep the old API alive\n"
+_GIANT_MODULE_COLON = "".join(f"row {n:07d}: payload payload payload payload payload\n" for n in range(_GIANT_LINE_COUNT)) \
+    + "LAST LINE: keep the old API alive\n"
 
 
 def _batch(tmp_path, *, window, read_args=None, read_chars=240_000):
@@ -232,7 +238,7 @@ def _long_tail(plan):
     return plan.messages_for("low") + [
         {"role": "assistant", "content": "", "tool_calls": [{"id": "big", "type": "function", "function": {
             "name": "read_file", "arguments": json.dumps({"path": "big.py", "start_line": 1, "max_lines": 9_000})}}]},
-        {"role": "tool", "tool_call_id": "big", "content": "LATER REAL MATERIAL " * 30_000}]  # ~150K: past the Low target
+        {"role": "tool", "tool_call_id": "big", "content": _LONG_TAIL_CONTENT}]  # ~150K: past the Low target
 
 
 def test_a_rebind_keeps_the_sent_view_on_a_smaller_fitting_window_and_unfolds_nothing(tmp_path, monkeypatch):
@@ -882,8 +888,7 @@ def test_a_chosen_read_above_target_reaches_the_model_inside_the_known_window(
     windows["account-a"] = 1_000_000
     built = plan(windows["account-a"])
     ctx.messages[:] = built.messages_for(owner_mode)
-    giant = "".join(f"row {n:07d} of the giant module: payload payload payload\n" for n in range(20_000))
-    giant += "LAST LINE: keep the old API alive\n"
+    giant = _GIANT_MODULE_OF
     (ctx.drive_root / "giant.txt").write_text(giant, encoding="utf-8")
     read = {"id": "chosen-read", "type": "function", "function": {"name": "read_file", "arguments": json.dumps(
         {"path": "giant.txt", "start_line": 1, "max_lines": 30_000})}}
@@ -898,7 +903,7 @@ def test_a_chosen_read_above_target_reaches_the_model_inside_the_known_window(
     second = gateway.uploads[1][0]["messages"]
     shown = next(row["content"] for row in second if row.get("tool_call_id") == "chosen-read")
     header, *rows = shown.rstrip("\n").split("\n")
-    assert "lines 1–20001 of 20001" in header
+    assert f"lines 1–{_GIANT_LINE_COUNT + 1} of {_GIANT_LINE_COUNT + 1}" in header
     assert "".join(row.split("\t", 1)[1] + "\n" for row in rows) == giant
     assert all(any(task_text in json.dumps(row, ensure_ascii=False) for row in payload["messages"])
                for payload, _key in gateway.uploads)
@@ -922,8 +927,7 @@ def test_a_window_bounded_chosen_read_survives_next_host_rows_and_source_shrink(
     windows.update({"account-a": window, "account-b": 1_000_000})
     built = plan(window)
     ctx.messages[:] = built.messages_for(owner_mode)
-    giant = "".join(f"row {n:07d}: payload payload payload payload payload\n" for n in range(20_000))
-    giant += "LAST LINE: keep the old API alive\n"
+    giant = _GIANT_MODULE_COLON
     path = ctx.drive_root / "giant.txt"
     path.write_text(giant, encoding="utf-8")
     read_file, originals = tools._entries["read_file"].handler, []
@@ -979,8 +983,7 @@ def test_a_chosen_read_on_an_unknown_window_stays_whole_after_an_unmeasured_engi
     windows.update({"account-a": 0, "account-b": 1_000_000})
     built = plan(0)
     ctx.messages[:] = built.messages_for("low")
-    giant = "".join(f"row {n:07d} of the giant module: payload payload payload\n" for n in range(20_000))
-    giant += "LAST LINE: keep the old API alive\n"
+    giant = _GIANT_MODULE_OF
     (ctx.drive_root / "giant.txt").write_text(giant, encoding="utf-8")
     runs, read_file = [], tools._entries["read_file"].handler
 
@@ -1007,7 +1010,8 @@ def test_a_chosen_read_on_an_unknown_window_stays_whole_after_an_unmeasured_engi
     assert delivery["status"] == "capacity_unknown" and delivery["whole_tokens"] > OWNER_LOW_TARGET_TOKENS
     assert delivery["whole_tokens"] - delivery["minimum_tokens"] > delivery["free_tokens"]
     header, *rows = shown.rstrip("\n").split("\n")  # the numbered view, row by row: the file itself, unchanged
-    assert "lines 1–20001 of 20001" in header and "".join(row.split("\t", 1)[1] + "\n" for row in rows) == giant
+    assert f"lines 1–{_GIANT_LINE_COUNT + 1} of {_GIANT_LINE_COUNT + 1}" in header \
+        and "".join(row.split("\t", 1)[1] + "\n" for row in rows) == giant
     # The pre-send measurement saw the target deficit (no window to fit) and concealed nothing for it.
     facts = [row["content"] for row in refused if str(row["content"]).startswith("[CONTEXT_FACTS]")][-1]
     assert "window unknown" in facts and "free unknown" in facts and "over target" in facts
