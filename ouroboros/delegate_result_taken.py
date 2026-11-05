@@ -112,7 +112,7 @@ def tell_engine(run: Any, task_id: str) -> str:
         return DONE
     if is_kept(run.root, task_id):  # the owner keeps this task's materials: its engine copies stay too
         run.hold("result_owner_keep")
-        return DONE
+        return WAIT
     why, held = tree_hold(run.root, task_id, document, live=run.live, census=run.census())
     states = {rid: owed(entry) for rid, entry in held.items() if rid not in recorded}
     if why or "wait" in states.values():

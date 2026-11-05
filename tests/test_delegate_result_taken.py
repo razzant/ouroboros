@@ -193,8 +193,16 @@ def test_a_typed_answer_is_recorded_once_and_never_repeated(world, status, code,
 
 
 def test_the_owner_keep_holds_the_engine_copy_too(world, monkeypatch):
-    monkeypatch.setattr(owner_keep, "is_kept", lambda _root, _task: True)
-    assert world.tell() == rt.DONE and world.engine.decisions == [] and world.asked == []
+    kept = {"value": True}
+    monkeypatch.setattr(owner_keep, "is_kept", lambda _root, _task: kept["value"])
+    run = _pass(world.root, world.engine)
+    assert taken.tell_engine(run, TASK) == rt.WAIT and run.report["holds"] == {"result_owner_keep": 1}
+    assert world.engine.decisions == [] and world.asked == [] and world.records() == {}
+    kept["value"] = False
+    released = _pass(world.root, world.engine)
+    assert taken.tell_engine(released, TASK) == rt.DONE and released.report["holds"] == {}
+    assert world.records()["run-1"]["state"] == "taken" and len(world.engine.decisions) == 1
+    assert world.tell() == rt.DONE and len(world.engine.decisions) == 1
 
 
 def test_a_stop_between_decisions_leaves_the_rest_waiting(world):
