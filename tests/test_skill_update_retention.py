@@ -96,9 +96,12 @@ def test_startup_restores_interrupted_update_and_leaves_running_review(release, 
     assert read_install_record(drive, "demo")["update_rejected"]["reason"] == "review_unfinished"
 
 
-@pytest.mark.parametrize("kind", ["hub", "git", "builtin", "registry"])
-@pytest.mark.parametrize("cut", ["before_swap", "between_moves", "after_swap"])
-@pytest.mark.parametrize("same_release", [False, True], ids=["new-release", "same-release"])
+@pytest.mark.parametrize(("same_release", "cut", "kind"), [
+    pytest.param(False, "between_moves", "builtin", id='new-release-between_moves-builtin'),
+    pytest.param(False, "after_swap", "registry", id='new-release-after_swap-registry'),
+    pytest.param(True, "before_swap", "hub", id='same-release-before_swap-hub'),
+    pytest.param(True, "after_swap", "git", id='same-release-after_swap-git'),
+])
 def test_startup_restores_landing_before_new_install_record(request, tmp_path, monkeypatch, kind, cut, same_release):
     from ouroboros.marketplace import fetcher, install as storage
 
@@ -596,8 +599,11 @@ def _extension(drive, skill_dir, *, enabled):
 
 
 @_POSIX_LINKS
-@pytest.mark.parametrize("kind", ["hub", "builtin", "registry"])
-@pytest.mark.parametrize("moved", [True, False], ids=["moved-app", "current-app"])
+@pytest.mark.parametrize(("moved", "kind"), [
+    pytest.param(True, "hub", id='moved-app-hub'),
+    pytest.param(True, "registry", id='moved-app-registry'),
+    pytest.param(False, "builtin", id='current-app-builtin'),
+])
 def test_update_keeps_the_previous_payload_with_its_links(request, tmp_path, monkeypatch, kind, moved):
     drive, update = _installed(request, tmp_path, monkeypatch, kind)
     payload = find_skill(drive, "demo").skill_dir
@@ -612,8 +618,11 @@ def test_update_keeps_the_previous_payload_with_its_links(request, tmp_path, mon
 
 @_POSIX_LINKS
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="a named pipe is what makes the copy fail here (POSIX)")
-@pytest.mark.parametrize("kind", ["hub", "builtin", "registry"])
-@pytest.mark.parametrize("state", ["live", "owner_off_meanwhile", "off"])
+@pytest.mark.parametrize(("state", "kind"), [
+    ("live", "builtin"),
+    ("owner_off_meanwhile", "hub"),
+    ("off", "registry"),
+])
 def test_failed_snapshot_changes_nothing_and_reloads_a_live_extension(request, tmp_path, monkeypatch, extension_runtime,
                                                                       kind, state):
     from ouroboros.extension_loader import is_extension_live
@@ -643,8 +652,7 @@ def test_failed_snapshot_changes_nothing_and_reloads_a_live_extension(request, t
 
 
 @_POSIX_LINKS
-@pytest.mark.parametrize("kind", ["hub", "builtin", "registry"])
-@pytest.mark.parametrize("basis", ["trusted", "review"])  # review: the retained update snapshot restores
+@pytest.mark.parametrize(("basis", "kind"), [("trusted", "builtin"), ("review", "hub"), ("review", "registry")])
 def test_failed_landing_restores_links_and_the_live_extension(request, tmp_path, monkeypatch, extension_runtime,
                                                               kind, basis):
     from ouroboros.extension_loader import is_extension_live

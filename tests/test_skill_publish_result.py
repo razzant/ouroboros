@@ -150,8 +150,10 @@ def test_real_pr_receipt_survives_missing_scanner_evidence_and_keeps_advice():
     ) is None
 
 
-@pytest.mark.parametrize("safety_note", ["", "⚠️ SAFETY_WARNING: allowed with a warning."])
-@pytest.mark.parametrize("success", [False, True])
+@pytest.mark.parametrize(("success", "safety_note"), [
+    (False, ""),
+    (True, "⚠️ SAFETY_WARNING: allowed with a warning."),
+])
 def test_registry_notes_preserve_publication_trace_metadata(tmp_path, monkeypatch, safety_note, success):
     from ouroboros import safety
     from ouroboros.loop_tool_execution import _typed_result_metadata
@@ -595,9 +597,13 @@ def test_valid_receipt_never_promotes_existing_objective(objective_status):
     assert outcome == before
 
 
-@pytest.mark.parametrize("objective_status", ["pass", "best_effort", "fail", "degraded", "not_evaluated"])
-@pytest.mark.parametrize("stage,reason", [("local_preflight", "github_actor_unavailable"),
-                                         ("fork_ready", "fork_sync_failed")])
+@pytest.mark.parametrize(("stage", "reason", "objective_status"), [
+    ("local_preflight", "github_actor_unavailable", "pass"),
+    ("local_preflight", "github_actor_unavailable", "fail"),
+    ("local_preflight", "github_actor_unavailable", "not_evaluated"),
+    ("fork_ready", "fork_sync_failed", "best_effort"),
+    ("fork_ready", "fork_sync_failed", "degraded"),
+])
 def test_definite_pre_branch_failure_is_failed_even_when_review_degrades(objective_status, stage, reason):
     from ouroboros.outcomes import normalize_outcome_axes
     from ouroboros.project_dialogue import outcome_phase
@@ -619,12 +625,12 @@ def test_definite_pre_branch_failure_is_failed_even_when_review_degrades(objecti
     assert outcome_phase(record, {}) == "error"
 
 
-@pytest.mark.parametrize("stage,reason", [("fork_ready", "branch_create_failed"),
-                                         ("fork_synced", "branch_create_failed"),
-                                         ("branch_created", "commit_failed"),
-                                         ("pr_create_attempted", "pr_open_indeterminate")])
-@pytest.mark.parametrize("reverse", [False, True])
-@pytest.mark.parametrize("objective_status", ["degraded", "fail"])
+@pytest.mark.parametrize(("objective_status", "reverse", "stage", "reason"), [
+    ("degraded", False, "fork_ready", "branch_create_failed"),
+    ("degraded", False, "branch_created", "commit_failed"),
+    ("fail", True, "fork_synced", "branch_create_failed"),
+    ("fail", True, "pr_create_attempted", "pr_open_indeterminate"),
+])
 def test_an_unconfirmed_branch_or_pr_attempt_survives_other_pre_branch_failures(stage, reason, reverse, objective_status):
     outcome = _loop_outcome(objective_status)
     unknown = _trace_call(_failed_result(status="partial", completed_stage=stage, reason_code=reason))

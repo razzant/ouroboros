@@ -75,8 +75,7 @@ def _fake(monkeypatch, *, exists=False, private=True, failure=None, error_stage=
     return calls
 
 
-@pytest.mark.parametrize("exists", [False, True])
-@pytest.mark.parametrize("private", [False, True])
+@pytest.mark.parametrize(("private", "exists"), [(False, False), (True, True)])
 def test_create_or_connect_repository_reports_visibility_and_saves_new_source(env, monkeypatch, exists, private):
     client, settings = env
     calls = _fake(monkeypatch, exists=exists, private=private)

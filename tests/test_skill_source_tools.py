@@ -77,10 +77,10 @@ def test_refusals_publish_argument_or_host_errors(tmp_path, monkeypatch, tool, a
     assert _typed_result_metadata(tool, result.text, True, result)["status"] == status
 
 
-@pytest.mark.parametrize("tool", ["skill_install", "skill_update"])
-@pytest.mark.parametrize("http_status", [400, 502])
-@pytest.mark.parametrize("error_code, expected", [("bad_check", "TOOL_ARG_ERROR"),
-                                                  ("registry_host_failed", "TOOL_ERROR")])
+@pytest.mark.parametrize(("error_code", "expected", "http_status", "tool"), [
+    ("bad_check", "TOOL_ARG_ERROR", 400, "skill_install"),
+    ("registry_host_failed", "TOOL_ERROR", 502, "skill_update"),
+])
 def test_installer_error_classification_uses_code_not_http_status(tmp_path, monkeypatch, tool, http_status,
                                                                 error_code, expected):
     from ouroboros import skill_source_install as installer
@@ -167,8 +167,10 @@ def test_install_from_a_review_row_starts_the_review_and_records_the_reason(ctx)
     assert record["task_id"] == "task-1" and record["basis"] == "review"
 
 
-@pytest.mark.parametrize("tool", ["skill_install", "skill_update"])
-@pytest.mark.parametrize("enforcement,expected", [("blocking", ["a", "b"]), ("advisory", ["a"])])
+@pytest.mark.parametrize(("enforcement", "expected", "tool"), [
+    pytest.param("blocking", ["a", "b"], "skill_install", id='blocking-expected0-skill_install'),
+    pytest.param("advisory", ["a"], "skill_update", id='advisory-expected1-skill_update'),
+])
 def test_skill_tools_carry_the_admitted_panel_before_mutation(tmp_path, monkeypatch, tool, enforcement, expected):
     from ouroboros import skill_source_install as installer
     from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool

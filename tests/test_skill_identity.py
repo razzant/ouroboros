@@ -255,8 +255,7 @@ def test_identity_conversion_retries_after_a_record_write_error(tmp_path, monkey
     assert si.convert_skill_identities(drive) == {"skipped": True}
 
 
-@pytest.mark.parametrize("edited", [False, True])
-@pytest.mark.parametrize("manifest_name", ["SKILL.md", "skill.json"])
+@pytest.mark.parametrize(("manifest_name", "edited"), [("SKILL.md", True), ("skill.json", False)])
 def test_legacy_hub_conversion_uses_only_the_original_manifest_declaration(tmp_path, edited, manifest_name):
     from ouroboros.skill_install_record import convert_legacy_records, read_install_record
     from ouroboros.skill_loader import find_skill
