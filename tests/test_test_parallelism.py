@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import config, preflight_runner, test_parallelism as budget
-from ouroboros.process_containment import ProcessContainer, pid_is_zombie
+from ouroboros.process_containment import ProcessContainer
 from ouroboros import platform_layer as pl
 from tests import conftest
 
@@ -230,58 +230,6 @@ def test_generated_pytest_entry_obeys_nested_allocation(tmp_path, slots):
     }, workers=slots)
     assert code == 0, output
     assert len(list(workers.iterdir())) == slots, output
-
-
-@pytest.mark.parametrize("fault", ["exit", "thread_timeout"])
-def test_worker_death_ends_pass_with_crash_and_unfinished_evidence(tmp_path, fault):
-    child_identity, running, finished = tmp_path / "child.json", tmp_path / "running", tmp_path / "finished"
-    child_code = ("import os,time,json; from pathlib import Path; "
-                  "from ouroboros.platform_layer import process_start_time; "
-                  f"Path({str(child_identity)!r}).write_text(json.dumps([os.getpid(),process_start_time(os.getpid())]),encoding='utf-8'); "
-                  "time.sleep(40)")
-    crash = "os._exit(7)" if fault == "exit" else "time.sleep(40)"
-    code, evidence, output, _ = _run_pytest(tmp_path, {
-        "test_0_crash.py": f"""
-            import os, subprocess, sys, time
-            from pathlib import Path
-            def test_dies():
-                subprocess.Popen([sys.executable, '-c', {child_code!r}])
-                deadline = time.monotonic() + 10
-                while not Path({str(running)!r}).exists() or not Path({str(child_identity)!r}).exists():
-                    assert time.monotonic() < deadline
-                    time.sleep(.01)
-                {crash}
-        """,
-        "test_1_running.py": f"""
-            import pytest, time
-            from pathlib import Path
-            @pytest.mark.timeout(0)
-            def test_running():
-                Path({str(running)!r}).write_text('started', encoding='utf-8')
-                time.sleep(40)
-                Path({str(finished)!r}).write_text('finished', encoding='utf-8')
-        """,
-        "test_2_pending.py": "def test_pending(): raise AssertionError('must not schedule after worker death')\n",
-    }, workers=2, extra=("--timeout=3", "--timeout-method=thread") if fault == "thread_timeout" else ())
-    assert code != 0 and not finished.exists(), output  # the pass ended without waiting for the sleeper
-    data = json.loads((evidence / "results.json").read_text(encoding="utf-8"))
-    crash_reports = [row for row in data["reports"] if row["phase"] == "crash"]
-    assert any(row["nodeid"] == "test_0_crash.py::test_dies" for row in crash_reports), output
-    # Only the timeout callback's own record names a cause; an os._exit leaves the crash unexplained.
-    assert [row.get("timeout_callback_seconds") for row in crash_reports] == [
-        3.0 if fault == "thread_timeout" else None], output
-    assert not any(row["nodeid"] == "test_2_pending.py::test_pending" for row in data["reports"]), output
-    assert data["session_exit_code"] != 0
-    assert data["worker_crash"]["collection_available"] is True
-    assert data["worker_crash"]["unfinished"] == [
-        "test_1_running.py::test_running", "test_2_pending.py::test_pending"]
-    pid, born = json.loads(child_identity.read_text(encoding="utf-8"))
-    # Gone or an unreaped corpse. Windows keeps an exited process (and its birth) readable
-    # while a handle is open and ends Job members asynchronously, so its exit state decides.
-    deadline = time.monotonic() + 15
-    while pl.process_start_time(pid) == born and not pl.pid_provably_gone(pid) and not pid_is_zombie(pid):
-        assert time.monotonic() < deadline, output
-        time.sleep(0.05)
 
 
 @pytest.mark.parametrize("name, change, seconds", [

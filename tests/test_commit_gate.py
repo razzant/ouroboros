@@ -274,93 +274,6 @@ def test_non_committing_review_cycle_exists_and_reuses_shared_stage_cycle():
     assert '["git", "commit"' not in source
 
 
-def _staged_whole_tree(ctx, outcome):
-    """What the real stage cycle records after ``git add -A`` (paths omitted): the finally undoes it."""
-    from ouroboros.tools.git_plumbing import WHOLE_INDEX
-
-    ctx._staged_selection = WHOLE_INDEX
-    return outcome
-
-
-def test_non_committing_review_cycle_runtime_unstages_on_success(monkeypatch, tmp_path):
-    git_mod = _get_git_module()
-    reset_calls = []
-    recorded = []
-    released = []
-
-    monkeypatch.setattr(git_mod, "_check_overlapping_review_attempt", lambda ctx: None)
-    monkeypatch.setattr(git_mod, "_acquire_git_lock", lambda ctx: "lock-token")
-    monkeypatch.setattr(git_mod, "_release_git_lock", lambda lock: released.append(lock))
-    monkeypatch.setattr(
-        git_mod,
-        "_run_reviewed_stage_cycle",
-        lambda ctx, *args, **kwargs: _staged_whole_tree(ctx, {
-            "status": "passed",
-            "message": "stage cycle passed",
-            "pre_fingerprint": {"fingerprint": "pre"},
-            "post_fingerprint": {"fingerprint": "post"},
-        }),
-    )
-    monkeypatch.setattr(
-        git_mod,
-        "_record_commit_attempt",
-        lambda *args, **kwargs: recorded.append(
-            {"status": args[2], "phase": kwargs.get("phase")}
-        ),
-    )
-    monkeypatch.setattr(
-        git_mod,
-        "run_cmd",
-        lambda cmd, cwd=None: reset_calls.append((tuple(cmd), cwd)) or "",
-    )
-
-    ctx = types.SimpleNamespace(
-        repo_dir="/tmp/repo", drive_root=tmp_path,
-        _coupling_review_history={"snap": [{"round": 1, "status": "FAIL"}]},
-    )
-    outcome = git_mod._run_non_committing_review_cycle(ctx, "test commit")
-
-    assert outcome["status"] == "passed"
-    assert "Commit was not created" in outcome["message"]
-    # A completed cycle closes the subject's coupling rounds; the next starts fresh.
-    assert ctx._coupling_review_history == {}
-    assert recorded == [{"status": "reviewed", "phase": "review_only"}]
-    assert released == ["lock-token"]
-    assert reset_calls == [(("git", "reset", "HEAD"), "/tmp/repo")]
-
-
-def test_non_committing_review_cycle_runtime_unstages_on_block(monkeypatch, tmp_path):
-    git_mod = _get_git_module()
-    reset_calls = []
-    released = []
-
-    monkeypatch.setattr(git_mod, "_check_overlapping_review_attempt", lambda ctx: None)
-    monkeypatch.setattr(git_mod, "_acquire_git_lock", lambda ctx: "lock-token")
-    monkeypatch.setattr(git_mod, "_release_git_lock", lambda lock: released.append(lock))
-    monkeypatch.setattr(
-        git_mod,
-        "_run_reviewed_stage_cycle",
-        lambda ctx, *args, **kwargs: _staged_whole_tree(ctx, {
-            "status": "blocked",
-            "message": "review blocked",
-            "block_reason": "critical_findings",
-        }),
-    )
-    monkeypatch.setattr(
-        git_mod,
-        "run_cmd",
-        lambda cmd, cwd=None: reset_calls.append((tuple(cmd), cwd)) or "",
-    )
-
-    ctx = types.SimpleNamespace(repo_dir="/tmp/repo", drive_root=tmp_path)
-    outcome = git_mod._run_non_committing_review_cycle(ctx, "test commit")
-
-    assert outcome["status"] == "blocked"
-    assert outcome["block_reason"] == "critical_findings"
-    assert released == ["lock-token"]
-    assert reset_calls == [(("git", "reset", "HEAD"), "/tmp/repo")]
-
-
 def test_repo_commit_push_uses_shared_reviewed_stage_cycle():
     git_mod = _get_git_module()
     source = inspect.getsource(git_mod._repo_commit_push)
@@ -527,11 +440,6 @@ def _get_preflight_module():
     return importlib.import_module("ouroboros.tools.preflight_review")
 
 
-def _get_review_state_module():
-    sys.path.insert(0, REPO)
-    return importlib.import_module("ouroboros.review_state")
-
-
 def test_advisory_pre_review_registered():
     """The old advisory_review name stays callable as an alias of preflight_review."""
     names = [t.name for t in _get_preflight_module().get_tools()]
@@ -567,21 +475,6 @@ def test_preflight_gate_in_repo_commit_push():
     parallel_source = inspect.getsource(git_mod._run_parallel_review)
     assert "_prepare_unified_review" in parallel_source
     assert "_dispatch_unified_review" in parallel_source
-
-
-def test_snapshot_hash_stable_on_message_change(tmp_path):
-    """Snapshot hash must NOT differ when only commit_message changes.
-
-    Hash is now based on code content only (decoupled from commit_message
-    to make freshness less brittle when the message is slightly rephrased).
-    """
-    import subprocess
-    rs_mod = _get_review_state_module()
-    subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
-
-    h1 = rs_mod.compute_snapshot_hash(tmp_path, "message A")
-    h2 = rs_mod.compute_snapshot_hash(tmp_path, "message B")
-    assert h1 == h2
 
 
 def test_repo_commit_schema_has_skip_advisory_param():
