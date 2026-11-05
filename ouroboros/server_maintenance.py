@@ -1267,7 +1267,7 @@ def _run_drive_custody_pass(stop_event: Any = None) -> None:
                 holds.note(skipped.get("reason"), task_id)
     released = sum(len(report.get("pruned") or ()) for report in reports.values())
     errors = [f"{row.get('task_id')}: {row.get('error')}" for report in reports.values() for row in report.get("errors") or ()]
-    if "map" in loaded or released or errors:
+    if "map" in loaded or released or errors or mailboxes.get("removed"):
         maintenance_jobs.record_pass(root, "drive_settlement", {**maintenance_jobs.pass_report(released, holds, errors),
                                                                 "headless": reports["headless"], "direct": reports["direct"],
                                                                 "mailboxes": mailboxes}, event="headless_task_drive_prune")
