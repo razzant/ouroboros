@@ -206,6 +206,7 @@ def run_root(world, task, *script):
     out = queue_module.Queue()
     world.root_steps[:] = script
     agent = world.h.factory(repo_dir=str(world.h.repo), drive_root=str(world.data), event_queue=out)
+    agent.owner_wait_callback = None  # the pool installs it; a root on a forked drive copies it to its own agent
     box = {"agent": agent, "out": out}
 
     def body():

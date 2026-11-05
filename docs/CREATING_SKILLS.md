@@ -1255,19 +1255,17 @@ a bound ending is not consent, and terminal questions stay answerable. Neither c
 sends an external reply or accepts an external request as an owner instruction.
 Delegated children still escalate to their parent.
 
-For promised work without a new event, `start_task(destination="place")` and
-`schedule_followup(notify=false, relation=...)` retain the existing Presence
-carrier and ordinary resource/control semantics; every `start_task` from a
-Presence carrier names its destination, and `destination="owner"` is the owner's
-private work, which reaches no connector. A scheduled root explicitly
-uses connector tools to deliver later; it is not discovered by polling the old
-event, its finish reaches no one by itself, and it reads the conversation's
-current previous turn rather than the copy taken when it was scheduled. Any turn
-of the place lists, reads and withdraws the follow-ups related to it, its own and
-those of the owner's work a late answer began (`manage_schedules`
-`list`/`get`/`delete`); withdrawal stops future runs only, and
-`cancel_task` stops work one already started. `notify=true` and the owner-wide
-schedule table remain separate capabilities.
+For promised work without an event, `start_task` and `schedule_followup`
+retain the Presence carrier and resource/control semantics. Starts and
+independent schedules require `destination`: `place` keeps this path; `owner`
+starts private work, or refuses a schedule so that private root can schedule
+itself. Scheduled roots deliver via connector tools, never polling the old
+event or their final text; they read the conversation's current previous turn.
+Any turn of the place lists, reads and withdraws its related follow-ups,
+including those of owner work an answer began (`manage_schedules`
+`list`/`get`/`delete`). Withdrawal stops future runs; `cancel_task` stops work
+already started. `notify=true` and the owner-wide schedule table are separate
+capabilities.
 
 A turn's source identity uses its first legacy binding id (otherwise its place id), source event ID, provider/account,
 conversation/thread, actor ID and text. Keep those facts stable on retry;

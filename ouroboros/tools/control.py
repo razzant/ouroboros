@@ -125,7 +125,8 @@ _START_CHOICE_PARAMS = {
     "destination": {"type": "string", "enum": ["place", "owner"], "description": (
         "Presence callers only. 'place': this place's work, which may answer its conversation. 'owner': the owner's own "
         "private work, asked for by their answer to a private question; it runs as ordinary owner work in Main or a "
-        "Project chosen here and never speaks in the place, which can still read and stop it.")},
+        "Project chosen here without an automatic place reply; the place can still read and stop it. That root schedules "
+        "its own follow-ups.")},
     "owner_quote": {"type": "string", "default": "", "description": (
         "With destination='owner': the held owner_quote_handle of the answer that asks for this work.")},
 }

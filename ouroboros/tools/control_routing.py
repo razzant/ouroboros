@@ -244,13 +244,14 @@ def _start_destination(ctx: ToolContext, carrier: Dict[str, Any], destination: A
     refused = "⚠️ TOOL_ARG_ERROR (start_task): {} Nothing was scheduled."
     if not carrier:
         return {}, (refused.format("destination and owner_quote apply only to a start from a Presence "
-                                   "conversation or work acting for a place.") if destination or owner_quote else "")
+                                   "conversation or work acting for a place.")
+                    if destination not in (None, "") or owner_quote not in (None, "") else "")
     if destination not in (DESTINATION_PLACE, DESTINATION_OWNER):
         return {}, refused.format(
             f"destination must be {DESTINATION_PLACE!r} (this place's work) or {DESTINATION_OWNER!r} (the owner's "
             "private work, with owner_quote naming their held answer to a private question).")
     if destination == DESTINATION_PLACE:
-        return {}, refused.format("owner_quote belongs to destination='owner'.") if owner_quote else ""
+        return {}, refused.format("owner_quote belongs to destination='owner'.") if owner_quote not in (None, "") else ""
     try:
         return private_start_fields(ctx, owner_quote), ""
     except ContactRequestInvalid as exc:

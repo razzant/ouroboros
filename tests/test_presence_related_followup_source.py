@@ -183,7 +183,8 @@ def test_a_follow_up_the_still_narrowed_run_emits_reads_its_source_and_the_run_k
     holds = presence_caller_binding(run), _worker_reads_the_owners_table(q, {"id": run.task_id, "metadata": run.task_metadata})
     assert holds == (BINDING, False)
 
-    written = _handle_schedule_followup(run, objective="Recheck the source", run_at="2000-01-01T00:00:00Z", relation="independent")
+    written = _handle_schedule_followup(run, objective="Recheck the source", run_at="2000-01-01T00:00:00Z", relation="independent",
+                                        destination="place")
 
     assert written.startswith("FOLLOWUP_SCHEDULED"), written
     [row] = [item for item in _rows(q).values() if (item.get("followup_origin") or {}).get("task_id") == run.task_id]

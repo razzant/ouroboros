@@ -286,7 +286,6 @@ def bound_room_chat(rooms: Callable[..., int], row: Dict[str, Any]) -> int:
     return int(rooms(row.get("task_id"), row.get("parent_task_id"), row.get("root_task_id")) or 0)
 
 
-
 def _source_ref_identity(ref: Dict[str, Any]) -> Optional[tuple]:
     try:
         chat_id = int(ref.get("chat_id") or 0)
@@ -312,7 +311,8 @@ def _entry_source_identities(entry: Dict[str, Any]) -> set:
     client_id = str(entry.get("client_message_id") or "")
     ts = str(entry.get("ts") or "")
     text_hash = _text_sha256(text)
-    return {(chat_id, client, stamp, text_hash) for client in (client_id, "") for stamp in (ts, "")}
+    return {(chat_id, client, stamp, text_hash) for client in (client_id, "") for stamp in (ts, "")
+            if client or entry.get("direction") == "in"}
 
 
 def entry_matches_source_ref(entry: Dict[str, Any], refs: Iterable[Dict[str, Any]]) -> bool:

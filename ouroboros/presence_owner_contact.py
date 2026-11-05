@@ -115,6 +115,21 @@ def private_answer_row(root, ref) -> dict:
     return row if _private_answer(row) and _owner_row(row) else {}
 
 
+def _private_start_source_fields(row: dict) -> dict:
+    """The private answer's event projection, shared by its producer and admission reader."""
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.dialogue_provenance import PRESENCE_BINDING_RELATION_KEY, private_contact
+    from ouroboros.owner_relay import owner_text
+    from ouroboros.project_dialogue import build_owner_message_ref
+
+    words = owner_text(row)
+    ref = build_owner_message_ref(chat_id=row["chat_id"], client_message_id=row.get("client_message_id"),
+                                  ts=row.get("ts"), text=words)
+    return {"chat_id": ref["chat_id"], "client_message_id": ref["client_message_id"], "attachment_uploads": [],
+            "source_ref": ref, "source_text": words, "work_kind": "owner", "owner_quote": format_address(row_address(row)),
+            PRESENCE_BINDING_RELATION_KEY: {"binding_id": private_contact(row)["binding_id"]}}
+
+
 def private_start_fields(ctx, handle) -> dict:
     """What a Presence caller's start of the owner's private work puts on its event, or ``ContactRequestInvalid``.
 
@@ -125,11 +140,9 @@ def private_start_fields(ctx, handle) -> dict:
     the caller rides along (speaker, binding authority, contract, focus, attachments), so the caller's
     limits stay on the caller, and its live metadata is never written.
     """
-    from ouroboros.consciousness_authority import WORK_KIND_OWNER
-    from ouroboros.dialogue_provenance import PRESENCE_BINDING_RELATION_KEY, presence_caller_binding, private_contact
+    from ouroboros.dialogue_provenance import presence_caller_binding, private_contact
     from ouroboros.owner_quiz import question_task_owned_by
-    from ouroboros.owner_relay import held_owner_messages, owner_text
-    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.owner_relay import held_owner_messages
     from ouroboros.store import StoreError
     from ouroboros.tool_access import canonical_data_root
 
@@ -153,38 +166,35 @@ def private_start_fields(ctx, handle) -> dict:
                                     "retry when it can.") from exc
     if not owned:
         raise ContactRequestInvalid("that answer replies to a question another work asked.")
-    words = owner_text(row)
-    ref = build_owner_message_ref(chat_id=row["chat_id"], client_message_id=row.get("client_message_id"),
-                                  ts=row.get("ts"), text=words)
+    fields = _private_start_source_fields(row)
     try:
-        verified = private_answer_row(root, ref)
+        verified = private_answer_row(root, fields["source_ref"])
     except StoreError as exc:
         raise ContactRequestInvalid(f"that answer's saved row cannot be read now ({type(exc).__name__}); "
                                     "retry when it can.") from exc
     if not verified:
         raise ContactRequestInvalid("that answer has no matching saved row.")
-    return {"chat_id": ref["chat_id"], "client_message_id": ref["client_message_id"], "attachment_uploads": [],
-            "source_ref": ref, "source_text": words, "work_kind": WORK_KIND_OWNER,
-            PRESENCE_BINDING_RELATION_KEY: {"binding_id": contact["binding_id"]}}
+    return fields
 
 
 def private_start_refusal(root, evt: dict) -> str:
     """Admission's own read of a private start, before any project, source or workspace effect: its refusal
-    code, else ``""``. The start must name a saved answer of the binding it relates to and carry no Presence
-    authority; the producer's facts are claims here, and any other start is not this reader's."""
-    from ouroboros.dialogue_provenance import PRESENCE_BINDING_RELATION_KEY, presence_root_carrier, private_contact
+    code, else ``""``. Read the same source projection the worker will consume, not just its reference.
+    This is an internal producer/consumer consistency check, not an untrusted event ingress."""
+    from ouroboros.dialogue_provenance import presence_root_carrier
     from ouroboros.store import StoreError
 
     if evt.get("destination") != DESTINATION_OWNER:
-        return ""
-    relation = evt.get(PRESENCE_BINDING_RELATION_KEY)
+        return "private_owner_source_invalid" if evt.get("owner_quote") not in (None, "") else ""
     try:
         row = private_answer_row(root, evt.get("source_ref"))
     except StoreError:
         return "private_owner_source_unavailable"
-    related = isinstance(relation, dict) and bool(row) and relation.get("binding_id") == private_contact(row).get("binding_id")
+    if not row:
+        return "private_owner_source_invalid"
+    matching = all(evt.get(key) == value for key, value in _private_start_source_fields(row).items())
     carried = presence_root_carrier(evt, task_contract=evt.get("task_contract"))
-    return "" if related and not carried else "private_owner_source_invalid"
+    return "" if matching and not carried and "task_contract" not in evt else "private_owner_source_invalid"
 
 
 def send_main_message(ctx, text: str, origin: dict, request_id: str = "") -> str:

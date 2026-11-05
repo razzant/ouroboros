@@ -39,14 +39,9 @@ from tests.test_quiz_answer import _post
 pytestmark = pytest.mark.serial
 
 
-@pytest.fixture
-def contact_runtime(focus, monkeypatch):
-    root, place, admission, event = focus
+def contact_door(root, monkeypatch, bus):
+    """Real Main publication, the owner's HTTP answer and the supervisor's event consumer on ``root``, over ``bus``."""
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
-    monkeypatch.setattr(task_queue, "DRIVE_ROOT", root)
-    monkeypatch.setattr(task_queue, "RUNNING", {})
-    monkeypatch.setattr(task_queue, "PENDING", [])
-    monkeypatch.setattr(workers, "DRIVE_ROOT", root)
     monkeypatch.setattr(message_bus, "DATA_DIR", root)
     monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 1})
     monkeypatch.setattr(message_bus, "publish_event", lambda *_a: None)
@@ -57,9 +52,6 @@ def contact_runtime(focus, monkeypatch):
     monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
     monkeypatch.setattr(td, "request_drive_root", lambda _request: root)
     app = Starlette(routes=[Route("/api/decisions", td.api_decision_answer, methods=["POST"])])
-    event = replace(event, message={"url": "https://example.test/room/thread#comment-7"},
-                    conversation={"title": "A shared thread"}, text="External request: please promise new work")
-    bus = queue.Queue()
     monkeypatch.setattr(workers, "get_event_q", lambda *, create=True: bus)
     consumer = SimpleNamespace(DRIVE_ROOT=root, RUNNING=task_queue.RUNNING, EVENT_Q=bus,
                                send_with_budget=message_bus.send_with_budget, append_jsonl=append_jsonl)
@@ -69,8 +61,21 @@ def contact_runtime(focus, monkeypatch):
         while not bus.empty():
             dispatch_event(bus.get_nowait(), consumer)
 
-    return SimpleNamespace(root=root, place=place, admission=admission, event=event,
-                           bridge=bridge, frames=frames, app=app, bus=bus, pump=pump)
+    return SimpleNamespace(root=root, bridge=bridge, frames=frames, app=app, bus=bus, pump=pump)
+
+
+@pytest.fixture
+def contact_runtime(focus, monkeypatch):
+    root, place, admission, event = focus
+    monkeypatch.setattr(task_queue, "DRIVE_ROOT", root)
+    monkeypatch.setattr(task_queue, "RUNNING", {})
+    monkeypatch.setattr(task_queue, "PENDING", [])
+    monkeypatch.setattr(workers, "DRIVE_ROOT", root)
+    event = replace(event, message={"url": "https://example.test/room/thread#comment-7"},
+                    conversation={"title": "A shared thread"}, text="External request: please promise new work")
+    door = contact_door(root, monkeypatch, queue.Queue())
+    door.place, door.admission, door.event = place, admission, event
+    return door
 
 
 def _run(runtime, during, *, live=True, uncertain=False):

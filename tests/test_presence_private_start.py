@@ -3,9 +3,11 @@
 A live turn that receives the owner's answer to its private question may start the owner's own work: the same
 root a private late answer starts, with the Main answer row as its owner origin, the place's read and stop kept and
 nothing of the turn's speaker, focus or limits. Omission or a wrong selection refuses before any effect, and only
-an outward start touches the conversation's handoff. Real question, HTTP answer, drain, tool dispatch, promote
-handler, readers, Continue and startup check; the model, the queue row store and Safety are doubles (the shared
-``contact_runtime``). Nothing is sent anywhere.
+an outward start touches the conversation's handoff. A schedule names its destination too, and the owner's work is not
+scheduled from there: that root schedules for itself (owner's decision, 5 November 2026). Real question, HTTP answer,
+drain, tool dispatch, promote handler, readers, Continue and startup check; the model, the queue row store and Safety are
+doubles (the shared ``contact_runtime``). Nothing is sent anywhere. The connector door, room and scheduler consumers:
+``test_presence_private_consumers``.
 """
 import json
 import queue
@@ -156,6 +158,8 @@ def test_a_live_answer_starts_the_owners_private_work_like_a_late_answer_and_lea
     # Two follow-ups keep the relation; then the whole late-answer exerciser (nested start, children, tools, stop).
     for args in ({"notify": True}, {"relation": "independent"}):
         assert _handle_schedule_followup(worker, objective="Revisit it", run_at="2030-01-01T00:00:00Z", **args).startswith("FOLLOWUP_SCHEDULED")
+        assert "FOLLOWUP_DESTINATION_NOT_APPLICABLE" in _handle_schedule_followup(
+            worker, objective="Revisit it", run_at="2030-01-01T00:00:00Z", destination="owner", **args)
     [followup] = [row for row in task_queue.list_scheduled_tasks(r.root)["tasks"] if row.get("kind") != "notify"]
     fired = task_queue._task_from_schedule(followup)["metadata"]
     assert fired["presence_binding_relation"] == {"binding_id": binding} and fired["work_kind"] == "owner"
@@ -172,9 +176,10 @@ def test_a_presence_start_refuses_a_missing_or_unusable_destination_before_any_e
 
     r = contact_runtime
 
-    def refused(ctx, emitted, words, **args):
+    def refused(ctx, emitted, words, *, direct=False, **args):
         known = {row.get("task_id") for row in list_task_results(r.root)}
-        out = _start_task(ctx, PRIVATE_START["objective"], title=PRIVATE_START["title"], **args)
+        out = (_start_task(ctx, **PRIVATE_START, **args) if direct
+               else ctx._consumer_tools.execute("start_task", {**PRIVATE_START, **args}))
         assert "TOOL_ARG_ERROR (start_task)" in out and words in out and "Nothing was scheduled" in out, (args, out)
         assert not emitted and {row.get("task_id") for row in list_task_results(r.root)} == known, args
         assert not hasattr(ctx, "_swarm_handoff_attempt"), args
@@ -187,6 +192,8 @@ def test_a_presence_start_refuses_a_missing_or_unusable_destination_before_any_e
                             ({"destination": ["owner"], "owner_quote": handle}, "destination must be"),
                             ({"owner_quote": handle}, "destination must be"),
                             ({"destination": "place", "owner_quote": handle}, "owner_quote belongs"),
+                            ({"destination": "place", "owner_quote": []}, "owner_quote belongs"),
+                            ({"destination": "place", "owner_quote": False}, "owner_quote belongs"),
                             ({"destination": "owner"}, "owner_quote must be"),  # one held answer is no default either
                             ({"destination": "owner", "owner_quote": "row:1@nowhere#000000000000"}, "owner_quote must be"),
                             ({"destination": "owner", "owner_quote": [handle]}, "owner_quote must be")):
@@ -226,17 +233,18 @@ def test_a_presence_start_refuses_a_missing_or_unusable_destination_before_any_e
         # A legacy ceiling keeps narrowing, and a delegated caller reports upward (the row stays held, so only these decide).
         saved = deepcopy(ctx.task_contract)
         ctx.task_contract = {**saved, "capability_ceiling": {}}
-        refused(ctx, emitted, "legacy capability ceiling", destination="owner", owner_quote=handle)
+        refused(ctx, emitted, "legacy capability ceiling", direct=True, destination="owner", owner_quote=handle)
         ctx.task_contract = saved
         ctx.task_metadata = {**task["metadata"], "parent_task_id": "parent", "delegation_role": "subagent"}
-        refused(ctx, emitted, "reports to its parent", destination="owner", owner_quote=handle)
+        refused(ctx, emitted, "reports to its parent", direct=True, destination="owner", owner_quote=handle)
         ctx.task_metadata = task["metadata"]
 
     _run(r, during)
     # Work holding no Presence authority has nothing to choose, and cannot name a choice.
     plain = SimpleNamespace(pending_events=[], event_queue=None, current_chat_id=1, drive_root=r.root, budget_drive_root=str(r.root),
                             project_id="", task_id="owner-turn", is_direct_chat=True, task_metadata={}, task_contract={})
-    for args in ({"destination": "owner"}, {"destination": "place"}, {"owner_quote": "row:1@x#y"}):
+    for args in ({"destination": "owner"}, {"destination": "place"}, {"owner_quote": "row:1@x#y"},
+                 *({key: value} for key in ("destination", "owner_quote") for value in (0, False, [], {}))):
         out = _start_task(plain, "x", title="X", **args)
         assert "apply only to a start from a Presence" in out and not plain.pending_events, args
 
@@ -257,7 +265,16 @@ def test_admission_reads_the_private_origin_itself_before_any_project_or_source_
 
         for tamper, reason in ((lambda e: e["source_ref"].update(client_message_id="quiz_answer:other:other"), "private_owner_source_invalid"),
                                (lambda e: e.update(presence_binding_relation={"binding_id": "other"}), "private_owner_source_invalid"),
-                               (lambda e: e.update(presence={"binding_id": r.admission.binding_id}), "private_owner_source_invalid")):
+                               (lambda e: e.update(presence={"binding_id": r.admission.binding_id}), "private_owner_source_invalid"),
+                               (lambda e: e.update(source_text="Different words."), "private_owner_source_invalid"),
+                               (lambda e: e.update(chat_id=77), "private_owner_source_invalid"),
+                               (lambda e: e.update(client_message_id="other"), "private_owner_source_invalid"),
+                               (lambda e: e.update(attachment_uploads=[{"upload": "foreign"}]), "private_owner_source_invalid"),
+                               (lambda e: e.update(work_kind="consciousness"), "private_owner_source_invalid"),
+                               (lambda e: e.update(owner_quote="another-answer"), "private_owner_source_invalid"),
+                               (lambda e: e.update(task_contract={}), "private_owner_source_invalid"),
+                               (lambda e: e.update(destination="place", presence={"binding_id": r.admission.binding_id}),
+                                "private_owner_source_invalid")):
             ctx.event_queue = SimpleNamespace(put_nowait=lambda event: (tamper(event), admit(event))[1])
             out = ctx._consumer_tools.execute("start_task", {**PRIVATE_START, "source": "https://example.test/repo.git",
                                                              "destination": "owner", "owner_quote": handle})
@@ -333,6 +350,97 @@ def test_only_the_outward_start_holds_the_first_handoff_in_either_order(contact_
     _run(r, during)
 
 
+def _published(r, tid):
+    """What the connector's retry reads back from the turn's record."""
+    from ouroboros.presence_runner import presence_result_from_stored
+    from ouroboros.task_results import load_task_result
+
+    result = presence_result_from_stored(load_task_result(r.root, tid), tid, r.root)
+    return result.outcome, result.work_ref, result.text
+
+
+@pytest.mark.parametrize("first", ["private", "outward", None], ids=["private-first", "outward-first", "private-only"])
+def test_a_quiet_final_defers_only_to_the_outward_start_and_says_nothing(contact_runtime, monkeypatch, first):
+    """The mind's silent finish, whichever start came first; private work alone leaves the turn plainly silent."""
+    from ouroboros.presence_runner import build_presence_result_event
+    from ouroboros.tools.control_routing import _start_task
+
+    r, seen = contact_runtime, {}
+
+    def during(ctx, task, _agent):
+        handle = _answered(r, ctx)
+        host, _emitted = _admitting(r, monkeypatch, ctx)
+        private = {"objective": "Owner's research", "title": "Research", "destination": "owner", "owner_quote": handle}
+        outward = {"objective": "Answer them", "title": "Answer", "destination": "place"}
+        for args in {"private": (private, outward), "outward": (outward, private), None: (private,)}[first]:
+            assert _start_task(ctx, **args).startswith("OK: task")
+        seen.update(frame=build_presence_result_event(task, "Noted for myself.", ctx, terminal_origin="model_final", silent=True),
+                    outward=next((row["id"] for row in host.PENDING if "presence" in row["metadata"]), ""), tid=ctx.task_id)
+
+    _run(r, during)
+    frame, outward = seen["frame"], seen["outward"]
+    assert (frame["outcome"], frame["work_ref"], frame["text"]) == ("deferred" if first else "silent", outward, "")
+    assert frame["finish_note"] == "Noted for myself." and bool(outward) is bool(first)
+    assert _published(r, seen["tid"]) == (frame["outcome"], outward, "")
+
+
+def test_one_private_answer_can_start_two_roots(contact_runtime, monkeypatch):
+    """No one-shot rule: the answer stays held and each start is its own ordinary root under the same owner origin."""
+    from ouroboros.task_results import load_task_result
+
+    r, seen = contact_runtime, {}
+
+    def during(ctx, _task, _agent):
+        handle = _answered(r, ctx)
+        host, emitted = _admitting(r, monkeypatch, ctx)
+        for title in ("First research", "Second research"):
+            out = ctx._consumer_tools.execute("start_task", {"objective": f"{title} of the source", "title": title,
+                                                             "destination": "owner", "owner_quote": handle})
+            assert out.startswith("OK: task"), out
+        assert not hasattr(ctx, "_swarm_handoff_attempt")
+        seen.update(roots=list(host.PENDING), emitted=emitted)
+
+    _run(r, during)
+    first, second = seen["roots"]
+    assert first["id"] != second["id"] and first["title"] != second["title"]
+    assert first["origin_message_ref"] == second["origin_message_ref"] == seen["emitted"][0]["source_ref"]
+    assert first["origin_message_text"] == second["origin_message_text"]
+    for root in (first, second):
+        assert load_task_result(r.root, root["id"])["status"] == "scheduled"
+        assert not (SPEAKER_KEYS | FOCUS_KEYS) & set(root["metadata"])
+        assert root["metadata"]["billing_group"]["billing_group_id"] == root["id"]
+
+
+def test_a_private_start_from_a_project_bound_turn_is_in_main_unless_the_owner_names_a_project(contact_runtime, monkeypatch):
+    """The turn's Project is the place's default for outward work and no default for the owner's: this is the omission."""
+    from ouroboros.projects_registry import create_project, project_chat_for_task, project_id_for_task
+    from ouroboros.tools.control_routing import _inherited_project_scope
+    from tests.test_presence_project_activity import _move
+
+    r, seen = contact_runtime, {}
+    placed = create_project(r.root, "place-room", name="Place room")
+    chosen = create_project(r.root, "owner-research", name="Owner research")
+
+    def during(ctx, _task, _agent):
+        handle = _answered(r, ctx)
+        host, _emitted = _admitting(r, monkeypatch, ctx)
+        _move(r.root, ctx.task_id, placed["id"])
+        assert _inherited_project_scope(ctx) == placed["id"]
+        for args in ({"destination": "owner", "owner_quote": handle}, {"destination": "place", "workspace": "none"},
+                     {"destination": "owner", "owner_quote": handle, "project_id": chosen["id"], "workspace": "none"}):
+            out = ctx._consumer_tools.execute("start_task", {**PRIVATE_START, **args})
+            assert out.startswith("OK: task"), out
+        seen.update(roots=list(host.PENDING))
+
+    _run(r, during)
+    unnamed, outward, named = seen["roots"]
+    assert not unnamed.get("project_id") and unnamed["chat_id"] == 1
+    assert project_id_for_task(r.root, unnamed["id"]) == "" and not project_chat_for_task(r.root, unnamed["id"])
+    assert unnamed["metadata"]["resource_intent"] == {"kind": "system_repo"}
+    assert outward["project_id"] == placed["id"] and project_id_for_task(r.root, outward["id"]) == placed["id"]
+    assert named["project_id"] == chosen["id"] and named["chat_id"] == chosen["chat_id"] == project_chat_for_task(r.root, named["id"])
+
+
 def test_a_private_start_alone_is_no_deferred_work_and_its_room_is_the_owners(contact_runtime, monkeypatch):
     from ouroboros.presence_runner import build_presence_result_event
     from ouroboros.projects_registry import create_project, project_chat_for_task
@@ -401,6 +509,11 @@ def test_observe_keeps_its_dispatch_refusal_with_every_selector(contact_runtime,
         for args in ({"destination": "owner", "owner_quote": handle}, {"destination": "place"}, {}):
             out = ctx._consumer_tools.execute("start_task", {**PRIVATE_START, **args})
             assert "RESOURCE_CONSTRAINT_BLOCKED" in out and "start_task" in out, out
+        for args in ({"destination": "owner"}, {"destination": "place"}, {}):
+            out = ctx._consumer_tools.execute("schedule_followup", {
+                "objective": "Revisit it", "run_at": "2030-01-01T00:00:00Z", "relation": "independent", **args})
+            assert "RESOURCE_CONSTRAINT_BLOCKED" in out and "schedule_followup" in out, out
+        assert task_queue.list_scheduled_tasks(r.root)["tasks"] == []
         assert not emitted and not host.PENDING and not hasattr(ctx, "_swarm_handoff_attempt")
         assert "disabled_tools" in task["metadata"] and task["metadata"]["consciousness_autonomy"] == "observe"
 
@@ -497,15 +610,99 @@ def test_the_recorded_successor_holding_the_answer_starts_it_and_a_card_row_is_a
     assert _entry_source_identities({**row, "type": "quiz_closed"}) == _entry_source_identities({**row, "source": "other"}) == set()
 
 
-def test_the_start_task_schema_and_retry_notice_name_the_destination(tmp_path):
+CARRIERS = {
+    "speaker": ({"presence": {"binding_id": "b" * 32}}, {}),
+    "work-acting-for-a-place": ({"presence_binding_authority": {"binding_id": "mail-room"}}, {}),
+    "retained-legacy-ceiling": ({"presence": {"binding_id": "b" * 32}}, {"capability_ceiling": {"tools": ["schedule_followup"]}}),
+    "lost-carrier-under-a-ceiling": ({}, {"capability_ceiling": {"tools": ["schedule_followup"]}}),
+}
+
+
+def _schedule_writes(ctx):
+    """Every durable schedule fact of this root: the table's rows and its audit stream."""
+    events = ctx.drive_root / "logs" / "events.jsonl"
+    audit = [row for row in events.read_text(encoding="utf-8").splitlines() if "schedule_mutation" in row] if events.exists() else []
+    return task_queue.list_scheduled_tasks(ctx.drive_root)["tasks"], audit
+
+
+def _carrying(tmp_path, carrier):
+    from tests.test_schedule_followup import _ctx
+
+    ctx = _ctx(tmp_path)
+    metadata, contract = CARRIERS[carrier]
+    ctx.task_metadata.update(metadata)
+    ctx.task_contract.update(contract)
+    return ctx
+
+
+@pytest.mark.parametrize("carrier", CARRIERS)
+def test_independent_work_from_a_carrier_names_its_destination_before_any_schedule_or_audit_write(tmp_path, carrier):
+    """Owner's choice A at the schedule: no default, and no reading of its objective. The owner's route is named, not taken."""
+    from tests.test_schedule_followup import _followup
+
+    ctx = _carrying(tmp_path, carrier)
+    for args in ({}, {"destination": None}, {"destination": ""}, {"destination": "nowhere"}, {"destination": "Owner"},
+                 {"destination": ["owner"]}, {"destination": 0}):
+        out = _followup(ctx, **args)
+        assert "FOLLOWUP_DESTINATION_REQUIRED" in out and "Nothing was scheduled" in out, args
+        assert _schedule_writes(ctx) == ([], []) and not ctx.pending_events, args
+    out = _followup(ctx, destination="owner")
+    assert "FOLLOWUP_DESTINATION_OWNER" in out and "start_task(destination='owner', owner_quote=" in out, out
+    assert "that new root" in out and "Nothing was scheduled" in out
+    assert _schedule_writes(ctx) == ([], []) and not ctx.pending_events
+
+    out = _followup(ctx, destination="place")
+    assert out.startswith("FOLLOWUP_SCHEDULED"), out
+    [row], audit = _schedule_writes(ctx)
+    assert audit and "destination" not in json.dumps(row)  # the choice is this call's, never a field of the promise
+    metadata = row["task"]["metadata"]
+    assert {key: metadata[key] for key in CARRIERS[carrier][0]} == CARRIERS[carrier][0]
+    assert row["followup_relation"]["kind"] == "independent"
+    assert row["task"]["task_contract"].get("capability_ceiling") == CARRIERS[carrier][1].get("capability_ceiling")
+
+
+@pytest.mark.parametrize("destination", ["place", "owner", "nowhere", ["place"], 0])
+def test_a_destination_named_where_there_is_no_choice_refuses_rather_than_being_ignored(tmp_path, destination):
+    """Ordinary work, a note and related work have nothing to choose; a contradictory choice is never silently dropped."""
+    from tests.test_schedule_followup import _ctx, _followup
+
+    ctx = _ctx(tmp_path)
+    for args in ({}, {"notify": True}, {"notify": True, "relation": "related"}, {"cron": "0 9 * * 1", "run_at": None}):
+        out = _followup(ctx, destination=destination, **args)
+        assert "FOLLOWUP_DESTINATION_NOT_APPLICABLE" in out and "Nothing was scheduled" in out, args
+    assert _schedule_writes(ctx) == ([], [])
+    assert "FOLLOWUP_SUBAGENT_REFUSED" in _followup(_ctx(tmp_path, role="subagent"), destination=destination)
+    assert "FOLLOWUP_NOTIFY_REFUSED" in _followup(_carrying(tmp_path, "speaker"), notify=True, destination=destination)
+    assert _schedule_writes(ctx) == ([], [])
+
+
+@pytest.mark.parametrize("empty", [None, ""])
+def test_an_ordinary_call_keeps_working_without_a_destination(tmp_path, empty):
+    from tests.test_schedule_followup import _ctx, _followup
+
+    ctx = _ctx(tmp_path)
+    assert _followup(ctx).startswith("FOLLOWUP_SCHEDULED")
+    assert _followup(ctx, notify=True).startswith("FOLLOWUP_SCHEDULED")
+    assert _followup(ctx, destination=empty).startswith("FOLLOWUP_SCHEDULED"), "models may send null"
+
+
+def test_both_schemas_and_the_retry_notice_name_the_destination(tmp_path):
     from ouroboros.promotion_intent import promotion_intent_notice
     from ouroboros.tools.control import get_tools
+    from ouroboros.tools.followup import get_tools as schedule_tools
 
     [tool] = [entry for entry in get_tools() if entry.name == "start_task"]
     properties = tool.schema["parameters"]["properties"]
     assert properties["destination"]["enum"] == ["place", "owner"] and "owner_quote" in properties
     assert set(tool.schema["parameters"]["required"]) == {"objective", "title"}  # ordinary callers keep their call
     assert "without one nothing starts" in tool.schema["description"]
+    assert "schedules its own follow-ups" in properties["destination"]["description"]
+    [schedule] = [entry for entry in schedule_tools() if entry.name == "schedule_followup"]
+    properties = schedule.schema["parameters"]["properties"]
+    assert properties["destination"]["enum"] == ["place", "owner"] and "owner_quote" not in properties
+    assert set(schedule.schema["parameters"]["required"]) == {"objective", "relation"}
+    assert "names destination" in schedule.schema["description"] and "Elsewhere omit it" in schedule.schema["description"]
+    assert "start_task(destination='owner', owner_quote=...)" in properties["destination"]["description"]
     notice = promotion_intent_notice("t1", {"promotion_admission": {"status": "not_started"}, "promotion_intent": {
         "objective": "x", "title": "X", "destination": "owner", "owner_quote": "row:1@t#0"}})
     assert '"destination": "owner"' in notice and '"owner_quote": "row:1@t#0"' in notice
