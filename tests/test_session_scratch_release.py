@@ -304,6 +304,24 @@ def test_the_owner_keep_holds_a_finished_tasks_scratch_until_released(tmp_path, 
     assert not scratch.exists()
 
 
+@pytest.mark.parametrize("task", ["api_skill_review", "marketplace_install"])
+def test_a_legacy_seat_note_releases_only_after_its_copy_is_gone(tmp_path, task):
+    """A-4: legacy pseudo-owner drive records follow the seat proof, without a terminal task row."""
+    key = "seat-legacy"
+    data = tmp_path / "data"
+    scratch = pathlib.Path(_prepare(tmp_path, _Catalog(GRANTED), task_id=task, key=key).scratch)
+    area = data / "state" / "review_checkouts" / "seats" / "legacy" / "area"
+    area.mkdir(parents=True)
+    assert release_finished_scratch(data, OVER) == {
+        "released": [], "holds": [_hold(data, "seat_open", task, key)], "errors": []}
+    assert scratch.is_dir() and _record(data, task, key).is_file()
+    area.rmdir()
+    assert release_finished_scratch(data, OVER) == {
+        "released": [str(_record(data, task, key).parent.resolve())], "holds": [], "errors": []}
+    assert _notes(data) == []
+    assert task_custody.remove_custody_trash(data)["removed"] == 1 and not scratch.exists()
+
+
 def test_a_note_whose_record_retired_with_its_drive_is_dropped(tmp_path):
     data, scratch = _started(tmp_path)
     assert task_custody.settle_child_drive(data, "task-1", data / "task_drives" / "task-1", live=OVER,
