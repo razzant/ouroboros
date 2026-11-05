@@ -8,11 +8,13 @@ and decides nothing: a reader overturns any row, and `devtools/coverage_census.p
 rows whose removal would lose a product line.
 
     python -m devtools.test_census --out DIR [--root .] [--protected tests/protected_tests.json]
-        [--journal events.jsonl ...] [--collected ids.txt]
+        [--journal events.jsonl ...] [--collected ids.txt] [--base REF]
 
 --journal    `tests/ci_evidence.py` events of a complete run: seconds and, without --collected,
              items. An earlier journal wins a function a later one also records.
 --collected  `pytest --collect-only -q` output for the default lane: the exact lane and items.
+--base       the commit the change under review started from. D6 calls a machinery test obsolete only
+             when every product function it names was rewritten since then; without --base it claims none.
 Without either, items come from literal parametrize lists and lane markers read from the source.
 A function no journal records weighs zero seconds, so D3 cannot tell it from a cheap list.
 
@@ -88,10 +90,11 @@ RULES = {  # cluster -> (the rule an agent can apply, the verdict of DEVELOPMENT
     "D4_wording": ("reaches no product behaviour and reads prose or UI text, or every assert is a substring of "
                    "that text; never a spawning, machinery, secret or incident test",
                    "delete: review owns (CHECKLISTS 5, 11(d), 26)"),
-    "D6_machinery": ("spawning, nested-pytest or git test of the runner, gate, evidence or scratch machinery, "
-                     "beyond the cheapest witness per file", "delete: obsolete (machinery rewritten)"),
+    "D6_machinery": ("spawning, nested-pytest or git test of the runner, gate, evidence or scratch machinery "
+                     "whose every named product function was rewritten since the base, beyond the cheapest "
+                     "witness per file; never a secret test", "delete: obsolete (machinery rewritten)"),
     "D5_event_file": ("file named after a delivery event whose product modules are each reached by at least "
-                      "three unit-file tests", "merge into the unit file, or delete: obsolete"),
+                      "three unit-file tests; never a secret test", "merge into the unit file, or delete: obsolete"),
     "D1_cartesian": ("at least two literal parametrize axes: every value of every axis once, unless the "
                      "docstring names an interaction", "merge into the surviving cases"),
     "D2_cases": ("a hand-written case list, or a heavy computed one: its distinct classes, at most three "
@@ -458,7 +461,7 @@ def _modules(row) -> list:
     return sorted({name.rsplit(".", 1)[0] for name in row["product_names"]})
 
 
-def _rule_for(row, unit_reach, witness, protected_files) -> tuple:
+def _rule_for(row, unit_reach, witness, protected_files, rewritten=frozenset()) -> tuple:
     """(cluster, items removed, seconds saved lo, hi) of the first rule that applies, D7 aside."""
     name = row["file"].rsplit("/", 1)[-1]
     items, seconds = row["items"], row["seconds"]
@@ -471,9 +474,12 @@ def _rule_for(row, unit_reach, witness, protected_files) -> tuple:
             and (row["exercise"] in ("none", "source_handle")
                  or 0 < row["asserts"] == row["substring_asserts"])):
         return "D4_wording", items, seconds, seconds
-    if not cited and MACHINERY_FILE.match(name) and (spawns or row["git"]) and witness.get(row["file"]) is not row:
+    secret = bool(SECRET_WORD.search(row["qual"]))
+    if (not cited and not secret and MACHINERY_FILE.match(name) and (spawns or row["git"])
+            and witness.get(row["file"]) is not row and row["product_names"]
+            and all(product in rewritten for product in row["product_names"])):
         return "D6_machinery", items, seconds, seconds
-    if (not cited and EVENT_FILE.search(name) and row["product_names"]
+    if (not cited and not secret and EVENT_FILE.search(name) and row["product_names"]
             and all(unit_reach[module] >= 3 for module in _modules(row))):
         return "D5_event_file", items, seconds, seconds
     axes = row["axes"]
@@ -507,8 +513,52 @@ def _fold_facets(rows) -> None:
                            survivor=ordered[-1]["qual"])
 
 
-def decide(rows: list, protected_files, protected_functions) -> list:
-    """Claim every row for its first rule, then give named functions back: nothing counts twice."""
+def _definitions(text: str) -> dict:
+    """qualname -> ast dump of every function and class of a module's source."""
+    found = {}
+
+    def walk(body, prefix):
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                found[prefix + node.name] = ast.dump(node)
+                if isinstance(node, ast.ClassDef):
+                    walk(node.body, prefix + node.name + ".")
+
+    walk(ast.parse(text).body, "")
+    return found
+
+
+def rewritten_since(root: Path, base: str, rows: list) -> set:
+    """The product names the rows use whose function or class definition differs from the one at `base`."""
+    names = {product for row in rows for product in row["product_names"]}
+    modules: dict = {}
+    changed = set()
+    for name in sorted(names):
+        parts = name.split(".")
+        for cut in range(len(parts) - 1, 0, -1):
+            rel = "/".join(parts[:cut]) + ".py"
+            if (root / rel).is_file():
+                break
+        else:
+            continue
+        qual = ".".join(parts[cut:])
+        if rel not in modules:
+            shown = subprocess.run(["git", "-C", str(root), "show", f"{base}:{rel}"], capture_output=True, text=True)
+            before = _definitions(shown.stdout) if shown.returncode == 0 else {}
+            modules[rel] = (before, _definitions((root / rel).read_text(encoding="utf-8")))
+        before, after = modules[rel]
+        if qual in after and before.get(qual) != after[qual]:
+            changed.add(name)
+    return changed
+
+
+def decide(rows: list, protected_files, protected_functions, rewritten=frozenset()) -> list:
+    """Claim every row for its first rule, then give named functions back: nothing counts twice.
+
+    `rewritten` holds the dotted product names (`ouroboros.mod.function`) whose definition changed since the
+    base (`rewritten_since`). A machinery test is obsolete only when all it names is in it: a module, a constant
+    or one unchanged function it names may be what it witnesses.
+    """
     unit_reach: Counter = Counter()
     witness: dict = {}
     for row in rows:
@@ -519,7 +569,7 @@ def decide(rows: list, protected_files, protected_functions) -> list:
             if row["file"] not in witness or row["seconds"] < witness[row["file"]]["seconds"]:
                 witness[row["file"]] = row
     for row in rows:
-        cluster, removed, lo, hi = _rule_for(row, unit_reach, witness, protected_files)
+        cluster, removed, lo, hi = _rule_for(row, unit_reach, witness, protected_files, rewritten)
         row.update(cluster=cluster, items_removed=removed, seconds_saved_lo=lo, seconds_saved_hi=hi, survivor="")
     _fold_facets(rows)
     for row in rows:
@@ -579,6 +629,7 @@ def main(argv=None) -> int:
     parser.add_argument("--journal", type=Path, action="append", default=[], help="events.jsonl of a complete run")
     parser.add_argument("--collected", type=Path, help="`pytest --collect-only -q` output of the default lane")
     parser.add_argument("--protected", type=Path, help="default: <root>/tests/protected_tests.json")
+    parser.add_argument("--base", help="the commit the change started from; D6 needs it")
     args = parser.parse_args(argv)
     protected_path = args.protected or args.root / "tests" / "protected_tests.json"
     if not protected_path.is_file():
@@ -587,7 +638,8 @@ def main(argv=None) -> int:
     journal = load_journals(args.journal)
     collected = load_collected(args.collected) if args.collected else None
     rows = join_lane(scan_tests(args.root), journal, collected)
-    decide(rows, set(protected["files"]), {function_key(key) for key in protected["functions"]})
+    rewritten = rewritten_since(args.root, args.base, rows) if args.base else set()
+    decide(rows, set(protected["files"]), {function_key(key) for key in protected["functions"]}, rewritten)
     report = {"head": _head(args.root), **totals(rows)}
     args.out.mkdir(parents=True, exist_ok=True)
     with (args.out / "decisions.csv").open("w", newline="", encoding="utf-8") as stream:
