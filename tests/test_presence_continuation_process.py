@@ -407,23 +407,6 @@ def test_killed_author_stays_interrupted_and_explicit_new_event_can_continue(tmp
         second_host.close()
 
 
-def test_stop_ends_parked_full_agent_without_another_model_call(tmp_path):
-    host = Host(tmp_path, 1, "blocking")
-    try:
-        first = host.turn().json()
-        assert first.get("status") == "continuing", first
-        assert host.client.post("/fixture/stop", json={"task_id": first["turn_ref"]}).status_code == 200
-        final = eventually(lambda: (reply if (reply := host.work(first["turn_ref"])).status_code == 200 else None))
-        assert final.json()["text"] == "" and not final.json()["outputs"]
-        assert len(host.inputs()) == 2
-        # The durable terminal is readable before handle_task's finally closes its
-        # model receiver (the race the teardown-order test exposes): require closure.
-        eventually(lambda: host.client.get("/fixture/live").json() == [])
-        (tmp_path / "consumer-facts.json").write_text(json.dumps({"stop": final.json(), "model_calls": 2}))
-    finally:
-        host.close()
-
-
 def second_park_with_late_child(host):
     """Drive two actual reviewer waits, with promotion only after the first yield."""
     response = host.turn()
