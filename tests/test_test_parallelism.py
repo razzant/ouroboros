@@ -248,7 +248,7 @@ def test_two_runs_started_at_once_admit_under_one_ledger_lock(tmp_path, monkeypa
         print("reserving", flush=True)
         admitted, lease = budget.reserve("child", 8)
         rows = {{json.loads(p.read_text())["pid"]: json.loads(p.read_text())["workers"] for p in ledger.glob("*.json")}}
-        print(json.dumps({{"workers": admitted.workers, "held": admitted.host.slots, "rows": rows}}), flush=True)
+        print(json.dumps({{"pid": os.getpid(), "workers": admitted.workers, "held": admitted.host.slots, "rows": rows}}), flush=True)
         lease.close()
     """)
     env = {key: value for key, value in os.environ.items() if key not in (budget.NESTED_WORKERS_ENV, budget.WORKERS_ENV)}
@@ -262,8 +262,8 @@ def test_two_runs_started_at_once_admit_under_one_ledger_lock(tmp_path, monkeypa
     finally:
         mine.close()
     assert child.returncode == 0, out
-    assert json.loads(out.strip().splitlines()[-1]) == {
-        "workers": 2, "held": 6, "rows": {str(os.getpid()): 6, str(child.pid): 2}}
+    seen = json.loads(out.strip().splitlines()[-1])  # its own pid: a Windows venv's python.exe starts the interpreter as a child
+    assert seen == {"pid": seen["pid"], "workers": 2, "held": 6, "rows": {str(os.getpid()): 6, str(seen["pid"]): 2}}
 
 
 @pytest.mark.parametrize("capacity", [2, 3])
