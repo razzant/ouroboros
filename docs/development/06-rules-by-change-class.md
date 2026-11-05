@@ -10,7 +10,7 @@ Imperative rules per change class: tool registration, skill payloads, live E2E, 
 - Read-only producers report admitted absent targets as typed misses only after query, confinement, runtime and protected-artifact checks; denials and bad content remain errors (`tests/test_discovery_miss_warnings.py`).
 - New memory/data files: decide in the same change whether they enter LLM context (`context.py`).
 
-Enforcement: CHECKLISTS items 11(g), 13 (`tool_registration`) and 22 (`context_building`); `tests/test_tool_api_v2_public_surface.py` (public schema and registry), `tests/test_safety_policy.py` (one policy per tool).
+Enforcement: CHECKLISTS items 11(g), 13 (`tool_registration`) and 22 (`context_building`); `ouroboros/tools/registry.py` (public schema), `tests/test_safety_policy.py` (one policy per tool).
 
 ### Skill repair and payload lanes
 
