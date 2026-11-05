@@ -21,6 +21,7 @@ import json
 import os
 import pathlib
 import shutil
+import stat
 import sys
 import tempfile
 from typing import Any, Dict, Iterator
@@ -81,16 +82,30 @@ def drive(home: pathlib.Path, **plan: Any) -> Dict[str, Any]:
     return measured
 
 
+def _remove(path: pathlib.Path) -> None:
+    """One entry gone. Windows refuses to delete a read-only file, and Git writes its objects read-only, so there the
+    bit goes first."""
+    def remove() -> None:
+        path.rmdir() if path.is_dir() and not path.is_symlink() else path.unlink(missing_ok=True)
+    try:
+        remove()
+    except PermissionError:
+        if os.name != "nt":
+            raise
+        os.chmod(path, stat.S_IWRITE)
+        remove()
+
+
 def _restore_file(source: pathlib.Path, inode: pathlib.Path, target: pathlib.Path) -> None:
     """One file back: its inode first (a rotation moved it away, an atomic write replaced it), then its bytes and time."""
     if source.is_symlink():
         if not target.is_symlink() or os.readlink(target) != os.readlink(source):
-            target.unlink(missing_ok=True)
+            _remove(target)
             os.symlink(os.readlink(source), target)
         return
     held = os.lstat(inode)
     if not os.path.lexists(target) or os.lstat(target).st_ino != held.st_ino:
-        target.unlink(missing_ok=True)
+        _remove(target)
         os.link(inode, target)
     seen = os.lstat(source)
     if (held.st_size, held.st_mtime_ns) != (seen.st_size, seen.st_mtime_ns):
@@ -109,7 +124,7 @@ def _restore(kept: pathlib.Path, home: pathlib.Path) -> None:
         for name in (*files, *folders):
             path = pathlib.Path(directory, name)
             if not os.path.lexists(built / path.relative_to(home)):
-                path.rmdir() if path.is_dir() and not path.is_symlink() else path.unlink()
+                _remove(path)
     for directory, folders, files in os.walk(built, topdown=False):
         relative = pathlib.Path(directory).relative_to(built)
         (home / relative).mkdir(parents=True, exist_ok=True)
