@@ -356,7 +356,7 @@ def test_a_store_an_older_body_published_gains_the_root_windows_at_boot(tmp_path
         newest_root_ids(tmp_path, 2)
     ensure_current_store(tmp_path)  # the boot's schema step
     with store.open_store(tmp_path, write=False) as txn:
-        assert txn.meta("schema_version") == store.SCHEMA_VERSION == 10
+        assert txn.meta("schema_version") == store.SCHEMA_VERSION == 11
         assert sorted(row[0] for row in txn.conn.execute(names)) == ["tasks_project_root_ts", "tasks_root_ts"]
     assert newest_root_ids(tmp_path, 2) == newest_root_ids(tmp_path, 2, project_id="room") == ["root2", "root1"]
     assert project_result_counts(tmp_path, "room") == (3, 1)

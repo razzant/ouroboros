@@ -75,8 +75,8 @@ def unit_at(messages, call_id):
 
 
 def saved(host):
-    from ouroboros.working_checkpoint import checkpoint_path
-    return json.loads(checkpoint_path(host.ctx.drive_root, host.ctx.task_id, 1).read_text())
+    from ouroboros.working_checkpoint import read_working  # the whole state, also from the store-once wrapper
+    return read_working(host.ctx.drive_root, host.ctx.task_id, 1)[1]
 
 
 # --- the real host: history stays writable while an effect runs ------------------------------------

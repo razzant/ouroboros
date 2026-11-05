@@ -830,7 +830,6 @@ def _log_dialogue(
     """Write one room row; an inbound one returns its store receipt. ``ts``/``historical_import``:
     an imported earlier message keeps its provider send time and immutable marker (``presence_history``).
     Every new arrival, live or imported, keeps its provider send time and order (``source_order``)."""
-    from types import SimpleNamespace
     from ouroboros import chat_chain
     from ouroboros.dialogue_provenance import ANONYMOUS_REACTIONS, presence_provenance_from_task, reaction_fact
     from ouroboros.presence_history import source_order_block
@@ -878,13 +877,9 @@ def _log_dialogue(
     if direction == "in" and (identity := getattr(event, "identity", None)) is not None:
         row["transport"]["identity"] = identity
     if direction == "in" and not task["metadata"].get("focus"):
-        # Retain the transport's exact contextual observations before publishing their address.
+        # The transport's exact contextual observations are this row's, read by its address (no copy).
         # They remain dated context of this event, never additional incoming speech or work.
-        source = {"recorded_at": row["ts"], "source_event_id": event.source_event_id,
-                  "text": text, "transport": row["transport"]}
-        row["context_source_ref"] = chat_chain.retain_memory_source(
-            SimpleNamespace(drive_root=drive_root, task_id=task_id), "presence-event",
-            json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"), "json")
+        row["context_source_ref"] = dict(chat_chain.ROW_CONTEXT)
     from ouroboros import dialogue_store
     # Inbound acceptance and both live-call captions require storage before acknowledging the row.
     # Ordinary text replies keep the best-effort retry buffer.

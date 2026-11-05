@@ -185,10 +185,10 @@ def test_census_lists_the_author_in_its_room_with_stop_only_and_no_queue_row(roo
             seen["chat"] = _move(root, task["id"], PROJECT)
             _move(root, control.task_id, OTHER)
             seen["moved"] = _state(root)
-            # The restart handover is untouched: the direct-roots fragment and direct turns name the control only.
-            from supervisor.direct_roots import collect_direct_roots
+            # The restart handover is untouched: no direct-roots fragment is written any more (retired), and the
+            # direct turns name the control only.
             from supervisor.workers import direct_chat_turns
-            seen["handover"] = ([row["task_id"] for row in collect_direct_roots()["roots"]],
+            seen["handover"] = (["fragment"] if (root / "state" / "direct_roots.json").exists() else [],
                                 [turn["id"] for turn in direct_chat_turns()])
         finally:
             control.close()

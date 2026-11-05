@@ -671,7 +671,7 @@ def _run_supervisor(settings: dict) -> None:
         from supervisor.queue import (
             enqueue_task, enforce_due_task_timeouts, enqueue_evolution_task_if_needed,
             persist_queue_snapshot, publish_queue_changes, publish_queue_snapshot, restore_pending_from_snapshot,
-            queue_deep_self_review_task, sort_pending, tick_publisher_started,
+            queue_deep_self_review_task, sort_pending, start_queue_writer, stop_queue_writer, tick_publisher_started,
         )
         from supervisor.workers import (
             init as workers_init, get_event_q, WORKERS, PENDING, RUNNING,
@@ -729,10 +729,8 @@ def _run_supervisor(settings: dict) -> None:
                     notice.append(f"Restored pending queue: {restored_pending} tasks.")
                 if interrupted_running:
                     count = len(interrupted_running)
-                    notice.append(
-                        f"Settling {count} task{'' if count == 1 else 's'} that "
-                        f"{'was' if count == 1 else 'were'} still running when the server stopped."
-                    )
+                    notice.append(f"Settling {count} task{'' if count == 1 else 's'} that "
+                                  f"{'was' if count == 1 else 'were'} still running when the server stopped.")
                 notice.extend(filter(None, [places.paused_places_sentence(DATA_DIR)]))
                 send_with_budget(int(st_boot["owner_chat_id"]), " ".join(notice), role="system", system_type="startup_notice")
         _startup_retired_settings_notice(settings)
@@ -814,6 +812,7 @@ def _run_supervisor(settings: dict) -> None:
     _last_review_job_reconcile = [time.time()]
     # The watchdog was started before startup recovery; never start another here.
     tick_publisher_started()  # queue marks publish on this loop's tick while it lives (queue_publication)
+    start_queue_writer()  # ...and their documents are written on the publisher thread, never on this one
     while not _restart_requested.is_set() and not _supervisor_stop.is_set() and not _exit_signalled.is_set():
         try:
             _loop_liveness[1], _loop_liveness[0] = loop_phase_facts(_loop_liveness, "events", new_tick=True), time.monotonic()
@@ -868,7 +867,7 @@ def _run_supervisor(settings: dict) -> None:
             if _restart_requested.is_set():
                 break  # restart just triggered (drain done) — exit without assigning new work (bridge intake already ran early this iteration)
             assign_tasks()
-            if publish_queue_changes() is False:  # the one publisher, outside Q; None: a saved queue kept as it is
+            if publish_queue_changes() is False:  # captured here, written by the publisher thread; None: a saved queue kept as it is
                 raise RuntimeError("queue publication failed")
             if _consciousness is not None and not draining and not _restart_lifecycle.agent_restart_pending():
                 try:
@@ -908,6 +907,7 @@ def _run_supervisor(settings: dict) -> None:
             # Backoff on the stop event, not time.sleep, so a shutdown is prompt.
             _supervisor_stop.wait(min(30, 2 ** crash_count))
     _watchdog_stop.set()  # every ordinary exit (restart, shutdown, crash death) stops this generation's watchdog
+    stop_queue_writer()  # ...and its queue writer: the doors after the loop publish synchronously where they stand
     _supervisor_thread = None
 
 
@@ -1334,6 +1334,7 @@ async def lifespan(app):
         except Exception:
             pass
         stop_owned_work(lifespan_drive_root)  # the generation's one bounded stop; a started one is joined
+        server_boot.stop_extension_loop()
         try:
             from ouroboros.extension_companion import get_global_supervisor
             supervisor = get_global_supervisor()

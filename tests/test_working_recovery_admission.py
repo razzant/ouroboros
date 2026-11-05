@@ -118,7 +118,9 @@ def test_original_later_attempt_needs_exact_source_and_dispatch_protocol(tmp_pat
     path = wc.checkpoint_path(tmp_path, "task", 3)
     if not protocol:
         source = json.loads(path.read_bytes())
-        source.pop("retained_work_dispatch_protocol")
+        # The rolling file wraps its state (``working_shared_v1``); the protocol mark is a top-level state field.
+        state = source["state"] if source.get("format") == wc.WORKING_SHARED_FORMAT else source
+        state.pop("retained_work_dispatch_protocol")
         path.write_text(json.dumps(source))
     task = {"id": "task", "_attempt": 4}
     assert wc.attach_recovery(tmp_path, task, source_task_id="task", from_attempt=3, cause="app_stop")

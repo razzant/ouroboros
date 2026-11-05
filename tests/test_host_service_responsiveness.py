@@ -268,6 +268,32 @@ def test_a_thread_that_cannot_start_returns_capacity_gate_and_identity(tmp_path,
     assert retried.status_code == 200 and calls == [1]
 
 
+def test_an_unarmed_server_returns_a_typed_retry_without_starting_the_host_turn(tmp_path, monkeypatch):
+    """The server's boot/whole-table-stop window is distinct from the standalone Host fixture."""
+    import os
+
+    from supervisor import conversation_lane, queue, workers
+
+    calls = []
+    app, binding_id, ctx = _presence_app(tmp_path, lambda **kwargs: calls.append(1) or _answer(**kwargs))
+    monkeypatch.setattr(queue, "INITIALIZED", True)
+    monkeypatch.setattr(queue, "OWNER_PID", os.getpid())
+    assert queue.owns_live_queue(tmp_path) and not conversation_lane.armed()
+    saved = {"pending": [{"id": "saved-work", "task": {"id": "saved-work"}}], "running": []}
+    queue.QUEUE_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    queue.QUEUE_SNAPSHOT_PATH.write_text(json.dumps(saved), encoding="utf-8")
+    before = queue.QUEUE_SNAPSHOT_PATH.read_bytes()
+
+    for _ in range(2):  # an unchanged retry remains unstarted, with no retained in-flight reservation
+        refused = asyncio.run(_turn(app, binding_id, "boot-event"))
+        payload = json.loads(refused.body)
+        assert refused.status_code == 503
+        assert payload["code"] == "presence_turn_not_started" and payload["disposition"] == "retry"
+        assert calls == [] and ctx.presence_turns.live() == [] and not any(ctx._inflight.values())
+        assert workers.RUNNING == {} and workers.WORKERS == {}
+        assert queue.QUEUE_SNAPSHOT_PATH.read_bytes() == before
+
+
 @pytest.mark.parametrize("outcome", ["answered", "refused"])
 def test_a_turn_retires_from_the_live_set_before_its_outcome_is_published(outcome):
     """The live set is custody the Host reads the moment a waiter sees the terminal.

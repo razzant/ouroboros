@@ -628,11 +628,9 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
         if authority["owner_fence"] and (selected_by or not authority["consumed_resume"]):
             return {"ok": False, "error": "selection_owner_held"}
         nominated_safe, nominated_error = observation["safe"], observation["unsafe_error"]
-        nominated_safe = bool(
-            nominated_safe
-            and pause.get("replay_safe")
-            and pause.get("physical_calls") == 0
-        )
+        # A zero-dispatch pause, or (owner 4A) held saved work this observation just revalidated: never a replay.
+        nominated_safe = bool(nominated_safe and (pause.get("replay_safe") and pause.get("physical_calls") == 0
+                                                  or pause.get("continuation") == "working" and "_working_recovery" in task))
         if not nominated_safe:
             return {
                 "ok": False,

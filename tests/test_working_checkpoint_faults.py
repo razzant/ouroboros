@@ -118,7 +118,7 @@ def test_candidate_is_saved_before_a_later_finalization_failure(
     with pytest.raises(RuntimeError, match="finalization interrupted"):
         loop.run_llm_loop(**_loop_kwargs(tmp_path, registry, []))
 
-    saved = json.loads(wc.checkpoint_path(tmp_path, "t-wait", 1).read_bytes())
+    saved = wc.read_working(tmp_path, "t-wait", 1)[1]
     assert saved["working"]["boundary"] == "candidate"
     assert saved["delivery_candidate"]["full_text"] == answer
     handoff = wc.prepare_recovery(tmp_path, "t-wait", from_attempt=1, cause="worker_crash")
@@ -134,7 +134,7 @@ def test_candidate_is_saved_before_a_later_finalization_failure(
         retry_kwargs = {**_loop_kwargs(tmp_path, registry, []), "task_id": task_id}
         with pytest.raises(RuntimeError, match="finalization interrupted"):
             loop.run_llm_loop(**retry_kwargs)
-        again = json.loads(wc.checkpoint_path(tmp_path, task_id, 2).read_bytes())
+        again = wc.read_working(tmp_path, task_id, 2)[1]
         assert again["delivery_candidate"]["full_text"] == answer
         handoff = wc.prepare_recovery(tmp_path, task_id, from_attempt=2, cause="worker_crash")
         registry = _registry(tmp_path, monkeypatch, task_id, 3)
@@ -324,7 +324,7 @@ def test_late_owner_mail_at_delivery_close_survives_failure_of_the_next_round(tm
     monkeypatch.setattr("ouroboros.llm.LLMClient.chat", lambda *a, **k: pytest.fail("no provider call"))
     with pytest.raises(RuntimeError, match="next round interrupted"):
         loop.run_llm_loop(**_loop_kwargs(tmp_path, registry, []))
-    saved = json.loads(wc.checkpoint_path(tmp_path, "t-wait", 1).read_bytes())
+    saved = wc.read_working(tmp_path, "t-wait", 1)[1]
     assert "late-mail" not in saved["seen"]
     assert [row["msg_id"] for row in drain_owner_entries(tmp_path, "t-wait", set(), 1)] == ["late-mail"]
 
@@ -364,7 +364,7 @@ def test_finalization_drains_defer_content_ack_until_saved(tmp_path, monkeypatch
         call()
     assert [row["msg_id"] for row in drain_owner_entries(tmp_path, "pause-task", set(), 1)] == ["final-mail"]
     wc.save_ready(limit)
-    saved = json.loads(wc.checkpoint_path(tmp_path, "pause-task", 1).read_bytes())
+    saved = wc.read_working(tmp_path, "pause-task", 1)[1]
     assert "final-mail" in saved["seen"]
     assert any("instruction during finalization" in str(row.get("content")) for row in saved["messages"])
     assert drain_owner_entries(tmp_path, "pause-task", set(), 1) == []
@@ -457,7 +457,7 @@ def test_a_returned_terminal_acknowledges_its_finalization_mail_only_once_saved(
         assert mail_read_state(tmp_path, "t-wait", "final-mail") is False
         assert _unread_ids(tmp_path, "t-wait") == ["final-mail"], "an unsaved read is never acknowledged"
         return
-    saved = json.loads(wc.checkpoint_path(tmp_path, "t-wait", 1).read_bytes())
+    saved = wc.read_working(tmp_path, "t-wait", 1)[1]
     assert "final-mail" in saved["seen"]
     assert any(text in str(row.get("content")) for row in saved["messages"])
     assert mail_read_state(tmp_path, "t-wait", "final-mail") is True

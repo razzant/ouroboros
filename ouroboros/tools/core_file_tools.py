@@ -772,38 +772,14 @@ def _root_display_path(root: str, path: str) -> str:
     return f"{root}:{safe_relpath(str(path or '.')).removeprefix('./') or '.'}"
 
 
-def _annotate_reread(ctx: ToolContext, target: Any, start_line: int, max_lines: int, result: str,
-                     start_char: int = 0, max_chars: Optional[int] = None) -> str:
-    """Nudge against unchanged rereads, keyed per task by resolved path and slice.
-    Size/mtime changes or different slices suppress the hint. Advisory only:
-    it asks the mind to act on already-read text, never blocks."""
-    try:
-        resolved = pathlib.Path(target).resolve(strict=False)
-        st = resolved.stat()
-    except (OSError, TypeError, ValueError):
-        return result
-    if not isinstance(result, str) or result.startswith("⚠️"):
-        return result
-    key = f"{resolved}|{int(start_line)}|{int(max_lines)}|{_coerce_start_char(start_char)}|{_coerce_max_chars(max_chars)}"
-    sig = (st.st_size, st.st_mtime_ns)
-    seen = getattr(ctx, "_read_file_seen", None)
-    if not isinstance(seen, dict):
-        ctx._read_file_seen = seen = {}
-    unchanged = seen.get(key) == sig
-    seen[key] = sig
-    return result + (
-        "\n\nℹ️ This exact view is unchanged since you already read it this task — "
-        "re-reading is usually wasted budget; act on what you have." if unchanged else "")
-
-
 def _stamp_read_view(ctx: ToolContext, target: Any, opened: str, opened_root: str,
                      extent: Dict[str, Any], rendered: str) -> str:
     """Stamp this read's resolved target, root-relative opened_path, normalized
     opened_root and renderer window as ctx.last_read_view for native review receipts.
     The registry normalizes absolute, padded and redundant-root spellings first.
     Per-call binding: _read_file resets on entry; the episode clears before dispatch.
-    These sole writers are statically pinned. Like reread hints, this is per-context
-    disclosure, never a gate or a change to the actual read."""
+    These sole writers are statically pinned. This is per-context disclosure,
+    never a gate or a change to the actual read."""
     identity_note = ""
     if opened_root == "runtime_data" and opened == "memory/identity.md":
         from ouroboros.tool_access import canonical_data_root
@@ -888,18 +864,16 @@ def _read_file(
         reader, display_path = ((_data_read, _root_display_path(normalized, path)) if normalized == "runtime_data" else
                                 (_repo_read, f"{target} (project room)" if binding.source == "project_room"
                                  else _root_display_path(normalized, opened)))
-        return _stamp_read_view(ctx, target, opened, opened_root, extent, _annotate_reread(ctx, target, start_line, max_lines, reader(
+        return _stamp_read_view(ctx, target, opened, opened_root, extent, reader(
             ctx, path, max_lines=max_lines, start_line=start_line, start_char=start_char, display_path=display_path,
             _resolved_binding=binding, extent=extent, max_chars=max_chars,
-        ), start_char=start_char, max_chars=max_chars))
+        ))
     try:
         content = _read_source_text(target, extent)
         rendered = _render_line_slice(_root_display_path(normalized, path), content,
                                       max_lines=max_lines, start_line=start_line,
                                       start_char=start_char, extent=extent, max_chars=max_chars)
-        return _stamp_read_view(ctx, target, opened, opened_root, extent,
-                                _annotate_reread(ctx, target, start_line, max_lines, rendered,
-                                                 start_char=start_char, max_chars=max_chars))
+        return _stamp_read_view(ctx, target, opened, opened_root, extent, rendered)
     except FileNotFoundError:
         return _publish_tool_result(ctx, ToolResult(
             status="ok", code="LEGACY_WARNING", text=f"⚠️ NOT_FOUND: {_root_display_path(normalized, path)} (resolved: {target})"))

@@ -61,7 +61,7 @@ def _resumed_after_a_crash(drive, prior):
         llm_trace={"reasoning_notes": [], "tool_calls": [{"tool": "read_file", "args": {}, "result": "read"}]},
         accumulated_usage={"rounds": 3, "prompt_tokens": 1_200, "completion_tokens": 300, "cost": 0.42})
     assert working_checkpoint.save_round(work, "post_batch")
-    saved = working_checkpoint.checkpoint_path(drive, task_id, 2).read_bytes()
+    saved = working_checkpoint.read_working(drive, task_id, 2)[0]  # a recovery freezes the whole state
     task = {**prior, "_attempt": 3}
     assert working_checkpoint.attach_recovery(drive, task, source_task_id=task_id, from_attempt=2, cause="worker_crash",
                                               prior_task=prior)

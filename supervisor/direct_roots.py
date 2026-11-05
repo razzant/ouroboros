@@ -1,17 +1,15 @@
-"""The retired direct-roots fragment: an empty residual, and the boot fold of a previous generation's file.
+"""The retired direct-roots fragment: the boot fold of a previous generation's file, nothing else.
 
 Direct turns once lived only in the server process's actor registry, so the main
 loop published ``state/direct_roots.json`` beside the queue snapshot by trying each
 actor's lock. Every focus now owns a RUNNING row (the conversation lane's carriers
 and the two inline executors alike), so the queue snapshot is the one roster and
-this fragment carries no rows: ``collect_direct_roots`` answers empty and complete
-without touching any actor, and the snapshot writer keeps publishing the document
-for readers that still date it (``task_status.task_execution_observation``,
-``peer_roster``). Queue init still takes a RESIDUAL file over — a previous
-generation of the body may have left live rows in it — and clears it in the same
-step, so a stale process's turns never outlive it, and snapshot restore learns
-which direct roots the stop caught, including the durable ones of an ended process
-that the roster never listed.
+nothing writes or reads this fragment any more. Queue init still takes a RESIDUAL
+file over — a previous generation of the body may have left live rows in it — and
+removes it in the same step, so a stale process's turns never outlive it, and
+snapshot restore learns which direct roots the stop caught, including the durable
+ones of an ended process that the roster never listed. An older body's publisher
+recreates the file on its first tick after a rollback.
 """
 
 from __future__ import annotations
@@ -20,7 +18,7 @@ import logging
 import pathlib
 from typing import Any, Dict
 
-from ouroboros.utils import append_jsonl, atomic_write_json, read_json_dict, utc_now_iso
+from ouroboros.utils import append_jsonl, read_json_dict, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -31,50 +29,24 @@ def _fragment_path(drive_root: Any) -> pathlib.Path:
     return pathlib.Path(drive_root) / FRAGMENT_NAME
 
 
-def direct_turn_facts(turn: Dict[str, Any]) -> Dict[str, Any]:
-    """The live turn's suggested name, start and typed origin; absent stays absent."""
-    from ouroboros.peer_roster import iso_from_epoch, typed_origin
-
-    facts: Dict[str, Any] = {}
-    suggested = str(turn.get("suggested_name") or "").strip()
-    if suggested:
-        facts["suggested_name"] = suggested
-    started = iso_from_epoch(turn.get("_started_at"))
-    if started:
-        facts["started_at"] = started
-    origin = typed_origin(turn)
-    if origin:
-        facts["origin"] = origin
-    return facts
-
-
-def collect_direct_roots() -> Dict[str, Any]:
-    """The fragment's rows: none. Every live focus is a RUNNING row of the queue snapshot."""
-    return {"roots": [], "incomplete": False}
-
-
-def clear_direct_roots(drive_root: Any) -> None:
-    """An empty fragment: no live direct roots are known for this process yet."""
-    try:
-        atomic_write_json(_fragment_path(drive_root), {"ts": utc_now_iso(), "roots": [], "incomplete": False})
-    except Exception:
-        log.debug("direct roots fragment clear failed", exc_info=True)
-
-
 def take_direct_roots(drive_root: Any) -> Dict[str, Any]:
-    """Hand the PREVIOUS process's rows over and clear the fragment in one step.
+    """Hand the PREVIOUS process's rows over and remove the fragment in one step.
 
     Queue init is the moment the roster stops describing anything live, so it is
-    also the last moment those ids exist: reading here keeps the clear exactly
-    where it was — a stale process's turns never outlive it however the boot
-    continues — while snapshot restore still learns which direct roots the stop
-    caught.  An ``incomplete`` roster skipped a turn that was mid-admission: the
-    rows it DOES list are real and are handed over, the skipped turn keeps the
+    also the last moment those ids exist: reading here keeps the removal exactly
+    where the clear was — a stale process's turns never outlive it however the
+    boot continues — while snapshot restore still learns which direct roots the
+    stop caught.  An ``incomplete`` roster skipped a turn that was mid-admission:
+    the rows it DOES list are real and are handed over, the skipped turn keeps the
     projection it has today, and the flag rides along so the restore record
     discloses that gap.  Never raises.
     """
-    payload = read_json_dict(_fragment_path(drive_root))
-    clear_direct_roots(drive_root)
+    path = _fragment_path(drive_root)
+    payload = read_json_dict(path)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        log.debug("direct roots fragment removal failed", exc_info=True)
     if not isinstance(payload, dict):
         return {"task_ids": [], "incomplete": False}
     incomplete = bool(payload.get("incomplete"))

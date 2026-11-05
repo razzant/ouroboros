@@ -410,14 +410,14 @@ def _crash_after_each_replacement(root: pathlib.Path) -> List[Dict[str, Any]]:
         stamp = queue_stamp(document)
         dispatch = load_queue_document(root, "queue_dispatch.json")
         facts.append({"allowed": allowed, "replaced": done, "published": published, "certifies": bool(stamp),
-                      "documents_agree": bool(stamp) and dispatch.get("generation") == stamp.get("generation")
+                      "documents_agree": bool(stamp) and bool(queue_stamp(dispatch))
                       and f"live-crash-{allowed}" in str(document.get("pending"))})
         if published:
             break
     return facts
 
 
-_QUEUE_FILES = frozenset({"queue_snapshot.json", "queue_dispatch.json", "direct_roots.json", "queue.alive"})
+_QUEUE_FILES = frozenset({"queue_snapshot.json", "queue_dispatch.json", "queue.alive"})
 
 
 def _reader_sees_owner_text(root: pathlib.Path) -> bool:

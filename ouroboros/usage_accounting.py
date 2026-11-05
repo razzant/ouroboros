@@ -59,7 +59,7 @@ __all__ = (
     "current_physical_attempt_predicate", "current_usage_scope",
     "execute_physical_attempt", "execute_physical_attempt_async",
     "last_physical_attempt_capture", "last_root_accounting", "physical_attempt_capture_from_exception",
-    "mark_dispatched", "mark_unresolved", "physical_attempt_limit",
+    "mark_dispatched", "mark_unresolved", "paid_admission", "physical_attempt_limit",
     "record_subscription_session",
     "record_unmetered_external_dispatch", "refresh_root_accounting",
     "release_attempt", "reserve_attempt", "settle_attempt",
@@ -631,13 +631,24 @@ def _global_limit(request: AttemptRequest) -> float:
     return float("inf") if configured is None else max(0.0, configured)
 
 
-_CANDIDATE_ROW_FIELDS = (
-    "candidate_raw_sha256", "candidate_raw_size_bytes", "candidate_context_sha256",
-    "candidate_context_size_bytes", "candidate_measurement_kind", "physical_context",
-    "candidate_manifest_ref",
-    "processing_preference", "submitted_processing_mode", "processing_basis",
-    "effort",
-)
+_SUBSCRIPTION_OR_LOCAL = frozenset({"claudexor", "local"})  # the owned subscription engine, the local lane
+
+
+def paid_admission(provider: Any, bound: Any, *, billed: bool = False) -> bool:
+    """Whether one attempt needs PAID admission, the only kind a reached GLOBAL limit refuses
+    (owner 2A, 04.11; BIBLE P8). A known price decides: positive pays, a known $0 does not. An
+    unknown price pays on every API provider; on the subscription engine or the local lane it does
+    not, unless that route's own receipts already carried cash (``billed``: refused from the next
+    call). The ledger keeps an unknown price unknown either way."""
+    if bound is not None:
+        return float(bound) > 0
+    return billed or str(provider or "").strip().lower() not in _SUBSCRIPTION_OR_LOCAL
+
+
+def _paid_at_limit(view: Any, provider: Any, bound: Any, model: Any) -> bool:
+    """``paid_admission`` inside the money transaction; a route's evidence is its model summary's settled cash."""
+    unpriced_free = bound is None and str(provider or "").strip().lower() in _SUBSCRIPTION_OR_LOCAL
+    return paid_admission(provider, bound, billed=unpriced_free and view.bucket("model", str(model or "")).cash[0] > 0)
 
 
 def _check_dispatch_fences(scope: UsageScope, root: pathlib.Path, *, retry: bool = True) -> None:
@@ -696,7 +707,8 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
         with acquire(root) as view:
             _check_dispatch_fences(scope, root, retry=False)
             global_limit = _global_limit(request)
-            if view.exceeds_limit(global_limit):
+            # Owner 2A: the reached global limit refuses paid admission only (root/group still refuse all).
+            if view.exceeds_limit(global_limit) and _paid_at_limit(view, request.provider, bound, request.model):
                 raise BudgetExceeded(
                     f"global model budget exhausted: {_known_spend_text(view.summary())}, "
                     f"limit=${global_limit:.6f}",
@@ -1038,8 +1050,10 @@ def _transition_once(reservation: AttemptReservation, state: str, **fields: Any)
                 ("root", scope.root_limit_usd, scope.root_task_id),
             ):
                 # The reservation's own predicate: known spend reached the limit
-                # since this attempt was reserved, so nothing is sent.
-                if limit is not None and view.exceeds_limit(limit, root_task_id=identity):
+                # since this attempt was reserved, so nothing is sent (global: paid admission only).
+                if limit is not None and view.exceeds_limit(limit, root_task_id=identity) and (axis == "root"
+                        or _paid_at_limit(view, current.get("provider"), current.get("reservation_upper_bound_usd"),
+                                          current.get("model"))):
                     raise BudgetExceeded(f"{axis} model budget changed before dispatch", limit_scope=axis,
                                          root_task_id=scope.root_task_id)
             from ouroboros.usage_admission import raise_group_refusal

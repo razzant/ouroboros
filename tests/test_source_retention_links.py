@@ -22,7 +22,8 @@ def test_promoted_blob_shares_inode_or_copies_and_survives_child_removal(tmp_pat
     parent, task = tmp_path / "canonical", "link-task"
     child = headless.prepare_task_drive(parent, task, "empty")
     payload = {"messages": [{"role": "user", "content": "Retained Ω evidence"}]}
-    call = observability.persist_call(child, task_id=task, call_id="request", call_type="llm_request", payload=payload)
+    # A record written whole (a request view is a skeleton placement plus parts: tests/test_shared_views.py).
+    call = observability.persist_call(child, task_id=task, call_id="request", call_type="tool_call", payload=payload)
     original = Path(call["redacted_projection_ref"]["path"])
     compressed, inode = original.read_bytes(), original.stat().st_ino
     _, state = observability.promote_child_task_refs(parent, child, task, {})
@@ -38,7 +39,7 @@ def test_promoted_blob_shares_inode_or_copies_and_survives_child_removal(tmp_pat
     assert destination.read_bytes() == compressed
     shutil.rmtree(child)
     _, restored, _ = observability.read_call_payload(parent, task_id=task, call_id="request")
-    assert restored == {**payload, "send_messages": payload["messages"]}
+    assert restored == payload
 
 
 def test_failed_blob_publication_retains_child_until_retry(tmp_path, monkeypatch, link_error):

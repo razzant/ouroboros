@@ -59,8 +59,6 @@ def test_owner_turn_is_admitted_to_the_lane_and_runs_in_the_carrier(lane):
     # Census: the turn is listed from its row, not from a process-local actor.
     assert [row["activity_id"] for row in conversation_lane.lane_turn_rows()] == [tid]
     assert conversation_lane.lane_turn_rows()[0]["phase"] == "working"
-    from supervisor.direct_roots import collect_direct_roots
-    assert collect_direct_roots() == {"roots": [], "incomplete": False}
 
 
 def test_hello_during_a_project_crash_storm_is_admitted_to_the_lane_never_pending(lane, monkeypatch):
@@ -286,19 +284,53 @@ def test_a_turn_awaiting_its_carrier_with_a_stop_on_record_is_never_dispatched(l
 def test_a_failed_admission_barrier_keeps_the_turn_unstarted_until_its_row_lands(lane, monkeypatch):
     """Astra M1: the row is on disk before any carrier can hold the turn. A failed barrier (False: the documents
     on disk are the previous generation's) keeps the row visibly unstarted and the READY spare untouched, pass
-    after pass; once a publication lands, the next dispatch pass hands the turn to the carrier."""
+    after pass; once a publication lands (the lane's pass runs the barrier outside Q, then dispatches under it),
+    the turn goes to the carrier."""
     from supervisor import queue
 
     real = queue.publish_queue_snapshot
     monkeypatch.setattr(queue, "publish_queue_snapshot", lambda reason="": False)
     worker_chat_lane.handle_chat_direct(1, "hello", None, task_metadata={"client_message_id": "cm-m1"})
     meta = next(m for m in workers.RUNNING.values() if m.get("lane") == LANE_CONVERSATION)
-    assert meta["worker_id"] is None and lane.spare.busy_task_id is None and lane.spare.in_q.empty()
-    conversation_lane.dispatch_awaiting_turns()  # the barrier still fails: the turn stays held
-    assert meta["worker_id"] is None and lane.spare.in_q.empty()
+    assert meta["worker_id"] is None and meta["_unpublished"] and lane.spare.busy_task_id is None and lane.spare.in_q.empty()
+    conversation_lane.publish_awaiting_rows()  # the barrier still fails: the turn stays held
+    with workers._queue_lock:
+        conversation_lane.dispatch_awaiting_turns()
+    assert meta["worker_id"] is None and meta["_unpublished"] and lane.spare.in_q.empty()
     monkeypatch.setattr(queue, "publish_queue_snapshot", real)
-    conversation_lane.dispatch_awaiting_turns()
+    conversation_lane.reconcile_conversation_lane()  # the tick's pass: the barrier outside Q, the dispatch under it
+    assert "_unpublished" not in meta
     assert meta["worker_id"] == lane.spare.wid and lane.spare.in_q.get_nowait()["id"] == meta["task"]["id"]
+
+
+def test_an_owner_turns_row_is_written_under_q_and_published_outside_it(lane, monkeypatch):
+    """Q spans memory only: the admission transaction (Q and the repo-writer gate lock) writes the row and marks
+    the queue; the barrier that puts the row on disk runs after it released both, and the carrier takes the
+    turn under Q again. Without the two-hold shape the barrier ran, and could wait on the disk, under Q."""
+    from supervisor import queue
+
+    seen = []
+    real_publish, real_mark = queue.publish_queue_snapshot, queue.persist_queue_snapshot
+
+    def publish(reason=""):
+        seen.append(("barrier", reason, queue._queue_lock._is_owned(), workers._repo_writer_gate_lock._is_owned()))
+        return real_publish(reason=reason)
+
+    def mark(reason=""):
+        seen.append(("mark", reason, queue._queue_lock._is_owned(), workers._repo_writer_gate_lock._is_owned()))
+        return real_mark(reason=reason)
+
+    monkeypatch.setattr(queue, "publish_queue_snapshot", publish)
+    monkeypatch.setattr(queue, "persist_queue_snapshot", mark)
+    worker_chat_lane.handle_chat_direct(1, "hello", None, task_metadata={"client_message_id": "cm-q"})
+    meta = next(m for m in workers.RUNNING.values() if m.get("lane") == LANE_CONVERSATION)
+    assert meta["worker_id"] == lane.spare.wid and "_unpublished" not in meta
+    kinds = [(kind, reason, under_q, under_gate) for kind, reason, under_q, under_gate in seen
+             if reason in ("conversation_turn_admitted", "conversation_turn_dispatched")]
+    assert kinds[0] == ("mark", "conversation_turn_admitted", True, True), "the row is marked inside the transaction"
+    assert ("barrier", "conversation_turn_admitted", False, False) in kinds, "the barrier runs outside Q and the gate"
+    assert kinds.index(("barrier", "conversation_turn_admitted", False, False)) < kinds.index(("mark", "conversation_turn_dispatched", True, False)), \
+        "the carrier takes the turn only after its row is on disk"
 
 
 def test_a_dead_carriers_retry_whose_barrier_failed_waits_unstarted_for_its_row(lane, monkeypatch):
@@ -316,9 +348,10 @@ def test_a_dead_carriers_retry_whose_barrier_failed_waits_unstarted_for_its_row(
     with queue._queue_lock:
         meta = conversation_lane.readmit_after_crash(task, {"client_message_id": "cm-r", "reply_expected": True})
     assert meta["attempt"] == 2 and meta["worker_id"] is None and meta.get("_unpublished") is True
-    assert lane.spare.busy_task_id is None and lane.spare.in_q.empty()
+    conversation_lane.dispatch_admitted_turn(meta)  # the caller's step outside Q: the barrier fails, the row stays held
+    assert meta.get("_unpublished") is True and lane.spare.busy_task_id is None and lane.spare.in_q.empty()
     monkeypatch.setattr(queue, "publish_queue_snapshot", real)
-    conversation_lane.dispatch_awaiting_turns()
+    conversation_lane.dispatch_admitted_turn(meta)
     assert meta["worker_id"] == lane.spare.wid and lane.spare.in_q.get_nowait()["id"] == "turn-r"
 
 

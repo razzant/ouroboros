@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from ouroboros.dialogue_store import thread_references
 from ouroboros.presence_admission import PresenceAdmission
 
 
@@ -50,6 +51,12 @@ class PresenceTurnEvent:
     continuation_version: int = 0
     facts: tuple[str, ...] | None = None
     identity: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        # The dialogue store keeps a provider thread by reference; an event rebuilt from its row reaches the model
+        # only whole (``dialogue_store.whole_body``). One that still names a reference is refused, typed.
+        if thread_references(self.conversation):
+            raise PresenceTurnError("presence_event_unexpanded", "event.conversation")
 
 
 def presence_event_origin(payload: Any) -> dict[str, str]:

@@ -33,7 +33,7 @@ from ouroboros.llm_substitution import (
 from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
 from ouroboros.model_wait import (ModelWaitInterrupted, accepted_operation_scope, current_model_wait,
                                   dispatch_deadline_remaining_sec, prepared_call_scope)
-from ouroboros.observability import persist_call
+from ouroboros.observability import persist_call, update_call_manifest_metadata
 from ouroboros.owner_pause import launch_admission, OwnerPauseRefused, model_handed_off
 from ouroboros.transport_custody import ProviderNotDispatched
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
@@ -132,7 +132,7 @@ class ClaudexorModelError(RuntimeError):
 
 
 class ClaudexorModelNotDispatched(ClaudexorModelError, ProviderNotDispatched):
-    """Only a terminal engine receipt proving dispatch.state=not_started mints this."""
+    """A failed prepare before create, or an engine receipt proving dispatch.state=not_started."""
 
 
 def presence_refusal_unstarted(error: Exception, round_idx: int) -> bool:
@@ -413,7 +413,7 @@ class _ModelInvocation:
             error.physical_attempt_capture = self.capture
         raise error from None
 
-    def prepare(self, reservation):
+    def prepare(self, reservation, *, canonical_bytes: bytes, sha256: str, size_bytes: int):
         self.invocation_id = reservation.attempt_id
         self.root = reservation.drive_root
         scope = current_usage_scope()
@@ -449,7 +449,8 @@ class _ModelInvocation:
             self.capture_failure_evidence = model_failure_evidence_supported(operations)
             self.capture_effort_evidence = operation_query_supported(operations, method="POST",
                 path="/v2/model-operations", name="captureEffortEvidence", value="true")
-            self.request_ref = self.gateway.upload_model_request(self.payload, idempotency_key=self.invocation_id)
+            self.request_ref = self.gateway.upload_model_request(canonical_bytes, sha256=sha256, size_bytes=size_bytes,
+                                                                 idempotency_key=self.invocation_id)
             self.request_manifest_ref = persist_call(self.root, task_id=self.task_id, call_id=f"{self.invocation_id}_model_request",
                          call_type="llm_claudexor_request", payload=self.payload, keep_raw=True,
                          manifest={"invocation_id": self.invocation_id, "request_ref": self.request_ref,
@@ -470,13 +471,11 @@ class _ModelInvocation:
             try:
                 # Only this operational request manifest is updated. The
                 # ledger's immutable physical-candidate manifest is untouched.
-                self.request_manifest_ref = persist_call(
+                self.request_manifest_ref = update_call_manifest_metadata(
                     self.root, task_id=self.task_id, call_id=f"{self.invocation_id}_model_request",
-                    call_type="llm_claudexor_request", payload=self.payload, keep_raw=True,
-                    manifest={"invocation_id": self.invocation_id, "request_ref": self.request_ref,
-                              "model_role": self.role, "operation_id": self.operation_id,
+                    metadata={"operation_id": self.operation_id,
                               "capture_failure_evidence": self.capture_failure_evidence,
-                              "capture_effort_evidence": self.capture_effort_evidence})["manifest_ref"]
+                              "capture_effort_evidence": self.capture_effort_evidence})
             except Exception as error:
                 self.request_manifest_ref = {}
                 log.warning("Model custody checkpoint unavailable: %s", type(error).__name__)
@@ -798,14 +797,7 @@ def _accounted_request(invocation: _ModelInvocation):
     # The engine relays to the vendor: its loopback address is not where the model runs (a not-started receipt is a remote-hop fact).
     request = replace(_attempt_request(invocation.target, invocation.payload), route_is_loopback=False,
                       force_unknown_reservation=True, max_completion_tokens=invocation.output_reserve)
-    existing = _candidate_before_dispatch(invocation.payload, request)
-
-    def before(reservation):
-        manifest = existing(reservation)
-        invocation.prepare(reservation)
-        return manifest
-
-    return request, before
+    return request, _candidate_before_dispatch(invocation.payload, request, prepare=invocation.prepare)
 
 
 def _unstarted_retry_preparation(target: dict, payload: dict, parameters: dict, error: ClaudexorModelNotDispatched):

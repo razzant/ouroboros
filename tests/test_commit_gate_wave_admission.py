@@ -263,6 +263,24 @@ def test_global_known_spend_at_the_limit_declines_the_wave_before_any_seat_reser
     assert (events[0]["limit_usd"], events[0]["known_usd"]) == (10.0, 0.0)
 
 
+def test_a_reached_global_limit_admits_a_wave_that_needs_no_paid_admission(gate, monkeypatch):
+    """A reached global limit refuses paid admission only: a wave of subscription seats fits, a wave
+    with one priced seat is declined whole, and a root cap at zero still binds every seat."""
+    subscription = "claudexor::codex=gpt-6-astra"
+    monkeypatch.setattr(ua, "_reservation_cost", lambda request: {subscription: None, "triad/a": 1.0}[request.model])
+    with ua.usage_scope(ua.UsageScope(drive_root=gate, task_id="other-root", root_task_id="other-root")):
+        other = ua.reserve_attempt(ua.AttemptRequest(model="triad/a", provider="test", source="main"))
+        ua.mark_dispatched(other)
+        ua.settle_attempt(other, {}, cost_usd=100.0, cost_final=True)
+    wave = dict(root_task_id=ROOT, prompt_chars=10, task_id=ROOT)
+    free = ua.review_wave_admission(gate, models=[subscription], root_limit_usd=10.0, **wave)
+    assert (free["fits"], free["binding_axis"], free["remaining_usd"]) == (True, "global", 0.0)
+    mixed = ua.review_wave_admission(gate, models=[subscription, "triad/a"], root_limit_usd=10.0, **wave)
+    assert (mixed["fits"], mixed["binding_axis"]) == (False, "global")
+    capped = ua.review_wave_admission(gate, models=[subscription], root_limit_usd=0.0, **wave)
+    assert (capped["fits"], capped["binding_axis"]) == (False, "root")
+
+
 def test_a_fence_reached_mid_wave_refuses_the_remaining_seats_with_custody(gate, tmp_path, monkeypatch):
     """The wave is admitted at $0 known; the retrieving seat settles at the full $4
     fence before the packet seats send, so each packet seat is refused at its OWN

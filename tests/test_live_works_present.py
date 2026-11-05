@@ -23,11 +23,13 @@ def _fixture(root):
     stamp = utc_now_iso()
     write_queue_document(root / "state/queue_snapshot.json", {"ts": stamp,
         "running": [{"id": "moved", "attempt": 1, "task": {"id": "moved", "chat_id": 1}},
-                    {"id": "child", "task": {"id": "child", "parent_task_id": "moved"}}],
+                    {"id": "child", "task": {"id": "child", "parent_task_id": "moved"}},
+                    # The owner's direct head: a conversation-lane row of the same snapshot, never a separate fragment.
+                    {"id": "native", "attempt": 1, "lane": "conversation", "task": {
+                        "id": "native", "chat_id": 1, "title": "A direct head", "_is_direct_chat": True,
+                        "_execution_owner": {"kind": "direct", "lane": "conversation", "executor": "worker"}}}],
         "pending": [{"id": "sleeper", "attempt": 1, "task": {"id": "sleeper", "chat_id": 1,
             "_project_admission_restore_hold": {"reason": "project_dispatch_unconfirmed"}}}]})
-    write_queue_document(root / "state/direct_roots.json", {"ts": stamp, "incomplete": False,
-        "roots": [{"task_id": "native", "chat_id": 1, "title": "A direct head", "started_at": stamp}]})
     return project, focus
 
 

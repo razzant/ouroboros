@@ -89,13 +89,18 @@ def main(root: str, scenario: str) -> None:
 
     real_replace = utils.replace_atomic
 
+    def staged_state(temp: Path) -> dict:
+        # The rolling file is a skeleton over CAS parts (written before it): read it as the host does.
+        document = json.loads(temp.read_bytes())
+        return wc.expand_working(drive, document) if document.get("format") == wc.WORKING_SHARED_FORMAT else document
+
     def replace_then_die(src, dst, **kwargs):
         target, temp = Path(dst), Path(src)
         if (scenario == "torn_ready_write" and target.name.startswith(wc.FILE_PREFIX)
-                and SECOND_MAIL.encode("utf-8") in temp.read_bytes()):
+                and SECOND_MAIL in json.dumps(staged_state(temp)["messages"], ensure_ascii=False)):
             # Die between the temp write and os.replace, the temp itself half written.
             data = temp.read_bytes()
-            working = json.loads(data)["working"]
+            working = staged_state(temp)["working"]
             temp.write_bytes(data[: len(data) // 2])
             _park(base, {"point": scenario, "temp": temp.name, "full_bytes": len(data),
                          "boundary": working["boundary"], "seq": working["seq"]})

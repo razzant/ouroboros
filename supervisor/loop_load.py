@@ -5,8 +5,11 @@ queue lock Q (``supervisor.queue._queue_lock``). These windows let the one compa
 ``supervisor_load`` row per busy minute (``ouroboros/server_liveness.py``) say where the
 consumer's time went: per event type, how many events its handlers served and their total
 and longest service time; per bus lane, the worst producer-stamp lag the drain saw; for Q,
-how long its outermost acquisitions waited and held it and from which code site the
-window's longest hold came. Each window is a measurement only: nothing here touches disk,
+how long its outermost acquisitions waited and held it, from which code site the window's
+longest hold came, and per code site the count, total and longest hold (``hold_by_site``: the
+sites are the lexical acquisitions of Q, so the table is bounded by the code, and it is what
+says whether a minute's hold time is one long barrier or many ordinary holds slowed by the
+machine). Each window is a measurement only: nothing here touches disk,
 a store or the event bus, decides anything or can raise into the code it measures, and its
 one reader drains it (returns it and starts the next). Stdlib and the event taxonomy only,
 so the queue module builds Q from it at import.
@@ -25,25 +28,39 @@ from supervisor.event_taxonomy import disposition_for
 _REPO_PREFIX = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + os.sep
 
 
+def _relative(filename: str) -> str:
+    if filename.startswith(_REPO_PREFIX):
+        filename = filename[len(_REPO_PREFIX):]
+    return filename.replace(os.sep, "/")
+
+
 def code_site(site: Optional[Tuple[str, int, str]]) -> Optional[str]:
     """``path:line in function`` (repository files relative), or None when no site was seen."""
     if not site:
         return None
     filename, lineno, name = site
-    if filename.startswith(_REPO_PREFIX):
-        filename = filename[len(_REPO_PREFIX):]
-    return f"{filename.replace(os.sep, '/')}:{lineno} in {name}"
+    return f"{_relative(filename)}:{lineno} in {name}"
+
+
+def code_place(place: Optional[Tuple[str, str]]) -> str:
+    """``path in function``: a site without its line, the key of the per-site table."""
+    if not place:
+        return "unknown"
+    filename, name = place
+    return f"{_relative(filename)} in {name}"
 
 
 class _LockWindow:
-    """Outermost holds of one lock that ended in the window: their waits, holds, longest site."""
+    """Outermost holds of one lock that ended in the window: their waits, holds, longest site, and
+    per site (the function that took the lock, whatever the line) the count, total and longest hold."""
 
-    __slots__ = ("count", "wait_total", "wait_max", "hold_total", "hold_max", "hold_max_site")
+    __slots__ = ("count", "wait_total", "wait_max", "hold_total", "hold_max", "hold_max_site", "sites")
 
     def __init__(self) -> None:
         self.count = 0
         self.wait_total = self.wait_max = self.hold_total = self.hold_max = 0.0
         self.hold_max_site: Optional[Tuple[str, int, str]] = None
+        self.sites: Dict[Optional[Tuple[str, str]], list] = {}  # (file, function) -> [count, hold_total, hold_max, wait_total]
 
     def note(self, waited: float, held: float, site: Optional[Tuple[str, int, str]]) -> None:
         self.count += 1
@@ -53,13 +70,27 @@ class _LockWindow:
             self.wait_max = waited
         if held >= self.hold_max:  # a window whose holds all measure 0.0 still names a site
             self.hold_max, self.hold_max_site = held, site
+        key = (site[0], site[2]) if site else None
+        row = self.sites.get(key)
+        if row is None:
+            row = self.sites[key] = [0, 0.0, 0.0, 0.0]
+        row[0] += 1
+        row[1] += held
+        row[3] += waited
+        if held > row[2]:
+            row[2] = held
 
     def facts(self) -> Dict[str, Any]:
+        by_site = sorted(self.sites.items(), key=lambda item: -item[1][1])  # the heaviest total first
         return {
             "count": self.count,
             "wait_total_sec": round(self.wait_total, 3), "wait_max_sec": round(self.wait_max, 3),
             "hold_total_sec": round(self.hold_total, 3), "hold_max_sec": round(self.hold_max, 3),
             "hold_max_site": code_site(self.hold_max_site),
+            "hold_by_site": {code_place(key): {
+                "count": count, "hold_total_sec": round(total, 3), "hold_max_sec": round(longest, 3),
+                "wait_total_sec": round(waited, 3)}
+                for key, (count, total, longest, waited) in by_site},
         }
 
 

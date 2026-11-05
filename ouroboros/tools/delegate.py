@@ -120,6 +120,7 @@ from ouroboros.delegate_shared import (  # noqa: F401
 # (same objects) because sibling code and the tests address it on THIS surface.
 # `_fail` is NOT re-imported from it — the one shared refusal author is
 # `delegate_shared._fail`, which delegate_integration itself imports.
+from ouroboros.engine_facts import engine_pool_line
 from ouroboros.delegate_continuation import NO_CONTINUATION, start_binding, with_run_binding
 from ouroboros.tools.delegate_integration import (  # noqa: F401
     _CAPTURE_DELEGATED_SNAPSHOT,
@@ -1216,6 +1217,7 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
                 "status": "observation_pending", "run_id": rid,
                 "reason": exc.observation_reason or exc.code, "detail": str(exc),
                 "waited_sec": time.monotonic() - started, "answered": exc.observation_answered,
+                "engine_pool": engine_pool_line(),
             })
         return _fail("delegate_wait", exc.code, str(exc), run_id=rid).text
     finally:

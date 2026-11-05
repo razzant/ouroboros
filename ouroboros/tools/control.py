@@ -204,7 +204,6 @@ def get_tools() -> List[ToolEntry]:
     from ouroboros.tools.control_mind import mind_tool_entries
     from ouroboros.tools.control_ui_translation import ui_translation_tool_entries
     from ouroboros.tools.control_update_description import update_description_tool_entries
-
     return [
         *maintenance_tool_entries(),
         *mind_tool_entries(),
@@ -320,11 +319,9 @@ def get_tools() -> List[ToolEntry]:
             "description": _SCHEDULE_SUBAGENT_DESCRIPTION,
             "parameters": {
                 "type": "object",
-                # DERIVED, not restated: schedule_subagent_properties() is the single source
-                # this schema and the handler's allowed-key set both read from.
+                # DERIVED: schedule_subagent_properties() is the one source this schema and the handler's keys read.
                 "properties": schedule_subagent_properties(),
-                "required": ["subagent_id", "objective", "expected_output"],
-                "additionalProperties": False,
+                "required": ["subagent_id", "objective", "expected_output"], "additionalProperties": False,
             },
         }, _schedule_task),
         # cancel_task + peek_task + discard_child_result are registered by ouroboros/tools/join_ledger.py.
@@ -560,7 +557,6 @@ from ouroboros.tools.control_scheduling import (  # noqa: E402, F401 -- intentio
     _resolve_executor_ref,
     _schedule_task,
     _select_subagent_constraint,
-    _subagent_slot_note,
     maybe_emit_delegated_run_fanout,
 )
 from ouroboros.tools.control_task_results import (  # noqa: E402, F401 -- intentional public re-exports

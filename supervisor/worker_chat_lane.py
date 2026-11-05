@@ -351,12 +351,13 @@ def admit_owner_turn(
 
     One transaction with the update owner (Q + the repo-writer gate lock): the gate,
     the restart intake, the row. A Restart accepted meanwhile finds started work; a
-    pending Restart saves the turn on the ordinary durable queue instead.
+    pending Restart saves the turn on the ordinary durable queue instead. The row's
+    barrier and its carrier follow outside that transaction (``dispatch_admitted_turn``).
     """
     from ouroboros.server_restart import agent_restart_pending
     from supervisor import queue
     from supervisor.active_activity import reply_expected
-    from supervisor.conversation_lane import admit_turn, replenish_after_claim
+    from supervisor.conversation_lane import admit_turn, dispatch_admitted_turn, replenish_after_claim
 
     client_msg_id = _client_message_id(task_metadata)
     task = _seed_task(chat_id, text, image_data, task_constraint, task_metadata)
@@ -373,12 +374,11 @@ def admit_owner_turn(
                 task, chat_id=chat_id, client_message_id=client_msg_id, quiet=False,
                 reply_expected=reply_expected({"metadata": task_metadata or {}}),
             )
-            if meta is not None:
-                _degrade_if_no_carrier_can_start(meta)
         if deferred:
             _defer_chat_for_restart(task, chat_id, task_metadata)
             return None
         if meta is not None:
+            dispatch_admitted_turn(meta)  # the barrier outside Q, then the carrier (or the degraded executor)
             replenish_after_claim()  # the spare the turn took is replaced now, or its own carrier started now (4A)
         _announce_turn_start({"task": task, "chat_id": chat_id, "client_msg_id": client_msg_id, "kind": "direct_chat"})
         return meta
@@ -409,7 +409,7 @@ def handle_wake_direct(
     failure leaves the complete text as the wake's only input.
     """
     from supervisor import queue
-    from supervisor.conversation_lane import admit_turn, replenish_after_claim
+    from supervisor.conversation_lane import admit_turn, dispatch_admitted_turn, replenish_after_claim
 
     closed = wake_gate_refusal()
     if closed:
@@ -424,7 +424,10 @@ def handle_wake_direct(
         remaining = budget_remaining(current, strict=True)
     except Exception:
         return {"admitted": False, "task_id": "", "reason": "cost_accounting_unavailable"}
-    if remaining <= 0:
+    from supervisor.worker_assignment import needs_paid_admission
+
+    # A reached global limit refuses paid admission only: a wake on a $0 subscription or local route runs.
+    if remaining <= 0 and needs_paid_admission({"metadata": dict(task_metadata or {})}):
         return {"admitted": False, "task_id": "", "reason": "budget_exhausted"}
     task = _seed_task(int(chat_id), str(text or ""), None, None, dict(task_metadata or {}))
     task_id = str(task["id"])
@@ -439,17 +442,22 @@ def handle_wake_direct(
             if closed:
                 return {"admitted": False, "task_id": "", "reason": closed}
             meta = admit_turn(task, chat_id=int(chat_id), quiet=True, reply_expected=False)
-            _degrade_if_no_carrier_can_start(meta)
     except Exception:
         log.warning("wake %s could not be admitted to the conversation lane", task_id, exc_info=True)
         return {"admitted": False, "task_id": "", "reason": "admission_failed"}
+    try:
+        dispatch_admitted_turn(meta)  # the barrier outside Q, then the carrier (or the degraded executor)
+    except Exception:
+        log.warning("wake %s admitted; its carrier could not start now (the lane's next pass retries)", task_id,
+                    exc_info=True)
     replenish_after_claim()  # the wake's own carrier starts now; a wake never takes the owner's spare (4A)
     _announce_turn_start({"task": task, "chat_id": int(chat_id), "client_msg_id": "", "kind": "direct_chat"})
     return {"admitted": True, "task_id": task_id, "reason": ""}
 
 
 def _degrade_if_no_carrier_can_start(meta: Dict[str, Any]) -> None:
-    """Under Q: a row no carrier holds takes the degraded executor only on a physical fact (2A).
+    """Under Q (``conversation_lane.dispatch_admitted_turn``, after the row's barrier): a row no carrier holds takes
+    the degraded executor only on a physical fact (2A).
 
     A spare still booting is a carrier that will come: the row waits for it. A
     marker window, a parked carrier or a refused spawn means none will: the same
