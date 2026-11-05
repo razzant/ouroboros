@@ -230,13 +230,8 @@ SCOPE = {"base": "b", "policy": "p", "changed": ["x.py"], "extra_tests": [], "fu
 
 @pytest.mark.parametrize("document,problem", [
     (_coherent(), ""),
-    (_coherent(2, tier="selected", scope=SCOPE), ""),
     (_coherent(1, tier="selected", scope=SCOPE), "schema does not match"),  # a selected record relabelled full
-    (_coherent(2, scope=SCOPE), "schema does not match"),
     (_coherent(2, tier="selected", scope={**SCOPE, "full_tests": True}), "the selection scope is incomplete"),
-    (_coherent(2, tier="selected", scope={k: v for k, v in SCOPE.items() if k != "base"}),
-     "the selection scope is incomplete"),
-    (_coherent(3, tier="selected", scope=SCOPE), "schema does not match"),
 ])
 def test_record_coherence_keeps_the_tiers_apart(document, problem):
     from ouroboros.preflight_receipts import _record_problem

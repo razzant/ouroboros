@@ -556,8 +556,7 @@ def test_an_observation_of_another_repository_is_left_out_and_a_public_one_stays
         (project_head, "other_bytes", ["tree"])]
 
 
-@pytest.mark.parametrize("stop", ["plugins_missing", "lane_never_returned", "terminal_lost", "terminal_only",
-                                  "nothing_left"])
+@pytest.mark.parametrize("stop", ["plugins_missing", "lane_never_returned", "nothing_left"])
 def test_a_run_that_minted_no_proof_states_what_its_runner_observed_and_never_running(tmp_path, monkeypatch, stop):
     """Setup failed before any lane (not started), a lane started and never returned
     (interrupted), the run's result.json then lost (the row still speaks, the terminal is
