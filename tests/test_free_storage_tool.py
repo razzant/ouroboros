@@ -162,6 +162,7 @@ def test_the_tools_answer_follows_the_receipt(tmp_path, monkeypatch, receipt, st
     assert (answer["status"], answer["ok"]) == (status, ok)
     assert answer["receipt"]["state"] == receipt["state"]
     assert ("reported to the owner in Main" in answer["note"]) == (receipt.get("refusal") != "busy")
+    assert receipt.get("refusal") != "busy" or "only this refusal receipt" in answer["note"]
 
 
 def test_a_receipt_that_has_not_landed_reads_as_requested_or_queued(tmp_path, monkeypatch):
