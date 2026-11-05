@@ -279,7 +279,7 @@ Children coordinate via `tree_note`/`tree_read`; only parents may `override_dele
 
 **Selected first-input sources** (`context_input_selection.py`). `input_sources="declared"` gives API children/session nannies assignment/evidence, verbatim owner origin (`owner_words.py`; old bytes stay), full SYSTEM/BIBLE/owner rules, authority/tools, own observations and applicable DESIGN map. Default `shared` adds book maps, identity, life account (not nannies), room page/marks, never whole dialogue. Children's signed chronicle drafts need the integrating mind's acceptance. Selection changes no read boundary, model/effort or independence/first-position guarantee; tools/mail can broaden evidence.
 
-**Selected files** (`delegate_readonly_inputs.py`, DELEGATED_ADMISSION §3b): `read_admission` checks both actors; retained `prepared_input_files` reach native/session bootstrap, restaged when folderless. No new roots; Presence admits exact listed copies. Receipts prove preparation, not reading or automatic inputs.
+**Selected files** (`delegate_readonly_inputs.py`, DELEGATED_ADMISSION §3b): `read_admission` checks both actors. `prepared_input_files` keeps bytes; `resource_intent` keeps folderless staging. Receipts separate supervisor/leaf sources, prove no reading or new rights; Presence admits exact copies.
 
 **Engine inputs** (`delegate_documents.py`, `claudexor_uploads.py`; DELEGATED_ADMISSION §3a): ready/uncertain keys survive copies/Continue. Owed managed releases feed `runtime_retirement` under tree/Continue/Keep holds, without local files. Keep shares custody with release; late Keep reports uncertainty; open uploads cancel before settlement.
 

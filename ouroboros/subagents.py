@@ -845,6 +845,9 @@ SUBAGENT_INTENT_FIELDS: tuple[str, ...] = (
     # A read-only child's explicit ``input_files``, retained at schedule time (DELEGATED_ADMISSION §3b):
     # the receipt its first input names and its first session start verifies. [] records an explicit none.
     "prepared_input_files",
+    # The parent's resolved resource intent is required to preserve folderless scratch versus an explicit folder
+    # through schedule admission; it is an authority fact, not a dispatch-derived decision.
+    "resource_intent",
 )
 
 

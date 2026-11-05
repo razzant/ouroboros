@@ -379,6 +379,16 @@ order lists the selection (`SELECTED INPUT FILES`), and the first start of that 
 the bytes against the receipt: restaged once into a folderless scope, named in place otherwise.
 A later start, continuation or replacement selects its own.
 
+A scheduled child also carries the parent's `resource_intent` through admission. A folderless non-project
+child must retain `{"kind": "explicit_none"}` so its first session gets the delegated readonly scope;
+an explicit `workspace_root` is recorded as `{"kind": "explicit_resource", "root": ...}` after
+schedule-time folder selection. The scheduling acknowledgement for an `agent_session` describes the
+selected sources separately from the nanny's broad `read_file` profile; first start confirms the
+scope or private checking copy, never the leaf's reading. A path
+written only in prose is not prepared. One session binds one directory; three worktrees require three
+read-only children or explicit regular-file selections. This preserves the existing contract without
+staging whole trees or adding an engine multi-root.
+
 ## 4. Compatibility floors and applied evidence
 
 The constants in `ouroboros/config.py` answer request-compatibility questions:
