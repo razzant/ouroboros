@@ -477,25 +477,25 @@ def test_size_ratchet_transition_against_explicit_base():
 
 
 def test_js_module_gate_buckets_and_grandfathering():
-    """The JS size gate sees web/tests and exempts debt by exact rel-path only."""
+    """The JS size gate leaves test modules (web/tests) and vendored code out and exempts debt by exact rel-path only."""
     from ouroboros.review import compute_complexity_metrics, module_is_grandfathered
 
     sections = [
         ("repo/web/app.js", "x\n" * 2000),                   # gated, over hard gate, not grandfathered
         ("repo/web/modules/chat.js", "x\n" * 4000),          # gated, grandfathered by rel-path
         ("repo/web/vendor/chart.umd.min.js", "x\n" * 9000),  # vendored/minified — excluded
-        ("repo/web/tests/foo.test.js", "x\n" * 9000),        # web/tests/ — gated
+        ("repo/web/tests/foo.test.js", "x\n" * 9000),        # web/tests/ — a test module, out of the band
         ("repo/ouroboros/small.py", "x\n" * 10),
     ]
     metrics = compute_complexity_metrics(sections)
 
-    assert metrics["js_files"] == 3  # app.js + chat.js + web/tests; vendored excluded
+    assert metrics["js_files"] == 2  # app.js + chat.js; web/tests and vendored excluded
     oversized = {p for p, _n in metrics["oversized_modules"]}
     grandfathered = {p for p, _n in metrics["grandfathered_modules"]}
     assert "web/app.js" in oversized
     assert "web/modules/chat.js" in grandfathered
     assert "web/modules/chat.js" not in oversized
-    assert "web/tests/foo.test.js" in oversized
+    assert "web/tests/foo.test.js" not in oversized
     assert "web/vendor/chart.umd.min.js" not in oversized
     assert "web/vendor/chart.umd.min.js" not in grandfathered
 
