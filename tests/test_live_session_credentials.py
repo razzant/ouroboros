@@ -7,7 +7,7 @@ from ouroboros import capability_evidence as ce
 from ouroboros.contracts.live_conversation import LiveOptions
 from ouroboros.extension_plugin_api import PluginAPIImpl, _PluginAPIConfig
 from tests.test_grok_openai_protocol import providers as providers, deny_network as deny_network, Wire
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_live_usage import token_usage
 
 

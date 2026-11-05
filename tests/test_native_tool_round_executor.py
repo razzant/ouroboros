@@ -22,6 +22,7 @@ from ouroboros.review_native_episode import NativeToolRoundReviewExecutor
 from ouroboros.review_substrate import ReviewRequest, ReviewSlot
 from ouroboros.tools.review_response import parse_model_response
 from ouroboros.triad_review import parse_seat_answer
+from tests._source_scan import parse
 
 _VERDICT = '[{"severity": "advisory", "item": "x", "evidence": "e", "recommendation": "r"}]'
 
@@ -1047,7 +1048,7 @@ def _last_read_view_sites(sources):
     sites = set()
     for rel, text in sources.items():
         try:
-            tree = ast.parse(text)
+            tree = parse(text)
         except SyntaxError:
             continue
         for node in ast.walk(tree):

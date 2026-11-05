@@ -9,6 +9,7 @@ transport or a lane outcome a test fixes on purpose.
 
 from __future__ import annotations
 
+import functools
 import json
 import multiprocessing
 import os
@@ -25,6 +26,7 @@ import pytest
 
 from ouroboros import preflight_receipts as receipts
 from ouroboros import preflight_runner as pr
+from tests._worlds import clone, clone_repository, world
 
 pytestmark = pytest.mark.serial
 
@@ -87,12 +89,8 @@ def _git(repo, *args) -> str:
                           check=True).stdout.strip()
 
 
-def _tiny_repo(root, *, web=False, lanes=("parallel", "serial")) -> pathlib.Path:
-    """A real repository carrying every lane of the complete default recipe: two
-    parallel tests, one serial test and, with ``web``, one ``node --test`` file. A
-    pytest lane missing from ``lanes`` has no test file, so that lane collects none."""
-    repo = pathlib.Path(root) / "tiny"
-    (repo / "tests").mkdir(parents=True)
+def _lay_tiny_repo(repo: pathlib.Path, *, web: bool, lanes: tuple) -> None:
+    (repo / "tests").mkdir()
     (repo / "pytest.ini").write_text("[pytest]\nmarkers =\n    serial: serial lane\n", encoding="utf-8")
     if "parallel" in lanes:
         (repo / "tests" / "test_parallel.py").write_text(
@@ -108,7 +106,15 @@ def _tiny_repo(root, *, web=False, lanes=("parallel", "serial")) -> pathlib.Path
     _git(repo, "init", "-q")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "tiny suite")
-    return repo
+
+
+def _tiny_repo(root, *, web=False, lanes=("parallel", "serial")) -> pathlib.Path:
+    """A real repository carrying every lane of the complete default recipe: two
+    parallel tests, one serial test and, with ``web``, one ``node --test`` file. A
+    pytest lane missing from ``lanes`` has no test file, so that lane collects none."""
+    template = world("-".join(("tiny-repo", "web" if web else "python", *lanes)),
+                     functools.partial(_lay_tiny_repo, web=web, lanes=tuple(lanes)))
+    return clone_repository(template, pathlib.Path(root) / "tiny")
 
 
 def _receipt_files(canonical) -> list:
@@ -139,15 +145,17 @@ def _launch_env(tag: str) -> dict:
             "_PYI_APPLICATION_HOME_DIR": f"/pyi/{tag}", f"OURO_PROC_CONTAINER_{uuid.uuid4().hex}": "1"}
 
 
-def _executing_copy(root) -> pathlib.Path:
-    """A physical copy of this executing implementation, as an installed body is one."""
-    install = pathlib.Path(root) / "install"
+def _lay_executing_copy(install: pathlib.Path) -> None:
     ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
     for name in ("ouroboros", "supervisor", "scripts"):
         shutil.copytree(REPO / name, install / name, ignore=ignore)
     for name in ("server.py", "launcher.py", "VERSION", "pyproject.toml"):
         shutil.copy2(REPO / name, install / name)
-    return install
+
+
+def _executing_copy(root) -> pathlib.Path:
+    """A physical copy of this executing implementation, as an installed body is one."""
+    return clone(world("executing-copy", _lay_executing_copy), pathlib.Path(root) / "install")
 
 
 # One process life of a gate caller: it pins its executing source before the gate's own

@@ -7,7 +7,8 @@ import pytest
 
 from ouroboros import memory_floor as mf, memory_view as mv
 from tests import _memory_view_synthetic as syn
-from tests.test_live_conversation import host_world as host_world, packages as packages
+from tests._live_world import host_world as host_world
+from tests.test_live_conversation import packages as packages
 
 
 @pytest.mark.parametrize('new_kind', ['page', 'part'])

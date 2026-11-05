@@ -13,7 +13,7 @@ import pytest
 
 from ouroboros import call_protocol as cp
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_live_deferred_custody import answer, mail_updates, successor
 from tests.test_live_delivery_owner import never, opened, room_pointers
 from tests.test_live_delivery_owner_stack import RESTART, handle, live_frames, spoken

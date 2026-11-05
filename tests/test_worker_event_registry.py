@@ -16,6 +16,7 @@ from types import MappingProxyType
 from typing import Mapping, NamedTuple
 
 import pytest
+from tests._source_scan import parse
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -98,7 +99,7 @@ def _runtime_trees():
     trees = {}
     for path in files:
         try:
-            trees[path] = ast.parse(path.read_text(encoding="utf-8"))
+            trees[path] = parse(path.read_text(encoding="utf-8"))
         except (OSError, SyntaxError):
             continue
     return trees

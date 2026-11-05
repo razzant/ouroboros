@@ -2,7 +2,7 @@
 import asyncio
 
 from ouroboros.contracts.live_conversation import LiveOptions
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_live_host_fit_evidence import host_events
 from tests.test_live_conversation_driver import Host, started, until
 

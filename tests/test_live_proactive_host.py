@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw
 
 from ouroboros import call_protocol as cp
 from ouroboros.call_peers import LiveCallHub, CallPeerError
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 def synthetic_jpeg():

@@ -6,7 +6,7 @@ from dataclasses import replace
 import pytest
 
 from ouroboros.contracts.live_conversation import LiveOptions, ToolOutputs
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 def test_legacy_session_needs_no_private_tools_attribute_after_capacity_failure(host_world):

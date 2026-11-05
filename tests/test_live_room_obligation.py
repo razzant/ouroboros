@@ -16,7 +16,7 @@ from ouroboros import call_protocol as cp
 from ouroboros.contracts.live_conversation import ContextUpdate
 from ouroboros.contracts.realtime import CatalogModel
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_live_conversation_driver import Host, until
 from tests.test_live_deferred_custody import MAIL, READY, answer, holding_mail, mail_updates, outputs, pointers, successor
 from tests.test_live_delivery_owner import ROOM_POINTER, Socket, never, opened, position, room_pointers

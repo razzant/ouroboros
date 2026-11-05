@@ -32,7 +32,7 @@ from tests import _memory_view_synthetic as syn
 from tests.test_authored_memory import _run
 from tests.test_canonical_runtime_reads import actor
 from tests.test_doc_context import _make_env_and_memory
-from tests.test_live_conversation import host_world as host_world  # noqa: F401 — the real call host
+from tests._live_world import host_world as host_world  # noqa: F401 — the real call host
 from tests.test_section_floor import RESERVE, _host_facts, _text, capacity_facts  # noqa: F401 — fixed density/reserve
 from tests.test_section_floor import _core as _synthetic_core
 from tests.test_section_floor import _plan as _synthetic_plan

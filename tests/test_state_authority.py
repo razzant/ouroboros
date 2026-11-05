@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from supervisor import state, state_initialization
+from tests._source_scan import parse
 from tests._store_shared import remove_store_tree
 
 
@@ -536,7 +537,7 @@ def test_owner_bindings_have_only_known_empty_slot_writers():
     repo = pathlib.Path(__file__).resolve().parents[1]
     writers = []
     for path in [repo / "server.py", *repo.joinpath("ouroboros").rglob("*.py"), *repo.joinpath("supervisor").rglob("*.py")]:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(
                 node, ast.AugAssign) else []

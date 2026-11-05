@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_live_conversation_config import config_api as config_api, request
 from tests.test_live_conversation_driver import Host, started, until
 

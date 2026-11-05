@@ -8,7 +8,7 @@ import pytest
 from ouroboros import call_protocol as cp
 from ouroboros.contracts.live_conversation import Audio
 from tests._live_stack import stack
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 @pytest.mark.parametrize('answer', [False, True])

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.test_delivery_contention import sender as sender, owed
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 def actor(monkeypatch, root, task_id='recipient', *, chat_id=1):

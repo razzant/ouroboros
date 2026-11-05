@@ -12,7 +12,7 @@ from ouroboros.contracts.realtime import CatalogModel, RouteFacts
 from ouroboros.tool_call_log import invocation_scope
 from skills.live_conversation.attention import Attention, attend_tool
 from skills.live_conversation.driver import _Call, engine_sentence
-from tests.test_live_conversation import host_world as host_world_fixture
+from tests._live_world import host_world as host_world_fixture
 from tests.test_live_conversation_driver import Batch, Host, Session, started, until
 
 host_world = host_world_fixture

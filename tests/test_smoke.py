@@ -17,6 +17,7 @@ import sys
 import tempfile
 
 import pytest
+from tests._source_scan import parse
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
@@ -661,7 +662,7 @@ def test_no_module_defines_the_same_top_level_name_twice():
         if parts & {".git", "node_modules", "venv", ".venv", "build", "dist"}:
             continue
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = parse(path.read_text(encoding="utf-8"))
         except (SyntaxError, UnicodeDecodeError):
             continue
         seen = collections.Counter()

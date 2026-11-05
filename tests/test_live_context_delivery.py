@@ -8,7 +8,7 @@ from ouroboros.contracts.live_conversation import ContextUpdate, LiveOptions
 from ouroboros.realtime_setup import loaded_provider
 from tests.test_live_conversation import ENGINES, VoiceWire, packages as packages
 from tests.test_live_provider_boundaries import selected
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 @pytest.mark.parametrize('name,engine', ENGINES)

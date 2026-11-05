@@ -7,7 +7,7 @@ import pytest
 
 from ouroboros.contracts.realtime import RealtimeSetupError
 from ouroboros.store import StoreBusy, StoreError
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 def test_strict_control_contention_retries_before_tool_effect(host_world, monkeypatch):

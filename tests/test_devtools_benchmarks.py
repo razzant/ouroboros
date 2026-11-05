@@ -38,6 +38,7 @@ from devtools.benchmarks.programbench.programbench_adapter import (
     verify_reference_executable_runnable,
 )
 from devtools.benchmarks.swe_bench.presets import resolve_preset
+from tests._source_scan import parse as parse_source
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -4579,7 +4580,7 @@ def test_every_migrated_launcher_routes_through_both_manifest_seams():
         # parsing and pure local derivation: no filesystem assertion, no docker, no subprocess, no
         # network, no state mutation. Walked with `ast` over the function that performs admission
         # AND, when that is not `main()`, over the statements of `main()` that precede it.
-        tree = ast.parse(source)
+        tree = parse_source(source)
         functions = {node.name: node for node in ast.walk(tree)
                      if isinstance(node, ast.FunctionDef)}
         owner = next(

@@ -43,6 +43,7 @@ from ouroboros.provider_models import (
     provider_credential_plan,
 )
 from ouroboros.request_wire_contract import WIRE_REASON_CODES
+from tests._source_scan import parse
 
 # A live settings file carrying EVERY provider credential the owner has configured. This is
 # the realistic shape: the owner's file accumulates keys over time, and which of them a
@@ -877,7 +878,7 @@ def _runtime_reason_code_literals() -> dict[str, str]:
                 found.setdefault(match.group(1), f"{path.relative_to(root.parent)}:{lineno}")
         # Conditional/fallback reason values remain producers; their spelling
         # need not be adjacent to the keyword on one source line.
-        tree = ast.parse(source)
+        tree = parse(source)
         forwarded = _forwarded_reason_arguments(tree)
         constants = {target.id: node.value for node in tree.body if isinstance(node, ast.Assign)
                      for target in node.targets if isinstance(target, ast.Name) and isinstance(node.value, ast.Constant)}
