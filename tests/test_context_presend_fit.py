@@ -57,6 +57,38 @@ def test_known_window_folds_before_first_provider_send(main_call, monkeypatch):
     assert not any(row.get("type") in {"llm_api_error", "remote_context_overflow"} for row in rows)
 
 
+@pytest.mark.parametrize("window", [900_000, 200_000])
+def test_a_prediction_first_refits_this_rounds_unsent_results_and_keeps_the_sent_prefix(main_call, window):
+    """A fresh result that does not fit leaves for an exact reader before any sent row changes: the request
+    stays a pure extension of the last answered send (the provider's whole-request prompt cache survives)
+    and no refusal pass runs. A fitting round sends the same result whole."""
+    import hashlib
+    from ouroboros import transcript_prefix
+    from ouroboros.tool_result_delivery import RESULT_VIEW_MARKER
+    from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
+
+    ctx, gateway, *_ = main_call
+    plan = replace(ctx.context_fit_plan, window_tokens=window, status="confirmed", stale=False)
+    ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan
+    transcript_prefix.observe_send(ctx.tools._ctx, ctx.messages[:-3], round_idx=0, tools=ctx.tool_schemas)
+    big = "fresh output line\n" * 30_000
+    row = ctx.messages[-2]
+    row.update({"content": big, TOOL_RESULT_RECORD_KEY: {
+        "version": 1, "content_sha256": hashlib.sha256(big.encode()).hexdigest(), "facts": {}, "trace_ref": {},
+        "invocation": {"tool_call_id": "a", "invocation_id": "inv-a"}, "source_ref": {}}})
+    answer, _, _mode = loop._call_round_model(ctx)
+    assert answer and len(gateway.creates) == 1
+    assert transcript_prefix.departure(ctx.tools._ctx, ctx.messages, ctx.tool_schemas) is None
+    rows = [json.loads(line) for line in (ctx.drive_logs / "events.jsonl").read_text().splitlines()]
+    rungs = [row.get("rung") for row in rows if row.get("type") == "context_reclaim"]
+    [shown] = [row["content"] for row in ctx.messages if row.get("tool_call_id") == "a"]
+    sent = [row.get("content") for row in gateway.uploads[0][0]["messages"]]
+    if window == 900_000:
+        assert rungs == [] and shown == big and big in sent
+    else:
+        assert rungs == ["fresh_results"] and RESULT_VIEW_MARKER in shown and shown in sent and big not in sent
+
+
 @pytest.mark.parametrize("known,stale", [(False, False), (True, True)])
 def test_unknown_or_stale_window_sends_the_first_full_request(main_call, known, stale):
     ctx, gateway, *_ = main_call

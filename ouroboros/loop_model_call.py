@@ -26,7 +26,7 @@ from ouroboros.context_anchor import main_input_anchor, measured_units, record_i
 from ouroboros.context_budget import WHOLE_CATEGORY
 from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import REBOUND_PHYSICAL_CONTEXT_KEY, REFUSED_CANDIDATE_KEY, TIMEOUT_REPEAT_KEY, TRANSPORT_DEATHS_KEY
-from ouroboros.loop_round_limits import _coarsen_memory_view, _run_emergency_address_pass
+from ouroboros.loop_round_limits import _coarsen_memory_view, _run_emergency_address_pass, refit_unsent_results_first
 from ouroboros.observability import new_execution_id
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.transcript_prefix import rewrite_epoch
@@ -1390,18 +1390,18 @@ def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str
     if isinstance(ctx.accumulated_usage.get(TRANSPORT_DEATHS_KEY), dict):
         _emit_overflow_retry_skipped(ctx, "round_holds_unresolved_attempt")
         return msg, cost, ctx.active_context_mode
-    # A wake's stored-source delivery is model-free and already applied: it earns the first retry.
-    prepared = _project_wake_input(ctx, overflowed=True)
+    # A wake's stored-source delivery, else this round's unsent results re-delivered, is model-free and earns the first retry.
+    prepared = _project_wake_input(ctx, overflowed=True) or refit_unsent_results_first(ctx, disposition, failed_capture)
     return _recover_context_overflow(ctx, failed_capture, cost, prepared=prepared)
 
 
-# Size recovery (owner revision, 20.10.2026): a known-window prediction of no result room or the provider's
-# typed size refusal starts two model-free passes, each earning one strictly smaller check/retry: the
-# first replaces superseded host state and bodies a usable turn already showed; the second, only after a
-# further failed check/refusal, lowers memory granularity (books too when memory falls short of the excess), then
-# changes books before addressing eligible unseen bodies, a just-chosen one last. Each pass runs once
-# per round whatever the route, so a configured fallback receives the view as applied and walks nothing
-# again. The fallback chain and the end of the path follow in the caller.
+# Size recovery (owner revision, 20.10.2026; cache order 5.11.2026): a known-window prediction of no result room or the
+# provider's typed size refusal first re-delivers the round's unsent results (sent rows keep their bytes, so the prompt cache
+# survives), then starts two model-free passes, each earning one strictly smaller check/retry: the first replaces superseded
+# host state and bodies a usable turn already showed; the second, only after a further failed check/refusal, lowers memory
+# granularity (books too when memory falls short of the excess), then changes books before addressing eligible unseen bodies,
+# a just-chosen one last. Each pass runs once per round whatever the route, so a configured fallback receives the view as
+# applied and walks nothing again. The fallback chain and the end of the path follow in the caller.
 from ouroboros.context_budget import REFUSAL_PASSES  # one rung order; dispatch stays in this driver
 WAKE_DELIVERY_STEP = "wake_delivery"  # the change applied before the passes, when there was one
 #: The round needing size recovery (``context_renewal`` reads it); a fallback's other failure cannot cancel it.

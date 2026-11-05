@@ -593,3 +593,43 @@ def test_range_recovery_respects_pageable_tool_and_loaded_reader(tool, reader):
         assert 'Do not rerun' in text
     assert ('Read the exact source above' in text) is reader
     assert ('read_omitted' in view) is reader
+
+
+def test_refit_unsent_results_cuts_only_unasked_bodies_past_the_last_send(tmp_path):
+    """Size recovery's first step: rows the provider accepted keep their bytes (its whole-request prompt
+    cache), this round's unasked result leaves for an exact reader, a chosen read stays whole, and a
+    fitting candidate changes nothing."""
+    from ouroboros.tool_result_delivery import FULL_SOURCE_MARKER, RESULT_VIEW_MARKER, refit_unsent_results
+    from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
+
+    def record(call_id, text):
+        return {"version": 1, "content_sha256": hashlib.sha256(text.encode()).hexdigest(), "facts": {}, "trace_ref": {},
+                "invocation": {"tool_call_id": call_id, "invocation_id": "inv-" + call_id}, "source_ref": {}}
+
+    def call(call_id, args):
+        return {"id": call_id, "type": "function", "function": {"name": "read_file", "arguments": json.dumps(args)}}
+
+    old, fresh, chosen = "old body\n" * 4000, "fresh body\n" * 4000, "chosen body\n" * 300
+    messages = [{"role": "system", "content": "core"},
+                {"role": "assistant", "content": "", "tool_calls": [call("old", {"path": "o"})]},
+                {"role": "tool", "tool_call_id": "old", "content": old, TOOL_RESULT_RECORD_KEY: record("old", old)},
+                {"role": "assistant", "content": "",
+                 "tool_calls": [call("fresh", {"path": "f"}), call("chosen", {"path": "c", "max_lines": 300})]},
+                {"role": "tool", "tool_call_id": "fresh", "content": fresh, TOOL_RESULT_RECORD_KEY: record("fresh", fresh)},
+                {"role": "tool", "tool_call_id": "chosen", "content": chosen,
+                 TOOL_RESULT_RECORD_KEY: record("chosen", chosen)},
+                {"role": "user", "content": "[CONTEXT_FACTS] the host row that follows the results"}]
+    whole = sum(len(str(row["content"])) for row in messages) // 4
+
+    def measure(capacity):
+        return lambda rows: {"estimated_input_tokens": sum(len(str(row.get("content") or "")) for row in rows) // 4,
+                             "capacity_total_tokens": capacity, "response_reserve_tokens": 1_000}
+
+    # The unasked share is the frame's eighth of the window, as at the first show: a roomy window keeps it whole.
+    assert refit_unsent_results(messages, 3, [], drive_root=tmp_path, task_id="t", measure=measure(whole * 9))[0] is None
+    rebuilt, receipt = refit_unsent_results(messages, 3, [], drive_root=tmp_path, task_id="t", measure=measure(whole - 5_000))
+    assert rebuilt[:4] == messages[:4] and rebuilt[5:] == messages[5:] and receipt["refit_call_ids"] == ["fresh"]
+    assert RESULT_VIEW_MARKER in rebuilt[4]["content"] and FULL_SOURCE_MARKER in rebuilt[4]["content"]
+    assert len(rebuilt[4]["content"]) < len(fresh) and rebuilt[4][TOOL_RESULT_RECORD_KEY]["source_ref"]
+    assert rebuilt[4][TOOL_RESULT_RECORD_KEY]["content_sha256"] == hashlib.sha256(
+        rebuilt[4]["content"].encode()).hexdigest()

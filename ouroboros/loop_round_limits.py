@@ -1128,6 +1128,65 @@ def _publish_reclaimed_transcript(ctx: Any, rebuilt: list, *, by: str = "compact
     prune_reclaim_trace_refs(ctx.tools._ctx, ctx.messages)
 
 
+def _measure_trial_candidate(ctx: Any, messages: list) -> Any:
+    """Measure ``messages`` as the sealed candidate with its next facts line; the live round stays untouched."""
+    from ouroboros.loop_messages import append_context_facts
+
+    trial = copy.copy(ctx)
+    trial.messages = copy.deepcopy(messages)
+    trial.accumulated_usage = dict(ctx.accumulated_usage)
+    trial.tools = copy.copy(ctx.tools)
+    trial.tools._ctx = copy.copy(ctx.tools._ctx)
+    trial.tools._ctx.messages = trial.messages
+    trial.tools._ctx._accumulated_usage = trial.accumulated_usage
+    # The baseline is the current refused transcript, not a hypothetical
+    # reprepare with another facts line. Only replacements earn new send facts.
+    if messages is not ctx.messages:
+        _loop().seal_task_transcript(trial.messages)
+        append_context_facts(trial)
+    return _loop()._measure_round_main_fit(trial, automatic_pass_used=True)
+
+
+def refit_unsent_results_first(ctx: Any, disposition: Any, failed_capture: Any) -> bool:
+    """Re-deliver this round's unsent results inside the final candidate before any sent row changes.
+
+    Rows past the last answered send are outside the provider's cached prefix: cutting their unasked
+    bodies to an exact reader keeps the whole-request prompt cache that every refusal pass loses
+    (DEVELOPMENT 06 "Cache-friendliness invariant"); chosen reads stay whole (owner 2A). A prediction's
+    measured excess sizes every candidate the round's own measure undercounts; a provider's refusal
+    is sized by the window alone. True when a row changed (the caller retries it before the passes)."""
+    from ouroboros.tool_result_delivery import refit_unsent_results
+    from ouroboros.transcript_prefix import DIGEST_ATTR
+
+    sent, measurement = getattr(ctx.tools._ctx, DIGEST_ATTR, None), getattr(disposition, "measurement", None)
+    if not isinstance(sent, list) or not sent or measurement is None or measurement.capacity_total_tokens is None:
+        return False
+    predicted = getattr(failed_capture, "predicted_free_tokens", None)
+    seen = measurement.estimated_input_tokens + measurement.response_reserve_tokens - measurement.capacity_total_tokens
+    offset = max(0, -int(predicted) - max(0, seen)) if predicted is not None else 0
+
+    def measure(messages: list) -> Dict[str, Any]:
+        measured = _measure_trial_candidate(ctx, messages)
+        facts = asdict(measured.measurement) if measured is not None else {}
+        return {**facts, "estimated_input_tokens": int(facts.get("estimated_input_tokens") or 0) + offset}
+
+    rebuilt, receipt = refit_unsent_results(ctx.messages, len(sent), list(ctx.tool_schemas or []),
+                                            drive_root=pathlib.Path(ctx.drive_root or ctx.drive_logs.parent),
+                                            task_id=ctx.task_id, measure=measure)
+    if rebuilt is None:
+        return False
+    ctx.messages[:] = rebuilt  # unsent rows only: no sanctioned rewrite, the sent prefix keeps its bytes
+    ctx.tools._ctx.messages = ctx.messages
+    _loop().seal_task_transcript(ctx.messages)
+    _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
+        "type": "context_reclaim", "checkpoint_kind": "context_reclaim_emergency", "rung": "fresh_results",
+        "cause": "context_size", "round": ctx.round_idx, "route_fp": measurement.route_fp,
+        "round_id": measurement.round_id, "status": "applied", "reclaimed_tokens": receipt["reclaimed_tokens"],
+        "checkpoint_ref": None, "selected_unit_ids": receipt["refit_call_ids"],
+    })
+    return True
+
+
 def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_tokens: Optional[int] = None,
                                 cause: str = "context_size") -> Any:
     """Publish a model-free source view, measuring the sealed candidate with its next facts line.
@@ -1136,26 +1195,12 @@ def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_t
     one the pass takes its whole category, never one unit sized by a missing number."""
     from ouroboros.context_budget import ContextReclaimRequest
     from ouroboros.context_compaction import context_reclaim_transcript_sha256, emergency_address_view
-    from ouroboros.loop_messages import append_context_facts
 
     measurement = disposition.measurement
     tool_ctx = ctx.tools._ctx
 
     def measure_candidate(messages: list) -> int:
-        trial = copy.copy(ctx)
-        trial.messages = copy.deepcopy(messages)
-        trial.accumulated_usage = dict(ctx.accumulated_usage)
-        trial.tools = copy.copy(ctx.tools)
-        trial.tools._ctx = copy.copy(tool_ctx)
-        trial.tools._ctx.messages = trial.messages
-        trial.tools._ctx._accumulated_usage = trial.accumulated_usage
-        # The baseline is the current refused transcript, not a hypothetical
-        # reprepare with another facts line. Only replacements earn new send facts.
-        if messages is not ctx.messages:
-            _loop().seal_task_transcript(trial.messages)
-            append_context_facts(trial)
-        measured = _loop()._measure_round_main_fit(trial, automatic_pass_used=True)
-        return measured.measurement.estimated_input_tokens
+        return _measure_trial_candidate(ctx, messages).measurement.estimated_input_tokens
 
     request = ContextReclaimRequest(
         route_fp=measurement.route_fp, round_id=measurement.round_id,

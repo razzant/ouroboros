@@ -600,3 +600,66 @@ def _measured_frame(
                            "complete_chars": len(texts[i]), "source_status": rows[i]["result_source_status"]}
                           for i in range(count) if rows[i].get("result_partial")]
     return rows, {**receipt, "status": status, "fit": final}
+
+
+def refit_unsent_results(
+    messages: List[Dict[str, Any]], first_unsent: int, tool_schemas: list, *,
+    drive_root: pathlib.Path, task_id: str, measure: Callable[[List[Dict[str, Any]]], Mapping[str, Any]],
+) -> Tuple[Optional[List[Dict[str, Any]]], Dict[str, Any]]:
+    """Re-deliver the whole results no answered send carried yet, measured inside the final candidate.
+
+    ``messages[first_unsent:]`` are rows the provider has not accepted; their tool results get the same
+    measured frame as their first show (unasked bodies to head+tail with an exact reader, chosen reads
+    kept whole), now measured with the host rows that follow them. ``measure`` sizes a whole candidate
+    list in the admission's units. Rows before ``first_unsent`` keep their bytes, so the provider's
+    whole-request prompt cache survives the fit. ``(None, receipt)`` when no such result changed.
+    """
+    from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY, logical_tool_result_text
+
+    calls: Dict[str, Tuple[str, Any]] = {}
+    for message in messages[first_unsent:]:
+        for call in (message.get("tool_calls") or []) if message.get("role") == "assistant" else []:
+            function = call.get("function") if isinstance(call, Mapping) else None
+            if isinstance(function, Mapping) and call.get("id"):
+                try:
+                    args = json.loads(function.get("arguments") or "{}")
+                except (TypeError, ValueError):
+                    args = {}
+                calls[str(call["id"])] = (str(function.get("name") or ""), args if isinstance(args, dict) else {})
+    rows, positions = [], {}
+    for index in range(max(0, first_unsent), len(messages)):
+        message = messages[index]
+        record, text = message.get(TOOL_RESULT_RECORD_KEY), logical_tool_result_text(message.get("content"))
+        call_id = str(message.get("tool_call_id") or "")
+        if (message.get("role") != "tool" or call_id not in calls or text is None
+                or not isinstance(record, Mapping) or record.get("source_ref")):
+            continue  # an already partial view, an unrecorded row or a non-text result keeps its first show
+        facts = dict(record.get("facts") or {})
+        rows.append({"tool_call_id": call_id, "result": text, "fn_name": calls[call_id][0],
+                     "tool_args": calls[call_id][1], "is_error": facts.get("is_error"),
+                     "result_meta": {**facts, "tool_result_code": facts.get("code")}})
+        positions[call_id] = index
+    if not rows:
+        return None, {"status": "no_eligible"}
+    refit = set(positions.values())
+
+    def fit(candidate: list, _schemas: list) -> Mapping[str, Any]:
+        shown = {row["tool_call_id"]: row["content"] for row in candidate}
+        return measure([{**message, "content": shown[message["tool_call_id"]]} if index in refit else message
+                        for index, message in enumerate(messages)])
+
+    delivered, receipt = project_tool_result_batch(rows, [], tool_schemas, drive_root=drive_root, task_id=task_id,
+                                                   fit_candidate=fit, policy="measured_frame")
+    changed = [row for row in delivered if row.get("result_partial")]
+    if not changed:
+        return None, receipt
+    rebuilt = list(messages)
+    for row in changed:
+        index = positions[row["tool_call_id"]]
+        record = dict(rebuilt[index][TOOL_RESULT_RECORD_KEY])
+        record.update(content_sha256=hashlib.sha256(str(row["result"]).encode("utf-8")).hexdigest(),
+                      source_ref=dict(row.get("result_source_ref") or {}))
+        rebuilt[index] = {**rebuilt[index], "content": row["result"], TOOL_RESULT_RECORD_KEY: record}
+    receipt["reclaimed_tokens"] = max(0, int(receipt.get("whole_tokens") or 0) - _tokens(receipt.get("fit") or {}))
+    receipt["refit_call_ids"] = [row["tool_call_id"] for row in changed]
+    return rebuilt, receipt
