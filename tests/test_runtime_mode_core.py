@@ -486,6 +486,7 @@ def _git_repo(tmp_path: pathlib.Path) -> pathlib.Path:
 @pytest.mark.parametrize(("tool_name", "args"), [
     ("write_file", {"path": "README.md", "content": "changed\n"}),
     ("vcs_pull_ff", {}),
+    ("vcs_restore", {}),
     ("promote_to_stable", {"reason": "test"}),
 ])
 def test_light_mode_blocks_repo_mutation_tools(tool_name, args, tmp_path, monkeypatch):

@@ -429,8 +429,15 @@ def test_schedule_born_root_may_finish_quietly(wake, origin):
 @pytest.mark.parametrize("extra,occurrence,parent", [
     ({"delegation_role": "subagent"}, SCHEDULE["schedule_occurrence"], None),
     ({}, SCHEDULE["schedule_occurrence"], "parent-task"),
+    ({"root_task_id": "other-root"}, SCHEDULE["schedule_occurrence"], None),
+    ({"presence": {"binding_id": "b1"}}, SCHEDULE["schedule_occurrence"], None),
+    ({"presence": {}}, SCHEDULE["schedule_occurrence"], None),
+    ({}, {"schedule_id": "daily-check"}, None),
+    ({}, {"token": "occurrence-1"}, None),
+    ({}, {"schedule_id": "daily-check", "token": " "}, None),
     ({}, "daily-check", None),
-], ids=["delegated", "parent", "invalid-occurrence"])
+], ids=["delegated", "parent", "non-root", "presence", "empty-presence",
+        "missing-token", "missing-schedule", "empty-token", "invalid-occurrence"])
 def test_schedule_marker_does_not_bypass_quiet_authority(wake, extra, occurrence, parent):
     from ouroboros.tools.control_runtime import _finish_task
 

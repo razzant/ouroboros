@@ -339,7 +339,7 @@ def index_flags(source):
             git(source, "--no-optional-locks", "status", "--porcelain=v2", "-z", "--untracked-files=no"))
 
 
-@pytest.mark.parametrize("dirty, flag", [(False, ""), (True, "intent_to_add"),
+@pytest.mark.parametrize("dirty, flag", [(False, ""), (True, ""), (True, "intent_to_add"),
                                          (False, "skip_worktree")])
 def test_a_genuine_index_failure_reverses_the_tree_and_restores_only_its_own_entries(case, monkeypatch, dirty, flag):
     """A real Git index failure while staging (another Git process holds index.lock) still fails the apply,

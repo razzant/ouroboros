@@ -270,6 +270,7 @@ def test_a_budget_spent_before_the_action_refuses_it_and_nothing_is_done(monkeyp
 @pytest.mark.parametrize("acted_at, oversleep, settled, read_back, observed", [
     (2.0, 0.0, 0.15, True, 350),     # time left after the settle: the readback and the read run on what remains
     (2.95, 0.0, 0.05, False, None),  # the settle uses the rest: nothing left, so the readback is skipped
+    (2.8, 0.5, 0.15, False, None),   # the settle oversleeps past the deadline: the readback is skipped
     (3.5, 0.0, None, False, None),   # the action itself outlived the budget: no settle, no readback
 ])
 def test_the_settle_readback_and_read_after_the_action_spend_only_what_is_left(acted_at, oversleep, settled, read_back, observed):

@@ -408,6 +408,7 @@ def offline_tariffs(monkeypatch):
 
 
 @pytest.mark.parametrize("routes, priced, usd, unpriced, sessions", [
+    ((_API, _API), [_PRICED, _PRICED], 2 * _SEAT_USD, 0, 0),
     ((_SESSION, _SESSION), [], None, 0, 2),
     ((_API, _API_UNPRICED, _SESSION), [_PRICED, _UNPRICED], _SEAT_USD, 1, 1),
     ((), [_PRICED], _SEAT_USD, 0, 0),  # no marked row: the Main model reviews alone

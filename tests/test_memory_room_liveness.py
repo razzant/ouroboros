@@ -38,8 +38,13 @@ def test_own_words_and_host_facts_share_one_addressed_line_in_every_live_mode(tm
 
 
 @pytest.mark.parametrize("change,quiet", [({}, True), ({"wake_silent": False}, False),
+    ({"owner_message_sent": True}, False), ({"terminal_host_notice": "host notice"}, False),
+    ({"direction": "system", "type": "host_notice"}, False),
+    ({"delegation_role": "subagent", "subagent_task_id": "kid1"}, False),
     ({"direction": "system", "type": "task_summary", "summary_kind": "terminal_root_projection",
-      "outcome_authority": "canonical_task_result_after_finalization", "quiet_effective": True}, True)])
+      "outcome_authority": "canonical_task_result_after_finalization", "quiet_effective": True}, True),
+    ({"direction": "system", "type": "task_summary", "summary_kind": "terminal_root_projection",
+      "outcome_authority": "canonical_task_result_after_finalization", "quiet_effective": False}, False)])
 def test_only_a_typed_quiet_finish_of_the_mind_considers_earlier_words_without_sealing(tmp_path, change, quiet):
     rooms, rows = _install(tmp_path)
     beta = str(rooms["beta"])

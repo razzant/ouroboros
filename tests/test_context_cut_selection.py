@@ -208,7 +208,7 @@ def test_smallest_cut_survives_image_batch_discontinuity(tmp_path, record_proper
 
 
 @pytest.mark.parametrize('provider_id,model_index', [('gemini_live:gemini', 0),
-    ('gemini_live:gemini', 1), ('grok_realtime:grok', 0)])
+    ('gemini_live:gemini', 1), ('openai_realtime:openai', 0), ('grok_realtime:grok', 0)])
 def test_native_envelope_does_not_skip_smaller_fitting_image_cut(host_world, packages, tmp_path,
                                                                record_property, provider_id, model_index):
     from hashlib import sha256

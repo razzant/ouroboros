@@ -127,6 +127,8 @@ def test_stop_snapshot_does_not_signal_a_new_custody_row(tmp_path, monkeypatch):
 @pytest.mark.parametrize("receipt,rc,accepted", [
     ({"ok": True, "stopped": True, "outcome": "exited"}, 0, True),
     ({"ok": True}, 0, False),
+    ({"ok": True, "stopped": True, "outcome": "still_alive"}, 0, False),
+    ({"ok": True, "stopped": True, "outcome": "exited"}, 1, False),
     ("not-json", 0, False),
 ])
 def test_operator_cli_requires_terminal_receipt_and_owned_environment(tmp_path, monkeypatch, receipt, rc, accepted):

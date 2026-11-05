@@ -438,7 +438,8 @@ def _handoff_diagnostic(attention, monkeypatch):
     ({"may_delegate": False}, 0, "delegation_rights_may_delegate"),
     ({"depth_remaining": 0}, 0, "delegation_rights_depth_exhausted"),
     ({}, 3, "subtask_depth_limit"),
-], ids=["no-delegation", "depth-exhausted", "configured-depth"])
+    ({"may_delegate": True, "depth_remaining": 1}, 0, ""),
+], ids=["no-delegation", "depth-exhausted", "configured-depth", "permitted-control"])
 def test_diagnostic_respects_source_delegation_at_worker_handoff(attention, monkeypatch, budget, depth, reason):
     from ouroboros.contracts.task_contract import attach_task_contract
 
@@ -521,7 +522,8 @@ def test_diagnostic_inherits_frozen_child_limits(attention, monkeypatch, budget,
 
 
 @pytest.mark.parametrize("permitted,live,depth,allowed", [
-    (4, 2, 3, True), (2, 4, 2, False), (None, 2, 2, False),
+    (4, 2, 3, True), (2, 4, 2, False), (4, 0, 2, False),
+    (None, 2, 2, False),
 ])
 def test_diagnostic_depth_keeps_frozen_permission_and_current_global_zero(
         attention, monkeypatch, permitted, live, depth, allowed):

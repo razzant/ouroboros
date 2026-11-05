@@ -285,7 +285,7 @@ def test_read_policy_beats_inherited_config_without_losing_it(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("count,valid", [
-    ("-1", False), ("1 ", False),
+    ("not-a-number", False), ("-1", False), ("1_0", False), ("１", False), ("1 ", False),
     ("", True),
 ])
 def test_inherited_config_count_keeps_gits_own_result(tmp_path, monkeypatch, count, valid):

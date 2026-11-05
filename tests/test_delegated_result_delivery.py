@@ -244,7 +244,7 @@ def _credited(mapping, shown):
 
 
 @pytest.mark.parametrize("start_line,start_char,max_chars", [
-    (1, 0, None), (1, 3, 150), (3, 2, 40)])
+    (1, 0, None), (2, 7, None), (1, 3, 150), (3, 2, 40)])
 def test_numbered_read_credit_counts_only_shown_source_characters(start_line, start_char, max_chars):
     """The one delivered-range SSOT decodes read_file's numbered rows: display
     numbers and a hidden middle credit nothing, partial rows keep exact offsets."""

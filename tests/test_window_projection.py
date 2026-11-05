@@ -96,6 +96,8 @@ def test_terminal_notice_carries_the_captured_window_and_honest_request_size(tmp
 @pytest.mark.parametrize("account,live_profile,fingerprint,expected,maximum", [
     ("", "account-a", "fingerprint-a", 400000, 4096),
     ("account-b", "account-b", "fingerprint-b", 250000, 4096),
+    ("account-a", "account-a", "renewed-a", None, 4096),
+    ("account-a", "account-b", "fingerprint-b", None, 0),
     ("account-a", "", "", None, 0),
 ])
 def test_subscription_preview_binds_stored_windows_to_the_live_catalog(

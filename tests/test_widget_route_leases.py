@@ -658,6 +658,7 @@ def test_recovery_without_stop_and_another_owners_stop_keep_working(env):
     ("http://testserver:80/api/extensions/route_media/echo", "{base}echo"),
     ("HTTP://TESTSERVER/api/extensions/route_media/echo?x=1", "{base}echo?x=1"),
     ("http://testserver:80/api/extensions/other_skill/echo", None),
+    ("http://testserver:80/api/state", None),
 ])
 def test_an_own_redirect_spelled_with_the_default_port_stays_under_the_lease(env, monkeypatch, target, expected):
     """Through the real gate and dispatcher: an explicit default port is the same origin; other skills and the core

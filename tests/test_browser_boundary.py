@@ -131,6 +131,7 @@ def test_other_sites_websockets_close_before_accept(client, headers):
     ("POST", "/api/settings", None, b'{"OUROBOROS_MODEL": "x"}'),
     ("POST", "/api/settings", "application/merge-patch+json; charset=utf-8", b"{}"),
     ("DELETE", "/api/chat/upload", "text/plain", b'{"filename": "probe.txt"}'),
+    ("POST", "/api/reset", "text/plain", b""),
 ])
 def test_every_body_reaches_the_handler_unchanged(client, method, path, content_type, body):
     headers = {"origin": OWN} | ({"content-type": content_type} if content_type else {})

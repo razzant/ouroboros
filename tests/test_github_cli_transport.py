@@ -25,6 +25,10 @@ def synthetic_credentials(monkeypatch):
         ("warning: quoted (HTTP 403) is not a status\ngh: Not Found (HTTP 404)", 404,
          "⚠️ GH_ERROR: warning: quoted (HTTP 403) is not a status | gh: Not Found (HTTP 404)"),
         ("a marker (HTTP 403) inside a sentence", None, "⚠️ GH_ERROR: a marker (HTTP 403) inside a sentence"),
+        ("failed to fork: HTTP 403: Resource not accessible by personal access token (https://api.github.com/repos/hub/project/forks)",
+         403, None),
+        ("HTTP 422: Validation Failed (https://api.github.com/repos/hub/project/pulls)", 422, None),
+        ("x" * 700 + " (HTTP 403)", 403, None),
     ],
 )
 def test_transport_bounds_stderr_and_only_reads_gh_http_marker(

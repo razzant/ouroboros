@@ -11,7 +11,9 @@ from tests.test_schedule_occurrence import q, _rows  # noqa: F401
 
 @pytest.mark.parametrize("extra,enabled,withdrawn", [
     ({}, True, False),
+    ({"enabled": False}, False, False),
     ({"manual_override": "deleted"}, False, True),
+    ({"manual_override": "disabled"}, False, False),
     ({"followup_relation": {"kind": "related", "revision": "original"}}, True, False),
 ])
 def test_adoption_preserves_the_authored_row_and_relation(extra, enabled, withdrawn):

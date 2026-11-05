@@ -237,7 +237,7 @@ def _interrupted_root(host, body, tmp_path, monkeypatch, producer, candidate):
 
 
 @pytest.mark.parametrize(("producer", "candidate"), [
-    ("folder", False), ("folder", True), ("legacy", True)])
+    ("folder", False), ("folder", True), ("no_folder", False), ("room_default", False), ("legacy", True)])
 def test_placed_continue_keeps_the_resource_its_predecessor_chose(host, body, tmp_path, monkeypatch,
                                                                   producer, candidate):
     """Continue admits the successor with the predecessor's recorded choice; placing it before

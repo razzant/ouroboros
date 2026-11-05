@@ -148,7 +148,13 @@ def test_each_room_section_is_one_legacy_record_aligned_to_the_stream_by_positio
 @pytest.mark.parametrize("change, exact", [
     (None, True),
     ("count", False),          # the counts no longer meet the cursor
+    ("gap", False),            # a room section begins with the gap marker
+    ("gap_block", False),      # an old gap block: its content begins with the marker, after whitespace
+    ("gap_id", False),         # the old writer's typed facts
+    ("gap_type", False),
     ("gap_mentioned", True),   # a retelling that discusses the marker mid-text is not a gap
+    ("not_int", False),        # a count that is not an integer
+    ("cursor_live_end", False),  # the same counts, a cursor further on
 ])
 def test_raw_range_is_exact_only_when_the_counts_meet_the_cursor_without_gaps(tmp_path, change, exact):
     blocks = _blocks((3, 1) if change == "count" else (3, 2))

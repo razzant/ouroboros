@@ -48,6 +48,7 @@ def _target(ctx) -> pathlib.Path:
     ({}, ""),                                                     # an acting Git writer: allowed
     ({"selector_root": "/payloads/alpha"}, "skill payload"),
     ({"investigation": True}, "evidence-only investigation"),
+    ({"strategy": "direct"}, ""),                                  # the documented default is no option
 ])
 def test_only_a_git_writer_may_work_in_place(facts, refused):
     authority = SimpleNamespace(investigation=facts.get("investigation", False),

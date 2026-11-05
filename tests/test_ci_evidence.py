@@ -882,8 +882,8 @@ def test_shard_reconciliation_slices_the_recorded_lane_by_position_like_the_plug
 
 @pytest.mark.parametrize("phases, executed", [
     ((("setup", "passed"), ("call", "passed"), ("teardown", "passed")), True),
-    ((("setup", "passed"),), False), ((), False),
-], ids=["passed", "setup-only", "silent"])
+    ((("setup", "passed"),), False), ((("setup", "passed"), ("teardown", "passed")), False), ((), False),
+], ids=["passed", "setup-only", "no-call", "silent"])
 def test_shard_reconciliation_counts_execution_exactly_as_the_lane_guard_does(tmp_path, phases, executed):
     from types import SimpleNamespace
 

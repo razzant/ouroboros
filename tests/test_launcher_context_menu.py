@@ -89,7 +89,9 @@ def test_cut_and_stop_share_an_identifier_so_only_the_tag_tells_them():
 
 @pytest.mark.parametrize("flags, drop", [
     ([], []),
+    ([False, False], []),
     ([True], [0]),
+    ([False, True, False], []),
     ([True, False, True, True, False, True], [0, 3, 5]),
 ])
 def test_separators_that_separate_nothing(flags, drop):

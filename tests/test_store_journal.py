@@ -80,7 +80,8 @@ def test_overlay_requires_every_backing_directory_to_be_known_local(tmp_path, ba
 
 
 @pytest.mark.parametrize("platform,kind,expected", [
-    ("darwin", "apfs", "apfs"), ("darwin", "hfs", "hfs"), ("freebsd14", "nfs", None)])
+    ("darwin", "apfs", "apfs"), ("darwin", "hfs", "hfs"), ("darwin", "smbfs", None),
+    ("freebsd14", "zfs", None), ("freebsd14", "nfs", None)])
 def test_bsd_statfs_reads_the_native_filesystem_name(monkeypatch, tmp_path, platform, kind, expected):
     class StatFS:
         def __call__(self, path, pointer):

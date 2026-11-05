@@ -641,7 +641,8 @@ def test_the_commit_gate_and_a_change_review_of_the_body_see_one_contract(staged
 
 
 @pytest.mark.parametrize("module, owner, rendered", [
-    ("skill", "_PREAMBLE", True), ("skill", "_INSTALL_ORIGIN_RULE", False), ("skill", "_REREVIEW_RULES[diff_cut]", False),
+    ("skill", "_PREAMBLE", True), ("skill", "_INSTALL_ORIGIN_RULE", False), ("skill", "_AUTHOR_WORDS", False), ("skill", "_PACKET_NOT_DELIVERED", False),
+    ("skill", "_install_origin_text", False), ("skill", "_REREVIEW_RULES[diff_cut]", False),
 ])
 def test_a_changed_skill_instruction_buys_one_new_wave_and_the_new_contract_then_replays_free(harness, module, owner,
                                                                                              rendered):

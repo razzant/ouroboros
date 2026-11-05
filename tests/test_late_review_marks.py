@@ -90,7 +90,7 @@ def test_a_publication_is_one_host_mark_of_its_proven_room_and_a_replay_changes_
     assert "- model/x: rejected it — defect in main1" in main["text"]
 
 
-@pytest.mark.parametrize("chat,meta", [(777, None), (None, None), (777, {"presence": {}})])
+@pytest.mark.parametrize("chat,meta", [(777, None), (0, None), (None, None), (-5, None), (777, {"presence": {}})])
 def test_an_unproven_room_keeps_no_mark_and_never_defaults_to_main(tmp_path, chat, meta):
     shared.world(tmp_path)
     seed_result(tmp_path, "other1", {"status": "completed", **({"chat_id": chat} if chat is not None else {}),

@@ -487,6 +487,8 @@ def said(session, text=QUESTION, **started):
 @pytest.mark.parametrize('case,owed', [
     ('no-response', True),
     ('begun-after-them-completes', False),
+    ('begun-after-them-continues-then-completes', False),
+    ('adapter-names-the-response-already-begun', False),
     ('older-words-join-newer-ones-a-later-response-answers', False),
 ])
 def test_what_answers_spoken_words(case, owed):

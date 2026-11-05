@@ -69,7 +69,7 @@ def test_native_selector_retains_source_task_and_canonical_drive(tmp_path, monke
     assert path.read_bytes() == raw
 
 
-@pytest.mark.parametrize('start,end', [(None, 1), (0, None), (-1, 2)])
+@pytest.mark.parametrize('start,end', [(None, 1), (0, None), (0, False), (-1, 2)])
 def test_completion_reader_preserves_the_existing_strict_range_contract(tmp_path, monkeypatch, start, end):
     reg, _ref, _path, _canonical, _execution, _row = source_reader(tmp_path, monkeypatch, 'split_readonly')
     typed = reg.execute_result('get_task_result', {

@@ -174,7 +174,8 @@ def test_session_targets_name_their_level_only_on_slug_harnesses(target, expecte
 
 @pytest.mark.parametrize("model, expected", [
     ("claudexor::cursor=grok-4.7-xhigh-fast", "xhigh"), ("claudexor::agy=gemini-3.1-pro-low", "low"),
-    ("claudexor::cursor", ""),
+    ("claudexor::codex=gpt-5.6-sol-high", ""), ("claudexor::claude=claude-opus-5", ""), ("claudexor::cursor", ""),
+    ("openai/gpt-5.5-high", ""), ("openai::gpt-5.5", ""), ("cursor-grok-4.6-high", ""), ("", ""),
 ])
 def test_api_wrapped_claudexor_models_name_their_level_the_same_way(model, expected):
     from ouroboros.route_spec import ROUTE_KIND_API_MODEL, RouteSpec, api_model_named_effort, model_named_effort

@@ -69,7 +69,7 @@ def test_other_origins_and_unreadable_navigation_are_denied(url):
 
 
 @pytest.mark.parametrize("audio,video,display", [(False, False, False), (True, True, False),
-    (True, False, True)])
+    (False, True, False), (True, False, True)])
 def test_video_display_and_non_audio_requests_are_denied(audio, video, display):
     request = Request(audio, video, display)
     media.handle_permission_request(View(), request, origin=ORIGIN, media_type=Request)

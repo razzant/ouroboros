@@ -25,6 +25,7 @@ def assert_closure_acts(classes, tools):
 
 
 @pytest.mark.parametrize("metadata,direct", [({}, False), ({}, True),
+    ({"usage_category": "consciousness"}, False),
     ({"presence": {"binding_id": "p", "event": {"provider": "telegram", "conversation_id": "c"}}}, False)])
 def test_every_waiting_class_has_a_closure_act_in_an_integrating_focus(tmp_path, monkeypatch, metadata, direct):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")

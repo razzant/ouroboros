@@ -524,7 +524,9 @@ def press(kind=wc._LEFT_MOUSE_DOWN, clicks=1):
 @pytest.mark.parametrize("setting, action", [
     (None, "zoom"),  # never chosen: Zoom, as on the native run whose ordinary bar zoomed
     ("Minimize", "miniaturize"),
+    ("None", None),  # Do Nothing
     ("Fill", "fill"),  # a distinct native action, never substituted by Zoom
+    ("Tile Left", None),  # a word this leaf does not know
 ])
 def test_a_double_click_in_the_band_does_what_the_macs_title_bar_setting_says(mac, setting, action):
     chrome, _window, native = shown()

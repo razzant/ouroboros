@@ -269,7 +269,7 @@ def _blue_checkout(root: pathlib.Path) -> pathlib.Path:
     return blue
 
 
-@pytest.mark.parametrize("fault,blue_input", [("", False), ("unconfirmed_then_adopted", False), ("", True)])
+@pytest.mark.parametrize("fault,blue_input", [("", False), ("evolution_beside", False), ("unconfirmed_then_adopted", False), ("", True)])
 def test_the_whole_chain_binds_one_commit_from_the_gate_to_the_served_bytes(lane, tmp_path, fault, blue_input):
     """Positive: every check, on the commit the gate's record names, with qualification recorded as it happened. An
     evolution cycle's own adoption beside it (another id, another commit) speaks for nothing here. A boot that left the
@@ -370,6 +370,10 @@ def test_a_serving_checkout_whose_status_git_cannot_read_is_not_clean(tmp_path):
     ("restart_refused", "restart_refused:ADOPTION_TESTS_REQUIRED", "ADOPTION_TESTS_REQUIRED"),
     ("no_request", "adoption_not_requested", None),
     ("restart_plain", "restart_without_adoption", ""),
+    ("request_other_commit", "restart_for_other_commit", None),
+    ("closed_abandoned", "adoption_closed:abandoned:not_armed", None),
+    ("verify_other_sha", "restart_verify_failed", None),
+    ("server_exited", "server_exited:1", None),
 ])
 def test_a_dead_end_ends_the_wait_at_once_with_its_own_reason_and_the_commit_kept(lane, fault, reason, refusal):
     """Long budget, immediate answer: nothing waits out a refusal. A refused state stays its own fact, and only the

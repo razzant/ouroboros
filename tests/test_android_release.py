@@ -213,6 +213,7 @@ def test_default_host_build_uses_the_shared_root_asset_path():
 
 @pytest.mark.parametrize(("event", "path", "ref", "expected"), [
     ("pull_request", "docs/readme.md", "refs/pull/1/merge", False),
+    ("pull_request", "ouroboros/core.py", "refs/pull/1/merge", False),
     ("pull_request", "android/host/change.java", "refs/pull/1/merge", True),
     ("schedule", "android/host/change.java", "refs/heads/main", False),
 ])

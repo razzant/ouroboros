@@ -228,7 +228,9 @@ def test_an_adopted_candidates_lower_pin_keeps_newer_engine(planned, monkeypatch
 
 
 @pytest.mark.parametrize("version,other,below", [
-    ("4.3.0", "4.3.1", True), ("4.3.1", "4.3.0", False), ("v4.3.0", "4.3.1", False),
+    ("4.3.0", "4.3.1", True), ("4.3.1", "4.3.0", False), ("4.3.1", "4.3.1", False),
+    ("4.3.0", "v4.3.1", False), ("4.3.0", "4.3.1-rc.1", False), ("4.3.0", "4.3", False), ("4.3.0", "", False),
+    ("4.3.0", "4.3.1\n", False), ("4.3.0", "\u0664.\u0663.\u0661", False), ("v4.3.0", "4.3.1", False),
 ])
 def test_release_order_is_the_engines_plain_semver_only(version, other, below):
     """Claudexor's root authority orders ASCII x.y.z numerically; every other spelling stays unordered."""

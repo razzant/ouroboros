@@ -515,10 +515,19 @@ def test_the_frame_log_prints_a_complete_texts_new_words_after_its_proven_draft(
         "an equal complete adds only its new words; a changed one is printed whole and says so"
     assert done["parts"][0]["text"] == complete, "the record keeps the whole complete text for the card and history"
     assert delegate_activity.card_text(done, 650).count(complete) == 1, "a card shows one record: the words whole"
+
+
+NOTES = [f"Note {index}." for index in range(40)]                   # with the draft, 41 parts: one is omitted
+LONG = ["L" * 550] * 4                                                   # their lines alone pass the frame's 2000
+
+
 @pytest.mark.parametrize("before,draft,rest,shown", [
     pytest.param([], ["Checking the file."], [], True, id="shown-whole"),
     pytest.param([], ["w" * 700], [], False, id="line-bound"),          # its line keeps 600 code points
+    pytest.param(NOTES, ["Checking the file."], [], False, id="part-bound"),
+    pytest.param(LONG, ["Checking the file."], [], False, id="frame-bound"),
     pytest.param([], ["😀" * 599], ["é ok"], True, id="astral-whole"),   # code points, not UTF-16 units
+    pytest.param([], ["😀" * 601], ["é ok"], False, id="astral-cut"),
 ])
 def test_the_frame_log_skips_only_words_its_earlier_lines_showed_whole(tmp_path, before, draft, rest, shown):
     first = [_harness(index + 1, "message", text=text) for index, text in enumerate(before)]

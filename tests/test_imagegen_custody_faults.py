@@ -100,7 +100,8 @@ def test_input_refusal_is_typed_before_any_submission(monkeypatch, ctx, tmp_path
 
 
 @pytest.mark.parametrize("field,value", [
-    ("id", None), ("id", ""), ("maxInputImages", True),
+    ("id", None), ("id", ""), ("maxInputImages", None), ("maxInputImages", True),
+    ("supportedOptions", None), ("models", None),
 ])
 def test_malformed_engine_capability_is_unavailable_not_a_caller_error(engine, ctx, field, value):
     from ouroboros import usage_accounting as usage

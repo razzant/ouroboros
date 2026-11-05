@@ -110,6 +110,24 @@ def test_process_codes_preserve_loop_error_and_policy_denial(subtests):
             'save_settings({"ouroboros_runtime_mode":"pro"})',
             None,
         ),
+        (
+            'save_settings({"ouroboros_context_mode":"low"})',
+            None,
+        ),
+        (
+            'save_settings({"ouroboros_safety_mode":"off"})',
+            None,
+        ),
+        (
+            "curl -X POST /api/owner/skills/demo/attest-review",
+            None,
+        ),
+        (
+            # Source text and a state filename do not bypass the configured
+            # Supervisor or constitute an independent permission veto.
+            "cp payload.json state/skills/demo/review.json",
+            None,
+        ),
         (["git", "commit"], "GIT_VIA_SHELL_BLOCKED"),
     ),
 )

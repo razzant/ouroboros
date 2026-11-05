@@ -236,7 +236,8 @@ def test_target_file_is_resolved_before_any_call_stage(desktop, method, kwargs):
     assert destinations and set(destinations) == {"http://a.invalid"}
 
 
-@pytest.mark.parametrize("field,value", [("sx", float("nan")), ("sy", float("inf")), ("sx", 0)])
+@pytest.mark.parametrize("field,value", [("sx", float("nan")), ("sy", float("inf")), ("sx", 0),
+    ("image_w", 0)])
 def test_invalid_transform_never_activates_or_sends(desktop, field, value):
     observation(desktop, **{field: value})
     out = json.loads(desktop.click(x=1, y=1, app="Editor", observation_id="shot"))

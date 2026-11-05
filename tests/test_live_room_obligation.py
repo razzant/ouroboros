@@ -114,7 +114,7 @@ def test_a_request_owes_one_pointer_on_each_fresh_session_until_answered(answere
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('status,answered', [('completed', True), ('interrupted', True), ('failed', False)])
+@pytest.mark.parametrize('status,answered', [('completed', True), ('interrupted', True), ('failed', False), ('incomplete', False)])
 def test_only_a_finished_response_answers(status, answered):
     async def scenario():
         async with opened(holds=never, fit_failed=False) as world:
@@ -354,6 +354,7 @@ def test_an_older_session_uses_its_send_boundary(answered):
 
 
 @pytest.mark.parametrize('case,room,tool', [('neither-answered', 1, 1), ('result-answered-before-the-mail', 1, 0),
+                                            ('mail-accepted-during-the-results-answer', 1, 0),
                                             ('one-answer-after-both', 0, 0)])
 def test_room_and_tool_obligations_settle_independently(case, room, tool):
     """Each is answered only by a response begun after its own delivery. What is left gets its pointer, in one offer, and

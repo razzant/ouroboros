@@ -144,7 +144,8 @@ def test_every_observation_replaces_missing_facts_and_expires_at_24_hours(catalo
 
 
 @pytest.mark.parametrize("field,expected", [
-    (["text"], False), (["text", "image"], True), ([], None),
+    (["text"], False), (["text", "image"], True), ([], None), (None, None),
+    ("text", None), ([False], None), ([""], None), ({"image": True}, None),
 ])
 def test_top_level_modalities_follow_existing_unknown_semantics(catalog, monkeypatch, field, expected):
     configure(monkeypatch, SETTINGS["deepseek"])

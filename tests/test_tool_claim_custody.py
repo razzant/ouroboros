@@ -167,6 +167,7 @@ def _platform(monkeypatch, *, gone=(), kernel=None, lstart="Tue Oct 27 23:28:21 
 @pytest.mark.parametrize("live, recorded, ended", [
     ("darwin-start:1793132901.017497", "darwin-start:1793102237.000001", True),
     ("darwin-start:1793102237.000001", "darwin-start:1793102237.000001", False),
+    ("123." + "a" * 32, "darwin-start:1793102237.000001", False),
     (None, "darwin-start:1793102237.000001", False),
 ])
 def test_a_reused_pid_is_ended_only_by_kernel_evidence_of_one_kind(monkeypatch, live, recorded, ended):

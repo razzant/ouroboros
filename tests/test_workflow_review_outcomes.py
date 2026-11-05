@@ -94,8 +94,11 @@ from ouroboros.review_records import review_outcome_received
 
 @pytest.mark.parametrize("rows,terminal,expected", [
     ([{"operation_state": "in_flight", "error": "logical wait ended"}], False, False),
+    ([{"operation_state": "pending_dispatch", "status": "error"}], True, False),
     ([{"raw_results": [{"operation_state": "in_flight"}]}], True, False),
     ([{"operation_state": "in_flight"}, {"status": "responded"}], False, True),
+    ([{"operation_state": "in_flight", "raw_text": "Pending host placeholder", "parsed": [{"item": "host note"}]}], False, False),
+    ([], False, False),
 ])
 def test_received_outcome_keeps_live_custody_distinct(rows, terminal, expected):
     import copy

@@ -59,6 +59,7 @@ def shell_docker(project, monkeypatch):
 
 @pytest.mark.parametrize("output,setup,valid", [
     ("missing/../answer.txt", "", False),
+    ("answer.txt/", "", False),
     ("created/../answer.txt", "mkdir created; ", True),
     ("answer-dir/", "mkdir answer-dir; cp answer.txt answer-dir/; ", True),
 ])

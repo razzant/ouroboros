@@ -398,6 +398,9 @@ _STALE = custody.RunCustody(run_id="", task_id="reader", settled=True, snapshot_
     ("run-snapshot", {}, False),
     ("run-snapshot", {}, True),
     ("run-snapshot", {"run-snapshot": _STALE}, False),   # a stale memo is replaced by the durable row
+    ("run-ghost", {"run-ghost": _STALE}, False),         # no durable row: the stale memo still answers
+    ("run-ghost", {}, False),
+    ("run-snapshot", {"run-other": _STALE}, False),      # an unrelated entry neither moves nor multiplies
 ])
 def test_orphan_disposition_keeps_its_one_memo_seed(tmp_path, monkeypatch, run_id, memo, owner_terminal):
     from ouroboros.delegate_shared import orphan_disposition_status

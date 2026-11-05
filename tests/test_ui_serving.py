@@ -288,6 +288,8 @@ def _stored(settings_path: pathlib.Path) -> dict:
 @pytest.mark.parametrize(("saved", "env", "effective"), [
     (None, "none", "none"),          # absent key: the operator's environment chooses
     (None, "", ""),                  # a blank environment value is no choice
+    ("", "none", ""),                # an explicitly saved blank selects builtin over a stale env
+    ("", "/srv/ui", ""),
     ("/srv/ui", "none", "/srv/ui"),  # a saved directory beats the environment
 ])
 def test_a_saved_choice_blank_included_beats_the_environment(isolated_settings, monkeypatch, saved, env, effective):

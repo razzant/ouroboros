@@ -11,7 +11,7 @@ from tests._live_stack_page import jpeg as synthetic_frame
 from tests._live_world import host_world as host_world
 
 
-@pytest.mark.parametrize('engine,thinking', [('openai', False), ('grok', False), ('gemini', True)])
+@pytest.mark.parametrize('engine,thinking', [('openai', False), ('grok', False), ('gemini', False), ('gemini', True)])
 def test_full_stack_greeting_owner_answer_and_retained_receipts(host_world, monkeypatch, engine, thinking):
     async def scenario():
         async with stack(host_world, monkeypatch, engine, thinking=thinking) as run:
@@ -37,7 +37,7 @@ def test_full_stack_greeting_owner_answer_and_retained_receipts(host_world, monk
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,thinking', [('openai', False), ('grok', False), ('gemini', True)])
+@pytest.mark.parametrize('engine,thinking', [('openai', False), ('grok', False), ('gemini', False), ('gemini', True)])
 def test_full_stack_languages_barge_in_mail_sharing_attention_and_real_tool(host_world, monkeypatch, engine, thinking):
     async def scenario():
         async with stack(host_world, monkeypatch, engine, thinking=thinking, languages=True) as run:

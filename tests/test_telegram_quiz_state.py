@@ -357,7 +357,12 @@ def test_the_manifest_declares_every_topic_register_subscribes(tmp_path):
 @pytest.mark.parametrize("record_state,event,expected", [
     (None, {"state": "answered", "answered_index": 5}, ("Q\nAnswered: 6.", [])),
     ("superseded", {"state": "expired_terminal"}, None),
+    ("expired_terminal", {"state": "open", "wait_for_answer": False}, None),
+    ("answered", {"state": "superseded"}, None),
+    (None, {"state": "unknown"}, None),
     ("expired_terminal", {"state": "closed", "closed_reason": "x" * 300}, ("Q\nQuestion closed.\n" + "x" * 200 + "…", [])),
+    ("closed", {"state": "answered", "answered_index": 0}, None),
+    ("answered", {"state": "closed", "closed_reason": "late"}, None),
 ])
 def test_lifecycle_edit_is_a_pure_forward_only_decision(record_state, event, expected):
     """The decision needs no Telegram client: text and keyboard from the card and the fact."""

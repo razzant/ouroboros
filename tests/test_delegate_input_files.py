@@ -473,6 +473,7 @@ def test_the_receiving_childs_policy_limits_what_the_caller_may_select(tmp_path,
 @pytest.mark.parametrize("call,bootstrap_state,carried", [
     ({"attachment_paths": ["attachments/brief.md"]}, {}, True),  # its own documents keep the parent's input copies
     ({"input_files": [{"path": "own.md"}]}, {}, False),  # its own selection replaces them
+    ({}, {"physical_started": True}, False),  # only the work order's first physical start carries them
     ({}, {"initial_invocation_id": "inv-1"}, False),
 ])
 def test_a_model_issued_first_start_carries_the_schedule_receipt_unless_it_selects(monkeypatch, call, bootstrap_state,

@@ -225,7 +225,7 @@ def test_skips_refusals_and_restart_keep_the_appointment(clock, monkeypatch, out
 
 
 @pytest.mark.parametrize("lateness,word", [(0, "on time"), (60, "due 1 min ago"),
-                                         (5400, "due 1 h 30 min ago")])
+                                         (5400, "due 1 h 30 min ago"), (None, "")])
 def test_launch_reason_reports_appointment_punctuality_only(clock, lateness, word):
     now = T0 + FLOOR
     clock.clock._appointment_at = now - lateness if lateness is not None else 0

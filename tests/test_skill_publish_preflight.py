@@ -245,6 +245,7 @@ def test_preflight_state_vocabulary_matches_gateway_contract():
         "publication_ready",
     ),
     [
+        (STATUS_CLEAN, "", _HASH_A, "1.2.3", _scan(), "ready", "", True),
         (
             STATUS_PENDING,
             "",

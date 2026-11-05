@@ -99,6 +99,7 @@ def test_builtin_compatible_same_endpoint_spelling_keeps_the_saved_key(monkeypat
 @pytest.mark.parametrize("saved_url,draft_url,same", [
     ("https://saved.example/v1?tenant=a", "https://saved.example/v1?tenant=a", True),
     ("https://saved.example/v1?tenant=a", "https://saved.example/v1/?tenant=a", False),
+    ("https://saved.example/v1/?tenant=a", "https://saved.example/v1?tenant=a", False),
     ("https://saved.example/v1#x", "https://saved.example/v1", False),
 ])
 def test_a_query_or_fragment_endpoint_is_the_same_only_spelled_the_same(monkeypatch, sends, saved_url, draft_url, same):

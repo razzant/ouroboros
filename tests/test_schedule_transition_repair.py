@@ -170,7 +170,7 @@ def test_api_edit_preserves_accepted_or_unprovable_occurrence(q, monkeypatch, ev
             assert bool(current.get("completed_at")) is not edit_timing
 
 
-@pytest.mark.parametrize("cron,successor", [(False, False), (True, True), (False, True)])
+@pytest.mark.parametrize("cron,successor", [(False, False), (True, False), (True, True), (False, True)])
 def test_worker_crash_retry_survives_settlement_and_successor(q, monkeypatch, cron, successor):  # noqa: F811
     from supervisor import state, worker_health, workers
     from tests.test_worker_crash_retry import _make_worker

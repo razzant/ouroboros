@@ -42,7 +42,8 @@ def _round_limit_prompts(h):
 
 
 @pytest.mark.parametrize("metadata,expected", [
-    ({}, None), ({"inline_max_rounds": 3}, 3), ({"inline_max_rounds": 200}, 200),  # a recorded positive cap binds
+    ({}, None), ({"inline_max_rounds": None}, None),  # absent stays absent: no inline cap at all
+    ({"inline_max_rounds": 3}, 3), ({"inline_max_rounds": 200}, 200),  # a recorded positive cap binds
 ])
 def test_bootstrap_reads_only_a_recorded_inline_cap(metadata, expected):
     from ouroboros.loop import carried_inline_round_cap

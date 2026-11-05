@@ -410,6 +410,9 @@ def test_extension_model_capability_requires_access_grant_and_value(tmp_path, mo
         (["read_settings"], ["OPENROUTER_API_KEY"], ["OPENROUTER_API_KEY"], "key", True),
         ([], ["OPENROUTER_API_KEY"], ["OPENROUTER_API_KEY"], "key", False),
         (["read_settings"], [], ["OPENROUTER_API_KEY"], "key", False),
+        (["read_settings"], ["OPENROUTER_API_KEY"], [], "key", False),
+        (["read_settings"], ["OPENROUTER_API_KEY"], ["OPENROUTER_API_KEY"], "", False),
+        (["read_settings"], ["GITHUB_TOKEN"], ["GITHUB_TOKEN"], "token", False),
     ],
 )
 def test_inprocess_model_probe_requires_actual_granted_provider_setting(

@@ -200,7 +200,8 @@ def test_legacy_malformed_binding_is_unknown_not_unregistered(room, bad_id):  # 
 
 
 @pytest.mark.parametrize("field,value", [
-    ("lifecycle", None), ("routing_generation", True), ("chat_id", "4"),
+    ("lifecycle", None), ("routing_generation", True), ("routing_generation", 0.0), ("chat_id", False), ("chat_id", "4"),
+    ("working_dir", None), ("routing_incarnation", ""), ("created_at", []),
 ])
 def test_selected_writers_preserve_invalid_neighbor_without_laundering_it(room, field, value):  # noqa: F811
     path = registry._registry_path(room.root)

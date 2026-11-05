@@ -612,7 +612,8 @@ def _with_secret(env, token):
 
 
 @pytest.mark.parametrize("token,embedded", [
-    ("image", False), ("image", True), ("blob", True)])
+    ("image", False), ("imag", False), ("mage", False), ("text", False), ("data", False),
+    ("image", True), ("blob", True)])
 def test_protocol_vocabulary_survives_a_colliding_secret_while_its_free_text_is_masked(mcp, token, embedded):
     _with_secret(mcp, token)
     mcp.peer.result = mcp_types.CallToolResult(content=[_text(f"echo {token}"), _blob() if embedded else _image()])

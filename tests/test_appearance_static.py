@@ -110,6 +110,8 @@ _SVG = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3C
 
 @pytest.mark.parametrize(("line", "baked"), [
     (f"    --select-arrow: {_SVG.format('%23efeff2')};", False),
+    (f"    mask-image: {_SVG.format('black')};", False),
+    (f"    -webkit-mask-image: {_SVG.format('black')};", False),
     (f"    background-image: {_SVG.format('black')};", True),
     (f"    mask-image: {_SVG.format('black').replace('/%3E', ' style=%22fill:%23888%22/%3E')};", True),
 ])

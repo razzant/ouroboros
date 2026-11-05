@@ -137,6 +137,8 @@ def test_non_assistant_matching_reasoning_fields_stay_exact(role):
 @pytest.mark.parametrize("model, retained", [
     ("minimax::MiniMax-M3.1", {"reasoning_content", "reasoning_details"}),
     ("openai::gpt-5.6-terra", set()),
+    ("zai::glm-5", set()),
+    ("cloudru::zai-org/GLM-4.7", set()),
     ("openai-compatible::local-model", set()),
 ])
 def test_direct_provider_carriers_keep_their_existing_projection(model, retained):

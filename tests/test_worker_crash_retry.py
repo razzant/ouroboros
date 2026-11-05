@@ -1375,6 +1375,8 @@ def test_a_refused_exact_continuation_load_parks_the_same_id_again(tmp_path, mon
 @pytest.mark.parametrize("pause, returns", [
     ({"state": "paused", "task_attempt": 1}, True),
     ({"state": "resume_granted", "task_attempt": 1, "grant": {"grant_id": "g", "consumed_at": 1.0}}, False),
+    ({"state": "resumed", "task_attempt": 1}, False),
+    ({"state": "paused", "task_attempt": 2}, False),
     ({}, False),
 ])
 def test_only_a_live_unconsumed_pause_of_this_attempt_keeps_the_death_for_recovery(pause, returns):

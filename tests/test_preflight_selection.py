@@ -236,6 +236,7 @@ SCOPE = {"base": "b", "policy": "p", "changed": ["x.py"], "extra_tests": [], "fu
 
 @pytest.mark.parametrize("document,problem", [
     (_coherent(), ""),
+    (_coherent(2, tier="selected", scope=SCOPE), ""),
     (_coherent(1, tier="selected", scope=SCOPE), "schema does not match"),  # a selected record relabelled full
     (_coherent(2, tier="selected", scope={**SCOPE, "full_tests": True}), "the selection scope is incomplete"),
 ])

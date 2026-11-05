@@ -455,10 +455,12 @@ def test_provider_death_still_makes_the_forced_call_when_the_wall_is_unspent(tmp
     "marker, expect_call",
     [
         ("unexpected-string", False),
+        (1, False),
+        ({"nested": "garbage"}, False),
         (0, True),
         (None, True),
     ],
-    ids=["truthy_str", "zero", "none"],
+    ids=["truthy_str", "truthy_int", "truthy_dict", "zero", "none"],
 )
 def test_malformed_retry_wall_marker_reads_as_a_plain_truth_value(
     tmp_path, monkeypatch, marker, expect_call,

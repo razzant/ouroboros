@@ -51,7 +51,9 @@ def test_cache_and_liveness_facts_are_distinct(matching):
 
 
 @pytest.mark.parametrize("facts,expected", [
-    ({}, None), ({"last_task_id": "last", "last_outcome": {"task_id": "last", "state": "completed"}}, False),
+    ({}, None), ({"last_task_id": "last"}, None),
+    ({"last_task_id": "last", "last_outcome": {"task_id": "older", "state": "completed"}}, None),
+    ({"last_task_id": "last", "last_outcome": {"task_id": "last", "state": "completed"}}, False),
     ({"occurrence": {"phase": "claimed"}}, True),
 ])
 def test_withdrawal_reports_only_known_work_facts(facts, expected):

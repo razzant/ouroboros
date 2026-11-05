@@ -400,6 +400,7 @@ def test_explicit_settings_mapping_is_authoritative(monkeypatch, model, settings
             "CLAUDE_CODE_MODEL": "claude-name-only",
         }, "anthropic::light"),
         ("cloudru", {}, "cloudru::zai-org/GLM-4.7"),
+        ("openai-compatible", {}, ""),
     ],
 )
 def test_provider_test_model_selection(provider, settings, expected):

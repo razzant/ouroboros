@@ -84,6 +84,7 @@ def test_a_model_the_record_lacks_is_unknown_until_a_fetch_is_allowed(catalogue)
 @pytest.mark.parametrize("settings,live,started", [
     ({"OPENROUTER_API_KEY": "key"}, True, True),
     ({}, True, False),  # no OpenRouter route on this install: nothing to observe
+    ({"OPENROUTER_API_KEY": "key"}, False, False),  # not a provisioned home: no real-data side effect
     ({"OPENROUTER_API_KEY": "key", "OUROBOROS_CONNECTIONS": [{"kind": "openrouter", "name": "default", "enabled": False}]},
      True, False),  # the only OpenRouter key turned off
 ])

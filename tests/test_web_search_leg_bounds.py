@@ -354,8 +354,14 @@ def test_a_send_that_died_after_its_bytes_stays_unknown_and_is_not_retried(legs,
 @pytest.mark.parametrize("state,reason,spent,unreadable,expected", [
     ("released", "deadline", True, False, True),
     (None, "execution_deadline", True, False, True),
+    ("dispatched", "deadline", True, False, False),   # a possibly sent attempt is never relabelled
+    ("unresolved", "deadline", True, False, False),
+    ("reserved", "deadline", True, False, False),     # an open reservation is no unsent proof
+    ("released", "cancelled", True, False, False),
+    ("released", "owner_pause", True, False, False),
+    ("released", "deadline", False, False, False),    # the caller's own window still has time
     ("released", "deadline", True, True, False),      # an unreadable control is no clear one
-], ids=["released", "no_capture", "unreadable"])
+], ids=["released", "no_capture", "dispatched", "unresolved", "reserved", "stop", "pause", "time_left", "unreadable"])
 def test_only_a_positively_unsent_refusal_by_the_callers_own_window_is_its_own_result(monkeypatch, state, reason,
                                                                                        spent, unreadable, expected):
     from ouroboros import llm_attempt

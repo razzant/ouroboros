@@ -78,8 +78,10 @@ def test_terminal_and_existing_ledger_use_attempt_cash_not_valuation(tmp_path, c
 @pytest.mark.parametrize("ttl,harnesses,control_keys,expected_wire,expected_reason", [
     ("default", [{"id": "chosen", "promptCacheTtls": ["5m", "1h"]}], ["promptCacheTtl"], None, None),
     ("5m", [{"id": "chosen", "promptCacheTtls": ["5m", "1h"]}], ["promptCacheTtl"], "5m", None),
+    ("1h", [{"id": "chosen", "promptCacheTtls": ["5m", "1h"]}], ["promptCacheTtl"], "1h", None),
     # Gated by exact advertised value, never by harness name:
     ("1h", [{"id": "claude", "promptCacheTtls": ["5m"]}], ["promptCacheTtl"], None, "harness_unsupported"),
+    ("1h", [{"id": "custom-harness", "promptCacheTtls": ["1h"]}], ["promptCacheTtl"], "1h", None),
 ])
 def test_session_prompt_cache_ttl_negotiates_by_exact_capability(
     monkeypatch, ttl, harnesses, control_keys, expected_wire, expected_reason,

@@ -610,7 +610,7 @@ CARRIER = {"binding_id": "b1", "transport_skill": "bridge", "event": {"conversat
 
 
 @pytest.mark.parametrize("shape,admitted,local", [
-    ("promoted", "bound", True), ("promoted", "main", False), ("continued", "registered_unbound", False)])
+    ("promoted", "bound", True), ("promoted", "main", False), ("scheduled", "place_room", False), ("continued", "registered_unbound", False)])
 def test_each_presence_carrier_root_answers_in_the_project_it_actually_lives_in(tmp_path, monkeypatch, shape,
                                                                                  admitted, local):
     """Promoted, schedule-born and hard-timeout-continued roots keep their Presence result; the room rule alone
@@ -833,7 +833,8 @@ def test_a_voided_place_final_points_at_finish_task_and_frozen_registries_keep_t
 
 
 @pytest.mark.parametrize("origin,refused,handoff", [
-    ("host_notice", False, False), ("model_final", True, False), ("model_final", True, True)])
+    ("host_notice", False, False), ("host_notice", False, True),
+    ("model_final", True, False), ("model_final", True, True)])
 def test_forced_or_refused_words_never_ride_speech_or_a_handoff(tmp_path, monkeypatch, origin, refused, handoff):
     """A host-authored final is never speech or a note; a Safety refusal at a forced exit holds its words."""
     from ouroboros.presence_delivery import PresenceDeliveryRecorder

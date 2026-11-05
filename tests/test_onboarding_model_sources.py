@@ -260,7 +260,7 @@ def test_codex_only_preview_and_finish_share_models_agents_and_atomic_settings(o
 
 
 @pytest.mark.parametrize("modalities, vision", [
-    (["text", "image"], "claudexor::codex=default"), (["text"], ""), (["image", ""], "")])
+    (["text", "image"], "claudexor::codex=default"), (["text"], ""), (["text", 42], ""), (["image", ""], "")])
 def test_codex_only_finish_computes_omitted_quick_path_models(onboarding, modalities, vision):
     onboarding.calls["snapshot_payload"] = {
         **LIVE_SNAPSHOT,

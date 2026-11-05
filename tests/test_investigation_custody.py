@@ -16,6 +16,7 @@ from ouroboros.subagents import delegated_run_shape
 
 @pytest.mark.parametrize("facts,possible", [
     ({"authority_source": INVESTIGATION_AUTHORITY, "snapshot_id": "snap", "target_root": "/repo"}, False),
+    ({"authority_source": "readonly"}, False),
     ({}, False),  # no source over no capture binding: nothing captured to apply
     ({"snapshot_id": "legacy-snap"}, True),  # a capture binding without a recorded source stays possible
 ])

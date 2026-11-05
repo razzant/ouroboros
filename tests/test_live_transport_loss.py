@@ -9,6 +9,13 @@ from ouroboros.realtime_session import transport_loss
 
 @pytest.mark.parametrize('code,reason,expected', [
     (1000, '', True), (1001, 'Going away', True), (1012, 'Service restart', True),
+    (1008, 'Policy refusal', False),
+    (1011, 'Deadline expired because credits are depleted.', False),
+    (1011, 'Policy: Deadline expired before operation could complete.', False),
+    (1011, '!!!', False),
+    (1007, 'Invalid request payload', False), (1002, 'Protocol error', False),
+    (1011, 'Your prepayment credits are depleted.', False),
+    (1011, 'Unknown provider refusal', False), (4001, 'Authentication refused', False),
 ])
 def test_close_codes_do_not_turn_a_provider_refusal_into_a_transport_retry(code, reason, expected):
     assert transport_loss(ConnectionClosedError(Close(code, reason), None)) is expected

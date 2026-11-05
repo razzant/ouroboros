@@ -164,8 +164,12 @@ def test_empty_windows_machine_uses_interpreter_build(monkeypatch, tmp_path, bui
     [
         ("Windows", "AMD64", "win32", "amd64", "windows-amd64"),
         ("Windows", "ARM64", "win-amd64", "arm64", None),
+        ("Windows", "x86", "win-amd64", "x86", None),
+        ("Windows", "mystery", "win-amd64", "mystery", None),
         ("Darwin", "arm64", "win32", "arm64", "darwin-arm64"),
         ("Linux", "aarch64", "win32", "aarch64", "linux-arm64"),
+        ("Darwin", "", "win-amd64", "", None),
+        ("Linux", "", "win-amd64", "", None),
     ],
 )
 def test_build_fallback_preserves_known_machine_and_other_os(

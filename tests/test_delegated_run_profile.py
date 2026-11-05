@@ -240,7 +240,9 @@ def test_a_task_without_write_authority_gets_an_evidence_only_investigation_neve
 
 
 @pytest.mark.parametrize("effective,entitled,widened", [
+    ("readonly", "readonly", ""),
     ("readonly", "workspace_write", ""),          # narrower than asked is fine
+    ("workspace_write", "workspace_write", ""),
     ("workspace_write", "readonly", "workspace_write"),
     ("full", "workspace_write", "full"),
 ])

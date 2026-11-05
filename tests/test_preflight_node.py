@@ -163,6 +163,8 @@ def test_too_old_node_is_a_typed_hard_block(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("version,meets_floor", [
     ("20.11.0", True),
+    ("20.10.9", False),
+    ("18.19.1", False),
     ("v20.11.0", True),      # probe strips the v, but the parser tolerates it
     ("garbage", False),        # unparseable degrades to 0 → blocked, not crashed
 ])

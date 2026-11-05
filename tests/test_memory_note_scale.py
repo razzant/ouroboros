@@ -13,7 +13,7 @@ _BASE_SNAPSHOT = scale.snapshot()
 
 
 @pytest.mark.parametrize('extra_chars, note_lines, aggregate, fits', [
-    (0, 6, True, True), (52000, 6, True, False), (54000, 6, True, False),
+    (0, 6, True, True), (52000, 6, True, False), (53000, 6, True, False), (54000, 6, True, False),
 ])
 def test_note_pressure_measurement(tmp_path, monkeypatch, extra_chars, note_lines, aggregate, fits):
     snap = deepcopy(_BASE_SNAPSHOT)

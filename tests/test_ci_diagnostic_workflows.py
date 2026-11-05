@@ -361,8 +361,12 @@ OFFICIAL, FORK, TAG = "razzant/ouroboros", "someone/private-copy", "refs/tags/v7
 @pytest.mark.parametrize("event,ref,repository,flag", [
     ("push", TAG, OFFICIAL, "--enforce"),
     ("workflow_dispatch", TAG, OFFICIAL, "--enforce"),  # A manual run on a tag ref can publish too.
+    ("push", "refs/heads/ouroboros", OFFICIAL, ""),
+    ("workflow_dispatch", "refs/heads/candidate", OFFICIAL, ""),
+    ("schedule", "refs/heads/main", OFFICIAL, ""),
     # A fork without the ten provider keys keeps releasing its own tags.
     ("push", TAG, FORK, ""),
+    ("workflow_dispatch", TAG, FORK, ""),
 ])
 def test_release_floor_is_the_last_canary_step_and_enforces_only_on_an_official_release_tag(
         tmp_path, monkeypatch, event, ref, repository, flag):

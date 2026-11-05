@@ -430,6 +430,7 @@ def test_native_review_episode_total_reaches_its_llm_usage_row_truthfully(tmp_pa
 @pytest.mark.parametrize("raw,round_idx,hit,cold", [
     (FULL, 2, 40 / 165, False),
     (PARTIAL, 1, None, False),  # a first round is never a RE-start, whatever was reported
+    (PARTIAL, 2, None, None),  # total prompt and cache unknown: no ratio, no verdict
     ({"input_tokens": 10, "output_tokens": 1, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 990},
      2, 0.0, True),
 ])

@@ -9,6 +9,7 @@ import pytest
 
 @pytest.mark.parametrize("resources,allowed", [
     ({"web": True, "network": False}, False),
+    ({"allow_web": True, "allow_network": False}, False),
     ({"web": True, "internet": False}, False),
     ({"web": True, "network": True}, True),
 ])

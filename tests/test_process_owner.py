@@ -392,8 +392,13 @@ def test_the_token_scan_keeps_its_own_cadence_and_its_members_stay_counted(monke
 
 
 @pytest.mark.parametrize("slots,tree,now,machine,pressure,stops", [
+    (1, 0.9, 2.0, 16, False, False),     # the one admitted worker on a busy 16 GB laptop runs
     (1, 2.5, 2.0, 16, False, False),     # past its admitted size, but the machine keeps its reserve
     (1, 2.5, 8.0, 16, True, True),       # macOS: critical kernel pressure while inactive pages look free
+    (1, 1.5, 8.0, 16, True, False),      # an admitted-size tree survives the kernel's pressure too
+    (1, 0.05, 12.0, 128, False, False),  # a small tree is not killed for another program's pressure
+    (1, 1.5, 10.0, 128, False, False),   # an admitted-size tree survives pressure that arrives later
+    (1, 42.0, 54.0, 128, False, False),  # summed RSS counts shared pages repeatedly: size alone never stops
     (2, 3.03, 2.6, 7, False, False),     # 17.10 macOS CI runner: two workers at 3.03 GiB with 2.6 GiB free
 ])
 def test_overload_stops_growth_only_under_machine_pressure(monkeypatch, slots, tree, now, machine, pressure, stops):

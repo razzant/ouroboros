@@ -111,6 +111,8 @@ def test_shared_log_refusals_do_not_relabel_heap_exit(returncode, expected):
     (-6, False, True, 6, None),      # V8 abort, no descriptor: the #844 shape
     (1, False, True, None, 1),       # engine refusal exit
     (0, False, False, None, 0),      # clean exit publishes nothing to latch on
+    (-6, True, False, 6, None),      # crashed AFTER publishing control: not the class
+    (None, False, False, None, None),  # still running: no exit fact at all
 ])
 def test_exit_fact_latches_only_a_failed_start_without_control(returncode, descriptor_written, latches, signal, code):
     fact = ExitFact(returncode=returncode, descriptor_written=descriptor_written)

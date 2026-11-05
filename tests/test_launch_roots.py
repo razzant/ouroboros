@@ -664,7 +664,8 @@ def test_the_packaged_cli_uses_app_roots_tuple_and_carries_it_into_the_macos_app
 
 
 @pytest.mark.parametrize("bound,target,accepted", [
-    ("127.0.0.2", "127.0.0.1", False), ("127.0.0.1", "127.0.0.1", True), ("::", "::1", True),
+    ("127.0.0.2", "127.0.0.1", False), ("127.0.0.1", "127.0.0.2", False),
+    ("127.0.0.1", "127.0.0.1", True), ("::1", "127.0.0.1", False), ("::", "::1", True),
 ])
 def test_packaged_implicit_endpoint_matches_the_bound_address(layout, monkeypatch, bound, target, accepted):
     from ouroboros import packaged_cli, server_process

@@ -59,6 +59,8 @@ def _row(data_root, reservation):
 @pytest.mark.parametrize("provider, bound, billed, paid", [
     ("claudexor", None, False, False),  # the subscription engine, price unknown before its receipt
     ("claudexor", None, True, True),    # ... whose own receipts already carried cash
+    ("local", None, False, False),      # the local lane
+    ("openai", 0.0, False, False),      # a known $0 price
     ("claudexor", 0.2, False, True),    # a known price decides, whatever the route
 ])
 def test_paid_admission_is_the_one_rule(provider, bound, billed, paid):

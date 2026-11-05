@@ -134,7 +134,17 @@ def test_requests_proxy_error_without_connect_evidence_stays_untyped(data_root):
 @pytest.mark.parametrize("url,expected", [
     ("http://localhost:11434/v1", True),
     ("http://127.0.0.2:11434/v1", True),  # the whole 127.0.0.0/8 range is this host
+    ("http://10.0.0.5:8000/v1", False),
+    ("http://example.com/v1", False),
     ("http://localhost.example/v1", False),  # a name is loopback only when it IS localhost
+    ("https://openrouter.ai/api/v1", False),
+    ("https://api.anthropic.com/v1", False),
+    ("", False),
+    ("not a url", False),
+    # every inet_aton spelling the OS accepts for a local server, and a trailing-dot name
+    ("http://10.1:8000/v1", False),  # an inet_aton shorthand of a remote address stays remote
+    ("http://8.8.8.8/v1", False),
+    ("http://example.com./v1", False),
 ])
 def test_is_loopback_base_url(url, expected):
     from ouroboros.transport_custody import is_loopback_base_url

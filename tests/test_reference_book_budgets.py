@@ -127,6 +127,9 @@ def test_a_change_does_not_grow_bible_or_the_prompts(capsys):
     (1000, 1001, "", False, "grew by 1 bytes"),  # an unknown mode is never a pass
     (1000, 1480, "warn", True, "maintainers will make room"),
     (1000, 1480, "approved", True, "owner approved"),
+    (1000, 900, "block", True, ""),
+    (1000, 1000, "block", True, ""),
+    (None, 5000, "block", True, ""),  # a book new in this change has no base to grow from
 ])
 def test_book_growth_verdict(base, tip, mode, passes, said):
     verdict = book_growth_verdict("architecture", base, tip, mode)

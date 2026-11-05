@@ -400,7 +400,7 @@ def test_telegram_http_clients_follow_the_constructor_trust_env(monkeypatch, tru
 
 @pytest.mark.parametrize(
     ("proxied", "worker", "expected"),
-    [(False, False, False), (True, True, False), (True, False, True)],
+    [(False, False, False), (True, True, False), (False, True, False), (True, False, True)],
 )
 def test_plugin_honours_env_proxies_only_in_a_proxy_routed_server_process(
     tmp_path, monkeypatch, proxied, worker, expected,

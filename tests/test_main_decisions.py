@@ -343,7 +343,7 @@ def test_corrupt_registry_and_unconfirmed_binding_are_not_complete_empty(tmp_pat
 
 @pytest.mark.parametrize("reason,automatic,source,expected", [
     ("auth", True, "codex", True), ("quota", True, "codex", False),
-    ("auth_quota", True, "codex", False),
+    ("auth_quota", True, "codex", False), ("unavailable", True, "codex", False),
 ])
 def test_human_required_waits_use_owner_capability_not_blanket_reason_exclusion(
         tmp_path, reason, automatic, source, expected):

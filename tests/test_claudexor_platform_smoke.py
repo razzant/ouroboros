@@ -98,6 +98,7 @@ def test_operator_cli_resolves_exact_bundled_node_without_npm_or_install(tmp_pat
 @pytest.mark.parametrize("barrier,receipt,rc,passes", [
     (False, {"ok": True, "stopped": True, "outcome": "exited"}, 0, True),
     (True, {"ok": True, "stopped": True, "outcome": "killed"}, 0, False),
+    (True, {"ok": True}, 0, False),
     (True, {"ok": True, "stopped": True, "outcome": "exited"}, 1, False),
 ])
 def test_operator_fixture_observes_receipt_and_always_cleans_up(tmp_path, monkeypatch, barrier, receipt, rc, passes):

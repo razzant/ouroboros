@@ -603,7 +603,15 @@ def test_a_stop_keeps_each_saved_queue_time_through_restore_and_its_readers(tmp_
     ({"queued_at": "2026-10-01T00:00:00+00:00"}, "2026-01-01T00:00:00+00:00", "2026-10-01T00:00:00+00:00"),
     ({"queued_at": None}, "2026-01-01T00:00:00+00:00", None),
     ({}, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
-], ids=["outer", "explicit-null", "nested-fallback"])
+    ({}, None, None),
+    ({"queued_at": True}, None, None),
+    ({"queued_at": float("nan")}, None, None),
+    ({"queued_at": float("inf")}, None, None),
+    ({"queued_at": 0}, None, None),
+    ({"queued_at": ""}, "2026-01-01T00:00:00+00:00", None),
+    ({"queued_at": ["2026-10-01"]}, None, None),
+], ids=["outer", "explicit-null", "nested-fallback", "absent", "bool", "nan", "inf",
+        "zero", "blank", "not-a-time"])
 def test_the_saved_row_decoder_reads_the_outer_queue_time_first(outer, nested, expected):
     """The outer value decides; only its absence falls back to a nested copy; nothing is guessed."""
     from supervisor.queue_snapshot import _saved_pending_task

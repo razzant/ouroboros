@@ -138,6 +138,7 @@ def test_another_remote_route_keeps_the_existing_defaults(clean_env, other_key):
 
 @pytest.mark.parametrize(("document", "settings", "expected"), [
     (None, {"OUROBOROS_MAX_ROUNDS": "unlimited", "OUROBOROS_TASK_ABS_CEILING_SEC": "unlimited"}, []),  # fresh
+    ({"OUROBOROS_MAX_ROUNDS": "unlimited", "OUROBOROS_TASK_ABS_CEILING_SEC": "unlimited"}, {}, []),
     ({"OUROBOROS_MAX_ROUNDS": "abc", "OUROBOROS_TASK_ABS_CEILING_SEC": "unlimited"}, {"OUROBOROS_MAX_ROUNDS": 200},
      [("OUROBOROS_MAX_ROUNDS", 200, "saved_invalid")]),
     (None, {"OUROBOROS_MAX_ROUNDS": 120, "OUROBOROS_TASK_ABS_CEILING_SEC": "unlimited"},
@@ -167,6 +168,7 @@ def test_the_classifier_ignores_the_process_environment_startup_projects_setting
     ({"OUROBOROS_MAX_ROUNDS": None}, "77", 200, "saved_invalid", None),
     ({"OUROBOROS_MAX_ROUNDS": 42}, "77", 42, "saved", 42),
     (None, "77", 77, "env", 77),
+    ({"OUROBOROS_MAX_ROUNDS": "unlimited"}, "77", None, None, None),
 ])
 def test_startup_notice_matches_loaded_runtime_bounds_and_raw_presence(
         monkeypatch, tmp_path, document, launch_env, expected, origin, raw):

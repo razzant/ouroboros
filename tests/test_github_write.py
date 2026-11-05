@@ -208,7 +208,8 @@ def test_resolve_thread_is_a_graphql_mutation_read_back_by_its_state(gh, state, 
 
 
 # ---- api ---------------------------------------------------------------------------------------------
-@pytest.mark.parametrize("verb,route,actor", [("PATCH", "issues/7", None), ("POST", "issues/7/comments", "alice"), ("POST", "issues/7/assignees", None)])
+@pytest.mark.parametrize("verb,route,actor", [("PATCH", "issues/7", None), ("PATCH", "issues/comments/3", None),
+                                           ("POST", "issues/7/comments", "alice"), ("POST", "issues/7/assignees", None)])
 def test_api_attributes_created_objects_but_not_modified_targets(gh, verb, route, actor):
     gh.answer = lambda p, argv, kw: json.dumps(_comment(3))
     _line, receipt = _receipt(gh.write(method="api", http_method=verb, route="repos/{owner}/{repo}/" + route))

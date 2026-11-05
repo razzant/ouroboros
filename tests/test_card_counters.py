@@ -214,9 +214,10 @@ def test_emitted_rounds_survive_split_dispatch_and_result_pruning(
 
 
 @pytest.mark.parametrize("snapshot, expected", [
-    ({}, None), ({"loop_outcome": {"usage": {"total_rounds": 0}}}, 0),
+    ({}, None), ({"loop_outcome": {"usage": {"total_rounds": None}}}, None),
+    ({"loop_outcome": {"usage": {"total_rounds": 0}}}, 0),
     ({"loop_outcome": {"usage": {"total_rounds": 3}}}, 3),
-], ids=["missing", "zero", "accepted"])
+], ids=["missing", "unknown", "zero", "accepted"])
 def test_recovery_facts_use_retained_loop_rounds(tmp_path, monkeypatch, snapshot, expected):
     from tests import _dialogue
 

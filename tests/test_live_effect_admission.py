@@ -285,7 +285,8 @@ def test_a_control_taken_while_an_ordinary_handler_runs_starts_no_later_one(host
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('control,code', [('none', ''), ('stop-durable', 'finalize_requested'), ('stop-drained', 'owner_stop')])
+@pytest.mark.parametrize('control,code', [('none', ''), ('stop-durable', 'finalize_requested'), ('stop-drained', 'owner_stop'),
+                                          ('end', '')])
 def test_a_control_taken_while_a_call_tool_runs_starts_no_later_one(host_world, control, code):
     host = host_world.host
     host.incoming = queue.Queue()

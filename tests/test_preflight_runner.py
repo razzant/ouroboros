@@ -313,6 +313,8 @@ def test_explicit_pytest_args_stay_single_pass():
     # ...while `--no-header` (in DEFAULT_PYTEST_ARGS, i.e. on EVERY invocation)
     # starts with `-n` as a STRING and must never be read as an xdist flag.
     ("--no-header", False),
+    ("--tb=line", False),
+    ("-q", False),
 ])
 def test_parallel_detection_reads_the_argv_not_the_label(token, parallel):
     """`PreflightPass.parallel` gates both hard-block diagnoses. Missing a real

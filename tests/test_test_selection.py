@@ -180,7 +180,8 @@ def test_author_can_widen_dynamic_consumers_or_request_full(repo):
 
 
 @pytest.mark.parametrize("extra,full,reason", [
-    (["tests/test_direct.py"], False, ""), (["tests/missing.py"], False, "consumer"), (["../tests/test_direct.py"], False, "consumer"),
+    (["tests/test_direct.py"], False, ""), ([], True, ""),
+    (["tests/missing.py"], False, "consumer"), (["../tests/test_direct.py"], False, "consumer"),
     ([], "yes", "consumer"), ([], False, None),
 ])
 def test_invalid_widening_fails_before_execution(repo, extra, full, reason):

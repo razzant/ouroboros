@@ -87,7 +87,7 @@ def test_the_origin_is_what_a_frozen_or_seed_launcher_imported_never_the_newer_h
 
 
 @pytest.mark.parametrize("rel,loaded_only,packaged", [
-    (None, False, False), ("ouroboros/not_imported_yet.py", False, True),
+    (None, False, False), ("server.py", False, False), ("ouroboros/not_imported_yet.py", False, True),
     ("launcher.py", True, True)])
 def test_the_cold_check_counts_the_packaged_trees_the_warm_check_only_what_is_loaded(tmp_path, rel, loaded_only,
                                                                                     packaged):
@@ -397,7 +397,8 @@ def test_startup_panic_fences_bootstrap_handoff_and_server_admission(tmp_path, b
     assert events == ([] if stop_at == "listen" else ["bootstrap"])
 
 
-@pytest.mark.parametrize("rel,hands_over", [(None, False), ("ouroboros/not_imported_yet.py", True), ("supervisor/queue.py", True)])
+@pytest.mark.parametrize("rel,hands_over", [(None, False), ("server.py", False),
+                                            ("ouroboros/not_imported_yet.py", True), ("supervisor/queue.py", True)])
 def test_a_frozen_app_loads_the_checkouts_launcher_at_cold_start_only_when_its_code_differs(tmp_path, boot, rel,
                                                                                          hands_over):
     """Owner answer 2A: after a full exit too, the updated shell, before any server or main window. Same code

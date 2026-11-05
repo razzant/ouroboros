@@ -29,7 +29,8 @@ def _snapshot(root, *, structural_age, stamp_age, generation, pending=()):
 
 @pytest.mark.parametrize("structural_age,stamp_age,generation,restored", [
     (1, None, None, 1), (901, None, None, 0),
-    (1, 1, "foreign-generation", 0),
+    (1, 901, "snapshot-generation", 0),
+    (1, None, "snapshot-generation", 0), (1, 1, "foreign-generation", 0),
 ])
 def test_boot_restore_uses_legacy_time_only_without_generation(
     roots, monkeypatch, structural_age, stamp_age, generation, restored,
@@ -60,7 +61,8 @@ def test_periodic_reconcile_and_status_keep_legacy_liveness_unknown(roots):
 
 @pytest.mark.parametrize("structural_age,stamp_age,generation,settled", [
     (1, None, None, True), (901, None, None, False),
-    (1, 1, "foreign-generation", False),
+    (1, 901, "snapshot-generation", False),
+    (1, None, "snapshot-generation", False), (1, 1, "foreign-generation", False),
 ])
 def test_split_root_boot_recovery_obeys_the_snapshot_protocol(
     roots, monkeypatch, structural_age, stamp_age, generation, settled,

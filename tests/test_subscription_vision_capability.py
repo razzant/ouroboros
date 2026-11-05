@@ -192,7 +192,8 @@ def test_text_only_catalog_places_the_placeholder_in_the_real_payload(subscripti
 
 
 @pytest.mark.parametrize("modalities, vision", [
-    (["text", "image"], "claudexor::codex=sees"), (["text"], ""), (["image", ""], ""),
+    (["text", "image"], "claudexor::codex=sees"), (["text"], ""), (None, ""), ([], ""), ("image", ""), (["image", 42], ""),
+    ([""], ""), (["text", " "], ""), (["image", ""], ""),
 ])
 def test_preset_vision_is_a_confirmed_image_row_or_blank_auto(modalities, vision):
     """Never the text default written into Vision, where it would read as the owner's choice."""
