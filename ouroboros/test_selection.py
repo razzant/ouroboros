@@ -46,7 +46,7 @@ _APPARATUS = frozenset({
     "ouroboros/process_containment.py", "ouroboros/process_lifeline.py",
     "ouroboros/process_overload.py", "ouroboros/test_parallelism.py",
     "tests/default_lane.py", "tests/browser_lane.py", "tests/ci_evidence.py", "tests/ci_verdicts.py",
-    "tests/ci_accepted.py", "tests/stack_samples.py",
+    "tests/ci_accepted.py", "tests/stack_samples.py", "tests/_test_folders.py",
 })
 # What switches, attests, boots and restores a body: a selected run cannot qualify
 # adopting a change to the machinery that adopts it. A minimum, not a risk classifier.
