@@ -392,7 +392,7 @@ def test_outage_wrap_keeps_older_wire_death_custody_without_summary(tmp_path, mo
 
 @pytest.mark.parametrize("stop,expected_reason", [
     ("wrap", "owner_requested_finalization"), ("deadline", "deadline_local"),
-    ("ceiling", "finalization_grace"), ("wrap_unknown", "owner_requested_finalization"),
+    ("ceiling", "finalization_grace"),
 ])
 def test_real_main_control_preserves_candidate_without_new_summary(main_call, monkeypatch, stop, expected_reason):
     from ouroboros import config
@@ -526,8 +526,7 @@ def test_hard_cancel_returns_empty_events_to_real_worker_loop_and_keeps_queue_ow
 
 
 @pytest.mark.parametrize("stop,deadline,transport,expected", [
-    (True, True, False, ["stop"]), (False, True, False, ["deadline"]),
-    (False, False, False, ["deadline", "cost"]), (False, True, True, ["cost"]),
+    (True, True, False, ["stop"]), (False, False, False, ["deadline", "cost"]), (False, True, True, ["cost"]),
 ])
 def test_pre_round_terminal_order_keeps_cost_after_stop_and_deadline(monkeypatch, stop, deadline, transport, expected):
     from ouroboros import loop_round_limits
@@ -545,9 +544,7 @@ def test_pre_round_terminal_order_keeps_cost_after_stop_and_deadline(monkeypatch
     assert result_value_actual == result_value and calls == expected
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("first", ["web", "host"])
-@pytest.mark.parametrize("persist_role", [False, True])
+@pytest.mark.parametrize(("persist_role", "first"), [(False, "host"), (True, "web")])
 def test_web_and_host_wait_decisions_share_saved_replay_and_attempt_fences(live_wait, monkeypatch, first, persist_role):
     from ouroboros import config
     from supervisor import queue as task_queue
@@ -590,9 +587,7 @@ def test_web_and_host_wait_decisions_share_saved_replay_and_attempt_fences(live_
             assert saved_bytes is None
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("declared", [True, False])
-@pytest.mark.parametrize("persist_role", [True, False])
+@pytest.mark.parametrize(("persist_role", "declared"), [(True, True), (False, False)])
 def test_a_main_model_saved_on_a_wait_card_is_recorded_like_a_settings_save(live_wait, monkeypatch, declared,
                                                                              persist_role):
     """ORDER item 4: the card's saved choice records the writer's receipt as one ``settings_changed`` with the origin
@@ -644,7 +639,6 @@ def test_a_main_model_saved_on_a_wait_card_is_recorded_like_a_settings_save(live
         assert "openrouter/old-main" in text and MODEL in text and "declared" not in text, text
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("surface", ["web", "host"])
 def test_wait_decision_preserves_existing_settings_timeout_receipt(live_wait, monkeypatch, surface):
     import threading

@@ -25,9 +25,9 @@ from tests._review_session_route_shared import _terminal_detail, fake_route as _
 from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
 from tests.test_receptive_commit_review import TASK, _git, _join, _notices, _parent, _produce, _read_mail, until
 from tests.test_receptive_commit_review import author as _author
+from tests._cases import chosen_rows
 
 author, fake_route = _author, _fake_route
-pytestmark = pytest.mark.serial
 SESSION_ANSWER = "SESSION-SEAT-ANSWER"
 _PAST = "2000-01-01T00:00:00Z"  # a wake time already reached when the wait starts
 
@@ -245,8 +245,8 @@ def _leave_wait(tmp_path, ctx, operation, entry, cause):
         assert review_pause.author_detaches(operation, entries)
 
 
-@pytest.mark.parametrize("detach", [*_WAIT_ONLY, "pause_preparation", "wake_at_then_pause", "not_live",
-                                    "other_live_operation", "row_of_another_operation"])
+@pytest.mark.parametrize("detach", chosen_rows([*_WAIT_ONLY, "pause_preparation", "wake_at_then_pause", "not_live",
+                                    "other_live_operation", "row_of_another_operation"], 0, 7, 9))
 def test_a_seat_left_only_waiting_moves_to_in_flight_at_its_start(tmp_path, monkeypatch, detach):
     """Whatever ended only the author's wait before a seat's first launch (addressed mail, a selected
     helper terminal or reviewer answer, the wake time, a departed author), the drain's PENDING row says

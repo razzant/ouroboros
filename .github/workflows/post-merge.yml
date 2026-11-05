@@ -132,7 +132,7 @@ jobs:
         env:
           BASE: ${{ steps.base.outputs.base }}
           DEFER_FULL: ${{ runner.os == 'Windows' && '--defer-full' || '' }}
-        run: python scripts/run_tests.py --selected --base "$BASE" --sequential --keep-going $DEFER_FULL --evidence-dir "$RUNNER_TEMP/post-merge"
+        run: python scripts/run_tests.py --selected --base "$BASE" --keep-going $DEFER_FULL --evidence-dir "$RUNNER_TEMP/post-merge"
       - name: Run each red once more (FAILED or FLAKY)
         id: classify
         if: ${{ !cancelled() && steps.base.outcome == 'success' }}

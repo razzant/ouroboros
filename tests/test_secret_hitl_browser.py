@@ -28,7 +28,7 @@ from tests.test_secret_hitl import TASK, _write_skill
 from tests.test_subscription_setup_browser import capture
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 CANARY = "zq7-CANARY-Ωlj3~p0+kx/2 browser"
 CANARY_B = "Second·canary·browser-9"
 STORAGE = "() => JSON.stringify([Object.entries(localStorage), Object.entries(sessionStorage)])"

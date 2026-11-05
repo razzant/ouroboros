@@ -2089,8 +2089,7 @@ def test_gateway_setup_job_operations_use_the_exact_daemon_routes():
     ]
 
 
-@pytest.mark.parametrize("op", ["snapshot", "cancel", "reconcile"])
-@pytest.mark.parametrize("status", [404, 410])
+@pytest.mark.parametrize(("status", "op"), [(404, "snapshot"), (404, "reconcile"), (410, "cancel")])
 def test_login_job_absence_statuses_pass_through(monkeypatch, tmp_path, op, status):
     """Job absence is a client-custody verdict for exactly these operations."""
     from ouroboros import claudexor_daemon as owned

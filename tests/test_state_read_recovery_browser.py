@@ -17,7 +17,7 @@ from tests._shared import producer_evidence_dir
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _TEST_SOCKET_OPEN, _emit_ws_frame, state_reads
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 LIFETIME_MS = 60_000  # web/modules/api_client.js STATE_READ_LIFETIME_MS
 _NO_FIGURE = re.compile(r"^(Loading…|Unavailable)$")

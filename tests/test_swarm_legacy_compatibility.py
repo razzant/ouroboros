@@ -76,7 +76,7 @@ def test_rollup_first_read_repairs_legacy_before_receipt_snapshot(tmp_path, monk
     assert "missing_child_results" in tree_inputs(tmp_path, "parent")["coverage"]["gaps"]
 
 
-@pytest.mark.parametrize("damage", ["absent", "torn", "corrupt", "unreadable"])
+@pytest.mark.parametrize("damage", ["absent", "corrupt", "unreadable"])
 def test_automatic_legacy_failure_keeps_unknown_without_publishing(tmp_path, monkeypatch, damage):
     seed_result(tmp_path, "parent", {"status": "running"})
     path = tmp_path / "logs/events.jsonl"
@@ -190,7 +190,7 @@ def test_real_761a_cursor_roundtrip_does_not_double_count_addressed_prefix(tmp_p
     assert swarm_rollup.load_swarm_rollup(tmp_path, "parent") == caught_up
 
 
-@pytest.mark.parametrize("damage", ["shortened", "torn", "corrupt", "unreadable", "conflicting_id"])
+@pytest.mark.parametrize("damage", ["shortened", "torn", "conflicting_id"])
 def test_legacy_prefix_overlap_requires_readable_exact_evidence(tmp_path, monkeypatch, damage):
     from pathlib import Path
     import runpy

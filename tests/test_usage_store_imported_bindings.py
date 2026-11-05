@@ -21,6 +21,7 @@ import pathlib
 from types import SimpleNamespace
 
 import pytest
+from tests._cases import case_folders
 
 _FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "usage_store" / "binding_checkpoints.json.gz"
 _DOC = json.loads(gzip.decompress(_FIXTURE.read_bytes()).decode("utf-8"))
@@ -178,61 +179,63 @@ _LIVE = [(index, checkpoint) for index, checkpoint in enumerate(_CHECKPOINTS)
          if checkpoint["function"] != _RETIRED_OVERLAY]
 
 
-@pytest.mark.parametrize("checkpoint", [checkpoint for _index, checkpoint in _LIVE],
-                         ids=[f"{index:03d}-{checkpoint['function']}" for index, checkpoint in _LIVE])
-def test_an_imported_journal_gives_the_shipped_answer(checkpoint, tmp_path, monkeypatch, imported_binding_seeds):
-    from ouroboros import usage_accounting as ua
-    from ouroboros import usage_admission as admission
-    from ouroboros import usage_store
-    from supervisor import continuation_admission as continuation
+def test_an_imported_journal_gives_the_shipped_answer(subtests, tmp_path, monkeypatch, imported_binding_seeds):
+    case_paths = case_folders(tmp_path)
+    for checkpoint in [checkpoint for _index, checkpoint in _LIVE]:
+        tmp_path = next(case_paths)
+        with subtests.test(checkpoint=checkpoint), monkeypatch.context() as monkeypatch:
+            from ouroboros import usage_accounting as ua
+            from ouroboros import usage_admission as admission
+            from ouroboros import usage_store
+            from supervisor import continuation_admission as continuation
 
-    root = tmp_path / "data"
-    (root / "state").mkdir(parents=True)
-    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
-    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
-    for key, value in checkpoint["env"].items():
-        if value is None:
-            monkeypatch.delenv(key, raising=False)
-        else:
-            monkeypatch.setenv(key, value)
-    _materialize_imported_seed(root, checkpoint, imported_binding_seeds)
-    args, kwargs = _decode(checkpoint["args"], root), _decode(checkpoint["kwargs"], root)
-    name = checkpoint["function"]
-    try:
-        if name == "admit_continuation":
-            from supervisor import queue_snapshot
-            from tests._budget_pause_exact_helpers import _install_queue
+            root = tmp_path / "data"
+            (root / "state").mkdir(parents=True)
+            monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
+            monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
+            for key, value in checkpoint["env"].items():
+                if value is None:
+                    monkeypatch.delenv(key, raising=False)
+                else:
+                    monkeypatch.setenv(key, value)
+            _materialize_imported_seed(root, checkpoint, imported_binding_seeds)
+            args, kwargs = _decode(checkpoint["args"], root), _decode(checkpoint["kwargs"], root)
+            name = checkpoint["function"]
+            try:
+                if name == "admit_continuation":
+                    from supervisor import queue_snapshot
+                    from tests._budget_pause_exact_helpers import _install_queue
 
-            _queue, _state, workers = _install_queue(root, monkeypatch)
-            # The recorded process held the queue it had published (a Continue waits for the restore otherwise).
-            monkeypatch.setattr(queue_snapshot, "_RESTORED", {str(_queue.QUEUE_SNAPSHOT_PATH.absolute())})
-            result = continuation.admit_continuation(*args, **kwargs)
-            expected = checkpoint["result"]
-            stable = ("ok", "held", "error", "replay", "status", "successor_task_id")
-            assert {key: result.get(key) for key in stable} == {key: expected.get(key) for key in stable}
-            if checkpoint["continuation"] is not None and not expected.get("replay"):
-                assert _billing(workers.PENDING[-1]["metadata"]["continuation"]) == _billing(
-                    _decode(checkpoint["continuation"], root))
-            return
-        if name == "usage_projection":
-            kwargs.setdefault("include_roots", True)  # the journal era's default
-            result = ua.usage_projection(*args, **kwargs)
-        elif name == "_billing_group":
-            result = continuation._billing_group(*args, **kwargs)
-        else:
-            result = getattr(admission, name)(*args, **kwargs)
-        result, expected = _on_the_known_spend_rule(name, _encode(result, root), checkpoint["result"])
-        if name == "usage_projection" and _amended(checkpoint):
-            expected = _without_the_retired_overlay(expected)
-        minted = expected.get("billing_group_limit_revision") if isinstance(expected, dict) else None
-        if isinstance(minted, str) and not any(minted in _DOC["blobs"][blob] for blob in checkpoint["files"].values()):
-            # A revision the question itself minted (an initial or default pin): a fresh
-            # timestamp each time, compared for presence only.
-            assert isinstance(result.pop("billing_group_limit_revision"), str)
-            expected = {key: value for key, value in expected.items() if key != "billing_group_limit_revision"}
-        assert result == expected, checkpoint["test"]
-    finally:
-        usage_store.forget(root)
+                    _queue, _state, workers = _install_queue(root, monkeypatch)
+                    # The recorded process held the queue it had published (a Continue waits for the restore otherwise).
+                    monkeypatch.setattr(queue_snapshot, "_RESTORED", {str(_queue.QUEUE_SNAPSHOT_PATH.absolute())})
+                    result = continuation.admit_continuation(*args, **kwargs)
+                    expected = checkpoint["result"]
+                    stable = ("ok", "held", "error", "replay", "status", "successor_task_id")
+                    assert {key: result.get(key) for key in stable} == {key: expected.get(key) for key in stable}
+                    if checkpoint["continuation"] is not None and not expected.get("replay"):
+                        assert _billing(workers.PENDING[-1]["metadata"]["continuation"]) == _billing(
+                            _decode(checkpoint["continuation"], root))
+                    continue
+                if name == "usage_projection":
+                    kwargs.setdefault("include_roots", True)  # the journal era's default
+                    result = ua.usage_projection(*args, **kwargs)
+                elif name == "_billing_group":
+                    result = continuation._billing_group(*args, **kwargs)
+                else:
+                    result = getattr(admission, name)(*args, **kwargs)
+                result, expected = _on_the_known_spend_rule(name, _encode(result, root), checkpoint["result"])
+                if name == "usage_projection" and _amended(checkpoint):
+                    expected = _without_the_retired_overlay(expected)
+                minted = expected.get("billing_group_limit_revision") if isinstance(expected, dict) else None
+                if isinstance(minted, str) and not any(minted in _DOC["blobs"][blob] for blob in checkpoint["files"].values()):
+                    # A revision the question itself minted (an initial or default pin): a fresh
+                    # timestamp each time, compared for presence only.
+                    assert isinstance(result.pop("billing_group_limit_revision"), str)
+                    expected = {key: value for key, value in expected.items() if key != "billing_group_limit_revision"}
+                assert result == expected, checkpoint["test"]
+            finally:
+                usage_store.forget(root)
 
 
 def _materialize(root, checkpoint):
@@ -245,7 +248,6 @@ def _materialize(root, checkpoint):
     ensure_current_store(root)  # the boot door imports the journal era's files; a read never does
 
 
-@pytest.mark.serial
 def test_continue_refuses_when_the_default_cap_cannot_be_pinned(tmp_path, monkeypatch):
     """An unpinned choice is no choice: the Continue of an open old root (its
     imported block disagrees on the cap) is refused, typed, while the store's
@@ -278,7 +280,6 @@ def test_continue_refuses_when_the_default_cap_cannot_be_pinned(tmp_path, monkey
     assert accepted["ok"] and load_task_result(root, "P")["billing_group"]["billing_group_limit_source"] == "legacy_default"
 
 
-@pytest.mark.serial
 def test_admission_transactions_read_the_store_before_taking_the_queue_lock(tmp_path, monkeypatch):
     """Continue and receipt-backed admission resolve a root's billing (a store
     read) off ``_queue_lock``."""

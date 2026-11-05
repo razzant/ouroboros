@@ -25,7 +25,7 @@ import pytest
 from ouroboros import platform_layer as _pl
 from ouroboros import process_scope as ps
 
-pytestmark = [pytest.mark.serial, pytest.mark.skipif(os.name == "nt", reason="the environment census is POSIX-only")]
+pytestmark = [pytest.mark.skipif(os.name == "nt", reason="the environment census is POSIX-only")]
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 

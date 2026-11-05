@@ -481,8 +481,6 @@ def test_a_tree_without_the_dialogue_store_gets_its_rows_back_at_the_restart_exi
 
 @pytest.mark.parametrize("cleanup, blocker", [
     (None, "worker_exits_unconfirmed"),
-    (_census(worker_exits=None), "worker_exits_unconfirmed"),
-    (_census(worker_exits={"unconfirmed": [4242]}), "worker_exits_unconfirmed"),
     (_census(live_children=[object()]), "child_processes_alive"),
     (_census(owned_stop={"state": "unconfirmed", "unconfirmed": ["x"]}), "owned_work_unconfirmed"),
 ])

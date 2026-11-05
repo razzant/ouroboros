@@ -19,7 +19,7 @@ import pytest
 from tests.test_chat_history_paging_browser import _FRAMES, MAIN, _append, _assert_at_newest, _idle, _open, _step
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 _WORDS = ("history keeps every passage where the reader left it while the column narrows and widens again "
           "and the rows far above wait with the size they last had").split()

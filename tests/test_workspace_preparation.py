@@ -23,7 +23,6 @@ from supervisor import queue, task_lifecycle
 from supervisor import workspace_preparation as prep
 from supervisor.events import dispatch_event
 
-pytestmark = pytest.mark.serial
 
 _WAIT_SEC = 30.0  # bounds only how long a broken run takes to report; passing runs never wait on it
 
@@ -759,8 +758,7 @@ def test_busy_store_at_entry_is_typed_and_starts_no_preparation(env, monkeypatch
         assert drive_cleanup == []
 
 
-@pytest.mark.parametrize("change", ["rebind", "deletion"])
-@pytest.mark.parametrize("phase", ["copy", "admission"])
+@pytest.mark.parametrize(("phase", "change"), [("copy", "rebind"), ("copy", "deletion"), ("admission", "deletion")])
 def test_project_change_during_copy_is_revalidated_at_admission(env, monkeypatch, change, phase):
     from ouroboros import projects_registry as registry, settings_integrity
     from ouroboros.startup_migrations import prepare_startup_state

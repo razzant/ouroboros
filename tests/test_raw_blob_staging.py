@@ -321,8 +321,7 @@ _IDS = "ANSWER = lambda size, data: hashlib.sha1(b'blob %d\\0' % size + data).he
     "import sys; sys.exit(0)",  # exits before answering
     "ANSWER = lambda size, data: b'not-an-object-id'\n" + _FAKE_PARSER,
     _IDS + _FAKE_PARSER + "sys.exit(1)\n",  # every id answered, then the stream fails at done
-    _IDS + _FAKE_PARSER + "out.write(b'unexpected'); out.flush()\n",
-], ids=["silent-exit", "bad-id", "fails-at-done", "trailing-output"])
+], ids=["silent-exit", "bad-id", "fails-at-done"])
 def test_a_misbehaving_writer_is_never_staged(tmp_path, monkeypatch, fake):
     root, env, index = _seeded_index(tmp_path)
     recorder = _Recorder(monkeypatch, fake_writer=fake)

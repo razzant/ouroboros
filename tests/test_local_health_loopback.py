@@ -12,7 +12,6 @@ import requests
 
 from ouroboros.local_model import LocalModelManager
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

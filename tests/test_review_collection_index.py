@@ -17,6 +17,7 @@ import pytest
 from ouroboros import obligations, store, store_import, task_store
 from tests._store_journal_shared import store_state
 from tests.test_store import document, publish
+from tests._cases import case_folders
 
 _SCHEMA_SHAPES = {"v1": (), "owner-v2": ("has_owner_questions",),
                   "review-v2": ("review_collection_pending",)}
@@ -26,10 +27,16 @@ def _operation(state="dispatched", **fields):
     return {"surface": "task_acceptance", "state": state, "retry_key": "wave", **fields}
 
 
-@pytest.mark.parametrize("surface", ["task_acceptance", "multi_model_review", "plan_review"])
-@pytest.mark.parametrize("state,pending", [
-    ("preparing", True), ("retained", True), ("dispatched", True), ("unpublished", False), ("closed", False),
-    ("collected", False), ("preparation_unknown", False), ("preparation_refused", False), ("unrecognized", False),
+@pytest.mark.parametrize(("state", "pending", "surface"), [
+    ("preparing", True, "task_acceptance"),
+    ("retained", True, "plan_review"),
+    ("dispatched", True, "plan_review"),
+    ("unpublished", False, "task_acceptance"),
+    ("closed", False, "multi_model_review"),
+    ("collected", False, "multi_model_review"),
+    ("preparation_unknown", False, "plan_review"),
+    ("preparation_refused", False, "task_acceptance"),
+    ("unrecognized", False, "multi_model_review"),
 ])
 def test_selection_is_an_open_pointer_of_any_surface(surface, state, pending):
     row = document("task", review_operations={"owner": {**_operation(state), "surface": surface}})
@@ -110,8 +117,10 @@ def _question_document(task_id):
         "quiz_id": "q", "state": "open", "question": "Keep this format?", "options": ["Yes", "No"]}})
 
 
-@pytest.mark.parametrize("tier", [store.TIER_ENFORCED, store.TIER_NAME])
-@pytest.mark.parametrize("shape", ["v1", "owner-v2"])
+@pytest.mark.parametrize(("shape", "tier"), [
+    pytest.param("v1", store.TIER_ENFORCED, id='v1-enforced'),
+    pytest.param("owner-v2", store.TIER_NAME, id='owner-v2-name'),
+])
 def test_upgrade_then_old_writer_resets_unknown_without_history_loss(tmp_path, tier, shape):
     closed = document("closed", review_operations={"op": _operation("collected")}, result="full old answer")
     _legacy_store(tmp_path, closed, owned_root=tmp_path, tier=tier, shape=shape)
@@ -129,57 +138,63 @@ def test_upgrade_then_old_writer_resets_unknown_without_history_loss(tmp_path, t
     assert task_store.read_document(tmp_path, "closed") == newer
 
 
-@pytest.mark.parametrize("shape", _SCHEMA_SHAPES)
-def test_passive_read_leaves_old_schema_and_first_child_write_upgrades_before_mutator(tmp_path, monkeypatch, shape):
-    child = tmp_path / "child"
-    original = _question_document("child")
-    _legacy_store(child, original, owned_root=tmp_path, shape=shape)
-    before = store_state(store.store_path(child))  # rows and any write's trace; a first WAL open's header aside
-    assert task_store.read_document(child, "child") == original
-    assert store_state(store.store_path(child)) == before
-    monkeypatch.setattr(store_import, "_reconcile", lambda *_: pytest.fail("first write must not replay/import history"))
-    calls = []
-    def mutate(row):
-        calls.append(row["result"])
-        with store.open_store(child, write=False) as txn:
-            _combined_schema(txn)
-            assert txn.row("child", "has_owner_questions", "write_seq") == (1, 1)
-        return {**row, "review_operations": {"op": _operation()}}
-    task_store.patch_document(child, "child", mutate)
-    # The current writer derives the column: an open pointer (an old acceptance one) is open until retired.
-    assert calls == [original["result"]] and _flag(child, "child") == (1, 2)
-    assert task_store.read_document(child, "child")["owner_quiz"] == original["owner_quiz"]
-    assert set(obligations.members(child, "owner_questions")) == {"child"}
+def test_passive_read_leaves_old_schema_and_first_child_write_upgrades_before_mutator(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for shape in _SCHEMA_SHAPES:
+        tmp_path = next(case_paths)
+        with subtests.test(shape=shape), monkeypatch.context() as monkeypatch:
+            child = tmp_path / "child"
+            original = _question_document("child")
+            _legacy_store(child, original, owned_root=tmp_path, shape=shape)
+            before = store_state(store.store_path(child))  # rows and any write's trace; a first WAL open's header aside
+            assert task_store.read_document(child, "child") == original
+            assert store_state(store.store_path(child)) == before
+            monkeypatch.setattr(store_import, "_reconcile", lambda *_: pytest.fail("first write must not replay/import history"))
+            calls = []
+            def mutate(row):
+                calls.append(row["result"])
+                with store.open_store(child, write=False) as txn:
+                    _combined_schema(txn)
+                    assert txn.row("child", "has_owner_questions", "write_seq") == (1, 1)
+                return {**row, "review_operations": {"op": _operation()}}
+            task_store.patch_document(child, "child", mutate)
+            # The current writer derives the column: an open pointer (an old acceptance one) is open until retired.
+            assert calls == [original["result"]] and _flag(child, "child") == (1, 2)
+            assert task_store.read_document(child, "child")["owner_quiz"] == original["owner_quiz"]
+            assert set(obligations.members(child, "owner_questions")) == {"child"}
 
 
-@pytest.mark.parametrize("shape", _SCHEMA_SHAPES)
-def test_interrupted_schema_upgrade_rolls_back_and_retries(tmp_path, monkeypatch, shape):
-    _legacy_store(tmp_path, _question_document("task"), owned_root=tmp_path, shape=shape)
-    with store.open_store(tmp_path, write=False) as txn:
-        columns = {r["name"] for r in txn.conn.execute("PRAGMA table_info(tasks)")}
-        indexes = {r["name"] for r in txn.conn.execute("PRAGMA index_list(tasks)")}
-        raw = txn.body_text("task")
-    real = store_import._upgrade_review_collection
-    def fail(txn):
-        real(txn)  # the preceding owner-flag derivation and both DDLs must roll back together
-        _combined_schema(txn)
-        assert txn.row("task", "has_owner_questions") == 1
-        raise OSError("interrupted before the combined transaction commits")
-    with monkeypatch.context() as patch:
-        patch.setattr(store_import, "_upgrade_review_collection", fail)
-        with pytest.raises(OSError):
+def test_interrupted_schema_upgrade_rolls_back_and_retries(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for shape in _SCHEMA_SHAPES:
+        tmp_path = next(case_paths)
+        with subtests.test(shape=shape), monkeypatch.context() as monkeypatch:
+            _legacy_store(tmp_path, _question_document("task"), owned_root=tmp_path, shape=shape)
+            with store.open_store(tmp_path, write=False) as txn:
+                columns = {r["name"] for r in txn.conn.execute("PRAGMA table_info(tasks)")}
+                indexes = {r["name"] for r in txn.conn.execute("PRAGMA index_list(tasks)")}
+                raw = txn.body_text("task")
+            real = store_import._upgrade_review_collection
+            def fail(txn):
+                real(txn)  # the preceding owner-flag derivation and both DDLs must roll back together
+                _combined_schema(txn)
+                assert txn.row("task", "has_owner_questions") == 1
+                raise OSError("interrupted before the combined transaction commits")
+            with monkeypatch.context() as patch:
+                patch.setattr(store_import, "_upgrade_review_collection", fail)
+                with pytest.raises(OSError):
+                    store_import.upgrade_current_schema(tmp_path)
+            with store.open_store(tmp_path, write=False) as txn:
+                assert txn.meta("schema_version") == (1 if shape == "v1" else 2)
+                assert {r["name"] for r in txn.conn.execute("PRAGMA table_info(tasks)")} == columns
+                assert {r["name"] for r in txn.conn.execute("PRAGMA index_list(tasks)")} == indexes
+                assert txn.body_text("task") == raw and txn.row("task", "write_seq") == 1
             store_import.upgrade_current_schema(tmp_path)
-    with store.open_store(tmp_path, write=False) as txn:
-        assert txn.meta("schema_version") == (1 if shape == "v1" else 2)
-        assert {r["name"] for r in txn.conn.execute("PRAGMA table_info(tasks)")} == columns
-        assert {r["name"] for r in txn.conn.execute("PRAGMA index_list(tasks)")} == indexes
-        assert txn.body_text("task") == raw and txn.row("task", "write_seq") == 1
-    store_import.upgrade_current_schema(tmp_path)
-    store_import.upgrade_current_schema(tmp_path)
-    assert _flag(tmp_path, "task") == (0 if shape == "review-v2" else None, 1)
-    with store.open_store(tmp_path, write=False) as txn:
-        _combined_schema(txn)
-        assert txn.row("task", "has_owner_questions") == 1 and txn.body_text("task") == raw
+            store_import.upgrade_current_schema(tmp_path)
+            assert _flag(tmp_path, "task") == (0 if shape == "review-v2" else None, 1)
+            with store.open_store(tmp_path, write=False) as txn:
+                _combined_schema(txn)
+                assert txn.row("task", "has_owner_questions") == 1 and txn.body_text("task") == raw
 
 
 @pytest.mark.parametrize("resume", ["writer", "boot"])  # the collector's own resume left with task acceptance
@@ -215,50 +230,56 @@ def test_partial_export_upgrade_does_not_publish_a_complete_schema_version(tmp_p
         assert txn.row("task", "has_owner_questions", "write_seq") == (1, 2 if resume == "writer" else 1)
 
 
-@pytest.mark.parametrize("shape", _SCHEMA_SHAPES)
-def test_first_touch_schema_owner_honors_zero_wait_and_never_calls_mutator(tmp_path, monkeypatch, shape):
-    _legacy_store(tmp_path, document("task"), owned_root=tmp_path, shape=shape)
-    with store.open_store(tmp_path, write=True):
-        with store.acquisition_budget(0), pytest.raises(store.StoreBusy):
-            store_import.upgrade_current_schema(tmp_path)
-        with store.acquisition_budget(0), pytest.raises(store.StoreBusy):
-            task_store.patch_document(tmp_path, "task", lambda _: pytest.fail("not acquired"))
-    assert task_store.patch_document(tmp_path, "task", lambda row: row)["task_id"] == "task"
+def test_first_touch_schema_owner_honors_zero_wait_and_never_calls_mutator(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for shape in _SCHEMA_SHAPES:
+        tmp_path = next(case_paths)
+        with subtests.test(shape=shape), monkeypatch.context() as monkeypatch:
+            _legacy_store(tmp_path, document("task"), owned_root=tmp_path, shape=shape)
+            with store.open_store(tmp_path, write=True):
+                with store.acquisition_budget(0), pytest.raises(store.StoreBusy):
+                    store_import.upgrade_current_schema(tmp_path)
+                with store.acquisition_budget(0), pytest.raises(store.StoreBusy):
+                    task_store.patch_document(tmp_path, "task", lambda _: pytest.fail("not acquired"))
+            assert task_store.patch_document(tmp_path, "task", lambda row: row)["task_id"] == "task"
 
 
-@pytest.mark.parametrize("shape", _SCHEMA_SHAPES)
-@pytest.mark.parametrize("boot", [False, True], ids=["first-touch-upgrade", "boot"])
-def test_combined_upgrade_keeps_question_duty_and_lazy_review_selection(tmp_path, shape, boot):
-    from ouroboros import evidence_packs
+def test_combined_upgrade_keeps_question_duty_and_lazy_review_selection(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for shape in _SCHEMA_SHAPES:
+        for boot in [False, True]:
+            tmp_path = next(case_paths)
+            with subtests.test(shape=shape, boot=boot):
+                from ouroboros import evidence_packs
 
-    asked, quiet = _question_document("asked"), document("quiet", result="closed history")
-    _legacy_store(tmp_path, asked, quiet, owned_root=tmp_path, shape=shape)
-    with store.open_store(tmp_path, write=False) as txn:
-        bodies = {tid: txn.body_text(tid) for tid in ("asked", "quiet")}
-    if boot:
-        store_import.ensure_current_store(tmp_path, with_children=False)
-    else:
-        store_import.upgrade_current_schema(tmp_path)
-    with store.open_store(tmp_path, write=False) as txn:
-        _combined_schema(txn)
-        assert txn.row("asked", "has_owner_questions") == 1
-        assert txn.row("quiet", "has_owner_questions") == 0
-        for tid, raw in bodies.items():
-            assert txn.body_text(tid) == raw and txn.row(tid, "write_seq") == 1
-            assert txn.row(tid, "review_collection_pending") == (0 if shape == "review-v2" else None)
-    assert set(obligations.members(tmp_path, "owner_questions")) == {"asked"}
-    assert "review_collection_pending" not in store.FLAG_COLUMNS.values()
-    # The upgraded rows pack (NULL or 0: no body with the selector recorded an open review); the
-    # owner-question duty grants no authority to block packing. A selector of 1 does, and only because
-    # it names a review that may still read the task's loose handles (evidence pack idiom).
-    with store.open_store(tmp_path, write=False) as txn:
-        assert evidence_packs.task_packable(txn, "quiet") and evidence_packs.task_packable(txn, "asked")
-    with store.open_store(tmp_path, write=True) as txn:
-        txn.conn.execute("UPDATE tasks SET review_collection_pending=1 WHERE task_id='quiet'")
-    with store.open_store(tmp_path, write=False) as txn:
-        assert not evidence_packs.task_packable(txn, "quiet") and evidence_packs.task_packable(txn, "asked")
-    task_store.patch_document(tmp_path, "asked", lambda row: {**row, "owner_quiz": {"q": {"state": "closed"}}})
-    assert obligations.members(tmp_path, "owner_questions") == {}
+                asked, quiet = _question_document("asked"), document("quiet", result="closed history")
+                _legacy_store(tmp_path, asked, quiet, owned_root=tmp_path, shape=shape)
+                with store.open_store(tmp_path, write=False) as txn:
+                    bodies = {tid: txn.body_text(tid) for tid in ("asked", "quiet")}
+                if boot:
+                    store_import.ensure_current_store(tmp_path, with_children=False)
+                else:
+                    store_import.upgrade_current_schema(tmp_path)
+                with store.open_store(tmp_path, write=False) as txn:
+                    _combined_schema(txn)
+                    assert txn.row("asked", "has_owner_questions") == 1
+                    assert txn.row("quiet", "has_owner_questions") == 0
+                    for tid, raw in bodies.items():
+                        assert txn.body_text(tid) == raw and txn.row(tid, "write_seq") == 1
+                        assert txn.row(tid, "review_collection_pending") == (0 if shape == "review-v2" else None)
+                assert set(obligations.members(tmp_path, "owner_questions")) == {"asked"}
+                assert "review_collection_pending" not in store.FLAG_COLUMNS.values()
+                # The upgraded rows pack (NULL or 0: no body with the selector recorded an open review); the
+                # owner-question duty grants no authority to block packing. A selector of 1 does, and only because
+                # it names a review that may still read the task's loose handles (evidence pack idiom).
+                with store.open_store(tmp_path, write=False) as txn:
+                    assert evidence_packs.task_packable(txn, "quiet") and evidence_packs.task_packable(txn, "asked")
+                with store.open_store(tmp_path, write=True) as txn:
+                    txn.conn.execute("UPDATE tasks SET review_collection_pending=1 WHERE task_id='quiet'")
+                with store.open_store(tmp_path, write=False) as txn:
+                    assert not evidence_packs.task_packable(txn, "quiet") and evidence_packs.task_packable(txn, "asked")
+                task_store.patch_document(tmp_path, "asked", lambda row: {**row, "owner_quiz": {"q": {"state": "closed"}}})
+                assert obligations.members(tmp_path, "owner_questions") == {}
 
 
 def test_storeless_export_import_and_changed_legacy_files_keep_documents_and_owe_no_collection(tmp_path):

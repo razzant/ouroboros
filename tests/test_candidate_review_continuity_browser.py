@@ -14,7 +14,7 @@ from tests.test_skill_review_runner import _reset_queue
 from tests.test_history_retention_browser import HTML, WEB
 from ouroboros.test_evidence import diagnostic_directory
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.fixture

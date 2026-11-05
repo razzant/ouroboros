@@ -13,6 +13,7 @@ import pytest
 
 from ouroboros import chat_chain as cc, dialogue_store as ds
 from tests._dialogue import import_all
+from tests._source_scan import parse
 from ouroboros.utils import jsonl_generation_signature
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -142,7 +143,7 @@ def test_retain_memory_source_is_reached_as_a_module_attribute_everywhere():
         text = path.read_text(encoding="utf-8")
         if relative == "ouroboros/chat_chain.py" or "retain_memory_source" not in text:
             continue
-        tree = ast.parse(text)
+        tree = parse(text)
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and any(a.name == "retain_memory_source" for a in node.names):
                 importers.append((relative, node.module))

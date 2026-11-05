@@ -19,7 +19,6 @@ from tests.test_delegate_retry_consumers import (
 )
 
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture(autouse=True)

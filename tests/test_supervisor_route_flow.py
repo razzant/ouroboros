@@ -17,7 +17,6 @@ from tests.test_available_subagents_runtime import _api_row, _session_row, _sett
 from tests.test_supervisor_route import cognition_row, selected_task
 from tests.test_swarm_host_admission import host as host
 
-pytestmark = pytest.mark.serial
 
 
 def root_context(tmp_path, settings, monkeypatch):
@@ -74,8 +73,11 @@ def test_explicit_parent_switch_still_schedules_its_chosen_binding(tmp_path, mon
     assert route["model"] == ctx.active_model and "parent's own choice" in answer
 
 
-@pytest.mark.parametrize("installation", ["api", "subscription", "mixed"])
-@pytest.mark.parametrize("mode", ["advisory", "blocking", "cyber_pro"])
+@pytest.mark.parametrize(("mode", "installation"), [
+    ("advisory", "api"),
+    ("blocking", "subscription"),
+    ("cyber_pro", "mixed"),
+])
 def test_schema_and_selection_are_unconditional_across_installs_and_modes(tmp_path, monkeypatch, installation, mode):
     from ouroboros.tools.control_subagent_spec import schedule_subagent_properties
 

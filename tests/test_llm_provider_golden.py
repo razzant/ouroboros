@@ -693,13 +693,14 @@ def test_golden_fixture_ids_are_unique_and_documented():
         assert case.get("route"), f"{case['id']} has no route description"
 
 
-@pytest.mark.parametrize("case", _CASES, ids=[case["id"] for case in _CASES])
-def test_llm_provider_route_matches_golden(case):
-    observed = _observe(case["spec"])
-    assert observed == case["expected"], (
-        f"route {case['id']} drifted from {case['_file']}:\n"
-        f"observed={json.dumps(observed, indent=2, sort_keys=True)}"
-    )
+def test_llm_provider_route_matches_golden(subtests):
+    for case in _CASES:
+        with subtests.test(case=case):
+            observed = _observe(case["spec"])
+            assert observed == case["expected"], (
+                f"route {case['id']} drifted from {case['_file']}:\n"
+                f"observed={json.dumps(observed, indent=2, sort_keys=True)}"
+            )
 
 
 

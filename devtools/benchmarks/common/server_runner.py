@@ -131,7 +131,7 @@ _PROVIDER_ENV_KEYS = frozenset({
 # path/port values that this lifecycle writes back explicitly, plus one
 # operational host-load lever: ``OUROBOROS_PREFLIGHT_TEST_WORKERS`` caps the
 # xdist fan-out of the commit gate's hermetic pytest pass (read by
-# ``preflight_runner._preflight_worker_count`` in the server process, never a
+# ``preflight_probe._preflight_worker_count`` in the server process, never a
 # model/credential/settings key, and still scrubbed from the candidate suite's
 # own environment by ``preflight_runner._preflight_env``).  Without it every
 # isolated server resolves ``-n auto`` to the host's CPU count.  This is scoped

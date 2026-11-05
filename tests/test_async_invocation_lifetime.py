@@ -13,7 +13,6 @@ from tests._extension_loader_shared import _clear_loader_state  # noqa: F401 -- 
 from tests.test_batch4_producer_custody import _registry
 from tests.test_invocation_ownership import claims, owner, run
 
-pytestmark = pytest.mark.serial
 
 
 @contextmanager

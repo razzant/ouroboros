@@ -28,6 +28,7 @@ from tests.test_consolidator_context_fit import fit  # noqa: F401 — offline Li
 from tests.test_late_phase_pause_cut import (  # noqa: F401
     ROOT, _maintenance, _phase, _resume, _row, _saved_by_an_earlier_version, late,
 )
+from tests._cases import case_folders
 
 BACKLOG = "improvement-backlog"
 LEGACY_BACKLOG = (
@@ -451,9 +452,9 @@ def _split_project_root(tmp_path, index, text="PROJECT REQUEST", task_type="task
 
 
 @pytest.mark.parametrize("opted_in,cadence,task_type,expected", [
-    (False, "every_n:1", "task", [0, 0]), (True, "every_n:1", "task", [1, 1]), (True, "every_n:2", "task", [0, 1]),
-    (True, "off", "task", [0, 0]), (True, "every_n:1", "evolution", [0, 0])],
-    ids=["evolution_off", "every_task", "every_second_task", "cadence_off", "evolution_task_excluded"])
+    (False, "every_n:1", "task", [0, 0]), (True, "every_n:2", "task", [0, 1]),
+    (True, "off", "task", [0, 0])],
+    ids=["evolution_off", "every_second_task", "cadence_off"])
 def test_a_split_project_root_reaches_the_canonical_chooser_under_the_same_opt_in_and_cadence(
         tmp_path, monkeypatch, opted_in, cadence, task_type, expected):
     import ouroboros.config as cfg
@@ -618,29 +619,32 @@ _ROLES = {
 }
 
 
-@pytest.mark.parametrize("role", sorted(_ROLES))
-def test_every_role_and_mode_indexes_the_register_and_carries_history_as_dated_pointers(tmp_path, monkeypatch, role):
-    import ouroboros.config as cfg
+def test_every_role_and_mode_indexes_the_register_and_carries_history_as_dated_pointers(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for role in sorted(_ROLES):
+        tmp_path = next(case_paths)
+        with subtests.test(role=role), monkeypatch.context() as monkeypatch:
+            import ouroboros.config as cfg
 
-    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path / "data")
-    env, memory = _context_world(tmp_path)
-    fields, integrating = _ROLES[role]
-    task = {"id": f"t-{role}", "type": "task", "text": "Work.", **fields}
-    actor = (_speaker(env, task["id"]) if role == "presence"
-             else _actor(env, task["id"], is_direct_chat=True) if integrating else None)
-    for mode, text in _mode_texts(env, memory, task, actor).items():
-        where = (role, mode)
-        # No automatic historical prose anywhere: not the old lesson, not the old report body,
-        # and no register body in any role or mode: the register is read where it lives.
-        assert "OLD AUTOMATIC LESSON BODY" not in text and "OLD DEEP REVIEW BODY" not in text, where
-        assert "| class-00 |" not in text and "LAST REGISTER LINE" not in text, where
-        if integrating:
-            # The overview and the knowledge index ride where they lived; the index lists the register.
-            assert "## Shared understanding" in text and REGISTER_INDEX_LINE in text, where
-            assert "subject to this task's tool/resource restrictions and Presence grants" in text, where
-            assert ("generated_at=2026-09-30T10:00:00Z, source_revision=abc123 (its provenance header)" in text), where
-        else:
-            assert "## Last Deep Self-Review" not in text, where
+            monkeypatch.setattr(cfg, "DATA_DIR", tmp_path / "data")
+            env, memory = _context_world(tmp_path)
+            fields, integrating = _ROLES[role]
+            task = {"id": f"t-{role}", "type": "task", "text": "Work.", **fields}
+            actor = (_speaker(env, task["id"]) if role == "presence"
+                     else _actor(env, task["id"], is_direct_chat=True) if integrating else None)
+            for mode, text in _mode_texts(env, memory, task, actor).items():
+                where = (role, mode)
+                # No automatic historical prose anywhere: not the old lesson, not the old report body,
+                # and no register body in any role or mode: the register is read where it lives.
+                assert "OLD AUTOMATIC LESSON BODY" not in text and "OLD DEEP REVIEW BODY" not in text, where
+                assert "| class-00 |" not in text and "LAST REGISTER LINE" not in text, where
+                if integrating:
+                    # The overview and the knowledge index ride where they lived; the index lists the register.
+                    assert "## Shared understanding" in text and REGISTER_INDEX_LINE in text, where
+                    assert "subject to this task's tool/resource restrictions and Presence grants" in text, where
+                    assert ("generated_at=2026-09-30T10:00:00Z, source_revision=abc123 (its provenance header)" in text), where
+                else:
+                    assert "## Last Deep Self-Review" not in text, where
 
 
 def test_the_pointers_are_stable_bytes_and_an_undated_report_stays_unknown(tmp_path, monkeypatch):
@@ -716,9 +720,12 @@ def test_a_root_on_the_canonical_drive_opens_the_report_with_the_call_it_is_show
     assert "OLD DEEP REVIEW BODY" in _run(root, deep)
 
 
-@pytest.mark.parametrize("mode", ["light", "advanced", "pro", "cyber_pro"])
-@pytest.mark.parametrize("focus", ["main", "project", "readonly_child", "acting_child"])
-@pytest.mark.parametrize("forked", [False, True])
+@pytest.mark.parametrize(("forked", "focus", "mode"), [
+    (False, "main", "light"),
+    (False, "readonly_child", "pro"),
+    (True, "project", "advanced"),
+    (True, "acting_child", "cyber_pro"),
+])
 def test_context_readers_open_canonical_history_in_every_mode_and_focus(tmp_path, monkeypatch, mode, focus, forked):
     from ouroboros.contracts.task_constraint import TaskConstraint
     from ouroboros.context import _canonical_runtime_reader

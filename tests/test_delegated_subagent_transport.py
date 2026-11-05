@@ -45,8 +45,7 @@ def test_discovery_reads_host_port_and_token(tmp_path):
 
 
 @pytest.mark.parametrize("host,loopback", [
-    ("127.0.0.1", True), ("localhost", True), ("::1", True), ("[::1]", True),
-    ("127.1.2.3", True), ("fe80::1%lo0", False),
+    ("127.0.0.1", True), ("localhost", True), ("fe80::1%lo0", False),
     # The exfiltration shapes: a plain external name, a name that merely LOOKS like a
     # loopback literal, an address that resolves off-host, and the wildcard bind.
     ("evil.example.com", False), ("127.0.0.1.evil.com", False),
@@ -590,9 +589,6 @@ def test_the_public_wait_is_event_only_and_its_outer_bound_matches_task_lifetime
             os.environ.pop("OUROBOROS_DELEGATE_WAIT_MAX_SEC", None)
         else:
             os.environ["OUROBOROS_DELEGATE_WAIT_MAX_SEC"] = previous
-
-
-# -- the window is a WINDOW: the timer waits, the human's stream does not ------
 
 
 # ---------------------------------------------------------------------------

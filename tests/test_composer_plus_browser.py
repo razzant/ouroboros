@@ -18,7 +18,7 @@ import pytest
 from tests.test_effort_range_browser import _evidence_dir, _launch, _open_chat
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture import
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 PLUS = "#page-chat #chat-plus"
 MENU = ".chat-plus-menu:not([data-leaving])"

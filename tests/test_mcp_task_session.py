@@ -19,7 +19,6 @@ from ouroboros import mcp_catalog, mcp_client, mcp_task_session, owner_pause
 from tests.test_batch4_producer_custody import _registry
 from tests.test_invocation_ownership import claims, owner, run
 
-pytestmark = pytest.mark.serial  # the shared producer-custody queue fixture, as its other MCP custody tests
 
 SERVER = r'''
 import asyncio, json, os, socket, sys, time

@@ -14,7 +14,7 @@ from tests import test_subscription_setup_browser as setup_browser
 from tests.test_design_system_gate_browser import open_nav, rest, seed_page, settle
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 BRIDGE = """(() => {
     window.__sizes = [];

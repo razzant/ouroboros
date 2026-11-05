@@ -40,20 +40,22 @@ def test_every_verb_is_either_mutating_or_view_only():
     assert sorted(act for act in core.ACTS if not core.act_mutating(act)) == sorted(VIEW_ONLY)
 
 
-@pytest.mark.parametrize("act", MUTATING)
-def test_a_completed_mutating_receipt_carries_the_mark_and_its_window(act):
-    said = core.receipt(plan(act), {"role": "button"}, {"role": "button"}, 5, 1, delivered_to=WINDOW)
-    assert said["observed_effect"] is True and said["delivered_to"] == WINDOW
-    assert said["ok"] is True and said["mutating"] is True and said["action_outcome"] == "completed"
-    bare = core.receipt(plan(act), {}, {}, 5, 1)  # the 0.1.0 positional call still works
-    assert bare["observed_effect"] is True and "delivered_to" not in bare
+def test_a_completed_mutating_receipt_carries_the_mark_and_its_window(subtests):
+    for act in MUTATING:
+        with subtests.test(act=act):
+            said = core.receipt(plan(act), {"role": "button"}, {"role": "button"}, 5, 1, delivered_to=WINDOW)
+            assert said["observed_effect"] is True and said["delivered_to"] == WINDOW
+            assert said["ok"] is True and said["mutating"] is True and said["action_outcome"] == "completed"
+            bare = core.receipt(plan(act), {}, {}, 5, 1)  # the 0.1.0 positional call still works
+            assert bare["observed_effect"] is True and "delivered_to" not in bare
 
 
-@pytest.mark.parametrize("act", VIEW_ONLY)
-def test_a_view_only_receipt_names_its_window_without_the_mark(act):
-    said = core.receipt(plan(act), {"role": "button"}, {"role": "button"}, 5, 1, delivered_to=WINDOW)
-    assert "observed_effect" not in said and said["delivered_to"] == WINDOW
-    assert said["ok"] is True and said["mutating"] is False and said["action_outcome"] == "completed"
+def test_a_view_only_receipt_names_its_window_without_the_mark(subtests):
+    for act in VIEW_ONLY:
+        with subtests.test(act=act):
+            said = core.receipt(plan(act), {"role": "button"}, {"role": "button"}, 5, 1, delivered_to=WINDOW)
+            assert "observed_effect" not in said and said["delivered_to"] == WINDOW
+            assert said["ok"] is True and said["mutating"] is False and said["action_outcome"] == "completed"
 
 
 @pytest.fixture

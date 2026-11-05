@@ -13,7 +13,7 @@ import pytest
 from tests import test_subscription_setup_browser as setup_browser
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 # What a token resolves to on this page (or inside `host`, where a surface's material restates it), as the browser
 # serializes the colour of a property.

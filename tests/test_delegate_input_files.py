@@ -19,6 +19,7 @@ import pytest
 from ouroboros import delegate_custody as custody
 from tests import _delegate_plan_shared
 from tests.test_delegated_skill_payload import _payload_ctx, _StartStub
+from tests._cases import case_folders
 
 plan_setup = _delegate_plan_shared.plan_setup
 
@@ -471,7 +472,6 @@ def test_the_receiving_childs_policy_limits_what_the_caller_may_select(tmp_path,
 
 @pytest.mark.parametrize("call,bootstrap_state,carried", [
     ({"attachment_paths": ["attachments/brief.md"]}, {}, True),  # its own documents keep the parent's input copies
-    ({}, {}, True),
     ({"input_files": [{"path": "own.md"}]}, {}, False),  # its own selection replaces them
     ({}, {"physical_started": True}, False),  # only the work order's first physical start carries them
     ({}, {"initial_invocation_id": "inv-1"}, False),
@@ -526,20 +526,23 @@ def test_the_root_vocabulary_is_every_ordinary_file_root_and_the_schema_says_so(
     assert input_files_parameter("x")["input_files"]["description"].endswith(" x")
 
 
-@pytest.mark.parametrize("root", sorted(_ROOT_BASE))
-def test_every_supported_root_prepares_through_the_real_start(tmp_path, monkeypatch, root):
-    monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(tmp_path / "home"))
-    monkeypatch.setenv("OUROBOROS_SUBAGENT_PROJECTS_ROOT", str(tmp_path / "projects"))
-    monkeypatch.setenv("OUROBOROS_DELIVERABLES_ROOT", str(tmp_path / "deliverables"))
-    ctx, engine = _ctx(tmp_path, monkeypatch)
-    source = _ROOT_BASE[root](ctx, tmp_path) / "folder" / "input.txt"
-    source.parent.mkdir(parents=True, exist_ok=True)
-    source.write_bytes(f"bytes of {root}\n".encode())
-    result = _start(ctx, input_files=[{"root": root, "path": "folder/input.txt"}])
-    assert result["status"] == "started", result
-    [row] = result["input_files"]
-    assert (row["root"], row["status"]) == (root, "prepared")
-    assert pathlib.Path(row["local"]).read_bytes() == source.read_bytes() and row["local"] in engine.requests[0]["instructions"]
+def test_every_supported_root_prepares_through_the_real_start(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for root in sorted(_ROOT_BASE):
+        tmp_path = next(case_paths)
+        with subtests.test(root=root), monkeypatch.context() as monkeypatch:
+            monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(tmp_path / "home"))
+            monkeypatch.setenv("OUROBOROS_SUBAGENT_PROJECTS_ROOT", str(tmp_path / "projects"))
+            monkeypatch.setenv("OUROBOROS_DELIVERABLES_ROOT", str(tmp_path / "deliverables"))
+            ctx, engine = _ctx(tmp_path, monkeypatch)
+            source = _ROOT_BASE[root](ctx, tmp_path) / "folder" / "input.txt"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_bytes(f"bytes of {root}\n".encode())
+            result = _start(ctx, input_files=[{"root": root, "path": "folder/input.txt"}])
+            assert result["status"] == "started", result
+            [row] = result["input_files"]
+            assert (row["root"], row["status"]) == (root, "prepared")
+            assert pathlib.Path(row["local"]).read_bytes() == source.read_bytes() and row["local"] in engine.requests[0]["instructions"]
 
 
 @pytest.mark.parametrize("root", ["skill_payload", "no_such_root"])

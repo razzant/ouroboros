@@ -16,7 +16,6 @@ subscription_ui = setup_browser.subscription_ui
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_settings_complete_draft_validation_and_local_stop(direct_server_with_data, engine):
@@ -204,7 +203,6 @@ def test_settings_complete_draft_validation_and_local_stop(direct_server_with_da
             browser.close()
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 def test_initial_settings_document_survives_early_edit_while_enrichment_waits(subscription_ui):
     """Hold actual optional reads until after an edit; no timing race or runtime."""
@@ -258,7 +256,6 @@ def test_initial_settings_document_survives_early_edit_while_enrichment_waits(su
     assert not any(path == '/api/settings' for path, _ in ui['posts'])
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 def test_mcp_local_json_errors_hold_whole_settings_save(subscription_ui):
     from playwright.sync_api import expect
@@ -349,7 +346,6 @@ def test_older_failed_settings_reload_cannot_disable_newer_success(subscription_
     expect(page.locator('#settings-status')).to_contain_text('current read failed')
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_stored_zero_allowance_survives_an_unrelated_settings_save(direct_server_with_data, engine):

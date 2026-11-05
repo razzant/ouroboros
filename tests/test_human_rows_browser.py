@@ -22,7 +22,7 @@ from tests.test_sidebar_activity_browser import FRAMES, activity, mount_sidebar
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 
 subscription_ui = setup.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 ROOM = [dict(id="p-fixture", name="Synthetic room", chat_id=42, lifecycle="active", visible_revision=0)]
 
 

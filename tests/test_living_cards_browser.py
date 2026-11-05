@@ -16,7 +16,7 @@ import pytest
 from tests.test_effort_range_browser import _evidence_dir, _launch, _open_chat
 from tests.test_ui_smoke_playwright import _write_phase3_widget_smoke_extension, direct_server_with_data  # noqa: F401
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 APP_HTML = """<!doctype html><html><head><style>
 body { margin: 0; padding: 8px; color: var(--ouro-text); font-family: var(--ouro-font); }

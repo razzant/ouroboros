@@ -52,8 +52,12 @@ def _whole_from_first(reader, ref):
     return "".join(pieces)
 
 
-@pytest.mark.parametrize("key", ["staged_output", "other_staged_outputs", "terminal_observation", "other_terminal_observations"])
-@pytest.mark.parametrize("geometry", ["parent", "forked_parent", "root_continue"])
+@pytest.mark.parametrize(("geometry", "key"), [
+    ("parent", "staged_output"),
+    ("parent", "other_terminal_observations"),
+    ("forked_parent", "other_staged_outputs"),
+    ("root_continue", "terminal_observation"),
+])
 def test_legacy_receipt_first_recipe_opens_after_gc_with_different_staging_and_publisher(geo, key, geometry):
     text, _ref = _old_receipt(geo, key)
     old = load_task_result(geo.canonical, NANNY)

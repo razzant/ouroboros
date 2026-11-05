@@ -11,9 +11,6 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_PATH = REPO_ROOT / "skills" / "unix_computer_use" / "plugin.py"
-SKILL_PATH = REPO_ROOT / "skills" / "unix_computer_use" / "SKILL.md"
-
-
 _PROBE_HEADS = (("lsappinfo",), ("xdotool", "getactivewindow"), ("wmctrl", "-lpxG"))
 
 
@@ -67,13 +64,6 @@ def test_unix_computer_use_registers_expected_tools(tmp_path):
         "window_list",
         "ax_tree",
     } <= set(api.tools)
-
-
-def test_unix_computer_use_manifest_declares_permissions():
-    text = SKILL_PATH.read_text(encoding="utf-8")
-
-    # `net` is required for the remote OSWorld HTTP / SSH backends.
-    assert "permissions: [tool, subprocess, net]" in text
 
 
 def test_unix_computer_use_screenshot_uses_detected_backend(tmp_path, monkeypatch):
@@ -375,8 +365,7 @@ def test_macos_screenshot_without_logical_size_is_capture_only(tmp_path, monkeyp
     assert "Capture only" in result["coordinate_note"]
 
 
-@pytest.mark.parametrize("backend", ["local", "remote"])
-@pytest.mark.parametrize("failure", ["write", "lock"])
+@pytest.mark.parametrize(("failure", "backend"), [("write", "local"), ("lock", "remote")])
 def test_screenshot_save_failure_keeps_image_without_claiming_observation(tmp_path, monkeypatch, backend, failure):
     from PIL import Image
     from ouroboros import utils

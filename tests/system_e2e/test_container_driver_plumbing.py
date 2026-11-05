@@ -40,7 +40,6 @@ def _post_local(url: str, payload: dict) -> dict:
         return json.loads(answer.read())
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform == "win32", reason="the relay runs inside Linux containers")
 def test_the_model_relay_carries_concurrent_streams_to_the_host_stub():
     port = _free_port()

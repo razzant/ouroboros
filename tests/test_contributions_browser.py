@@ -16,7 +16,7 @@ import pytest
 from tests import test_subscription_setup_browser as setup_browser
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 VOICE_URL = "/api/extensions/voice/ui/r1/ui/tts.js"
 BROKEN_URL = "/api/extensions/broken/ui/r1/ui/panel.js"

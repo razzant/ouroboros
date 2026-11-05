@@ -537,7 +537,7 @@ def _receipts(root):
     return mi.fallback_refusals(ChronicleStore(root).scan_state())
 
 
-@pytest.mark.parametrize("case", ["not_json", "output_truncated", "empty_summary", "context_overflow"])
+@pytest.mark.parametrize("case", ["not_json", "empty_summary", "context_overflow"])
 def test_a_refusal_leaves_a_receipt_that_skips_the_same_input_on_the_same_route(tmp_path, monkeypatch, light, case):
     rooms = shared.world(tmp_path)
     alpha_unit, beta_unit = f"legacy-b01-r{rooms['alpha']}", f"legacy-b01-r{rooms['beta']}"

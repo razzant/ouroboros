@@ -12,7 +12,6 @@ import pytest
 from ouroboros import body_candidate, workspace_executor as executor
 from tests.body_candidate_support import isolate, make_ctx, make_serving
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize('consumer', ['command', 'service'])

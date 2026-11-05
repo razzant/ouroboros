@@ -108,13 +108,21 @@ def test_a_real_review_park_wakes_for_an_untagged_message_and_the_same_author_re
     assert world.h.settled.wait(60)
 
 
-@pytest.mark.parametrize("passive", ["reaction", "bot", "threadless", "owner_pause", "budget_fence", "place_paused", "off"])
+@pytest.mark.parametrize("passive", ["reaction", "place_paused", "off"])
 def test_nothing_passive_or_controlled_wakes_a_real_question_park(host, monkeypatch, passive):
     from ouroboros import owner_pause
 
     world = host(wakes=("mention",))
     thread = "" if passive == "threadless" else "1.0"
     author = _park_at_question(world, finish("Done."), thread=thread)
+    model_woke = threading.Event()
+    scripted_model = world.h.script
+
+    def observe_wake(messages):
+        model_woke.set()
+        return scripted_model(messages)
+
+    world.h.script = observe_wake
     calls = world.h.calls
     arguments = {"text": "Words beside the park.", "thread": thread}
     if passive == "reaction":
@@ -136,7 +144,7 @@ def test_nothing_passive_or_controlled_wakes_a_real_question_park(host, monkeypa
     assert reply.status_code == 200 and reply.json()["outcome"] == "silent", (passive, reply.text)
     assert attention(world, source)["decision"] == "heard" and "recipient" not in attention(world, source), passive
     assert place_rows(world.data, author) == [], passive
-    time.sleep(1.5)  # a wake lands within the park's one-second poll
+    assert not model_woke.wait(1.5), (passive, "no round and no stand-in focus")
     assert world.h.calls == calls and len(world.h.agents) == 1, (passive, "no round and no stand-in focus")
     assert (load_task_result(world.data, author).get("owner_wait") or {}).get("state") == "waiting", passive
     # The control lifted, the same live park still wakes for the next real message.

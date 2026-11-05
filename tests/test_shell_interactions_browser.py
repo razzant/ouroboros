@@ -19,7 +19,7 @@ from tests._work_projection_shared import work_fields
 from tests.ui_motion_samples import SAMPLE_TRANSITION
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.fixture(params=['webkit', 'chromium'])

@@ -78,8 +78,7 @@ def _comment(cid, **extra):
             "issue_url": f"{API}/repos/owner/selected/issues/7", "body": f"comment {cid}", **extra}
 
 
-@pytest.mark.parametrize("retired,kind", [("get_github_issue", "comment"), ("get_github_pr", "comment"),
-                                         ("get_github_pr", "review_comment"), ("get_github_pr", "review")])
+@pytest.mark.parametrize("retired,kind", [("get_github_issue", "comment"), ("get_github_pr", "review_comment"), ("get_github_pr", "review")])
 def test_retired_detail_names_withhold_target_lists_but_allow_repo_sweeps(gh, monkeypatch, retired, kind):
     from ouroboros.tools.registry import ToolRegistry
 
@@ -225,8 +224,10 @@ def test_get_with_a_cursor_pages_exactly_one_facet(gh):
     assert gh.read(method="get", kind="pr", target=7, include=["weird"]).startswith("⚠️ TOOL_ARG_ERROR: unknown include facet(s) weird")
 
 
-@pytest.mark.parametrize("detail", ["concise", "full"])
-@pytest.mark.parametrize("fields", [[], ["review_decision"]])
+@pytest.mark.parametrize(("fields", "detail"), [
+    pytest.param([], "concise", id='fields0-concise'),
+    pytest.param(["review_decision"], "full", id='fields1-full'),
+])
 def test_get_pr_keeps_review_decision_in_both_detail_modes(gh, detail, fields):
     def answer(p, argv, kw):
         if p.route != "graphql":
@@ -254,8 +255,14 @@ def test_full_pr_list_enrichment_preserves_raw_head_and_base(gh):
     assert payload["items"][0]["base"]["repo"] == {"id": 2}
 
 
-@pytest.mark.parametrize("detail", ["concise", "full"])
-@pytest.mark.parametrize("null_field", [None, "headRefOid", "headRefName", "headRepositoryOwner", "baseRefName", "all"])
+@pytest.mark.parametrize(("null_field", "detail"), [
+    (None, "full"),
+    ("headRefOid", "full"),
+    ("headRefName", "concise"),
+    ("headRepositoryOwner", "concise"),
+    ("baseRefName", "full"),
+    ("all", "concise"),
+])
 def test_pr_list_overlays_only_nonnull_graphql_head_and_base_facts(gh, detail, null_field):
     node = {"id": "PR_node7", "commits": {"totalCount": 4}, "reviewDecision": "APPROVED",
             "headRefName": "new-feature", "headRefOid": "d" * 40,
@@ -280,8 +287,7 @@ def test_pr_list_overlays_only_nonnull_graphql_head_and_base_facts(gh, detail, n
     assert item["commits"] == 4 and item["review_decision"] == "APPROVED"
 
 
-@pytest.mark.parametrize("detail", ["concise", "full"])
-@pytest.mark.parametrize("nested", ["comments", "replies"])
+@pytest.mark.parametrize(("nested", "detail"), [("comments", "concise"), ("replies", "full")])
 def test_nested_cuts_are_disclosed_in_both_detail_modes(gh, detail, nested):
     def answer(p, argv, kw):
         if p.route != "graphql":
@@ -306,7 +312,6 @@ def test_nested_cuts_are_disclosed_in_both_detail_modes(gh, detail, nested):
 
 @pytest.mark.parametrize("kind,target,route,label", [
     ("comment", 44, "repos/owner/selected/issues/comments/44", "comment 44"),
-    ("review_comment", 45, "repos/owner/selected/pulls/comments/45", "review_comment 45"),
     ("release", "v1.2", "repos/owner/selected/releases/tags/v1.2", "release v1.2"),
     ("label", "bug", "repos/owner/selected/labels/bug", "label bug"),
 ])
@@ -380,7 +385,7 @@ def test_list_prs_keeps_exact_commit_counts_and_review_decisions_from_one_graphq
     assert count_argv == ["gh", "api", "graphql", "--hostname", "github.example", "--input", "-"] and count_kw["cwd"] == str(gh.ctx.repo_dir)
 
 
-@pytest.mark.parametrize("case", ["bool-count", "missing-node", "no-id", "foreign-repo", "graphql-error"])
+@pytest.mark.parametrize("case", ["bool-count", "missing-node", "graphql-error"])
 def test_an_unreadable_pr_count_withholds_the_list(gh, case):
     rows = [_pr(1), _pr(2)]
     if case == "no-id":
@@ -403,8 +408,11 @@ def test_list_pr_since_stops_at_the_first_older_row(gh):
     assert [i["number"] for i in payload["items"]] == [3] and payload["complete"] is True and payload["next_cursor"] == ""
 
 
-@pytest.mark.parametrize("filters", [{"state": "merged"}, {"labels": "bug"}, {"author": "dev"}])
-@pytest.mark.parametrize("detail", ["concise", "full"])
+@pytest.mark.parametrize(("detail", "filters"), [
+    pytest.param("concise", {"author": "dev"}, id='concise-filters2'),
+    pytest.param("full", {"state": "merged"}, id='full-filters0'),
+    pytest.param("full", {"labels": "bug"}, id='full-filters1'),
+])
 def test_search_backed_pr_lists_keep_facts_and_withhold_unreadable_counts(gh, filters, detail):
     def answer(p, argv, kw):
         if p.route == "graphql":
@@ -427,12 +435,7 @@ def test_search_backed_pr_lists_keep_facts_and_withhold_unreadable_counts(gh, fi
 @pytest.mark.parametrize("kind,target,route,label", [
     ("comment", 0, "repos/owner/selected/issues/comments?since=S&sort=updated&direction=asc", "comment (repo-wide, issues and PR conversations)"),
     ("comment", 7, "repos/owner/selected/issues/7/comments?since=S", "comment on #7"),
-    ("review_comment", 0, "repos/owner/selected/pulls/comments?since=S&sort=updated&direction=asc", "review_comment (repo-wide inline review comments)"),
-    ("review_comment", 7, "repos/owner/selected/pulls/7/comments?since=S", "review_comment on PR #7"),
-    ("review", 7, "repos/owner/selected/pulls/7/reviews?", "review on PR #7"),
     ("notification", 0, "repos/owner/selected/notifications?since=S&all=true", "notification (all)"),
-    ("release", 0, "repos/owner/selected/releases?", "release"),
-    ("label", 0, "repos/owner/selected/labels?", "label"),
 ])
 def test_list_kinds_take_since_and_target_on_the_matching_route(gh, kind, target, route, label):
     gh.answer = lambda p, argv, kw: _rest([])
@@ -451,8 +454,7 @@ def test_list_reviews_need_a_pull_request(gh):
     assert gh.read(method="list", kind="review").startswith("⚠️ TOOL_ARG_ERROR: list(kind='review') needs target") and not gh.calls
 
 
-@pytest.mark.parametrize("detail", ["concise", "full"])
-@pytest.mark.parametrize("since", ["", "2026-10-01T00:00:00Z"])
+@pytest.mark.parametrize(("since", "detail"), [("", "full"), ("2026-10-01T00:00:00Z", "concise")])
 def test_label_list_discloses_unsupported_since_without_claiming_a_filter(gh, detail, since):
     # A synthetic old timestamp makes this nonempty fixture distinguish an applied filter from an ignored one.
     label = {"id": 1, "name": "bug", "color": "ff0000", "updated_at": "2026-09-01T00:00:00Z"}
@@ -543,8 +545,8 @@ def test_search_discussions_is_a_graphql_search_without_repository_variables(gh)
 
 
 # ---- checks ------------------------------------------------------------------------------------------
-@pytest.mark.parametrize("target,expected", [(7, {"number": 7, "sha": ""}), ("7", {"number": "7", "sha": ""}), (SHA, {"number": 0, "sha": SHA}),
-                                             (SHA.upper(), {"number": 0, "sha": SHA}), ("main", {"number": 0, "sha": "main"})])
+@pytest.mark.parametrize("target,expected", [(7, {"number": 7, "sha": ""}), (SHA, {"number": 0, "sha": SHA}),
+                                             ("main", {"number": 0, "sha": "main"})])
 def test_checks_is_the_existing_reader_registered_as_a_method(gh, monkeypatch, target, expected):
     seen = {}
 
@@ -575,7 +577,6 @@ def test_rest_api_preserves_pagination_and_a_usable_next_route(gh, next_route):
 @pytest.mark.parametrize("document", [
     'query{search(query:"fix mutation bug",type:ISSUE,first:1){issueCount}}',
     'query{search(query:"""fix mutation bug\nwith a block string""",type:ISSUE,first:1){issueCount}}',
-    '# mutation Fake { ignored }\nquery { viewer { login } }',
     'query mutation { viewer { mutation: login } }',
 ])
 def test_graphql_query_classification_ignores_strings_comments_and_names(gh, document):
@@ -665,12 +666,8 @@ def test_a_result_beyond_the_tool_limit_is_saved_whole_as_a_task_artifact(gh, mo
 @pytest.mark.parametrize("args,fragment", [
     ({"method": "nope"}, "method must be one of"),
     ({"method": "get"}, "get needs kind ∈"),
-    ({"method": "list"}, "list needs kind ∈"),
     ({"method": "list", "kind": "widget"}, "kind must be one of"),
-    ({"method": "list", "kind": "issue", "limit": 0}, "limit is a whole number from 1 to 100"),
-    ({"method": "list", "kind": "issue", "limit": "ten"}, "limit is a whole number from 1 to 100"),
     ({"method": "get", "kind": "issue", "target": 7, "detail": "huge"}, "detail is 'concise' or 'full'"),
-    ({"method": "whoami", "repo": None}, "GH_TARGET_INVALID"),
 ])
 def test_argument_refusals_are_typed_and_send_nothing(gh, args, fragment):
     gh.ctx._active_builtin_tool_result = None

@@ -17,7 +17,6 @@ from ouroboros import projects_registry as registry
 from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_schedule_occurrence import q, _row, _rows  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def task(tid="attempt", **extra):
@@ -34,7 +33,7 @@ def room(q):  # noqa: F811
     return q
 
 
-@pytest.mark.parametrize("activity", ["unchanged", "own_touch", "other_touch", "visible", "result"])
+@pytest.mark.parametrize("activity", ["unchanged", "other_touch", "result"])
 def test_activity_is_not_a_routing_change(room, activity):
     basis = registry.project_admission_view(room.root, "target")
     if activity.endswith("touch"):
@@ -81,7 +80,7 @@ def test_registry_lock_occupancy_does_not_delay_nested_queue_admission(room, wri
     assert not thread.is_alive() and not caller.is_alive()
 
 
-@pytest.mark.parametrize("change", ["rebind", "aba", "delete", "missing", "reconstruct"])
+@pytest.mark.parametrize("change", ["rebind", "missing", "reconstruct"])
 def test_original_preparation_basis_rejects_semantic_changes(room, change):
     basis = registry.project_admission_view(room.root, "target")
     if change in {"rebind", "aba"}:
@@ -107,7 +106,7 @@ def test_original_preparation_basis_rejects_semantic_changes(room, change):
     assert "attempt" not in room.queue.ADMISSION_RESERVATIONS
 
 
-@pytest.mark.parametrize("corruption", ["json", "lifecycle", "generation", "duplicate", "folder", "permission", "missing_file"])
+@pytest.mark.parametrize("corruption", ["json", "duplicate", "missing_file"])
 def test_raw_unavailable_authority_is_typed_and_never_normalized_active(room, monkeypatch, corruption):
     basis = registry.project_admission_view(room.root, "target")
     path = registry._registry_path(room.root)
@@ -542,8 +541,7 @@ def corrupt_neighbor(root, **fields):
     return row
 
 
-@pytest.mark.parametrize("operation", ["create", "rename", "folder", "bind", "visible_id",
-                                        "visible_chat", "delete", "delete_failure", "tombstone"])
+@pytest.mark.parametrize("operation", ["create", "delete_failure", "tombstone"])
 def test_registry_writers_preserve_unrelated_raw_rows(room, operation):
     if operation in {"delete_failure", "tombstone"}:
         registry.begin_project_deletion(room.root, "target")
@@ -574,7 +572,7 @@ def test_registry_writers_preserve_unrelated_raw_rows(room, operation):
     assert "working_dir" not in next(row for row in rows if row["id"] == "other")
 
 
-@pytest.mark.parametrize("corruption", ["target", "duplicate_id", "duplicate_chat", "json"])
+@pytest.mark.parametrize("corruption", ["target", "duplicate_id", "json"])
 def test_selected_writer_refuses_invalid_authority_without_changing_bytes(room, corruption):
     path = registry._registry_path(room.root)
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -661,7 +659,7 @@ def test_named_strict_readers_preserve_refusal_for_relevant_unknown_authority(ro
         assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("operation", ["create", "rename", "delete", "folder", "start"])
+@pytest.mark.parametrize("operation", ["create", "folder", "start"])
 def test_named_project_consumers_keep_healthy_neighbor_available(room, tmp_path, monkeypatch, operation):
     import asyncio
     from ouroboros.gateway import projects

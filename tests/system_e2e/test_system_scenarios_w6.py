@@ -110,7 +110,6 @@ def _tool_body(text: str) -> dict:
             "tools": [{"type": "function", "function": {"name": "list_files"}}]}
 
 
-@pytest.mark.serial  # a real loopback port (ScriptedStubModel) — the serial pass
 def test_model_gate_holds_once_outside_the_call_lock_and_releases():
     gate = ModelGate(lambda body: bool(body.get("tools")) and "HOLD-ME" in body_text(body),
                      timeout=30)
@@ -276,7 +275,6 @@ def _terminal_fields(oracle: ArtifactOracle, task_id: str) -> dict:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s26_direct_chat_turn_owner_stop_mid_round_is_typed_and_ends_the_turn(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)

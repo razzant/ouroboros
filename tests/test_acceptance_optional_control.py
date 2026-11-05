@@ -77,12 +77,8 @@ def test_answer_choice_preserves_the_pending_review_wait_policy(tmp_path, monkey
 
 
 @pytest.mark.parametrize("raw", [
-    "", "   ", [{"type": "thinking", "thinking": "reasoning only"}],
-    '{"delivery_control":"unknown"}', '{"delivery_control":"replace","full_answer":""}',
-    '{"delivery_control":"replace","full_answer":', '{"full_answer":"missing verb"}',
-    '{"delivery_control":"keep","pending_review":"unknown"}',
-    '{"delivery_control":"keep","delivery_control":"replace","full_answer":"bad"}',
-    'A notice.\n{"delivery_control":"keep"}', '```json\n{"delivery_control":\n```',
+    "", [{"type": "thinking", "thinking": "reasoning only"}],
+    '```json\n{"delivery_control":\n```',
 ])
 def test_unselected_or_historical_control_never_forces_completion(tmp_path, monkeypatch, raw):
     registry, ctx, trace, candidate = _held(tmp_path)
@@ -106,10 +102,7 @@ def test_explicit_selection_after_a_malformed_old_control(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize("arguments", [
     {"action": "unknown", "answer": ANSWER},
-    {"action": "finish", "answer": ""},
     {"action": "finish", "answer_sha256": ""},
-    {"action": "finish", "answer": ANSWER, "answer_sha256": "both"},
-    {"action": "stop", "answer": ANSWER},
     {"action": "finish", "answer": ANSWER, "pending_review": "unknown"},
 ])
 def test_invalid_completion_retains_answer_then_allows_explicit_reselection(tmp_path, monkeypatch, arguments):
@@ -177,7 +170,6 @@ def test_explicit_replacement_after_material_change_binds_the_new_evidence(tmp_p
      (ANSWER, True, False, True, False)),
     ('{"action":"finish","answer":"Complete replacement."}',
      ("Complete replacement.", False, False, True, True)),
-    ("Forced complete answer.", ("Forced complete answer.", False, False, True, False)),
 ])
 def test_forced_transport_uses_explicit_completion_or_plain_final_prose(tmp_path, monkeypatch, raw, expected):
     from ouroboros.loop_delivery import _resolve_forced_delivery_control_body

@@ -11,7 +11,7 @@ from tests._delegate_capture_child import idle_maintenance_child  # noqa: F401
 from tests.test_synthesis_ownership_recovery import work as work, checkpoint
 from tests.test_delegate_body_collection import _until
 
-pytestmark = [pytest.mark.serial, pytest.mark.usefixtures("idle_maintenance_child")]
+pytestmark = [pytest.mark.usefixtures("idle_maintenance_child")]
 
 
 def test_real_maintenance_recovers_unsent_phase_while_usage_duty_is_blocked(work, monkeypatch):

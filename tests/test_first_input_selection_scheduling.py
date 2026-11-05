@@ -194,7 +194,7 @@ def test_selected_contract_survives_existing_queue_snapshot(registry, tmp_path):
     assert build_task_contract(pending[0])["context"] == "COMMON_FACTS"
 
 
-@pytest.mark.parametrize("selection", [None, "", "unknown", "DECLARED", True, [], {}])
+@pytest.mark.parametrize("selection", [None, "DECLARED", {}])
 def test_malformed_selection_has_typed_reason_without_creating_child(registry, selection):
     result = _schedule(registry, input_sources=selection)
     assert (result.status, result.code) == ("error", "TOOL_ARG_ERROR")

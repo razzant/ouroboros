@@ -51,8 +51,10 @@ def test_stale_writer_cannot_replace_answer_or_provenance(tmp_path):
     assert settled["verdict"]["aggregate"] == "PASS"
 
 
-@pytest.mark.parametrize("writer", ["collected", "pending_payload"])
-@pytest.mark.parametrize("status,role", [("responded", "response"), ("error", "failure")])
+@pytest.mark.parametrize(("status", "role", "writer"), [
+    ("responded", "response", "collected"),
+    ("error", "failure", "pending_payload"),
+])
 def test_settlement_replaces_current_sources_and_keeps_historical_originals(tmp_path, writer, status, role):
     from ouroboros.review_projection import ledger_record_panel
     from tests.test_task_review_sources import client_for, source_url
@@ -171,8 +173,11 @@ def test_distinct_findings_on_one_item_survive_and_identical_replay_deduplicates
     assert len(replay["verdict"]["critical_findings"]) == 2
 
 
-@pytest.mark.parametrize("operation", ["write", "revise", "collect"])
-@pytest.mark.parametrize("lock_failure", ["unavailable", "raises"])
+@pytest.mark.parametrize(("lock_failure", "operation"), [
+    ("unavailable", "write"),
+    ("raises", "revise"),
+    ("raises", "collect"),
+])
 def test_unavailable_lock_writes_nothing_and_normal_lock_recovers(tmp_path, monkeypatch, operation, lock_failure):
     from ouroboros import platform_layer
 

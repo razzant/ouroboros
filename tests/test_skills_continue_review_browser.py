@@ -14,7 +14,7 @@ import pytest
 
 from tests._skills_page_harness import URL, capture, no_overflow, open_skills, skills_browser as _skills_browser
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 skills_browser = _skills_browser
 HASH = "e4525ee1b665f43e71d181e2a7e557978932b6bd4726ba34ab46f134e7d44d73"
 RECORD = "rl-20261102T151335-70f9fdc1d8b9"

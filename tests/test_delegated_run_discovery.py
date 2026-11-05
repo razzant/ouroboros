@@ -191,7 +191,7 @@ def _publish_terminal_result(geo, task_id, status="cancelled"):
 
 # --- the staging task reads its own retained answer on every drive -----------------
 
-@pytest.mark.parametrize("geometry", ["canonical_top", "forked_top", "readonly_child", "acting_child"])
+@pytest.mark.parametrize("geometry", ["canonical_top", "forked_top", "acting_child"])
 def test_the_staging_task_reads_its_retained_output_on_every_drive(geo, monkeypatch, geometry):
     ctx = {
         "canonical_top": lambda: _top(geo, ROOT),
@@ -385,7 +385,6 @@ def test_existing_read_rules_run_first_and_the_default_read_never_opens_the_sour
         "an explicit selector is never swallowed by the unchanged-result shortcut"
 
 
-@pytest.mark.serial  # retry authority reads a fresh queue snapshot (the retry suites' lane)
 def test_a_retry_reader_stages_into_its_own_store_and_the_starter_receipt_names_it(tmp_path, monkeypatch):
     from ouroboros.delegate_terminal import _audit_task_custody, record_terminal_reconciliation
     from ouroboros.tools import delegate

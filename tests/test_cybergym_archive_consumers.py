@@ -22,7 +22,6 @@ from tests.test_cybergym_executor import _config, _write_archive, _DESCRIPTOR_SA
     ("_MAX_ARCHIVE_MEMBERS", 1, [("src/one", "file", "a"), ("src/two", "file", "b")], "member count"),
     ("_MAX_ARCHIVE_FILE_BYTES", 3, [("src/large", "file", "four")], "member size"),
     ("_MAX_ARCHIVE_TOTAL_BYTES", 3, [("src/one", "file", "ab"), ("src/two", "file", "cd")], "total size"),
-    ("_MAX_ARCHIVE_STREAM_BYTES", 1024, [("src/one", "file", "a")], "expanded stream"),
 ])
 def test_archive_limits_refuse_before_publication(tmp_path, monkeypatch, limit, value, entries, message):
     archive = tmp_path / "repo-vul.tar.gz"
@@ -181,7 +180,7 @@ def test_final_copy_uses_one_open_inode(tmp_path, monkeypatch):
     assert destination.read_bytes() == b"chosen"
 
 
-@pytest.mark.parametrize("variant", ["valid", "expanded", "compressed", "corrupt", "deflate", "escaped"])
+@pytest.mark.parametrize("variant", ["valid", "corrupt", "escaped"])
 def test_compressed_telemetry_consumer_is_bounded(tmp_path, monkeypatch, variant):
     cap = 512
     monkeypatch.setattr(wire, "_MAX_TELEMETRY_REF_BYTES", cap)

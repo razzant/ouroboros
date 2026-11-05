@@ -8,7 +8,7 @@ from tests.test_subscription_setup_browser import subscription_ui as _subscripti
 
 subscription_ui = _subscription_ui  # re-exported pytest fixture (requested by name below)
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def open_appearance(page):

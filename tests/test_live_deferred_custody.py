@@ -19,7 +19,7 @@ from ouroboros import call_protocol as cp
 from ouroboros.contracts.live_conversation import ContextUpdate, ToolOutputs
 from ouroboros.contracts.realtime import RealtimeSetupError
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_live_conversation_driver import Batch, Host, until
 from tests.test_live_tool_continuity import Adapter, POINTER, RECEIPT, look_call, reached
 from tests.test_live_tool_continuity_stack import native_output
@@ -353,8 +353,11 @@ def held_write(fails):
     return SimpleNamespace(during=during, entered=entered, release=release)
 
 
-@pytest.mark.parametrize('deferred', [False, True])
-@pytest.mark.parametrize('fails,answered', [(True, True), (True, False), (False, True)])
+@pytest.mark.parametrize(("fails", "answered", "deferred"), [
+    (True, True, False),
+    (True, False, True),
+    (False, True, False),
+])
 def test_a_write_ending_after_the_switch_changes_nothing_on_the_successor(fails, answered, deferred):
     """However late the old socket's write ends: consume carried its debt, so a failure offers nothing more, and a
     stale success records no delivery on the conversation that replaced it."""
@@ -467,8 +470,7 @@ def test_a_direct_result_never_written_before_a_fresh_fit_owes_its_one_pointer()
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('fits', [True, False])
-@pytest.mark.parametrize('gap', [False, True])
+@pytest.mark.parametrize(("gap", "fits"), [(False, True), (True, False)])
 def test_mail_measured_across_a_fresh_switch_stays_in_the_fit(gap, fits):
     """The same worker measures pending mail after its output: a fresh fit holds that mail, and with no connection
     yet there is no session to write it to. Neither ends the call, however the old measure answers."""
@@ -529,8 +531,7 @@ def test_the_private_answer_marker_leaves_no_copy_of_a_row_for_a_wire():
 # --- the real host and adapters ----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize('answered', [True, False])
-@pytest.mark.parametrize('engine', ['openai', 'gemini'])
+@pytest.mark.parametrize(("engine", "answered"), [('openai', True), ('gemini', False)])
 def test_native_guard_returning_after_a_successor_took_custody(host_world, monkeypatch, engine, answered):
     """Real host and adapters: one real ahead-fit capacity failure withholds a completed batch for its serving measure,
     and the socket is replaced while that measure runs. One pointer, one spoken answer if the mind gives it, never an

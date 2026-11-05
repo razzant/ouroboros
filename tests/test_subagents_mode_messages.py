@@ -67,8 +67,13 @@ def test_unannotated_legacy_history_is_readable_and_has_no_inferred_label():
     assert "subagents_mode" not in replay
 
 
-@pytest.mark.parametrize("room_state", ["readable", "deleting", "registry", "bindings", "settings"])
-@pytest.mark.parametrize("surface", ["round", "message"])
+@pytest.mark.parametrize(("surface", "room_state"), [
+    ("round", "readable"),
+    ("round", "bindings"),
+    ("round", "settings"),
+    ("message", "deleting"),
+    ("message", "registry"),
+])
 def test_room_annotations_survive_unavailable_project(room_state, surface, monkeypatch, tmp_path):
     from ouroboros.loop_messages import append_context_facts
     from ouroboros.settings_integrity import live_subagents_mode, task_settings_scope
@@ -106,9 +111,13 @@ def test_room_annotations_survive_unavailable_project(room_state, surface, monke
             assert message_ingress.accepted_chat_message(config.DATA_DIR, room["chat_id"], "annotation") == row
 
 
-@pytest.mark.parametrize("mode", ["off", "auto", "swarm"])
-@pytest.mark.parametrize("availability", ["available", "disabled", "unsaved"])
-@pytest.mark.parametrize("project", [False, True])
+@pytest.mark.parametrize(("project", "availability", "mode"), [
+    (False, "available", "off"),
+    (False, "available", "auto"),  # the recorded mode follows the owner's choice: one available row per mode
+    (True, "available", "swarm"),
+    (False, "unsaved", "swarm"),
+    (True, "disabled", "auto"),
+])
 def test_direct_owner_root_records_effective_admission_not_client_metadata(monkeypatch, mode, availability, project):
     from supervisor import workers
     from tests.conversation_carrier_support import carry

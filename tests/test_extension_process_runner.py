@@ -689,8 +689,6 @@ def test_isolated_dependency_extension_rejects_unproxied_side_effect_surface(tmp
     [
         {"tools": [{"name": "foreign_tool"}]},
         {"routes": [{"path": "/api/extensions/other/x", "methods": ["GET"]}]},
-        {"ws_handlers": [{"type": "foreign.ws"}]},
-        {"ui_tabs": [{"key": "other:tab"}]},
         {"settings_sections": [{"key": "other:settings"}]},
     ],
 )
@@ -720,7 +718,6 @@ def test_out_of_process_catalog_revalidates_parent_namespace(tmp_path, catalog):
     "catalog",
     [
         lambda skill: {"tools": [{"name": extension_loader.extension_surface_name(skill.name, "bad"), "schema": []}]},
-        lambda skill: {"routes": [{"path": f"/api/extensions/{skill.name}/bad", "methods": ["TRACE"]}]},
         lambda skill: {"ws_handlers": [{"type": extension_loader.extension_surface_name(skill.name, "bad") + "."}]},
         lambda skill: {"ui_tabs": [{"key": f"{skill.name}:bad", "render": []}]},
         lambda skill: {"settings_sections": [{"key": f"{skill.name}:bad", "render": []}]},

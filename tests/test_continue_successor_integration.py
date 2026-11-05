@@ -31,7 +31,6 @@ from supervisor.events_subagent_admission import _resolve_subagent_constraint
 from tests._store_shared import read_result, result_signature, seed_result
 
 # Actual Git subprocess fixtures follow the repository's real-process lane.
-pytestmark = pytest.mark.serial
 
 NONCE = "continue-nonce-1"
 SUCCESSOR = successor_id("pred", NONCE)

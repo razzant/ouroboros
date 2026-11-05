@@ -132,35 +132,36 @@ def test_every_recorded_chat_stream_has_expectations():
     assert {_rel(path) for path in _streams()} == set(EXPECTED)
 
 
-@pytest.mark.parametrize("size", CHUNK_SIZES)
-@pytest.mark.parametrize("path", _streams(), ids=_rel)
-def test_recorded_chat_stream_assembles_completely(path, size):
-    expected = EXPECTED[_rel(path)]
-    body, receipt = _assemble(path, size)
-    assert receipt["anomalies"] == {"count": 0, "first": []}, "a recorded wire is clean; irregularities would be disclosed here"
-    assert receipt["complete"] is True
-    for choice in body["choices"]:
-        assert choice["finish_reason"]
-        for call in choice["message"].get("tool_calls") or []:
-            assert call["id"] and call["type"] in {"function", "custom"}
-            assert _call_name(call)
-            assert isinstance(call[call["type"]]["arguments" if call["type"] == "function" else "input"], str)
-    msg, usage = _normalized(path, {**body, "_stream_receipt": receipt})
-    assert usage["stream_receipt"]["anomalies"]["count"] == 0
-    calls = msg.get("tool_calls") or []
-    assert [_call_name(call) for call in calls] == expected["calls"]
-    assert [call["type"] for call in calls] == expected.get("kinds", ["function"] * len(calls))
-    assert [set(_call_args(call)) for call in calls] == expected.get("args", [{"query"}] * len(calls))
-    details = msg.get("reasoning_details") or []
-    assert [detail["type"] for detail in details] == expected["reasoning"]
-    if "encrypted_id" in expected:
-        encrypted = [detail for detail in details if detail["type"] == "reasoning.encrypted"]
-        assert encrypted and all(detail["id"].startswith(expected["encrypted_id"]) for detail in encrypted)
-    assert usage["response_finish_reason"] == expected.get("finish", "tool_calls")
-    if expected.get("refusal"):
-        assert msg["refusal"] and not calls
-    if "usage" in body:
-        assert usage["prompt_tokens"] and usage["completion_tokens"]
+def test_recorded_chat_stream_assembles_completely(subtests):
+    for size in CHUNK_SIZES:
+        for path in _streams():
+            with subtests.test(size=size, path=path):
+                expected = EXPECTED[_rel(path)]
+                body, receipt = _assemble(path, size)
+                assert receipt["anomalies"] == {"count": 0, "first": []}, "a recorded wire is clean; irregularities would be disclosed here"
+                assert receipt["complete"] is True
+                for choice in body["choices"]:
+                    assert choice["finish_reason"]
+                    for call in choice["message"].get("tool_calls") or []:
+                        assert call["id"] and call["type"] in {"function", "custom"}
+                        assert _call_name(call)
+                        assert isinstance(call[call["type"]]["arguments" if call["type"] == "function" else "input"], str)
+                msg, usage = _normalized(path, {**body, "_stream_receipt": receipt})
+                assert usage["stream_receipt"]["anomalies"]["count"] == 0
+                calls = msg.get("tool_calls") or []
+                assert [_call_name(call) for call in calls] == expected["calls"]
+                assert [call["type"] for call in calls] == expected.get("kinds", ["function"] * len(calls))
+                assert [set(_call_args(call)) for call in calls] == expected.get("args", [{"query"}] * len(calls))
+                details = msg.get("reasoning_details") or []
+                assert [detail["type"] for detail in details] == expected["reasoning"]
+                if "encrypted_id" in expected:
+                    encrypted = [detail for detail in details if detail["type"] == "reasoning.encrypted"]
+                    assert encrypted and all(detail["id"].startswith(expected["encrypted_id"]) for detail in encrypted)
+                assert usage["response_finish_reason"] == expected.get("finish", "tool_calls")
+                if expected.get("refusal"):
+                    assert msg["refusal"] and not calls
+                if "usage" in body:
+                    assert usage["prompt_tokens"] and usage["completion_tokens"]
 
 
 def _wire_opaque_values(path: pathlib.Path) -> list:
@@ -173,62 +174,66 @@ def _wire_opaque_values(path: pathlib.Path) -> list:
     return values
 
 
-@pytest.mark.parametrize("path", _streams(), ids=_rel)
-def test_each_opaque_wire_payload_is_one_whole_record_value(path):
+def test_each_opaque_wire_payload_is_one_whole_record_value(subtests):
     """A signature or encrypted payload is minted whole: each arrives in one delta and
     must stay one record's entire value, never fused with a neighbour's."""
-    details = _assemble(path, 0)[0]["choices"][0]["message"].get("reasoning_details") or []
-    assembled = [detail[key] for detail in details for key in ("signature", "data") if detail.get(key)]
-    assert sorted(assembled) == sorted(_wire_opaque_values(path))
+    for path in _streams():
+        with subtests.test(path=path):
+            details = _assemble(path, 0)[0]["choices"][0]["message"].get("reasoning_details") or []
+            assembled = [detail[key] for detail in details for key in ("signature", "data") if detail.get(key)]
+            assert sorted(assembled) == sorted(_wire_opaque_values(path))
 
 
-@pytest.mark.parametrize("path", _streams(), ids=_rel)
-def test_recorded_chat_stream_assembly_is_fragmentation_invariant(path):
-    bodies = [_assemble(path, size)[0] for size in CHUNK_SIZES]
-    assert all(body == bodies[0] for body in bodies)
+def test_recorded_chat_stream_assembly_is_fragmentation_invariant(subtests):
+    for path in _streams():
+        with subtests.test(path=path):
+            bodies = [_assemble(path, size)[0] for size in CHUNK_SIZES]
+            assert all(body == bodies[0] for body in bodies)
 
 
-@pytest.mark.parametrize("stream,sibling", _pairs(), ids=lambda p: _rel(p) if p.suffix == ".sse" else "")
-def test_recorded_stream_matches_its_nonstream_sibling_structurally(stream, sibling):
-    if _rel(stream) == NATIVE:
-        pytest.skip("native Messages parity is asserted by test_recorded_native_stream_assembles_blocks")
-    text = sibling.read_text(encoding="utf-8")
-    json_body = json.loads(text[text.index("{"):])
-    streamed_msg, streamed_usage = _normalized(stream, _assemble(stream, 0)[0])
-    json_msg, json_usage = _normalized(stream, json_body)
-    assert set(streamed_msg) == set(json_msg)
-    streamed_calls, json_calls = streamed_msg.get("tool_calls") or [], json_msg.get("tool_calls") or []
-    assert [_call_name(call) for call in streamed_calls] == [_call_name(call) for call in json_calls]
-    assert [set(_call_args(call)) for call in streamed_calls] == [set(_call_args(call)) for call in json_calls]
-    assert ([detail["type"] for detail in streamed_msg.get("reasoning_details") or []]
-            == [detail["type"] for detail in json_msg.get("reasoning_details") or []])
-    # Per-record key sets: a streamed record that lost its opaque continuation payload
-    # (``signature``/``data``/``id``) would differ from the non-stream sibling here.
-    assert ([sorted(detail) for detail in streamed_msg.get("reasoning_details") or []]
-            == [sorted(detail) for detail in json_msg.get("reasoning_details") or []])
-    assert streamed_usage["response_finish_reason"] == json_usage["response_finish_reason"]
-    assert set(streamed_usage) - {"stream_receipt"} == set(json_usage)
+def test_recorded_stream_matches_its_nonstream_sibling_structurally(subtests):
+    for stream, sibling in _pairs():
+        with subtests.test(stream=stream, sibling=sibling):
+            if _rel(stream) == NATIVE:
+                pytest.skip("native Messages parity is asserted by test_recorded_native_stream_assembles_blocks")
+            text = sibling.read_text(encoding="utf-8")
+            json_body = json.loads(text[text.index("{"):])
+            streamed_msg, streamed_usage = _normalized(stream, _assemble(stream, 0)[0])
+            json_msg, json_usage = _normalized(stream, json_body)
+            assert set(streamed_msg) == set(json_msg)
+            streamed_calls, json_calls = streamed_msg.get("tool_calls") or [], json_msg.get("tool_calls") or []
+            assert [_call_name(call) for call in streamed_calls] == [_call_name(call) for call in json_calls]
+            assert [set(_call_args(call)) for call in streamed_calls] == [set(_call_args(call)) for call in json_calls]
+            assert ([detail["type"] for detail in streamed_msg.get("reasoning_details") or []]
+                    == [detail["type"] for detail in json_msg.get("reasoning_details") or []])
+            # Per-record key sets: a streamed record that lost its opaque continuation payload
+            # (``signature``/``data``/``id``) would differ from the non-stream sibling here.
+            assert ([sorted(detail) for detail in streamed_msg.get("reasoning_details") or []]
+                    == [sorted(detail) for detail in json_msg.get("reasoning_details") or []])
+            assert streamed_usage["response_finish_reason"] == json_usage["response_finish_reason"]
+            assert set(streamed_usage) - {"stream_receipt"} == set(json_usage)
 
 
-@pytest.mark.parametrize("size", CHUNK_SIZES)
-def test_recorded_native_stream_assembles_blocks(size):
+def test_recorded_native_stream_assembles_blocks(subtests):
     """Direct Anthropic Messages SSE (thinking + text + two tool_use blocks), and its
     structural parity with the non-streaming body of the same request."""
-    stream = WIRE / NATIVE
-    body, receipt = _assemble(stream, size, native=True)
-    assert receipt["anomalies"] == {"count": 0, "first": []} and receipt["complete"] is True
-    blocks = body["content"]
-    assert [block["type"] for block in blocks] == ["thinking", "text", "tool_use", "tool_use"]
-    assert isinstance(blocks[0]["signature"], str) and blocks[0]["signature"]
-    assert blocks[1]["text"].startswith("The two most relevant terms")
-    assert [(block["name"], block["input"]) for block in blocks[2:]] == [
-        ("lookup", {"query": "oura"}), ("lookup", {"query": "boros"})]
-    assert body["stop_reason"] == "tool_use"
-    assert body["usage"]["output_tokens"] == 186 and body["usage"]["input_tokens"] == 482
-    json_body = json.loads((WIRE / "anthropic/claude-sonnet-5/native_nonstream.json").read_text(encoding="utf-8"))
-    json_blocks = json_body["content"]
-    assert [block["type"] for block in json_blocks] == [block["type"] for block in blocks]
-    assert [block["name"] for block in json_blocks if block["type"] == "tool_use"] == ["lookup", "lookup"]
-    assert [set(block["input"]) for block in json_blocks if block["type"] == "tool_use"] == [{"query"}, {"query"}]
-    assert json_body["stop_reason"] == body["stop_reason"]
-    assert set(json_body["usage"]) == set(body["usage"])
+    for size in CHUNK_SIZES:
+        with subtests.test(size=size):
+            stream = WIRE / NATIVE
+            body, receipt = _assemble(stream, size, native=True)
+            assert receipt["anomalies"] == {"count": 0, "first": []} and receipt["complete"] is True
+            blocks = body["content"]
+            assert [block["type"] for block in blocks] == ["thinking", "text", "tool_use", "tool_use"]
+            assert isinstance(blocks[0]["signature"], str) and blocks[0]["signature"]
+            assert blocks[1]["text"].startswith("The two most relevant terms")
+            assert [(block["name"], block["input"]) for block in blocks[2:]] == [
+                ("lookup", {"query": "oura"}), ("lookup", {"query": "boros"})]
+            assert body["stop_reason"] == "tool_use"
+            assert body["usage"]["output_tokens"] == 186 and body["usage"]["input_tokens"] == 482
+            json_body = json.loads((WIRE / "anthropic/claude-sonnet-5/native_nonstream.json").read_text(encoding="utf-8"))
+            json_blocks = json_body["content"]
+            assert [block["type"] for block in json_blocks] == [block["type"] for block in blocks]
+            assert [block["name"] for block in json_blocks if block["type"] == "tool_use"] == ["lookup", "lookup"]
+            assert [set(block["input"]) for block in json_blocks if block["type"] == "tool_use"] == [{"query"}, {"query"}]
+            assert json_body["stop_reason"] == body["stop_reason"]
+            assert set(json_body["usage"]) == set(body["usage"])

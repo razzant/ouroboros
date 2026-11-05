@@ -9,6 +9,7 @@ from ouroboros.queue_observation import load_queue_document
 from ouroboros.work_stop import STOP_REASONS, continuation_refusal
 from supervisor import events_budget as eb
 from tests._budget_pause_exact_helpers import _install_queue
+from tests._source_scan import parse
 
 
 def test_release_consumers_do_not_branch_on_hold_names():
@@ -25,7 +26,7 @@ def test_release_consumers_do_not_branch_on_hold_names():
                 continue
             source = path.read_text(encoding="utf-8")
             assert "SELECTABLE_HOLD_REASONS" not in source and "OWNER_ROOT_RESUME_HOLDS" not in source, path
-            tree = ast.parse(source)
+            tree = parse(source)
             for function in ast.walk(tree):
                 if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue

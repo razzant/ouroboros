@@ -6,9 +6,10 @@ Restart repeated the whole battery for an unchanged subject. Owner decision 3A
 when everything matches, shown to reviewers, unsigned. This module keeps ONE
 small JSON per exact identity under the caller's canonical data root. Only
 ``preflight_runner.run_hermetic_pytest`` writes it, after a complete run (the
-node lane when the candidate carries web tests, the parallel ``not serial`` pass
-green on two observed xdist workers or the one admitted, the serial pass without
-xdist flags, a proven containment reap). That runner reads it at its existing reuse
+node lane when the candidate carries web tests, the xdist ``not exclusive`` pass
+(a ``serial("<resource>")`` group stays in it) green on two observed xdist workers
+or the one admitted, the ``serial("exclusive")`` pass without xdist flags, a proven
+containment reap). That runner reads it at its existing reuse
 seam after the baseline and assembly checks; adoption reads it for exactly its
 commit (``preflight_qualification.receipt_for_commit``).
 
@@ -363,9 +364,9 @@ class GateReceipt:
         if self.path is None:
             return
         try:
-            workers, admitted = len(pr._observed_worker_ids(temp_root)), pr._allocated_worker_count(temp_root)
+            workers, admitted = len(pr.observed_worker_ids(temp_root)), pr.allocated_worker_count(temp_root)
             reason = ("the parallel pass collected no tests" if "parallel" in empty_passes else
-                      f"{workers} observed xdist worker(s)" if workers < min(pr._MIN_PREFLIGHT_WORKERS, admitted) else "")
+                      f"{workers} observed xdist worker(s)" if workers < min(pr.MIN_PREFLIGHT_WORKERS, admitted) else "")
             if not reason:
                 reason = _source_status()[1]
             if not reason:

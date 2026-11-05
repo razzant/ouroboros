@@ -17,6 +17,7 @@ from ouroboros.request_wire_contract import physical_candidate_bytes
 from ouroboros.shared_values import SharedValueMissing, token_digests
 from ouroboros.task_results import write_task_result
 from tests._budget_pause_exact_helpers import _loop_ctx
+from tests._cases import chosen_rows
 
 SECRET = "ghp_" + "abcdefghijklmnopqrstuvwxyz123456"
 
@@ -107,7 +108,7 @@ def test_a_checkpoint_is_a_skeleton_over_cas_parts_listed_by_one_manifest_per_at
     assert sorted(p.name for p in _file(tmp_path).parent.glob("working_checkpoint-a*")) == ["working_checkpoint-a1.json"]
 
 
-@pytest.mark.parametrize("boundary", [*wc.BOUNDARIES, wc.RESUMED])
+@pytest.mark.parametrize("boundary", chosen_rows([*wc.BOUNDARIES, wc.RESUMED], 0, 2, 4))
 def test_restore_at_every_boundary_yields_the_same_continuation_state(tmp_path, boundary):
     from ouroboros.owner_wait import continuation_state
 

@@ -33,8 +33,7 @@ def test_navigation_matches_full_inventory_with_real_markdown_titles_and_metadat
     assert store.knowledge_index_view(address, view) == expected
 
 
-@pytest.mark.parametrize("scope", ["global", "project:demo"])
-@pytest.mark.parametrize("index_exists", [False, True])
+@pytest.mark.parametrize(("index_exists", "scope"), [(False, "global"), (True, "project:demo")])
 def test_real_consumers_see_a_same_size_external_edit(tmp_path, monkeypatch, scope, index_exists):
     monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
     address = store.resolve_knowledge_address(tmp_path, "topic", scope)

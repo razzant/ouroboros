@@ -16,7 +16,7 @@ import pytest
 from tests import test_batch4_owner_controls_browser as b4
 from tests import test_ui_smoke_playwright as smoke
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 direct_server_with_data = smoke.direct_server_with_data
 
 

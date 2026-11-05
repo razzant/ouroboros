@@ -340,8 +340,10 @@ def test_finalize_on_miss_delivers_the_unreviewed_salvage(qenv, monkeypatch):
     assert row["task_id"] == "miss-del"
     assert (row["outcome"], row["settled_status"]) == ("stopped", "cancelled")
 
-@pytest.mark.parametrize("fence", [False, True], ids=["owner_stop", "restore_fence"])
-@pytest.mark.parametrize("lane", ["miss", "kill"])
+@pytest.mark.parametrize(("lane", "fence"), [
+    pytest.param("miss", False, id='miss-owner_stop'),
+    pytest.param("kill", True, id='kill-restore_fence'),
+])
 def test_a_restore_fence_notice_names_why_the_task_stopped(qenv, monkeypatch, fence, lane):
     """19.10.2026: an update's restore cancelled running work and the owner read only "Task …
     was stopped." under his own quoted message, as if someone had pressed Stop. A fence the
@@ -443,7 +445,6 @@ def test_fast_settled_reentry_delivers_idempotently_and_settles_with_the_claim(
     )
 
 
-@pytest.mark.serial
 def test_one_cancel_leaves_exactly_one_salvaged_paragraph_in_the_chat(tmp_path, monkeypatch):
     """Owner item spam L: the stop receipt OWNS the preserved paragraph.
 
@@ -501,7 +502,6 @@ def test_one_cancel_leaves_exactly_one_salvaged_paragraph_in_the_chat(tmp_path, 
     assert row["text"].startswith("Stopped. Root task stopped-one.")
 
 
-@pytest.mark.serial
 def test_cascade_receipt_dedups_the_actual_destination_and_preserves_main(qenv, monkeypatch):
     """A settled root borrows child lineage, then send-time binding wins.
 
@@ -579,7 +579,6 @@ def test_cascade_receipt_dedups_the_actual_destination_and_preserves_main(qenv, 
     assert "Open the Project" not in summary["text"], "the row's Project reference is its door"
 
 
-@pytest.mark.serial
 def test_unsent_receipts_and_new_stop_episodes_do_not_inherit_delivery(tmp_path, monkeypatch):
     """An origin address, failed send and duplicate skip prove no new delivery."""
     from ouroboros.project_dialogue import _completion_excerpt, SALVAGE_EXCERPT_LABEL

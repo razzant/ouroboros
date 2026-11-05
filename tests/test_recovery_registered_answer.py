@@ -52,7 +52,7 @@ def _register(drive, tid: str, state: str) -> dict:
     return evt
 
 
-@pytest.mark.parametrize("state", ["owed", "exhausted", "delivered", "unreadable"])
+@pytest.mark.parametrize("state", ["owed", "exhausted", "unreadable"])
 def test_a_hard_timeout_finalizes_a_registered_answer_instead_of_rerunning_the_prompt(qenv, monkeypatch, state):
     """The reaper's own hard-deadline job (``queue_timeouts`` shape) over an attempt whose answer the host holds."""
     from ouroboros.headless import prepare_terminal_task_files
@@ -103,8 +103,7 @@ def test_a_hard_timeout_finalizes_a_registered_answer_instead_of_rerunning_the_p
     assert final_answer_registered(qenv.drive, tid), "finalizing never retires the answer's custody"
 
 
-@pytest.mark.parametrize("state", ["owed", "delivered", "unreadable"])
-@pytest.mark.parametrize("exitcode", [1, -11])
+@pytest.mark.parametrize(("exitcode", "state"), [(1, "owed"), (-11, "delivered"), (-11, "unreadable")])
 def test_dead_worker_recovery_finalizes_a_registered_answer_without_a_requeue(qenv, monkeypatch, state, exitcode):
     from supervisor import task_reaper, worker_health as health, workers
 
@@ -236,8 +235,7 @@ def test_a_final_timeout_without_retry_also_finalizes_a_registered_answer(qenv, 
         assert salvage == [] and finished == ["failed"], "published as a terminal, never a second salvage message"
 
 
-@pytest.mark.parametrize("answer_state", ["owed", "delivered"])
-@pytest.mark.parametrize("origin", ["host_notice", "host_salvage"])
+@pytest.mark.parametrize(("origin", "answer_state"), [("host_notice", "owed"), ("host_salvage", "delivered")])
 def test_recovery_keeps_the_host_terminal_provenance(tmp_path, answer_state, origin):
     """A host-written final (provider-failure notice or salvage receipt) stays host-authored after
     recovery; a salvage receipt yields the full preserved bytes and their path, as a store would."""

@@ -295,7 +295,6 @@ def test_finish_preserves_visible_empty_inheritance_and_shipped_value(onboarding
     assert saved["OUROBOROS_MODEL_FALLBACKS"] == ""
 
 
-@pytest.mark.serial
 def test_explicit_preset_recovery_previews_main_reviews_then_saves_visible_draft(onboarding, pool_seams):
     """A broken CLI inventory does not replace a working Main with keyless API defaults:
     every reviewer row the preview proposes runs on Main, and the visible draft is saved
@@ -333,7 +332,6 @@ def test_explicit_preset_recovery_previews_main_reviews_then_saves_visible_draft
     assert onboarding.calls["supervisor"] == 1
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("model", ["", "openai/no-key-model"])
 def test_main_review_recovery_does_not_invent_main_access(onboarding, model):
     response = onboarding.client.post("/api/onboarding/subagents/preview", json={

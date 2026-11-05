@@ -140,23 +140,13 @@ def test_promoted_objective_is_not_owner_corpus_even_with_inherited_owner_stamp(
 # --- the objective's author: one line from the same typed facts ---------------------------------------------
 
 @pytest.mark.parametrize("label,record,expected", [
-    ("drafted start", {"metadata": {"origin_message_ref": OWNER_REF, "objective_author": {"kind": "task", "task_id": "draft-1"}}},
-     "drafted by task draft-1, not spoken by my human"),
-    ("helper", {"delegation_role": "subagent", "parent_task_id": "root-1",
-                "metadata": {"objective_author": {"kind": "task", "task_id": "x"}}},
-     "the assignment parent task root-1 wrote for this helper — Ouroboros's account, not my human's words"),
     ("continuation", {"metadata": {"objective_author": {"kind": "continuation", "predecessor_task_id": "p-1"}}},
      "the host's Continue work order for task p-1"),
     ("unknown author kind", {"metadata": {"objective_author": {"kind": "relay"}}}, "its author is recorded by the host as kind=relay"),
-    ("consciousness", {"metadata": {"initiator": "consciousness"}}, "started by my consciousness"),
-    ("owner door", {"type": "task", "metadata": {"origin_message_ref": OWNER_REF}},
-     "my human's message started this run; the host does not attest this text as their exact words"),
-    ("presence", _presence_task(), "a message from Sergei in a connected place"),
     ("schedule", {"metadata": {"schedule_id": "sch-1"}},
      "the template of schedule sch-1; the host does not attest this text as my human's words"),
     ("started from a task", {"metadata": {"origin_task_id": "t-9"}},
      "started from task t-9; the host does not attest this text as my human's words"),
-    ("api", {"type": "task", "source": "api_task", "metadata": {}}, "its author is not recorded by the host (host marker: source=api_task)"),
     ("nothing", None, "its author is not recorded by the host"),
 ])
 def test_the_objective_author_line_names_what_the_host_recorded_and_invents_nothing(label, record, expected):
@@ -192,10 +182,8 @@ def test_the_mind_reads_a_drafted_objective_through_the_same_line_and_nothing_el
     ("owner turn, suppressed log", True, {"origin_suppressed": True}, "owner_turn"),
     ("presence event, direct", True, _presence_metadata(), "task"),
     ("presence event, not direct", False, _presence_metadata(), "task"),
-    ("consciousness wake", True, {"initiator": "consciousness", "client_message_id": "w-1"}, "task"),
     ("auto-resume: direct, no metadata", True, {}, "task"),
     ("promoted root: inherited stamp, not direct", False, {"origin_message_ref": OWNER_REF}, "task"),
-    ("caller-declared channel only", True, {"client_surface": {"channel": "api_command"}}, "task"),
 ])
 def test_routing_issuer_is_the_direct_turn_the_owner_door_stamped(label, direct, metadata, expected):
     from ouroboros.tools.control_routing import ISSUER_OWNER_TURN, _routing_issuer

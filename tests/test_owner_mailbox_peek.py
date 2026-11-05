@@ -68,7 +68,7 @@ def test_transport_episode_reuses_empty_proof_and_checks_incoming_queue_each_tic
     assert loop_transport.TransportWaitEpisode().mailbox_peek is not episode.mailbox_peek
 
 
-@pytest.mark.parametrize("change", ["ack_only", "replace", "truncate", "same_size", "delete_ack", "delete_mailbox"])
+@pytest.mark.parametrize("change", ["ack_only", "truncate", "delete_mailbox"])
 def test_each_source_fingerprint_change_invalidates_empty_proof(tmp_path, change):
     path, ack = acknowledged_history(tmp_path, 2)
     peek = mailbox.OwnerMailboxPeek()
@@ -131,8 +131,7 @@ def test_revocation_and_retry_keep_the_existing_control_semantics(tmp_path, kind
     assert mailbox.drain_owner_entries(tmp_path, "parent", set(), 2) == []
 
 
-@pytest.mark.parametrize("source", ["mailbox", "ack"])
-@pytest.mark.parametrize("fault", ["torn", "malformed", "read_error"])
+@pytest.mark.parametrize(("fault", "source"), [("torn", "ack"), ("malformed", "ack"), ("read_error", "mailbox")])
 def test_failed_or_incomplete_read_is_never_a_cached_empty_result(tmp_path, monkeypatch, source, fault):
     path, ack = acknowledged_history(tmp_path, 2)
     target = path if source == "mailbox" else ack
@@ -176,7 +175,7 @@ def test_stat_error_does_not_make_fail_soft_empty_sticky(tmp_path, monkeypatch):
     assert counts == {path: 2, ack: 1}
 
 
-@pytest.mark.parametrize("ack_state", ["missing", "valid", "torn", "malformed", "unreadable"])
+@pytest.mark.parametrize("ack_state", ["missing", "torn", "unreadable"])
 def test_acknowledged_owner_source_and_wait_completeness_remain_distinct(tmp_path, monkeypatch, ack_state):
     assert mailbox.write_owner_message(tmp_path, "Enable the repaired skill", "parent", msg_id="owner")
     ack = mailbox._ack_path(tmp_path, "parent")

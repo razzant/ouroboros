@@ -816,8 +816,8 @@ def test_keep_going_runs_every_lane_after_a_red_one(run_tests, monkeypatch, tmp_
         assert code == 1 and record["outcome"] == "failure"
         assert record["node"] == ("failure" if node else "success")
         if keep_going:
-            assert ran == ["parallel", "serial"]
+            assert ran == ["warm", "parallel", "serial"]
         else:  # the unchanged default stops at the first red lane
-            assert ran == ([] if node else ["parallel"])
+            assert ran == ([] if node else ["warm", "parallel"])
     with pytest.raises(SystemExit):
         run_tests.main(["--keep-going", "tests/test_x.py"])

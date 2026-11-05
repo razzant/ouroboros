@@ -18,7 +18,7 @@ import pytest
 from tests.test_ui_smoke_playwright import direct_server_with_data as _server
 
 direct_server_with_data = _server
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 OUT = pathlib.Path(os.environ.get("QA_OUT", "")) if os.environ.get("QA_OUT") else None
 FOLDERS = 3

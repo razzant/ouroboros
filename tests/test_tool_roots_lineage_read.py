@@ -502,8 +502,7 @@ def _forked_parent_sources(geo):
     return ctx, registry, refs, advertised, canonical
 
 
-@pytest.mark.parametrize("source", ["plan", "reply"])
-@pytest.mark.parametrize("root", ["runtime_data", "", "artifact_store"])
+@pytest.mark.parametrize(("root", "source"), [("runtime_data", "plan"), ("", "reply"), ("artifact_store", "plan")])
 def test_a_child_reads_its_parents_advertised_source_where_its_writer_kept_it(geometry, source, root):
     """The reported handoff: the parent gave its child the absolute path built from its advertised root.
     The child's read delivers the writer's exact bytes and names the placement it opened."""

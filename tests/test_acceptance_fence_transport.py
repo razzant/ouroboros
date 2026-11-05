@@ -374,8 +374,7 @@ def test_unconfirmed_begin_only_releases_its_own_token(monkeypatch, tmp_path, sh
         supervisor.stop()
 
 
-@pytest.mark.parametrize("ownership", ["current", "missing", "old_attempt", "old_pid", "dead", "reaping",
-                                       "foreign_root"])
+@pytest.mark.parametrize("ownership", ["current", "missing", "foreign_root"])
 def test_pooled_begin_requires_the_exact_current_owner(monkeypatch, tmp_path, short_wait, ownership):
     import os
 

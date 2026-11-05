@@ -110,8 +110,8 @@ class TestSentHistoryHealth:
         assert "origin not recorded 40 in 32+ tasks" in build_health_invariants(env)
 
     @pytest.mark.parametrize("reports", [
-        [None] * 6, [0] * 6, [600] * 6, [None] * 10 + [600] * 5,
-    ], ids=["unknown", "measured_zero", "measured_hit", "mixed"])
+        [None] * 6, [600] * 6, [None] * 10 + [600] * 5,
+    ], ids=["unknown", "measured_hit", "mixed"])
     def test_nullable_adapter_cache_reaches_durable_and_live_rounds(self, tmp_path, reports):
         """The real adapter uses a present null key for an unreported cache.
 

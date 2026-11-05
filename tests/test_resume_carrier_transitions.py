@@ -22,7 +22,6 @@ from tests.test_root_resume_selection_survival import (
 )
 from tests.test_saved_root_resume_grant import _saved_tree
 
-pytestmark = pytest.mark.serial
 ROOT, CHILD, OTHER = 'saved-root', 'first', 'second'
 
 

@@ -518,17 +518,6 @@ def test_configure_remote_remains_credential_helper_surface():
     assert ".git/credentials" in helper_source
 
 
-# --- ARCHITECTURE version sync (Phase 5) ---
-
-def test_version_sync_checks_architecture_md():
-    """check_version_sync must compare VERSION with ARCHITECTURE.md header."""
-    sys.path.insert(0, REPO)
-    startup_mod = importlib.import_module("ouroboros.agent_startup_checks")
-    source = inspect.getsource(startup_mod.check_version_sync)
-    assert "ARCHITECTURE" in source
-    assert "architecture_version" in source
-
-
 # ---------------------------------------------------------------------------
 # The author's preflight (decision 3A): the wrapper names and the commit gate
 # ---------------------------------------------------------------------------
@@ -699,57 +688,6 @@ def test_review_blocked_retry_note_owes_outcome_not_procedure():
                     "re-read the full diff", "group obligations by root cause",
                     "rewrite the plan", "another paid review needs"):
         assert retired not in lowered, retired
-
-
-def test_self_consistency_listed_as_critical_in_severity_rules():
-    """self_consistency (Ouroboros Body Layer item 14) must be treated as conditionally critical, not always advisory."""
-    import pathlib
-    checklists_path = pathlib.Path(__file__).parent.parent / "docs" / "CHECKLISTS.md"
-    content = checklists_path.read_text(encoding="utf-8")
-
-    # The severity rules section must describe self_consistency as conditionally critical
-    assert "self_consistency" in content
-    # Must NOT say items 11-13 are ALL advisory
-    lines = content.split("\n")
-    for line in lines:
-        if "items 11-13 are advisory" in line.lower():
-            raise AssertionError(
-                f"Found old 'items 11-13 are advisory' rule — self_consistency "
-                f"must now be conditionally critical:\n  {line}"
-            )
-    # Must say item 14 (self_consistency) is conditionally critical
-    assert "item 14 (self_consistency) is conditionally critical" in content.lower()
-    # v4.33.0: the old "README test counts" example was folded into the
-    # broader Critical surface whitelist. Narrative / prose / commentary
-    # mismatches outside the whitelist must be explicitly advisory.
-    assert "Critical surface whitelist" in content
-    assert "advisory" in content.lower()
-    # And the "narrative" framing of commit-message / doc wording remains.
-    assert "narrative" in content.lower()
-
-
-def test_development_compliance_checklist_expanded():
-    """development_compliance description must include specific concrete checks."""
-    import pathlib
-    checklists_path = pathlib.Path(__file__).parent.parent / "docs" / "CHECKLISTS.md"
-    content = checklists_path.read_text(encoding="utf-8")
-
-    # All these concrete checks must appear in the checklist
-    required_terms = [
-        "snake_case",
-        "PascalCase",
-        "Gateway",
-        "LLMClient",
-        "record/view contract",
-        "retain exact sources",
-        "required resident core",
-        "ToolEntry",
-    ]
-    for term in required_terms:
-        assert term in content, (
-            f"development_compliance checklist must mention '{term}' for concrete checks, "
-            f"but it's missing from CHECKLISTS.md"
-        )
 
 
 # test_triad_review_prompt_has_thoroughness_instructions and

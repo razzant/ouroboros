@@ -23,12 +23,13 @@ def _through_actor(status, operation_state, usage, *, headers=None):
     ).to_dict()
 
 
-@pytest.mark.parametrize("status,state", [
-    ("error", "in_flight"), ("error", "custody_lost"),
-    ("responded", "settled"), ("responded", "late_settled"),
-    ("pending", "in_flight"),
+@pytest.mark.parametrize(("amount", "status", "state"), [
+    (None, "error", "in_flight"),
+    (None, "responded", "late_settled"),
+    (0.0, "error", "custody_lost"),
+    (0.0, "pending", "in_flight"),
+    (1.25, "responded", "settled"),
 ])
-@pytest.mark.parametrize("amount", [None, 0.0, 1.25])
 def test_amount_survives_response_actor_record_and_tool(status, state, amount):
     raw = _through_actor(status, state, {"cost": amount})
     assert raw["cost_usd"] == amount

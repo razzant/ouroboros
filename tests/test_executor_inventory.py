@@ -30,6 +30,7 @@ from typing import Dict, Iterable, List, NamedTuple, Set, Tuple
 
 import pytest
 
+from tests._source_scan import parse
 from tests.test_conversation_lane_presence import lane as lane  # noqa: F401 -- fixture
 from tests.test_owner_wait_pool import pool as pool  # noqa: F401 -- fixture
 
@@ -180,7 +181,7 @@ class _References(ast.NodeVisitor):
 
 def references_in(source: str, path: str) -> Set[Site]:
     visitor = _References(path)
-    visitor.visit(ast.parse(source))
+    visitor.visit(parse(source))
     return visitor.found
 
 
@@ -256,9 +257,10 @@ def test_every_row_names_a_known_executor_and_a_reason():
 
 # ---- the law over the rows: exactly the owner's two ---------------------------------------------------------------
 
-@pytest.mark.parametrize("focus", FOCI)
-def test_no_focus_starts_on_a_server_thread(focus):
-    assert not (rows := _on_server_threads(focus)), rows
+def test_no_focus_starts_on_a_server_thread(subtests):
+    for focus in FOCI:
+        with subtests.test(focus=focus):
+            assert not (rows := _on_server_threads(focus)), rows
 
 
 def test_a_server_thread_runs_cognition_only_on_the_two_named_rows():
@@ -380,7 +382,6 @@ def test_a_due_wake_prepares_nothing_on_the_tick(alarm):
     _no_door(alarm.started)
 
 
-@pytest.mark.serial  # its fixture rebinds the pool's tables
 def test_a_presence_event_runs_no_turn_body_in_this_process(lane, monkeypatch):
     """The Host's door over a started lane: the body reaches a carrier's queue, and its future resolves from that carrier's
     frames (tests/test_conversation_lane_presence.py); nothing here runs it."""

@@ -30,7 +30,7 @@ from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _emit_ws_frame
 from tests.ui_console_errors import PageErrors
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 EVIDENCE: Path | None = None
 GOAL = "Return focus to the composer after a message is sent, on both the Enter and the Send button paths"
 NAME = "Фокус в поле ввода после отправки"

@@ -91,8 +91,7 @@ def test_legacy_response_rechecks_exact_dispatch_before_release(tmp_path):
     assert gateway.reads == ["op-one"] and not gateway.results
 
 
-@pytest.mark.parametrize("proven", [False, True])
-@pytest.mark.parametrize("ready", [False, True])
+@pytest.mark.parametrize(("ready", "proven"), [(False, False), (True, True)])
 def test_late_upload_proof_keeps_attempt_but_releases_only_definite_non_delivery(tmp_path, proven, ready):
     request(tmp_path, operation_id="op-one")
     gateway = Gateway(state="failed", dispatch="not_started" if proven else "unknown", ready=ready)

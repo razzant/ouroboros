@@ -204,7 +204,6 @@ def _registry_rows(data_root: pathlib.Path, snapshot_id: str) -> list:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s24_mutating_delegated_run_is_isolated_until_an_explicit_clean_apply(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
@@ -334,7 +333,6 @@ def test_s24_mutating_delegated_run_is_isolated_until_an_explicit_clean_apply(
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s25_mutating_delegated_patch_conflict_is_refused_and_keeps_its_material(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)

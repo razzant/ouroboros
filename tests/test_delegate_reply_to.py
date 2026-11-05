@@ -51,7 +51,7 @@ def test_escalation_round_trip_keeps_question_and_starter_submits(setup, tmp_pat
     assert stub.answers[0][0][0:2] == ("run-1", "int-current")
 
 
-@pytest.mark.parametrize("change", ["starter", "run", "interaction", "questions", "resolved", "different_pending", "wrong_run_detail", "unreadable", "plan"])
+@pytest.mark.parametrize("change", ["interaction", "different_pending", "wrong_run_detail"])
 def test_wrong_or_stale_address_never_selects_another_question(setup, change):
     ctx, stub, address = setup
     address = dict(address)

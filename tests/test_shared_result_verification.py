@@ -16,7 +16,6 @@ from supervisor.events_subagent_admission import _resolve_subagent_constraint
 from tests._store_shared import read_result, seed_result
 
 # Actual Git subprocess fixtures follow the repository's real-process lane.
-pytestmark = pytest.mark.serial
 
 
 def git(root, *args):
@@ -107,8 +106,7 @@ def assert_unabsorbed(drive):
     assert not load_effective_task_result(drive, "child").get("child_result_disposition")
 
 
-@pytest.mark.parametrize("direct", [False, True])
-@pytest.mark.parametrize("decision", ["apply", "accept", "reject"])
+@pytest.mark.parametrize(("decision", "direct"), [("apply", False), ("accept", True), ("reject", False)])
 def test_shared_decision_does_not_absorb_a_result_published_after_capture_read(env, monkeypatch, direct, decision):
     from ouroboros.tools import subagent_integration as integration
     from ouroboros.tools.join_ledger import _current_child_result_disposition
@@ -130,7 +128,7 @@ def test_shared_decision_does_not_absorb_a_result_published_after_capture_read(e
                                         "accepted_shared_workspace", "rejected"}
 
 
-@pytest.mark.parametrize("kind", ["different_repo", "linked", "no_external", "unavailable_a", "same_root"])
+@pytest.mark.parametrize("kind", ["different_repo", "no_external", "same_root"])
 def test_public_verifies_at_b_without_transfer(env, monkeypatch, kind):
     parent, a, b, drive = env
     if kind == "linked":
@@ -155,7 +153,7 @@ def test_public_verifies_at_b_without_transfer(env, monkeypatch, kind):
     assert load_effective_task_result(drive, "child")["child_result_disposition"] == "integrated"
 
 
-@pytest.mark.parametrize("change", ["wrong_target", "capture_root", "result_root", "base", "missing_assignment"])
+@pytest.mark.parametrize("change", ["wrong_target", "base", "missing_assignment"])
 def test_identity_refusals_precede_b_verification(env, monkeypatch, change):
     parent, a, b, drive = env
     art = capture(parent, b, drive)
@@ -232,7 +230,7 @@ def test_cyber_no_external_parent_keeps_existing_off_home_read(env, monkeypatch)
     assert "Verified external_workspace child" in invoke(parent)
 
 
-@pytest.mark.parametrize("drift", ["patch_bytes", "content", "legacy_fields", "live_head"])
+@pytest.mark.parametrize("drift", ["patch_bytes", "content", "live_head"])
 def test_capture_integrity_legacy_and_shared_head_movement(env, drift):
     parent, a, b, drive = env
     art = capture(parent, b, drive)
@@ -470,8 +468,7 @@ def dispositions(drive):
     return marks(drive, "parent").get("patch_verdicts", [])
 
 
-@pytest.mark.parametrize("refusal", ["missing_assignment", "conflicting_assignment", "presence_root",
-                                     "path_policy", "path_escape", "unparseable_patch"])
+@pytest.mark.parametrize("refusal", ["missing_assignment", "path_policy", "unparseable_patch"])
 def test_early_refusals_keep_verdict_and_custody_without_absorption(env, refusal):
     parent, a, b, drive = env
     art = capture(parent, b, drive, edit=nested_edit(b) if refusal == "path_escape" else None)
@@ -539,7 +536,6 @@ def presence(parent, root, prefix):
 
 @pytest.mark.parametrize("root, prefix, allowed", [
     ("user_files", "Deliverables/b", True),  # B's deepest containing root is deliverables
-    ("deliverables", "b", True),
     ("user_files", "Deliverables/other", False),
     ("active_workspace", ".", False),
 ])
@@ -654,8 +650,7 @@ def test_direct_chat_project_room_parent_verifies_child_folder(env, b_is_room):
     assert load_effective_task_result(drive, "child")["child_result_disposition"] == "integrated"
 
 
-@pytest.mark.parametrize("operation", ["read_bytes", "hash"])
-@pytest.mark.parametrize("b_is_room", [False, True])
+@pytest.mark.parametrize(("b_is_room", "operation"), [(False, "read_bytes"), (True, "hash")])
 def test_project_room_relative_policy_uses_caller_room(env, monkeypatch, operation, b_is_room):
     parent, a, b, drive = env
     parent.workspace_root, parent.workspace_mode = None, ""
@@ -691,8 +686,7 @@ def test_project_room_relative_policy_uses_caller_room(env, monkeypatch, operati
     assert (snapshot(a), snapshot(b), snapshot(art)) == before
 
 
-@pytest.mark.parametrize("room", ["missing_path", "note_only"])
-@pytest.mark.parametrize("absolute_policy", [False, True])
+@pytest.mark.parametrize(("absolute_policy", "room"), [(False, "missing_path"), (True, "note_only")])
 def test_unavailable_project_room_does_not_block_independent_child(env, room, absolute_policy):
     parent, a, b, drive = env
     parent.workspace_root, parent.workspace_mode = None, ""

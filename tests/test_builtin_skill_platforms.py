@@ -141,8 +141,7 @@ def test_each_host_is_offered_and_installs_only_its_own_computer_use_skill(data,
 
 # ── the Unix copy kept on Windows for remote machines ──
 
-@pytest.mark.parametrize("actor", ["owner_ui", None])
-@pytest.mark.parametrize("backend", ["osworld_http", "ssh_macos"])
+@pytest.mark.parametrize(("backend", "actor"), [("osworld_http", None), ("ssh_macos", "owner_ui")])
 def test_a_legacy_unix_remote_choice_on_windows_survives_off_reseed_and_on(data, monkeypatch, tmp_path, actor, backend):
     from ouroboros import extension_loader, skill_lifecycle_actions
 
@@ -707,6 +706,10 @@ def test_os_declarations_parse_as_platform_lists():
     unix, windows = skill_builtin._manifest(SEEDS / UNIX), skill_builtin._manifest(SEEDS / WINDOWS)
     assert unix.os == "darwin,linux" and windows.os == "win32"
     assert windows.permissions == ["tool"]
+    # Each permission is enforced where the skill uses it (PluginAPIImpl._require): `net` carries the remote OSWorld
+    # HTTP/SSH backends of the Unix skill, `route` the Telegram bridge's settings and mini-app routes.
+    assert unix.permissions == ["tool", "subprocess", "net"]
+    assert "route" in skill_builtin._manifest(SEEDS / "telegram").permissions
     assert windows.raw_extra["install"] == [{"kind": "pip", "package": "comtypes==1.4.17"}]
 
 

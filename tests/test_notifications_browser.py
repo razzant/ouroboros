@@ -26,7 +26,7 @@ from tests.test_subscription_setup_browser import capture, subscription_ui as _s
 
 subscription_ui = _subscription_ui  # re-exported pytest fixture (requested by name below)
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 # Records notifications, and replaces the socket transport with one this test
 # can push frames into. `ws.js` keeps its own dispatch, reconnect and queue.

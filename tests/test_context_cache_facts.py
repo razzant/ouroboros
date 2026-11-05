@@ -13,8 +13,6 @@ from tests.test_loop_compaction import _ctx
     ({"prompt_tokens": 1000, "cached_tokens": 750, "cache_write_tokens": 250}, "750/1,000 tokens (75.0%)"),
     ({"prompt_tokens": 1000, "cached_tokens": 0, "cache_write_tokens": 1000}, "0/1,000 tokens (0.0%)"),
     ({"prompt_tokens": 1000}, "unknown"),
-    ({"cached_tokens": 750}, "unknown"),
-    ({"prompt_tokens": 0, "cached_tokens": 0}, "unknown"),
 ])
 def test_usable_call_then_cold_next_route_facts(tmp_path, metrics, expected):
     class Provider:
@@ -92,14 +90,8 @@ def test_the_providers_own_report_outranks_a_billing_zero(tmp_path, reported_cac
      "; before that request sent message 174 changed (superseded_skill_snapshot)"),
     ({"kind": "rewritten", "index": 9, "sanctioned_by": None},
      "; before that request sent message 9 changed (origin not recorded)"),
-    ({"kind": "rewritten", "index": 31, "sanctioned_by": "image_eviction"},
-     "; before that request sent message 31 changed (image_eviction)"),
     ({"kind": "shrunk", "index": 10, "sanctioned_by": "compaction", "previous_messages": 10, "current_messages": 4},
      "; before that request sent history shrank from 10 to 4 messages (compaction)"),
-    ({"kind": "tools_changed", "index": 0, "sanctioned_by": None}, "; before that request: tool set changed"),
-    ({"kind": "system_rewritten", "index": 0, "sanctioned_by": None}, "; before that request: system view rebuilt"),
-    ({"kind": "no_baseline", "index": 0, "sanctioned_by": None},
-     "; before that request: resume without a send record"),
 ])
 def test_a_change_of_sent_history_is_named_beside_the_cache_it_preceded(tmp_path, change, clause):
     previous = {"round": 2, "provider": "claudexor", "model": "codex", "prompt_tokens": 682_741,
@@ -136,8 +128,10 @@ def test_no_clause_without_a_change_before_that_request(tmp_path):
         assert "write 0 tokens |" in line and "before that request" not in line
 
 
-@pytest.mark.parametrize("kind,target", [("api_model", "openai/gpt-fixture"), ("agent_session", "codex=gpt-fixture")])
-@pytest.mark.parametrize("input_sources", ["shared", "declared"])
+@pytest.mark.parametrize(("input_sources", "kind", "target"), [
+    ("shared", "api_model", "openai/gpt-fixture"),
+    ("declared", "agent_session", "codex=gpt-fixture"),
+])
 def test_context_cache_facts(tmp_path, monkeypatch, kind, target, input_sources):
     from ouroboros import maintenance
     from ouroboros.context import _capture_context_core

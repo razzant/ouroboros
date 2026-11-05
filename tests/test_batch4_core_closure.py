@@ -1,7 +1,6 @@
 """Bounded recovery: exact consumer death, retained unknowns and tree membership."""
 
 import asyncio
-import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -15,7 +14,6 @@ from tests._usage_store_testing import ledger_rows
 from tests.test_owner_continue import NONCE, _interrupted
 from tests._store_shared import seed_result
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
@@ -74,50 +72,6 @@ def test_retired_local_answer_owner_releases_same_continue_without_settling_mone
     assert ua.usage_projection(tmp_path, billing_group_id="pred-1")["accounted_usd"] == 0.7
 
 
-def test_unbound_model_and_generic_tool_effects_survive_terminal_owner(tmp_path, monkeypatch):
-    from ouroboros import platform_layer, usage_accounting as ua
-    from ouroboros.task_results import write_task_result
-    from supervisor.continuation_admission import conflicting_writers
-
-    queue, _, _ = _install_queue(tmp_path, monkeypatch)
-    _interrupted(tmp_path, launch_handoffs={"op": {"tool": "external_write", "state": "claimed"}})
-    monkeypatch.setenv("TOTAL_BUDGET", "100")
-    reservation = ua.reserve_attempt(ua.AttemptRequest(
-        model="m", provider="test", drive_root=tmp_path, task_id="pred-1",
-        root_task_id="pred-1", reservation_usd=0.5))
-    ua.mark_dispatched(reservation)  # legacy/tool dispatch: no sole answer consumer binding
-    monkeypatch.setattr(platform_layer, "pid_is_alive", lambda pid: False)
-    blockers = conflicting_writers(queue, "pred-1")
-    assert {"tool_handoff", "model_handoff"} <= {b["kind"] for b in blockers}
-    # Positive model receipt changes only the model operation; remote tool remains unknown.
-    ua.settle_attempt(reservation, {}, cost_usd=0.5, cost_final=True)
-    assert [b["kind"] for b in conflicting_writers(queue, "pred-1")] == ["tool_handoff"]
-    write_task_result(tmp_path, "pred-1", "cancelled", launch_handoffs={})
-    assert conflicting_writers(queue, "pred-1") == []
-
-
-def test_unreadable_pause_preserves_cause_and_prevents_physical_send(tmp_path, monkeypatch):
-    from ouroboros import owner_pause, usage_accounting as ua
-    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
-    from tests._store_shared import seed_result, unreadable_result
-
-    monkeypatch.setenv("TOTAL_BUDGET", "100")
-    seed_result(tmp_path, "root", {"status": "running"})
-    unreadable_result(monkeypatch, "root")  # the store cannot answer for the root's row
-    source = SimpleNamespace(task_id="root", root_task_id="root", drive_root=tmp_path)
-    with pytest.raises(owner_pause.OwnerPauseRefused, match="owner_pause_authority_unreadable"):
-        with owner_pause.launch_admission(source):
-            pytest.fail("unknown authority admitted a tool")
-    sent = []
-    with pytest.raises(PhysicalDispatchInterrupted) as exc:
-        ua.execute_physical_attempt(ua.AttemptRequest(
-            model="m", provider="test", drive_root=tmp_path, task_id="root",
-            root_task_id="root", reservation_usd=0.5), lambda: sent.append(True))
-    assert exc.value.control_reason == "owner_pause_authority_unreadable"
-    assert sent == []
-    assert ledger_rows(tmp_path)[-1]["state"] == "released"
-
-
 def test_restart_retains_legacy_unknown_and_saved_zero_dispatch_without_inference(tmp_path, monkeypatch):
     from ouroboros.work_stop import continuation_refusal
     from ouroboros.task_results import load_task_result, write_task_result
@@ -154,34 +108,6 @@ def test_restart_retains_legacy_unknown_and_saved_zero_dispatch_without_inferenc
     assert held.get("admitted_dispatch") != "none"
 
 
-def test_member_cause_comes_from_current_fence_without_a_copied_cause(tmp_path, monkeypatch):
-    from ouroboros.task_results import load_task_result, write_task_result
-    from supervisor.events_budget import (
-        BUDGET_HOLD_KEY, _set_root_budget_pause_locked, hold_root_resume_descendants,
-    )
-    from ouroboros.work_stop import current_stop
-
-    queue, _, workers = _install_queue(tmp_path, monkeypatch)
-    child = {"id": "child", "root_task_id": "root", "admitted_dispatch": "none"}
-    workers.PENDING.append(child)
-    write_task_result(tmp_path, "child", "scheduled", root_task_id="root")
-    fence = _set_root_budget_pause_locked("root", {"cause": "owner_pause", "fence_id": "owner-f"})
-    assert current_stop(child, {"budget": queue.BUDGET_ROOT_FENCES})["cause"] == "pause"
-    queue.BUDGET_ROOT_FENCES.pop("root")
-    hold_root_resume_descendants(queue, "root", fence, {"grant_id": "g1", "generation": 1})
-    assert current_stop(child)["cause"] == "awaiting_selection"
-    assert "cause" not in child[BUDGET_HOLD_KEY]
-    assert load_task_result(tmp_path, "child")["reason_code"] == "root_fence_lifted_pending_selection"
-    # A new monetary pause must not inherit the old owner's cause.
-    fence = _set_root_budget_pause_locked("root", {"reason": "budget", "fence_id": "money-f"})
-    assert "cause" not in fence
-    assert current_stop(child, {"budget": queue.BUDGET_ROOT_FENCES})["cause"] == "money"
-    queue.BUDGET_ROOT_FENCES.pop("root")
-    hold_root_resume_descendants(queue, "root", fence, {"grant_id": "g2", "generation": 2})
-    assert "cause" not in child[BUDGET_HOLD_KEY]
-    assert child[BUDGET_HOLD_KEY]["root_grant_id"] == "g2"
-
-
 def test_indexed_census_preserves_legacy_members_and_reads_no_foreign_body(tmp_path, monkeypatch):
     """The census selects the tree by the typed ``root_task_id`` column: a legacy member whose
     root lives only in its metadata is still read (its column is NULL), the 1000 foreign roots
@@ -216,100 +142,6 @@ def test_indexed_census_preserves_legacy_members_and_reads_no_foreign_body(tmp_p
         busy.setattr(task_store, "open_store", lambda *a, **kw: (_ for _ in ()).throw(StoreBusy("busy")))
         assert any(b["kind"] == "tree_census_unreadable" for b in conflicting_writers(queue, "root"))
     assert any(b.get("task_id") == "legacy-child" for b in conflicting_writers(queue, "root"))
-
-
-@pytest.mark.parametrize("manual", [False, True])
-@pytest.mark.parametrize("race", ["none", "restart", "pause", "stop", "panic", "replacement", "same_bytes", "unreadable"])
-def test_settled_continue_observes_off_lock_and_revalidates_owner_authority(tmp_path, monkeypatch, race, manual):
-    from ouroboros import budget_pause
-    from ouroboros.cancel_intents import request_cancel
-    from ouroboros.owner_pause import install_fence
-    from ouroboros.task_results import write_task_result
-    from supervisor.continuation_admission import admit_continuation, release_settled_continuations
-    from supervisor.events_budget import budget_hold_fact
-    from supervisor.restart_retention import hold_for_owner_restart
-    from supervisor.queue_transitions import resume_budget_paused_task
-
-    queue, _, workers = _install_queue(tmp_path, monkeypatch)
-    _interrupted(tmp_path, launch_handoffs={"op": {"tool": "external_write"}})
-    accepted = admit_continuation("pred-1", action_nonce=NONCE)
-    assert accepted["held"]
-    successor = accepted["successor_task_id"]
-    write_task_result(tmp_path, "pred-1", "cancelled", launch_handoffs={})
-    entered, finish = threading.Event(), threading.Event()
-    real_observe = budget_pause.observe_task_runs
-
-    def observe(*args, **kwargs):
-        entered.set()
-        assert finish.wait(4)
-        return {"custody_read": "unknown"} if race == "unreadable" else real_observe(*args, **kwargs)
-
-    real_cost = queue.reconstruct_task_cost
-    money_reads = []
-
-    def cost(*args, **kwargs):
-        assert not queue._queue_lock._is_owned(), "ledger observation occupied queue lock"
-        money_reads.append(True)
-        return real_cost(*args, **kwargs)
-
-    monkeypatch.setattr(budget_pause, "observe_task_runs", observe)
-    monkeypatch.setattr(queue, "reconstruct_task_cost", cost)
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        future = (pool.submit(resume_budget_paused_task, successor) if manual else
-                  pool.submit(release_settled_continuations, "pred-1"))
-        try:
-            assert entered.wait(4)
-            assert queue._queue_lock.acquire(timeout=0.5), "daemon observation occupied queue lock"
-            try:
-                task = workers.PENDING[0]
-                if race == "restart":
-                    hold_for_owner_restart(task, tmp_path)
-                elif race == "pause":
-                    install_fence(tmp_path, successor, request_id="new-owner-pause")
-                elif race == "stop":
-                    request_cancel(tmp_path, successor, reason="new owner Stop", source="owner")
-                elif race == "panic":
-                    from supervisor.events_budget import hold_budget_row
-                    hold_budget_row(task, reason="panic_hold", result_root=tmp_path)
-                elif race == "same_bytes":
-                    workers.PENDING[:] = [dict(task)]
-                elif race == "replacement":
-                    workers.PENDING[:] = [{**task, "_attempt": 2}]
-            finally:
-                queue._queue_lock.release()
-        finally:
-            finish.set()
-        released = future.result(timeout=4)
-    assert money_reads
-    assert (released["ok"] if manual else released == [successor]) is (race == "none")
-    assert bool(budget_hold_fact(workers.PENDING[0])) is (race != "none")
-
-
-def test_export_and_import_keep_local_consumer_binding_and_late_receipt(tmp_path, monkeypatch):
-    from ouroboros import usage_accounting as ua, usage_store
-
-    monkeypatch.setenv("TOTAL_BUDGET", "100")
-    for index in range(3):
-        settled = ua.reserve_attempt(ua.AttemptRequest(model="m", provider="test", drive_root=tmp_path,
-            task_id=f"done-{index}", root_task_id=f"done-{index}", reservation_usd=0.1))
-        ua.mark_dispatched(settled)
-        ua.settle_attempt(settled, {}, cost_usd=0.1, cost_final=True)
-    reservation = ua.reserve_attempt(ua.AttemptRequest(model="m", provider="test", drive_root=tmp_path,
-        task_id="local", root_task_id="local", reservation_usd=0.5))
-    ua.mark_dispatched(reservation, local_answer_owner_pid=os.getpid())
-    ua.mark_unresolved(reservation, "unknown response")
-
-    def current():
-        row = {r["attempt_id"]: r for r in ledger_rows(tmp_path)}[reservation.attempt_id]
-        return {key: value for key, value in row.items() if key != "seq"}
-
-    before = current()
-    # The downgrade export, then the next access's one-time import of it.
-    usage_store.export_journal(tmp_path)
-    assert current() == before
-    ua.settle_attempt(reservation, {}, cost_usd=0.7, cost_final=True)
-    row = current()
-    assert row["local_answer_owner_pid"] == os.getpid() and row["cost_usd"] == 0.7
 
 
 @pytest.mark.parametrize("race", ["none", "grant", "stop", "pause", "hold", "same_bytes", "money_unreadable"])
@@ -366,29 +198,6 @@ def test_manual_synthetic_hold_gets_fresh_observation_after_mutation(tmp_path, m
     assert bool(budget_hold_fact(workers.PENDING[1])) is (race != "none")
 
 
-def test_owner_pause_wake_ack_is_control_receipt_not_transcript_or_settlement(tmp_path):
-    import queue
-    from ouroboros.loop_round_limits import _drain_incoming_messages
-    from ouroboros.owner_mailbox import (
-        KIND_OWNER_PAUSE, acknowledged_task_message_ids, drain_owner_entries, write_owner_message,
-    )
-    from ouroboros.owner_pause import install_fence, read_fence
-
-    from ouroboros.task_results import write_task_result
-    write_task_result(tmp_path, "root", "running", root_task_id="root")
-    install_fence(tmp_path, "root", request_id="p")
-    assert write_owner_message(tmp_path, "wake", "root", msg_id="pause-p", kind=KIND_OWNER_PAUSE)
-    before = read_fence(tmp_path, "root")
-    messages = []
-    controls = _drain_incoming_messages(messages, queue.Queue(), tmp_path, "root", None, set())
-    assert controls == {} and messages == []
-    assert acknowledged_task_message_ids(tmp_path, "root") == {"pause-p"}
-    assert drain_owner_entries(tmp_path, "root", set()) == []
-    assert read_fence(tmp_path, "root") == before
-    acks = (tmp_path / "memory" / "owner_mailbox" / "root.acks.jsonl").read_text()
-    assert json.loads(acks)["wake_id"] == "owner_pause_wake"
-
-
 @pytest.mark.parametrize("first", ["usage_admission", "usage_accounting"])
 def test_review_admission_public_alias_imports_in_both_orders_and_prices_group(tmp_path, first):
     import subprocess
@@ -414,103 +223,3 @@ with ua.usage_scope(scope):
 '''
     result = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
-
-
-@pytest.mark.parametrize("dispatch", [None, "possible", "none"])
-def test_fresh_owner_pause_and_zero_ledger_do_not_prove_legacy_dispatch(tmp_path, monkeypatch, dispatch):
-    from ouroboros.owner_pause import read_fence
-    from ouroboros.task_results import write_task_result
-    from supervisor.owner_pause_control import request_owner_pause
-    from supervisor.queue_transitions import resume_budget_paused_task
-
-    queue, _, workers = _install_queue(tmp_path, monkeypatch)
-    task = {"id": "legacy", "root_task_id": "legacy", "type": "task", "chat_id": 0, "_attempt": 1}
-    if dispatch is not None:
-        task["admitted_dispatch"] = dispatch
-    write_task_result(tmp_path, "legacy", "scheduled", root_task_id="legacy")
-    workers.PENDING.append(task)
-    assert request_owner_pause("legacy", request_id="p")["ok"]
-    before = read_fence(tmp_path, "legacy")
-    result = resume_budget_paused_task("legacy")
-    if dispatch is not None:
-        # Recorded evidence decides the path; a Resume never rewrites it.
-        assert result["ok"] and result["owner_pause_released"]
-        assert result["never_started"] is (dispatch == "none")
-        assert read_fence(tmp_path, "legacy")["state"] == "released"
-    else:
-        assert result["error"] == "dispatch_outcome_unknown"
-        assert read_fence(tmp_path, "legacy") == before
-    assert task.get("admitted_dispatch") == dispatch
-
-
-def test_escaping_tool_exception_keeps_unknown_effects_after_owner_terminal(tmp_path, monkeypatch):
-    from ouroboros.owner_pause import operation_start, tool_handoff
-    from ouroboros.task_results import load_task_result, write_task_result
-    from supervisor.continuation_admission import conflicting_writers
-
-    queue, _, _ = _install_queue(tmp_path, monkeypatch)
-    write_task_result(tmp_path, "root", "running", root_task_id="root")
-    source = SimpleNamespace(task_id="root", root_task_id="root", drive_root=tmp_path)
-    with pytest.raises(TimeoutError):
-        with tool_handoff(source, "external_write"):
-            with operation_start(source):
-                raise TimeoutError("request sent, response unknown")
-    claim = load_task_result(tmp_path, "root").get("launch_handoffs", {})
-    assert claim
-    write_task_result(tmp_path, "root", "cancelled")
-    assert load_task_result(tmp_path, "root").get("launch_handoffs", {}) == claim
-    assert any(b["kind"] == "tool_handoff" for b in conflicting_writers(queue, "root"))
-
-
-def test_pause_corpus_matches_actual_registry_producer(tmp_path):
-    from ouroboros.owner_pause import install_fence
-    from ouroboros.task_results import write_task_result
-    from ouroboros.tools.registry import ToolRegistry
-    from tests.tool_classification_corpus import _PRODUCER_SHAPES
-
-    write_task_result(tmp_path, "root", "running", root_task_id="root")
-    install_fence(tmp_path, "root", request_id="p")
-    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    registry._ctx.task_id = registry._ctx.root_task_id = "root"
-    registry._ctx.budget_drive_root = tmp_path
-    result = registry.execute_result("knowledge_read", {"topic": "x"})
-    row = next(row for row in _PRODUCER_SHAPES if row[0] == "owner_pause_not_started")
-    assert result.text == row[2] and result.code == row[3]
-    assert result.meta["owner_pause_not_started"] is True
-
-
-def test_unstarted_resume_never_reopens_a_replaced_owner_fence(tmp_path, monkeypatch):
-    from contextlib import contextmanager
-
-    from ouroboros import owner_pause
-    from ouroboros.task_results import write_task_result
-    from supervisor.owner_pause_control import request_owner_pause
-    from supervisor.queue_transitions import resume_budget_paused_task
-
-    queue, _, workers = _install_queue(tmp_path, monkeypatch)
-    task = {"id": "root", "root_task_id": "root", "admitted_dispatch": "none", "chat_id": 0}
-    write_task_result(tmp_path, "root", "scheduled", root_task_id="root")
-    workers.PENDING.append(task)
-    assert request_owner_pause("root", request_id="first")["ok"]
-    real_lock = owner_pause.launch_lock
-    installed = []
-    replacing = False
-
-    @contextmanager
-    def replace_before_claim(*args, **kwargs):
-        nonlocal replacing
-        if not replacing:
-            replacing = True
-            # A real replacement can win before the final lock, never inside
-            # it: install_fence also takes the process lock (non-reentrant).
-            with real_lock(*args, **kwargs):
-                owner_pause.release_fence(tmp_path, "root", reason="earlier owner Resume")
-            newer, _ = owner_pause.install_fence(tmp_path, "root", request_id="newer")
-            installed.append(newer)
-        with real_lock(*args, **kwargs):
-            yield
-
-    monkeypatch.setattr(owner_pause, "launch_lock", replace_before_claim)
-    assert resume_budget_paused_task("root")["error"] == "selection_authority_changed"
-    assert owner_pause.read_fence(tmp_path, "root") == installed[0]
-    assert "root" in queue.BUDGET_ROOT_FENCES

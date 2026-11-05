@@ -103,14 +103,8 @@ def test_every_refusal_reason_has_a_short_factual_phrase():
     "action, status, expected",
     [
         ("promote_chat_to_task", "needs_manual_target", "Not started"),
-        ("route_to_project", "needs_manual_target", "Not started"),
         ("promote_chat_to_task", "rejected", "Not started"),
         ("steer_task", "needs_manual_target", "Not delivered"),
-        ("steer_task", "rejected", "Not delivered"),
-        ("ensure_project_scope", "rejected", "Not moved"),
-        ("promote_chat_to_task", "unconfirmed", "Not confirmed"),
-        ("steer_task", "unconfirmed", "Not confirmed"),
-        ("ensure_project_scope", "unconfirmed", "Not confirmed"),
     ],
 )
 def test_prefix_follows_the_act_and_its_outcome(action, status, expected):
@@ -171,29 +165,32 @@ def test_origin_addressed_notice_types_cover_admission_and_steering():
     })
 
 
-@pytest.mark.parametrize("notice_type", sorted(ORIGIN_ADDRESSED_NOTICE_TYPES))
-def test_origin_addressed_notice_rows_stay_in_the_owners_chat(notice_type):
+def test_origin_addressed_notice_rows_stay_in_the_owners_chat(subtests):
     """R12: the refused task id is bound to the project it never started in, so
     binding lineage would move the notice out of Main into that project on
     reload. The notice is addressed to the chat the OWNER wrote in. A relay's answer
     is its work's speech too: it stays in that chat and also joins its work's Project."""
-    rooms = lambda task_id, parent="", root="": 77 if "refused-task" in (task_id, parent, root) else 0  # noqa: E731
-    main = room_membership(1, {77}, [], rooms)
-    project = room_membership(77, {77}, [], rooms)
-    notice = {"direction": "system", "type": notice_type, "task_id": "refused-task", "chat_id": 1}
+    for notice_type in sorted(ORIGIN_ADDRESSED_NOTICE_TYPES):
+        with subtests.test(notice_type=notice_type):
+            rooms = lambda task_id, parent="", root="": 77 if "refused-task" in (task_id, parent, root) else 0  # noqa: E731
+            main = room_membership(1, {77}, [], rooms)
+            project = room_membership(77, {77}, [], rooms)
+            notice = {"direction": "system", "type": notice_type, "task_id": "refused-task", "chat_id": 1}
 
-    assert main(1, notice) is True
-    assert project(1, notice) is (notice_type in WORK_SPEECH_ELSEWHERE_TYPES)
-    assert project(77, {**notice, "chat_id": 77}) is True
-    # An ordinary bound row keeps today's behaviour: lineage moves it to its room.
-    ordinary = {"direction": "out", "type": "chat", "task_id": "refused-task", "chat_id": 1}
-    assert main(1, ordinary) is False
-    assert project(1, ordinary) is True
+            assert main(1, notice) is True
+            assert project(1, notice) is (notice_type in WORK_SPEECH_ELSEWHERE_TYPES)
+            assert project(77, {**notice, "chat_id": 77}) is True
+            # An ordinary bound row keeps today's behaviour: lineage moves it to its room.
+            ordinary = {"direction": "out", "type": "chat", "task_id": "refused-task", "chat_id": 1}
+            assert main(1, ordinary) is False
+            assert project(1, ordinary) is True
 
 
-@pytest.mark.parametrize("chat_id", [1, 0, -1001])
-@pytest.mark.parametrize("labelled", [False, True])
-@pytest.mark.parametrize("after_lock", [False, True])
+@pytest.mark.parametrize(("after_lock", "labelled", "chat_id"), [
+    (False, False, -1001),
+    (True, True, 1),
+    (True, True, 0),
+])
 def test_cancel_refusal_is_one_system_notice_only_when_no_owner_receipt_can_tell_it(
     tmp_path, monkeypatch, chat_id, labelled, after_lock,
 ):

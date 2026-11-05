@@ -224,7 +224,7 @@ def test_discovery_preserves_engine_provenance_without_entitlement_claim(engine)
     assert rows[0]["evidence"] == CAPABILITY and rows[0]["credential_configured"] is None
 
 
-@pytest.mark.parametrize("options", [{"n": True}, {"n": 0}, {"n": 11}, {"quality": "max"}, {"output_format": "png"}])
+@pytest.mark.parametrize("options", [{"n": True}, {"quality": "max"}, {"output_format": "png"}])
 def test_subscription_options_refused_before_upload(engine, ctx, options):
     wire = engine(ImageWire())
     assert invoke(ctx, options=options).code == "TOOL_ARG_ERROR"

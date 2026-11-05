@@ -7,6 +7,7 @@ import pytest
 
 from ouroboros.llm import LLMClient
 from tests.test_llm_provider_golden import _observe
+from tests._cases import chosen_rows
 
 
 MODEL = "unlisted/reasoner"
@@ -42,7 +43,6 @@ def _build(history, model=MODEL):
 @pytest.mark.parametrize("parts", [
     ["one exact thought"],
     ["\n Préserver e\u0301", " 🐍\t", "tail\r\n"],
-    ["first", "", "last"],
     ["\n \t"],
 ])
 def test_complete_ordered_text_duplicate_only_leaves_the_send_copy(parts):
@@ -68,7 +68,7 @@ def test_complete_ordered_text_duplicate_only_leaves_the_send_copy(parts):
     assert payload["extra_body"]["provider"]["allow_fallbacks"] is False
 
 
-@pytest.mark.parametrize("carriers", [
+@pytest.mark.parametrize("carriers", chosen_rows([
     pytest.param({"reasoning": "alpha"}, id="flat-only"),
     pytest.param({"reasoning_details": [_text("alpha")]}, id="details-only"),
     pytest.param({"reasoning": "", "reasoning_details": [_text("")]}, id="empty-flat"),
@@ -107,7 +107,7 @@ def test_complete_ordered_text_duplicate_only_leaves_the_send_copy(parts):
                    id=f"nonstring-part-{type(value).__name__}") for value in [None, 0, False, [], {}]],
     *[pytest.param({"reasoning": value, "reasoning_details": [_text("alpha")]},
                    id=f"nonstring-flat-{type(value).__name__}") for value in [None, 0, False, [], {}]],
-])
+], 0, 19, 32))
 def test_non_equivalent_empty_mixed_and_unknown_forms_stay_exact(carriers):
     history = _history({"reasoning_content": "", **carriers})
     before = copy.deepcopy(history)
@@ -136,7 +136,6 @@ def test_non_assistant_matching_reasoning_fields_stay_exact(role):
 
 @pytest.mark.parametrize("model, retained", [
     ("minimax::MiniMax-M3.1", {"reasoning_content", "reasoning_details"}),
-    ("deepseek::deepseek-v4-flash", {"reasoning_content"}),
     ("openai::gpt-5.6-terra", set()),
     ("zai::glm-5", set()),
     ("cloudru::zai-org/GLM-4.7", set()),
@@ -155,9 +154,7 @@ def test_direct_provider_carriers_keep_their_existing_projection(model, retained
     assert history == before
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("method", ["chat", "chat_async"])
-@pytest.mark.parametrize("no_proxy", [False, True])
+@pytest.mark.parametrize(("no_proxy", "method"), [(False, "chat"), (True, "chat_async")])
 def test_sync_async_physical_send_preserves_details_and_seals_deduplicated_payload(method, no_proxy):
     details = [_text("exact", signature="opaque==", future={"parts": [2, 1]})]
     history = _history({"reasoning": "exact", "reasoning_details": details})

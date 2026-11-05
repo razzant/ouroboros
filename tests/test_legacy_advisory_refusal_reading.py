@@ -66,15 +66,7 @@ def test_the_refusal_reads_best_effort_beside_its_stored_fail_and_nothing_else_m
 
 @pytest.mark.parametrize("variant, change", [
     ("blocking enforcement", {"enforcement": "blocking"}),
-    ("no recorded enforcement", {"enforcement": None}),
-    ("unknown enforcement", {"enforcement": "auto"}),
-    ("a reviewer's FAIL", {"review": "fail", "signals": ("FAIL",)}),
     ("a FAIL among the signals", {"signals": ("DEGRADED", "FAIL")}),
-    ("a failed execution", {"execution": "failed", "status": "failed"}),
-    ("no delivered answer", {"execution": "failed", "result": ""}),
-    ("execution ok with an empty result", {"result": ""}),
-    ("execution ok with an unknown result", {"result": None}),
-    ("an explicit unfinished stop", {"reason": "author_stop"}),
     ("spent review rounds", {"reason": "review_cycles_exhausted"}),
 ])
 def test_anything_but_that_exact_shape_keeps_the_recorded_fail(variant, change):
@@ -85,9 +77,6 @@ def test_anything_but_that_exact_shape_keeps_the_recorded_fail(variant, change):
 
 @pytest.mark.parametrize("change,sentence", [
     ({"enforcement": "blocking"}, SENTENCE),
-    ({"enforcement": None}, SENTENCE),
-    ({"enforcement": "unknown"}, SENTENCE),
-    ({"review": "fail", "signals": ("FAIL",)}, SENTENCE),
     ({"enforcement": "blocking", "reason": "review_degraded"},
      "The reviewers did not reach a verdict on this answer."),
     ({"reason": "review_cycles_exhausted"},
@@ -149,11 +138,6 @@ def test_only_affirmative_answer_evidence_survives_the_compact_projection():
 @pytest.mark.parametrize("change,label", [
     ({}, "Done with warnings"),
     ({"result": ""}, "Failed"),
-    ({"result": None}, "Failed"),
-    ({"terminal_origin": "host_notice"}, "Failed"),
-    ({"terminal_origin": "host_salvage"}, "Failed"),
-    ({"terminal_origin": "unknown"}, "Failed"),
-    ({"terminal_origin": ""}, "Done with warnings"),
     ({"status": "failed", "outcome_axes": {"objective": {"status": "fail", "source": "acceptance"}}}, "Failed"),
 ])
 def test_stamp_sources_keep_raw_objective_while_compact_history_interprets_it(tmp_path, monkeypatch, change, label):

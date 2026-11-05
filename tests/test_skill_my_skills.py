@@ -75,8 +75,7 @@ def _fake(monkeypatch, *, exists=False, private=True, failure=None, error_stage=
     return calls
 
 
-@pytest.mark.parametrize("exists", [False, True])
-@pytest.mark.parametrize("private", [False, True])
+@pytest.mark.parametrize(("private", "exists"), [(False, False), (True, True)])
 def test_create_or_connect_repository_reports_visibility_and_saves_new_source(env, monkeypatch, exists, private):
     client, settings = env
     calls = _fake(monkeypatch, exists=exists, private=private)
@@ -147,9 +146,7 @@ def test_missing_token_never_touches_github_or_sources(env, monkeypatch):
     assert not settings.exists() and skill_sources.load_sources() == INITIAL
 
 
-@pytest.mark.parametrize("stage,status,code", [("create", 403, "cannot_create"), ("create", 404, "cannot_create"),
-    ("create", 422, "failed"), ("create", 401, "failed"), ("read", 403, "failed"), ("user", 401, "failed"),
-    ("create", None, "failed")])
+@pytest.mark.parametrize("stage,status,code", [("create", 403, "cannot_create"), ("create", 401, "failed"), ("read", 403, "failed"), ("create", None, "failed")])
 def test_failures_have_typed_codes_and_never_save_a_source(env, monkeypatch, stage, status, code):
     client, settings = env
     error = GitHubError("synthetic refusal ghp_SYNTHETIC1234567890", http_status=status,

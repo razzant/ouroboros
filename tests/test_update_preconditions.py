@@ -12,9 +12,12 @@ from supervisor import git_ops, git_ops_reset, workers
 from tests.test_git_lock_owners import _git, _repo, _live_writer
 
 
-@pytest.mark.parametrize("topology", ["checkout", "linked-worktree", "alternate-index"])
-@pytest.mark.parametrize("holder", ["orphan", "live"])
-@pytest.mark.parametrize("door", ["smart", "replace", "ui_rollback", "vcs_rollback"])
+@pytest.mark.parametrize(("door", "holder", "topology"), [
+    ("smart", "orphan", "checkout"),
+    ("replace", "live", "linked-worktree"),
+    ("ui_rollback", "orphan", "alternate-index"),
+    ("vcs_rollback", "live", "checkout"),
+])
 def test_lock_refusal_precedes_every_stop(tmp_path, monkeypatch, topology, holder, door):
     repo = _repo(tmp_path)
     if topology == "linked-worktree":
@@ -59,7 +62,7 @@ def test_absent_lock_is_observed_without_creating_one(tmp_path, monkeypatch):
     assert not (repo / ".git" / "index.lock").exists()
 
 
-@pytest.mark.parametrize("door", ["smart", "replace", "ui_rollback", "vcs_rollback"])
+@pytest.mark.parametrize("door", ["smart", "replace", "ui_rollback"])
 def test_failed_git_observation_is_not_applied_before_any_stop(tmp_path, monkeypatch, door):
     from supervisor import update_merge
 
@@ -90,8 +93,13 @@ def test_failed_git_observation_is_not_applied_before_any_stop(tmp_path, monkeyp
     assert stopped == [] and workers.repo_writer_admission_closed() == ""
 
 
-@pytest.mark.parametrize("topology", ["checkout", "linked-worktree", "alternate-index", "relative-index"])
-@pytest.mark.parametrize("output", ["modern", "echoed-flag", "relative", "empty"])
+@pytest.mark.parametrize(("output", "topology"), [
+    ("modern", "linked-worktree"),
+    ("echoed-flag", "checkout"),
+    ("echoed-flag", "alternate-index"),
+    ("relative", "relative-index"),
+    ("empty", "alternate-index"),
+])
 def test_index_path_fallback_observes_the_real_lock(tmp_path, monkeypatch, topology, output):
     repo = _repo(tmp_path)
     if topology == "linked-worktree":

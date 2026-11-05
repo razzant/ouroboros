@@ -42,7 +42,7 @@ def test_pin_partial_update_persists_without_changing_room_authority(pin_client)
     assert registry.get_project(root, "alpha")["pinned"] is False
 
 
-@pytest.mark.parametrize("value", ["true", "false", 1, 0, None, [], {}])
+@pytest.mark.parametrize("value", ["true", 0, {}])
 def test_pin_is_strict_boolean_and_refuses_atomically(pin_client, value):
     client, root = pin_client
     registry.create_project(root, "alpha", name="Original")

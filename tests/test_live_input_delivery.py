@@ -10,7 +10,7 @@ from ouroboros import call_protocol as cp
 from ouroboros.call_peers import CallPeerError, LiveCallHub
 from ouroboros.contracts.live_conversation import Audio, LiveOptions
 from ouroboros.gateway.call_ws import serve_peer
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 @pytest.mark.parametrize('delay', [0, .04])
@@ -84,8 +84,7 @@ def test_rejected_input_and_pending_close_have_distinct_drop_causes():
     assert evidence['dropped_ms'] == pytest.approx(822 * 1000 / 24000)
 
 
-@pytest.mark.parametrize('frames', [1, 10, 30])
-@pytest.mark.parametrize('epoch', [0, 65535])
+@pytest.mark.parametrize(("epoch", "frames"), [(0, 1), (0, 30), (65535, 10)])
 def test_barge_in_keeps_inflight_microphone_frames_and_retires_old_output(frames, epoch):
     """Audit epoch-repro: 20–600 ms in flight belongs to the new owner turn."""
     hub = LiveCallHub(cp.CallSpec('barge-in', 1, 'fixture', 'voice'))

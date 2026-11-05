@@ -51,6 +51,7 @@ from ouroboros.contracts import (
     read_schema_version,
     with_schema_version,
 )
+from tests._source_scan import parse
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -422,7 +423,7 @@ def _collect_literal_progress_meta_keys(source_path: pathlib.Path) -> set[str]:
     """Collect literal progress_meta keys that can reach ChatOutbound frames."""
     from tests._progress_meta_scan import progress_meta_keys
 
-    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    tree = parse(source_path.read_text(encoding="utf-8"))
     keys: set[str] = set()
     meta_helper_names = {"_subagent_rejection_meta", "_subagent_progress_meta", "_subagent_scheduled_meta"}
     # A producer may build the dict under a local name and hand it over as

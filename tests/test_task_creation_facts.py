@@ -6,7 +6,6 @@ import pytest
 from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_headless_task_title import admission as admission  # shared API fixture
 
-pytestmark = pytest.mark.serial
 CREATED = "2026-01-01T00:00:01+00:00"
 
 

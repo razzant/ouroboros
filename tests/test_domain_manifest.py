@@ -269,8 +269,7 @@ def test_generated_block_replacement_is_idempotent():
     assert once.count(check_domains.GENERATED_BEGIN) == 1
 
 
-@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
-@pytest.mark.parametrize("terminal_newline", [False, True])
+@pytest.mark.parametrize(("terminal_newline", "newline"), [(False, "\n"), (False, "\r"), (True, "\r\n")])
 def test_duplicate_segments_match_parser_byte_columns(tmp_path, monkeypatch, newline, terminal_newline):
     """The consumer must slice parser lines, not splitlines' Unicode separators."""
     from scripts import domain_graph

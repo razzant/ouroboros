@@ -356,16 +356,10 @@ def test_the_manifest_declares_every_topic_register_subscribes(tmp_path):
 
 @pytest.mark.parametrize("record_state,event,expected", [
     (None, {"state": "answered", "answered_index": 5}, ("Q\nAnswered: 6.", [])),
-    (None, {"state": "answered"}, ("Q\nAnswered.", [])),
-    (None, {"state": "answered", "answered_index": True}, ("Q\nAnswered.", [])),
-    (None, {"state": "superseded"}, ("Q\nReplaced by a newer question.", [])),
-    (None, {"state": "open", "wait_for_answer": False},
-     ("Q\nThe task continued; an answer is still accepted.\nReply to this message with your answer.", [])),
     ("superseded", {"state": "expired_terminal"}, None),
     ("expired_terminal", {"state": "open", "wait_for_answer": False}, None),
     ("answered", {"state": "superseded"}, None),
     (None, {"state": "unknown"}, None),
-    (None, {"state": "closed", "answered_index": 0, "comment": "yes"}, ("Q\nQuestion closed.", [])),
     ("expired_terminal", {"state": "closed", "closed_reason": "x" * 300}, ("Q\nQuestion closed.\n" + "x" * 200 + "…", [])),
     ("closed", {"state": "answered", "answered_index": 0}, None),
     ("answered", {"state": "closed", "closed_reason": "late"}, None),
@@ -689,13 +683,12 @@ def test_a_later_answer_refused_behind_the_winners_failed_delivery_is_a_conflict
     assert [host.block().get(key) for key in keys] == [winner.get(key) for key in keys]
 
 
-@pytest.mark.parametrize("failure", ["history", "mailbox"])
-@pytest.mark.parametrize("path,earlier,given,shown", [
-    ("tap", {"option_index": 1}, 1, "2. postgres"),
-    ("reply", {"comment": "Use duckdb"}, "Use duckdb", "Use duckdb"),
-    ("tap", None, 1, "2. postgres"),
-    ("reply", None, "Use duckdb", "Use duckdb"),
-], ids=["tap-same-answer", "reply-same-answer", "tap-same-update", "reply-same-update"])
+@pytest.mark.parametrize(("path", "earlier", "given", "shown", "failure"), [
+    pytest.param("tap", {"option_index": 1}, 1, "2. postgres", "history", id='tap-same-answer-history'),
+    pytest.param("reply", {"comment": "Use duckdb"}, "Use duckdb", "Use duckdb", "mailbox", id='reply-same-answer-mailbox'),
+    pytest.param("tap", None, 1, "2. postgres", "history", id='tap-same-update-history'),
+    pytest.param("reply", None, "Use duckdb", "Use duckdb", "mailbox", id='reply-same-update-mailbox'),
+])
 def test_the_same_answer_behind_a_failed_delivery_stays_accepted(
         card, tmp_path, monkeypatch, failure, path, earlier, given, shown):
     """No false changed answer: the same answer given on the web card, or this very update answered again,

@@ -18,7 +18,6 @@ import pytest
 from tests.ui_console_errors import PageErrors
 
 
-pytestmark = pytest.mark.serial
 
 WEB = Path(__file__).resolve().parents[1] / "web"
 ORIGIN = "http://widgets.test"

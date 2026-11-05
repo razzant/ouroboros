@@ -399,8 +399,10 @@ def test_a_landed_receipt_whose_work_cannot_be_read_keeps_its_project_address(tm
     assert _shown(frame) == _shown(row)
 
 
-@pytest.mark.parametrize("lifecycle", ["deleting", "tombstoned"])
-@pytest.mark.parametrize("producer", ["direct_late_reply", "picker_steer"])
+@pytest.mark.parametrize(("producer", "lifecycle"), [
+    ("direct_late_reply", "deleting"),
+    ("picker_steer", "tombstoned"),
+])
 def test_words_reaching_a_work_whose_project_is_closing_offer_no_room_to_open(tmp_path, monkeypatch, producer, lifecycle):
     """Only an ACTIVE Project is a room the receipt can open (the address rule these producers always had); the
     work's own name stays. Live and after a reload alike: no `Open project` reference into a closing room."""

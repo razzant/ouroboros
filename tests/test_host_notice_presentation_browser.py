@@ -26,7 +26,7 @@ import pytest
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 LATE_TS = "2026-09-28T00:06:00+00:00"
 

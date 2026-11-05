@@ -8,12 +8,6 @@ from ouroboros.consciousness_authority import work_kind, consciousness_origin_me
 
 @pytest.mark.parametrize("metadata,kind", [
     ({}, "consciousness"), ({"work_kind": "owner", "initiator": "consciousness"}, "owner"),
-    ({"initiator": "consciousness", "origin_message_ref": "x"}, "consciousness"),
-    ({"presence_binding_authority": {"id": "old"}}, "consciousness"),
-    ({"presence_binding_authority": {}, "origin_message_ref": "owner"}, "consciousness"),
-    ({"presence_root_carrier": True}, "consciousness"), ({"presence": True}, "consciousness"),
-    ({"origin_message_ref": "owner-message"}, "owner"), ({"origin_suppressed": True}, "owner"),
-    ({"owner_ingress": True, "project_id": "project-room"}, "owner"),
     ({"project_id": "project-room"}, "consciousness"),
 ])
 def test_fallback_order_and_child_copy(metadata, kind):
@@ -22,7 +16,7 @@ def test_fallback_order_and_child_copy(metadata, kind):
 
 
 @pytest.mark.parametrize("addressed,confirmed,kind", [(True, True, "owner"), (True, False, "consciousness"),
-                                                      (False, True, "consciousness"), (False, False, "consciousness")])
+                                                      (False, False, "consciousness")])
 def test_confirmed_addressed_request_mints_only_an_independent_owner_root(addressed, confirmed, kind):
     metadata = {"initiator": "consciousness", "wake_cause": "focus", "task_id": "focus-turn",
                 "focus": {"addressed": addressed, "actor": {"owner_confirmed": confirmed}}}

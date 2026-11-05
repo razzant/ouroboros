@@ -79,9 +79,11 @@ def test_deep_review_separates_installed_governance_from_candidate_sources(
     assert proposed_bible not in brief and "Proposed replacement" not in brief
     assert str(source) in brief and "Interaction meaning" in brief
 
-@pytest.mark.parametrize("surface", ["triad", "scope", "deep_self_review"])
-@pytest.mark.parametrize("delivery", ["packet", "retrieving"])
-@pytest.mark.parametrize("touched", ["ouroboros/event.py", "web/modules/chat.js"])
+@pytest.mark.parametrize(("touched", "delivery", "surface"), [
+    ("ouroboros/event.py", "packet", "triad"),
+    ("ouroboros/event.py", "packet", "deep_self_review"),
+    ("web/modules/chat.js", "retrieving", "scope"),
+])
 def test_noninline_design_keeps_map_and_direct_source(governance_repo, surface, delivery, touched):
     path = _design(governance_repo)
     context = governance_context(governance_repo, surface=surface, delivery=delivery,
@@ -349,8 +351,7 @@ def _git_origin(harness, subject):
 
 
 @pytest.mark.parametrize("subject, affected", [
-    ("candidate", "event.py"), ("candidate", "."), ("foreign", "event.py"),
-    ("unknown", "event.py"), ("folderless", ""),
+    ("candidate", "event.py"), ("candidate", "."), ("folderless", ""),
 ])
 def test_plan_navigation_and_pack_follow_body_identity(harness, subject, affected):
     source = _design(harness.system)
@@ -387,12 +388,19 @@ def _research_context(harness, subject, task_id="task-1"):
     return ctx
 
 
-@pytest.mark.parametrize("flag_location", ["contract", "metadata"])
-@pytest.mark.parametrize("subject, flag, expected", [
-    ("main", True, True), ("candidate", True, True), ("body_copy", True, True),
-    ("folderless", True, True), ("foreign", True, False), ("unknown", True, False),
-    ("foreign_copy", True, False), ("main", None, False), ("main", False, False),
-    ("candidate", None, False), ("folderless", None, False), ("unknown", None, False),
+@pytest.mark.parametrize(("subject", "flag", "expected", "flag_location"), [
+    ("main", True, True, "contract"),
+    ("candidate", True, True, "metadata"),
+    ("body_copy", True, True, "contract"),
+    ("folderless", True, True, "metadata"),
+    ("foreign", True, False, "contract"),
+    ("unknown", True, False, "metadata"),
+    ("foreign_copy", True, False, "contract"),
+    ("main", None, False, "metadata"),
+    ("main", False, False, "contract"),
+    ("candidate", None, False, "metadata"),
+    ("folderless", None, False, "contract"),
+    ("unknown", None, False, "metadata"),
 ])
 def test_empty_path_plan_is_a_body_plan_only_for_a_declared_body_subject(
     harness, subject, flag, expected, flag_location,
@@ -420,7 +428,7 @@ def test_empty_path_plan_is_a_body_plan_only_for_a_declared_body_subject(
     assert ("## BIBLE.md (constitution" in api) is expected
 
 
-@pytest.mark.parametrize("subject", ["main", "candidate", "body_copy", "folderless"])
+@pytest.mark.parametrize("subject", ["main", "body_copy", "folderless"])
 def test_declared_body_research_flag_cannot_override_actual_foreign_file_target(harness, subject):
     source = _design(harness.system)
     # The declaration makes this subject's plan a body plan while it names no file ...

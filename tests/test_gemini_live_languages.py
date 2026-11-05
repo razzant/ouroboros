@@ -8,7 +8,7 @@ import pytest
 
 from ouroboros.contracts.live_conversation import Respond, ToolOutputs
 from skills.live_conversation.driver import call_tools, recorded_call_languages, session_options
-from tests.test_live_conversation import host_world as host_world_fixture
+from tests._live_world import host_world as host_world_fixture
 from tests.test_gemini_live_boundaries import deny_network  # noqa: F401
 from tests.test_gemini_live_boundaries import gemini as gemini_fixture, Wire, audio_content, receive
 

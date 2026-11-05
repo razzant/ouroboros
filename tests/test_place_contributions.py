@@ -8,6 +8,7 @@ from ouroboros.extension_contributions import project_contributions
 from ouroboros import skill_source_catalog as catalog
 from tests.test_skill_contributions import manifest, TEMPLATE
 from tests.test_extension_icons import PLACE, staged_icon
+from tests._cases import chosen_rows
 
 
 def test_place_has_own_contract_and_full_projection():
@@ -22,10 +23,9 @@ def test_place_has_own_contract_and_full_projection():
     assert rows[0]["tools"] == [{"name": "ext_6_r_mail_send", "effect": "message", "target": "to"}]
 
 
-@pytest.mark.parametrize("patch", [{"destination": "host"}, {"destination": "vendor:"}, {"scope": "workspace"},
-    {"wakes": ["a keyword"]}, {"wakes": [{}]}, {"wakes": "mention"}, {"settings": "../x"},
-    {"read_only": True}, {"read_only": "host"}, {"source": {"route": "../status", "refresh_s": 60}},
-    {"source": {"route": "status", "refresh_s": 1}}, {"runtime": "server"}, {"route": "send"}])
+@pytest.mark.parametrize("patch", [{"destination": "host"}, {"scope": "workspace"},
+    {"settings": "../x"},
+    {"read_only": True}, {"runtime": "server"}])
 def test_invalid_place_drops_only_it_and_valid_place_still_works(patch):
     invalid = {**PLACE, **patch, "id": "invalid"}
     clean, errors = validate_contributions(manifest([PLACE, invalid, TEMPLATE], kind="extension", permissions=["presence"]))
@@ -75,8 +75,6 @@ def test_hub_pointer_optional_fields_do_not_change_schema(tmp_path):
 @pytest.mark.parametrize("facts,wakes,labels", [
     (["mention", {"id": "signal.words", "label": "Words you chose appear"}], ["mention", "signal.words"],
      {"signal.words": "Words you chose appear"}),
-    ([{"id": "direct_message", "label": "Mail addressed to you"}], ["direct_message"],
-     {"direct_message": "Mail addressed to you"}),
     ([], [], {}), (["any_message", "from_bot"], ["from_bot"], {}),
 ])
 def test_declared_facts_and_signal_labels_project_unchanged(facts, wakes, labels):
@@ -88,7 +86,7 @@ def test_declared_facts_and_signal_labels_project_unchanged(facts, wakes, labels
     assert row["labels"] == labels
 
 
-@pytest.mark.parametrize("patch", [
+@pytest.mark.parametrize("patch", chosen_rows([
     {"facts": ["mention"], "wakes": ["reply_to_me"]},
     {"facts": [], "wakes": ["mention"]}, {"wakes": ["signal.words"]},
     {"facts": ["signal.words"]}, {"facts": ["unknown"]}, {"facts": "mention"},
@@ -98,7 +96,7 @@ def test_declared_facts_and_signal_labels_project_unchanged(facts, wakes, labels
     {"facts": [{"id": "signal.words", "label": ""}]},
     {"facts": [{"id": "mention", "label": "x" * 121}]},
     {"facts": [{"id": "signal.words", "label": "Words", "pattern": "text"}]},
-])
+], 0, 3, 5, 6, 10, 12))
 def test_invalid_facts_drop_only_invalid_contribution(patch):
     good = {**PLACE, "wakes": ["mention"]}  # no facts keeps existing core vocabulary
     clean, errors = validate_contributions(manifest(

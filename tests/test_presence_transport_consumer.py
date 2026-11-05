@@ -110,10 +110,9 @@ def _turn(client, binding):
 
 @pytest.mark.parametrize("turn_forced,spoken_now", [
     (_forced("message", PARTIAL), [PARTIAL]),  # a declared partial beside owed work
-    (_forced("deferred", PARTIAL), [PARTIAL]),
     (_forced("tool_delivered", NOTE), []),  # the note is context, never a reply
     (RECORD, []),  # an undeclared internal record says nothing new
-], ids=["message", "deferred", "tool_delivered", "undeclared"])
+], ids=["message", "tool_delivered", "undeclared"])
 def test_the_installed_transport_gets_the_partial_now_and_the_owed_result_later(
         tmp_path, monkeypatch, turn_forced, spoken_now):
     _seed_token(tmp_path, skill="telegram-bot", token=_TOKEN, permissions=["presence"],

@@ -19,7 +19,6 @@ import pytest
 
 from tests.test_model_sleep import _ctx as _sleep_ctx, _mail
 
-pytestmark = pytest.mark.serial  # cold consumers bind queue module state
 
 
 @pytest.fixture(autouse=True)

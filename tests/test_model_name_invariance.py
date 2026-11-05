@@ -53,6 +53,7 @@ import socket
 from dataclasses import dataclass
 
 import pytest
+from tests._source_scan import parse
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 NAME_SOURCES = (REPO / "ouroboros", REPO / "supervisor", REPO / "server.py")
@@ -128,7 +129,7 @@ def _harvest_model_literals() -> dict[str, set[str]]:
     for source in NAME_SOURCES:
         paths.extend(sorted(source.rglob("*.py")) if source.is_dir() else [source])
     for path in paths:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
                 continue

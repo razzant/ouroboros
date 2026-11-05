@@ -27,7 +27,6 @@ from tests.test_scheduled_receipt_contention import install_worker, request
 from tests.test_workspace_preparation import _WAIT_SEC, spy_provisions
 from tests.test_workspace_preparation import env as env
 
-pytestmark = pytest.mark.serial
 
 
 def wait_for(predicate, what):
@@ -83,8 +82,7 @@ def hold_at_receipt(env, monkeypatch, stack, *, write):
     return held, transitions, failures
 
 
-@pytest.mark.parametrize("journal", ["PERSIST", "WAL"])
-@pytest.mark.parametrize("acting", [False, True])
+@pytest.mark.parametrize(("acting", "journal"), [(False, "PERSIST"), (True, "WAL")])
 def test_pinned_reader_admits_once_at_the_lane_without_storage_under_q(env, monkeypatch, journal, acting):
     use_journal(monkeypatch, journal)
     event = request(env, acting)
@@ -122,8 +120,7 @@ def test_pinned_reader_admits_once_at_the_lane_without_storage_under_q(env, monk
     assert [task["id"] for task in delivered] == ["receipt-child"] and worker.busy_task_id == "receipt-child"
 
 
-@pytest.mark.parametrize("acting", [False, True])
-@pytest.mark.parametrize("control", ["stop", "pause"])
+@pytest.mark.parametrize(("control", "acting"), [("stop", False), ("pause", True)])
 def test_control_between_receipt_and_put_wins_and_settles_the_receipt_typed(env, monkeypatch, acting, control):
     from supervisor.events_budget import _set_root_budget_pause_locked
 

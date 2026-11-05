@@ -340,7 +340,6 @@ def test_concurrent_custody_on_a_pending_task_settles_exactly_once(qenv):
     assert load_task_result(qenv.drive, "pending-race")["status"] == "scheduled"
     assert ci.active_intent(qenv.drive, "pending-race")["claim_owner"] == "custody-1"
 
-@pytest.mark.serial
 def test_custody_raising_mid_teardown_releases_the_reaping_slot(qenv, monkeypatch):
     """A-F1a: a crash between capture and respawn must not strand the slot."""
     task_id = "raiser"
@@ -362,7 +361,6 @@ def test_custody_raising_mid_teardown_releases_the_reaping_slot(qenv, monkeypatc
     intent = ci.active_intent(qenv.drive, task_id)
     assert intent is not None and intent["state"] == ci.INTENT_REQUESTED
 
-@pytest.mark.serial
 def test_custody_takes_over_a_slot_stranded_by_an_abandoned_claim(qenv):
     """A-F1c: the infinite CANCEL_FAILED loop a dead custody used to cause."""
     task_id = "stranded"

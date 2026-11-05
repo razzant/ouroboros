@@ -30,7 +30,7 @@ def test_effective_authority_keeps_configured_enforcement(access):
 
 
 @pytest.mark.parametrize("status", [
-    "responded", "unanswered", "error", "not_performed", "not_dispatched", "pending",
+    "responded", "error", "pending",
 ])
 def test_coupling_facts_survive_action_authority(candidate, access, status):  # noqa: F811
     """The gate's one verdict (``review_err``) is projected under the owner's

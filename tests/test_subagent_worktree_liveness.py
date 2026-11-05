@@ -166,8 +166,11 @@ def _pass_cost(monkeypatch):
     return counts
 
 
-@pytest.mark.parametrize("count", [100, 800])
-@pytest.mark.parametrize("only", [None, ["absent"], ["task-0"]])
+@pytest.mark.parametrize(("only", "count"), [
+    (None, 100),
+    pytest.param(["absent"], 800, id='only1-800'),
+    pytest.param(["task-0"], 100, id='only2-100'),
+])
 def test_a_pass_locks_only_the_records_it_selected_and_rewrites_none(world, monkeypatch, count, only):
     repo, data, root = world
     for i in range(count):

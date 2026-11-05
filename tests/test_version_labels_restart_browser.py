@@ -22,7 +22,7 @@ from tests.test_ui_smoke_playwright import direct_server_with_data as direct_ser
 from tests.test_version_labels_browser import CARET, DRAFT, FACTS, HEALTH_READS, MAIN, PIN, settle_labels
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 _ROWS_SHOWN = "(n) => document.querySelectorAll('#chat-messages [data-history-id]').length >= n"
 _NEWEST_SOCKET_OPEN = "(n) => window.__testSockets.length >= n && window.__testSockets.at(-1).readyState === WebSocket.OPEN"
 

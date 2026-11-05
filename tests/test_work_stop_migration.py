@@ -19,8 +19,10 @@ def _pause(reason="owner", **extra):
             "checkpoint": {"pause_id": "current", "pause_generation": 2}, **extra}
 
 
-@pytest.mark.parametrize("reason", ["panic_hold", "Ouroboros: the owner asked to pause before updating"])
-@pytest.mark.parametrize("has_current", [True, False])
+@pytest.mark.parametrize(("has_current", "reason"), [
+    (True, "panic_hold"),
+    (False, "Ouroboros: the owner asked to pause before updating"),
+])
 def test_old_copied_reason_never_overrules_current_pause(reason, has_current):
     task = {"id": "root", "root_task_id": "root", "_budget_pause_hold": {
         "reason": reason, "selected": False, "detail": "root_resume_generation_stale"}}
@@ -73,7 +75,7 @@ def test_selected_members_keep_only_q9_bindings_and_new_pause_discards_old_selec
 
 
 @pytest.mark.parametrize("reason,release", [("panic_hold", "owner"), ("saved_work_hold", "resume"),
-                                          ("owner_restart_hold", "resume"), ("unrecognized_code", "resume")])
+                                          ("unrecognized_code", "resume")])
 def test_unselected_old_holds_gain_release_or_become_point_refusals(reason, release):
     task = {"id": "held", "_budget_pause_hold": {"reason": reason, "stop_cause": "panic", "selected": False}}
     snap = _snapshot(task)

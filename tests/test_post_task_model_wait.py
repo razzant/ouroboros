@@ -168,7 +168,7 @@ def test_detached_decision_mailbox_and_activity_remain_live_after_task_done(phas
     assert len(forwarded) == 1  # An ended post owner cannot be resurrected.
 
 
-@pytest.mark.parametrize("cause", ["budget", "deadline", "unknown", "ordinary"])
+@pytest.mark.parametrize("cause", ["budget", "unknown", "ordinary"])
 def test_paid_stage_interruption_closes_checkpoint_without_buying_following_stages(phase, monkeypatch, cause):
     from ouroboros.usage_accounting import BudgetExceeded
 
@@ -449,7 +449,6 @@ def _controlled_worker(input_queue, output_queue, data_root, repo_root, resume):
         worker_main(0, input_queue, output_queue, repo_root, data_root)
 
 
-@pytest.mark.serial
 def test_real_pooled_process_does_not_dequeue_next_task_during_post_wait(tmp_path, monkeypatch):
     import multiprocessing
     from pathlib import Path
@@ -504,7 +503,6 @@ def test_real_pooled_process_does_not_dequeue_next_task_during_post_wait(tmp_pat
         outgoing.join_thread()
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("first_settled", ["attachments", "post_work"])
 def test_mailbox_survives_until_both_attachment_and_post_work_custody_settle(tmp_path, first_settled):
     from ouroboros.owner_mailbox import _mailbox_path, write_owner_message

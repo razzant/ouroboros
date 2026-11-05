@@ -22,7 +22,7 @@ from tests._store_shared import result_signature
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _emit_ws_frame, state_reads
 from tests.ui_console_errors import PageErrors
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 WAIT = "Waiting for Project verification"
 CHILD = '.chat-live-card[data-task-id="held"]'
 # A held card waits for something that ends by itself: still dots on a neutral chip, nothing that moves, no amber.

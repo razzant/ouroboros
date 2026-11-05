@@ -36,7 +36,6 @@ from supervisor import queue as task_queue
 from tests.test_place_focus import focus as focus
 from tests.test_quiz_answer import _post
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

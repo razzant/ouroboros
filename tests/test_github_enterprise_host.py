@@ -541,7 +541,6 @@ REAL_LEGS = [
 ]
 
 
-@pytest.mark.serial
 def test_the_fixture_sees_the_defect_a_bare_placeholder_call_has(two_hosts):
     """Without this repair's --hostname, gh fills the Enterprise repository's name and sends it to github.com."""
     subprocess.run(["gh", "api", "repos/{owner}/{repo}/issues/7"], cwd=str(two_hosts.cwd), capture_output=True, timeout=30, check=False)
@@ -549,7 +548,6 @@ def test_the_fixture_sees_the_defect_a_bare_placeholder_call_has(two_hosts):
     assert (seen.host, seen.path, seen.token) == (PUBLIC_API, "/repos/corp/secret/issues/7", "public-env-token")
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("name,args", REAL_LEGS, ids=lambda value: value if isinstance(value, str) else "-".join(
     str(value.get(key)) for key in ("method", "kind", "http_method") if value.get(key)) + ("-graphql" if "graphql" in value else ""))
 def test_a_two_host_project_keeps_every_leg_on_its_own_host_and_credential(two_hosts, name, args):
@@ -558,7 +556,6 @@ def test_a_two_host_project_keeps_every_leg_on_its_own_host_and_credential(two_h
     _on_the_enterprise_host_only(two_hosts, "enterprise-hosts-token")
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("env,token", [({}, "enterprise-hosts-token"), ({"GITHUB_ENTERPRISE_TOKEN": "enterprise-alt-token"}, "enterprise-alt-token"),
                                        ({"GH_ENTERPRISE_TOKEN": "enterprise-env-token", "GITHUB_ENTERPRISE_TOKEN": "enterprise-alt-token"}, "enterprise-env-token")],
                          ids=["hosts-yml", "GITHUB_ENTERPRISE_TOKEN", "GH_ENTERPRISE_TOKEN"])
@@ -577,7 +574,6 @@ def test_each_credential_family_reaches_only_its_own_host(two_hosts, monkeypatch
     assert two_hosts.tokens() == {"public-settings-token" if public == "settings" else "public-env-token"}
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("kind", ["room", "system"])
 def test_room_and_system_repositories_take_the_same_path(two_hosts, kind):
     _bind(two_hosts, kind)
@@ -585,7 +581,6 @@ def test_room_and_system_repositories_take_the_same_path(two_hosts, kind):
     _on_the_enterprise_host_only(two_hosts, "enterprise-hosts-token")
 
 
-@pytest.mark.serial
 def test_list_pages_and_a_next_route_stay_on_the_project_host(two_hosts):
     first = json.loads(two_hosts.call("github_read", method="list", kind="issue").partition("\n")[2])
     assert first["next_cursor"] == "2" and first["items"][0]["number"] == 7
@@ -598,7 +593,6 @@ def test_list_pages_and_a_next_route_stay_on_the_project_host(two_hosts):
     assert two_hosts.seen[-1].path == "/api/v3/repositories/1/issues/7/timeline"
 
 
-@pytest.mark.serial
 def test_an_unanswered_comment_is_reconciled_with_the_project_hosts_lookup_and_actor(two_hosts):
     two_hosts.lost = {"POST /repos/corp/secret/issues/7/comments"}
     text = two_hosts.call("github_write", method="comment", target=7, body="hello", expect={"state": "open"})
@@ -611,7 +605,6 @@ def test_an_unanswered_comment_is_reconciled_with_the_project_hosts_lookup_and_a
     _on_the_enterprise_host_only(two_hosts, "enterprise-hosts-token")
 
 
-@pytest.mark.serial
 def test_an_unanswered_node_only_mutation_is_reconciled_on_the_project_host(two_hosts):
     two_hosts.lost = {"resolve"}
     receipt = json.loads(two_hosts.call("github_write", method="resolve_thread", target="PRRT_1").partition("\n")[2])
@@ -620,7 +613,6 @@ def test_an_unanswered_node_only_mutation_is_reconciled_on_the_project_host(two_
     _on_the_enterprise_host_only(two_hosts, "enterprise-hosts-token")
 
 
-@pytest.mark.serial
 def test_explicit_targets_keep_their_contract_from_any_project(two_hosts, monkeypatch):
     two_hosts.call("github_read", method="get", kind="issue", target=7, repo=f"{ENTERPRISE}/corp/secret")
     assert [(seen.host, seen.path) for seen in two_hosts.seen] == [(ENTERPRISE, "/api/v3/repos/corp/secret/issues/7")]
@@ -636,7 +628,6 @@ def test_explicit_targets_keep_their_contract_from_any_project(two_hosts, monkey
     assert two_hosts.hosts() == {ENTERPRISE}
 
 
-@pytest.mark.serial
 def test_a_public_project_stays_public(two_hosts, monkeypatch):
     monkeypatch.setenv("GH_ENTERPRISE_TOKEN", "enterprise-env-token")
     two_hosts.tmp_path = two_hosts.tmp_path / "public"
@@ -647,7 +638,6 @@ def test_a_public_project_stays_public(two_hosts, monkeypatch):
     assert two_hosts.public.comments and not two_hosts.enterprise.comments
 
 
-@pytest.mark.serial
 def test_every_leg_follows_the_base_gh_resolved_names(two_hosts):
     """`gh api` alone ignores `gh repo set-default`; a resolved call addresses the repository `gh pr` would."""
     _git(two_hosts.cwd, "remote", "add", "upstream", f"https://{ENTERPRISE}/corp/other.git")
@@ -656,7 +646,6 @@ def test_every_leg_follows_the_base_gh_resolved_names(two_hosts):
     assert two_hosts.seen[-1].path == "/api/v3/repos/corp/secret/issues/7"
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("failure", ["no-remote", "no-repository", "GH_HOST-elsewhere", "host-refuses"])
 def test_an_unresolved_project_sends_no_write_to_any_host(two_hosts, monkeypatch, failure):
     if failure == "no-remote":
@@ -674,13 +663,11 @@ def test_an_unresolved_project_sends_no_write_to_any_host(two_hosts, monkeypatch
     assert not two_hosts.enterprise.comments and not two_hosts.public.comments
 
 
-@pytest.mark.serial
 def test_a_foreign_absolute_route_reaches_no_host(two_hosts):
     text = two_hosts.call("github_read", method="api", route="https://api.github.com/user")
     assert text.startswith("⚠️ GH_TARGET_INVALID:") and PUBLIC_API not in two_hosts.hosts()
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("env,source", [({}, "gh CLI host configuration"), ({"GH_ENTERPRISE_TOKEN": "enterprise-env-token"}, "env GH_ENTERPRISE_TOKEN")])
 def test_whoami_names_the_project_hosts_actor_and_credential_source(two_hosts, monkeypatch, env, source):
     for key, value in env.items():
@@ -690,7 +677,6 @@ def test_whoami_names_the_project_hosts_actor_and_credential_source(two_hosts, m
     assert two_hosts.hosts() == {ENTERPRISE}
 
 
-@pytest.mark.serial
 def test_whoami_without_a_repository_stays_generic_and_names_the_host_that_answered(two_hosts):
     shutil.rmtree(two_hosts.cwd / ".git")
     payload = json.loads(two_hosts.call("github_read", method="whoami").partition("\n")[2])

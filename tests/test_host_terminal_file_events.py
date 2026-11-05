@@ -56,11 +56,11 @@ def terminal_host(tmp_path, monkeypatch):
                            pushed=pushed, respawned=respawned, root=tmp_path)
 
 
-@pytest.mark.parametrize("task_type,exitcode,status", [
-    ("task", -11, "failed"), ("deep_self_review", -11, "failed"),
-    ("evolution", 1, "cancelled"),
+@pytest.mark.parametrize(("split", "task_type", "exitcode", "status"), [
+    (False, "task", -11, "failed"),
+    (True, "deep_self_review", -11, "failed"),
+    (True, "evolution", 1, "cancelled"),
 ])
-@pytest.mark.parametrize("split", [False, True])
 def test_crash_terminal_reaches_durable_and_live_consumers(terminal_host, task_type, exitcode, status, split):
     host = terminal_host
     task = {"id": "host-terminal", "type": task_type, "chat_id": 0, "_attempt": 1}

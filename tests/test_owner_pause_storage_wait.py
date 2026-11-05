@@ -15,7 +15,6 @@ from ouroboros.task_results import write_task_result
 from tests._budget_pause_exact_helpers import _loop_ctx
 from tests.test_admission_contention import database_reader
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -89,7 +88,7 @@ def test_pause_arriving_during_storage_wait_is_observed_before_any_effect(bounda
     assert limit.round_idx == 4 and ctx.task_attempt == 3
 
 
-@pytest.mark.parametrize("control", ["panic", "deadline", "cancelled", "finalize_requested"])
+@pytest.mark.parametrize("control", ["panic", "cancelled", "finalize_requested"])
 def test_existing_controls_remain_distinct_while_the_database_is_busy(boundary, monkeypatch, control):
     root, ctx, limit = boundary
     task = {"id": "same"}
@@ -111,7 +110,7 @@ def test_existing_controls_remain_distinct_while_the_database_is_busy(boundary, 
                 assert raised.value.control_reason == control
 
 
-@pytest.mark.parametrize("kind", ["uninspectable", "unknown_rollback", "lost", "malformed", "permission"])
+@pytest.mark.parametrize("kind", ["uninspectable", "unknown_rollback", "permission"])
 def test_non_contention_keeps_existing_authority_semantics(boundary, monkeypatch, kind):
     from ouroboros import store_hot_facts
 

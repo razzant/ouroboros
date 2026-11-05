@@ -27,7 +27,6 @@ from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests.test_presence_admission import _binding
 from tests.test_presence_runner import _event
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

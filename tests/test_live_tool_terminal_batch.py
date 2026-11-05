@@ -14,7 +14,7 @@ import pytest
 from ouroboros.model_wait import ModelWaitInterrupted
 from ouroboros.usage_accounting import BudgetExceeded, UsageAccountingError
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_live_tool_continuity import invocation, is_request, saved, unit_at
 
 

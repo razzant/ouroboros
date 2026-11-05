@@ -20,7 +20,7 @@ import pytest
 
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-pytestmark = [pytest.mark.integration, pytest.mark.serial]
+pytestmark = [pytest.mark.integration]
 
 
 @pytest.fixture

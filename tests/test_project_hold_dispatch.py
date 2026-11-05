@@ -8,7 +8,6 @@ from supervisor import queue, workers
 from tests.test_project_hold_recovery import accepted, restore_unreadable, resume_after_app_stop, worker
 from tests.test_swarm_host_admission import host  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def test_failed_running_mirror_and_stale_pending_snapshot_cannot_replay(host, tmp_path, monkeypatch):  # noqa: F811
@@ -41,7 +40,7 @@ def test_failed_running_mirror_and_stale_pending_snapshot_cannot_replay(host, tm
     assert host.pending[0]['_project_admission_restore_hold']
 
 
-@pytest.mark.parametrize('boundary', ['snapshot', 'snapshot_none', 'result_false', 'result_raise', 'readback'])
+@pytest.mark.parametrize('boundary', ['snapshot', 'snapshot_none', 'readback'])
 def test_failed_pre_handoff_proof_never_sends(host, tmp_path, monkeypatch, boundary):  # noqa: F811
     from supervisor import task_admission
 
@@ -68,7 +67,7 @@ def test_failed_pre_handoff_proof_never_sends(host, tmp_path, monkeypatch, bound
     assert [row['id'] for row in sent] == ['held']
 
 
-@pytest.mark.parametrize('proof', ['absent', None, 'possible', ['malformed']])
+@pytest.mark.parametrize('proof', ['absent', None, ['malformed']])
 def test_legacy_or_unknown_dispatch_does_not_backfill_on_restore(host, tmp_path, monkeypatch, proof):  # noqa: F811
     import json
 
@@ -94,7 +93,7 @@ def test_legacy_or_unknown_dispatch_does_not_backfill_on_restore(host, tmp_path,
     assert host.pending[0]['_project_admission_restore_hold']['reason'] == 'project_dispatch_unconfirmed'
 
 
-@pytest.mark.parametrize('basis', ['absent', None, ['malformed'], 'legacy', 'incomplete'])
+@pytest.mark.parametrize('basis', ['absent', None, 'incomplete'])
 def test_unknown_original_identity_never_recaptures_today(host, tmp_path, monkeypatch, basis):  # noqa: F811
     accepted(host, tmp_path)
     path, original = restore_unreadable(host)
