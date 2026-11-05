@@ -16,7 +16,7 @@ import pytest
 from ouroboros import headless, task_custody, task_results
 from ouroboros.store import StoreBusy
 from supervisor import queue, queue_transitions, workers
-from supervisor.task_ownership import ProbeUnknown, TaskOwnershipRead
+from supervisor.task_ownership import TaskOwnershipRead
 from tests.test_child_drive_settlement import TASK, _capture
 
 PROBE = queue_transitions.task_settlement_liveness
@@ -73,7 +73,7 @@ def test_a_row_another_writer_moves_after_the_refresh_still_refuses(env, tmp_pat
         return real(stop=stop)
 
     outcome = task_custody.settle_child_drive(env, TASK, drive, live=PROBE, guard=interlock_after_a_foreign_write)
-    assert outcome["status"] == "retained" and outcome["reason"] == "canonical_changed", outcome
+    assert outcome["status"] == "retained" and outcome["reason"] == "liveness_unknown", outcome
     assert drive.is_dir()
     assert _settle(env, drive)["status"] == "removed", "the next pass, with nothing else moving, settles it"
 
@@ -99,8 +99,8 @@ def test_a_store_busy_under_the_lock_is_reported_busy_never_live(env, tmp_path, 
         return real(self, task_id)
 
     monkeypatch.setattr(TaskOwnershipRead, "_stamp", busy_under_the_lock)
-    answer = PROBE(TASK)
-    assert isinstance(answer, ProbeUnknown) and answer.cause == "store_busy" and answer is not False
+    with pytest.raises(StoreBusy):
+        PROBE(TASK)
     assert _settle(env, drive) == {"status": "retained", "reason": "store_busy", "published": 0}
     assert drive.is_dir()
     monkeypatch.setattr(TaskOwnershipRead, "_stamp", real)

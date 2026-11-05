@@ -67,13 +67,19 @@ export const FREE_GROUPS = {
     },
 };
 
-/** The retirers' own typed reasons (stored as they named them, #2709) in the owner's words: this map is where the
- *  words are grouped; the server folds nothing. A code without words reads as `other`. */
+/** The server's compatible owner-facing reason groups, plus the exact retirer codes used in `cause`.  The client
+ * keeps the group sentence stable and adds the cause's detail when the server supplies one. */
 const RESULTS_PENDING = 'their results are not copied yet';
 const BUSY_NOW = 'busy right now';
 const RECORD_UNREADABLE = 'their task record could not be read';
 const RECORD_MOVED = 'their record changed under the check';
 export const KEPT_REASONS = {
+    // The API stores the compatible owner-facing group in `reason`; `cause` below
+    // carries the retirer's exact code when the item has one.
+    results_pending: RESULTS_PENDING,
+    busy: BUSY_NOW,
+    unreadable_record: RECORD_UNREADABLE,
+    restart: 'stopped by a restart',
     // the task that owns it
     task_live: 'their task is running',
     liveness_unknown: 'whether their task still runs could not be read',
@@ -108,13 +114,11 @@ export const KEPT_REASONS = {
     not_own_drive: 'the folder is not their task’s own',
     admission_rollback_evidence: 'the folder holds evidence of a start',
     // busy right now
-    busy: BUSY_NOW,
     store_busy: 'their record store was busy',
     custody_busy: BUSY_NOW,
     mailbox_busy: BUSY_NOW,
     record_busy: BUSY_NOW,
     // unreadable
-    unreadable_record: RECORD_UNREADABLE,
     task_result_unreadable: RECORD_UNREADABLE,
     unread_mailbox_unreadable: 'their mailbox could not be read',
     record_unreadable: RECORD_UNREADABLE,
@@ -153,7 +157,7 @@ const OUTCOMES = {
     // pool's "not verified saved".
     kept: (item) => (item.availability === 'manual_discard' && item.reason === 'capture_unproven'
         ? fmt('Kept: its work could not be saved first, so nothing was removed.')
-        : fmt('Kept: {reason}.', { reason: reasonWords(item.reason) })),
+        : fmt('Kept: {reason}.', { reason: reasonWords(item.reason, item.cause) })),
     not_started: () => fmt('Not started: left as it was.'),
     deleting: () => fmt('Moved aside; still being deleted.'),
     removed: () => fmt('Removed.'),
@@ -172,7 +176,25 @@ const NOT_STARTED = {
 /** The refusals that mean this plan's list can no longer be sent: the review offers Check again, not Remove. */
 export const OUTDATES_PLAN = new Set(['preview_outdated', 'unknown_group', 'unknown_item', 'not_offered']);
 
-const reasonWords = (reason) => fmt(KEPT_REASONS[reason] || KEPT_REASONS.other);
+const CAUSES = {
+    task_live: 'the task has a live owner', liveness_unknown: 'whether the task is still in use could not be established',
+    owner_paused: 'the task is paused', owner_processes_live: 'a process of this task is still running',
+    child_result_unadopted: 'the child result is not adopted yet', child_refs_pending: 'some result files are not copied yet',
+    call_inventory_pending: 'model call records are not saved yet', call_inventory_changed: 'model call records changed during cleanup',
+    inputs_uncustodied: 'input files are not saved yet', unread_mailbox_uncustodied: 'messages are not saved yet',
+    verification_receipts_uncustodied: 'verification records are not saved yet', canonical_changed: 'the task record changed during cleanup',
+    drive_occupant_changed: 'the folder’s task owners changed during cleanup', canonical_not_settled: 'the task is not finished',
+    post_work_open: 'post-task work is still open', custody_held: 'the result is still held by its run',
+    custody_busy: 'result publication is busy', mailbox_busy: 'the mailbox is busy', store_busy: 'the task store is busy',
+    review_custody_active: 'the review still has an active run', seat_checking: 'a reviewer still uses this copy',
+    review_environment_held: 'a retained review copy still needs this environment',
+    operation_live: 'a review operation is still running', task_not_terminal: 'the task is not finished',
+    review_state_unreadable: 'the review state could not be read', marker_unreadable: 'the copy ownership record could not be read',
+    raw_evidence_uncustodied: 'raw evidence is not saved yet', artifact_source_missing: 'the source of a saved artifact could not be found',
+    undeclared_environment: 'the environment has no recorded owner',
+    task_result_unreadable: 'the task record could not be read', unread_mailbox_unreadable: 'the mailbox could not be read',
+};
+const reasonWords = (reason, cause = '') => cause ? fmt(CAUSES[cause] || KEPT_REASONS[cause] || '{reason} ({cause})', { reason: fmt(KEPT_REASONS[reason] || KEPT_REASONS.other), cause }) : fmt(KEPT_REASONS[reason] || KEPT_REASONS.other);
 
 /** What happened to the owner's own attempt, kept beside the server's current facts: `notice` outlives a plan the
  *  server replaced, `outdated` and `postUnknown` belong to the plan still shown. A lost answer is never read as nothing
@@ -213,7 +235,15 @@ export const savedGroups = (free) => groupsOf(free).filter((group) => group.coun
 const groupBytes = (group) => (isSize(group?.bytes) ? group.bytes : 0);
 const chosen = (free, checked = null) => groupsOf(free).filter((group) => !checked || checked.has(group.id));
 /** The sum of the sizes known for the (checked) groups: unknown is never zero, so see `sumComplete`. */
-export const freeSum = (free, checked = null) => chosen(free, checked).reduce((total, group) => total + groupBytes(group), 0);
+export const freeSum = (free, checked = null) => {
+    let measured = false;
+    const sum = chosen(free, checked).reduce((total, group) => {
+        if (!isSize(group?.bytes)) return total;
+        measured = true;
+        return total + group.bytes;
+    }, 0);
+    return measured ? sum : null;
+};
 /** Every (checked) group with folders was sized whole: the sum is the whole truth. */
 export const sumComplete = (free, checked = null) => chosen(free, checked)
     .every((group) => !group.count || (isSize(group.bytes) && group.bytes_complete !== false));
@@ -316,7 +346,7 @@ function excludedRow(item) {
     return `<li class="storage-free-group" data-free-excluded="${attr(item.reason || 'other')}"${item.availability ? ` data-availability="${attr(item.availability)}"` : ''}>
         <span class="storage-free-label" data-i18n-authored>${text(item.name)}</span>
         ${isSize(item.bytes) ? sizeCell(item) : ''}
-        <p class="storage-free-why" data-i18n-fmt="storage.free.item">${text(`${fmt(kindOf(item).label)} · ${reasonWords(item.reason)}${item.availability === 'manual_discard' ? ` · ${fmt('can be discarded by hand')}` : ''}`)}</p>
+        <p class="storage-free-why" data-i18n-fmt="storage.free.item">${text(`${fmt(kindOf(item).label)} · ${reasonWords(item.reason, item.cause)}${item.availability === 'manual_discard' ? ` · ${fmt('can be discarded by hand')}` : ''}`)}</p>
         <p class="storage-free-why storage-free-path" data-i18n-authored>${text(item.path)}</p>
     </li>`;
 }
@@ -360,17 +390,6 @@ function chosenFacts(free, ui) {
     };
 }
 
-const kindLine = (kinds) => Object.keys(KINDS).filter((kind) => kinds[kind] > 0).map((kind) => plural(kinds[kind], ...KINDS[kind].unit)).join(', ');
-
-/** "9 items · 5.8 GB counted": the size observed, never a promise of the space it returns. */
-function chosenSum(facts) {
-    const items = itemsWord(facts.count);
-    if (!facts.count) return items;
-    if (facts.bytes === null) return fmt('{items} · size unknown', { items });
-    if (facts.whole) return fmt('{items} · {size} counted', { items, size: formatBytes(facts.bytes) });
-    return fmt('{items} · {size} counted, some sizes unknown', { items, size: formatBytes(facts.bytes) });
-}
-
 function listStatus(list, { reading, problem, retry }) {
     if (list.error) return `<p class="ui-status storage-status" data-tone="warn" data-i18n-fmt="storage.free.list">${text(problem)}</p><div class="storage-free-picks">${button('Try again', retry)}</div>`;
     if (list.loading || (!list.complete && list.want > list.items.length)) return `<p class="storage-progress" data-i18n-fmt="storage.free.list">${DOTS}<span>${text(reading)}</span></p>`;
@@ -388,7 +407,7 @@ function poolStatus(free, ui) {
 function showAllHtml(free, ui, now) {
     const list = ui.pool;
     const total = free.pool?.count || 0;
-    if (!list.complete) return '';
+    if (!list.complete || !total) return '';
     const shown = list.items.slice(0, ui.poolShown || 100);
     const count = list.items.filter((item) => ui.chosen?.has(item.id)).length;
     const more = list.items.length - shown.length;
@@ -399,7 +418,7 @@ function showAllHtml(free, ui, now) {
     const hiddenLine = hiddenChosen
         ? fmt('Showing {shown} of {total}. The {hidden} not shown keep their choice: {chosen} chosen, and Remove takes those too.', { ...hidden, chosen: number(hiddenChosen) })
         : fmt('Showing {shown} of {total}. The {hidden} not shown keep their choice: none chosen.', hidden);
-    const body = `<div class="storage-free-picks">
+    const body = `<p class="storage-meta">Results, messages and model history of these tasks are already saved. Each item is removed whole, with whatever was installed in it.</p><div class="storage-free-picks">
                 <p class="storage-meta" data-i18n-fmt="storage.free.picked">${text(fmt('{chosen} of {total} chosen', { chosen: number(count), total: number(total) }))}</p>
                 ${button(fmt('Choose all {total}', { total: number(total) }), 'data-free-all', 'btn-ghost', 'storage.free.all', inert(held))}
                 ${button('Choose none', 'data-free-none', 'btn-ghost', '', inert(held))}
@@ -407,16 +426,7 @@ function showAllHtml(free, ui, now) {
             <ul class="storage-free-groups storage-free-list">${shown.map((item, index) => pickRow(item, index, ui.chosen || new Set(), now, held)).join('')}</ul>
             ${more > 0 ? `<p class="storage-meta" data-i18n-fmt="storage.free.shown">${text(hiddenLine)}</p>
                 ${button(fmt('Show {n} more', { n: number(Math.min(more, 100)) }), 'data-free-more-picks', 'btn-ghost', 'storage.free.more.picks')}` : ''}`;
-    return disclosure('included', fmt('Show all {total} and choose', { total: number(total) }), body);
-}
-
-function savedRow(group) {
-    const said = words(group);
-    return `<li class="storage-free-group" data-kept-group="${attr(group.id)}">
-        <span class="storage-free-label">${text(fmt(said.label))}</span>
-        ${sizeCell(group)}
-        <p class="storage-free-why" data-i18n-fmt="storage.free.why">${text([unitOf(group, group.count), said.stays ? fmt(said.stays) : ''].filter(Boolean).join('. '))}</p>
-    </li>`;
+    return disclosure('included', fmt('Review the {total} items', { total: number(total) }), body);
 }
 
 function excludedHtml(free, ui) {
@@ -428,20 +438,21 @@ function excludedHtml(free, ui) {
     // reason row gives up only its own `manual_count`.
     const blocked = blockedRows(free.pool);
     const manual = manualOf(free);
-    const rows = blocked.length ? `<h4 class="storage-free-sub">Can’t go right now</h4>
-        <p class="storage-meta" data-i18n-fmt="storage.free.reasons">${text(blocked.map((row) => `${number(row.count)}: ${reasonWords(row.reason)}`).join(' · '))}</p>` : '';
-    const copies = manual ? `<h4 class="storage-free-sub">Finished copies not verified saved</h4>
-        <p class="storage-meta" data-i18n-fmt="storage.free.manual.door">${text(manualDoorSentence(manual))}</p>
-        <div class="storage-free-picks">${button('Choose copies to discard…', 'data-free-manual-open', 'btn-ghost', '', inert(heldFlow(ui)))}</div>` : '';
-    const groups = saved.length ? `<h4 class="storage-free-sub">Saved, unknown or undecided: this button never removes them</h4>
-        <ul class="storage-free-groups storage-free-list is-single">${saved.map(savedRow).join('')}</ul>
-        <div class="storage-free-picks">${button('Choose saved groups to remove…', 'data-free-saved', 'btn-ghost', '', inert(heldFlow(ui)))}</div>` : '';
-    const each = reasons.length ? `<h4 class="storage-free-sub" data-i18n-fmt="storage.free.each">${text(fmt('Each item left out ({total})', { total: number(excludedCount(free.pool)) }))}</h4>
+    const decisionRow = (label, entry, action, note) => {
+        const qualified = !isSize(entry?.bytes) || entry.bytes_complete === false;
+        return `<li class="storage-decision-row"><span class="storage-decision-label" data-i18n-fmt="storage.free.decision">${text(label)}<span class="storage-meta">${text(note)}</span></span><span class="storage-decision-size${qualified ? ' is-qualified' : ''}" data-i18n-fmt="storage.size">${text(sizeWords(entry))}</span>${action}</li>`;
+    };
+    const copiesEntry = manual && { bytes: manual.bytes, bytes_complete: manual.bytes_complete };
+    const copies = manual ? decisionRow(plural(manual.count, '{n} finished copy not verified saved', '{count} finished copies not verified saved'), copiesEntry, button('Choose copies…', 'data-free-manual-open', 'btn-default', '', inert(heldFlow(ui))), fmt('Only if you choose; each copy is deleted whole.')) : '';
+    const groupsEntry = saved.length && { bytes: freeSum(free, new Set(saved.map((g) => g.id))), bytes_complete: sumComplete(free, new Set(saved.map((g) => g.id))) };
+    const groups = saved.length ? decisionRow(fmt('Saved work in {groups}', { groups: plural(saved.length, '{n} group', '{count} groups') }), groupsEntry, button('Choose groups…', 'data-free-saved', 'btn-default', '', inert(heldFlow(ui))), fmt('Only if you choose; a whole group is deleted permanently.')) : '';
+    const each = reasons.length ? `<h4 class="storage-free-sub">Each item left out</h4>
         ${list.items.length ? `<ul class="storage-free-groups storage-free-list is-single">${list.items.map(excludedRow).join('')}</ul>` : ''}
         ${listStatus(list, { reading: fmt('Reading the list…'), problem: fmt('The list of what stays could not be read in full.'), retry: 'data-free-retry-excluded' })}
         ${more && !list.loading && !list.error ? button(fmt('Show {n} more', { n: number(Math.min(list.total - list.items.length, 100)) }), 'data-free-more-excluded', 'btn-ghost', 'storage.free.more.excluded') : ''}` : '';
-    return disclosure('left', fmt('Not included, and why'), `${rows}${copies}${groups}${each}
-        <p class="storage-meta">Projects you keep working in, results, history, memory, skills, services and the app itself are never part of this.</p>`);
+    const kept = blocked.length ? disclosure('left', fmt('Kept · {reasons}', { reasons: blocked.map((row) => `${number(row.count)} ${reasonWords(row.reason)}`).join(' · ') }), each) : reasons.length ? disclosure('left', fmt('Each item left out ({total})', { total: number(excludedCount(free.pool)) }), each) : '';
+    return copies || groups || kept ? `<div class="storage-decisions"><h4 class="storage-free-sub">Your decision, and what is not included</h4><ul class="storage-decision-rows">${copies}${groups}</ul>${kept}</div>` : '';
+
 }
 
 function reviewActions(free, ui, facts) {
@@ -455,33 +466,25 @@ function reviewActions(free, ui, facts) {
     if (ui.pool?.error) return `<div class="storage-actions">${cancel}</div>`;
     if (!ui.pool?.complete) return `<div class="storage-actions">${cancel}${button('Reading the list…', 'data-free-go', 'btn-primary', '', ' aria-disabled="true"')}</div>`;
     if (ui.sending) return `<div class="storage-actions">${cancel}${button('Sending…', 'data-free-go', 'btn-primary', '', inert(true))}</div>`;
-    const go = facts.count ? button(fmt('Remove {items}', { items: itemsWord(facts.count) }), 'data-free-go', 'btn-primary', 'storage.free.go')
+    const go = facts.count ? button(plural(facts.count, 'Remove {n} selected item', 'Remove {count} selected items'), 'data-free-go', 'btn-primary', 'storage.free.go')
         : '<span class="storage-meta">Nothing selected</span>';
     return `<div class="storage-actions">${cancel}${go}</div>`;
 }
 
+const figure = (label, value, meta = '', quiet = false) => `<div class="storage-cleanup-figure${quiet ? ' is-quiet' : ''}"><span class="storage-kicker">${text(fmt(label))}</span><span class="storage-cleanup-amount" data-i18n-fmt="storage.size">${text(value)}</span>${meta ? `<span class="storage-meta" data-i18n-fmt="storage.free.figure">${text(meta)}</span>` : ''}</div>`;
+
 function reviewHtml(free, ui, now) {
     const facts = { ...chosenFacts(free, ui), total: free.pool?.count || 0 };
-    const noted = attemptHtml(ui);
-    if (!free.pool) {
-        return `${headHtml('Ready to remove')}${noted}<p class="ui-status storage-status" data-tone="warn">The ordinary list is not available, so nothing can be removed from here. Check again.</p>
-            ${excludedHtml(free, ui)}
-            <div class="storage-actions">${button('Cancel', 'data-free-cancel')}${button('Check again', 'data-free-preview')}</div>`;
-    }
-    if (!facts.total) {
-        return `${headHtml('Nothing ready to remove')}${noted}<p class="storage-meta">What stays and why is below.</p>
-            ${excludedHtml(free, ui)}${reviewActions(free, ui, facts)}`;
-    }
-    const environments = facts.kinds.environment > 0;
-    const lead = facts.count ? fmt('Leftovers of finished work whose results are saved: {kinds}.', { kinds: kindLine(facts.kinds) }) : fmt('Nothing is chosen.');
-    return `${headHtml('Ready to remove', chosenSum(facts))}
-        ${noted}
-        <p class="storage-tray-text" data-i18n-fmt="storage.free.lead">${text(lead)}</p>
-        <p class="storage-meta">${environments ? 'Temporary environments go whole, with whatever was installed in them. Later work gets an empty one or says why it cannot; nothing is reinstalled by itself. ' : ''}Freed space can differ from the sizes.</p>
-        ${ui.pool?.complete || ui.outdated ? '' : poolStatus(free, ui)}
-        ${showAllHtml(free, ui, now)}
-        ${excludedHtml(free, ui)}
-        ${reviewActions(free, ui, facts)}`;
+    const checked = free.finished_at ? fmt('Checked {when}', { when: whenLabel(free.finished_at, now) }) : '';
+    const counted = !free.pool ? fmt('Not available') : !facts.total ? fmt('Nothing right now') : sizeWords(free.pool);
+    const selected = !ui.pool?.complete && facts.total ? fmt('Reading the list…') : !facts.count ? fmt('Nothing') : sizeWords({ bytes: facts.bytes, bytes_complete: facts.whole });
+    return `<div class="storage-meta" data-i18n-fmt="storage.free.checked">${text(checked)}</div>${attemptHtml(ui)}${!free.pool ? '<p class="ui-status storage-status" data-tone="warn">The ordinary list is not available, so nothing can be removed from here. Check again.</p>' : ''}
+        <div class="storage-cleanup-figures">${figure('Can be removed', counted, itemsWord(facts.total))}
+            ${facts.total ? figure('Selected', selected, fmt('{chosen} of {total} items', { chosen: number(facts.count), total: number(facts.total) }), true) : ''}
+            ${facts.total || ui.postUnknown || ui.outdated ? reviewActions(free, ui, facts) : `<div class="storage-actions">${button('Check again', 'data-free-preview')}</div>`}</div>
+        ${ui.pool?.complete || ui.outdated || !facts.total ? '' : poolStatus(free, ui)}
+        ${showAllHtml(free, ui, now)}${excludedHtml(free, ui)}
+        <p class="storage-meta storage-cleanup-foot">Sizes are what the files take on disk; free space can grow by less.</p>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -530,8 +533,8 @@ function largestHtml(free) {
 /** The danger capsule's label: the sum when every checked folder was sized, else the honest rest. */
 export function goLabel(free, checked) {
     const sum = freeSum(free, checked);
-    if (sumComplete(free, checked)) return fmt('Free {size}', { size: formatBytes(sum) });
-    return sum > 0 ? fmt('Free {size} or more', { size: formatBytes(sum) }) : fmt('Free, size unknown');
+    if (sumComplete(free, checked)) return fmt('Free {size}', { size: formatBytes(sum || 0) });
+    return sum !== null ? fmt('Free {size} or more', { size: formatBytes(sum) }) : fmt('Free, size unknown');
 }
 
 function savedHtml(free, ui, days) {
@@ -562,13 +565,6 @@ function savedHtml(free, ui, days) {
 function countedWords(bytes, whole) {
     if (!isSize(bytes)) return fmt('size unknown');
     return whole ? fmt('{size} counted', { size: formatBytes(bytes) }) : fmt('{size} counted, some sizes unknown', { size: formatBytes(bytes) });
-}
-
-/** The door's sentence, from the pool's own fact: how many, why the app leaves them, their counted size. */
-function manualDoorSentence(manual) {
-    const count = plural(manual.count, '{n} copy of finished work stays: some files in it are not verified saved.',
-        '{count} copies of finished work stay: some files in them are not verified saved.');
-    return `${count} ${countedWords(manual.bytes, manual.bytes_complete !== false)}. ${fmt('You can discard them one by one.')}`;
 }
 
 /** What discarding one copy loses, in words: the files not verified saved and what stays. */
@@ -714,8 +710,8 @@ function listingHtml(free) {
     const size = free.pool ? free.pool.bytes : freeSum(free);
     const counted = { done: number(free.done), total: number(free.total) };
     const sentence = isSize(size) && size > 0
-        ? fmt('Checking what can go · {done} of {total} folders · {size} so far. Nothing is removed.', { ...counted, size: formatBytes(size) })
-        : fmt('Checking what can go · {done} of {total} folders. Nothing is removed.', counted);
+        ? fmt('Checking for files to remove · {done} of {total} folders · {size} so far. Nothing is removed.', { ...counted, size: formatBytes(size) })
+        : fmt('Checking for files to remove · {done} of {total} folders. Nothing is removed.', counted);
     return `<p class="storage-progress" data-i18n-fmt="storage.free.listing">${DOTS}<span>${text(sentence)}</span></p>
         <div class="storage-actions">${button('Stop', 'data-free-stop')}</div>`;
 }
@@ -728,7 +724,7 @@ export function resultSentences(free, volume = null, now = new Date()) {
     const removed = itemsWord(run.removed || 0);
     const lead = run.stopped ? fmt('Removed {items}, then stopped. The rest was left as it was.', { items: removed }) : fmt('Removed {items}.', { items: removed });
     const kept = (run.kept || []).filter((row) => row.count > 0).map((row) => (
-        plural(row.count, '{n} was kept: {reason}.', '{count} were kept: {reason}.').replace('{reason}', reasonWords(row.reason))));
+        plural(row.count, '{n} was kept: {reason}.', '{count} were kept: {reason}.').replace('{reason}', row.causes?.length ? row.causes.map((entry) => `${number(entry.count)} ${reasonWords(row.reason, entry.cause)}`).join(' · ') : reasonWords(row.reason))));
     const free_ = isSize(volume?.free_bytes)
         ? fmt('Free now: {size}, read {when}.', { size: formatBytes(volume.free_bytes), when: whenLabel(volume.observed_at, now) }) : fmt('Free space could not be read.');
     return {
@@ -795,8 +791,7 @@ export function trayHtml(free, ui, days = 7, { volume = null, now = new Date() }
     const notice = attemptHtml(held);
     if (state === 'listing') return notice + listingHtml(free);
     if (state === 'empty') {
-        return `${notice}<p class="storage-tray-text">Nothing temporary is waiting.</p>
-            <p class="storage-meta">Most of Ouroboros is kept on purpose.</p>`;
+        return `${notice}${figure('Can be removed', fmt('Nothing right now'), fmt('No files of finished work are waiting.'))}`;
     }
     if (state === 'running') return notice + runningHtml(free);
     if (state === 'done') return notice + resultHtml(free, held, volume, now);
@@ -805,7 +800,7 @@ export function trayHtml(free, ui, days = 7, { volume = null, now = new Date() }
         return `${notice}<p class="ui-status storage-status" data-tone="warn" data-i18n-fmt="storage.free.failed">${text(fmt('Temporary space could not be listed: {reason}. Nothing was removed.', { reason }))}</p>
             <div class="storage-actions">${button('Try again', 'data-free-preview')}</div>`;
     }
-    return notice;
+    return `${notice}${figure('Can be removed', fmt(free.run ? 'Not checked since the last removal' : 'Not checked yet'), fmt('A check lists files of finished work and their size. Nothing is removed until you choose.'))}`;
 }
 
 /** The summary card's door stands alone at rest and beside an empty answer; every other phase holds it back,
@@ -818,7 +813,8 @@ export const notStarted = (reason) => fmt('Nothing was removed. {reason}', { rea
 /** What the confirm dialog shows for the checked saved groups: the body and one detail row per group. */
 export function confirmCopy(free, checked) {
     const groups = groupsOf(free).filter((group) => checked.has(group.id));
-    const size = formatBytes(freeSum(free, checked));
+    const total = freeSum(free, checked);
+    const size = total === null ? fmt('size unknown') : formatBytes(total);
     const removes = sumComplete(free, checked) ? fmt('This removes {size} for good.', { size })
         : fmt('This removes the checked folders for good; some of their sizes could not be read.');
     const saved = groups.filter((group) => words(group).saved).map((group) => fmt(words(group).label));

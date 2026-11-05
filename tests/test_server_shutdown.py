@@ -806,8 +806,9 @@ def _run(rec, server):
      "♻️ Restored pending queue: 2 tasks. "
      "Settling 2 tasks that were still running when the server stopped."),
 ])
+@pytest.mark.parametrize("places_state", ["paused", "empty", "unreadable"])
 def test_boot_notice_states_recovery_as_an_intent(
-        monkeypatch, tmp_path, restored, fenced, expected):
+        monkeypatch, tmp_path, restored, fenced, expected, places_state):
     """A window closed on live work: the boot line names how many tasks the
     restart interrupted and says they are BEING settled. It cannot claim they
     ENDED: restore only minted the durable intent, and cancellation custody
@@ -815,6 +816,9 @@ def test_boot_notice_states_recovery_as_an_intent(
     import server
 
     rec = _supervisor_harness(monkeypatch, tmp_path, ["stop"])
+    from tests.test_places import paused_inventory
+    suffix = paused_inventory(tmp_path, places_state)
+    expected += f" {suffix}" if suffix else ""
     rec.restored_pending = restored
     rec.fenced_running = list(fenced)
     _run(rec, server)

@@ -519,7 +519,7 @@
     "id": "test_live_card_timeline_body_renders_markdown",
     "path": "web/modules/chat_activity.js",
     "kind": "regex",
-    "value": "item\\.bodyFormat === 'text'\\s*\\?\\s*escapeHtml\\(displayBody\\)\\s*:\\s*renderMarkdown\\(displayBody, \\{ inlineHeadingBreaks: true \\}\\)"
+    "value": "plainBody\\s*\\?\\s*escapeHtml\\(displayBody\\)\\s*:\\s*renderMarkdown\\(displayBody, \\{ inlineHeadingBreaks: true \\}\\)"
   },
   {
     "id": "test_live_card_timeline_headline_renders_markdown_for_progress",

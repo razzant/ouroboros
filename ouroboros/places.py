@@ -210,26 +210,45 @@ def _read(drive_root: Any) -> dict:
         raise PlaceError("places_unreadable", str(path), f"Place records need repair: {path}: {exc}") from exc
 
 
+def paused_places_sentence(drive_root: Any) -> str:
+    """Name current pauses, including legacy imports in memory, without writing."""
+    try:
+        current = _read(drive_root)
+        migration_pending = not current.get("migration", {}).get("presence_bindings_v1")
+        current = _migrated_document(drive_root, current)
+        rows = current["places"]
+    except (PlaceError, OSError, ValueError):
+        return "Paused places: unknown (place records could not be read)."
+    labels = [row.get("label") or key for key, row in sorted(rows.items()) if row.get("state") == STATE_PAUSED]
+    sentence = "Places still paused: " + ", ".join(labels) + "." if labels else ""
+    if migration_pending and current.get("migration", {}).get("problems"):
+        sentence += " Paused legacy places: unknown (some old connections could not be read)."
+    return sentence.strip()
+
+
+def _migrated_document(drive_root: Any, current: dict) -> dict:
+    """Apply the legacy import in memory for both display and the durable migration."""
+    from ouroboros.places_migration import legacy_places
+
+    current = _document(current or None)
+    if current.get("migration", {}).get("presence_bindings_v1"):
+        return current
+    rows = dict(current["places"])
+    imported, problems = legacy_places(Path(drive_root))
+    known = {bid for row in rows.values() for bid in row.get("legacy_binding_ids", ())}
+    for place in imported:
+        if not known.intersection(place.legacy_binding_ids):
+            rows.setdefault(place.place_id, place_summary(place))
+    return {**current, "places": rows, "revision": current["revision"] + 1,
+            "migration": {"presence_bindings_v1": True, "at": utc_now_iso(), "problems": problems}}
+
+
 def migrate_places(drive_root: Any) -> dict:
     """Atomically import each binding once; a failed import leaves all source bytes intact."""
-    from ouroboros.places_migration import legacy_places
     path = places_path(drive_root)
-
-    def migrate(current: dict) -> dict:
-        current = _document(current or None)
-        if current.get("migration", {}).get("presence_bindings_v1"):
-            return current
-        rows = dict(current["places"])
-        imported, problems = legacy_places(Path(drive_root))
-        known = {bid for row in rows.values() for bid in row.get("legacy_binding_ids", ())}
-        for place in imported:
-            if not known.intersection(place.legacy_binding_ids):
-                rows.setdefault(place.place_id, place_summary(place))
-        return {**current, "places": rows, "revision": current["revision"] + 1,
-                "migration": {"presence_bindings_v1": True, "at": utc_now_iso(), "problems": problems}}
-
     try:
-        return update_json_locked(path, migrate, strict_existing_dict=True, reject_existing_empty_dict=True)
+        return update_json_locked(path, lambda current: _migrated_document(drive_root, current),
+                                  strict_existing_dict=True, reject_existing_empty_dict=True)
     except PlaceError:
         raise
     except (OSError, ValueError, TimeoutError) as exc:
@@ -384,6 +403,45 @@ def owner_account_matches(owner_accounts: Iterable[OwnerAccount], platform_actor
     actor = str(platform_actor_id or "").strip()
     return bool(actor) and any(a.platform_actor_id == actor and (not a.account_id or a.account_id == account_id)
                                for a in owner_accounts)
+
+
+def place_owner_accounts(drive_root: Any) -> dict[str, tuple[OwnerAccount, ...]]:
+    """Every place's confirmed owner accounts as stored now: one read, never a migration (``load_places``
+    may write). An unreadable document raises ``PlaceError``: unknown, never "no owner"."""
+    current = _read(drive_root)
+    connections = current.get("connections", {})
+    return {key: _decode(value, connections.get(key)).owner_accounts for key, value in current["places"].items()}
+
+
+def _fields(value: Any, key: str) -> Mapping[str, Any]:
+    found = value.get(key) if isinstance(value, Mapping) else None
+    return found if isinstance(found, Mapping) else {}
+
+
+def row_place_id(row: Mapping[str, Any]) -> str:
+    """The place a stored room row came through: its provenance stamp (kept beside the text), else its own field."""
+    return str(_fields(row, "presence_provenance").get("place_id") or row.get("place_id") or "")
+
+
+def owner_confirmed_row(row: Mapping[str, Any], accounts: Mapping[str, Iterable[OwnerAccount]]) -> bool:
+    """A place row as my human's own words: its actor is an account its place confirms now.
+
+    ``accounts`` is one ``place_owner_accounts`` read per pass. The answer is the current confirmation,
+    as the room's history shows it (``gateway.place_history``): confirming an account names its earlier
+    rows too, and withdrawing a mistaken confirmation unnames them; what caused a work is the admission's
+    own snapshot instead (``focus.actor.owner_confirmed``), with the same rule. Only facts a stored row keeps
+    beside its text are read (``memory_inventory._META_FIELDS``). An actor the connector reports
+    unauthenticated and an imported earlier message (``presence_history``) are never confirmed. A place where
+    I write from my human's own account (``sends_as`` confirmed, CREATING_SKILLS "Who the connector writes as")
+    confirms their rows as theirs, as admission does; returning my own sends as arrivals is the connector's to
+    filter, never inferred here.
+    """
+    transport = _fields(row, "transport")
+    actor = _fields(transport, "actor")
+    actor_id = str(actor.get("platform_actor_id") or actor.get("id") or "")
+    return (actor.get("authenticated") is not False and not isinstance(row.get("historical_import"), Mapping)
+            and owner_account_matches(accounts.get(row_place_id(row), ()), actor_id,
+                                      str(transport.get("account_id") or "")))
 
 
 def note_identity(place_id: str, index: int, note: NoteEntry) -> str:

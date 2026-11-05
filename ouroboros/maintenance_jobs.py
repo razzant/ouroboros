@@ -166,7 +166,7 @@ def record_pass(root: Any, name: str, report: Dict[str, Any], *, event: Optional
     when the pass is evidence (something released, an error, or a hold set that differs from the row's); a
     pass that rested (``report["rested"]``) or changed nothing writes nothing and returns None. ``event``
     names the events.jsonl row written beside the job row, with the same facts (the custody sweep's evidence
-    of what moved and what holds); the retirer's whole report rides along when something moved or failed."""
+    of what moved and what holds); the retirer's whole report rides along whenever an event is emitted."""
     if report.get("rested"):
         return None
     current = job(root, name) or {}
@@ -185,5 +185,5 @@ def record_pass(root: Any, name: str, report: Dict[str, Any], *, event: Optional
 
         append_jsonl(pathlib.Path(root) / "logs" / "events.jsonl",
                      {"ts": now, "type": event, "job": name, "released": released_count, "holds": holds,
-                      "errors": row["errors"], **({"report": report} if released_count or report.get("errors") else {})})
+                      "errors": row["errors"], "report": report})
     return row

@@ -263,13 +263,14 @@ def test_retry_does_not_inherit_the_previous_attempts_summary(wake, cause, title
 @pytest.mark.parametrize("metadata,direct", [({}, True), ({**SCHEDULE, "presence": {"binding_id": "b1"}}, False),
     ({"initiator": "consciousness", "usage_category": CONSCIOUSNESS_TASK_CATEGORY}, False), (WAKE, False)])
 @pytest.mark.parametrize("action", ["finish", "stop"])
-def test_summary_refuses_runs_not_self_started_but_empty_summary_keeps_ordinary_completion(wake, metadata, direct, action):
+def test_child_summary_is_refused_but_empty_summary_keeps_ordinary_completion(wake, metadata, direct, action):
     from ouroboros.tools.control_runtime import _finish_task
 
     wake.ctx.task_metadata, wake.ctx.is_direct_chat = metadata, direct
+    wake.ctx.task_id, wake.ctx.parent_task_id = TASK_ID, "parent-task"
     wake.ctx._active_builtin_tool_result = None
     rejected = _finish_task(wake.ctx, action=action, answer="Answer", rationale="Unfinished", summary="A line")
-    assert "COMPLETION_ARGUMENT: silent and summary are available only on a self-started run" in rejected
+    assert "COMPLETION_ARGUMENT: summary is available only on a root task or a self-started run" in rejected
     assert wake.ctx._active_builtin_tool_result.code == "TOOL_ARG_ERROR"
     assert getattr(wake.ctx, "_completion_request", None) is None
     assert "completion_requested" in _finish_task(wake.ctx, action=action, answer="Answer", rationale="Unfinished", summary=" \n")
@@ -437,7 +438,8 @@ def test_schedule_marker_does_not_bypass_quiet_authority(wake, extra, occurrence
     wake.ctx.parent_task_id = parent
     wake.ctx.task_metadata = {**extra, "schedule_occurrence": occurrence}
     assert "COMPLETION_ARGUMENT" in _finish_task(wake.ctx, action="finish", silent=True)
-    assert "COMPLETION_ARGUMENT" in _finish_task(wake.ctx, action="finish", answer="Answer", summary="A line")
+    if parent or extra.get("delegation_role") == "subagent" or extra.get("root_task_id"):
+        assert "COMPLETION_ARGUMENT" in _finish_task(wake.ctx, action="finish", answer="Answer.", summary="A line.")
     assert getattr(wake.ctx, "_completion_request", None) is None
     assert "completion_requested" in _finish_task(wake.ctx, action="finish", answer="Ordinary answer.")
 

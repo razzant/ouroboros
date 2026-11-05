@@ -40,17 +40,20 @@ class StorageFreeEntry(TypedDict):
     bytes_complete: bool
     eligible_after: Optional[str]
     reason: Optional[str]
+    cause: NotRequired[str]  # exact retirer code; reason remains the compatible category
     outcome: Optional[str]
     availability: Literal["ordinary", "saved_group", "manual_discard", "none"]  # how the owner can remove it, whatever ``reason`` says
     manual: NotRequired[StorageFreeManual]  # ``view=manual`` only
 
 
 class StorageFreeKept(TypedDict):
-    reason: str  # the retirer's own typed reason, as stored (task_live | liveness_unknown | store_busy | not_proven_over |
-    # custody_held | child_result_unadopted | ... | owner_keep | changed | capture_unproven | unproven_excluded_inputs |
-    # unreadable_record | generation_closed | advanced_group | other); the client groups the words
+    reason: str  # results_pending | in_use | busy | unreadable_record | capture_unproven | unproven_excluded_inputs
+    # | owner_keep | changed | retained_evidence | undeclared_environment | advanced_group | restart | other
+    # ``results_pending`` also carries raw_evidence_uncustodied and artifact_source_missing;
+    # their exact causes remain in each outcome's ``cause`` field.
     count: int
     manual_count: NotRequired[int]  # ``pool.excluded`` only: how many of ``count`` the owner can discard by hand (``view=manual``)
+    causes: NotRequired[List[Dict[str, Any]]]  # run summary: exact codes and their counts
 
 
 class StorageFreePool(TypedDict):
@@ -79,6 +82,7 @@ def entry(item: Any, *, reason: Optional[str] = None, outcome: Optional[str] = N
         "id": item.key, "group": item.group, "kind": item.kind, "name": item.name, "path": str(item.path),
         "task_id": item.task or None, "bytes": item.bytes, "bytes_complete": item.bytes is not None and not item.unreadable,
         "eligible_after": item.eligible_after, "reason": reason, "outcome": outcome, "availability": _availability(item),
+        **({"cause": item.cause} if getattr(item, "cause", None) else {}),
     }
 
 
@@ -94,7 +98,7 @@ def _ordinary(plan: Dict[str, Any]) -> List[Any]:
 
 
 def _excluded(plan: Dict[str, Any]) -> List[Any]:
-    found = [(item.reason or "other", item) for group in plan["groups"] for item in group["excluded"]]
+    found = [(item.reason or "in_use", item) for group in plan["groups"] for item in group["excluded"]]
     found += [(ADVANCED, item) for group in plan["groups"] for item in group["candidates"] if not item.ordinary]
     return sorted(found, key=lambda pair: (pair[0], pair[1].key))
 

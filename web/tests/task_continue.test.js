@@ -7,13 +7,29 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 
 import { continueNonce, continueOfferView, continueTaskAction, syncContinueAction } from '../modules/task_continue.js';
-import { taskReasonDetail, taskReasonPhrase } from '../modules/log_events.js';
+import { taskReasonDetail, taskReasonPhrase, taskTerminalPhase } from '../modules/log_events.js';
 import { ElementStub, installDom, restoreDom } from './chat_dom_fixture.js';
 
 function memoryStorage() {
     const map = new Map();
     return { getItem: (k) => (map.has(k) ? map.get(k) : null), setItem: (k, v) => map.set(k, String(v)), map };
 }
+
+test('an author-stopped card keeps its reason and Continue in the Stopped phase', () => {
+    const { prior } = installDom();
+    try {
+        const detail = { status: 'completed', reason_code: 'final_message', outcome_axes: {
+            execution: { status: 'ok', task_completion: { action: 'stop', rationale: 'The export is unfinished.' } },
+            objective: { status: 'fail', source: 'task_completion', reason: 'author_stop' } },
+            continuation_offer: { eligible: true, cause: 'author_stop' } };
+        const card = settledRootCard('stopped-root');
+        card.phase = taskTerminalPhase(detail);
+        assert.equal(card.phase, 'cancelled');
+        assert.equal(taskReasonDetail(detail), 'Ouroboros stopped with unfinished work · The export is unfinished.');
+        syncContinueAction(card, detail);
+        assert.equal(card.root.querySelector('[data-continue-task]')?.textContent, 'Continue');
+    } finally { restoreDom(prior); }
+});
 
 test('the action nonce is created once per task and survives a reload (same storage)', async () => {
     const storage = memoryStorage();
@@ -120,7 +136,7 @@ test('a refused Continue press explains its hard bound and preserves the same ac
 
 test('chat reaches the Continue action through the one settled-card seam', () => {
     const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
-    assert.match(chat, /import \{ syncSettledItems \} from '\.\/settled_card\.js';/);
+    assert.match(chat, /import \{[^}]*\bsyncSettledItems\b[^}]*\} from '\.\/settled_card\.js';/);
     const seam = readFileSync(new URL('../modules/settled_card.js', import.meta.url), 'utf8');
     assert.match(seam, /syncContinueAction\(record, detail, options\)/);
     assert.match(seam, /return syncResultFilesItem\(record, detail\)/);

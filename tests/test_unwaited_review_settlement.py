@@ -549,7 +549,7 @@ def test_storage_holds_a_rounds_checkout_by_custody_until_settled_then_by_its_ow
 
     def hold():
         return review_checking_prune._checkout_hold(world.data, entry, rounds=review_checking_prune._review_rounds(
-            world.data), sources=set(), live=lambda: set(), cutoff=0.0)
+            world.data), sources=set(), live=lambda _task: False, cutoff=0.0)
 
     assert hold() == "review_custody_active"
     if adviser:

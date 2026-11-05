@@ -115,6 +115,22 @@ _START_TASK_DESCRIPTION = (
 )
 
 
+_MESSAGE_DESTINATION_DESCRIPTION = (
+    "'current' (default): this work's room. 'main': also the "
+    "owner's main chat while this work lives in an owner-visible Project "
+    "room, for an expected result, a decision or a substantial change to "
+    "what the owner relies on (such as lost promised verification or "
+    "unique data, risk to shared work, a correction of a reported "
+    "result), even when a workaround means they need not act. One "
+    "message: the Project shows it too, and it is read once; it is not "
+    "this task's answer. A Presence root reports privately, with host-bound "
+    "source attribution, including from Silent places: Main keeps its "
+    "address, the Project its work lives in (if any) shows the same row, "
+    "and its place never sees it. "
+    "Delegated and agent-to-agent work cannot use it."
+)
+
+
 _ROOT_EFFORT_PARAM = {"type": "string", "enum": list(EFFORT_SCALE), "description": (
     "Optional: the reasoning effort the NEW task starts on; applied in Cyber Pro only — otherwise the "
     "task starts at my human's recommended level and the result says so. Omit for that level.")}
@@ -221,7 +237,7 @@ def get_tools() -> List[ToolEntry]:
                 "pending_review": {"type": "string", "enum": ["wait", "finish"], "default": "wait"},
                 "swarm_comparison": {"type": "string", "description": "Optional solo-versus-swarm comparison in your own words, attributed to you separately from measured tree facts."},
                 "silent": {"type": "boolean", "default": False, "description": "Finish without a message where allowed above and no human reply is owed; any answer stays internal (wake_silent)."},
-                "summary": {"type": "string", "default": "", "description": "On a self-started run: one short plain sentence for your human, in their language: what this run did, found or decided. When you finish silently it is what they see instead of a message: on the run's card (a wake's title; a scheduled run's line under the schedule's name) and first in its Details, as the schedule's last-run line in Activity or the wake's row on the Consciousness page; the next run of the same schedule, or the next wake, reads it. Your answer or note stays as written."},
+                "summary": {"type": "string", "default": "", "description": "On a root task or self-started run: one short plain sentence for your human, in their language, saying what this run did, found or decided. A clean finish shows it on the card, room row and portal; a held cause takes precedence. An unnamed self-started run, including a schedule-born root without a Presence binding, may take it as its title; an authored title and an ordinary task's name stay. It also appears in the schedule's last-run line or Consciousness row; the next scheduled run or wake reads it. Your full answer stays as written. Not available to a child."},
             }, "required": ["action"]}}, _finish_task),
         ToolEntry("set_tool_timeout", {
             "name": "set_tool_timeout",
@@ -370,18 +386,7 @@ def get_tools() -> List[ToolEntry]:
                 "request_id": {"type": "string", "description": "Presence Main contact retry key (at most 128 characters). Reuse the same key and words after uncertain delivery; a new key permits a distinct identical report. Omitted: identical words from this work rejoin."},
                 "reply_to_relay": {"type": "string", "description": "Reply to a drained relay in its source room; this work's Project shows the same answer. Empty selects the single open relay; omit for an ordinary room message."},
                 "destination": {"type": "string", "enum": ["current", "main"], "default": "current",
-                                "description": "'current' (default): this work's room. 'main': also the "
-                                               "owner's main chat while this work lives in an owner-visible Project "
-                                               "room, for an expected result, a decision or a substantial change to "
-                                               "what the owner relies on (such as lost promised verification or "
-                                               "unique data, risk to shared work, a correction of a reported "
-                                               "result), even when a workaround means they need not act. One "
-                                               "message: the Project shows it too, and it is read once; it is not "
-                                               "this task's answer. A Presence root reports privately, with host-bound "
-                                               "source attribution, including from Silent places: Main keeps its "
-                                               "address, the Project its work lives in (if any) shows the same row, "
-                                               "and its place never sees it. "
-                                               "Delegated and agent-to-agent work cannot use it."},
+                                "description": _MESSAGE_DESTINATION_DESCRIPTION},
             }, "required": ["text"]},
         }, _send_user_message),
         ToolEntry("update_identity", {

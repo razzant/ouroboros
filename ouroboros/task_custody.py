@@ -1036,16 +1036,6 @@ def _input_closure(canonical: pathlib.Path, drive: pathlib.Path, task_id: str, c
     return {key: snapshot[key] for key in _INPUT_FIELDS if snapshot.get(key) != current.get(key)}, inputs
 
 
-def _live_hold(live: LiveProbe, occupants: Any) -> Optional[str]:
-    """The retention the probe names for the first occupant not proven absent (``task_live``,
-    ``liveness_unknown``, or the probe's own cause such as ``store_busy``), None when every one is."""
-    for item in occupants:
-        answer = live(item["task_id"])
-        if answer is not False:
-            return "liveness_unknown" if answer is None else getattr(answer, "cause", "task_live")
-    return None
-
-
 def _prepare_occupant(canonical: pathlib.Path, drive: pathlib.Path, task_id: str, *, live: LiveProbe,
                       staging: pathlib.Path, admission_rollback: bool, stop=None) -> Dict[str, Any]:
     """Everything outside the locks: liveness, durable settledness, copy-back, pending refs and
@@ -1054,8 +1044,9 @@ def _prepare_occupant(canonical: pathlib.Path, drive: pathlib.Path, task_id: str
     from ouroboros.store import StoreError
     from ouroboros.task_results import cancellation_blocks_child_result
 
-    if hold := _live_hold(live, ({"task_id": task_id},)):
-        raise _Retained(hold)
+    alive = live(task_id)
+    if alive is not False:
+        raise _Retained("liveness_unknown" if alive is None else "task_live")
     try:
         current = load_task_result(canonical, task_id, strict=True) or {}
         child = load_task_result(drive, task_id, strict=True) or {}
@@ -1194,7 +1185,7 @@ def _recheck_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Di
 # I/O error) is attempted again on the next pass.
 TRANSIENT_RETENTIONS = frozenset({"liveness_unknown", "task_live", "generation_closed", "custody_busy",
                                    "mailbox_busy", "store_busy", "canonical_changed", "drive_occupant_changed",
-                                   "call_inventory_changed", "task_result_unreadable"})
+                                   "call_inventory_changed", "task_result_unreadable", "review_environment_held"})
 
 
 def settlement_basis(parent: pathlib.Path, task_id: str, task_dir: pathlib.Path, drive: pathlib.Path) -> list:
@@ -1319,10 +1310,8 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
                        admission_rollback: bool = False, report: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The one decision to delete one of TASK's own execution drives; see the module docstring.
 
-    ``live(task_id)`` is the caller's supervisor probe (True live, False proven not live, None
-    unknown, or an unknown carrying its ``cause``, such as ``store_busy``); without one nothing
-    is deleted. It is asked before preparation, again after Phase A's own write (so the row the
-    interlock re-checks is the one this settlement left) and once more under the interlock. ``guard()`` is the supervisor's
+    ``live(task_id)`` is the caller's supervisor probe (True live, False proven not live,
+    None unknown); without one nothing is deleted. ``guard()`` is the supervisor's
     ownership interlock (its queue lock, yielding False once the generation closed): the
     final census, probe and move happen inside it. ``stop()`` closes a maintenance
     generation between phases. ``admission_rollback`` additionally lets a never-started
@@ -1341,14 +1330,19 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
             raise _Retained("not_own_drive")
         if live is None:
             raise _Retained("liveness_unknown")
+        from ouroboros.workspace_preflight import review_scratch_held
+        if review_scratch_held(canonical, drive):
+            raise _Retained("review_environment_held")
         occupants = _occupants(drive, tid)
         prepared = [_prepare_occupant(canonical, drive, occupant, live=live, staging=staging,
                                       admission_rollback=admission_rollback and occupant == tid, stop=closed)
                     for occupant in occupants]
         if closed():
             raise _Retained("generation_closed")
-        if hold := _live_hold(live, prepared):
-            raise _Retained(hold)  # ownership back after preparation: no publication for a task owned again
+        for item in prepared:
+            alive = live(item["task_id"])
+            if alive is not False:
+                raise _Retained("liveness_unknown" if alive is None else "task_live")
         with contextlib.ExitStack() as stack:  # Phase A: publication, per occupant, every write fenced
             stack.enter_context(publication_fence(closed))
             for item in prepared:
@@ -1358,18 +1352,24 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
                 outcome["published"] += _secure_occupant(canonical, drive, item, closed)
         if closed():
             raise _Retained("generation_closed")
-        # Ownership read again AFTER this settlement's own canonical write and BEFORE the interlock: the
-        # probe prepares the row it will re-check under the queue lock, so a signature Phase A moved is
-        # the prepared one, never a change (#2709); a write by anyone else after this is still a change.
-        if hold := _live_hold(live, prepared):
-            raise _Retained(hold)
+        # Phase A may have published custody onto the canonical row. Prepare the
+        # supervisor's signed ownership read AFTER that publication, outside its
+        # queue lock; Phase B still rejects any subsequent change or new owner.
+        for item in prepared:
+            alive = live(item["task_id"])
+            if alive is not False:
+                raise _Retained("liveness_unknown" if alive is None else "task_live")
         with (guard() if guard is not None else contextlib.nullcontext(True)) as allowed:  # Phase B: the move
             if not allowed:
                 raise _Retained("generation_closed")
             if _occupants(drive, tid) != occupants:
                 raise _Retained("drive_occupant_changed")
-            if hold := _live_hold(live, prepared):
-                raise _Retained(hold)
+            if review_scratch_held(canonical, drive):
+                raise _Retained("review_environment_held")
+            for item in prepared:
+                alive = live(item["task_id"])
+                if alive is not False:
+                    raise _Retained("liveness_unknown" if alive is None else "task_live")
             with contextlib.ExitStack() as stack:
                 for item in prepared:
                     if not stack.enter_context(task_custody_lock(canonical, item["task_id"],
@@ -1393,6 +1393,8 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
     except _Retained as retained:
         # A fenced write surfaces as its caller's own failure reason: a closed generation names the close.
         outcome["reason"] = "generation_closed" if closed() else str(retained)
+    except StoreBusy:
+        outcome["reason"] = "generation_closed" if closed() else "store_busy"
     except (OSError, ValueError, TimeoutError) as exc:
         outcome["reason"] = "generation_closed" if closed() else f"custody_error: {type(exc).__name__}"
         if not closed():

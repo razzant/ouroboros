@@ -634,14 +634,9 @@ def _capture_directory(home: pathlib.Path, marker: Mapping[str, Any]) -> pathlib
 
 
 def capture_seat_evidence(data_root: Any, task_id: str, operation_id: str, *, hold: bool = False) -> Dict[str, Any]:
-    """Retain one terminal seat's changes as evidence, then remove its one-shot copy.
-
-    ``summary.json`` precedes deletion; ``retained``/``partial`` repeats only retry cleanup.
-    Active thread copies stay; so does a one-shot copy captured with ``hold`` (its run stopped
-    with work the engine can continue) until its explicit successor or the prune releases it.
-    The seat lock serializes captures across processes, with immutable evidence per operation.
-    Failure keeps the copy and names the error without raising; ``{}`` means no checking copy.
-    """
+    """Save immutable evidence before releasing a terminal one-shot copy under its
+    seat lock. Threads and explicit continuation holds keep their copies; failures
+    retain with an error. An empty answer means no checking copy was recorded."""
     home = seat_dir(data_root, task_id, operation_id)
     try:
         marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
@@ -985,14 +980,8 @@ def wave_checking_source(session_root: Any, slots: Any, *, data_root: Any,
 
 def terminal_seat_evidence(data_root: Any, task_id: str, operation_id: str,
                            detail: Any, *, hold: bool = False) -> Dict[str, Any]:
-    """Capture an observed terminal run's seat; its one-shot copy goes with the receipt.
-
-    Normal results, attach-only collection and timeout/interaction cancellation
-    receipts share this boundary. Any terminal state releases, whatever process
-    census the engine reports (owner decisions 2026-10-12 and 2026-10-13): bytes a
-    leftover writes after the terminal are not part of the verdict. A stop the engine
-    can continue (``hold``) keeps the copy for an explicit successor.
-    """
+    """Capture an observed terminal; a resumable stop holds copy and environment
+    for its explicit successor, within the original recorded window (no new TTL)."""
     from ouroboros.delegate_custody import is_terminal
 
     if not isinstance(detail, dict) or not is_terminal(detail):

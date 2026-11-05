@@ -30,6 +30,7 @@ import {
 import { showToast } from './toast.js';
 import { motionMs, reducedMotion } from './motion.js';
 import { isStackLayout } from './layout.js';
+import { closingLine } from './settled_card.js';
 
 // The closed list rises back as it fades (room_work.css rw-unfold, reversed).
 const SHADE_FOLDS = [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-6px)' }];
@@ -53,11 +54,11 @@ export function latestRepresentedRoot(records = []) {
 
 /** A card's own words as a row's view (a settled row, the Project's latest root): a known outcome keeps its tone and
  *  its dot; any other state of a card is unconfirmed here (a ring). The owner's move is a work's turn, never a card's. */
-export function cardRowView(view = {}, { settled = false } = {}) {
+export function cardRowView(view = {}, { settled = false, closing = '' } = {}) {
     const outcome = OUTCOME_TONES[view.phase] ? String(view.phase) : '';
     return { word: String(view.text || ''), secondary: String(view.secondary || ''),
         tone: OUTCOME_TONES[outcome] || (settled ? 'ended' : 'unknown'), mark: outcome ? 'none' : 'ring', owner: false,
-        outcome, focus: '' };
+        outcome, focus: settled ? String(closing || '') : '' };
 }
 
 /** The card a work's row goes to: its current episode's, else another of its episodes' root cards that is shown
@@ -295,7 +296,7 @@ export function createRoomWork({
         if (asPanel && !items.length) {
             const latest = latestRepresentedRoot([...records.values()]);
             if (latest) items.push({ id: latest.groupId, kind: 'task', work: null, record: latest, latest: true,
-                view: cardRowView(desiredLiveCardPhase(latest, replayTerminalPhase(latest)), { settled: latest.finished }),
+                view: cardRowView(desiredLiveCardPhase(latest, replayTerminalPhase(latest)), { settled: latest.finished, closing: closingLine(latest) }),
                 confirmed: false, cmid: '', startedAt: 0, episode: latest.groupId, attempt: null, activity: '' });
         }
         return items.map(decorate);
@@ -342,7 +343,7 @@ export function createRoomWork({
         const outcome = record?.finished ? desiredLiveCardPhase(record, replayTerminalPhase(record)) : null;
         const card = record?.root?.isConnected ? record.root : null;
         const target = card || (row.cmid ? bubbleFor(row.cmid) : null);
-        const view = outcome ? cardRowView(outcome, { settled: true })
+        const view = outcome ? cardRowView(outcome, { settled: true, closing: closingLine(record) })
             : { word: tr('room_work.ended', 'No longer listed as active'), secondary: '', tone: 'ended', mark: 'ring',
                 owner: false, outcome: '', focus: '' };
         const name = nameOf({ ...row, record }, target);
@@ -538,7 +539,7 @@ export function createRoomWork({
         const secondary = String(row.view.secondary || '');
         if (view.secondary.textContent !== secondary) view.secondary.textContent = secondary;
         view.secondary.hidden = !secondary;
-        const focus = row.settled ? '' : String(row.view.focus || '');
+        const focus = String(row.view.focus || '');
         if (view.focus.textContent !== focus) view.focus.textContent = focus;
         view.focus.hidden = !focus;
         view.chev.hidden = !detailable;

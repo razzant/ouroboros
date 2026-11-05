@@ -171,7 +171,7 @@ def test_a_known_window_that_cannot_hold_it_gets_the_source_overview(tmp_path, m
     assert ctx.messages[1]["content"] == PROJECTION
     assert ctx.messages[1]["cache_control"] == {"type": "ephemeral"}  # re-sealed as the prefix anchor
     assert ctx.tools._ctx.task_metadata["wake_observation"] is WAKE  # the source facts are untouched
-    assert events == [{"checkpoint_kind": "wake_input_by_source", "round": 1, "after_overflow": False,
+    assert events == [{"checkpoint_kind": "wake_input_by_source", "round": 1, "after_overflow": False, "form": "pointer",
                        "composition": {"task_terminal": 2500}, "source_sha256": "f" * 64}]
 
 

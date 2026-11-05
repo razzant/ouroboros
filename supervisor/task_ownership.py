@@ -12,24 +12,7 @@ import pathlib
 import threading
 
 UNCHANGED, CHANGED, BUSY = "unchanged", "changed", "busy"
-# A re-check's two unknown answers, as the retirer names the hold they leave (``task_custody.TRANSIENT_RETENTIONS``).
-_UNKNOWN_CAUSES = {BUSY: "store_busy", CHANGED: "canonical_changed"}
 _SETTLEMENT_READS = threading.local()
-
-
-class ProbeUnknown:
-    """A liveness probe's answer that is neither True nor False, with its cause: the ownership store was busy
-    under the queue lock (``store_busy``) or the prepared row moved before it (``canonical_changed``). Like
-    ``None`` it never authorizes a deletion: every consumer tests ``is False``; a retirer that names what it
-    keeps reports ``cause`` instead of a live task that is not there (#2709)."""
-
-    __slots__ = ("cause",)
-
-    def __init__(self, cause: str) -> None:
-        self.cause = cause
-
-    def __repr__(self) -> str:
-        return f"ProbeUnknown({self.cause!r})"
 # A hard memory bound on unconsumed preparations per thread (each holds parsed result bodies);
 # a multi-occupant settlement prepares one per occupant, far below it. An evicted one is
 # reported unknown by its locked follow-up, which retains the drive (never a wrong settle).
@@ -42,7 +25,6 @@ class TaskOwnershipRead:
         self.rows = {}
         self.stamps = {}
         self.errors = {}
-        self.unknown = None  # the last re-check's ProbeUnknown, None after one that proved the rows unchanged
 
     def _stamp(self, task_id):
         from ouroboros.task_store import signature
@@ -96,11 +78,9 @@ class TaskOwnershipRead:
         budget = acquisition_budget(0) if queue._queue_lock._is_owned() else nullcontext()
         try:
             with budget:
-                state = UNCHANGED if all(self.stamps[tid] == self._stamp(tid) for tid in task_ids) else CHANGED
+                return UNCHANGED if all(self.stamps[tid] == self._stamp(tid) for tid in task_ids) else CHANGED
         except StoreBusy:
-            state = BUSY
-        self.unknown = None if state == UNCHANGED else ProbeUnknown(_UNKNOWN_CAUSES[state])
-        return state
+            return BUSY
 
     def unchanged(self, task_ids):
         """True only for a proven-unchanged set; busy or changed cannot authorize a mutation."""

@@ -1081,7 +1081,8 @@ Neither carrier adds fields to `places.json`.
 
 The owner's “This is my account” confirms `sends_as.id` using the existing `owner_accounts` writer.
 For `kind: user` only, a matching `platform_actor_id` in the same `account_id` scope derives `owner: true`; revocation removes it.
-This says whose credential writes or reads, independently of who sent an incoming message. Bot identities
+This says whose credential writes or reads, independently of who sent an incoming message. Never return your own
+sends as incoming events: from the owner's confirmed account they would read as the owner's words. Bot identities
 never derive owner status or offer this confirmation. Only the human activates a place, through its sheet or an owner-door Main turn;
 consciousness may still set Silent or Paused.
 

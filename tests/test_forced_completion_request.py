@@ -235,13 +235,19 @@ def test_silence_while_a_reply_is_owed_is_refused_on_both_forms(at_limit, form):
                                        {"action": "finish", "summary": SUMMARY, "answer": ANSWER}],
                          ids=["silent", "summary"])
 @pytest.mark.parametrize("form", ["native", "text"])
-@pytest.mark.parametrize("metadata", [{}, {"presence_binding_authority": {"binding_id": "b1"}}],
-                         ids=["ordinary", "binding-authority-only"])
-def test_a_run_that_did_not_start_itself_cannot_finish_silently_or_leave_a_sentence(at_limit, form, arguments, metadata):
+@pytest.mark.parametrize("metadata", [{}, {"presence_binding_authority": {"binding_id": "b1"}},
+                                      {"parent_task_id": "parent-task"}],
+                         ids=["ordinary", "binding-authority-only", "child"])
+def test_forced_root_sentence_keeps_the_separate_silence_and_child_boundaries(at_limit, form, arguments, metadata):
     turn = at_limit
     text, usage, trace, _bus = turn.run([call("chat_history", {}), FORMS[form](arguments)], metadata=metadata)
-    _host_fallback(text, usage, trace)
-    assert _request_fact(trace)["reason"].startswith("invalid_completion_request: silent and summary are available")
+    if "summary" in arguments and not metadata.get("parent_task_id"):
+        assert _request_fact(trace)["status"] == "selected"
+        assert text == ANSWER and usage["wake_summary"] == SUMMARY
+    else:
+        _host_fallback(text, usage, trace)
+        field = "silent" if "silent" in arguments else "summary"
+        assert _request_fact(trace)["reason"].startswith(f"invalid_completion_request: {field} is available only")
 
 
 @pytest.mark.parametrize("calls", [

@@ -379,6 +379,62 @@ def _plain_directory(path: pathlib.Path) -> bool:
     return stat.S_ISDIR(info.st_mode) and not getattr(info, "st_file_attributes", 0) & 0x400
 
 
+def review_scratch_held(data_root: Any, drive: pathlib.Path) -> bool:
+    """Whether a legacy seat-keyed record under DRIVE still serves a checking copy.
+
+    New seats keep their record beside the seat; this read covers the task-drive records
+    written before that handoff, including nested headless layouts.
+    """
+    from ouroboros.review_checking_prune import seat_scratch_released
+    from ouroboros.session_scratch import _nested_drives, owner_records
+
+    for holder in (pathlib.Path(drive), *_nested_drives(pathlib.Path(drive))):
+        try:
+            owners = owner_records(holder)
+            for owner in owners:
+                if owner.name.startswith(SEAT_SCRATCH_KEY_PREFIX) and not seat_scratch_released(data_root, owner.name):
+                    return True
+        except OSError:
+            return True  # an unreadable ownership layout cannot prove the drive free
+    return False
+
+
+def release_session_scratch(drive: pathlib.Path, *, data_root: Any = None) -> List[str]:
+    """Compatibility seam for the custody trash remover: release recorded scratch under DRIVE.
+
+    The holder-aware implementation lives in ``session_scratch``; this wrapper preserves the
+    historical import and returns retained paths for callers that only need a display list.
+    """
+    from ouroboros.session_scratch import release_session_scratch as release
+
+    del data_root  # the records carry their own validated path and identity
+    return [str(row.get("path") or "") for row in release(pathlib.Path(drive))]
+
+
+def restore_seat_scratch_notes(data_root: Any, *, stop: Any = None) -> None:
+    """Recover older unnoted task-drive seat records on the existing startup views pass."""
+    from ouroboros.task_results import validate_task_id
+
+    root = pathlib.Path(data_root)
+    seats = root / "state" / "review_checkouts" / "seats"
+    for home in sorted(seats.iterdir()) if _plain_directory(seats) else ():
+        if stop is not None and stop():
+            break
+        try:
+            if not _plain_directory(home):
+                continue
+            marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
+            if not isinstance(marker, dict):
+                continue
+            task = validate_task_id(str(marker.get("task_id") or ""))
+            key = f"seat-{home.name}"
+            owner = root / "task_drives" / task / SESSION_SCRATCH_DIRNAME / key
+            if _plain_directory(owner) and (owner / "scratch.json").is_file():
+                _note_open_scratch(root, task, key, owner)
+        except (OSError, ValueError, TypeError):
+            continue  # no readable producer record: never infer a release
+
+
 def _publish_released(root: pathlib.Path, staged: pathlib.Path) -> None:
     """Rename a staged release entry into the custody trash whole: its remover never meets it half-made."""
     from ouroboros.task_custody import _TRASH_DIR

@@ -22,9 +22,10 @@ def test_a_root_answering_its_own_place_conversation_may_finish_silently(wake, m
     assert wake.ctx._completion_request["wake_silent"] is True
     assert wake.ctx._completion_request["answer"] == "Sent the file."
     wake.ctx._completion_request = None
-    # The one sentence for a human stays a self-started run's; silence never needs it.
-    assert "COMPLETION_ARGUMENT" in _finish_task(wake.ctx, action="finish", silent=True, summary="A line")
-    assert getattr(wake.ctx, "_completion_request", None) is None
+    # A root may provide its closing sentence; its existing speaker carrier permits silence.
+    assert "completion_requested" in _finish_task(wake.ctx, action="finish", silent=True, summary="A line")
+    assert wake.ctx._completion_request["wake_summary"] == "A line"
+    assert wake.ctx._completion_request["wake_silent"] is True
 
 
 @pytest.mark.parametrize("metadata", [

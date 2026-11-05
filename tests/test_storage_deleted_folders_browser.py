@@ -196,7 +196,7 @@ def test_kept(direct_server_with_data, request, engine):
         saved_file.write_text(json.dumps({"_schema_version": 1, "latest": first, "previous": None}), encoding="utf-8")
         page.locator('[data-dashboard-tab="storage"]').click()
         expect(fold).to_contain_text("Not counted yet", timeout=15_000)
-        expect(fold).to_contain_text("Measure again to list them.")
+        expect(fold).to_contain_text("Refresh sizes to list them.")
         assert posts == [], "opening the tab starts no count"
 
         # Projects through the real API, each folder kind once; the two attached to one folder, and one still alive on it.
@@ -249,7 +249,7 @@ def test_kept(direct_server_with_data, request, engine):
         expect(fold).to_contain_text("is outside the total")
         expect(fold).to_contain_text("1 not found")
         assert fold.locator("button").count() == 0, "nothing on this list acts on a folder"
-        assert page.locator("[data-storage-group]").count() <= 5, "no sixth group"
+        assert 1 <= page.locator(".storage-legend li").count() <= 5, "no sixth group"
         assert fold.locator(".storage-key").count() == 0
         fold.locator("summary").first.click()
         opened = fold.locator(".storage-deleted-open")
@@ -337,7 +337,7 @@ def test_kept(direct_server_with_data, request, engine):
         assert finished["error"] is None
 
         # A place's row opens the same "Largest parts" from the same renderer, under its own keys.
-        page.locator('[data-storage-group="other"] > .storage-group-fold > summary').click()
+        page.locator('[data-storage-place="app_state"] summary[data-key="place-app_state-open"]').click()
         place_parts = page.locator('[data-storage-place="app_state"] details[data-key="parts-app_state"]')
         place_parts.locator('summary[data-key="parts-app_state-open"]').click()
         expect(place_parts.locator(".storage-parts-list")).to_be_visible()

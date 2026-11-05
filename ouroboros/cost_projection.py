@@ -521,6 +521,54 @@ def cost_projection(source: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+def _live_cost_source(source: Any) -> bool:
+    from ouroboros.task_status import NONTERMINAL_STATUSES
+
+    return (isinstance(source, Mapping) and bool(source.get("task_id") or source.get("id"))
+            and str(source.get("status") or "").strip().lower() in NONTERMINAL_STATUSES | {"cancel_requested"})
+
+
+def current_cost(source: Mapping[str, Any], drive_root: Any, *, breakdown=None) -> Dict[str, Any]:
+    """Overlay live accounting after effective-result resolution; terminal receipts stay intact."""
+    from supervisor.state import reconstruct_task_cost
+
+    if not _live_cost_source(source):
+        return dict(source)
+    task_id = str(source.get("task_id") or source.get("id"))
+    fresh = reconstruct_task_cost(task_id, fields=True, drive_root=drive_root, breakdown=breakdown)
+    if isinstance(fresh.get("cost_presentation"), dict) and not fresh["cost_presentation"]["has_rows"]:
+        fresh["accounted_upper_bound_usd"] = None  # no ledger rows do not establish a free task
+    return {**with_cost_aliases(source), **fresh, "cost_final": False}
+
+
+def current_costs(sources: Any, drive_root: Any) -> list:
+    """Read each requested task tree once, independently of the observer's tree."""
+    from ouroboros.task_results import resolve_task_lineage
+    from ouroboros.usage_accounting import usage_breakdown
+
+    rows, breakdowns = list(sources), {}
+    for index, row in enumerate(rows):
+        if not _live_cost_source(row):
+            continue
+        root_task_id = resolve_task_lineage(row.get("task_id") or row.get("id"),
+            root_task_id=row.get("root_task_id"), metadata=row.get("metadata"))["root_task_id"]
+        if root_task_id not in breakdowns:
+            try:
+                breakdowns[root_task_id] = usage_breakdown(drive_root, root_task_id=root_task_id, include_custody=True)
+            except Exception as exc:
+                log.warning("Batch task cost unavailable for %s: %s: %s", root_task_id, type(exc).__name__, exc)
+                breakdowns[root_task_id] = None
+        breakdown = breakdowns[root_task_id]
+        rows[index] = current_cost(row, drive_root, breakdown=breakdown) if breakdown is not None else {
+            **with_cost_aliases(row), "cost_accounting_status": "unavailable", "cost_final": False,
+            "cost_accounting_error": "ledger_unavailable", "cost_presentation": None,
+            "accounted_upper_bound_usd": None, "total_rounds": None, "prompt_tokens": None,
+            "completion_tokens": None, "reserved_usd": None, "unresolved_upper_bound_usd": None,
+            "unknown_unmetered": None, "non_final_rows": None, "ledger_integrity_degraded": True,
+        }
+    return rows
+
+
 def cost_display(source: Optional[Mapping[str, Any]], *, decimals: int = 2) -> str:
     """Human rendering of one task's cost. Null NEVER renders as ``$0.00``.
 
@@ -552,6 +600,8 @@ __all__ = [
     "LIVE_ROOT_COSTS",
     "LiveRootCosts",
     "build_cost_presentation",
+    "current_cost",
+    "current_costs",
     "carry_cost_meta",
     "cost_display",
     "cost_projection",

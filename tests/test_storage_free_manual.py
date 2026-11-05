@@ -297,7 +297,7 @@ def test_any_write_since_the_preview_keeps_the_copy_as_changed(copies, change): 
         _git(path, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "late")
     else:
         target.unlink()
-    _kept_for(owner, copies, path, "nothing_unsaved" if change == "removed" else "changed")
+    _kept_for(owner, copies, path, "changed")
     assert sw._record_at(path, copies[0]) is not None
 
 
@@ -313,7 +313,7 @@ def test_an_unreadable_record_keeps_the_copy(copies):  # noqa: F811
     handle, path, _target = _held(copies)
     owner = _ready(copies)
     sw._record_file(handle.path, copies[0]).write_text("{", encoding="utf-8")
-    _kept_for(owner, copies, path, "record_unreadable")
+    _kept_for(owner, copies, path, "unreadable_record")
 
 
 def test_a_record_lock_or_custody_held_by_another_is_busy(copies, monkeypatch):  # noqa: F811
@@ -333,7 +333,7 @@ def test_a_record_lock_or_custody_held_by_another_is_busy(copies, monkeypatch): 
     thread.start()
     assert entered.wait(10)
     try:
-        _kept_for(owner, copies, path, "record_busy")
+        _kept_for(owner, copies, path, "busy")
     finally:
         leave.set()
         thread.join(10)
@@ -382,14 +382,14 @@ def test_a_live_task_is_not_offered_and_one_live_again_after_the_preview_stays(c
     _preview(owner, copies[0], copies[0].parent)
     assert _page(owner, copies)["total"] == 1
     probes["finished"] = True
-    _kept_for(owner, copies, path, "not_proven_over")
+    _kept_for(owner, copies, path, "in_use")
 
 
 def test_a_task_running_again_or_with_a_live_process_stays(copies, monkeypatch):  # noqa: F811
     _handle, path, _target = _held(copies)
     owner = _ready(copies)
     seed_result(copies[0], "finished", document("finished", "running"))
-    _kept_for(owner, copies, path, "not_proven_over")
+    _kept_for(owner, copies, path, "in_use")
     seed_result(copies[0], "finished", document("finished", "completed"))
     monkeypatch.setattr(body, "live_lineage_processes", lambda *_args: [4242])
     assert _page(_ready(copies), copies)["total"] == 0
@@ -402,7 +402,7 @@ def test_a_paused_tree_is_not_offered_and_a_pause_after_the_preview_holds(copies
     owner = _ready(copies)
     assert _page(owner, copies)["total"] == 1
     monkeypatch.setattr(owner_pause, "read_fence", lambda _root, task: {"state": state} if task == "the-root" else {})
-    _kept_for(owner, copies, path, "owner_paused")
+    _kept_for(owner, copies, path, "in_use")
     assert _page(_ready(copies), copies)["total"] == 0
 
 
@@ -425,7 +425,7 @@ def test_a_held_delegated_run_on_the_task_or_inside_the_copy_stays(copies, monke
     assert _page(owner, copies)["total"] == 1
     bound = {key: value.replace("HERE", str(path)) for key, value in facts.items()}
     monkeypatch.setattr(current, "held_runs", lambda _root: _held_run(**bound))
-    _kept_for(owner, copies, path, "custody_held")
+    _kept_for(owner, copies, path, "in_use")
 
 
 def test_a_held_run_of_another_task_elsewhere_does_not_refuse(copies, monkeypatch):  # noqa: F811
@@ -445,7 +445,7 @@ def test_unreadable_custody_refuses(copies, monkeypatch):  # noqa: F811
     _handle, path, _target = _held(copies)
     owner = _ready(copies)
     monkeypatch.setattr(current, "held_runs", unreadable)
-    _kept_for(owner, copies, path, "record_unreadable")
+    _kept_for(owner, copies, path, "unreadable_record")
 
 
 def test_retention_inside_the_copy_or_its_environment_is_never_discarded(copies):  # noqa: F811
@@ -471,7 +471,7 @@ def test_evidence_retained_after_the_preview_stays_with_its_reason(copies):  # n
     held.mkdir()
     (held / ".gitkeep").write_text("", encoding="utf-8")
     assert environment.retain_tree(held, REASON)
-    _kept_for(owner, copies, path, "retained_process_environment")
+    _kept_for(owner, copies, path, "retained_evidence")
     assert (held / environment.RETENTION_MARKER).is_file() and retire_synthetic_retention(held, REASON)
 
 

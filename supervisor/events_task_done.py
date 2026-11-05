@@ -111,6 +111,8 @@ def _completed_lifecycle_display(
     phase = outcome_phase(record, task_done_event)
     if phase == "error":
         return "❌", "finished with a failed outcome"
+    if phase == "cancelled":
+        return "⏹", "stopped"
     if _finished_with_warnings(task_done_event, record):
         return "⚠️", "finished with warnings"
     return None

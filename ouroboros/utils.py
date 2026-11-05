@@ -1261,6 +1261,16 @@ def sanitize_task_for_event(
                 metadata["origin_message_text"] = truncate_for_log(nested, threshold)
                 sanitized["metadata"] = metadata
 
+        # A wake's delivery forms and row addresses (``consciousness_wake.bind_wake_observation``) grow with its
+        # window; the task document and the stored source keep them, an event copy keeps only their sizes.
+        wake = metadata.get("wake_observation") if isinstance(metadata, dict) else None
+        if isinstance(wake, dict):
+            bodies = {key for key, value in wake.items()
+                      if key.endswith(("_text", "_rows", "_in_fallback")) and isinstance(value, (str, list))}
+            kept = {key: value for key, value in wake.items() if key not in bodies}
+            metadata = {**metadata, "wake_observation": {**kept, **{f"{key}_len": len(wake[key]) for key in bodies}}}
+            sanitized["metadata"] = metadata
+
         # The event needs one contract; the live task keeps both mirrors.
         contract = sanitized.get("task_contract")
         if isinstance(metadata, dict) and contract and metadata.get("task_contract") == contract:

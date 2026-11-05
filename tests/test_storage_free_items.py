@@ -96,8 +96,8 @@ def test_an_excluded_or_saved_work_item_is_not_offered_to_the_ordinary_action(co
     assert _page(owner, copies, "pool")["total"] == 0
     excluded = _page(owner, copies, "excluded")
     reasons = {Path(row["path"]).name: row["reason"] for row in excluded["items"]}
-    assert reasons == {"held": "capture_unproven", "live": "task_live", "dlg_lost-task_0123456789abcdef": "advanced_group"}
-    assert excluded["counts"] == {"advanced_group": 1, "capture_unproven": 1, "task_live": 1}
+    assert reasons == {"held": "capture_unproven", "live": "in_use", "dlg_lost-task_0123456789abcdef": "advanced_group"}
+    assert excluded["counts"] == {"advanced_group": 1, "capture_unproven": 1, "in_use": 1}
     for row in excluded["items"]:
         assert _start(owner, copies, items=[row["id"]]) == {"started": False, "reason": "not_offered"}
     assert Path(held.path).is_dir() and Path(live.path).is_dir()
@@ -643,7 +643,7 @@ def test_lost_copies_and_test_runs_of_one_name_in_both_roots_are_named_and_settl
     view = _run(owner, root, root.parent, groups=("lost_copies", "service_folders"))
     rows = _page(owner, copies, "outcomes")["items"]
     assert {row["path"]: (row["outcome"], row["reason"]) for row in rows} == {
-        str(lost["older"]): ("removed", None), str(lost["new"]): ("kept", "copy_registered"),
+        str(lost["older"]): ("removed", None), str(lost["new"]): ("kept", "in_use"),
         str(runs["older"]): ("removed", None), str(runs["new"]): ("removed", None)}
     assert view["run"]["removed"] == 3 and view["run"]["removed_bytes"] == sum(row["bytes"] for row in rows if row["outcome"] == "removed")
     assert not lost["older"].exists() and (lost["new"] / "f.bin").is_file()
@@ -672,7 +672,7 @@ def test_a_snapshot_live_again_after_its_preview_is_in_use_not_a_failed_deletion
     probes["finished"] = True
     answer = _run(owner, copies[0], copies[0].parent, groups=("working_copies",))
     assert Path(handle.path).is_dir() and answer["run"]["failed"] == 0
-    assert _outcome(owner, copies) == ("kept", "custody_held")
+    assert _outcome(owner, copies) == ("kept", "in_use")
 
 
 def _custody_answers_held(_root):
@@ -683,7 +683,7 @@ def _custody_unreadable(_root):
     raise OSError("no")
 
 
-@pytest.mark.parametrize("custody,reason", [(_custody_answers_held, "custody_held"), (_custody_unreadable, "unreadable_record")])
+@pytest.mark.parametrize("custody,reason", [(_custody_answers_held, "in_use"), (_custody_unreadable, "unreadable_record")])
 def test_a_snapshot_custody_took_back_or_cannot_answer_for_is_no_failed_deletion(copies, monkeypatch, custody, reason):  # noqa: F811
     from ouroboros import delegate_custody
 
@@ -756,7 +756,7 @@ def test_a_record_lock_held_by_another_is_busy_and_the_run_goes_on(copies, make,
         leave.set()
         thread.join(10)
     assert Path(handle.path).is_dir() and answer["run"]["error"] is None and answer["state"] == "done"
-    assert _outcome(owner, copies) == ("kept", "record_busy")
+    assert _outcome(owner, copies) == ("kept", "busy")
 
 
 def test_a_candidate_with_retained_evidence_stays_out_of_the_pool_and_the_preview_writes_nothing(candidate, monkeypatch):  # noqa: F811
@@ -784,7 +784,7 @@ def test_a_candidate_retained_after_its_preview_is_kept_with_that_reason(candida
     assert environment.retain_tree(env_root / "tmp", REASON)
     _run(owner, data, data.parent, groups=("working_copies",))
     assert Path(ctx.repo_dir).is_dir() and env_root.is_dir()
-    assert _outcome(owner, (data, data.parent)) == ("kept", "retained_process_environment")
+    assert _outcome(owner, (data, data.parent)) == ("kept", "retained_evidence")
     assert retire_synthetic_retention(env_root / "tmp", REASON)
 
 
@@ -795,7 +795,7 @@ def test_a_candidate_whose_owner_ran_again_is_in_use(candidate, monkeypatch):  #
     _preview(owner, data, data.parent)
     seed_result(data, ctx.task_id, document(ctx.task_id, "running"))
     _run(owner, data, data.parent, groups=("working_copies",))
-    assert Path(ctx.repo_dir).is_dir() and _outcome(owner, (data, data.parent)) == ("kept", "owner_not_terminal")
+    assert Path(ctx.repo_dir).is_dir() and _outcome(owner, (data, data.parent)) == ("kept", "in_use")
 
 
 def test_names_come_from_the_narrow_display_read(copies, monkeypatch):  # noqa: F811
