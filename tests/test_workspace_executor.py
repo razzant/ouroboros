@@ -13,8 +13,9 @@ reference were split verbatim into ``tests/test_workspace_executor_services.py``
 ``tests/test_workspace_executor_admission.py``; the repository builder they share lives
 in ``tests/_workspace_executor_shared.py``.
 
-Whole-file serial suite: it spawns real processes, so ``tests/conftest.py`` tags this
-module and its three siblings ``serial`` and the parallel pass excludes them.
+Runs in the xdist pass beside other files: its processes are owned children killed within the
+test's own drive root (``kill_all_foreground``/``kill_all_services(drive_root)``) and the per-worker
+registries are restored by ``_isolate_workspace_executor_globals``, so it names no host resource.
 """
 from __future__ import annotations
 

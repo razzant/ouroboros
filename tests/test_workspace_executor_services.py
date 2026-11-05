@@ -7,8 +7,9 @@ task and global cleanup they participate in, the keep-alive that survives task
 teardown, the panic cleanup that kills durable foreground and service processes, and
 the child-drive records a parent data root must scan.
 
-Whole-file serial suite: it spawns real processes, so ``tests/conftest.py`` tags it
-``serial`` and the parallel pass excludes it.
+Runs in the xdist pass beside other files: its processes are owned children killed within the
+test's own drive root and the per-worker registries are restored by
+``_isolate_workspace_executor_globals`` (``tests/test_workspace_executor.py``), so it names no host resource.
 """
 
 from __future__ import annotations
