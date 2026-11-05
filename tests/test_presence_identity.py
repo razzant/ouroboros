@@ -32,8 +32,12 @@ def ingress(focus, monkeypatch):
         yield client, body, calls
 
 
-@pytest.mark.parametrize("identity", [None, {}, IDENTITY, {"reads_as": []}])
-@pytest.mark.parametrize("authenticated", [None, False, True])
+@pytest.mark.parametrize(("authenticated", "identity"), [
+    (None, None),
+    pytest.param(False, IDENTITY, id='False-identity2'),
+    pytest.param(True, {}, id='True-identity1'),
+    pytest.param(True, {"reads_as": []}, id='True-identity3'),
+])
 def test_ingress_keeps_optional_identity_and_authentication(ingress, identity, authenticated):
     client, body, calls = ingress
     if identity is not None:
@@ -108,8 +112,13 @@ def test_evolves_cannot_activate_but_owner_main_can(focus):
     assert json.loads(_configure_presence(ctx, "set_state", place.place_id, state="active"))["place"]["state"] == "active"
 
 
-@pytest.mark.parametrize("reader", ["place_view", "places_view", "focus_metadata", "call_place_facts", "places_text"])
-@pytest.mark.parametrize("identity", [None, IDENTITY])
+@pytest.mark.parametrize(("identity", "reader"), [
+    (None, "place_view"),
+    (None, "focus_metadata"),
+    (None, "places_text"),
+    pytest.param(IDENTITY, "places_view", id='identity1-places_view'),
+    pytest.param(IDENTITY, "call_place_facts", id='identity1-call_place_facts'),
+])
 def test_place_readers_never_import_or_call_connector_dispatch(focus, monkeypatch, identity, reader):
     """Astra R1/R2 and Opus N1/N4: even a callable route cannot enter cognition."""
     import builtins

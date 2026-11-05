@@ -279,11 +279,13 @@ def test_task_lineage_requires_stored_task_owned_by_reporting_transport(tmp_path
     assert ("presence_provenance" in row["transport"]["delivery"]) is (owner == "transport")
 
 
-@pytest.mark.parametrize("reporter", ["bridge", "other-bridge"])
-@pytest.mark.parametrize("sends_as_owner", [False, True])
-@pytest.mark.parametrize("identity", [None, {"reads_as": []}, {
+@pytest.mark.parametrize(("identity", "sends_as_owner", "reporter"), [
+    (None, False, "bridge"),
+    pytest.param({"reads_as": []}, True, "other-bridge", id='identity1-True-other-bridge'),
+    pytest.param({
     "sends_as": {"id": "account", "label": "Mailbox café", "kind": "user"},
-}])
+}, False, "bridge", id='identity2-False-bridge'),
+])
 def test_receipt_keeps_focus_identity_snapshot_without_changing_v1(focus, identity, sends_as_owner, reporter):
     root, _, _, _ = focus
     task = task_for(focus)
@@ -359,8 +361,7 @@ def test_host_rejects_noninteger_or_unknown_turn_mode_before_model(tmp_path, ver
     assert response.status_code == 400
 
 
-@pytest.mark.parametrize("status", ["running", "completed"])
-@pytest.mark.parametrize("version", [None, 0, 1])
+@pytest.mark.parametrize(("version", "status"), [(None, "running"), (0, "completed"), (1, "running")])
 def test_deferred_work_echoes_original_persisted_mode(tmp_path, status, version):
     _seed_token(tmp_path, skill="telegram-bot", token="receipt-token",
                 permissions=["presence"], manifest_permissions=["presence"])

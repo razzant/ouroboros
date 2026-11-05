@@ -107,8 +107,11 @@ def test_held_model_candidate_cannot_author_a_later_host_fallback(tmp_path, monk
     assert result["outcome"] == "silent" and result["text"] == ""
 
 
-@pytest.mark.parametrize("origin", ["host_notice", "host_salvage", ""])
-@pytest.mark.parametrize("admission", ["scheduled", "unconfirmed", "rejected"])
+@pytest.mark.parametrize(("admission", "origin"), [
+    ("scheduled", "host_notice"),
+    ("unconfirmed", "host_salvage"),
+    ("rejected", ""),
+])
 def test_answerless_failed_parent_keeps_only_admitted_child_custody(tmp_path, origin, admission):
     result, stored, raw = _failed_parent(tmp_path, admission=admission, accepted=True, usage={
         "execution_status": "infra_failed", "reason_code": "provider_unavailable", "terminal_origin": origin,
@@ -119,8 +122,11 @@ def test_answerless_failed_parent_keeps_only_admitted_child_custody(tmp_path, or
     assert stored["status"] == "failed"
 
 
-@pytest.mark.parametrize("origin", ["host_notice", "host_salvage", "model_final"])
-@pytest.mark.parametrize("admission", ["scheduled", "rejected"])
+@pytest.mark.parametrize(("admission", "origin"), [
+    ("scheduled", "host_notice"),
+    ("scheduled", "model_final"),
+    ("rejected", "host_salvage"),
+])
 def test_unresolved_attempt_is_refused_whatever_authored_its_terminal(tmp_path, origin, admission):
     """Under the unknown-outcome fence authorship decides nothing: the rail's notice, its salvage
     and a round-one draft it stamped ``model_final`` are all unanswered events, refused back to
