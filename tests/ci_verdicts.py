@@ -31,8 +31,6 @@ DURATIONS_ENV = "OUROBOROS_CI_DURATIONS"
 # The owner's persisted table (ouroboros.test_evidence.TEST_DURATIONS_ENV spells the same key): read for weights when
 # CI's table is absent, and brought up to date by every owned session at its end (`record_session_durations`).
 TEST_DURATIONS_ENV = "OUROBOROS_TEST_DURATIONS"
-# The xdist group of a serial test in the one xdist pass (tests/conftest.py): its resource's, `serial:<resource>`.
-SERIAL_GROUP = re.compile(r"serial:.+")
 
 
 def write_json(path: Path, value) -> None:
@@ -130,8 +128,7 @@ def _table_shape_holds(table) -> bool:
         return isinstance(value, dict) and all(milliseconds(files) for files in value.values())
     source = table.get("source") if isinstance(table, dict) else None
     return bool(isinstance(source, dict) and table.get("format") == 1 and isinstance(source.get("run_id"), str)
-                and source["run_id"] and per_system(table.get("platforms")) and per_system(table.get("serial", {}))
-                and milliseconds(table.get("ui_nodes", {})))
+                and source["run_id"] and per_system(table.get("platforms")) and milliseconds(table.get("ui_nodes", {})))
 
 
 def durations_table() -> tuple[dict | None, str]:
@@ -167,11 +164,11 @@ def _read_table(path) -> tuple[dict | None, str]:
     return table, ""
 
 
-def session_file_durations(reports) -> tuple[dict, dict]:
-    """(milliseconds per file, the serial part per file) of one session's reports: the setup, call and teardown
-    time of every test, subtests excluded (their time lies within their test's call); a test is serial when it ran
-    in a `serial…` xdist group. A file with a crashed worker's report is left out: its time is not whole."""
-    files, serial, broken = {}, {}, set()
+def session_file_durations(reports) -> dict:
+    """Milliseconds per file of one session's reports: the setup, call and teardown time of every test, subtests
+    excluded (their time lies within their test's call). A file with a crashed worker's report is left out: its
+    time is not whole."""
+    files, broken = {}, set()
     for row in reports:
         path = str(row.get("nodeid", "")).split("::", 1)[0]
         if row.get("phase") == "crash":
@@ -182,18 +179,15 @@ def session_file_durations(reports) -> tuple[dict, dict]:
             continue
         seconds = max(seconds, 0) if math.isfinite(seconds) else 0
         files[path] = files.get(path, 0) + seconds
-        if SERIAL_GROUP.fullmatch(str(row["nodeid"]).rpartition("@")[2]):
-            serial[path] = serial.get(path, 0) + seconds
-    return ({path: round(files[path] * 1000) for path in sorted(files) if path not in broken},
-            {path: round(serial[path] * 1000) for path in sorted(serial) if path not in broken})
+    return {path: round(files[path] * 1000) for path in sorted(files) if path not in broken}
 
 
 def record_session_durations(path, reports, *, system: str, rootpath, run_id: str, sha: str = "") -> str:
     """Fold one session's file times into the owner's table at ``path`` (format 1, the shape `durations_table`
-    reads): the files this session ran replace their entries for this system (a file no longer serial leaves
-    `serial`), entries for files absent from ``rootpath`` are dropped, other systems' entries stay, and an
-    unreadable or misshapen table starts afresh. Returns "" or why nothing was written."""
-    files, serial = session_file_durations(reports)
+    reads): the files this session ran replace their entries for this system, entries for files absent from
+    ``rootpath`` are dropped, other systems' entries stay, and an unreadable or misshapen table starts afresh
+    (a table with the retired `serial` part loses it). Returns "" or why nothing was written."""
+    files = session_file_durations(reports)
     if not files:
         return "no whole test file ran"
     path, system = Path(path), platform_name(system)
@@ -202,14 +196,11 @@ def record_session_durations(path, reports, *, system: str, rootpath, run_id: st
     except (OSError, ValueError):
         table = None
     if not _table_shape_holds(table):
-        table = {"format": 1, "platforms": {}, "serial": {}, "source": {}, "ui_nodes": {}}
-    table.setdefault("serial", {})
-    platforms, serial_part = table["platforms"].setdefault(system, {}), table["serial"].setdefault(system, {})
+        table = {"format": 1, "platforms": {}, "source": {}, "ui_nodes": {}}
+    table.pop("serial", None)  # no producer can fill it (ids stay plain) and its reader, `serial_shards`, is gone
+    platforms = table["platforms"].setdefault(system, {})
     platforms.update(files)
-    for name in files:
-        serial_part.pop(name, None)
-    serial_part.update(serial)
-    for part in (platforms, serial_part):
+    for part in (platforms,):
         for name in [name for name in part if not (Path(rootpath) / name).exists()]:
             del part[name]
         ordered = {name: part[name] for name in sorted(part)}
@@ -303,7 +294,7 @@ def collect_durations(root: Path, *, run_id: str, sha: str) -> dict:
         key = (system_of(data), lane or Path(directory).name, str(data[lane].get("shard")) if lane else "")
         if key not in chosen or rank > chosen[key][0]:
             chosen[key] = (rank, data)
-    files, serial, nodes = {}, {}, {}
+    files, nodes = {}, {}
     for (name, lane, _), (_, data) in chosen.items():
         for row in data["reports"]:
             seconds = row.get("duration_seconds")
@@ -313,15 +304,12 @@ def collect_durations(root: Path, *, run_id: str, sha: str) -> dict:
                 nodes[row["nodeid"]] = nodes.get(row["nodeid"], 0) + max(seconds, 0)
                 continue
             path = row["nodeid"].split("::", 1)[0]
-            parts = [files] + ([serial] if SERIAL_GROUP.fullmatch(row["nodeid"].rpartition("@")[2]) else [])
-            for part in parts:
-                totals = part.setdefault(name, {})
-                totals[path] = totals.get(path, 0) + max(seconds, 0)
+            totals = files.setdefault(name, {})
+            totals[path] = totals.get(path, 0) + max(seconds, 0)
 
     def milliseconds(totals):
         return {key: round(totals[key] * 1000) for key in sorted(totals)}
     return {"format": 1, "platforms": {name: milliseconds(files[name]) for name in sorted(files)},
-            "serial": {name: milliseconds(serial[name]) for name in sorted(serial)},
             "source": {"run_id": run_id, "sha": sha}, "ui_nodes": milliseconds(nodes)}
 
 
