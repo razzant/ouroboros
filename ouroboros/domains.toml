@@ -913,6 +913,7 @@ D20 = "Presence"
 "ouroboros/storage_free_view.py" = "D16"  # Temporary space pool and paged item views over the held plan
 "ouroboros/storage_free.py" = "D16"  # Dashboard Storage: the owner's free-space preview and run over the existing retirers
 "ouroboros/storage_removers.py" = "D16"  # Dashboard Storage: each place's removers and how their last pass ended
+"ouroboros/tools/control_storage.py" = "D16"  # Dashboard Storage: the mind's Free tool over the same storage_free owner
 "ouroboros/jsonl_tail.py" = "D18"
 "ouroboros/temp_sweep.py" = "D18"
 "ouroboros/utils.py" = "D18"
@@ -1242,6 +1243,7 @@ allowed = [
   "D15->D18",
   "D15->D19",
   "D16->D02",
+  "D16->D04",
   "D16->D06",
   "D16->D12",
   "D16->D17",

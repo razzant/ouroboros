@@ -23,12 +23,12 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D13 | Safety, guards & runtime mode | 11 | 0 |
 | D14 | Skills & extensions | 72 | 0 |
 | D15 | Memory, knowledge, consciousness & self-evolution | 35 | 0 |
-| D16 | Observability, usage accounting & cost | 30 | 0 |
+| D16 | Observability, usage accounting & cost | 31 | 0 |
 | D17 | Projects, workspaces & task results | 55 | 0 |
 | D18 | Launcher, packaging, platform & shared substrate | 39 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 24 | 0 |
-| **total** | | **993** | **0** |
+| **total** | | **994** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -51,7 +51,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
 | **D13** | ✓ | ✓ | · | ✓ | · | · | · | · | · | · | · | ✓ | · | · | ✓ | · | ✓ | ✓ | · | ✓ |
 | **D14** | · | ✓ | ✓ | ✓ | ✓ | ✓ | · | · | ✓ | ✓ | ✓ | ✓ | ✓ | · | · | ✓ | ✓ | ✓ | ✓ | · |
 | **D15** | ✓ | · | ✓ | ✓ | · | · | · | · | · | · | · | ✓ | · | · | · | ✓ | ✓ | ✓ | ✓ | · |
-| **D16** | · | ✓ | · | · | · | ✓ | · | · | · | · | · | ✓ | · | · | · | · | ✓ | ✓ | ✓ | · |
+| **D16** | · | ✓ | · | ✓ | · | ✓ | · | · | · | · | · | ✓ | · | · | · | · | ✓ | ✓ | ✓ | · |
 | **D17** | ✓ | · | · | ✓ | ✓ | ✓ | ✓ | ✓ | · | · | ✓ | ✓ | · | · | ✓ | ✓ | · | ✓ | ✓ | · |
 | **D18** | · | · | · | · | · | · | · | · | ✓ | ✓ | · | ✓ | ✓ | · | · | · | · | · | · | · |
 | **D19** | · | · | · | · | · | · | · | · | · | · | · | · | · | ✓ | · | · | · | ✓ | · | · |
@@ -1100,6 +1100,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/storage_free.py`
 - `ouroboros/storage_free_view.py`
 - `ouroboros/storage_removers.py`
+- `ouroboros/tools/control_storage.py`
 - `ouroboros/usage_accounting.py`
 - `ouroboros/usage_admission.py`
 - `ouroboros/usage_journal.py`
