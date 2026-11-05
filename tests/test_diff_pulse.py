@@ -192,6 +192,37 @@ def test_a_changed_test_source_adds_what_the_suite_declares_and_records(tmp_path
     assert "tests: items +0/-0 (1 unreadable)," in diff_pulse(repo, ["tests/test_old.py"])
 
 
+def test_the_suite_facts_read_each_side_with_one_git_call(tmp_path, monkeypatch):
+    """A `git show` per changed test module cost a 2,000-module PR's commit fifty seconds of pulse: both sides
+    are read with one `git cat-file --batch` each (the worktree side needs none), and a path with whitespace,
+    which batch input would split, is read alone."""
+    from ouroboros import review
+
+    repo = _suite_repo(tmp_path / "body")
+    for index in range(12):
+        _write(repo, f"tests/test_many_{index}.py", 1, SUITE)
+    _write(repo, "tests/test_old.py", 1, SUITE + "\n\ndef test_more():\n    pass\n")
+    _git(repo, "add", "-A")
+    calls, real = [], review.subprocess.run
+
+    def counted(argv, *args, **kwargs):
+        calls.append(list(argv))
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(review.subprocess, "run", counted)
+    declared = review._declared_tests(SUITE, "tests/test_x.py")[0]
+    assert f"tests: items +{12 * declared + 1}/-0, new modules 12," in diff_pulse(repo, staged=True)
+    batched = [argv for argv in calls if "cat-file" in argv]
+    assert len(batched) == 2 and not any("show" in argv for argv in calls)  # the base side and the index side
+    assert "tests: items +1/-0, new modules 0," in diff_pulse(repo, ["tests/test_old.py"])  # the worktree side: one batch
+    assert [argv for argv in calls if "cat-file" in argv][2:] == [batched[0]]
+    _write(repo, "tests/test_spaced name.py", 1, SUITE)
+    _git(repo, "add", "-A")
+    calls.clear()
+    assert "new modules 13," in diff_pulse(repo, staged=True)
+    assert sum("show" in argv for argv in calls) == 2 and len([argv for argv in calls if "cat-file" in argv]) == 2
+
+
 def test_a_bare_mark_shows_and_a_mark_kept_or_moved_adds_nothing(tmp_path):
     repo = _suite_repo(tmp_path / "body")
     _write(repo, "tests/test_old.py", 1, SUITE.replace("def test_rows", "@pytest.mark.serial\ndef test_rows"))
