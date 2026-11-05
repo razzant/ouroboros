@@ -120,8 +120,8 @@ review-only.
 
 `docs/ARCHITECTURE.md` is the present-tense map of the body in BIBLE P6's three layers:
 what exists and where, how it flows, why. `docs/DEVELOPMENT.md` is how the body is
-changed: one rule per change class, each naming its enforcing test, gate or CI lane or
-saying review-only. ARCHITECTURE, CHECKLISTS, BIBLE, DESIGN and `config.py` are pointed
+changed: one rule per change class, each naming its invariant's home (the home test or
+the product owner, never a test file per rule), gate or CI lane, or saying review-only. ARCHITECTURE, CHECKLISTS, BIBLE, DESIGN and `config.py` are pointed
 to, never restated; the ARCHITECTURE settings and endpoint tables are test-checked
 registries of those owners, not second authorities.
 

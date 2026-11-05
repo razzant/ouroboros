@@ -146,8 +146,7 @@ attention or enforcement changes, no requested-as-observed execution. Incomplete
 rows remain gaps. Existing chat/task/attempt readers supply the view;
 `gateway/task_reviews.py` adds passive paged history and owned saved-text exports
 through ledger/Plan/skill readers. No second ledger, persisted UI state or cost
-copy (ARCHITECTURE §3). Enforcement: `web/tests/review_presentation.test.js`,
-`web/tests/harness_presentation.test.js`, `tests/test_task_review_sources.py`.
+copy (ARCHITECTURE §3). Enforcement: `web/tests/review_presentation.test.js`.
 
 #### Context and growth matrix
 
@@ -176,8 +175,7 @@ serialized budget; previews carry `full_chars` and a `source_ref`). Durable `tas
 bodies stay the SSOT; the brief names each omitted field and size and never stands in for
 it. No hop cap, no chain walk: a successor reads its predecessor through the exact read
 above, and the predecessor mind's notes follow the assignment as one foldable row.
-Enforcement: `tests/test_continuation_context_authority.py`,
-`tests/test_helper_predecessor_history.py`.
+Enforcement: `tests/test_continuation_context_authority.py`.
 
 ### Invariant: notifications ring for live events only
 
@@ -198,7 +196,6 @@ without DOM or socket. Preferences stay client-local, outside `s-`, settings-dir
 tracking and `/api/settings`. Delivery degrades rather than disappearing and never
 requests OS permission. Importance adds no host field, text heuristic or model call
 (mechanism: `web/modules/notifications.js` header). Enforcement:
-`tests/test_notifications_static.py`, `tests/test_notification_destination.py`,
 `web/tests/notifications.test.js`.
 
 ### Invariant: UI resources carry a disposer
@@ -244,5 +241,4 @@ behavior in the refresh contract, where missing or malformed job status is an im
 protocol error and an unknown in-progress label is a bounded pending state.
 
 Enforcement: CHECKLISTS item 9 `perf_lifecycle` points lifecycle changes here; the
-widget geometry/refresh contracts are pinned in `tests/test_widgets_ui_static.py` and
-`tests/test_extension_surfaces.py`.
+widget geometry/refresh contracts live in `tests/test_widgets_ui_static.py`.
