@@ -142,10 +142,11 @@ def test_the_tool_emits_the_control_event_and_returns_the_receipt_it_finds(tmp_p
     ({"state": "done", "outcome": {"removed": 1, "removed_bytes": 10 ** 9, "kept": [], "stopped": True}}, "stopped", False),
     ({"state": "done", "outcome": {"removed": 2, "removed_bytes": 10 ** 9, "kept": []}}, "done", True),
     ({"state": "failed", "refusal": "busy"}, "refused", False),
+    ({"state": "done", "preview": {"pool": {"count": 0}}}, "done", True),
 ])
 def test_the_tools_answer_follows_the_receipt(tmp_path, monkeypatch, receipt, status, ok):
     """A failed or stopped run is said so at the top of the answer, never ok and done; a finished one is both;
-    a refusal because Free was busy is reported to no one, and the note says so."""
+    a refusal because Free was busy is reported to no one, and a preview is reported but is no event; the note says so."""
     from ouroboros.tools import control_storage
 
     root = tmp_path / "data"
@@ -163,6 +164,7 @@ def test_the_tools_answer_follows_the_receipt(tmp_path, monkeypatch, receipt, st
     assert answer["receipt"]["state"] == receipt["state"]
     assert ("reported to the owner in Main" in answer["note"]) == (receipt.get("refusal") != "busy")
     assert receipt.get("refusal") != "busy" or "only this refusal receipt" in answer["note"]
+    assert ("storage_free event with actor" in answer["note"]) == bool(receipt.get("outcome")), "only a run is an event"
 
 
 def test_a_receipt_that_has_not_landed_reads_as_requested_or_queued(tmp_path, monkeypatch):

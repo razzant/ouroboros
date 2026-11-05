@@ -62,10 +62,10 @@ def _free_storage(ctx: ToolContext, dry_run: bool = False, wait_sec: int = 90) -
         "note": ("The run continues on the server; its receipt lands on the storage_free job row "
                  "(query_data kind=storage reads the removers; the owner sees the outcome in Main)."
                  if status in ("requested", "queued") else
-                 "Not run: a listing or a run of Free was already under way; only this refusal receipt was recorded, "
-                 "and Main was not told."
+                 "Not run: Free was busy or stopping; only this refusal receipt was written, and Main was not told."
                  if receipt.get("refusal") == "busy" else
-                 "Recorded as a storage_free event with actor=this task and reported to the owner in Main."),
+                 "Recorded as a storage_free event with actor=this task and reported to the owner in Main."
+                 if receipt.get("outcome") else "No run, so no storage_free event; reported to the owner in Main."),
     }, ensure_ascii=False, default=str)
 
 
