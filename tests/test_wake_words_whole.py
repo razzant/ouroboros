@@ -187,6 +187,15 @@ def test_a_finished_root_reads_its_outcome_while_its_synthesis_is_still_open(tmp
     line = wake._event_line("task_terminal", {"task_id": "open1", "ts": _iso(T0 - 60)},
                             {"open1": read_document(tmp_path, "open1")}, RoomLabelResolver(projects=[]), {}, T0)
     assert line.startswith("- task open1 Done") and "Working" not in line
+    # Its recorded cause reads the same settled record: the line equals the one a settled synthesis prints.
+    for status, reason, objective in (("fail", "author_finish", "best_effort"), ("degraded", "review_degraded", "pass")):
+        record = {"status": "completed", "reason_code": "final_message", "description": "do it", "metadata": {}, "outcome_axes": {
+            "lifecycle": {"status": "completed"}, "execution": {"status": "ok"}, "objective": {"status": objective},
+            "review": {"status": status, "acceptance_decision": {"status": "finalized_unaccepted", "reason": reason}}}}
+        lines = [wake._event_line("task_terminal", {"task_id": "r1", "ts": _iso(T0 - 60)}, {"r1": {
+            **record, "root_phase_checkpoint": {"post_task_synthesis": phase}}}, RoomLabelResolver(projects=[]), {}, T0)
+            for phase in (synthesis, "completed")]
+        assert lines[0] == lines[1] and lines[1].endswith(")"), lines
 
 
 def test_an_event_copy_of_a_wake_task_keeps_the_forms_sizes_not_their_bodies(tmp_path, place):

@@ -502,9 +502,9 @@ def _event_line(kind: str, row: Dict[str, Any], results: Dict[str, Dict[str, Any
     if result:  # the card's word and recorded cause (an explicit stop's own reason too), never a bare lifecycle
         from ouroboros.project_dialogue import OUTCOME_PHASE_HEADLINE, _completion_verdict, outcome_phase
 
-        outcome = ("Interrupted" if result.get("status") == "interrupted"  # an open post-task synthesis is not its end
-                   else OUTCOME_PHASE_HEADLINE[outcome_phase({**result, "root_phase_checkpoint": {}}, {})])
-        cause = _completion_verdict(result, {}, include_review_details=False)
+        settled = {**result, "root_phase_checkpoint": {}}  # an open post-task synthesis is not how the work ended
+        outcome = "Interrupted" if result.get("status") == "interrupted" else OUTCOME_PHASE_HEADLINE[outcome_phase(settled, {})]
+        cause = _completion_verdict(settled, {}, include_review_details=False)
     return (f"- {noun} {outcome}{cost_text}{where}, {when}: {title}".rstrip(": ") + summary
             + (f" ({cause})" if cause else ""))
 
