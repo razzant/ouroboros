@@ -88,6 +88,20 @@ class TestDeliverOwnerEvent:
         assert [e["text"] for e in ctx.pending_events] == ["a", "b"]
         assert ctx.event_queue.items == []
 
+    def test_origin_is_stamped_before_delivery_and_explicit_event_value_wins(self):
+        q = _Queue()
+        ctx = _ctx(event_queue=q, meta={"initiator": "consciousness"})
+        frame = {"type": "send_message", "chat_id": 123, "text": "wake"}
+        assert deliver_owner_event(ctx, frame) == "live"
+        assert q.items[0]["initiator"] == "consciousness"
+        assert q.items[0]["progress_meta"]["initiator"] == "consciousness"
+
+        explicit = {"type": "send_message", "chat_id": 123, "text": "explicit",
+                    "progress_meta": {"initiator": "explicit"}}
+        assert deliver_owner_event(ctx, explicit) == "live"
+        assert q.items[1]["initiator"] == "explicit"
+        assert q.items[1]["progress_meta"]["initiator"] == "explicit"
+
 
 class TestSendToolsLiveIntegration:
     def test_a2a_message_does_not_count_as_owner_delivery(self, tmp_path):
@@ -127,6 +141,21 @@ class TestSendToolsLiveIntegration:
         # task's final on history reload; the discriminator (persisted via
         # log_chat record_type) keeps the live card open.
         assert frame["system_type"] == "proactive_message"
+
+    def test_send_user_message_stamps_consciousness_and_keeps_owner_turn_plain(self, tmp_path):
+        from ouroboros.tools.control import _send_user_message
+
+        q = _Queue()
+        wake = _ctx(event_queue=q, drive_root=tmp_path, meta={"initiator": "consciousness"})
+        wake.drive_logs = lambda: tmp_path
+        assert "accepted for delivery" in _send_user_message(wake, "wake note")
+        assert q.items[0]["progress_meta"]["initiator"] == "consciousness"
+
+        owner_q = _Queue()
+        owner = _ctx(event_queue=owner_q, drive_root=tmp_path)
+        owner.drive_logs = lambda: tmp_path
+        assert "accepted for delivery" in _send_user_message(owner, "owner note")
+        assert "initiator" not in owner_q.items[0].get("progress_meta", {})
 
     def test_send_photo_accepts_chat_zero(self, tmp_path):
         from ouroboros.tools.core import _send_photo

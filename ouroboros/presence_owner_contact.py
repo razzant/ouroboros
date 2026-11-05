@@ -96,7 +96,7 @@ def send_main_message(ctx, text: str, origin: dict, request_id: str = "") -> str
     from ouroboros.project_dialogue import MAIN_NOTICE_TYPE
     from ouroboros.task_store import patch_document
     from ouroboros.tool_access import canonical_data_root
-    from ouroboros.tools.owner_delivery import deliver_owner_event
+    from ouroboros.tools.owner_delivery import deliver_owner_event, stamp_lineage
     from ouroboros.utils import utc_now_iso
     from supervisor.terminal_delivery import register_pending_delivery
 
@@ -108,6 +108,9 @@ def send_main_message(ctx, text: str, origin: dict, request_id: str = "") -> str
              "system_type": MAIN_NOTICE_TYPE, "ts": utc_now_iso(),
              "delivery_id": f"presence-owner:{ctx.task_id}:{key}",
              "progress_meta": {"presence_contact": origin}}
+    # The owner-contact event is frozen and registered before its live/deferred
+    # delivery. Stamp origin before either durable copy is written.
+    stamp_lineage(ctx, event)
 
     def freeze(row):
         nonlocal event, rejoined
@@ -119,6 +122,7 @@ def send_main_message(ctx, text: str, origin: dict, request_id: str = "") -> str
             if prior.get("fingerprint") != fingerprint:
                 raise ContactRequestConflict("request_id already names different message bytes")
             event = copy.deepcopy(prior["event"])
+            stamp_lineage(ctx, event)
             rejoined = True
             return None
         contacts[key] = {"fingerprint": fingerprint, "event": event}
