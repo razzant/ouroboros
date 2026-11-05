@@ -575,14 +575,13 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
                 if views:
                     report["errors"].append(f"{home.name}: the seat home is a link")
                 return set()
+            if not views and not _checking_area_present(area) and not os.path.lexists(home / SESSION_SCRATCH_DIRNAME):
+                return set()  # a periodic pass reads (marker included) only seats that still hold a copy or a scratch record
             try:
                 marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
                 thread, task_id = marker.get("thread_seat"), marker.get("task_id")
             except (OSError, ValueError, AttributeError):
                 thread, task_id = "", ""
-            if not views and not _checking_area_present(area) and not os.path.lexists(home / SESSION_SCRATCH_DIRNAME) \
-                    and task_id not in _PSEUDO_SEAT_OWNERS:
-                return set()  # a periodic pass reads only seats that still hold a copy or a scratch record
             lock_home = seat_dir(data_root, task_id, f"thread:{thread}") if thread else home
             with _seat_locked(lock_home, wait=False) as held:  # same owner for active and relocated thread turns
                 if not held:  # a worker is changing it; the views it needs are read in a later pass
