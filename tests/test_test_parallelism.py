@@ -201,6 +201,31 @@ def test_a_planted_ledger_is_no_ledger_and_a_row_never_follows_a_link(tmp_path, 
     assert not row.exists()
 
 
+def test_a_lease_narrows_to_what_a_pass_uses_and_never_widens(tmp_path, monkeypatch):
+    """grok 7 / astra 14: the gate holds one row across both passes; at the one-process pass it holds one slot."""
+    ledger, me = tmp_path / "slots", os.getpid()
+    monkeypatch.setattr(budget, "_ledger_dir", lambda: ledger)
+    monkeypatch.delenv(budget.NESTED_WORKERS_ENV, raising=False)
+    monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(2 ** 40, 2 ** 40))
+    monkeypatch.setattr(budget, "_process_table", lambda: ([], ""))
+    admitted, lease = budget.reserve("hermetic gate", 4, slots=lambda admission: admission.workers + 5)
+    row = lambda: json.loads((ledger / f"{me}.json").read_text(encoding="utf-8"))  # noqa: E731
+    assert (admitted.workers, lease.workers, row()["workers"]) == (4, 4, 4)  # never more than admitted
+    lease.hold(1)
+    assert (lease.workers, row()["workers"], row()["command"]) == (1, 1, "hermetic gate")
+    lease.hold(3)
+    assert (lease.workers, row()["workers"]) == (1, 1)
+    lease.close()
+    _, one = budget.reserve("run_tests.py node", 4, slots=lambda admission: 2)
+    assert (one.workers, row()["workers"]) == (2, 2)
+    one.close()
+    monkeypatch.setenv(budget.NESTED_WORKERS_ENV, "2")
+    nested, lease = budget.reserve("child", 4)
+    assert (nested, lease.path) == (budget.Admission(2, budget.HostRuns()), None)
+    lease.hold(1)
+    assert lease.workers == 1 and not list(ledger.glob("*.json"))
+
+
 def test_two_runs_started_at_once_admit_under_one_ledger_lock(tmp_path, monkeypatch):
     """Astra 8: admission read the ledger and the row was written afterwards, so two runs started at once both
     saw an empty ledger and each took the whole machine. ``reserve`` holds the ledger's lock from the census to

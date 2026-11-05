@@ -63,6 +63,19 @@ def _admission():
     return admission(_cpu_default())
 
 
+def _pass_slots(argv: list[str], workers: int) -> int:
+    """The slots one pass really uses, for its ledger row: the admitted workers for an xdist pass (`-n`), a Node
+    lane's `--test-concurrency` or the warm's `--workers` within them, one for the one-process pass."""
+    if "-n" in argv:
+        return workers
+    for index, arg in enumerate(argv):
+        if arg.startswith("--test-concurrency=") and arg.partition("=")[2].isdecimal():
+            return min(int(arg.partition("=")[2]), workers)
+        if arg == "--workers" and index + 1 < len(argv) and argv[index + 1].isdecimal():
+            return min(int(argv[index + 1]), workers)
+    return 1
+
+
 def _workers() -> int:
     return _admission().workers
 
@@ -110,8 +123,9 @@ def _run(label: str, argv: list[str], cwd: pathlib.Path) -> int:
     env = node_environment(os.environ)
     for key in _OUTER_WORKER_KEYS:  # a battery is a run of its own, never a worker of the session that started it
         env.pop(key, None)
-    # One reservation: the admission and this pass's row in the host ledger, under the ledger's lock.
-    admitted, lease = reserve(f"run_tests.py {label}", _cpu_default())
+    # One reservation under the ledger's lock: the admission, and this pass's row holding what the pass uses.
+    admitted, lease = reserve(f"run_tests.py {label}", _cpu_default(),
+                              slots=lambda admitted: _pass_slots(argv, admitted.workers))
     env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = str(admitted.workers)
     env[NESTED_WORKERS_ENV] = env["PYTEST_XDIST_AUTO_NUM_WORKERS"]
     argv = bounded_test_command(argv, env)

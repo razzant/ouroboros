@@ -1415,6 +1415,8 @@ def _run_hermetic_pytest(
                     f"⚠️ PRE_PUSH_TEST_ERROR: the {spec.label} pass never started — the "
                     f"total budget of {timeout} seconds was exhausted by the earlier pass(es)"
                 )
+            if lease is not None and not spec.parallel:
+                lease.hold(1)  # a one-process pass holds one slot: the admitted count went with the xdist pass
             # Headers report this pass, not cumulative shared-budget time.
             pass_started = time.monotonic()
             unproven_teardown = f"the {spec.label} pass did not return, so its teardown is unconfirmed"

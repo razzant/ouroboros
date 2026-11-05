@@ -156,6 +156,49 @@ def test_the_worker_override_steers_xdist_like_the_gate(run_tests, monkeypatch, 
     assert list(standalone_budget.glob("*.json")) == [], "the lease outlived its run"
 
 
+@pytest.mark.parametrize("argv, held", [
+    (["python", "-m", "pytest", "tests/", "-n", "8", "--dist", "loadgroup"], 3),  # the xdist pass: the admitted count
+    (["python", "-m", "pytest", "tests/", "-m", "exclusive", "--timeout=300"], 1),  # the one-process pass
+    (["node", "--test", "--test-timeout=300000", "--test-concurrency=2", "a.test.js"], 2),  # a lane's concurrency
+    (["node", "--test", "--test-concurrency=9", "a.test.js"], 3),  # within the admitted count
+    (["python", "-c", "bootstrap", "test_bytecode.py", "--repo", ".", "--workers", "2"], 2),  # the warm's shards
+])
+def test_a_pass_leases_what_it_uses(run_tests, argv, held):
+    """grok 7 / astra 14: every pass used to lease the admitted xdist count, so a neighbour started during the
+    one-process pass lost N slots to a run using one."""
+    assert run_tests._pass_slots(argv, 3) == held
+
+
+def test_the_one_process_pass_holds_one_slot_in_the_ledger(run_tests, monkeypatch, standalone_budget):
+    from ouroboros import process_containment
+
+    monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "3")
+    seen = {}
+
+    class Owner:
+        def __init__(self, **options):
+            pass
+
+        def spawn(self, argv, *, cwd, env):
+            seen["leases"] = [json.loads(path.read_text(encoding="utf-8")) for path in standalone_budget.glob("*.json")]
+            seen["env"] = env
+            return types.SimpleNamespace(wait=lambda **kwargs: 0)
+
+        def reap(self):
+            return ""
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(process_containment, "ProcessContainer", Owner)
+    serial = [run_tests.sys.executable, "-m", "pytest", "tests/", "-m", "exclusive", "--timeout=300"]
+    assert run_tests._run("serial", serial, run_tests.REPO) == 0
+    (lease,) = seen["leases"]
+    assert (lease["workers"], lease["command"]) == (1, "run_tests.py serial")
+    assert seen["env"]["OURO_TEST_WORKER_BUDGET"] == "3"  # the pass's own children keep the admitted allocation
+    assert list(standalone_budget.glob("*.json")) == []
+
+
 def test_node_lane_uses_the_shared_worker_budget(run_tests, monkeypatch):
     from ouroboros import preflight_node
 

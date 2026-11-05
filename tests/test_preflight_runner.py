@@ -981,7 +981,8 @@ def test_second_pass_never_starts_once_the_total_budget_is_gone(tmp_path, two_pa
 def test_the_gate_leases_its_workers_and_names_its_durations_table_for_the_whole_run(tmp_path, two_pass_env,
                                                                                     stub_passes, monkeypatch):
     """A standalone gate (no parent allocation) holds its admitted count in the host ledger from the admission
-    to the end of the run, so a run started meanwhile subtracts it; the row goes with the run. A caller with a
+    to the end of the run, so a run started meanwhile subtracts it, and one slot once the one-process pass
+    begins (grok 7 / astra 14); the row goes with the run. A caller with a
     canonical data root points every session of the gate at the install's durations table
     (`state/test-durations.json`), which the sessions read for their weights and bring up to date; a caller
     without one names no table."""
@@ -1014,7 +1015,7 @@ def test_the_gate_leases_its_workers_and_names_its_durations_table_for_the_whole
     repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
     assert pr.run_hermetic_pytest(repo, timeout=120) is None
     assert [[(row["pid"], row["workers"], row["command"]) for row in rows] for rows in leases] == [
-        [(os.getpid(), 2, "hermetic gate")]] * 2
+        [(os.getpid(), 2, "hermetic gate")], [(os.getpid(), 1, "hermetic gate")]]
     assert tables == [(str(data / "state" / "test-durations.json"),) * 2] * 2
     assert list(ledger.glob("*.json")) == []
 

@@ -247,16 +247,18 @@ def _ledger_lock(directory: Optional[Path]):
         os.close(descriptor)
 
 
-def reserve(command: str, cpu_workers: Optional[int] = None, *,
-            env: Optional[Mapping[str, str]] = None) -> tuple[Admission, "SlotLease"]:
+def reserve(command: str, cpu_workers: Optional[int] = None, *, env: Optional[Mapping[str, str]] = None,
+            slots=None) -> tuple[Admission, "SlotLease"]:
     """Admit this run's workers and publish its row as ONE reservation under the ledger lock: no other run's
-    census, admission or write comes between this run's. A child with a parent allocation reads no ledger
-    and holds no row."""
+    census, admission or write comes between this run's. ``slots`` maps the admission to the count the row
+    holds, within the admitted workers (default: all of them; a one-process pass holds one, a Node lane its
+    concurrency). A child with a parent allocation reads no ledger and holds no row."""
     env = os.environ if env is None else env
     directory = None if NESTED_WORKERS_ENV in env else _owned_ledger()
     with _ledger_lock(directory):
         admitted = admission(cpu_workers, env=env)
-        return admitted, SlotLease(admitted.workers, command, locked=True)
+        held = admitted.workers if slots is None else max(1, min(int(slots(admitted)), admitted.workers))
+        return admitted, SlotLease(held, command, locked=True)
 
 
 def _read_lease(path: Path) -> Optional[dict]:
@@ -279,7 +281,8 @@ class SlotLease:
     """This run's ledger row while it runs: the owner's pid, birth token and admitted workers.
 
     The owner that admits workers writes it (scripts/run_tests.py per pass, the hermetic gate per run)
-    and removes it when the run ends; a lease covers the owner's whole process tree. A row whose pid is
+    and removes it when the run ends; a lease covers the owner's whole process tree, and holds what the
+    pass really uses: the admitted workers for an xdist pass, one for a one-process pass. A row whose pid is
     dead or reborn is ignored by every reader and unlinked by the next writer, so nothing piles up: one
     row of about a hundred bytes per live owner. A child with a parent allocation holds no row (its
     parent's lease covers it), and a ledger the host refuses to write, or one that is not this user's
@@ -325,6 +328,17 @@ class SlotLease:
         except OSError:
             return
         self.path = path
+
+    def hold(self, workers: int) -> None:
+        """Narrow this row to ``workers`` slots at a pass boundary (the one-process pass after the xdist pass
+        holds one): rewritten in place under the lock, never widened, which would take a new admission."""
+        workers = max(1, int(workers))
+        if workers >= self.workers:
+            return
+        self.workers = workers
+        if self.path is not None:
+            with _ledger_lock(self.path.parent):
+                self._publish(self.path.parent)
 
     def close(self) -> None:
         if self.path is not None:
