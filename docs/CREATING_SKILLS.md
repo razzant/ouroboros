@@ -1127,6 +1127,9 @@ Use the connector's ordinary content-hash-bound skill token for:
   `source_event_id`, `provider`, `account_id`, `conversation_id`, `thread_id`,
   `conversation_key`, `actor`, `conversation`, `message` and `text`. The host derives
   its own canonical conversation key. Files stay confined to the connector's state root.
+  `message.sent_at` (the provider's original send time) and, for an edited revision,
+  `message.edited_at` are ISO 8601 times with a time zone, absent when the provider records
+  none; the focus states them and never substitutes a receipt time.
 - Optional `event.facts`: a list of `direct_message`, `group_dm`, `mention`,
   `reply_to_me`, `my_thread`, `new_issue`, `new_pull_request`, `review_requested`,
   `assigned`, `any_message`, `from_bot`.
