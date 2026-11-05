@@ -248,7 +248,7 @@ def test_android_emulator_selection_uses_event_diff(tmp_path, event, path, ref, 
     assert result.returncode == 0, result.stderr
     detected = output.read_text(encoding="utf-8").strip().split("=", 1)[1]
     expression = jobs["android-emulator-smoke"]["if"]
-    for key, value in {"github.event_name": event, "github.ref": ref,
+    for key, value in {"github.event_name": event, "github.ref": ref, "inputs.scope": "",  # no dispatch: inputs are empty
                        "needs.android-test.outputs.android_changed": detected}.items():
         expression = expression.replace(key, repr(value))
     expression = expression.replace("&&", " and ").replace("||", " or ")
