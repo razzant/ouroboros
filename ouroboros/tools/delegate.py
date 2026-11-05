@@ -109,19 +109,18 @@ from ouroboros.delegate_readonly_inputs import NO_INPUTS, input_files_parameter,
 from ouroboros.subagent_worktrees import registered_checkout
 from ouroboros.delegate_shared import (  # noqa: F401
     _emit,
-    _fail as _refuse,
+    _fail,
     _owned_run,
     delegate_result,
     publish_delegate_result,
     refusal_host_code,
 )
+# The C1 integration seam (mutation authority, execution snapshots, retry binding,
+# terminal patch capture) lives in its own module (size gate); re-exported here
+# (same objects) because sibling code and the tests address it on THIS surface.
+# `_fail` is NOT re-imported from it — the one shared refusal author is
+# `delegate_shared._fail`, which delegate_integration itself imports.
 from ouroboros.engine_facts import engine_pool_line
-
-
-def _fail(tool, code, detail, **extra):
-    if tool == "delegate_start" and "engine_pool" not in extra:
-        extra["engine_pool"] = engine_pool_line()
-    return _refuse(tool, code, detail, **extra)
 from ouroboros.delegate_continuation import NO_CONTINUATION, start_binding, with_run_binding
 from ouroboros.tools.delegate_integration import (  # noqa: F401
     _CAPTURE_DELEGATED_SNAPSHOT,

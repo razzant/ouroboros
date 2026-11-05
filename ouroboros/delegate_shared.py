@@ -142,6 +142,10 @@ def publish_delegate_result(ctx: Any, result: ToolResult) -> str:
 
 
 def _fail(tool: str, code: str, detail: str, **extra: Any) -> ToolResult:
+    if tool == "delegate_start" and "engine_pool" not in extra:
+        from ouroboros.engine_facts import engine_pool_line  # a refused start states the engine and pool facts
+
+        extra["engine_pool"] = engine_pool_line()
     payload = {
         "status": "refused", "ok": False, "tool": tool, "reason": code,
         "host_code": refusal_host_code(code), "detail": detail, **extra,
