@@ -392,19 +392,17 @@ class CapturedPass(tuple):
 
 def finish_gate(evidence, verdict, phase, release) -> None:
     """Persist outcome before release; retention/evidence never rewrite a verdict."""
-    from ouroboros.test_environment import retain_tree, retention_markers
+    from ouroboros.test_environment import marker_text, retain_tree, retained_folders
 
     cleanup = evidence.get("cleanup")
-    reason = (cleanup[4] if cleanup else "") or evidence.get("retain_reason", "")
+    # The run's own hold keeps its whole root; a marker beneath the root keeps only its folder.
+    hold = (cleanup[4] if cleanup else "") or evidence.get("retain_reason", "")
     if cleanup and os.environ.get("OUROBOROS_PREFLIGHT_KEEP") == "1":
-        reason = reason or "explicit preflight debug retention"
-    if cleanup and not reason:
-        markers = retention_markers(cleanup[1])
-        if markers:
-            try:
-                reason = markers[0].read_text(encoding="utf-8").strip()
-            except (OSError, UnicodeError):
-                reason = "retention marker or unreadable subtree"
+        hold = hold or "explicit preflight debug retention"
+    kept = retained_folders(cleanup[1]) if cleanup and not hold else {}
+    if cleanup and cleanup[1] in kept:
+        hold = marker_text(kept[cleanup[1]][0])
+    reason = hold or next((marker_text(found_in[0]) for found_in in kept.values()), "")
     record = {"verdict": verdict, "phase": phase, "reused_from": evidence.get("reused_from"),
               "execution": evidence.get("reuse", evidence.get("execution", "not_run")),
               "scratch": str(cleanup[1]) if cleanup else None,
@@ -416,15 +414,15 @@ def finish_gate(evidence, verdict, phase, release) -> None:
     try:
         write_record(evidence["path"] / "result.json", record)
     except OSError as exc:
-        reason = f"gate evidence write failed: {exc}"
+        reason = hold = f"gate evidence write failed: {exc}"
         record["diagnostics_incomplete"] = True
         record["evidence_errors"].append(reason)
         report_diagnostic(f"PREFLIGHT_EVIDENCE_INCOMPLETE {exc}")
     if cleanup:
-        if reason:
-            retain_tree(cleanup[1], reason)
+        if hold:
+            retain_tree(cleanup[1], hold)
         try:
-            release(*cleanup[:4], reason)
+            release(*cleanup[:4], hold)
         except OSError as exc:
             reason = f"scratch release failed: {exc}"
             retain_tree(cleanup[1], reason)

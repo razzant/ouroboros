@@ -102,21 +102,58 @@ def test_controller_signatures_survive_a_bounded_preview(tmp_path):
     assert 'nothing recorded why' in verdict and 'Do NOT mark' not in verdict
 
 
-def test_retention_unknown_siblings_and_symlinks_are_not_released(tmp_path):
+@pytest.mark.parametrize("held", ["nested", "unreadable", "root"])
+def test_retention_keeps_only_its_own_folder_and_never_unknown_siblings_or_links(tmp_path, held):
     from ouroboros.safe_test_supervisor import release_scratch
-    root = tmp_path / "owned"
-    known, unknown = root / "known", root / "unknown"
-    known.mkdir(parents=True)
-    unknown.mkdir()
-    declare_scratch(known, "pytest-session")
-    (unknown / "work").write_text("keep")
-    retain_tree(known, "unconfirmed child")
+    from ouroboros.test_environment import RETENTION_MARKER
+    from tests._shared import retire_synthetic_retention
+
+    if held == "unreadable" and (os.name == "nt" or os.geteuid() == 0):
+        pytest.skip("needs a directory this user cannot list")
+    run = tmp_path / "run"  # a finished battery: two tests of one worker, a session root, data nobody declared
+    (run / "b0").mkdir(parents=True)
+    declare_scratch(run / "b0", "pytest-basetemp")
+    worker = run / "b0" / "t" / "popen-gw0"
+    test, sibling, session, unknown = worker / "test_held0", worker / "test_other0", run / "p1", run / "unknown"
+    (test / "deep").mkdir(parents=True)
+    for path in (sibling, session, unknown):
+        path.mkdir(parents=True)
+    declare_scratch(session, "pytest-session")
+    for path in (test / "work", sibling / "work", session / "work", unknown / "work"):
+        path.write_text("bytes")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "target").write_text("not ours")
+    (run / "link").symlink_to(outside, target_is_directory=True)  # a link is unknown data at the top, gone as a link below
+    (worker / "link").symlink_to(outside, target_is_directory=True)
+    sealed = test / "deep" / "sealed"
+    sealed.mkdir()
+    marked = {"nested": test / "deep", "root": run}.get(held)
+    if marked is not None:
+        retain_tree(marked, "unconfirmed child")
+    else:
+        sealed.chmod(0)
     try:
-        assert release_scratch(root)["retained"] == [str(root)]
-        assert known.is_dir() and (unknown / "work").is_file()
+        result = release_scratch(run)
+        assert result["retained"] == [str(run)]
+        assert (test / "work").is_file(), "the test's processes work anywhere in its folder"
+        assert (unknown / "work").is_file() and (run / "link").is_symlink() and (outside / "target").is_file()
+        assert (run / "b0" / "OUROBOROS_TEST_SCRATCH.txt").is_file(), "what the kept folder lives in stays declared"
+        if held == "root":
+            assert result["released"] == [] and (sibling / "work").is_file() and (session / "work").is_file()
+            assert "retention marker" in result["reason"]
+        else:
+            assert not sibling.exists() and not session.exists() and not (worker / "link").is_symlink()
+            assert {str(sibling), str(session), str(worker / "link")} == set(result["released"])
+            assert "reason" not in result and not (run / RETENTION_MARKER).exists(), "one marker kept the whole run"
+        kept = [str(run)] if held == "root" else [str(test)]
+        assert [row["path"] for row in result["kept"]] == kept
+        if marked is not None:
+            assert result["kept"][0]["reasons"] == ["unconfirmed child"]
     finally:
-        # This marker models an unknown process; the fixture spawned none.
-        (known / 'OUROBOROS_RETAINED.txt').unlink()
+        sealed.chmod(0o700)
+        if marked is not None:  # this marker models an unknown process; the fixture spawned none
+            assert retire_synthetic_retention(marked, "unconfirmed child")
 
 
 def _repo(root, source):

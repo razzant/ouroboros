@@ -17,7 +17,9 @@ import threading
 import time
 
 from ouroboros.process_containment import ProcessContainer
-from ouroboros.test_environment import SCRATCH_MARKER, isolated_environment, retain_tree, retention_markers
+from ouroboros.test_environment import (
+    isolated_environment, marker_text, release_except_retained, retain_tree, retained_folders,
+)
 from ouroboros.test_evidence import (
     EVIDENCE_ENV, EVIDENCE_POINTER, FileOutput, describe_gaps, evidence_directory, retain_uncaptured_source,
     source_evidence, write_record, remove_scratch_tree, report_diagnostic,
@@ -29,22 +31,20 @@ _LISTED_MARKERS = 5  # release diagnostics name a few markers, never grant delet
 
 
 def release_scratch(root: Path) -> dict:
-    """Release declared *direct* children, never unknown command data or symlinks."""
-    released, retained = [], []
-    markers = retention_markers(root)
-    if markers:
+    """Release declared *direct* children, never unknown command data or symlinks. A retention marker
+    keeps its own folder, and at the top of ``root`` all of it (``retained_folders``)."""
+    kept = retained_folders(root)
+    held = [{"path": str(folder), "reasons": [marker_text(found).split("\n")[0] for found in found_in]}
+            for folder, found_in in kept.items()]
+    if root in kept:
+        markers = [found for found_in in kept.values() for found in found_in]
         listed = ", ".join(map(str, markers[:_LISTED_MARKERS]))
         more = f" (+{len(markers) - _LISTED_MARKERS} more)" if len(markers) > _LISTED_MARKERS else ""
-        return {"released": [], "retained": [str(root)],
+        return {"released": [], "retained": [str(root)], "kept": held,
                 "reason": f"retention marker or unreadable subtree: {listed}{more}"}
-    for path in root.iterdir():
-        if path.is_symlink():
-            retained.append(str(path))
-        elif path.is_dir() and (path / SCRATCH_MARKER).is_file():
-            # Declarations say reproducible, not idle. The caller already reaped
-            # its container; no independent consumer may call this as a reaper.
-            remove_scratch_tree(path)
-            released.append(str(path))
+    # Declarations say reproducible, not idle. The caller already reaped its
+    # container; no independent consumer may call this as a reaper.
+    released = release_except_retained(root, kept, remove_scratch_tree, declared_only=True)
     # The launcher's empty defaults carry no unique content. Remove empty
     # directories bottom-up only; an arbitrary HOME/file is not test scratch.
     defaults = isolated_environment(root, Path(__file__).resolve().parents[1], source={}, create=False)
@@ -57,7 +57,7 @@ def release_scratch(root: Path) -> dict:
             path.rmdir()
         except OSError:
             pass
-    return {"released": released, "retained": [str(root)] if root.exists() else []}
+    return {"released": released, "retained": [str(root)] if root.exists() else [], "kept": held}
 
 
 class _LiveDisplay(threading.Thread):
@@ -252,15 +252,17 @@ def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) ->
             except OSError as exc:
                 why = evidence_error = f"evidence/cleanup incomplete: {exc}"
         if why:
-            retain_tree(root, why)
+            retain_tree(root, why)  # a marker beneath the root already holds its own folder, and only that
+        kept = cleanup.get("kept") or []
+        reason = why or (f"{kept[0]['path']}: {kept[0]['reasons'][0]}" if kept else "")
         if evidence is not None:
             try:
                 write_record(evidence / "result.json", {**facts, "evidence_error": evidence_error, "cleanup": cleanup,
-                                                        "retention_reason": why})
+                                                        "retention_reason": reason})
             except OSError as exc:
                 report_diagnostic(f"SAFE_TEST_EVIDENCE_INCOMPLETE {exc}")
-        if why:
-            report_diagnostic(f"SAFE_TEST_RETENTION {why}")
+        if reason:
+            report_diagnostic(f"SAFE_TEST_RETENTION {reason}")
         for signum, handler in previous.items():
             signal.signal(signum, handler)
     # Command status stays the status. Containment/evidence failures have their

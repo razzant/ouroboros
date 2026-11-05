@@ -324,6 +324,31 @@ def test_a_lane_whose_evidence_never_opened_keeps_its_armed_reason(tmp_path, mon
         retire_synthetic_gate_hold(repo, temp_root, reason)
 
 
+def test_a_marker_beneath_a_proven_gate_root_keeps_its_folder_and_lets_the_rest_go(tmp_path):
+    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
+    root = (tmp_path / "preflight-root").resolve()
+    worktree = root / "repo"
+    subprocess.run(["git", "worktree", "add", "--detach", str(worktree), "HEAD"], cwd=repo, check=True, capture_output=True)
+    (root / "b0").mkdir()
+    test_environment.declare_scratch(root / "b0", "pytest-basetemp")
+    held, other = root / "b0" / "t" / "popen-gw0" / "test_held0", root / "b0" / "t" / "popen-gw0" / "test_other0"
+    (held / "deep").mkdir(parents=True)
+    other.mkdir()
+    reason = "1 process tree(s) started from this checkout were never proven gone"
+    assert test_environment.retain_tree(held / "deep", reason)
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    try:
+        test_evidence.finish_gate({"path": evidence, "cleanup": (repo, root, worktree, True, "")}, None, "post_commit",
+                                  pr._release_hermetic_tree)
+        result = json.loads((evidence / "result.json").read_text(encoding="utf-8"))
+        assert (result["cleanup"], result["retention_reason"]) == ("retained", reason)
+        assert held.is_dir() and not other.exists() and not worktree.exists() and not _registered(repo, root)
+        assert not (root / RETENTION_MARKER).exists(), "one nested marker kept the whole gate root"
+    finally:
+        retire_synthetic_retention(held / "deep", reason)
+
+
 # --- Retiring a hold the test itself manufactured
 
 

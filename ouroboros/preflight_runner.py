@@ -1191,14 +1191,16 @@ def _release_hermetic_tree(repo, temp_root, worktree, worktree_added: bool, unpr
     the worktree it runs in, and the source repository keeps the registration
     for whoever proves those processes gone.
     The marker is the enclosing layers' retention protocol; this decision does
-    not depend on the marker write succeeding."""
-    from ouroboros.test_environment import retention_markers
-    if unproven or retention_markers(temp_root):
-        from ouroboros.test_environment import retain_tree
-
+    not depend on the marker write succeeding. A marker beneath the proven root
+    keeps its own folder and everything else goes (``retained_folders``), the
+    worktree's registration with it unless the marker sits in that worktree."""
+    from ouroboros.test_environment import release_except_retained, retain_tree, retained_folders
+    from ouroboros.test_evidence import remove_scratch_tree
+    kept = retained_folders(temp_root)
+    if unproven or temp_root in kept:
         retain_tree(temp_root, f"hermetic preflight: {unproven or 'retention marker or unreadable subtree'}")
         return
-    if worktree_added:
+    if worktree_added and worktree not in kept:
         removed = subprocess.run(
             ["git", "worktree", "remove", "--force", str(worktree)],
             cwd=str(repo),
@@ -1207,11 +1209,12 @@ def _release_hermetic_tree(repo, temp_root, worktree, worktree_added: bool, unpr
             timeout=30,
         )
         if removed.returncode:
-            from ouroboros.test_environment import retain_tree
             retain_tree(temp_root, f"git worktree removal failed: {removed.stderr}")
             return
-    from ouroboros.test_evidence import remove_scratch_tree
-    remove_scratch_tree(temp_root)
+    if kept:
+        release_except_retained(temp_root, kept, remove_scratch_tree)
+    else:
+        remove_scratch_tree(temp_root)
 
 
 def _assemble_live_source(repo, worktree, evidence):
