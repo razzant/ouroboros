@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { EMPTY_LIST, KEPT_REASONS, MANUAL_ROWS, OUTDATES_PLAN, acceptPage, confirmCopy, doneSentences, doorOffered, freeSum, goLabel, manualConfirmCopy, manualFacts, manualKnown, manualOf, notStarted, resultSentences, savedGroups, sumComplete, trayHtml, trayState } from '../modules/storage_free.js';
+import { CAUSES, EMPTY_LIST, KEPT_REASONS, MANUAL_ROWS, OUTDATES_PLAN, acceptPage, confirmCopy, doneSentences, doorOffered, freeSum, goLabel, holdsPhrase, manualConfirmCopy, manualFacts, manualKnown, manualOf, notStarted, resultSentences, savedGroups, sumComplete, trayHtml, trayState } from '../modules/storage_free.js';
 
 // Text is escaped through document.createElement, as a browser's innerHTML does.
 globalThis.document = globalThis.document || {
@@ -35,7 +35,7 @@ const saved = () => [group('review_evidence', { count: 40, inside_wait: 0, in_us
     group('result_pins', { count: 3, inside_wait: 0, in_use: 0, bytes: 2e5, items: [] })];
 const run = (overrides = {}) => ({
     groups: [], selected: 1601, done: 1601, removed: 1584, removed_bytes: 8.2 * GB, deleting: 3,
-    deleting_bytes: 0.3 * GB, stuck: 0, failed: 0, not_started: 0, kept: [{ reason: 'child_result_unadopted', count: 11 }, { reason: 'in_use', count: 3 }],
+    deleting_bytes: 0.3 * GB, stuck: 0, failed: 0, not_started: 0, kept: [{ reason: 'results_pending', count: 11 }, { reason: 'in_use', count: 3 }],
     free_before: 140 * GB, free_after: 148 * GB, stopped: false, error: null, outcomes_ready: true, ...overrides,
 });
 /** A flow whose pool was read whole: every id chosen unless named. */
@@ -365,19 +365,9 @@ test('names from the server are escaped text; titles and accessible names are fi
     assert.deepEqual(attributes(trayHtml(free('done', { groups: both(), run: run() }), read())), []);
 });
 
-// Revision 5 of the backend contract (sections 2 and 3): compatible owner-facing groups are in `reason`, with the
-// retirer's exact typed code beside them in `cause`/`causes`.
-const CONTRACT_REASONS = ['task_live', 'liveness_unknown', 'task_not_terminal', 'parent_not_terminal', 'owner_not_terminal',
-    'not_proven_over', 'owner_processes_live', 'owner_paused', 'custody_held', 'run_open', 'copy_registered', 'copy_present', 'in_use',
-    'child_result_unadopted', 'child_refs_pending', 'call_inventory_pending', 'call_inventory_changed', 'inputs_uncustodied',
-    'unread_mailbox_uncustodied', 'verification_receipts_uncustodied', 'raw_evidence_uncustodied', 'canonical_not_settled',
-    'post_work_open', 'artifacts_not_terminal', 'child_drive_mismatch', 'artifact_source_missing', 'artifact_source_mismatch',
-    'canonical_changed', 'drive_occupant_changed', 'not_own_drive', 'admission_rollback_evidence',
-    'busy', 'store_busy', 'custody_busy', 'mailbox_busy', 'record_busy',
-    'unreadable_record', 'task_result_unreadable', 'unread_mailbox_unreadable', 'record_unreadable',
-    'capture_unproven', 'capture_incomplete', 'unproven_excluded_inputs', 'retained_evidence', 'retained_process_environment',
-    'undeclared_environment', 'owner_keep', 'changed', 'nothing_unsaved', 'nested_repository', 'commits_unprotected',
-    'generation_closed', 'results_pending', 'restart', 'producer_retained', 'advanced_group', 'other'];
+// Revision 4 of the backend contract (sections 2 and 3): every typed reason a page, a pool or a run's kept rows can carry.
+const CONTRACT_REASONS = ['results_pending', 'in_use', 'busy', 'unreadable_record', 'restart', 'other', 'capture_unproven', 'retained_evidence',
+    'undeclared_environment', 'owner_keep', 'changed', 'unproven_excluded_inputs', 'advanced_group'];
 
 test('every reason the server can send has its own words; none falls through to "another reason"', () => {
     for (const reason of CONTRACT_REASONS.filter((name) => name !== 'other')) {
@@ -385,6 +375,36 @@ test('every reason the server can send has its own words; none falls through to 
         assert.notEqual(KEPT_REASONS[reason], KEPT_REASONS.other, reason);
     }
     assert.deepEqual(Object.keys(KEPT_REASONS).sort(), [...CONTRACT_REASONS].sort(), 'the words name exactly the contract\'s reasons');
+});
+
+// The exact codes beside a group: a Free item's `cause` (and a kept row's `causes`), which the server's listers and
+// retirers send (`storage_free._KEPT_REASONS`, the seat and checkout listers), and the hold classes the five server
+// retirers report on a place's remover line.
+const CONTRACT_CAUSES = ['child_result_unadopted', 'child_refs_pending', 'call_inventory_pending', 'call_inventory_changed',
+    'inputs_uncustodied', 'unread_mailbox_uncustodied', 'verification_receipts_uncustodied', 'raw_evidence_uncustodied',
+    'artifact_source_missing', 'canonical_changed', 'drive_occupant_changed', 'canonical_not_settled', 'post_work_open',
+    'artifacts_not_terminal', 'child_drive_mismatch', 'task_live', 'liveness_unknown', 'owner_processes_live', 'owner_not_terminal',
+    'task_not_terminal', 'parent_not_terminal', 'not_proven_over', 'custody_held', 'owner_paused', 'review_custody_active',
+    'seat_checking', 'operation_live', 'review_environment_held', 'custody_busy', 'mailbox_busy', 'store_busy', 'record_busy',
+    'task_result_unreadable', 'unread_mailbox_unreadable', 'record_unreadable', 'review_state_unreadable', 'marker_unreadable',
+    'capture_unproven', 'capture_incomplete', 'retained_process_environment', 'undeclared_environment', 'producer_retained',
+    'changed', 'nothing_unsaved', 'nested_repository', 'commits_unprotected', 'unproven_excluded_inputs', 'owner_keep',
+    'generation_closed', 'in_use', 'run_open', 'seat_open', 'seat_busy', 'custody_unreadable', 'capture_failed', 'removal_failed',
+    'younger_than_retention'];
+
+test('every exact cause reads its own words from the one map, the same in the Free tray and on the Storage line', () => {
+    const escape = (said) => said.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    for (const cause of CONTRACT_CAUSES) {
+        const said = CAUSES[cause] || KEPT_REASONS[cause];
+        assert.ok(said && said !== KEPT_REASONS.other, cause);
+        const tray = resultSentences(free('done', { run: run({ kept: [{ reason: 'other', count: 1, causes: [{ cause, count: 1 }] }] }) })).rest.join(' ');
+        assert.match(tray, new RegExp(`1 was kept: 1 ${escape(said)}\\.`), cause);
+        assert.equal(holdsPhrase({ holds: [{ class: cause, count: 1 }] }, NOW), `holding 1: 1 ${said}`, cause);
+    }
+    // A code without words stays visible by its name on both surfaces, never as "another reason" alone.
+    const tray = resultSentences(free('done', { run: run({ kept: [{ reason: 'in_use', count: 1, causes: [{ cause: 'some_new_hold', count: 1 }] }] }) })).rest.join(' ');
+    assert.match(tray, /1 was kept: 1 still in use \(some_new_hold\)\./);
+    assert.equal(holdsPhrase({ holds: [{ class: 'some_new_hold', count: 1 }] }, NOW), 'holding 1: 1 some new hold');
 });
 
 test('saved-group items the pool leaves out are counted by the saved groups, not under what cannot go', () => {

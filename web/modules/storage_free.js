@@ -67,74 +67,19 @@ export const FREE_GROUPS = {
     },
 };
 
-/** The server's compatible owner-facing reason groups, plus the exact retirer codes used in `cause`.  The client
- * keeps the group sentence stable and adds the cause's detail when the server supplies one. */
-const RESULTS_PENDING = 'their results are not copied yet';
-const BUSY_NOW = 'busy right now';
-const RECORD_UNREADABLE = 'their task record could not be read';
-const RECORD_MOVED = 'their record changed under the check';
+/** The server's typed kept reasons in the owner's words. */
 export const KEPT_REASONS = {
-    // The API stores the compatible owner-facing group in `reason`; `cause` below
-    // carries the retirer's exact code when the item has one.
-    results_pending: RESULTS_PENDING,
-    busy: BUSY_NOW,
-    unreadable_record: RECORD_UNREADABLE,
+    results_pending: 'their results are not copied yet',
+    in_use: 'still in use',
+    busy: 'busy right now',
+    unreadable_record: 'their task record could not be read',
     restart: 'stopped by a restart',
-    // the task that owns it
-    task_live: 'their task is running',
-    liveness_unknown: 'whether their task still runs could not be read',
-    task_not_terminal: 'their task has not finished',
-    parent_not_terminal: 'their parent task has not finished',
-    owner_not_terminal: 'their owner task has not finished',
-    not_proven_over: 'their task is not proven over (running, paused or with a live process)',
-    owner_processes_live: 'a process of their task is still running',
-    owner_paused: 'their task is paused',
-    custody_held: 'a coding run still holds them',
-    run_open: 'their run has not finished',
-    copy_registered: 'their copy is still registered',
-    copy_present: 'their copy still exists',
-    in_use: 'still in use',  // the review seat and checkout listers' word (review_checking_prune)
-    // results and messages not yet in the task record
-    child_result_unadopted: RESULTS_PENDING,
-    child_refs_pending: RESULTS_PENDING,
-    call_inventory_pending: RESULTS_PENDING,
-    call_inventory_changed: RESULTS_PENDING,
-    inputs_uncustodied: RESULTS_PENDING,
-    unread_mailbox_uncustodied: 'their unread messages are not carried yet',
-    verification_receipts_uncustodied: RESULTS_PENDING,
-    raw_evidence_uncustodied: RESULTS_PENDING,
-    canonical_not_settled: 'their task record is not settled yet',
-    post_work_open: 'work after their task is still open',
-    artifacts_not_terminal: 'their files are still being saved',
-    child_drive_mismatch: 'their task record names another folder',
-    artifact_source_missing: 'a captured file is missing from the folder',
-    artifact_source_mismatch: 'a captured file differs from its record',
-    canonical_changed: RECORD_MOVED,
-    drive_occupant_changed: 'the folder gained an occupant under the check',
-    not_own_drive: 'the folder is not their task’s own',
-    admission_rollback_evidence: 'the folder holds evidence of a start',
-    // busy right now
-    store_busy: 'their record store was busy',
-    custody_busy: BUSY_NOW,
-    mailbox_busy: BUSY_NOW,
-    record_busy: BUSY_NOW,
-    // unreadable
-    task_result_unreadable: RECORD_UNREADABLE,
-    unread_mailbox_unreadable: 'their mailbox could not be read',
-    record_unreadable: RECORD_UNREADABLE,
-    // saved work and its proofs
     capture_unproven: 'unique work not verified saved',
-    capture_incomplete: 'unique work not verified saved',
     unproven_excluded_inputs: 'files only a patch rule calls disposable',
     retained_evidence: 'marked as evidence, or could not be read through',
-    retained_process_environment: 'marked as evidence, or could not be read through',
-    undeclared_environment: 'no recorded owner', producer_retained: 'the producer marked this scratch to keep',
+    undeclared_environment: 'no recorded owner',
     owner_keep: 'you asked to keep it',
     changed: 'changed after the check',
-    nothing_unsaved: 'changed after the check',
-    nested_repository: 'a repository inside them cannot be saved as a patch',
-    commits_unprotected: 'their commits are not held by a branch',
-    generation_closed: 'stopped by a restart',
     advanced_group: 'saved work: only its saved group can remove it',
     other: 'for another reason',
 };
@@ -176,7 +121,10 @@ const NOT_STARTED = {
 /** The refusals that mean this plan's list can no longer be sent: the review offers Check again, not Remove. */
 export const OUTDATES_PLAN = new Set(['preview_outdated', 'unknown_group', 'unknown_item', 'not_offered']);
 
-const CAUSES = {
+/** The one map from a retirer's exact code (a Free item's `cause`, a pass's hold `class` on the Storage page) to the
+ *  owner's words: one code reads the same in the Free tray and on a place's remover line. A code that is itself a
+ *  reason group reads that group's words (`KEPT_REASONS`). */
+export const CAUSES = {
     task_live: 'the task has a live owner', liveness_unknown: 'whether the task is still in use could not be established',
     owner_paused: 'the task is paused', owner_processes_live: 'a process of this task is still running',
     child_result_unadopted: 'the child result is not adopted yet', child_refs_pending: 'some result files are not copied yet',
@@ -193,8 +141,35 @@ const CAUSES = {
     raw_evidence_uncustodied: 'raw evidence is not saved yet', artifact_source_missing: 'the source of a saved artifact could not be found',
     undeclared_environment: 'the environment has no recorded owner',
     task_result_unreadable: 'the task record could not be read', unread_mailbox_unreadable: 'the mailbox could not be read',
+    parent_not_terminal: 'the parent task is not finished', owner_not_terminal: 'the owner task is not finished',
+    not_proven_over: 'the task is not proven over (running, paused or with a live process)',
+    run_open: 'a run of the task has not finished', seat_open: 'a reviewer seat still holds it', seat_busy: 'the reviewer seat is busy',
+    copy_registered: 'the copy is still registered', copy_present: 'the copy still exists',
+    artifacts_not_terminal: 'the task’s files are still being saved', child_drive_mismatch: 'the task record names another folder',
+    artifact_source_mismatch: 'a saved artifact differs from its source', not_own_drive: 'the folder is not its task’s own',
+    admission_rollback_evidence: 'the folder holds evidence of a start', record_busy: 'the record is busy',
+    record_unreadable: 'the record could not be read', custody_unreadable: 'the run custody could not be read',
+    capture_incomplete: 'the capture of its work is incomplete', capture_failed: 'its capture failed',
+    retained_process_environment: 'a process marked this environment to keep', producer_retained: 'its producer marked it to keep',
+    nothing_unsaved: 'nothing in it is unsaved any more', nested_repository: 'a repository inside it cannot be saved as a patch',
+    commits_unprotected: 'its commits are not held by a branch', generation_closed: 'stopped by a restart',
+    removal_failed: 'its removal failed', younger_than_retention: 'it is still inside the retention days',
 };
-const reasonWords = (reason, cause = '') => cause ? fmt(CAUSES[cause] || KEPT_REASONS[cause] || '{reason} ({cause})', { reason: fmt(KEPT_REASONS[reason] || KEPT_REASONS.other), cause }) : fmt(KEPT_REASONS[reason] || KEPT_REASONS.other);
+/** A code's words from the one map, `''` when it has none. */
+const causeWords = (code) => CAUSES[code] || KEPT_REASONS[code] || '';
+const reasonWords = (reason, cause = '') => cause ? fmt(causeWords(cause) || '{reason} ({cause})', { reason: fmt(KEPT_REASONS[reason] || KEPT_REASONS.other), cause }) : fmt(KEPT_REASONS[reason] || KEPT_REASONS.other);
+
+/** A retirer pass's holds in one phrase, in the one map's words: "holding 3 since …: 2 the task has a live owner,
+ *  1 you asked to keep it"; a class without words is shown by its name. */
+export function holdsPhrase(fact, now) {
+    const holds = Array.isArray(fact.holds) ? fact.holds.filter((hold) => hold && hold.count > 0) : [];
+    const held = holds.length ? holds.reduce((sum, hold) => sum + hold.count, 0) : (fact.held > 0 ? fact.held : 0);
+    if (!(held > 0)) return '';
+    const head = fact.held_since ? fmt('holding {n} since {when}', { n: number(held), when: whenLabel(fact.held_since, now) })
+        : fmt('holding {n}', { n: number(held) });
+    const words = (hold) => (causeWords(hold.class) ? fmt(causeWords(hold.class)) : String(hold.class || '').replace(/_/g, ' '));
+    return holds.length ? `${head}: ${holds.map((hold) => `${number(hold.count)} ${words(hold)}`).join(', ')}` : head;
+}
 
 /** What happened to the owner's own attempt, kept beside the server's current facts: `notice` outlives a plan the
  *  server replaced, `outdated` and `postUnknown` belong to the plan still shown. A lost answer is never read as nothing
