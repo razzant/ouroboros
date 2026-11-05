@@ -67,6 +67,7 @@ def _loop_ctx(root, task_id="pause-task", *, direct=False, attempt=1):
                                                               "reason_code": "budget_exhausted"},
         messages=messages, llm_trace={"tool_calls": [1]}, owner_msg_seen={"m1"}, round_idx=4,
         tool_schemas=[{"type": "function", "function": {"name": "x"}}],
+        active_model=ctx.active_model, active_use_local=ctx.active_use_local,  # as _RoundLimitContext carries them
     )
     return ctx, limit_ctx
 

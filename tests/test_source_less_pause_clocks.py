@@ -79,7 +79,7 @@ def _after_second_pause_crash(tmp_path, monkeypatch, *, seed_origin=True, legacy
     wc.save_round(limit, "post_batch")
     path = wc.checkpoint_path(tmp_path, task["id"], 1)
     if legacy:
-        saved = json.loads(path.read_bytes())
+        saved = wc.read_working(tmp_path, task["id"], 1)[1]  # an older body's whole file, without the field
         if legacy == "missing_clock":
             saved.pop("model_wait")
         elif legacy == "missing_origin":

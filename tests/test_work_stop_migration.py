@@ -117,6 +117,7 @@ def test_ghost_shapes_are_addressable_but_never_selected_or_terminally_revived()
 def test_format_stamp_survives_absent_stops_and_empty_snapshot(tmp_path, monkeypatch):
     queue, _, workers = _install_queue(tmp_path, monkeypatch)
     path = tmp_path / "state" / "queue_snapshot.json"
+    path.parent.mkdir(parents=True, exist_ok=True)  # no install-time writer creates state/ any more
     path.write_text(json.dumps(_snapshot()))
     assert queue.restore_pending_from_snapshot() == 0
     assert json.loads(path.read_text())[FORMAT_KEY] == FORMAT_VERSION
