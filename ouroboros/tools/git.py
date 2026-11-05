@@ -667,7 +667,8 @@ def _run_pre_push_tests(ctx: ToolContext, force: bool = False) -> Optional[str]:
     try:
         from ouroboros.preflight_runner import run_hermetic_pytest
 
-        # Timeout owned by run_hermetic_pytest (default + OUROBOROS_PREFLIGHT_TIMEOUT_SEC).
+        # Budget owned by run_hermetic_pytest: none for the full suite (owner 5A); a bounded
+        # run (selected, explicit argv) takes OUROBOROS_PREFLIGHT_TIMEOUT_SEC, else the default.
         return run_hermetic_pytest(
             pathlib.Path(ctx.repo_dir),
             max_output=MAX_TEST_OUTPUT,

@@ -608,15 +608,16 @@ class TestPrePushGate:
         assert callable(_git_commit_with_tests)
 
     def test_pre_push_tests_timeout_is_sufficient(self):
-        """The pre-push/post-commit pytest budget must be >= 180s.
+        """A bounded run's default budget must be >= 180s.
 
-        Since v6.88.0 this is the TOTAL budget across the node test lane AND
-        both preflight passes (parallel ``not serial``, then ``serial``, which
-        gets the remainder) — not a per-pass one. A full suite takes MINUTES,
-        and one loaded-host run measured 1077s, so a cap sized for an idle host
-        reports a healthy suite as a timeout. The budget is owned by ``run_hermetic_pytest``
-        (default + ``OUROBOROS_PREFLIGHT_TIMEOUT_SEC`` env) so callers do not
-        re-pin a stale literal — this guard anchors on that single source of truth.
+        Since v6.88.0 this is the TOTAL budget across the node test lane AND both
+        preflight passes (the xdist ``not exclusive`` pass, then ``serial("exclusive")``,
+        which gets the remainder) — not a per-pass one. It bounds a selected run or an
+        explicit pytest argv; the full suite has no total budget (owner 5A, 2026-11-05:
+        each test's own 300 s bound, containment and Stop end it). The budget is owned by
+        ``run_hermetic_pytest`` (default + ``OUROBOROS_PREFLIGHT_TIMEOUT_SEC`` for a
+        bounded run) so callers do not re-pin a stale literal — this guard anchors on
+        that single source of truth.
         """
         from ouroboros.preflight_runner import (
             _DEFAULT_PREFLIGHT_TIMEOUT_SEC,
@@ -628,7 +629,7 @@ class TestPrePushGate:
             "FLOOR against a caller re-pinning a tiny literal, never a claim about how "
             "long the suite takes; the real budget must cover a whole loaded-host run."
         )
-        # The env override is honoured so operators can raise it on slow hosts.
+        # The env override is honoured for a bounded run so operators can raise it on slow hosts.
         import os as _os
         prev = _os.environ.get("OUROBOROS_PREFLIGHT_TIMEOUT_SEC")
         try:

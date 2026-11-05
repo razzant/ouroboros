@@ -6,9 +6,10 @@ Restart repeated the whole battery for an unchanged subject. Owner decision 3A
 when everything matches, shown to reviewers, unsigned. This module keeps ONE
 small JSON per exact identity under the caller's canonical data root. Only
 ``preflight_runner.run_hermetic_pytest`` writes it, after a complete run (the
-node lane when the candidate carries web tests, the parallel ``not serial`` pass
-green on two observed xdist workers or the one admitted, the serial pass without
-xdist flags, a proven containment reap). That runner reads it at its existing reuse
+node lane when the candidate carries web tests, the xdist ``not exclusive`` pass
+(a ``serial("<resource>")`` group stays in it) green on two observed xdist workers
+or the one admitted, the ``serial("exclusive")`` pass without xdist flags, a proven
+containment reap). That runner reads it at its existing reuse
 seam after the baseline and assembly checks; adoption reads it for exactly its
 commit (``preflight_qualification.receipt_for_commit``).
 
