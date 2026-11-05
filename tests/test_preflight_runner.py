@@ -926,12 +926,10 @@ def stub_passes(monkeypatch):
     test would fail on `PREFLIGHT_PLUGIN_MISSING` instead of on its own subject),
     and `_observed_worker_ids` reads the worker files a real xdist run writes (a
     recorded pass writes none, so every green two-pass case would fail on
-    `PREFLIGHT_PARALLELISM_LOST`). Both behaviours have their own dedicated
-    tests, which install their own expectations:
-    `test_plugins_are_verified_before_the_candidate_tree_exists`,
-    `test_the_legacy_single_pass_does_not_require_the_parallel_plugins`,
-    `test_a_nominally_parallel_pass_on_one_worker_is_a_hard_block` and the
-    real-spawn `test_the_parallel_pass_really_starts_more_than_one_worker`.
+    `PREFLIGHT_PARALLELISM_LOST`). Both behaviours keep their own witnesses:
+    `test_classify_plugin_missing` names the missing plugin, tests/test_preflight_receipts.py
+    blocks a lost worker (`workers_lost`), and the real-spawn
+    `test_a_candidate_cannot_switch_the_parallel_plugins_off` proves the lane fans out.
     """
     from ouroboros import preflight_runner
 
@@ -1193,6 +1191,58 @@ def test_deleting_the_whole_test_suite_is_a_hard_block(tmp_path, two_pass_env, s
     assert [event[0] for event in events].count("pass") == 0
 
 
+@pytest.mark.parametrize("entry_point", ["commit", "review"])
+def test_the_production_entry_points_do_not_short_circuit_a_deleted_suite(
+    tmp_path, two_pass_env, stub_passes, monkeypatch, entry_point
+):
+    """The block above is only reachable if something CALLS the runner. Both
+    production entry points used to check `(repo_dir / "tests").exists()` first
+    and return None when it did not — so the candidate that deletes every test
+    file was waved through by the callers, and the hard block inside
+    `run_hermetic_pytest` was dead code no shipped path could reach.
+
+    Each entry point is driven in the repository state that call site really
+    sees, which is NOT the same state:
+
+    * review (`_run_review_preflight_tests`) runs PRE-commit, so the deletion is
+      merely staged and `HEAD` still carries the suite;
+    * commit (`_run_pre_push_tests`) runs POST-commit — `_post_commit_result`
+      is only reached once `commit_sha` exists, which is why its failure text
+      says the commit "was already created and preserved". By then the deletion
+      is in `HEAD` itself, and a HEAD-only baseline answers "this repository has
+      no test suite" and returns green for the change that deleted the gate.
+      Staging without committing here would have kept this pin passing against
+      a state production never reaches.
+
+    Driven through the entry points themselves for that reason: pinning the
+    runner alone is what let this regress."""
+    if entry_point == "commit":
+        from ouroboros.tools.git import _run_pre_push_tests as under_test
+    else:
+        from ouroboros.tools.review_helpers import _run_review_preflight_tests as under_test
+
+    monkeypatch.setenv("OUROBOROS_PRE_PUSH_TESTS", "1")
+    events = stub_passes([])
+    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
+    _git(repo, "rm", "-r", "--quiet", "tests")
+    if entry_point == "commit":
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
+             "commit", "-m", "delete the suite"],
+            cwd=str(repo), check=True, capture_output=True, text=True,
+        )
+    assert not (repo / "tests").exists(), "fixture precondition: tests/ is gone"
+
+    class _Ctx:
+        repo_dir = str(repo)
+
+    result = under_test(_Ctx())
+
+    assert result is not None, f"the {entry_point} entry point skipped the gate for a deleted suite"
+    assert "removes the entire tests/ tree" in result, result
+    assert [event[0] for event in events].count("pass") == 0
+
+
 # ── Candidate assembly (universal one-diff capture) ───────────────────
 #
 # The candidate is assembled the same way for EVERY source-index state: one
@@ -1241,6 +1291,101 @@ def _start_conflicted_merge(
         capture_output=True, text=True, check=True,
     )
     assert unmerged.stdout.strip(), "fixture precondition: no unmerged index entries"
+
+
+
+def _capture_world(folder: pathlib.Path) -> None:
+    """The capture world: one commit carrying every file a scenario below changes, and a branch that conflicts."""
+    _git(folder, "init")
+    _git(folder, "checkout", "-b", "ouroboros")
+    _git(folder, "config", "core.autocrlf", "false")  # an operator autocrlf would rewrite the very bytes under test
+    (folder / "pytest.ini").write_text(_FIXTURE_PYTEST_INI, encoding="utf-8")
+    (folder / "tests").mkdir()
+    (folder / "tests" / "test_plain.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    for rel, data in {"crlf.txt": b"one\n", "latin.txt": b"plain\n", "tool.sh": b"#!/bin/sh\necho hi\n",
+                      "blob.bin": b"\x00\x01\x02", "victim.txt": b"victim base\n", "zero.txt": b"a\nb\nc\nd\n",
+                      "conflict.txt": b"base\n"}.items():
+        (folder / rel).write_bytes(data)
+    _commit_all(folder)
+    _git(folder, "checkout", "-b", "incoming")
+    (folder / "conflict.txt").write_bytes(b"incoming\n")
+    _commit_all(folder)
+    _git(folder, "checkout", "ouroboros")
+    (folder / "conflict.txt").write_bytes(b"ours\n")
+    _commit_all(folder)
+
+
+def test_the_candidate_is_the_live_worktree_byte_for_byte(subtests, tmp_path, two_pass_env, stub_passes, monkeypatch):
+    """The one-diff capture (`_assemble_live_source`: `git diff --binary … HEAD`, `_apply_diff`, `_copy_untracked`)
+    hands the passes exactly the live worktree, whatever shape each change has. One real repository in the middle
+    of a conflicted merge carries every shape at once: an unmerged path resolved in the worktree without `git add`
+    (git renders it as a `--cc` hunk the old staged/unstaged pair could not replay), CRLF line endings (a text-mode
+    hop translates them; on Windows `core.autocrlf=true` is the default), a staged binary change (only `--binary`
+    can carry it), a chmod-only change, NUL-free non-UTF-8 content (it travels on plain diff lines, where a decode
+    with errors="replace" once substituted it silently), an untracked file with a non-UTF-8 name, a staged delete
+    with the same name recreated untracked, and a `diff.context=0` config whose zero-context hunks `git apply`
+    rejects without `--unidiff-zero`. Each shape is a subtest on the bytes the pass sees."""
+    from ouroboros import preflight_runner
+    from ouroboros.preflight_runner import run_hermetic_pytest
+    from tests._worlds import clone_repository, world
+
+    repo = clone_repository(world("preflight-capture", _capture_world), tmp_path / "repo")
+    merge = subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "merge", "incoming"],
+                           cwd=str(repo), capture_output=True, text=True)
+    assert merge.returncode != 0, f"fixture precondition: the merge must conflict:\n{merge.stdout}{merge.stderr}"
+    assert subprocess.run(["git", "ls-files", "-u"], cwd=str(repo), capture_output=True, text=True,
+                          check=True).stdout.strip(), "fixture precondition: no unmerged index entries"
+    expected = {
+        "conflict.txt": b"resolved\n",
+        "crlf.txt": b"one\r\ntwo\r\n",
+        "latin.txt": b"plain\ncaf\xe9 au lait\n",
+        "zero.txt": b"a\nb\nEDITED\nd\n",
+        "blob.bin": b"\x00\xff\xfe\x00",
+        "victim.txt": b"reborn\n",
+    }
+    for rel in ("conflict.txt", "crlf.txt", "latin.txt", "zero.txt", "blob.bin"):
+        (repo / rel).write_bytes(expected[rel])
+    _git(repo, "add", "blob.bin")
+    _git(repo, "rm", "-q", "victim.txt")
+    (repo / "victim.txt").write_bytes(expected["victim.txt"])  # untracked now
+    _git(repo, "config", "diff.context", "0")
+    filemode = subprocess.run(["git", "config", "--get", "core.filemode"], cwd=str(repo), capture_output=True,
+                              text=True).stdout.strip().lower() == "true"
+    if filemode:
+        os.chmod(repo / "tool.sh", 0o755)
+    raw_name = None
+    if os.name == "posix":
+        try:
+            with open(os.path.join(os.fsencode(str(repo)), b"fixture_\xff.dat"), "wb") as handle:
+                handle.write(b"untracked payload\n")
+            raw_name = os.fsdecode(b"fixture_\xff.dat")
+            expected[raw_name] = b"untracked payload\n"
+        except (OSError, UnicodeError):  # APFS and friends enforce UTF-8 names
+            raw_name = None
+
+    stub_passes([])  # neutralises the plugin and worker seams; the spy below replaces the recorder
+    seen: dict = {}
+
+    def _spy(agent_python, worktree, temp_root, args, timeout):
+        candidate = pathlib.Path(worktree)
+        for rel in expected:
+            seen[rel] = (candidate / rel).read_bytes() if (candidate / rel).is_file() else None
+        seen["tool.sh mode"] = (candidate / "tool.sh").stat().st_mode & 0o111
+        return (0, "", "")
+
+    monkeypatch.setattr(preflight_runner, "_execute_pytest_pass", _spy)
+    assert run_hermetic_pytest(repo, timeout=120) is None
+    for rel, data in expected.items():
+        with subtests.test(path=rel):
+            assert seen[rel] == data, f"the candidate's {rel} is not the live worktree's"
+    with subtests.test(path="tool.sh mode"):
+        if not filemode:
+            pytest.skip("this filesystem does not track the executable bit")
+        assert seen["tool.sh mode"], "the executable bit never reached the candidate"
+    with subtests.test(path="non-UTF-8 name"):
+        if raw_name is None:
+            pytest.skip("byte filenames are a POSIX property this filesystem does not have")
+        assert seen[raw_name] == b"untracked payload\n"
 
 
 def test_a_failed_capture_is_a_named_hard_block_not_a_test_failure(
@@ -2184,6 +2329,104 @@ def test_pass2_timeout_names_serial_pass(tmp_path, two_pass_env):
     assert "timed out" in result, result
     assert "serial pass" in result, result
     assert "total budget 30 seconds" in result, result
+
+
+@requires_preflight_plugins
+def test_a_candidate_cannot_switch_the_parallel_plugins_off(tmp_path, two_pass_env):
+    """Verifying the interpreter proves the plugins are INSTALLED. It says nothing
+    about whether the candidate's own pytest configuration lets them LOAD, and ini
+    `addopts` are PREPENDED to the gate's argv, so `-p no:xdist -p no:timeout` in
+    the candidate's `pytest.ini` disarms both before the gate's flags are read.
+
+    That is why the parallel pass appends `-p xdist -p timeout`: `consider_preparse`
+    walks `-p` entries in order, so the later unblock wins over the earlier block.
+    Pinned behaviourally — the candidate says no, and the lane still fans out over
+    at least two real workers."""
+    from ouroboros.preflight_runner import run_hermetic_pytest
+
+    workers_dir = tmp_path / "hostile_workers"
+    workers_dir.mkdir()
+    files = {
+        "pytest.ini": (
+            "[pytest]\n"
+            "addopts = -p no:xdist -p no:timeout\n"
+            "markers =\n"
+            "    serial: real-process/port/global-state test; runs in the serial pass\n"
+        ),
+    }
+    # `--dist loadscope` distributes by MODULE, so four files are four work units
+    # and xdist's initial round-robin reaches both nodes.
+    for index in range(4):
+        files[f"tests/test_scope_{index}.py"] = f"""
+            import os
+            import pathlib
+
+
+            def test_records_its_worker():
+                worker = os.environ["PYTEST_XDIST_WORKER"]
+                pathlib.Path(r'{workers_dir}', worker).write_text(worker)
+        """
+    repo = _make_repo(tmp_path, files)
+
+    assert run_hermetic_pytest(repo, timeout=180) is None
+
+    observed = sorted(path.name for path in workers_dir.iterdir())
+    assert len(observed) >= 2, (
+        f"the candidate switched xdist off and the gate accepted it: {observed}"
+    )
+
+
+@requires_preflight_plugins
+def test_a_candidate_faking_the_parallel_flags_cannot_earn_a_green_pass(tmp_path, two_pass_env):
+    """The full attack, end to end. `pytest.ini` blocks both plugins AND a conftest
+    declares the gate's own flags with `pytest_addoption` and ignores them, so
+    nothing rejects `-n`: the lane is labelled parallel, runs strictly serially and
+    exits 0. Green, on a pass that never ran two things at once.
+
+    The invariant is that this shape cannot be BOTH green and serial. Forcing the
+    plugins on makes the conftest's duplicate option definitions collide with the
+    real ones, which is a usage error and a block; without the collision the lane
+    genuinely fans out. Either outcome is fail-closed — a silent pass is not."""
+    from ouroboros.preflight_runner import run_hermetic_pytest
+
+    workers_dir = tmp_path / "faked_workers"
+    workers_dir.mkdir()
+    files = {
+        "pytest.ini": (
+            "[pytest]\n"
+            "addopts = -p no:xdist -p no:timeout\n"
+            "markers =\n"
+            "    serial: real-process/port/global-state test; runs in the serial pass\n"
+        ),
+        "conftest.py": """
+            def pytest_addoption(parser):
+                # Swallow the gate's parallel flags so a plugin-less pytest accepts
+                # them: "pytest did not reject -n" is not evidence of parallelism.
+                parser.addoption("-n", "--numprocesses", action="store", default=None)
+                parser.addoption("--dist", action="store", default=None)
+                parser.addoption("--timeout", action="store", default=None)
+                parser.addoption("--timeout-method", action="store", default=None)
+                parser.addoption("--max-worker-restart", action="store", default=None)
+        """,
+    }
+    for index in range(4):
+        files[f"tests/test_scope_{index}.py"] = f"""
+            import os
+            import pathlib
+
+
+            def test_records_its_worker():
+                worker = os.environ.get("PYTEST_XDIST_WORKER", "none")
+                pathlib.Path(r'{workers_dir}', worker).write_text(worker)
+        """
+    repo = _make_repo(tmp_path, files)
+
+    result = run_hermetic_pytest(repo, timeout=180)
+
+    observed = sorted(path.name for path in workers_dir.iterdir())
+    assert result is not None or len(observed) >= 2, (
+        f"a lane that never ran in parallel returned green; workers observed: {observed}"
+    )
 
 
 # ── Reaper / interpreter source pins ──────────────────────────────────
