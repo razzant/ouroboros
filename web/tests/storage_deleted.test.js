@@ -29,7 +29,7 @@ test('a count saved before the list says it was not counted, never none', () => 
     for (const legacy of [undefined, null, 'odd']) {
         const said = words(html(legacy));
         assert.match(said, /Folders of deleted projects Not counted yet/);
-        assert.match(said, /Measure again to list them\./);
+        assert.match(said, /Refresh sizes to list them\./);
         assert.doesNotMatch(said, /None/);
     }
 });
@@ -69,9 +69,9 @@ test('it is no sixth group: no key dot, no group id, no share, no action that de
     const withList = { places: [place], deleted_projects: counted([folder('/x/export', 'Example: export', 12 * GB)]) };
     assert.deepEqual(barSegments(withList), barSegments({ places: [place] }));
     const view = renderStorage({ count: { ...withList, finished_at: '2026-11-01T16:12:00Z', bytes: 10, unreadable: 0 }, counting: null, error: null, volume: {}, retention_days: 7 }, { now: NOW });
-    assert.equal((view.places.match(/data-storage-group=/g) || []).length, 1);
+    assert.equal((view.bar.match(/storage-bar-seg/g) || []).length, 1);
     assert.match(view.places, /data-storage-deleted/);
-    assert.match(words(view.summary), /Ouroboros uses 10 bytes/);
+    assert.match(words(view.summary), /Space used by Ouroboros 10 bytes/);
 });
 
 test('a folder inside another listed folder is said and never added twice', () => {

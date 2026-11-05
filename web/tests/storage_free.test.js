@@ -45,28 +45,28 @@ const read = (items = rows(), { chosen = items.map((item) => item.id), ...rest }
 const AVOIDED = /At least|Excluded|System data|Junk|Clean\b|Prune|%|[Pp]ackage/;
 
 test('at rest the flow is empty and the door stands alone; every phase up to Done holds the door back', () => {
-    assert.equal(trayHtml(free('idle', { plan: null, pool: null }), read()), '');
+    assert.match(trayHtml(free('idle', { plan: null, pool: null }), read()), /Can be removed[\s\S]*Not checked yet/);
     assert.equal(trayState(free('idle')), 'rest');
     assert.deepEqual(['rest', 'empty', 'listing', 'ready', 'running', 'done', 'failed'].filter(doorOffered), ['rest', 'empty']);
     const listing = trayHtml(free('listing', { done: 1240, total: 1661, pool: pool({ bytes: 5.1 * GB, bytes_complete: false }) }), read());
-    assert.match(listing, /Checking what can go · 1,240 of 1,661 folders · 5\.1 GB so far\. Nothing is removed\./);
+    assert.match(listing, /Checking for files to remove · 1,240 of 1,661 folders · 5\.1 GB so far\. Nothing is removed\./);
     assert.match(listing, /data-free-stop[^>]*>Stop</);
     assert.doesNotMatch(listing, /type="checkbox"|data-free-go/, 'no list of technical groups while it lists');
     assert.match(trayHtml(free('listing', { done: 1, total: 2, pool: null, groups: [group('work_folders', { bytes: 3 * GB })] }), read()), /3\.0 GB so far/);
     const noSizeYet = trayHtml(free('listing', { done: 1, total: 2, pool: pool({ bytes: null, bytes_complete: false }) }), read());
-    assert.match(noSizeYet, /Checking what can go · 1 of 2 folders\. Nothing is removed\./);
+    assert.match(noSizeYet, /Checking for files to remove · 1 of 2 folders\. Nothing is removed\./);
     assert.doesNotMatch(noSizeYet, /0 bytes|so far/, 'a pool with no size yet is never zero');
 });
 
 test('ready names the exact composition and its observed size, one Remove last, the details folded', () => {
     const ready = trayHtml(free('ready', { groups: [...both(), ...saved()] }), read(), 7, { now: NOW });
-    assert.match(ready, /Ready to remove[\s\S]*3 items · 3\.5 GB counted/);
-    assert.match(ready, /Leftovers of finished work whose results are saved: 1 work folder, 1 working copy, 1 temporary environment\./);
-    assert.match(ready, /Freed space can differ from the sizes\./);
-    assert.match(ready, /Temporary environments go whole, with whatever was installed in them\. Later work gets an empty one or says why it cannot; nothing is reinstalled by itself\. Freed space can differ from the sizes\./);
-    assert.match(ready, /<summary[^>]*>Show all 3 and choose<\/summary>/);
-    assert.match(ready, /<summary[^>]*>Not included, and why<\/summary>/);
-    assert.match(ready, /data-free-cancel[^>]*>Cancel<[\s\S]*btn-primary[^>]*data-free-go[^>]*>Remove 3 items</);
+    assert.match(ready, /Can be removed[\s\S]*3\.5 GB[\s\S]*Selected[\s\S]*3 of 3 items/);
+    assert.match(ready, /Results, messages and model history of these tasks are already saved/);
+    assert.match(ready, /free space can grow by less\./);
+    assert.match(ready, /Each item is removed whole, with whatever was installed in it\./);
+    assert.match(ready, /<summary[^>]*>Review the 3 items<\/summary>/);
+    assert.match(ready, /<summary[^>]*>Kept ·[^<]+<\/summary>/);
+    assert.match(ready, /data-free-cancel[^>]*>Cancel<[\s\S]*btn-primary[^>]*data-free-go[^>]*>Remove 3 selected items</);
     assert.equal((ready.match(/btn-danger/g) || []).length, 0, 'the ordinary action is no danger capsule');
     assert.ok(ready.lastIndexOf('data-free-go') > ready.lastIndexOf('data-free-cancel'));
     assert.doesNotMatch(ready, AVOIDED);
@@ -76,10 +76,10 @@ test('ready names the exact composition and its observed size, one Remove last, 
 
 test('the review never claims or sends a whole list it has not read: reading, failing and an incomplete pool', () => {
     const reading = trayHtml(free('ready'), { pool: { ...EMPTY_LIST(), items: rows().slice(0, 1), total: 3, loading: true, want: Infinity }, chosen: new Set(), checked: new Set() });
-    assert.match(reading, /3 items · 3\.5 GB counted/, 'the pool’s own facts are shown while its ids are read');
+    assert.match(reading, /Can be removed[\s\S]*3\.5 GB[\s\S]*3 items/, 'the pool’s own facts are shown while its ids are read');
     assert.match(reading, /Reading the list · 1 of 3/);
     assert.match(reading, /data-free-go[^>]*aria-disabled="true"[^>]*>Reading the list…</);
-    assert.doesNotMatch(reading, /Remove 3 items|Show all 3/);
+    assert.doesNotMatch(reading, /Remove 3 selected items|Review the 3/);
     const failed = trayHtml(free('ready'), { pool: { ...EMPTY_LIST(), items: rows().slice(0, 1), total: 3, error: 'read', want: Infinity }, chosen: new Set(), checked: new Set() });
     assert.match(failed, /data-tone="warn"[^>]*>The whole list could not be read, so nothing can be removed from here yet\./);
     assert.match(failed, /data-free-retry-pool[^>]*>Try again</);
@@ -100,19 +100,19 @@ test('the review never claims or sends a whole list it has not read: reading, fa
     assert.deepEqual([trayState(free('ready', { pool: null, groups: [group('work_folders', { count: 0 })] })), trayState(free('ready', { pool: null, groups: both() }))], ['empty', 'ready']);
 });
 
-test('Show all carries every row’s real facts, the counts follow the choice, and a long list says what is not shown', () => {
+test('Review the carries every row’s real facts, the counts follow the choice, and a long list says what is not shown', () => {
     const ready = trayHtml(free('ready'), read(rows(), { chosen: ['b'] }), 7, { now: NOW });
     assert.match(ready, /1 of 3 chosen/);
     assert.match(ready, /Choose all 3[\s\S]*Choose none/);
     assert.equal((ready.match(/type="checkbox"/g) || []).length, 3);
     assert.equal((ready.match(/ checked/g) || []).length, 1);
-    assert.match(ready, /1 item · 2\.0 GB counted/);
-    assert.match(ready, /whose results are saved: 1 working copy\./, 'the line follows what is chosen');
-    assert.match(ready, />Remove 1 item</);
+    assert.match(ready, /Selected[\s\S]*2\.0 GB[\s\S]*1 of 3 items/);
+    assert.match(ready, /1 of 3 items/);
+    assert.match(ready, />Remove 1 selected item</);
     assert.match(ready, /Task a[\s\S]*1\.0 GB[\s\S]*Work folder · the app may clear this by itself from 3 Nov at \d\d:\d\d[\s\S]*\/data\/state\/headless_tasks\/a/);
     assert.match(ready, /Task c[\s\S]*Temporary environment · the app does not clear this by itself/);
     const none = trayHtml(free('ready'), read(rows(), { chosen: [] }));
-    assert.match(none, /Nothing is chosen\./);
+    assert.match(none, /Selected[\s\S]*Nothing/);
     assert.match(none, /Nothing selected/);
     assert.doesNotMatch(none, /data-free-go/);
     const many = Array.from({ length: 250 }, (_, index) => entry(`i${index}`));
@@ -124,10 +124,10 @@ test('Show all carries every row’s real facts, the counts follow the choice, a
     const mixed = trayHtml(free('ready', { pool: pool({ count: 250 }) }), read(many, { chosen: many.map((item) => item.id).filter((id) => !['i3', 'i150', 'i200'].includes(id)) }));
     assert.match(mixed, /247 of 250 chosen/);
     assert.match(mixed, /The 150 not shown keep their choice: 148 chosen, and Remove takes those too\./);
-    assert.match(mixed, />Remove 247 items</);
+    assert.match(mixed, />Remove 247 selected items</);
     const onlyShown = trayHtml(free('ready', { pool: pool({ count: 250 }) }), read(many, { chosen: ['i0', 'i99'] }));
     assert.match(onlyShown, /The 150 not shown keep their choice: none chosen\./);
-    assert.match(onlyShown, />Remove 2 items</);
+    assert.match(onlyShown, />Remove 2 selected items</);
     assert.doesNotMatch(long + mixed + onlyShown, /stay as they are/, 'nothing implies that a chosen row off screen is kept');
     assert.match(long, /data-free-more-picks[^>]*>Show 100 more</);
     assert.equal((trayHtml(free('ready', { pool: pool({ count: 250 }) }), read(many, { poolShown: 300 })).match(/type="checkbox"/g) || []).length, 250);
@@ -135,12 +135,12 @@ test('Show all carries every row’s real facts, the counts follow the choice, a
 
 test('an unknown or incomplete size is never zero: the row, the sum, the saved groups and the dialog say so', () => {
     const unknown = trayHtml(free('ready', { pool: pool({ count: 1, bytes: null, bytes_complete: false, kinds: { work_folder: 1 } }) }), read([entry('a', { bytes: null, bytes_complete: false })]));
-    assert.match(unknown, /1 item · size unknown/);
+    assert.match(unknown, /Can be removed[\s\S]*size unknown[\s\S]*1 item/);
     assert.match(unknown, /storage-free-size is-qualified"[^>]*>size unknown</);
-    assert.match(unknown, />Remove 1 item</);
+    assert.match(unknown, />Remove 1 selected item</);
     assert.doesNotMatch(unknown, /0 bytes/);
     const partial = trayHtml(free('ready', { pool: pool({ count: 2, bytes: 1 * GB, bytes_complete: false }) }), read([entry('a'), entry('b', { bytes: null })]));
-    assert.match(partial, /2 items · 1\.0 GB counted, some sizes unknown/);
+    assert.match(partial, /Can be removed[\s\S]*1\.0 GB \(some could not be read\)/);
     const incomplete = trayHtml(free('ready'), read([entry('a', { bytes_complete: false })]));
     assert.match(incomplete, /1\.0 GB \(some could not be read\)/);
 
@@ -208,12 +208,12 @@ test('an empty preview says so and the door stays; a pool of nothing still shows
     const emptyPool = pool({ count: 0, bytes: 0, kinds: {}, excluded: [] });
     const empty = free('ready', { pool: emptyPool, groups: [group('work_folders', { count: 0, inside_wait: 0, in_use: 0, bytes: 0, items: [] })] });
     assert.equal(trayState(empty), 'empty');
-    assert.match(trayHtml(empty, read([])), /Nothing temporary is waiting\.[\s\S]*Most of Ouroboros is kept on purpose\./);
+    assert.match(trayHtml(empty, read([])), /Can be removed[\s\S]*Nothing right now[\s\S]*No files of finished work are waiting\./);
     const staysOnly = free('ready', { pool: pool({ count: 0, bytes: 0, kinds: {}, excluded: [{ reason: 'in_use', count: 2 }] }) });
     assert.equal(trayState(staysOnly), 'ready');
     const html = trayHtml(staysOnly, read([]));
-    assert.match(html, /Nothing ready to remove[\s\S]*Not included, and why[\s\S]*data-free-cancel[^>]*>Close</);
-    assert.doesNotMatch(html, /data-free-go|Show all/);
+    assert.match(html, /Nothing right now[\s\S]*Check again[\s\S]*Kept ·/);
+    assert.doesNotMatch(html, /data-free-go|data-free-disclosure="included"/);
 });
 
 test('running, done, stopped and failed read in the owner\'s words; the result leads with what went wrong and has one way out', () => {
@@ -291,17 +291,17 @@ test('what the pool leaves out is named by reason, item by item, and the saved g
         entry('y', { reason: 'in_use', bytes: null }), entry('z.json', { reason: 'unreadable_record', bytes: null, kind: 'other' }),
     ] };
     const html = trayHtml(free('ready', { groups: [...both(), ...saved()] }), { ...read(), excluded });
-    assert.match(html, /Can’t go right now[\s\S]*2: unique work not verified saved · 1: still in use/);
+    assert.match(html, /Kept ·[\s\S]*2 unique work not verified saved · 1 still in use/);
     const reasons = trayHtml(free('ready', { pool: pool({ excluded: [{ reason: 'unproven_excluded_inputs', count: 1 }, { reason: 'never_seen_before', count: 2 }] }) }), read());
-    assert.match(reasons, /1: files only a patch rule calls disposable · 2: for another reason/, 'a reason this client lacks words for is still counted');
+    assert.match(reasons, /1 files only a patch rule calls disposable · 2 for another reason/, 'a reason this client lacks words for is still counted');
     assert.match(html, /data-free-excluded="capture_unproven"[\s\S]*Working copy · unique work not verified saved/);
     assert.match(html, /data-free-excluded="unreadable_record"[\s\S]*Other item · their task record could not be read[\s\S]*\/data\/state\/headless_tasks\/z\.json/);
     assert.doesNotMatch(html.split('data-free-excluded')[1], /size unknown/, 'an item the pool leaves out is not sized, which says nothing');
-    assert.match(html, /Saved, unknown or undecided: this button never removes them/);
-    assert.match(html, /data-kept-group="review_evidence"[\s\S]*40 reviewer folders\. Test records, logs and screenshots behind review verdicts\. Saved work\./);
+    assert.match(html, /Saved work in/);
+    assert.match(html, /Only if you choose; a whole group is deleted permanently\./);
     assert.doesNotMatch(html, /data-free-group|data-kept-group="work_folders"|data-kept-group="working_copies"/, 'no checkbox and no ordinary group here');
-    assert.match(html, /data-free-saved[^>]*>Choose saved groups to remove…</);
-    assert.match(html, /Projects you keep working in, results, history, memory, skills, services and the app itself are never part of this\./);
+    assert.match(html, /data-free-saved[^>]*>Choose groups…</);
+    assert.match(html, /Saved work in/);
     assert.deepEqual(savedGroups(free('ready', { groups: [...both(), group('unknown_kind', { count: 2 }), group('lost_copies', { count: 0 })] })).map((row) => row.id), ['unknown_kind']);
     const paged = trayHtml(free('ready'), { ...read(), excluded: { ...excluded, total: 250, complete: false, next: 3 } });
     assert.match(paged, /data-free-more-excluded[^>]*>Show 100 more</);
@@ -381,10 +381,10 @@ test('saved-group items the pool leaves out are counted by the saved groups, not
     const html = trayHtml(free('ready', { groups: saved(), pool: pool({ excluded: [{ reason: 'advanced_group', count: 43 }, { reason: 'in_use', count: 1 }] }) }), {
         ...read(), excluded: { ...EMPTY_LIST(), total: 44, complete: false, next: 1, want: 100, items: [entry('s', { group: 'review_evidence', kind: 'other', reason: 'advanced_group', bytes: null })] },
     });
-    assert.match(html, /Can’t go right now[\s\S]*>1: still in use</);
+    assert.match(html, /Kept · 1 still in use</);
     assert.match(html, /data-free-excluded="advanced_group"[\s\S]*Other item · saved work: only its saved group can remove it/);
     const savedOnly = trayHtml(free('ready', { groups: saved(), pool: pool({ excluded: [{ reason: 'advanced_group', count: 43 }] }) }), read());
-    assert.doesNotMatch(savedOnly, /Can’t go right now/, 'nothing is blocked: only saved work is left out');
+    assert.doesNotMatch(savedOnly, /Kept ·/, 'nothing is blocked: only saved work is left out');
 });
 
 test('a list cut short after its first page still says it is being read', () => {
@@ -417,10 +417,10 @@ test('what happened to the owner\'s attempt is said beside whatever the server h
     assert.match(trayHtml(idle, { notice: 'refused' }), /Nothing was removed: the list you reviewed had changed\./);
     assert.match(trayHtml(idle, { notice: 'read' }), /The list you were reviewing changed\./);
     assert.match(trayHtml(free('listing', { plan: null }), { notice: 'lostFree' }), /The answer to Free was lost and the list has changed since/);
-    assert.match(trayHtml(free('listing', { plan: null }), { notice: 'lost' }), /The answer to Remove was lost and the list has changed since; whether it removed anything is not known here\. Nothing is sent again\.[\s\S]*Checking what can go/);
-    assert.match(trayHtml(free('ready', { plan: 'p2' }), read(rows(), { notice: 'refused' })), /Nothing was removed: the list you reviewed had changed\.[\s\S]*Remove 3 items/);
-    assert.equal(trayHtml(idle, { notice: 'refused', dismissed: true }), '', 'a dismissed flow says nothing');
-    assert.equal(trayHtml(idle, {}), '');
+    assert.match(trayHtml(free('listing', { plan: null }), { notice: 'lost' }), /The answer to Remove was lost and the list has changed since; whether it removed anything is not known here\. Nothing is sent again\.[\s\S]*Checking for files to remove/);
+    assert.match(trayHtml(free('ready', { plan: 'p2' }), read(rows(), { notice: 'refused' })), /Nothing was removed: the list you reviewed had changed\.[\s\S]*Remove 3 selected items/);
+    assert.match(trayHtml(idle, { notice: 'refused', dismissed: true }), /Not checked yet/);
+    assert.match(trayHtml(idle, {}), /Not checked yet/);
 });
 
 // ---------------------------------------------------------------------------
@@ -443,16 +443,16 @@ test('the door to copies by hand names them from the pool\'s own fact; each reas
         { reason: 'in_use', count: 1 }, { reason: 'advanced_group', count: 6 }];
     const html = trayHtml(free('ready', { pool: pool({ manual: { count: 5, bytes: 9.5 * GB, bytes_complete: true }, excluded }) }), read());
     // 5 − 3 and not 5 − 5 (the global manual count); a row with no manual share keeps its whole count; a row that is all manual is gone.
-    assert.match(html, /Can’t go right now[\s\S]*2: unique work not verified saved · 4: marked as evidence, or could not be read through · 1: still in use</);
-    assert.doesNotMatch(html.match(/Can’t go right now[\s\S]*?<\/p>/)[0], /busy|saved work|5: |6: /);
-    assert.match(html, /Finished copies not verified saved/);
-    assert.match(html, /5 copies of finished work stay: some files in them are not verified saved\. 9\.5 GB counted\. You can discard them one by one\./);
-    assert.match(html, /btn-ghost[^>]*data-free-manual-open[^>]*>Choose copies to discard…</);
+    assert.match(html, /Kept ·[\s\S]*2 unique work not verified saved · 4 marked as evidence, or could not be read through · 1 still in use</);
+    assert.doesNotMatch(html.match(/Kept ·[\s\S]*?<\/p>/)[0], /busy|saved work|5: |6: /);
+    assert.match(html, /finished cop(?:y|ies) not verified saved/);
+    assert.match(html, /5 finished copies not verified saved[\s\S]*9\.5 GB/);
+    assert.match(html, /btn-default[^>]*data-free-manual-open[^>]*>Choose copies…</);
     assert.doesNotMatch(html, /btn-danger|data-free-manual-go|type="checkbox"[^>]*data-free-manual-pick/, 'the door chooses nothing and discards nothing');
-    assert.match(html, /Remove 3 items/, 'the ordinary pool is untouched');
+    assert.match(html, /Remove 3 selected items/, 'the ordinary pool is untouched');
     const one = trayHtml(free('ready', { pool: pool({ manual: { count: 1, bytes: null, bytes_complete: false }, excluded: [{ reason: 'capture_unproven', count: 1, manual_count: 1 }] }) }), read());
-    assert.match(one, /1 copy of finished work stays: some files in it are not verified saved\. size unknown\./);
-    assert.doesNotMatch(one, /Can’t go right now/, 'everything left out can be discarded by hand: nothing is blocked');
+    assert.match(one, /1 finished copy not verified saved[\s\S]*size unknown/);
+    assert.doesNotMatch(one, /Kept ·/, 'everything left out can be discarded by hand: nothing is blocked');
     const none = trayHtml(free('ready', { pool: pool({ manual: { count: 0, bytes: 0, bytes_complete: true } }) }), read());
     assert.doesNotMatch(none, /data-free-manual-open|Finished copies not verified saved/);
     assert.doesNotMatch(trayHtml(free('ready', { pool: pool() }), read()), /data-free-manual-open/, 'an older answer without the field offers nothing');
@@ -472,7 +472,7 @@ test('a plan holding only copies by hand is still a review, and an item left out
     assert.match(html, /data-free-excluded="capture_unproven" data-availability="manual_discard"[\s\S]*Working copy · unique work not verified saved · can be discarded by hand/);
     assert.doesNotMatch(html.match(/data-free-excluded="in_use"[\s\S]*?<\/li>/)[0], /discarded by hand/);
     assert.doesNotMatch(html.match(/data-free-excluded="advanced_group"[\s\S]*?<\/li>/)[0], /discarded by hand/);
-    assert.match(html, /Can’t go right now[\s\S]*?>1: still in use</);
+    assert.match(html, /Kept · 1 still in use</);
 });
 
 test('the copies screen lists every copy unchosen, with what it would lose said by name and the whole folder going', () => {
@@ -610,4 +610,34 @@ test('names and paths from the server are escaped text on the copies screen', ()
     const html = trayHtml(free('ready', { pool: manualPool(1) }), byHand([hostile]));
     assert.doesNotMatch(html, /<img|<b>|<script/);
     assert.match(html, /&lt;img src=x onerror=1&gt;/);
+});
+
+
+test('exact cleanup causes remain distinct and unknown codes stay visible beside compatible categories', () => {
+    const outcomes = { ...EMPTY_LIST(), complete: true, total: 3, items: [
+        entry('a', { reason:'in_use', cause:'liveness_unknown', outcome:'kept' }),
+        entry('b', { reason:'results_pending', cause:'canonical_changed', outcome:'kept' }),
+        entry('c', { reason:'results_pending', cause:'new_retention_cause', outcome:'kept' }),
+    ] };
+    const html = trayHtml(free('done', { run:run({ kept:[{reason:'in_use',count:1,causes:[{cause:'liveness_unknown',count:1}]}] }) }), { ...read(), outcomes });
+    assert.match(html, /whether the task is still in use could not be established/);
+    assert.match(html, /the task record changed during cleanup/);
+    assert.match(html, /new_retention_cause/);
+    const mixed = resultSentences(free('done', { run:run({ kept:[{reason:'in_use',count:2,causes:[
+        {cause:'in_use',count:1}, {cause:'task_live',count:1}]}] }) }));
+    assert.match(mixed.rest.join(' '), /2 were kept: 1 still in use · 1 the task has a live owner/);
+});
+
+test('preservation causes remain kept outcomes rather than becoming deletion failures', () => {
+    const outcomes = { ...EMPTY_LIST(), complete: true, total: 3, items: [
+        entry('raw', { reason:'results_pending', cause:'raw_evidence_uncustodied', outcome:'kept' }),
+        entry('artifact', { reason:'results_pending', cause:'artifact_source_missing', outcome:'kept' }),
+        entry('environment', { reason:'retained_evidence', cause:'undeclared_environment', outcome:'kept' }),
+    ] };
+    const html = trayHtml(free('done', { run:run({ kept:[{ reason:'results_pending', count:2 }, { reason:'retained_evidence', count:1 }] }) }),
+        { ...read(), outcomes });
+    assert.doesNotMatch(html, /Could not be deleted/);
+    assert.match(html, /raw evidence is not saved yet/);
+    assert.match(html, /the source of a saved artifact could not be found/);
+    assert.match(html, /the environment has no recorded owner/);
 });
