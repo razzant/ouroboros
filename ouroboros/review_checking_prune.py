@@ -303,9 +303,11 @@ def _retire_checkouts(data_root: Any, entries: list, live: Callable[[], Any], cu
         rounds = _review_rounds(data_root, repair=True)
     except Exception as exc:  # unknown custody: every checkout stays
         report["errors"].append(f"review state unreadable: {type(exc).__name__}: {exc}")
+        report["partial"] = True
         return
     for entry in entries:
         if stopped():
+            report["partial"] = True  # the checkouts not judged keep the row's holds
             return
         try:
             hold = _checkout_hold(data_root, entry, rounds=rounds, sources=sources,
@@ -473,7 +475,8 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
     """One pass over ``state/review_checkouts`` (see the module docstring).
 
     ``live_task_ids`` is a set or a callable asked again for each thread seat; ``stop`` is
-    asked before each seat. ``views_done`` reports a completed views pass."""
+    asked before each seat. ``views_done`` reports a completed views pass, ``partial`` one whose
+    checkouts were not judged (a busy or unread seat, a stop, an unreadable review state)."""
     from ouroboros import delegate_custody_current as current
     from ouroboros.maintenance_jobs import Holds
     from ouroboros.retention import age_cutoff, get_gc_retention_days
@@ -629,6 +632,8 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
                 report["errors"].append(f"{home.name}: {type(exc).__name__}: {exc}")
         if checkouts and not unread and not busy and not stopped():
             _retire_checkouts(data_root, checkouts, live, cutoff, sources, stopped, holds, report)
+        elif checkouts:  # a seat could not be judged: the checkouts wait, and the row keeps their holds
+            report["partial"] = True
         if views and not unread and not stopped():
             doomed = []
             with _seat_locked(base, wait=False, name=VIEWS_LOCK_NAME) if view_root.is_dir() else contextlib.nullcontext(

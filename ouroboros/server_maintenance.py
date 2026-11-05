@@ -810,6 +810,14 @@ def _prune_event(event_type: str, keys: tuple, **reports: dict) -> None:
 # errors) and are recorded as their job row plus one event ONLY when the pass is evidence: something
 # released, an error, or a hold set different from the row's (``maintenance_jobs.record_pass``). A pass
 # that keeps everything it kept last time writes nothing; what it keeps is a fact Storage and the mind read.
+# A pass that throws is a fact too: ``last_error`` on its row (``_retirer_threw``) until one returns.
+
+def _retirer_threw(job: str, message: str, error: BaseException) -> None:
+    log.debug(message, exc_info=True)
+    from ouroboros import maintenance_jobs
+
+    maintenance_jobs.record_threw(DATA_DIR, job, error)
+
 
 def _prune_worktrees() -> None:
     """Subagent working copies past the GC retention, on the custody pass: a plain copy goes only
@@ -826,8 +834,8 @@ def _prune_worktrees() -> None:
             holds.note(reason, path)
         maintenance_jobs.record_pass(DATA_DIR, "copy_retirement", {**maintenance_jobs.pass_report(report["removed"], holds),
                                                                    "kept": report["kept"]}, event="subagent_worktree_prune")
-    except Exception:
-        log.debug("Subagent worktree prune failed", exc_info=True)
+    except Exception as exc:
+        _retirer_threw("copy_retirement", "Subagent worktree prune failed", exc)
 
 
 def _prune_engine_runtimes() -> None:
@@ -837,8 +845,8 @@ def _prune_engine_runtimes() -> None:
         from ouroboros.claudexor_runtime_retention import prune_unpinned_runtimes
 
         maintenance_jobs.record_pass(DATA_DIR, "engine_runtime_prune", prune_unpinned_runtimes(), event="engine_runtime_prune")
-    except Exception:
-        log.debug("Engine runtime prune failed", exc_info=True)
+    except Exception as exc:
+        _retirer_threw("engine_runtime_prune", "Engine runtime prune failed", exc)
 
 
 def _release_finished_scratch() -> None:
@@ -851,8 +859,8 @@ def _release_finished_scratch() -> None:
 
         maintenance_jobs.record_pass(DATA_DIR, "session_scratch_release",
                                      release_finished_scratch(DATA_DIR, task_settlement_liveness), event="session_scratch_release")
-    except Exception:
-        log.debug("Session scratch release failed", exc_info=True)
+    except Exception as exc:
+        _retirer_threw("session_scratch_release", "Session scratch release failed", exc)
 
 
 def _record_engine_pass() -> None:
@@ -945,8 +953,8 @@ def _prune_review_checkouts(*, stop_event: Any = None) -> None:
 
         released = int(report.get("released") or 0) + int(report.get("removed") or 0) + int(report.get("checkouts_removed") or 0)
         maintenance_jobs.record_pass(DATA_DIR, "review_checkout_prune", {**report, "released": released}, event="review_checkout_prune")
-    except Exception:
-        log.debug("Review checkout prune failed", exc_info=True)
+    except Exception as exc:
+        _retirer_threw("review_checkout_prune", "Review checkout prune failed", exc)
 
 
 def _cursor_refresh_settled_terminals(live_task_ids: Any = None) -> None:
@@ -1111,7 +1119,11 @@ def _run_periodic_reconcile_sweep(marker: list, stop_event: Any = None, latch: A
         replay_owed_late_reviews(DATA_DIR, stop=lambda: _stop_requested(stop_event))  # owed rows only
         if _stop_requested(stop_event):
             return
-        _run_drive_custody_pass(stop_event)
+        try:
+            _run_drive_custody_pass(stop_event)
+        except Exception as exc:  # the drive retirer's own fact; the sweep step still records its failure
+            _retirer_threw("drive_settlement", "Drive custody pass failed", exc)
+            raise
         if not _stop_requested(stop_event):  # history-sized named jobs: the one maintenance child, never here
             _tick_maintenance_child()
         _step_recovered("reconcile_sweep")
@@ -1254,20 +1266,21 @@ def _run_drive_custody_pass(stop_event: Any = None) -> None:
                 forget_arrivals(txn, base_name, task_ids)  # the published drives this lap looked at
     # What the pass holds, as facts: every retained drive's durable verdict (the decoded map) and this pass's
     # transient and not-yet-terminal skips; the term's wait and a rested verdict are not holds. A pass that
-    # decoded no verdicts (both layouts at rest, or nothing reached) and moved nothing writes nothing.
-    holds = maintenance_jobs.Holds()
-    for task_id, verdict in sorted((loaded.get("map") or {}).items()):
-        holds.note(verdict.get("reason") or "other", task_id)
-    for report in reports.values():
-        for skipped in report.get("skipped") or ():
-            task_id = skipped.get("task_id")
-            if task_id in (loaded.get("map") or {}):
-                continue  # record_rest already put this drive in the durable map this pass
-            if skipped.get("reason") not in ("younger_than_retention", "custody_unchanged"):
-                holds.note(skipped.get("reason"), task_id)
+    # decoded no verdicts (both layouts at rest, or nothing reached) and moved nothing writes nothing; one that
+    # is evidence all the same reads the verdicts first, so what it reports holding is never a part of them.
     released = sum(len(report.get("pruned") or ()) for report in reports.values())
     errors = [f"{row.get('task_id')}: {row.get('error')}" for report in reports.values() for row in report.get("errors") or ()]
-    if "map" in loaded or released or errors or mailboxes.get("removed"):
+    if "map" in loaded or released or errors or mailboxes.get("removed") or "last_error" in row:
+        holds = maintenance_jobs.Holds()
+        for task_id, verdict in sorted(rested().items()):
+            holds.note(verdict.get("reason") or "other", task_id)
+        for report in reports.values():
+            for skipped in report.get("skipped") or ():
+                task_id = skipped.get("task_id")
+                if task_id in loaded["map"]:
+                    continue  # record_rest already put this drive in the durable map this pass
+                if skipped.get("reason") not in ("younger_than_retention", "custody_unchanged"):
+                    holds.note(skipped.get("reason"), task_id)
         maintenance_jobs.record_pass(root, "drive_settlement", {**maintenance_jobs.pass_report(released, holds, errors),
                                                                 "headless": reports["headless"], "direct": reports["direct"],
                                                                 "mailboxes": mailboxes}, event="headless_task_drive_prune")

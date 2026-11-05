@@ -90,6 +90,45 @@ def test_drive_settlement_does_not_count_a_durable_verdict_twice(tmp_path, monke
     assert holds == {"store_busy": 1, "task_live": 1}
 
 
+def test_drive_settlement_evidence_at_rest_reports_every_retained_verdict(tmp_path, monkeypatch):
+    """Both layouts at rest decode no verdicts; a pass that is evidence all the same (a mailbox it removed) reads
+    them before it writes, so its holds are the retained drives' verdicts, never the part this pass looked at."""
+    from ouroboros import headless, owner_mailbox
+
+    data = tmp_path / "data"
+    data.mkdir()
+    store_import.ensure_current_store(data)
+    monkeypatch.setattr(server_maintenance, "DATA_DIR", data)
+    verdicts = {"a": {"reason": "child_result_unadopted"}, "b": {"reason": "child_result_unadopted"}}
+    monkeypatch.setattr(server_maintenance, "settlement_verdicts", lambda _root: dict(verdicts))
+    rested = lambda *args, **kwargs: {"pruned": [], "errors": [], "skipped": [], "cursor": "", "arrivals": [], "rested": True}  # noqa: E731
+    monkeypatch.setattr(headless, "prune_headless_task_drives", rested)
+    monkeypatch.setattr(headless, "prune_task_drives", rested)
+    monkeypatch.setattr(owner_mailbox, "sweep_settled_owner_mailboxes", lambda *_a, **_k: {"removed": ["t-mail"]})
+    server_maintenance._run_drive_custody_pass()
+    row = maintenance_jobs.job(data, "drive_settlement")
+    assert [(hold["class"], hold["count"]) for hold in row["holds"]] == [("child_result_unadopted", 2)] and row["held"] == 2
+    del verdicts["b"]  # one retained drive went: the next evidence reads the verdicts as they stand now
+    server_maintenance._run_drive_custody_pass()
+    assert [(hold["class"], hold["count"]) for hold in maintenance_jobs.job(data, "drive_settlement")["holds"]] == [
+        ("child_result_unadopted", 1)]
+
+
+def test_a_retirer_pass_that_throws_leaves_a_fact_until_one_returns(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir()
+    store_import.ensure_current_store(data)
+    monkeypatch.setattr(server_maintenance, "DATA_DIR", data)
+    monkeypatch.setattr(trees, "prune_orphans", lambda **_kwargs: (_ for _ in ()).throw(OSError("store moved")))
+    server_maintenance._prune_worktrees()
+    row = maintenance_jobs.job(data, "copy_retirement")
+    assert row["last_error"]["class"] == "OSError", "the throw is on the retirer's row, not only in a debug log"
+    monkeypatch.setattr(trees, "prune_orphans", lambda **_kwargs: {"removed": [], "kept": []})
+    server_maintenance._prune_worktrees()
+    row = maintenance_jobs.job(data, "copy_retirement")
+    assert "last_error" not in row and row["state"] == "done", "a pass that returns clears it"
+
+
 # ---- private copies ---------------------------------------------------------------------------------------------
 
 @witness("ouroboros.subagent_worktrees.prune_orphans")
@@ -165,6 +204,14 @@ def test_review_checkout_prune_releases_a_settled_seat_and_holds_an_open_run(tmp
     second = rp.prune_review_checkouts(root, live_checkouts)
     assert record_pass(root, "review_checkout_prune", second, event="review_checkout_prune") is None, \
         "nothing released, the same hold: silent"
+    assert "partial" not in second, "every checkout was judged"
+    from ouroboros import review_checking as rc
+    with rc._seat_locked(running.parent):  # a worker holds a seat: its pass judges no checkout
+        busy = rp.prune_review_checkouts(root, live_checkouts)
+    assert busy["partial"] is True and checkout_running.is_dir()
+    assert record_pass(root, "review_checkout_prune", busy, event="review_checkout_prune") is None
+    assert maintenance_jobs.job(root, "review_checkout_prune")["holds"] == first["holds"], \
+        "the checkouts' holds stand while a pass could not judge them"
 
 
 # ---- session scratch ----------------------------------------------------------------------------------------------
