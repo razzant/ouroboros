@@ -93,17 +93,19 @@ under the copy's `.review-evidence/`, whose retention applies no cache, binary, 
 ignore filter. Where the route's catalog row
 negotiates `accessControl.auxiliaryWritableRoots` (never a guess from a harness name or
 write mechanism) and the start is an Agent `workspace_write` one, the host makes the run's
-exact short scratch under `test_environment.default_temp_parent()` (`/tmp/obs-<random>` on
-macOS, resolved physically), with its path/inode record in the ungranted task drive at
-`task_drives/<task>/session_scratch_owners/<snapshot>/scratch.json` (a reviewer seat's
-`seat-<seat>`), and the cache's `uv`/`pip`/`npm` folders, real directories outside every Git
-tree and never reached through a link, and adds only these exact directories as
+exact short scratch under `test_environment.session_scratch_parent()` (`/var/tmp/obs-<random>`
+on macOS/Linux, resolved physically), with its path/inode record in the ungranted task drive at
+`task_drives/<task>/session_scratch_owners/<snapshot>/scratch.json`; a reviewer seat keeps its
+`session_scratch_owners/seat-<seat>/scratch.json` in its own home. The cache's `uv`/`pip`/`npm` folders
+and scratch are real directories outside every Git
+tree and never reached through a link. The host adds only these exact directories as
 `execution.auxiliaryWritableRoots`; the binding, a seat's checking text and the facts then
 name that scratch instead of the default parent (`workspace_preflight.session_service_directories`).
 A `full` Agent start, whose rights already reach such a folder, gets the same owned scratch with nothing
 sent: a private copy's (keyed by its snapshot), an in-place run's (`in-place-<invocation>`) and a reviewer seat's.
 Every naming declares it disposable before use (`delegate_start_instructions.DISPOSABLE_SCRATCH`): never
-captured, released once the starting task is over (`workspace_preflight.release_finished_scratch`), nothing
+captured, released when its task ends (`workspace_preflight.release_finished_scratch`) or its seat copy goes
+(`session_scratch.release_seat_scratch`), nothing
 reinstalled for a later session. That is a purpose and an owner, not a promise of byte-for-byte reproduction.
 The native profile's existing temporary-directory permissions are unchanged. Directory grants do
 not grant IPC or process inspection: a blocked check stays unverified, with its command and
