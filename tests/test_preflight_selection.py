@@ -1,5 +1,6 @@
 """Selected execution, honest inventory and the full-only consumer boundaries."""
 import json
+import pathlib
 from types import SimpleNamespace
 
 import pytest
@@ -41,6 +42,8 @@ def test_real_selected_run_records_inventory_and_cannot_qualify_managed_update(c
     assert pr.run_hermetic_pytest(ctx.repo_dir, ctx=ctx, selected=True, phase=pr.PRE_COMMIT_PHASE) is None
     proof = ctx._preflight_test_proof
     assert proof and proof.tier == "selected"
+    ran = json.loads((pathlib.Path(ctx._preflight_test_evidence) / "result.json").read_text(encoding="utf-8"))
+    assert proof.workload[1] == ran["budget_seconds"] == 1800 and 0 < ran["elapsed_seconds"] < 1800  # the tier's own
     assert not admission.preflight_test_proof_matches(ctx, ctx.repo_dir)
     assert admission.preflight_test_proof_matches(ctx, ctx.repo_dir, require_full=False)
     assert not admission.preflight_test_workload_unchanged(proof, ctx.repo_dir, timeout=1800, pytest_args=None)
@@ -111,6 +114,8 @@ def test_apparatus_change_executes_full_and_reports_actual_failure(candidate):
     error = pr.run_hermetic_pytest(candidate.repo_dir, ctx=candidate, selected=True, phase=pr.PRE_COMMIT_PHASE)
     assert error and "unrelated collection" in error
     assert candidate._preflight_test_proof is None
+    ran = json.loads((pathlib.Path(candidate._preflight_test_evidence) / "result.json").read_text(encoding="utf-8"))
+    assert ran["budget_seconds"] is None and ran["elapsed_seconds"] > 0  # widened to the whole suite: no deadline
 
 
 @pytest.mark.parametrize("mode", ["missing", "empty"])

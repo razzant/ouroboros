@@ -637,12 +637,22 @@ def _plugin_missing_remediation(agent_python: str, rejected: str = "") -> str:
     )
 
 
-_DEFAULT_PREFLIGHT_TIMEOUT_SEC = 1800
+_DEFAULT_PREFLIGHT_TIMEOUT_SEC = 1800  # a selected run's total; the full suite has none
 
 
-def _resolve_preflight_timeout(timeout: int = _DEFAULT_PREFLIGHT_TIMEOUT_SEC) -> int:
-    """Env override (`OUROBOROS_PREFLIGHT_TIMEOUT_SEC`) takes precedence so the
-    timeout is one SSOT across callers without editing each call site."""
+def _full_tier(selection, pytest_args) -> bool:
+    """The whole default suite: a selection says so itself; without one, a run with no argv of its caller's."""
+    return selection.tier == "full" if selection is not None else pytest_args is None
+
+
+def _resolve_preflight_timeout(timeout: Optional[int] = None, *, full: bool = False) -> Optional[int]:
+    """The total budget, in seconds, of the lanes that decide a run (Node, the passes); None is no budget.
+
+    The env override (`OUROBOROS_PREFLIGHT_TIMEOUT_SEC`) comes first for either tier, so the budget is one
+    SSOT across callers; then the caller's own; then the tier's: `_DEFAULT_PREFLIGHT_TIMEOUT_SEC` for a
+    selected run, none for the full suite. How long the whole suite honestly takes is this install's to
+    find, and a constant below it makes every full proof red: a full run ends by its tests' own 300 s
+    bound, the containment proof and the owner's Stop, and records how long it took."""
     raw = os.environ.get("OUROBOROS_PREFLIGHT_TIMEOUT_SEC")
     if raw:
         try:
@@ -651,7 +661,9 @@ def _resolve_preflight_timeout(timeout: int = _DEFAULT_PREFLIGHT_TIMEOUT_SEC) ->
                 return parsed
         except (TypeError, ValueError, OverflowError):
             pass
-    return timeout
+    if timeout is not None:
+        return timeout
+    return None if full else _DEFAULT_PREFLIGHT_TIMEOUT_SEC
 
 
 def _terminate_preflight_tree(proc: "subprocess.Popen", temp_root: pathlib.Path) -> None:
@@ -732,12 +744,13 @@ def _execute_pytest_pass(
     worktree: pathlib.Path,
     temp_root: pathlib.Path,
     args: Sequence[str],
-    timeout: float,
+    timeout: Optional[float],
 ) -> tuple[Optional[int], str, str]:
     """Run ONE pytest invocation in the prepared worktree.
 
     ``timeout`` is the caller's exact remaining share of the TOTAL budget and
-    stays a float — rounding it up would let the last pass outlive the total.
+    stays a float — rounding it up would let the last pass outlive the total;
+    None when the run has no total budget (the full suite).
 
     Returns ``(returncode, combined_output, containment_error)``.
     ``returncode is None`` means the pass exhausted its slice of the budget and
@@ -1214,7 +1227,7 @@ def _containment_failed(label: str, reap_error: str, max_output: int) -> str:
 def _run_hermetic_pytest(
     repo_dir: pathlib.Path | str,
     *,
-    timeout: int = _DEFAULT_PREFLIGHT_TIMEOUT_SEC,
+    timeout: Optional[int] = None,
     pytest_args: Optional[Sequence[str]] = None,
     max_output: int = 8000,
     phase: str = "post_commit",
@@ -1228,7 +1241,10 @@ def _run_hermetic_pytest(
     ``base`` (default HEAD before commit, HEAD~1 after) plus authored widening. Green
     runs mint receipts: full ones as full, selected ones only of an exact commit.
     Skip/no suite returns None without proof; failures return bounded diagnostics.
-    OUROBOROS_PREFLIGHT_TIMEOUT_SEC owns the shared total lane budget.
+    Node and the passes share one total budget (``_resolve_preflight_timeout``; the
+    full suite has none). The bytecode warm decides nothing, so it takes none of it:
+    it is bounded by what the budget still held when it started. The run records
+    its budget and how long it took.
 
     Assembly captures one hardened, raw-byte worktree-vs-HEAD diff (including
     live merge resolutions), applies it with LF preserved, and copies non-ignored
@@ -1242,7 +1258,7 @@ def _run_hermetic_pytest(
     previous_inventory = getattr(ctx, "_preflight_test_inventory", None)
     if ctx is not None:
         ctx._preflight_test_proof, ctx._preflight_tests_passed, ctx._preflight_test_inventory = None, False, None
-    timeout = _resolve_preflight_timeout(timeout)
+    began = time.monotonic()
     # Check before execution: an unrenderable failure used to become an empty
     # string, which the caller reads as success. Never silently green a red run.
     if max_output <= 0:
@@ -1337,6 +1353,8 @@ def _run_hermetic_pytest(
                 raise ValueError("selected scope cannot be combined with custom pytest arguments")
             passes = selection_passes(selection, probe_module=probe_module, temp_root=temp_root,
                                       inventory_dir=evidence["path"])
+        # The tier is known only now: a selection may have widened to the whole suite.
+        timeout = evidence["budget_seconds"] = _resolve_preflight_timeout(timeout, full=_full_tier(selection, pytest_args))
 
         subject = capture_preflight_test_subject(
             worktree, timeout=timeout, pytest_args=pytest_args,
@@ -1366,10 +1384,12 @@ def _run_hermetic_pytest(
         if node_error := (node_result or {}).get("error"):
             return _with_retention_notice(node_error, unproven_teardown, worktree, max_output)
         unproven_teardown = "the bytecode warm did not return, so its teardown is unconfirmed"
+        warm_started = time.monotonic()
         with launching(evidence):  # the prefix every pass reads; a warm out of budget or red leaves them cold
             warm_error = _warm_bytecode(agent_python, worktree, temp_root, evidence,
-                                        max(0.0, timeout - (time.monotonic() - started)),
+                                        None if timeout is None else max(0.0, timeout - (warm_started - started)),
                                         selection.files if selection is not None else ())
+        started += time.monotonic() - warm_started  # the passes keep the budget the warm found: it decides nothing
         unproven_teardown = ""  # it returned: its own reap decided, and a leak is the block below
         if warm_error:
             unproven_teardown = next((lane.get("containment_error") for lane in reversed(evidence.get("lanes", []))
@@ -1379,8 +1399,8 @@ def _run_hermetic_pytest(
         timings: list[tuple[str, float]] = []
         for spec in passes:
             # Do not round the remaining shared budget up.
-            remaining = timeout - (time.monotonic() - started)
-            if remaining <= 0:
+            remaining = None if timeout is None else timeout - (time.monotonic() - started)
+            if remaining is not None and remaining <= 0:
                 return (
                     f"⚠️ PRE_PUSH_TEST_ERROR: the {spec.label} pass never started — the "
                     f"total budget of {timeout} seconds was exhausted by the earlier pass(es)"
@@ -1472,8 +1492,8 @@ def _run_hermetic_pytest(
                 ctx._preflight_tests_passed = False
                 raise ValueError("selected test scope changed during execution; no proof was minted")
         return None
-    except subprocess.TimeoutExpired:
-        failure = f"⚠️ PRE_PUSH_TEST_ERROR: pytest timed out after {timeout} seconds"
+    except subprocess.TimeoutExpired as exc:  # a command of the gate's own; the lanes report their budget themselves
+        failure = f"⚠️ PRE_PUSH_TEST_ERROR: pytest timed out after {exc.timeout:g} seconds"
     except FileNotFoundError:
         failure = f"⚠️ PRE_PUSH_TEST_ERROR: pytest not available via interpreter: {agent_python}"
     except Exception as exc:
@@ -1481,6 +1501,7 @@ def _run_hermetic_pytest(
     finally:
         if lease is not None:
             lease.close()
+        evidence["elapsed_seconds"] = round(time.monotonic() - began, 1)
         unproven_teardown = evidence.pop("lane_teardown", unproven_teardown)
         evidence["cleanup"] = (repo, temp_root, worktree, worktree_added, unproven_teardown)
         from ouroboros.preflight_inventory import record_failed_attempt
@@ -1488,7 +1509,7 @@ def _run_hermetic_pytest(
     return _with_retention_notice(failure, unproven_teardown, worktree, max_output)
 
 
-def run_hermetic_pytest(repo_dir, *, timeout=_DEFAULT_PREFLIGHT_TIMEOUT_SEC, pytest_args=None,
+def run_hermetic_pytest(repo_dir, *, timeout=None, pytest_args=None,
                        max_output=8000, phase="post_commit", ctx=None, selected=False, base=None,
                        extra_tests=(), full_tests=False, test_reason="") -> Optional[str]:
     """Existing gate, with durable raw evidence also on green and ctx-less calls.

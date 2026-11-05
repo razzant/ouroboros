@@ -543,7 +543,7 @@ def preflight_test_workload(
         tuple((p.label, tuple(pr._WORKER_PROBE_MODULE if probe_module and arg == probe_module else
                              MODULE if arg.startswith(MODULE + "_") else arg
                              for arg in p.args), p.parallel) for p in specs),
-        pr._resolve_preflight_timeout(pr._DEFAULT_PREFLIGHT_TIMEOUT_SEC if timeout is None else timeout),
+        pr._resolve_preflight_timeout(timeout, full=pr._full_tier(selection, pytest_args)),
         environment, _executable_identity(python),
         (_executable_identity(resolve_node()), node_tests) if node_tests else (),
         preflight_probe._WORKER_PROBE_SOURCE,

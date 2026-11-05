@@ -110,7 +110,7 @@ def _version_tuple(version: str) -> tuple:
 def run_node_tests(
     worktree: pathlib.Path,
     temp_root: pathlib.Path,
-    timeout: float,
+    timeout: Optional[float],
     max_output: int,
 ) -> Optional[dict]:
     """Run the candidate's browser-module suite once, contained, or block typed.
