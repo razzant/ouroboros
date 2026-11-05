@@ -375,7 +375,7 @@ def test_a_record_under_the_legacy_tmp_parent_still_releases_and_a_foreign_paren
 
 @pytest.mark.parametrize("reason", ["the live process table could not be enumerated", "debug retention"],
                          ids=["process-proof-failed", "debug-keep"])
-def test_a_retained_scratch_keeps_its_record_as_a_visible_hold_until_its_marker_goes(tmp_path, reason):
+def test_a_retained_scratch_keeps_its_record_as_a_visible_hold_until_its_marker_goes(tmp_path, reason, monkeypatch):
     """#2708: a producer's retention marker never deletes the scratch, and no longer drops its owner: the
     record stays in the trash as the hold ``producer_retained`` (the marker's words, since it was written),
     re-read every run, and the scratch goes only once the marker is gone, a failed process proof and a
@@ -389,11 +389,23 @@ def test_a_retained_scratch_keeps_its_record_as_a_visible_hold_until_its_marker_
     marker = nested / test_environment.RETENTION_MARKER
     assert release_finished_scratch(data, OVER)["released"]
     hold = {"class": "producer_retained", "count": 1, "example": f"{scratch}: {reason}", "since": _iso(marker.lstat().st_mtime)}
-    assert task_custody.remove_custody_trash(data) == {"removed": 0, "stuck": {}, "holds": [hold]}
+    report = task_custody.remove_custody_trash(data)
+    assert report["removed"] == 0 and report["stuck"] == {} and report["holds"] == [hold]
     assert (scratch / "env" / "pyvenv.cfg").is_file() and marker.is_file()
     [entry] = (data / "state" / "custody_trash").iterdir()  # the record survives, in its own handoff entry
     assert entry.name.startswith("task-1+scratch-") and (entry / SESSION_SCRATCH_DIRNAME / "snap-1" / "scratch.json").is_file()
-    assert task_custody.remove_custody_trash(data) == {"removed": 0, "stuck": {}, "holds": [hold]}  # unchanged: silent
+    assert report["held"][entry.name] == [entry.stat().st_ino, entry.stat().st_mtime_ns]
+    assert task_custody.remove_custody_trash(data)["holds"] == [hold]  # unchanged: silent
+    from ouroboros import maintenance, maintenance_jobs
+
+    monkeypatch.setattr(maintenance, "JOBS", {"custody_trash": maintenance.JOBS["custody_trash"]})
+    assert maintenance.run_job(data, "custody_trash") == {"state": "done", "items": 0}
+    assert maintenance.due(data) == [], "an unchanged held entry is at rest"
+    row = maintenance_jobs.job(data, "custody_trash")
+    assert row["held"][entry.name] == [entry.stat().st_ino, entry.stat().st_mtime_ns]
+    stamp = entry.stat().st_mtime_ns + 1_000_000
+    os.utime(entry, ns=(stamp, stamp))
+    assert maintenance.due(data) == ["custody_trash"], "a changed held entry is due again"
     assert retire_synthetic_retention(nested, reason)  # the producer's proof holds (or the owner removed the marker)
     assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "holds": []}
     assert not scratch.exists() and not list((data / "state" / "custody_trash").iterdir())

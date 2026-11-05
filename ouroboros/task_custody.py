@@ -1461,7 +1461,7 @@ def custody_trash_entries(canonical_root: Any) -> List[Tuple[str, List[int]]]:
 def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
     """Delete the drives settlements moved aside: each was fully custodied before its move, and
     nothing serves or references it, so no age or liveness applies. The maintenance child runs this,
-    off the serving process. Returns the count removed, each entry that survived its removal
+    off the serving process. Returns the count removed, stuck and held entries that survived
     (``name -> identity``; the child retries it at its next run, a changed identity makes the job due)
     and ``holds``: the session scratch a producer's retention marker keeps in place (#2708). Such a
     record is never deleted with its entry: it moves into its own ``<id>+scratch-<token>/`` entry, which
@@ -1488,18 +1488,15 @@ def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], boo
                     retained += release_session_scratch(entry / "data")
                 held += [(row["class"], row["example"], row["since"]) for row in retained]
                 holding = bool(retained) and _RELEASE_MARK in entry.name
-                if holding:
-                    continue  # this entry is one record's handoff: it stays as the hold it reports
-                for row in retained:  # the drive goes; the retained scratch keeps its record in its own entry
+                for row in [] if holding else retained:  # a held handoff stays; a drive moves each held record aside
                     own = root / f"{entry.name.split('+', 1)[0].rsplit('-', 1)[0]}{_RELEASE_MARK}{uuid.uuid4().hex[:12]}"
                     (own / SESSION_SCRATCH_DIRNAME / row["owner"].name).mkdir(parents=True)
                     os.replace(row["owner"] / "scratch.json", own / SESSION_SCRATCH_DIRNAME / row["owner"].name / "scratch.json")
-            _remove_entry(entry)
-        if holding:
-            continue
+            if not holding:
+                _remove_entry(entry)
         try:
             stat = entry.lstat()
-            report["stuck"][entry.name] = [stat.st_ino, stat.st_mtime_ns]
+            report.setdefault("held" if holding else "stuck", {})[entry.name] = [stat.st_ino, stat.st_mtime_ns]
         except FileNotFoundError:
             report["removed"] += 1
         except OSError as exc:
