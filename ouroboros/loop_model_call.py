@@ -1459,7 +1459,7 @@ def _refusal_target(ctx: _RoundModelCallContext, fit: Any, refused: Any = None) 
         slack = refused.predicted_slack_tokens
         return max(0, -predicted_free) + slack, slack
     stated, size, slack, reply = _refusal_window(ctx, fit, refused)
-    record_refused_input(ctx.accumulated_usage, ctx.context_fit_plan, size)  # the provider's count when it stated one
+    record_refused_input(ctx.accumulated_usage, ctx.context_fit_plan, size, measured=measurement.anchor_input_tokens is not None)  # the provider's count when stated
     if stated:
         return max(0, size + reply - stated) + slack, slack
     accepted = measurement.accepted_input_tokens
