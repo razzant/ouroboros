@@ -399,18 +399,6 @@ def review_scratch_held(data_root: Any, drive: pathlib.Path) -> bool:
     return False
 
 
-def release_session_scratch(drive: pathlib.Path, *, data_root: Any = None) -> List[str]:
-    """Compatibility seam for the custody trash remover: release recorded scratch under DRIVE.
-
-    The holder-aware implementation lives in ``session_scratch``; this wrapper preserves the
-    historical import and returns retained paths for callers that only need a display list.
-    """
-    from ouroboros.session_scratch import release_session_scratch as release
-
-    del data_root  # the records carry their own validated path and identity
-    return [str(row.get("path") or "") for row in release(pathlib.Path(drive))]
-
-
 def restore_seat_scratch_notes(data_root: Any, *, stop: Any = None) -> None:
     """Recover older unnoted task-drive seat records on the existing startup views pass."""
     from ouroboros.task_results import validate_task_id
