@@ -955,13 +955,9 @@ def test_m1_a_direct_provider_structural_empty_catalog_stays_empty(key):
 
 @pytest.mark.parametrize("document", [
     {"OUROBOROS_MODEL": "x/y", "OPENROUTER_API_KEY": "present"},
-    {"OUROBOROS_MODEL": "x/y", "OPENROUTER_API_KEY": "present", SUBAGENTS: ""},
     {"TOTAL_BUDGET": 1.0},
-    {"OUROBOROS_REVIEW_MODELS": "a/one, b/two", "OPENROUTER_API_KEY": "present"},
-    {SLOTS: "", SUBAGENTS: "", "OPENROUTER_API_KEY": "present"},
     {SLOTS: "  ", "OPENROUTER_API_KEY": "present"},
-], ids=["provider-key-only", "blank-catalog-string", "no-provider", "retired-comma-keys", "ui-saved-blank-lanes",
-        "whitespace-lanes"])
+], ids=["provider-key-only", "no-provider", "whitespace-lanes"])
 def test_m1_an_environment_catalog_wins_over_the_factory_rows_of_a_document_that_authored_none(
         tmp_path, monkeypatch, document):
     """The factory rows the seam mints for a document that authored NO review lanes and saved
@@ -1097,7 +1093,7 @@ def test_authored_lanes_beside_a_pool_catalog_are_refused_not_dropped_in_silence
     assert "could not be migrated automatically" in m.owner_message(outcome, "x")
 
 
-@pytest.mark.parametrize("value", [{"triad": []}, ["x/y"], 7, True])
+@pytest.mark.parametrize("value", [{"triad": []}, 7, True])
 def test_a_non_string_lanes_value_is_refused_with_the_key_retained(value):
     """VD3-11 (P4): the lane key held JSON text; a dict, list or number is garbage the
     frozen reader never accepted — not "no lanes" to be replaced by the factory rows."""

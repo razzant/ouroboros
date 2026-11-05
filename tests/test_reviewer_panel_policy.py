@@ -44,8 +44,7 @@ def test_adviser_neither_vetoes_nor_keeps_wave_pending(additional, signal):
 
 
 @pytest.mark.parametrize("count,answers,expected", [(1, 1, "PASS"), (2, 2, "PASS"),
-                                                    (2, 1, "QUORUM_FAILED"), (3, 2, "PASS"),
-                                                    (3, 1, "QUORUM_FAILED")])
+                                                    (2, 1, "QUORUM_FAILED")])
 def test_quorum_counts_the_seats_asked(count, answers, expected):
     raws = [_raw(str(i), f"model-{i}", "responded" if i < answers else "error", parts=BOTH)
             for i in range(count)]

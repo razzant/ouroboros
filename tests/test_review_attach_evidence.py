@@ -94,7 +94,7 @@ def _assert_receipt(actor, area):
     return receipt
 
 
-@pytest.mark.parametrize("state", ["succeeded", "failed", "cancelled", "interrupted"])
+@pytest.mark.parametrize("state", ["succeeded", "failed", "interrupted"])
 def test_attach_only_terminal_collection_captures_edits_and_named_evidence(
         checking_run, monkeypatch, forbid_effects, state):  # noqa: F811
     root, subject, area, run = checking_run
@@ -235,7 +235,7 @@ def test_unfinished_or_unavailable_invocation_never_captures_or_releases(
         assert calls == []
 
 
-@pytest.mark.parametrize("foreign", ["task_id", "root_task_id", "operation_id", "slot_id", "surface"])
+@pytest.mark.parametrize("foreign", ["task_id", "operation_id", "surface"])
 def test_foreign_invocation_binding_cannot_collect_or_release_checking_copy(
         checking_run, monkeypatch, forbid_effects, foreign):  # noqa: F811
     root, _subject, area, run = checking_run

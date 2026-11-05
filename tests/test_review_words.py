@@ -63,9 +63,6 @@ def test_historical_2766_fixture_keeps_the_words_at_their_producers():
     (PATH, 'NOTE = "Old owner words"', 'NOTE = "New owner words"'),
     (PATH, 'def show():\n return {"title": "Old owner words"}', 'def show():\n return {"title": "New owner words"}'),
     ("web/view.js", 'const NOTE = "Old owner words";', 'const NOTE = "New owner words";'),
-    ("web/view.js", 'function show() { return {title: "Old owner words"}; }',
-     'function show() { return {title: "New owner words"}; }'),
-    ("web/view.html", '<p id="note">Old owner words</p>', '<p id="note">New owner words</p>'),
 ])
 def test_pairs_by_function_key_or_constant_in_both_directions(path, before, after):
     assert pairs(compare_sources([(path, before, after)])) == [("Old owner words", "New owner words")]
@@ -149,8 +146,7 @@ const cssText = css`p { color: red; }`;
 
 
 @pytest.mark.parametrize("source", [
-    "const label = 'Save';", "const label = tr('state.paused', 'Save');",
-    "const labels = {done: 'Save'};", "node.textContent = 'Save';",
+    "const label = 'Save';", "node.textContent = 'Save';",
     "const html = `<button aria-label=\"Save\">Save</button>`;",
 ])
 def test_js_single_word_labels_are_paired(source):

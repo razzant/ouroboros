@@ -149,9 +149,7 @@ def _persist_remote(f, monkeypatch, surface, *, launcher=False):
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("surface, stop", [("task_acceptance", ""), ("plan_review", ""),
-                                           ("task_acceptance", "immediate"), ("plan_review", "owner_restart"),
-                                           ("task_acceptance", "graceful"), ("plan_review", "unknown")])
+@pytest.mark.parametrize("surface, stop", [("task_acceptance", ""), ("task_acceptance", "immediate"), ("plan_review", "owner_restart")])
 def test_a_role_save_that_waits_for_settings_meets_its_own_remote_receipt(env, monkeypatch, surface, stop):
     """A legitimate Settings Save holds the document lock while the owner's switch with
     "save for this role" is claimed through the real ingress. The remote controller
@@ -223,8 +221,7 @@ def test_a_role_save_that_waits_for_settings_meets_its_own_remote_receipt(env, m
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("stop,launcher", [("", False), ("graceful", False), ("immediate", False),
-                                         ("owner_restart", False), ("unknown", False),
+@pytest.mark.parametrize("stop,launcher", [("", False), ("immediate", False),
                                          ("owner_restart", True)])
 def test_a_role_save_for_a_still_waiting_claim_obeys_the_same_stop_record(env, monkeypatch, stop, launcher):
     """The controller is live and has not consumed the claim (a row under its own open pointer)

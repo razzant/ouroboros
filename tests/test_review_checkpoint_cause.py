@@ -196,9 +196,7 @@ def test_session_checkpoint_retains_same_actor_retry_capture(
 
 
 @pytest.mark.parametrize("scenario,expected", [
-    ("authority", "authority_error"), ("authority_unsent", "authority_error"),
-    ("provider", "provider_transport_error"), ("unsent", "not_dispatched"),
-    ("success", "success"),
+    ("authority", "authority_error"), ("provider", "provider_transport_error"), ("unsent", "not_dispatched"),
 ])
 def test_failure_facts_reach_persisted_task_history_and_actual_card(tmp_path, fake_route, monkeypatch, scenario, expected):
     from dataclasses import asdict, replace

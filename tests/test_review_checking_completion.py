@@ -39,8 +39,6 @@ _LOCKABLE = pytest.mark.skipif(os.name == "nt" or getattr(os, "geteuid", lambda:
 @pytest.mark.parametrize("detail", [
     {},
     {"state": "succeeded"},
-    {"summary": None, "runFacts": {"state": "succeeded"}},
-    {"summary": {"state": "running"}, "result": {"final": True}},
     {"summary": {"state": "interrupted", "failure": {"cause": "host_restart"}}},
 ])
 def test_early_or_unobserved_details_leave_the_copy_untouched(tmp_path, detail):

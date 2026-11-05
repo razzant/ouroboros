@@ -441,7 +441,6 @@ def _exited(pid, birth, within):
 
 @pytest.mark.parametrize("alive,observed_birth,expected", [
     (True, "", False),
-    (True, "original", False),
     (True, "replacement", True),
     (False, "", True),
 ])

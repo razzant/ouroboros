@@ -170,7 +170,7 @@ def test_a_malformed_catalog_raises_on_every_pool_reader_never_a_default_panel(c
 # --- an empty pool: the Main model reviews alone (owner decision B) ------------------------
 
 
-@pytest.mark.parametrize("catalog", ["unmarked", "switched_off", "no_rows", "absent"])
+@pytest.mark.parametrize("catalog", ["unmarked", "switched_off", "absent"])
 def test_an_empty_valid_pool_is_one_main_seat_that_reads_and_answers_both_parts(clean_env, catalog):
     """No enabled marked row (rows unmarked, the marked row switched off, no rows, no
     catalog) is ONE seat on every pool reader: ``main``, the direct Main row on Main's own

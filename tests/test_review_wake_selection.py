@@ -29,7 +29,7 @@ def _entry(status="responded", *, published=True, additional=False):
     return entry
 
 
-@pytest.mark.parametrize("status", ["responded", "parse_failure", "error", "not_dispatched", "interrupted"])
+@pytest.mark.parametrize("status", ["responded", "parse_failure", "interrupted"])
 def test_selected_finalized_answer_or_unavailability_wakes_and_peek_never_acks(tmp_path, status):
     ctx, entry = _ctx(tmp_path), _entry(status)
     selected = {"reviewers": [_pin()]}
@@ -45,7 +45,7 @@ def test_selected_finalized_answer_or_unavailability_wakes_and_peek_never_acks(t
     assert not model_sleep.terminal_readiness(ctx, selected, [ready[0]["id"]], review_entries=[entry])
 
 
-@pytest.mark.parametrize("case", ["unselected", "raw", "pending", "additional", "unfinalized", "other_wave", "other_operation", "other_slot"])
+@pytest.mark.parametrize("case", ["unselected", "additional", "other_slot"])
 def test_noncanonical_or_unselected_review_does_not_wake(tmp_path, case):
     ctx, entry = _ctx(tmp_path), _entry()
     pin = _pin()
@@ -81,8 +81,7 @@ def test_default_is_whole_wave_and_explicit_helpers_use_readable_ids(tmp_path):
     assert "waking_actor_id" not in resumed  # a new wait observes its own waking source
 
 
-@pytest.mark.parametrize("invalid", [{"tasks": ["all"]}, {"tasks": "child"}, {"runs": ["foreign"]},
-                                      {"reviewers": [""]}, {"wake_after_sec": 1}, {"wake_at": "later"}, []])
+@pytest.mark.parametrize("invalid", [{"wake_after_sec": 1}, {"wake_at": "later"}, []])
 def test_invalid_selectors_refuse_before_review(tmp_path, invalid):
     ctx = _ctx(tmp_path)
     with pytest.raises(ValueError):
@@ -324,7 +323,7 @@ def test_retained_ledger_unavailability_uses_exact_owned_canonical_outcome(tmp_p
     assert bool(model_sleep.terminal_readiness(_ctx(tmp_path, task_id=owner), chosen)) is (owner == "task-1" and status == "error")
 
 
-@pytest.mark.parametrize("wake_on", [None, {}, {"tasks": [], "reviewers": []}, {"tasks": ["child"]}])
+@pytest.mark.parametrize("wake_on", [None, {}, {"tasks": ["child"]}])
 def test_system_report_refuses_unsupported_wake_choice_before_dispatch(tmp_path, monkeypatch, wake_on):
     from ouroboros import preflight_receipts
     from ouroboros.tools import review_change

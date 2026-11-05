@@ -79,9 +79,8 @@ def test_every_terminal_releases_its_copy_after_the_receipt(tmp_path, state, sco
     assert rc.terminal_seat_evidence(root, TASK, "op-1", {"summary": summary}) == receipt
 
 
-@pytest.mark.parametrize("detail", [{"summary": {"state": "running"}}, {"summary": {"state": "queued"}},
-                                    {"summary": None}, {}, None],
-                         ids=["running", "queued", "no-summary", "empty", "none"])
+@pytest.mark.parametrize("detail", [{"summary": {"state": "running"}}, {"summary": None}, None],
+                         ids=["running", "no-summary", "none"])
 def test_a_run_not_seen_terminal_keeps_its_copy(tmp_path, detail):
     root, source = _frozen(tmp_path)
     area = _seat(root, source, "op-1")

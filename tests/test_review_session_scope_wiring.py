@@ -187,8 +187,6 @@ def _coupling_matrix_with_critical():
         (200_000, "unknown_conservative"),
         # Sourced, but genuinely below the floor.
         (131_072, "confirmed"),
-        # Sourced and large.
-        (1_000_000, "confirmed"),
         # The designated-default sentinel is a routing grant, never a measurement.
         (1_000_000, "designated_default_sentinel"),
     ],

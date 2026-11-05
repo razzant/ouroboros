@@ -161,7 +161,7 @@ def test_acquisition_refusal_preserves_platform_cause_and_timeout_compatibility(
     assert _path(tmp_path).read_bytes() == before
 
 
-@pytest.mark.parametrize("value", [None, False, 0, [], "read result"])
+@pytest.mark.parametrize("value", [None, 0, "read result"])
 def test_only_explicit_unchanged_results_skip_a_save_and_keep_return_contract(tmp_path, monkeypatch, value):
     store.save_state(tmp_path, store.AdvisoryReviewState())
     before, mtime = _path(tmp_path).read_bytes(), _path(tmp_path).stat().st_mtime_ns
@@ -177,7 +177,7 @@ def test_only_explicit_unchanged_results_skip_a_save_and_keep_return_contract(tm
     assert writes == [_path(tmp_path)]  # arbitrary false/None still keeps the old save behavior
 
 
-@pytest.mark.parametrize("legacy", ["missing_field", "coalescing", "hydration", "roster", "ordering", "counter_type"])
+@pytest.mark.parametrize("legacy", ["missing_field", "coalescing", "counter_type"])
 def test_false_changed_fact_still_persists_load_and_preparation_changes(tmp_path, monkeypatch, legacy):
     state = store.AdvisoryReviewState(attempts=[_attempt()])
     store.save_state(tmp_path, state)

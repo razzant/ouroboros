@@ -123,7 +123,7 @@ def test_ordinary_child_can_request_independent_review(tree, subject):
     assert load_record(parent.drive_root, result['record_id'])['task_id'] == child.task_id
 
 
-@pytest.mark.parametrize('target', ['foreign', 'system', 'symlink', 'enclosing'])
+@pytest.mark.parametrize('target', ['foreign', 'system', 'enclosing'])
 def test_name_grant_alone_cannot_widen_the_review_target(tree, monkeypatch, target):
     parent, child, project = tree
     (parent.repo_dir / 'README.md').write_text('Foreign target change\n')

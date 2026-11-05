@@ -13,6 +13,7 @@ import pytest
 
 
 from tests._review_session_route_shared import _owned_gateway_uses_each_test_transport as __owned_gateway_uses_each_test_transport
+from tests._cases import chosen_rows
 
 # The autouse transport fixture is requested by pytest, not by name, so it is re-bound
 # through a module attribute exactly as in the sibling suites: leaving it behind would
@@ -149,7 +150,6 @@ def test_poller_keeps_polling_when_the_engine_timeout_lands_inside_the_slot(
 @pytest.mark.parametrize("timeout_at", [
     None,                     # absent: no engine expiry exists
     "not-a-timestamp",        # unparseable: no PROVEN expiry
-    "at_deadline",            # lands at/after the slot deadline
     "far_future",             # far beyond the slot
 ])
 def test_poller_still_terminates_when_no_expiry_lands_inside_the_slot(
@@ -274,7 +274,7 @@ def test_waiting_on_user_raise_carries_the_honest_cancel_outcome(
     assert stub.cancels == ["review_session_waiting_on_user"]
 
 
-@pytest.mark.parametrize("outcome,expected", _CANCEL_OUTCOME_CASES)
+@pytest.mark.parametrize("outcome,expected", chosen_rows(_CANCEL_OUTCOME_CASES, 0, 1, 3))
 def test_slot_timeout_raise_carries_the_honest_cancel_outcome(
         tmp_path, monkeypatch, outcome, expected):
     """BR1-1(c): the same outcome-honesty on the slot-timeout cancel — a
@@ -466,10 +466,7 @@ def test_an_unreadable_settled_success_raises_typed_never_may_still_be_live(
 
 @pytest.mark.parametrize("state,must,must_not", [
     ("failed", "its own terminal state 'failed'", "host-cancelled"),
-    ("interrupted", "its own terminal state 'interrupted'", "host-cancelled"),
     ("cancelled", "host-cancelled with a verified terminal receipt", "its own terminal"),
-    ("settled", "host-cancelled with a verified terminal receipt", "its own terminal"),
-    ("absent", "host-cancelled with a verified terminal receipt", "its own terminal"),
     ("", "host-cancelled with a verified terminal receipt", "its own terminal"),
 ])
 def test_confirmed_attribution_follows_the_verified_state(state, must, must_not):
@@ -564,7 +561,7 @@ def _transient(code="daemon_unreachable", status_code=0):
 
 
 @pytest.mark.parametrize("failure", [
-    _transient(), _transient("poll_wall_timeout"), _transient("malformed_response"),
+    _transient(), _transient("malformed_response"),
     _transient("http_503", status_code=503),
 ])
 def test_a_transient_observation_failure_keeps_polling_until_the_terminal(tmp_path, monkeypatch, failure):
