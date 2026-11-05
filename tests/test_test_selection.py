@@ -34,6 +34,7 @@ def test_leaf_selects_only_direct_importers_and_changed_tests_above_floor(repo):
 
 @pytest.mark.parametrize("path", [
     "tests/conftest.py", "pyproject.toml", "tests/fixtures/sample.json",
+    "ouroboros/preflight_probe.py", "ouroboros/test_bytecode.py",  # the gate's plugin and its warm: apparatus too
 ])
 def test_verification_changes_require_full(repo, path):
     result = selection.select_from_paths(repo, [path], base="base")
