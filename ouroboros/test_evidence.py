@@ -383,16 +383,38 @@ class FileOutput:
 
 
 class CapturedPass(tuple):
-    """The existing three-value lane API, plus independent diagnostic status."""
-    def __new__(cls, returncode, output, containment_error, evidence_errors=()):
+    """The existing three-value lane API, plus independent diagnostic status and the lane's token."""
+    def __new__(cls, returncode, output, containment_error, evidence_errors=(), containment_token=""):
         result = super().__new__(cls, (returncode, output, containment_error))
-        result.evidence_errors = list(evidence_errors)
+        result.evidence_errors, result.containment_token = list(evidence_errors), containment_token
         return result
 
 
-def finish_gate(evidence, verdict, phase, release) -> None:
-    """Persist outcome before release; retention/evidence never rewrite a verdict."""
-    from ouroboros.test_environment import marker_text, retain_tree, retained_folders
+def record_kept_scratch(ctx, root, kept, tokens) -> None:
+    """One session-scratch record (``workspace_preflight``'s shape, with what is kept and why) for a
+    run's task: the custody pass over finished tasks then holds and releases a kept root like any
+    task's scratch, with no reader, sweeper or age of its own. The root's ``obs-`` name is what
+    that shape requires. A run with no task records nothing, nor does a root an outer owner releases."""
+    from ouroboros.test_environment import default_temp_parent
+    from ouroboros.tool_access_paths import canonical_data_root
+    from ouroboros.workspace_preflight import SESSION_SCRATCH_DIRNAME, _note_open_scratch, _owned_directory
+
+    task_id, drive = str(getattr(ctx, "task_id", "") or ""), getattr(ctx, "drive_root", "")
+    if not task_id or not drive or root.parent != default_temp_parent().resolve():
+        return
+    owner = _owned_directory(drive, ("task_drives", task_id, SESSION_SCRATCH_DIRNAME, root.name), root)
+    seen = root.lstat()
+    write_record(owner / "scratch.json", {"schema_version": 1, "path": str(root), "identity": [seen.st_dev, seen.st_ino],
+                                          "kept": kept, "containment_tokens": tokens})
+    _note_open_scratch(canonical_data_root(ctx), task_id, root.name, owner)
+
+
+def finish_gate(evidence, verdict, phase, release, ctx=None) -> None:
+    """Persist outcome before release; retention/evidence never rewrite a verdict.
+
+    What stays is recorded with the outcome: the kept paths, why, the lanes' containment tokens
+    and, for a task's run, one session-scratch record (``record_kept_scratch``)."""
+    from ouroboros.test_environment import kept_facts, marker_text, retain_tree, retained_folders
 
     cleanup = evidence.get("cleanup")
     # The run's own hold keeps its whole root; a marker beneath the root keeps only its folder.
@@ -410,7 +432,8 @@ def finish_gate(evidence, verdict, phase, release) -> None:
               "lanes": evidence.get("lanes", []),
               "diagnostics_incomplete": bool(evidence.get("evidence_errors")),
               "evidence_errors": evidence.get("evidence_errors", []),
-              "retention_reason": reason, "cleanup": "pending" if cleanup else "not_created"}
+              "retention_reason": reason, "cleanup": "pending" if cleanup else "not_created",
+              "kept": [], "containment_tokens": []}
     try:
         write_record(evidence["path"] / "result.json", record)
     except OSError as exc:
@@ -430,6 +453,13 @@ def finish_gate(evidence, verdict, phase, release) -> None:
         record.update(cleanup="retained" if remains else "released", retention_reason=reason)
         if remains:
             report_diagnostic(f"PREFLIGHT_RETAINED {cleanup[1]}: {reason or 'release incomplete'}")
+            record.update(kept=kept_facts(kept) or [{"path": str(cleanup[1]), "reasons": [
+                (reason or "release incomplete").split("\n")[0]]}],
+                containment_tokens=[token for token in evidence.get("containment_tokens", ()) if token])
+            try:
+                record_kept_scratch(ctx, cleanup[1], record["kept"], record["containment_tokens"])
+            except (OSError, ValueError, KeyError, TypeError) as exc:  # the tree stays either way; its record is a gap
+                report_diagnostic(f"PREFLIGHT_EVIDENCE_INCOMPLETE {cleanup[1]}: no scratch record: {exc}")
         try:
             write_record(evidence["path"] / "result.json", record)
         except OSError as exc:

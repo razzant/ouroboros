@@ -18,7 +18,7 @@ import time
 
 from ouroboros.process_containment import ProcessContainer
 from ouroboros.test_environment import (
-    isolated_environment, marker_text, release_except_retained, retain_tree, retained_folders,
+    isolated_environment, kept_facts, release_except_retained, retain_tree, retained_folders,
 )
 from ouroboros.test_evidence import (
     EVIDENCE_ENV, EVIDENCE_POINTER, FileOutput, describe_gaps, evidence_directory, retain_uncaptured_source,
@@ -34,13 +34,11 @@ def release_scratch(root: Path) -> dict:
     """Release declared *direct* children, never unknown command data or symlinks. A retention marker
     keeps its own folder, and at the top of ``root`` all of it (``retained_folders``)."""
     kept = retained_folders(root)
-    held = [{"path": str(folder), "reasons": [marker_text(found).split("\n")[0] for found in found_in]}
-            for folder, found_in in kept.items()]
     if root in kept:
-        markers = [found for found_in in kept.values() for found in found_in]
+        markers = [found for held in kept.values() for found in held]
         listed = ", ".join(map(str, markers[:_LISTED_MARKERS]))
         more = f" (+{len(markers) - _LISTED_MARKERS} more)" if len(markers) > _LISTED_MARKERS else ""
-        return {"released": [], "retained": [str(root)], "kept": held,
+        return {"released": [], "retained": [str(root)], "kept": kept_facts(kept),
                 "reason": f"retention marker or unreadable subtree: {listed}{more}"}
     # Declarations say reproducible, not idle. The caller already reaped its
     # container; no independent consumer may call this as a reaper.
@@ -57,7 +55,7 @@ def release_scratch(root: Path) -> dict:
             path.rmdir()
         except OSError:
             pass
-    return {"released": released, "retained": [str(root)] if root.exists() else [], "kept": held}
+    return {"released": released, "retained": [str(root)] if root.exists() else [], "kept": kept_facts(kept)}
 
 
 class _LiveDisplay(threading.Thread):
@@ -255,12 +253,15 @@ def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) ->
                 why = evidence_error = f"evidence/cleanup incomplete: {exc}"
         if why:
             retain_tree(root, why)  # a marker beneath the root already holds its own folder, and only that
-        kept = cleanup.get("kept") or []
+        kept = cleanup.pop("kept", None)
+        if kept is None:  # the root's own hold: nothing was walked, and only its reason matters
+            kept = [{"path": str(root), "reasons": [why.split("\n")[0]]}]
         reason = why or (f"{kept[0]['path']}: {kept[0]['reasons'][0]}" if kept else "")
         if evidence is not None:
             try:
                 write_record(evidence / "result.json", {**facts, "evidence_error": evidence_error, "cleanup": cleanup,
-                                                        "retention_reason": reason})
+                                                        "retention_reason": reason, "kept": kept,
+                                                        "containment_tokens": [container.token] if kept else []})
             except OSError as exc:
                 report_diagnostic(f"SAFE_TEST_EVIDENCE_INCOMPLETE {exc}")
         if reason:

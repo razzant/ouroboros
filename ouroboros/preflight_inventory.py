@@ -202,6 +202,7 @@ def note_lane_process(exc: BaseException, container, proc) -> None:
     try:
         exc.preflight_lane_process = True if proc is not None else False if created is False else None
         exc.preflight_lane_teardown = teardown
+        exc.preflight_lane_token = container.token
     except (AttributeError, TypeError):  # an exception that takes no attributes stays unknown
         pass
 
@@ -222,6 +223,7 @@ def launching(evidence: dict):
         evidence["execution"] = "executed" if acquired is True else before if acquired is False else "attempted"
         if isinstance(teardown := getattr(exc, "preflight_lane_teardown", None), str):
             evidence["lane_teardown"] = teardown
+        evidence.setdefault("containment_tokens", []).append(getattr(exc, "preflight_lane_token", ""))
         raise
     evidence["execution"] = "executed"
 

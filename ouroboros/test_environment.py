@@ -161,19 +161,25 @@ def retained_folders(root) -> dict[Path, list[Path]]:
     return kept
 
 
+def kept_facts(kept) -> list[dict]:
+    """``retained_folders`` as a record: each kept path with each marker's first line."""
+    return [{"path": str(folder), "reasons": [marker_text(found).split("\n")[0] for found in markers]}
+            for folder, markers in kept.items()]
+
+
 def release_except_retained(root, kept, remove, *, declared_only=False) -> list[str]:
     """Remove what ``root`` holds beyond ``kept`` (``retained_folders``); the removed paths.
 
     The caller proved its run's processes gone. ``remove`` takes a directory tree; links go as links,
     never followed. ``declared_only`` leaves direct children no scratch declaration names: unknown
-    command data, links included. The folders on the way to a kept one stay, with their declarations."""
+    command data, links included. The folders on the way to a kept one stay, declared as they were."""
     released: list[str] = []
     passed = {parent for folder in kept for parent in folder.parents}
 
     def release(directory: Path, top: bool) -> None:
         for entry in list(os.scandir(directory)):
             path, is_dir = Path(entry.path), entry.is_dir(follow_symlinks=False)
-            if path in kept or (entry.name == SCRATCH_MARKER and not top):
+            if path in kept or entry.name == SCRATCH_MARKER:
                 continue
             if path in passed:
                 release(path, False)

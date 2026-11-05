@@ -283,6 +283,8 @@ class ProcessContainer:
         self._setup_error = ""
         # Unique per instance: a nested preflight and its outer run never claim each other's.
         self._token = f"{CONTAINMENT_ENV_PREFIX}{uuid.uuid4().hex}"
+        # The same name after ``reap`` consumed it: what a record of a kept tree can prove gone later.
+        self.token = self._token
         self._protect_owner = lifeline
         self._watch_overload = overload
         self._lifeline = self._watch = None

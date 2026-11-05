@@ -306,6 +306,8 @@ def test_failed_containment_setup_never_reexecutes_the_command(tmp_path, monkeyp
     root.mkdir()
     calls = []
     class BrokenContainer:
+        token = 'OURO_PROC_CONTAINER_fixture'
+
         def spawn(self, command, **kwargs):
             calls.append('spawn')
             raise OSError('setup failed after possible creation')
@@ -494,7 +496,7 @@ def test_a_lost_final_record_leaves_every_observed_fact_in_the_pending_one(tmp_p
     assert 'SAFE_TEST_EVIDENCE_INCOMPLETE controlled loss of the final record' in err
     assert json.loads((run / 'result.json').read_bytes()) == pending and pending['cleanup'] == 'pending'
     # Only cleanup and retention move on; the INT-window observation and every other fact are already there.
-    moving = {'cleanup', 'retention_reason'}
+    moving = {'cleanup', 'retention_reason', 'kept', 'containment_tokens'}
     assert {key: value for key, value in final.items() if key not in moving} == {
         key: value for key, value in pending.items() if key not in moving}
     assert (pending['returncode'], pending['execution'], pending['stopped'], pending['interrupt_escalation']) == (

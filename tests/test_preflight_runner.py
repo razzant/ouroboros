@@ -986,7 +986,7 @@ def _pin_preflight_root(monkeypatch, temp_root):
     """Pin only the gate's scratch root; its evidence and lane logs keep their own directories."""
     real = tempfile.mkdtemp
     monkeypatch.setattr(tempfile, "mkdtemp", lambda *a, **k: str(temp_root)
-                        if k.get("prefix") == "ouroboros-preflight-" else real(*a, **k))
+                        if k.get("prefix") == "obs-preflight-" else real(*a, **k))
 
 
 @pytest.fixture
@@ -1368,7 +1368,7 @@ def test_the_hermetic_tree_is_deleted_only_after_every_lane_proved_its_teardown(
 def test_the_retention_notice_precedes_the_body_and_stays_inside_the_budget():
     from ouroboros.preflight_runner import _with_retention_notice
 
-    tree = pathlib.Path("/t/ouroboros-preflight-x/repo")
+    tree = pathlib.Path("/t/obs-preflight-x/repo")
     assert _with_retention_notice("H\nbody", "", tree, 8000) == "H\nbody"
     kept = _with_retention_notice("H\n" + "b" * 9000, "unproven", tree, 400)
     assert kept.startswith(f"H\nRETAINED (not deleted): {tree.parent},"), kept
@@ -2762,9 +2762,9 @@ def test_hermetic_pytest_applies_candidate_diff_and_scrubs_live_env(tmp_path, mo
             'assert "OUROBOROS_SAFETY_MODE" not in os.environ',
             'assert "OUROBOROS_TASK_REVIEW_MODE" not in os.environ',
             'assert "OUROBOROS_FAKE_API_KEY" not in os.environ',
-            'assert "ouroboros-preflight-" in os.environ["OUROBOROS_DATA_DIR"]',
+            'assert "obs-preflight-" in os.environ["OUROBOROS_DATA_DIR"]',
             'assert os.environ["OUROBOROS_SETTINGS_PATH"].startswith(os.environ["OUROBOROS_DATA_DIR"])',
-            'assert "ouroboros-preflight-" in os.environ["OUROBOROS_REPO_DIR"]',
+            'assert "obs-preflight-" in os.environ["OUROBOROS_REPO_DIR"]',
             'assert pathlib.Path(os.environ["OUROBOROS_DATA_DIR"]).parent in tmp_path.parents',
         ]
     )
@@ -3399,6 +3399,8 @@ def test_pass_returns_observed_reap_and_export_status(tmp_path, monkeypatch, exp
     calls = []
 
     class Container:
+        token = "OURO_PROC_CONTAINER_fixture"
+
         def spawn(self, *_args, **kwargs):
             calls.append("spawn")
             kwargs["stdout"].write(b"observed output\n")
