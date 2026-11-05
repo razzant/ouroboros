@@ -9,6 +9,58 @@ from ouroboros.presence_bindings import PresenceBinding, PresenceEndpoint
 from tests.frozen_presence_bindings import save_presence_binding
 
 
+def paused_inventory(root, kind):
+    """A stored inventory without a migration stamp, shared with restart consumers."""
+    path = p.places_path(root)
+    if kind == "absent":
+        return ""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "unreadable":
+        path.write_text("{broken", encoding="utf-8")
+        return "Paused places: unknown (place records could not be read)."
+    rows = {key: p.place_summary(p.Place(key, "custom-bridge", "custom", label=label, state=state))
+            for key, label, state in [("a", "Research room", "paused"), ("b", "", "paused"),
+                                     ("c", "Active room", "active"), ("d", "Silent room", "silent")]}
+    if kind == "empty":
+        rows = {}
+    path.write_text(json.dumps({"schema_version": 1, "revision": 4, "places": rows}), encoding="utf-8")
+    return "Places still paused: Research room, b." if rows else ""
+
+
+@pytest.mark.parametrize("kind", ["paused", "empty", "absent", "unreadable"])
+def test_paused_places_sentence_reads_without_migration_or_writes(tmp_path, monkeypatch, kind):
+    expected = paused_inventory(tmp_path, kind)
+    path = p.places_path(tmp_path)
+    before = path.read_bytes() if path.exists() else None
+    monkeypatch.setattr(p, "migrate_places", lambda *_a: pytest.fail("display migrated places"))
+    monkeypatch.setattr(p, "update_json_locked", lambda *_a, **_k: pytest.fail("display wrote places"))
+    assert p.paused_places_sentence(tmp_path) == expected
+    assert (path.read_bytes() if path.exists() else None) == before
+
+
+@pytest.mark.parametrize("migration_saved", [False, True])
+def test_paused_places_legacy_warning_ends_after_persisted_migration(tmp_path, monkeypatch, migration_saved):
+    expected = paused_inventory(tmp_path, "paused")
+    binding = PresenceBinding("a" * 32, "slack-bridge", "missing-mind", PresenceEndpoint("slack", "team", "*"),
+                              PresenceEndpoint("slack", "team", "elsewhere"), False)
+    save_presence_binding(tmp_path, binding)
+    legacy = tmp_path / "state" / "presence_bindings.json"
+    legacy_bytes = legacy.read_bytes()
+    monkeypatch.setattr("ouroboros.skill_loader.find_skill", lambda *_a: None)
+    if migration_saved:
+        document = p.migrate_places(tmp_path)
+        assert document["migration"]["presence_bindings_v1"] and document["migration"]["problems"]
+    else:
+        expected += " Paused legacy places: unknown (some old connections could not be read)."
+    path = p.places_path(tmp_path)
+    before = path.read_bytes()
+    monkeypatch.setattr(p, "migrate_places", lambda *_a: pytest.fail("display persisted migration"))
+    monkeypatch.setattr(p, "update_json_locked", lambda *_a, **_k: pytest.fail("display wrote places"))
+    assert p.paused_places_sentence(tmp_path) == expected
+    assert p.paused_places_sentence(tmp_path) == expected
+    assert path.read_bytes() == before and legacy.read_bytes() == legacy_bytes
+
+
 def connect(root, **kw):
     return p.connect_place(root, connector="slack-bridge", provider="slack", account_id="team", **kw)
 
@@ -65,6 +117,9 @@ def test_migration_exact_sources_and_idempotence(tmp_path, monkeypatch, enabled)
                               PresenceEndpoint("slack", "team", "elsewhere"), enabled)
     save_presence_binding(root, binding)
     source = (root / "state" / "presence_bindings.json").read_bytes()
+    assert p.paused_places_sentence(root) == ("" if enabled else "Places still paused: slack.")
+    assert not p.places_path(root).exists()
+    assert (root / "state" / "presence_bindings.json").read_bytes() == source
     place, = p.load_places(root)
     assert place.state == ("active" if enabled else "paused") and place.legacy_binding_ids == (binding.binding_id,)
     assert place.notes[0] == p.NoteEntry("Keep these exact words.\n", "migration")
@@ -74,6 +129,7 @@ def test_migration_exact_sources_and_idempotence(tmp_path, monkeypatch, enabled)
     assert "connected_revision" not in json.loads(p.places_path(root).read_text(encoding="utf-8"))["places"][place.place_id]
     saved = p.edit_place(root, place.place_id, "set_state", author="owner", state="silent")
     assert p.load_places(root) == [saved]
+    assert p.paused_places_sentence(root) == ""
     assert (root / "state" / "presence_bindings.json").read_bytes() == source
 
 
@@ -84,6 +140,7 @@ def test_empty_and_malformed_sources_preserved(tmp_path):
     path = other / "state" / "presence_bindings.json"
     path.parent.mkdir(parents=True)
     path.write_text("{broken")
+    assert p.paused_places_sentence(other) == "Paused places: unknown (place records could not be read)."
     with pytest.raises(p.PlaceError, match="repair"):
         p.load_places(other)
     assert path.read_text(encoding="utf-8") == "{broken"

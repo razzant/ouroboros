@@ -225,7 +225,7 @@ def _resume_outstanding(current: Dict[str, Any], fence: Dict[str, Any]) -> bool:
 
 
 def install_fence(root_drive: Any, root_task_id: str, *, request_id: str,
-                  late_work: bool = False, requested_by: str = "owner",
+                  late_work: bool = False,
                   actor_id: str = "", by: Optional[dict] = None) -> Tuple[Dict[str, Any], bool]:
     """Close the root's fence durably; ``(fence, created)``.
 
@@ -284,9 +284,7 @@ def install_fence(root_drive: Any, root_task_id: str, *, request_id: str,
             return stamp_task_result_schema({**current, "owner_pause": fence})
         fence = {
             **attribution, "fence_id": uuid.uuid4().hex, "request_id": str(request_id or ""),
-            # ``owner``: this owner Pause control, whoever pressed it (``by`` is who declared the press);
-            # a stop door names itself (``server_shutdown``, ``owner_restart``): the next start reads it.
-            "state": FENCE_REQUESTED, "requested_by": str(requested_by or "owner"), "requested_at": utc_now_iso(),
+            "state": FENCE_REQUESTED, "requested_at": utc_now_iso(),
             "requested_at_ts": time.time(), "root_task_id": str(root_task_id),
             "generation": int(old.get("generation") or 0) + 1,
             # Still closed here only under outstanding Resume authority: name it.

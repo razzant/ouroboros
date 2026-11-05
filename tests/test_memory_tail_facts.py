@@ -375,7 +375,7 @@ def test_a_transport_keeps_the_facts_its_readers_read_and_never_the_thread_copy(
         meta = ROW_META(row)
         assert [read(meta) for read in readers] == [read(row) for read in readers], row["ts"]
         held = json.dumps(meta["transport"])
-        assert "thread line" not in held and "blocks" not in held and "profile" not in held and "sends_as" not in held
+        assert "thread line" not in held and "blocks" not in held and "profile" not in held
         assert len(held) * 20 < len(json.dumps(row["transport"]))  # a row's facts stay small whatever its thread
     assert ROW_META({"transport": {}})["transport"] == {}  # an owner's own row stays without transport facts
     flat = {"kind": "telegram", "conversation_id": "5", "sender_label": "Ann"}  # a bridge's flat transport: all scalars

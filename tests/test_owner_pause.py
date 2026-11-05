@@ -374,10 +374,12 @@ def test_a_fence_keeps_its_first_declared_author_and_a_press_that_declared_nobod
     assert request_owner_pause("root-1", request_id="bare")["ok"]
     fence = read_fence(tmp_path, "root-1")
     assert "by" not in fence and pause_author(fence)["actor"] == "", "an anonymous press names nobody"
+    assert "requested_by" not in fence
     # A later declared press on the same closed fence fills the author it lacked...
     assert request_owner_pause("root-1", request_id="owner-press", by=owner)["duplicate"] is True
     fence = read_fence(tmp_path, "root-1")
     assert fence["by"] == owner and pause_author(fence) == owner
+    assert "requested_by" not in fence
     # ...and a declared author is never overwritten; every press keeps its own record.
     assert request_owner_pause("root-1", request_id="mind-press", by=mind)["duplicate"] is True
     fence = read_fence(tmp_path, "root-1")
@@ -393,6 +395,7 @@ def test_a_fence_keeps_its_first_declared_author_and_a_press_that_declared_nobod
     assert request_owner_pause("solo", request_id="owner-later", by=owner)["ok"]
     fence = read_fence(tmp_path, "solo")
     assert fence["by"]["actor"] == "ouroboros" and pause_author(fence)["actor"] == "ouroboros"
+    assert "requested_by" not in fence
     assert pause_author(fence)["text"] == "Freeing the worker for the update"
 
 

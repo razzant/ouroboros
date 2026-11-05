@@ -286,19 +286,25 @@ def _owner_content_projection(content: Any) -> str:
     return "\n".join(parts)
 
 
-def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Dict[str, str]]:
+def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Dict[str, Any]]:
     """Collect the task-local canonical owner corpus without semantic inference."""
-    rows: List[Dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
+    rows: List[Dict[str, Any]] = []
+    seen_ids: set[tuple[str, ...]] = set()
+    seen_texts: set[str] = set()
 
-    def add(source: str, content: Any, msg_id: str = "", origin: Any = None) -> None:
+    def add(source: str, content: Any, msg_id: str = "", origin: Any = None, reply_to: Any = None) -> None:
         text = _owner_content_projection(content)
         if not text.strip():
             return
-        key = (str(msg_id or ""), text)
-        if key in seen or (not key[0] and any(existing[1] == text for existing in seen)):
+        # One source is one row: an identified row repeats only a row of one of its ids (a mailbox msg_id, a chat
+        # message's room and client id), never another message in the same words; a row with no id repeats words.
+        client = str((origin or {}).get("client_message_id") or "")
+        ids = {("msg", str(msg_id))} if msg_id else set()
+        ids |= {("client", str((origin or {}).get("chat_id") or ""), client)} if client else set()
+        if ids & seen_ids or (not ids and text in seen_texts):
             return
-        seen.add(key)
+        seen_ids.update(ids)
+        seen_texts.add(text)
         row = {"source": source, "content": text}
         if msg_id:
             row["msg_id"] = str(msg_id)
@@ -306,6 +312,8 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
         # the sibling it was relayed from, an owner answer's card) travels with the row:
         # every reader of this one corpus sees a relayed proposal as such, without inferring it from the text.
         row.update({key: str(value) for key, value in (origin or {}).items() if value})
+        if isinstance(reply_to, dict) and reply_to:  # the message these words reply to, never counted as them
+            row["reply_to"] = dict(reply_to)
         rows.append(row)
 
     recorded = getattr(ctx, "_owner_directives", None)
@@ -316,7 +324,9 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
                     str(item.get("source") or "task_local"),
                     item.get("content"),
                     str(item.get("msg_id") or ""),
-                    {key: item.get(key) for key in ("source_task_id", "relayed_from_task_id", "quiz_id")},
+                    {key: item.get(key) for key in ("source_task_id", "relayed_from_task_id", "quiz_id",
+                                                    "client_message_id", "chat_id")},
+                    item.get("reply_to"),
                 )
 
     messages = getattr(ctx, "messages", None)

@@ -290,11 +290,16 @@ def _drain_incoming_messages(
                 model_msg = card_press_model_text(str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root,
                                                   entry.get("card_press"), dmsg)
             owner_content = _owner_content({**entry, "text": model_msg}, drive_root, task_id)
+            from ouroboros.owner_words import reply_target
+
+            chats = str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root  # the room's rows
             _loop()._record_owner_directive(
                 owner_ctx,
                 source="owner_mailbox",
                 content=_owner_content(entry, drive_root, task_id),
                 msg_id=str(entry.get("msg_id") or ""),
+                origin={"client_message_id": entry.get("client_message_id")},  # the same message relayed: one row
+                reply_to=reply_target(chats, entry.get("reply_reference")) or None,
             )
             _stamp_owner_delivery(
                 owner_ctx,
@@ -520,6 +525,7 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         from ouroboros.tools.tool_discovery import update_resident_notice
         candidate = copy.deepcopy(candidate)
         update_resident_notice(ctx.tools, schemas, candidate)
+    receipt_source, retained_receipt = None, None
     if receipt["status"] != "no_op":
         from ouroboros.artifacts import store_actor_source_bytes
         import hashlib
@@ -532,6 +538,17 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
                 category="context_checkpoints", source_id=hashlib.sha256(raw).hexdigest(),
                 data=raw, extension="json")
             notice = {"status": receipt["status"], "receipt_source": source}
+            from ouroboros.observability import promote_task_source_ref
+            from ouroboros.task_custody import canonical_owner_root
+
+            root = ctx.drive_root or pathlib.Path(ctx.drive_logs).parent
+            try:
+                promote_task_source_ref(root, getattr(tool_ctx, "budget_drive_root", None) or canonical_owner_root(root),
+                                        source, task_id=ctx.task_id)
+                retained_receipt = copy.deepcopy(receipt)
+                receipt_source = {**source, "task_id": ctx.task_id}
+            except (OSError, ValueError):
+                pass  # Local model receipt remains valid; the event keeps all structures.
         except (OSError, ValueError):
             notice = {"status": receipt["status"], "receipt_source": "unavailable"}
         if memory_price:
@@ -591,8 +608,19 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
     tool_ctx._pending_compaction = None
     tool_ctx._pending_tool_schema_names = None
     tool_ctx._context_view_receipt = receipt
+    event_receipt = receipt
+    if receipt_source is not None:
+        # The saved candidate precedes the final fit and publication. Only equal
+        # structures move behind its reader; later facts stay in the event.
+        at_source = {key: len(value) for key, value in receipt.items()
+                     if isinstance(value, (dict, list, tuple)) and value == retained_receipt.get(key)}
+        source_ref = {key: value for key, value in receipt_source.items() if key != "read"}
+        receipt_source["read"] = {"tool": "memory_read", "arguments": {"source_ref": source_ref}}
+        event_receipt = {**{key: value for key, value in receipt.items() if key not in at_source},
+                         "at_source": at_source, "receipt_source": receipt_source,
+                         "receipt_stage": "candidate_materialization"}
     _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs,
-                                   {"checkpoint_kind": "context_view", "round": ctx.round_idx, **receipt})
+                                   {"checkpoint_kind": "context_view", "round": ctx.round_idx, **event_receipt})
     return candidate
 
 

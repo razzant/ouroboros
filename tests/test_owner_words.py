@@ -92,9 +92,9 @@ def test_child_passes_on_exactly_its_inherited_words(tmp_path):
     absent_child = _ctx(tmp_path, task_id="child02", metadata={"delegation_role": "subagent",
                                                                ow.ABSENT_FIELD: "initiator=consciousness"})
     assert ow.governing_words_for_schedule(absent_child) == {ow.ABSENT_FIELD: "initiator=consciousness"}
-    # A root holding the same metadata key rebuilds from its own corpus instead.
+    # A root holding the same metadata key hands those words on beside its own corpus.
     root = _ctx(tmp_path, metadata={ow.FIELD: inherited}, directives=[{"source": "initial_user", "content": "Mine"}])
-    assert _texts(ow.governing_words_for_schedule(root)[ow.FIELD]) == ["Mine"]
+    assert _texts(ow.governing_words_for_schedule(root)[ow.FIELD]) == ["Root words", "Mine"]
 
 
 def test_absence_carries_the_raw_run_origin_marker(tmp_path):

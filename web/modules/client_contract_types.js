@@ -351,6 +351,7 @@
  * @property {string=} author_label
  * @property {string=} kind
  * @property {string=} snippet
+ * @property {number=} chars  // the quoted text's whole length, present when snippet cuts it
  * @property {string=} ts
  * @property {string=} task_id
  * @property {'work'|'room'|'none'=} target_home  // what decides the quoted row's room; an older reference lacks it

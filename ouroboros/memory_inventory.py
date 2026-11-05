@@ -78,14 +78,17 @@ _REPLY_FIELDS = ("address", "chat_id", "task_id", "role", "target_home", "unreso
 # the dialogue row, read by address: on the owner's install they were four fifths of the stored tail.
 _TRANSPORT_NESTED = {
     "actor": ("display_name", "username", "platform_actor_id", "id",  # who spoke (``dialogue_speaker``)
-              "kind"),  # who made a wordless reaction (``row_author``)
+              "kind",  # who made a wordless reaction (``row_author``)
+              "authenticated", "is_bot"),  # the author fact (``places.owner_confirmed_row``, ``_place_speaker``)
+    "identity": ("sends_as",),  # the account I send as (``_place_speaker``)
     "delivery": ("state",  # ``dialogue_provenance``, ``reaction_note``, the view's typed fact, ``place_activity``
                  "presence_provenance"),  # an older receipt's place facts (``place_row_facts``)
     "message": ("reaction",),  # the typed reaction (``reaction_fact``): its words, or a row that is that act alone
 }
-# Bumped when ``row_meta``'s facts change (5: a transport keeps only what its readers read): a stored
-# prefix of another version is another source, read live until the maintenance job ``memory_tail`` refills it.
-_META_VERSION = 5
+# Bumped when ``row_meta``'s facts change (5: a transport keeps only what its readers read; 6: and the author
+# fact's): a stored prefix of another version is another source, read live until the maintenance job
+# ``memory_tail`` refills it.
+_META_VERSION = 6
 
 Entry = Tuple[Dict[str, Any], Dict[str, Any], int]
 

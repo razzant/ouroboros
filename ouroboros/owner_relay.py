@@ -17,11 +17,13 @@ from ouroboros.context_budget import OWNER_WORDS_KIND
 KIND_RELAY = "relay_entry"
 
 
-def _owner_row(row) -> bool:
+def quotable_owner_row(row, drive_root=None, *, accounts=None) -> bool:
+    """An attested owner row (``owner_words.owner_row``, over the caller's one place snapshot when given) or an
+    owner's answered card."""
     from ouroboros.owner_quiz import secret_outcome_block
-    from ouroboros.owner_words import _owner_row as attested
+    from ouroboros.owner_words import owner_row
     # A secret request's answer row is the host's outcome frame: never a quotable owner row.
-    return attested(row) or bool(row and row.get("type") == "quiz_answer"
+    return owner_row(row, drive_root, accounts=accounts) or bool(row and row.get("type") == "quiz_answer"
         and row.get("source") == "owner_quiz_answer" and (row.get("quiz") or {}).get("state") == "answered"
         and secret_outcome_block(row) is None)
 
@@ -52,13 +54,14 @@ def held_owner_messages(ctx) -> dict:
                 row = resolve_owner_message_source(canonical_data_root(ctx), ref)
             except StoreError:  # its archive is still importing: nothing held yet, never a failed turn
                 row = None
-            if _owner_row(row):
+            if quotable_owner_row(row, canonical_data_root(ctx)):
                 held[format_address(row_address(row))] = row
         persist_held_state(ctx)
     return held
 
 
-def retain_owner_message(ctx, row=None, *, client_message_id="") -> None:
+def retain_owner_message(ctx, row=None, *, client_message_id="", accounts=None) -> None:
+    """Hold one owner row of this turn by its address; ``accounts``: the caller's one place snapshot for its rows."""
     if ctx is None:
         return
     if row is None and client_message_id and getattr(ctx, "drive_root", None):
@@ -67,7 +70,9 @@ def retain_owner_message(ctx, row=None, *, client_message_id="") -> None:
         chat_id = getattr(ctx, "current_chat_id", None)  # a context may carry no chat: Main's lookup
         row = accepted_chat_message(canonical_data_root(ctx), 1 if chat_id is None else int(chat_id),
                                     client_message_id)
-    if _owner_row(row):
+    from ouroboros.tool_access import canonical_data_root
+    if quotable_owner_row(row, canonical_data_root(ctx) if getattr(ctx, "drive_root", None) else None,
+                          accounts=accounts):
         held_owner_messages(ctx)[format_address(row_address(row))] = copy.deepcopy(row)
         persist_held_state(ctx)
 
@@ -223,12 +228,22 @@ def write_relay(root, task_id: str, *, relay_id: str, note: str, quotes: list, c
 
 
 def inject_relay(ctx, entry: dict, messages: list) -> None:
-    """Only exact owner rows enter the owner corpus; the note has its own voice."""
+    """Only exact owner rows enter the owner corpus, carried from the teller (no reply owed); the note has its
+    own voice."""
     from ouroboros import loop
+    from ouroboros.owner_words import owner_place_accounts, reply_target
+    from ouroboros.tool_access import canonical_data_root
+
+    root = canonical_data_root(ctx) if getattr(ctx, "drive_root", None) else None
+    accounts = owner_place_accounts(root)  # one place snapshot for every quoted row
     for row in entry.get("owner_rows") or []:
-        retain_owner_message(ctx, row)
+        retain_owner_message(ctx, row, accounts=accounts)
         address = format_address(row_address(row))
-        loop._record_owner_directive(ctx, source="owner_mailbox", content=owner_text(row), msg_id=address)
+        loop._record_owner_directive(ctx, source="owner_mailbox", content=owner_text(row), msg_id=address, carried=True,
+                                     origin={"source_task_id": entry.get("source_task_id"),
+                                             "client_message_id": row.get("client_message_id"),
+                                             "chat_id": row.get("chat_id")},
+                                     reply_to=reply_target(root, row.get("reply_to")) or None)
         body = f"[Owner words quoted verbatim; handle {address}]\n{owner_text(row)}"
         if isinstance(row.get("reply_to"), dict) and row["reply_to"]:
             body += ("\n[Host reference: the message these owner words reply to; context, not the owner's words]\n"

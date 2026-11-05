@@ -131,7 +131,8 @@ def test_the_budget_pause_checkpoint_rides_the_same_producer_path(logs):
     frame = bus.get_nowait()["data"]
     assert bus.empty() and not progress_rows(logs.parent)
     assert row["checkpoint_kind"] == frame["checkpoint_kind"] == "budget_scope_paused"
-    assert row["toast_once"] == "t1:budget-paused:root" and row["scope"] == "root" and row["chat_id"] == 7
+    assert "toast_once" not in row and "owner_visible" not in row
+    assert row["scope"] == "root" and row["chat_id"] == 7
     assert row["ts"] == frame["ts"]
     _emit_budget_pause_checkpoint(None, logs, "t1", dict(limit))
     assert len(_rows(logs / "events.jsonl")) == 2

@@ -552,14 +552,14 @@ def _annotate_terminal_task_truth(
             # Selected receipt events keep their physical identity, but show current task-result truth.
             row_id = str(message.get("card_row_id") or "")
             if message.get("card_row") == "reviews" and row_id.startswith("merge-receipt:"):
-                from ouroboros.merge_receipts import card_row_text
+                from ouroboros.merge_receipts import card_row_projection
                 try:
                     receipt = next(r for r in cache.get(task_id, {}).get("merge_receipts", [])
                                    if isinstance(r, dict) and row_id == f"merge-receipt:{r.get('receipt_id')}")
                     revision = receipt.get("revision", 0)
                     if type(revision) is not int or revision < int(message.get("card_row_revision") or 0):
                         raise ValueError("canonical receipt revision unavailable")
-                    message.update(text=card_row_text(receipt), card_row_revision=revision)
+                    message.update(**card_row_projection(data_dir, receipt), card_row_revision=revision)
                 except (StopIteration, KeyError, TypeError, ValueError, AttributeError):
                     message["text"] += "\nCurrent merge receipt unavailable; showing recorded event."
             if cache.get(task_id, {}).get("_history_result_absent"):
@@ -828,7 +828,7 @@ def _collect_chat_rows(
                     if isinstance(entry.get(key), dict):
                         rec[key] = dict(entry[key])
                 for key in ("project_id", "project_name", "task_name", "target_label", "status", "completion_answer",
-                            "completion_reason", "delivery_id", "handoff_id"):
+                            "completion_reason", "delivery_id", "handoff_id", "wake_summary"):
                     if key in entry:
                         rec[key] = str(entry.get(key) or "")
             annotation = _user_annotation(role, rec["client_message_id"], chat_annotations)

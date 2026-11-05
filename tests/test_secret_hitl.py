@@ -898,7 +898,7 @@ def test_owner_corpus_readers_keep_secret_frames_host_authored(env):
     from ouroboros.dialogue_evidence import _row_projection
     from ouroboros.dialogue_provenance import row_author
     from ouroboros.owner_continue import owner_corpus_rows, owner_sources
-    from ouroboros.owner_relay import _owner_row
+    from ouroboros.owner_relay import quotable_owner_row
     from ouroboros.task_results import load_task_result
     from ouroboros.tools.plan_dialogue import _quiz_text
     from tests import _dialogue
@@ -911,8 +911,8 @@ def test_owner_corpus_readers_keep_secret_frames_host_authored(env):
     assert row_author(fill_row)["kind"] == "host" and row_author(fill_row)["via"] == "secret_request"
     assert row_author(cancel_row)["kind"] == "host" and row_author(cancel_row)["via"] == "secret_request"
     assert cancel_row["quiz"]["closed_actor"] == "owner"
-    assert not _owner_row(fill_row)  # never a quotable owner row
-    assert _owner_row({**fill_row, "quiz": {k: v for k, v in fill_row["quiz"].items() if not k.startswith("secret_")}})
+    assert not quotable_owner_row(fill_row)  # never a quotable owner row
+    assert quotable_owner_row({**fill_row, "quiz": {k: v for k, v in fill_row["quiz"].items() if not k.startswith("secret_")}})
     assert _quiz_text(fill_row) == f"[secret request {filled}] secret_filled: fakeplug, botToken"
     for i, entry in enumerate(_mail(env), 1):
         assert _row_projection({**entry, "task_id": TASK}, "mailbox", i)["author"] == "host"
