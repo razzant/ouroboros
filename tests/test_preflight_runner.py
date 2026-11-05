@@ -984,9 +984,9 @@ def test_classify_green_and_empty_pass():
 
 def _pin_preflight_root(monkeypatch, temp_root):
     """Pin only the gate's scratch root; its evidence and lane logs keep their own directories."""
-    real = tempfile.mkdtemp
-    monkeypatch.setattr(tempfile, "mkdtemp", lambda *a, **k: str(temp_root)
-                        if k.get("prefix") == "ouroboros-preflight-" else real(*a, **k))
+    from ouroboros import preflight_runner
+
+    monkeypatch.setattr(preflight_runner, "gate_root", lambda: temp_root)
 
 
 @pytest.fixture
@@ -1368,7 +1368,7 @@ def test_the_hermetic_tree_is_deleted_only_after_every_lane_proved_its_teardown(
 def test_the_retention_notice_precedes_the_body_and_stays_inside_the_budget():
     from ouroboros.preflight_runner import _with_retention_notice
 
-    tree = pathlib.Path("/t/ouroboros-preflight-x/repo")
+    tree = pathlib.Path("/t/obs-preflight-x/repo")
     assert _with_retention_notice("H\nbody", "", tree, 8000) == "H\nbody"
     kept = _with_retention_notice("H\n" + "b" * 9000, "unproven", tree, 400)
     assert kept.startswith(f"H\nRETAINED (not deleted): {tree.parent},"), kept
@@ -2665,6 +2665,8 @@ def test_timeout_keeps_flushed_file_output_without_waiting_for_stdio_eof(tmp_pat
             raise subprocess.TimeoutExpired("pytest", timeout)
 
     class _FakeContainer:
+        token = "OURO_PROC_CONTAINER_fixture"
+
         def spawn(self, argv, **kwargs):
             kwargs["stdout"].write(b"tests/test_a.py .\ntests/test_hangs_here.py ")
             return _StuckProc()
@@ -2762,9 +2764,9 @@ def test_hermetic_pytest_applies_candidate_diff_and_scrubs_live_env(tmp_path, mo
             'assert "OUROBOROS_SAFETY_MODE" not in os.environ',
             'assert "OUROBOROS_TASK_REVIEW_MODE" not in os.environ',
             'assert "OUROBOROS_FAKE_API_KEY" not in os.environ',
-            'assert "ouroboros-preflight-" in os.environ["OUROBOROS_DATA_DIR"]',
+            'assert os.environ["OUROBOROS_DATA_DIR"].startswith(os.environ["OUROBOROS_TEST_TEMP_ROOT"])',
             'assert os.environ["OUROBOROS_SETTINGS_PATH"].startswith(os.environ["OUROBOROS_DATA_DIR"])',
-            'assert "ouroboros-preflight-" in os.environ["OUROBOROS_REPO_DIR"]',
+            'assert os.environ["OUROBOROS_REPO_DIR"].startswith(os.environ["OUROBOROS_TEST_TEMP_ROOT"])',
             'assert pathlib.Path(os.environ["OUROBOROS_DATA_DIR"]).parent in tmp_path.parents',
         ]
     )
@@ -3399,6 +3401,8 @@ def test_pass_returns_observed_reap_and_export_status(tmp_path, monkeypatch, exp
     calls = []
 
     class Container:
+        token = "OURO_PROC_CONTAINER_fixture"
+
         def spawn(self, *_args, **kwargs):
             calls.append("spawn")
             kwargs["stdout"].write(b"observed output\n")
@@ -3650,52 +3654,41 @@ def test_a_descendant_unreadable_before_it_was_ever_seen_is_still_a_leak(monkeyp
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX marker-membership reaping")
-def test_the_deadline_report_names_the_last_scan_that_actually_saw_something(monkeypatch):
-    """A block that names no pid is a block the operator cannot act on.
+@pytest.mark.parametrize("scan_states, leaked", [
+    pytest.param(["member", "absent", "absent"], "", id="quiet-past-the-deadline-gets-its-confirming-scan"),
+    pytest.param(["member", "absent", "member"], "still alive", id="visible-past-the-deadline-fails"),
+    pytest.param(["member", "absent", "unreadable"], "could not be determined", id="unreadable-past-the-deadline-fails"),
+])
+def test_the_clock_fails_a_visible_member_and_never_an_already_quiet_tree(monkeypatch, scan_states, leaked):
+    """Every scan after the sweep lands past the deadline, as on a loaded host where one census takes seconds.
 
-    The remediation tells the operator to go and kill the pids listed, so the report
-    has to be built from the last scan that SAW one — not from whichever scan the
-    deadline happens to land on. Reporting the current scan means a member that
-    flickers out of readability on the final probe produces "nothing is proven gone"
-    with no pid at all, from a run that named it moments earlier.
-
-    The member below is alive on the first scan and gone from the second, and the
-    deadline is set to expire in the 50ms settle between them — so the scan the
-    deadline lands on is empty while the run has already named a pid. One quiet scan
-    is not two, so this is a BLOCK either way; the question is whether it is an
-    actionable one."""
+    A clock that fails the tree on its last scan's time, however quiet, kept whole run roots for a
+    tree that was already gone (17 of 26 marked roots on 05.11). A quiet scan gets its confirming
+    one; a member still visible or unreadable past the deadline fails, and the report names it, so
+    a block always carries a pid the operator can act on."""
     from ouroboros import platform_layer, process_containment
 
-    flicker = os.getpid() + 1_000_000  # never a live pid; every probe is stubbed
-    scans: list[str] = []
+    member = os.getpid() + 1_000_000  # never a live pid; every probe is stubbed
+    states = {"member": process_containment.MARKER_MEMBER, "absent": process_containment.MARKER_ABSENT,
+              "unreadable": process_containment.MARKER_UNREADABLE}
+    scans: list[int] = []
 
     def _enumerate(marker, pgid=0, since_ticks=0):
-        scans.append(marker)
-        return [flicker] if len(scans) == 1 else []
+        scans.append(member)
+        return [member]
 
-    # Shorter than one settle interval, so it expires during the sleep after scan 1
-    # and the loop exits on scan 2 — before quiet could ever reach two.
+    # Shorter than one settle interval, so it expires during the sleep after the sweep.
     monkeypatch.setattr(process_containment, "_REAP_DEADLINE_SEC", 0.03)
     monkeypatch.setattr(process_containment, "pids_with_env_marker", _enumerate)
-    monkeypatch.setattr(
-        process_containment, "pid_marker_state",
-        lambda pid, marker: (process_containment.MARKER_MEMBER if len(scans) == 1
-                             else process_containment.MARKER_ABSENT),
-    )
+    monkeypatch.setattr(process_containment, "pid_marker_state",
+                        lambda pid, marker: states[scan_states[len(scans) - 1]])
     monkeypatch.setattr(process_containment, "pid_is_zombie", lambda pid: False)
     monkeypatch.setattr(platform_layer, "force_kill_pid", lambda pid: None)
 
     error = process_containment.ProcessContainer().reap()
 
-    assert len(scans) >= 2, (
-        f"the reap exited on its first scan ({len(scans)}), so 'the LAST non-empty "
-        "scan' is not being exercised at all"
-    )
-    assert error, "the flickering member was reported as a clean teardown"
-    assert str(flicker) in error, (
-        "the deadline report was built from the empty final scan, so it names no pid "
-        f"for the operator to act on: {error}"
-    )
+    assert len(scans) == len(scan_states), "the reap did not stop at the scan that decides it"
+    assert (leaked in error and str(member) in error) if leaked else error == "", error
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX marker-membership reaping")

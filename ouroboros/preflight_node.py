@@ -208,7 +208,7 @@ def run_node_tests(
         capture.close()
     elapsed = time.monotonic() - started
     result["returncode"] = returncode
-    result["reap_error"] = reap_error
+    result["reap_error"], result["containment_token"] = reap_error, container.token
     if reap_error:
         result["error"] = pr._diagnosis(
             "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_CONTAINMENT_FAILED (hard block): "

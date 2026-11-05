@@ -87,6 +87,7 @@ pytest_plugins = ["tests.browser_lane", "tests.ci_evidence", "tests.default_lane
 from tests._shared import (  # noqa: E402
     _PROVIDER_CATALOG_PRISTINE, _provider_catalog_snapshot, _restore_provider_catalog, offline_provider_catalog,
 )
+from tests import _test_folders  # noqa: E402
 
 
 def _provider_catalog_class():
@@ -278,6 +279,7 @@ def _isolated_child_env(value) -> dict:
     # test child that changes its process group escapes the owner's token scan.
     child_env.update({key: value for key, value in os.environ.items()
                       if key.startswith(CONTAINMENT_ENV_PREFIX)})
+    child_env.update(_test_folders.child_env())
     child_env[NESTED_WORKERS_ENV] = str(nested_workers(child_env))
     child_env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = child_env[NESTED_WORKERS_ENV]
     return child_env
@@ -304,7 +306,8 @@ def _install_pytest_child_isolation() -> None:
             positional[0] = bounded_test_command(positional[0], env)
         elif "args" in kwargs:
             kwargs["args"] = bounded_test_command(kwargs["args"], env)
-        return _ORIGINAL_POPEN_INIT(self, *positional, **kwargs)
+        _ORIGINAL_POPEN_INIT(self, *positional, **kwargs)
+        _test_folders.note_child(self, positional, kwargs)
 
     subprocess.Popen.__init__ = isolated_init
     _PYTEST_POPEN_PATCHED = True
@@ -554,7 +557,8 @@ def _guard_test_tree_deletion(config) -> None:
 
     Tests start servers, workers and git in tmp_path, and a test's exit does not prove
     them gone. The "failed"/"none" retention policies delete tmp_path after passing
-    tests, and an explicit --basetemp is emptied before the session starts. pytest's
+    tests with no such proof (``_test_folders`` does, with it), and an explicit
+    --basetemp is emptied before the session starts. pytest's
     OWN numbered basetemp is never used either: its exit hook deletes earlier
     sessions' trees and, with tmp_path_retention_count=0, the current one — whatever
     the policy says — so every controller, bare or not, claims a fresh explicit one.
@@ -614,6 +618,7 @@ def pytest_sessionstart(session):  # noqa: ARG001
     from ouroboros.test_parallelism import NESTED_WORKERS_ENV
 
     session.config._ouroboros_session = session
+    _test_folders.number_once(session.config)
     # This process already owns its allocation. Test-created runners begin with
     # one slot; tests of real concurrency opt in by setting their child's key.
     os.environ[NESTED_WORKERS_ENV] = "1"
@@ -660,6 +665,7 @@ def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
     workeroutput = getattr(session.config, "workeroutput", None)
     if workeroutput is not None:  # xdist worker: hand the leak list to the controller
         workeroutput["thread_leaks"] = list(_THREAD_LEAKS)
+        workeroutput["test_folders"] = dict(_test_folders.counts)
     # The per-process session tree (unique mkdtemp per controller/worker) is RETAINED,
     # never deleted here: a finished session does not prove that every process its
     # tests started is gone, and nothing at this layer can prove it. The terminal
@@ -690,6 +696,7 @@ def pytest_runtest_protocol(item, nextitem):  # noqa: ARG001
         item.stash[_PHASE_EVENT_LOOPS] = loops
         if _SAFE_TEMP_ROOT:
             item.stash[_RETENTION_BEFORE_ITEM] = _basetemp_witness(item)
+        _test_folders.begin()
         yield
     finally:
         # The call and teardown hooks close their loops and fail that phase if a close raises;
@@ -1326,13 +1333,14 @@ def pytest_runtest_teardown(item, nextitem):  # noqa: ARG001
     asyncio.get_event_loop() after a test that used asyncio.run(), they
     would raise RuntimeError because pytest_runtest_call already cleared
     the loop.  This hook installs a temporary loop for teardown and
-    closes it afterwards.
+    closes it afterwards. Last, a passed test's folder goes (``_test_folders``).
     """
     teardown_loop = item.stash[_PHASE_EVENT_LOOPS][1]
     asyncio.set_event_loop(teardown_loop)
     tmp = (getattr(item, "funcargs", None) or {}).get("tmp_path")
+    outcome = None
     try:
-        yield  # fixture finalizers and teardown run here
+        outcome = yield  # fixture finalizers and teardown run here
     finally:
         teardown_loop.close()
         asyncio.set_event_loop(None)
@@ -1342,6 +1350,8 @@ def pytest_runtest_teardown(item, nextitem):  # noqa: ARG001
         _fail_if_the_password_resolver_leaked(item)
         _fail_if_a_thread_leaked(item)
         _fail_if_retention_was_left(item, tmp)
+        if outcome is not None and outcome.excinfo is None:
+            _test_folders.release_passed(tmp, run_root=_SAFE_TEMP_ROOT, child_seam=_PYTEST_POPEN_PATCHED)
 
 
 _PRISTINE_PASSWORD_RESOLVER = None
@@ -1428,12 +1438,12 @@ def _fail_if_a_thread_leaked(item):
                 f"test it pollutes", pytrace=False)
 
 
-# ---- retention hygiene: name the test whose marker keeps the whole run (#1908) ----
+# ---- retention hygiene: name the test that leaves a marker behind (#1908) ----
 #
 # Under an owner that releases its scratch (scripts/safe_test.py, run_tests.py, the native
-# preflight) one retention marker anywhere beneath its root keeps all of it: 7-11 GB per full
-# battery. A test that manufactures one (an injected fault, a stubbed reap) retires it; one that
-# forgot kept every green battery's root and nothing named it. retain_tree touches the scratch
+# preflight) a retention marker keeps its test's folder past the run, and the run's root with it. A
+# test that manufactures one (an injected fault, a stubbed reap) retires it; one that forgot left
+# that root behind every green battery and nothing named it. retain_tree touches the scratch
 # declaration above the tree it marks, so one stat clears a test under an unmoved declaration.
 _RETENTION_BEFORE_ITEM = pytest.StashKey()
 _BASETEMP_DECLARATION: list = []  # this process's, looked up once
@@ -1460,8 +1470,8 @@ def _fail_if_retention_was_left(item, tmp):
     moved = _basetemp_witness(item) != item.stash[_RETENTION_BEFORE_ITEM]
     left = retention_left_in(tmp) if moved or (tmp / RETENTION_MARKER).exists() else ""
     if left:
-        pytest.fail(f"{item.nodeid} left retention in its tmp_path, which keeps the whole run root "
-                    f"{_SAFE_TEMP_ROOT} with every test's scratch: {left} — retire what this test "
+        pytest.fail(f"{item.nodeid} left retention in its tmp_path, which keeps that folder and the "
+                    f"run root {_SAFE_TEMP_ROOT} past the run: {left} — retire what this test "
                     "manufactured (an injected fault, a stubbed reap) with "
                     "tests._shared.retire_synthetic_retention; a real one means its teardown was never proven",
                     pytrace=False)
@@ -1471,6 +1481,7 @@ def _fail_if_retention_was_left(item, tmp):
 def pytest_testnodedown(node, error):  # noqa: ARG001
     # pytest-xdist controller: merge each worker's leak list (shipped via workeroutput below).
     _THREAD_LEAKS.extend(getattr(node, "workeroutput", {}).get("thread_leaks", []))
+    _test_folders.counts.update(getattr(node, "workeroutput", {}).get("test_folders", {}))
     if error is None:
         return
     session = getattr(node.config, "_ouroboros_session", None)
@@ -1527,6 +1538,7 @@ def _record_worker_crash(node, reason, scheduler):
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_logreport(report):
+    _test_folders.custody.failed |= report.failed  # a subtest's report comes through here too
     outcome = yield
     node = getattr(report, "node", None)
     config = getattr(node, "config", None)
@@ -1559,6 +1571,7 @@ def pytest_terminal_summary(terminalreporter):
             f"{len(_THREAD_LEAKS)} test(s): {tests}")
     else:
         terminalreporter.write_line("thread hygiene: no leaked threads")
+    terminalreporter.write_line(_test_folders.summary())
     retained = [str(path) for path in (_PYTEST_ROOT, _PYTEST_REPO_FALLBACK) if path is not None]
     basetemp = getattr(getattr(terminalreporter.config, "_tmp_path_factory", None), "_basetemp", None)
     if basetemp is not None and not any(pathlib.Path(basetemp).is_relative_to(path) for path in retained):

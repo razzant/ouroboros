@@ -8,7 +8,8 @@ the boundary before starting the command. It installs nothing and is not a sandb
 Stage two retains complete raw output and declared diagnostics, reaps the
 contained command, then releases declared reproducible test scratch on green
 and red, including a command that could not be launched (exit 2, `launch_error`
-in its result). Unknown command data, debug and unconfirmed teardown stay in place.
+in its result). Unknown command data, debug and unconfirmed teardown stay in place;
+a retention marker keeps only its own test's folder.
 The last stderr line names the root once: `SAFE_TEST_RETAINED` or
 `SAFE_TEST_RELEASED` describes that path, not every process anywhere.
 

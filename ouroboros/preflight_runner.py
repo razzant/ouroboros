@@ -9,7 +9,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 from typing import NamedTuple, Optional, Sequence
@@ -19,7 +18,7 @@ from typing import NamedTuple, Optional, Sequence
 # candidate's web/tests/*.test.js — see ouroboros/preflight_node.py. Imported
 # by name so tests/operators can stub `preflight_runner.run_node_tests`.
 from ouroboros.preflight_node import run_node_tests
-from ouroboros.test_environment import default_temp_parent
+from ouroboros.test_environment import gate_root
 
 
 DEFAULT_PYTEST_ARGS = ["tests/", "-q", "--tb=line", "--no-header"]
@@ -894,7 +893,7 @@ def _execute_pytest_pass(
             preview = _controller_diagnostics(output.root) + preview
         except OSError as exc:
             output.failed("controller diagnostics", exc)
-        return CapturedPass(returncode, preview, reap_error, output.errors)
+        return CapturedPass(returncode, preview, reap_error, output.errors, container.token)
     except BaseException as exc:
         if proc is not None and proc.poll() is None:
             _terminate_preflight_tree(proc, temp_root)
@@ -1191,14 +1190,16 @@ def _release_hermetic_tree(repo, temp_root, worktree, worktree_added: bool, unpr
     the worktree it runs in, and the source repository keeps the registration
     for whoever proves those processes gone.
     The marker is the enclosing layers' retention protocol; this decision does
-    not depend on the marker write succeeding."""
-    from ouroboros.test_environment import retention_markers
-    if unproven or retention_markers(temp_root):
-        from ouroboros.test_environment import retain_tree
-
+    not depend on the marker write succeeding. A marker beneath the proven root
+    keeps its own folder and everything else goes (``retained_folders``), the
+    worktree's registration with it unless the marker sits in that worktree."""
+    from ouroboros.test_environment import release_except_retained, retain_tree, retained_folders
+    from ouroboros.test_evidence import remove_scratch_tree
+    kept = {} if unproven else retained_folders(temp_root)
+    if unproven or temp_root in kept:
         retain_tree(temp_root, f"hermetic preflight: {unproven or 'retention marker or unreadable subtree'}")
         return
-    if worktree_added:
+    if worktree_added and worktree not in kept:
         removed = subprocess.run(
             ["git", "worktree", "remove", "--force", str(worktree)],
             cwd=str(repo),
@@ -1207,11 +1208,12 @@ def _release_hermetic_tree(repo, temp_root, worktree, worktree_added: bool, unpr
             timeout=30,
         )
         if removed.returncode:
-            from ouroboros.test_environment import retain_tree
             retain_tree(temp_root, f"git worktree removal failed: {removed.stderr}")
             return
-    from ouroboros.test_evidence import remove_scratch_tree
-    remove_scratch_tree(temp_root)
+    if kept:
+        release_except_retained(temp_root, kept, remove_scratch_tree)
+    else:
+        remove_scratch_tree(temp_root)
 
 
 def _assemble_live_source(repo, worktree, evidence):
@@ -1246,8 +1248,9 @@ def _assemble_live_source(repo, worktree, evidence):
 def _record_lane(evidence, lane, result, **facts) -> None:
     """One lane's observed exit/containment and its separate diagnostic errors."""
     evidence.setdefault("lanes", []).append({"lane": lane, **facts})
-    evidence.setdefault("evidence_errors", []).extend(result.get("evidence_errors", ()) if isinstance(result, dict)
-                                                      else getattr(result, "evidence_errors", ()))
+    fact = result.get if isinstance(result, dict) else lambda name, default: getattr(result, name, default)
+    evidence.setdefault("evidence_errors", []).extend(fact("evidence_errors", ()))
+    evidence.setdefault("containment_tokens", []).append(fact("containment_token", ""))
 
 
 def _run_hermetic_pytest(
@@ -1325,7 +1328,7 @@ def _run_hermetic_pytest(
     source_index_tree, source_index_error = _capture_source_index_tree(repo, max_output)
     if source_index_error is not None:
         return source_index_error
-    temp_root = pathlib.Path(tempfile.mkdtemp(prefix="ouroboros-preflight-", dir=default_temp_parent())).resolve()
+    temp_root = gate_root()
     worktree = temp_root / "repo"
     worktree_added = False
     unproven_teardown = ""
@@ -1584,4 +1587,4 @@ def run_hermetic_pytest(repo_dir, *, timeout=_DEFAULT_PREFLIGHT_TIMEOUT_SEC, pyt
                                        full_tests=full_tests, test_reason=test_reason)
         return verdict
     finally:
-        finish_gate(evidence, verdict, phase, _release_hermetic_tree)
+        finish_gate(evidence, verdict, phase, _release_hermetic_tree, ctx=ctx)
