@@ -13,8 +13,8 @@ rows whose removal would lose a product line.
 --journal    `tests/ci_evidence.py` events of a complete run: seconds and, without --collected,
              items. An earlier journal wins a function a later one also records.
 --collected  `pytest --collect-only -q` output for the default lane: the exact lane and items.
-Without either, items come from literal parametrize lists and lane markers read from the source;
-without a journal every test weighs zero seconds, so D3 cannot tell a heavy computed list.
+Without either, items come from literal parametrize lists and lane markers read from the source.
+A function no journal records weighs zero seconds, so D3 cannot tell it from a cheap list.
 
 Writes DIR/decisions.csv (one row per default-lane function: cluster, rule, verdict) and
 DIR/totals.json (one block per rule, plus the deleted and folded numbers reported separately).
@@ -443,7 +443,8 @@ def join_lane(rows: list, journal: dict, collected: Counter | None) -> list:
     lane = []
     for row in rows:
         key = (row["file"], row["qual"])
-        if key in collected if collected is not None else not row["lane_marked"]:
+        in_lane = key in collected if collected is not None else not row["lane_marked"]
+        if in_lane:
             record = journal.get(key, {})
             static = math.prod(row["axes"]) if None not in row["axes"] else 1
             row["items"] = collected[key] if collected is not None else record.get("items", static)
