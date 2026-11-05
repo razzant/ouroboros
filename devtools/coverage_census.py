@@ -7,7 +7,8 @@ survivor covers moves to merge. The raw data is gigabytes, so it never leaves th
 
 1. Measure, on a runner. This module is also a pytest plugin. With `coverage` and `pytest-cov`
    installed (dev-only, by the job itself; nothing here imports them):
-       python -m pytest -p devtools.coverage_census --cov=ouroboros --cov=supervisor \
+       python -m pytest -p devtools.coverage_census --cov=ouroboros --cov=supervisor --cov=launcher \
+           --cov=server --cov=scripts --cov=skills --cov=devtools \
            --cov-context=test --cov-config=RC --cov-report= tests/ ...
    RC sets `parallel = true`, an absolute `data_file`, `source_pkgs`, `core = ctrace` and
    `context = ${PYTEST_CURRENT_TEST}`, which is how a child process learns its test.
@@ -28,6 +29,10 @@ What this cannot see, and how it errs:
 - A fixture or a long-lived child shared across tests, and any once-only line (a cache fill), is
   credited to the first test that reached it. That test looks unique: this errs toward keeping.
 - A covered line is not a checked line. Coverage finds lost reach, never lost assertions.
+- A root it was not told to measure is blind: a test whose only reach is there looks deletable. The
+  05.11.2026 digest measured `ouroboros/` and `supervisor/` only; `PRODUCT_ROOTS` now names the
+  launcher, the server entry, `scripts/`, `skills/` and `devtools/` too, and the run must pass the
+  same roots to `--cov`.
 """
 from __future__ import annotations
 
@@ -46,7 +51,7 @@ from contextlib import closing
 from pathlib import Path, PurePosixPath
 
 # Stdlib only at import: pytest loads this before tests/conftest.py draws its isolation boundary.
-PRODUCT_ROOTS = ("ouroboros", "supervisor")
+PRODUCT_ROOTS = ("ouroboros", "supervisor", "launcher.py", "server.py", "scripts", "skills", "devtools")
 CHILD_KEYS = ("COVERAGE_PROCESS_START", "PYTEST_CURRENT_TEST")
 TEST_PHASE = re.compile(r"(?:\|(?:setup|run|teardown)| \((?:setup|call|teardown)\))$")
 LINE_BITS = ("SELECT file.path, context.context, line_bits.numbits FROM line_bits "

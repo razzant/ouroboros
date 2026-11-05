@@ -272,6 +272,11 @@ def test_the_digest_answers_what_a_deletion_loses(tmp_path):
     (tmp_path / "shard1" / ".coverage.killed").write_bytes(b"not a database")
     _coverage_file(tmp_path / "shard2" / ".coverage", [(checkout, f"{three}|teardown", [6, 10])])
     folds = [cov.fold(tmp_path / "shard1", tmp_path), cov.fold(tmp_path / "shard2", tmp_path)]
+    # Every product root is measured, the launcher and the bundled skills too; a test file never is.
+    _write_tree(tmp_path, {"launcher.py": "", "skills/telegram/plugin.py": "", "tests/test_a.py": ""})
+    assert cov._product_file(tmp_path, "/runner/copy/launcher.py") == "launcher.py"
+    assert cov._product_file(tmp_path, "/runner/copy/skills/telegram/plugin.py") == "skills/telegram/plugin.py"
+    assert cov._product_file(tmp_path, "/runner/copy/tests/test_a.py") == ""
     assert [fold["unreadable"] for fold in folds] == [1, 0]
     report = cov.digest(folds)
     assert report["totals"] == {"tests_measured": 3, "lines_covered": 3, "covering_sets": 3, "kept_sets": 2,
