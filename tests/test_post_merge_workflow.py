@@ -105,7 +105,8 @@ def test_the_steps_check_retry_attribute_hand_over_and_report_in_order():
                      "classify", "attribute", "route", "cost_contract"]
     selected = STEPS["selected"]
     assert selected["continue-on-error"] is True  # the retry, not this step, decides FAILED vs FLAKY
-    assert "scripts/run_tests.py --selected --base \"$BASE\" --sequential --keep-going" in selected["run"]
+    assert "scripts/run_tests.py --selected --base \"$BASE\" --keep-going" in selected["run"]
+    assert "--sequential" not in selected["run"]  # gone with the serial pass's file groups (test diet, 2026-11-05)
     assert selected["env"]["BASE"] == "${{ steps.base.outputs.base }}"
     assert "steps.base.outcome == 'success'" in selected["if"]
     for name in ("classify", "attribute", "route"):

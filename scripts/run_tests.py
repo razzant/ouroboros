@@ -324,6 +324,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{REPO} is not an Ouroboros checkout (no tests/conftest.py)", file=sys.stderr)
         return 2
     point_at_durations()
+    if not args.selected and (args.base or args.extra_test or args.full_tests or args.test_reason or args.defer_full
+                              or args.keep_going):
+        parser.error("--base, --defer-full, --keep-going and widening options require --selected")
     if args.node:
         if args.selected or pytest_args:
             parser.error("--node runs only the Node lane")
@@ -332,8 +335,6 @@ def main(argv: list[str] | None = None) -> int:
         if pytest_args:
             parser.error("--selected cannot be combined with arbitrary pytest arguments")
         return _selected(args, evidence)
-    if args.base or args.extra_test or args.full_tests or args.test_reason or args.defer_full or args.keep_going:
-        parser.error("--base, --defer-full, --keep-going and widening options require --selected")
     if pytest_args:
         if evidence is not None:
             pytest_args = ["--ci-evidence-dir", str(evidence / "focused"), *pytest_args]

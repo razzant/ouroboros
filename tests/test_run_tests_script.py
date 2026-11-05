@@ -192,7 +192,7 @@ def test_the_node_option_runs_only_the_owned_node_lane(run_tests, monkeypatch):
     monkeypatch.setattr(run_tests, "_node_lane", lambda: lanes.append("node") or 7)
     monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: pytest.fail("pytest must not start"))
     assert run_tests.main(["--node"]) == 7 and lanes == ["node"]  # its exit status is the step's
-    for combined in (["--node", "--sequential"], ["--node", "--selected"], ["--node", "tests/test_x.py"]):
+    for combined in (["--node", "--keep-going"], ["--node", "--selected"], ["--node", "tests/test_x.py"]):
         with pytest.raises(SystemExit):
             run_tests.main(combined)
 

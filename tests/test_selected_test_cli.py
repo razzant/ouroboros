@@ -240,7 +240,7 @@ def test_merges_run_the_selected_scope_and_qualification_runs_remain_full():
     post = yaml.safe_load((ROOT / ".github/workflows/post-merge.yml").read_text(encoding="utf-8"))
     steps = {step.get("id"): step for step in post["jobs"]["post-merge"]["steps"] if step.get("id")}
     selected = steps["selected"]
-    assert selected["run"].startswith('python scripts/run_tests.py --selected --base "$BASE" --sequential --keep-going')
+    assert selected["run"].startswith('python scripts/run_tests.py --selected --base "$BASE" --keep-going')
     # The run's exit belongs to classify and summary, which retry, bisect and decide the job.
     assert selected["timeout-minutes"] > 0 and selected["continue-on-error"] is True
     assert "continue-on-error" not in steps["classify"]
