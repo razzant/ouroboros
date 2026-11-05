@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+from ouroboros.tool_capabilities import MCP_GATEWAY_TOOL_NAME
 from ouroboros.tool_policy import (
     BUILTIN_NAMESPACE,
     CAPABILITY_OMISSION_HEADER,
@@ -295,7 +296,7 @@ def enable_tools(
     return text
 
 
-GATEWAY_TOOL = "call_mcp_tool"
+GATEWAY_TOOL = MCP_GATEWAY_TOOL_NAME
 
 
 def _gateway_schemas(shown: Dict[str, Dict[str, Any]], servers: Dict[str, List[str]]) -> str:

@@ -641,6 +641,12 @@ def test_refit_unsent_results_cuts_only_unasked_bodies_past_the_last_send(tmp_pa
     assert not first_show_bound(plain, {"result": "x"})
     assert first_show_bound({**plain, "result_meta": {"tool_result_meta": {"review_delivery": {"id": 1}}}}, {"result": "x"})
     assert first_show_bound(plain, {"result": terminal})  # inline delegated output credited whole
+    review, sleep = ({**plain, "result_meta": {"tool_result_meta": {key: 1}}} for key in ("review_delivery", "sleep_question_notice"))
+    assert not first_show_bound(review, {"result": "x", "result_partial": True}) and first_show_bound(sleep, {"result": "x"})
+    assert not first_show_bound({**sleep, "is_error": True}, {"result": "x"})  # no acknowledgement credits these
+    for delivery in ({"complete": False}, {"complete": True, "inline_is_preview": True}):
+        assert not first_show_bound(plain, {"result": json.dumps({"status": "terminal", "output_delivery": delivery})})
+    assert not first_show_bound(plain, {"result": terminal, "result_partial": True})
     assert RESULT_VIEW_MARKER in rebuilt[4]["content"] and FULL_SOURCE_MARKER in rebuilt[4]["content"]
     assert rebuilt[4]["content"].endswith(trailer) and rebuilt[4]["content"].count(trailer) == 1
     assert len(rebuilt[4]["content"]) < len(fresh) and rebuilt[4][TOOL_RESULT_RECORD_KEY]["source_ref"]

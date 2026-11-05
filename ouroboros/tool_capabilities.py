@@ -87,6 +87,8 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
 META_TOOL_NAMES: frozenset[str] = frozenset({
     "list_available_tools", "enable_tools",
 })
+# Main's gateway to on-demand MCP tools: what keeps a request's tool list stable, so a route ceiling keeps it too.
+MCP_GATEWAY_TOOL_NAME: str = "call_mcp_tool"
 
 LOCAL_READONLY_SUBAGENT_MODE: str = "local_readonly_subagent"
 

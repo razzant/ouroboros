@@ -602,20 +602,22 @@ def _measured_frame(
     return rows, {**receipt, "status": status, "fit": final}
 
 
-#: Published facts whose host reader credits the delivered view when the batch is delivered, not when it is sent.
-_FIRST_SHOW_READERS = ("sleep_question_notice", "held_dependency_notice", "review_delivery", "supervision_wake_id",
-                       "read_view")
-
-
 def first_show_bound(row: Mapping[str, Any], view: Mapping[str, Any]) -> bool:
-    """Whether a later refit must keep this first show: a host reader already credited the delivered view
-    (sleep questions, held dependencies, review receipts, delegate wakes, staged or inline delegated output)."""
+    """Whether a later refit must keep this first show: a host reader credits the delivered view when the batch
+    is delivered, under the gates of ``loop_tool_execution`` and ``delegate_output`` (a delegate wake and a staged
+    read always; a review receipt unless partial; a sleep question or held dependency when whole and no error;
+    inline delegated output when whole, complete and not a preview)."""
     typed, meta = row.get("tool_result"), (row.get("result_meta") or {}).get("tool_result_meta") or {}
-    text = str(view.get("result") or "")
-    if any(meta.get(key) for key in _FIRST_SHOW_READERS) or (getattr(typed, "meta", None) or {}).get("read_view"):
+    partial, text = bool(view.get("result_partial")), str(view.get("result") or "")
+    if meta.get("supervision_wake_id") or meta.get("read_view") or (getattr(typed, "meta", None) or {}).get("read_view"):
+        return True
+    if (meta.get("review_delivery") and not partial) or ((meta.get("sleep_question_notice") or meta.get(
+            "held_dependency_notice")) and not partial and not row.get("is_error")):
         return True
     try:
-        return text.startswith("{") and '"output_delivery"' in text and json.loads(text).get("status") == "terminal"
+        payload = json.loads(text) if not partial and text.startswith("{") and '"output_delivery"' in text else {}
+        delivery = payload.get("output_delivery") or {}
+        return payload.get("status") == "terminal" and bool(delivery.get("complete")) and not delivery.get("inline_is_preview")
     except (ValueError, AttributeError):
         return False
 
