@@ -15,7 +15,6 @@ from ouroboros.tools import delegate
 from tests._delegated_transport_shared import _delegating_ctx
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("initially_queued", [False, True])
 def test_public_wait_reads_response_slower_than_five_seconds(tmp_path, monkeypatch, initially_queued):
     requests = []

@@ -10,7 +10,6 @@ from tests._budget_pause_exact_helpers import _install_queue, _supervisor_ctx
 from tests.test_budget_pause_holds import _idle_worker
 from tests.test_restart_saved_work import _pool_events, _stop_and_boot, _working_run
 
-pytestmark = pytest.mark.serial
 
 
 def _saved_tree(tmp_path, monkeypatch):

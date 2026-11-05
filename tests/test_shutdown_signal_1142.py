@@ -169,13 +169,11 @@ def _wait_json(url: str, key: str, timeout_sec: float) -> None:
     raise RuntimeError(f"{url} never reported {key}=true: {last}")
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform == "win32", reason="process groups and SIGTERM are POSIX")
 def test_group_sigterm_reaches_terminal_custody_without_a_false_supervisor_alarm(tmp_path):
     _check_real_shutdown(tmp_path, launcher_pipe=False)
 
 
-@pytest.mark.serial
 def test_launcher_pipe_reaches_server_shutdown_without_a_signal(tmp_path):
     _check_real_shutdown(tmp_path, launcher_pipe=True)
 
@@ -363,7 +361,6 @@ def _launch_pipe_owner_probe(tmp_path, mode):
     pytest.fail(f"private-stdin probe never became ready: {output}")
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("message,source", [(b"quit\n", "launcher_quit"), (b"", "launcher_gone"),
                                             (b"other", "launcher_gone")])
 def test_launcher_pipe_quit_or_launcher_exit_stops_the_server(tmp_path, message, source):
@@ -388,7 +385,6 @@ def test_launcher_pipe_quit_or_launcher_exit_stops_the_server(tmp_path, message,
         proc.communicate(timeout=5)
 
 
-@pytest.mark.serial
 def test_private_launcher_reader_allows_normal_exit_with_owner_pipe_still_open(tmp_path):
     proc, ready = _launch_pipe_owner_probe(tmp_path, "exit-open")
     try:
@@ -413,7 +409,6 @@ def test_direct_server_does_not_consume_stdin_without_launcher_opt_in(monkeypatc
     assert not server.should_exit
 
 
-@pytest.mark.serial
 def test_direct_server_keeps_ordinary_child_stdin_without_launcher_opt_in(tmp_path):
     import sysconfig
 

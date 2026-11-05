@@ -12,7 +12,6 @@ import pytest
 from tests.test_batch4_producer_custody import _registry, _docker
 from tests.test_worker_crash_retry import _isolate_worker_crash_state  # noqa: F401 - autouse reaper isolation
 
-pytestmark = pytest.mark.serial
 
 
 def _assert_consumers(root, registry, queue, workers, held):

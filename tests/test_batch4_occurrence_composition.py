@@ -10,7 +10,6 @@ from tests.test_g1_followup_policy import (  # noqa: F401
     world, register, row, restore, stop, ORIGIN, BINDING, DEADLINE, _assignment_world,
 )
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize('fault', ['none', 'write', 'readback'])

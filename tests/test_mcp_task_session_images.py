@@ -23,7 +23,6 @@ from tests.test_invocation_ownership import claims, owner, run
 from tests.test_mcp_result_images import PNG, Recorder, _batch, _items, _no_base64_text, _pixels
 from tests.test_mcp_task_session import _private_mcp, alive, rows, session_of, wire  # noqa: F401  (autouse fixture)
 
-pytestmark = pytest.mark.serial  # the shared producer-custody queue fixture, as the other task-session suites
 
 MODEL = "openrouter::fixture/vision"
 SERVER = r'''

@@ -9,7 +9,6 @@ import pytest
 from devtools.benchmarks.common.server_runner import seed_owner_state
 from supervisor import state, state_initialization
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

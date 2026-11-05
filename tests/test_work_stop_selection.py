@@ -21,7 +21,6 @@ from tests.test_budget_pause_lineage_restore import _consume, _restart
 from tests.test_model_sleep import _cold_park
 from tests.test_restart_retention import _pool_events
 
-pytestmark = pytest.mark.serial
 
 
 def _released_panic_running(root, monkeypatch):

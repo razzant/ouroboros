@@ -127,7 +127,6 @@ def _serve(handler):
     return asyncio.start_server(handler, "127.0.0.1", 0)
 
 
-@pytest.mark.serial
 def test_http_proxy_tunnels_to_telegram_and_never_sees_the_token(monkeypatch):
     """The explicit proxy wins over an ambient one; CONNECT names only the host, the
     credentials ride Proxy-Authorization, and refusals echo neither secret."""
@@ -172,7 +171,6 @@ def test_http_proxy_tunnels_to_telegram_and_never_sees_the_token(monkeypatch):
         assert "SECRET-BOT-TOKEN" not in head and "/bot" not in head
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("scheme", ["socks5", "socks5h"])
 def test_socks_proxy_receives_the_telegram_host_name_and_credentials(scheme):
     _plugin, telegram_api, _nt = _load()

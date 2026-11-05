@@ -759,7 +759,6 @@ def test_a_pending_review_invocation_is_left_to_its_panel_never_re_posted(tmp_pa
     dc._CUSTODY.clear()
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("pending", [False, True], ids=["bound", "pending"])
 @pytest.mark.parametrize("captured,case", [
     (captured, case) for captured in (False, True)

@@ -20,7 +20,6 @@ import pytest
 from tests.test_telegram_format_parity import _load_skill
 
 # The shared native-skill loader replaces its package entries in sys.modules.
-pytestmark = pytest.mark.serial
 
 ASK = "Добавь в экспорт оглавление"
 

@@ -17,7 +17,6 @@ from ouroboros.test_environment import isolated_environment, settings_keys
 from tests.group_run import kill_survivors, run_in_group
 
 REPO = Path(__file__).resolve().parents[1]
-pytestmark = pytest.mark.serial
 
 
 def test_pytest_cache_belongs_to_session_boundary(pytestconfig):

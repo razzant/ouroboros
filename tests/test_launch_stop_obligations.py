@@ -28,7 +28,7 @@ from tests._launch_stop_shared import (
     _reader,
 )
 
-pytestmark = [pytest.mark.serial,
+pytestmark = [
               pytest.mark.skipif(os.name == "nt", reason="the measured stop is POSIX; Windows keeps its native kill")]
 
 

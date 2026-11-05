@@ -8,7 +8,6 @@ import pytest
 
 from tests._budget_pause_exact_helpers import _fast_hold, _install_queue, _loop_ctx, _supervisor_ctx
 
-pytestmark = pytest.mark.serial  # the installed queue fixture binds module state
 
 
 class Runtime:

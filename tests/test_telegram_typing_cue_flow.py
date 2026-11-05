@@ -27,7 +27,6 @@ import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx
 
-pytestmark = pytest.mark.serial
 
 PINNED = 777
 ORIGIN = {"origin_message_ref": {"chat_id": 1, "client_message_id": "m-1", "ts": "2026-10-17T00:00:00+00:00"}}

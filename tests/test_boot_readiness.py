@@ -15,7 +15,6 @@ import time
 
 import pytest
 
-pytestmark = pytest.mark.serial
 
 CONTRACT_KEYS = {"phase", "since", "dialogue_ready", "tasks_ready", "steps", "jobs", "error", "supervisor_load"}
 

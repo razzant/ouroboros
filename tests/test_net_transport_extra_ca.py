@@ -219,7 +219,6 @@ def test_gigachat_client_receives_the_bundle_only_when_configured(monkeypatch, t
     assert seen[-1]["verify_ssl_certs"] is True
 
 
-@pytest.mark.serial
 def test_no_proxy_transport_trusts_the_owner_ca_only_when_configured(monkeypatch, tls_server):
     import httpx
 

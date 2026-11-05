@@ -28,7 +28,6 @@ from ouroboros.model_wait import task_model_wait_scope
 from ouroboros.review_dispatch import ReviewPaidStamp, bind_api_review_paid_stamp
 from tests._usage_store_testing import ledger_rows, request, root as root
 
-pytestmark = pytest.mark.serial
 
 
 @contextlib.contextmanager

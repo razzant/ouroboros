@@ -204,7 +204,6 @@ def test_the_idle_probe_answer_lets_comparable_kernel_births_decide(pool, slot_b
     assert confirmed("", {key: value for key, value in event.items() if key != "kernel_birth"}) is before
 
 
-@pytest.mark.serial  # a real spawned worker loop
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS ps spells lstart in the reader's zone")
 def test_a_real_worker_in_another_zone_opens_its_slot_and_answers_its_probe(pool, seam, tmp_path,  # noqa: F811
                                                                              monkeypatch):

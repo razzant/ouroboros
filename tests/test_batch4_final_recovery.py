@@ -1,12 +1,10 @@
 """A refused recovery attempt cannot retire an earlier unknown physical create."""
 from pathlib import Path
 
-import pytest
 
 from tests._delegated_transport_shared import _owned_gateway_uses_each_test_transport  # noqa: F401
 from tests.test_delegated_full_access import full_run as full_run
 
-pytestmark = pytest.mark.serial
 
 
 def test_recovering_claim_refusal_keeps_same_pending_invocation_and_snapshot(full_run, monkeypatch):

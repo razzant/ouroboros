@@ -19,7 +19,6 @@ from ouroboros.task_results import load_task_result
 from tests._review_session_route_shared import FakeGateway
 from tests.test_review_operation_lifetime import TASK, _parent, env, until  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

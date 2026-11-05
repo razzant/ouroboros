@@ -339,7 +339,6 @@ def test_manifest_confines_snapshot_declaration(path):
                                              "context_snapshot": {"path": path}}))
 
 
-@pytest.mark.serial
 def test_real_worker_adoption_captures_published_descriptor(publisher, monkeypatch):
     import os
     from ouroboros import config

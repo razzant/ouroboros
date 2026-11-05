@@ -65,7 +65,6 @@ def _put_call(endpoint):
     endpoint.put(_call())
 
 
-@pytest.mark.serial
 def test_spawned_call_behind_real_manager_backlog_reaches_the_same_idle_owner(host, monkeypatch):
     monkeypatch.setitem(events.EVENT_HANDLERS, "noise", lambda *args: None)
     context = multiprocessing.get_context("spawn")

@@ -23,7 +23,7 @@ from tests.system_e2e.harness import (
     wait_durable_result, wait_until,
 )
 
-pytestmark = [pytest.mark.serial, pytest.mark.integration]
+pytestmark = [pytest.mark.integration]
 
 
 def native_worker_census(root):

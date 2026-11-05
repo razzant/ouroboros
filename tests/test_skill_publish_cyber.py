@@ -196,7 +196,6 @@ def test_actual_github_failure_remains_failure_after_advice(monkeypatch, tmp_pat
     assert calls == ["prepare"]
 
 
-@pytest.mark.serial
 def test_real_cached_scanner_high_finding_reaches_one_simulated_pr(monkeypatch, tmp_path):
     from tests.test_skill_publish_scanner_real import _binary, _executable
 

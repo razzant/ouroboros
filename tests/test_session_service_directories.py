@@ -320,7 +320,6 @@ def test_replaced_short_directory_is_neither_granted_nor_deleted(tmp_path):
     assert displaced.is_dir()
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("consumer", ["delegate", "reviewer"])
 def test_real_bus_through_safe_test_uses_the_actual_short_grant(tmp_path, monkeypatch, consumer):
     """The previously failing AF_UNIX consumer, under the grant named in an ordinary start.

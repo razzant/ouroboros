@@ -545,7 +545,6 @@ def test_a_stranger_that_took_a_recycled_pid_or_pgid_is_never_signalled(monkeypa
         stranger.wait(timeout=10)
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux nondumpable process fixture")
 def test_unrelated_nondumpable_process_does_not_block_or_receive_a_signal(monkeypatch, caplog):
     import builtins

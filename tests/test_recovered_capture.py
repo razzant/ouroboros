@@ -27,7 +27,6 @@ from tests._usage_store_testing import ledger_rows
 from tests.test_delegate_body_collection import _until, terminal
 from tests.test_headless_workspace_patch import _init_repo_with_file
 
-pytestmark = pytest.mark.serial
 ANSWER = "Recovered complete answer.\n" * 1024
 EVIDENCE = b"\x00byte-exact checking output\xff\n" * 16
 

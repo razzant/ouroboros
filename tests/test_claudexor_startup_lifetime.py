@@ -19,7 +19,7 @@ from ouroboros import claudexor_daemon as owned, claudexor_runtime, config, proc
 from ouroboros.gateways.claudexor import ClaudexorGateway, ClaudexorUnavailable
 from ouroboros.platform_layer import kill_process_tree, pid_is_alive, subprocess_new_group_kwargs
 
-pytestmark = [pytest.mark.serial, pytest.mark.skipif(os.name == "nt", reason="POSIX measured process custody")]
+pytestmark = [pytest.mark.skipif(os.name == "nt", reason="POSIX measured process custody")]
 
 _ENGINE = '''
 import http.server, json, os, pathlib, socketserver, subprocess, sys, time

@@ -392,7 +392,6 @@ def test_actual_producer_shell_preserves_success_and_failure_exit(tmp_path, work
 OFFICIAL, FORK, TAG = "razzant/ouroboros", "someone/private-copy", "refs/tags/v7.5.2"
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("event,ref,repository,flag", [
     ("push", TAG, OFFICIAL, "--enforce"),
     ("workflow_dispatch", TAG, OFFICIAL, "--enforce"),  # A manual run on a tag ref can publish too.
@@ -506,7 +505,6 @@ def test_every_added_outcome_reference_names_an_already_declared_step():
                 known.add(step["id"])
 
 
-@pytest.mark.serial
 def test_full_lane_runs_as_eight_guarded_shards_under_step_ceilings(tmp_path):
     job = _workflow("ui-browser.yml")["jobs"]["ui-shard"]
     steps = _steps("ui-browser.yml", "ui-shard")
@@ -608,7 +606,6 @@ def test_every_shard_installs_the_digest_pinned_official_caddy_its_lane_needs(tm
         assert not output.exists() and not binary.exists()
 
 
-@pytest.mark.serial
 def test_lane_manifest_is_an_unsharded_collection_whose_upload_is_mandatory(tmp_path):
     jobs = _workflow("ui-browser.yml")["jobs"]
     job, steps = jobs["ui-manifest"], _steps("ui-browser.yml", "ui-manifest")
@@ -695,7 +692,6 @@ def _verdict(tmp_path, **results):
 SKIPPED_LANE = {"SHARD_RESULT": "skipped", "MANIFEST_RESULT": "skipped"}
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("results, path, green, said", [
     ({}, "full", True, []),
     ({"SHARD_RESULT": "failure"}, "full", False, ["ui-shard: failure"]),
@@ -735,7 +731,6 @@ def test_aggregator_verdict_shell_has_two_explicit_paths(tmp_path, results, path
         assert summary == "", "a green full lane is announced by the reconciliation, not by this step"
 
 
-@pytest.mark.serial
 def test_real_reconciler_fails_the_aggregator_step_when_no_shard_reported(tmp_path):
     """The workflow's own reconcile command, run as written: an empty download is RED."""
     bash = shutil.which("bash")

@@ -171,7 +171,6 @@ def test_the_classifier_ignores_the_process_environment_startup_projects_setting
     assert [(f["value"], f["origin"]) for f in facts] == [(200, "document_absent_key")]
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize(("document", "launch_env", "expected", "origin", "raw"), [
     ({"OUROBOROS_MAX_ROUNDS": None}, "77", 200, "saved_invalid", None),
     ({"OUROBOROS_MAX_ROUNDS": ""}, "77", 200, "saved_invalid", ""),

@@ -26,7 +26,7 @@ from ouroboros import process_scope as ps
 from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.tools.shell_process import _active_subprocesses, _tracked_subprocess_run
 
-pytestmark = [pytest.mark.serial, pytest.mark.skipif(os.name == "nt", reason="the environment census is POSIX-only")]
+pytestmark = [pytest.mark.skipif(os.name == "nt", reason="the environment census is POSIX-only")]
 
 
 @contextmanager

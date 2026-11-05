@@ -2,7 +2,6 @@ import pathlib
 import shlex
 import sys
 
-import pytest
 
 from ouroboros.tools.registry import ToolRegistry
 
@@ -355,7 +354,6 @@ def test_light_mode_blocks_runtime_data_as_artifact_workaround(tmp_path, monkeyp
     assert not (data / "uploads" / "report.html").exists()
 
 
-@pytest.mark.serial
 def test_light_mode_executes_process_runtime_data_upload_writes(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
@@ -383,7 +381,6 @@ def test_light_mode_executes_process_runtime_data_upload_writes(tmp_path, monkey
     assert upload.exists()
 
 
-@pytest.mark.serial
 def test_light_mode_executes_run_script_runtime_data_upload_writes(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
@@ -407,7 +404,6 @@ def test_light_mode_executes_run_script_runtime_data_upload_writes(tmp_path, mon
     assert upload.exists()
 
 
-@pytest.mark.serial
 def test_light_mode_executes_relative_process_runtime_data_upload_writes(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
@@ -436,7 +432,6 @@ def test_light_mode_executes_relative_process_runtime_data_upload_writes(tmp_pat
     assert upload.exists()
 
 
-@pytest.mark.serial
 def test_light_mode_executes_env_runtime_data_upload_writes(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
@@ -456,7 +451,6 @@ def test_light_mode_executes_env_runtime_data_upload_writes(tmp_path, monkeypatc
 
 
 
-@pytest.mark.serial
 def test_light_mode_executes_interpreter_runtime_data_touch_without_write_marker(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
@@ -485,7 +479,6 @@ def test_light_mode_executes_interpreter_runtime_data_touch_without_write_marker
     assert upload.exists()
 
 
-@pytest.mark.serial
 def test_light_mode_executes_home_runtime_data_upload_writes(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
@@ -518,7 +511,6 @@ def test_light_mode_executes_home_runtime_data_upload_writes(tmp_path, monkeypat
 
 
 
-@pytest.mark.serial
 def test_light_mode_executes_relative_run_script_runtime_data_upload_writes(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
@@ -567,7 +559,6 @@ def test_light_run_script_allows_readonly_repo_analysis_with_external_write(tmp_
     assert out.read_text(encoding="utf-8") == str(repo)
 
 
-@pytest.mark.serial
 def test_light_run_script_executes_dynamic_repo_write_even_from_task_drive(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
@@ -591,7 +582,6 @@ def test_light_run_script_executes_dynamic_repo_write_even_from_task_drive(tmp_p
     assert target.read_text(encoding="utf-8") == "bad"
 
 
-@pytest.mark.serial
 def test_light_run_script_executes_path_open_repo_write(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
@@ -1380,7 +1370,6 @@ def test_system_repo_write_targets_system_when_active_workspace_differs(tmp_path
     assert (repo / "x.txt").read_text(encoding="utf-8") == "x"
 
 
-@pytest.mark.serial
 def test_light_mode_executes_interpreter_inline_repo_writes(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")

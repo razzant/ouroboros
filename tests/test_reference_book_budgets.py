@@ -138,7 +138,6 @@ def test_book_growth_verdict(base, tip, mode, passes, said):
     assert (said in verdict[1]) if said else verdict[1] == ""
 
 
-@pytest.mark.serial
 def test_composed_bytes_measure_the_book_at_the_base_commit(tmp_path):
     entry = "# Architecture\n\nIntro café.\n\n## Chapters\n\n- [One](architecture/01-one.md)\n"
     chapter = "# One\n\nThe first chapter, naïve.\n"
@@ -156,7 +155,6 @@ def test_composed_bytes_measure_the_book_at_the_base_commit(tmp_path):
     assert composed_bytes(tmp_path, "development", "HEAD") is None  # absent at the base
 
 
-@pytest.mark.serial
 def test_growth_base_is_the_event_base_and_nothing_else(tmp_path):
     _git(tmp_path, "init", "-q")
     shas = []

@@ -15,7 +15,6 @@ from ouroboros.test_evidence import diagnostic_directory
 from ouroboros.test_environment import declare_scratch, retain_tree
 
 REPO = Path(__file__).resolve().parents[1]
-pytestmark = pytest.mark.serial
 
 
 def _safe(tmp_path, command, *, keep=False, evidence=None):

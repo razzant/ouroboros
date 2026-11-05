@@ -22,7 +22,6 @@ from ouroboros.tool_custody import owner_proof
 from tests._budget_pause_exact_helpers import _install_queue
 from tests._store_shared import result_signature
 
-pytestmark = pytest.mark.serial
 
 
 def _dead_process_identity():

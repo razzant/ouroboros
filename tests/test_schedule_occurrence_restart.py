@@ -13,7 +13,6 @@ from tests._store_shared import delete_result, unreadable_result
 
 _row, _rows, q = fixtures._row, fixtures._rows, fixtures.q
 
-pytestmark = pytest.mark.serial
 
 
 def _capacity_refusal(q, monkeypatch):

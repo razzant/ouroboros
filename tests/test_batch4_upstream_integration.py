@@ -11,7 +11,6 @@ from tests.test_review_operation_lifetime import env  # noqa: F401 - isolated op
 from tests.test_send_clock import ticking  # noqa: F401 - deterministic clock samples
 from tests._usage_store_testing import ledger_rows
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("door,expected", [

@@ -563,7 +563,6 @@ def test_a_result_the_handler_cannot_read_leaves_the_rows_name_standing(tmp_path
             if record.name == "supervisor.conversation_lane" and tid in record.getMessage()] == [logging.WARNING] * 2
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("returns_named", [True, False])
 def test_a_refused_head_leaves_no_row_and_a_deferred_one_is_saved_with_its_name(runtime, monkeypatch,  # noqa: F811
                                                                                  returns_named):
@@ -602,7 +601,6 @@ def test_a_refused_head_leaves_no_row_and_a_deferred_one_is_saved_with_its_name(
         saved["id"], "scheduled", "accepted", "Which db for the pilot?")
 
 
-@pytest.mark.serial
 def test_a_head_saved_for_restart_keeps_its_name_through_the_real_return(runtime, monkeypatch):  # noqa: F811
     """A late answer arriving after a Restart was accepted is saved for after it; the real Restart writes the queue
     snapshot, the next generation restores it and returns the head to a worker, whose real start records it. Its

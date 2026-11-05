@@ -295,7 +295,6 @@ def test_journal_accepts_nonfinal_price_refinement_but_not_release(root):
     assert apply_retained_receipt(root, attempt_id, held)["status"] == "duplicate"
 
 
-@pytest.mark.serial
 def test_two_process_receipt_application_changes_money_once(root):
     ua.execute_physical_attempt(request(root), lambda: {"id": "gen-race"})
     attempt_id = ua.last_physical_attempt_capture().attempt_id

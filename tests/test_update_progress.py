@@ -119,7 +119,6 @@ def test_executor_result_survives_panel_reopen(isolated_progress, body, code, re
     assert isolated_progress.saved[progress.STATE_KEY]["result"] == result
 
 
-@pytest.mark.serial
 def test_cancelled_http_await_does_not_finish_the_running_executor(monkeypatch):
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
 
@@ -153,7 +152,6 @@ def test_cancelled_http_await_does_not_finish_the_running_executor(monkeypatch):
     assert progress.snapshot()["active"] is False
 
 
-@pytest.mark.serial
 def test_rejected_competing_executor_cannot_clear_or_advance_owner():
     progress.begin()
     progress.advance("stopping_workers")

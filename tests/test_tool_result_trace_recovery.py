@@ -23,7 +23,6 @@ from ouroboros.tools.core import _read_file
 from ouroboros.tools.registry import ToolContext
 from tests._tool_result_delivery_shared import measured_fit
 
-pytestmark = pytest.mark.serial
 
 TOOL = "ext_receipt_probe"
 CALL_ID = "call-receipt"

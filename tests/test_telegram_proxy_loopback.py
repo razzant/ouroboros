@@ -26,7 +26,6 @@ from cryptography.x509.oid import NameOID
 
 from tests.test_telegram_proxy import _Api, _TOKEN, _bridge_events, _load
 
-pytestmark = pytest.mark.serial
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "telegram" / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))

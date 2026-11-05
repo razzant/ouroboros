@@ -8,7 +8,6 @@ from ouroboros import body_adoption, body_candidate, owned_shutdown
 from tests.body_candidate_support import candidate_commit, git, isolate, make_ctx, make_serving, run_entry
 from tests.test_body_adoption_repairs import _armed
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize('kind', ['file', 'symlink'])

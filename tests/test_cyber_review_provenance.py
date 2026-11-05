@@ -4,7 +4,6 @@ Recovered first-review and exact-author evidence regression from the preserved O
 """
 import pytest
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("case", ["same", "no_first", "stale", "blocking", "post_changed"])

@@ -94,7 +94,6 @@ def test_failed_completion_promotion_retains_child_until_retry(tmp_path, monkeyp
     assert artifacts.read_actor_source_bytes(parent, "source", ref) == raw
 
 
-@pytest.mark.serial
 def test_source_download_is_bound_and_distinct_from_same_named_user_file(tmp_path):
     ref = _old_published_panel(tmp_path, "applied", _run())
     name = Path(ref["path"]).name

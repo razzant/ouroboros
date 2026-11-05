@@ -12,7 +12,6 @@ from ouroboros.skill_loader import SkillReviewState, compute_content_hash, save_
 from ouroboros.tools import skill_exec
 from ouroboros.tools.registry import ToolContext
 
-pytestmark = pytest.mark.serial
 
 PROGRAMS = {
     'python': ('py', "import sys\nfrom pathlib import Path\nprint(Path('cwd-proof.txt').read_text(encoding='utf-8'))\nprint(*sys.argv[1:],sep='\\n')\nprint('diagnostic',file=sys.stderr)\nsys.exit(7)\n"),

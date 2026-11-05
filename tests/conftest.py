@@ -413,24 +413,11 @@ def _mock_pollution_files(root: pathlib.Path) -> set[pathlib.Path]:
 # hermetic commit gate (ouroboros/preflight_runner.py) run ONE xdist pass in which a resource's tests take
 # turns on one worker (`xdist_group("serial:<resource>")`) while the other resources and every parallel-safe
 # test run beside them; `serial("exclusive")` names the one resource that is the whole machine: a test proven
-# to harm live siblings (a reaper that kills xdist workers, a process-global another worker's test observes)
-# or to need none, run alone in the short one-process pass after it. A bare `serial` stays valid until the
-# strip (test diet, 2026-11-05): its file runs in one of the `--serial-shards` file groups of the xdist pass.
-# An owned child, a private root or port 0 is parallel-safe and marks nothing (CHECKLISTS Self-Check 18).
-# Whole-file marks below carry the reason each file recorded; the three mixed cloud runs decide which stay.
+# to harm live siblings (a reaper that kills xdist workers, a process-global another worker's test observes),
+# run alone in the short one-process pass after it. A bare `serial` is a collection error (DEVELOPMENT 14
+# "Parallel CI and the `serial` marker"). An owned child, a private root or port 0 is parallel-safe and marks
+# nothing (CHECKLISTS Self-Check 18). Whole-file marks below carry the reason each file recorded.
 _SERIAL_RESOURCES = {
-    "test_workspace_executor.py": "",
-    # Themed siblings of test_workspace_executor.py; they spawn the same real processes.
-    "test_workspace_executor_services.py": "",
-    "test_workspace_executor_docker.py": "",
-    "test_workspace_executor_admission.py": "",
-    "test_workspace_executor_cleanup.py": "",
-    "test_process_custody.py": "",
-    "test_kill_process_tree_orphans.py": "",
-    "test_zombie_prevention.py": "",
-    "test_worker_crash_retry.py": "",
-    "test_process_resource_leaks.py": "",
-    "test_restart_reconnect.py": "",
     # spawns a real pytest subprocess via run_hermetic_pytest + its reaper kills whole process
     # trees / sweeps processes referencing a temp root → can collateral-damage sibling xdist
     # workers under -n (their unrelated tests then fail as a crashed-worker batch).
@@ -440,10 +427,6 @@ _SERIAL_RESOURCES = {
     # unrelated server tests, cached route/probe state can escape monkeypatch restoration and turn
     # the mocked capability probe into a real network attempt: it needs no live sibling.
     "test_settings_budget_hotreload.py": "exclusive",
-    # spawns real long-lived sleeper subprocesses via the legacy ouroboros.tools.services path
-    # AND mutates the module-global tools.services._SERVICES (NOT covered by the
-    # _isolate_workspace_executor_globals fixture, which isolates a different dict).
-    "test_services_tool_v2.py": "",
     # Its own autouse fixture documents that the writer fence "deliberately latches PROCESS-wide
     # state" (workers admission/survivor/blocker latches, update_merge/git_ops module globals);
     # under -n the replace-family no-side-effect pins (replace_env["calls"] == []) intermittently
@@ -480,12 +463,21 @@ def pytest_collection_modifyitems(config, items):  # noqa: ARG001
     """Tag whole-file serial suites BEFORE pytest's own `-m` deselection runs (tryfirst), derive `exclusive`
     from `serial("exclusive")` so `-m "not exclusive"` / `-m exclusive` partition the two passes, then pin the
     xdist groups. Tests that carry their own `@pytest.mark.serial` decorator are honored natively too."""
+    bare = []
     for item in items:
         resource = _SERIAL_RESOURCES.get(pathlib.Path(str(item.fspath)).name)
         if resource is not None and item.get_closest_marker("serial") is None:
-            item.add_marker(pytest.mark.serial(resource) if resource else pytest.mark.serial)
-        if serial_resource(item) == EXCLUSIVE:
+            item.add_marker(pytest.mark.serial(resource))
+        kind = serial_resource(item)
+        if kind == "":
+            bare.append(item.nodeid)
+        elif kind == EXCLUSIVE:
             item.add_marker(pytest.mark.exclusive)
+    if bare:
+        raise pytest.UsageError(
+            f"a bare @pytest.mark.serial on {len(bare)} test(s), first {bare[0]}: name the host resource the test "
+            'cannot isolate, @pytest.mark.serial("<resource>"), or make it parallel-safe '
+            '(docs/development/14-build-and-ci.md, "Parallel CI and the `serial` marker")')
     _pin_lane_groups(items, config)
 
 

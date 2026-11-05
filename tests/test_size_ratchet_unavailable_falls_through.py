@@ -24,7 +24,6 @@ from ouroboros.review import (
     validate_size_ratchet,
 )
 
-pytestmark = pytest.mark.serial
 
 
 # --- shared helpers ----------------------------------------------------------

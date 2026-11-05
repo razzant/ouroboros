@@ -382,7 +382,6 @@ def test_an_owner_hard_stop_of_a_direct_turn_is_a_terminal_not_a_hold(turn):
     assert holds(turn.root) == []
 
 
-@pytest.mark.serial
 def test_a_presence_answer_met_by_stop_now_is_a_terminal_not_a_hold(owner_stop, monkeypatch):
     """A real Place focus turn: its final answer meets the owner's Stop now at the closing admission."""
     from ouroboros.presence_runner import PresenceTurnError

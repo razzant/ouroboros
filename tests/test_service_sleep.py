@@ -23,7 +23,6 @@ import pytest
 
 from tests.test_model_sleep import _ctx, _mail, _result
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture(autouse=True)

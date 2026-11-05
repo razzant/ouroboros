@@ -32,7 +32,6 @@ def test_file_assignment_keeps_modules_and_balances_independent_of_input_order()
     assert set(file_shards(weights, 1).values()) == {1}
 
 
-@pytest.mark.serial
 def test_real_pytest_manifests_and_xdist_prove_both_passes_by_whole_file(tmp_path):
     suite = tmp_path / "suite"
     (suite / "tests").mkdir(parents=True)

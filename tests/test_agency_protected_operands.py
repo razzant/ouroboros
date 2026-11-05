@@ -13,7 +13,6 @@ from ouroboros import config, safety
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.tools.shell_guards import direct_shell_rows, direct_utility_target_rows
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

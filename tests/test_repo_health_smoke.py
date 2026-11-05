@@ -354,7 +354,6 @@ def _band_repo(tmp_path: Path, lines: dict[str, int], manifest: SizeRatchetManif
     return tmp_path / "repo"
 
 
-@pytest.mark.serial
 def test_band_entry_stays_only_while_its_module_sits_above_the_band(tmp_path: Path) -> None:
     """A module drifting to 1501-1600 lines keeps its band entry (live and staged); below
     the band, above the hard gate or deleted, the entry is stale, and a band module without
@@ -387,7 +386,6 @@ def test_band_entry_stays_only_while_its_module_sits_above_the_band(tmp_path: Pa
     assert "GIANT_PATHS contains stale entry: 'big.py'" in validate_size_ratchet(repo)
 
 
-@pytest.mark.serial
 def test_band_entry_kept_above_the_band_returns_with_its_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1188,7 +1186,6 @@ def test_generator_candidate_allows_tracked_source_deletion(tmp_path: Path, monk
     assert generated.giant_paths == frozenset()
 
 
-@pytest.mark.serial
 def test_generator_keeps_a_band_entry_only_while_its_module_sits_above_the_band(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

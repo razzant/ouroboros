@@ -102,7 +102,6 @@ def test_task_name_alone_confers_no_host_role(data_root, monkeypatch, name):
     assert not first["scope"].non_task_operation
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("door", ["http", "marketplace"])
 def test_actual_adapter_produces_non_task_review(data_root, monkeypatch, door):
     from ouroboros import skill_review, skill_review_runner

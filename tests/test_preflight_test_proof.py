@@ -18,7 +18,6 @@ from ouroboros.commit_admission import (
 )
 from ouroboros.tools.review_helpers import _run_review_preflight_tests
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture(autouse=True)

@@ -27,7 +27,6 @@ from tests.test_scheduled_receipt_contention import install_worker, request
 from tests.test_workspace_preparation import _WAIT_SEC, spy_provisions
 from tests.test_workspace_preparation import env as env
 
-pytestmark = pytest.mark.serial
 
 
 def wait_for(predicate, what):

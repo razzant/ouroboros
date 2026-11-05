@@ -23,7 +23,6 @@ from tests.test_windows_restart_proof import Gateway
 from tests.test_pending_deadline_continuations import expiry  # noqa: F401
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

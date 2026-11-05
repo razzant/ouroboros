@@ -19,7 +19,6 @@ from tests._shared import stop_socket_sharer, wait_test_child_stop
 root, _prior, _write = state_fixtures.root, state_fixtures._prior, state_fixtures._write
 q, _rows = schedule_fixtures.q, schedule_fixtures._rows
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("writer", ["update", "save", "init"])

@@ -29,7 +29,6 @@ from tests.test_continue_blocker_diagnostics import _held, _http
 from tests.test_continue_independent_review import PRED, _current_pool  # noqa: F401 - pytest fixture
 from tests.test_owner_continue import NONCE
 
-pytestmark = pytest.mark.serial
 
 LEAF = "delegated run run-leaf is running"
 UNKNOWN_START = "a delegated start has an unknown outcome (no run was recorded)"

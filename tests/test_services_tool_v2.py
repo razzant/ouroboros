@@ -763,7 +763,6 @@ def test_user_files_service_without_outputs_reports_audit_gap(tmp_path, monkeypa
     assert stopped["artifact_output_failed"] is False
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("relative", [False, True])
 def test_light_service_python_body_executes_once_with_bound_environment(tmp_path, monkeypatch, relative):
     from ouroboros.tools import services

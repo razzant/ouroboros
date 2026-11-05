@@ -13,7 +13,6 @@ from tests._review_session_route_shared import (
 
 _owned_gateway_uses_each_test_transport = _transport_fixture
 fake_route = _route_fixture
-pytestmark = pytest.mark.serial  # the session fixture mutates its shared transport registry
 
 
 @pytest.mark.parametrize("cleanup_fails", [False, True])

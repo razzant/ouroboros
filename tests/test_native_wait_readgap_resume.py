@@ -18,7 +18,6 @@ from tests.test_owner_wait_restart import (
 )
 from tests.test_project_hold_recovery import worker
 
-pytestmark = pytest.mark.serial
 
 EARLY = "restore_refused:owner_wait_source_unavailable"
 LATE = "restore_refused:pause_record_unreadable"

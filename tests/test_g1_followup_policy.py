@@ -16,7 +16,6 @@ from supervisor.followup_policy import observed_store, record_restart
 from tests.test_schedule_followup import _ctx
 from tests._store_shared import delete_result, unreadable_result
 
-pytestmark = pytest.mark.serial
 ORIGIN = 'root-1'
 BINDING = {'billing_group_id': ORIGIN, 'billing_group_limit_usd': 10.0,
            'billing_group_limit_source': 'initial_task_admission', 'billing_group_limit_revision': 'original-revision'}

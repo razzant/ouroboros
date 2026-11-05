@@ -73,7 +73,6 @@ def _open_settings(page, url: str, tab: str) -> None:
     page.click(f'[data-settings-tab="{tab}"]')
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 def test_settings_grid_tracks_never_scroll_the_body_sideways(direct_server_with_data):
     """At 780x680 the Agents route grid and a custom secret row stay inside the

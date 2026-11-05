@@ -16,7 +16,6 @@ from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_admission_contention import database_reader
 from tests._store_journal_shared import use_journal
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

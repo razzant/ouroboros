@@ -11,7 +11,6 @@ from tests.test_question_answer_routing import debt, drain
 from tests.test_quiz_late_answer import _inbox, _late_bridge
 from tests.test_swarm_host_admission import host  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("destination,cut", [

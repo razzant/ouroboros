@@ -59,7 +59,6 @@ def test_composed_size_is_the_composed_book_on_the_real_tree():
         assert composed_size(book_source_sizes(REPO, book_id)) == composed
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("remote,url", [
     ("canonical", "https://github.com/razzant/ouroboros.git"),
     ("renamed", "git@github.com:razzant/ouroboros.git"),
@@ -101,7 +100,6 @@ def test_published_feature_keeps_contribution_growth(tmp_path, remote, url):
     assert book_balances(clone, ["notes.md"]) == []  # no book source touched, nothing measured
 
 
-@pytest.mark.serial
 def test_linked_body_candidate_without_upstream_keeps_committed_growth(tmp_path):
     serving = _book_repo(tmp_path / "serving")
     base = _git(serving, "rev-parse", "HEAD")
@@ -116,7 +114,6 @@ def test_linked_body_candidate_without_upstream_keeps_committed_growth(tmp_path)
     assert balance.merge_base == base and balance.upstream == "refs/remotes/canonical/ouroboros"
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("baseline", ["absent_remote", "fork", "missing_ref", "unrelated", "missing_book"])
 def test_unknown_contribution_never_means_paid_even_with_measured_head(tmp_path, baseline):
     repo = _book_repo(tmp_path / "repo", official=False)
@@ -144,7 +141,6 @@ def test_unknown_contribution_never_means_paid_even_with_measured_head(tmp_path,
         assert "contribution unknown" in note and "nothing owed" not in note
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("suffix", ["", "Short.\n"])
 def test_committed_growth_can_be_paid_in_the_worktree(tmp_path, suffix):
     repo = _book_repo(tmp_path)
@@ -157,7 +153,6 @@ def test_committed_growth_can_be_paid_in_the_worktree(tmp_path, suffix):
     assert "nothing owed" in book_balance_note(repo, [CHAPTER])
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("url", [
     "/tmp/github.com/razzant/ouroboros.git", "file://github.com/razzant/ouroboros.git",
     "https://example.invalid/razzant/ouroboros.git", "https://github.com.example.invalid/razzant/ouroboros.git",
@@ -173,7 +168,6 @@ def test_remote_host_and_exact_repository_matter_even_with_an_official_push_url(
     assert "contribution unknown" in book_balance_note(repo, [CHAPTER])
 
 
-@pytest.mark.serial
 def test_membership_and_utf8_bytes_include_composition_separators(tmp_path):
     repo = _book_repo(tmp_path)
     second = "docs/architecture/02-two.md"
@@ -190,7 +184,6 @@ def test_membership_and_utf8_bytes_include_composition_separators(tmp_path):
     assert sum(delta for _, delta in balance.changed) + 2 == balance.vs_head
 
 
-@pytest.mark.serial
 def test_balance_helper_does_not_import_runtime_state(tmp_path):
     repo = _book_repo(tmp_path)
     code = ("import sys; from pathlib import Path; from ouroboros.reference_books import book_balances; "
@@ -201,7 +194,6 @@ def test_balance_helper_does_not_import_runtime_state(tmp_path):
     subprocess.run([sys.executable, "-B", "-c", code, str(repo)], cwd=REPO, check=True, capture_output=True)
 
 
-@pytest.mark.serial
 def test_note_states_the_rule_when_owed_and_one_quiet_line_when_paid(tmp_path):
     repo = _book_repo(tmp_path)
     (repo / CHAPTER).write_text(BODY + "Added.\n", encoding="utf-8", newline="\n")
@@ -214,7 +206,6 @@ def test_note_states_the_rule_when_owed_and_one_quiet_line_when_paid(tmp_path):
     assert book_balance_note(repo, ["notes.md"]) == ""
 
 
-@pytest.mark.serial
 def test_note_never_calls_an_unmeasured_book_paid(tmp_path):
     repo = tmp_path / "fresh"
     repo.mkdir()
@@ -234,7 +225,6 @@ def test_note_never_calls_an_unmeasured_book_paid(tmp_path):
     assert "nothing owed" in book_balance_note(measured, [CHAPTER])
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("missing_book", ["architecture", "development"])
 @pytest.mark.parametrize("growth", ["", "Added.\n"])
 def test_note_discloses_an_unavailable_book_beside_a_measured_book(tmp_path, missing_book, growth):
@@ -294,7 +284,6 @@ GROW = {
 }
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("tool", sorted(GROW))
 def test_a_body_book_edit_carries_the_balance(tmp_path, monkeypatch, tool):
     import ouroboros.safety as safety
@@ -305,7 +294,6 @@ def test_a_body_book_edit_carries_the_balance(tmp_path, monkeypatch, tool):
     assert "ℹ️ Text growth:\n" in result and BOOK_GROWTH_RULE in result
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("tool", sorted(GROW))
 def test_a_foreign_project_or_a_non_book_path_gets_no_balance(tmp_path, monkeypatch, tool):
     import ouroboros.safety as safety
@@ -321,7 +309,6 @@ def test_a_foreign_project_or_a_non_book_path_gets_no_balance(tmp_path, monkeypa
     assert body.startswith("✅") and "Text growth" not in body, body[:300]
 
 
-@pytest.mark.serial
 def test_the_commit_gate_states_the_staged_books_balance_in_its_diff_pulse(tmp_path):
     """The gate's free checks carry the touched books' balance once, inside the diff
     pulse they show before the panel: the rule when the book grew, "nothing owed" when
@@ -343,7 +330,6 @@ def test_the_commit_gate_states_the_staged_books_balance_in_its_diff_pulse(tmp_p
         assert not [w for w in check_worktree_readiness(repo, paths=[CHAPTER]) if "book" in w]
 
 
-@pytest.mark.serial
 def test_bible_and_the_prompts_follow_the_book_rule(tmp_path):
     """BIBLE.md and the prompt files (one text) carry the same balance and rule as a book."""
     for path, text in {"BIBLE.md": "# BIBLE\n\nP0.\n", "prompts/SYSTEM.md": "system words\n",

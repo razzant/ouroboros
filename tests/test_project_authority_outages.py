@@ -17,7 +17,6 @@ from tests.test_project_hold_recovery import accepted, restore_unreadable, resum
 from tests.test_swarm_host_admission import host  # noqa: F401
 from tests._store_shared import delete_result, result_exists, result_signature, seed_result, unreadable_result
 
-pytestmark = pytest.mark.serial
 
 
 def test_registry_loss_blocks_admission_until_reconstruction_with_new_identity(tmp_path, monkeypatch):

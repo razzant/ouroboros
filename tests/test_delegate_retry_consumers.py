@@ -13,7 +13,6 @@ from ouroboros.utils import utc_now_iso
 from tests._shared import write_queue_document
 
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture(autouse=True)

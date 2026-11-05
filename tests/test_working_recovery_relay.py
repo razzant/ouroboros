@@ -22,7 +22,6 @@ from tests.test_swarm_host_admission import host  # noqa: F401
 from tests.test_working_recovery_admission import _running
 from tests._store_shared import read_result, seed_result
 
-pytestmark = pytest.mark.serial
 
 
 def _first_receiver(host, tmp_path, monkeypatch, scope, origin="crash"):  # noqa: F811 - the imported fixture

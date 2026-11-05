@@ -16,7 +16,6 @@ from tests.test_delegated_run_isolation_orphans import _captured_flat, _disposer
 from tests.test_delegated_skill_payload import _captured
 
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture(autouse=True)

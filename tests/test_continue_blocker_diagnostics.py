@@ -20,7 +20,6 @@ from tests._budget_pause_exact_helpers import _install_queue
 from tests.test_continue_independent_review import PRED, _current_pool, _pending, _rows  # noqa: F401
 from tests.test_owner_continue import NONCE, _interrupted
 
-pytestmark = pytest.mark.serial
 
 
 def _http(handler, task_id, body=None):

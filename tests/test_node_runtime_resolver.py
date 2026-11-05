@@ -126,7 +126,6 @@ def test_healthy_path_node_is_byte_identical_noop(tmp_path, monkeypatch, quiet_b
     assert apply_env_path_prepend(None, trace) is None
 
 
-@pytest.mark.serial
 def test_broken_path_node_falls_back_to_bundled_with_rewrite_and_prepend(
     tmp_path, monkeypatch, quiet_bootstrap,
 ):
@@ -561,7 +560,6 @@ def test_registry_healthy_path_handler_argv_is_untouched(tmp_path, monkeypatch, 
     assert attested.env_path_prepend == ""
 
 
-@pytest.mark.serial
 def test_light_shell_request_reaches_node_probe_and_executes_once(tmp_path, monkeypatch):
     """A guessed write in shell text does not veto the chosen Safety decision."""
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
@@ -738,7 +736,6 @@ def test_run_script_accepts_attested_bundled_node_and_allows_node_exe(
     assert "RUN_SCRIPT_BLOCKED" not in admitted
 
 
-@pytest.mark.serial
 def test_workspace_executor_local_applies_env_overlay(tmp_path):
     from ouroboros.workspace_executor import ExecutorRef, PathMapping, _execute_local
 

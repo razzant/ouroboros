@@ -9,7 +9,6 @@ from tests._budget_pause_exact_helpers import _install_queue
 from tests.test_batch4_repair_compositions import _running
 from tests._store_shared import delete_result, result_exists, result_signature, seed_result
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize('asynchronous', [False, True])

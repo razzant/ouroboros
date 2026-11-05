@@ -461,7 +461,6 @@ def test_stall_forensics_separates_the_three_stall_hypotheses(tmp_path):
 # Mock lane: a real isolated server driven by the local stub model.
 # ===========================================================================
 
-@pytest.mark.serial
 @_SCENARIO_CEILING
 def test_e4_cancel_single_settles_the_intent_and_writes_the_terminal(mock_stack):
     """E4 — the single cancel: intent requested -> claimed -> settled, the projection is
@@ -488,7 +487,6 @@ def test_e4_cancel_single_settles_the_intent_and_writes_the_terminal(mock_stack)
     assert task_id not in intents(data_root)
 
 
-@pytest.mark.serial
 @_SCENARIO_CEILING
 def test_e5_cancel_cascade_settles_descendants_then_the_root(e2e_clone, tmp_path_factory):
     """E5 — the cascade: the root intent is minted with ``scope=cascade`` AT THE INGRESS,
@@ -529,7 +527,6 @@ def test_e5_cancel_cascade_settles_descendants_then_the_root(e2e_clone, tmp_path
             server.stop()
 
 
-@pytest.mark.serial
 @_SCENARIO_CEILING
 def test_e6_cancel_after_settlement_is_a_404_and_preserves_the_result(mock_stack):
     """E6 — the cancel x completion race, on its deterministic side: once a task settles on
@@ -585,7 +582,6 @@ def test_e6_cancel_after_settlement_is_a_404_and_preserves_the_result(mock_stack
     assert task_id not in intents(data_root)
 
 
-@pytest.mark.serial
 @_SCENARIO_CEILING
 def test_e7_terminal_delivery_is_owed_then_recorded_exactly_once(mock_stack):
     """E7 — the owed outbox, on the side a stub can drive: a terminal answer registers a
@@ -630,7 +626,6 @@ def test_e7_terminal_delivery_is_owed_then_recorded_exactly_once(mock_stack):
         _read_ledger()
 
 
-@pytest.mark.serial
 @_SCENARIO_CEILING
 def test_e9_boot_migration_adopts_a_legacy_cancel_requested_latch(e2e_clone, tmp_path_factory):
     """E9 — a pre-redesign ``cancel_requested`` result file becomes an ordinary intent at
@@ -673,7 +668,6 @@ def test_e9_boot_migration_adopts_a_legacy_cancel_requested_latch(e2e_clone, tmp
             server.stop()
 
 
-@pytest.mark.serial
 @_SCENARIO_CEILING
 def test_e10_graceful_stop_keeps_the_intent_open_and_finalizes(e2e_clone, tmp_path_factory):
     """E10 — ``finalize_then_cancel``: a 202 pending acknowledgement, an intent that stays
@@ -735,7 +729,6 @@ def _stop_while_a_call_is_on_the_wire(server, stub, **stop) -> tuple[str, int, d
     return task_id, calls_at_stop, server.cancel_task(task_id, **stop)
 
 
-@pytest.mark.serial
 @_SCENARIO_CEILING
 def test_e10_wrap_up_landing_while_a_call_is_on_the_wire_still_gets_its_one_final_turn(e2e_clone, tmp_path_factory):
     """E10, deterministically mid-call. The held call completes and the Wrap up keeps the round's
@@ -772,7 +765,6 @@ def test_e10_wrap_up_landing_while_a_call_is_on_the_wire_still_gets_its_one_fina
             server.stop()
 
 
-@pytest.mark.serial
 @_SCENARIO_CEILING
 def test_e10_stop_now_landing_while_a_call_is_on_the_wire_cancels_with_no_final_turn(e2e_clone, tmp_path_factory):
     """The hard twin of the above, unchanged by the Wrap up repair: an immediate Stop landing while
@@ -800,7 +792,6 @@ def test_e10_stop_now_landing_while_a_call_is_on_the_wire_cancels_with_no_final_
             server.stop()
 
 
-@pytest.mark.serial
 @_SCENARIO_CEILING
 def test_e11_stop_now_hardens_the_same_intent_without_minting_a_second(e2e_clone, tmp_path_factory):
     """E11 — Stop-now during the graceful wait HARDENS the pending intent: same
@@ -834,7 +825,6 @@ def test_e11_stop_now_hardens_the_same_intent_without_minting_a_second(e2e_clone
             server.stop()
 
 
-@pytest.mark.serial
 @_SCENARIO_CEILING
 def test_e12_owner_hurry_is_idempotent_text_free_and_loses_to_a_pending_stop(
     e2e_clone, tmp_path_factory,
@@ -888,7 +878,6 @@ def test_e12_owner_hurry_is_idempotent_text_free_and_loses_to_a_pending_stop(
 # lane's author — see the module docstring.
 # ===========================================================================
 
-@pytest.mark.serial
 def test_e1_delegated_run_lifecycle_emits_the_four_verb_families(e2e_clone, tmp_path_factory):
     """E1 — start -> wait -> answer -> cancel against a REAL delegated lane: the durable
     event families exist and containment recorded no fault."""
@@ -916,7 +905,6 @@ def test_e1_delegated_run_lifecycle_emits_the_four_verb_families(e2e_clone, tmp_
         server.stop()
 
 
-@pytest.mark.serial
 def test_e2_delegated_patch_integration_disposes_the_snapshot(e2e_clone, tmp_path_factory):
     """E2 — a clean ``integrate_delegated_patch``: capture -> apply -> disposed=applied."""
     require_lane(LANE_PAID)
@@ -938,7 +926,6 @@ def test_e2_delegated_patch_integration_disposes_the_snapshot(e2e_clone, tmp_pat
         server.stop()
 
 
-@pytest.mark.serial
 def test_e3_conflicting_delegated_patch_preserves_the_snapshot(e2e_clone, tmp_path_factory):
     """E3 — a conflicting integrate: the patch is NOT disposed and the snapshot's record and
     its pinned result survive, so the owner can retry instead of losing the delegated work."""
@@ -965,7 +952,6 @@ def test_e3_conflicting_delegated_patch_preserves_the_snapshot(e2e_clone, tmp_pa
         server.stop()
 
 
-@pytest.mark.serial
 def test_e13_budget_drain_pauses_queued_tasks_and_leaves_no_intents(e2e_clone, tmp_path_factory):
     """E13 — the budget drain under the LIVE pause semantics (supersedes E8, F6
     disposition): a task whose root budget is exhausted BEFORE its first model

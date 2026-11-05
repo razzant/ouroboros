@@ -296,7 +296,6 @@ def test_stage_per_file_cap_is_inclusive():
         staged.cleanup()
 
 
-@pytest.mark.serial
 def test_stage_preserves_arbitrary_data_through_loading_and_review(tmp_path):
     from ouroboros.skill_loader import load_skill
     from ouroboros.skill_review_packs import frozen_payload_files, payload_pack
@@ -331,7 +330,6 @@ def test_stage_preserves_arbitrary_data_through_loading_and_review(tmp_path):
         staged.cleanup()
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
 @pytest.mark.parametrize("name", ["program.so", "node_modules/lib/index.js"])
 def test_cyber_stages_archive_findings_as_advice(monkeypatch, caplog, mode, name):
@@ -351,7 +349,6 @@ def test_cyber_stages_archive_findings_as_advice(monkeypatch, caplog, mode, name
         staged.cleanup()
 
 
-@pytest.mark.serial
 def test_cyber_archive_advice_preserves_exact_bytes_and_extraction_root(monkeypatch):
     from ouroboros.marketplace import fetcher
 

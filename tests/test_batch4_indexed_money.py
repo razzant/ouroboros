@@ -20,7 +20,6 @@ from tests.test_usage_lock_continuity import short_acquisitions as short_acquisi
 from tests._usage_store_testing import request, write_journal
 from tests._usage_store_testing import root as root
 
-pytestmark = pytest.mark.serial
 
 
 def group_scope(root, task="child", root_id="successor", *, cap=10, root_cap=None):

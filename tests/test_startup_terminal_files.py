@@ -790,7 +790,6 @@ def _surviving_worker(root, task_id, *, chat_id=1):
     return proc
 
 
-@pytest.mark.serial
 def test_a_worker_that_survived_the_shutdown_is_killed_before_the_terminal_is_written(
     roots, monkeypatch,
 ):
@@ -847,7 +846,6 @@ def test_a_worker_that_survived_the_shutdown_is_killed_before_the_terminal_is_wr
     assert stored["result"] == terminal[0]["result"] == SERVER_STOPPED_CANCEL
 
 
-@pytest.mark.serial
 def test_an_ordinary_cancel_of_a_live_worker_keeps_stating_the_kill(roots, monkeypatch):
     """The shared producer speaks for a shutdown fence and for nothing else.
 
@@ -873,7 +871,6 @@ def test_an_ordinary_cancel_of_a_live_worker_keeps_stating_the_kill(roots, monke
     assert stored["result"] == LIVE_WORKER_CANCEL
 
 
-@pytest.mark.serial
 def test_the_fence_is_the_same_on_either_side_of_the_reap(roots):
     """Restore never consults process liveness, so whether the previous
     generation's worker died before or after the fence was minted must not change

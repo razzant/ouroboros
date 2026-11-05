@@ -24,7 +24,6 @@ from supervisor.continuation_admission import action_writers, admit_continuation
 from tests._budget_pause_exact_helpers import _install_queue
 from tests.test_owner_continue import NONCE, _interrupted
 
-pytestmark = pytest.mark.serial
 
 # These waits synchronize events, not a latency promise. Store creation and
 # admission can take seconds under load; keep one bounded deadlock escape.

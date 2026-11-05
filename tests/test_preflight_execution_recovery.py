@@ -17,7 +17,6 @@ from tests.test_review_change_end_to_end import (
     _brief_text, _paid_rows, _pending_then_answering_seat, staged_body,  # noqa: F401
 )
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("refusal", [

@@ -102,7 +102,6 @@ def test_versioned_interpreter_basename_still_classified(tmp_path):
 # ---- registry level: the resolver is hoisted above the light guard ---------
 
 
-@pytest.mark.serial
 def test_light_mode_task_drive_label_cwd_is_not_light_blocked(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     reg = _registry(tmp_path)
@@ -119,7 +118,6 @@ def test_light_mode_task_drive_label_cwd_is_not_light_blocked(tmp_path, monkeypa
 
 
 
-@pytest.mark.serial
 def test_light_mode_repo_write_still_blocked(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     reg = _registry(tmp_path)

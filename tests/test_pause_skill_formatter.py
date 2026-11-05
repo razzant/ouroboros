@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import threading
 
-import pytest
 
 from ouroboros import budget_pause, loop, model_wait, usage_accounting as ua
 from ouroboros.artifacts import read_actor_source_bytes
@@ -19,7 +18,6 @@ from tests.test_pause_model_receiver import _request, _extract, _until
 from tests.test_skill_publish_transaction import _install_transaction_fakes, _snapshot
 from tests.test_working_checkpoint import _registry
 
-pytestmark = pytest.mark.serial
 
 
 def test_pause_of_real_tool_formatter_checkpoints_blocked_attempt_before_late_answer(tmp_path, monkeypatch):

@@ -21,7 +21,6 @@ from ouroboros.skill_publish_scanner import (
     scan_named_bytes,
 )
 
-pytestmark = pytest.mark.serial
 
 _FAKE_SOURCE = pathlib.Path(__file__).parent / "fixtures" / "skill_publish_scanner" / "fake_betterleaks.py"
 

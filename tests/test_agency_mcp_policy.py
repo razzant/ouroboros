@@ -54,7 +54,6 @@ def test_cyber_url_credentials_use_existing_diagnostic_masking(monkeypatch):
     assert mcp_client.normalize_server_config({"id": "auth", "url": url}) is None
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("mode", ["pro", "cyber_pro"])
 def test_live_http_mcp_discovery_call_and_remote_failure(tmp_path, monkeypatch, mode):
     pytest.importorskip("mcp")

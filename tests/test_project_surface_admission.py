@@ -16,7 +16,6 @@ from tests._store_shared import result_signature
 from tests.test_project_hold_recovery import accepted, worker
 
 host = host_fixture
-pytestmark = pytest.mark.serial
 
 
 def request_for(host, task_id="", query=b""):

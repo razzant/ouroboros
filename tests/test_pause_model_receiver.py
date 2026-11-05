@@ -25,7 +25,6 @@ from ouroboros.task_results import load_task_result, write_task_result
 from tests._usage_store_testing import attempt_rows_in_start_order
 from tests.test_llm_claudexor import setup as subscription_setup  # noqa: F401 - the imported fixture
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

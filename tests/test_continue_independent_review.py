@@ -19,7 +19,6 @@ from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
 from tests.test_owner_continue import NONCE, _interrupted
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 PRED = "pred-1"
 SLOT = "review-session"

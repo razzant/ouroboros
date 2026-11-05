@@ -8,7 +8,6 @@ import pytest
 from ouroboros import budget_pause as bp, sleep_custody as sc, usage_accounting as ua
 from tests.test_authority_pause_composition import LiveGateway
 
-pytestmark = pytest.mark.serial
 
 
 def _prepared_transfer(tmp_path, monkeypatch, *, sleep=False):

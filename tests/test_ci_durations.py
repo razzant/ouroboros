@@ -243,7 +243,6 @@ def _session(tmp_path, suite, entry, lane, public, *options, env=None):
 PARAMETRIZED = "import pytest\n@pytest.mark.parametrize('n', range({}))\ndef test_n(n):\n    pass\n"
 
 
-@pytest.mark.serial
 def test_real_shards_pack_whole_files_by_recorded_time_and_reconcile(tmp_path):
     suite, entry = _suite(tmp_path, {
         # The table shapes the collection only: the session's own tests never inherit it.
@@ -282,8 +281,6 @@ def test_real_shards_pack_whole_files_by_recorded_time_and_reconcile(tmp_path):
             in gaps), gaps
 
 
-@pytest.mark.serial
-@pytest.mark.serial
 def test_an_owned_session_records_its_durations_at_its_end_and_a_narrowed_one_does_not(tmp_path):
     """The owner names the table through the environment; the session drops the name at collection (its tests'
     children inherit no table) and folds its whole files' seconds in at its end; a `-k` session writes nothing."""

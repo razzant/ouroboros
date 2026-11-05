@@ -24,7 +24,6 @@ from ouroboros.owner_mailbox import drain_owner_entries, write_owner_message
 from ouroboros.review_state import load_state
 from ouroboros.task_results import write_task_result
 
-pytestmark = pytest.mark.serial
 TASK = "receptive-author"
 
 

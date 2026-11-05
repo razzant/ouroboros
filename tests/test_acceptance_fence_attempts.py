@@ -20,7 +20,6 @@ from tests.test_worker_crash_retry import (
     _reserved_job as _reserved_crash_job,
 )
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture(autouse=True)

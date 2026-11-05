@@ -107,7 +107,6 @@ def test_plain_python_and_nonstandard_cfg_neighbor(tmp_path):
     assert pip_install_target_args(str(bundled)) == ["--user"]
 
 
-@pytest.mark.serial
 def test_real_venv_installs_and_imports_local_wheel(tmp_path):
     venv = tmp_path / "work-environment"
     env = embedded_python_env(tmp_path / "data")
@@ -138,7 +137,6 @@ def test_real_venv_installs_and_imports_local_wheel(tmp_path):
     assert value == "local wheel imported"
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("outcome", ["timeout", "success", "nonzero", "no-cleanup"])
 def test_install_command_settles_descendants_before_fallback(tmp_path, outcome):
     """Observe births/exit state before the independent outer owner reaps anything."""
@@ -245,7 +243,6 @@ else:
     assert not live(sentinel_identity)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("timeout", [0.05, 10], ids=["timeout-and-cleanup-error", "success-and-cleanup-error"])
 def test_install_command_cleanup_failure_stays_red(monkeypatch, timeout):
     containers = []
@@ -286,7 +283,6 @@ def test_install_command_cleanup_failure_stays_red(monkeypatch, timeout):
     assert containers[0].proc.stdout.closed and containers[0].proc.stderr.closed
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("text", [False, True], ids=["bytes", "text"])
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_install_timeout_drains_initially_missing_output(monkeypatch, text, newline):

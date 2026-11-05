@@ -28,7 +28,7 @@ from tests.test_presence_promises import _due_promise
 from tests.test_presence_promises import fired_context as fired_context  # fixture
 from tests.test_presence_project_activity import root as root  # fixture
 
-pytestmark = [pytest.mark.serial, pytest.mark.usefixtures("provider_catalog_offline")]
+pytestmark = [pytest.mark.usefixtures("provider_catalog_offline")]
 
 NO_ROUTE = "No connector reads this root's final"
 UNSETTLED = "whether a connector reads its final there is not settled"

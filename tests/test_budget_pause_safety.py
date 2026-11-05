@@ -9,7 +9,6 @@ import pytest
 from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx, _parked, _supervisor_ctx
 from tests.test_budget_pause_holds import _fenced_member, _idle_worker, _source_file
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("saved_pause,selected", [(True, True), (False, True), (True, False), (False, False)])

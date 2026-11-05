@@ -27,7 +27,6 @@ from tests.test_receptive_commit_review import TASK, _git, _join, _notices, _par
 from tests.test_receptive_commit_review import author as _author
 
 author, fake_route = _author, _fake_route
-pytestmark = pytest.mark.serial
 SESSION_ANSWER = "SESSION-SEAT-ANSWER"
 _PAST = "2000-01-01T00:00:00Z"  # a wake time already reached when the wait starts
 

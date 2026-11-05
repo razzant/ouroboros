@@ -318,7 +318,6 @@ def test_data_write_blocks_missing_native_payload_creation(tmp_path, monkeypatch
     assert not (drive_root / "skills" / "native" / "demo" / "SKILL.md").exists()
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("body", [
     '{"content":"ordinary document","id":7}\n',
     '{"id":7,"content":"ordinary document"}\n',

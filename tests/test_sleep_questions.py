@@ -13,7 +13,6 @@ import pytest
 from tests.test_model_sleep import _ctx, _result
 from tests._budget_pause_exact_helpers import _loop_ctx
 
-pytestmark = pytest.mark.serial  # cold consumers bind queue module state
 
 
 def _run(root, run_id="run-one", task_id="sleeper", source="delegate_start"):

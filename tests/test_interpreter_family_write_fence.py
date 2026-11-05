@@ -350,7 +350,6 @@ def test_the_fence_inspects_inline_code_by_default():
     assert default is True
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shim script")
 def test_run_script_follows_the_configured_supervisor(tmp_path, monkeypatch):
     """The script body executes once when the chosen Supervisor permits it."""
@@ -367,7 +366,6 @@ def test_run_script_follows_the_configured_supervisor(tmp_path, monkeypatch):
     assert target.read_text() == "MUTATED"
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("cwd", ["", "task_drive"])
 def test_readonly_python_string_method_executes_without_a_false_write(tmp_path, monkeypatch, cwd):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
@@ -389,7 +387,6 @@ def test_readonly_python_string_method_executes_without_a_false_write(tmp_path, 
     assert "probe text" in read and "LIGHT_MODE_BLOCKED" not in read
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("body", [
     "from pathlib import Path\np = Path('.')\nprint((p / '.git').exists())\n"
     "with (p / 'result.txt').open('a', newline='') as f: f.write('once\\n')\n",

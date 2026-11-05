@@ -15,7 +15,6 @@ from tests._review_session_route_shared import (
 
 fake_route = _fake_route_fixture
 _owned_gateway_uses_each_test_transport = _transport_fixture
-pytestmark = pytest.mark.serial
 COUNTERS = tuple(TOKEN_COUNTER_ALIASES)
 
 

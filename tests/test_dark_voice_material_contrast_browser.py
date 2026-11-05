@@ -21,7 +21,7 @@ from tests import test_room_work_browser as rw
 
 room_ui = rw.room_ui
 subscription_ui = rw.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 PROJECT = {"id": "pal-proj", "name": "Archive evidence review", "chat_id": 42, "lifecycle": "active",
            "visible_revision": 0}

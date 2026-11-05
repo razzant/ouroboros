@@ -12,7 +12,6 @@ from ouroboros.tools import skill_exec, shell_process
 from tests.test_skill_install_resources import serve
 from tests.test_skill_runtime_commands import execute, installed_script
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize('net,resource_allowed', [(False, True), (True, False), (True, True)])

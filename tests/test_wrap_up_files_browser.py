@@ -19,7 +19,7 @@ from tests.test_human_rows_browser import ROOM, _host, _push, _serve_history
 from tests.test_sidebar_activity_browser import FRAMES, activity, mount_sidebar
 
 subscription_ui = setup.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])

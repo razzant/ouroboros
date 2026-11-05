@@ -13,7 +13,6 @@ from types import SimpleNamespace
 
 import pytest
 
-pytestmark = pytest.mark.serial
 
 
 class _ExitCalled(RuntimeError):

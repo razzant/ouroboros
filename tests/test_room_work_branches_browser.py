@@ -39,7 +39,7 @@ from tests import test_room_work_browser as rw
 
 subscription_ui = rw.subscription_ui
 direct_server_with_data = backend.direct_server_with_data
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 REPO = Path(__file__).resolve().parents[1]
 FULL_MENU = ["finalize", "hurry", "pause", "stop_now"]

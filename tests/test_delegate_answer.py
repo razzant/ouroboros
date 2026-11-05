@@ -353,7 +353,6 @@ def test_already_resolved_tells_the_nanny_not_to_repost(tmp_path, monkeypatch):
     assert "do NOT re-post" in out["note"]
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("status,code,accepted", [
     ("delivered", 200, True), ("already_resolved", 409, False),
     ("not_found", 404, False), ("rejected", 409, False),
@@ -437,7 +436,6 @@ def _answer_over_wire(tmp_path, monkeypatch, response):
     return result, json.loads(result.text)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("response", _RECORDED_ANSWERS, ids=lambda row: row["case"])
 def test_recorded_engine_answers_reach_the_nanny_classified(tmp_path, monkeypatch, response):
     """The published class of each engine outcome: delivered and already_resolved are
@@ -463,7 +461,6 @@ def test_recorded_engine_answers_reach_the_nanny_classified(tmp_path, monkeypatc
     assert ("Fix the answer rows" in out["note"]) is (status == "rejected")
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("response", [row for row in _RECORDED_ANSWERS
                                       if (row["service_outcome"] or {}).get("status") in
                                       ("already_resolved", "not_found", "rejected")],
@@ -479,7 +476,6 @@ def test_direct_and_wrapped_answer_refusals_publish_identically(tmp_path, monkey
     assert (wrapped[0].status, wrapped[0].code, wrapped[1]) == (legacy[0].status, legacy[0].code, legacy[1])
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("status,problem,outcome,tool_code", [
     (409, {"code": "http_409", "context": {"accepted": True, "status": "delivered"}}, "rejected", "TOOL_ARG_ERROR"),
     (409, {"code": "http_409", "context": {"accepted": False, "status": "unknown"}}, "rejected", "TOOL_ARG_ERROR"),

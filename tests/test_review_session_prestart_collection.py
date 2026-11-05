@@ -16,7 +16,6 @@ from tests._review_session_route_shared import (
     _owned_gateway_uses_each_test_transport, fake_route,  # noqa: F401
 )
 
-pytestmark = pytest.mark.serial
 
 
 def fail(message):

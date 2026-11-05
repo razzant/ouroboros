@@ -15,7 +15,6 @@ from tests.test_project_hold_recovery import resume_after_app_stop, worker
 from tests.test_swarm_host_admission import host  # noqa: F401
 from tests._store_shared import unreadable_result
 
-pytestmark = pytest.mark.serial
 
 
 def admit_main(host, producer="promotion", tid="main"):  # noqa: F811

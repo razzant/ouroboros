@@ -22,7 +22,6 @@ from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.task_status import load_effective_task_result
 from tests._store_shared import remove_store_tree
 
-pytestmark = pytest.mark.serial
 
 
 def _run(task_attempt=1):

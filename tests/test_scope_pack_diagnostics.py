@@ -24,7 +24,6 @@ from ouroboros.tools import review_brief_coupling as brief_mod
 from supervisor.log_addressing import make_server_log_sink
 
 
-pytestmark = pytest.mark.serial
 _TASK_ADDRESS = {"chat_id": 42, "parent_task_id": "brief-parent", "root_task_id": "brief-root"}
 
 

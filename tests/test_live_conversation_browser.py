@@ -16,7 +16,7 @@ from tests import test_voice_browser as voice
 from tests import test_subscription_setup_browser as browser
 
 subscription_ui = browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = "/api/extensions/live_conversation/ui/synthetic/ui/"
 CALL_ID = "a" * 32

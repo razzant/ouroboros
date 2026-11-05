@@ -37,7 +37,6 @@ from ouroboros.usage_ledger import UsageLockUnavailable
 from tests._store_journal_shared import exclusive_hold
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial  # 64 real threads + supervisor.state module globals
 
 _WORKERS = 64  # the production CyberGym lane count
 _CONVOY_SEC = 3.0

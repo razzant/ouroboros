@@ -26,7 +26,6 @@ from tests.test_receptive_commit_review import _git, _join, _parent, _produce
 from tests.test_receptive_commit_review import author as _author
 
 author, fake_route = _author, _fake_route
-pytestmark = pytest.mark.serial
 SESSION_ANSWER = "CONTINUED-SEAT-ANSWER"
 RESUMABLE = {"cause": "pool_exhausted", "resetsAt": None, "limitWindow": None, "limitEvidence": None,
              "carriers": ["native", "packet"], "limitCode": None, "session": None,

@@ -451,7 +451,6 @@ def test_real_browser_screenshot_reaches_claudexor_payload(subscription_transpor
         browser_tools.cleanup_browser(ctx)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("name", ["vlm_query", "analyze_screenshot"])
 def test_registered_vision_tool_reaches_real_child_from_preset(child_fixture, catalog, tmp_path, monkeypatch, name):
     from ouroboros.tools.registry import ToolRegistry

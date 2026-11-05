@@ -13,7 +13,6 @@ from tests.test_execution_clock_resume_handover import (  # noqa: F401
 from tests.test_resume_handover import _DeadProcess
 from tests.test_swarm_host_admission import host  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def _consumed(host, monkeypatch, clock, *, consume=True):  # noqa: F811

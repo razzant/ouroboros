@@ -25,7 +25,6 @@ from tests._execution_clock_seams import agent_start as _agent_start
 from tests.test_owner_wait_pool import pool  # noqa: F401 -- the real pool fixture
 from tests.test_swarm_host_admission import host  # noqa: F401 -- the real admission host
 
-pytestmark = pytest.mark.serial
 
 
 def _fake_clock(monkeypatch, start=None):

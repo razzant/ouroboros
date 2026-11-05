@@ -25,7 +25,6 @@ def test_owner_tree_and_restart_hold_do_not_inherit_a_budget_label():
     assert _activity_pause_cause({"_budget_pause": {"reason": "owner"}}, {}) == "unknown"
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("cause", ["budget", "owner", "sleep"])
 def test_census_carries_typed_pause_cause_for_a_parked_direct_root(tmp_path, monkeypatch, cause):
     from ouroboros.gateway.state import _chat_activities_snapshot_safe

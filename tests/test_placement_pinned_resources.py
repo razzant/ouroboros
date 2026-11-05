@@ -16,7 +16,6 @@ from ouroboros.project_placement import append_placement_notice, move_task_to_pr
 from supervisor.events_project_routing import _handle_promote_chat_to_task
 from supervisor import workers
 
-pytestmark = pytest.mark.serial
 ORIGIN = {"absent": "mid_task_no_origin"}
 
 

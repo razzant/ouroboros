@@ -17,7 +17,7 @@ from tests._work_projection_shared import work_fields
 from tests.test_design_system_gate_browser import rest
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 WORK = '.nav-project-row[data-project-id="p-work"]'
 FRAMES = '() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))'
 OBSERVE = """() => {

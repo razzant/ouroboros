@@ -4,7 +4,6 @@ import pytest
 from tests.test_saved_root_resume_grant import _saved_tree
 from tests.test_direct_chat_turn_owner_control import _live_chat_agent
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize('exact_child', [False, True], ids=['saved-child', 'exact-child'])

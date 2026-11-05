@@ -17,7 +17,6 @@ from supervisor import conversation_lane, worker_chat_lane, worker_pool_lifecycl
 from tests.test_owner_wait_pool import InputQueue, Process, pool as pool  # noqa: F401 -- fixture
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 _REAL_LANE_RECONCILE = conversation_lane.reconcile_conversation_lane
 

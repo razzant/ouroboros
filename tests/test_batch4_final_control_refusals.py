@@ -9,7 +9,6 @@ import pytest
 from tests._budget_pause_exact_helpers import _install_queue
 from tests.test_budget_pause_holds import _fenced_member, _idle_worker
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("paused", [False, True])

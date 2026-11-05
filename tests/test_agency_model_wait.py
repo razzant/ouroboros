@@ -10,7 +10,6 @@ from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests.test_llm_claudexor import MODEL, ledger
 from tests.test_model_wait import _refusal, live_wait, setup  # noqa: F401 - pytest fixtures
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])

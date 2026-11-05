@@ -9,7 +9,6 @@ from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.tools import core_secret_paths
 from tests.test_file_resource_consistency import environment as environment
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("mode", ["local_readonly_subagent", "acting_subagent"])

@@ -40,7 +40,6 @@ from tests.test_review_change_end_to_end import staged_body as _staged_body
 
 staged_body = _staged_body
 
-pytestmark = pytest.mark.serial
 
 
 # --------------------------------------------------------------- managed update consumers

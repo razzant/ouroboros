@@ -477,7 +477,6 @@ def test_stop_sidecar_bounds_cancellation_resistant_proxy_close(
     asyncio.run(scenario())
 
 
-@pytest.mark.serial
 def test_stuck_proxy_close_hard_exits_companion_process() -> None:
     code = """
 import asyncio

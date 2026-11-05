@@ -10,7 +10,6 @@ from ouroboros.llm_attempt import PhysicalDispatchInterrupted
 from ouroboros.usage_ledger import ControlAuthorityUnavailable, UsageLockUnavailable
 from tests.test_admission_contention import database_reader, publish, root as root
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

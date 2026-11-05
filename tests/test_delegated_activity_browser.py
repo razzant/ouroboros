@@ -34,7 +34,7 @@ from tests.test_reconnect_feed_browser import HISTORY_LANDED
 from tests.test_subscription_setup_browser import capture, subscription_ui as subscription_ui
 from tests.test_task_file_serving import _client
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 ROOT, KID = "root1350q", "kid1350q"
 LINEAGE = {"delegation_role": "subagent", "root_task_id": ROOT, "parent_task_id": ROOT, "subagent_role": "UI reviewer",
            "model": "coordinator-model", "executor_route": "claude"}

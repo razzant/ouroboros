@@ -17,7 +17,6 @@ from tests.test_available_subagents_runtime import _api_row, _session_row, _sett
 from tests.test_supervisor_route import cognition_row, selected_task
 from tests.test_swarm_host_admission import host as host
 
-pytestmark = pytest.mark.serial
 
 
 def root_context(tmp_path, settings, monkeypatch):

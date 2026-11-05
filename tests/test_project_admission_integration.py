@@ -13,7 +13,6 @@ from tests._store_shared import unreadable_result
 from tests.test_schedule_occurrence import _row
 from tests.test_swarm_host_admission import host  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def convert(host, tid="converted"):  # noqa: F811

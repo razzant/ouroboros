@@ -15,7 +15,6 @@ from supervisor import queue, task_admission, workspace_preparation as prep
 from tests.test_admission_contention import database_reader
 from tests.test_workspace_preparation import env as env, spy_provisions, _WAIT_SEC
 
-pytestmark = pytest.mark.serial
 
 
 def test_held_store_at_entry_claims_in_memory_and_admits_once_when_free(env, monkeypatch):

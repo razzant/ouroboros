@@ -468,7 +468,6 @@ def _reconcile(tmp_path, manifest, shards, count):
     return result, summary.read_text(encoding="utf-8")
 
 
-@pytest.mark.serial
 def test_real_shards_partition_the_lane_and_reconcile_against_the_unsharded_manifest(tmp_path):
     collected, manifest = _lane_process(tmp_path, "manifest", "--collect-only", "-q")
     assert collected.returncode == 0, collected.stdout + collected.stderr
@@ -510,7 +509,6 @@ def test_real_shards_partition_the_lane_and_reconcile_against_the_unsharded_mani
     assert not any(node in silent.stdout for node in slices[0] + slices[2])
 
 
-@pytest.mark.serial
 def test_real_shard_still_refuses_a_narrowed_lane_and_an_unguarded_shard(tmp_path):
     narrowed, work = _lane_process(tmp_path, "narrowed", "--ui-browser-shard=1/3", "-k", "test_case")
     assert narrowed.returncode == 4, narrowed.stdout + narrowed.stderr
@@ -523,7 +521,6 @@ def test_real_shard_still_refuses_a_narrowed_lane_and_an_unguarded_shard(tmp_pat
     assert "UI_BROWSER_SHARD" in unguarded.stderr and not (work / "host" / "results.json").exists()
 
 
-@pytest.mark.serial
 def test_real_shard_out_of_session_budget_names_only_its_own_unexecuted_nodes(tmp_path):
     # pytest-timeout's cooperative session budget: checked after each test, it ends the
     # session through its normal finish. An already spent budget runs exactly one test.

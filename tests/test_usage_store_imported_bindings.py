@@ -245,7 +245,6 @@ def _materialize(root, checkpoint):
     ensure_current_store(root)  # the boot door imports the journal era's files; a read never does
 
 
-@pytest.mark.serial
 def test_continue_refuses_when_the_default_cap_cannot_be_pinned(tmp_path, monkeypatch):
     """An unpinned choice is no choice: the Continue of an open old root (its
     imported block disagrees on the cap) is refused, typed, while the store's
@@ -278,7 +277,6 @@ def test_continue_refuses_when_the_default_cap_cannot_be_pinned(tmp_path, monkey
     assert accepted["ok"] and load_task_result(root, "P")["billing_group"]["billing_group_limit_source"] == "legacy_default"
 
 
-@pytest.mark.serial
 def test_admission_transactions_read_the_store_before_taking_the_queue_lock(tmp_path, monkeypatch):
     """Continue and receipt-backed admission resolve a root's billing (a store
     read) off ``_queue_lock``."""

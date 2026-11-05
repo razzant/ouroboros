@@ -9,7 +9,6 @@ import pytest
 from ouroboros.artifacts import registered_task_artifact
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("example", [

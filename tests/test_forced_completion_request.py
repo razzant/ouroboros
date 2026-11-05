@@ -33,7 +33,6 @@ from tests.test_presence_owner_contact import contact_runtime as _contact_runtim
 from tests.test_presence_owner_stop import _kept_unsent, _outbound, owner_stop as _owner_stop
 
 contact_runtime, owner_stop, wake = _contact_runtime, _owner_stop, _silent_wake
-pytestmark = pytest.mark.serial
 
 SUMMARY = "Sent the card and the HTML page; both deliveries are confirmed."
 ANSWER = "Wrap-up: the first probe is green; the second one is still unread."

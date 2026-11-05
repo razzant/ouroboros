@@ -11,7 +11,6 @@ from types import SimpleNamespace
 import pytest
 from tests._store_shared import read_result
 
-pytestmark = pytest.mark.serial
 
 from ouroboros import usage_accounting as ua
 from ouroboros.llm_claudexor import ClaudexorModelError, ClaudexorModelNotDispatched

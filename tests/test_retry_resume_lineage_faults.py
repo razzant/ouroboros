@@ -21,7 +21,6 @@ from tests.test_retry_pause_generations import _park, _running_actor
 from tests.test_retry_pause_identity import _assign, _fresh_plan, _loop_once, reaper  # noqa: F401
 from tests.test_swarm_host_admission import host  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("latch_pending", [False, True])

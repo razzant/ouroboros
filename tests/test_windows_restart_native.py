@@ -21,7 +21,6 @@ import pytest
 
 
 pytestmark = [
-    pytest.mark.serial,
     pytest.mark.skipif(sys.platform != "win32", reason="native Win32 handle inheritance"),
 ]
 

@@ -9,7 +9,6 @@ from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx
 from tests.test_restart_retention import _pool_events, _restart_door
 from tests._usage_store_testing import ledger_rows
 
-pytestmark = pytest.mark.serial
 
 
 def _running(root, workers, task_id="root"):

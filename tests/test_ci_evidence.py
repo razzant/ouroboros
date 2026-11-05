@@ -13,7 +13,6 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-pytestmark = pytest.mark.serial
 REPO = Path(__file__).resolve().parents[1]
 SECRET = "synthetic-ci-secret-47d5fb6c-never-sent"
 ARTIFACT_URL = "https://github.com/example/project/actions/runs/123/artifacts/456"

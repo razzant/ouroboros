@@ -48,7 +48,6 @@ from tests._budget_pause_exact_helpers import _fast_hold, _install_queue, _mock_
 from tests._store_shared import delete_result, read_result, seed_result
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 ROOT, CHILD, SIBLING = "rl-root", "rl-child", "rl-sibling"
 

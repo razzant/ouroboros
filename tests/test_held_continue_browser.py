@@ -20,7 +20,7 @@ from tests.test_continue_independent_review import _current_pool, _pending, _row
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 UNBOUND = "a delegated start has an unknown outcome (no run was recorded)"
 # Where the cause text sits against its row and the row's one control: the cause must be laid out whole
 # (a clipped or ellipsized line still has its full innerText) and never under the control.

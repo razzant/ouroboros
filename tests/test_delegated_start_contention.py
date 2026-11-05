@@ -20,7 +20,6 @@ from tests._review_session_route_shared import (
 
 fake_route = _fake_route
 _owned_gateway_uses_each_test_transport = _owned_gateway_fixture
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

@@ -10,7 +10,6 @@ from ouroboros import body_candidate, subagent_worktrees
 from tests._shared import retire_synthetic_retention
 from tests.body_candidate_support import candidate_commit, git, isolate, make_ctx, make_serving
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

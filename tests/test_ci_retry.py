@@ -523,7 +523,6 @@ def _json(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("always", [False, True], ids=["fails-once", "fails-twice"])
 def test_a_real_session_retries_its_failure_once(tmp_path, always):
     suite = tmp_path / "suite"
@@ -568,7 +567,6 @@ def _reconciled(tmp_path, suite, expression, lane_key):
                             lane_key=lane_key)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("death, seconds", [("os._exit(3)", None), ("time.sleep(60)", 2.0)],
                          ids=["exit", "thread-timeout"])
 def test_a_dead_worker_is_continued_and_the_shard_still_reconciles(tmp_path, death, seconds):
@@ -635,7 +633,6 @@ def test_a_dead_worker_is_continued_and_the_shard_still_reconciles(tmp_path, dea
     assert any("assigned but not executed" in gap for gap in gaps)
 
 
-@pytest.mark.serial
 def test_a_killed_session_is_continued_from_its_journal_and_proven_by_its_verdict(tmp_path):
     """pytest-timeout's thread method ends a whole serial session on Windows: no final export at all.
     The lane block journaled at collection lets the rounds retry the test in flight and run the rest,

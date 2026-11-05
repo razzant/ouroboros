@@ -13,7 +13,6 @@ from ouroboros import evidence_packer as packer, evidence_packs as packs, mainte
 from tests._store_journal_shared import exclusive_hold
 from tests.test_evidence_packs import REPO, _FakeChild, _task, root as root
 
-pytestmark = pytest.mark.serial
 
 _QUIET = json.dumps({"status": "completed", "jobs": {}}).encode()
 

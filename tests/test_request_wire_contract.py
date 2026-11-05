@@ -975,7 +975,6 @@ def _process_writer(root: str, model: str) -> None:
         raise RuntimeError(result.error_code)
 
 
-@pytest.mark.serial
 def test_store_cross_process_writers_do_not_lose_updates(tmp_path):
     ctx = multiprocessing.get_context("spawn")
     processes = [

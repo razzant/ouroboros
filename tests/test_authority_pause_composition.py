@@ -15,7 +15,6 @@ from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx, _superv
 from tests.test_billing_authority_unavailable import BINDING, _loop_driver, _request, _run, _task_scope
 from tests.test_billing_group import _scope, _spend
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("authority", ["readable", "unreadable", "group_exhausted", "global_exhausted"])

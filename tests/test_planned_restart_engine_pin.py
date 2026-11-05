@@ -350,7 +350,6 @@ def test_the_check_lives_in_the_restart_teardown_and_the_handoff_performer_is_un
     assert planned.calls == []
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name == "nt", reason="POSIX measured process custody")
 def test_real_engine_ends_only_for_another_pin_that_is_not_lower(startup, monkeypatch):  # noqa: F811
     """On the real fake engine (9.9.9 / c*40) the same generation keeps it while the pin matches or is a

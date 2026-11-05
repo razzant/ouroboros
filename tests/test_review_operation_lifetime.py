@@ -514,7 +514,6 @@ def _forge(root, wait_id, row, pointer=None, *, remove=False):
     patch_document(root, TASK, change)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("surface", ["result", "plan_review"])
 def test_a_real_remote_operation_consumes_its_exact_decision_and_a_closed_one_is_never_told_202(
         env, monkeypatch, record_property, capsys, surface):
@@ -632,7 +631,6 @@ def test_a_real_remote_operation_consumes_its_exact_decision_and_a_closed_one_is
     assert dead.status_code == 409
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("surface", ["task_acceptance", "plan_review"])
 def test_a_decision_the_remote_operation_applies_between_the_gateway_reads_is_its_own_receipt(
         env, monkeypatch, surface):

@@ -83,7 +83,6 @@ def test_unreadable_multiprocessing_state_keeps_the_legacy_refusal(monkeypatch):
 
 
 @_POSIX_ONLY
-@pytest.mark.serial
 @pytest.mark.parametrize("named,faked_ppid,survives", [
     (None, True, False), ("4242", True, False), ("junk", True, False), ("1", True, True),
     ("999999999", False, False),  # a real parent that is not the named spawner
@@ -112,7 +111,6 @@ def _process_gone(pid: int) -> bool:
 
 
 @_POSIX_ONLY
-@pytest.mark.serial
 @pytest.mark.parametrize("start_method,arms", [
     ("spawn", True),
     pytest.param("fork", True, marks=pytest.mark.skipif(sys.platform != "linux", reason="fork is Linux-only here")),

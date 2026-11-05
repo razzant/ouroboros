@@ -48,7 +48,7 @@ LATE_CHILD = "work-promoted-after-first-yield"
 MANUAL = "I checked the prior delivery. Continue the interrupted report as a new turn."
 ACKNOWLEDGEMENT = "On it: checking the report now."
 TOOL_NOTE = "My transport tool already delivered the checked report."
-pytestmark = [pytest.mark.serial, pytest.mark.skipif(
+pytestmark = [pytest.mark.skipif(
     os.name != "posix", reason="This fixture qualifies POSIX SIGKILL/process-group custody only")]
 
 

@@ -18,7 +18,6 @@ from ouroboros.model_wait import task_model_wait_scope
 from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_batch4_producer_custody import _registry
 
-pytestmark = pytest.mark.serial
 
 
 @contextmanager

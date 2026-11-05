@@ -14,7 +14,6 @@ from tests.test_project_semantic_admission import room, task  # noqa: F401
 from tests.test_schedule_occurrence import q  # noqa: F401
 from tests.test_swarm_host_admission import host  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def _drop_project(root):

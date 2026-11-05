@@ -292,7 +292,6 @@ def test_settings_writer_normalizes_its_own_copy_never_the_request_body(mcp_sett
     assert gateway.ALLOW_EMPTY_REVIEW_POOL not in case.saved
 
 
-@pytest.mark.serial  # the shared fixture's module is serial: it re-points the Settings file
 def test_show_reads_one_exact_saved_header_value(reveal_settings):  # noqa: F811
     case = reveal_settings
     case.settings["OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"] = "full"
@@ -388,7 +387,6 @@ def test_unrelated_save_keeps_malformed_existing_headers_and_unknown_fields(mcp_
     assert case.saved["MCP_SERVERS"][0]["future"] == {"yes": True}
 
 
-@pytest.mark.serial  # the shared fixture's module is serial: it re-points the Settings file
 def test_production_read_and_write_keep_untouched_legacy_and_malformed_values(reveal_settings, monkeypatch):  # noqa: F811
     """The real loader, GET, POST and file: not an in-memory helper document.
 

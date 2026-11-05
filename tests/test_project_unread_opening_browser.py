@@ -24,7 +24,7 @@ from tests.test_project_unread_read_band_browser import PANEL, _client, _unread,
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.ui_chat_viewport_smoke import _SETTLE_RESTORE_FRAMES, _emit_ws_frame
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 REPLY = "STANDALONE REPLY: show this on opening"
 _OLDER = "/api/chat/history"
 # The reply's box against the band the reader sees: the feed less the composer drawn over it.

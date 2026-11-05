@@ -10,7 +10,6 @@ from devtools.e2e_live.stub_lane import routed_stub_model, stub_settings
 from ouroboros.context import build_user_content
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("quoted_legacy_marker", [False, True])
 def test_swarm_managed_root_starts_agent_script_over_loopback(quoted_legacy_marker):
     task = {"id": "managed-root", "root_task_id": "managed-root", "text": SW1_OBJECTIVE,

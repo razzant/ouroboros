@@ -12,7 +12,6 @@ from tests.test_batch4_repair_compositions import _running
 from tests.test_owner_pause import _owner_park
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 
 def _park(root, monkeypatch, queue, workers):

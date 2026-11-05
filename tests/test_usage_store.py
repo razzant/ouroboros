@@ -643,7 +643,6 @@ conn.execute("ROLLBACK")
 """
 
 
-@pytest.mark.serial
 def test_enforced_tier_contention_across_processes_honours_stop(root):
     import threading
 
@@ -848,7 +847,6 @@ def _ordinary_reads(root, monkeypatch):
     }
 
 
-@pytest.mark.serial
 def test_ordinary_readers_do_not_grow_with_unrelated_history(tmp_path, monkeypatch):
     monkeypatch.setenv("TOTAL_BUDGET", "100")
     measured = {}

@@ -8,7 +8,7 @@ from threading import Thread
 
 import pytest
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / "web"
 HTML = """<!doctype html><html class="ouro-ui"><head><meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="/ui.css"><link rel="stylesheet" href="/style.css">

@@ -24,7 +24,6 @@ from tests._store_journal_shared import exclusive_hold
 from tests.test_g1_followup_policy import world as _world
 from tests.test_schedule_occurrence import _row, _rows, q as _q
 
-pytestmark = pytest.mark.serial
 RealThread = threading.Thread
 # Fixtures requested by name, re-bound as module attributes (a direct import of a name that
 # reappears as a parameter is an F811 redefinition under the CI ruff gate).

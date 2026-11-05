@@ -136,7 +136,6 @@ def test_responsible_question_precedes_selected_terminal_and_unselected_mail_sta
 
 @pytest.mark.parametrize("tool", ["change", "commit"])
 @pytest.mark.parametrize("mode,enforcement", [("pro", "blocking"), ("pro", "advisory"), ("cyber_pro", "blocking")])
-@pytest.mark.serial
 def test_selected_review_returns_with_other_seat_live_and_never_lands(author, monkeypatch, tool, mode, enforcement):
     from ouroboros import config
     from ouroboros.tools.review_change import _handle_review_change

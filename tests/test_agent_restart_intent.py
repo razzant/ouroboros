@@ -13,7 +13,6 @@ import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

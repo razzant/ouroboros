@@ -1021,7 +1021,6 @@ def test_local_and_model_operation_transports_receive_no_stream_option(isolated,
     assert all("stream" not in kwargs and "stream_options" not in kwargs for kwargs in seen)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("no_proxy", [False, True])
 @pytest.mark.parametrize("terminal", [False, True])
@@ -1081,7 +1080,6 @@ def test_actual_sdk_loopback_sse_and_cleanup(isolated, monkeypatch, asynchronous
     assert not thread.is_alive()
 
 
-@pytest.mark.serial
 def test_native_async_cancellation_keeps_worker_until_physical_terminal(isolated, monkeypatch):
     import threading
     import requests

@@ -14,7 +14,6 @@ from ouroboros.task_results import load_task_result, write_task_result
 from tests._budget_pause_exact_helpers import _install_queue
 from tests.test_delegate_body_collection import _until
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

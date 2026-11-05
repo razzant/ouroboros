@@ -11,7 +11,6 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.testclient import TestClient
 from tests.test_launcher_handoff_stop import native_guard  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize('case', ['unmanaged', 'custom', 'missing', 'error'])

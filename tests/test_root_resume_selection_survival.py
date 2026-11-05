@@ -24,7 +24,6 @@ from tests.test_budget_pause_holds import _idle_worker
 from tests.test_budget_pause_lineage_restore import _consume, _restart
 from tests.test_saved_root_resume_grant import _saved_tree
 
-pytestmark = pytest.mark.serial
 ROOT, CHILD, OTHER = 'saved-root', 'first', 'second'
 
 

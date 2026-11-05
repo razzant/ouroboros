@@ -24,7 +24,6 @@ from tests.test_subscription_setup_browser import subscription_ui  # noqa: F401
 from tests.test_swarm_host_admission import host  # noqa: F401
 from tests._work_projection_shared import state_fields
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("door", ["warm", "exact", "queued", "unsaved"])

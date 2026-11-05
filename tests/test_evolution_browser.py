@@ -14,7 +14,7 @@ import pytest
 from tests import test_subscription_setup_browser as setup_browser
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 ROOT = Path(__file__).resolve().parents[1]
 STATE = {"sha": "evolution-browser-fixture", "supervisor_ready": True, "active_chat_activities": [], "projects": [], "runtime_mode": "advanced",

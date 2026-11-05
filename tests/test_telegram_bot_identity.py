@@ -28,7 +28,6 @@ from tests.test_telegram_api_base_loopback import _BotServer
 from tests.test_telegram_proxy import _Api, _load
 
 # The shared native-skill loader replaces its package entries in sys.modules; the host's globals are patched.
-pytestmark = pytest.mark.serial
 
 A, A_ROTATED, B = "111111:SECRET-A", "111111:ROTATED-A", "222222:SECRET-B"
 A_ID, B_ID = "111111", "222222"

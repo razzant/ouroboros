@@ -30,7 +30,6 @@ from tests.test_resume_attempt_history import (
     _events, _paused_held_continue, _restart_held, _settle_leaf, _stored, _work,
 )
 
-pytestmark = pytest.mark.serial
 LEAF = [{**RUNNING, "task_id": PRED, "review_owned": False}]
 
 

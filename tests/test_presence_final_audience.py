@@ -16,7 +16,6 @@ import pytest
 from tests.test_presence_promises import _due_promise, _turn
 from tests.test_presence_promises import fired_context as fired_context  # fixture
 
-pytestmark = pytest.mark.serial
 
 HEADING = "## Where your final answer goes (host-authored facts)"
 THREAD = "t-42"

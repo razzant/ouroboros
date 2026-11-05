@@ -10,7 +10,6 @@ from ouroboros import workspace_executor as executor
 from ouroboros.tool_access import build_resolved_resource_binding as bind
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-pytestmark = pytest.mark.serial
 
 
 def _shared_absolute(path):

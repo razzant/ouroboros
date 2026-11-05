@@ -11,7 +11,6 @@ from ouroboros.test_environment import DIAGNOSTIC_OUTPUT_KEYS
 from tests._shared import producer_evidence_dir
 
 
-@pytest.mark.serial
 def test_managed_launchers_preserve_explicit_producer_destinations(tmp_path, monkeypatch):
     """Exercise the actual scrub/launcher, not just a producer in the parent env."""
     import json
@@ -179,7 +178,6 @@ def test_main_and_quiz_producers_keep_the_shared_and_explicit_destinations(tmp_p
     assert destination() == (explicit / "stage" if family == "main" else explicit)
 
 
-@pytest.mark.serial
 def test_managed_launchers_do_not_enable_optional_outputs(tmp_path, monkeypatch):
     import json
     import sys

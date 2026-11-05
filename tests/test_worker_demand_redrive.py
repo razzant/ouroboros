@@ -21,7 +21,6 @@ from tests.test_owner_wait_pool import InputQueue, Process, pool as pool  # noqa
 from tests.test_worker_demand import acknowledge, assigning as assigning, task  # noqa: F401
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 _REAL_THREAD = threading.Thread  # the pool fixture stubs Thread; the reaper below is real
 

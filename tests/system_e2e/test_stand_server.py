@@ -63,7 +63,7 @@ from tests.system_e2e.test_system_scenarios_w6 import _WsFrames
 from tests._stand_cache import child
 
 _TIMEOUT_METHOD = "signal" if hasattr(signal, "SIGALRM") else "thread"
-pytestmark = [pytest.mark.integration, pytest.mark.serial, pytest.mark.timeout(3600, method=_TIMEOUT_METHOD)]
+pytestmark = [pytest.mark.integration, pytest.mark.timeout(3600, method=_TIMEOUT_METHOD)]
 
 LANE_FULL = "stand_full"  # the full shape's own lane: 50 real workers
 HOOK = pathlib.Path(__file__).resolve().parents[1] / "_stand_hook.py"

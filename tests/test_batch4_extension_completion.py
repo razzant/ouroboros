@@ -17,7 +17,6 @@ from ouroboros.tools.tool_result import ToolResult
 from tests.test_batch4_producer_custody import _registry, _consumers
 from tests.test_batch4_full_repair import _park
 
-pytestmark = pytest.mark.serial
 
 
 def _local(tmp_path, monkeypatch, handler, *, process=False, warning=""):

@@ -101,7 +101,6 @@ def _registered_query(tmp_path, monkeypatch, client, tool, raw, model, *, real_c
     return registry.execute_result(tool, args)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("tool", ["vlm_query", "analyze_screenshot"])
 def test_registered_vlm_common_note_survives_real_child_ipc(child_fixture, tmp_path, monkeypatch, tool):
     from ouroboros.llm import LLMClient

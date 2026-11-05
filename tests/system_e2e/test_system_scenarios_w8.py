@@ -203,7 +203,6 @@ def _post_completion(stub: ScriptedStubModel, payload: dict) -> bytes:
         return resp.read()
 
 
-@pytest.mark.serial  # a real loopback port (the stub) — the serial pass
 def test_priced_stub_reports_a_final_cost_on_json_and_sse_envelopes():
     with PricedStubModel([dict(KEEPALIVE_STEP)], cost_usd=0.25) as stub:
         tool_body = {"messages": [{"role": "user", "content": "go"}],
@@ -375,7 +374,6 @@ def _wake_signal(oracle: ArtifactOracle, server, stub: ScriptedStubModel, task_i
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s30_exact_budget_pause_then_owner_resume_continues_the_same_task_id(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
@@ -656,7 +654,6 @@ def test_s30_exact_budget_pause_then_owner_resume_continues_the_same_task_id(
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s30_public_detail_of_a_paused_root_reports_the_pause_not_running(
         e2e_clone, tmp_path_factory):
     """The PUBLIC status plane of an exactly paused root must agree with its durable
@@ -751,7 +748,6 @@ def _direct_turn_id(oracle: ArtifactOracle, client_message_id: str) -> str:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s31_direct_chat_turn_pauses_under_its_own_id_and_owner_resume_completes_in_chat(
         e2e_clone, tmp_path_factory):
     """The owner's DIRECT chat turn meets a monetary rail mid-turn and pauses the
@@ -960,7 +956,6 @@ def _boot_restore_rows(oracle: ArtifactOracle) -> list:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s32_exact_pause_survives_a_graceful_server_restart_and_resumes_after_it(
         e2e_clone, tmp_path_factory):
     """Owner contract (#1196): an exact budget pause survives a physical epoch.

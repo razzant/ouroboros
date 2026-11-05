@@ -250,7 +250,6 @@ def test_ui_smoke_review_truth_is_visible_in_chat_and_logs(direct_server_with_da
 
 
 @pytest.mark.ui_browser
-@pytest.mark.serial
 def test_ui_smoke_action_only_author_finish_keeps_the_reviewer_fail(direct_server_with_data):
     """TZ-2 C4 in the real review renderer: Main's final response after a FAIL panel was an
     action-only finish (no stance). The retired acceptance loop stored that decision on the

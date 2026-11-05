@@ -301,7 +301,6 @@ def _gone(pid):
     return not pl.pid_is_alive(pid) or custody.pid_is_zombie(pid)
 
 
-@pytest.mark.serial
 def test_loopback_fixture_bind_does_not_require_reverse_dns(monkeypatch):
     import ast
     import http.server
@@ -423,7 +422,6 @@ def _fixture_cli(root, monkeypatch):
     ))
 
 
-@pytest.mark.serial
 def test_real_ancestor_cleanup_spares_daemon_and_other_client(tmp_path, shared_tree):
     parent, info = shared_tree
     roots = custody.live_daemon_root_pids(tmp_path)
@@ -434,7 +432,6 @@ def test_real_ancestor_cleanup_spares_daemon_and_other_client(tmp_path, shared_t
     _continues(tmp_path, info)
 
 
-@pytest.mark.serial
 def test_real_cli_process_stops_legacy_custody_without_signalling(tmp_path, monkeypatch, shared_tree):
     _, info = shared_tree
     _fixture_cli(tmp_path, monkeypatch)
@@ -451,7 +448,6 @@ def test_real_cli_process_stops_legacy_custody_without_signalling(tmp_path, monk
     assert custody._read_ledger(tmp_path)[0]["fingerprint"]["start_time"] == ""
 
 
-@pytest.mark.serial
 def test_prior_session_custody_tree_reap_preserves_shared_daemon(tmp_path, shared_tree):
     _, info = shared_tree
     worker = custody.record_process(
@@ -521,7 +517,6 @@ def test_stray_reaper_filters_descendants_before_final_root_revalidation(monkeyp
                       ("signal", 10), ("signal", 12), ("signal", 11)]
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows Job inheritance")
 def test_windows_forced_launcher_exit_preserves_previous_generation_daemon_then_panic_stops_it(
     tmp_path, monkeypatch, shared_tree,
@@ -550,7 +545,6 @@ def test_windows_forced_launcher_exit_preserves_previous_generation_daemon_then_
     assert _gone(info["pid"]) and _gone(info["harness_pid"])
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows process identity")
 def test_windows_birth_and_full_command_round_trip():
     argv = [sys.executable, "-c", "import time;time.sleep(30)", 'путь с пробелом', 'quoted"value', "tail\\"]
@@ -564,7 +558,6 @@ def test_windows_birth_and_full_command_round_trip():
         proc.wait(timeout=5)
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows Job capability")
 @pytest.mark.parametrize("shared_tree", ["legacy", "headless"], indirect=True)
 def test_windows_first_use_keeps_working_with_legacy_job_or_without_launcher_job(

@@ -21,7 +21,6 @@ import pytest
 from ouroboros.config import PANIC_EXIT_CODE
 from tests.test_launcher_handoff_stop import native_guard as native_guard
 
-pytestmark = pytest.mark.serial  # real children and the launcher's module-global agent owner
 
 READS_QUIT = "import sys; sys.stdin.readline(); sys.exit(0)"  # the server's stdin watcher, nothing else
 # The server's drain after its quit line; like ``server.executable_main`` it reports a caught signal as 128+N.

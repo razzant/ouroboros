@@ -406,7 +406,6 @@ from tests.test_services_tool_v2 import (  # noqa: E402
 )
 
 
-@pytest.mark.serial
 def test_start_refuses_a_refused_output_before_launch_and_exports_a_parent_spelling(tmp_path, monkeypatch):
     _force_light_runtime(monkeypatch)
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
@@ -436,7 +435,6 @@ def test_start_refuses_a_refused_output_before_launch_and_exports_a_parent_spell
     assert artifact.read_text(encoding="utf-8") == "<p>ok</p>"
 
 
-@pytest.mark.serial
 def test_a_local_executor_service_refuses_an_escape_before_launch_and_exports_its_parent_output(local_project):
     registry, active, _outside, _launched = local_project
     site = active / "site"
@@ -464,7 +462,6 @@ def test_a_local_executor_service_refuses_an_escape_before_launch_and_exports_it
     assert _registered(registry, stopped["artifact_outputs"]) == {(active / "qualification.html").resolve(): b"<p>local</p>"}
 
 
-@pytest.mark.serial
 def test_a_baseline_that_could_not_be_taken_is_disclosed_at_start(tmp_path, monkeypatch):
     from ouroboros.tools import shell_outputs
 
@@ -497,7 +494,6 @@ def test_a_baseline_that_could_not_be_taken_is_disclosed_at_start(tmp_path, monk
     assert "registered output" in stopped["artifact_outputs"] and stopped["artifact_output_failed"] is False
 
 
-@pytest.mark.serial
 def test_a_service_output_generated_in_the_system_repo_is_exported_at_stop(tmp_path, monkeypatch):
     from ouroboros.tool_access import build_resolved_resource_binding
     from ouroboros.tools.registry import ToolContext
@@ -525,7 +521,6 @@ def test_a_service_output_generated_in_the_system_repo_is_exported_at_stop(tmp_p
 
 
 @posix_permissions
-@pytest.mark.serial
 def test_a_service_output_the_baseline_cannot_read_is_disclosed_at_start_and_stop(tmp_path, monkeypatch):
     _force_light_runtime(monkeypatch)
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))

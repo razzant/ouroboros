@@ -784,7 +784,6 @@ class _QuestionStub(_Stub):
         self.closed += 1
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("message_id", ["", "m-replayed-refusal"])
 def test_pending_refusal_includes_current_answerable_questions_without_consuming_wait_news(
         tmp_path, monkeypatch, message_id):
@@ -821,7 +820,6 @@ def test_pending_refusal_includes_current_answerable_questions_without_consuming
     assert "pending_interactions" not in receipts[0]
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("outcome,reason", [
     ("accepted", ""), ("delivered", ""), ("rejected", "rpc_refused"),
     ("unsupported", "interaction_pending"), ("not_active", "run_terminal"),
@@ -839,7 +837,6 @@ def test_unrelated_message_outcomes_do_not_read_run_detail(tmp_path, monkeypatch
     assert stub.detail_reads == [] and stub.answers == [] and stub.closed == 1
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("detail,error", [
     ({}, None), ({"pendingInteractions": None}, None),
     ({"pendingInteractions": "unreadable"}, None),
@@ -875,7 +872,6 @@ def test_failed_question_observation_preserves_the_refusal_as_unknown(
     assert [r["outcome"] for r in _receipts(tmp_path)] == ["not_active"]
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("message_id", ["", "m-stored"])
 def test_question_resolved_between_refusal_and_read_is_an_empty_current_observation(
         tmp_path, monkeypatch, message_id):
@@ -892,7 +888,6 @@ def test_question_resolved_between_refusal_and_read_is_an_empty_current_observat
     assert stub.answers == [] and len(stub.detail_reads) == 1 and stub.closed == 1
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("remaining", [0.0, 0.25])
 def test_question_observation_uses_only_the_remaining_message_budget(
         tmp_path, monkeypatch, remaining):
@@ -923,7 +918,6 @@ def test_question_observation_uses_only_the_remaining_message_budget(
     assert stub.closed == 1 and stub.answers == []
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("shape", ["many_questions", "long_answer_keys", "long_label"])
 def test_large_pending_questions_fit_and_are_retrievable_with_complete_refusal(
         tmp_path, monkeypatch, shape):
@@ -975,7 +969,6 @@ def test_large_pending_questions_fit_and_are_retrievable_with_complete_refusal(
     assert stub.closed == 1 and stub.answers == []
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("failure", ["render", "stage", "observe"])
 def test_question_delivery_failure_never_replaces_the_message_receipt(
         tmp_path, monkeypatch, failure):

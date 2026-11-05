@@ -9,7 +9,6 @@ from ouroboros import cancel_intents, owner_pause
 from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_admission_contention import database_reader
 
-pytestmark = pytest.mark.serial
 
 
 def _contend_publication(monkeypatch, *, outside=None, acquire_wait_sec=0.0):

@@ -39,7 +39,6 @@ from tests.conversation_carrier_support import carry, install_lane_spare
 from tests.test_agent_restart_intent import accept, runtime  # noqa: F401  # the shared real-queue fixture
 from tests.test_consciousness import AVAILABLE, CEILING, DEFAULT, FLOOR
 
-pytestmark = pytest.mark.serial
 
 OWNER_LINE = "owner line observed during the window"
 

@@ -18,7 +18,6 @@ from ouroboros.gateway.router import collect_routes
 from ouroboros.secret_masking import MASKED_SECRET_SETTING_KEYS, mask_settings_secret
 from ouroboros.server_auth import NetworkAuthGate
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

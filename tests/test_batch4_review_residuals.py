@@ -16,7 +16,6 @@ from tests.test_batch4_full_repair import _park
 from tests.test_batch4_producer_custody import _registry
 from tests.test_batch4_repair_compositions import _running
 
-pytestmark = pytest.mark.serial
 
 
 def _github_task(tmp_path, monkeypatch, target):

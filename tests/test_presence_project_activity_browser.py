@@ -52,7 +52,7 @@ from tests.test_presence_contact_browser import LABEL, SKILL, TOKEN, _event, _ht
 from tests.test_room_work_browser import ROOM_FACTS
 
 wait_clone = clone_fixture
-pytestmark = [pytest.mark.serial, pytest.mark.browser]
+pytestmark = [pytest.mark.browser]
 
 PROJECT, OTHER = "activity-room", "activity-other"
 VIEWPORT = {"width": 1148, "height": 808}

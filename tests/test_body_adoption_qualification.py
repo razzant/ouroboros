@@ -21,7 +21,6 @@ from ouroboros.tools import git as git_tools
 from tests.body_candidate_support import REPO, candidate_commit, git, isolate, make_ctx, make_serving
 from tests.test_preflight_receipts import receipt_python  # noqa: F401 -- dependency-only lane fixture
 
-pytestmark = pytest.mark.serial  # finite nested pytest controllers; one at a time
 
 REAL_EVIDENCE = preflight_qualification.adoption_test_evidence  # isolate() stubs it for switching tests
 FLOOR = {"tests/test_floor.py": "floor witness"}

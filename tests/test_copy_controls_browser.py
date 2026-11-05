@@ -13,7 +13,7 @@ from tests.test_markdown_reading_browser import FENCE_BODY, capture, open_chat
 from tests.test_markdown_reading_browser import reading_ui as reading_ui  # the suite's fixture
 from tests.ui_clipboard_sink import INSTALL, recorded, set_sink
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 COPY_MODES = [  # (what happened, the async API, the engine's answer, whether a copy really happened)
     ("api settled", "ok", True, True),

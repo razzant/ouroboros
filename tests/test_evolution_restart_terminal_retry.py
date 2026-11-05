@@ -9,7 +9,6 @@ import pytest
 
 from tests.test_agent_restart_intent import enqueue, evolution_completion, runtime, worker  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def prepare(runtime, monkeypatch):  # noqa: F811

@@ -17,7 +17,6 @@ import pytest
 
 from ouroboros import loop
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize('control', ['stop', 'panic'])

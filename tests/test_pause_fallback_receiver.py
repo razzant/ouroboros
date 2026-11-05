@@ -12,7 +12,6 @@ from tests.test_loop_transport_wait import _loop_kwargs
 from tests.test_pause_model_receiver import _extract, _request
 from tests.test_working_checkpoint import _registry
 
-pytestmark = pytest.mark.serial
 
 
 def test_pause_returns_from_actual_loop_fallback_before_sender_finishes(tmp_path, monkeypatch):

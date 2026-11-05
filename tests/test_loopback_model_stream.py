@@ -12,7 +12,6 @@ from tests.fixtures_e2e_cancellation import StubModelServer
 from tests.system_e2e.harness import ScriptedStubModel
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("tool_call", [False, True])
 def test_loopback_model_round_trips_through_the_real_sdk(stream, tool_call):
@@ -44,7 +43,6 @@ def test_loopback_model_round_trips_through_the_real_sdk(stream, tool_call):
     assert result["usage"]["total_tokens"] == 15
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("tool_call", [False, True])
 def test_cancellation_model_round_trips_through_the_real_sdk(stream, tool_call):

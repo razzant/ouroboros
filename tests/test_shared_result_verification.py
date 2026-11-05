@@ -16,7 +16,6 @@ from supervisor.events_subagent_admission import _resolve_subagent_constraint
 from tests._store_shared import read_result, seed_result
 
 # Actual Git subprocess fixtures follow the repository's real-process lane.
-pytestmark = pytest.mark.serial
 
 
 def git(root, *args):

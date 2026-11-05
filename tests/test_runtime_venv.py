@@ -44,7 +44,6 @@ class Run:
         return subprocess.run(cmd, **kwargs)
 
 
-@pytest.mark.serial
 def test_a_real_venv_is_prepared_once_then_reused_ready(tmp_path):
     root = tmp_path / "runtime volume" / "venv"
     run = Run()
@@ -289,7 +288,6 @@ def test_bootstrap_refuses_a_mount_point_without_a_checkout_and_moves_nothing(tm
     assert _tree(repo) == before and not (tmp_path / "data" / "archive").exists()
 
 
-@pytest.mark.serial
 def test_preparing_python_without_pip_is_repaired_and_keeps_an_installed_package(tmp_path):
     import hashlib
     import shutil

@@ -397,7 +397,6 @@ def test_cleanup_selection_cannot_include_a_peer_run(monkeypatch):
     assert ("network", "rm", "own-net") in calls
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name == "nt" or not shutil.which("sh"), reason="real POSIX process-group ownership check")
 def test_stop_process_group_terminates_its_child_without_touching_peer(tmp_path):
     child_file = tmp_path / "child.pid"

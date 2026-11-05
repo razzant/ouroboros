@@ -39,7 +39,6 @@ from ouroboros.settings_integrity import SETTINGS_INTEGRITY_ENV
 from ouroboros.test_evidence import diagnostic_directory
 
 # Real loopback ports and real child processes: the serial pass.
-pytestmark = pytest.mark.serial
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 _TOKEN = "fake-host-engine-token"

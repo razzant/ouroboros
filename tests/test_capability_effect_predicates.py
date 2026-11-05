@@ -239,7 +239,6 @@ def test_gh_mentions_and_readonly_auth_have_no_semantic_veto(tmp_path, cmd):
     assert registry_guard_process._run_shell_safety_check(_registry(tmp_path), {"cmd": cmd}, "advanced") is None
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("cmd", [
     ["gh", "auth", "login"],
     ["gh", "auth", "logout"],

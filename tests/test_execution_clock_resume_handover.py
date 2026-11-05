@@ -37,7 +37,6 @@ from tests.test_resume_handover import MARK, ProcessLost, _account_route, _dispa
 from tests.test_swarm_host_admission import host  # noqa: F401
 from tests.test_working_checkpoint import _registry
 
-pytestmark = pytest.mark.serial
 
 # Seconds of each interval of the scenario.
 WORK_1, HELD_1, WORK_2, PAUSED, CAPACITY, WORK_RESUMED, HELD_2 = 60, 600, 20, 900, 600, 10, 600
