@@ -535,10 +535,8 @@ def _model_refusal(code):
                                 "context": {"httpStatus": 400}})
 
 
-@pytest.mark.parametrize(("primary_refused", "other"), [
-    pytest.param(True, "invalid_request", id='primary_cannot_serve-invalid_request'),
-    pytest.param(False, "unsupported_parameter", id='fallback_cannot_serve-unsupported_parameter'),
-])
+@pytest.mark.parametrize("other", ["invalid_request", "unsupported_parameter"])
+@pytest.mark.parametrize("primary_refused", [True, False], ids=["primary_cannot_serve", "fallback_cannot_serve"])
 def test_the_salvage_decision_belongs_to_the_acting_route(data_root, tmp_path, monkeypatch, primary_refused, other):
     """A route that cannot serve its model gets no salvage summary; a failed configured fallback's
     refusal neither grants nor takes away the acting route's own salvage."""

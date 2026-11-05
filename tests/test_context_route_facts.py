@@ -85,7 +85,8 @@ def test_unknown_conversation_window_keeps_host_sources_whole(tmp_path, monkeypa
     assert measure.response_reserve_tokens == 24_000
 
 
-@pytest.mark.parametrize(("density", "cutoff", "basis"), [(0.25, 0.5, "provider"), (4.0, 2.0, "estimator")])
+@pytest.mark.parametrize("basis", ["provider", "estimator"])
+@pytest.mark.parametrize("density,cutoff", [(0.25, 0.5), (4.0, 2.0)])
 def test_window_basis_applies_before_the_first_memory_selection(tmp_path, monkeypatch, basis, density, cutoff):
     captured = core(tmp_path)
     raw = plan(captured, 0).nano_projection.estimated_tokens

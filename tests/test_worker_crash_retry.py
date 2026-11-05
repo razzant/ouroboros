@@ -1139,12 +1139,8 @@ def test_existing_nonretry_reasons_and_cost_projection_survive_handoff(tmp_path,
     q.enqueue_task.assert_not_called()
 
 
-@pytest.mark.parametrize(("basis_kind", "deleted"), [
-    ("prepared", False),
-    ("legacy", True),
-    ("converted_main", False),
-    ("converted_derived", True),
-])
+@pytest.mark.parametrize("deleted", [False, True])
+@pytest.mark.parametrize("basis_kind", ["prepared", "legacy", "converted_main", "converted_derived"])
 def test_real_crash_retry_keeps_prepared_scope_across_registry_activity(tmp_path, monkeypatch, deleted, basis_kind):
     from ouroboros import projects_registry as registry
     from ouroboros.task_results import load_task_result, write_task_result

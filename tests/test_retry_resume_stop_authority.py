@@ -80,12 +80,8 @@ def paused_retry(host, monkeypatch, clock, reaper, door):
     return task, child, plan
 
 
-@pytest.mark.parametrize(("stop", "door"), [
-    ("logical_graceful", "warm"),
-    ("logical_immediate", "exact"),
-    ("physical", "queued"),
-    ("healthy", "unsaved"),
-])
+@pytest.mark.parametrize("door", ["warm", "exact", "queued", "unsaved"])
+@pytest.mark.parametrize("stop", ["logical_graceful", "logical_immediate", "physical", "healthy"])
 def test_pending_stop_vetoes_retry_resume(host, monkeypatch, clock, reaper, door, stop):  # noqa: F811
     task, child, plan = paused_retry(host, monkeypatch, clock, reaper, door)
     task_id = task["id"]

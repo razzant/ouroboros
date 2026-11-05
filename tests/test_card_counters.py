@@ -149,12 +149,12 @@ def test_failed_loop_rounds_match_live_saved_facts_and_history(tmp_path, monkeyp
                 ("live", "saved", "facts", "history"), expected)
 
 
-@pytest.mark.parametrize(("usage", "expected", "skip_post", "lane"), [
-    pytest.param({"rounds": 3}, 3, False, "split-project", id='accepted-post-split-project'),
-    pytest.param({"rounds": 0}, 0, True, "ordinary", id='zero-skip-post-ordinary'),
-    pytest.param({}, 0, True, "split", id='no-response-skip-post-split'),
-    pytest.param({"rounds": 17, "loop_evidence_unavailable": True}, None, False, "split-project", id='unknown-post-split-project'),
-])
+@pytest.mark.parametrize("lane", ["ordinary", "split", "split-project"])
+@pytest.mark.parametrize("skip_post", [False, True], ids=["post", "skip-post"])
+@pytest.mark.parametrize("usage, expected", [
+    ({"rounds": 3}, 3), ({"rounds": 0}, 0), ({}, 0),
+    ({"rounds": 17, "loop_evidence_unavailable": True}, None),
+], ids=["accepted", "zero", "no-response", "unknown"])
 def test_emitted_rounds_survive_split_dispatch_and_result_pruning(
     tmp_path, monkeypatch, lane, skip_post, usage, expected,
 ):

@@ -75,11 +75,8 @@ def test_ticks_only_write_liveness_and_derive_durations_on_read(published, monke
     assert snapshot["ts"] == _read(root, "queue.alive")["ts"]
 
 
-@pytest.mark.parametrize(("raises", "failed"), [
-    (False, "queue_snapshot.json"),
-    (False, "queue.alive"),
-    (True, "queue_dispatch.json"),
-])
+@pytest.mark.parametrize("failed", ["queue_snapshot.json", "queue_dispatch.json", "queue.alive"])
+@pytest.mark.parametrize("raises", [False, True])
 def test_failed_publish_never_refreshes_liveness_and_retries(published, monkeypatch, failed, raises):
     root, _now = published
     assert queue.persist_queue_snapshot()

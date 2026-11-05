@@ -347,11 +347,10 @@ def test_workspace_capture_lists_only_real_tracked_changes(tmp_path, monkeypatch
     assert not [row for row in rows if row.get("label") == "do_write_index"]
 
 
-@pytest.mark.parametrize(("count", "name", "reader", "changed"), [
-    pytest.param(1, "binary.dat", "vcs_names", True, id='1-binary.dat-vcs_names-content'),
-    pytest.param(30, "binary[1].dat", "selection", False, id='30-binary[1].dat-selection-stat-only'),
-    pytest.param(100, "binary[1].dat", "selection", True, id='100-binary[1].dat-selection-content'),
-])
+@pytest.mark.parametrize("changed", [False, True], ids=["stat-only", "content"])
+@pytest.mark.parametrize("reader", ["vcs_names", "selection"])
+@pytest.mark.parametrize("name", ["binary.dat", "binary[1].dat"])
+@pytest.mark.parametrize("count", [1, 30, 100])
 def test_binary_path_observers_compare_content(tmp_path, monkeypatch, changed, reader, name, count):
     """Binary numstat rows alone prove neither edits nor an unchanged tree."""
     from ouroboros.git_observation import host_git_env

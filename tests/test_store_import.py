@@ -260,10 +260,10 @@ with store.open_store(sys.argv[1], write=True) as txn:
 """
 
 
-@pytest.mark.parametrize(("before", "after", "body_sha", "boot"), [
-    pytest.param(store.TIER_ENFORCED, store.TIER_NAME, None, False, id='enforced_to_name-no_body_sha-first_touch'),
-    pytest.param(store.TIER_NAME, store.TIER_ENFORCED, "b" * 40, True, id='name_to_enforced-body_sha-boot'),
-])
+@pytest.mark.parametrize("boot", [False, True], ids=["first_touch", "boot"])
+@pytest.mark.parametrize("body_sha", [None, "b" * 40], ids=["no_body_sha", "body_sha"])
+@pytest.mark.parametrize("before, after", [(store.TIER_ENFORCED, store.TIER_NAME), (store.TIER_NAME, store.TIER_ENFORCED)],
+                         ids=["enforced_to_name", "name_to_enforced"])
 def test_a_boot_retier_leaves_this_process_choosing_the_journal_its_siblings_choose(tmp_path, monkeypatch, before, after,
                                                                                      boot, body_sha):
     """A lock-tier re-record converts the file the way an export hands it off, but this process keeps

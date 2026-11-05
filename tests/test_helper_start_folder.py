@@ -187,11 +187,8 @@ def test_ignored_write_root_neither_refuses_nor_changes_named_start(start_regist
     assert registry._ctx.pending_events[-1]["workspace_root"] == str(folder)
 
 
-@pytest.mark.parametrize(("known_address", "selection"), [
-    (False, "omitted"),
-    (False, "relative"),
-    (True, "absolute"),
-])
+@pytest.mark.parametrize("selection", ["omitted", "absolute", "relative"])
+@pytest.mark.parametrize("known_address", [False, True])
 def test_unavailable_project_focus_does_not_block_independent_helper(start_registry, selection, known_address):
     registry, args, home, repo, data, _outside = start_registry
     missing = home / "unavailable-project"

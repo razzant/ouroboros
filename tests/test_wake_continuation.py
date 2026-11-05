@@ -157,7 +157,8 @@ def test_an_authored_end_settles_the_doubt_and_a_cleared_note_stays_cleared(cloc
     assert "wake0002" not in previous and "A's whole note." not in previous and "last known note" not in previous
 
 
-@pytest.mark.parametrize(("settlement", "unknowns"), [("host", 1), ("host", 7), ("authored", 2)])
+@pytest.mark.parametrize("unknowns", [1, 2, 7])
+@pytest.mark.parametrize("settlement", ["host", "authored"])
 def test_resolving_one_attempt_does_not_silently_resolve_an_earlier_span(clock, monkeypatch, unknowns, settlement):
     from ouroboros import task_store
 

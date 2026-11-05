@@ -425,10 +425,8 @@ def test_no_key_of_a_record_without_exact_coverage_is_proven_either_way(tmp_path
     assert fourth["updated"] is True, "a later block begun behind one seen whole is proven again"
 
 
-@pytest.mark.parametrize(("done", "space"), [
-    pytest.param(False, " ", id='unfinished-space'),
-    pytest.param(True, "\n\n", id='completed-paragraph'),
-])
+@pytest.mark.parametrize("space", [" ", "\n\n"], ids=["space", "paragraph"])
+@pytest.mark.parametrize("done", [False, True], ids=["unfinished", "completed"])
 def test_a_poll_holding_only_the_space_between_words_keeps_it_in_the_utterance(tmp_path, space, done):
     """The engine streams words and the space between them as fragments, and a poll can hold only the space. The
     record carries that fragment, whose seq it read, so the card joins across it with the space; no text reader

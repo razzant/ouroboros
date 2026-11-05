@@ -54,10 +54,10 @@ def test_tool_result_cannot_overflow_native_held_context(host_world, held):
     asyncio.run(host.session(consume, LiveOptions()))
 
 
-@pytest.mark.parametrize(("completed_receipt", "silent", "held", "growth"), [
-    (False, False, 15000, 'result'),
-    (True, True, 39000, 'schemas'),
-])
+@pytest.mark.parametrize('growth', ['result', 'schemas'])
+@pytest.mark.parametrize('held', [15000, 39000])
+@pytest.mark.parametrize('silent', [False, True])
+@pytest.mark.parametrize('completed_receipt', [False, True])
 def test_tool_growth_refits_without_a_quiet_boundary_and_answers_from_fitted_history(growth, held, silent, completed_receipt):
     async def scenario():
         host = Host()

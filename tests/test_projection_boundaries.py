@@ -16,11 +16,9 @@ from tests.test_subagent_metrics import event
 from tests.test_terminal_cost_reconciliation import attempt, dirty, env as env  # noqa: F401
 
 
-@pytest.mark.parametrize(("archived", "producer", "stale"), [
-    (False, "api", True),
-    (True, "execution", False),
-    (True, "review", True),
-])
+@pytest.mark.parametrize("stale", [False, True])
+@pytest.mark.parametrize("producer", ["execution", "review", "api"])
+@pytest.mark.parametrize("archived", [False, True])
 def test_first_publication_never_folds_a_cold_suffix(tmp_path, monkeypatch, stale, producer, archived):
     from ouroboros import utils
     counts = []

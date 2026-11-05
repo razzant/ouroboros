@@ -22,11 +22,9 @@ LIMIT = {"scope": "turn_text", "unit": "unicode_scalars", "limit": 1_048_576,
          "askPromptBudget": {"shape": "ordinary_initial_attempt", "engineOverheadMax": 8576}}
 
 
-@pytest.mark.parametrize(("workspace", "access", "large"), [
-    ("git_ignored", "readonly", False),
-    ("git_unignored", "full", False),
-    ("directory", "full", True),
-])
+@pytest.mark.parametrize("large", [True, False])
+@pytest.mark.parametrize("access", ["readonly", "full"])
+@pytest.mark.parametrize("workspace", ["git_ignored", "git_unignored", "directory"])
 def test_complete_session_turn_pages_only_when_transport_requires_it(tmp_path, large, access, workspace):
     root, checking, data = (tmp_path / name for name in ("repo", "checking", "data"))
     for tree in (root, checking):

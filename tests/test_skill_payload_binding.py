@@ -23,11 +23,9 @@ def _resolve(root, constraint, *, name="", location="", profile="main", top_leve
     )
 
 
-@pytest.mark.parametrize(("omitted", "bucket", "mode"), [
-    ("both", "external", "normal"),
-    ("name", "clawhub", "skill_repair"),
-    ("location", "ouroboroshub", "normal"),
-])
+@pytest.mark.parametrize("mode", ["normal", "skill_repair"])
+@pytest.mark.parametrize("bucket", ["external", "clawhub", "ouroboroshub"])
+@pytest.mark.parametrize("omitted", ["both", "name", "location"])
 def test_selected_payload_fills_only_omitted_selectors(tmp_path, mode, bucket, omitted):
     expected = _payload(tmp_path, bucket=bucket)
     constraint = {"mode": mode, "skill_name": "alpha", "payload_root": f"skills/{bucket}/alpha"}

@@ -136,19 +136,9 @@ def test_missing_original_source_is_a_gap_without_losing_the_original_binding(pa
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize(("source", "axis"), [
-    ("prompt", "task_id"),
-    ("prompt", "root_task_id"),
-    ("prompt", "slot_id"),
-    ("prompt", "task_attempt"),
-    ("prompt", "epoch"),
-    ("prompt", "roster_hash"),
-    ("prompt", "review_contract"),
-    ("response", "surface"),
-    ("response", "operation_id"),
-    ("response", "subject_hash"),
-    ("response", "epoch"),
-])
+@pytest.mark.parametrize("axis", ["task_id", "root_task_id", "surface", "slot_id", "operation_id",
+                                 "task_attempt", "subject_hash", "epoch", "roster_hash", "review_contract"])
+@pytest.mark.parametrize("source", ["prompt", "response"])
 def test_foreign_manifest_and_payload_never_supply_a_paid_answer(paid, source, axis):
     root, _slot, row, calls, _text = paid
     manifest, payload, _ = read_call_payload(root, task_id="late-cas", call_id=f'{row["operation_id"]}_{source}')

@@ -1048,7 +1048,8 @@ def test_replayed_refusal_observes_changed_then_vanished_questions_without_borro
     assert interactions._interactions_are_news("run-1", [{"interaction_id": "int-replacement"}])
 
 
-@pytest.mark.parametrize(("detail_shape", "source_fails"), [("questions", True), ("empty", False), ("missing", True)])
+@pytest.mark.parametrize("source_fails", [False, True])
+@pytest.mark.parametrize("detail_shape", ["questions", "empty", "missing"])
 def test_complete_published_refusal_envelope_fits_with_huge_receipt_and_observation_fields(
         tmp_path, monkeypatch, source_fails, detail_shape):
     import hashlib

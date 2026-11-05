@@ -159,13 +159,9 @@ def test_contention_hold_obeys_real_task_controls(tmp_path, monkeypatch, stage, 
         bp.end_dispatch_fence("member")
 
 
-@pytest.mark.parametrize(("reason", "rollback", "stage"), [
-    ("contention", True, "seed"),
-    ("contention", False, "checkpoint"),
-    ("contention", None, "checkpoint"),
-    ("unknown", True, "seed"),
-    ("permission", True, "checkpoint"),
-])
+@pytest.mark.parametrize("stage", ["seed", "checkpoint"])
+@pytest.mark.parametrize("reason,rollback", [("contention", True), ("contention", False),
+                                           ("contention", None), ("unknown", True), ("permission", True)])
 def test_only_positive_rolled_back_contention_retries(tmp_path, monkeypatch, stage, reason, rollback):
     publish(tmp_path, document("member", status="running"))
     _ctx, limit = _loop_ctx(tmp_path, "member")

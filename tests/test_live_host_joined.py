@@ -10,7 +10,8 @@ from ouroboros.realtime_session import joined
 from tests._live_world import host_world as host_world
 
 
-@pytest.mark.parametrize(("fails", "cancel"), [(False, False), (True, True)])
+@pytest.mark.parametrize('cancel', [False, True])
+@pytest.mark.parametrize('fails', [False, True])
 def test_joined_preserves_cancellation_and_the_owned_outcome(cancel, fails):
     async def run():
         entered, release = asyncio.Event(), asyncio.Event()

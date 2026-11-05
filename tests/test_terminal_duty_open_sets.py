@@ -230,7 +230,8 @@ def test_a_receipt_racing_the_terminal_mark_stays_authoritative(env, monkeypatch
     assert row["settle_reason"] == "late_receipt" and row["cost_usd"] == 0.6 and "recovery" not in row
 
 
-@pytest.mark.parametrize(("operation", "taken"), [("cancelled", False), ("not_started", False), ("gone", True)])
+@pytest.mark.parametrize("taken", [True, False])
+@pytest.mark.parametrize("operation", ["cancelled", "not_started", "gone"])
 def test_ownership_taken_during_a_blocked_probe_refuses_the_settlement(env, monkeypatch, operation, taken):
     """Discovery eligibility is cached; the post-I/O fences re-read ownership before any write."""
     import threading

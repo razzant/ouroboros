@@ -438,13 +438,10 @@ def test_push_mode_reaches_the_size_lane_and_only_growth_fails(monkeypatch, caps
             test_a_change_does_not_grow_a_reference_book(capsys)
 
 
-@pytest.mark.parametrize(("mode", "tip", "passes", "text_id", "name"), [
-    ("block", 101, False, "constitution", "BIBLE.md"),
-    ("", 101, False, "prompts", "Prompts"),
-    ("approved", 101, True, "constitution", "BIBLE.md"),
-    ("warn", 101, True, "prompts", "Prompts"),
-    ("block", 100, True, "constitution", "BIBLE.md"),
-    ("block", 99, True, "prompts", "Prompts"),
+@pytest.mark.parametrize("text_id,name", [("constitution", "BIBLE.md"), ("prompts", "Prompts")])
+@pytest.mark.parametrize("mode,tip,passes", [
+    ("block", 101, False), ("", 101, False), ("approved", 101, True), ("warn", 101, True),
+    ("block", 100, True), ("block", 99, True),
 ])
 def test_bible_and_prompt_growth_fails_unless_the_owner_approved(monkeypatch, capsys, text_id, name, mode, tip, passes):
     import sys
