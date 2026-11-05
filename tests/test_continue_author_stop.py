@@ -64,8 +64,16 @@ def test_a_real_stop_is_offered_and_admits_one_successor_with_the_same_work_and_
     from supervisor.continuation_admission import admit_continuation
 
     data, stored = _stored_author_end(tmp_path, monkeypatch, [_stop_tool_call()])
+    from ouroboros.gateway.work_status import shown_outcome
+    from ouroboros.project_dialogue import TASK_CAUSE_PHRASES, _completion_verdict, outcome_phase
+    from supervisor.events_task_done import _completed_lifecycle_display
+
     assert stored["status"] == "completed", "the stored status stays the author's own completed row"
     assert stored["outcome_axes"]["execution"]["task_completion"]["rationale"] == STOP_RATIONALE
+    assert outcome_phase(stored, {}) == outcome_phase({}, stored) == "cancelled"
+    assert shown_outcome(stored) == "cancelled"
+    assert _completed_lifecycle_display({}, stored) == ("⏹", "stopped")
+    assert _completion_verdict(stored, {}) == TASK_CAUSE_PHRASES["author_stop"][:-1] + " · " + STOP_RATIONALE
     _queue, _state, workers = _install_queue(data, monkeypatch)
     assert continuation_offer(stored, "stop-root") == {"eligible": True, "cause": AUTHOR_STOP_CAUSE, "refusal": ""}
     assert workers.PENDING == [] and "continued_by" not in stored, "the stop and its offer start nothing by themselves"

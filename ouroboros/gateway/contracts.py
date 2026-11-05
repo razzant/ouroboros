@@ -307,9 +307,8 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     card_row_id: NotRequired[str]
     card_row_revision: NotRequired[int]  # canonical source order, independent of delivery timestamp
     terminal_receipt: NotRequired[Literal["retained_work"]]  # a placed row typed as a terminal receipt, not progress
-    late_evidence: NotRequired[Dict[str, Any]]  # late review identity/revision + exact applied source; no transcript
-    # Event-time human presentation; raw task/project ids remain machine keys.
-    target_label: NotRequired[str]
+    late_evidence: NotRequired[Dict[str, Any]]  # applied source or merge_review identity/revision + retained report; merge_review refreshes on history reads only
+    target_label: NotRequired[str]  # event-time human presentation; raw task/project ids remain machine keys
     project_id: NotRequired[str]
     project_name: NotRequired[str]
     task_name: NotRequired[str]
@@ -317,6 +316,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     terminal_time: NotRequired[Dict[str, Any]]  # host-owned occurrence, separate from publication ts
     completion_answer: NotRequired[str]  # a Project root's model-authored final answer, mirrored into Main (DESIGN)
     completion_reason: NotRequired[str]  # one recorded nonclean-outcome fact beside the answer
+    wake_summary: NotRequired[str]  # a Project root's own closing sentence, for its Main portal
     completion_notice: NotRequired[Dict[str, Any]]  # transport view: neutral/detail/phase/salvage; Main adds cause and undescribed codes
     delivery_id: NotRequired[str]  # stable logical publication identity across transport retries
     set_at: NotRequired[str]  # a `reminder` row's provenance, live frame only (its text carries the signature): when written

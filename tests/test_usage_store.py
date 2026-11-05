@@ -311,11 +311,26 @@ def test_one_shots_compare_identity_not_payload(root):
     first = ua.record_subscription_session("session", drive_root=root, route="r", model="first",
                                            task_id="t", root_task_id="r", spend_usd=1.0)
     before = ledger_rows(root)
+    assert before[0]["run_id"] == "session"
+    with usage_store.read(root) as txn:
+        extra = txn.conn.execute("SELECT extra FROM attempts WHERE attempt_id=?", (first,)).fetchone()[0]
+        assert json.loads(extra)["run_id"] == "session"
     assert ua.record_subscription_session("session", drive_root=root, route="r", model="second",
                                           task_id="t", root_task_id="r", spend_usd=9.0) == first
     assert ledger_rows(root) == before
     with pytest.raises(ua.UsageAccountingError, match="conflicting settled-row identity"):
         ua.record_subscription_session("session", drive_root=root, route="other", task_id="t", root_task_id="r")
+
+
+def test_legacy_session_without_run_id_replays_without_a_second_charge(root):
+    producer = root / "producer"
+    attempt = ua.record_subscription_session("legacy-run", drive_root=producer, route="r", spend_usd=1.0)
+    legacy, = ledger_rows(producer)
+    legacy.pop("run_id", None)
+    write_journal(root, [legacy])
+    assert ua.record_subscription_session("legacy-run", drive_root=root, route="r", spend_usd=9.0) == attempt
+    row, = ledger_rows(root)
+    assert row["cost_usd"] == 1.0 and "run_id" not in row
 
 
 # ---- the one-time import -----------------------------------------------------

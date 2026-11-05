@@ -47,11 +47,11 @@ def resolve_owner_source(ctx: Any, source: Any) -> dict[str, Any]:
         if ref.get("chat_id") != chat_id and ref != (task or {}).get("origin_message_ref"):
             return {}
         row = resolve_owner_message_source(drive, ref)
-        if not row or row.get("direction") != "in" or not str(row.get("text") or "").strip():
-            return {}
-        # System/skill injections cannot become owner authority merely by
-        # retaining an inbound-looking row or a copied owner reference.
-        if row.get("system_type") or row.get("presence") or row.get("source") == "skill_repair":
+        # System/skill injections and a place participant cannot become owner authority merely by
+        # retaining an inbound-looking row or a copied owner reference (``owner_words.owner_row``).
+        from ouroboros.owner_words import owner_row
+
+        if not owner_row(row, drive):
             return {}
         # Canonicalize selectors to the actual row so omitting a client id or
         # adding caller fields cannot turn one owner message into two grants.

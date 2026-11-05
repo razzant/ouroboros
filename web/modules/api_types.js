@@ -490,9 +490,7 @@
  * @property {string=} card_row_id  // the row's stable identity across live delivery, outbox replay and history
  * @property {number=} card_row_revision  // canonical source order, independent of delivery timestamp
  * @property {"retained_work"=} terminal_receipt  // a placed row the host types as a terminal receipt (Wrap up's saved work), not progress
- * @property {Object=} late_evidence
- *   Late-review identity, reviewed revision and exact applied source_ref served by
- *   taskSourceDownloadUrl; not an original reviewer transcript or a copy of the row.
+ * @property {Object=} late_evidence  // late-review identity, revision and applied source_ref (taskSourceDownloadUrl); no transcript copy
  * @property {string=} target_label
  * @property {string=} project_id
  * @property {string=} task_name  // structured work title on Project creation/transfer entries
@@ -501,6 +499,7 @@
  * @property {Object=} terminal_time  // host-owned occurrence; ts remains publication time
  * @property {string=} completion_answer  // a Project root's model-authored final answer, mirrored into Main
  * @property {string=} completion_reason One recorded nonclean-outcome fact beside the answer.
+ * @property {string=} wake_summary  // a Project root's own closing sentence, for its Main portal
  * @property {Object=} completion_notice Transport view: neutral/detail/phase/salvage; Main adds cause and undescribed codes.
  * @property {string=} delivery_id Stable logical publication identity across transport retries.
  * @property {string=} set_at  // a `reminder` row: when its words were written (live frame only; the text carries the signature)

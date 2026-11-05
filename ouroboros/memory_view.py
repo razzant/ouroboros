@@ -553,11 +553,13 @@ def _row_line(entry: Entry, author: Mapping[str, Any], texts: Mapping[str, Dict[
 
 
 def _spoken(entry: Entry, author: Mapping[str, Any], texts: Mapping[str, Dict[str, Any]]) -> Dict[str, Any]:
-    """A verbatim lane-1 line with the facts its address line needs (head, size, position)."""
+    """A verbatim lane-1 line with the facts its address line needs (head, size, position); my human's side is
+    every person's row outside places and a place row its account confirms (``row_author``'s ``owner_confirmed``)."""
     from ouroboros.dialogue_provenance import row_provenance
 
     row = texts.get(entry[0]["row_sha256"])
-    return {"owner_side": author.get("kind") == "human" and row_provenance(entry[1]) != "place",
+    return {"owner_side": author.get("kind") == "human" and (row_provenance(entry[1]) != "place"
+                                                               or author.get("owner_confirmed") is True),
             "ref": f"chat {entry[0]['chat_id']} / {entry[1].get('client_message_id') or ''}",
             "text_sha256": sha256_text(str(row.get("text") or "")) if row else "",
             "line": _row_line(entry, author, texts), "head": _row_head(entry, author), "kind": author.get("kind"),

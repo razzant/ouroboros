@@ -174,6 +174,13 @@ def project_main_task_authority(task: Mapping[str, Any]) -> Dict[str, Any]:
             "ref": copy.deepcopy(dict(origin_ref)),
             **({"text": str(origin_text)} if isinstance(origin_text, str) and origin_text else {}),
         }
+    # A drafted objective (a start, a follow-up) shows the words of my human its drafter carried, beside it.
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
+    author = metadata.get("objective_author") if isinstance(metadata.get("objective_author"), Mapping) else {}
+    carried = [copy.deepcopy(dict(row)) for row in metadata.get("owner_corpus") or [] if isinstance(row, Mapping)
+               and str(row.get("content") or "").strip() and row.get("content") != origin_text]
+    if author.get("kind") == "task" and carried:
+        projection["task_owner_words"] = {"carried_by": str(author.get("task_id") or ""), "rows": carried}
     if isinstance(task.get("authority_historical_gaps"), list):
         projection["authority_historical_gaps"] = copy.deepcopy(task["authority_historical_gaps"])
     return projection

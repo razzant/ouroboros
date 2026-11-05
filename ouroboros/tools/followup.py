@@ -238,6 +238,11 @@ def _update_schedule(ctx: ToolContext, root: Any, schedule_id: str, reason: str,
         patch["trigger"] = {"type": "once", "run_at": patch.pop("run_at")}
     elif "cron" in patch:
         patch["trigger"] = {"type": "cron", "expr": patch.pop("cron")}
+    if patch.keys() & {"objective", "context"}:  # a new assignment keeps the words that changed it
+        from ouroboros.owner_words import carried_owner_corpus
+
+        if words := carried_owner_corpus(ctx):
+            patch["owner_corpus"] = words
     outcome = patch_scheduled_task(schedule_id, patch, reason=reason, actor="agent",
                                    task_id=str(getattr(ctx, "task_id", "") or ""), drive_root=root,
                                    writer_kind=work_kind(getattr(ctx, "task_metadata", None)),
@@ -690,6 +695,10 @@ def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
     # authority. Only independent work uses the root-start exception and cause.
     record["task"]["metadata"].update(consciousness_origin_metadata(
         metadata_src, started_root=relation["kind"] == "independent"))
+    from ouroboros.owner_words import carried_owner_corpus
+
+    if corpus := carried_owner_corpus(ctx):  # my human's words ride by value, as a drafted start's; none: no claim
+        record["task"]["metadata"]["owner_corpus"] = corpus
     # The resource choice rides BY VALUE (#1315): the origin's producer-stamped intent,
     # else a direct turn's own (its room's default, or Main's system repo).
     intent = followup_resource_intent(ctx, metadata_src, project_id)

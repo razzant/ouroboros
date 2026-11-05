@@ -123,6 +123,35 @@ test('replay: a quiet schedule run is titled by its schedule and says what it di
     });
 });
 
+test('replay keeps the sentence when history stamps completion on progress before the summary', async () => {
+    for (const row of [terminal('stamped', { ...named, wake_summary: SENTENCE }),
+        evidence('stamped', { ...named, wake_summary: SENTENCE })]) {
+        const progress = checkpoint('stamped', { ...named, task_terminal_status: 'completed',
+            text: 'Checking the disk and the gateway.', outcome_phase: 'done', outcome_final: true });
+        delete progress.task_phase;
+        assert.ok(!Object.hasOwn(progress, 'wake_summary') && !Object.hasOwn(row, 'task_terminal_status'));
+        await replay({ messages: [progress, row], window: { complete: true } }, feed => {
+            assert.equal(view(feed, 'stamped').title, 'Daily check');
+            assert.equal(view(feed, 'stamped').line, SENTENCE, 'a history status stamp does not replace the task summary');
+            assert.ok(view(feed, 'stamped').facts.includes(SENTENCE));
+        });
+    }
+});
+
+test('the task own terminal carriers clear an absent sentence even in the same attempt', async () => {
+    for (const source of ['task_done', 'task_summary']) {
+        await replay({ messages: [checkpoint('cleared'), terminal('cleared', { ...named, wake_summary: SENTENCE })],
+            window: { complete: true } }, (feed, handlers) => {
+            assert.equal(view(feed, 'cleared').line, SENTENCE);
+            if (source === 'task_done') handlers.get('log')({ chat_id: 1, data: {
+                type: 'task_done', task_id: 'cleared', status: 'completed', task_terminal_status: 'completed', ts: AT } });
+            else handlers.get('chat')(terminal('cleared', named));
+            assert.notEqual(view(feed, 'cleared').line, SENTENCE);
+            assert.ok(!view(feed, 'cleared').facts.includes(SENTENCE));
+        });
+    }
+});
+
 // A wake's narration as the live path sends it and history replays it: the words after the mark are its line.
 const narration = (task_id, words, extra = {}) => ({ task_id, chat_id: 1, ts: '2026-10-28T06:30:00+00:00', role: 'assistant',
     is_progress: true, narration: true, text: `💬 ${words}`, content: `💬 ${words}`, ...extra });
@@ -208,5 +237,32 @@ test('live: the supervisor\'s task_done names the origin without waiting for a h
         assert.equal(seen.title, 'Daily check');
         assert.equal(seen.line, SENTENCE);
         assert.match(seen.facts, /<dt>Started by<\/dt><dd>Schedule · <span data-i18n-authored>Daily check<\/span><\/dd>/);
+    });
+});
+
+
+test('an ordinary root says its closing sentence once; a held cause keeps the sentence in Details', async () => {
+    for (const held of [false, true]) {
+        const row = terminal('o-summary', { suggested_name: 'Owner work', wake_summary: SENTENCE,
+            quiet_effective: false, ...(held ? { status: 'cancelled', outcome_phase: 'cancelled', reason_code: 'author_stop' } : {}) });
+        await replay({ messages: [checkpoint('o-summary'), row], window: { complete: true } }, feed => {
+            const seen = view(feed, 'o-summary');
+            assert.equal(seen.facts.includes('In its words'), held);
+            if (!held) assert.equal(seen.line, SENTENCE);
+            else assert.notEqual(seen.line, SENTENCE);
+        });
+    }
+});
+
+for (const [type, status] of [['task_started', 'running'], ['task_done', 'completed']]) test(`a new attempt clears its previous sentence (${type})`, async () => {
+    await replay({ messages: [checkpoint('retry'), terminal('retry', { suggested_name: 'Owner work', wake_summary: SENTENCE,
+        task_attempt: 1 })], window: { complete: true } }, (feed, handlers) => {
+        assert.equal(view(feed, 'retry').line, SENTENCE);
+        handlers.get('log')({ chat_id: 1, data: { type: 'task_metrics_event', task_id: 'retry', rounds: 2 } });
+        assert.equal(view(feed, 'retry').line, SENTENCE, 'a partial same-attempt update does not erase the sentence');
+        handlers.get('log')({ chat_id: 1, data: { type, task_id: 'retry', status,
+            task_attempt: 2, ts: '2026-10-28T07:00:00+00:00' } });
+        assert.notEqual(view(feed, 'retry').line, SENTENCE);
+        assert.ok(!view(feed, 'retry').facts.includes(SENTENCE));
     });
 });

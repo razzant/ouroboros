@@ -115,7 +115,7 @@ network-bound runs inside it.
   column/index migration on an existing database. The original physical failure,
   HTTP-200 body errors included, is retained in private CAS before retry. Failure, administrative
   closure, answer completeness and monetary finality remain independent.
-- One-shot kinds compare identity, not payload: a subscription session's later
+- One-shot kinds compare identity, not payload (`extra.run_id` names new subscription sessions): a later
   observation replays the stored row. New partial session receipts retain known
   cash and `cost_partial`, with no reservation bound; an exact subtotal remains
   exact while `unknown_unmetered` counts its unpriced remainder once per row.

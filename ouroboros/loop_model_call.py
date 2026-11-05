@@ -5,14 +5,14 @@ split); loop.py re-exports every name."""
 
 from __future__ import annotations
 
-from ouroboros.context_fit import _physical_context_for_fit
+from ouroboros.context_fit import _physical_context_for_fit, extract_plain_text_from_content
 
 from ouroboros.config import runtime_setting
 
 import logging
 import contextlib
 import copy
-import json
+from datetime import datetime, timezone
 import pathlib
 import queue
 import time
@@ -1245,8 +1245,8 @@ def _project_wake_input(ctx: _RoundModelCallContext, *, overflowed: bool = False
     and route of THIS call, so a grown tool set or a switched route is measured
     again), the answer reserve and one clock line against a KNOWN capacity.
     Unknown capacity sends the whole input, as any call does; a real provider
-    overflow may apply the delivery before consumption, as the one retry the
-    strict-shrink predicate admits only when it is actually smaller. Once a
+    overflow may apply the delivery (the bare ``pointer_text`` when bound) before consumption,
+    as the one retry the strict-shrink predicate admits only when smaller. Once a
     response followed the input, the transcript is history and stays as sent.
     Only the delivered first user message changes; the task text, the owner
     corpus and the stored source keep the complete observation (``consciousness_wake``).
@@ -1260,34 +1260,36 @@ def _project_wake_input(ctx: _RoundModelCallContext, *, overflowed: bool = False
     if index is None or any(isinstance(message, dict) and message.get("role") == "assistant"
                             for message in ctx.messages[index + 1:]):
         return False  # a response already followed the wake input: consumed history, never rewritten
+    from ouroboros.context_input_selection import wake_deliveries, wake_input_checkpoint, whole_wake_input
     if not hasattr(tool_ctx, "_wake_input_full_message"):  # a projected start's whole input is its plan's
-        from ouroboros.context_input_selection import whole_wake_input
         tool_ctx._wake_input_full_message = whole_wake_input(ctx.messages[index], ctx.context_fit_plan, wake)
     full = tool_ctx._wake_input_full_message
-    delivery = {"role": "user", "content": str(wake["projection_text"])}
-    if len(json.dumps(delivery, ensure_ascii=False)) >= len(json.dumps(full, ensure_ascii=False)):
-        return False  # a pointer must actually save space
-    projected = overflowed
-    if not overflowed:
-        # Re-evaluate the FULL input on each actual route, even when the last
-        # unconsumed candidate used a pointer. Measurement never rewrites history.
-        current = ctx.messages[index]
-        ctx.messages[index] = full
+    forms = wake_deliveries(wake, full)  # rescue order, the bare pointer last, each smaller than the whole input
+    if not forms:
+        return False  # no bound form saves space
+    from ouroboros.send_clock import main_clock_policy, render_clock_note
+    from ouroboros.utils import estimate_tokens
+
+    policy = main_clock_policy(meta, task_type=ctx.task_type)
+    clock = estimate_tokens(render_clock_note(policy, datetime.now(timezone.utc))) if policy else 0
+
+    def unfit(candidate: Dict[str, Any]) -> bool:  # THIS round's request carrying it exceeds a KNOWN capacity
+        current, ctx.messages[index] = ctx.messages[index], candidate  # measurement never rewrites history
         try:
             disposition = _loop()._measure_round_main_fit(ctx, automatic_pass_used=False)
         finally:
             ctx.messages[index] = current
         measurement = disposition.measurement if disposition is not None else None
-        from datetime import datetime, timezone
-        from ouroboros.send_clock import main_clock_policy, render_clock_note
-        from ouroboros.utils import estimate_tokens
+        return bool(measurement is not None and measurement.capacity_total_tokens is not None
+                    and measurement.estimated_input_tokens + measurement.response_reserve_tokens + clock
+                    > measurement.capacity_total_tokens)
 
-        policy = main_clock_policy(meta, task_type=ctx.task_type)
-        clock = estimate_tokens(render_clock_note(policy, datetime.now(timezone.utc))) if policy else 0
-        projected = bool(measurement is not None and measurement.capacity_total_tokens is not None
-                         and measurement.estimated_input_tokens + measurement.response_reserve_tokens + clock
-                         > measurement.capacity_total_tokens)
-    from ouroboros.context_fit import extract_plain_text_from_content
+    # The FULL input is measured first on each actual route, even after a pointer, and restored when it fits; else
+    # the first bound form measured to fit, the bare pointer last, as at the start (``rescued_start``).
+    projected = overflowed or unfit(full)
+    delivery = forms[-1]  # a real overflow's one strict-shrink retry, and the last rescue: the smallest form
+    if projected and not overflowed:
+        delivery = next((form for form in forms[:-1] if not unfit(form)), delivery)
     desired = delivery if projected else full
     # Cross-family fallbacks copy the transcript, then restore it on failure.
     # Projection belongs to THESE bytes, never a flag on the shared tool context.
@@ -1297,11 +1299,8 @@ def _project_wake_input(ctx: _RoundModelCallContext, *, overflowed: bool = False
     invalidate_task_cache_splits(ctx.task_id)
     _loop().seal_task_transcript(ctx.messages)
     tool_ctx.messages = ctx.messages
-    _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
-        "checkpoint_kind": "wake_input_by_source" if projected else "wake_input_inline",
-        "round": ctx.round_idx, "after_overflow": overflowed,
-        "composition": wake.get("composition"), "source_sha256": (wake.get("source") or {}).get("sha256"),
-    })
+    _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, wake_input_checkpoint(
+        wake, delivery["content"] if projected else None, round_idx=ctx.round_idx, after_overflow=overflowed))
     return True
 
 

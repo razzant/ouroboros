@@ -892,19 +892,18 @@ def outcome_phase(result: Dict[str, Any], event: Dict[str, Any]) -> str:
             status == "completed" and post_task_synthesis_is_open(synthesis)))):
         return "working"
     lifecycle = axis.get("lifecycle") or status
-    if lifecycle in {"cancelled", "cancel_requested"}:
-        return "cancelled"
     command, ending = owner_stop_ending(record)  # Stop now is Stopped whatever it kept
-    if command == "stop_now":
+    if lifecycle in {"cancelled", "cancel_requested"} or command == "stop_now":
         return "cancelled"
     unanswered = ending == "stop"  # a Wrap up without an answer: its own failure is the stop
+    author_stopped = (axes.get("objective", {}).get("source"), axes.get("objective", {}).get("reason")) == ("task_completion", "author_stop")
     author_finished = axis.get("objective") == "pass" and (axes.get("objective") or {}).get("source") == "author_acceptance"
     if (((lifecycle == "failed" or axis.get("execution") == "failed") and not unanswered)
             or axis.get("execution") == "infra_failed"
-            or axis.get("objective") == "fail" or (axis.get("review") == "fail" and not author_finished)
+            or (axis.get("objective") == "fail" and not author_stopped) or (axis.get("review") == "fail" and not author_finished)
             or {axis.get("artifacts"), str(record.get("artifact_status") or "").lower()} & {"failed", "missing"}):
         return "error"
-    if unanswered:
+    if unanswered or author_stopped:
         return "cancelled"
     if str(record.get("reason_code") or "") == REASON_OWNER_REQUESTED_FINALIZATION:
         return "done"
@@ -1266,9 +1265,11 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
     typed = str(execution.get("reason_code") or "")
     if reason in {REASON_FINAL_MESSAGE, ""} and typed != WARN_DELEGATED_CUSTODY_UNRECONCILED:
         reason = typed or reason
+    author_stop = completion.get("action") == "stop" and execution.get("status") != "cancelled" and not origin
     review_cause = (cause if status and (status != ACCEPTANCE_ACCEPTED or cause in TASK_CAUSE_PHRASES)
                     and (phase in {"done", "warn"} or recorded_author_stop(decision)
-                         or (phase == "error" and status != ACCEPTANCE_ACCEPTED and not custody
+                         or ((phase == "error" or (phase == "cancelled" and author_stop))
+                             and status != ACCEPTANCE_ACCEPTED and not custody
                              and reason in {REASON_FINAL_MESSAGE, ""})) else "")
     # Author-accepted completion is not reviewer approval. Required mode, explicit
     # debts and unknown enforcement are not inferred optional from a reason string.
@@ -1281,7 +1282,6 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
                                       or (review_cause == "author_finish" and author_closed and review.get("status") != "fail")):
         review_cause = ""
     held = phase == "error" and str(objective.get("source") or "").startswith("plan_review_")
-    author_stop = completion.get("action") == "stop" and phase != "cancelled"  # the author's own, never the owner's
     if reason == "foreign_install_root" and (result.get("reason_detail") or event.get("reason_detail")):
         clause = str(result.get("reason_detail") or event["reason_detail"])
     elif raw_reason == REASON_OWNER_REQUESTED_FINALIZATION and not stopped:

@@ -35,10 +35,10 @@ def test_a_wake_lists_each_reaction_as_its_context_fact_never_as_a_correspondent
     assert lines[1].endswith(", by News (chat): [Reaction, not speech: added thumbsup on message 1712.0001]")
     assert lines[2].endswith(", by Anonymous reactions (anonymous): "
                              "[Reaction, not speech: counts observed: thumbsup 3 on message 1712.0001]")
-    assert lines[3].startswith("- Presence correspondent message in Place chat r") and lines[3].endswith(': "Real words."')
+    assert lines[3].startswith("- message in a place in Place chat r") and lines[3].endswith('] Real words.')
     text = observation.full_text()
-    assert "3 Presence reactions (context, not speech), 1 Presence correspondent message;" in text
-    assert ': ""' not in text and "correspondent messages" not in text  # no reaction reads as an empty message
+    assert "3 Presence reactions (context, not speech), 1 message in a place;" in text
+    assert ': ""' not in text and "messages in places" not in text  # no reaction reads as an empty message
     assert b'"composition": {"correspondent_message": 1, "correspondent_reaction": 3}' in observation.source_bytes()
 
 
