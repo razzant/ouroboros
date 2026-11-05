@@ -70,9 +70,9 @@ def _exclusive(path: pathlib.Path) -> Iterator[None]:
 def _refuse_own_path(folder: pathlib.Path) -> None:
     """A copy lives elsewhere, so a path to the template inside it leads a test back to the template."""
     needle = os.fsencode(str(folder).removeprefix("/private"))  # macOS: /tmp is a link to /private/tmp
-    for directory, _folders, files in os.walk(folder):
-        for name in files:
-            path = pathlib.Path(directory, name)
+    for directory, folders, files in os.walk(folder):
+        for name in (*files, *(name for name in folders if os.path.islink(os.path.join(directory, name)))):
+            path = pathlib.Path(directory, name)  # a link to a folder is listed with the folders and never walked
             if needle in (os.fsencode(os.readlink(path)) if path.is_symlink() else path.read_bytes()):
                 raise ValueError(f"{path.relative_to(folder)} holds the path it was built at: every copy would lead back here")
 

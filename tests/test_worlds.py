@@ -101,13 +101,16 @@ def test_a_build_runs_once_and_a_failed_build_publishes_nothing(run_root):
     assert world("another", _lay_out) != template
 
 
-@pytest.mark.parametrize("where", ["file", "link"])
+@pytest.mark.parametrize("where", ["file", "link", "folder-link"])
 def test_a_world_that_knows_its_own_path_is_refused_and_a_relative_one_is_not(run_root, where):
     def knows(folder):
         if where == "file":
             (folder / "record.json").write_text(f'{{"root": "{folder}"}}', encoding="utf-8")
-        else:
+        elif where == "link":
             os.symlink(folder / "elsewhere", folder / "link")
+        else:  # a link to a folder: every clone would write through it into the template
+            (folder / "shared").mkdir()
+            os.symlink(folder / "shared", folder / "link", target_is_directory=True)
 
     with pytest.raises(ValueError, match="holds the path it was built at"):
         world("knows-its-path", knows)
