@@ -322,6 +322,31 @@ def test_a_legacy_seat_note_releases_only_after_its_copy_is_gone(tmp_path, task)
     assert task_custody.remove_custody_trash(data)["removed"] == 1 and not scratch.exists()
 
 
+def test_counting_scratch_skips_hold_proofs_and_keeps_other_roots_after_an_unreadable_record(tmp_path, monkeypatch):
+    data, good = _started(tmp_path, "good")
+    _data, bad = _started(tmp_path, "bad")
+    read = pathlib.Path.read_text
+
+    def unreadable(path, *args, **kwargs):
+        if path == _record(data, "bad"):
+            raise PermissionError("record unreadable")
+        return read(path, *args, **kwargs)
+
+    def no_hold_reads(*args, **kwargs):
+        pytest.fail("counting must not compute discarded holds")
+
+    monkeypatch.setattr(pathlib.Path, "read_text", unreadable)
+    with monkeypatch.context() as patch:
+        for name in ("task_hold", "seat_hold", "retention_hold"):
+            patch.setattr(session_scratch, name, no_hold_reads)
+        patch.setattr(owner_keep, "is_kept", no_hold_reads)
+        assert session_scratch.recorded_scratch_roots(data) == [str(good)]
+        assert bad.is_dir()  # an unreadable record is not retirement authority
+    rows = {row["task_id"]: row for row in session_scratch.scratch_records(data, live=lambda _: True)}
+    assert rows["good"]["valid"] and rows["good"]["hold"] == "task_live"  # the full view still judges holds
+    assert not rows["bad"]["valid"] and rows["bad"]["problem"].startswith("PermissionError:")
+
+
 def test_a_note_whose_record_retired_with_its_drive_is_dropped(tmp_path):
     data, scratch = _started(tmp_path)
     assert task_custody.settle_child_drive(data, "task-1", data / "task_drives" / "task-1", live=OVER,
