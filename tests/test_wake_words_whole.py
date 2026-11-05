@@ -188,6 +188,25 @@ def test_a_finished_root_reads_its_outcome_while_its_synthesis_is_still_open(tmp
     assert line.startswith("- task open1 Done") and "Working" not in line
 
 
+def test_an_event_copy_of_a_wake_task_keeps_the_forms_sizes_not_their_bodies(tmp_path, place):
+    """``task_received`` goes to events.jsonl and the live log frame: the forms grow with the window (one long message
+    of my human or thousands of short ones), while the task document and the stored source keep them whole."""
+    from ouroboros.utils import sanitize_task_for_event
+
+    since = T0 - 3600
+    _chat(tmp_path, _owner(LONG * 40, since + 1, cmid="a"), _place_row(place, "sasha", "Sasha: " + LONG, since + 2))
+    task = {"id": "wake-1", "text": "[Wake-up]", "metadata": {}}
+    wake.bind_wake_observation(tmp_path, task, _observe(tmp_path), lambda events: "[Wake-up] " + events)
+    facts = task["metadata"][wake.WAKE_OBSERVATION_KEY]
+    event = sanitize_task_for_event(task, tmp_path / "logs")
+    copied = event["metadata"][wake.WAKE_OBSERVATION_KEY]
+    for key in ("projection_text", "pointer_text", "whole_rows", "inline_rows_in_fallback"):
+        assert key not in copied and copied[f"{key}_len"] == len(facts[key])
+    assert copied["source"] == facts["source"] and copied["composition"] == facts["composition"]
+    assert len(json.dumps(event)) < len(LONG) * 10, "the event no longer carries my human's 40 × LONG words, twice"
+    assert task["metadata"][wake.WAKE_OBSERVATION_KEY] is facts and facts["projection_text"].count(LONG) >= 40
+
+
 def test_an_overflow_delivers_the_bare_pointer_while_a_measured_shortfall_keeps_my_humans_words(tmp_path,
                                                                                                 monkeypatch):
     from ouroboros.loop_model_call import _project_wake_input
