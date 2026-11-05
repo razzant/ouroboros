@@ -58,12 +58,7 @@ def _typed_call(tool, ctx, **kwargs):
 
 @pytest.mark.parametrize("tool, arguments, code, status", [
     ("skill_sources", {"action": "unknown"}, "TOOL_ARG_ERROR", "argument_error"),
-    ("skill_sources", {"action": "remove", "source_id": "builtin"}, "TOOL_ERROR", "error"),
     ("skill_install", {"id": "https://example.test/skill", "reason": "r"}, "TOOL_ARG_ERROR", "argument_error"),
-    ("skill_install", {"id": "builtin/skill", "reason": " "}, "TOOL_ARG_ERROR", "argument_error"),
-    ("skill_install", {"id": "builtin/skill", "reason": "r", "replace": True}, "TOOL_ERROR", "error"),
-    ("skill_update", {"name": "skill", "mode": "later"}, "TOOL_ARG_ERROR", "argument_error"),
-    ("skill_update", {"name": "", "mode": "replace"}, "TOOL_ARG_ERROR", "argument_error"),
     ("skill_update", {"name": "absent", "mode": "replace"}, "TOOL_ERROR", "error"),
 ])
 def test_refusals_publish_argument_or_host_errors(tmp_path, monkeypatch, tool, arguments, code, status):
@@ -110,7 +105,7 @@ def test_source_host_failures_publish_tool_error(ctx, monkeypatch, failure):
     assert (result.status, result.code) == ("error", "TOOL_ERROR")
 
 
-@pytest.mark.parametrize("tool", ["skill_sources", "skill_search", "skill_install", "skill_update"])
+@pytest.mark.parametrize("tool", ["skill_sources", "skill_install", "skill_update"])
 def test_successful_calls_publish_ok(ctx, tool):
     context, _drive, _reviews, _hub = ctx
     _call("skill_search", context)

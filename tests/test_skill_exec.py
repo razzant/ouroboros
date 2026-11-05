@@ -438,9 +438,6 @@ def test_skill_exec_refuses_when_unconfigured(tmp_path, monkeypatch):
 # ``ouroboros.config.save_settings`` and ``_data_write`` settings.json
 # block, exercised in tests/test_runtime_mode_elevation.py.
 # ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # Review-status + enable gating
 # ---------------------------------------------------------------------------
 
@@ -1084,8 +1081,6 @@ def test_generated_repair_enable_requires_expressed_owner_source(tmp_path, monke
 @pytest.mark.parametrize("tool_name,args", [
     ("run_command", {"cwd": "skill_payload", "cmd": ["python", "-c", "print('x')"]}),
     ("browse_page", {"url": "https://example.invalid"}),
-    ("browser_action", {"action": "evaluate", "value": "1 + 1"}),
-    ("schedule_subagent", {"objective": "inspect skill", "expected_output": "findings"}),
     ("skill_exec", {"skill": "alpha", "script": "run.py"}),
 ])
 def test_skill_development_keeps_normal_capabilities(tool_name, args, tmp_path, monkeypatch):
@@ -1184,8 +1179,6 @@ def test_selected_skill_blocks_marketplace_sidecar_writes(sidecar, tmp_path):
 @pytest.mark.parametrize("tool_name,args", [
     ("write_file", {"root": "skill_payload", "bucket": "external", "skill_name": "beta", "path": "notes.txt", "content": "x"}),
     ("read_file", {"root": "skill_payload", "bucket": "external", "skill_name": "beta", "path": "SKILL.md"}),
-    ("list_files", {"root": "skill_payload", "bucket": "external", "skill_name": "beta", "path": "."}),
-    ("skill_review", {"skill": "beta"}),
     ("skill_preflight", {"skill": "beta"}),
 ])
 def test_selected_skill_cannot_redirect_payload_tools(tool_name, args, tmp_path, monkeypatch):

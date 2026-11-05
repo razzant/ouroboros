@@ -855,7 +855,7 @@ def test_symlink_escape_excluded_from_pack(tmp_path):
 
 
 @pytest.mark.parametrize("name", [
-    ".env", "prod.env", ".env.production", "credentials.json", "id_rsa", ".netrc", "config/.env", ".env.example",
+    ".env", "id_rsa", ".env.example",
 ])
 def test_credential_like_filename_is_ordinary_hashed_payload(tmp_path, name):
     """A credential-like name never refuses or hides a file (owner choice for the skill

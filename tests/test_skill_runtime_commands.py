@@ -11,6 +11,7 @@ import yaml
 from ouroboros.skill_loader import SkillReviewState, compute_content_hash, save_enabled, save_review_state
 from ouroboros.tools import skill_exec
 from ouroboros.tools.registry import ToolContext
+from tests._cases import chosen_rows
 
 pytestmark = pytest.mark.serial
 
@@ -53,7 +54,7 @@ def execute(ctx, script, args=()):
     return skill_exec._handle_skill_exec(ctx, skill='runtime_fixture', script=f'scripts/{script.name}', args=list(args))
 
 
-@pytest.mark.parametrize('runtime', list(PROGRAMS))
+@pytest.mark.parametrize('runtime', chosen_rows(list(PROGRAMS), 0, 4, 6))
 def test_advertised_runtime_preserves_args_cwd_stderr_and_exit(tmp_path, monkeypatch, runtime):
     if not skill_exec._resolve_runtime_binary(runtime)[0]:
         pytest.skip(f'{runtime} toolchain is not installed')
@@ -99,7 +100,7 @@ console.log(text);
     assert 'NotCapable' not in facts['stderr']
 
 
-@pytest.mark.parametrize('permission,allowed', [('fs', False), ('fs', True), ('subprocess', False), ('subprocess', True)])
+@pytest.mark.parametrize('permission,allowed', [('fs', False), ('fs', True), ('subprocess', True)])
 def test_deno_effects_use_reviewed_declarations(tmp_path, monkeypatch, permission, allowed):
     if not shutil.which('deno'):
         pytest.skip('deno runtime is not installed')

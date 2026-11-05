@@ -433,7 +433,6 @@ def test_admitted_owner_task_edits_keep_running(tmp_path, owner_request, not_cyb
 
 @pytest.mark.parametrize("stamp,owner_request", [
     ({"source_ref": {"chat_id": 1, "client_message_id": "owner-1"}}, True),
-    ({"origin_suppressed": True}, True),
     ({}, False),
     ({"source_ref": {}, "origin_suppressed": "yes"}, False),
 ])

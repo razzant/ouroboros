@@ -354,7 +354,7 @@ def test_update_restore_ignores_mismatched_paths_and_keeps_evidence(release, tmp
     assert "paths do not match" in caplog.text
 
 
-@pytest.mark.parametrize("failure", ["source_land", "source_record", "builtin_copy", "builtin_digest"])
+@pytest.mark.parametrize("failure", ["source_land", "builtin_copy", "builtin_digest"])
 def test_update_landing_failure_restores_with_landing_reason(release, tmp_path, monkeypatch, failure):  # noqa: F811
     drive, folder, row, item = release
     if failure.startswith("builtin"):

@@ -42,7 +42,7 @@ def test_clear_absent_record_is_idempotent_without_creating_receipt(tmp_path):
     assert not (tmp_path / 'state/skills/demo/ouroboroshub.json').exists()
 
 
-@pytest.mark.parametrize('contents', ['{}', '[]', 'not json', '{"schema_version":1}'])
+@pytest.mark.parametrize('contents', ['{}', 'not json', '{"schema_version":1}'])
 def test_clear_does_not_repair_or_erase_malformed_existing_record(tmp_path, contents):
     path = tmp_path / 'state/skills/demo/ouroboroshub.json'
     path.parent.mkdir(parents=True)

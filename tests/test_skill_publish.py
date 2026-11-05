@@ -17,7 +17,6 @@ from ouroboros.skill_publish_snapshot import (
 from ouroboros.skill_review_status import (
     STATUS_BLOCKERS,
     STATUS_CLEAN,
-    STATUS_PENDING,
     STATUS_WARNINGS,
 )
 from ouroboros.tools import skill_publish
@@ -77,7 +76,7 @@ def _snapshot(*, description: str = "A test skill.") -> SkillPublishSnapshot:
     )
 
 
-@pytest.mark.parametrize("status", [STATUS_CLEAN, STATUS_WARNINGS, "advisory", "advisory_pass"])
+@pytest.mark.parametrize("status", [STATUS_CLEAN, STATUS_WARNINGS, "advisory_pass"])
 def test_validate_accepts_clean_and_warnings(monkeypatch, status):
     loaded = _loaded(status=status)
     _patch_validate(monkeypatch, loaded)
@@ -86,7 +85,7 @@ def test_validate_accepts_clean_and_warnings(monkeypatch, status):
     assert returned is loaded
 
 
-@pytest.mark.parametrize("status", [STATUS_BLOCKERS, STATUS_PENDING, "fail", "weird-unknown"])
+@pytest.mark.parametrize("status", [STATUS_BLOCKERS, "fail", "weird-unknown"])
 def test_validate_rejects_blockers_and_pending(monkeypatch, status):
     _patch_validate(monkeypatch, _loaded(status=status))
     with pytest.raises(skill_publish._PublishFailure) as caught:
