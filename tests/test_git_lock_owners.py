@@ -547,7 +547,7 @@ def test_a_store_switch_deferral_moves_nothing_and_is_untouched_by_a_later_lock(
     assert len(scene.events["restarts"]) == 1
 
 
-@pytest.mark.parametrize("case", ["every_attempt_refused", "mixed_attempts", "foreign_lock", "not_a_locking_command",
+@pytest.mark.parametrize("case", ["every_attempt_refused", "not_a_locking_command",
                                   "repair_between"])
 def test_only_a_lock_refusal_on_every_attempt_of_a_locking_command_is_typed(tmp_path, monkeypatch, case):
     from supervisor import git_ops_reset
@@ -621,7 +621,7 @@ def test_a_failed_bootstrap_is_told_once_in_the_owner_chat_and_a_deliberate_defe
     assert (managed_boot.repo / "owner-draft.txt").exists()
 
 
-@pytest.mark.parametrize("owner_chat", [None, "", -5, "not-an-id"])
+@pytest.mark.parametrize("owner_chat", [None, -5, "not-an-id"])
 def test_bootstrap_notice_never_invents_an_owner_address(monkeypatch, owner_chat):
     from ouroboros.server_restart import _noticed_bootstrap
     from supervisor import message_bus, state

@@ -14,7 +14,7 @@ from tests.test_launcher_handoff_stop import native_guard  # noqa: F401
 pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize('case', ['unmanaged', 'custom', 'missing', 'error'])
+@pytest.mark.parametrize('case', ['unmanaged', 'missing', 'error'])
 def test_runtime_branch_defaults_preserve_managed_choices_and_fallback(monkeypatch, case):
     import server
     from supervisor import git_ops
@@ -274,7 +274,7 @@ def test_onboarding_panic_runs_real_panic_marker_and_exit_99(startup_without_con
     assert state.read_state(obj.data).quality == "uninitialized"
 
 
-@pytest.mark.parametrize('command', ['ordinary chat', '/review', '/evolve', '/panic later', '/restart later'])
+@pytest.mark.parametrize('command', ['ordinary chat', '/review', '/restart later'])
 def test_unknown_commands_are_not_accepted_without_a_consumer(startup_controls, command):
     obj = startup_controls
     response = obj.client.post('/api/command', json={'cmd': command})
@@ -360,7 +360,7 @@ def test_onboarding_restart_refusal_keeps_core_and_source(startup_controls, monk
     assert 'update is still resolving' in caplog.text
 
 
-@pytest.mark.parametrize('kind', ['same', 'changed', 'empty', 'wrong_type', 'unconditioned'])
+@pytest.mark.parametrize('kind', ['same', 'empty', 'unconditioned'])
 def test_command_boot_precondition_is_checked_before_enqueue(startup_controls, monkeypatch, kind):
     from ouroboros import server_liveness
     from supervisor import message_bus

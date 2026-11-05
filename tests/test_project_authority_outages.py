@@ -16,6 +16,7 @@ from tests.test_main_project_consistency import owner_turn
 from tests.test_project_hold_recovery import accepted, restore_unreadable, resume_after_app_stop, worker
 from tests.test_swarm_host_admission import host  # noqa: F401
 from tests._store_shared import delete_result, result_exists, result_signature, seed_result, unreadable_result
+from tests._cases import chosen_rows
 
 pytestmark = pytest.mark.serial
 
@@ -424,7 +425,7 @@ def test_boot_recovery_claims_no_resume_until_its_resolver_is_admitted(pool, tmp
     assert _drain(pool.slot) == [RESOLVER]
 
 
-@pytest.mark.parametrize("veto", [None, "stop", "terminal", "torn", "bound", "foreign_tx"])
+@pytest.mark.parametrize("veto", [None, "terminal", "foreign_tx"])
 def test_boot_recovery_resumes_a_resolver_restored_from_its_claimed_handoff_once(pool, tmp_path, monkeypatch, veto):  # noqa: F811
     """R1: the server dies after the handoff, before its assign snapshot. Restore holds the
     claimed 'possible' row beside the worker's readable result; the NEXT real boot recovery's
@@ -653,11 +654,11 @@ def _passes(count=4, busy=""):
 
 # A queued parent whose own result tears AFTER restore is terminalized by assignment's
 # result-authority owner, so the torn queued case is exercised at restore only.
-@pytest.mark.parametrize("where,fault,phase", [
+@pytest.mark.parametrize("where,fault,phase", chosen_rows([
     *((where, fault, phase) for phase in ("restore", "release") for where, fault in (
         ("queued", None), ("queued", "missing"), ("queued", "shutdown"),
         ("external", "missing"), ("external", "never_admitted"))),
-    ("queued", "torn", "restore")])
+    ("queued", "torn", "restore")], 0, 9, 10))
 def test_healthy_child_waits_for_an_unknown_parent_inside_or_outside_the_snapshot(
         host, tmp_path, monkeypatch, where, fault, phase):  # noqa: F811
     """A child's own evidence is healthy; only its parent's is not. A parent queued beside

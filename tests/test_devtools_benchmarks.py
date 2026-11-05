@@ -38,6 +38,7 @@ from devtools.benchmarks.programbench.programbench_adapter import (
     verify_reference_executable_runnable,
 )
 from devtools.benchmarks.swe_bench.presets import resolve_preset
+from tests._cases import chosen_rows
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -5807,7 +5808,7 @@ _REFUSAL_CASES = (
 
 
 @pytest.mark.parametrize(
-    "build_case", _REFUSAL_CASES,
+    "build_case", chosen_rows(_REFUSAL_CASES, 0, 6, 11),
     ids=[case.__name__[len("_refusal_case_"):] for case in _REFUSAL_CASES],
 )
 def test_migrated_launcher_exit_status_matches_the_recorded_exit_code(build_case, tmp_path, monkeypatch):

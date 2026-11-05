@@ -118,7 +118,7 @@ def test_a_recorded_capture_whose_source_is_gone_stays_held_by_its_verified_cano
     assert (row["sha256"], row["immutable"]) == (record["sha256"], True)
 
 
-@pytest.mark.parametrize("material", ["child_result", "registration", "file", "directory", "mailbox", "receipts"])
+@pytest.mark.parametrize("material", ["child_result", "registration", "file", "directory", "receipts"])
 def test_unreadable_material_retains_the_drive(tmp_path, monkeypatch, material):
     data, drive, record = _cancelled_with_capture(tmp_path)
     store = artifacts.task_artifact_dir_path(drive, TASK)

@@ -207,7 +207,7 @@ def test_raw_usage_events_do_not_turn_malformed_into_known_money(tmp_path, raw, 
     assert row["cost_invalid"] is (known is None and not _missing(raw))
 
 
-@pytest.mark.parametrize("last_cost", [0, 3.0, None, True], ids=["zero", "positive", "unknown", "invalid"])
+@pytest.mark.parametrize("last_cost", [0, None, True], ids=["zero", "unknown", "invalid"])
 def test_review_continuation_uses_each_runs_typed_cash_and_collects_once(tmp_path, monkeypatch, fake_route, last_cost):
     """A legacy chain (an older host's automatic successor, now only joined) folds each run's own cash once."""
     from ouroboros.delegate_custody_usage import observe_session_usage

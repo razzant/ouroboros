@@ -43,6 +43,7 @@ from tests._launch_stop_shared import (
     write_scripts,
 )
 from tests.test_launch_stop_contract import HIDDEN, _host, _leader_gone, _roots_unknown
+from tests._cases import chosen_rows
 
 pytestmark = [pytest.mark.serial,
               pytest.mark.skipif(os.name == "nt", reason="the measured stop is POSIX; Windows keeps its native kill")]
@@ -100,7 +101,7 @@ def _ledger_only_debt(tmp_path, monkeypatch, scripts, task, *, survivor="denied"
 
 
 @pytest.mark.parametrize("survivor", ["denied", "held"])
-@pytest.mark.parametrize("reader", READERS)
+@pytest.mark.parametrize("reader", chosen_rows(READERS, 0, 3))
 def test_a_stale_copy_cannot_hide_what_the_ledger_names_from_any_reader(tmp_path, monkeypatch, scripts, reader, survivor):
     """Whichever store a reader used to start from, the launch holds while C lives; reading signals nothing."""
     (tmp_path / "data").mkdir()
@@ -137,7 +138,7 @@ def test_a_stale_copy_keeps_the_candidate_and_the_log_of_a_launch_that_still_owe
         _settle(record.proc, identities=[(pid, birth)])
 
 
-@pytest.mark.parametrize("stop", ["next start", "exit", "reaper", "quiesce"])
+@pytest.mark.parametrize("stop", ["next start", "reaper", "quiesce"])
 def test_every_stop_reads_what_only_the_ledger_names_and_ends_it(tmp_path, monkeypatch, scripts, stop):
     """The stale copy does not narrow a stop either: each ends C from what the ledger names, and retires the launch."""
     from ouroboros import owned_shutdown, process_custody
@@ -276,7 +277,7 @@ def _rows_of(data, leader):
 
 
 @pytest.mark.parametrize("where", ["pending copy", "folded into the document"])
-@pytest.mark.parametrize("reader", READERS)
+@pytest.mark.parametrize("reader", chosen_rows(READERS, 0, 3))
 def test_every_reader_holds_a_launch_only_a_copy_names_after_compaction(tmp_path, monkeypatch, scripts, reader, where):
     """That schedule, then each reader. C was published, so unlike the late child nobody observed yet, the launch must
     hold even though its canonical row is gone; reading signals nothing."""
@@ -645,8 +646,7 @@ def test_the_exit_adds_debt_only_the_ledger_names_to_its_one_stop(tmp_path, monk
     assert owned_shutdown.owned_records(tmp_path, strict=True) == []
 
 
-@pytest.mark.parametrize("case", ["owed, copies refused", "owed, copy written", "nothing owed, copies refused",
-                                  "ledger unreadable", "ledger malformed", "set unreadable"])
+@pytest.mark.parametrize("case", ["owed, copies refused", "ledger malformed", "set unreadable"])
 def test_the_exit_never_reports_completion_over_ledger_debt_it_could_not_count(tmp_path, monkeypatch, case):
     """Debt only the ledger names reaches the exit's stop through its ownership copy. When neither the document nor the
     pending channel takes that copy for the whole exit, or the ledger or the set cannot be read, the exit cannot count

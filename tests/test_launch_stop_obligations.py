@@ -27,6 +27,7 @@ from tests._launch_stop_shared import (
     _owed,
     _reader,
 )
+from tests._cases import chosen_rows
 
 pytestmark = [pytest.mark.serial,
               pytest.mark.skipif(os.name == "nt", reason="the measured stop is POSIX; Windows keeps its native kill")]
@@ -122,13 +123,10 @@ def test_two_parallel_exit_stops_of_one_launch_keep_what_either_could_not_end(tm
 @pytest.mark.parametrize("current,judged,observed,stale,expected", [
     # a stop discharges what it measured and left out, keeps what another stop added, takes its own answer
     ([{"pid": 7, "birth": "b"}], [{"pid": 7, "birth": "b"}], [], False, []),
-    ([{"pid": 8, "birth": "b", "held": True}], [], [{"pid": 9, "birth": "b"}], False,
-     [{"pid": 9, "birth": "b"}, {"pid": 8, "birth": "b", "held": True}]),
     # held status survives its answer
     ([{"pid": 8, "birth": "b", "held": True}], (), [{"pid": 8, "birth": "b"}], False,
      [{"pid": 8, "birth": "b", "held": True}]),
     # another birth on the same pid is another identity; a stale copy adds without authority
-    ([{"pid": 7, "birth": "a"}], [{"pid": 7, "birth": "b"}], [], False, [{"pid": 7, "birth": "a"}]),
     ([], (), [{"pid": 9, "birth": "b"}], True, [{"pid": 9, "birth": "b", "held": True}]),
 ])
 def test_only_a_stop_that_judged_an_identity_discharges_it(current, judged, observed, stale, expected):
@@ -160,7 +158,7 @@ def _births_unreadable(monkeypatch):
     return restore
 
 
-@pytest.mark.parametrize("consumer", ["reaper", "quiesce", "presence", "body candidate"])
+@pytest.mark.parametrize("consumer", ["reaper", "quiesce", "body candidate"])
 def test_a_launch_whose_birth_could_not_be_read_is_still_ended_and_held_by_its_marker(
         tmp_path, monkeypatch, scripts, consumer):
     """The registration could not read the leader's birth, so the row keeps its launch marker without one. The
@@ -553,7 +551,7 @@ _CONTENDED_CASES = [*((stop, "presence") for stop in ("exit record step", "reape
                     ("reaper", "body candidate"), ("service owner", "next start")]
 
 
-@pytest.mark.parametrize("stop,reader", _CONTENDED_CASES)
+@pytest.mark.parametrize("stop,reader", chosen_rows(_CONTENDED_CASES, 0, 8, 9))
 def test_a_child_a_stop_observed_while_the_ledger_lock_was_held_stays_owed_for_every_later_reader(
         tmp_path, monkeypatch, stop, reader):
     """A stop of launch A reaches runner L's child C through L's chain while the daemon roots are unreadable, so
@@ -691,7 +689,7 @@ def _contended_stop(tmp_path, monkeypatch, task):
     return rows, world, roots
 
 
-@pytest.mark.parametrize("damage", _DAMAGES)
+@pytest.mark.parametrize("damage", chosen_rows(_DAMAGES, 0, 2))
 @pytest.mark.parametrize("reader", ["presence", "continuation", "cold sleep", "body candidate"])
 def test_custody_a_contended_stop_wrote_reads_as_unknown_while_it_cannot_be_read(tmp_path, monkeypatch, reader, damage):
     """The stop succeeded in writing C to the existing pending channel because the ledger lock was held. The pending

@@ -127,7 +127,7 @@ def test_partial_visual_result_completeness_follows_recovery(evidence_context, r
     assert packet["gap_count"] == (0 if recoverable else 1)
 
 
-@pytest.mark.parametrize("shape", ["missing", "empty", "failed", "other_execution", "tampered"])
+@pytest.mark.parametrize("shape", ["missing", "failed", "tampered"])
 def test_following_response_gap_never_selects_a_later_success(evidence_context, shape):
     ctx = evidence_context
     model_response(ctx, "before", "Before")

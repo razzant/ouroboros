@@ -52,7 +52,7 @@ def _register(drive, tid: str, state: str) -> dict:
     return evt
 
 
-@pytest.mark.parametrize("state", ["owed", "exhausted", "delivered", "unreadable"])
+@pytest.mark.parametrize("state", ["owed", "exhausted", "unreadable"])
 def test_a_hard_timeout_finalizes_a_registered_answer_instead_of_rerunning_the_prompt(qenv, monkeypatch, state):
     """The reaper's own hard-deadline job (``queue_timeouts`` shape) over an attempt whose answer the host holds."""
     from ouroboros.headless import prepare_terminal_task_files

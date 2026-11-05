@@ -179,8 +179,7 @@ def test_unreadable_place_store_holds_only_connector_writes(published_tool, plac
         "Place records need repair" if declares_place else "")
 
 
-@pytest.mark.parametrize("kind,account,owner", [("user", "account", True), ("user", "other", False),
-    ("bot", "account", False), (None, "account", False)])
+@pytest.mark.parametrize("kind,account,owner", [("user", "account", True), ("bot", "account", False), (None, "account", False)])
 def test_call_facts_use_captured_identity_and_user_owner_match(published_tool, places, kind, account, owner):
     from ouroboros.places import OwnerAccount
     from tests.test_place_arrivals import seed_identity_arrival

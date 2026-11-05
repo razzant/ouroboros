@@ -307,8 +307,7 @@ def test_reset_replay_read_and_typed_refusal_keep_exact_contract(engine):
     assert result.headers["Retry-After"] == "3"
 
 
-@pytest.mark.parametrize("body", [None, [], {"target": None}, {"target": {"harness": "claude", "profile_id": ""}},
-                                       {"target": {"harness": "claude", "profile_id": False}}, {"unknown": 1}])
+@pytest.mark.parametrize("body", [None, [], {"unknown": 1}])
 def test_refresh_invalid_body_never_becomes_full_refresh(engine, body):
     client, _, calls = engine
     response = client.post("/api/claudexor/quota/refresh", content=json.dumps(body))

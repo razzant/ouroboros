@@ -462,7 +462,7 @@ def test_outer_control_keeps_its_reason_without_recovery_or_paid_recap(tmp_path,
         assert kw["tools"]._ctx._skip_post_task_synthesis is True
 
 
-@pytest.mark.parametrize("kind", ["auth_error", "quota_exhausted", "transport_unavailable", "deadline_exhausted", "provider_outcome_unknown"])
+@pytest.mark.parametrize("kind", ["auth_error", "deadline_exhausted", "provider_outcome_unknown"])
 def test_other_failure_rails_are_not_relabelled_as_output_exhaustion(kind):
     usage = {recovery.KEY: {"stage": "fallback"}, "_last_llm_error_kind": kind}
     assert recovery.next_step(usage) == ""

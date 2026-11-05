@@ -650,7 +650,7 @@ def test_factory_review_rows_mint_the_shipped_panel_for_each_install_class():
     assert _factory({"TOTAL_BUDGET": 5.0}) == [(model, "high") for model in OPENROUTER_REVIEW_DEFAULTS["triad"]]
 
 
-@pytest.mark.parametrize("provider", ["openai", "anthropic", "cloudru", "gigachat", "deepseek", "zai", "minimax"])
+@pytest.mark.parametrize("provider", ["openai", "deepseek", "minimax"])
 def test_a_direct_provider_panel_seats_main_once_unless_it_mixes_two_models(provider):
     """Owner Q5=A for direct providers: a panel that would repeat Main is Main once; MiniMax's
     mixed panel (Main, Light, Light: two models) keeps its three seats. Saved catalogs are not

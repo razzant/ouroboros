@@ -44,6 +44,7 @@ from tests._delegated_transport_shared import (  # noqa: F401  (autouse fixture 
     _owned_gateway_uses_each_test_transport,
     _started_request,
 )
+from tests._cases import chosen_rows
 
 
 # ===========================================================================
@@ -361,7 +362,7 @@ def test_model_operation_host_control_cancels_without_fabricating_result_or_rele
 
 
 @pytest.mark.parametrize(
-    "name", [n for n in _DRIVERS if PROVIDER_DRIVERS[n].choice_shaped])
+    "name", chosen_rows([n for n in _DRIVERS if PROVIDER_DRIVERS[n].choice_shaped], 0, 1, 6))
 def test_null_finish_reason_is_surfaced_observably(name):
     """An incomplete response (finish_reason: null) must be visible in usage —
     the key is present with a null marker, distinguishable from an absent

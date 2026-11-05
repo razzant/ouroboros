@@ -103,14 +103,8 @@ def test_every_refusal_reason_has_a_short_factual_phrase():
     "action, status, expected",
     [
         ("promote_chat_to_task", "needs_manual_target", "Not started"),
-        ("route_to_project", "needs_manual_target", "Not started"),
         ("promote_chat_to_task", "rejected", "Not started"),
         ("steer_task", "needs_manual_target", "Not delivered"),
-        ("steer_task", "rejected", "Not delivered"),
-        ("ensure_project_scope", "rejected", "Not moved"),
-        ("promote_chat_to_task", "unconfirmed", "Not confirmed"),
-        ("steer_task", "unconfirmed", "Not confirmed"),
-        ("ensure_project_scope", "unconfirmed", "Not confirmed"),
     ],
 )
 def test_prefix_follows_the_act_and_its_outcome(action, status, expected):

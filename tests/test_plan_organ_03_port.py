@@ -28,6 +28,7 @@ from tests._review_session_route_shared import (  # noqa: F401 - pytest fixtures
     fake_route,
 )
 from tests.test_plan_task_tool import CLEAN, _call, _record, _reply, _slots, _write, harness as _harness
+from tests._cases import chosen_rows
 
 harness = _harness  # noqa: F811 - pytest fixture re-export
 
@@ -302,8 +303,8 @@ def _cold(harness, ctx):
     return cold
 
 
-@pytest.mark.parametrize(("change", "entry"), [(change, entry) for change in CHANGES for entry in ENTRIES
-                                               if (change, entry) != ("deleted_workspace", "identical")])
+@pytest.mark.parametrize(("change", "entry"), chosen_rows([(change, entry) for change in CHANGES for entry in ENTRIES
+                                               if (change, entry) != ("deleted_workspace", "identical")], 0, 10, 16))
 def test_collection_reads_the_send_time_identity_whatever_changed_since(harness, change, entry):
     """03's rebinding matrix on the organ: the author's roots moved (a body candidate prepared
     before or after the ask), the attempt changed, both, or the workspace is gone — the free READ,

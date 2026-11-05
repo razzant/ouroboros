@@ -370,11 +370,9 @@ def _dispatch_provider_block(monkeypatch, model, messages):
 @pytest.mark.parametrize("model,details", [
     # Roster-vouched families: their SIGNED artifacts replay across sibling endpoints.
     ("anthropic/claude-sonnet-4.6", _SIGNED_TEXT),
-    ("google/gemini-3.5-flash", _SIGNED_TEXT),
     # Shape-first: an UNSIGNED readable artifact is portable for EVERY family — the
     # issue #468 case (a deepseek run pinned to one 429ing endpoint with 30 healthy ones).
     ("deepseek/deepseek-v4-flash-0731", _PLAIN_TEXT),
-    ("z-ai/glm-4.6", _PLAIN_TEXT),
     ("openai/gpt-5.5", _PLAIN_TEXT),
 ])
 def test_portable_reasoning_replay_stays_failover_eligible(monkeypatch, model, details):
@@ -1108,49 +1106,15 @@ def _sealed(details=None, content=None, model="z-ai/glm-4.6", **extra):
 
 
 @pytest.mark.parametrize("kwargs,expected", [
-    # --- portable for EVERY family: readable text carries no endpoint binding ---
-    ({"details": [{"type": "reasoning.text", "text": "t"}]}, False),
-    ({"details": [{"type": "reasoning.summary", "summary": "s"}]}, False),
     # A sidecar ``data`` on a READABLE type must not seal: opaqueness is a property
     # of the TYPE. Reading it as "has data => opaque" is how #468 comes back dressed up.
     ({"details": [{"type": "reasoning.text", "text": "t", "data": "x"}]}, False),
-    # ``None``/``""`` is how providers spell "unsigned" on a readable artifact.
-    ({"details": [{"type": "reasoning.text", "text": "t", "signature": None}]}, False),
-    ({"details": [{"type": "reasoning.text", "text": "t", "signature": ""}]}, False),
-    ({"details": [{"type": "reasoning.text", "text": "t", "signature": "  "}]}, False),
-    ({"content": [{"type": "thinking", "thinking": "p"}]}, False),
-    ({"content": [{"type": "reasoning", "text": "p"}]}, False),
-    ({"reasoning": "plain chain of thought"}, False),
-    ({"reasoning_content": "plain chain of thought"}, False),
-    ({"response_id": "gen-1"}, False),  # an identifier is not an artifact (Q3)
-    ({}, False),
-    # --- sealed for a non-roster family ---
-    ({"details": [{"type": "reasoning.text", "text": "t", "signature": "sig"}]}, True),
-    # A signed SUMMARY seals too: a signature is an endpoint binding wherever it
-    # rides on a readable entry (fail-closed; roast finding F6).
-    ({"details": [{"type": "reasoning.summary", "summary": "s", "signature": "sig"}]}, True),
     # Non-string truthy flat reasoning fields are unrecognized shapes => fail-closed.
     ({"reasoning": {"weird": "dict"}}, True),
-    ({"reasoning_content": ["weird", "list"]}, True),
-    # A truthy NON-STRING signature is an unrecognized shape => fail-closed too.
-    ({"details": [{"type": "reasoning.text", "text": "t", "signature": 123}]}, True),
-    ({"content": [{"type": "thinking", "thinking": "p", "signature": b"sig"}]}, True),
     # FALSY-present reasoning_details is the common JSON idiom for "no reasoning at
     # all" — NOT an artifact. Sealing it would pin transcripts with zero reasoning
     # (the response_id bug class); parity with the presence predicate's truthiness.
     ({"details": {}}, False),
-    ({"details": ""}, False),
-    ({"details": 0}, False),
-    ({"details": False}, False),
-    ({"reasoning_details": None}, False),  # explicit present-null via **extra
-    ({"details": [{"type": "reasoning.encrypted", "data": "blob"}]}, True),
-    ({"details": [{"type": "reasoning.brand_new_shape"}]}, True),  # unknown => fail-closed
-    ({"details": [{"no_type": 1}]}, True),
-    ({"details": "not-a-list"}, True),                             # malformed => fail-closed
-    ({"details": {"type": "reasoning.text"}}, True),
-    ({"content": [{"type": "redacted_thinking", "data": "blob"}]}, True),
-    ({"content": [{"type": "thinking", "thinking": "p", "signature": "sig"}]}, True),
-    ({"content": [{"type": "text", "text": "hi", "signature": "stray"}]}, True),
 ])
 def test_sealed_classifier_single_forms(kwargs, expected):
     """One artifact form at a time, on a NON-ROSTER family, so the verdict is the

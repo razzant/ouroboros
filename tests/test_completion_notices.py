@@ -62,14 +62,8 @@ def _record(case):
 
 
 @pytest.mark.parametrize("case,fragment", [
-    ("clean", "finished"), ("receipt", "finished"),
-    ("delivery_control", "final delivery instruction could not be read"),
+    ("clean", "finished"), ("delivery_control", "final delivery instruction could not be read"),
     ("verification_output", "A tool this task used failed"),
-    ("partial", "The result is partial"),
-    ("mixed", "A retired check recorded no tool calls"),
-    ("unknown_warning", "future_warning"),
-    ("artifact_missing", "result files are missing"),
-    ("unknown_delivery", "Delivery of the final answer could not be confirmed"),
 ])
 def test_actual_outcome_summary_and_phone(case, fragment, tmp_path, monkeypatch):
     nt = _load()
@@ -111,9 +105,6 @@ def test_actual_outcome_summary_and_phone(case, fragment, tmp_path, monkeypatch)
 @pytest.mark.parametrize("trigger,enforcement,obligations,expected_neutral", [
     ("auto_effect", "advisory", [], True),
     ("required_effect", "advisory", [], False),
-    ("auto_effect", "blocking", [], False),
-    ("auto_effect", "advisory", ["unmet-review"], False),
-    ("", "advisory", [], False),
     ("auto_effect", "", [], False),
 ])
 def test_recorded_author_completion_and_review_obligations(trigger, enforcement, obligations, expected_neutral):

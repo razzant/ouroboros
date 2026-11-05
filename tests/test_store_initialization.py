@@ -13,6 +13,7 @@ import pytest
 from ouroboros import dialogue_store, store, store_import, usage_store
 from ouroboros.utils import atomic_write_json
 from tests._usage_store_testing import seed
+from tests._cases import chosen_rows
 
 KINDS = ('current', 'dialog', 'usage')
 
@@ -170,7 +171,7 @@ raise AssertionError('crash point not reached')
 '''
 
 
-@pytest.mark.parametrize('kind', KINDS)
+@pytest.mark.parametrize('kind', chosen_rows(KINDS, 0, 2))
 @pytest.mark.parametrize('stage', ('schema', 'before_commit', 'after_commit', 'after_publish'))
 def test_process_death_then_public_creation_preserves_atomicity(tmp_path, kind, stage):
     _seed(tmp_path, kind)

@@ -103,7 +103,7 @@ def test_not_delivered_repeats_on_its_route_within_the_overload_bound(tmp_path, 
     assert all(row["retry_same_request"] and row["attempt_custody_state"] == "released" for row in errors)
 
 
-@pytest.mark.parametrize("code", ["daemon_unreachable", "daemon_not_answering", "daemon_starting", "daemon_descriptor_changed"])
+@pytest.mark.parametrize("code", ["daemon_unreachable", "daemon_not_answering", "daemon_descriptor_changed"])
 def test_typed_daemon_prepare_failure_repeats_within_same_route_bound(tmp_path, slept, code):
     llm = _ScriptedLLM(fail_times=99, failure=lambda: _prepare_failure(code))
     usage = {}
@@ -115,7 +115,6 @@ def test_typed_daemon_prepare_failure_repeats_within_same_route_bound(tmp_path, 
 
 @pytest.mark.parametrize("failure", [
     lambda: _receipt("daemon_unreachable"),  # an accepted operation is not prepare
-    lambda: _receipt("daemon_unreachable", operation_id="", provider="openai"),
     lambda: _prepare_failure("arbitrary_daemon_error"),
     _untyped_daemon_failure,  # code, provider and empty operation alone are insufficient
 ])

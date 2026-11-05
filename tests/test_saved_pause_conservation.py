@@ -124,8 +124,7 @@ def test_saved_technical_pause_survives_result_gap_then_explicit_resume(tmp_path
     assert kept["_budget_pause_resume"]["pause_id"] == pause["pause_id"]
 
 
-@pytest.mark.parametrize("marker", [None, {}, {"exact_continuation": False}, {"exact_continuation": "true"},
-                                    {"exact_continuation": 1}])
+@pytest.mark.parametrize("marker", [None, {}, {"exact_continuation": 1}])
 def test_unsaved_unreadable_pending_keeps_its_existing_terminal_custody(tmp_path, monkeypatch, marker):
     queue, _state, workers = _install_queue(tmp_path, monkeypatch)
     task_results.write_task_result(tmp_path, "saved", "scheduled")

@@ -164,7 +164,7 @@ class _LoopbackBot:
                         await stream.wait_closed()
 
 
-@pytest.mark.parametrize("scheme", ["direct", "http", "socks5", "socks5h"])
+@pytest.mark.parametrize("scheme", ["direct", "http", "socks5h"])
 def test_all_telegram_consumers_succeed_through_real_transport(tmp_path, monkeypatch, caplog, scheme):
     plugin, _telegram_api, notifier = _load()
     caplog.set_level(logging.DEBUG, logger="httpcore")

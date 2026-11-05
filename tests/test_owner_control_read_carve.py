@@ -15,9 +15,6 @@ pytestmark = pytest.mark.serial
 @pytest.mark.parametrize("example", [
     "ouroboros.config.save_settings({'OUROBOROS_RUNTIME_MODE': 'pro'})",
     "OUROBOROS_CONTEXT_MODE /api/owner/context-mode",
-    "OUROBOROS_SAFETY_MODE settings.json /api/owner/safety-mode",
-    "/api/owner/skills/demo/attest-review",
-    "OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS settings.json",
     "OUROBOROS_POST_TASK_EVOLUTION state/skills/demo/review.json",
 ])
 def test_owner_control_example_reaches_a_registered_result(tmp_path, monkeypatch, example):

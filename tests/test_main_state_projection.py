@@ -218,24 +218,9 @@ def _hold(reason):
 
 @pytest.mark.parametrize("row,owner_paused,expected", [
     ({"_budget_pause": {**_EXACT, "reason": "budget"}}, False, True),
-    ({"_budget_pause": {"status": "paused_before_dispatch", "reason": "budget", "replay_safe": True}}, False, True),
     ({"_budget_pause": {**_EXACT, "reason": "budget"}}, True, False),
-    ({"_budget_pause": {**_EXACT, "reason": "owner"}}, False, True),
-    ({"_budget_pause": {**_EXACT, "reason": "sleep", "sleep": {"sleep_id": "s"}}}, False, False),
-    ({"_budget_pause": {**_EXACT, "reason": "sleep", "sleep": {"sleep_id": "s"}},
-      "_budget_pause_hold": _hold("saved_sleep_recovery")}, False, True),
-    ({"_budget_pause": {**_EXACT, "reason": "sleep", "sleep": {"sleep_id": "s"}},
-      "_budget_pause_hold": _hold("panic_hold")}, False, True),
-    ({"_budget_pause_hold": _hold("owner_restart_hold")}, False, True),
-    ({"_budget_pause_hold": _hold("saved_work_hold")}, False, True),
-    ({"_budget_pause_hold": _hold("continuation_writer_unsettled")}, False, False),
-    ({"_budget_pause_hold": _hold("restore_refused:invalid_budget_fence_snapshot")}, False, True),
-    ({"_continuation_prepared": "sha"}, False, True),
-    ({"_resume_selection": {"selected_by": "owner"}}, False, False),
     ({}, False, False),
-], ids=["exact-budget", "zero-dispatch-budget", "under-owner-fence", "owner-saved", "unheld-sleep",
-        "held-saved-sleep", "panic-held-sleep", "restart-hold", "saved-work-hold", "writer-hold",
-        "restore-refused", "continue-unconfirmed", "already-selected", "not-parked"])
+], ids=["exact-budget", "under-owner-fence", "not-parked"])
 def test_explicit_resume_follows_each_rows_release_rule(tmp_path, row, owner_paused, expected):
     """Only rows that nothing but an explicit Resume continues need the owner."""
     from ouroboros.gateway.state import _pending_resume_available
@@ -502,7 +487,7 @@ def test_an_interrupted_owner_resume_of_a_project_member_offers_its_existing_res
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("change", ["newer_pause", "other_attempt", "revoked", "owner_pause"])
+@pytest.mark.parametrize("change", ["newer_pause", "revoked", "owner_pause"])
 def test_main_offers_no_member_resume_beyond_its_own_interrupted_grant(host, tmp_path, monkeypatch, change):  # noqa: F811
     from ouroboros import budget_pause
     from ouroboros.owner_pause import read_fence

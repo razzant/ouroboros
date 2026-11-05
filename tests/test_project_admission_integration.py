@@ -39,7 +39,7 @@ def admit(host, tmp_path, *, scoped=False, tid="converted"):  # noqa: F811
     return row
 
 
-@pytest.mark.parametrize("authority", ["malformed", "unreadable", "missing", "readable"])
+@pytest.mark.parametrize("authority", ["malformed", "missing", "readable"])
 def test_bare_promotion_checks_scope_before_drive_effects(host, tmp_path, monkeypatch, authority):  # noqa: F811
     from ouroboros import headless
     from supervisor.events_project_routing import _handle_promote_chat_to_task

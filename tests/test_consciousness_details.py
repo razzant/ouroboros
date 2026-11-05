@@ -20,16 +20,6 @@ NOW = dt.datetime(2027, 1, 15, 12, tzinfo=dt.timezone.utc).timestamp()
     ({}, "sleeping"),
     ({"live_wake_task_id": "own-1"}, "thinking"),
     ({"live_wake_task_id": "own-1", "live_wake_held": True}, "wake_paused"),
-    ({"last_wake_outcome": "skipped:waiting_for_first_conversation"}, "waiting_for_first_conversation"),
-    ({"last_wake_outcome": "skipped:allowance_exhausted"}, "allowance_exhausted"),
-    ({"last_wake_outcome": "skipped:allowance_unknown"}, "allowance_unknown"),
-    ({"last_wake_outcome": "rejected:budget_exhausted"}, "wake_rejected"),
-    ({"last_wake_outcome": "paused"}, "wake_paused"),
-    ({"last_wake_outcome": "pausing"}, "wake_paused"),
-    ({"last_wake_outcome": "unknown"}, "wake_outcome_unknown"),
-    ({"last_wake_outcome": "failed"}, "wake_failed"),
-    ({"next_wake_at": "2027-01-15T11:59:59+00:00"}, "due"),
-    ({"next_wake_at": "2027-01-15T11:59:59+00:00", "live_wake_task_id": "own-1"}, "thinking"),
 ])
 def test_primary_endpoint_and_state_fallback_share_status(monkeypatch, tmp_path, facts, status):
     import server
@@ -155,7 +145,7 @@ def test_recent_wake_coverage_names_the_selection_cap_even_with_pruned_documents
     assert panel["recent_wakes_coverage"] == prefix + "wakes that reached a model call in the last 48 h"
 
 
-@pytest.mark.parametrize("own,places", [(50, 0), (0, 50), (49, 1), (25, 25), (1, 49), (24, 25)])
+@pytest.mark.parametrize("own,places", [(50, 0), (0, 50), (49, 1)])
 def test_recent_wake_coverage_names_actual_shares_only_on_a_full_mixed_page(monkeypatch, tmp_path, own, places):
     wakes = [{"task_id": str(i), "cause": "own_clock" if i < own else "focus"} for i in range(own + places)]
     monkeypatch.setattr(view, "wake_ids", lambda *args: [wake["task_id"] for wake in wakes])

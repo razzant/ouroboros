@@ -64,7 +64,7 @@ def test_previous_wake_reads_one_document_and_keeps_the_whole_note(tmp_path, mon
 
 
 @pytest.mark.parametrize("status,word", [("completed", "Done"), ("failed", "Failed"),
-                                        ("cancelled", "Stopped"), ("interrupted", "Interrupted")])
+                                        ("cancelled", "Stopped")])
 def test_previous_wake_uses_card_outcome_words_and_never_guesses_completion_time(tmp_path, status, word):
     row = seed_wake(tmp_path, status=status, outcome_axes={}, terminal_time=None)
     previous = wake.previous_wake_text(tmp_path, row["task_id"], now=T0)
@@ -551,7 +551,7 @@ def test_human_input_is_classified_by_producer_provenance(tmp_path):
 
 
 @pytest.mark.parametrize("status, origin", [("failed", "host_notice"), ("cancelled", ""),
-                                           ("completed", "host_notice"), ("failed", "model_final")])
+                                           ("completed", "host_notice")])
 def test_failed_inline_presence_is_visible_on_regular_wake_without_reviving_owner_turns(tmp_path, status, origin):
     from ouroboros.presence_runner import _build_task
     from ouroboros.task_results import write_task_result

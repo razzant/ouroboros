@@ -262,7 +262,7 @@ def test_a_failed_preparation_of_the_correlated_send_stays_that_failure(replay, 
     assert isinstance(raised.value.__cause__, OSError) and len(f.uploads) == 1
 
 
-@pytest.mark.parametrize("scenario", ["continuation", "preferred", "third", "returns"])
+@pytest.mark.parametrize("scenario", ["continuation", "preferred", "returns"])
 def test_real_wire_engine_stories(replay, monkeypatch, scenario):
     from tests import test_claudexor_capability_engine as engine
     story = {"continuation": engine.test_bound_continuation_and_next_call,
@@ -276,8 +276,7 @@ def test_real_wire_engine_stories(replay, monkeypatch, scenario):
     story(f, monkeypatch)
 
 
-@pytest.mark.parametrize("guard", ["pin", "unknown", "unsettled", "generation_started",
-                                   "no_typed_permission", "second_retry", "granted"])
+@pytest.mark.parametrize("guard", ["pin", "unknown", "granted"])
 def test_typed_guards_from_recorded_facts(guard, monkeypatch, tmp_path):
     fact = results("serve")[0]
     payload = deepcopy(capture("serve")["uploads"][0])

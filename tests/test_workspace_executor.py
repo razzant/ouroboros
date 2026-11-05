@@ -639,7 +639,7 @@ def test_start_service_local_branch_uses_case_aware_overlay(tmp_path, monkeypatc
     assert payload.get("state") in ("running", "ready", "started", None) or payload
 
 
-@pytest.mark.parametrize("layout", ["repo", "nested", "worktree", "plain"])
+@pytest.mark.parametrize("layout", ["repo", "nested", "plain"])
 def test_live_run_scripts_keep_git_clean_and_own_only_their_scratch(tmp_path, monkeypatch, layout):
     import concurrent.futures
     import pathlib

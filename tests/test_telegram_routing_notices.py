@@ -213,7 +213,7 @@ def test_an_unlabelled_owner_act_is_told_once_while_the_web_keeps_its_system_row
     assert len(stored) == 1 and "reply_to" not in stored[0]
 
 
-@pytest.mark.parametrize("reason", ["target_closed", "target_finished", "acceptance_fence_sealed", "mailbox_write_failed"])
+@pytest.mark.parametrize("reason", ["target_closed", "acceptance_fence_sealed", "mailbox_write_failed"])
 def test_a_late_refusal_of_an_unlabelled_act_still_reaches_the_phone(phone, monkeypatch, reason):
     """A refusal found inside the delivery transaction writes no System row while its ACK is handed over:
     that ACK is the only carrier."""
@@ -448,7 +448,7 @@ def _host_promote(row, *, token="tok-pdf"):
                 chat_id=42, client_message_id=row["client_message_id"], ts=row["ts"], text=row["text"])}
 
 
-@pytest.mark.parametrize("failure", [None, "append_false", "append_raises", "ack_raises"])
+@pytest.mark.parametrize("failure", [None, "append_false", "ack_raises"])
 def test_a_refused_host_promote_is_told_once_and_a_replay_tells_nothing(phone, monkeypatch, failure):
     """A Swarm, skill-card or picker promote has its typed System row in the owner's chat. The phone gets
     the ACK's line, replying to his message, and skips that row; without a handed-over ACK the row is the

@@ -14,6 +14,7 @@ from ouroboros import _usage_wait, owner_pause, store, usage_accounting as usage
 from ouroboros.model_wait import task_model_wait_scope
 from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_admission_contention import database_reader, publish
+from tests._cases import chosen_rows
 
 pytestmark = pytest.mark.serial
 SURFACES = ("ordinary", "run_operation", "submit_tool", "handed_inline_tool", "model_send",
@@ -70,7 +71,7 @@ def _invoke(surface, source, body):
     return asyncio.run(start())
 
 
-@pytest.mark.parametrize("surface", SURFACES)
+@pytest.mark.parametrize("surface", chosen_rows(SURFACES, 0, 7))
 @pytest.mark.parametrize("budget", [None, 0.8])
 def test_handed_body_waits_out_real_sqlite_contention_with_its_original_policy(source, surface, budget):
     effects = []

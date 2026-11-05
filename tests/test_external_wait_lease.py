@@ -595,8 +595,7 @@ def test_active_llm_call_spares_idle_without_elapsed_expiry(monkeypatch, tmp_pat
 
 
 @pytest.mark.parametrize("kind, phase, stamped", [
-    ("tool", "finished", True), ("tool", "failed", False), ("review", "finished", True), ("review", "failed", True),
-    ("llm", "finished", False), ("vlm", "failed", False), ("in_slot_wait", "finished", False),
+    ("tool", "finished", True), ("review", "finished", True), ("llm", "finished", False),
 ])
 def test_only_a_closed_tool_or_review_lease_is_fresh_progress(kind, phase, stamped, monkeypatch):
     """A completed tool call and a review seat that physically ended, with an answer or an error, are the

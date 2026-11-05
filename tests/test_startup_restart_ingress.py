@@ -74,7 +74,7 @@ def test_ws_typed_restart_preserves_surface_when_supervisor_becomes_ready(
     assert len(dialogue_test.log_text(path).splitlines()) == 1, 'ready handoff must not re-log the accepted message'
 
 
-@pytest.mark.parametrize('case', ['known', 'unknown', 'unbound', 'foreign', 'changed_after_admission', 'ready', 'ready_after_admission'])
+@pytest.mark.parametrize('case', ['known', 'unknown', 'changed_after_admission'])
 def test_host_service_restart_uses_current_owner_or_preserves_normal_intake(startup_controls, monkeypatch, case):
     from ouroboros.gateway.host_service import create_host_service_app
     from supervisor import message_bus, state

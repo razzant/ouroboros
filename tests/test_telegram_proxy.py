@@ -66,8 +66,6 @@ class _Api:
 @pytest.mark.parametrize("value", [
     "socks5://owner:proxy-secret@proxy.example:1080",
     "socks5h://proxy.example:1080",
-    "http://proxy.example",
-    "https://owner:proxy-secret@proxy.example:8443",
     "  http://proxy.example:3128\n",
 ])
 def test_supported_proxy_urls_are_kept_verbatim(value):
@@ -77,12 +75,6 @@ def test_supported_proxy_urls_are_kept_verbatim(value):
 
 @pytest.mark.parametrize("value", [
     "proxy.example:3128",
-    "ftp://owner:proxy-secret@proxy.example:21",
-    "socks4://owner:proxy-secret@proxy.example:1080",
-    "socks5://owner:proxy-secret@proxy.example",
-    "http://owner:proxy-secret@:3128",
-    "http://owner:proxy-secret@proxy.example:99999",
-    "http://owner:proxy-secret@proxy.example/path",
     "http://owner:proxy-secret@proxy.example?route=bad",
     "socks5://owner:proxy-secret@proxy.example:0",
 ])

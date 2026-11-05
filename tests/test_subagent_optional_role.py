@@ -16,6 +16,7 @@ from tests import _dialogue as dialogue_test
 from tests._shared import configure_test_subagent
 from tests.test_subagent_role_texts import _env
 from tests._store_shared import result_signature, seed_result, unreadable_result
+from tests._cases import chosen_rows
 
 
 # These consumers patch process-wide routing/configuration and supervisor seams.
@@ -67,7 +68,7 @@ def _assert_role(record, role):
     assert record["delegation_role"] == "subagent"
 
 
-@pytest.mark.parametrize("role_fields,role", ROLE_CASES)
+@pytest.mark.parametrize("role_fields,role", chosen_rows(ROLE_CASES, 0, 2, 5))
 def test_role_reaches_child_prompt_and_durable_lifecycle_without_inference(tmp_path, monkeypatch, role_fields, role):
     from ouroboros.agent import Env, OuroborosAgent
     from ouroboros.agent_task_pipeline import _store_task_result

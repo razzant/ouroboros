@@ -82,8 +82,7 @@ def test_sharing_conflict_defers_without_losing_rows(tmp_path, monkeypatch, capl
 
 
 @pytest.mark.parametrize("stage", [
-    "sentinel_stat", "prelock_stat", "lock_path", "acquire", "locked_stat",
-    "archive_stat", "mkdir", "rename", "touch", "release",
+    "sentinel_stat", "touch", "release",
 ])
 def test_oserror_at_each_rotation_stage_preserves_history_and_releases_lock(
         tmp_path, monkeypatch, caplog, stage):

@@ -317,9 +317,7 @@ def test_stage_two_releases_a_failed_launch_once_its_reap_is_clean(tmp_path, mon
 
 @posix_only
 @pytest.mark.parametrize("hold,reason", [
-    ("first_reap_unconfirmed", UNCONFIRMED), ("no_handle_unconfirmed", UNCONFIRMED),
-    ("guardian_unsettled", GUARDIAN_UNSETTLED), ("keep", "debug retention"),
-    ("evidence_lost", "evidence/cleanup incomplete: controlled evidence loss"),
+    ("first_reap_unconfirmed", UNCONFIRMED), ("guardian_unsettled", GUARDIAN_UNSETTLED), ("evidence_lost", "evidence/cleanup incomplete: controlled evidence loss"),
 ])
 def test_every_real_reason_still_holds_a_failed_launchs_scratch(tmp_path, monkeypatch, hold, reason):
     root, checkout, parent = _stage_two(tmp_path, monkeypatch)

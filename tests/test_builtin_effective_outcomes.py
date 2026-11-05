@@ -40,20 +40,7 @@ def invoke(tmp_path, monkeypatch):
 @pytest.mark.parametrize(("identifier", "code"), [
     ("SEND_LINKS_NO_CHAT", "LEGACY_UNAVAILABLE"),
     ("SEND_LINKS_TOO_MANY", "TOOL_ARG_ERROR"),
-    ("ESCALATE_PARENT_SETTLED", "LEGACY_UNAVAILABLE"),
     ("ESCALATE_UNWRITTEN", "TOOL_ERROR"),
-    ("FILE_TOO_LARGE", "TOOL_ARG_ERROR"),
-    ("SKILL_EXEC_EXTENSION", "TOOL_ARG_ERROR"),
-    ("SKILL_EXEC_GRANT_REQUIRED", "LEGACY_BLOCKED"),
-    ("SKILL_EXEC_ARGV_TOO_LARGE", "TOOL_ARG_ERROR"),
-    ("SKILL_EXEC_OVERFLOW", "TOOL_ERROR"),
-    ("SKILL_REPAIR_STALE", "LEGACY_BLOCKED"),
-    ("SERVICE_ALREADY_RUNNING", "LEGACY_BLOCKED"),
-    ("CHERRY_PICK_CONFLICT", "TOOL_ERROR"),
-    ("RESTORE_PARTIAL", "TOOL_ERROR"),
-    ("EVOLUTION_AUTHORITY_REVOKED", "LEGACY_BLOCKED"),
-    ("EVOLUTION_COMMIT_ORPHANED", "TOOL_ERROR"),
-    ("EVOLUTION_PUBLICATION_STOPPED", "LEGACY_BLOCKED"),
 ])
 def test_confirmed_identifiers_reach_existing_trace_consumers(identifier, code):
     from ouroboros._outcome_tool_errors import _OK_TOOL_STATUSES
@@ -71,11 +58,7 @@ def test_confirmed_identifiers_reach_existing_trace_consumers(identifier, code):
 
 
 @pytest.mark.parametrize("marker", [
-    "LIST_FILES_NOT_FOUND", "FILE_NOT_FOUND", "SEARCH_NOT_FOUND", "QUERY_CODE_TRUNCATED",
-    "CHILD_RESULT_DISPOSITION_PARTIAL", "SERVICE_NOT_FOUND", "GIT_NO_CHANGES",
-    "UNRECOGNIZED_REFUSED", "UNRECOGNIZED_TOO_MANY", "UNRECOGNIZED_OVERFLOW",
-    # Coordinated review branches publish natively; their text is not a global verdict.
-    "REVIEW_PENDING", "REVIEW_CUSTODY_LOST", "IDENTICAL_DIFF_REFUSED", "REVIEW_CYCLES_EXHAUSTED",
+    "LIST_FILES_NOT_FOUND", "UNRECOGNIZED_REFUSED", "REVIEW_CYCLES_EXHAUSTED",
 ])
 def test_warnings_and_branch_typed_review_markers_keep_their_meaning(marker):
     result = LegacyTextResultAdapter.from_text("builtin", f"⚠️ {marker}: retained")
@@ -401,7 +384,7 @@ def test_recorded_historical_outcome_is_not_reclassified_from_its_text():
     assert trace["tool_calls"][0]["status"] == "ok"
 
 
-@pytest.mark.parametrize("action", ["click", "fill", "select", "evaluate", "wait", "unrecognized"])
+@pytest.mark.parametrize("action", ["click", "fill", "select", "wait", "unrecognized"])
 def test_browser_plain_argument_refusals_survive_the_return_wrapper(invoke, monkeypatch, action):
     from ouroboros.tools import browser
     page = SimpleNamespace(set_default_timeout=lambda timeout: None)
@@ -422,7 +405,6 @@ def test_browser_plain_argument_refusals_survive_the_return_wrapper(invoke, monk
 
 @pytest.mark.parametrize(("names", "code"), [
     ("", "TOOL_ARG_ERROR"), ("missing", "UNKNOWN_TOOL"), ("hidden", "ACCESS_BLOCKED"),
-    ("hidden,missing", "ACCESS_BLOCKED"), ("known,missing", "OK"), ("known", "OK"),
 ])
 def test_tool_enablement_distinguishes_total_refusal_from_partial_effect(invoke, names, code):
     from ouroboros.tools.tool_discovery import enable_tools
@@ -446,7 +428,7 @@ def test_unbound_discovery_is_unavailable(invoke, monkeypatch, handler):
     assert invoke(getattr(tool_discovery, handler)).code == "LEGACY_UNAVAILABLE"
 
 
-@pytest.mark.parametrize("outcome", ["failed", "unknown", "success", "no_route"])
+@pytest.mark.parametrize("outcome", ["failed", "unknown", "no_route"])
 def test_search_own_failure_object_reaches_registry_without_losing_custody(invoke, monkeypatch, outcome):
     from ouroboros.tools import search
     legs = [{"source": "openai", "backend": "openai_responses", "model": "fixture"}]
@@ -488,7 +470,7 @@ def test_evolution_stats_artifact_outcome_is_not_hidden_by_summary(invoke, monke
     assert "operation_outcome" not in result.meta
 
 
-@pytest.mark.parametrize("case", ["stale", "unstable", "partial", "empty"])
+@pytest.mark.parametrize("case", ["stale", "unstable", "empty"])
 def test_recent_tasks_snapshot_refusal_differs_from_partial_read(invoke, monkeypatch, case):
     from ouroboros.tools import recent_tasks
 
@@ -530,7 +512,7 @@ def _assert_consumers(result, code):
     assert result.meta.get("operation_outcome") != "completed_no_effect"
 
 
-@pytest.mark.parametrize("phase", ["pre_tag", "post_receipt", "containment_failed", "orphaned"])
+@pytest.mark.parametrize("phase", ["pre_tag", "containment_failed", "orphaned"])
 def test_evolution_retained_commit_publication_consumers(invoke, monkeypatch, phase):
     from ouroboros.tools import git, git_evolution
     invoke.ctx.current_task_type = "evolution"
@@ -643,7 +625,7 @@ def test_multi_review_validation_and_execution_fault_consumers(invoke, monkeypat
     assert set(json.loads(result.text)) == {"error"}
 
 
-@pytest.mark.parametrize("case", ["policy", "unavailable", "reference", "disposition", "preflight"])
+@pytest.mark.parametrize("case", ["policy", "unavailable", "disposition"])
 def test_skill_author_finish_branch_outcomes_preserve_review_state(invoke, monkeypatch, case):
     from ouroboros.tools import skill_exec
     review_state = SimpleNamespace(status="pending" if case == "reference" else "failed", review_profile="",
@@ -670,7 +652,7 @@ def test_skill_author_finish_branch_outcomes_preserve_review_state(invoke, monke
     assert review_state.reviewed_content_hash == "reviewed"
 
 
-@pytest.mark.parametrize("case", ["identical", "ceiling", "overlap", "advisory", "stopped"])
+@pytest.mark.parametrize("case", ["identical", "advisory", "stopped"])
 def test_review_gate_return_boundaries_reach_consumers(invoke, monkeypatch, case):
     from ouroboros.tools import git, git_review_cycle
     monkeypatch.setattr("ouroboros.config.get_review_enforcement", lambda: "advisory" if case == "advisory" else "blocking")

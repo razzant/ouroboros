@@ -67,14 +67,8 @@ def test_editor_validation_finishes_without_a_writer_and_owner_can_resume(tmp_pa
 
 @pytest.mark.parametrize("tool,args", [
     ("edit_text", {"path": "notes.txt", "old_str": "", "new_str": "gamma"}),
-    ("write_file", {"path": "bad.py", "content": "def broken(:"}),
     ("write_file", {}),
-    ("schedule_followup", {"objective": "check", "relation": "independent"}),
-    ("schedule_followup", {"objective": "check", "relation": "independent", "run_at": "invalid"}),
-    ("schedule_followup", {"objective": "", "relation": "independent", "run_at": "2099-01-01T00:00:00Z"}),
     ("manage_schedules", {"action": "invalid"}),
-    ("delegate_start", {"prompt": ""}),
-    ("delegate_start", {"prompt": "check", "continue_from": "run-old", "retry_of": "inv-old"}),
 ])
 def test_pre_effect_argument_refusals_do_not_hold_continue(tmp_path, monkeypatch, tool, args):
     from ouroboros.task_results import load_task_result

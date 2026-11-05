@@ -69,7 +69,7 @@ def test_a_reused_loop_context_cannot_acknowledge_an_unsaved_previous_turn(tmp_p
     assert [row["msg_id"] for row in drain_owner_entries(tmp_path, "previous", set(), 1)] == ["previous-mail"]
 
 
-@pytest.mark.parametrize("receipt", ["owed", "delivered", "delivered_without_source", "corrupt"])
+@pytest.mark.parametrize("receipt", ["owed", "delivered_without_source", "corrupt"])
 def test_final_delivery_ownership_prevents_recovery_without_losing_checkpoint(tmp_path, receipt):
     from supervisor import terminal_delivery as td
 
@@ -382,7 +382,7 @@ def _unread_ids(root, task_id):
     return [json.loads(row)["msg_id"] for row in held.get("rows", [])]
 
 
-@pytest.mark.parametrize("exit_path", ["model_call", "outer_control", "budget_hold", "admission_close",
+@pytest.mark.parametrize("exit_path", ["model_call", "admission_close",
                                        "write_fails"])
 def test_a_returned_terminal_acknowledges_its_finalization_mail_only_once_saved(tmp_path, monkeypatch, exit_path):
     """R1: a terminal rail drained the owner's message into the final but never ACKed

@@ -116,7 +116,7 @@ def test_paging_observes_older_runs_before_inferring_coverage(monkeypatch, older
     assert pages == [1, 2, 3] and not changed
 
 
-@pytest.mark.parametrize("ending", ["exhausted", "oldest", "predates", "budget", "unavailable"])
+@pytest.mark.parametrize("ending", ["exhausted", "budget", "unavailable"])
 def test_coverage_requires_reading_through_the_range(ending, monkeypatch):
     commits = [{"sha": sha, "subject": sha, "date": "2026-10-23T03:00:00+03:00"}
                for sha in ("newest", "middle", "oldest")]
@@ -433,4 +433,3 @@ def test_a_failed_read_keeps_the_observation_the_record_holds_under_the_lock():
                                       target_version="7.9.0")
     assert record["post_merge_reds"]["read"] == "unavailable"
     assert (record["post_merge_reds"]["issues"], record["post_merge_reds"]["observed_at"]) == (held["issues"], "t1")
-

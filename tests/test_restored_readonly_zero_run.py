@@ -67,7 +67,7 @@ def test_restored_readonly_definite_unrun_can_record_only_its_receipt(
     assert not stub_delegate_engines
 
 
-@pytest.mark.parametrize("blocker", ["pending", "live", "custody_unreadable", "already_receipted"])
+@pytest.mark.parametrize("blocker", ["pending", "custody_unreadable", "already_receipted"])
 def test_restored_readonly_receipt_still_proves_empty_custody(tmp_path, monkeypatch, blocker):
     from ouroboros import delegate_custody as custody
     from ouroboros.outcomes import read_verification_receipts

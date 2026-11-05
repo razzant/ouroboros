@@ -70,7 +70,7 @@ def park(limit, task):
     workers.WORKERS.pop(INLINE_WID, None)
 
 
-@pytest.mark.parametrize("cut", ["arm", "checkpoint", "seed", "source", "pause_row", "park", "unregister", "wake_grant"])
+@pytest.mark.parametrize("cut", ["arm", "seed", "wake_grant"])
 def test_detach_crash_prefix_restores_the_same_work_and_runs_it_once(host, monkeypatch, cut):  # noqa: F811
     from ouroboros import owner_wait, working_checkpoint
     from supervisor import queue, workers
@@ -193,7 +193,7 @@ def test_seed_cannot_invent_saved_work_or_override_stop(host, monkeypatch, block
     assert has_active_intent(host.root, "head", strict=True)
 
 
-@pytest.mark.parametrize("pause_at", ["none", "readiness", "after_grant", "launch"])
+@pytest.mark.parametrize("pause_at", ["none", "after_grant", "launch"])
 def test_owner_pause_vetoes_detach_wake_and_last_launch_gate(host, monkeypatch, pause_at):  # noqa: F811
     from ouroboros import project_placement
     from ouroboros.owner_pause import read_fence

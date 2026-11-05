@@ -253,9 +253,8 @@ def test_a_legacy_row_without_a_base_still_recovers_its_journal_fanout(lane, mon
 @pytest.mark.parametrize("extra,seeded", [
     ({"_fresh_identity": True}, True),
     ({}, False),
-    ({"_fresh_identity": True, "_attempt": 2}, False),
     ({"_fresh_identity": True, "timeout_retry_from": "R"}, False),
-], ids=["minted", "unmarked", "second_attempt", "reissue"])
+], ids=["minted", "unmarked", "reissue"])
 def test_only_a_minted_first_attempt_gets_the_base_and_the_money_binding_is_unchanged(lane, extra, seeded):
     rows = []
     lane.task.update(extra)

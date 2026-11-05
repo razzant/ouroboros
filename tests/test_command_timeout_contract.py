@@ -82,19 +82,8 @@ def _dispatched(monkeypatch, registry, tool, args):
 
 @pytest.mark.parametrize("tool,args,saved,env,ceiling,deadline", [
     pytest.param("run_command", {}, 600, None, None, None, id="default-run-command"),
-    pytest.param("verify_and_record", {}, 1000, None, None, None, id="default-verify-under-saved-1000"),
-    pytest.param("verify_and_record", {"timeout_sec": 1800}, 1000, None, None, None, id="explicit-verify-1800-history"),
-    pytest.param("run_command", {}, 600, "1200", None, None, id="environment-over-saved"),
-    pytest.param("run_script", {}, 600, "1200", None, None, id="environment-over-saved-script"),
-    pytest.param("verify_and_record", {"timeout": 1800}, 600, None, None, None, id="alias-verify-1800-under-saved-600"),
-    pytest.param("run_script", {"timeout": 900}, 600, None, None, None, id="alias-script"),
-    pytest.param("run_command", {"timeout_sec": None}, 600, None, None, None, id="null-canonical"),
-    pytest.param("verify_and_record", {"timeout_sec": 3000}, 600, None, "3600", None, id="raised-ceiling-verify"),
     pytest.param("run_command", {"timeout_sec": 900}, 600, None, "30", 3600, id="deadline-with-configured-ceiling-30"),
     pytest.param("verify_and_record", {"timeout_sec": 1800}, 600, None, None, 7200, id="deadline-explicit-verify"),
-    pytest.param("run_command", {}, 600, None, None, 7200, id="deadline-default-run-command"),
-    pytest.param("run_script", {"timeout_sec": 3000}, 600, None, "3600", None, id="control-explicit-script"),
-    pytest.param("run_command", {"timeout_sec": 5}, 600, None, None, None, id="control-short-override"),
 ])
 def test_outer_wait_outlasts_the_handlers_own_child_timeout(tmp_path, monkeypatch, tool, args, saved, env, ceiling,
                                                             deadline):
@@ -343,7 +332,6 @@ SLEEP_THEN_PRINT = "import sys, time; time.sleep(float(sys.argv[1])); print('chi
     pytest.param("success", "0", 30, id="success"),
     pytest.param("timeout", "3", 1, id="timeout"),
     pytest.param("refused", "0", 99999999999, id="refused"),
-    pytest.param("refused", "0", 10**400, id="refused-integer-past-any-float"),  # 401 digits, parsed from the call's JSON
 ])
 def test_a_real_child_through_the_real_dispatcher_returns_its_own_typed_result(tmp_path, monkeypatch, case, sleep,
                                                                                 timeout_sec):

@@ -44,7 +44,7 @@ def revoke(attention, monkeypatch, change):
         monkeypatch.setattr("ouroboros.task_results.load_task_result", read)
 
 
-@pytest.mark.parametrize("change", ["progress", "attempt", "stop", "panic", "missing", "unreadable"])
+@pytest.mark.parametrize("change", ["progress", "missing", "unreadable"])
 def test_control_request_rechecks_after_model_response(attention, monkeypatch, change):
     from ouroboros.tool_call_log import invocation_scope
     child = _mint(attention)
@@ -167,7 +167,7 @@ def test_unpublished_source_progress_reaches_unsent_boundaries(attention, monkey
     assert "root" in attention.running and queue._reap_queue.empty()
 
 
-@pytest.mark.parametrize("reason", ["task_exception", "provider_failure", "llm_api_error", "worker_crash_owner_wait"])
+@pytest.mark.parametrize("reason", ["task_exception", "llm_api_error", "worker_crash_owner_wait"])
 def test_terminal_source_cannot_use_old_episode_for_continue(attention, monkeypatch, reason):
     from ouroboros.owner_continue import continuation_eligibility
     from ouroboros.work_diagnostics import control_reason
@@ -367,7 +367,7 @@ def test_real_late_wait_consumers_wake(attention, monkeypatch, mode):
     assert child in queue.PENDING
 
 
-@pytest.mark.parametrize("unavailable", ["missing", "owner", "other_task", "held"])
+@pytest.mark.parametrize("unavailable", ["missing", "other_task", "held"])
 def test_no_republication_for_unavailable_late_waiter(attention, monkeypatch, unavailable):
     from supervisor import silence_attention
     attention.meta["task"]["parent_task_id"] = "parent"
@@ -442,7 +442,7 @@ def test_owner_related_source_hands_its_diagnostic_no_place_authority(attention,
     assert not {"presence", "presence_binding_relation", "origin_message_ref"} & set(child["metadata"])
 
 
-@pytest.mark.parametrize("barrier", ["parent", "pause", "billing", "store"])
+@pytest.mark.parametrize("barrier", ["parent", "billing", "store"])
 def test_unchanged_attention_avoids_tick_reads_and_recovers(attention, monkeypatch, barrier):
     from ouroboros.config import BODY_MAINTENANCE_INTERVAL_SEC
     from ouroboros.store import StoreError

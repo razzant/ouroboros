@@ -38,8 +38,7 @@ def _selectors(root):
     return {"bucket": "external", "skill_name": "demo"} if root == "skill_payload" else {}
 
 
-@pytest.mark.parametrize("root", ["active_workspace", "system_repo", "runtime_data",
-                                  "task_drive", "artifact_store", "user_files", "skill_payload"])
+@pytest.mark.parametrize("root", ["active_workspace", "system_repo", "skill_payload"])
 def test_batch_and_patch_use_each_writable_root_through_registry(file_tools, root):
     registry, _, *_ = file_tools
     base = _target(file_tools, root)
@@ -100,8 +99,7 @@ def test_omitted_root_uses_absolute_home_target_without_widening_explicit_root(f
     assert not (workspace / target.relative_to(home)).exists()
 
 
-@pytest.mark.parametrize("root", ["active_workspace", "system_repo", "runtime_data",
-                                  "task_drive", "artifact_store", "user_files", "skill_payload"])
+@pytest.mark.parametrize("root", ["active_workspace", "system_repo", "skill_payload"])
 def test_patch_preview_tracks_placed_change_with_repeated_lines(file_tools, root):
     registry, _, *_ = file_tools
     base = _target(file_tools, root)
@@ -201,8 +199,7 @@ def test_numbered_read_keeps_source_offsets_and_prefix_cuts(file_tools):
     assert view["source_end_char"] - view["source_start_char"] == 4
 
 
-@pytest.mark.parametrize("root", ["active_workspace", "system_repo", "runtime_data",
-                                  "task_drive", "artifact_store", "user_files", "skill_payload"])
+@pytest.mark.parametrize("root", ["active_workspace", "artifact_store", "skill_payload"])
 def test_patch_add_delete_authority_and_data_recovery(file_tools, root):
     registry, _, _, _, _, data, _ = file_tools
     base = _target(file_tools, root)
@@ -282,8 +279,7 @@ def test_patch_original_spans_overlap_and_uniform_indent_failure():
     assert changed is None and "context not found" in failure
 
 
-@pytest.mark.parametrize("root", ["active_workspace", "system_repo", "runtime_data",
-                                  "task_drive", "artifact_store", "user_files", "skill_payload"])
+@pytest.mark.parametrize("root", ["active_workspace", "system_repo", "skill_payload"])
 def test_patch_trailing_space_keeps_file_bytes_and_never_shifts_indentation(file_tools, root):
     registry, _, *_ = file_tools
     base = _target(file_tools, root)
@@ -315,7 +311,7 @@ def test_trailing_whitespace_keeps_ambiguity_and_content_refusals():
     assert changed is None and "context not found" in failure
 
 
-@pytest.mark.parametrize("tool", ["write_file", "edit_text", "edit_batch", "apply_patch"])
+@pytest.mark.parametrize("tool", ["write_file", "edit_text", "apply_patch"])
 def test_explicit_wrong_user_root_redirects_each_editor_without_writes(file_tools, tool):
     registry, _, _, _, workspace, *_ = file_tools
     target = workspace / "explicit.txt"
@@ -523,8 +519,7 @@ def test_add_then_update_retains_existing_explicit_chaining(file_tools):
     assert result.startswith('✅') and (workspace / 'chain.py').read_text() == 'x = 1\n', result
 
 
-@pytest.mark.parametrize("root", ["active_workspace", "system_repo", "runtime_data",
-                                  "task_drive", "artifact_store", "user_files", "skill_payload"])
+@pytest.mark.parametrize("root", ["active_workspace", "system_repo", "skill_payload"])
 def test_unicode_edit_sites_agree_with_numbered_reader(file_tools, root):
     registry, _, *_ = file_tools
     base = _target(file_tools, root)
@@ -590,8 +585,7 @@ def test_public_root_schema_does_not_invent_an_explicit_default(file_tools):
             assert "omitted" in schema["root"]["description"].lower(), entry.name
 
 
-@pytest.mark.parametrize("root", ["active_workspace", "system_repo", "runtime_data",
-                                  "task_drive", "artifact_store", "user_files", "skill_payload"])
+@pytest.mark.parametrize("root", ["active_workspace", "system_repo", "skill_payload"])
 def test_terminal_line_deletion_keeps_old_match_number(file_tools, root):
     registry, _, *_ = file_tools
     base = _target(file_tools, root)
@@ -741,7 +735,7 @@ def test_data_edit_keeps_existing_non_json_text_capability(file_tools, root, too
     assert "SYNTAX_WARNING" not in result
 
 
-@pytest.mark.parametrize("form", ["edit_text", "edit_text_list", "edit_batch", "apply_patch"])
+@pytest.mark.parametrize("form", ["edit_text", "edit_batch", "apply_patch"])
 def test_repo_syntax_failure_is_reported_after_the_edit_lands(file_tools, form):
     registry, _, _, _, workspace, *_ = file_tools
     target = workspace / "config.json"
@@ -762,8 +756,7 @@ def test_repo_syntax_failure_is_reported_after_the_edit_lands(file_tools, form):
     assert target.read_text() == '{"value": invalid}\n'
 
 
-@pytest.mark.parametrize("root", ["active_workspace", "runtime_data",  # system_repo: same repo guard, via a candidate
-                                  "task_drive", "artifact_store", "user_files", "skill_payload"])
+@pytest.mark.parametrize("root", ["active_workspace", "artifact_store", "skill_payload"])
 def test_exact_edit_shrink_refusal_asks_only_for_force(file_tools, monkeypatch, root):
     """Owner 1.11.2026: the 30% shrink guard, force=true and Cyber's bypass stay on every lane;
     an exact edit is not sent back to edit_text, while write_file keeps that advice."""

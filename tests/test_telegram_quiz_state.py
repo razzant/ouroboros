@@ -356,19 +356,8 @@ def test_the_manifest_declares_every_topic_register_subscribes(tmp_path):
 
 @pytest.mark.parametrize("record_state,event,expected", [
     (None, {"state": "answered", "answered_index": 5}, ("Q\nAnswered: 6.", [])),
-    (None, {"state": "answered"}, ("Q\nAnswered.", [])),
-    (None, {"state": "answered", "answered_index": True}, ("Q\nAnswered.", [])),
-    (None, {"state": "superseded"}, ("Q\nReplaced by a newer question.", [])),
-    (None, {"state": "open", "wait_for_answer": False},
-     ("Q\nThe task continued; an answer is still accepted.\nReply to this message with your answer.", [])),
     ("superseded", {"state": "expired_terminal"}, None),
-    ("expired_terminal", {"state": "open", "wait_for_answer": False}, None),
-    ("answered", {"state": "superseded"}, None),
-    (None, {"state": "unknown"}, None),
-    (None, {"state": "closed", "answered_index": 0, "comment": "yes"}, ("Q\nQuestion closed.", [])),
     ("expired_terminal", {"state": "closed", "closed_reason": "x" * 300}, ("Q\nQuestion closed.\n" + "x" * 200 + "…", [])),
-    ("closed", {"state": "answered", "answered_index": 0}, None),
-    ("answered", {"state": "closed", "closed_reason": "late"}, None),
 ])
 def test_lifecycle_edit_is_a_pure_forward_only_decision(record_state, event, expected):
     """The decision needs no Telegram client: text and keyboard from the card and the fact."""

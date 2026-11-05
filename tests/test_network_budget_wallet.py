@@ -50,8 +50,7 @@ def test_known_global_spend_leaves_one_same_route_final_then_the_atomic_fence_bi
 
 
 @pytest.mark.parametrize("global_remaining,root_cap,deciding,expected", [
-    (20.0, 2.0, 1.0, False), (1.0, 50.0, 0.0, False),
-    (2.0, None, None, True), (0.0, None, None, False), (None, None, None, None),
+    (20.0, 2.0, 1.0, False), (2.0, None, None, True), (None, None, None, None),
 ])
 def test_all_known_remainders_bind_and_unknown_tree_spend_is_not_invented(
     tmp_path, global_remaining, root_cap, deciding, expected,

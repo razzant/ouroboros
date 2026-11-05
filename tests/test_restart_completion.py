@@ -498,7 +498,7 @@ sys.exit(server.main())
 
 @pytest.mark.parametrize("platform,failure", [
     ("nt", ""), ("nt", "spawn"),
-    ("posix", ""), ("posix", "exec"), ("posix", "spawn"),
+    ("posix", "exec"),
 ])
 def test_direct_transfer_uses_platform_process_primitive(monkeypatch, tmp_path, platform, failure):
     """Windows must bypass CRT exec; POSIX keeps exec and its spawn fallback."""

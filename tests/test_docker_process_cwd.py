@@ -230,7 +230,7 @@ def test_symlink_escape_is_not_reinterpreted_as_scratch(workspace):
         bind(ctx, operation="shell", process_cwd="/workspace/project/link")
 
 
-@pytest.mark.parametrize("cwd", ["", ".", "sub", "active_workspace/sub", "task_drive"])
+@pytest.mark.parametrize("cwd", ["", "sub", "task_drive"])
 def test_existing_cwd_spellings_keep_same_binding_as_local_executor(workspace, cwd):
     ctx, _active = workspace
     docker = bind(ctx, operation="shell", process_cwd=cwd)

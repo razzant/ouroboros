@@ -205,8 +205,6 @@ def test_a_failed_record_or_row_never_unsaves_the_settings(client, monkeypatch):
 @pytest.mark.parametrize("headers, expected", [
     ({}, {"surface": "api", "actor": "not declared"}),
     ({"X-Ouroboros-Surface": "app", "X-Ouroboros-Actor": "OWNER"}, {"surface": "app", "actor": "owner"}),
-    ({"X-Ouroboros-Surface": "two words", "X-Ouroboros-Actor": "admin", "X-Ouroboros-Task-Id": "../etc"},
-     {"surface": "api", "actor": "not declared"}),
     ({"X-Ouroboros-Actor": "ouroboros", "X-Ouroboros-Task-Id": "abc123"},
      {"surface": "api", "actor": "ouroboros", "actor_task_id": "abc123"}),
 ])

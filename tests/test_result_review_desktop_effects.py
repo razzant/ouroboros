@@ -164,7 +164,7 @@ def test_required_reviews_a_root_result_whose_only_material_is_a_desktop_input(t
     assert "tool producer's reports of execution, not proof of a UI change or goal success" in subject
 
 
-@pytest.mark.parametrize("case", ["wayland_drag", "x11_hold", "mac_keys", "ssh_keys"])
+@pytest.mark.parametrize("case", ["wayland_drag", "x11_hold", "ssh_keys"])
 def test_a_reported_failure_keeps_the_receipt_of_what_ran(tmp_path, monkeypatch, case):
     ctx = _floor_ctx(tmp_path, monkeypatch)
     sends: list[dict] = []

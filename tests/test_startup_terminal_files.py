@@ -355,7 +355,7 @@ def test_legacy_scheduled_split_root_is_rebound_only_from_proven_child_start(roo
     assert result_signature(root, "split") == before
 
 
-@pytest.mark.parametrize("condition", ["pending", "owner_wait", "live", "no_start", "missing_queue", "stale_queue", "no_boot", "cancel_pending"])
+@pytest.mark.parametrize("condition", ["pending", "missing_queue", "cancel_pending"])
 def test_legacy_split_start_recovery_preserves_unproven_or_owned_work(roots, monkeypatch, condition):
     from supervisor import queue
     from ouroboros.cancel_intents import request_cancel

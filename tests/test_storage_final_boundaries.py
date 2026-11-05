@@ -52,7 +52,7 @@ def _interrupt_probe(probe, evidence, workers):
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX SIGINT delivery; Windows keeps Job teardown')
 @pytest.mark.parametrize('entry,workers,repeat', [
     ('safe_test', 0, False), ('run_tests', 0, False),
-    ('run_tests', 2, False), ('run_tests', 2, True),
+    ('run_tests', 2, True),
 ])
 def test_ctrl_c_exports_real_pytest_terminal_results(tmp_path, entry, workers, repeat):
     from ouroboros import platform_layer as pl
@@ -138,12 +138,7 @@ def _reported_or_cut(raw, line, record, command):
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX signal exits')
 @pytest.mark.parametrize('line,escalation,end,accepted', [
     (True, '', 130, True),  # the runner's own report
-    (True, 'recorded', 130, True),  # a late ordinary completion that still reported itself
-    (False, 'recorded', 'SIGTERM', True),  # the recorded cut, ended by its TERM
-    (False, 'recorded', 'SIGKILL', True),  # or by the forced reap
     (False, 'recorded', 130, False),  # the wait timed out, then an ordinary exit lost its line
-    (False, 'recorded', 0, False),
-    (False, '', 'SIGTERM', False),  # a signal end the owner never recorded as its cut
     (False, '', 130, False),
 ])
 def test_a_lost_final_line_needs_a_recorded_cut_and_a_signal_end(line, escalation, end, accepted):

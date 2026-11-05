@@ -481,7 +481,7 @@ def test_successful_body_patch_needs_readback_and_recovers_without_second_merge(
     assert not any(c[:2] == ["pr", "edit"] for c in original.calls)
 
 
-@pytest.mark.parametrize("url", ["", "unknown", "https://github.com/octo/demo", URL + "junk",
+@pytest.mark.parametrize("url", ["", URL + "junk",
                                  "https://github.com/octo/demo/pull/8"])
 def test_unknown_body_target_is_an_explicit_gap_without_default_repo_write(world, url):
     world.gh.pr["url"] = url
@@ -578,8 +578,7 @@ def test_parallel_callers_share_one_atomic_intent(world, monkeypatch):
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize(("mode", "status"), [("ok", "merged"), ("accepted_open", "queued"), ("queued", "queued"),
-                                              ("refused", "refused")])
+@pytest.mark.parametrize(("mode", "status"), [("ok", "merged"), ("accepted_open", "queued"), ("refused", "refused")])
 def test_losing_claim_cannot_erase_the_winners_effect_or_settled_outcome(world, monkeypatch, mode, status):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier, Event, local

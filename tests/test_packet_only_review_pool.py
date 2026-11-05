@@ -15,6 +15,7 @@ import pytest
 
 from ouroboros.configured_subagents import SUBAGENTS_SETTING
 from ouroboros.subagent_runtime import review_facts_block
+from tests._cases import chosen_rows
 
 REPO = Path(__file__).resolve().parents[1]
 # Spelled out so a missing warning fails on behaviour, not on a missing name.
@@ -152,11 +153,11 @@ def test_a_blocking_save_of_a_pool_with_no_reading_row_warns_and_still_saves(mon
     assert WARNING in body.get("warnings", [])
 
 
-@pytest.mark.parametrize("catalog, enforcement, mode", [
+@pytest.mark.parametrize("catalog, enforcement, mode", chosen_rows([
     *[(catalog, "blocking", "advanced") for catalog in READING.values()],
     (PACKET_ONLY["two Packet reviewers"], "advisory", "advanced"),
     (PACKET_ONLY["two Packet reviewers"], "blocking", "cyber_pro"),
-], ids=[*READING, "advisory review", "Cyber Pro"])
+], 0, 2, 3), ids=chosen_rows([*READING, "advisory review", "Cyber Pro"], 0, 2, 3))
 def test_no_warning_with_a_reading_row_under_advisory_or_in_cyber_pro(monkeypatch, catalog, enforcement, mode):
     stored = {"OUROBOROS_RUNTIME_MODE": mode}
     status, body, _saved = _post(

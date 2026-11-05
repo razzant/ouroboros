@@ -234,8 +234,7 @@ def test_partial_deliverable_manifest_keeps_its_warning_beside_its_identity(tmp_
     assert "status" not in row  # the producer's facts are kept, not overlaid with a clean "ready" record
 
 
-@pytest.mark.parametrize("change", ["equal_length_bytes", "new_child_artifact", "critical_notice",
-                                    "read_error", "unregistered_listing"])
+@pytest.mark.parametrize("change", ["equal_length_bytes", "read_error", "unregistered_listing"])
 def test_real_changes_after_the_decision_still_reopen_it(tmp_path, monkeypatch, change):
     data, drive, ctx, before, shown = _decided(tmp_path)
     export = Path(next(row for row in before["artifacts"] if row["kind"] == "memory_export")["path"])

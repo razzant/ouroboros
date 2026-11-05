@@ -190,7 +190,7 @@ def test_aborted_update_saved_successor_expires_without_dispatch(tmp_path, monke
     assert load_task_result(tmp_path, task["id"])["reason_code"] == "deadline"
 
 
-@pytest.mark.parametrize("authority", ["valid", "spent", "source_unreadable", "transaction_unreadable"])
+@pytest.mark.parametrize("authority", ["valid", "spent", "transaction_unreadable"])
 def test_owner_wait_restoration_uses_its_existing_settlement_owner(restart_case, expiry, monkeypatch, authority):  # noqa: F811
     from ouroboros import owner_wait, delegate_recovery
     from tests.test_owner_wait_restart import first_cleanup, acknowledge

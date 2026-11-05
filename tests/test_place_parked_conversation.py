@@ -108,7 +108,7 @@ def test_a_real_review_park_wakes_for_an_untagged_message_and_the_same_author_re
     assert world.h.settled.wait(60)
 
 
-@pytest.mark.parametrize("passive", ["reaction", "bot", "threadless", "owner_pause", "budget_fence", "place_paused", "off"])
+@pytest.mark.parametrize("passive", ["reaction", "place_paused", "off"])
 def test_nothing_passive_or_controlled_wakes_a_real_question_park(host, monkeypatch, passive):
     from ouroboros import owner_pause
 

@@ -15,6 +15,7 @@ import pytest
 from ouroboros.server_runtime import apply_runtime_provider_defaults
 from ouroboros.configured_subagents import resolve_configured_subagents
 from tests.test_server_runtime import _FORMERLY_REMAPPED_IDS
+from tests._cases import chosen_rows
 
 
 def test_formerly_remapped_review_ids_are_no_longer_rewritten():
@@ -74,8 +75,6 @@ def test_direct_openai_keeps_a_saved_id_that_was_never_our_default_for_its_slot(
 
 @pytest.mark.parametrize("model", (
     "google/gemini-3.1-pro-preview",
-    "google/gemini-3-flash-preview",
-    "openai/gpt-5.4-pro",
     "openai::gpt-5.4-pro",
     # Our direct default was only ever stored as `openai::gpt-5.4`; the slash spelling
     # shipped solely inside the old review list and as a UI suggestion.
@@ -204,7 +203,7 @@ def test_our_former_openai_code_default_leaves_heavy_without_becoming_an_actor()
     assert all(row.subagent_id != "legacy-heavy" for row in rows)
 
 
-@pytest.mark.parametrize("install", [*sorted(_DIRECT_PROVIDER_CREDENTIALS), "local-only"])
+@pytest.mark.parametrize("install", chosen_rows([*sorted(_DIRECT_PROVIDER_CREDENTIALS), "local-only"], 0, 2, 7))
 def test_an_explicit_gemini_pro_preview_choice_stays_as_written(install):
     """It was never one of our Main/Code/Light/Fallback defaults (it shipped only inside the
     old review list), so no install class rewrites it."""

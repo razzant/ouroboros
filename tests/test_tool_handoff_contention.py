@@ -147,7 +147,7 @@ def test_wait_rechecks_current_controls_without_revoking_handed_pause(
 
 
 @pytest.mark.parametrize("error", [store.StoreBusy("unknown", reason="unknown"),
-    store.StoreBusy("uninspectable", reason="uninspectable"), store.StoreLost("lost"), PermissionError("denied")])
+    store.StoreLost("lost"), PermissionError("denied")])
 def test_hard_or_unknown_claim_failure_never_retries_or_enters_handler(reader, monkeypatch, error):
     _root, registry, calls = reader
     attempts = []

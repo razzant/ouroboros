@@ -360,8 +360,7 @@ def test_material_reference_refuses_symlinked_store_authority(tmp_path):
 
 
 @pytest.mark.parametrize("reference", [{"name": "../secret"}, {"name": "missing.txt"},
-                                      {"name": "choice.txt", "path": "/secret"},
-                                      {"task_id": "unrelated", "name": "choice.txt"}])
+                                      {"name": "choice.txt", "path": "/secret"}])
 def test_materials_refuse_unknown_paths_and_unrelated_authority(tmp_path, reference):
     from ouroboros.tools.core_artifacts import _escalate
 

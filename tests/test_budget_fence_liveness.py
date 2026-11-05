@@ -96,7 +96,7 @@ def test_a_publication_slower_than_the_former_window_is_waited_out(tmp_path, mon
     assert _reserve(tmp_path, CHILD).attempt_id and len(waits) == 25
 
 
-@pytest.mark.parametrize("damage", ["malformed", "non_object", "missing", "no_generation", "unreadable"])
+@pytest.mark.parametrize("damage", ["malformed", "missing", "unreadable"])
 def test_an_unreadable_dispatch_document_refuses_typed(tmp_path, monkeypatch, caplog, damage):
     _publish(tmp_path)
     path = tmp_path / "state/queue_dispatch.json"

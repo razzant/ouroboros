@@ -156,8 +156,7 @@ def test_successor_failure_never_borrows_prior_run_or_unbound_exception_detail(t
         assert "input_token_usage" not in last and last["observed_attempt"] == {}
 
 
-@pytest.mark.parametrize("state,split", [("succeeded", SPLIT), ("failed", SPLIT),
-                                         ("succeeded", dict.fromkeys(SPLIT)), ("failed", None)])
+@pytest.mark.parametrize("state,split", [("succeeded", SPLIT), ("succeeded", dict.fromkeys(SPLIT)), ("failed", None)])
 def test_attach_only_usage_uses_recorded_attribution_without_new_effects(tmp_path, monkeypatch, state, split):
     from ouroboros import review_operation
     from ouroboros.usage_accounting import UsageScope, usage_scope

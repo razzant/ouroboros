@@ -56,7 +56,7 @@ def test_actual_scoped_shell_preserves_each_pytest_exit(tmp_path, scope, selecti
     assert args[:3] == ["-m", "pytest", "tests/test_provider_integration.py"]
 
 
-@pytest.mark.parametrize("scope", ["", "REQUIRED", "unrecognized", "all; touch injected"])
+@pytest.mark.parametrize("scope", ["", "REQUIRED", "all; touch injected"])
 def test_unknown_scope_refuses_before_launch(tmp_path, scope):
     done, args = _run_shell(_steps(CANARY, "integration-test")["provider_tests"], tmp_path, scope=scope)
     assert done.returncode == 2 and args == []

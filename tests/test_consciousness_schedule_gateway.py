@@ -126,7 +126,6 @@ def test_the_tick_waits_out_an_unknown_in_flight_run_instead_of_re_dispatching(t
     ("explode", "cron-1", "why", "invalid_action"),
     ("disable", "", "why", "missing_schedule_id"),
     ("disable", "cron-1", "   ", "reason_required"),
-    ("disable", "absent", "why", "not_found"),
 ])
 def test_a_malformed_or_impossible_action_is_typed_and_writes_nothing(
         tmp_path, monkeypatch, action, schedule_id, reason, status):

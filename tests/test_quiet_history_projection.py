@@ -48,8 +48,7 @@ def test_terminal_flags_round_trip_through_room_history(tmp_path, silent, notice
     assert "Private retained words" not in json.dumps(response)
 
 
-@pytest.mark.parametrize("flags", [{}, {"wake_silent": True}, {"quiet_effective": False},
-                                  {"wake_silent": False, "quiet_effective": False}])
+@pytest.mark.parametrize("flags", [{}, {"wake_silent": True}, {"wake_silent": False, "quiet_effective": False}])
 def test_legacy_summary_flags_stay_present_or_absent_as_recorded(tmp_path, flags):
     entry = {"type": "task_summary", "direction": "system", "chat_id": 1,
              "task_id": "legacy", "text": "Recorded terminal", "ts": "2026-10-21T12:00:00Z", **flags}

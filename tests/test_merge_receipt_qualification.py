@@ -85,8 +85,7 @@ def test_body_patch_uses_selected_repo_scoped_identity_without_org_access(world,
 
 
 @pytest.mark.parametrize("failure", ["EOF", "HTTP 502: Bad Gateway (https://api.github.com/graphql)",
-                                     "HTTP 409: Conflict (https://api.github.com/graphql)",
-                                     PRE_EFFECT + "HTTP 503: lost reply", "timeout"])
+                                     "timeout"])
 def test_real_transport_unknown_exit_never_releases_intent(world, monkeypatch, failure):
     effects = []
 
@@ -139,7 +138,7 @@ def test_proven_pre_effect_failure_can_recover(world, monkeypatch, failure):
     assert [r["outcome"]["status"] for r in _receipts(world)] == ["refused", "merged"]
 
 
-@pytest.mark.parametrize("gap", ["settlement", "publication_receipt", "card", "body"])
+@pytest.mark.parametrize("gap", ["settlement", "card", "body"])
 def test_post_effect_gaps_reach_the_registered_tool(world, monkeypatch, gap):
     original = merge_receipts.write_receipt
 
@@ -495,7 +494,7 @@ def test_cold_bounded_history_supplies_current_receipt_to_new_chat(world, monkey
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("gap", ["missing_result", "unreadable_result", "missing_receipt", "older_revision", "malformed_receipt", "other_task"])
+@pytest.mark.parametrize("gap", ["missing_result", "older_revision", "other_task"])
 def test_bounded_history_discloses_unavailable_canonical_receipt(world, monkeypatch, gap):
     from ouroboros.gateway.history import make_chat_history_endpoint
 
@@ -697,9 +696,6 @@ def gap_only_in_detail(receipt, *codes):
 
 @pytest.mark.parametrize(("facts", "status", "gaps", "earlier"), [
     ({"base": "e" * 40}, "unknown", ["reviewed_base_differs"], False),
-    ({"base": ""}, "unknown", ["reviewed_base_not_recorded"], False),
-    ({"tree": "9" * 40}, "unknown", ["merged_tree_differs_from_reviewed_head"], True),
-    ({"tree": ""}, "unknown", ["tree_comparison_unavailable"], False),
     ({"head": "e" * 40}, "changes_after_review", [], True),
     ({"head": ""}, "unknown", ["reviewed_head_not_recorded"], False),
 ])

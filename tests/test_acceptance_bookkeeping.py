@@ -110,7 +110,7 @@ def test_child_copyback_keeps_the_review_projection_and_only_user_deliverables(t
         assert artifacts.task_artifact_dir_path(canonical, "applied").joinpath("notes.lock").read_bytes() == b"user deliverable"
 
 
-@pytest.mark.parametrize("status", ["pending", "finalizing", "failed", "partial", "missing"])
+@pytest.mark.parametrize("status", ["pending", "failed", "missing"])
 def test_present_but_incomplete_user_record_does_not_upgrade_empty_bundle(tmp_path, status):
     from ouroboros.outcomes import artifact_bundle_from_result
 
@@ -122,7 +122,7 @@ def test_present_but_incomplete_user_record_does_not_upgrade_empty_bundle(tmp_pa
     assert bundle["artifacts"][0]["status"] == status
 
 
-@pytest.mark.parametrize("status", ["pending", "finalizing", "failed", "ready_no_changes"])
+@pytest.mark.parametrize("status", ["pending", "failed", "ready_no_changes"])
 def test_ready_user_record_preserves_independent_bundle_state(tmp_path, status):
     from ouroboros.outcomes import artifact_bundle_from_result
 

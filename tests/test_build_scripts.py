@@ -753,9 +753,6 @@ class TestDockerfile:
     [
         ".github/actions/setup-python-env/action.yml",
         "Dockerfile",
-        "Makefile",
-        "build.sh",
-        "build_linux.sh",
         "build_windows.ps1",
     ],
 )

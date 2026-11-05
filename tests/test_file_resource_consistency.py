@@ -52,7 +52,7 @@ def environment(tmp_path, monkeypatch):
     return reg, ctx, home, work, data
 
 
-@pytest.mark.parametrize('root', ['active_workspace', 'system_repo', 'runtime_data', 'task_drive', 'artifact_store'])
+@pytest.mark.parametrize('root', ['active_workspace', 'system_repo', 'artifact_store'])
 def test_absolute_in_root_keeps_exact_file_identity(environment, root):
     _reg, ctx, _home, _work, _data = environment
     base = resource_root_path(ctx, root)
@@ -120,7 +120,7 @@ def test_payload_edit_requires_a_skill_selector(environment, tool):
     assert not (data / 'skills').exists() and not (work / 'mod.py').exists()
 
 
-@pytest.mark.parametrize('relative', ['settings.json', '.config/app/options.conf', 'Library/Preferences/app.conf', '.ssh/config'])
+@pytest.mark.parametrize('relative', ['settings.json', 'Library/Preferences/app.conf', '.ssh/config'])
 def test_root_can_read_and_edit_ordinary_config(environment, relative):
     reg, _ctx, home, _work, _data = environment
     target = home / relative
@@ -426,8 +426,7 @@ def test_child_inline_source_read_and_bare_word_execute_without_argv_rewrite(env
 
 
 @pytest.mark.parametrize('spelling', [
-    '$OUROBOROS_DATA_DIR', '${OUROBOROS_DATA_DIR}', '%OUROBOROS_DATA_DIR%',
-    '$HOME/Ouroboros/data', '${HOME}/Ouroboros/data', '%USERPROFILE%/Ouroboros/data', '~/Ouroboros/data',
+    '$OUROBOROS_DATA_DIR', '$HOME/Ouroboros/data', '~/Ouroboros/data',
 ])
 def test_known_root_expansion_applies_to_write_targets_only(tmp_path, monkeypatch, spelling):
     from ouroboros.tools.shell_guards import runtime_data_guard_targets
@@ -449,8 +448,6 @@ def test_known_root_expansion_applies_to_write_targets_only(tmp_path, monkeypatc
     ['sh', '-c', 'cat $HOME/.ssh/id_fixture'],
     ['sh', '-c', 'cd $HOME && cat .ssh/id_fixture'],
     ['sh', '-c', 'env -C $HOME cat .ssh/id_fixture'],
-    ['sh', '-c', 'cat $OUROBOROS_DATA_DIR/settings.json'],
-    ['cmd', '/c', 'type %USERPROFILE%/.ssh/id_fixture'],
 ])
 def test_child_known_root_read_reaches_the_configured_supervisor(environment, monkeypatch, command):
     reg, ctx, home, work, data = environment

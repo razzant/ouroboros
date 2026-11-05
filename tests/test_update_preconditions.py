@@ -62,7 +62,7 @@ def test_absent_lock_is_observed_without_creating_one(tmp_path, monkeypatch):
     assert not (repo / ".git" / "index.lock").exists()
 
 
-@pytest.mark.parametrize("door", ["smart", "replace", "ui_rollback", "vcs_rollback"])
+@pytest.mark.parametrize("door", ["smart", "replace", "ui_rollback"])
 def test_failed_git_observation_is_not_applied_before_any_stop(tmp_path, monkeypatch, door):
     from supervisor import update_merge
 

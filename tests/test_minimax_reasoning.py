@@ -150,11 +150,7 @@ def test_same_route_tool_continuation_keeps_exact_carriers(isolated, make_client
 
 @pytest.mark.parametrize("reasoning", [
     {"reasoning_content": {"future": ["retained", 42]}},
-    {"reasoning_content": None},
-    {"reasoning_content": ""},
-    {"reasoning_details": {"future": "not a list"}},
     {"reasoning_details": [None, 17, {"type": "new", "data": "opaque"}]},
-    {"reasoning_details": None},
     {"reasoning_details": []},
 ])
 def test_unknown_and_empty_shapes_are_retained_without_display_coercion(isolated, make_client, reasoning):

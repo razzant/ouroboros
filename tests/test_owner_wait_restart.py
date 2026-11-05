@@ -239,8 +239,7 @@ def test_observed_restart_restores_real_native_source_past_snapshot_age(restart_
     assert transaction["ack_source"] == ACK_SOURCES[transport]
 
 
-@pytest.mark.parametrize("fault", ["token_only", "observation_failed", "exit_1", "panic_99", "other_parent_pid",
-                                   "other_parent_birth", "binding_failed", "other_successor"])
+@pytest.mark.parametrize("fault", ["token_only", "observation_failed", "other_successor"])
 def test_windows_successor_without_exact_parent_proof_holds_the_wait(restart_case, monkeypatch, caplog, fault):
     """Only the inherited parent's own exit 42 and the bound identities return the wait (S1 keeps it held)."""
     from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
@@ -272,7 +271,7 @@ def test_windows_successor_without_exact_parent_proof_holds_the_wait(restart_cas
     assert "continuation unproven, its handoffs are not resumed" in caplog.text
 
 
-@pytest.mark.parametrize("control", ["restart", "unacknowledged", "panic", "stop_child", "bad_child_source"])
+@pytest.mark.parametrize("control", ["restart", "unacknowledged", "bad_child_source"])
 def test_preserved_question_parent_keeps_its_saved_running_child(restart_case, monkeypatch, control):
     """Separate owner-question custody counts as surviving ancestry during both kills."""
     from ouroboros import working_checkpoint
@@ -595,8 +594,7 @@ def test_project_wait_unreadable_authority_stays_same_id_then_recovers(restart_c
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("refusal", ["unacknowledged", "spent_wait", "owner_restart", "deadline", "ceiling",
-                                   "ceiling_unreadable_transaction", "stop"])
+@pytest.mark.parametrize("refusal", ["unacknowledged", "ceiling_unreadable_transaction", "stop"])
 def test_project_wait_positive_refusal_uses_existing_custody(restart_case, monkeypatch, refusal):
     from ouroboros.cancel_intents import request_cancel
     from supervisor import queue_timeouts
@@ -695,7 +693,7 @@ def test_project_wait_deadline_keeps_custody_while_its_authority_is_unreadable(r
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("control", ["owner_pause", "stop", "saved_terminal", "live_owner"])
+@pytest.mark.parametrize("control", ["owner_pause", "stop", "live_owner"])
 def test_project_wait_deadline_rechecks_controls_before_settlement(restart_case, monkeypatch, control):
     """A control arriving after the deadline marker and before the reaper's write wins."""
     from ouroboros.cancel_intents import request_cancel

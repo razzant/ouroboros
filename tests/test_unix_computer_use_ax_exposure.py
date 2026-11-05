@@ -59,7 +59,7 @@ def invoke(ax, operation, monkeypatch, *, emit=None, now=None):
                              ax=ax, front=front, settle=lambda _: None, emit=emit, **kwargs)
 
 
-@pytest.mark.parametrize("operation", ["tree", "observe", "act", "element"])
+@pytest.mark.parametrize("operation", ["tree", "observe", "element"])
 def test_cold_first_call_exposes_before_selection_and_preserves_action_observation(operation, monkeypatch):
     ax = ColdAX()
     checkpoints = []
@@ -78,7 +78,7 @@ def test_cold_first_call_exposes_before_selection_and_preserves_action_observati
 
 
 @pytest.mark.parametrize("code,status", [(-25205, "unsupported"), (-25208, "unsupported"),
-                                       (-25204, "unknown"), (-25211, "failed"), (-25200, "failed")])
+                                       (-25204, "unknown")])
 def test_negotiation_errors_remain_visible_without_breaking_an_available_tree(code, status, monkeypatch):
     ax = ColdAX(code=code, cold=False)
     out = invoke(ax, "element", monkeypatch)

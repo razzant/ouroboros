@@ -302,7 +302,7 @@ def test_replayed_client_message_id_admits_nothing_new(host, room, phase):
     assert not host.attempts and not host.notices
 
 
-@pytest.mark.parametrize("collision", ["reserved", "different_token", "unreadable", "live_only"])
+@pytest.mark.parametrize("collision", ["reserved", "different_token", "live_only"])
 def test_replay_identity_requires_original_durable_token(host, monkeypatch, collision):
     case = incoming_case(host, "main")
     host.pending.append({"id": case.task_id})

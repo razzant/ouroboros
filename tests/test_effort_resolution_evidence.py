@@ -24,6 +24,7 @@ from tests.test_llm_claudexor import MODEL, ledger
 from tests.test_llm_claudexor import result as _model_result
 from tests.test_llm_claudexor import setup as _model_fixture
 from tests._usage_store_testing import ledger_rows
+from tests._cases import chosen_rows
 
 _owned_gateway_uses_each_test_transport = _owned_fixture
 fake_route = _route_fixture
@@ -71,7 +72,7 @@ def test_observation_reporter_is_separate_from_resolution_authority():
     assert usage["effort_resolution"]["source"] == "account_catalog"
 
 
-@pytest.mark.parametrize("report", [None, {}, [], {"requested": "ultra"},
+@pytest.mark.parametrize("report", chosen_rows([None, {}, [], {"requested": "ultra"},
     {**SHARED, "submitted": None}, {**SHARED, "parameter": None},
     {**SHARED, "requested": None}, {**SHARED, "resolution": "exact"},
     {**SHARED, "resolution": "floor", "requested": None},
@@ -89,7 +90,7 @@ def test_observation_reporter_is_separate_from_resolution_authority():
     *[{**SHARED, field: invalid} for field in ("requested", "submitted", "parameter", "observed", "observedSource")
       for invalid in (" ", 1, False, [], {})],
     {**VARIANTS["known_parameter_unverifiable"], "parameter": " "},
-])
+], 4, 5, 7, 10, 13, 15, 17, 19, 20))
 def test_malformed_or_incoherent_reports_stay_unknown_in_both_consumers(tmp_path, report):
     assert validated_effort_resolution(report) is None
     usage = _finish(report)

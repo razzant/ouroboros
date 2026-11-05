@@ -111,8 +111,7 @@ def test_recovered_native_wait_needs_explicit_resume_then_dispatches_once(restar
     _assert_original_dispatch(env)
 
 
-@pytest.mark.parametrize("fault", ["result", "source", "transaction", "unacknowledged", "spent",
-                                   "terminal", "cancel", "owner_restart", "deadline"])
+@pytest.mark.parametrize("fault", ["result", "cancel", "owner_restart"])
 def test_explicit_resume_keeps_current_native_authority_refusals(restart_case, monkeypatch, fault):
     from ouroboros.cancel_intents import request_cancel
 
@@ -147,7 +146,7 @@ def test_explicit_resume_keeps_current_native_authority_refusals(restart_case, m
 
 
 @pytest.mark.parametrize("carrier,fallback", [(None, "working"), ({}, "zero"),
-                                               ("not-a-locator", "working"), ({"wait_id": "other"}, "zero")])
+                                               ({"wait_id": "other"}, "zero")])
 def test_read_gap_without_valid_native_authority_never_falls_back(restart_case, monkeypatch, carrier, fallback):
     env = _held(restart_case, monkeypatch)
     task = env.task

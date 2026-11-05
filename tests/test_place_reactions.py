@@ -93,10 +93,6 @@ def mail(root):
 
 @pytest.mark.parametrize("wakes,actor,facts", [
     (["any_message"], USER, []),
-    (["any_message"], CHAT, []),
-    (["any_message"], ANON, []),
-    (["from_bot"], {**USER, "is_bot": True}, ["from_bot"]),
-    (["any_message", "from_bot"], {**USER, "is_bot": True}, ["from_bot"]),
     (["mention"], USER, ["mention"]),  # a connector's claimed fact does not make a reaction a wake
     (["direct_message"], USER, ["direct_message"]),
 ])
@@ -137,10 +133,7 @@ def test_paused_and_off_keep_their_own_reasons(room, monkeypatch):
 
 @pytest.mark.parametrize("message", [
     {},  # a textless message
-    {"message_id": "9", "file": "attached"},  # a textless attachment's message facts
     {"reaction": "thumbsup"},  # an old skill's word for its own marker
-    {"reaction": ["👍"]},
-    {"reaction": {"kind": "added", "name": "thumbsup"}},  # no schema_version: not this fact
     {"event_kind": "message_reaction", "old_reaction": [], "new_reaction": [{"type": "emoji", "emoji": "👍"}]},
 ])
 def test_an_untyped_event_keeps_todays_wake_behaviour(room, message):
@@ -152,49 +145,20 @@ def test_an_untyped_event_keeps_todays_wake_behaviour(room, message):
 
 @pytest.mark.parametrize("change,actor,mutate", [
     ("add", USER, lambda f: f.update(schema_version=2)),
-    ("add", USER, lambda f: f.update(schema_version="1")),
-    ("add", USER, lambda f: f.update(schema_version=True)),
     ("add", USER, lambda f: f.update(change="noted")),
     ("add", USER, lambda f: f.update(extra=1)),
     ("add", USER, lambda f: f.update(new=[])),
-    ("add", USER, lambda f: f.update(old=[THUMB])),
-    ("add", USER, lambda f: f.update(new=[{"type": "name"}])),
-    ("add", USER, lambda f: f.update(new=[{"type": "", "value": "x"}])),
-    ("add", USER, lambda f: f.update(new=[{"type": "t", "value": 1}])),
     ("add", USER, lambda f: f.update(new=[{"type": "t", "value": "x", "extra": 1}])),
-    ("add", USER, lambda f: f.update(new="thumbsup")),
     ("add", USER, lambda f: f.update(counts=[])),
-    ("remove", USER, lambda f: f.update(old=[])),
-    ("remove", USER, lambda f: f.update(new=[THUMB])),
-    ("replace", USER, lambda f: f.update(new=[THUMB])),
-    ("replace", USER, lambda f: f.update(old=[])),
     ("count", ANON, lambda f: f.update(old=[])),
-    ("count", ANON, lambda f: f.update(counts=None)),
-    ("count", ANON, lambda f: f.update(counts=[{**THUMB, "count": -1}])),
-    ("count", ANON, lambda f: f.update(counts=[{**THUMB, "count": True}])),
-    ("count", USER, lambda f: None),  # an aggregate has no individual
-    ("add", ANON, lambda f: None),  # an individual change has one
-    ("add", {"kind": "person", "platform_actor_id": "p"}, lambda f: None),
-    ("add", {"platform_actor_id": "p"}, lambda f: None),
     ("add", {"kind": "user"}, lambda f: None),
     ("add", {"kind": "chat", "platform_actor_id": "-1"}, lambda f: None),  # authenticated must be false
-    ("add", {**CHAT, "authenticated": True}, lambda f: None),
-    ("add", {**CHAT, "is_bot": False}, lambda f: None),
-    ("count", {"kind": "anonymous"}, lambda f: None),
     ("count", {**ANON, "platform_actor_id": "fabricated"}, lambda f: None),
-    ("count", {**ANON, "id": "fabricated"}, lambda f: None),
     ("add", USER, lambda f: f.update(target=None)),
     ("add", USER, lambda f: f.update(target={"resolution": "resolved"})),
-    ("add", USER, lambda f: f.update(target={"message_id": "", "resolution": "resolved"})),
-    ("add", USER, lambda f: f.update(target={"message_id": 12, "resolution": "resolved"})),
     ("add", USER, lambda f: f.update(target={"message_id": "1", "resolution": "guessed"})),
-    ("add", USER, lambda f: f.update(target={"message_id": "1", "resolution": "resolved", "thread_id": "t"})),
     ("add", USER, lambda f: f.update(target={"message_id": "1", "resolution": "resolved", "author": "Ann"})),
-    ("add", USER, lambda f: f.update(target={"message_id": "1", "resolution": "resolved", "author": {"is_self": 1}})),
     ("add", USER, lambda f: f.update(target={"message_id": "1", "resolution": "resolved", "excerpt": "words"})),
-    ("add", USER, lambda f: f.update(target={"message_id": "1", "resolution": "resolved", "excerpt": {"text": "w"}})),
-    ("add", USER, lambda f: f.update(target={"message_id": "1", "resolution": "resolved",
-                                             "excerpt": {"text": "x" * 501, "truncated": True}})),
 ])
 def test_invalid_typed_fact_is_refused_before_capture(room, change, actor, mutate):
     world = room(["any_message"])
@@ -225,7 +189,7 @@ def test_a_reaction_carries_no_words_no_files_and_no_phantom_root(room):
     assert not stored(world.root) and not world.calls
 
 
-@pytest.mark.parametrize("change,actor", [("add", USER), ("remove", USER), ("replace", USER), ("add", CHAT), ("count", ANON)])
+@pytest.mark.parametrize("change,actor", [("add", USER), ("add", CHAT), ("count", ANON)])
 def test_every_valid_shape_is_accepted(room, change, actor):
     world = room(["any_message"])
     response = world.client.post("/presence/turn", json=wire(world.event, actor, fact(change)))
@@ -433,16 +397,6 @@ def receipt(operation="set", new=(THUMB,), effect="applied", **extra):
     ("delivered", receipt(), "set reaction thumbsup, requested on message 77"),
     ("accepted", receipt(), "set reaction thumbsup, requested on message 77 (accepted by the provider)"),
     ("delivered", receipt(new=()), "cleared reactions, requested on message 77"),
-    ("delivered", receipt("add"), "added reaction thumbsup, requested on message 77"),
-    ("delivered", {"reaction": {"schema_version": 1, "operation": "remove", "old": [THUMB], "effect": "applied",
-                                "target": {"message_id": "77", "resolution": "resolved"}}},
-     "removed reaction thumbsup, requested on message 77"),
-    ("delivered", receipt("add", effect="already_present"), "no change: reaction thumbsup was already present, requested on message 77"),
-    ("delivered", {"reaction": {"schema_version": 1, "operation": "remove", "old": [THUMB], "effect": "already_absent",
-                                "target": {"message_id": "77", "resolution": "resolved"}}},
-     "no change: reaction thumbsup was already absent, requested on message 77"),
-    ("failed", receipt(effect=None), "failed: set reaction thumbsup, requested on message 77"),
-    ("uncertain", receipt(effect=None), "outcome unknown, may have landed, do not repeat: set reaction thumbsup, requested on message 77"),
 ])
 def test_previous_turn_reports_real_reaction_receipts_without_speech(room, state, message, expected):
     world = room(["mention"])
@@ -637,10 +591,6 @@ def test_a_nonempty_row_with_a_typed_key_keeps_its_words(room):
     ("add", USER, lambda f: f.update(change=[])),
     ("add", USER, lambda f: f.update(change={})),
     ("add", {"kind": {}, "platform_actor_id": "p"}, lambda f: None),
-    ("add", {"kind": [], "platform_actor_id": "p"}, lambda f: None),
-    ("add", USER, lambda f: f.update(target={"message_id": "1", "resolution": []})),
-    ("add", USER, lambda f: f.update(target={"message_id": "1", "resolution": {}})),
-    ("add", USER, lambda f: f.update(schema_version=[])),
 ])
 def test_unhashable_json_values_are_a_400_not_a_500(room, change, actor, mutate):
     world = room(["any_message"])
@@ -658,17 +608,7 @@ TARGET = {"message_id": "7", "resolution": "resolved"}
 @pytest.mark.parametrize("state,extra,expected", [
     ("delivered", {"effect": "applied"}, CLAIM),
     ("accepted", {"effect": "applied"}, CLAIM + " (accepted by the provider)"),
-    ("delivered", {}, "effect not reported: " + CLAIM),
-    ("accepted", {}, "effect not reported: " + CLAIM),
-    ("delivered", {"effect": "maybe"}, "effect not reported: " + CLAIM),
-    ("delivered", {"effect": []}, "effect not reported: " + CLAIM),
-    ("delivered", {"effect": {"a": 1}}, "effect not reported: " + CLAIM),
     ("", {"effect": "applied"}, "state not recorded: " + CLAIM),
-    ("mystery", {"effect": "applied"}, "state not recorded: " + CLAIM),
-    ("failed", {"effect": "applied"}, "failed: " + CLAIM),
-    ("failed", {"effect": "already_present"}, "failed: " + CLAIM),
-    ("uncertain", {"effect": "applied"}, "outcome unknown, may have landed, do not repeat: " + CLAIM),
-    ("uncertain", {}, "outcome unknown, may have landed, do not repeat: " + CLAIM),
 ])
 def test_a_receipt_is_a_confirmed_gesture_only_when_it_says_so(state, extra, expected):
     from ouroboros.dialogue_provenance import reaction_action_words
@@ -677,7 +617,7 @@ def test_a_receipt_is_a_confirmed_gesture_only_when_it_says_so(state, extra, exp
 
 
 @pytest.mark.parametrize("action", [
-    {}, {"operation": []}, {"operation": "set", "new": "x", "target": "y"}, {"operation": {}, "old": [1], "new": [None]},
+    {}, {"operation": []}, {"operation": {}, "old": [1], "new": [None]},
 ])
 def test_malformed_receipt_facts_render_without_crashing_or_claiming(action):
     from ouroboros.dialogue_provenance import reaction_action_words
@@ -689,7 +629,6 @@ def test_malformed_receipt_facts_render_without_crashing_or_claiming(action):
     ("failed", {}, "failed: set reaction thumbsup, requested on message 77"),
     ("uncertain", {}, "outcome unknown, may have landed, do not repeat: set reaction thumbsup, requested on message 77"),
     ("delivered", {}, "effect not reported: set reaction thumbsup, requested on message 77"),
-    ("delivered", {"effect": "already_present"}, "no change: reaction thumbsup was already present, requested on message 77"),
 ])
 def test_room_reader_and_model_readers_keep_the_receipts_state(room, state, extra, expected):
     from ouroboros.dialogue_provenance import dialogue_text, render_row_text

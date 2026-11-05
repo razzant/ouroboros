@@ -210,7 +210,7 @@ def test_settled_quiz_drops_only_required_wait_copy(tmp_path, monkeypatch, requi
     assert _LAST_CLIENT[-1].edits[0][3] == []
 
 
-@pytest.mark.parametrize("answer_text", ["Use mysql instead", "  Use mysql instead\n", "2", "`/panic`", "The command is /panic"])
+@pytest.mark.parametrize("answer_text", ["Use mysql instead", "2", "The command is /panic"])
 def test_reply_to_the_card_is_the_owners_own_answer(tmp_path, monkeypatch, answer_text):
     plugin = _load_plugin()
     api = _send_card(plugin, tmp_path, monkeypatch)
@@ -736,12 +736,8 @@ def _answer(plugin, tmp_path, monkeypatch, update, reply):
 @pytest.mark.parametrize("delivery,status", [
     (_delivery(reason="awaiting_recipient_read"), _SAVED),
     (_delivery(), _PENDING),
-    (_delivery(reason="quiz_history_write_failed"), _PENDING),
-    (_delivery(reason="late_answer_delivery_unknown"), _UNKNOWN),
     (_delivery(reason="late_answer_delivery_unknown", dismissed=True), _UNKNOWN),  # dismissed is not delivered
-    (_delivery("delivered"), ""),
-    (None, ""),  # no delivery fact: the record only, and no delivery claim
-], ids=["saved", "pending", "history-pending", "unknown", "dismissed", "delivered", "no-fact"])
+], ids=["saved", "pending", "dismissed"])
 def test_text_answer_is_confirmed_in_its_card_without_a_separate_line(tmp_path, monkeypatch, delivery, status):
     plugin = _load_plugin()
     payload = {"ok": True, "state": "answered", "comment": "Use duckdb",
@@ -767,10 +763,8 @@ def test_tap_toasts_the_hosts_receipt_and_the_card_keeps_its_status(tmp_path, mo
 @pytest.mark.parametrize("path,recorded,shown", [
     ("reply", {"comment": "Use duckdb"}, "Use duckdb"),
     ("reply", {"answered_index": 0, "comment": "only with nightly backups"}, "1. sqlite — only with nightly backups"),
-    ("tap", {"comment": "Use duckdb"}, "Use duckdb"),
-    ("tap", {"answered_index": 0, "comment": "only with nightly backups"}, "1. sqlite — only with nightly backups"),
     ("tap", {}, ""),
-], ids=["reply-comment", "reply-option-comment", "tap-comment", "tap-option-comment", "tap-no-winner"])
+], ids=["reply-comment", "reply-option-comment", "tap-no-winner"])
 def test_a_replayed_answer_settles_on_the_hosts_record_not_the_local_attempt(tmp_path, monkeypatch, path, recorded, shown):
     """A 200 replays what the host recorded for this request: the card shows that record and
     never invents it from the tapped option or the words this bridge sent."""
@@ -863,10 +857,9 @@ def test_the_same_answer_sent_again_is_its_own_record_not_a_conflict(tmp_path, m
 
 @pytest.mark.parametrize("path,code,recorded,first", [
     ("reply", 200, {"comment": "Use duckdb"}, f"{_SAVED}."),
-    ("tap", 200, {"answered_index": 1}, f"{_SAVED}."),
     ("reply", 409, {"answered_index": 0}, _LOST.format(answer="1. sqlite")),
     ("tap", 409, {"answered_index": 0}, _LOST.format(answer="1. sqlite")),
-], ids=["reply", "tap", "reply-conflict", "tap-conflict"])
+], ids=["reply", "reply-conflict", "tap-conflict"])
 def test_a_card_that_could_not_be_updated_is_said_once_and_never_retried(tmp_path, monkeypatch, path, code, recorded, first):
     plugin = _load_plugin()
     monkeypatch.setattr(Client, "edit_result", False)

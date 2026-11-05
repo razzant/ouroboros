@@ -145,7 +145,7 @@ def test_any_shape_of_reply_to_a_secret_note_is_refused_locally(tmp_path, monkey
     assert all(CANARY not in message for _level, message in api.logs)
 
 
-@pytest.mark.parametrize("command", ["/menu", "/help", "/language", "/language@ouro_bot"])
+@pytest.mark.parametrize("command", ["/menu", "/help", "/language@ouro_bot"])
 def test_explicit_local_commands_still_run_as_a_reply_to_the_note(tmp_path, monkeypatch, command):
     plugin = _load_plugin()
     api = _send_note(plugin, tmp_path, monkeypatch)

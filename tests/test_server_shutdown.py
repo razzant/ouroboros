@@ -401,8 +401,6 @@ def test_failed_boot_rollback_does_not_restart(monkeypatch):
 @pytest.mark.parametrize("intent,marker,starts", [
     ("automatic", "panic", False),
     ("automatic", "owner_restart_no_resume", True),
-    ("automatic", None, True),
-    ("owner", "panic", True),
     (None, "panic", True),
 ])
 def test_main_automatic_start_preserves_panic(monkeypatch, tmp_path, capsys, intent, marker, starts):

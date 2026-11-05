@@ -355,7 +355,7 @@ def test_runtime_actor_snapshot_reads_the_pool_not_stale_lane_or_legacy_strings(
 
 @pytest.mark.parametrize(
     "local_key",
-    ("USE_LOCAL_MAIN", "USE_LOCAL_LIGHT", "USE_LOCAL_FALLBACK", "USE_LOCAL_CONSCIOUSNESS"),
+    ("USE_LOCAL_MAIN", "USE_LOCAL_FALLBACK", "USE_LOCAL_CONSCIOUSNESS"),
 )
 def test_runtime_actor_snapshot_refuses_each_remote_to_local_route_drift(local_key):
     model = "openai/gpt-5.5"

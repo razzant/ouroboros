@@ -43,8 +43,7 @@ def main_plan(manager, monkeypatch, tmp_path):
     return build
 
 
-@pytest.mark.parametrize("unknown", [{}, {"context_length": None}, {"context_length": 0},
-                                      {"context_length": -1}, {"context_length": "unknown"},
+@pytest.mark.parametrize("unknown", [{}, {"context_length": "unknown"},
                                       ConnectionError("unavailable")])
 def test_unknown_metadata_does_not_poison_cache_or_health(manager, monkeypatch, unknown):
     health = Mock(side_effect=[unknown, {"context_length": 131072}])

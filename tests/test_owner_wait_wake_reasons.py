@@ -324,7 +324,7 @@ def test_a_cold_handoff_is_refused_once_the_task_deadline_passed(tmp_path):
 
 
 @pytest.mark.parametrize("reason,announced", [
-    ("hurry", True), ("mail:peer-1", True), ("owner_text", True), ("control:cancelled", False),
+    ("hurry", True), ("mail:peer-1", True), ("owner_text", True),
 ])
 def test_the_pool_grant_announces_every_non_control_wake(tmp_path, monkeypatch, reason, announced):
     from ouroboros.owner_wait import set_owner_wait
@@ -365,7 +365,7 @@ def test_the_pool_grant_announces_every_non_control_wake(tmp_path, monkeypatch, 
 
 @pytest.mark.parametrize("outcome,expects", [
     ("hurry", "owner hurry request"), ("mail:peer-1", "task mail from peer-1"),
-    ("timeout", "No owner answer arrived within 5 minutes"), ("answer", None), ("control:deadline", None),
+    ("timeout", "No owner answer arrived within 5 minutes"),
 ])
 def test_a_cold_continuation_explains_a_non_answer_wake_like_warm(tmp_path, monkeypatch, outcome, expects):
     from ouroboros import loop

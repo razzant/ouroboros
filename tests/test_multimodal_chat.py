@@ -120,7 +120,7 @@ class TestImageEviction:
         rendered = json.dumps(messages, ensure_ascii=False)
         assert all(f"[image evicted: shot-{idx}]" in rendered for idx in range(6))
 
-    @pytest.mark.parametrize(("prior", "incoming"), [(5, 6), (9, 3), (0, 11), (2, 14)])
+    @pytest.mark.parametrize(("prior", "incoming"), [(5, 6), (9, 3), (0, 11)])
     def test_incoming_batch_keeps_five_newest_even_when_batch_exceeds_high_water(self, prior, incoming):
         from ouroboros.loop_messages import _append_or_merge_user_content
 

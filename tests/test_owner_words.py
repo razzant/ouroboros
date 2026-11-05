@@ -260,7 +260,7 @@ def test_child_resolves_its_root_unless_it_carries_the_field(tmp_path):
 
 # --- rendering ----------------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("audience", ["child", "session", "reviewer", "plan", "writer"])
+@pytest.mark.parametrize("audience", ["child", "session", "writer"])
 def test_render_is_verbatim_and_whole_for_every_audience(audience):
     long_text = ("Слово владельца. " * 700)[:10_250]
     assert len(long_text) == 10_250

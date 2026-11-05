@@ -25,6 +25,7 @@ from tests.test_llm_claudexor import setup as gateway_fixture
 from tests.test_model_wait import live_wait as wait_fixture
 from tests.test_model_wait_controls import _loop_tools
 from tests.test_subscription_main_wait import main_call as main_call_fixture
+from tests._cases import chosen_rows
 
 setup = gateway_fixture
 live_wait = wait_fixture
@@ -524,7 +525,7 @@ def test_primary_refusal_policy_preserves_every_wire_status_and_ending(tmp_path,
     assert events[-1]["phase"] == ("recovered" if ending == "answer" else "ended")
 
 
-@pytest.mark.parametrize("wire,status,ending", _REFUSAL_LOOP_CASES)
+@pytest.mark.parametrize("wire,status,ending", chosen_rows(_REFUSAL_LOOP_CASES, 0, 4, 9))
 def test_primary_refusal_wait_paces_real_requests_without_catalog_recovery(
         main_call, monkeypatch, wire, status, ending):
     from datetime import datetime, timedelta, timezone

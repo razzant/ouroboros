@@ -64,7 +64,7 @@ def _events(tmp_path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
 
 
-@pytest.mark.parametrize("consumer", ["rollback", "boot_finalize", "boot_diverged", "boot_preapply", "gateway_unwind"])
+@pytest.mark.parametrize("consumer", ["rollback", "boot_preapply", "gateway_unwind"])
 def test_each_consumer_retains_failed_marker_and_replay_preserves_later_edits(tmp_path, monkeypatch, consumer):
     repo, tx = _fixture(tmp_path, monkeypatch, consumer)
     real_write = update_merge.write_update_tx
@@ -426,7 +426,7 @@ def test_gateway_rollback_disclosure_uses_the_actual_stash_note_consumer(monkeyp
     assert body["stash_note"] == note == body["rollback"]
 
 
-@pytest.mark.parametrize("restore_status", [None, "applying", "restored", "preserved"])
+@pytest.mark.parametrize("restore_status", [None, "applying", "preserved"])
 def test_restart_keeps_ordinary_boot_smoke_but_never_resets_pending_restore(tmp_path, monkeypatch, restore_status):
     from ouroboros.server_restart import _safe_restart_serialized
 

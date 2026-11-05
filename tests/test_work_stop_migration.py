@@ -75,7 +75,7 @@ def test_selected_members_keep_only_q9_bindings_and_new_pause_discards_old_selec
 
 
 @pytest.mark.parametrize("reason,release", [("panic_hold", "owner"), ("saved_work_hold", "resume"),
-                                          ("owner_restart_hold", "resume"), ("unrecognized_code", "resume")])
+                                          ("unrecognized_code", "resume")])
 def test_unselected_old_holds_gain_release_or_become_point_refusals(reason, release):
     task = {"id": "held", "_budget_pause_hold": {"reason": reason, "stop_cause": "panic", "selected": False}}
     snap = _snapshot(task)

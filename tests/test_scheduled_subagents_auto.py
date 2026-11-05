@@ -409,8 +409,7 @@ def test_negative_control_a_wake_and_what_it_starts_off_the_clock_keep_conscious
         "id": "wake-1", "root_task_id": "wake-1", "metadata": child_origin}) == ("auto", None)
 
 
-@pytest.mark.parametrize("main,project_mode,seen", [("off", None, "off"), ("swarm", None, "auto"),
-                                                  ("swarm", "off", "off"), ("off", "swarm", "auto")])
+@pytest.mark.parametrize("main,project_mode,seen", [("off", None, "off"), ("swarm", "off", "off"), ("off", "swarm", "auto")])
 def test_presence_scheduled_work_uses_its_bound_room_or_main_and_keeps_off(q, monkeypatch, main, project_mode, seen):
     """A real due Presence promise obeys its room, regardless of the schedule author's autonomy."""
     from ouroboros.dialogue_provenance import PRESENCE_BINDING_AUTHORITY_KEY

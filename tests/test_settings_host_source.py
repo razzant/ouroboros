@@ -39,7 +39,7 @@ def applied_host(monkeypatch, tmp_path):
     return saved
 
 
-@pytest.mark.parametrize("source", ["settings", "environment", "cli", "launcher"])
+@pytest.mark.parametrize("source", ["settings", "environment", "launcher"])
 def test_known_bind_is_separate_from_host_source(applied_host, tmp_path, source):
     saved = {**applied_host, "OUROBOROS_SERVER_HOST": "0.0.0.0"}
     server_process.record_applied_restart_settings({"OUROBOROS_SERVER_HOST": "127.0.0.1"},

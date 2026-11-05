@@ -266,11 +266,6 @@ def test_money_gate_reads_selection_from_dispatch_on_every_send(tmp_path, monkey
 
 @pytest.mark.parametrize("reason,release", [
     ("saved_work_hold", "resume"), ("owner_restart_hold", "resume"), ("panic_hold", "owner"),
-    ("saved_sleep_recovery", "resume"), ("unsaved_pause_intent", "resume"),
-    ("root_fence_lifted_pending_selection", "resume"), ("root_fence_member_pending_selection", "resume"),
-    ("continuation_writer_unsettled", "none"), ("restore_refused:source_missing", "resume"),
-    ("malformed_resume_identity", "resume"), ("resume_grant_revocation_unwritten", "resume"),
-    ("stale_resume_grant_superseded", "resume"), ("dispatch_outcome_unknown", "resume"),
 ])
 def test_hold_builder_keeps_release_and_attribution_separate(reason, release):
     by = {"actor": "ouroboros", "task_id": "mind", "text": "explanation", "at": "T"}

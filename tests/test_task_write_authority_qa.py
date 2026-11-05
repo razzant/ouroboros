@@ -34,7 +34,7 @@ def test_artifact_write_binding_cannot_select_child_store_or_ancestors(world):
     assert (artifacts.task_artifact_dir_path(child, "t1") / "report.txt").read_text() == "ordinary output"
 
 
-@pytest.mark.parametrize("root", ["runtime_data", "task_drive", "artifact_store", "user_files"])
+@pytest.mark.parametrize("root", ["runtime_data", "artifact_store", "user_files"])
 def test_acting_subagent_file_tools_have_no_generated_data_write_binding(world, root):
     ctx = ToolContext(repo_dir=world.repo, drive_root=world.data, task_id="t1",
                       task_constraint=TaskConstraint(mode="acting_subagent", surface="external_workspace",

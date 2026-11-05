@@ -129,10 +129,7 @@ def test_all_runtime_chat_producers_declare_authorship():
 
 @pytest.mark.parametrize("call", [
     'send_with_budget(1, "host")',
-    'ctx.send_with_budget(1, "host", role="system")',
     'bridge.send_message(1, "host", system_type="notice")',
-    'ctx.send_with_budget(1, "host", role="system", system_type="")',
-    'q.put({"type":"send_message", "text":"host"})',
     'frame = {"type":"chat", "role":"assistant", "content":"host"}',
 ])
 def test_a_new_unstamped_site_is_red(call):

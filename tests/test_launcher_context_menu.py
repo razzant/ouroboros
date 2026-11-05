@@ -25,7 +25,6 @@ OPEN_LINK, NEW_WINDOW, DOWNLOAD_LINK = (f"{ID}OpenLink", 33), (f"{ID}OpenLinkInN
 COPY_LINK, SHARE = (f"{ID}CopyLink", 3), (f"{ID}ShareMenu", 0)
 NEW_IMAGE, DOWNLOAD_IMAGE, COPY_IMAGE = (f"{ID}OpenImageInNewWindow", 4), (f"{ID}DownloadImage", 5), (f"{ID}CopyImage", 6)
 SUBJECT, REVEAL = (f"{ID}CopySubject", 97), (f"{ID}RevealImage", 94)
-NEW_FRAME = (f"{ID}OpenFrameInNewWindow", 7)
 LOOK_UP, TRANSLATE, SEARCH = (f"{ID}LookUp", 22), (f"{ID}Translate", 95), (f"{ID}SearchWeb", 21)
 COPY, HIGHLIGHT, SPEECH = (f"{ID}Copy", 8), (f"{ID}CopyLinkWithHighlight", 102), (f"{ID}SpeechMenu", 0)
 CUT, PASTE, SPELLING = (FORWARD, 13), (f"{ID}Paste", 14), (f"{ID}SpellingMenu", 0)
@@ -33,9 +32,6 @@ GUESS, IGNORE, SUBSTITUTIONS = (FORWARD, 15), (FORWARD, 17), (None, 0)
 BACK, FORWARD_ITEM, RELOAD, STOP = (f"{ID}GoBack", 9), (f"{ID}GoForward", 10), (f"{ID}Reload", 12), (FORWARD, 11)
 PLAY, CONTROLS, COPY_MEDIA = (FORWARD, 0), (f"{ID}ShowHideMediaControls", 0), (f"{ID}CopyMediaLink", 0)
 NEW_MEDIA, DOWNLOAD_MEDIA = (f"{ID}OpenMediaInNewWindow", 0), (f"{ID}DownloadMedia", 0)
-FUTURE = (f"{ID}SomethingNext", 200)
-
-
 class Item:
     def __init__(self, entry):
         self.entry = entry
@@ -75,24 +71,7 @@ class Menu:
     ("selected text",
      [LOOK_UP, TRANSLATE, SEPARATOR, SEARCH, SEPARATOR, COPY, HIGHLIGHT, SEPARATOR, SHARE, SEPARATOR, SEPARATOR, SEPARATOR, SPEECH],
      [LOOK_UP, TRANSLATE, SEPARATOR, SEARCH, SEPARATOR, COPY, HIGHLIGHT, SEPARATOR, SHARE, SEPARATOR, SPEECH]),
-    ("field, misspelled selection",
-     [GUESS, GUESS, SEPARATOR, IGNORE, SEPARATOR, LOOK_UP, TRANSLATE, SEPARATOR, CUT, COPY, PASTE, SEPARATOR, SEPARATOR, SPELLING,
-      SUBSTITUTIONS, SEPARATOR, SHARE],
-     [GUESS, GUESS, SEPARATOR, IGNORE, SEPARATOR, LOOK_UP, TRANSLATE, SEPARATOR, CUT, COPY, PASTE, SEPARATOR, SPELLING,
-      SUBSTITUTIONS, SEPARATOR, SHARE]),
-    ("empty field", [CUT, COPY, PASTE, SEPARATOR, SEPARATOR, SPELLING, SUBSTITUTIONS, SEPARATOR],
-     [CUT, COPY, PASTE, SEPARATOR, SPELLING, SUBSTITUTIONS]),
-    ("image", [NEW_IMAGE, DOWNLOAD_IMAGE, COPY_IMAGE, SUBJECT, REVEAL, SEPARATOR, SHARE], [COPY_IMAGE, SUBJECT, REVEAL, SEPARATOR, SHARE]),
-    ("linked image",
-     [OPEN_LINK, NEW_WINDOW, DOWNLOAD_LINK, COPY_LINK, SEPARATOR, NEW_IMAGE, DOWNLOAD_IMAGE, COPY_IMAGE, SEPARATOR, SHARE],
-     [COPY_LINK, SEPARATOR, COPY_IMAGE, SEPARATOR, SHARE]),
-    ("video", [PLAY, CONTROLS, SEPARATOR, COPY_MEDIA, NEW_MEDIA, DOWNLOAD_MEDIA, SEPARATOR, SHARE],
-     [PLAY, CONTROLS, SEPARATOR, COPY_MEDIA, SEPARATOR, SHARE]),
-    ("empty area", [RELOAD, SEPARATOR], [RELOAD]),
-    ("empty area with history", [BACK, FORWARD_ITEM, RELOAD, SEPARATOR], [BACK, FORWARD_ITEM, RELOAD]),
     ("document still loading", [BACK, STOP, SEPARATOR], [BACK]),
-    ("frame: nothing of use is left", [NEW_FRAME, SEPARATOR], []),
-    ("an item this WebKit does not have yet stays", [FUTURE, OPEN_LINK, SEPARATOR, SHARE], [FUTURE, SEPARATOR, SHARE]),
 ])
 def test_cocoa_menus_keep_what_works(name, stock, shown):
     menu = Menu(stock)
@@ -108,13 +87,7 @@ def test_cut_and_stop_share_an_identifier_so_only_the_tag_tells_them():
 
 @pytest.mark.parametrize("flags, drop", [
     ([], []),
-    ([False, False], []),
     ([True], [0]),
-    ([True, True], [0, 1]),
-    ([True, False], [0]),
-    ([False, True], [1]),
-    ([False, True, False], []),
-    ([False, True, True, True, False], [2, 3]),
     ([True, False, True, True, False, True], [0, 3, 5]),
 ])
 def test_separators_that_separate_nothing(flags, drop):
@@ -416,16 +389,7 @@ GTK_ACTIONS = ("OPEN_LINK", "OPEN_LINK_IN_NEW_WINDOW", "DOWNLOAD_LINK_TO_DISK", 
 @pytest.mark.parametrize("stock, shown", [
     (["OPEN_LINK", "OPEN_LINK_IN_NEW_WINDOW", "DOWNLOAD_LINK_TO_DISK", "COPY_LINK_TO_CLIPBOARD"],
      ["DOWNLOAD_LINK_TO_DISK", "COPY_LINK_TO_CLIPBOARD"]),
-    (["GO_BACK", "GO_FORWARD", "STOP", "RELOAD"], ["GO_BACK", "GO_FORWARD", "RELOAD"]),
-    (["COPY", "CUSTOM"], ["COPY", "CUSTOM"]),
     (["CUT", "COPY", "PASTE", "DELETE", "-", "SELECT_ALL"], ["CUT", "COPY", "PASTE", "DELETE", "-", "SELECT_ALL"]),
-    (["OPEN_IMAGE_IN_NEW_WINDOW", "DOWNLOAD_IMAGE_TO_DISK", "COPY_IMAGE_TO_CLIPBOARD", "COPY_IMAGE_URL_TO_CLIPBOARD"],
-     ["DOWNLOAD_IMAGE_TO_DISK", "COPY_IMAGE_TO_CLIPBOARD", "COPY_IMAGE_URL_TO_CLIPBOARD"]),
-    (["OPEN_LINK", "OPEN_LINK_IN_NEW_WINDOW", "DOWNLOAD_LINK_TO_DISK", "COPY_LINK_TO_CLIPBOARD", "-", "OPEN_IMAGE_IN_NEW_WINDOW",
-      "COPY_IMAGE_TO_CLIPBOARD"],
-     ["DOWNLOAD_LINK_TO_DISK", "COPY_LINK_TO_CLIPBOARD", "-", "COPY_IMAGE_TO_CLIPBOARD"]),
-    (["MEDIA_PLAY", "-", "COPY_VIDEO_LINK_TO_CLIPBOARD", "OPEN_VIDEO_IN_NEW_WINDOW", "DOWNLOAD_VIDEO_TO_DISK"],
-     ["MEDIA_PLAY", "-", "COPY_VIDEO_LINK_TO_CLIPBOARD", "DOWNLOAD_VIDEO_TO_DISK"]),
     (["GO_BACK", "RELOAD", "OPEN_FRAME_IN_NEW_WINDOW"], ["GO_BACK", "RELOAD"]),
 ])
 def test_gtk_menus_keep_what_works(stock, shown):

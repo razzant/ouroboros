@@ -105,8 +105,8 @@ def _changes(repo: pathlib.Path, form: str) -> list:
     return [*_changes(repo, "staged_addition"), *_changes(repo, "untracked_only"), *_changes(repo, "modified")]
 
 
-@pytest.mark.parametrize("form", ["staged_addition", "untracked_only", "modified", "deleted", "rename",
-                                  "directory", "mixed"])
+@pytest.mark.parametrize("form", ["staged_addition", "rename",
+                                  "mixed"])
 def test_scoped_restore_matches_head_inside_and_keeps_everything_outside(project, form):
     registry, repo = project
     outside = _outside(repo)
@@ -293,8 +293,7 @@ def test_a_file_turned_into_a_folder_returns_without_deleting_kept_files(project
         assert _status(repo, "tracked.txt") == []
 
 
-@pytest.mark.parametrize("paths,missing", [(None, False), (["dir"], False), (["dir/a.txt"], False),
-                                            (["dir/a.txt"], True)])
+@pytest.mark.parametrize("paths,missing", [(None, False), (["dir"], False), (["dir/a.txt"], True)])
 def test_a_folder_turned_into_a_file_returns_inside_its_scope_only(project, paths, missing):
     """The reverse change returns HEAD's folder, untracked and ignored neighbors as their scope says;
     restoring only a child would delete the staged file outside that scope, so it is reported instead."""

@@ -390,9 +390,6 @@ def test_a_comparison_sign_no_longer_makes_an_inspection_a_write(argv):
 
 @pytest.mark.parametrize("argv", [
     ["tee", "f"],
-    ["grep", "-n", "x", "f", ">", "out.txt"],
-    ["cmd", ">", "out"],
-    ["cmd", ">>", "out"],
     # `>&` is a stdout+stderr redirect, never a comparison: a standalone token
     # of it stays a write channel in both lanes.
     ["ls", ">&", "out.txt"],

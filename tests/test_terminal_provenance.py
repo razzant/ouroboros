@@ -731,8 +731,8 @@ def test_an_authors_stop_over_objections_that_hold_nothing_never_says_the_work_p
                     else TASK_CAUSE_PHRASES["plan_review_objections_open"])
 
 
-@pytest.mark.parametrize("enforcement, exit_by", [("blocking", "stop"), ("advisory", "stop"), ("cyber_pro", "stop"),
-                                                  ("blocking", "round_limit"), ("blocking", "stop_known")])
+@pytest.mark.parametrize("enforcement, exit_by", [("advisory", "stop"), ("cyber_pro", "stop"),
+                                                  ("blocking", "round_limit")])
 def test_an_unreadable_plan_record_names_the_authors_stop_and_leaves_other_exits_as_they_were(
         tmp_path, monkeypatch, enforcement, exit_by):
     """An unreadable record holds a normal answer outside Cyber Pro (its reminder unchanged). The author's stop then

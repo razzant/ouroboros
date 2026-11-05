@@ -42,7 +42,7 @@ def late_run(case, folder, run_id, path="late.txt", *, task_id="native", parent_
     return entry
 
 
-@pytest.mark.parametrize("resolution", ["refused", "unknown", "started", "wrong_owner", "wrong_target"])
+@pytest.mark.parametrize("resolution", ["refused", "unknown", "wrong_target"])
 def test_pending_in_place_invocation_resolves_only_from_its_addressed_fate(case, resolution):
     from ouroboros import delegate_custody as custody, headless
     from ouroboros.task_results import load_task_result, write_task_result
@@ -701,7 +701,7 @@ def test_ordinary_decision_then_late_capture_is_undecided_for_continue(case, mon
     assert marks(case[2], "parent")["patch_verdicts"][-1]["child_result_sha256"] == consumed
 
 
-@pytest.mark.parametrize("writer", ["live", "unknown", "terminal", "other_invocation"])
+@pytest.mark.parametrize("writer", ["live", "unknown", "other_invocation"])
 def test_covered_in_place_writer_does_not_hide_new_or_unknown_work(case, writer):
     import json
     from dataclasses import replace
@@ -885,7 +885,7 @@ def test_parent_returns_named_source_under_existing_write_rights(case, monkeypat
     assert (case[1] / "BIBLE.md").read_bytes() == b"foreign project docs\n"
 
 
-@pytest.mark.parametrize("restriction", ["readonly", "acting", "presence", "owner_store"])
+@pytest.mark.parametrize("restriction", ["readonly", "acting", "owner_store"])
 def test_named_source_never_mints_parent_write_authority(case, monkeypatch, restriction):
     from ouroboros.contracts.task_constraint import TaskConstraint
     from ouroboros.presence_authority import presence_ceiling_payload

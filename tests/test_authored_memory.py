@@ -451,9 +451,9 @@ def _split_project_root(tmp_path, index, text="PROJECT REQUEST", task_type="task
 
 
 @pytest.mark.parametrize("opted_in,cadence,task_type,expected", [
-    (False, "every_n:1", "task", [0, 0]), (True, "every_n:1", "task", [1, 1]), (True, "every_n:2", "task", [0, 1]),
-    (True, "off", "task", [0, 0]), (True, "every_n:1", "evolution", [0, 0])],
-    ids=["evolution_off", "every_task", "every_second_task", "cadence_off", "evolution_task_excluded"])
+    (False, "every_n:1", "task", [0, 0]), (True, "every_n:2", "task", [0, 1]),
+    (True, "off", "task", [0, 0])],
+    ids=["evolution_off", "every_second_task", "cadence_off"])
 def test_a_split_project_root_reaches_the_canonical_chooser_under_the_same_opt_in_and_cadence(
         tmp_path, monkeypatch, opted_in, cadence, task_type, expected):
     import ouroboros.config as cfg

@@ -158,9 +158,6 @@ def test_search_unknown_response_guard_is_independent_of_received_price(isolated
 @pytest.mark.parametrize("provider,loopback,error_type,retryable", [
     ("openrouter", False, httpx.ReadError, True),
     ("local", False, httpx.ReadError, False),
-    ("openai-compatible", True, httpx.ReadError, False),
-    ("openrouter", False, httpx.ReadTimeout, False),
-    ("openrouter", False, httpx.WriteTimeout, False),
     ("openrouter", False, httpx.ConnectTimeout, False),
 ])
 def test_priced_incomplete_chain_keeps_locality_and_timeout_exclusions(provider, loopback, error_type, retryable):

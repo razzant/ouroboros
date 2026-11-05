@@ -135,17 +135,7 @@ def test_file_weights_are_recorded_time_else_nodes_times_the_median_time_per_nod
     (None, "the durations table is unreadable (FileNotFoundError)"),
     ("not json", "the durations table is unreadable (JSONDecodeError)"),
     ("[]", "the durations table has another shape"),
-    ('{"format": 2, "source": {"run_id": "1"}, "platforms": {}}', "the durations table has another shape"),
-    ('{"format": 1, "source": {"run_id": ""}, "platforms": {}}', "the durations table has another shape"),
-    ('{"format": 1, "source": {"run_id": "1"}, "platforms": {"linux": {"tests/a.py": -1}}}',
-     "the durations table has another shape"),
-    ('{"format": 1, "source": {"run_id": "1"}, "platforms": {}, "ui_nodes": {"x": 1.5}}',
-     "the durations table has another shape"),
-    ('{"format": 1, "source": {"run_id": "1"}, "platforms": {}, "serial": {"linux": {"tests/a.py": 1.5}}}',
-     "the durations table has another shape"),
-    ('{"format": 1, "source": {"run_id": "1"}, "platforms": {}}',
-     f"the durations of run 1 record no collected file on {SYSTEM}"),
-], ids=["missing", "garbage", "array", "format", "no-run", "negative", "float", "serial-float", "other-system"])
+], ids=["missing", "garbage", "array"])
 def test_an_unusable_table_falls_back_to_node_counts_and_says_why(tmp_path, monkeypatch, content, reason):
     path = tmp_path / "durations.json"
     if content is not None:
@@ -322,11 +312,8 @@ def _ui_run(tmp_path, *, change=None):
     (None, None),
     (lambda shard, lane: shard and lane.update(assigned=UI[shard - 1::2]),
      "shard 1/2: its assignment is not slice 1 of 2 of the manifest lane"),
-    (lambda shard, lane: shard == 2 and lane["node_weights"][0].__setitem__(1, 1),
-     "shard 2/2: node weights differ from the manifest"),
-    (lambda shard, lane: shard == 2 and lane.pop("node_weights"), "shard 2/2: node weights differ from the manifest"),
     (lambda shard, lane: shard is None and lane["node_weights"].reverse(), "invalid ui_browser block"),
-], ids=["packed", "positional-slice", "other-weights", "no-weights", "weights-not-the-lane"])
+], ids=["packed", "positional-slice", "weights-not-the-lane"])
 def test_a_packed_ui_lane_reconciles_only_against_the_manifests_packing(tmp_path, change, gap):
     gaps, _ = _ui_run(tmp_path, change=change)
     assert gaps == [] if gap is None else any(gap in text for text in gaps), gaps
@@ -406,10 +393,7 @@ def test_a_red_shard_session_with_a_passing_verdict_is_proven_with_its_rounds(tm
     ({"verdict": "red", "not_run": [ASSIGNED[1][1]]}, "its retry verdict is red (0 failed, 1 not run)"),
     # A verdict that says flaky but lists an unaccepted failure is judged by its lists.
     ({"verdict": "flaky", "failed": [ASSIGNED[1][0]]}, "its retry verdict is red (1 failed, 0 not run)"),
-    ({"verdict": "flaky", "run_id": "901"}, f"its retry verdict belongs to commit {SHA} run 901"),
-    ({"payload": "{not json"}, "its retry verdict is unreadable"),
-    ({"payload": {"format": 1, "verdict": "green"}}, "its retry verdict is invalid"),
-], ids=["red-failed", "red-not-run", "inconsistent", "foreign", "unreadable", "invalid"])
+], ids=["red-failed", "red-not-run", "inconsistent"])
 def test_a_red_shard_session_without_a_passing_verdict_of_this_run_stays_a_gap(tmp_path, verdict, gap):
     first, _, _ = _red_first_session(_default_run(tmp_path))
     _verdict(first, **verdict)

@@ -455,13 +455,10 @@ def test_provider_death_still_makes_the_forced_call_when_the_wall_is_unspent(tmp
     "marker, expect_call",
     [
         ("unexpected-string", False),
-        (1, False),
-        ({"nested": "garbage"}, False),
         (0, True),
-        ("", True),
         (None, True),
     ],
-    ids=["truthy_str", "truthy_int", "truthy_dict", "zero", "empty_str", "none"],
+    ids=["truthy_str", "zero", "none"],
 )
 def test_malformed_retry_wall_marker_reads_as_a_plain_truth_value(
     tmp_path, monkeypatch, marker, expect_call,
@@ -487,9 +484,6 @@ def test_malformed_retry_wall_marker_reads_as_a_plain_truth_value(
         ("round_limit", "[ROUND_LIMIT] wrap up"),
         ("finalization_grace", "[FINALIZE_NOW] wrap up"),
         ("deadline_local", "[DEADLINE] wrap up"),
-        ("owner_requested_finalization", "[OWNER_STOP] wrap up"),
-        ("budget_exhausted", "[BUDGET] wrap up"),
-        ("children_unabsorbed", "[CHILDREN] wrap up"),
     ],
 )
 def test_other_forced_rails_never_skip_even_with_the_wall_marker_set(

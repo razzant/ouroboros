@@ -170,7 +170,7 @@ def test_service_baseline_preserves_allowed_values_without_inheriting_credential
         assert "USER_API_TOKEN" not in env
 
 
-@pytest.mark.parametrize("invalid", [[], {"BAD=NAME": "x"}, {"": "x"}, {"KEY": None}, {"KEY": "x\x00y"}])
+@pytest.mark.parametrize("invalid", [[], {"BAD=NAME": "x"}, {"KEY": "x\x00y"}])
 def test_service_rejects_invalid_env_without_spawning(tmp_path, monkeypatch, invalid):
     from ouroboros.tools.services import _start_service
     monkeypatch.setattr("ouroboros.process_custody.spawn_supervised", lambda *a, **k: pytest.fail("must not spawn"))

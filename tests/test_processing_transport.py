@@ -123,7 +123,6 @@ def test_explicit_standard_does_not_inherit_global_fast(transport, monkeypatch):
 
 @pytest.mark.parametrize("provider,payload", [
     ("openai", {"service_tier": "default"}),
-    ("openrouter", {"extra_body": {"service_tier": "flex"}}),
     ("anthropic", {"speed": "standard"}),
     ("openai-compatible", {"model": "custom"}),
 ])

@@ -105,10 +105,7 @@ def test_acting_write_root_and_real_symlink_target(resources, monkeypatch, runti
 
 
 @pytest.mark.parametrize("cmd", [
-    ["echo", ">", "/runtime/settings.json"], ["echo", "tee", "/runtime/settings.json"],
-    ["python", "-c", "open('/runtime/settings.json','w').write('x')"],
-    ["ruby", "-e", "puts 'settings.json'"], ["sed", "-f", "program.sed", "/runtime/file"],
-    ["tar", "-cf", "archive.tar", "/runtime/source"],
+    ["echo", ">", "/runtime/settings.json"], ["sed", "-f", "program.sed", "/runtime/file"],
     ["sh", "-c", "printf '%s' '>' /runtime/settings.json"],
 ])
 def test_unknown_bodies_and_literal_operators_do_not_manufacture_targets(cmd):

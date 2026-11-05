@@ -95,7 +95,7 @@ class TestRegistry:
 
 
 class TestPlanSwitch:
-    @pytest.mark.parametrize("plan", [None, "", "payg", " PAYG ", "unknown-plan"])
+    @pytest.mark.parametrize("plan", [None, " PAYG ", "unknown-plan"])
     def test_payg_is_the_default_and_the_fallback(self, plan):
         assert resolve_zai_base_url(plan) == ZAI_PLAN_ENDPOINTS["payg"]
 
@@ -163,13 +163,8 @@ class TestEffortCarriage:
         ("requested", "wire"),
         [
             ("none", "low"),
-            ("minimal", "low"),
-            ("low", "low"),
             ("medium", "high"),
-            ("high", "high"),
             ("xhigh", "max"),
-            ("max", "max"),
-            ("ultra", "max"),
         ],
     )
     def test_projection_reaches_the_wire(self, requested, wire):

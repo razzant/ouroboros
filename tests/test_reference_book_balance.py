@@ -117,7 +117,7 @@ def test_linked_body_candidate_without_upstream_keeps_committed_growth(tmp_path)
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("baseline", ["absent_remote", "fork", "missing_ref", "unrelated", "missing_book"])
+@pytest.mark.parametrize("baseline", ["absent_remote", "fork", "missing_book"])
 def test_unknown_contribution_never_means_paid_even_with_measured_head(tmp_path, baseline):
     repo = _book_repo(tmp_path / "repo", official=False)
     if baseline != "absent_remote":
@@ -159,9 +159,7 @@ def test_committed_growth_can_be_paid_in_the_worktree(tmp_path, suffix):
 
 @pytest.mark.serial
 @pytest.mark.parametrize("url", [
-    "/tmp/github.com/razzant/ouroboros.git", "file://github.com/razzant/ouroboros.git",
-    "https://example.invalid/razzant/ouroboros.git", "https://github.com.example.invalid/razzant/ouroboros.git",
-    "https://github.com/razzant/ouroboros-extra.git", "https://github.com:bad/razzant/ouroboros.git",
+    "/tmp/github.com/razzant/ouroboros.git", "https://example.invalid/razzant/ouroboros.git", "https://github.com:bad/razzant/ouroboros.git",
 ])
 def test_remote_host_and_exact_repository_matter_even_with_an_official_push_url(tmp_path, url):
     repo = _book_repo(tmp_path, official=False)

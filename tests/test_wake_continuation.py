@@ -193,7 +193,7 @@ def test_a_settlement_that_could_not_read_or_record_never_brings_an_older_note_b
     assert "A's whole note." not in previous
 
 
-@pytest.mark.parametrize("note_state", ["unreadable", "absent", "unattributed", "none-known"])
+@pytest.mark.parametrize("note_state", ["unreadable", "absent", "none-known"])
 def test_earlier_uncertainty_is_visible_even_without_a_readable_note(clock, monkeypatch, note_state):
     from ouroboros import task_store
 

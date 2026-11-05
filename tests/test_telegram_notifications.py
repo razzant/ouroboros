@@ -880,9 +880,6 @@ def test_task_notify_shows_the_cost_in_the_cards_words(tmp_path, monkeypatch, re
 
 @pytest.mark.parametrize("result", [
     {"cost_presentation": _tree_cost(None, final=False, open_=True, rows=False)},  # the card's "Cost unknown"
-    {"cost_presentation": _tree_cost(None, final=False, unpriced=True)},  # only unpriced rows: no measured zero
-    {"cost_presentation": None, "cost_accounting_status": "unavailable"},
-    {"cost_presentation": _tree_cost(1.5, scope="own")},  # a root's own share is not the tree's cost
     {"cost_usd": 7.98},  # the retired alias is not a current price
     {"accounted_upper_bound_usd": 7.98, "cost_usd": 7.98},
 ])

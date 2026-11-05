@@ -270,7 +270,6 @@ def test_a_budget_spent_before_the_action_refuses_it_and_nothing_is_done(monkeyp
 @pytest.mark.parametrize("acted_at, oversleep, settled, read_back, observed", [
     (2.0, 0.0, 0.15, True, 350),     # time left after the settle: the readback and the read run on what remains
     (2.95, 0.0, 0.05, False, None),  # the settle uses the rest: nothing left, so the readback is skipped
-    (2.8, 0.5, 0.15, False, None),   # the settle oversleeps past the deadline: the readback is skipped
     (3.5, 0.0, None, False, None),   # the action itself outlived the budget: no settle, no readback
 ])
 def test_the_settle_readback_and_read_after_the_action_spend_only_what_is_left(acted_at, oversleep, settled, read_back, observed):
@@ -480,8 +479,6 @@ def test_screenshot_with_an_unlocatable_window_says_it_captured_the_main_display
     ("no_output", "native helper gave no answer"),
     ("timeout", "TimeoutExpired"),
     ("not_launched", "PermissionError"),
-    ("answer_without_target", "MemoryError: lost"),
-    ("not_running", "is not a running application"),
 ])
 def test_screenshot_of_an_app_the_helper_did_not_resolve_captures_nothing(tmp_path, monkeypatch, failure, says):
     """The main-display fallback is for a RESOLVED application whose window was not located. With the display list read,

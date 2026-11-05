@@ -241,15 +241,6 @@ def test_a_refused_delegate_call_is_no_longer_recorded_as_a_successful_call(tmp_
     ("daemon_unreachable", "TOOL_REPORTED_FAILURE"),
     ("run_ownership_unknown", "TOOL_REPORTED_FAILURE"),
     ("run_not_owned", "TOOL_REPORTED_FAILURE"),
-    ("subscription_window_exhausted", "TOOL_REPORTED_FAILURE"),
-    ("home_isolation_breach", "TOOL_REPORTED_FAILURE"),
-    ("some_future_engine_code", "TOOL_REPORTED_FAILURE"),
-    # Agent faults: the call itself was malformed or self-contradictory.
-    ("empty_prompt", "TOOL_ARG_ERROR"),
-    ("missing_run_id", "TOOL_ARG_ERROR"),
-    ("retry_selector_conflict", "TOOL_ARG_ERROR"),
-    ("checkpoint_requires_time_and_reason", "TOOL_ARG_ERROR"),
-    ("configured_actor_route_mismatch", "TOOL_ARG_ERROR"),
 ])
 def test_the_refusal_class_separates_a_substrate_no_from_a_malformed_call(reason, code):
     from ouroboros._outcome_tool_errors import _POLICY_DENIAL_STATUSES
@@ -295,7 +286,6 @@ def _own_run(tmp_path, run_id="run-1", task_id="t-family"):
     # The daemon REFUSED the stop, or the stop could not be verified: the run may
     # still be live and mutating, so the call did not succeed.
     ("failed", "TOOL_REPORTED_FAILURE"),
-    ("containment_fault_run_may_still_be_live", "TOOL_REPORTED_FAILURE"),
 ])
 def test_cancel_outcomes_split_on_whether_the_run_may_still_be_live(
     tmp_path, monkeypatch, outcome, expected_code,

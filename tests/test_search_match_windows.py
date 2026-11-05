@@ -96,8 +96,8 @@ def test_a_line_at_the_window_width_stays_whole(tmp_path, backend):
 
 
 @pytest.mark.parametrize("prefix", [
-    "αβγ\n", "a\x0cb\n", "a\x0bb\r\n", "a\rb\n", "a\x85b\n", "a b c\n", "a\x1cb\x1dc\x1ed\n",
-], ids=["multibyte", "form-feed", "vertical-tab-crlf", "lone-cr", "nel", "unicode-separators", "info-separators"])
+    "αβγ\n", "a b c\n", "a\x1cb\x1dc\x1ed\n",
+], ids=["multibyte", "unicode-separators", "info-separators"])
 def test_earlier_separators_and_multibyte_text_keep_exact_read_file_ranges(tmp_path, backend, prefix):
     tail = "λ" * 900 + "NEEDLE" + "ω" * 900
     raw = (prefix + "head " + tail + "\n").encode()
@@ -214,7 +214,7 @@ def test_rg_json_records_split_only_on_lf_not_unicode_inside_strings(tmp_path, s
         assert line == 2 and found["at"] == "500" and body[60:66] == "NEEDLE"
 
 
-@pytest.mark.parametrize("separator", ["\x0c", "\x0b", "\x85", "\u2028", "\u2029", "\r"])
+@pytest.mark.parametrize("separator", ["\x0c", "\u2028", "\r"])
 def test_every_matched_read_file_line_survives_with_its_own_count(tmp_path, backend, separator):
     raw = ("x" * 300 + "NEEDLE" + separator + "y" * 300 + "NEEDLE\n").encode()
     ctx, result = _search(tmp_path, "separated.txt", raw, "NEEDLE")

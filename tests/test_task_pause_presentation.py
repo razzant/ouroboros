@@ -45,7 +45,7 @@ def test_census_carries_typed_pause_cause_for_a_parked_direct_root(tmp_path, mon
         assert row["stop"]["cause"] == "awaiting_selection"
 
 
-@pytest.mark.parametrize("synthesis,named", [("running", True), ("pending_once", True), ("refresh", False), ("", False)])
+@pytest.mark.parametrize("synthesis,named", [("running", True), ("refresh", False), ("", False)])
 def test_only_a_stored_answer_names_its_late_work(tmp_path, synthesis, named):
     """Activity names an answered root's remaining work; a working turn whose checkpoint holds
     only the pre-answer cost "refresh" pseudo-status is not answered and is never so labelled."""

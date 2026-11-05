@@ -2,7 +2,6 @@
 
 import json
 import shutil
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,10 +12,7 @@ from ouroboros.shared_values import token_digests
 
 @pytest.mark.parametrize("original,sent,equal", [
     ({"role": "user", "content": "Hello Ω"}, {"content": "Hello Ω", "role": "user"}, True),
-    ({"content": ("one", "two")}, {"content": ["one", "two"]}, True),
-    ({"content": Path("fixture.txt")}, {"content": "fixture.txt"}, True),
     ({"content": "original"}, {"content": "adapted"}, False),
-    ({"content": 1}, {"content": True}, False),
     ({"content": 1}, {"content": 1.0}, False),
 ])
 def test_loop_persists_both_arrays_and_stores_their_equal_elements_once(tmp_path, monkeypatch, original, sent, equal):

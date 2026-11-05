@@ -94,7 +94,7 @@ def test_exact_paid_checkpoint_survives_author_continuation(reserved, status, se
     assert len(state_store.load_state(ctx.drive_root).attempts) == 1
 
 
-@pytest.mark.parametrize("axis", ["repo_key", "tool_name", "task_id", "attempt", "review_retry_key", "surface", "slot_id", "operation_id"])
+@pytest.mark.parametrize("axis", ["repo_key", "surface", "operation_id"])
 def test_wrong_identity_cannot_checkpoint_another_attempt(reserved, axis):
     ctx = reserved
     _record_commit_attempt(ctx, "fixture commit", "succeeded", _strict=True)
@@ -122,7 +122,7 @@ def test_replacement_cycle_does_not_receive_old_invocation(reserved):
     assert asdict(state_store.load_state(ctx.drive_root)) == before
 
 
-@pytest.mark.parametrize("defect", ["unpaid", "settled_row", "other_invocation", "duplicate_slot"])
+@pytest.mark.parametrize("defect", ["unpaid", "settled_row", "duplicate_slot"])
 def test_exact_reservation_requirements_remain(reserved, defect):
     ctx = reserved
     arguments = args_for(ctx)

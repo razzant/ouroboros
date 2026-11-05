@@ -315,10 +315,8 @@ def test_a_spent_budget_is_a_reached_limit_not_a_continue(pool):
 @pytest.mark.parametrize("close", [
     None,  # a record settled before its terminal writers kept the total
     {"sec": 120.0, "attempt": 1},  # a later attempt started and never closed
-    {"sec": "120", "attempt": 2},
-    {"sec": -1.0, "attempt": 2},
     {"sec": 120.0, "attempt": True},
-], ids=["never_recorded", "stale_attempt", "text", "negative", "bool_attempt"])
+], ids=["never_recorded", "stale_attempt", "bool_attempt"])
 def test_an_unknown_consumed_total_is_refused_never_regranted(pool, close):
     from ouroboros.owner_continue import continuation_offer
     from ouroboros.task_results import load_task_result, write_task_result

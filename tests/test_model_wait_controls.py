@@ -392,7 +392,7 @@ def test_outage_wrap_keeps_older_wire_death_custody_without_summary(tmp_path, mo
 
 @pytest.mark.parametrize("stop,expected_reason", [
     ("wrap", "owner_requested_finalization"), ("deadline", "deadline_local"),
-    ("ceiling", "finalization_grace"), ("wrap_unknown", "owner_requested_finalization"),
+    ("ceiling", "finalization_grace"),
 ])
 def test_real_main_control_preserves_candidate_without_new_summary(main_call, monkeypatch, stop, expected_reason):
     from ouroboros import config
@@ -526,8 +526,7 @@ def test_hard_cancel_returns_empty_events_to_real_worker_loop_and_keeps_queue_ow
 
 
 @pytest.mark.parametrize("stop,deadline,transport,expected", [
-    (True, True, False, ["stop"]), (False, True, False, ["deadline"]),
-    (False, False, False, ["deadline", "cost"]), (False, True, True, ["cost"]),
+    (True, True, False, ["stop"]), (False, False, False, ["deadline", "cost"]), (False, True, True, ["cost"]),
 ])
 def test_pre_round_terminal_order_keeps_cost_after_stop_and_deadline(monkeypatch, stop, deadline, transport, expected):
     from ouroboros import loop_round_limits

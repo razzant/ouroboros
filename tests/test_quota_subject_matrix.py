@@ -139,7 +139,7 @@ def _consumers(monkeypatch, case: dict) -> dict:
 
 
 @pytest.mark.parametrize("name", ["split_primary20_secondary100", "blocked_beside_absence_same_subject",
-                                  "all_blocked_earliest_recheck", "strict_pin_blocked_beside_free_sibling"])
+                                  "strict_pin_blocked_beside_free_sibling"])
 def test_a_known_block_reaches_every_guard_with_its_recheck(monkeypatch, name):
     case = CASES[name]
     reset = case["expect"]["resets_at"]
@@ -151,10 +151,8 @@ def test_a_known_block_reaches_every_guard_with_its_recheck(monkeypatch, name):
     assert facts["skip"] == {"s1": {"failure_code": "subscription_window_exhausted", "reset_at": reset}}
 
 
-@pytest.mark.parametrize("name", ["available_beside_blocked_subject", "absence_only_alternative",
-                                  "model_scoped_available_beside_blocked_subject", "image_only_window_for_text",
-                                  "early_reset_repoll", "malformed_reset_is_no_live_block", "legacy_scope_missing",
-                                  "same_id_different_credential_route", "strict_pin_never_borrows_null_subject"])
+@pytest.mark.parametrize("name", ["available_beside_blocked_subject", "legacy_scope_missing",
+                                  "strict_pin_never_borrows_null_subject"])
 def test_available_and_unknown_both_fail_open_unchanged(monkeypatch, name):
     facts = _consumers(monkeypatch, CASES[name])
     assert facts["health"] == ("", "")

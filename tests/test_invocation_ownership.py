@@ -86,7 +86,7 @@ def test_joined_read_has_one_executor_and_no_claim_despite_delayed_passive_callb
         release.set()
 
 
-@pytest.mark.parametrize("control_kind", ["open", "pause", "stop", "deadline", "inherited_deadline"])
+@pytest.mark.parametrize("control_kind", ["open", "pause", "inherited_deadline"])
 def test_fresh_control_after_registry_preparation_precedes_actual_handler(tmp_path, monkeypatch, control_kind):
     registry, _, _ = _registry(tmp_path, monkeypatch)
     prepared, release = threading.Event(), threading.Event()

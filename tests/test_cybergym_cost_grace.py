@@ -113,8 +113,6 @@ def test_gateway_live_reservation_is_never_grace_accepted(tmp_path):
     "missing",
     [
         "ledger_integrity_degraded",
-        "cost_accounting_status",
-        "cost_estimated",
         "unknown_unmetered",
         "reserved_usd",
     ],

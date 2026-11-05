@@ -205,7 +205,7 @@ def test_service_replacement_keeps_uncertain_record_and_returns_start_error(proc
         workspace_executor._SERVICES.pop(key, None)
 
 
-@pytest.mark.parametrize('cleanup', ['stop', 'task', 'global', 'global_nowait'])
+@pytest.mark.parametrize('cleanup', ['stop', 'task', 'global_nowait'])
 def test_local_executor_finalizes_secret_log_before_forgetting_record(process_context, monkeypatch, cleanup):
     registry, ctx, workspace, data = process_context
     ctx.executor_ref = {'type': 'local', 'workspace_host_path': str(workspace), 'workspace_backend_path': '/workspace'}

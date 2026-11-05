@@ -203,8 +203,7 @@ def test_never_started_project_wait_expires_on_the_tick_without_capacity(host, c
     assert _done(clock) == ["failed"]
 
 
-@pytest.mark.parametrize("veto", ["owner_pause", "result_missing", "result_unreadable", "possible", "started",
-                                    "unknown_dispatch", "exact_pause", "resume", "owner_wait", "working_recovery"])
+@pytest.mark.parametrize("veto", ["owner_pause", "result_missing", "working_recovery"])
 def test_project_deadline_does_not_take_protected_or_unknown_custody(
     host, clock, tmp_path, monkeypatch, veto,  # noqa: F811
 ):

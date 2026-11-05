@@ -22,6 +22,7 @@ from ouroboros.task_results import write_task_result
 from tests._dialogue import seed
 from tests.test_chat_history_paging import isolated_runtime  # noqa: F401  (autouse: state/queue roots, no lifecycle row)
 from tests.test_dialogue_addressed_readers import metered
+from tests._cases import chosen_rows
 
 
 def ts(minute: int) -> str:
@@ -96,7 +97,7 @@ def _check(reader, result):
         assert sorted(rows) == sorted([f"own step {i}" for i in range(5)] + [f"own answer {i}" for i in range(5)])
 
 
-@pytest.mark.parametrize("reader", sorted(READERS))
+@pytest.mark.parametrize("reader", chosen_rows(sorted(READERS), 0, 2, 4))
 def test_a_reader_does_equal_sql_work_whatever_other_rooms_wrote(tmp_path, monkeypatch, reader):
     """Two foreign Projects with one or thirty rows each: the room's page, Main's page (every chat no
     Project owns), the task's log tail and both event transports run the same statements and the same

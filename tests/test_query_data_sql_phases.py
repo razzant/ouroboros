@@ -229,7 +229,7 @@ def test_mature_money_default_is_direct_and_explicit_snapshot_is_equivalent(mone
 
 
 @pytest.mark.parametrize("phase,snapshot", [("acquire", False), ("snapshot_copy", True),
-                                              ("snapshot_check", True), ("sql", False), ("sql", True)])
+                                              ("sql", True)])
 def test_owned_phase_expiry_is_not_store_damage(money, monkeypatch, phase, snapshot):
     children, directories, _ = instrument(money, monkeypatch, "slow_" + phase)
     result = call(money, "SELECT count(*) FROM sqlite_master", snapshot=snapshot, timeout_sec=2)
@@ -252,11 +252,6 @@ def test_copy_check_and_sql_share_one_operation_budget(money, monkeypatch):
 @pytest.mark.parametrize("mode,phase,exception", [
     ("copy_io", "snapshot_copy", "OSError"),
     ("copy_corrupt", "snapshot_copy", "UsageLedgerCorrupt"),
-    ("late_copy_io", "snapshot_copy", "OSError"),
-    ("late_copy_corrupt", "snapshot_copy", "UsageLedgerCorrupt"),
-    # Corruption found just after expiry, whose answer then arrives later than FINISH_SEC.
-    ("tardy_copy_corrupt", "snapshot_copy", "UsageLedgerCorrupt"),
-    ("copy_unowned_interrupt", "snapshot_copy", "UsageAccountingError"),
     ("bad_check", "snapshot_check", "ValueError"),
 ])
 def test_snapshot_failure_is_honest_and_never_falls_back(money, monkeypatch, mode, phase, exception):

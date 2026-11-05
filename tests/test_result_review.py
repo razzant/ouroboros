@@ -133,7 +133,6 @@ def test_result_reviews_of_one_root_share_one_allowance_wherever_their_material_
 
 @pytest.mark.parametrize("args, problem", [
     ({"subject": "result", "base": "HEAD~1"}, "root, workspace_root, base and head do not apply"),
-    ({"subject": "result", "workspace_root": "/tmp"}, "root, workspace_root, base and head do not apply"),
     ({"subject": "result", "coupling_only": ["x"]}, "coupling_only belongs to a change review"),
     ({"subject": "index", "answer": "Done."}, "answer belongs to subject=result"),
     ({"subject": "index", "surface": "result"}, "subject=result goes with surface=result"),

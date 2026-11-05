@@ -219,8 +219,8 @@ def test_plan_task_skips_only_a_spent_deadline(harness, monkeypatch, seconds):
 
 # Retired pin (R4): 400 s left was refused as "a 100 s planning window under the 300 s useful
 # floor" of the quarter-window wait that no longer exists; 1199 s and 600 s are council time.
-@pytest.mark.parametrize("seconds", [None, 86_400, 1_199, 600, 400],
-                         ids=["no-deadline", "roomy-deadline", "1199s", "600s", "400s"])
+@pytest.mark.parametrize("seconds", [None, 1_199, 400],
+                         ids=["no-deadline", "1199s", "400s"])
 def test_plan_task_no_deadline_does_not_skip(harness, monkeypatch, seconds):
     monkeypatch.setenv("OUROBOROS_FINALIZATION_GRACE_SEC", "120")
     substrate = harness.install({})

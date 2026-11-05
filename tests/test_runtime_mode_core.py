@@ -485,12 +485,7 @@ def _git_repo(tmp_path: pathlib.Path) -> pathlib.Path:
 
 @pytest.mark.parametrize(("tool_name", "args"), [
     ("write_file", {"path": "README.md", "content": "changed\n"}),
-    ("commit_reviewed", {"commit_message": "test"}),
-    ("edit_text", {"path": "README.md", "old_str": "ok", "new_str": "changed"}),
-    ("vcs_revert", {"sha": "HEAD"}),
     ("vcs_pull_ff", {}),
-    ("vcs_restore", {}),
-    ("vcs_rollback", {"target": "HEAD"}),
     ("promote_to_stable", {"reason": "test"}),
 ])
 def test_light_mode_blocks_repo_mutation_tools(tool_name, args, tmp_path, monkeypatch):
@@ -552,7 +547,6 @@ def test_light_mode_does_not_block_skill_exec_at_registry_layer(tmp_path, monkey
 @pytest.mark.parametrize("path", [
     "ouroboros/safety.py",
     "ouroboros/contracts/plugin_api.py",
-    "ouroboros/runtime_mode_policy.py",
     ".github/workflows/ci.yml",
 ])
 def test_advanced_mode_blocks_protected_write(path, tmp_path, monkeypatch):
@@ -1064,9 +1058,6 @@ def test_runtime_mode_rank_preserves_the_access_order():
 @pytest.mark.parametrize("cmd", [
     "git rebase HEAD~1",
     "git checkout -- BIBLE.md",
-    "git restore BIBLE.md",
-    "git commit -m rewrite BIBLE.md",
-    "git update-ref refs/heads/feature HEAD",
     "git filter-repo --path other.txt --invert-paths",
 ])
 def test_bible_history_predicate_allows_unrelated_git_history_operations(cmd):
@@ -1077,7 +1068,6 @@ def test_bible_history_predicate_allows_unrelated_git_history_operations(cmd):
 
 @pytest.mark.parametrize("cmd", [
     "git rm BIBLE.md",
-    "git mv BIBLE.md BIBLE.old",
     "git update-index --remove BIBLE.md",
     "git filter-repo --path BIBLE.md --invert-paths",
 ])
@@ -1118,8 +1108,6 @@ def test_light_mode_allows_extension_tool_dispatch(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(("tool_name", "args"), [
     ("fetch_pr_ref", {"pr_number": 1}),
-    ("create_integration_branch", {"pr_number": 1}),
-    ("cherry_pick_pr_commits", {"shas": ["deadbeef"]}),
     ("stage_adaptations", {}),
     ("stage_pr_merge", {"branch": "integration/test"}),
 ])

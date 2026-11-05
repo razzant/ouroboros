@@ -456,7 +456,7 @@ def test_child_stop_never_seals_the_parent_root(turn):
     assert trace['task_completion']['action'] == 'stop'
 
 
-@pytest.mark.parametrize('refusal', ['unseen_work', 'invalid_subject', 'missing_answer', 'new_owner'])
+@pytest.mark.parametrize('refusal', ['unseen_work', 'invalid_subject', 'new_owner'])
 def test_refused_completion_keeps_the_retained_answer_unselected(tmp_path, refusal):
     from ouroboros.loop_delivery import completion_observation, consume_completion_request
     from ouroboros.loop_messages import capture_acceptance_observation

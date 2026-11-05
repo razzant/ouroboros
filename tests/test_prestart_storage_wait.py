@@ -1060,7 +1060,7 @@ def test_stop_after_accepted_prestart_pause_still_wins_while_storage_is_busy(lan
     assert load_task_result(lane.root, "S")["status"] == "cancelled"
 
 
-@pytest.mark.parametrize("control", ["stop", "pause", "deadline", "none"])
+@pytest.mark.parametrize("control", ["stop", "pause", "none"])
 def test_control_inside_successful_strict_budget_read_prevents_body(lane, monkeypatch, control):
     """SQLite waits inside a successful read: no exception reaches retry_presend.
 

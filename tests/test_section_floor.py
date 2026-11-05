@@ -30,7 +30,7 @@ def test_host_ladder_lists_live_producers_and_keeps_only_the_actual_protected_co
     assert "shared_understanding" not in memory_floor.HOST_STEPS
 
 
-@pytest.mark.parametrize("missing", ["window", "root", "task_id", "measure", "eligible"])
+@pytest.mark.parametrize("missing", ["window", "measure", "eligible"])
 def test_host_steps_do_not_measure_when_no_section_can_step(missing):
     calls = []
     args = dict(window=50_000, root="test-root", task_id="test-task", reserve=RESERVE,

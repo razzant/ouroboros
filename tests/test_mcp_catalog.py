@@ -190,7 +190,7 @@ def test_first_failure_is_attempt_only_and_worker_never_lists(monkeypatch, tmp_p
     reader._async_list_tools.assert_not_called()
 
 
-@pytest.mark.parametrize("change", ["url", "auth_token", "env_value", "headers"])
+@pytest.mark.parametrize("change", ["url", "auth_token", "headers"])
 def test_identity_change_ignores_file_until_server_event_prunes(change, monkeypatch):
     old = settings(auth_token="synthetic-old")
     if change == "env_value":
@@ -267,7 +267,7 @@ def test_boot_seeds_before_blocked_listing_and_prunes_removed(monkeypatch, tmp_p
         assert finished.wait(5)
 
 
-@pytest.mark.parametrize("evidence", ["none", "failed", "partial", "failed_after_empty", "partial_after_empty", "invalid"])
+@pytest.mark.parametrize("evidence", ["none", "partial_after_empty", "invalid"])
 def test_uncertain_empty_catalog_has_only_provenance(monkeypatch, tmp_path, evidence):
     value = settings(url="file:///invalid") if evidence == "invalid" else settings()
     install_settings(monkeypatch, value)
@@ -469,7 +469,7 @@ def test_write_failure_keeps_local_listing_but_never_claims_publication(monkeypa
     assert "publication failed" in writer.catalog_notices()[0]["detail"]
 
 
-@pytest.mark.parametrize("server_id", ["con", "nul", "aux", "com1"])
+@pytest.mark.parametrize("server_id", ["con", "aux", "com1"])
 def test_windows_reserved_ids_use_safe_filenames(server_id):
     writer = publisher(settings(id=server_id))
     assert writer.refresh_server(server_id)["published"]

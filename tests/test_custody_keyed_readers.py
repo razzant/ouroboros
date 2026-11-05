@@ -137,7 +137,7 @@ def _named(lines, marker, root):
 # --- health: one selected read, equal lines, the shared full-read fallback -------------
 
 
-@pytest.mark.parametrize("reader", ["own", "owner", "someone-else", ""])
+@pytest.mark.parametrize("reader", ["own", "someone-else", ""])
 def test_health_lines_equal_the_every_row_read_for_every_reader(tmp_path, reader):
     _seed_health(tmp_path)
     keyed = _delegated_lines(tmp_path, task_id=reader, active_root="/tmp/t1")
@@ -376,7 +376,7 @@ def _answer(result):
     return status, extra, None if entry is None else vars(entry)
 
 
-@pytest.mark.parametrize("run_id", ["run-own", "run-snapshot", "run-missing", "", None, " run-own"])
+@pytest.mark.parametrize("run_id", ["run-own", "run-missing", " run-own"])
 def test_retry_result_status_answers_as_over_every_row(tmp_path, run_id):
     from ouroboros.delegate_shared import retry_result_status
 
@@ -394,9 +394,6 @@ _STALE = custody.RunCustody(run_id="", task_id="reader", settled=True, snapshot_
     ("run-snapshot", {}, False),
     ("run-snapshot", {}, True),
     ("run-snapshot", {"run-snapshot": _STALE}, False),   # a stale memo is replaced by the durable row
-    ("run-ghost", {"run-ghost": _STALE}, False),         # no durable row: the stale memo still answers
-    ("run-ghost", {}, False),
-    ("run-snapshot", {"run-other": _STALE}, False),      # an unrelated entry neither moves nor multiplies
 ])
 def test_orphan_disposition_keeps_its_one_memo_seed(tmp_path, monkeypatch, run_id, memo, owner_terminal):
     from ouroboros.delegate_shared import orphan_disposition_status

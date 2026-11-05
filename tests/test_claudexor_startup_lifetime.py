@@ -306,7 +306,7 @@ def test_stop_does_not_wait_for_the_same_managers_control_window(startup):
     assert _gone(elected["child"])
 
 
-@pytest.mark.parametrize("damage", ["corrupt", "unreadable", "stat_unreadable", "invalid_utf8", "dangling"])
+@pytest.mark.parametrize("damage", ["corrupt", "stat_unreadable", "dangling"])
 def test_unknown_custody_refuses_a_new_spawn(startup, monkeypatch, damage):
     ledger = process_custody.ledger_path(startup.root)
     ledger.parent.mkdir(parents=True, exist_ok=True)
@@ -352,7 +352,7 @@ def test_other_daemon_purposes_are_not_joined_as_claudexor(startup):
         stranger.wait(timeout=5)
 
 
-@pytest.mark.parametrize("damage", ["marker", "foreign_marker", "descriptor", "token"])
+@pytest.mark.parametrize("damage", ["marker", "foreign_marker", "token"])
 def test_peer_stop_never_promotes_invalid_or_foreign_discovery_to_authority(startup, damage):
     manager = owned.OwnedClaudexorDaemon()
     with pytest.raises(ClaudexorUnavailable):

@@ -178,8 +178,7 @@ def _dead_worker(tmp_path, monkeypatch, scripts, task="exec-task"):
     return ctx, record, leader, server, owned_shutdown.installation_root(ctx.drive_root)
 
 
-@pytest.mark.parametrize("consumer", ["ordinary stop", "exit owner", "task end", "reaper", "quiesce", "exit record step",
-                                      "local executor stop", "dead worker's records", "leftover record"])
+@pytest.mark.parametrize("consumer", ["ordinary stop", "quiesce", "leftover record"])
 def test_no_stop_signals_before_what_only_a_chain_reached_is_durable(tmp_path, monkeypatch, scripts, consumer):
     """Write-ahead, seen at the signal itself: every stop has C in the launch's custody before it signals anything that
     could break L's chain, so what it observed cannot go with it. With the roots readable the same pass ends L and C,

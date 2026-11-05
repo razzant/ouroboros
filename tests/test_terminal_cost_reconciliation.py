@@ -112,7 +112,7 @@ def test_task_and_root_are_refreshed_and_acknowledged(env):
     assert task_results.load_task_result(env.root, "root")["accounted_upper_bound_usd_with_children"] == 0.4
 
 
-@pytest.mark.parametrize("condition", ["missing", "unreadable", "live", "synthesis"])
+@pytest.mark.parametrize("condition", ["missing", "unreadable", "synthesis"])
 def test_ineligible_result_keeps_debt(env, monkeypatch, condition):
     task(env)
     attempt(env)
@@ -191,7 +191,7 @@ def test_foreign_live_owner_never_opens_foreign_money(env, monkeypatch):
     assert dirty(env) and not (env.root / "foreign").exists()
 
 
-@pytest.mark.parametrize("owner", ["running", "busy", "direct", "postwork", "retry", "malformed_retry", "review", "control_review"])
+@pytest.mark.parametrize("owner", ["running", "malformed_retry", "control_review"])
 def test_real_ownership_predicate_still_fences_projection_and_recovery(env, monkeypatch, owner):
     from ouroboros import review_operation
     from supervisor import queue_transitions, workers

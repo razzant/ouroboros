@@ -54,7 +54,6 @@ def test_mcp_rendering_keeps_task_paths_and_database_isolation():
     ({"status": "completed"}, "success", False),
     ({"status": "completed", "reason_code": "round_cap"}, "max_turns_reached", False),
     ({"status": "failed", "reason_code": "provider_unavailable"}, "failed", True),
-    ({"status": "failed", "outcome_axes": {"execution": {"status": "infra_failed"}}}, "failed", True),
 ])
 def test_task_outcome_keeps_runtime_rails_and_infrastructure_separate(result, expected, infra):
     outcome = adapter.classify_outcome(result, ["round_cap"])

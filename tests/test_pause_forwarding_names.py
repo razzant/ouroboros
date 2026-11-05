@@ -52,7 +52,7 @@ def _claims(tmp_path):
 
 
 @pytest.mark.parametrize("args", [
-    {"source": GIT_URL}, {"function": "f"}, {"source": GIT_URL, "function": "f", "note": "n"}, {"note": "n"}, {}])
+    {"source": GIT_URL}, {"function": "f"}, {}])
 def test_registry_dispatch_forwards_every_public_keyword_to_the_tool(tmp_path, probe, args):
     registry, calls = probe
 

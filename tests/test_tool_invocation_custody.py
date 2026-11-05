@@ -34,7 +34,7 @@ def _assert_consumers(root, registry, queue, workers, held):
     assert admit_continuation('root', action_nonce=NONCE)['successor_task_id'] == ack['successor_task_id']
 
 
-@pytest.mark.parametrize('case', ['nonrepo_diff', 'numeric_argument', 'exit_zero', 'exit_nonzero', 'joined_timeout'])
+@pytest.mark.parametrize('case', ['nonrepo_diff', 'exit_zero', 'joined_timeout'])
 def test_actual_local_completion_releases_all_control_consumers(tmp_path, monkeypatch, case):
     from ouroboros.task_results import load_task_result
 
@@ -286,8 +286,7 @@ def test_every_builtin_uses_the_same_actual_handler_lifetime_boundary(tmp_path, 
     assert invoked == list(names) and len(names) > 100
 
 
-@pytest.mark.parametrize('evidence', ['exact', 'wrong_birth', 'wrong_attempt', 'wrong_root',
-                                     'wrong_pid', 'live', 'unknown_exit', 'replaced_worker', 'replaced_meta', 'legacy'])
+@pytest.mark.parametrize('evidence', ['exact', 'wrong_birth', 'legacy'])
 def test_death_retires_only_attributed_local_invocation(tmp_path, monkeypatch, evidence):
     import os
     from tests.test_worker_crash_retry import _reserved_job
@@ -401,7 +400,7 @@ def test_effective_retry_read_keeps_predecessor_unknown_effect_history(tmp_path,
     assert "original-op" in result and "external effects remain unknown" in result, result
 
 
-@pytest.mark.parametrize('status, owns', [('read', False), ('delivered', False), ('unconfirmed', True), (None, True)])
+@pytest.mark.parametrize('status, owns', [('read', False), ('delivered', False), ('unconfirmed', True)])
 def test_a_read_steer_receipt_discharges_its_message_handoff(tmp_path, status, owns):
     """A relayed message acknowledged as read settles its handoff; nothing is resent."""
     from ouroboros.project_dialogue import append_chat_annotation

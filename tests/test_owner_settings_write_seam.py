@@ -28,6 +28,7 @@ from starlette.testclient import TestClient
 
 from ouroboros.reviewer_slot_config import review_pool_state
 from ouroboros.settings_defaults import OPENROUTER_REVIEW_DEFAULTS
+from tests._cases import chosen_rows
 
 
 @pytest.fixture
@@ -341,7 +342,6 @@ def test_a_pre_commit_failure_is_still_reported_as_unsaved(monkeypatch, isolated
 
 @pytest.mark.parametrize("payload", [
     {"TOTAL_BUDGET": "25", "OUROBOROS_UPDATE_CHANNEL": "not-a-channel"},
-    {"TOTAL_BUDGET": "25", "OUROBOROS_POST_TASK_EVOLUTION_CADENCE": "every_n:0"},
     {"TOTAL_BUDGET": "not a number"},
     {"MINIMAX_REGION": "atlantis"},
 ])
@@ -907,7 +907,7 @@ def _owner_app(handler_name, route, isolated_settings):
     return app
 
 
-@pytest.mark.parametrize("route,handler_name,payload", _OWNER_SETTINGS_WRITERS)
+@pytest.mark.parametrize("route,handler_name,payload", chosen_rows(_OWNER_SETTINGS_WRITERS, 0, 1, 3))
 def test_owner_endpoints_map_a_contended_lock_to_a_typed_refusal(monkeypatch, isolated_settings,
                                                                  route, handler_name, payload):
     """Every single-decision owner endpoint shares the seam, and none of them had

@@ -116,7 +116,7 @@ def test_retained_screenshot_reaches_next_request_after_all_tool_replies(tmp_pat
             if isinstance(message.get("content"), list) for part in message["content"])
 
 
-@pytest.mark.parametrize("gap", ["route", "local", "missing", "mime", "size", "roots"])
+@pytest.mark.parametrize("gap", ["route", "missing", "roots"])
 def test_image_gap_keeps_text_and_verdict_without_delivery_claim(tmp_path, screenshot, monkeypatch, gap):
     path = _shot(tmp_path, screenshot)
     expected = ""

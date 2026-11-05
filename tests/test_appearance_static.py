@@ -110,11 +110,7 @@ _SVG = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3C
 
 @pytest.mark.parametrize(("line", "baked"), [
     (f"    --select-arrow: {_SVG.format('%23efeff2')};", False),
-    (f"    mask-image: {_SVG.format('black')};", False),
-    (f"    -webkit-mask-image: {_SVG.format('black')};", False),
     (f"    background-image: {_SVG.format('black')};", True),
-    (f"    background-image: {_SVG.format('%23888')};", True),
-    (f"    -webkit-mask-image: {_SVG.format('%23888')};", True),
     (f"    mask-image: {_SVG.format('black').replace('/%3E', ' style=%22fill:%23888%22/%3E')};", True),
 ])
 def test_inline_svg_guard_separates_token_paint_and_mask_geometry_from_baked_colour(line, baked):

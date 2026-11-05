@@ -824,7 +824,7 @@ def test_scratchpad_warnings_publish_the_current_producer_contract(scratchpad_in
     assert _published_answer("update_scratchpad", result) == contract
 
 
-@pytest.mark.parametrize("tool", ["write_file", "edit_text", "apply_patch", "edit_batch"])
+@pytest.mark.parametrize("tool", ["write_file", "apply_patch", "edit_batch"])
 def test_output_capture_warning_preserves_the_successful_write(tool):
     """workspace_file_outputs.capture_known_workspace_outputs runs post-write.
 

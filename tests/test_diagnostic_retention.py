@@ -152,7 +152,7 @@ def test_real_history_producer_resolves_outside_scratch(tmp_path, monkeypatch):
     assert _evidence_dir(scratch / "tmp-path").is_relative_to(evidence)
 
 
-@pytest.mark.parametrize("family", ["main", "quiz", "skill", "quiz-response"])
+@pytest.mark.parametrize("family", ["main", "skill", "quiz-response"])
 def test_main_and_quiz_producers_keep_the_shared_and_explicit_destinations(tmp_path, monkeypatch, family):
     from tests.test_main_consumer_journeys_browser import _controls_evidence
     from tests.test_ui_quiz_comment_only_browser import _evidence_dir

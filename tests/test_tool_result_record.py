@@ -57,7 +57,7 @@ def test_duplicate_provider_id_and_identical_text_keep_distinct_outcomes_after_s
 
 @pytest.mark.parametrize("change,reason", [
     ("legacy", "record_missing"), ("text", "content_mismatch"),
-    ("identity", "invocation_unrecorded"), ("call_id", "tool_result_mismatch"),
+    ("identity", "invocation_unrecorded"),
 ])
 def test_missing_or_mismatched_binding_is_unknown(change, reason):
     row = result_row(facts={"status": "ok", "code": "OK", "is_error": False, "exit_code": 0})

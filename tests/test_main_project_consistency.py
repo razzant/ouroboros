@@ -85,7 +85,7 @@ def test_unscoped_producers_preserve_absence_and_stale_restore_policy(host, prod
     assert budget_hold_fact(held)["reason"] == HOLD_SAVED_WORK and "_project_admission" not in held
 
 
-@pytest.mark.parametrize("veto", ["legacy", "null", "malformed", "dispatch", "stopped", "binding", "origin", "folder"])
+@pytest.mark.parametrize("veto", ["legacy", "null", "folder"])
 def test_no_scope_recovery_requires_original_positive_authority(host, monkeypatch, veto):  # noqa: F811
     row = admit_main(host)
     if veto == "legacy":

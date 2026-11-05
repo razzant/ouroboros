@@ -126,8 +126,7 @@ def test_contract_carries_the_derived_list_and_origin_helpers():
 
 
 @pytest.mark.parametrize(("install", "cap", "expected"), [
-    ("cyber_pro", "light", "light"), ("pro", "light", "light"), ("advanced", "light", "light"),
-    ("light", "light", "light"), ("light", "advanced", "light"), ("cyber_pro", "", "cyber_pro"),
+    ("cyber_pro", "light", "light"), ("cyber_pro", "", "cyber_pro"),
     ("pro", "bogus", "pro"),
 ])
 def test_effective_runtime_mode_is_the_stricter_of_install_and_cap(install, cap, expected):

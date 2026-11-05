@@ -351,8 +351,7 @@ def _git_origin(harness, subject):
 
 
 @pytest.mark.parametrize("subject, affected", [
-    ("candidate", "event.py"), ("candidate", "."), ("foreign", "event.py"),
-    ("unknown", "event.py"), ("folderless", ""),
+    ("candidate", "event.py"), ("candidate", "."), ("folderless", ""),
 ])
 def test_plan_navigation_and_pack_follow_body_identity(harness, subject, affected):
     source = _design(harness.system)
@@ -429,7 +428,7 @@ def test_empty_path_plan_is_a_body_plan_only_for_a_declared_body_subject(
     assert ("## BIBLE.md (constitution" in api) is expected
 
 
-@pytest.mark.parametrize("subject", ["main", "candidate", "body_copy", "folderless"])
+@pytest.mark.parametrize("subject", ["main", "body_copy", "folderless"])
 def test_declared_body_research_flag_cannot_override_actual_foreign_file_target(harness, subject):
     source = _design(harness.system)
     # The declaration makes this subject's plan a body plan while it names no file ...

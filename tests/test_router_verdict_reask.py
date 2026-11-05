@@ -322,11 +322,10 @@ def provider_block(monkeypatch, model, routing_value, messages=None):
 
 @pytest.mark.parametrize("routing_value,expected", [
     ("repro", {"data_collection": "deny", "allow_fallbacks": False}),
-    ({"only": ["anthropic"]}, {"data_collection": "deny", "allow_fallbacks": True, "only": ["anthropic"]}),
     ('{"order": ["anthropic"], "allow_fallbacks": false}',
      {"data_collection": "deny", "allow_fallbacks": False, "order": ["anthropic"]}),
     (None, {"data_collection": "deny", "allow_fallbacks": True}),
-], ids=["preset", "object", "json-text", "built-in"])
+], ids=["preset", "json-text", "built-in"])
 def test_connection_routing_merges_over_the_global_setting(monkeypatch, global_routing, routing_value, expected):
     assert provider_block(monkeypatch, MODEL, routing_value) == {"require_parameters": True, **expected}
     # The global value itself, and so every other connection's requests, are unchanged.

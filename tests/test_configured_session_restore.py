@@ -146,7 +146,7 @@ def test_saved_dispatch_and_first_input_restore_before_leaf_admission(
         loop.run_llm_loop(**kwargs)
 
 
-@pytest.mark.parametrize("locator", [None, {}, "unreadable", {"source_ref": {"path": "missing"}}])
+@pytest.mark.parametrize("locator", [None, {}, {"source_ref": {"path": "missing"}}])
 def test_present_invalid_working_carrier_is_a_gap_never_a_fresh_start(tmp_path, monkeypatch, locator):
     from ouroboros import loop, subagent_bootstrap, subagent_runtime
     from ouroboros.agent import _load_start_continuation

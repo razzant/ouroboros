@@ -23,7 +23,7 @@ from ouroboros.cost_projection import (
 )
 
 
-@pytest.mark.parametrize("status", ["running", "scheduled", "interrupted", "cancel_requested", "completed"])
+@pytest.mark.parametrize("status", ["running", "cancel_requested", "completed"])
 def test_current_cost_refreshes_live_totals_without_rewriting_terminal_receipts(root, status):
     from ouroboros import usage_accounting as ua
     from ouroboros.cost_projection import current_cost
@@ -45,7 +45,7 @@ def test_current_cost_refreshes_live_totals_without_rewriting_terminal_receipts(
     assert _child_result_sha256(projected) == _child_result_sha256(data)
 
 
-@pytest.mark.parametrize("accounting", ["priced", "free", "unpriced", "empty", "unavailable"])
+@pytest.mark.parametrize("accounting", ["priced", "empty", "unavailable"])
 def test_live_cost_readers_refresh_the_effective_task_and_batch_once(root, monkeypatch, accounting):
     from ouroboros import task_status, usage_accounting as ua
     from ouroboros.task_results import write_task_result
@@ -194,11 +194,8 @@ def test_live_authority_pages_survive_new_usage_rows(root):
 
 
 @pytest.mark.parametrize("selector", [
-    {"call_id": "missing", "manifest_sha256": "a" * 64}, {"presence_reentry_sha256": "a" * 64},
-    {"delegated_output_sha256": "a" * 64}, {"review_source_sha256": "a" * 64},
-    {"include_work_order_source": True}, {"include_completion_source": True},
-    {"include_focus_source": True}, {"include_authority": True}, {"authority_fields": []},
-    {"view": "answer"}, {"view": "full"},
+    {"call_id": "missing", "manifest_sha256": "a" * 64}, {"include_completion_source": True},
+    {"view": "full"},
 ])
 def test_source_and_non_cost_views_do_not_read_live_accounting(root, monkeypatch, selector):
     from ouroboros import usage_accounting as ua

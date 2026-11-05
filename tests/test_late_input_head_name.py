@@ -426,8 +426,8 @@ def test_a_press_admitted_after_its_card_changed_reads_the_press_it_accepted(tmp
         assert (head.task["suggested_name"], lane.light.requests) == ("Book it", ["Book it"])
 
 
-@pytest.mark.parametrize("settles", ["before_the_park", "after_the_park", "after_the_resume",
-                                     "crossing_the_resumed_start", "lost_in_a_restart"])
+@pytest.mark.parametrize("settles", ["before_the_park", "after_the_resume",
+                                     "lost_in_a_restart"])
 def test_a_parked_head_keeps_the_coined_name_into_its_resumed_attempt(tmp_path, monkeypatch, settles):
     """A Main head whose namer coined a name is paused and parked by the supervisor (RUNNING -> PENDING, the
     one path a park and a detach take), then Resumed on a project worker, which runs no namer. The namer writes

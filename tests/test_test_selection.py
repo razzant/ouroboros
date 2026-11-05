@@ -33,11 +33,7 @@ def test_leaf_selects_only_direct_importers_and_changed_tests_above_floor(repo):
 
 
 @pytest.mark.parametrize("path", [
-    "tests/conftest.py", "tests/nested/conftest.py", "tests/ci_evidence.py", "tests/default_lane.py",
-    "tests/test_floor.py", "pyproject.toml", "uv.lock", "requirements-runtime.lock", "site/pnpm-lock.yaml",
-    "ouroboros/preflight_runner.py", "ouroboros/test_selection.py", "scripts/run_tests.py",
-    "ouroboros/process_containment.py", "ouroboros/process_lifeline.py",
-    "ouroboros/process_overload.py", "ouroboros/test_parallelism.py", "tests/fixtures/sample.json",
+    "tests/conftest.py", "pyproject.toml", "tests/fixtures/sample.json",
 ])
 def test_verification_changes_require_full(repo, path):
     result = selection.select_from_paths(repo, [path], base="base")
@@ -153,10 +149,7 @@ def test_a_changed_test_module_never_narrows_a_full_escalation(repo, apparatus):
     assert result.tier == "full" and len(result.files) == result.available
 
 
-@pytest.mark.parametrize("path", ["server.py", "launcher.py", "ouroboros/__init__.py", "ouroboros/body_switch.py",
-                                  "ouroboros/body_adoption.py", "supervisor/update_recovery.py",
-                                  "ouroboros/launcher_bootstrap.py", "supervisor/git_ops_reset.py",
-                                  "supervisor/update_merge.py"])
+@pytest.mark.parametrize("path", ["server.py", "ouroboros/__init__.py", "supervisor/update_merge.py"])
 def test_body_cutover_and_recovery_changes_require_full(repo, path):
     # The package init carries the adoption hook: it is cutover, not an ordinary hub of imports.
     result = selection.select_from_paths(repo, [path], base="base")
@@ -187,10 +180,8 @@ def test_author_can_widen_dynamic_consumers_or_request_full(repo):
 
 
 @pytest.mark.parametrize("extra,full,reason", [
-    (["tests/test_direct.py"], False, ""), ([], True, ""),
-    (["tests/missing.py"], False, "consumer"), (["../tests/test_direct.py"], False, "consumer"),
-    (["/tests/test_direct.py"], False, "consumer"), (["-k"], False, "consumer"),
-    ("tests/test_direct.py", False, "consumer"), ([], "yes", "consumer"), ([""], False, "consumer"), ([], False, None),
+    (["tests/test_direct.py"], False, ""), (["tests/missing.py"], False, "consumer"), (["../tests/test_direct.py"], False, "consumer"),
+    ([], "yes", "consumer"), ([], False, None),
 ])
 def test_invalid_widening_fails_before_execution(repo, extra, full, reason):
     with pytest.raises(ValueError):

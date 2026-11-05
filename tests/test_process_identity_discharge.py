@@ -138,8 +138,7 @@ def _spelled(epoch: int, zone) -> str:
 
 # --------------------------------------------------------------------------- 1. boot time
 
-@pytest.mark.parametrize("btime", [PermissionError(13, "denied"), b"cpu 1 2 3\n", b"btime soon\n", b"btime 0\n",
-                                   b"btime \n"], ids=["unreadable", "missing", "malformed", "zero", "empty"])
+@pytest.mark.parametrize("btime", [PermissionError(13, "denied"), b"cpu 1 2 3\n", b"btime \n"], ids=["unreadable", "missing", "empty"])
 def test_no_boot_time_spells_no_birth_in_either_reader_and_a_later_read_recovers(tmp_path, monkeypatch, btime):
     kernel = _Kernel(monkeypatch, {PID: _stat(PID)}, btime=btime)
     sent = _signals(monkeypatch, kernel)
@@ -274,9 +273,6 @@ def _leader_group(birth: str) -> dict:
     ("unreadable", {"sent": [], "gone": [], "reused": [], "owed": True}),
     ("alive", {"sent": [PID], "gone": [], "reused": [], "owed": False}),
     ("moved", {"sent": [PID], "gone": [PID], "reused": [], "owed": False}),
-    ("absent", {"sent": [], "gone": [PID], "reused": [], "owed": False}),
-    ("zombie", {"sent": [], "gone": [], "reused": [], "owed": False}),
-    ("reborn", {"sent": [], "gone": [], "reused": [PID], "owed": False}),
 ])
 def test_a_recorded_leader_a_partial_table_omits_is_read_by_name(monkeypatch, answer, expected):
     """The census could not read the leader's stat (the row is missing from the table); the

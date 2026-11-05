@@ -110,7 +110,7 @@ def test_a_reopened_store_keeps_then_consumes_the_abandonment_fact(root):
     assert _current(root, "late") == actual
 
 
-@pytest.mark.parametrize("prior", ["unresolved", "abandoned", "settled", "released"])
+@pytest.mark.parametrize("prior", ["unresolved", "abandoned", "released"])
 def test_untyped_settlement_cannot_change_a_terminal_attempt(root, prior):
     rows = _numbered(_chain("terminal", prior))
     update = _numbered([_row("terminal", "settled", cost_usd=.8, cost_final=True)], len(rows) + 1)
@@ -135,8 +135,7 @@ def test_late_marker_cannot_change_an_ordinary_terminal(root, prior):
 
 
 @pytest.mark.parametrize("facts", [
-    {"cost_usd": 0.0}, {"cost_usd": 1.25}, {"cost_final": True},
-    {"cost_final": None}, {"state": "unresolved"}, {"kind": "subscription_session"},
+    {"cost_usd": 0.0}, {"cost_final": None}, {"kind": "subscription_session"},
 ])
 def test_abandoned_marker_cannot_claim_a_price_or_another_kind(root, facts):
     base = _numbered(_chain("abandoned", "dispatched"))

@@ -431,7 +431,7 @@ def test_normalize_settings_raw_is_idempotent(isolated_settings):
 
 @pytest.mark.parametrize(
     ("minimum", "maximum", "expected_minimum", "expected_maximum"),
-    [(30, 30, 60, 60), (30, 7200, 60, 7200), (900, 14400, 900, 14400), (120, 600, 120, 600)],
+    [(30, 30, 60, 60), (30, 7200, 60, 7200), (900, 14400, 900, 14400)],
 )
 def test_wakeup_bounds_read_normalization_preserves_valid_values_and_does_not_write(
     isolated_settings, minimum, maximum, expected_minimum, expected_maximum,

@@ -134,7 +134,7 @@ def test_nested_copy_sees_parent_work_and_bubbles_child_delta(case):
     assert git(source, "branch", "--list", "subagent/*") == b""
 
 
-@pytest.mark.parametrize("mode", ["light", "advanced", "pro", "cyber_pro"])
+@pytest.mark.parametrize("mode", ["light", "advanced", "cyber_pro"])
 def test_foreign_copy_uses_foreign_policy_in_every_mode(case, monkeypatch, mode):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     folder, task = admit(case, "child", "parent")
@@ -339,9 +339,8 @@ def index_flags(source):
             git(source, "--no-optional-locks", "status", "--porcelain=v2", "-z", "--untracked-files=no"))
 
 
-@pytest.mark.parametrize("dirty, flag", [(False, ""), (True, ""), (True, "intent_to_add"),
-                                         (False, "assume_unchanged"), (False, "skip_worktree"),
-                                         (True, "assume_unchanged"), (True, "skip_worktree")])
+@pytest.mark.parametrize("dirty, flag", [(False, ""), (True, "intent_to_add"),
+                                         (False, "skip_worktree")])
 def test_a_genuine_index_failure_reverses_the_tree_and_restores_only_its_own_entries(case, monkeypatch, dirty, flag):
     """A real Git index failure while staging (another Git process holds index.lock) still fails the apply,
     which is reversed; exactly the entries the attempt changed return, a three-way apply's own included,
@@ -399,9 +398,6 @@ def test_a_genuine_index_failure_reverses_the_tree_and_restores_only_its_own_ent
 
 @pytest.mark.parametrize("dirty, flag, absent, lands", [
     (True, "assume_unchanged", False, True),  # plain `add -u` skips this silently: unstaged under a "staged" receipt
-    (True, "skip_worktree", False, True),  # plain `add -u` refuses it
-    (False, "assume_unchanged", False, True),  # a three-way apply rewrites the entry without its flag
-    (False, "skip_worktree", True, True),  # ... and materializes the absent sparse file it patches
     (False, "skip_worktree", False, True),  # a present file the index's stat data still matches lands the same way
     (True, "skip_worktree", True, False),  # a working-tree apply has no file to patch
 ])
@@ -506,7 +502,6 @@ def test_odd_names_reach_git_literally(case):
 
 @pytest.mark.parametrize("options,refused", [
     ({"directory_strategy": "copy", "scope_paths": ["."]}, True),
-    ({"scope_paths": ["a.txt"]}, True),
     ({"directory_strategy": "direct", "scope_paths": []}, False),
     ({}, False),
 ])

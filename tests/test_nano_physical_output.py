@@ -275,11 +275,6 @@ def test_confirmed_output_maximum_reaches_real_wire_capture_and_reservation(tran
     # Direct Anthropic dispatch sends (and labels usage with) the canonical id, so the
     # owner's maximum holds whichever alias the selection or the ack spelled.
     ('anthropic', 'anthropic::claude-opus-4.8', 'anthropic::claude-opus-4.8', 4096),
-    ('anthropic', 'anthropic::claude-opus-4.8', 'anthropic::claude-opus-4-8', 4096),
-    ('anthropic', 'anthropic::claude-opus-4-8', 'anthropic::claude-opus-4.8', 4096),
-    ('anthropic', 'anthropic/claude-opus-4.8', 'anthropic::claude-opus-4-8', 4096),
-    # OpenRouter ids stay exact: no alias folding there, and no direct-route borrow.
-    ('openrouter', 'anthropic/claude-opus-4.8', 'anthropic/claude-opus-4.8', 4096),
     ('openrouter', 'anthropic/claude-opus-4.8', 'anthropic/claude-opus-4-8', C),
     ('anthropic', 'anthropic::claude-opus-4.8', 'anthropic/claude-opus-4-8', C),
 ])

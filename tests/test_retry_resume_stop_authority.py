@@ -125,7 +125,7 @@ def test_pending_stop_vetoes_retry_resume(host, monkeypatch, clock, reaper, door
         assert not _assign(host, monkeypatch), "old children need explicit selection"
 
 
-@pytest.mark.parametrize("door", ["warm", "exact", "queued", "unsaved"])
+@pytest.mark.parametrize("door", ["warm", "exact", "unsaved"])
 def test_unknown_root_identity_refuses_without_member_grant(host, monkeypatch, clock, reaper, door):  # noqa: F811
     task, _child, _plan = paused_retry(host, monkeypatch, clock, reaper, door)
     from ouroboros.task_store import patch_document

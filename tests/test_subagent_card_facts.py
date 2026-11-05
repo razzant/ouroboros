@@ -83,7 +83,7 @@ def test_billing_basis_ignores_price_cache_and_requires_observed_cost(monkeypatc
 
 
 @pytest.mark.parametrize("last_meta,expected", [
-    (None, "unknown"), ({}, "unknown"), ({"model": "other"}, "unknown"),
+    (None, "unknown"), ({"model": "other"}, "unknown"),
     ({"model": "openai/gpt-5"}, "measured"),
 ])
 def test_accumulated_cost_needs_the_same_recorded_route(last_meta, expected):

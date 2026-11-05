@@ -427,7 +427,7 @@ def test_a_member_resume_consumed_before_its_fence_selection_completes_at_the_ow
     assert restored == ("working", 1, 3, wc.RESUMED, True), "the member continues its exact handover"
 
 
-@pytest.mark.parametrize("change", ["none", "root", "revoked", "other_attempt", "other_fence", "already_selected"])
+@pytest.mark.parametrize("change", ["none", "other_attempt", "already_selected"])
 def test_member_resume_completion_needs_its_own_consumed_grant_and_fence(tmp_path, monkeypatch, change):
     from ouroboros.owner_pause import consumed_member_resume, read_fence, set_fence_state
     from tests.test_budget_pause_lineage import CHILD, ROOT

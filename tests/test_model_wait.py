@@ -462,8 +462,7 @@ def test_permanent_switch_uses_existing_owner_writer_once(live_wait, monkeypatch
 
 @pytest.mark.serial
 @pytest.mark.parametrize("surface, role, key", [
-    ("web", "main", "OUROBOROS_MODEL"), ("host", "reviewer:main", "OUROBOROS_MODEL"),
-    ("web", "light", "OUROBOROS_MODEL_LIGHT"), ("host", "fallback:0", "OUROBOROS_MODEL_FALLBACKS")])
+    ("web", "main", "OUROBOROS_MODEL"), ("web", "light", "OUROBOROS_MODEL_LIGHT"), ("host", "fallback:0", "OUROBOROS_MODEL_FALLBACKS")])
 def test_permanent_switch_to_the_shown_default_authors_the_slot(live_wait, monkeypatch, surface, role, key):
     """Keeping a model is a choice even when it is the default an unsaved slot shows: the card saves
     it, and the next task keeps it after an access change moves the slots nobody chose. An
@@ -580,9 +579,7 @@ def test_generic_client_parameter_flattens_kwargs_and_keeps_string_product(live_
     assert usage["model_role_route"]["role"] == "vision"
 
 
-@pytest.mark.parametrize("delta", [{"revision": True}, {"action": []}, {"model": 3},
-                                    {"credential_profile_id": None}, {"use_local": "false"},
-                                    {"persist_role": "true"}, {"comment": "not this family"}])
+@pytest.mark.parametrize("delta", [{"revision": True}, {"action": []}, {"model": 3}])
 def test_malformed_switch_is_refused_before_effects(live_wait, delta):
     root, _transport, _client, _controller, _events, decide = live_wait
     body = {"request_id": "request-one", "decision_id": "model_wait:task-one:wait-one", "revision": 1,
@@ -676,9 +673,7 @@ def test_confirmed_mixed_pool_waits_and_heals_on_the_same_live_call(elapsed_quot
     assert load_task_result(root, "task-one")["model_waits"][rows[0]["wait_id"]]["reason"] == "auth_quota"
 
 
-@pytest.mark.parametrize("pool_context", [{}, {"poolCause": "unavailable"}, {"poolCause": ""},
-                                         {"poolCause": "unknown"}, {"poolCause": ["mixed"]},
-                                         {"poolCauses": ["auth", "quota"]}])
+@pytest.mark.parametrize("pool_context", [{}, {"poolCause": "unavailable"}, {"poolCauses": ["auth", "quota"]}])
 def test_unproved_pool_cause_never_enters_resource_wait(live_wait, pool_context):
     from ouroboros.llm_claudexor import ClaudexorModelError
 

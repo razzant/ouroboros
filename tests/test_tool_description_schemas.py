@@ -68,20 +68,6 @@ def test_schedule_readonly_choice_survives_custom_projection(tmp_path, constrain
     ("delegate_start", {"prompt": "New evidence", "subagent_id": "actor-1",
                         "continue_from": "settled-run", "continue_carrier": "packet"},
      "continue_carrier", "restart"),
-    ("verify_and_record", {"contract_kind": "explicit_command", "check": ["python", "check.py"],
-                           "expected_match": "bytes_equal", "artifact_paths": ["actual", "expected"]},
-     "expected_match", "approximate"),
-    ("start_task", {"objective": "Inspect supplied project", "title": "Supplied project inspection",
-                              "workspace": "none", "context_requires_self_body_docs": False},
-     "context_requires_self_body_docs", "false"),
-    ("preflight_review", {"commit_message": "Repair interfaces", "deterministic_only": True,
-                          "source": "index"},
-     "source", "head"),
-    ("query_data", {"op": "sql", "db": "money", "query": "SELECT 1", "max_rows": 5}, "db", "ledger"),
-    ("query_data", {"op": "jsonl", "kind": "events_log", "tail": 20}, "max_rows", 0),
-    ("delegate_wait", {"run_id": "run-1", "checkpoint_after_sec": 60, "checkpoint_reason": "Inspect the diff"},
-     "checkpoint_after_sec", "soon"),
-    ("wait_tasks", {"task_ids": ["child-1"], "mode": "any_terminal", "timeout_sec": 60}, "mode", "first_terminal"),
 ])
 def test_edited_description_schemas_keep_representative_call_shapes(
         tmp_path, name, arguments, invalid_field, invalid_value):

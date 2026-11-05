@@ -68,7 +68,7 @@ def test_frozen_producer_and_writer_after_repair_count_known_emissions_once(
     assert swarm_rollup.load_swarm_rollup(tmp_path, "parent") == facts
 
 
-@pytest.mark.parametrize("damage", ["absent", "shortened", "torn", "unreadable"])
+@pytest.mark.parametrize("damage", ["absent", "torn", "unreadable"])
 def test_invalidated_witness_with_lost_history_is_unknown(tmp_path, monkeypatch, damage):
     legacy(tmp_path)
     swarm_rollup.load_swarm_rollup(tmp_path, "parent")

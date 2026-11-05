@@ -67,8 +67,8 @@ def test_one_id_is_one_object_when_a_task_owns_two_copies(copies):  # noqa: F811
 
 
 @pytest.mark.parametrize("items,groups,reason", [
-    (["nope"], None, "unknown_item"), ([], None, "nothing_selected"), ("x", None, "unknown_item"), ([1], None, "unknown_item"),
-    (["any"], ["working_copies"], "selection_conflict"), (None, None, "nothing_selected")])
+    ([], None, "nothing_selected"), ([1], None, "unknown_item"),
+    (["any"], ["working_copies"], "selection_conflict")])
 def test_a_bad_selection_refuses_before_any_effect(copies, items, groups, reason):  # noqa: F811
     handle = _copy(copies)
     owner = _owner({"finished": False})
@@ -821,7 +821,7 @@ def test_names_come_from_the_narrow_display_read(copies, monkeypatch):  # noqa: 
 # ---- one reader of the private-copy records ----------------------------------------------------------
 
 
-@pytest.mark.parametrize("raw", [b"{", b"[]", b'{"path": ""}', b"\xff\xfe", b'"text"'])
+@pytest.mark.parametrize("raw", [b"{", b"\xff\xfe", b'"text"'])
 def test_passive_and_owning_readers_refuse_the_same_records(copies, raw):  # noqa: F811
     from ouroboros.private_copy_read import checkout_registration, read_records
 

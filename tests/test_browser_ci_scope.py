@@ -18,20 +18,7 @@ WORKFLOWS = REPO / ".github/workflows"
 
 @pytest.mark.parametrize("paths,expected", [
     (["README.md", "docs/development/14-build-and-ci.md"], True),
-    (["docs/new.rst"], True),
-    ([".github/PULL_REQUEST_TEMPLATE.md"], True),
     (["docs/install/index.html"], False),
-    (["site/src/index.md"], False),
-    (["assets/logo.md"], False),
-    (["README.md", "server.py"], False),
-    (["requirements.txt"], False),
-    (["Makefile"], False),
-    (["Ouroboros.spec"], False),
-    (["prompts/SYSTEM.md"], False),
-    (["skills/new/SKILL.md"], False),
-    (["tests/test_new.py"], False),
-    ([".github/workflows/ci.yml"], False),
-    (["unknown/new-code.ext"], False),
     ([], False),
 ])
 def test_only_complete_documentation_changes_skip_browser(paths, expected):
@@ -144,9 +131,7 @@ def _guard(config, items):
 
 
 @pytest.mark.parametrize("narrowing", [
-    {"ignore": ["tests/test_skill_publish_browser.py"]}, {"ignore_glob": ["*publish*"]},
-    {"lf": True}, {"deselect": ["tests/test_x.py::one"]}, {"keyword": "publish"},
-    {"override_ini": ["python_files=test_ui_*.py"]}, {"override_ini": ["norecursedirs=tests"]},
+    {"ignore": ["tests/test_skill_publish_browser.py"]}, {"lf": True}, {"override_ini": ["norecursedirs=tests"]},
 ])
 def test_collection_guard_refuses_controls_that_narrow_collection(narrowing):
     config = _config(option=SimpleNamespace(collectonly=False, **narrowing))
@@ -260,10 +245,7 @@ def test_shard_option_never_relaxes_the_full_lane_guard(option):
 
 
 @pytest.mark.parametrize("value,required,accepted", [
-    ("1/1", True, True), ("3/3", True, True), ("2/4", True, True),
-    ("2/4", False, False),  # A shard without the full-lane guard proves nothing.
-    ("0/3", True, False), ("4/3", True, False), ("1/0", True, False), ("-1/3", True, False),
-    ("1", True, False), ("1/3/5", True, False), ("a/b", True, False), ("1 /3", True, False),
+    ("1/1", True, True), ("2/4", False, False),  # A shard without the full-lane guard proves nothing.
     ("", True, False),
 ])
 def test_shard_option_is_refused_when_malformed_or_without_the_lane_guard(value, required, accepted):

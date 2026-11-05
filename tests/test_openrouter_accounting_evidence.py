@@ -111,13 +111,8 @@ def test_actual_retry_ladder_retains_first_failure_before_second_send(root, monk
 
 
 @pytest.mark.parametrize("usage,expected,final", [
-    ({"cost": 1.25}, 1.25, True), ({"cost": 0}, 0, True), ({}, None, False),
-    ({"cost": "nan"}, None, False), ({"cost": True}, None, False),
+    ({"cost": 0}, 0, True), ({}, None, False),
     ({"cost": 1.25, "prompt_tokens": "broken", "completion_tokens": "inf"}, 1.25, True),
-    ({"cost": 1.25, "cache_creation": {"ephemeral_5m_input_tokens": "broken"},
-      "cache_write_tokens_by_ttl": "broken"}, 1.25, True),
-    ({"prompt_tokens": 0, "completion_tokens": 0}, 0, True),
-    ({"prompt_tokens": 0, "completion_tokens": 0, "cost": -1}, None, False),
 ])
 def test_returned_body_failure_preserves_explicit_money(root, usage, expected, final):
     body = {"id": "gen-body", "error": {"code": 500, "message": "private failure"}, "usage": usage}

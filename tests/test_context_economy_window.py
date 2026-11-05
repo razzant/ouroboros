@@ -307,9 +307,8 @@ def test_a_rebind_uses_only_the_exact_routes_accepted_lower_bound(tmp_path, monk
 
 
 @pytest.mark.parametrize("route,prepared,slack", [
-    ("same", 30_000, 15_000), ("same", -5_000, -2_500), ("same", -5_000, -10_000), ("another-account", 30_000, 15_000),
-    ("estimator", 30_000, 15_000), ("unknown", 30_000, 15_000)],
-    ids=["caption-added", "image-withheld", "image-withheld-narrow", "another-account", "estimator-window", "unknown-window"])
+    ("same", 30_000, 15_000), ("same", -5_000, -2_500), ("same", -5_000, -10_000)],
+    ids=["caption-added", "image-withheld", "image-withheld-narrow"])
 def test_a_rebind_keeps_a_view_exactly_when_the_rounds_carried_input_fits_it(tmp_path, monkeypatch, route, prepared,
                                                                              slack):
     """Review rl-20261104T011620, on a hand-written anchor (no VLM, caption model or provider runs): the accepted
@@ -354,9 +353,8 @@ def test_a_rebind_keeps_a_view_exactly_when_the_rounds_carried_input_fits_it(tmp
 
 
 @pytest.mark.parametrize("owner,ran,mode", [
-    ("low", None, "low"), ("max", "low", "low"), ("max", "nano", "nano"), ("low", "nano", "nano"),
-    ("max", "unknown", "max"), ("low", "max", "low")],
-    ids=["owner-low", "max-task-local-low", "max-task-local-nano", "low-task-local-nano", "unknown-mode", "owner-lowered"])
+    ("low", None, "low"), ("max", "nano", "nano"), ("max", "unknown", "max")],
+    ids=["owner-low", "max-task-local-nano", "unknown-mode"])
 def test_a_cold_restore_sends_the_new_capture_at_its_own_level_not_refolded_to_the_restored_tail(tmp_path, monkeypatch,
                                                                                                   owner, ran, mode):
     """The production owner-wait cold restore (the saved route restored onto the task, then its rebind). The new

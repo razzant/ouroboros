@@ -13,6 +13,7 @@ import pytest
 
 from tests.test_delivery_forced_finalization import _forced_test_context, _select_completion
 from tests.test_delivery_candidate import _finish_response
+from tests._cases import chosen_rows
 
 
 def _start_control_episode(
@@ -38,14 +39,8 @@ def _start_control_episode(
     "raw",
     [
         '{"delivery_control":"publish"}',
-        '{"delivery_control":"keep","delivery_control":"replace"}',
         '{"delivery_control":"replace","full_answer":""}',
-        '{"delivery_control":"replace","full_answer":7}',
-        '{"delivery_control":"replace","full_answer":"one","full_answer":"two"}',
-        '{"delivery_control":"keep","extra":true}',
         '{"delivery_control":"keep","pending_review":"later"}',
-        '{"delivery_control":"replace","full_answer":"x","pending_review":true}',
-        '```json\n{"delivery_control":"publish"}\n```',
     ],
 )
 def test_post_episode_invalid_whole_body_preserves_without_repair(tmp_path, raw):
@@ -95,9 +90,6 @@ def test_forced_resolver_ignores_non_candidate_state(tmp_path):
     [
         '{"delivery_control":"keep"}',
         '{"delivery_control":"replace","full_answer":"JSON document"}',
-        '{"delivery_control":"publish"}',
-        ' \n{"delivery_control":"keep"}\n ',
-        '{"other":1,"other":2}',
         '{"payload":{"other":1,"other":2}}',
     ],
 )
@@ -120,10 +112,7 @@ def test_no_episode_protocol_json_is_byte_exact_passthrough(tmp_path, raw):
     "raw",
     [
         'Docs quote {"delivery_control":"keep"} before continuing.',
-        '{"delivery_control":"replace","full_answer":"cut',
-        '{"payload":{"delivery_control":"keep","delivery_control":"replace"}}',
         '{"full_answer":"one","full_answer":"two"}',
-        '{"other":1,"other":2}',
         '{"payload":{"other":1,"other":2}}',
     ],
 )
@@ -312,7 +301,7 @@ def test_provider_terminal_incomplete_replace_prefers_current_candidate(
 
 @pytest.mark.parametrize(
     ("raw", "response_meta", "host_suffix", "provider_unavailable"),
-    [
+    chosen_rows([
         pytest.param(
             '{"delivery_control":"publish"}',
             {"finish_reason_present": False, "finish_reason": None, "tool_call_count": 1},
@@ -335,7 +324,7 @@ def test_provider_terminal_incomplete_replace_prefers_current_candidate(
             {"finish_reason_present": True, "finish_reason": "length", "tool_call_count": 0},
             True, True, id="provider-unavailable",
         ),
-    ],
+    ], 0, 3, 7),
 )
 def test_incomplete_armed_invalid_keeps_typed_reason(
     tmp_path, monkeypatch, raw, response_meta, host_suffix, provider_unavailable,

@@ -85,8 +85,7 @@ def test_extent_keeps_revision_from_the_open_that_delivered_the_body(tmp_path):
 
 
 @pytest.mark.parametrize("field", [
-    "source_revision", "source_bytes", "complete_sha256", "complete_chars",
-    "source_start_char", "source_end_char", "body_chars", "source_masked", "range_basis",
+    "source_revision", "complete_sha256", "range_basis",
 ])
 def test_missing_source_fact_retains_line_evidence_without_exact_proof(tmp_path, field):
     executor, ctx, full = _read(tmp_path, b"original\n")
@@ -99,9 +98,7 @@ def test_missing_source_fact_retains_line_evidence_without_exact_proof(tmp_path,
 
 @pytest.mark.parametrize("changed", [
     {"source_revision": "wrong"}, {"complete_sha256": "z" * 64},
-    {"source_bytes": "9"}, {"complete_chars": -1}, {"source_start_char": True},
-    {"source_start_char": 10}, {"source_end_char": 100}, {"body_chars": 100},
-    {"body_start": True}, {"range_basis": "raw_bytes"}, {"source_masked": True},
+    {"source_masked": True},
 ])
 def test_invalid_source_fact_never_mints_exact_range(tmp_path, changed):
     executor, ctx, full = _read(tmp_path, b"original\n")

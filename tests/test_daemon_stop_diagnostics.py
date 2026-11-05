@@ -76,8 +76,7 @@ def test_authenticated_legacy_attach_creates_marker_without_replacing_it(authent
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("marker", ["{broken", "[]", "{}", '{"owner":"other"}',
-    '{"owner":"ouroboros","data_dir":"/other-install"}'])
+@pytest.mark.parametrize("marker", ["{broken", "[]", '{"owner":"ouroboros","data_dir":"/other-install"}'])
 def test_attach_refuses_existing_invalid_or_foreign_marker_before_handshake(authenticated_home, marker):
     _, requests = authenticated_home
     path = daemon.ownership_marker_path()

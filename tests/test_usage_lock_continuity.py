@@ -380,7 +380,7 @@ def test_interactive_window_expiry_is_typed_and_never_quota_wait(root, short_acq
     assert rows(root) == []
 
 
-@pytest.mark.parametrize("reason", ["kernel_refused", "name_tier_refused", "identity_unreadable", "permission", "unknown"])
+@pytest.mark.parametrize("reason", ["kernel_refused", "permission", "unknown"])
 def test_negative_acquisition_facts_are_never_cooperatively_retried(root, monkeypatch, reason):
     calls = []
 

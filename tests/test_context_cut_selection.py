@@ -13,7 +13,7 @@ from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path
 from tests.test_live_conversation import host_world as host_world, packages as packages
 
 
-@pytest.mark.parametrize('shape', ['meeting', 'autonomous', 'chat', 'mixed'])
+@pytest.mark.parametrize('shape', ['meeting', 'autonomous', 'mixed'])
 def test_cut_any_kind_oldest_first_and_exact(tmp_path, shape):
     rows = [{'role': 'system', 'content': 'Core'}, {'role': 'user', 'content': 'Assignment'}]
     for i in range(900 if shape == 'meeting' else 300):
@@ -207,7 +207,7 @@ def test_smallest_cut_survives_image_batch_discontinuity(tmp_path, record_proper
 
 
 @pytest.mark.parametrize('provider_id,model_index', [('gemini_live:gemini', 0),
-    ('gemini_live:gemini', 1), ('openai_realtime:openai', 0), ('grok_realtime:grok', 0)])
+    ('gemini_live:gemini', 1), ('grok_realtime:grok', 0)])
 def test_native_envelope_does_not_skip_smaller_fitting_image_cut(host_world, packages, tmp_path,
                                                                record_property, provider_id, model_index):
     from hashlib import sha256

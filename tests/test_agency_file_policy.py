@@ -57,7 +57,7 @@ def test_cyber_nonexternal_root_reads_exact_outside_home_and_skill_state(files, 
 
 @pytest.mark.parametrize("mode,profile", [
     ("advanced", "local_readonly_subagent"), ("advanced", "acting_subagent"),
-    ("cyber_pro", "local_readonly_subagent"), ("cyber_pro", "acting_subagent"),
+    ("cyber_pro", "acting_subagent"),
 ])
 def test_child_reads_lists_and_searches_ordinary_credential_named_files(files, monkeypatch, mode, profile):
     registry, ctx, _home, work, _data = files

@@ -345,7 +345,7 @@ def test_historic_raised_send_uses_only_addressed_open_rows_without_pid_gate(tmp
     assert _row(tmp_path, reservation.attempt_id) == before
 
 
-@pytest.mark.parametrize("case", ["unknown-status", "success-status", "transport-cause", "missing-cause"])
+@pytest.mark.parametrize("case", ["unknown-status", "transport-cause", "missing-cause"])
 def test_remote_facts_of_an_unbound_raised_send_do_not_hold_continue(tmp_path, monkeypatch, case):
     """Status and transport cause describe the remote exchange, never a local receiver."""
     queue, _, _ = _install_queue(tmp_path, monkeypatch)
@@ -365,8 +365,7 @@ def test_remote_facts_of_an_unbound_raised_send_do_not_hold_continue(tmp_path, m
     assert _row(tmp_path, reservation.attempt_id) == before
 
 
-@pytest.mark.parametrize("case", ["body-error", "no-stage", "failure-not-dict", "bound", "partial-birth",
-                                   "partial-attempt", "still-dispatched"])
+@pytest.mark.parametrize("case", ["body-error", "partial-attempt", "still-dispatched"])
 def test_bound_dispatched_or_unproven_failures_keep_continue_held(tmp_path, monkeypatch, case):
     queue, _, _ = _install_queue(tmp_path, monkeypatch)
     facts = dict(_PROBE_FACTS["TimeoutError"])

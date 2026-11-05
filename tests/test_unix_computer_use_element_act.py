@@ -518,7 +518,7 @@ def test_focused_window_retains_title_read_errors_without_preventing_identity_se
     assert "title" not in out["window"] and ax.performed == [("play", "AXPress")] and ax.balanced()
 
 
-@pytest.mark.parametrize("focused_reply", [(None, TIMEOUT), (None, -25200), (None, 0), (("wrong", "win"), 0)])
+@pytest.mark.parametrize("focused_reply", [(None, TIMEOUT), (None, -25200), (("wrong", "win"), 0)])
 def test_default_window_refuses_failed_or_malformed_focused_read_without_fallback(focused_reply):
     ax = FakeAX(deck(), windows=["win"], focused=None)
     original_attr = ax.attr

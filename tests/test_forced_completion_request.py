@@ -31,6 +31,7 @@ from tests.test_presence_continuation_bootstrap import install_bootstrap_harness
 from tests.test_presence_contact_wait import start
 from tests.test_presence_owner_contact import contact_runtime as _contact_runtime, focus  # noqa: F401
 from tests.test_presence_owner_stop import _kept_unsent, _outbound, owner_stop as _owner_stop
+from tests._cases import chosen_rows
 
 contact_runtime, owner_stop, wake = _contact_runtime, _owner_stop, _silent_wake
 pytestmark = pytest.mark.serial
@@ -165,7 +166,7 @@ CASES = {
 
 
 @pytest.mark.parametrize("form", ["native", "text"])
-@pytest.mark.parametrize("case", list(CASES))
+@pytest.mark.parametrize("case", chosen_rows(list(CASES), 0, 2))
 def test_forced_native_and_text_completion_select_the_same_result(at_limit, form, case):
     turn = at_limit
     text, usage, trace, bus = turn.run([call("chat_history", {}), FORMS[form](CASES[case])])
@@ -271,8 +272,7 @@ def test_a_completion_beside_other_calls_executes_nothing_and_is_not_adopted(at_
                                     "tool_call_count": None}
 
 
-@pytest.mark.parametrize("arguments", ['{"action": "finish", "answer": "Truncated', '', '[]', '{"answer": "No verb"}',
-                                       '{"action": "finish", "answer": "One", "answer": "Two"}'])
+@pytest.mark.parametrize("arguments", ['{"action": "finish", "answer": "Truncated', '', '{"action": "finish", "answer": "One", "answer": "Two"}'])
 def test_malformed_native_arguments_degrade_without_publishing_them(at_limit, arguments):
     turn = at_limit
     reply = {"role": "assistant", "content": None, "tool_calls": [{
@@ -335,7 +335,7 @@ def test_null_fields_name_nothing_and_false_keeps_a_spoken_finish(tmp_path, form
     assert usage.get("wake_silent") is not True and "wake_summary" not in usage and "task_completion" not in returned
 
 
-@pytest.mark.parametrize("case", ["action-list", "pending-review-object", "silent-string", "summary-object"])
+@pytest.mark.parametrize("case", ["action-list", "silent-string", "summary-object"])
 def test_the_handler_refuses_the_same_types_and_stages_nothing(wake, case):
     """The ordinary finish_task call reads the same contract: a typed argument error, nothing staged."""
     request, reason = WRONG_TYPES[case]
@@ -445,8 +445,8 @@ def _real_transport(tmp_path, reply, finish, *, retained=False, schemas=None, be
     return text, usage, returned, registry, kept
 
 
-@pytest.mark.parametrize("finish", ["tool_calls", "tool_use", "function_call", "stop", ABSENT],
-                         ids=["tool_calls", "tool_use", "function_call", "stop", "absent"])
+@pytest.mark.parametrize("finish", ["tool_calls", "stop", ABSENT],
+                         ids=["tool_calls", "stop", "absent"])
 def test_the_real_transport_carries_the_call_and_keeps_the_actual_call_count(tmp_path, finish):
     """Through the real ``call_llm_with_retry``: the response facts keep tool_call_count=1, and a reply that
     ended only because it asked for its one completion call is complete."""

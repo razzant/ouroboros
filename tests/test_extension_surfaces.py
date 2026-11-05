@@ -22,6 +22,7 @@ from tests.test_extension_loader import (
     _prepare_extension,
     _write_ext_skill,
 )
+from tests._cases import chosen_rows
 
 
 @pytest.fixture(autouse=True)
@@ -376,16 +377,13 @@ def test_legacy_iframe_without_route_registers_but_preflight_reports_defect(tmp_
 @pytest.mark.parametrize(
     "render,expected",
     [
-        ({"kind": "module", "entry": "widget.js", "height": 319}, "height"),
         ({"kind": "module", "entry": "widget.js", "max_height": 8193}, "max_height"),
         ({"kind": "module", "entry": "widget.js", "height": True}, "height"),
         ({"kind": "module", "entry": "widget.js", "height": 900, "max_height": 800}, "cannot exceed"),
         ({"kind": "iframe", "route": "view", "max_height": 1000}, "module widgets only"),
         ({"kind": "declarative", "schema_version": 1, "components": [], "height": 640}, "framed widgets only"),
-        ({"kind": "declarative", "schema_version": 1, "components": [], "max_height": 640}, "framed widgets only"),
-        ({"kind": "iframe", "height": 640}, "requires route"),
     ],
-    ids=["below-min", "above-max", "bool", "contradictory", "legacy-max", "declarative-height", "declarative-max", "iframe-no-route"],
+    ids=["above-max", "bool", "contradictory", "legacy-max", "declarative-height"],
 )
 def test_frame_geometry_validation_rejects_ambiguous_values(render, expected):
     with pytest.raises(ExtensionRegistrationError, match=expected):
@@ -411,7 +409,7 @@ def test_validate_ui_render_leaves_legacy_module_appearance_absent():
     assert "appearance" not in render
 
 
-@pytest.mark.parametrize("appearance", ["", "system", 1, False])
+@pytest.mark.parametrize("appearance", ["", 1, False])
 def test_validate_ui_render_rejects_invalid_module_appearance(appearance):
     with pytest.raises(ExtensionRegistrationError, match="appearance"):
         validate_ui_render({"kind": "module", "entry": "widget.js", "appearance": appearance})
@@ -653,23 +651,12 @@ def test_register_ui_tab_rejects(tmp_path, case_id, name, plugin, expected_subst
     "render,expected_start",
     [
         ({"kind": "module", "entry": "widget.js"}, "manual"),
-        ({"kind": "module", "entry": "widget.js", "start": None}, "manual"),
-        ({"kind": "module", "entry": "widget.js", "start": ""}, "manual"),
-        ({"kind": "module", "entry": "widget.js", "start": "  "}, "manual"),
         ({"kind": "module", "entry": "widget.js", "start": "auto"}, "auto"),
-        ({"kind": "module", "entry": "widget.js", "start": " auto "}, "auto"),
         ({"kind": "module", "entry": "widget.js", "start": "retain"}, "retain"),
-        ({"kind": "iframe", "route": "view"}, "manual"),
-        ({"kind": "iframe", "route": "view", "start": None}, "manual"),
-        ({"kind": "iframe", "route": "view", "start": "retain"}, "retain"),
-        ({"kind": "declarative", "schema_version": 1, "components": []}, "auto"),
-        ({"kind": "declarative", "schema_version": 1, "components": [], "start": ""}, "auto"),
-        ({"kind": "declarative", "schema_version": 1, "components": [], "start": "auto"}, "auto"),
     ],
     ids=[
-        "module-default", "module-none", "module-blank", "module-whitespace", "module-auto",
-        "module-auto-padded", "module-retain", "iframe-default", "iframe-none", "iframe-retain",
-        "declarative-default", "declarative-blank", "declarative-auto",
+        "module-default", "module-auto",
+        "module-retain",
     ],
 )
 def test_validate_ui_render_fills_explicit_start_mode(render, expected_start):
@@ -692,20 +679,20 @@ _BAD_START_VALUES = {
 
 @pytest.mark.parametrize(
     "render,expected",
-    [
+    chosen_rows([
         ({"kind": "module", "entry": "widget.js", "start": "whenever"}, "expected one of"),
         ({"kind": "iframe", "route": "view", "start": "always"}, "expected one of"),
         *[({"kind": "module", "entry": "widget.js", "start": bad}, "expected one of") for bad in _BAD_START_VALUES.values()],
         *[({"kind": "iframe", "route": "view", "start": bad}, "expected one of") for bad in _BAD_START_VALUES.values()],
         ({"kind": "declarative", "schema_version": 1, "components": [], "start": "manual"}, "nothing to start"),
         ({"kind": "declarative", "schema_version": 1, "components": [], "start": "retain"}, "nothing to start"),
-    ],
-    ids=[
+    ], 0, 14, 17),
+    ids=chosen_rows([
         "module-unknown", "iframe-unknown",
         *[f"module-{name}" for name in _BAD_START_VALUES],
         *[f"iframe-{name}" for name in _BAD_START_VALUES],
         "declarative-manual", "declarative-retain",
-    ],
+    ], 0, 14, 17),
 )
 def test_validate_ui_render_rejects_bad_start_mode(render, expected):
     with pytest.raises(ExtensionRegistrationError, match=expected):

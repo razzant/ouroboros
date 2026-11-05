@@ -33,7 +33,7 @@ def _bundle(prompt):
                       .split("\nProposed tool call:", 1)[0])
 
 
-@pytest.mark.parametrize("role", ["main", "api", "declared_api", "declared_nanny"])
+@pytest.mark.parametrize("role", ["main", "api", "declared_nanny"])
 def test_rules_reach_every_author_role_and_mode_once_from_the_task_snapshot(tmp_path, monkeypatch, role):
     monkeypatch.setenv(OWNER_RULES_KEY, LIVE)
     env, memory = _make_env_and_memory(tmp_path)

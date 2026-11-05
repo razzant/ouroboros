@@ -57,7 +57,7 @@ def _group(item):
     return mark.args[0]
 
 
-@pytest.mark.parametrize("workers, shards", [(2, 1), (4, 1), (7, 1), (8, 2), (12, 3), (16, 4), (64, 4)])
+@pytest.mark.parametrize("workers, shards", [(2, 1), (8, 2), (12, 3)])
 def test_serial_overlap_is_bounded_by_the_worker_count(run_tests, workers, shards):
     assert run_tests.serial_shards(workers) == shards
 

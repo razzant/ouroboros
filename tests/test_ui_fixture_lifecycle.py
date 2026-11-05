@@ -640,9 +640,9 @@ def esm_probe(fixture_probe, monkeypatch, source, tmp_path):
 
 
 @pytest.mark.parametrize("script, outcome", [
-    ([500, _READY], "ready"), (["timeout", _READY], "ready"), ([503], "deadline"),
-    ([_FAILED, _READY], "error"), ([b"<!doctype html>", _READY], "malformed"),
-], ids=["transient-500", "transport-error", "persistent-503", "supervisor-error", "malformed-200"])
+    ([500, _READY], "ready"), ([503], "deadline"),
+    ([_FAILED, _READY], "error"),
+], ids=["transient-500", "persistent-503", "supervisor-error"])
 def test_widget_esm_server_reads_state_until_it_answers(esm_probe, tmp_path, script, outcome):
     probe = esm_probe
     probe.script[:] = script

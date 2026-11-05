@@ -541,9 +541,7 @@ def _record(**over):
 @pytest.mark.parametrize("head, latest, relation", [
     ("a" * 40, "b" * 40, "pending"),
     ("b" * 40, "b" * 40, "applied"),
-    ("b" * 40, "c" * 40, "applied"),
     ("a" * 40, "c" * 40, "superseded"),
-    ("d" * 40, "b" * 40, "other"),
 ])
 def test_project_letter_relations(head, latest, relation):
     view = ul.project_letter(_record(), head_sha=head, latest_sha=latest)

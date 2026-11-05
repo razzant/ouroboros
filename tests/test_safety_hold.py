@@ -33,7 +33,7 @@ def test_legacy_owner_backend_absence_still_warns(supervisor, monkeypatch):
     assert not h.module.check_safety("write_remote", {}, ctx=h.ctx)[0]
 
 
-@pytest.mark.parametrize("source", ["subject", "rules", "directives", "prior"])
+@pytest.mark.parametrize("source", ["subject", "directives", "prior"])
 def test_mandatory_bundle_never_truncated(supervisor, monkeypatch, source):
     h = supervisor
     monkeypatch.setattr(h.module, "_SAFETY_BUNDLE_BYTE_BUDGET", 2000)

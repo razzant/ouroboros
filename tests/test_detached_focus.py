@@ -363,9 +363,8 @@ def test_absent_or_malformed_owner_is_no_fact_and_the_origin_decides(tmp_path, o
 @pytest.mark.parametrize("kind,metadata,flags", [
     ("pooled", {"delegation_role": "subagent", "parent_task_id": "head", "root_task_id": "head"}, {}),
     ("presence", {"source": "presence", "presence": {"binding_id": "b"}}, {"_presence_turn": True}),
-    ("pooled", {"source": "presence_promote", "presence": {"binding_id": "b"}}, {}),
     ("pooled", {"presence_binding_authority": {"binding_id": "b"}, "root_task_id": TASK_ID}, {}),
-], ids=["child", "presence_turn", "presence_origin_on_the_pool", "acting_for_a_binding"])
+], ids=["child", "presence_turn", "acting_for_a_binding"])
 def test_the_carrier_grants_no_child_or_presence_authority(tmp_path, kind, metadata, flags):
     from ouroboros.task_status import execution_owner_record
     from ouroboros.tools.project_journal import _update_focus

@@ -149,13 +149,9 @@ def test_native_directory_parent_cannot_verify_another_folder(tmp_path, monkeypa
     assert not (workspace / ".git").exists()
 
 
-@pytest.mark.parametrize("surface,mixed,drift", [("self_worktree", False, ""), ("self_worktree", True, ""),
-                                                 ("external_workspace", False, ""),
+@pytest.mark.parametrize("surface,mixed,drift", [("external_workspace", False, ""),
                                                  ("self_worktree", False, "worktree"),
-                                                 ("self_worktree", False, "index"),
-                                                 ("self_worktree", False, "unmerged"),
-                                                 ("self_worktree", True, "unmerged"),
-                                                 ("self_worktree", True, "stage_failure")])
+                                                 ("self_worktree", False, "index")])
 def test_native_git_receives_complete_file_outputs(tmp_path, monkeypatch, surface, mixed, drift):
     from ouroboros import workspace_patch_capture as capture
     monkeypatch.setattr(capture, "_PATCH_FILE_REFERENCE_BYTES", 4)

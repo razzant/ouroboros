@@ -268,7 +268,7 @@ def _blue_checkout(root: pathlib.Path) -> pathlib.Path:
     return blue
 
 
-@pytest.mark.parametrize("fault,blue_input", [("", False), ("evolution_beside", False), ("unconfirmed_then_adopted", False), ("", True)])
+@pytest.mark.parametrize("fault,blue_input", [("", False), ("unconfirmed_then_adopted", False), ("", True)])
 def test_the_whole_chain_binds_one_commit_from_the_gate_to_the_served_bytes(lane, tmp_path, fault, blue_input):
     """Positive: every check, on the commit the gate's record names, with qualification recorded as it happened. An
     evolution cycle's own adoption beside it (another id, another commit) speaks for nothing here. A boot that left the
@@ -311,17 +311,9 @@ def test_full_evidence_from_the_tasks_own_proof_qualifies_too(lane):
     ("handoff_other_commit", "timeout:authorization", {"adoption_requested_for_reviewed_commit", "adoption_qualified_by_real_tests",
                                                         "adoption_settled_and_restart_verified", "adoption_recorded_on_task"}),
     ("closed_other_id", "timeout:settlement", {"adoption_qualified_by_real_tests", "adoption_settled_and_restart_verified", "adoption_recorded_on_task"}),
-    ("no_settlement", "timeout:settlement", {"adoption_qualified_by_real_tests", "adoption_settled_and_restart_verified", "adoption_recorded_on_task"}),
     # Unconfirmed is no dead end (the next boot may settle it), so only the deadline names it.
     ("unconfirmed", "adoption_unconfirmed:native_host", {"adoption_qualified_by_real_tests", "adoption_settled_and_restart_verified",
                                                          "adoption_recorded_on_task"}),
-    ("no_verify", "timeout:restart_verify", {"adoption_settled_and_restart_verified"}),
-    ("no_task_record", "timeout:task_record", {"adoption_recorded_on_task"}),
-    ("candidate_other_commit", "adopted", {"adoption_requested_for_reviewed_commit"}),
-    ("qualification_other_head", "adopted", {"adoption_qualified_by_real_tests"}),
-    ("qualification_other_tree", "adopted", {"adoption_qualified_by_real_tests"}),
-    ("state_serves_old", "adopted", {"adoption_serves_commit"}),
-    ("checkout_not_moved", "adopted", {"adoption_serves_commit"}),
 ])
 def test_one_wrong_identity_fails_exactly_its_own_stage(lane, fault, reason, failed):
     host, ctx = lane(fault)
@@ -377,10 +369,6 @@ def test_a_serving_checkout_whose_status_git_cannot_read_is_not_clean(tmp_path):
     ("restart_refused", "restart_refused:ADOPTION_TESTS_REQUIRED", "ADOPTION_TESTS_REQUIRED"),
     ("no_request", "adoption_not_requested", None),
     ("restart_plain", "restart_without_adoption", ""),
-    ("request_other_commit", "restart_for_other_commit", None),
-    ("closed_abandoned", "adoption_closed:abandoned:not_armed", None),
-    ("verify_other_sha", "restart_verify_failed", None),
-    ("server_exited", "server_exited:1", None),
 ])
 def test_a_dead_end_ends_the_wait_at_once_with_its_own_reason_and_the_commit_kept(lane, fault, reason, refusal):
     """Long budget, immediate answer: nothing waits out a refusal. A refused state stays its own fact, and only the

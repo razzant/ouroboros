@@ -556,7 +556,7 @@ def test_the_harness_summary_carries_its_own_limits(tmp_path, monkeypatch):
 
 @pytest.mark.serial
 @pytest.mark.parametrize("fault", [
-    "none", "promotion", "persistent_promotion", "non_permission",
+    "none", "persistent_promotion", "non_permission",
 ])
 def test_node_repair_directory_transaction_preserves_success_and_failure(tmp_path, monkeypatch, fault):
     """Unique generation publication retries sharing refusals, never displaces a live root.

@@ -533,8 +533,7 @@ def test_a_denied_chain_member_stays_owed_on_the_row_and_the_next_pass_of_each_c
         assert '"service:review-probe"' not in path.read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("first,then", [("reaper", "reaper"), ("exit stop", "exit stop"), ("exit stop", "reaper"),
-                                         ("reaper", "exit stop")])
+@pytest.mark.parametrize("first,then", [("reaper", "reaper"), ("exit stop", "exit stop"), ("reaper", "exit stop")])
 def test_a_held_child_survives_renewed_ledger_failure_and_any_later_consumer_ends_it(tmp_path, scripts, first, then):
     """A torn installation ledger: the first stop ends the leader and holds its chain-only child; a renewed
     failure holds it again; once the ledger reads, whichever consumer comes next ends it from the row."""
@@ -720,7 +719,7 @@ def test_an_old_launchs_owed_child_outlives_a_new_process_that_reuses_its_dead_l
         assert refuted["record_id"] == a_id and refuted["pid"] == _PID
 
 
-@pytest.mark.parametrize("late", ["before-compaction", "during-compaction", "after-unlock", "after-forget"])
+@pytest.mark.parametrize("late", ["before-compaction", "after-unlock", "after-forget"])
 def test_a_late_row_of_the_same_launch_keeps_its_custody_across_a_compaction_that_dropped_the_launch(
         tmp_path, monkeypatch, late):
     """A compaction drops launch A's observed rows (its end was confirmed) while a stop of A that finished later

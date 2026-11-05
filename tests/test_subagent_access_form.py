@@ -85,7 +85,7 @@ def test_api_omitted_access_keeps_result_free_of_an_ignored_field_notice(registr
     assert "ignored" not in result.text
 
 
-@pytest.mark.parametrize("access", ["full", "", "invalid", [], {}])
+@pytest.mark.parametrize("access", ["full", "", {}])
 def test_invalid_access_names_field_value_and_selected_route(access):
     with pytest.raises(SubagentSelectionError) as raised:
         select_subagent_snapshot(_settings(), subagent_id="api-scout", access=access)

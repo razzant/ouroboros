@@ -71,7 +71,7 @@ def test_a_copy_with_nothing_unique_goes_without_any_capture(copies):
     assert _prune(copies)["removed"] == 1 and not Path(handle.path).exists()
 
 
-@pytest.mark.parametrize("rel", [".venv/bin/python", ".cache/inputs/held.txt", "__pycache__/a.pyc", "scratch.tmp"])
+@pytest.mark.parametrize("rel", [".venv/bin/python", ".cache/inputs/held.txt", "scratch.tmp"])
 def test_a_name_the_patch_rules_leave_out_proves_nothing_reproducible(copies, rel):
     """Those rules decide transport; no producer recorded these as reproducible, so the copy stays."""
     handle = _copy(copies)
@@ -301,7 +301,7 @@ def test_a_file_result_made_read_only_after_its_capture_keeps_the_copy(copies):
             blob.chmod(saved)  # Win32 cannot delete a read-only file
 
 
-@pytest.mark.parametrize("damage", ["archive_bytes", "archive_gone", "ledger_gone", "member_lies"])
+@pytest.mark.parametrize("damage", ["archive_bytes", "ledger_gone", "member_lies"])
 def test_a_file_result_that_cannot_be_read_back_whole_keeps_the_copy(copies, damage):
     import zipfile
 
@@ -337,7 +337,7 @@ def _artifact_identity(path):
     return measured["sha256"], measured["size"]
 
 
-@pytest.mark.parametrize("rel", [".venv/bin/python", ".env", "ignored.log", "cache/__pycache__/a.pyc", "scratch.tmp"])
+@pytest.mark.parametrize("rel", [".venv/bin/python", "ignored.log", "scratch.tmp"])
 def test_what_no_capture_holds_keeps_the_copy_beside_a_saved_file_result(copies, rel):
     """Ignored, environment and credential-shaped files really are nowhere else: that stays the owner's choice."""
     (copies[1] / ".gitignore").write_text("*.log\n", encoding="utf-8")

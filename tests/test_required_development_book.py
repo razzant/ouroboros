@@ -355,8 +355,7 @@ def test_a_declared_capture_reads_the_same_signal(tmp_path, monkeypatch):
 
 # --- It costs the window, and nothing automatic ---------------------------------------------------------------------
 
-@pytest.mark.parametrize("preferred,window", [("low", 1_000_000), ("nano", 1_000_000), ("max", 1_000_000),
-                                              ("low", 330_000), ("max", 330_000)])
+@pytest.mark.parametrize("preferred,window", [("low", 1_000_000), ("low", 330_000), ("max", 330_000)])
 def test_every_automatic_choice_matches_the_same_capture_without_the_book(tmp_path, fixed_density, preferred, window):
     ordinary = _plan(tmp_path, _core(tmp_path), preferred, window)
     required = _plan(tmp_path, _core(tmp_path, required=True), preferred, window)

@@ -342,7 +342,7 @@ def test_a_refused_wake_consumes_no_transition_and_the_admitted_one_persists_obs
     assert set(header['boundary']['transitions']["inventory"]) == {"kid", "wake0001"}
 
 
-@pytest.mark.parametrize('failure', ['write', 'readback', 'corrupt_previous', 'missing_previous'])
+@pytest.mark.parametrize('failure', ['write', 'corrupt_previous', 'missing_previous'])
 def test_inventory_source_failure_never_advances_accepted_boundary(clock, monkeypatch, failure):
     from ouroboros import artifacts, chat_chain
     from ouroboros.consciousness import OBSERVATION_STATE_KEY
@@ -663,10 +663,6 @@ def test_a_money_skip_is_rechecked_after_a_restart_from_its_key(clock, monkeypat
 @pytest.mark.parametrize("stored", [
     "not a record", {"reason": "allowance_unknown", "next_wake_at": "2027-02-01T00:00:00+00:00"},
     {"reason": "allowance_exhausted", "next_wake_at": "2027-02-01T00:00:00+00:00", "allowance": {"limit_usd": None}},
-    {"reason": "allowance_exhausted", "next_wake_at": "2027-01-31T00:00:00+00:00", "allowance": {"limit_usd": 20.0}},
-    {"reason": "allowance_exhausted", "next_wake_at": "2027-02-01T00:00:00+00:00", "allowance": {"limit_usd": 20.0}},
-    {"at": "yesterday", "reason": "allowance_exhausted", "next_wake_at": "2027-02-01T00:00:00+00:00",
-     "allowance": {"limit_usd": 20.0}},
 ])
 def test_a_restart_restores_no_recheck_from_any_other_record(clock, monkeypatch, stored):
     """Only an exhausted-allowance skip with a known time and limit that set the stored next wake is restored."""

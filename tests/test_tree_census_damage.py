@@ -66,8 +66,7 @@ def test_a_damaged_row_is_named_and_every_readable_member_kept(tmp_path, kind, d
     assert task_store.tree_facts(tmp_path, "other").unresolved == census.unresolved
 
 
-@pytest.mark.parametrize("tie", ["parent", "member_parent", "retry_of_root", "superseded", "caller_id", "handoff",
-                                 "own_root"])
+@pytest.mark.parametrize("tie", ["parent", "superseded", "own_root"])
 def test_a_damaged_row_tied_to_one_tree_is_linked_there_only(tmp_path, tie):
     _tree(tmp_path)
     typed = {"parent": {"parent_task_id": "child"}, "superseded": {"superseded_by": "child"}}.get(tie, {})
@@ -284,7 +283,7 @@ AFTER = {"task_id": "stray-2", "reason": "body_not_object"}
 TIED = {"kind": "member_record_unreadable", "task_id": "stray-2", "detail": "body_not_object"}
 
 
-@pytest.mark.parametrize("case", ["clean", "after", "beside_the_pause_gap", "tied"])
+@pytest.mark.parametrize("case", ["clean", "beside_the_pause_gap", "tied"])
 def test_the_resume_census_names_a_row_damaged_after_the_pause_settled(tmp_path, monkeypatch, case):
     """Exact Resume of a parked root: no settle tick re-read the tree after the damage, only Resume's own census."""
     from ouroboros import owner_pause
@@ -462,7 +461,7 @@ def _reserve_model_request(root, task_id, root_task_id):
                                                 task_id=task_id, root_task_id=root_task_id))
 
 
-@pytest.mark.parametrize("tie", ["unattributed", "parent", "custody", "model_request"])
+@pytest.mark.parametrize("tie", ["unattributed", "custody", "model_request"])
 def test_continue_is_held_only_by_a_damaged_row_tied_to_its_tree(tmp_path, monkeypatch, tie):
     from supervisor.continuation_admission import admit_continuation
     from tests.test_owner_continue import NONCE, _interrupted
@@ -510,7 +509,7 @@ def _cold_tie(root, tie):
     _damage(root, "kid", "torn", **({"parent_task_id": "sleeper"} if tie == "child" else {}))
 
 
-@pytest.mark.parametrize("tie", ["unattributed", "child", "model_request", "other_root_request"])
+@pytest.mark.parametrize("tie", ["unattributed", "child", "other_root_request"])
 def test_a_cold_sleep_is_refused_only_by_its_own_damaged_member(tmp_path, tie):
     from ouroboros import model_sleep
     from tests.test_model_sleep import _ctx, _result

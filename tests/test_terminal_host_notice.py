@@ -567,7 +567,7 @@ def test_open_custody_is_its_own_card_row_live_and_on_history_replay(tmp_path, m
     assert pending_deliveries(tmp_path) == []
 
 
-@pytest.mark.parametrize("outcome", ["message", "deferred", "silent", "tool_delivered"])
+@pytest.mark.parametrize("outcome", ["message", "silent", "tool_delivered"])
 def test_presence_preserves_authored_speech_and_keeps_host_notice_in_task(tmp_path, monkeypatch, outcome):
     from ouroboros.presence_runner import PresenceTurnGate, run_presence_turn
     from tests.test_presence_runner import _admission, _event

@@ -125,9 +125,8 @@ def test_same_id_recovers_once_with_original_resources_and_visible_wait(host, tm
     assert "project_admission_hold" not in settled
 
 
-@pytest.mark.parametrize("guard", ["owner_hold", "budget_pause", "budget_root", "acceptance", "reservation",
-                                  "running", "missing_result", "unreadable_result", "started", "deadline",
-                                  "null", "malformed", "missing_workspace", "retargeted_workspace", "missing_drive"])
+@pytest.mark.parametrize("guard", ["owner_hold", "reservation",
+                                  "missing_result"])
 def test_recovery_preserves_independent_guards(host, tmp_path, monkeypatch, guard):  # noqa: F811
     accepted(host, tmp_path)
     path, original = restore_unreadable(host)

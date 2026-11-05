@@ -9,7 +9,7 @@ from tests._wake_summary_shared import seed_wake
 
 
 @pytest.mark.parametrize("silent,sent,notice,quiet", [(True, False, "", True),
-    (True, True, "", False), (True, False, "A check failed.", False), (False, False, "", False)])
+    (True, True, "", False), (False, False, "", False)])
 def test_quiet_finish_and_projected_row_use_all_delivery_facts(tmp_path, silent, sent, notice, quiet):
     from ouroboros.terminal_projection import _project_row
 

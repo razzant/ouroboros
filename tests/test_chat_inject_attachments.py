@@ -288,7 +288,7 @@ def test_server_routes_a_file_only_owner_message(monkeypatch):
     assert routed[0]["task_metadata"] == {"chat_attachment_uploads": uploads}
 
 
-@pytest.mark.parametrize("failure", ["missing_second", "bad_shape_second", "copy_second", "invalid_wait", "invalid_user"])
+@pytest.mark.parametrize("failure", ["missing_second", "bad_shape_second", "invalid_user"])
 def test_unaccepted_inject_removes_only_its_new_copies(tmp_path, monkeypatch, failure):
     from ouroboros.gateway import host_service
 

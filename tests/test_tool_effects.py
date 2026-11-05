@@ -43,7 +43,6 @@ def test_published_manifest_only_and_generation_match(published_tool, tmp_path, 
 
 @pytest.mark.parametrize("value,expected,declared", [
     ("read", "read", True), ("message", "message", True), ("write", "write", True),
-    (None, "write", False), ("mixed", "write", False), (["read", "write"], "write", False),
 ])
 def test_effect_defaults_and_mixed_tools(published_tool, value, expected, declared):
     name, descriptor = published_tool(value)

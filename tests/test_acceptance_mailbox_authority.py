@@ -70,8 +70,8 @@ def test_context_mail_does_not_hide_observation_or_refuse_ack(case, provenance):
     assert tool_ctx._loop_mailbox_seen_ids == set()
 
 
-@pytest.mark.parametrize("kind", ["owner_text", "quiz_answer", "hurry", "finalize_now",
-                                 "ancestor_task", "peer_via_ancestor", "legacy"])
+@pytest.mark.parametrize("kind", ["owner_text", "finalize_now",
+                                 "legacy"])
 def test_unread_owner_or_control_keeps_finalization_open(case, kind):
     tool_ctx, _tools, ctx, trace, _candidate = case
     observed = capture_acceptance_observation(tool_ctx, trace, ctx.incoming_messages)

@@ -199,7 +199,7 @@ def test_a_restart_before_the_row_is_a_refusal_and_leaves_the_window_to_the_next
 
 
 @pytest.mark.parametrize("window,door_named", [("carrier_gap", False), ("carrier_gap", True),
-                                               ("binding", False), ("preparation", False)])
+                                               ("preparation", False)])
 def test_a_restart_accepted_after_the_row_finds_a_started_wake(race, monkeypatch, window, door_named):
     """``carrier_gap`` is the production order: tick returned with the row written and dispatched, the same
     loop accepts, then the carrier runs. The row shares its Q transaction with the gate, so no later

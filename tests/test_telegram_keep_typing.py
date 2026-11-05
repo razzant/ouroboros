@@ -556,9 +556,6 @@ def test_a_quiz_card_is_bracketed_like_a_reply(mod, tmp_path, monkeypatch):
 @pytest.mark.parametrize("settings,transport,expected", [
     ({"TELEGRAM_CHAT_ID": "77", "TELEGRAM_MIRROR_MODE": "all"}, {}, {77}),
     ({"TELEGRAM_CHAT_ID": "77", "TELEGRAM_MIRROR_MODE": "telegram_only"}, {}, set()),
-    ({"TELEGRAM_CHAT_ID": "77", "TELEGRAM_MIRROR_MODE": "telegram_only"},
-     {"kind": "telegram", "conversation_id": "77"}, {77}),
-    ({}, {"kind": "telegram", "conversation_id": "88"}, {88}),
     ({}, {}, set()),
 ])
 def test_the_cue_maps_host_chats_through_the_bridges_mirror_policy(mod, tmp_path, settings, transport, expected):

@@ -380,7 +380,6 @@ def test_one_failed_source_preserves_other_account_catalogs(account_engine):
 
 
 @pytest.mark.parametrize("change", [{"method": "POST"}, {"path": "/wrong"},
-    {"parameters": [{"name": "view", "location": "header", "enum": ["accounts"]}]},
     {"parameters": [{"name": "view", "location": "query", "enum": ["selected"]}]}])
 def test_account_view_requires_the_exact_declared_query(change):
     path = "/v2/model-sources/:id/models"

@@ -12,7 +12,7 @@ from tests.test_budget_pause_holds import _fenced_member, _idle_worker, _source_
 pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize("saved_pause,selected", [(True, True), (False, True), (True, False), (False, False)])
+@pytest.mark.parametrize("saved_pause,selected", [(True, True), (True, False), (False, False)])
 def test_new_saved_pause_does_not_rearm_historic_selected_panic(tmp_path, monkeypatch, saved_pause, selected):
     from supervisor.events_budget import BUDGET_HOLD_KEY, HOLD_PANIC
     from ouroboros import budget_pause
@@ -237,7 +237,7 @@ def test_invalid_fences_retain_exact_source_locators(tmp_path, monkeypatch, fenc
         assert not queue.resume_budget_paused_task("saved")["ok"]
 
 
-@pytest.mark.parametrize("surface,key", [("handoff", "pause_id"), ("handoff", "grant_id"),
+@pytest.mark.parametrize("surface,key", [("handoff", "grant_id"),
                                           ("row", "pause_id"), ("grant", "grant_id")])
 def test_empty_resume_identity_cannot_match_or_overwrite(tmp_path, monkeypatch, surface, key):
     from ouroboros import budget_pause

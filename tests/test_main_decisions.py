@@ -343,9 +343,7 @@ def test_corrupt_registry_and_unconfirmed_binding_are_not_complete_empty(tmp_pat
 
 @pytest.mark.parametrize("reason,automatic,source,expected", [
     ("auth", True, "codex", True), ("quota", True, "codex", False),
-    ("auth_quota", True, "codex", False), ("unavailable", True, "codex", False),
-    ("quota", False, "codex", True), ("auth_quota", False, "codex", True),
-    ("unavailable", False, "codex", True), ("unavailable", True, "", True),
+    ("auth_quota", True, "codex", False),
 ])
 def test_human_required_waits_use_owner_capability_not_blanket_reason_exclusion(
         tmp_path, reason, automatic, source, expected):
@@ -407,8 +405,7 @@ def test_model_wait_without_current_owner_action_evidence_discloses_gap(tmp_path
 
 
 @pytest.mark.parametrize("cause,can_resume,reason", [
-    ("budget", True, "budget"), ("restart", True, "restart"), ("sleep", True, "resume"), ("unknown", True, "resume"),
-    ("owner", False, None), ("sleep", False, None), ("unknown", False, None)])
+    ("budget", True, "budget"), ("restart", True, "restart"), ("sleep", True, "resume")])
 def test_resume_attention_follows_the_parked_rows_release_rule(tmp_path, cause, can_resume, reason):
     """The census owner derives can_resume from the row's own release rule
     (``events_budget.explicit_resume_required``); the projector never

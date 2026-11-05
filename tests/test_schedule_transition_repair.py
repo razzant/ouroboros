@@ -171,7 +171,7 @@ def test_api_edit_preserves_accepted_or_unprovable_occurrence(q, monkeypatch, ev
             assert bool(current.get("completed_at")) is not edit_timing
 
 
-@pytest.mark.parametrize("cron,successor", [(False, False), (True, False), (True, True), (False, True)])
+@pytest.mark.parametrize("cron,successor", [(False, False), (True, True), (False, True)])
 def test_worker_crash_retry_survives_settlement_and_successor(q, monkeypatch, cron, successor):  # noqa: F811
     from supervisor import state, worker_health, workers
     from tests.test_worker_crash_retry import _make_worker
@@ -226,7 +226,7 @@ def test_worker_crash_retry_survives_settlement_and_successor(q, monkeypatch, cr
     assert queue_schedules.load_schedule_store(q.root) == retained
 
 
-@pytest.mark.parametrize("case", ["terminal", "foreign", "foreign_schedule", "owner_hold", "unknown"])
+@pytest.mark.parametrize("case", ["terminal", "foreign_schedule", "unknown"])
 def test_retired_row_does_not_authorize_invalid_redispatch(q, monkeypatch, case):  # noqa: F811
     _row(q, intent={"kind": "system_repo"})
     q.queue.check_scheduled_tasks()

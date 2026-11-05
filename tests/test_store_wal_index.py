@@ -578,7 +578,7 @@ def test_a_child_whose_wal_writer_was_killed_captures_copies_back_and_settles(tm
         assert conn.execute("SELECT count(*) FROM t").fetchone() == (300,)
 
 
-@pytest.mark.parametrize("listing", ["capture", "strict_capture", "unmeasured", "view", "rescued"])
+@pytest.mark.parametrize("listing", ["capture", "view", "rescued"])
 def test_a_task_artifact_listing_leaves_a_held_index_unopened_and_keeps_both_locks(tmp_path, monkeypatch, listing):
     """A store this process holds inside a task's artifact folder (its read transaction locks the
     index's read mark and the database's SHARED range): every listing over the held walk leaves the

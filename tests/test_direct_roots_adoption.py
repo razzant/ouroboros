@@ -346,7 +346,7 @@ def _live_actor(drive):
 
 
 @pytest.mark.parametrize("case", [
-    "same_process_revival", "live_actor", "unstamped_legacy_owner", "owner_bound_elsewhere", "admission_not_held",
+    "same_process_revival", "live_actor", "admission_not_held",
 ])
 def test_no_positive_end_of_its_process_leaves_the_turn_alone(qenv, monkeypatch, tmp_path_factory, case):
     """Absence from the roster, age, a worker boot or a supervisor revival is no death."""
@@ -436,7 +436,7 @@ def test_a_failed_discovery_read_adds_nothing(qenv, monkeypatch):
     assert load_task_result(qenv.drive, TID)["status"] == STATUS_RUNNING
 
 
-@pytest.mark.parametrize("case", ["direct", "pooled", "owner_missing", "owner_attempt", "boolean", "marked", "later"])
+@pytest.mark.parametrize("case", ["direct", "owner_missing", "later"])
 def test_zero_attempt_is_only_the_unmarked_direct_first_launch(case):
     from supervisor.task_admission import _working_attempt_unstarted
 

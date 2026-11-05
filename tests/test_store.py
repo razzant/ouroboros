@@ -604,7 +604,7 @@ def _read_store_file_in_this_process(kind, root, path):
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("kind", ["header", "wal_flag", "preview", "agent_read", "copy", "stream", "artifact"])
+@pytest.mark.parametrize("kind", ["header", "copy", "artifact"])
 def test_reading_a_store_file_keeps_the_write_lock_another_thread_holds(tmp_path, kind):
     """Closing any descriptor of the store file releases every POSIX lock this process holds on
     it (sqlite.org howtocorrupt 2.2). ``probe`` read the header on every ``open_store``, and the

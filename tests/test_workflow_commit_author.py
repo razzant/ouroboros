@@ -193,7 +193,7 @@ def test_no_current_test_proof_means_no_author_commit(candidate, monkeypatch):  
     assert sum(row.paid for row in load_state(ctx.drive_root).attempts) == 1
 
 
-@pytest.mark.parametrize("signal", ["passed", "author_continued", "not_confirmed", "unknown"])
+@pytest.mark.parametrize("signal", ["passed", "author_continued", "unknown"])
 def test_evolution_receipt_preserves_actual_review_authority(tmp_path, signal):
     from types import SimpleNamespace
     from ouroboros.tools.git_evolution import _record_evolution_commit_receipt

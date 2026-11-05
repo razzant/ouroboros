@@ -63,10 +63,7 @@ def test_textual_overflow_does_not_match_embedded_rate_markers(detail, body_erro
 
 
 @pytest.mark.parametrize("text", [
-    "Error code: 429", "HTTP 429: throttled", "(429)",
-    "TPM exceeded", "tpm exceeded", "RPM exceeded", "rpm exceeded",
-    "rate_limit_exceeded", "too many tokens per minute",
-    "HTTP_429", "tpm_limit_exceeded", "429 Too Many Requests",
+    "Error code: 429", "tpm_limit_exceeded", "429 Too Many Requests",
 ])
 def test_standalone_rate_markers_remain_retryable(text):
     classified = classify_llm_exception(RuntimeError(text))

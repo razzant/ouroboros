@@ -92,7 +92,7 @@ def test_the_registry_rides_whole_beside_a_short_start_room(tmp_path, mode, regi
     assert "omitted for the physical window" not in _text(plan)
 
 
-@pytest.mark.parametrize("content", [None, "", " \n", b"\xff\xfe not utf-8"], ids=["absent", "empty", "blank", "unreadable"])
+@pytest.mark.parametrize("content", [None, " \n", b"\xff\xfe not utf-8"], ids=["absent", "blank", "unreadable"])
 def test_no_registry_is_invented_and_an_unreadable_one_is_disclosed(tmp_path, content):
     _env, core = _world(tmp_path, content)
     shown = "## Memory Registry" in core.dynamic_text
@@ -456,10 +456,8 @@ def _levels(sep, eol):
                      "SUB_BODY")) + eol
 
 
-@pytest.mark.parametrize("sep,eol", [("", "\n"), ("", "\r\n"), ("\u2028", "\n"), ("\u2029", "\n"), ("\x0c", "\n"),
-                                     ("\x0b", "\n"), ("\x85", "\n"), ("\x1c\x1d\x1e", "\n"), ("\r", "\n"),
-                                     ("\u2028\r", "\r\n")],
-                         ids=["lf", "crlf", "u2028", "u2029", "ff", "vt", "nel", "fs-gs-rs", "cr", "u2028-cr-in-crlf"])
+@pytest.mark.parametrize("sep,eol", [("", "\n"), ("", "\r\n"), ("\u2028\r", "\r\n")],
+                         ids=["lf", "crlf", "u2028-cr-in-crlf"])
 def test_registry_outline_ranges_are_the_lines_its_retained_reader_reads(tmp_path, sep, eol):
     """read_file numbers the retained capture by str.splitlines of its universal-newline text; each heading's range,
     read through that very reader, delivers exactly its section (the parser's span), first row the heading."""

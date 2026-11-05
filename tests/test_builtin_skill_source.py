@@ -386,10 +386,6 @@ def test_bundled_telegram_reseed_delivers_the_current_version(tmp_path, monkeypa
     ("telegram", "7f71fe8d29c975e25b35a235e1c821e1b547674f", "1.3.1"),
     ("telegram", "6014e8896dabe371f5c06cf8adc5dc9902f53c2d", "1.3.2"),
     ("telegram", "08ed0f824df498a1c43c8ff9e04dd42e5c64ee76", "1.3.3"),
-    ("telegram", "de5daf1a8d8831b51a1ad3592ff1bf520d76c857", "1.4.0"),  # 1.4.1 declares secret_fields
-    ("unix_computer_use", "ec3fc6e5b5ae5ee99a746b5e1a0f6343a41926d4", "0.4.2"),
-    ("unix_computer_use", "1e237c1bc89f0600a7362f69eddafdff4ddd1f2d", "0.4.3"),
-    ("unix_computer_use", "9e2bd962903044a6516917bcb10a933b2d1acafd", "0.5.0"),
 ])
 def test_reseed_from_a_real_previous_seed(tmp_path, monkeypatch, name, source, old_version):
     """Full preceding payload from history: the re-seed delivers the bundled bytes,

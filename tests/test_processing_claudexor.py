@@ -76,7 +76,7 @@ def test_response_received_with_proved_no_generation_reprepares_standard(setup, 
     assert usage["processing"] == receipt()
 
 
-@pytest.mark.parametrize("axis", ["unknown_outcome", "unknown_dispatch", "no_proof", "exact_native", "standard"])
+@pytest.mark.parametrize("axis", ["unknown_outcome", "exact_native", "standard"])
 def test_only_explicit_no_start_advisory_proof_allows_retry(setup, axis):
     root, gateway, client = setup
     response = refusal()

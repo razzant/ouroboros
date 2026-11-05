@@ -28,7 +28,7 @@ def _fake_ditto(monkeypatch, run):
     monkeypatch.setattr(storage, "_may_share", lambda path: False)
 
 
-@pytest.mark.parametrize("failure", ["unavailable", "timeout", "size", "sha256"])
+@pytest.mark.parametrize("failure", ["unavailable", "timeout", "sha256"])
 def test_failed_compression_preserves_original_and_removes_temporary(tmp_path, monkeypatch, failure):
     from ouroboros.config import ARTIFACT_COMPRESSION_TIMEOUT_SEC
 

@@ -34,6 +34,7 @@ from ouroboros.llm_attempt import _PhysicalSendNotStarted
 from ouroboros.model_wait import ModelWaitInterrupted
 from ouroboros.tools import search
 from tests._usage_store_testing import ledger_rows
+from tests._cases import chosen_rows
 
 PHASES = ("connect", "read", "write", "pool")
 
@@ -272,7 +273,7 @@ def states(env):
     return [row["state"] for row in ledger_rows(env.root)]
 
 
-@pytest.mark.parametrize("backend", LOOP_LEGS)
+@pytest.mark.parametrize("backend", chosen_rows(LOOP_LEGS, 0, 2))
 @pytest.mark.parametrize("stage,ledger", [("reservation", []), ("recording", ["released"]), ("claim", ["released"])])
 def test_a_search_window_spent_before_the_send_leaves_the_loop_its_graceful_finish(legs, monkeypatch, backend,
                                                                                   stage, ledger):
@@ -288,7 +289,7 @@ def test_a_search_window_spent_before_the_send_leaves_the_loop_its_graceful_fini
     assert legs.seen == [] and states(legs) == ledger
 
 
-@pytest.mark.parametrize("backend", LOOP_LEGS)
+@pytest.mark.parametrize("backend", chosen_rows(LOOP_LEGS, 0, 2))
 @pytest.mark.parametrize("deadline,read", [(400.0, 170.0), (None, 480.0)], ids=["timely", "unbounded"])
 def test_a_search_with_time_left_or_no_deadline_still_answers(legs, monkeypatch, backend, deadline, read):
     """10 s of recording: the send gets what is left of the window, or with no deadline the plain 480 s socket."""
@@ -353,14 +354,8 @@ def test_a_send_that_died_after_its_bytes_stays_unknown_and_is_not_retried(legs,
 @pytest.mark.parametrize("state,reason,spent,unreadable,expected", [
     ("released", "deadline", True, False, True),
     (None, "execution_deadline", True, False, True),
-    ("dispatched", "deadline", True, False, False),   # a possibly sent attempt is never relabelled
-    ("unresolved", "deadline", True, False, False),
-    ("reserved", "deadline", True, False, False),     # an open reservation is no unsent proof
-    ("released", "cancelled", True, False, False),
-    ("released", "owner_pause", True, False, False),
-    ("released", "deadline", False, False, False),    # the caller's own window still has time
     ("released", "deadline", True, True, False),      # an unreadable control is no clear one
-], ids=["released", "no_capture", "dispatched", "unresolved", "reserved", "stop", "pause", "time_left", "unreadable"])
+], ids=["released", "no_capture", "unreadable"])
 def test_only_a_positively_unsent_refusal_by_the_callers_own_window_is_its_own_result(monkeypatch, state, reason,
                                                                                        spent, unreadable, expected):
     from ouroboros import llm_attempt

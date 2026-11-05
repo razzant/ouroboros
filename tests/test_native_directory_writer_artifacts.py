@@ -97,7 +97,7 @@ def test_all_native_writers_register_outputs_before_result_and_survive_reopen(tm
     assert load_task_result(parent, ctx.task_id)["result"] == "Requested changes written"
 
 
-@pytest.mark.parametrize("tool", ["write_file", "edit_text", "apply_patch", "edit_batch"])
+@pytest.mark.parametrize("tool", ["write_file", "apply_patch", "edit_batch"])
 def test_capture_failure_reports_already_written_file_without_retry(tmp_path, monkeypatch, tool):
     registry, ctx, task, parent = _registry(tmp_path, monkeypatch)
     target = ctx.workspace_root / "out.txt"

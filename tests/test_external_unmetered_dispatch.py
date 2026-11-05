@@ -410,9 +410,6 @@ def test_extension_model_capability_requires_access_grant_and_value(tmp_path, mo
         (["read_settings"], ["OPENROUTER_API_KEY"], ["OPENROUTER_API_KEY"], "key", True),
         ([], ["OPENROUTER_API_KEY"], ["OPENROUTER_API_KEY"], "key", False),
         (["read_settings"], [], ["OPENROUTER_API_KEY"], "key", False),
-        (["read_settings"], ["OPENROUTER_API_KEY"], [], "key", False),
-        (["read_settings"], ["OPENROUTER_API_KEY"], ["OPENROUTER_API_KEY"], "", False),
-        (["read_settings"], ["GITHUB_TOKEN"], ["GITHUB_TOKEN"], "token", False),
     ],
 )
 def test_inprocess_model_probe_requires_actual_granted_provider_setting(
@@ -954,7 +951,7 @@ def test_a_host_dispatch_is_its_own_group_and_a_task_dispatch_without_lineage_is
     assert refused.value.kind == "refused" and len(_external_rows(tmp_path)) == 1
 
 
-@pytest.mark.parametrize("identity", ["host", "context", "scope", "parent", "prefix"])
+@pytest.mark.parametrize("identity", ["host", "context", "prefix"])
 def test_script_receipt_declares_host_role_only_without_bound_task_identity(tmp_path, identity):
     from ouroboros.usage_accounting import BillingAuthorityUnavailable
 

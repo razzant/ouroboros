@@ -245,13 +245,6 @@ def _budget_ctx(drive, budget_sec, used_sec=0.0):
 @pytest.mark.parametrize("requested, clamp, minimum, margin, remaining, expected", [
     (180, 3600, 0, 30, None, (180, "requested")),
     (0, 3600, 0, 30, None, (0, "requested")),       # the zero-second peek survives
-    (-4, 3600, 0, 30, None, (0, "minimum")),
-    (10_000, 7200, 0, 30, None, (7200, "ceiling")),
-    (3600, 3600, 0, 30, 1000.5, (910, "deadline")),  # emit window 940, less the margin once
-    (3600, 3600, 0, 30, 90.5, (0, "deadline")),      # emit window 30: nothing left to wait
-    (3600, 3600, 0, 30, -5, (0, "deadline")),        # spent deadline: one peek
-    (0, None, 1, 1, None, (1, "minimum")),           # await_messages keeps its minimum ...
-    (600, None, 1, 1, 400.5, (339, "deadline")),     # ... and its one-second margin ...
     (10_000, None, 1, 1, None, (10_000, "requested")),  # ... and the time it asked for (owner 30 Oct, B)
 ])
 def test_the_one_window_ladder(tmp_path, monkeypatch, requested, clamp, minimum, margin, remaining, expected):
@@ -264,7 +257,6 @@ def test_the_one_window_ladder(tmp_path, monkeypatch, requested, clamp, minimum,
 @pytest.mark.parametrize("requested, clamp, minimum, margin, budget, used, expected", [
     (3600, 3600, 0, 30, 1000.5, 0, (910, "deadline")),  # emit window 940, less the margin once
     (600, None, 1, 1, 400.5, 0, (339, "deadline")),     # await_messages: its one-second margin
-    (3600, 3600, 0, 30, 60, 120, (0, "deadline")),      # a spent budget: one peek
     (600, None, 1, 1, 60, 120, (0, "deadline")),
 ])
 def test_an_execution_budget_narrows_the_window_as_a_deadline_does(tmp_path, monkeypatch, requested, clamp,

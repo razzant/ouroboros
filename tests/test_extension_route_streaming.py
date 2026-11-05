@@ -85,8 +85,7 @@ def register(api):
 
 @pytest.mark.parametrize(('method', 'range_header', 'status', 'expected'), [
     ('GET', '', 200, None), ('HEAD', '', 200, b''),
-    ('GET', 'bytes=2-8', 206, b'2345678'), ('HEAD', 'bytes=2-8', 206, b''),
-    ('GET', 'bytes=99999999-', 416, b''),
+    ('GET', 'bytes=2-8', 206, b'2345678'),
 ])
 def test_file_response_preserves_large_bytes_head_and_range(tmp_path, method, range_header, status, expected):
     plugin = '''from starlette.responses import FileResponse

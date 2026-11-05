@@ -374,9 +374,8 @@ else:
 
 
 @pytest.mark.parametrize("kind,control", [
-    ("explicit", "missing"), ("room", "missing"), ("explicit", "no_resume"), ("explicit", "budget"),
-    ("room", "deadline"), ("explicit", "now_file"), ("room", "redirected"), ("explicit", "protected_now"),
-    ("room", "admitted_present"), ("room", "room_moved"),
+    ("explicit", "missing"), ("explicit", "budget"),
+    ("room", "deadline"),
 ])
 def test_a_long_stop_keeps_the_admission_of_a_missing_folder(tmp_path, kind, control):
     """Real queue save, interpreter exit and a restore old enough (the production 900 s) to

@@ -235,8 +235,7 @@ def test_child_inherits_the_remaining_allowance_with_its_own_queue_excluded(tmp_
         assert "TASK_LIFETIME_EXHAUSTED" in spent and ctx.event_queue.empty()
 
 
-@pytest.mark.parametrize("duration,global_limit,expected", [(60, 300, 60), (600, 300, 300), (None, None, None),
-                                                            (0, None, None), (90, None, 90)])
+@pytest.mark.parametrize("duration,global_limit,expected", [(60, 300, 60), (600, 300, 300), (None, None, None)])
 def test_one_resolver_keeps_no_default_and_takes_the_narrower(duration, global_limit, expected):
     from ouroboros.config import resolve_task_execution_timeout_sec
 

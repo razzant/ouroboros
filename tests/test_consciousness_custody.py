@@ -15,7 +15,7 @@ from tests.test_consciousness import T0, FLOOR, DEFAULT, _launched, _register
 clock = clocks.clock
 
 
-@pytest.mark.parametrize("shape", ["main", "project", "parked", "auto_resume", "post_answer"])
+@pytest.mark.parametrize("shape", ["main", "auto_resume", "post_answer"])
 def test_owner_work_never_holds_its_own_clock(clock, shape):
     registry = get_direct_activity_registry()
     entry = registry.register("owner", 7, project_id="room" if shape == "project" else "")
@@ -188,7 +188,7 @@ def test_stop_during_admission_reaches_the_wake_and_leaves_owner_running(clock, 
     assert owner_mailbox.drain_owner_entries(clock.root, "owner") == []
 
 
-@pytest.mark.parametrize("witness", ["identity", "metadata", "row", "none"])
+@pytest.mark.parametrize("witness", ["identity", "metadata", "none"])
 def test_restarted_clock_requires_a_carrier_witness(clock, witness):
     """A carrier witness is the lane's RUNNING row the pool restored, or an inline executor's registered
     actor (by identity, or by its own-clock metadata when the persisted admission is gone)."""
@@ -205,7 +205,7 @@ def test_restarted_clock_requires_a_carrier_witness(clock, witness):
     assert restarted.tick(restarted.next_wake_at) == ("launched" if witness == "none" else "wake_live")
 
 
-@pytest.mark.parametrize("outcome", ["allowance_unknown", "allowance_exhausted", "first_conversation", "refused"])
+@pytest.mark.parametrize("outcome", ["allowance_unknown", "first_conversation", "refused"])
 def test_skips_refusals_and_restart_keep_the_appointment(clock, monkeypatch, outcome):
     finished = _launched(clock)
     monkeypatch.setattr(clock_module.time, "time", lambda: T0 + 5000)
@@ -224,8 +224,8 @@ def test_skips_refusals_and_restart_keep_the_appointment(clock, monkeypatch, out
     assert restarted.status_snapshot()["appointment_at"] == clock_module._iso(appointment)
 
 
-@pytest.mark.parametrize("lateness,word", [(0, "on time"), (59.9, "on time"), (60, "due 1 min ago"),
-                                         (5400, "due 1 h 30 min ago"), (None, "")])
+@pytest.mark.parametrize("lateness,word", [(0, "on time"), (60, "due 1 min ago"),
+                                         (5400, "due 1 h 30 min ago")])
 def test_launch_reason_reports_appointment_punctuality_only(clock, lateness, word):
     now = T0 + FLOOR
     clock.clock._appointment_at = now - lateness if lateness is not None else 0

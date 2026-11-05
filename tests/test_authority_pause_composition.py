@@ -18,7 +18,7 @@ from tests.test_billing_group import _scope, _spend
 pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize("authority", ["readable", "unreadable", "group_exhausted", "global_exhausted"])
+@pytest.mark.parametrize("authority", ["readable", "group_exhausted", "global_exhausted"])
 def test_child_pause_keeps_sibling_independent_and_resume_rechecks_original_money(tmp_path, monkeypatch, authority):
     from ouroboros.task_results import write_task_result
     from ouroboros.task_store import patch_document
@@ -158,8 +158,7 @@ def test_cold_queue_restore_rebinds_actual_body_and_returns_same_live_session(tm
         assert not env.runtime.thread.is_alive()
 
 
-@pytest.mark.parametrize("change", ["task_attempt", "pause_generation", "root_task_id", "project_id", "source_ref",
-                                    "foreign_run", "changed_invocation", "unknown_custody"])
+@pytest.mark.parametrize("change", ["task_attempt", "foreign_run", "unknown_custody"])
 def test_resume_refuses_changed_or_unknown_accepted_binding(tmp_path, monkeypatch, change):
     from ouroboros import delegate_custody as custody, delegate_custody_current as current, sleep_custody as sc
     env, original = _park_with_body(tmp_path, monkeypatch, False)

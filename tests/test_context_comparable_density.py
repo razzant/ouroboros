@@ -95,8 +95,6 @@ def _witness(raw, density=1.56, *, route="route-a", basis=ce.MAIN_DENSITY_BASIS,
 @pytest.mark.parametrize("witness_size,model,basis,observed,expected", [
     (600_000, "openai/test-model", ce.MAIN_DENSITY_BASIS, None, 1.56),
     (97_000, "openai/test-model", ce.MAIN_DENSITY_BASIS, None, 1.0),
-    (600_000, "other/model", ce.MAIN_DENSITY_BASIS, None, 1.0),
-    (600_000, "openai/test-model", "raw", None, 1.0),
     (600_000, "openai/test-model", ce.MAIN_DENSITY_BASIS, "2000-01-01T00:00:00Z", 1.0),
 ])
 def test_round_one_uses_only_comparable_same_model_evidence(

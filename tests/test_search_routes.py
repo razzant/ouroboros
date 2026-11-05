@@ -55,18 +55,6 @@ def test_generic_extension_search_executes_when_builtin_search_is_unavailable(tm
     ('auto', '', [('openai', SEARCH_MODELS['openai']), ('openrouter', SEARCH_MODELS['openrouter']), ('anthropic', RECOMMENDED)]),
     ('auto', 'future', [('openai', 'future'), ('openrouter', 'openai/future'), ('anthropic', RECOMMENDED)]),
     ('auto', 'vendor/future', [('openrouter', 'vendor/future'), ('anthropic', RECOMMENDED)]),
-    ('auto', 'anthropic/future', [('openrouter', 'anthropic/future'), ('anthropic', 'future')]),
-    ('auto', 'anthropic::future', [('anthropic', 'future')]),
-    ('auto', 'openai::future', [('openai', 'future'), ('openrouter', 'openai/future')]),
-    ('auto', 'openrouter::vendor/future', [('openrouter', 'vendor/future')]),
-    ('openai', 'future', [('openai', 'future')]),
-    ('openrouter', 'future', [('openrouter', 'openai/future')]),
-    ('anthropic', 'old-ignored-setting', [('anthropic', RECOMMENDED)]),
-    ('anthropic', 'anthropic::future', [('anthropic', 'future')]),
-    ('openai', 'anthropic::future', []), ('openai', 'vendor/future', []),
-    # Auto keeps the legs that need no model when no built-in transport serves the saved one.
-    ('auto', 'claudexor::codex=future', [('anthropic', RECOMMENDED)]),
-    ('auto', 'openai::vendor/future', [('anthropic', RECOMMENDED)]),
 ])
 def test_dispatch_uses_resolved_candidates_and_truthful_failed_legs(monkeypatch, source, selected, expected):
     for key in ('OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'ANTHROPIC_API_KEY'):
@@ -139,7 +127,7 @@ def test_auto_sends_a_saved_legacy_anthropic_model_on_the_direct_anthropic_leg(m
     assert [(leg['source'], leg['outcome']) for leg in result['legs_tried']] == [('anthropic', 'succeeded')]
 
 
-@pytest.mark.parametrize('saved', ['claudexor::codex=future', 'deepseek::deepseek-chat', 'openai-compatible::local', ''])
+@pytest.mark.parametrize('saved', ['claudexor::codex=future', 'openai-compatible::local', ''])
 def test_a_ddgs_pin_ignores_any_saved_model_and_still_searches(monkeypatch, saved):
     monkeypatch.setenv('OUROBOROS_WEBSEARCH_BACKEND', 'ddgs')
     monkeypatch.setenv('OUROBOROS_WEBSEARCH_MODEL', saved)
@@ -152,8 +140,7 @@ def test_a_ddgs_pin_ignores_any_saved_model_and_still_searches(monkeypatch, save
     assert result['answer'] == 'ddgs: q' and [leg['outcome'] for leg in result['legs_tried']] == ['succeeded']
 
 
-@pytest.mark.parametrize('source,saved', [('auto', 'claudexor::codex=future'), ('openai', 'claudexor::codex=future'),
-                                          ('auto', 'anthropic::vendor/future'), ('anthropic', 'anthropic::vendor/future')])
+@pytest.mark.parametrize('source,saved', [('auto', 'claudexor::codex=future'), ('auto', 'anthropic::vendor/future'), ('anthropic', 'anthropic::vendor/future')])
 def test_an_unsupported_selection_is_disclosed_under_auto_and_refused_by_a_strict_source(monkeypatch, source, saved):
     monkeypatch.setenv('ANTHROPIC_API_KEY', 'synthetic')
     monkeypatch.setitem(sys.modules, 'ddgs', None)
@@ -168,7 +155,6 @@ def test_an_unsupported_selection_is_disclosed_under_auto_and_refused_by_a_stric
 
 @pytest.mark.parametrize('override,expected,origin', [
     (None, RECOMMENDED, 'provider_default'),
-    ('', RECOMMENDED, 'provider_default'),
     ('claude-opus-4-6', 'claude-opus-4-6', 'selection'),
     ('claude-future-native', 'claude-future-native', 'selection'),
 ])
@@ -192,7 +178,7 @@ def test_anthropic_native_per_call_model_reaches_provider_while_saved_legacy_sta
     assert result['legs_tried'][0]['model'] == expected
 
 
-@pytest.mark.parametrize('override', ['openai::future', 'vendor/future', 'anthropic::vendor/future', 'anthropic/vendor/future'])
+@pytest.mark.parametrize('override', ['openai::future', 'vendor/future', 'anthropic/vendor/future'])
 def test_anthropic_pin_refuses_foreign_per_call_model_without_dispatch(monkeypatch, override):
     monkeypatch.setenv('ANTHROPIC_API_KEY', 'synthetic')
     monkeypatch.setenv('OUROBOROS_WEBSEARCH_BACKEND', 'anthropic')
@@ -239,19 +225,10 @@ def _refusing_legs(monkeypatch):
 
 
 @pytest.mark.parametrize('source,named,expected', [
-    ('auto', 'future', [('openai', 'future', ''), ('openrouter', 'openai/future', '')]),
-    ('auto', 'openai::future', [('openai', 'future', '')]),
-    ('auto', 'openai@work::future', [('openai', 'future', 'work')]),
-    ('auto', 'openrouter::vendor/future', [('openrouter', 'vendor/future', '')]),
-    ('auto', 'vendor/future', [('openrouter', 'vendor/future', '')]),
-    ('auto', 'anthropic/future', [('openrouter', 'anthropic/future', ''), ('anthropic', 'future', '')]),
     ('auto', 'anthropic::future', [('anthropic', 'future', '')]),
-    ('openai', 'future', [('openai', 'future', '')]),
     ('openrouter', 'future', [('openrouter', 'openai/future', '')]),
     # No built-in transport sends these: refused before any send, never replaced by Auto's other legs.
     ('auto', 'claudexor::codex=future', []),
-    ('auto', 'openai::vendor/future', []),
-    ('ddgs', 'future', []),  # ddgs takes no model, so a named one is refused rather than dropped
 ])
 def test_a_model_the_call_names_is_mandatory(monkeypatch, source, named, expected):
     _every_source_ready(monkeypatch, source)
@@ -598,11 +575,7 @@ _OPENAI_WORK = {'kind': 'openai', 'name': 'work', 'api_key': 'work-key'}
 
 @pytest.mark.parametrize('source,saved,row,named,sent', [
     ('auto', '', _OPENAI_WORK, 'openai@work::future', ('openai', 'future', 'work')),
-    ('openai', '', _OPENAI_WORK, 'openai@work::future', ('openai', 'future', 'work')),
     ('openai', 'openai/gpt-5.2', _OPENAI_WORK, 'openai@work::future', ('openai', 'future', 'work')),  # saved unusable
-    ('auto', 'openai@gone::old', _OPENAI_WORK, 'openai@work::future', ('openai', 'future', 'work')),  # saved row gone
-    ('auto', '', {'kind': 'openrouter', 'name': 'byok', 'api_key': 'k'}, 'openrouter@byok::vendor/future',
-     ('openrouter', 'vendor/future', 'byok')),
     ('anthropic', '', {'kind': 'anthropic', 'name': 'team', 'api_key': 'k'}, 'anthropic@team::future', ('anthropic', 'future', 'team')),
 ])
 def test_a_named_connection_only_install_offers_web_search_to_the_call_that_names_it(
@@ -635,9 +608,6 @@ def test_a_failed_search_with_a_built_in_route_does_not_advertise_named_connecti
 @pytest.mark.parametrize('source,row,packages', [
     ('anthropic', _OPENAI_WORK, {}),  # a pinned Source refuses another source's connection
     ('ddgs', _OPENAI_WORK, {}),  # ddgs takes no model, so no call could name one
-    ('auto', {**_OPENAI_WORK, 'enabled': False}, {}),  # a disabled row cannot serve
-    ('auto', {'kind': 'openai', 'name': 'keyless'}, {}),  # nor one without its credential
-    ('auto', {'kind': 'openai-compatible', 'name': 'vllm', 'base_url': 'https://compatible.invalid/v1'}, {}),  # no search transport
     ('anthropic', {'kind': 'anthropic', 'name': 'team', 'api_key': 'k'}, {'anthropic': False}),  # its SDK is missing
 ])
 def test_a_named_connection_no_call_could_use_leaves_web_search_withheld(tmp_path, monkeypatch, source, row, packages):

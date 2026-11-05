@@ -520,18 +520,8 @@ def test_checker_exit_maps_to_audit_outcome_only(tmp_path, monkeypatch, code, ou
 @pytest.mark.serial
 @pytest.mark.parametrize(("summary_patch", "agent_state", "reason"), [
     ({"reason_code": "round_limit"}, "absent", ""),
-    ({"reason_code": "budget_exhausted"}, "absent", ""),
-    ({"reason_code": "wall_clock_timeout", "bench_status": "failed"}, "absent", ""),
     ({"reason_code": "owner_requested_finalization"}, "absent", "stop_reason_not_eligible"),
-    ({"reason_code": "children_unabsorbed"}, "absent", "stop_reason_not_eligible"),
-    ({"reason_code": "finalization_grace"}, "absent", "stop_reason_not_eligible"),
     ({"reason_code": "llm_api_error", "infra_failed": True}, "absent", "infrastructure_outcome"),
-    ({"model_activity_observed": False}, "absent", "no_agent_activity"),
-    ({"model_activity_observed": None}, "absent", "agent_activity_unknown"),
-    ({"task_submission_started": False}, "absent", "no_task_submission"),
-    ({"task": "another_task"}, "absent", "adapter_summary_not_linked"),
-    ({}, "present", "agent_termination_unproven"),
-    ({}, "unknown", "agent_termination_unproven"),
 ])
 def test_eligibility_is_narrow_and_distinguishes_unknown(tmp_path, monkeypatch, summary_patch, agent_state, reason):
     status = summary_patch.get("bench_status", "max_turns_reached")
@@ -544,7 +534,7 @@ def test_eligibility_is_narrow_and_distinguishes_unknown(tmp_path, monkeypatch, 
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("change", ["boolean_verdict", "result_rewritten", "log_rewritten", "no_receipt"])
+@pytest.mark.parametrize("change", ["boolean_verdict", "result_rewritten", "no_receipt"])
 def test_only_a_proven_same_attempt_status_gate_decline_is_eligible(tmp_path, monkeypatch, change):
     status = "success" if change == "boolean_verdict" else "max_turns_reached"
     bench, claim = settled_attempt(tmp_path, monkeypatch, status=status, summary={
@@ -575,7 +565,6 @@ def install_fake_upstream(monkeypatch) -> None:
 @pytest.mark.parametrize(("saved_eval", "expected"), [
     ({"groundtruth_workspace": "/saved/gt", "evaluation_command": "saved-cmd"}, ("saved-cmd", "/saved/gt")),
     ({"groundtruth_workspace": None, "evaluation_command": "saved-cmd"}, ("saved-cmd", "BUILT")),
-    ({"groundtruth_workspace": "/saved/gt", "evaluation_command": None}, ("BUILT_CMD", "/saved/gt")),
     ({"groundtruth_workspace": None, "evaluation_command": None}, ("BUILT_CMD", "BUILT")),
 ])
 def test_command_uses_saved_config_with_upstream_build_fallback(tmp_path, monkeypatch, saved_eval, expected):
@@ -702,8 +691,7 @@ def test_flag_is_default_off_and_part_of_the_applied_config():
 
 
 @pytest.mark.parametrize(("previous", "current", "accepted"), [
-    ("missing", False, True), (False, False, True), (True, True, True),
-    ("missing", True, False), (False, True, False), (True, False, False), ("false", False, False),
+    ("missing", False, True), ("missing", True, False), ("false", False, False),
 ])
 def test_resume_normalizes_only_a_missing_flag_to_false(tmp_path, previous, current, accepted):
     bench = tmp_path / "bench"

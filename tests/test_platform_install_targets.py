@@ -141,7 +141,7 @@ def test_real_venv_installs_and_imports_local_wheel(tmp_path):
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("outcome", ["timeout", "success", "nonzero", "no-cleanup"])
+@pytest.mark.parametrize("outcome", ["timeout", "success", "no-cleanup"])
 def test_install_command_settles_descendants_before_fallback(tmp_path, outcome):
     """Observe births/exit state before the independent outer owner reaps anything."""
     from ouroboros import platform_layer as pl

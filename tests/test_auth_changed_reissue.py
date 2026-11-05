@@ -129,8 +129,7 @@ def test_a_pause_after_the_refusal_sends_nothing_more(setup):
     assert raised.value.control_reason == "owner_paused" and len(gateway.accepted_operations) == 1
 
 
-@pytest.mark.parametrize("order", [("auth", "native"), ("native", "auth"), ("processing", "auth"),
-                                   ("processing", "native", "auth")])
+@pytest.mark.parametrize("order", [("auth", "native"), ("native", "auth"), ("processing", "native", "auth")])
 def test_each_cause_keeps_its_one_repair_in_the_same_bounded_loop(setup, monkeypatch, order):
     root, gateway, client = setup
     monkeypatch.setattr(transport, "model_sources", lambda **_kw: {

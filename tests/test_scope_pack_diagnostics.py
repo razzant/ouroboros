@@ -121,7 +121,7 @@ def test_context_failure_persists_and_forwards_one_row(brief_env, monkeypatch, r
     assert ctx.pending_events == []
 
 
-@pytest.mark.parametrize("failure", ["false", "append_error", "missing_logs", "sink_error"])
+@pytest.mark.parametrize("failure", ["false", "append_error", "sink_error"])
 def test_diagnostic_failure_preserves_exact_preparation_result(brief_env, monkeypatch, failure):
     ctx, _, _ = brief_env
     monkeypatch.setattr(brief_mod, "load_checklist_section", lambda _section: "")

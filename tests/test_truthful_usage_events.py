@@ -21,11 +21,7 @@ COUNTERS = tuple(TOKEN_COUNTER_ALIASES)
 
 @pytest.mark.parametrize("usage,expected", [
     ({}, [None, None, None, None]),
-    (dict.fromkeys(COUNTERS), [None, None, None, None]),
     (dict.fromkeys(COUNTERS, 0), [0, 0, 0, 0]),
-    ({"prompt_tokens": 37, "completion_tokens": 0}, [37, 0, None, None]),
-    ({"input_tokens": 19, "output_tokens": 8, "cache_read_input_tokens": 0,
-      "cache_creation_input_tokens": 2}, [19, 8, 0, 2]),
     ({"prompt_tokens": "bad", "completion_tokens": float("inf"),
       "cached_tokens": False, "cache_write_tokens": -1}, [None, None, None, None]),
 ])

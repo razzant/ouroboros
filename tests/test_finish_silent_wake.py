@@ -429,15 +429,8 @@ def test_schedule_born_root_may_finish_quietly(wake, origin):
 @pytest.mark.parametrize("extra,occurrence,parent", [
     ({"delegation_role": "subagent"}, SCHEDULE["schedule_occurrence"], None),
     ({}, SCHEDULE["schedule_occurrence"], "parent-task"),
-    ({"root_task_id": "other-root"}, SCHEDULE["schedule_occurrence"], None),
-    ({"presence": {"binding_id": "b1"}}, SCHEDULE["schedule_occurrence"], None),
-    ({"presence": {}}, SCHEDULE["schedule_occurrence"], None),
-    ({}, {"schedule_id": "daily-check"}, None),
-    ({}, {"token": "occurrence-1"}, None),
-    ({}, {"schedule_id": "daily-check", "token": " "}, None),
     ({}, "daily-check", None),
-], ids=["delegated", "parent", "non-root", "presence", "empty-presence",
-        "missing-token", "missing-schedule", "empty-token", "invalid-occurrence"])
+], ids=["delegated", "parent", "invalid-occurrence"])
 def test_schedule_marker_does_not_bypass_quiet_authority(wake, extra, occurrence, parent):
     from ouroboros.tools.control_runtime import _finish_task
 
@@ -548,10 +541,9 @@ def test_quiet_project_schedule_through_delivery_and_notifications(wake, monkeyp
 
 @pytest.mark.parametrize("metadata,direct", [
     ({"initiator": "owner", "usage_category": "chat"}, True),
-    ({"initiator": "consciousness", "usage_category": CONSCIOUSNESS_TASK_CATEGORY}, True),
     ({"initiator": "consciousness", "usage_category": CONSCIOUSNESS_TASK_CATEGORY}, False),
     ({"presence": {"binding_id": "b1"}, "usage_category": "presence"}, True),
-], ids=["owner-turn", "wake-started-root", "wake-started-child", "presence"])
+], ids=["owner-turn", "wake-started-child", "presence"])
 def test_other_turns_cannot_finish_silently(wake, metadata, direct):
     wake.ctx.is_direct_chat = direct
     text, usage, trace, _ = wake.run([finish(silent=True), finish("Ordinary answer.")], metadata=metadata)

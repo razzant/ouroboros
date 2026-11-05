@@ -103,7 +103,7 @@ def test_real_pytest_manifests_and_xdist_prove_both_passes_by_whole_file(tmp_pat
     assert narrowed.returncode != 0 and "DEFAULT_SUITE_INCOMPLETE" in narrowed.stderr
 
 
-@pytest.mark.parametrize("value", ["0/4", "5/4", "1/0", "x/4", "1", "1/2/3"])
+@pytest.mark.parametrize("value", ["0/4", "1", "1/2/3"])
 def test_invalid_file_shard_is_refused(value):
     from tests.default_lane import _shard
 

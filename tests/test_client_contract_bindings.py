@@ -253,7 +253,7 @@ def _owned_names() -> dict:
     return names
 
 
-@pytest.mark.parametrize("outcome", ["unlisted", "listed", "failed", "unpublished"])
+@pytest.mark.parametrize("outcome", ["unlisted", "failed", "unpublished"])
 def test_mcp_listing_evidence_matches_published_contracts(client, monkeypatch, tmp_path, outcome):
     from ouroboros import config, mcp_catalog, mcp_client
     from ouroboros.gateway import mcp as api

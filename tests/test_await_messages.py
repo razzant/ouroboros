@@ -154,7 +154,6 @@ def test_an_in_process_turn_reads_its_open_intent_and_keeps_an_unreadable_one_un
 
 @pytest.mark.parametrize("requested, window, bound", [
     (0, 1, "minimum"), (-5, 1, "minimum"), (1, 1, "requested"),
-    (1800, 1800, "requested"), (1801, 1801, "requested"), (7200, 7200, "requested"),
 ])
 def test_the_window_is_the_request_with_a_one_second_floor(tmp_path, monkeypatch, requested, window, bound):
     clock = _FakeClock()

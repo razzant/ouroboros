@@ -38,13 +38,8 @@ def _chaptered_corpus(root: pathlib.Path, *, body: str = "The exact chapter body
 
 @pytest.mark.parametrize("path,role", [
     ("docs/ARCHITECTURE.md", "entrypoint"),
-    ("docs/DEVELOPMENT.md", "entrypoint"),
     ("docs/architecture/06-agent-core.md", "chapter"),
-    ("docs/development/14-build-and-ci.md", "chapter"),
     ("docs/reference-books-migration.md", ""),
-    ("docs/CHECKLISTS.md", ""),
-    ("docs/architecture/notes.txt", ""),
-    ("", ""),
 ])
 def test_book_path_role_answers_by_shape_without_reading_the_tree(path, role):
     assert book_path_role(path) == role

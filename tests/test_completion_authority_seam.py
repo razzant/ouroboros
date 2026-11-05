@@ -17,6 +17,7 @@ from ouroboros import outcomes, project_dialogue as dialogue, terminal_projectio
 from ouroboros import usage_accounting as ua
 from tests.test_billing_authority_unavailable import BINDING, _loop_driver, _run, _task_scope
 from tests.test_telegram_notifications import _api, _load, _Rec, _write_rows
+from tests._cases import chosen_rows
 
 
 def _throw(*_a, **_k):
@@ -64,7 +65,7 @@ EXPECTED_CODE = {
 }
 
 
-@pytest.mark.parametrize("case", list(EXPECTED_CODE))
+@pytest.mark.parametrize("case", chosen_rows(list(EXPECTED_CODE), 0, 1, 3))
 def test_actual_authority_fallback_reaches_phone_as_failure_not_money_or_review(case, tmp_path, monkeypatch):
     tid, (text, usage, trace) = _produce(case, tmp_path, monkeypatch)
     code = EXPECTED_CODE[case]

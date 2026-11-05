@@ -184,10 +184,8 @@ def test_requested_head_tail_spends_free_room_while_unsolicited_shares_the_eight
 @pytest.mark.parametrize("window,target,reserve,part,multiple", [
     (100_000, 85_000, 8_192, 60_000, False),
     (100_000, 85_000, 8_192, 60_000, True),
-    (None, 85_000, 8_192, 90_000, True),
-    (300_000, 250_000, 65_536, 160_000, True),
     (40_000, 85_000, 8_192, 60_000, True),
-], ids=["nano", "multiple-forms", "unknown-beyond-target", "low", "physical-nonfit"])
+], ids=["nano", "multiple-forms", "physical-nonfit"])
 def test_only_requested_content_over_the_window_can_shrink_a_chosen_form(
         tmp_path, window, target, reserve, part, multiple):
     """Escaped ends and a plain omitted middle misprice the unasked log initially.

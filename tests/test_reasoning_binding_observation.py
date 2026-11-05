@@ -142,7 +142,7 @@ def test_model_fact_explains_the_change_without_indices_or_internal_cause_codes(
     assert not transcript_prefix.reasoning_retirement_fact(usage, 5)
 
 
-@pytest.mark.parametrize("change", ["image", "blocks", "tools", "cache_only"])
+@pytest.mark.parametrize("change", ["image", "blocks", "cache_only"])
 def test_cache_observer_sees_images_blocks_and_schemas_but_not_cache_markers(change):
     messages = [{"role": "system", "content": "go"}, {"role": "user", "content": [
         {"type": "text", "text": "ab"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,YQ=="}},

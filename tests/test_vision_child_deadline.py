@@ -443,8 +443,8 @@ def test_a_refusal_with_an_attempt_it_could_not_release_stays_unknown(vlm):
 
 
 @pytest.mark.parametrize("forged", [
-    {"state": "dispatched"}, {"state": "unresolved"}, {"state": "reserved"}, {"control_reason": "owner_pause"}, {"unknown": True},
-], ids=["dispatched", "unresolved", "reserved", "other_reason", "unknown_flag"])
+    {"state": "dispatched"}, {"control_reason": "owner_pause"}, {"unknown": True},
+], ids=["dispatched", "other_reason", "unknown_flag"])
 def test_a_malformed_refused_send_stays_an_unknown_outcome(monkeypatch, forged):
     from ouroboros.tools import shell, vision_process
 

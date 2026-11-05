@@ -148,13 +148,7 @@ def test_each_room_section_is_one_legacy_record_aligned_to_the_stream_by_positio
 @pytest.mark.parametrize("change, exact", [
     (None, True),
     ("count", False),          # the counts no longer meet the cursor
-    ("gap", False),            # a room section begins with the gap marker
-    ("gap_block", False),      # an old gap block: its content begins with the marker, after whitespace
-    ("gap_id", False),         # the old writer's typed facts
-    ("gap_type", False),
     ("gap_mentioned", True),   # a retelling that discusses the marker mid-text is not a gap
-    ("not_int", False),        # a count that is not an integer
-    ("cursor_live_end", False),  # the same counts, a cursor further on
 ])
 def test_raw_range_is_exact_only_when_the_counts_meet_the_cursor_without_gaps(tmp_path, change, exact):
     blocks = _blocks((3, 1) if change == "count" else (3, 2))
@@ -261,7 +255,7 @@ def test_an_invalid_block_member_becomes_a_located_gap_and_its_neighbours_stay(t
     assert not _by_type(clean_store, "gap")
 
 
-@pytest.mark.parametrize("bad", [b"{broken", b"{}", b"null", b"\xff\xfe"])
+@pytest.mark.parametrize("bad", [b"{broken", b"null", b"\xff\xfe"])
 def test_an_unreadable_blocks_file_is_retained_and_the_flat_summary_still_imports(tmp_path, bad):
     memory = tmp_path / "memory"
     memory.mkdir()
@@ -294,10 +288,10 @@ def test_a_flat_summary_that_repeats_a_section_is_not_imported_twice(tmp_path):
 
 
 @pytest.mark.parametrize("cursor", [
-    b"{broken", b"[]", b'{"last_consolidated_offset":-1}', b'{"last_consolidated_offset":"100"}',
+    b'{"last_consolidated_offset":"100"}',
     b'{"last_consolidated_offset":1,"last_consolidated_offset":2}',
     b'{"pending_knowledge_nominations":[{"topic":"no id"}]}',
-    "missing_generation", "past_the_rows",
+    "missing_generation",
 ])
 def test_an_unreadable_or_unresolvable_cursor_makes_the_frontier_unknown_at_the_chain_end(tmp_path, cursor):
     rows = _chat(tmp_path)

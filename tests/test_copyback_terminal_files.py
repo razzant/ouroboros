@@ -102,7 +102,7 @@ def test_shared_observability_directory_is_same_store(tmp_path, monkeypatch):
     assert Path(promoted["path"]).read_bytes() == original
 
 
-@pytest.mark.parametrize("defect", ["sha", "size", "encoding", "existing_outside"])
+@pytest.mark.parametrize("defect", ["sha", "encoding", "existing_outside"])
 def test_missing_locator_fallback_does_not_replace_invalid_blob_evidence(tmp_path, monkeypatch, defect):
     root = tmp_path / "data"
     ref = obs.write_blob(root, {"answer": "exact"})

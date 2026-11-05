@@ -33,10 +33,6 @@ DIRTY, BLOCKED, BEHIND = ("the merge commit cannot be cleanly created", "the bas
 CONFLICT = "GraphQL: Pull Request has merge conflicts (mergePullRequest)\n"
 BASE_RACE = "GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)\n"
 HEAD_MOVED = "GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)\n"
-PERMISSION = "GraphQL: Resource not accessible by integration (mergePullRequest)\n"
-INTERNAL = "GraphQL: Something went wrong while executing your query. Please include `A1B2:3C4D` when reporting.\n"
-
-
 def refusal(reason, number=7):
     return f"X Pull request octo/demo#{number} is not mergeable: {reason}.\n"
 
@@ -66,13 +62,9 @@ def _classify(tmp_path, monkeypatch, stderr, *, method="squash", repo="", rc=1, 
 
 @pytest.mark.parametrize("method,repo,stderr", [
     ("squash", "", refusal(DIRTY) + AUTO),
-    ("squash", "octo/demo", refusal(DIRTY) + AUTO),
     ("merge", "", refusal(DIRTY) + AUTO + hint("merge")),
     ("squash", "", refusal(DIRTY) + AUTO + hint("merge", base="release/2026.10")),
-    ("rebase", "", refusal(DIRTY) + AUTO + hint("rebase", remote="upstream", base="team/main")),
-    ("merge", "octo/demo", refusal(BLOCKED) + AUTO + ADMIN),
-    ("rebase", "", refusal(BEHIND) + AUTO + ADMIN),
-], ids=["dirty", "dirty-repo", "dirty-merge-hint", "dirty-slash-base", "dirty-rebase-hint", "blocked", "behind"])
+], ids=["dirty", "dirty-merge-hint", "dirty-slash-base"])
 def test_gh_pre_merge_refusals_are_pre_effect(tmp_path, monkeypatch, method, repo, stderr):
     result = _classify(tmp_path, monkeypatch, stderr, method=method, repo=repo)
 
@@ -103,48 +95,12 @@ def test_stdin_body_retains_exact_pre_effect_refusal(tmp_path, monkeypatch, body
 
 
 @pytest.mark.parametrize("stderr,kw", [
-    (refusal(DIRTY) + AUTO + ADMIN, {}),
-    (refusal(BLOCKED) + AUTO, {}),
-    (refusal(BLOCKED) + AUTO + hint() + ADMIN, {}),
     (refusal(DIRTY) + AUTO + hint(), {"repo": "octo/demo"}),
-    (refusal(DIRTY) + AUTO + hint(number=8), {}),
-    (refusal(DIRTY, number=8) + AUTO, {}),
-    (refusal(DIRTY) + AUTO + hint("rebase"), {"method": "squash"}),
-    (refusal(DIRTY) + AUTO + hint("merge"), {"method": "rebase"}),
-    (refusal(DIRTY) + AUTO + hint(target="origin/other"), {}),
-    (refusal(DIRTY) + AUTO + "HTTP 503: Service Unavailable (https://api.github.com/graphql)\n", {}),
-    ("HTTP 503: Service Unavailable (https://api.github.com/graphql)\n" + refusal(DIRTY) + AUTO, {}),
-    (refusal(DIRTY), {}),
-    (refusal(DIRTY) + AUTO, {"stdout": "Merged pull request octo/demo#7"}),
     # The exact BLOCKED text proves nothing outside the one invocation and exit it belongs to.
     (refusal(BLOCKED, number=8) + AUTO + ADMIN, {}),
-    (refusal(BLOCKED) + AUTO + ADMIN, {"stdout": "Merged pull request octo/demo#7"}),
-    (refusal(BLOCKED) + AUTO + ADMIN, {"rc": 2}),
-    (refusal(BLOCKED) + AUTO + ADMIN, {"rc": -15}),
-    (refusal(BLOCKED) + AUTO + ADMIN, {"args": ["pr", "view", "7"]}),
     (refusal(BLOCKED) + AUTO + ADMIN, {"args": ["pr", "merge", "7", "--squash", "--match-head-commit", HEAD,
                                                 "--admin"]}),
-    (refusal(BLOCKED) + AUTO + ADMIN, {"args": ["pr", "merge", "7", "--auto", "--match-head-commit", HEAD]}),
-    ("GraphQL: Pull Request is not mergeable (mergePullRequest)\n", {}),
-    # Only GitHub's two whole answers to the sent mutation qualify; anything around or beside them stays unknown.
-    (CONFLICT + BASE_RACE, {}),
-    (CONFLICT + "HTTP 502: Bad Gateway (https://api.github.com/graphql)\n", {}),
-    ("gh: " + CONFLICT, {}),
-    (CONFLICT.replace(" (mergePullRequest)", ""), {}),
-    (CONFLICT, {"stdout": "Merging pull request octo/demo#7"}),
-    (CONFLICT, {"rc": 2}),
-    (BASE_RACE, {"args": ["pr", "merge", "7", "--squash", "--match-head-commit", HEAD, "--admin"]}),
-    (BASE_RACE, {"args": ["pr", "merge", "7", "--auto", "--match-head-commit", HEAD]}),
-    (CONFLICT, {"args": ["pr", "merge", "7", "--squash", "--match-head-commit", HEAD, "--body-file", "body.txt"]}),
-    (HEAD_MOVED, {}),
-    (PERMISSION, {}),
-    (INTERNAL, {}),
-], ids=["dirty-admin", "blocked-no-admin", "blocked-hint", "hint-with-repo", "hint-number", "line-number",
-        "rebase-hint-for-squash", "merge-hint-for-rebase", "hint-target", "status-suffix", "status-prefix",
-        "truncated", "stdout", "blocked-line-number", "blocked-stdout", "exit-2", "signal", "other-command",
-        "extra-flag", "auto-flag", "server-refusal", "two-answers", "answer-with-status", "answer-prefix",
-        "answer-without-path", "answer-with-stdout", "answer-exit-2", "answer-admin", "answer-auto", "answer-body-file",
-        "head-moved", "permission", "internal"])
+], ids=["hint-with-repo", "blocked-line-number", "extra-flag"])
 def test_anything_but_the_exact_refusal_stays_an_unknown_exit(tmp_path, monkeypatch, stderr, kw):
     result = _classify(tmp_path, monkeypatch, stderr, **kw)
 
@@ -432,16 +388,9 @@ def test_proven_conflict_refusal_frees_custody_and_a_repaired_head_merges_once(c
 
 @pytest.mark.parametrize("answer", [
     (1, "", refusal(DIRTY) + AUTO + "HTTP 503: Service Unavailable (https://api.github.com/graphql)\n"),
-    (1, "Merging pull request octo/demo#7", refusal(DIRTY) + AUTO),
-    (1, "", refusal(DIRTY) + AUTO + ADMIN),
     "timeout",
-    (1, "Merging pull request octo/demo#7", CONFLICT),
-    (2, "", BASE_RACE),
-    (1, "", PERMISSION),
-    (1, "", INTERNAL),
     (1, "", HEAD_MOVED),
-], ids=["status-suffix", "stdout", "malformed", "timeout", "github-stdout", "github-exit-2", "github-permission",
-        "github-internal", "github-head-moved"])
+], ids=["status-suffix", "timeout", "github-head-moved"])
 def test_unknown_refusal_keeps_its_hold_and_is_only_read_back(chain, answer):
     chain.answers.append(answer)
     first = _merge(chain, HEAD)

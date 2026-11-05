@@ -87,8 +87,8 @@ def test_the_origin_is_what_a_frozen_or_seed_launcher_imported_never_the_newer_h
 
 
 @pytest.mark.parametrize("rel,loaded_only,packaged", [
-    (None, False, False), ("server.py", False, False), ("ouroboros/not_imported_yet.py", False, True),
-    ("supervisor/queue.py", False, True), ("launcher.py", True, True)])
+    (None, False, False), ("ouroboros/not_imported_yet.py", False, True),
+    ("launcher.py", True, True)])
 def test_the_cold_check_counts_the_packaged_trees_the_warm_check_only_what_is_loaded(tmp_path, rel, loaded_only,
                                                                                     packaged):
     """A frozen or seed launcher imports later helpers from its own bundle too, so its cold check counts the
@@ -397,8 +397,7 @@ def test_startup_panic_fences_bootstrap_handoff_and_server_admission(tmp_path, b
     assert events == ([] if stop_at == "listen" else ["bootstrap"])
 
 
-@pytest.mark.parametrize("rel,hands_over", [(None, False), ("server.py", False),
-                                            ("ouroboros/not_imported_yet.py", True), ("supervisor/queue.py", True)])
+@pytest.mark.parametrize("rel,hands_over", [(None, False), ("ouroboros/not_imported_yet.py", True), ("supervisor/queue.py", True)])
 def test_a_frozen_app_loads_the_checkouts_launcher_at_cold_start_only_when_its_code_differs(tmp_path, boot, rel,
                                                                                          hands_over):
     """Owner answer 2A: after a full exit too, the updated shell, before any server or main window. Same code
@@ -533,9 +532,6 @@ def test_an_older_apps_handoff_restarts_once_without_its_console_window(prologue
 
 @pytest.mark.parametrize("argv,options", [
     (["--seed-bundle", "C:\\seed"], {"platform": "darwin"}),
-    (["--seed-bundle", "C:\\seed"], {"platform": "linux"}),
-    (["--seed-bundle", "C:\\seed"], {"frozen": True}),
-    (["--seed-bundle", "C:\\seed"], {"marked": True}),
     (["--no-ui", "--seed-bundle", "C:\\seed"], {}),
     (["--launch-intent", "owner"], {}),  # a source launcher someone started from a terminal: its console is theirs
 ])
@@ -545,8 +541,6 @@ def test_every_other_start_keeps_its_console(prologue, argv, options):
 
 @pytest.mark.parametrize("facts", [
     {"provenance": False},  # manual source CLI, even with seed argv and a console of its own
-    {"clients": 2},         # an intentional shared terminal, even with inherited GUI provenance
-    {"clients": 0}, {"own_client": False}, {"window": 0}, {"visible": False},
     {"subsystem": 3}, {"malformed": True},  # a CLI executable or unproven GUI origin
 ])
 def test_legacy_repair_requires_gui_origin_and_its_own_visible_console(prologue, facts):

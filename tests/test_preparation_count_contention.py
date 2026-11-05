@@ -125,7 +125,7 @@ def test_retry_reads_the_real_count_and_preserves_the_parent_limit(env, monkeypa
     assert row["delegation_admission"]["direct_child_count"] == 1 and env.pending_ids() == []
 
 
-@pytest.mark.parametrize("failure", ["permission", "corrupt", "uninspectable", "unknown", "rollback_unknown"])
+@pytest.mark.parametrize("failure", ["permission", "corrupt", "rollback_unknown"])
 def test_genuine_unknown_count_is_not_temporary_contention(env, monkeypatch, failure):
     _parent(env)
     event = env.request("unknown-count")

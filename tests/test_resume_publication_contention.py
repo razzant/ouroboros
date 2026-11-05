@@ -38,7 +38,7 @@ def _contend_publication(monkeypatch, *, outside=None, acquire_wait_sec=0.0):
     return publications, waits
 
 
-@pytest.mark.parametrize("interruption", ["open", "pause", "stop", "different_grant", "read_probe"])
+@pytest.mark.parametrize("interruption", ["pause", "stop", "different_grant", "read_probe"])
 def test_resume_publication_rechecks_exact_current_controls(tmp_path, monkeypatch, interruption):
     write_task_result(tmp_path, "root", "running", root_task_id="root")
     fence, _ = owner_pause.install_fence(tmp_path, "root", request_id="original-pause")

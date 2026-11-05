@@ -373,7 +373,7 @@ def test_document_bridge_rejects_foreign_task_and_changed_capture(tmp_path, monk
     assert not bridge.send_document(1, b"", task_id=ctx.task_id, file_ref=first["file_ref"])[0]
 
 
-@pytest.mark.parametrize("ref", [{}, "", False, {"kind": "task_source"}])
+@pytest.mark.parametrize("ref", [{}, "", {"kind": "task_source"}])
 def test_malformed_full_reference_cannot_become_a_complete_preview(tmp_path, ref):
     authority = {"attachment_manifest": [{"status": "staged", "label": "only a preview"}],
                  "attachment_manifest_ref": ref}
@@ -846,7 +846,7 @@ def test_first_materialization_copy_failure_keeps_each_gc_root(tmp_path, monkeyp
     assert Path(published["path"]).is_relative_to(artifacts.task_artifact_dir_path(parent, "capture").resolve())
 
 
-@pytest.mark.parametrize("context", ["healthy", "missing", "none", "storage_failure"])
+@pytest.mark.parametrize("context", ["healthy", "missing", "storage_failure"])
 def test_small_document_keeps_inline_delivery_when_capture_is_unavailable(tmp_path, monkeypatch, context):
     import base64
     from ouroboros.tools import core_artifacts

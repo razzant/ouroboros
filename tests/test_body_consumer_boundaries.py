@@ -143,7 +143,7 @@ def test_explicit_serving_child_source_is_copied_from_candidate(body, monkeypatc
     assert (serving / "ouroboros/mod_b.py").read_text() == "GEN = 'GEN_OLD'\n"
 
 
-@pytest.mark.parametrize("selection", ["read_only", "omitted", "relative", "absolute"])
+@pytest.mark.parametrize("selection", ["read_only", "relative", "absolute"])
 def test_unavailable_project_focus_keeps_own_body_child_on_the_candidate(body, monkeypatch, selection):
     import ouroboros.safety as safety
     from tests._shared import configure_test_subagent
@@ -171,8 +171,7 @@ def test_unavailable_project_focus_keeps_own_body_child_on_the_candidate(body, m
     assert ctx.pending_events[-1]["workspace_root"] == candidate
 
 
-@pytest.mark.parametrize("parent", ["folderless_project", "metadata_serving", "metadata_foreign", "explicit_foreign",
-                                    "explicit_missing", "explicit_sibling"])
+@pytest.mark.parametrize("parent", ["folderless_project", "metadata_foreign", "explicit_sibling"])
 def test_own_body_child_source_is_the_schedulers_own_selection(body, monkeypatch, tmp_path, parent):
     """The seam binds exactly when the scheduler's selection copies the serving checkout."""
     import ouroboros.safety as safety

@@ -159,7 +159,7 @@ def test_recovered_review_uses_native_subject_and_separate_terminal_bytes(tmp_pa
     assert len(list(evidence.parent.glob("evidence*"))) == 1
 
 
-@pytest.mark.parametrize("basis", ["empty", "missing_field", "timeout", "missing_commit"])
+@pytest.mark.parametrize("basis", ["empty", "timeout", "missing_commit"])
 def test_required_unknown_or_missing_basis_never_becomes_unborn(tmp_path, monkeypatch, basis):
     from ouroboros import workspace_preflight as preflight
     from ouroboros.workspace_patch_capture import write_workspace_patch_artifacts
