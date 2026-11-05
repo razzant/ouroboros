@@ -270,18 +270,20 @@
  */
 
 /**
- * One remover of a place, read fresh: a maintenance job's row or the engine's last retention pass.
+ * One remover of a place, read fresh: a maintenance job's row, a server retirer pass's row or the engine's last retention pass.
  * @typedef {Object} StorageRemover
- * @property {string} id  // engine | runtime_retirement | custody_trash | evidence_packing | record_compression
+ * @property {string} id  // engine | runtime_retirement | custody_trash | evidence_packing | record_compression | drive_settlement | copy_retirement | review_checkout_prune | session_scratch_release | engine_runtime_prune
  * @property {string} state  // a job: pending | running | done | failed | never | unsupported | unavailable; the engine: completed | held | truncated | failed | none | unavailable | unsupported
  * @property {string|null} at  // the job row's last write; the engine pass's end
  * @property {{class: string, at: string}=} last_error  // a job whose last run threw, until a run returns normally
  * @property {number=} compressed  // record_compression: files compressed so far in this place's plane
  * @property {(number|null)=} saved_bytes  // record_compression: that plane's allocation saved; null where unreported
  * @property {number=} freed_bytes  // the engine pass
- * @property {number=} held  // the engine pass: folders it held (project roots and native homes)
+ * @property {number=} released  // a retirer pass: items it released
+ * @property {{class: string, count: number, example: string, since: string}[]=} holds  // a retirer pass or the engine pass: what it keeps, by typed reason, since when
+ * @property {number=} held  // the engine pass: folders it held (project roots and native homes); a retirer pass: items held
  * @property {string=} held_since  // the earliest of those holds
- * @property {number=} errors  // the engine pass's errors
+ * @property {number=} errors  // the engine pass's errors; a retirer pass's pass-level errors
  * @property {(string|null)=} first_error
  */
 

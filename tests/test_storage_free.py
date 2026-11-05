@@ -377,7 +377,7 @@ def test_a_kept_folder_names_its_reason_and_the_next_run_frees_it(tmp_path, monk
     ("not_own_drive", "not_own_drive"),  # every retirer code is stored as named (#2709): the client groups the words
     ("", "other"),
 ])
-def test_the_fail_closed_mailbox_and_call_inventory_codes_name_their_owner_facing_reason(code, reason):
+def test_a_retirers_reason_is_stored_as_named_and_a_custody_error_reads_its_class(code, reason):
     from ouroboros.storage_free import _reason
 
     assert _reason(code) == reason

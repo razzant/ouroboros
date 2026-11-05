@@ -480,13 +480,15 @@ def release_finished_scratch(data_root: Any, live: Any, *, stop: Any = None) -> 
     record of its task, is dropped; unknown liveness, a busy custody lock or a failed step keeps it for
     the next pass. Links and junctions are never followed."""
     from ouroboros.body_candidate import _recorded_terminal
+    from ouroboros.maintenance_jobs import Holds
     from ouroboros.owner_keep import gate
     from ouroboros.subagent_worktrees import _task_proven_over
     from ouroboros.task_custody import _STAGING_DIR
     from ouroboros.task_results import validate_task_id
 
     root = pathlib.Path(data_root)
-    report: Dict[str, Any] = {"released": [], "kept": 0, "errors": []}
+    holds = Holds()  # the shared retirer shape (maintenance_jobs.record_pass): what stays, by typed reason
+    report: Dict[str, Any] = {"released": [], "holds": holds.rows(), "errors": []}
     with contextlib.suppress(OSError):  # one pass at a time (the custody latch): staged entries are a stopped pass's
         for staged in sorted((root / _STAGING_DIR).glob(f"*{_RELEASE_MARK}*")):
             try:
@@ -508,12 +510,15 @@ def release_finished_scratch(data_root: Any, live: Any, *, stop: Any = None) -> 
             continue  # no note of a task: nothing in it is read
         if not _plain_directory(folder):
             continue
-        if not _task_proven_over(task_id, root, live) or _runs_still_open(root, task_id):
-            report["kept"] += 1
+        if not _task_proven_over(task_id, root, live):
+            holds.note("not_proven_over", task_id)
+            continue
+        if _runs_still_open(root, task_id):
+            holds.note("run_open", task_id)
             continue
         with gate(root, task_id, timeout_sec=0) as held:
             if held or not _recorded_terminal(task_id, root):
-                report["kept"] += 1
+                holds.note(held or "task_not_terminal", task_id)
                 continue
             for note in sorted(folder.glob("*.json")):
                 if note.is_symlink() or not note.is_file():
@@ -537,6 +542,7 @@ def release_finished_scratch(data_root: Any, live: Any, *, stop: Any = None) -> 
                     report["errors"].append(f"{owner}: {type(exc).__name__}: {exc}")
             with contextlib.suppress(OSError):
                 folder.rmdir()  # empty once every note went
+    report["holds"] = holds.rows()
     return report
 
 

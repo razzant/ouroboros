@@ -380,13 +380,15 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
     ``live_task_ids`` is a set or a callable asked again for each thread seat; ``stop`` is
     asked before each seat. ``views_done`` reports a completed views pass."""
     from ouroboros import delegate_custody_current as current
+    from ouroboros.maintenance_jobs import Holds
     from ouroboros.retention import age_cutoff, get_gc_retention_days
 
     base = (pathlib.Path(data_root) / "state" / "review_checkouts").resolve(strict=False)
     seats, view_root = base / "seats", base / "views"
     views = views_since is not None
+    holds = Holds()  # the shared retirer shape (maintenance_jobs.record_pass): each kept copy by its typed reason
     report: Dict[str, Any] = {"released": 0, "removed": 0, "kept": 0, "busy": 0, "capture_failed": 0,
-                              "checkouts_removed": 0, "checkouts_kept": 0, "errors": []}
+                              "checkouts_removed": 0, "checkouts_kept": 0, "errors": [], "holds": holds.rows()}
     checkouts = _checkout_entries(base)
     if not (seats.is_dir() or checkouts or views and view_root.is_dir()):
         return {**report, "views_done": views}
@@ -421,6 +423,7 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
             over = _copy_runs_over(data_root, task_id, area, marker.get("created_at"))
             if over is False or (thread_home or marker.get("held_for_continuation")) and task_id in live():
                 report["kept"] += 1
+                holds.note("run_open" if over is False else "task_live", home.name)
                 return True
             receipt = _receipt(data_root, task_id, operation) if operation else {}
             if (over or receipt.get("status") == "capture_failed") and operation and receipt.get("status") not in _RECEIPTED:
@@ -428,21 +431,25 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
                 receipt = _receipt(data_root, task_id, operation)  # only a durable receipt counts
                 if not receipt:  # nothing was saved (a full volume): the copy waits for a later pass
                     report["capture_failed"] += 1
+                    holds.note("capture_failed", home.name)
                     return True
             if receipt.get("status") in _RECEIPTED:
                 with gate(data_root, task_id, timeout_sec=0) as held:  # the owner's keep holds a captured copy too
                     if held:
                         report["kept"] += 1
+                        holds.note(held, home.name)
                         return True
                     receipt = _release_area(area, receipt, marker.get("git"))
                 if receipt.get("cleanup_error"):
                     report["errors"].append(receipt["cleanup_error"])
+                    holds.note("removal_failed", home.name)
                     return True
                 report["released"] += 1
                 return False
             # Age proves neither execution completion nor retention of unique
             # work. A failed or unknown capture keeps the copy and its basis.
             report["capture_failed" if receipt else "kept"] += 1
+            holds.note("capture_failed" if receipt else "capture_unproven", home.name)
             return True
 
         def staging(entry: pathlib.Path) -> None:
@@ -469,6 +476,7 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
             with _seat_locked(lock_home, wait=False) as held:  # same owner for active and relocated thread turns
                 if not held:  # a worker is changing it; the views it needs are read in a later pass
                     report["busy"] += 1
+                    holds.note("seat_busy", home.name)
                     busy.append(home.name)
                     return set()
                 try:

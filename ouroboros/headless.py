@@ -320,6 +320,7 @@ def _prune_drives(base: pathlib.Path, parent: pathlib.Path, *, drive_of: Any, no
     ``only`` restricts the pass to those task ids (the free action's previewed folders; every other drive is
     untouched, no rest is kept); ``progress`` is called with the report after each settlement attempt."""
     from ouroboros.retention import age_cutoff
+    from ouroboros.store import StoreError
     from ouroboros.task_custody import (arrived_drives, forget_departed, layout_basis, record_rest, rested_verdict,
                                         settle_child_drive)
 
@@ -377,7 +378,11 @@ def _prune_drives(base: pathlib.Path, parent: pathlib.Path, *, drive_of: Any, no
                 continue
             # A hint never authorizes removal. In particular a date changed after
             # selection must be checked here; settlement rechecks custody, not age.
-            result = load_task_result(parent, task_id, strict=True) or {}
+            try:
+                result = load_task_result(parent, task_id, strict=True) or {}
+            except (OSError, ValueError, StoreError):  # a quarantined or torn row: this drive's own hold, not the pass's error
+                report["skipped"].append({"task_id": task_id, "reason": "task_result_unreadable"})
+                continue
             status = str(result.get("status") or "").lower()
             if status not in _FINAL_STATUSES:
                 report["skipped"].append({"task_id": task_id, "reason": not_terminal, "status": status})
