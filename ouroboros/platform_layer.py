@@ -1291,6 +1291,25 @@ def subprocess_new_group_kwargs(*, breakaway_from_job: bool = False, suspended: 
     return {"start_new_session": True}
 
 
+def background_priority_creationflags() -> int:
+    """Windows: the creation flag that starts a process tree in the below-normal priority class; 0 elsewhere."""
+    return getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x4000) if IS_WINDOWS else 0
+
+
+def lower_tree_priority(pid: int, pgid: int = 0) -> bool:
+    """POSIX: nice a root that is still starting (its whole group when it leads one) ten steps below the
+    caller, capped at 19, so everything it forks inherits it. False on Windows (the creation flag above did
+    it), where the call does not exist, or for a root already gone: the tree then runs at the caller's priority."""
+    if IS_WINDOWS or not hasattr(os, "setpriority"):
+        return False
+    try:
+        os.setpriority(os.PRIO_PGRP if pgid else os.PRIO_PROCESS, pgid or pid,
+                       min(os.getpriority(os.PRIO_PROCESS, 0) + 10, 19))
+    except OSError:
+        return False
+    return True
+
+
 def install_shutdown_signal_handlers(handler) -> None:
     """Install SIGINT and POSIX SIGTERM handlers that only set a flag/event.
 
