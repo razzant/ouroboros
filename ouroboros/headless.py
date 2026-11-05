@@ -1000,14 +1000,13 @@ def _finalize_task_artifacts_locked(parent_drive_root: pathlib.Path, task: Dict[
                 atomic_write_json(manifest_path, manifest, trailing_newline=True)
                 patch_artifacts = [_file_artifact("workspace_patch_manifest", manifest_path)]
             else:
-                direct = _directory_direct_artifacts(workspace_root, artifact_dir, task, existing)
-                # The task's own copy has no run to retain its evidence folder: this capture retains it once
-                # (reusing the last published generation while unchanged) and holds it out of the patch (#2711).
+                # The task's own copy or folder has no run to retain its evidence folder: this capture retains it
+                # once (reusing the last published generation while unchanged), held out of any patch (#2711).
+                evidence = {"retain_evidence_dir": artifact_dir / "named_evidence",
+                            "retained_evidence": published_workspace_evidence(existing)}
+                direct = _directory_direct_artifacts(workspace_root, artifact_dir, task, existing, **evidence)
                 patch_artifacts, manifest = direct if direct is not None else write_workspace_patch_artifacts(
-                    workspace_root, artifact_dir, task=task, scratch_dir=artifact_base,
-                    retain_evidence_dir=artifact_dir / "named_evidence",
-                    retained_evidence=published_workspace_evidence(existing),
-                )
+                    workspace_root, artifact_dir, task=task, scratch_dir=artifact_base, **evidence)
                 summary_path = (manifest.get("named_evidence") or {}).get("summary_path")
                 if summary_path and manifest["named_evidence"].get("status") == "retained":
                     patch_artifacts.append(_file_artifact("named_evidence_manifest", pathlib.Path(summary_path),
