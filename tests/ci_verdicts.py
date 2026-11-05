@@ -29,8 +29,12 @@ VERDICTS = frozenset({"green", "flaky", "accepted", "red"})
 SYSTEMS = frozenset({"linux", "darwin", "windows"})
 # The run's weight table (`collect_durations`); the lane plugins read it at collection.
 DURATIONS_ENV = "OUROBOROS_CI_DURATIONS"
-# The xdist group of a serial test in run_tests.py's one-run battery (`serial_group`).
-SERIAL_GROUP = re.compile(r"serial[0-9]+")
+# The owner's persisted table (ouroboros.test_evidence.TEST_DURATIONS_ENV spells the same key): read for weights when
+# CI's table is absent, and brought up to date by every owned session at its end (`record_session_durations`).
+TEST_DURATIONS_ENV = "OUROBOROS_TEST_DURATIONS"
+# The xdist group of a serial test in the one xdist pass (tests/conftest.py): a bare mark's file-sharded group
+# `serial<N>` (`serial_group`) or a named resource's `serial:<resource>`.
+SERIAL_GROUP = re.compile(r"serial(?:[0-9]+|:.+)")
 
 
 def serial_group(path: str, shards: int) -> str:
@@ -124,32 +128,110 @@ def system_of(data: dict) -> str:
     return platform_name(environment.get("platform", ""))
 
 
-def durations_table() -> tuple[dict | None, str]:
-    """(the run's weight table, "") from $OUROBOROS_CI_DURATIONS, or (None, why it is not used).
-
-    Unset is no table and no reason. A table that cannot be read or has another
-    shape is a reason, and the lanes fall back to their positional weights.
-    """
-    path = os.environ.get(DURATIONS_ENV)
-    if not path:
-        return None, ""
-
+def _table_shape_holds(table) -> bool:
     def milliseconds(value):
         return isinstance(value, dict) and all(isinstance(key, str) and type(count) is int and count >= 0
                                                for key, count in value.items())
 
     def per_system(value):
         return isinstance(value, dict) and all(milliseconds(files) for files in value.values())
+    source = table.get("source") if isinstance(table, dict) else None
+    return bool(isinstance(source, dict) and table.get("format") == 1 and isinstance(source.get("run_id"), str)
+                and source["run_id"] and per_system(table.get("platforms")) and per_system(table.get("serial", {}))
+                and milliseconds(table.get("ui_nodes", {})))
+
+
+def durations_table() -> tuple[dict | None, str]:
+    """(the run's weight table, "") from $OUROBOROS_CI_DURATIONS, or (None, why it is not used).
+
+    Unset is no table and no reason. A table that cannot be read or has another shape is a reason, and the
+    lanes fall back to their positional weights. Only this table may weigh a whole-lane proof's shards: every
+    session of a run reads the same copy, so their packing agrees; the owner's table (`recorded_durations_table`)
+    changes while the run goes on.
+    """
+    return _read_table(os.environ.get(DURATIONS_ENV))
+
+
+def recorded_durations_table() -> tuple[dict | None, str]:
+    """The run's table (`durations_table`), else the owner's persisted one ($OUROBOROS_TEST_DURATIONS): what sizes
+    and orders the xdist pass's serial groups (tests/conftest.py, scripts/run_tests.py), never a lane's shards.
+    An owner's table that no session has written yet is no table and no reason."""
+    if os.environ.get(DURATIONS_ENV):
+        return durations_table()
+    path = os.environ.get(TEST_DURATIONS_ENV)
+    return _read_table(path) if path and Path(path).exists() else (None, "")
+
+
+def _read_table(path) -> tuple[dict | None, str]:
+    if not path:
+        return None, ""
     try:
         table = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         return None, f"the durations table is unreadable ({type(error).__name__})"
-    source = table.get("source") if isinstance(table, dict) else None
-    if not (isinstance(source, dict) and table.get("format") == 1 and isinstance(source.get("run_id"), str)
-            and source["run_id"] and per_system(table.get("platforms")) and per_system(table.get("serial", {}))
-            and milliseconds(table.get("ui_nodes", {}))):
+    if not _table_shape_holds(table):
         return None, "the durations table has another shape"
     return table, ""
+
+
+def session_file_durations(reports) -> tuple[dict, dict]:
+    """(milliseconds per file, the serial part per file) of one session's reports: the setup, call and teardown
+    time of every test, subtests excluded (their time lies within their test's call); a test is serial when it ran
+    in a `serial…` xdist group. A file with a crashed worker's report is left out: its time is not whole."""
+    files, serial, broken = {}, {}, set()
+    for row in reports:
+        path = str(row.get("nodeid", "")).split("::", 1)[0]
+        if row.get("phase") == "crash":
+            broken.add(path)
+            continue
+        seconds = row.get("duration_seconds")
+        if row.get("is_subtest") or row.get("phase") not in PHASES or type(seconds) not in (int, float):
+            continue
+        seconds = max(seconds, 0) if math.isfinite(seconds) else 0
+        files[path] = files.get(path, 0) + seconds
+        if SERIAL_GROUP.fullmatch(str(row["nodeid"]).rpartition("@")[2]):
+            serial[path] = serial.get(path, 0) + seconds
+    return ({path: round(files[path] * 1000) for path in sorted(files) if path not in broken},
+            {path: round(serial[path] * 1000) for path in sorted(serial) if path not in broken})
+
+
+def record_session_durations(path, reports, *, system: str, rootpath, run_id: str, sha: str = "") -> str:
+    """Fold one session's file times into the owner's table at ``path`` (format 1, the shape `durations_table`
+    reads): the files this session ran replace their entries for this system (a file no longer serial leaves
+    `serial`), entries for files absent from ``rootpath`` are dropped, other systems' entries stay, and an
+    unreadable or misshapen table starts afresh. Returns "" or why nothing was written."""
+    files, serial = session_file_durations(reports)
+    if not files:
+        return "no whole test file ran"
+    path, system = Path(path), platform_name(system)
+    try:
+        table = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        table = None
+    if not _table_shape_holds(table):
+        table = {"format": 1, "platforms": {}, "serial": {}, "source": {}, "ui_nodes": {}}
+    table.setdefault("serial", {})
+    platforms, serial_part = table["platforms"].setdefault(system, {}), table["serial"].setdefault(system, {})
+    platforms.update(files)
+    for name in files:
+        serial_part.pop(name, None)
+    serial_part.update(serial)
+    for part in (platforms, serial_part):
+        for name in [name for name in part if not (Path(rootpath) / name).exists()]:
+            del part[name]
+        ordered = {name: part[name] for name in sorted(part)}
+        part.clear()
+        part.update(ordered)
+    table["source"] = {"run_id": run_id, "sha": sha}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        staging = path.with_name(path.name + ".tmp")
+        staging.write_text(json.dumps({key: table[key] for key in sorted(table)}, indent=1, sort_keys=True) + "\n",
+                           encoding="utf-8")
+        os.replace(staging, path)
+    except OSError as error:
+        return f"the durations table could not be written ({type(error).__name__}: {error})"
+    return ""
 
 
 def verdict_shape(verdict) -> bool:
@@ -207,7 +289,9 @@ def collect_durations(root: Path, *, run_id: str, sha: str) -> dict:
     reports, projections of an unknown system and subtest reports (their time lies within
     their test's call) are left out. Of one pass (system, lane, shard) the highest run
     attempt counts, then the larger projection, then the first path, so a projection
-    downloaded twice counts once.
+    downloaded twice counts once. A test's time is serial when it ran in a `serial…` xdist
+    group (a bare or resource-named `serial` mark in the xdist pass); the one-process pass
+    of `serial("exclusive")` tests is not what the serial groups are sized by.
     """
     chosen = {}
     for directory, dirs, files in os.walk(root):
@@ -237,8 +321,7 @@ def collect_durations(root: Path, *, run_id: str, sha: str) -> dict:
                 nodes[row["nodeid"]] = nodes.get(row["nodeid"], 0) + max(seconds, 0)
                 continue
             path = row["nodeid"].split("::", 1)[0]
-            parts = [files] + ([serial] if lane in ("default_serial", "serial") or (
-                lane == "overlapped" and SERIAL_GROUP.fullmatch(row["nodeid"].rpartition("@")[2])) else [])
+            parts = [files] + ([serial] if SERIAL_GROUP.fullmatch(row["nodeid"].rpartition("@")[2]) else [])
             for part in parts:
                 totals = part.setdefault(name, {})
                 totals[path] = totals.get(path, 0) + max(seconds, 0)

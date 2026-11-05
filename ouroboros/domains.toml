@@ -531,6 +531,7 @@ D20 = "Presence"
 "ouroboros/preflight_qualification.py" = "D06"  # exact-commit adoption evidence; publication stays full-only
 "ouroboros/preflight_receipts.py" = "D06"  # unsigned full/selected gate receipts and reviewer execution evidence
 "ouroboros/preflight_runner.py" = "D06"
+"ouroboros/test_bytecode.py" = "D06"  # the warm bytecode prefix of a test run (run_tests and the gate)
 "ouroboros/test_environment.py" = "D06"
 "ouroboros/test_selection.py" = "D06"  # commit-gate test scope: floor, changed tests, direct importers, widening
 "ouroboros/test_evidence.py" = "D06"

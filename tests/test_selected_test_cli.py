@@ -145,7 +145,7 @@ def test_selected_cli_starts_pytest_with_a_scope_longer_than_one_windows_command
     spec.loader.exec_module(cli)
     importer = "from leaf import value\n\n\ndef test_it():\n    assert value == 2\n"
     lanes = ("import pytest\nfrom leaf import value\n\n\ndef test_plain():\n    assert value == 2\n\n\n"
-             "@pytest.mark.serial\ndef test_serial():\n    assert value == 2\n\n\n"
+             "@pytest.mark.serial('exclusive')\ndef test_serial():\n    assert value == 2\n\n\n"
              "@pytest.mark.ui_browser\ndef test_opt_in():\n    raise AssertionError('an excluded lane must not run')\n")
     folder = "tests/проверки_выбранной_области"  # kept short: the longest path stays under a Windows MAX_PATH
     long_scope = {f"{folder}/test_проверка_{n:03d}_имя_модуля_для_заполнения_вектора.py": importer for n in range(340)}
@@ -184,7 +184,7 @@ def test_selected_cli_starts_pytest_with_a_scope_longer_than_one_windows_command
         assert not [arg for arg in launch if arg.startswith(SELECT)] and len(subprocess.list2cmdline(launch)) < 2_000
         assert plugin_scope(launch, evidence / "probe") == selected  # exactly the selection, in order
     assert [launch[launch.index("tests/") + 2] for launch in launches] == [
-        f"not serial and {LANE_EXCLUSION_EXPR}", f"serial and {LANE_EXCLUSION_EXPR}"]  # the lane policy is unchanged
+        f"not exclusive and {LANE_EXCLUSION_EXPR}", f"exclusive and {LANE_EXCLUSION_EXPR}"]  # the gate's pass split
     parallel, serial = row["inventory"]["parallel"], row["inventory"]["serial"]
     assert sorted(parallel["executed"]) == sorted(parallel["expected"])
     assert {node.split("::")[0] for node in parallel["executed"]} == set(selected)  # every selected module ran
@@ -228,10 +228,11 @@ def test_selected_cli_runs_where_the_evidence_directory_and_a_module_spell_templ
     assert sorted(parallel["executed"]) == sorted(parallel["expected"]) == sorted([
         "tests/test_floor.py::test_floor", f"{named}::test_named"])
     assert row["outcomes"] == {"parallel": "success", "serial": "success"} and row["outcome"] == "success"
-    # The worker probe reported where its readers look (_observed_worker_ids, _recorded_session): a file per worker, a pointer.
+    # The gate's plugin reported where its readers look (_observed_worker_ids, _recorded_session): a file per worker of
+    # the parallel pass, and the pointer each pass's controller leaves at its own results directory (the serial pass last).
     workers = [path.name for path in (evidence / "workers").iterdir()]
     assert workers and all(name.startswith("gw") for name in workers), workers
-    assert (evidence / "ci-evidence-dir").read_text(encoding="utf-8") == str((evidence / "parallel").resolve())
+    assert (evidence / "ci-evidence-dir").read_text(encoding="utf-8") == str((evidence / "serial").resolve())
 
 
 @pytest.mark.serial

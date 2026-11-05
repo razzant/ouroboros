@@ -87,14 +87,15 @@ DIAGNOSTIC_OUTPUT_KEYS = (
     "OUROBOROS_UI_SHOTS", "OUROBOROS_UI_SMOKE_SHOT_DIR", "QUIZ_BROWSER_EVIDENCE",
 )
 # Where a run writes, not what it tests: never part of a reusable proof identity.
-OUTPUT_LOCATION_KEYS = ("OUROBOROS_TEST_TEMP_ROOT", "OUROBOROS_TEST_EVIDENCE_ROOT", *DIAGNOSTIC_OUTPUT_KEYS)
+OUTPUT_LOCATION_KEYS = ("OUROBOROS_TEST_TEMP_ROOT", "OUROBOROS_TEST_EVIDENCE_ROOT", "OUROBOROS_TEST_DURATIONS",
+                        *DIAGNOSTIC_OUTPUT_KEYS)
 
 
 def declare_scratch(root, role: str, *, owner: str = "") -> None:
     """A fresh producer declares its tree disposable state it made: purpose, never liveness, deletion
     authority or a promise that the contents come back byte for byte.
     ``owner``: a one-line fact naming what it was made for (``copy_environments`` reads it)."""
-    if role not in {"pytest-session", "pytest-basetemp", "body-process", "process-temp"}:
+    if role not in {"pytest-session", "pytest-basetemp", "body-process", "process-temp", "bytecode-prefix"}:
         raise ValueError(f"unknown test scratch role: {role}")
     with (Path(root) / SCRATCH_MARKER).open("x", encoding="utf-8") as stream:
         stream.write(role + "\n" + (owner.strip() + "\n" if owner else ""))

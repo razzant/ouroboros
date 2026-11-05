@@ -179,7 +179,7 @@ def run_node_tests(
     proc = None
     argv = [node, "--test", f"--test-concurrency={env['PYTEST_XDIST_AUTO_NUM_WORKERS']}", *files]
     try:
-        proc = container.spawn(argv, cwd=str(pathlib.Path(worktree) / WEB_DIR),
+        proc = container.spawn(argv, background=True, cwd=str(pathlib.Path(worktree) / WEB_DIR),
                                env=env, stdout=capture.stdout, stderr=capture.stderr)
         result["execution"] = "executed"
         try:

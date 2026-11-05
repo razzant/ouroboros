@@ -20,7 +20,7 @@ from tests.ci_verdicts import render_run_verdict
 
 REPO = Path(__file__).resolve().parents[1]
 SHA, RUN = "c" * 40, "777"
-PARALLEL = f"not serial and {LANE_EXCLUSION_EXPR}"
+PARALLEL = f"not exclusive and {LANE_EXCLUSION_EXPR}"
 A, B, C, D = (f"tests/test_{name}.py::test_case" for name in "abcd")
 
 
@@ -40,7 +40,7 @@ def _round(evidence, k=1):
 
 
 @pytest.mark.parametrize("pass_flags", [
-    ["-n", "auto", "--dist", "loadscope", "--max-worker-restart=0", "--timeout=300"], ["--timeout=300"],
+    ["-n", "auto", "--dist", "loadgroup", "--max-worker-restart=0", "--timeout=300"], ["--timeout=300"],
 ], ids=["parallel", "serial"])
 def test_the_ci_run_tests_form_keeps_every_option_but_the_lane_proof(ci_retry, tmp_path, pass_flags):
     """Exactly what ci.yml wraps; --timeout stays, the shard goes, the evidence moves into the round."""
@@ -642,7 +642,7 @@ def test_a_killed_session_is_continued_from_its_journal_and_proven_by_its_verdic
     and the journal with that verdict proves the shard."""
     suite = tmp_path / "suite"
     (suite / "tests").mkdir(parents=True)
-    serial = "import pytest\npytestmark = pytest.mark.serial\n"
+    serial = "import pytest\npytestmark = pytest.mark.serial('exclusive')\n"
     (suite / "tests" / "test_a.py").write_text(serial + "@pytest.mark.parametrize('n', range(2))\n"
                                                "def test_quick(n):\n    pass\n", encoding="utf-8")
     (suite / "tests" / "test_b_killed.py").write_text(serial + textwrap.dedent(f"""
@@ -656,7 +656,7 @@ def test_a_killed_session_is_continued_from_its_journal_and_proven_by_its_verdic
     """), encoding="utf-8")
     (suite / "tests" / "test_c.py").write_text(serial + "@pytest.mark.parametrize('n', range(2))\n"
                                                "def test_later(n):\n    pass\n", encoding="utf-8")
-    expression = f"serial and {LANE_EXCLUSION_EXPR}"
+    expression = f"exclusive and {LANE_EXCLUSION_EXPR}"
     evidence = tmp_path / "shards" / "default-ci-shard-1-attempt1" / "serial"
     result = _wrapper(tmp_path, evidence, _command(tmp_path, suite, "-m", expression,
                                                    f"--ci-evidence-dir={evidence}", "--default-suite-shard=1/1"))

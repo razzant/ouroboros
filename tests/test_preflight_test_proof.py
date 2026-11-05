@@ -36,7 +36,7 @@ def _suite(repo):
     (repo / "tests" / "test_candidate.py").write_text(
         "import pathlib, pytest\n"
         "def test_parallel():\n    assert pathlib.Path('candidate.txt').read_text() == 'tested'\n"
-        "@pytest.mark.serial\ndef test_serial():\n    test_parallel()\n"
+        "@pytest.mark.serial('exclusive')\ndef test_serial():\n    test_parallel()\n"
     )
     (repo / "candidate.txt").write_text("tested")
 

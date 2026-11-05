@@ -97,7 +97,7 @@ def _lay_tiny_repo(repo: pathlib.Path, *, web: bool, lanes: tuple) -> None:
             "def test_one():\n    assert True\n\n\ndef test_two():\n    assert True\n", encoding="utf-8")
     if "serial" in lanes:
         (repo / "tests" / "test_serial.py").write_text(
-            "import pytest\n\n\n@pytest.mark.serial\ndef test_serial():\n    assert True\n", encoding="utf-8")
+            "import pytest\n\n\n@pytest.mark.serial('exclusive')\ndef test_serial():\n    assert True\n", encoding="utf-8")
     if web:
         (repo / "web" / "tests").mkdir(parents=True)
         (repo / "web" / "tests" / "tiny.test.js").write_text(

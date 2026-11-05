@@ -18,7 +18,7 @@ from ouroboros.test_parallelism import NESTED_WORKERS_ENV
 
 ROOT = Path(__file__).resolve().parents[1]
 SHA, RUN = "a" * 40, "42"
-EXPRESSIONS = {name: f"{prefix}serial and {LANE_EXCLUSION_EXPR}"
+EXPRESSIONS = {name: f"{prefix}exclusive and {LANE_EXCLUSION_EXPR}"
                for name, prefix in (("parallel", "not "), ("serial", ""))}
 # The full-test matrix: runner image, `runner.os` (the artifacts' OS name) and its shard count.
 SHARDED = (("ubuntu-latest", "Linux", 4), ("macos-latest", "macOS", 4), ("windows-latest", "Windows", 8))
@@ -47,7 +47,7 @@ def test_real_pytest_manifests_and_xdist_prove_both_passes_by_whole_file(tmp_pat
             "    return calls\n"
             f"@pytest.mark.parametrize('n', range({parallel}))\n"
             "def test_parallel(n, shared): assert shared == 1\n"
-            "@pytest.mark.serial\n"
+            "@pytest.mark.serial('exclusive')\n"
             f"@pytest.mark.parametrize('n', range({serial}))\n"
             "def test_serial(n, shared): assert shared == 1\n"
             "@pytest.mark.ui_browser\n"
@@ -69,7 +69,7 @@ def test_real_pytest_manifests_and_xdist_prove_both_passes_by_whole_file(tmp_pat
             args += (["--default-suite-manifest", "--collect-only"] if shard is None
                      else [f"--default-suite-shard={shard}/2"])
             if lane == "parallel" and shard is not None:
-                args += ["-n", "2", "--dist", "loadscope", "--max-worker-restart=0"]
+                args += ["-n", "2", "--dist", "loadgroup", "--max-worker-restart=0"]
             result = subprocess.run(
                 [sys.executable, "-I", "-S", str(ROOT / "scripts/safe_test.py"),
                  "--temp-parent", str(tmp_path), "--", sys.executable, str(entry), *args],
@@ -90,7 +90,8 @@ def test_real_pytest_manifests_and_xdist_prove_both_passes_by_whole_file(tmp_pat
         assert gaps == []
         assert assignments[lane, 1].isdisjoint(assignments[lane, 2])
         assert assignments[lane, 1] | assignments[lane, 2] == selections[lane]
-    assert len(selections["parallel"]) == 7 and len(selections["serial"]) == 9
+    # test_services_tool_v2.py's whole-file mark is a bare `serial` (tests/conftest.py): the xdist pass holds it.
+    assert len(selections["parallel"]) == 9 and len(selections["serial"]) == 7
     assert selections["parallel"].isdisjoint(selections["serial"])
     owners = {}
     for (_, shard), nodes in assignments.items():
@@ -186,9 +187,9 @@ def _jobs():
 
 def test_every_os_runs_whole_file_shards_of_both_passes_and_its_checks_once(tmp_path):
     job = _jobs()["full-test-runs"]
-    matrix = job["strategy"]["matrix"]
-    assert matrix == {"include": [{"os": image, "shard": index, "shards": count}
-                                  for image, _, count in SHARDED for index in range(1, count + 1)]}
+    # The legs come from the run's plan (tests/test_platform_ci_events.py runs that step per scope).
+    assert job["needs"] == "shard-plan"
+    assert job["strategy"]["matrix"] == {"include": "${{ fromJSON(needs.shard-plan.outputs.legs) }}"}
     assert job["strategy"]["fail-fast"] is False and "continue-on-error" not in job
     steps = {step["id"]: step for step in job["steps"] if "id" in step}
     for label in EXPRESSIONS:
@@ -286,7 +287,7 @@ def _artifacts(proof, os_name, count):
 def test_full_test_result_requires_the_matrix_and_every_os_reconciliation(tmp_path, outcome):
     jobs = _jobs()
     job = jobs["full-test"]
-    assert job["needs"] == ["full-test-runs", "journal-persist"]
+    assert job["needs"] == ["shard-plan", "full-test-runs", "journal-persist"]
     assert job["if"] == "${{ !cancelled() && needs.full-test-runs.result != 'skipped' }}"
     assert "continue-on-error" not in job
     gate, *steps = job["steps"]
@@ -307,8 +308,10 @@ def test_full_test_result_requires_the_matrix_and_every_os_reconciliation(tmp_pa
     assert "full-test" in jobs["release"]["needs"], "nothing is published without the reconciled matrix"
     if outcome != "success":
         return  # The loop below is the same for every outcome of the matrix.
-    # Every OS of the matrix, with its own shard count, is reconciled in both passes: run the step itself.
-    assert f"for spec in {' '.join(f'{os_name}:{count}' for _, os_name, count in SHARDED)}; do" in reconcile["run"]
+    # Every OS the plan named, with its own shard count, is reconciled in both passes: run the step itself.
+    assert "for spec in $SYSTEMS; do" in reconcile["run"]
+    assert reconcile["env"]["SYSTEMS"] == "${{ needs.shard-plan.outputs.systems }}"
+    systems = " ".join(f"{os_name}:{count}" for _, os_name, count in SHARDED)
     script = reconcile["run"].replace("python3 -I -S", f'"{sys.executable}" -I -S')
     for missing in (None, ("macOS", 3)):
         proof = tmp_path / f"proof-{missing is None}"
@@ -319,7 +322,7 @@ def test_full_test_result_requires_the_matrix_and_every_os_reconciliation(tmp_pa
         summary = tmp_path / f"summary-{missing is None}.md"
         result = subprocess.run([bash, "-c", script], cwd=ROOT, capture_output=True, text=True, timeout=120,
                                 env={**os.environ, "PROOF": str(proof), "SHA": SHA, "RUN_ID": RUN,
-                                     "GITHUB_STEP_SUMMARY": str(summary)})
+                                     "SYSTEMS": systems, "GITHUB_STEP_SUMMARY": str(summary)})
         text = summary.read_text(encoding="utf-8")
         if missing is None:
             assert result.returncode == 0, result.stdout + result.stderr
@@ -330,10 +333,12 @@ def test_full_test_result_requires_the_matrix_and_every_os_reconciliation(tmp_pa
 
 def test_each_journal_mode_is_proven_by_its_own_lane():
     """Fresh installs run the shipped interpreter's WAL, installs updated in place keep an older SQLite's
-    PERSIST: the matrix probes WAL, while quick-test and journal-persist (all three OSes) probe PERSIST."""
+    PERSIST: the matrix probes WAL, while quick-test and journal-persist (on the systems the run's plan
+    names: all three on a release, Ubuntu under `scope=tests`) probe PERSIST."""
     jobs = _jobs()
     persist = jobs["journal-persist"]
-    assert persist["strategy"]["matrix"]["os"] == ["ubuntu-latest", "macos-latest", "windows-latest"]
+    assert persist["needs"] == "shard-plan"
+    assert persist["strategy"]["matrix"]["os"] == "${{ fromJSON(needs.shard-plan.outputs.persist) }}"
     for name in ("journal-persist", "quick-test"):
         setup = next(step for step in jobs[name]["steps"] if step.get("uses") == "./.github/actions/setup-python-env")
         assert "interpreter" not in (setup.get("with") or {}), name  # setup-python's SQLite

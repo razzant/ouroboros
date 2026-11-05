@@ -5,6 +5,7 @@
 # runtime cleanup) live in ``tests/_shared.py`` instead.
 import asyncio
 import functools
+import gc
 import json
 import os
 import pathlib
@@ -53,6 +54,10 @@ if os.environ.get("OUROBOROS_ALLOW_LIVE_DATA_TESTS") != "1":
         _PYTEST_ROOT, _PYTEST_ROOT / "data" / "repo", source={},
     )
     _environment["declare_scratch"](_PYTEST_ROOT, "pytest-session")
+    if _SAFE_TEMP_ROOT and os.environ.get("PYTHONPYCACHEPREFIX"):
+        # One bytecode prefix per RUN, the owner's, warmed once (ouroboros/test_bytecode.py) and read by
+        # every controller, worker and child of it; a session prefix of its own would start cold again.
+        _PYTEST_DEFAULTS["PYTHONPYCACHEPREFIX"] = os.environ["PYTHONPYCACHEPREFIX"]
     if not _SAFE_TEMP_ROOT:
         for _key in ("TMPDIR", "TEMP", "TMP", "PYTEST_DEBUG_TEMPROOT"):
             _PYTEST_DEFAULTS.pop(_key, None)
@@ -404,61 +409,84 @@ def _mock_pollution_files(root: pathlib.Path) -> set[pathlib.Path]:
     return out
 
 
-# Files whose tests spawn REAL OS processes / bind REAL ports / mutate process-global state.
-# Under `pytest -n` (xdist) they flake — or crash a worker, which (with --max-worker-restart=0)
-# fails that worker's WHOLE co-located batch, surfacing as spurious failures in unrelated files.
-# So CI **and the hermetic commit gate** (ouroboros/preflight_runner.py, v6.88.0) run them in a
-# SERIAL pass (`-m serial`) and exclude them from the parallel pass (`-m "not serial" -n auto`);
-# in the gate a crashed worker is a named hard block, not a retry. `serial` names the host
-# resource it serializes: `@pytest.mark.serial("<resource>")`. An owned child, a private root
-# or port 0 runs in parallel (CHECKLISTS Self-Check 18).
-# See docs/DEVELOPMENT.md "Pytest marker lanes".
-_SERIAL_TEST_FILES = frozenset({
-    "test_workspace_executor.py",
-    # Themed siblings of test_workspace_executor.py; they spawn the same real
-    # processes, so the whole family stays in the serial lane.
-    "test_workspace_executor_services.py",
-    "test_workspace_executor_docker.py",
-    "test_workspace_executor_admission.py",
-    "test_workspace_executor_cleanup.py",
-    "test_process_custody.py",
-    "test_kill_process_tree_orphans.py",
-    "test_zombie_prevention.py",
-    "test_worker_crash_retry.py",
-    "test_process_resource_leaks.py",
-    "test_restart_reconnect.py",
+# `serial` names the host resource a test cannot isolate: `@pytest.mark.serial("<resource>")`. CI and the
+# hermetic commit gate (ouroboros/preflight_runner.py) run ONE xdist pass in which a resource's tests take
+# turns on one worker (`xdist_group("serial:<resource>")`) while the other resources and every parallel-safe
+# test run beside them; `serial("exclusive")` names the one resource that is the whole machine: a test proven
+# to harm live siblings (a reaper that kills xdist workers, a process-global another worker's test observes)
+# or to need none, run alone in the short one-process pass after it. A bare `serial` stays valid until the
+# strip (test diet, 2026-11-05): its file runs in one of the `--serial-shards` file groups of the xdist pass.
+# An owned child, a private root or port 0 is parallel-safe and marks nothing (CHECKLISTS Self-Check 18).
+# Whole-file marks below carry the reason each file recorded; the three mixed cloud runs decide which stay.
+_SERIAL_RESOURCES = {
+    "test_workspace_executor.py": "",
+    # Themed siblings of test_workspace_executor.py; they spawn the same real processes.
+    "test_workspace_executor_services.py": "",
+    "test_workspace_executor_docker.py": "",
+    "test_workspace_executor_admission.py": "",
+    "test_workspace_executor_cleanup.py": "",
+    "test_process_custody.py": "",
+    "test_kill_process_tree_orphans.py": "",
+    "test_zombie_prevention.py": "",
+    "test_worker_crash_retry.py": "",
+    "test_process_resource_leaks.py": "",
+    "test_restart_reconnect.py": "",
     # spawns a real pytest subprocess via run_hermetic_pytest + its reaper kills whole process
     # trees / sweeps processes referencing a temp root → can collateral-damage sibling xdist
     # workers under -n (their unrelated tests then fail as a crashed-worker batch).
-    "test_preflight_runner.py",
-    "test_preflight_process_containment.py",
-    # Imports/mutates the process-global server settings facade; when xdist
-    # reuses a worker after unrelated server tests, cached route/probe state can
-    # escape monkeypatch restoration and turn the mocked capability probe into
-    # a real network attempt. Keep the whole hot-reload contract in the serial
-    # lane, matching its process-global subject.
-    "test_settings_budget_hotreload.py",
+    "test_preflight_runner.py": "exclusive",
+    "test_preflight_process_containment.py": "exclusive",
+    # Imports/mutates the process-global server settings facade; when xdist reuses a worker after
+    # unrelated server tests, cached route/probe state can escape monkeypatch restoration and turn
+    # the mocked capability probe into a real network attempt: it needs no live sibling.
+    "test_settings_budget_hotreload.py": "exclusive",
     # spawns real long-lived sleeper subprocesses via the legacy ouroboros.tools.services path
     # AND mutates the module-global tools.services._SERVICES (NOT covered by the
     # _isolate_workspace_executor_globals fixture, which isolates a different dict).
-    "test_services_tool_v2.py",
+    "test_services_tool_v2.py": "",
     # Its own autouse fixture documents that the writer fence "deliberately latches PROCESS-wide
     # state" (workers admission/survivor/blocker latches, update_merge/git_ops module globals);
     # under -n the replace-family no-side-effect pins (replace_env["calls"] == []) intermittently
-    # observe git calls leaked by co-located modules. Same module-global class -> serial lane.
-    "test_update_apply_routing.py",
-})
+    # observe git calls leaked by co-located modules: it needs no live sibling.
+    "test_update_apply_routing.py": "exclusive",
+}
+EXCLUSIVE = "exclusive"
+
+
+def serial_resource(item):
+    """The host resource an item's `serial` mark names: "" for a bare mark, None for no mark."""
+    marker = item.get_closest_marker("serial")
+    if marker is None:
+        return None
+    return str(marker.args[0]) if marker.args and marker.args[0] is not None else ""
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_collection(session):  # noqa: ARG001
+    """Collection imports every test module at once: with the cyclic collector paused it costs a fraction
+    (a whole-tree parse runs 2-3.5x faster, opus_rework N3), and nothing it builds is garbage before it ends.
+    The collected tree is then frozen out of every later collection's reach, so the tests' own garbage
+    collections never rescan it."""
+    gc.disable()
+    try:
+        yield
+    finally:
+        gc.enable()
+        gc.freeze()
 
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):  # noqa: ARG001
-    """Tag whole-file serial suites with the `serial` marker BEFORE pytest's own `-m`
-    deselection runs (tryfirst), so `-m "not serial"` / `-m serial` partition them correctly.
-    Tests that carry their own `@pytest.mark.serial` decorator are honored natively too."""
+    """Tag whole-file serial suites BEFORE pytest's own `-m` deselection runs (tryfirst), derive `exclusive`
+    from `serial("exclusive")` so `-m "not exclusive"` / `-m exclusive` partition the two passes, then pin the
+    xdist groups. Tests that carry their own `@pytest.mark.serial` decorator are honored natively too."""
     for item in items:
-        if pathlib.Path(str(item.fspath)).name in _SERIAL_TEST_FILES:
-            item.add_marker(pytest.mark.serial)
-    _pin_lane_groups(items, config.getoption("--serial-shards"))
+        resource = _SERIAL_RESOURCES.get(pathlib.Path(str(item.fspath)).name)
+        if resource is not None and item.get_closest_marker("serial") is None:
+            item.add_marker(pytest.mark.serial(resource) if resource else pytest.mark.serial)
+        if serial_resource(item) == EXCLUSIVE:
+            item.add_marker(pytest.mark.exclusive)
+    _pin_lane_groups(items, config)
 
 
 _BROWSER_LANE_MARKERS = ("ui_browser", "ui_browser_docker", "browser")
@@ -494,32 +522,61 @@ def pytest_collection_finish(session):
 
 def pytest_addoption(parser):
     parser.addoption(
-        "--serial-shards", type=int, default=0,
-        help="With `--dist loadgroup`: pin the serial tests to this many file-sharded xdist groups "
-             "so ONE run covers both lanes (scripts/run_tests.py). 0 leaves scheduling untouched.",
+        "--serial-shards", default="0",
+        help="How many file-sharded xdist groups the bare-`serial` files run in; `auto` (the default under "
+             "`--dist loadgroup`: the recorded serial share of this system's time and the run's workers, "
+             "ouroboros.test_parallelism.serial_shards) or a count; named resources group by resource. "
+             "0 outside `--dist loadgroup` leaves scheduling untouched.",
     )
 
 
-def _pin_lane_groups(items, shards: int) -> None:
-    """One-run lane scheduling for `scripts/run_tests.py`; inert (shards == 0) for CI and the gate.
+def _serial_shard_count(config) -> int:
+    """An explicit count, else `auto` under `--dist loadgroup` (the one xdist pass), else 0 (a plain `-n` run)."""
+    value = str(config.getoption("--serial-shards")).strip().lower()
+    if value not in ("auto", "", "0") or (value in ("", "0") and getattr(config.option, "dist", "") != "loadgroup"):
+        return int(value or 0)
+    from ouroboros.test_parallelism import serial_shards
+    from tests.ci_verdicts import recorded_durations_table
 
-    Under `--dist loadgroup` a serial FILE never splits across workers and never runs beside
-    another file of its own shard, so the shard count bounds how many serial files run at once.
-    Every other test keeps the scope `--dist loadscope` gives the two-pass recipe (file, or class
-    when there is one). Serial tests sort first so their long groups are handed out before the queue drains.
+    workers = getattr(config.option, "numprocesses", None)
+    return serial_shards(int(workers) if isinstance(workers, int) and workers > 0 else 1, recorded_durations_table()[0])
+
+
+def _pin_lane_groups(items, config) -> None:
+    """The one xdist pass's scheduling (`--dist loadgroup`); inert when `--serial-shards` is 0.
+
+    A `serial("<resource>")` test joins its resource's group (`serial:<resource>`): the resource's tests take
+    turns on one worker while the other resources and every parallel-safe test run beside them. A bare
+    `serial` test joins the file-sharded group `serial<N>` of `--serial-shards` (a FILE never splits across
+    workers and never runs beside another file of its own shard), so the shard count bounds how many such
+    files run at once. Every other test keeps the scope `--dist loadscope` would give it (file, or class when
+    there is one). Groups are handed out longest-first by their files' recorded seconds (the run's durations
+    table), serial groups first among equals, so no long group starts after the queue drains.
     It runs inside the tryfirst hook because xdist reads `xdist_group` in the same hook.
     """
+    shards = _serial_shard_count(config)
     if shards <= 0:
         return
-    from tests.ci_verdicts import serial_group
+    from tests.ci_verdicts import platform_name, recorded_durations_table, serial_group
 
+    table = recorded_durations_table()[0]
+    recorded = ((table or {}).get("platforms") or {}).get(platform_name(sys.platform), {})
+    groups, files = {}, {}
     for item in items:
         path = item.nodeid.split("::", 1)[0]
-        serial = item.get_closest_marker("serial") is not None
-        # Serial: by FILE (the isolation unit). Others: the scope `--dist loadscope` uses (class when present).
-        group = serial_group(path, shards) if serial else item.nodeid.rsplit("::", 1)[0]
+        resource = serial_resource(item)
+        if resource is None:
+            group = item.nodeid.rsplit("::", 1)[0]
+        elif resource:
+            group = f"serial:{resource}"
+        else:
+            group = serial_group(path, shards)
         item.add_marker(pytest.mark.xdist_group(group))
-    items.sort(key=lambda item: item.get_closest_marker("serial") is None)
+        groups[item.nodeid] = group
+        files.setdefault(group, set()).add(path)
+    weight = {group: sum(recorded.get(path, 0) for path in paths) for group, paths in files.items()}
+    order = {item.nodeid: index for index, item in enumerate(items)}
+    items.sort(key=lambda item: (-weight[groups[item.nodeid]], serial_resource(item) is None, order[item.nodeid]))
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -539,6 +596,8 @@ def pytest_cmdline_main(config):
 @pytest.hookimpl(tryfirst=True)
 def pytest_configure(config):
     config.addinivalue_line("markers", "scale: storage operation-count acceptance measurements")
+    config.addinivalue_line("markers", "exclusive: derived here from `serial(\"exclusive\")`, never written by hand: "
+                                       "the tests that run alone in the one-process pass after the xdist pass")
     config.addinivalue_line("markers", "starter_skills: the test runs the real starter-skill installer "
                                        "(conftest `_starter_skills_stay_off`); its skill sources are local fixtures")
     evidence = os.environ.get("OUROBOROS_TEST_EVIDENCE_ROOT")

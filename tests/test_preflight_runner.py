@@ -1,5 +1,6 @@
 import errno
 import inspect
+import json
 import os
 import pathlib
 import re
@@ -135,13 +136,18 @@ def two_pass_env(monkeypatch, preflight_timeout_diagnostics):
     # leak into the nested run and turn the lane-partition probes false-red.
     monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
     monkeypatch.delenv("PYTEST_XDIST_TESTRUNUID", raising=False)
+    # The bytecode warm is a real contained root over the candidate; these scenarios are about the passes.
+    # `test_the_gate_warms_its_prefix_once_before_the_passes` runs it for real.
+    from ouroboros import preflight_runner
+    monkeypatch.setattr(preflight_runner, "_warm_bytecode", lambda *args, **kwargs: "")
 
 
 # ── Pass-spec contract (unit) ─────────────────────────────────────────
 
 
 def test_two_pass_specs_mirror_ci(monkeypatch):
-    """The gate runs CI's exact split: parallel `not serial` pass, then `serial`."""
+    """The gate runs CI's exact split: one xdist pass of everything but `serial("exclusive")` (`--dist loadgroup`:
+    resource groups, bare-serial file groups), then those alone in one process."""
     from ouroboros import preflight_runner as pr
 
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
@@ -149,16 +155,18 @@ def test_two_pass_specs_mirror_ci(monkeypatch):
     assert [spec.label for spec in specs] == ["parallel", "serial"]
     parallel, serial = specs
 
-    assert parallel.args[:3] == ["tests/", "-m", f"not serial and {pr.LANE_EXCLUSION_EXPR}"]
-    for flag in ("-n", "auto", "--dist", "loadscope", "--max-worker-restart=0", "--timeout=300"):
+    assert parallel.args[:3] == ["tests/", "-m", f"not exclusive and {pr.LANE_EXCLUSION_EXPR}"]
+    for flag in ("-n", "auto", "--dist", "loadgroup", "--max-worker-restart=0", "--timeout=300"):
         assert flag in parallel.args, f"parallel pass lost {flag}"
+    assert "--serial-shards" not in " ".join(parallel.args), "the shared vector names only xdist's own options"
     # pytest-timeout picks its own method: SIGALRM fails one test; the thread method (Windows) stops a worker.
     assert not any(arg.startswith("--timeout-method") for arg in parallel.args)
 
-    # The serial pass carries the same per-test hang bound like CI, and no xdist flag.
-    # It forces the timeout plugin against a candidate `-p no:timeout`, as the parallel pass does.
-    assert serial.args == ["tests/", "-m", f"serial and {pr.LANE_EXCLUSION_EXPR}", "--timeout=300",
-                           "-p", "timeout", "-q", "--tb=line", "--no-header"]
+    # The serial pass carries the same per-test hang bound like CI, and no xdist flag. It forces the timeout
+    # plugin against a candidate `-p no:timeout`, as the parallel pass does, and loads the gate's own plugin
+    # for its reading of `serial("exclusive")`.
+    assert serial.args == ["tests/", "-m", f"exclusive and {pr.LANE_EXCLUSION_EXPR}", "--timeout=300",
+                           "-p", "timeout", "-p", pr._WORKER_PROBE_MODULE, "-q", "--tb=line", "--no-header"]
 
     # `parallel` is read off the argv, not the label: it gates the xdist-only
     # diagnoses so they cannot fire on a pass that never ran a worker.
@@ -191,10 +199,10 @@ def test_the_parallel_pass_forces_the_plugins_and_the_worker_probe(monkeypatch):
     assert " ".join(pr._FORCED_PLUGIN_FLAGS) in joined, "the parallel pass does not force its plugins"
     assert f"-p {pr._WORKER_PROBE_MODULE}" in joined, "the parallel pass carries no worker probe"
 
-    # The serial pass carries the per-test timeout, so it forces only the timeout
-    # plugin; it never uses xdist and needs no worker probe.
-    assert serial.args.count("-p") == 1 and "timeout" in serial.args
-    assert "xdist" not in serial.args and pr._WORKER_PROBE_MODULE not in serial.args
+    # The serial pass carries the per-test timeout, so it forces the timeout plugin and never xdist; it loads
+    # the gate's plugin too, which reads `serial("exclusive")` for both passes (the worker count is the parallel one's).
+    assert serial.args.count("-p") == 2 and "timeout" in serial.args
+    assert "xdist" not in serial.args and pr._WORKER_PROBE_MODULE in serial.args
     assert "-p" not in pr._preflight_pass_specs(["tests/", "-n", "2"])[0].args, (
         "an explicit caller argv must be forwarded verbatim"
     )
@@ -482,6 +490,7 @@ def test_worker_count_respects_physical_room_and_the_parent_allocation(monkeypat
     monkeypatch.delenv(budget.NESTED_WORKERS_ENV, raising=False)
     peak = config.TEST_WORKER_PEAK_RSS_BYTES
     monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(10 * peak, 4 * peak))
+    monkeypatch.setattr(budget, "other_runs", lambda: budget.HostRuns())  # a quiet host; the ledger has its own test
     monkeypatch.setenv(WORKERS_ENV, "1")
     assert pr._preflight_worker_count() == 1
     monkeypatch.setenv(WORKERS_ENV, "0")
@@ -601,17 +610,30 @@ def test_the_parallel_pass_loads_the_probe_module_that_was_actually_written(tmp_
     assert pr._WORKER_PROBE_MODULE not in parallel.args, (
         "the parallel pass loads the bare stem, which names no file on the probe path"
     )
-    assert module not in serial.args, "the serial pass needs no worker probe"
+    assert module in serial.args, "the serial pass loads the same generated plugin for its `serial(\"exclusive\")` reading"
 
 
 def test_serial_file_manifest_entries_exist_and_partition():
-    """A renamed/removed file left in `_SERIAL_TEST_FILES` silently shrinks the
-    serial lane; this file itself must stay in it (it spawns real pytest trees)."""
-    from tests.conftest import _SERIAL_TEST_FILES
+    """A renamed/removed file left in `_SERIAL_RESOURCES` silently drops a mark; the files that record harm to
+    sibling workers name the whole machine (`exclusive`), this one among them (it spawns real pytest trees and
+    its reaper kills whole trees), and a resource is read off the mark the way the gate's plugin reads it."""
+    from types import SimpleNamespace
 
-    for name in _SERIAL_TEST_FILES:
-        assert (REPO_ROOT / "tests" / name).exists(), f"_SERIAL_TEST_FILES names a missing file: {name}"
-    assert {"test_preflight_runner.py", "test_preflight_process_containment.py"} <= _SERIAL_TEST_FILES
+    from tests.conftest import EXCLUSIVE, _SERIAL_RESOURCES, serial_resource
+
+    for name in _SERIAL_RESOURCES:
+        assert (REPO_ROOT / "tests" / name).exists(), f"_SERIAL_RESOURCES names a missing file: {name}"
+    assert {name for name, resource in _SERIAL_RESOURCES.items() if resource == EXCLUSIVE} >= {
+        "test_preflight_runner.py", "test_preflight_process_containment.py", "test_update_apply_routing.py"}
+    assert all(resource in ("", EXCLUSIVE) for resource in _SERIAL_RESOURCES.values())
+
+    def item(marker):
+        return SimpleNamespace(get_closest_marker=lambda name: marker if name == "serial" else None)
+
+    assert serial_resource(item(None)) is None
+    assert serial_resource(item(SimpleNamespace(args=()))) == ""
+    assert serial_resource(item(SimpleNamespace(args=("db",)))) == "db"
+    assert serial_resource(item(SimpleNamespace(args=(EXCLUSIVE,)))) == EXCLUSIVE
 
 
 # ── Result classification (unit, no spawn) ────────────────────────────
@@ -1117,6 +1139,81 @@ def test_each_pass_gets_the_exact_remaining_budget(tmp_path, two_pass_env, stub_
     assert first_timeout <= 60
     assert second_timeout < first_timeout, "pass 2 was handed a fresh budget, not the remainder"
     assert second_timeout <= 60 - 0.5, "pass 2's share was rounded up past the total budget"
+
+
+def test_the_gate_leases_its_workers_and_names_its_durations_table_for_the_whole_run(tmp_path, two_pass_env,
+                                                                                    stub_passes, monkeypatch):
+    """A standalone gate (no parent allocation) holds its admitted count in the host ledger from the admission
+    to the end of the run, so a run started meanwhile subtracts it; the row goes with the run. A caller with a
+    canonical data root points every session of the gate at the install's durations table
+    (`state/test-durations.json`), which the sessions read for their weights and bring up to date; a caller
+    without one names no table."""
+    from types import SimpleNamespace
+
+    from ouroboros import preflight_runner as pr
+    from ouroboros import test_parallelism as budget
+    from ouroboros.test_evidence import DURATIONS_POINTER, TEST_DURATIONS_ENV
+
+    data = tmp_path / "data"
+    assert pr._durations_target(SimpleNamespace(task_metadata={"budget_drive_root": str(data)}, drive_root=data)) == (
+        data / "state" / "test-durations.json")
+    assert pr._durations_target(None) is None
+    ledger, scratch = tmp_path / "slots", tmp_path / "scratch"
+    scratch.mkdir()
+    _pin_preflight_root(monkeypatch, scratch)
+    monkeypatch.delenv(budget.NESTED_WORKERS_ENV)
+    monkeypatch.setattr(budget, "other_runs", lambda: budget.HostRuns())
+    monkeypatch.setattr(budget, "_ledger_dir", lambda: ledger)
+    monkeypatch.setattr(pr, "_durations_target", lambda ctx: data / "state" / "test-durations.json")
+    leases, tables = [], []
+
+    def green():
+        leases.append([json.loads(path.read_text(encoding="utf-8")) for path in ledger.glob("*.json")])
+        tables.append(((scratch / DURATIONS_POINTER).read_text(encoding="utf-8"),
+                       pr._preflight_env(scratch, scratch / "repo").get(TEST_DURATIONS_ENV)))
+        return (0, "ok", "")
+
+    stub_passes([green, green])
+    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
+    assert pr.run_hermetic_pytest(repo, timeout=120) is None
+    assert [[(row["pid"], row["workers"], row["command"]) for row in rows] for rows in leases] == [
+        [(os.getpid(), 2, "hermetic gate")]] * 2
+    assert tables == [(str(data / "state" / "test-durations.json"),) * 2] * 2
+    assert list(ledger.glob("*.json")) == []
+
+
+def test_the_gate_warms_its_prefix_once_before_the_passes(tmp_path, two_pass_env, stub_passes, monkeypatch, capsys):
+    """One contained warm root, under the gate's env and behind the owner's work, writes the candidate's compiled
+    modules and pytest's rewritten test modules into the run's prefix before the first pass; its facts are a lane of
+    the run's evidence, and the passes read the prefix with the write ban kept."""
+    from ouroboros import preflight_runner as pr
+    from ouroboros.test_bytecode import warm_lane
+
+    monkeypatch.setattr(pr, "_warm_bytecode", lambda *args, **kwargs: warm_lane(*args, **kwargs))
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    _pin_preflight_root(monkeypatch, scratch)
+    seen = []
+
+    def green():
+        env = pr._preflight_env(scratch, scratch / "repo")
+        prefix = pathlib.Path(env["PYTHONPYCACHEPREFIX"])
+        mirrored = prefix / pathlib.Path(*(scratch / "repo").resolve().parts[1:]) / "tests"
+        seen.append((env["PYTHONDONTWRITEBYTECODE"], prefix.is_relative_to(scratch),
+                     sorted(path.name.split(".")[0] for path in mirrored.glob("*-pytest-*.pyc"))))
+        return (0, "ok", "")
+
+    stub_passes([green, green])
+    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n",
+                                 "tests/test_other.py": "def test_ok():\n    assert True\n"})
+    assert pr.run_hermetic_pytest(repo, timeout=300) is None
+    assert seen == [("1", True, ["test_other", "test_plain"])] * 2
+    named = next(line.split(" ", 1)[1] for line in capsys.readouterr().err.splitlines() if line.startswith("PREFLIGHT_EVIDENCE "))
+    record = json.loads((pathlib.Path(named) / "result.json").read_text(encoding="utf-8"))
+    (warm,) = [lane for lane in record["lanes"] if lane["lane"] == "warm"]
+    assert warm["returncode"] == 0 and warm["containment_error"] == "" and warm["facts"]["files"] == 2
+    assert warm["facts"]["compile_exit"] == 0 and warm["facts"]["collect_exits"] == [0]
+    assert [lane["lane"] for lane in record["lanes"]].index("warm") < [lane.get("pass") for lane in record["lanes"]].index("parallel")
 
 
 def test_plugins_are_verified_before_the_candidate_tree_exists(tmp_path, two_pass_env, stub_passes, monkeypatch):
@@ -2668,6 +2765,7 @@ def test_timeout_keeps_flushed_file_output_without_waiting_for_stdio_eof(tmp_pat
         token = "OURO_PROC_CONTAINER_fixture"
 
         def spawn(self, argv, **kwargs):
+            order.append("spawn behind" if kwargs.get("background") else "spawn")  # the gate's tree runs behind the owner
             kwargs["stdout"].write(b"tests/test_a.py .\ntests/test_hangs_here.py ")
             return _StuckProc()
 
@@ -2690,7 +2788,7 @@ def test_timeout_keeps_flushed_file_output_without_waiting_for_stdio_eof(tmp_pat
     assert "test_hangs_here" in output, (
         "both collections timed out and the excerpt was thrown away with them"
     )
-    assert order[:3] == ["wait", "terminate", "reap"], (
+    assert order[:4] == ["spawn behind", "wait", "terminate", "reap"], (
         f"the container was not reaped before reading the logs: {order}"
     )
 
@@ -2794,7 +2892,7 @@ def test_hermetic_pytest_applies_candidate_diff_and_scrubs_live_env(tmp_path, mo
                 import value
 
 
-                @pytest.mark.serial
+                @pytest.mark.serial("exclusive")
                 def test_candidate_diff_and_env_are_hermetic_in_serial_pass(tmp_path):
 {assertions}
             """,
@@ -2839,7 +2937,7 @@ def test_both_passes_execute_and_partition(tmp_path, two_pass_env):
                 import pytest
 
 
-                @pytest.mark.serial
+                @pytest.mark.serial("exclusive")
                 def test_runs_in_the_serial_pass():
                     assert "PYTEST_XDIST_WORKER" not in os.environ, "serial test ran under xdist"
                     open(r'{marker_serial}', "w").write("serial")
@@ -3056,7 +3154,7 @@ def test_a_green_pass_cannot_leak_a_child_into_the_next_pass(tmp_path, two_pass_
                 import pytest
 
 
-                @pytest.mark.serial
+                @pytest.mark.serial("exclusive")
                 def test_the_parallel_pass_left_nothing_running():
                     pid = int(pathlib.Path(r'{marker}').read_text().strip())
                     deadline = time.time() + 15
@@ -3182,7 +3280,7 @@ def test_worker_crash_is_hard_block(tmp_path, two_pass_env):
                 import pytest
 
 
-                @pytest.mark.serial
+                @pytest.mark.serial("exclusive")
                 def test_should_never_run():
                     open(r'{marker_serial}', "w").write("serial")
             """,
@@ -3322,7 +3420,7 @@ def test_pass2_timeout_names_serial_pass(tmp_path, two_pass_env):
                 import pytest
 
 
-                @pytest.mark.serial
+                @pytest.mark.serial("exclusive")
                 def test_hangs():
                     time.sleep(300)
             """,

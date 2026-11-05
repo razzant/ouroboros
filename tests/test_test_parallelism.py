@@ -66,12 +66,86 @@ def test_native_probe_failure_admits_one_worker(monkeypatch):
     assert budget.worker_budget(16, env={budget.WORKERS_ENV: "24"}) == 1
 
 
-@pytest.mark.parametrize("requested, inherited, expected", [(16, None, 3), (2, None, 2), (16, 1, 1), (16, 2, 2)])
-def test_physical_headroom_and_parent_slots_cap_the_same_budget(monkeypatch, requested, inherited, expected):
+@pytest.mark.parametrize("requested, inherited, host, expected", [
+    (16, None, budget.HostRuns(), 3), (2, None, budget.HostRuns(), 2), (16, 1, budget.HostRuns(), 1),
+    (16, 2, budget.HostRuns(), 2),
+    # What other live runs hold comes off the top: leased slots, one per unleased root; floor one.
+    (16, None, budget.HostRuns(slots=2, leases=((100, "run_tests.py overlapped"),)), 1),
+    (16, None, budget.HostRuns(strangers=((700, "python3 -m pytest -n 8"),)), 2),
+    (16, None, budget.HostRuns(slots=5), 1),
+    (16, 2, None, 2),  # a child with a parent allocation reads no ledger: its parent accounted for it
+])
+def test_physical_headroom_parent_slots_and_other_runs_cap_the_same_budget(monkeypatch, requested, inherited,
+                                                                           host, expected):
     peak = config.TEST_WORKER_PEAK_RSS_BYTES
     monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(10 * peak, 4 * peak))
+
+    def census():
+        assert host is not None, "a child with a parent allocation reads no ledger and runs no census"
+        return host
+
+    monkeypatch.setattr(budget, "other_runs", census)
     env = {} if inherited is None else {budget.NESTED_WORKERS_ENV: str(inherited)}
     assert budget.worker_budget(requested, env=env) == expected
+    assert budget.admission(requested, env=env) == budget.Admission(expected, host or budget.HostRuns())
+
+
+def test_the_ledger_counts_live_leases_and_the_census_counts_unleased_roots(tmp_path, monkeypatch):
+    """A live lease outside this lineage holds its slots; a dead, reborn or unreadable row counts nothing
+    and the next writer unlinks it; every pytest/node root nobody leased counts one slot, while a nested
+    run, a leased owner's tree and this process's own run (its ancestors included) never do."""
+    ledger, me = tmp_path / "slots", os.getpid()
+    monkeypatch.setattr(budget, "_ledger_dir", lambda: ledger)
+    monkeypatch.delenv(budget.NESTED_WORKERS_ENV, raising=False)
+    births = {100: "b100", 300: "b300-reborn", 400: "b400", me: "me"}
+    monkeypatch.setattr(pl, "pid_is_alive", lambda pid: pid in births)
+    monkeypatch.setattr(pl, "process_start_time", lambda pid: births.get(pid, ""))
+    ledger.mkdir()
+    for row in ({"pid": 100, "birth": "b100", "workers": 6, "command": "run_tests.py overlapped"},
+                {"pid": 200, "birth": "gone", "workers": 4, "command": "dead"},
+                {"pid": 300, "birth": "b300", "workers": 4, "command": "reborn pid"},
+                {"pid": 400, "birth": "b400", "workers": 9, "command": "my own ancestor"}):
+        (ledger / f"{row['pid']}.json").write_text(json.dumps(row), encoding="utf-8")
+    (ledger / "garbage.json").write_text("{not json", encoding="utf-8")
+    python, worker = "/opt/py/bin/python3", "import sys;exec(eval(sys.stdin.readline()))"
+    table = [
+        (400, 1, [python, "-m", "pytest", "tests/"]),  # the controller above this process: its own run
+        (me, 400, [python, "-c", worker]),
+        (100, 1, [python, "scripts/run_tests.py", "tests/"]),  # a leased owner...
+        (101, 100, [python, "-m", "pytest", "tests/"]),  # ...whose tree the lease covers
+        (700, 1, [python, "-m", "pytest", "-n", "8"]),  # an unleased root
+        (701, 700, [python, "-c", worker]),
+        (702, 701, [python, "-m", "pytest", "tests/test_nested.py"]),  # nested under that root: the same run
+        (800, 1, ["/opt/node/bin/node", "--test", "a.test.js"]),  # the node lane of a bare run
+        (801, 1, ["/opt/node/bin/node", "server.js"]),  # node without --test is no test run
+        (900, 1, [python, "-I", "-S", "scripts/safe_test.py", "--", python, "-m", "pytest"]),  # stage one
+        (901, 900, [python, "-I", "-S", "-c", "import sys; ...", "--", python, "-m", "pytest"]),  # stage two
+        (902, 901, [python, "-m", "pytest", "tests/test_x.py"]),
+    ]
+    monkeypatch.setattr(budget, "_process_table", lambda: (table, ""))
+    host = budget.other_runs()
+    assert host == budget.HostRuns(slots=6, leases=((100, "run_tests.py overlapped"),), strangers=(
+        (700, "python3 -m pytest -n 8"), (800, "node --test a.test.js"),
+        (900, "python3 -I -S safe_test.py -- python3 -m pytest")))
+    assert host.held == 9
+    assert host.disclosure() == ("other test runs hold 6 slot(s): 100 run_tests.py overlapped; 3 unleased pytest/node "
+                                 "root(s) counted one slot each: 700 python3 -m pytest -n 8, 800 node --test a.test.js, "
+                                 "900 python3 -I -S safe_test.py -- python3 -m pytest")
+    # A new lease unlinks the dead, reborn and unreadable rows, keeps the live ones and removes itself on close.
+    lease = budget.SlotLease(3, "run_tests.py node")
+    assert {path.name for path in ledger.iterdir()} == {"100.json", "400.json", f"{me}.json"}
+    assert json.loads((ledger / f"{me}.json").read_text(encoding="utf-8")) == {
+        "pid": me, "birth": "me", "workers": 3, "command": "run_tests.py node"}
+    lease.close()
+    assert sorted(path.name for path in ledger.iterdir()) == ["100.json", "400.json"]
+    # A child with a parent allocation holds no row. An unreadable table is disclosed, never a silent zero,
+    # and without it lineage is unknown: the ancestor's lease counts too (fewer workers, never more).
+    monkeypatch.setenv(budget.NESTED_WORKERS_ENV, "1")
+    assert budget.SlotLease(2).path is None and not (ledger / f"{me}.json").exists()
+    monkeypatch.delenv(budget.NESTED_WORKERS_ENV)
+    note = "process census unavailable (OSError): unleased runs were not counted"
+    monkeypatch.setattr(budget, "_process_table", lambda: (None, note))
+    assert budget.other_runs() == budget.HostRuns(15, ((100, "run_tests.py overlapped"), (400, "my own ancestor")), (), note)
 
 
 @pytest.mark.parametrize("capacity", [2, 3])
@@ -90,12 +164,17 @@ def test_the_gate_pins_the_worker_count_it_verified(tmp_path, monkeypatch, capac
 
 
 def test_preflight_keeps_the_admission_it_measured_before_the_run(tmp_path, monkeypatch):
-    monkeypatch.setattr(preflight_runner, "_preflight_worker_count", lambda: 2)
+    host = budget.HostRuns(slots=4, leases=((100, "run_tests.py overlapped"),), strangers=((700, "python3 -m pytest"),))
+    monkeypatch.setattr(preflight_runner, "_preflight_admission", lambda: budget.Admission(2, host))
     preflight_runner._install_worker_probe(tmp_path)
-    monkeypatch.setattr(preflight_runner, "_preflight_worker_count", lambda: 16)
+    monkeypatch.setattr(preflight_runner, "_preflight_admission", lambda: budget.Admission(16, budget.HostRuns()))
     env = preflight_runner._preflight_env(tmp_path, tmp_path / "repo")
     assert env["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "2"
     assert env[budget.NESTED_WORKERS_ENV] == "2"
+    # The admission's facts travel with the run's evidence (`result.json` `workers`).
+    assert preflight_runner._recorded_admission(tmp_path) == {
+        "workers": 2, "held_by_other_runs": 4, "leases": [[100, "run_tests.py overlapped"]],
+        "unleased_roots": [[700, "python3 -m pytest"]], "note": ""}
 
 
 def test_local_node_lane_uses_the_same_cpu_and_memory_budget(tmp_path, monkeypatch):
@@ -106,6 +185,7 @@ def test_local_node_lane_uses_the_same_cpu_and_memory_budget(tmp_path, monkeypat
     spec.loader.exec_module(runner)
     peak = config.TEST_WORKER_PEAK_RSS_BYTES
     monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(10 * peak, 4 * peak))
+    monkeypatch.setattr(budget, "other_runs", lambda: budget.HostRuns())  # a quiet host; the ledger has its own test
     monkeypatch.setenv(budget.WORKERS_ENV, "16")
     monkeypatch.delenv(budget.NESTED_WORKERS_ENV)
     monkeypatch.setattr(preflight_node, "candidate_node_tests", lambda repo: ["tests/a.test.js", "tests/b.test.js"])
