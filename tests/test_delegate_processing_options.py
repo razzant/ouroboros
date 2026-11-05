@@ -153,7 +153,7 @@ def test_final_attempt_prompt_cache_ttl_binds_unique_final_attempt(tmp_path, val
 
 
 @pytest.mark.parametrize("malformed", [
-    {"requested": "1h", "submitted": "5m", "observed": "1h", "write_1h_tokens": 100, "write_5m_tokens": 0},
+    None, {}, [], {"requested": "1h", "submitted": "5m", "observed": "1h", "write_1h_tokens": 100, "write_5m_tokens": 0},
     {"requested": "1h", "submitted": "1h", "observed": "5m", "write_1h_tokens": 10, "write_5m_tokens": 10},
     {"requested": "1h", "submitted": "1h", "observed": "1h", "write_1h_tokens": 100, "write_5m_tokens": None},
     {"requested": "1h", "submitted": "1h", "observed": "1h", "write_1h_tokens": True, "write_5m_tokens": 0},

@@ -68,6 +68,7 @@ def test_schedule_readonly_choice_survives_custom_projection(tmp_path, constrain
     ("delegate_start", {"prompt": "New evidence", "subagent_id": "actor-1",
                         "continue_from": "settled-run", "continue_carrier": "packet"},
      "continue_carrier", "restart"),
+    ("query_data", {"op": "jsonl", "kind": "events_log", "tail": 20}, "max_rows", 0),
 ])
 def test_edited_description_schemas_keep_representative_call_shapes(
         tmp_path, name, arguments, invalid_field, invalid_value):

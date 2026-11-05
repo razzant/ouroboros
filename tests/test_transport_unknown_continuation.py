@@ -193,7 +193,7 @@ def test_deadline_closes_unknown_wait_without_a_probe_or_send(tmp_path, monkeypa
         messages=[], accumulated_usage={}, drive_logs=tmp_path, task_id="t", model="m", emit_progress=lambda *a, **k: None)
 
 
-@pytest.mark.parametrize("status,ready", [(200, True), (401, True), (405, True)])
+@pytest.mark.parametrize("status,ready", [(200, True), (401, True), (405, True), (503, False)])
 def test_upstream_probe_is_non_generating_and_uses_resolved_route(monkeypatch, status, ready):
     from ouroboros.llm import LLMClient
 

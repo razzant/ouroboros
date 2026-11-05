@@ -42,6 +42,7 @@ def test_role_defaults_are_the_table_of_the_spec():
 
 
 @pytest.mark.parametrize("meta,role", [
+    ({}, "integrator"),
     ({"usage_category": "consciousness"}, "consciousness"),
     ({"usage_category": "consciousness_task"}, "integrator"),  # work a wake starts is a root
     (PRESENCE, "presence"),

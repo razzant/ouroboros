@@ -41,6 +41,8 @@ def test_model_final_answer_is_mirrored_whole_for_every_terminal_phase(phase):
     (_result(terminal_origin="host_salvage"), "error"),   # preserved bytes are not a final answer
     (_result(terminal_origin="host_notice"), "error"),    # the host's own notice is not his voice
     (_result(terminal_origin=""), "done"),                # unknown authorship is never assumed
+    (_result(), ""),
+    (None, "done"),
 ])
 def test_everything_else_keeps_the_row_a_pointer(result, phase):
     assert mirrored_answer(result, phase) == {}

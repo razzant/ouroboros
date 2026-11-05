@@ -368,6 +368,7 @@ def test_success_has_one_nested_authority_and_no_top_level_pr_aliases():
         ({"url": "http://github.com/OuroborosHub/OuroborosHub/pull/17"}, REPOSITORY),
         ({"url": "https://github.com/OuroborosHub/OuroborosHub/issues/17"}, REPOSITORY),
         ({"snapshot_hash": SNAPSHOT_HASH + "c"}, REPOSITORY),
+        ({}, "different/repository"),
     ],
 )
 def test_receipt_rejects_wrong_host_repo_path_number_or_empty_text(changes, expected_repository):

@@ -479,6 +479,7 @@ def test_returned_refs_notes_and_blockers_stay_whole(isolated_progress):
 
 @pytest.mark.parametrize("result,bootstrap_ok,baseline,expected", [
     ({"finalized": True, **_seen("applied")}, True, "c" * 40, ("applied", "")),
+    ({"finalized": True, **_seen("applied")}, False, "c" * 40, ("unknown", "startup_unconfirmed")),
     ({"finalized": True, **_seen("rolled_back", commit="a" * 40)}, True, "a" * 40, ("rolled_back", "")),
     ({"abandoned": True, **_seen("not_applied", commit="a" * 40)}, True, "a" * 40, ("not_applied", "")),
 ])

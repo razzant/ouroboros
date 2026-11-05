@@ -1069,6 +1069,7 @@ def test_fair_completion_dead_extension_unknown_tool_text_stays_infra():
     ({"status": "failed"}, "execution_failed"),
     ({"status": "infra_failed"}, "execution_infra_failed"),
     ({"status": "best_effort"}, "execution_best_effort"),
+    ({}, "execution_missing"),
 ])
 def test_fair_completion_refuses_everything_else(execution, basis):
     from devtools.benchmarks.cybergym.cybergym_wire import _gateway_fair_completion

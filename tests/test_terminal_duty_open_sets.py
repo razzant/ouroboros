@@ -76,7 +76,7 @@ def _record(env, reservation, fact):
 _ABSENT = object()
 
 
-@pytest.mark.parametrize("outcome", [_ABSENT, "unresolved", "other"])
+@pytest.mark.parametrize("outcome", [_ABSENT, None, "unresolved", "other"])
 def test_a_recorded_ended_custody_alone_takes_an_abandoned_row_out(env, monkeypatch, outcome):
     """Absent, null and every other outcome keep the row selected; its retained receipt settles offline."""
     _terminal(env)

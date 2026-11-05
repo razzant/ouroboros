@@ -774,6 +774,7 @@ class TestDockerfile:
     [
         ".github/actions/setup-python-env/action.yml",
         "Dockerfile",
+        "build_linux.sh",
         "build_windows.ps1",
     ],
 )

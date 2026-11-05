@@ -56,7 +56,7 @@ def test_default_is_string_two_and_coercion_keeps_unlimited():
 
 
 @pytest.mark.parametrize("raw,expected", [
-    ("2", 2), (" 5 ", 5), (1, 1),
+    ("2", 2), (" 5 ", 5), (1, 1), ("unlimited", None), ("UNLIMITED", None), ("inf", None), ("∞", None),
 ])
 def test_parse_accepts_positive_ints_and_unlimited_aliases(raw, expected):
     assert rc.parse_review_max_cycles(raw) == expected

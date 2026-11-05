@@ -142,6 +142,8 @@ def test_clock_identity_alone_can_keep_a_terminal_wake_live(tmp_path, wake):
 
 @pytest.mark.parametrize("status,phase,live", [
     ("running", "running", True), ("interrupted", "unknown", True), ("paused", "paused", True),
+    ("completed", "done", False), ("failed", "error", False), ("cancelled", "cancelled", False),
+    ("rejected_duplicate", "warn", False),
 ])
 def test_status_is_independent_of_missing_terminal_time(tmp_path, wake, status, phase, live):
     wake.update(status=status, outcome_axes={}, wake_silent=False)

@@ -14,7 +14,8 @@ from tests._live_world import host_world as host_world
 
 
 @pytest.mark.parametrize('vision,room,successor', [
-    (True, 700, 'native'), (True, 700, 'fresh'), (True, 700, 'none'),
+    (True, 700, 'native'), (True, 700, 'fresh'), (False, 700, 'native'),
+    (True, 700, 'none'), (False, 700, 'none'),
 ])
 def test_native_attend_measures_the_complete_delivery(host_world, record_property, vision, room, successor):
     host = host_world.host

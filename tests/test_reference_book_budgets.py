@@ -184,10 +184,17 @@ OWNER_ADDS = _label("labeled", "razzant")
 
 
 @pytest.mark.parametrize("repo,event,association,events,mode", [
+    ("razzant/ouroboros", "pull_request", "COLLABORATOR", [], "block"),
+    ("razzant/ouroboros", "pull_request", "OWNER", [], "block"),
+    ("razzant/ouroboros", "pull_request", "MEMBER", [], "block"),
+    ("razzant/ouroboros", "pull_request", "CONTRIBUTOR", [], "warn"),
+    ("razzant/ouroboros", "pull_request", "FIRST_TIME_CONTRIBUTOR", [], "warn"),
     ("someone/fork", "pull_request", "OWNER", [OWNER_ADDS], "warn"),  # a fork's own CI never blocks
+    ("razzant/ouroboros", "push", "", [], "warn"),  # without a target ref this is not an official-line push
     ("razzant/ouroboros", "pull_request", "COLLABORATOR", [OWNER_ADDS], "approved"),
     # Ouroboros's own token can apply the label, but only the repository owner's approves.
     ("razzant/ouroboros", "pull_request", "COLLABORATOR", [_label("labeled", "ouroboros-agent")], "block"),
+    ("razzant/ouroboros", "pull_request", "COLLABORATOR", None, "block"),  # unreadable label events
 ])
 def test_the_growth_mode_is_decided_from_raw_label_events(repo, event, association, events, mode):
     from scripts.book_growth_mode import decide
@@ -390,6 +397,7 @@ def test_unreadable_push_evidence_leaves_growth_strict(monkeypatch, failed_endpo
     (PUSH_ENV, "block"),
     ({**PUSH_ENV, "SHA": "", "PR_NUMBER": "7"}, "block"),  # no arbitrary PR-number fallback
     ({**PUSH_ENV, "REPO": "someone/fork"}, "warn"),
+    ({}, "warn"),
 ])
 def test_only_official_development_pushes_are_strict(monkeypatch, env, expected):
     from scripts.book_growth_mode import main

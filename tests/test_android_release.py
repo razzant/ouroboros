@@ -18,7 +18,6 @@ from ouroboros.tools.release_sync import (
     release_asset_name,
     version_carrier_desyncs,
 )
-from tests._cases import chosen_rows
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -255,14 +254,14 @@ def test_android_emulator_selection_uses_event_diff(tmp_path, event, path, ref, 
     assert eval(expression, {"__builtins__": {}}, {"startsWith": str.startswith}) is expected
 
 
-@pytest.mark.parametrize(("failed_job", "result", "cancelled", "expected"), chosen_rows([
+@pytest.mark.parametrize(("failed_job", "result", "cancelled", "expected"), [
     ("android-build", "failure", False, True),
     ("android-build", "cancelled", False, True),
     ("android-build", "skipped", False, True),
     *[(job, "failure", False, False) for job in ("build", "release-preflight", "marker-guards",
        "ui-smoke", "docker-ui-smoke", "docker-portable-test", "skill-smoke")],
     (None, "success", True, False),
-], 0, 4, 10))
+])
 def test_release_requires_desktop_gates_and_respects_workflow_cancel(failed_job, result, cancelled, expected):
     import re
     import yaml

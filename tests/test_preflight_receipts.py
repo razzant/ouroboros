@@ -658,6 +658,7 @@ _SOURCE_INDEX = "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_SOURCE_INDEX (hard block)
 
 @pytest.mark.parametrize("step,failure,headline,detail", [
     ("read-tree", "raise", "the source index tree could not be installed", "timed out after 30 seconds"),
+    ("read-tree", "raise_silent", "the source index tree could not be installed", ""),
     ("write-tree", "raise", "the disposable index could not be verified", "timed out after 30 seconds"),
     ("write-tree", "mismatch", "the disposable index does not match the source index tree",
      f"expected {'a' * 40}, got {'0' * 40}"),

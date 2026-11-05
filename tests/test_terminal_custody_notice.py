@@ -367,7 +367,8 @@ def test_a_silent_finish_stays_exactly_as_quiet_as_before():
     (provider_terminal_body("Older explicit reply", "Budget stop retained.\n\n" + _FAILED_FULL),
      provider_terminal_body("Older explicit reply", "Budget stop retained.\n\n" + _FAILED_FULL)),
     ("Exact authored reply", "Exact authored reply"),
-], ids=["old-composition", "different-reply", "authored"])
+    ("", ""),
+], ids=["old-composition", "different-reply", "authored", "deliberately-empty"])
 def test_presence_replay_undoes_only_a_recorded_host_composition(tmp_path, frozen, expected):
     from ouroboros.presence_runner import _cached_result
 

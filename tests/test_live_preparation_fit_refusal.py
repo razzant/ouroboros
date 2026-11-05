@@ -11,7 +11,8 @@ from tests.test_call_task_lifecycle import direct_call as direct_call
 from tests.test_context_minimum_view_unfit import FACTS, build_minimum_view
 
 
-@pytest.mark.parametrize("call,shape", [(True, "memory"), (True, "fixed"), (True, "fit")])
+@pytest.mark.parametrize("call,shape", [(True, "memory"), (False, "memory"),
+                                       (True, "fixed"), (False, "fixed"), (True, "fit")])
 def test_preparation_overflow_is_typed_only_for_an_admitted_call(direct_call, tmp_path, monkeypatch, call, shape):
     from ouroboros import agent_task_pipeline as pipeline
     from ouroboros.context_fit import MinimumViewUnfit

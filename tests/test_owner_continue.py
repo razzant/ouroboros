@@ -690,7 +690,11 @@ def test_history_replays_the_offer_so_a_collapsed_card_needs_no_opening(tmp_path
 
 
 @pytest.mark.parametrize("field,value,gap", [
+    ("corpus", {}, "retained_owner_corpus_malformed"),
+    ("corpus", None, "retained_owner_corpus_malformed"),
+    ("inputs", [], "retained_owner_corpus_malformed"),
     ("continuation", "lost chain", "chained_owner_source_malformed"),
+    ("sources", [], "chained_owner_source_malformed"),
     ("later", [{"source": "principal_task_message", "content": "peer words"}], "owner_source_provenance_unknown"),
     ("later", [{"source": "owner_mailbox", "content": "first", "msg_id": "same"},
                {"source": "owner_mailbox", "content": "rival", "msg_id": "same"}], "owner_message_identity_conflict"),

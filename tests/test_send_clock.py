@@ -72,7 +72,8 @@ def test_only_a_main_loop_opts_in_and_the_zone_is_the_validated_sender_zone():
 
 
 @pytest.mark.parametrize("raw, expected", [
-    ("Europe/Moscow", "Europe/Moscow"), ("UTC", "UTC"), ("  Asia/Tokyo ", "Asia/Tokyo"),
+    ("Europe/Moscow", "Europe/Moscow"), ("UTC", "UTC"), ("  Asia/Tokyo ", "Asia/Tokyo"), ("../../etc/passwd", ""), ("/etc/localtime", ""), ("Not/AZone", ""),
+    ("Europe/" + "x" * 80, ""), (42, ""), (None, ""), ("", ""),
 ])
 def test_the_ingress_keeps_only_a_loadable_iana_name(raw, expected):
     assert normalize_timezone_name(raw) == expected

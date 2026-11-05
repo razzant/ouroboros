@@ -405,7 +405,7 @@ def test_model_wait_without_current_owner_action_evidence_discloses_gap(tmp_path
 
 
 @pytest.mark.parametrize("cause,can_resume,reason", [
-    ("budget", True, "budget"), ("restart", True, "restart"), ("sleep", True, "resume")])
+    ("budget", True, "budget"), ("restart", True, "restart"), ("sleep", True, "resume"), ("owner", False, None), ("sleep", False, None), ("unknown", False, None)])
 def test_resume_attention_follows_the_parked_rows_release_rule(tmp_path, cause, can_resume, reason):
     """The census owner derives can_resume from the row's own release rule
     (``events_budget.explicit_resume_required``); the projector never

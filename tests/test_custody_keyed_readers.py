@@ -380,7 +380,7 @@ def _answer(result):
     return status, extra, None if entry is None else vars(entry)
 
 
-@pytest.mark.parametrize("run_id", ["run-own", "run-missing", " run-own"])
+@pytest.mark.parametrize("run_id", ["run-own", "run-missing", "", None, " run-own"])
 def test_retry_result_status_answers_as_over_every_row(tmp_path, run_id):
     from ouroboros.delegate_shared import retry_result_status
 

@@ -189,7 +189,9 @@ def test_file_weights_are_recorded_time_else_nodes_times_the_median_time_per_nod
     (None, "the durations table is unreadable (FileNotFoundError)"),
     ("not json", "the durations table is unreadable (JSONDecodeError)"),
     ("[]", "the durations table has another shape"),
-], ids=["missing", "garbage", "array"])
+    ('{"format": 1, "source": {"run_id": "1"}, "platforms": {"linux": {"tests/a.py": -1}}}',
+     "the durations table has another shape"),
+], ids=["missing", "garbage", "array", "negative"])
 def test_an_unusable_table_falls_back_to_node_counts_and_says_why(tmp_path, monkeypatch, content, reason):
     path = tmp_path / "durations.json"
     if content is not None:

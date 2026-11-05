@@ -55,6 +55,7 @@ def test_overview_is_authored_introduction_and_details_have_physical_addresses()
     "- [Outside](../outside.md)",
     "- [Remote](https://example.com/a.md)",
     "- No link",
+    "",
 ])
 def test_incomplete_membership_never_returns_a_partial_full_book(membership):
     corpus = sources()

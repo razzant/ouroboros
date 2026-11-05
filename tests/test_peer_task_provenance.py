@@ -41,6 +41,7 @@ def test_peer_task_is_a_closed_context_only_provenance():
     ("sibling", "[Message from peer task sib-1 (sibling)]"),
     ("parent", "[Message from peer task kid-1 (your child)]"),
     ("tree", "[Message from peer task cousin-1 (same tree)]"),
+    ("", "[Message from peer task kid-1]"),
 ])
 def test_render_prefix_names_the_relation_never_ancestor_or_owner(relation, label):
     source = {"sibling": "sib-1", "tree": "cousin-1"}.get(relation, "kid-1")

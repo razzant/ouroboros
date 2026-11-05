@@ -347,7 +347,12 @@ def test_an_operative_instruction_change_is_a_new_wave_within_the_allowance(fore
 @pytest.mark.parametrize("surface, module, owner, seat", [
     ("change", "multi", "TRIAD_ROLE_HINT", "t2"),
     # Sections, frames and wrappers a builder writes around the request's data.
-    ("change", "helpers", "build_scope_section", "t1"), ("preflight", "multi", "TRIAD_ROLE_HINT", "s1"),
+    ("change", "helpers", "build_scope_section", "t1"), ("preflight", "multi", "TRIAD_ROLE_HINT", "s1"), ("preflight", "multi", "TRIAD_USER_TURN", None), ("preflight", "multi", "triad_stable_head", None),
+    ("preflight", "nav", "core.packet", None), ("preflight", "admission", "PACKET_TEMPLATE_STABLE", None),
+    # Its native seat reads no agent session's wrapper.
+    ("preflight", "session", "render_review_session_prompt", None),
+    # A foreign project's change carries no diff pulse (the body's own growth question).
+    ("change", "pulse", "DIFF_PULSE_QUESTION", None),
 ])
 def test_a_changed_change_brief_instruction_is_a_new_wave_where_its_delivery_sits(foreign, monkeypatch, surface,
                                                                                  module, owner, seat):

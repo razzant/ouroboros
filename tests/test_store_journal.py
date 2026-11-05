@@ -114,7 +114,7 @@ def test_windows_only_accepts_fixed_volume_including_volume_mounts(monkeypatch, 
     assert store._filesystem_type(tmp_path) == ("fixed" if kind == 3 else None)
 
 
-@pytest.mark.parametrize("platform", ["linux", "darwin", "unknown"])
+@pytest.mark.parametrize("platform", ["linux", "darwin", "win32", "unknown"])
 def test_unreadable_filesystem_is_unknown(monkeypatch, tmp_path, platform):
     def unavailable(*_args, **_kwargs):
         raise OSError("filesystem unavailable")

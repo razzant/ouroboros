@@ -144,6 +144,7 @@ def test_successful_close_preserves_action_and_reports_unavailable_after_state(t
 
 @pytest.mark.parametrize("verb,pattern_id,method", [
     ("invoke", 10000, "Invoke"), ("set_value", 10002, "SetValue"), ("toggle", 10015, "Toggle"),
+    ("focus", None, "SetFocus"),
 ])
 def test_exception_inside_action_is_not_a_preguard_refusal(tmp_path, registered, verb, pattern_id, method):
     calls, current = registered

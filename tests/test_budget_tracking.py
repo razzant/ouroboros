@@ -109,6 +109,7 @@ class TestAdvisoryUsageEmit:
     ("anthropic::claude-opus-4.6", "anthropic"),
     ("openai::gpt-5.5", "openai"),
     ("openai-compatible::my-model", "openai-compatible"),
+    ("", "openrouter"),
 ])
 def test_infer_provider_from_model(model, expected_provider):
     """infer_provider_from_model must return correct provider for all prefixes."""

@@ -71,7 +71,7 @@ def test_pins_name_official_archives_outside_playwright_garbage_collection():
 
 @pytest.mark.parametrize("system,machine,platform", [
     ("darwin", "arm64", "mac-arm64"), ("darwin", "x86_64", "mac-x64"),
-    ("win32", "AMD64", "win64"),
+    ("linux", "x86_64", "linux64"), ("win32", "AMD64", "win64"),
 ])
 def test_each_supported_host_has_its_pin(system, machine, platform):
     assert chromium_runtime.host_pin(system=system, machine=machine).platform == platform

@@ -116,6 +116,7 @@ def test_pinned_release_has_exact_cross_platform_assets() -> None:
         ("Darwin", "arm64", "darwin-arm64"),
         ("Darwin", "x86_64", "darwin-amd64"),
         ("Linux", "aarch64", "linux-arm64"),
+        ("Windows", "AMD64", "windows-amd64"),
     ],
 )
 def test_platform_matrix(
@@ -139,7 +140,7 @@ def test_platform_matrix_rejects_unpinned_targets(
         cloudflare._current_asset()
 
 
-@pytest.mark.parametrize("build,arch", [("win-amd64", "amd64"), ("win-arm64", "arm64"), ("win32", "x86")])
+@pytest.mark.parametrize("build,arch", [("win-amd64", "amd64"), ("win-arm64", "arm64"), ("win32", "x86"), ("unknown", "")])
 def test_empty_windows_machine_uses_interpreter_build(monkeypatch, tmp_path, build, arch):
     import json
     import platform_support
@@ -164,6 +165,7 @@ def test_empty_windows_machine_uses_interpreter_build(monkeypatch, tmp_path, bui
         ("Windows", "AMD64", "win32", "amd64", "windows-amd64"),
         ("Windows", "ARM64", "win-amd64", "arm64", None),
         ("Darwin", "arm64", "win32", "arm64", "darwin-arm64"),
+        ("Linux", "aarch64", "win32", "aarch64", "linux-arm64"),
     ],
 )
 def test_build_fallback_preserves_known_machine_and_other_os(

@@ -202,7 +202,7 @@ def test_the_background_owns_the_platform_adapter(monkeypatch, indicator):
 
 
 @pytest.mark.parametrize(("platform", "kind"), [("darwin", dn.MacNotifier), ("win32", dn.WindowsNotifier),
-                                                ("freebsd14", type(None))])
+                                                ("linux", dn.FreedesktopNotifier), ("freebsd14", type(None))])
 def test_one_adapter_per_platform(monkeypatch, platform, kind):
     monkeypatch.setattr(dn.sys, "platform", platform)
     assert isinstance(dn.native_notifier(lambda token: None), kind)

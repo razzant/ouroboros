@@ -148,6 +148,8 @@ def test_pin_matrix_is_immutable_complete_and_bound_to_official_v181_release():
         ("Darwin", "arm64", "darwin-arm64"),
         ("Darwin", "x86_64", "darwin-x64"),
         ("Linux", "aarch64", "linux-arm64"),
+        ("Windows", "ARM64", "windows-arm64"),
+        ("FreeBSD", "x86_64", ""),
     ],
 )
 def test_platform_key_maps_only_the_six_supported_targets(system, machine, expected):

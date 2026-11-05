@@ -54,6 +54,8 @@ def config(**changes):
     ({"Authorization": BEARER, "X-Api-Key": CUSTOM}, {"Authorization": BEARER, "X-Api-Key": CUSTOM}),
     ({"Authorization": BASIC}, {"Authorization": BASIC}),
     ({"X-Tenant": "tenant-7", "X-Empty": ""}, {"X-Tenant": "tenant-7"}),
+    ({}, {}),
+    (None, {}),
 ])
 def test_literal_headers_reach_the_wire_exactly_and_empty_values_are_not_sent(headers, wire):
     cfg, errors = config(headers=headers)
@@ -165,6 +167,7 @@ def test_case_only_rename_keeps_the_value_under_the_new_spelling():
 @pytest.mark.parametrize("incoming_headers, saved_headers, reason", [
     ({"X-New-Name": MASK}, {"X-Api-Key": CUSTOM}, "not saved under that name"),
     ({"X-Api-Key": MASK}, {"X-Api-Key": CUSTOM, "x-api-key": "second"}, "several saved headers"),
+    ({"X-Api-Key": MASK}, None, "not saved under that name"),
     (MASK, {"X-Api-Key": CUSTOM}, "no saved headers to keep"),
 ])
 def test_an_unmatched_or_ambiguous_mask_refuses_with_a_reentry_instruction(incoming_headers, saved_headers, reason):

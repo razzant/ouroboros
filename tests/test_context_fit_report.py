@@ -185,7 +185,7 @@ def test_the_launchers_utf8_record_is_read_as_utf8_under_a_windows_default_encod
     assert not server_alive(tmp_path)
 
 
-@pytest.mark.parametrize('answer', ['held on Windows', 'unknown Windows error', 'unreadable'])
+@pytest.mark.parametrize('answer', ['held on Windows', 'unknown Windows error', 'no POSIX locks', 'unreadable'])
 def test_only_a_granted_lock_proves_the_root_offline(tmp_path, monkeypatch, answer):
     """The lock is tried through the server's own descriptor lock on the existing file. A missing lock is no
     evidence and stays missing; held, refused or unreadable all leave the root possibly served."""

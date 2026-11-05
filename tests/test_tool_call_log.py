@@ -193,6 +193,8 @@ def test_handler_settlement_producer_reaches_memory(tmp_path, status, code, prev
     ({"status": "ok"}, "⚠️ quoted warning", "✓"),
     # A typed ok answer that names another outcome keeps its bucket, never a success mark.
     ({"status": "inspection_required", "is_error": False}, "⚠️ INTEGRATE_DELEGATED_INSPECT_CAPTURE: …", "inspection_required"),
+    ({}, "legacy success", "✓"),
+    ({}, " ⚠️ legacy failure", "·"),
 ])
 def test_memory_settlement_truth_precedes_preview(tmp_path, facts, preview, mark):
     from ouroboros.memory import Memory

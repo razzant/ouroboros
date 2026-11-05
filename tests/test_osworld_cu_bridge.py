@@ -1555,6 +1555,8 @@ class _GateArgs:
         ({"result": "~/Desktop is empty; nothing to act on.\nINFEASIBLE"}, "INFEASIBLE"),
         # Everything below must FAIL OPEN: the working phase still runs.
         ({"result": "a discussion that never states a verdict"}, "UNDETERMINED"),
+        ({}, "UNDETERMINED"),
+        (None, "UNDETERMINED"),
         # The terminal answer field wins over the runtime result body.
         ({"final_answer": "PROCEED", "result": "INFEASIBLE"}, "PROCEED"),
     ],

@@ -255,6 +255,7 @@ def test_the_touched_manifest_carries_dispositions_and_candidate_sizes(tmp_path,
     ({"status": "complete"}, "complete"),
     ({"status": "complete", "reason": "declared_empty"}, "declared_empty"),
     ({"status": "incomplete"}, "incomplete"),
+    (None, "unobserved"),
 ])
 def test_the_four_coverage_states(fact, expected):
     assert coverage_state(fact) == expected
@@ -368,6 +369,7 @@ def test_the_required_source_manifest_reaches_both_retrieving_deliveries(
     ({"status": "complete", "reason": "declared_empty", "sources": []}, "declared_empty"),
     ({"status": "incomplete", "sources": [{"path": "prompts/SYSTEM.md", "status": "incomplete"}]},
      "incomplete"),
+    (None, "unobserved"),
 ])
 def test_the_seat_record_carries_the_observed_coverage_state(fact, expected):
     """One reader for every delivery: whoever observed the reads reports the

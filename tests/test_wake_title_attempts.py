@@ -153,6 +153,8 @@ def test_focus_runner_names_its_place_then_its_accepted_summary(focus, monkeypat
     ({"wake_cause": "focus", "focus": {"place_id": "place-1", "label": "Research room"}}, "Research room"),
     ({"wake_cause": "focus", "focus": {"place_id": "place-1"},
       "presence": {"place": {"place_id": "place-1", "label": "Lab"}}}, "Lab"),
+    ({"initiator": "owner"}, ""),
+    ({"initiator": "consciousness", "consciousness_cause": "started"}, ""),
 ])
 def test_admission_titles_use_only_typed_wake_causes_and_place_labels(metadata, expected):
     assert wake_cause_title(metadata) == expected

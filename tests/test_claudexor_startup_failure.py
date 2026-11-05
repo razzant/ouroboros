@@ -75,6 +75,7 @@ _SIGNAL_EXIT = ExitFact(returncode=-6, descriptor_written=False)
     (_FLOOR_BELOW, StartupFailureClass.ENGINE_FLOOR),
     (b"FATAL ERROR: NewSpace::Rebalance Allocation failed - process out of memory\n",
      StartupFailureClass.HEAP_EXHAUSTED),
+    (b"", StartupFailureClass.UNCLASSIFIED),
 ])
 def test_classifier_names_each_class_and_nothing_else(text, expected):
     fact = (ExitFact(1, False) if expected in {
@@ -96,6 +97,8 @@ def test_classifier_reads_the_last_refusal_and_needs_an_exit():
     (-6, StartupFailureClass.HEAP_EXHAUSTED),
     (134, StartupFailureClass.HEAP_EXHAUSTED),
     (1, StartupFailureClass.WRITER_LEASE_CONTENDED),
+    (0, StartupFailureClass.UNCLASSIFIED),
+    (None, StartupFailureClass.UNCLASSIFIED),
 ])
 def test_shared_log_refusals_do_not_relabel_heap_exit(returncode, expected):
     interval = _LEASE_BUSY * 2 + _OOM_REACHED + _LEASE_BUSY * 3

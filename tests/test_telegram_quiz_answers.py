@@ -737,7 +737,9 @@ def _answer(plugin, tmp_path, monkeypatch, update, reply):
     (_delivery(reason="awaiting_recipient_read"), _SAVED),
     (_delivery(), _PENDING),
     (_delivery(reason="late_answer_delivery_unknown", dismissed=True), _UNKNOWN),  # dismissed is not delivered
-], ids=["saved", "pending", "dismissed"])
+    (_delivery("delivered"), ""),
+    (None, ""),  # no delivery fact: the record only, and no delivery claim
+], ids=["saved", "pending", "dismissed", "delivered", "no-fact"])
 def test_text_answer_is_confirmed_in_its_card_without_a_separate_line(tmp_path, monkeypatch, delivery, status):
     plugin = _load_plugin()
     payload = {"ok": True, "state": "answered", "comment": "Use duckdb",

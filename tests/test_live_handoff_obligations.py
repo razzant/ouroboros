@@ -228,7 +228,7 @@ def test_languages_recorded_after_preparation_reach_next_session(host_world, mon
 
 
 @pytest.mark.parametrize('field,value', [('voice', 'Kore'), ('instructions', 'New exact owner instruction.'),
-    ('pause', 'long')])
+    ('pause', 'long'), ('interruptions', False)])
 def test_changed_live_option_discards_preparation_once(host_world, monkeypatch, field, value):
     async def scenario():
         async with stack(host_world, monkeypatch, 'gemini', thinking=True) as run:

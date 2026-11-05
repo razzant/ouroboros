@@ -41,7 +41,7 @@ def test_each_validated_kind_parses(token, identity):
 
 
 @pytest.mark.parametrize("text", [
-    "", "вторник, 27 октября 2026 г. 11:57:40",  # the same field under a Russian locale
+    "", "darwin-start:", "вторник, 27 октября 2026 г. 11:57:40",  # the same field under a Russian locale
     b"812",
 ])
 def test_unvalidated_text_is_no_identity_and_proves_nothing(text):
@@ -100,6 +100,8 @@ def test_macos_mints_only_from_the_kernel_record(monkeypatch):
     (f"812.{_BOOT}", f"812.{_BOOT}"),
     ("812.", "812."),
     ("win-filetime:134058912345678901", "win-filetime:134058912345678901"),
+    ("Tue Oct 27 14:57:17 2026", None),  # the ps wall-clock fallback is no kernel birth
+    ("", None),
 ])
 def test_other_platforms_pass_only_a_validated_process_start_time(monkeypatch, minted, expected):
     monkeypatch.setattr(platform_darwin_abi, "IS_DARWIN", False)

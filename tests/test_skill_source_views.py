@@ -214,8 +214,8 @@ def test_remote_http_probe_discloses_encryption_without_refusing(tmp_path, monke
     assert answer.get("warning") == ("not_encrypted" if scheme == "http" else None)
 
 
-@pytest.mark.parametrize("url", ["http://u:p@host/repo", "https://u@host/repo",
-                                  "ssh://git:p@host/repo"])
+@pytest.mark.parametrize("url", ["http://u:p@host/repo", "https://u:p@host/repo", "https://u@host/repo",
+                                  "http://u@host/repo", "ssh://git:p@host/repo"])
 def test_git_addresses_still_refuse_embedded_credentials(url):
     with pytest.raises(sources.SkillSourceError, match="Remove the credentials"):
         sources.validate_git_url(url)

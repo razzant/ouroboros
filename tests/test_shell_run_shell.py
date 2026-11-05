@@ -424,6 +424,7 @@ class TestGrepRegexHint:
         assert calls[0]["cmd"] == ["/usr/bin/grep", "-E", "A|B", "/tmp/x"]
 
     @pytest.mark.parametrize("argv,reason", [
+        (["grep", "\\(foo\\)", "/tmp/x"], "POSIX BRE grouping, not the \\| trap"),
         (["grep", "-E", "A\\|B", "/tmp/x"], "explicit -E means user knows what they want"),
         (["grep", "-rnE", "A\\|B", "/tmp/x"], "clustered -rnE still explicit extended regex"),
         (["egrep", "A\\|B", "/tmp/x"], "egrep already chose regex flavor"),
