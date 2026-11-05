@@ -406,8 +406,9 @@ def _mock_pollution_files(root: pathlib.Path) -> set[pathlib.Path]:
 # fails that worker's WHOLE co-located batch, surfacing as spurious failures in unrelated files.
 # So CI **and the hermetic commit gate** (ouroboros/preflight_runner.py, v6.88.0) run them in a
 # SERIAL pass (`-m serial`) and exclude them from the parallel pass (`-m "not serial" -n auto`);
-# in the gate a crashed worker is a named hard block, not a retry. A NEW real-process/port/
-# global-state test should mark itself `@pytest.mark.serial` (preferred) or be added here.
+# in the gate a crashed worker is a named hard block, not a retry. `serial` names the host
+# resource it serializes: `@pytest.mark.serial("<resource>")`. An owned child, a private root
+# or port 0 runs in parallel (CHECKLISTS Self-Check 18).
 # See docs/DEVELOPMENT.md "Pytest marker lanes".
 _SERIAL_TEST_FILES = frozenset({
     "test_workspace_executor.py",
