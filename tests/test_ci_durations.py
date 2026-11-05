@@ -18,13 +18,14 @@ from tests import browser_lane, default_lane
 from tests.ci_evidence import file_shards, node_shards, reconcile_shards
 from tests.ci_verdicts import (
     DURATIONS_ENV, TEST_DURATIONS_ENV, collect_durations, durations_table, platform_name, record_session_durations,
+    recorded_durations_table,
 )
 
 REPO = Path(__file__).resolve().parents[1]
 CLI = [sys.executable, "-I", "-S", str(REPO / "tests/ci_evidence.py")]
 SHA, RUN = "d" * 40, "900"
 SYSTEM = platform_name(sys.platform)
-EXPRESSIONS = {name: f"{prefix}serial and {LANE_EXCLUSION_EXPR}"
+EXPRESSIONS = {name: f"{prefix}exclusive and {LANE_EXCLUSION_EXPR}"
                for name, prefix in (("parallel", "not "), ("serial", ""))}
 
 
@@ -74,9 +75,12 @@ def test_durations_sum_each_file_per_system_and_each_ui_node(tmp_path):
         _row(a, 0.7, subtest=True),  # Within its test's call: never counted twice.
         _row("tests/test_a.py::test_two", None), _row("tests/test_b.py::TestC::test_three", 0.0004)],
         attempt="2", default_parallel=_block("parallel", [1, 2]))
-    # The serial pass adds to the same file; a copy of it in a second artifact counts once.
+    # A resource group's test (`@serial:<resource>`) is the file's serial part, whichever pass it ran in; a copy of
+    # the projection in a second artifact counts once; the one-process pass of `serial("exclusive")` tests is not
+    # serial time (its tests join no group).
     for artifact in ("default-ci-shard-Windows-1-a2", "ci-evidence-full-test-windows-shard-1-a2"):
-        _projection(root / artifact / "serial", [_row("tests/test_a.py::test_s", 2.0)], attempt="2",
+        _projection(root / artifact / "serial", [_row("tests/test_a.py::test_s@serial:db", 2.0),
+                                                 _row("tests/test_x.py::test_alone", 1.0)], attempt="2",
                     default_serial=_block("serial", [1, 2]))
     # Another system; a manifest, a retry round, another producer and an unknown system add nothing.
     _projection(root / "default-ci-shard-Linux-1" / "parallel", [_row(a, 0.5)], system="Linux",
@@ -92,7 +96,7 @@ def test_durations_sum_each_file_per_system_and_each_ui_node(tmp_path):
                                                        _row("tests/test_ui.py::page[chromium]", 1.0)],
                 system="Linux", ui_browser={"full": [], "shard": [1, 8], "assigned": []})
     table = {"format": 1, "platforms": {"darwin": {"tests/test_m.py": 125}, "linux": {"tests/test_a.py": 500},
-                                        "windows": {"tests/test_a.py": 4000, "tests/test_b.py": 0}},
+                                        "windows": {"tests/test_a.py": 4000, "tests/test_b.py": 0, "tests/test_x.py": 1000}},
              "serial": {"windows": {"tests/test_a.py": 2000}},
              "source": {"run_id": RUN, "sha": SHA}, "ui_nodes": {"tests/test_ui.py::page[chromium]": 5000}}
     assert collect_durations(root, run_id=RUN, sha=SHA) == table
@@ -103,7 +107,7 @@ def test_durations_sum_each_file_per_system_and_each_ui_node(tmp_path):
         assert result.returncode == 0, result.stdout + result.stderr
         payloads.append(out.read_bytes())
     assert payloads[0] == payloads[1] and json.loads(payloads[0]) == table
-    assert list(json.loads(payloads[0])) == sorted(table) and "windows 2 files" in result.stdout
+    assert list(json.loads(payloads[0])) == sorted(table) and "windows 3 files" in result.stdout
     empty = subprocess.run(CLI + ["durations", "--evidence-root", str(tmp_path / "none"), "--run-id", RUN,
                                   "--sha", SHA, "--out", str(out)], capture_output=True, text=True, timeout=30)
     assert empty.returncode == 0 and "::warning::" in empty.stdout and _json(out)["platforms"] == {}
@@ -138,34 +142,35 @@ def test_an_owned_session_folds_its_whole_file_times_into_the_owners_table(tmp_p
              _row("tests/test_a.py::test_one", 0.7, subtest=True),  # within its test's call: never counted twice
              _row("tests/test_s.py::test_s@serial1", 2.0), _row("tests/test_gone.py::test_g", 9.0),
              _row("tests/test_n.py::test_crash", 1.0), _row("tests/test_n.py::test_crash", 0.0, "crash", "failed")]
-    assert record_session_durations(table, first, system="Darwin", serial_session=False, rootpath=tree,
-                                    run_id="session 1") == ""
+    assert record_session_durations(table, first, system="Darwin", rootpath=tree, run_id="session 1") == ""
     assert _json(table) == {"format": 1, "platforms": {"darwin": {"tests/test_a.py": 1750, "tests/test_s.py": 2000}},
                             "serial": {"darwin": {"tests/test_s.py": 2000}}, "source": {"run_id": "session 1", "sha": ""},
                             "ui_nodes": {}}
-    # A serial session measures a file as serial, a later parallel one takes it back out; another system stays.
-    assert record_session_durations(table, [_row("tests/test_a.py::test_one", 3.0)], system="Darwin",
-                                    serial_session=True, rootpath=tree, run_id="session 2") == ""
+    # A resource group measures a file as serial, a later ungrouped run takes it back out; another system stays.
+    assert record_session_durations(table, [_row("tests/test_a.py::test_one@serial:db", 3.0)], system="Darwin",
+                                    rootpath=tree, run_id="session 2") == ""
     assert record_session_durations(table, [_row("tests/test_s.py::test_s", 1.0)], system="Linux",
-                                    serial_session=False, rootpath=tree, run_id="session 3", sha="abc") == ""
+                                    rootpath=tree, run_id="session 3", sha="abc") == ""
     assert _json(table)["platforms"] == {"darwin": {"tests/test_a.py": 3000, "tests/test_s.py": 2000},
                                          "linux": {"tests/test_s.py": 1000}}
     assert _json(table)["serial"] == {"darwin": {"tests/test_a.py": 3000, "tests/test_s.py": 2000}, "linux": {}}
     assert record_session_durations(table, [_row("tests/test_a.py::test_one", 1.0)], system="Darwin",
-                                    serial_session=False, rootpath=tree, run_id="session 4") == ""
+                                    rootpath=tree, run_id="session 4") == ""
     assert _json(table)["serial"]["darwin"] == {"tests/test_s.py": 2000}
     assert _json(table)["source"] == {"run_id": "session 4", "sha": ""}
     assert record_session_durations(table, [_row("tests/test_n.py::t", 1.0, "crash")], system="Darwin",
-                                    serial_session=False, rootpath=tree, run_id="session 5") == "no whole test file ran"
+                                    rootpath=tree, run_id="session 5") == "no whole test file ran"
     assert _json(table)["source"]["run_id"] == "session 4"
+    # The owner's table sizes and orders the serial groups; it never weighs a lane's shards, which every session
+    # of a run must pack alike (only CI's run table does that). A table nobody wrote yet is no table and no reason.
     monkeypatch.delenv(DURATIONS_ENV, raising=False)
     monkeypatch.setenv(TEST_DURATIONS_ENV, str(table))
-    assert durations_table()[0]["source"]["run_id"] == "session 4"
+    assert recorded_durations_table()[0]["source"]["run_id"] == "session 4" and durations_table() == (None, "")
     monkeypatch.setenv(TEST_DURATIONS_ENV, str(tmp_path / "nobody" / "test-durations.json"))
-    assert durations_table() == (None, "")
+    assert recorded_durations_table() == (None, "")
     monkeypatch.setenv(DURATIONS_ENV, str(_table(tmp_path)))
     monkeypatch.setenv(TEST_DURATIONS_ENV, str(table))
-    assert durations_table()[0]["source"]["run_id"] == RUN
+    assert recorded_durations_table()[0]["source"]["run_id"] == durations_table()[0]["source"]["run_id"] == RUN
 
 
 def test_file_weights_are_recorded_time_else_nodes_times_the_median_time_per_node(tmp_path, monkeypatch):
@@ -300,9 +305,9 @@ def test_a_shard_without_a_file_of_a_pass_proves_its_empty_slice(tmp_path):
     exits 0 (not pytest's 5) and proves the empty slice the manifest's packing gives it."""
     suite, entry = _suite(tmp_path, {
         "test_parallel_only.py": PARAMETRIZED.format(3),
-        "test_serial_only.py": "import pytest\npytestmark = pytest.mark.serial\n" + PARAMETRIZED.format(2)})
+        "test_serial_only.py": "import pytest\npytestmark = pytest.mark.serial('exclusive')\n" + PARAMETRIZED.format(2)})
     # Node counts over both passes: the parallel file (3) on shard 1, the serial file (2) on shard 2.
-    for lane, empty, options in (("parallel", 2, ["-n", "2", "--dist", "loadscope"]), ("serial", 1, [])):
+    for lane, empty, options in (("parallel", 2, ["-n", "2", "--dist", "loadgroup"]), ("serial", 1, [])):
         _session(tmp_path, suite, entry, lane, tmp_path / "manifest" / "m1" / lane, "--collect-only",
                  "--default-suite-manifest")
         for shard in (1, 2):

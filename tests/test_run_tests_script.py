@@ -50,11 +50,16 @@ def standalone_budget(monkeypatch, tmp_path):
 
 
 def _item(nodeid, *, serial):
-    markers = [types.SimpleNamespace(name="serial")] if serial else []
+    """A collected item; ``serial`` is None (no mark), "" (a bare mark) or the resource the mark names."""
+    markers = [] if serial is None else [types.SimpleNamespace(name="serial", args=(serial,) if serial else ())]
     item = types.SimpleNamespace(nodeid=nodeid, added=[])
     item.get_closest_marker = lambda name: next((m for m in markers if m.name == name), None)
     item.add_marker = item.added.append
     return item
+
+
+def _config(shards="0", dist="loadgroup", workers=4):
+    return types.SimpleNamespace(getoption=lambda name: shards, option=types.SimpleNamespace(numprocesses=workers, dist=dist))
 
 
 def _group(item):
@@ -94,7 +99,7 @@ def test_serial_groups_take_the_recorded_serial_share_of_the_workers(run_tests, 
     assert os.environ[TEST_DURATIONS_ENV] == str(evidence / "test-durations.json")
     monkeypatch.setattr(run_tests, "recorded_durations", recorded)
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "8")
-    ((_label, command),) = run_tests.battery_commands(sequential=False)
+    (_label, command), _serial = run_tests.battery_commands()
     assert command[-1] == "--serial-shards=4"  # half the time is serial; today's rule would say 2
     plan = capsys.readouterr().out
     assert "4 serial groups of 8 workers, sized by session 2026-11-05T12:00:00Z" in plan
@@ -108,26 +113,15 @@ def test_serial_groups_take_the_recorded_serial_share_of_the_workers(run_tests, 
     assert TEST_DURATIONS_ENV not in os.environ and recorded() == (None, "no recorded durations")
 
 
-def test_sequential_mode_keeps_the_gate_marker_split_and_xdist_flags(run_tests, monkeypatch):
-    monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "6")
-    (parallel_label, parallel), (serial_label, serial) = run_tests.battery_commands(sequential=True)
-    assert (parallel_label, serial_label) == ("parallel", "serial")
-    assert parallel[3:] == ["tests/", "-m", f"not serial and {LANE_EXCLUSION_EXPR}", *PARALLEL_PASS_FLAGS]
-    assert serial[3:] == ["tests/", "-m", f"serial and {LANE_EXCLUSION_EXPR}", *SERIAL_PASS_FLAGS]
-
-
-def test_default_mode_is_one_run_over_both_lanes(run_tests, monkeypatch, standalone_budget):
+def test_the_battery_is_the_gates_two_passes(run_tests, monkeypatch, standalone_budget):
+    """The same marker split and flag vector as the gate and CI, with the bare-serial file groups of the xdist
+    pass sized here (so the plan line is true) instead of left to the conftest's `auto`."""
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "8")
-    ((label, command),) = run_tests.battery_commands(sequential=False)
-    assert label == "overlapped"
-    assert command[:3] == [run_tests.sys.executable, "-m", "pytest"]
-    command = command[3:]
-    assert command[command.index("-m") + 1] == LANE_EXCLUSION_EXPR
-    assert command[command.index("--dist") + 1] == "loadgroup"
-    assert command[command.index("-n") + 1] == "auto"
-    assert command[-1] == "--serial-shards=2"
-    untouched = [flag for flag in PARALLEL_PASS_FLAGS if flag.startswith("--") and flag != "--dist"]
-    assert all(flag in command for flag in untouched)
+    (parallel_label, parallel), (serial_label, serial) = run_tests.battery_commands()
+    assert (parallel_label, serial_label) == ("parallel", "serial")
+    assert parallel[3:] == ["tests/", "-m", f"not exclusive and {LANE_EXCLUSION_EXPR}", *PARALLEL_PASS_FLAGS,
+                            "--serial-shards=2"]
+    assert serial[3:] == ["tests/", "-m", f"exclusive and {LANE_EXCLUSION_EXPR}", *SERIAL_PASS_FLAGS]
 
 
 @pytest.mark.parametrize("host, workers", [
@@ -250,7 +244,7 @@ def test_empty_lane_with_cleanup_error_makes_the_battery_red(run_tests, monkeypa
     owners = iter([owner(0, ""), owner(5, diagnostic)])
     monkeypatch.setattr(process_containment, "ProcessContainer", lambda **options: next(owners))
     monkeypatch.setattr(run_tests, "_node_lane", lambda: 0)
-    assert run_tests.main(["--sequential"]) == 1
+    assert run_tests.main([]) == 1
     captured = capsys.readouterr()
     assert diagnostic in captured.err
     assert "battery: RED" in captured.out
@@ -345,20 +339,13 @@ def test_a_deferred_full_escalation_keeps_what_the_other_changes_select(run_test
     assert "the other changes escalate too (a renamed escalation)" in summary.read_text(encoding="utf-8")
 
 
-def test_sequential_with_pytest_arguments_is_refused(run_tests, monkeypatch):
-    monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: pytest.fail("nothing must run"))
-    with pytest.raises(SystemExit) as exit_info:
-        run_tests.main(["--sequential", "tests/test_x.py"])
-    assert exit_info.value.code == 2
-
-
 def test_a_bare_call_never_means_a_subset(run_tests, monkeypatch):
     monkeypatch.delenv("OUROBOROS_TEST_EVIDENCE_ROOT", raising=False)
     calls = []
     monkeypatch.setattr(run_tests, "_node_lane", lambda: 0)
     monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: calls.append((label, argv)) or 0)
     assert run_tests.main([]) == 0
-    assert [label for label, _ in calls] == ["warm", "overlapped"]
+    assert [label for label, _ in calls] == ["warm", "parallel", "serial"]
     calls.clear()
     assert run_tests.main(["tests/test_x.py", "-k", "one"]) == 0
     assert calls == [("focused", [run_tests.sys.executable, "-m", "pytest", "tests/test_x.py", "-k", "one"])]
@@ -368,7 +355,7 @@ def test_a_bare_call_never_means_a_subset(run_tests, monkeypatch):
     assert calls == [("focused", [run_tests.sys.executable, "-m", "pytest", *explicit])]
 
 
-@pytest.mark.parametrize("arguments, phases", [([], ["warm", "overlapped"]), (["--sequential"], ["warm", "parallel", "serial"]),
+@pytest.mark.parametrize("arguments, phases", [([], ["warm", "parallel", "serial"]),
                                               (["tests/test_x.py", "-k", "one"], ["focused"])])
 def test_evidence_option_keeps_selection_and_gives_each_pytest_phase_its_own_argv(
     run_tests, monkeypatch, tmp_path, arguments, phases,
@@ -396,7 +383,7 @@ def test_evidence_option_keeps_selection_and_gives_each_pytest_phase_its_own_arg
         if label == "focused":
             assert selection == [run_tests.sys.executable, "-m", "pytest", *arguments]
         else:
-            assert selection == dict(run_tests.battery_commands("--sequential" in arguments))[label]
+            assert selection == dict(run_tests.battery_commands())[label]
 
 
 def test_a_missing_node_is_a_red_not_run_never_a_silent_skip(run_tests, monkeypatch):
@@ -413,35 +400,61 @@ def test_a_red_lane_stops_the_battery_and_an_empty_battery_is_red(run_tests, mon
     codes = iter([0, 1])  # the warm, then a red first lane
     seen = []
     monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: seen.append(label) or next(codes))
-    assert run_tests.main(["--sequential"]) == 1
+    assert run_tests.main([]) == 1
     assert seen == ["warm", "parallel"]
     monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: 0 if label == "warm" else 5)
-    assert run_tests.main(["--sequential"]) == 1
+    assert run_tests.main([]) == 1
 
 
-def test_lane_groups_pin_serial_files_and_keep_other_files_whole():
+def test_lane_groups_pin_resources_and_serial_files_and_keep_other_files_whole(run_tests, monkeypatch, tmp_path):
+    """A named resource's tests share one group across files; a bare mark's file joins one of the shards; every
+    other test keeps its file (or class) scope; with recorded durations the longest groups go first, serial
+    groups first among equals; `auto` sizes the shards from the workers and the table."""
+    from tests import ci_verdicts
+
     items = [
-        _item("tests/test_a.py::test_one", serial=False),
-        _item("tests/test_s.py::test_one", serial=True),
-        _item("tests/test_a.py::test_two", serial=False),
-        _item("tests/test_s.py::test_two[x]", serial=True),
-        _item("tests/test_t.py::test_one", serial=True),
-        _item("tests/test_c.py::TestBox::test_one", serial=False),
-        _item("tests/test_s.py::TestSer::test_three", serial=True),
+        _item("tests/test_a.py::test_one", serial=None),
+        _item("tests/test_s.py::test_one", serial=""),
+        _item("tests/test_a.py::test_two", serial=None),
+        _item("tests/test_s.py::test_two[x]", serial=""),
+        _item("tests/test_t.py::test_one", serial=""),
+        _item("tests/test_c.py::TestBox::test_one", serial=None),
+        _item("tests/test_s.py::TestSer::test_three", serial=""),
+        _item("tests/test_d.py::test_db", serial="db"),
+        _item("tests/test_e.py::test_db_too", serial="db"),
+        _item("tests/test_x.py::test_alone", serial="exclusive"),
     ]
-    conftest._pin_lane_groups(items, 2)
-    assert [item.nodeid.split("::")[0] for item in items[:4]] == ["tests/test_s.py", "tests/test_s.py", "tests/test_t.py", "tests/test_s.py"]
+    system = ci_verdicts.platform_name(run_tests.sys.platform)
+    table = {"format": 1, "platforms": {system: {"tests/test_a.py": 900, "tests/test_d.py": 50, "tests/test_e.py": 60,
+                                                 "tests/test_s.py": 100}}, "serial": {}, "source": {"run_id": "1"}}
+    monkeypatch.setattr(ci_verdicts, "recorded_durations_table", lambda: (table, ""))
+    conftest._pin_lane_groups(items, _config(shards="2"))
     groups = {item.nodeid: _group(item) for item in items}
     assert groups["tests/test_a.py::test_one"] == groups["tests/test_a.py::test_two"] == "tests/test_a.py"
     assert groups["tests/test_c.py::TestBox::test_one"] == "tests/test_c.py::TestBox"
     assert groups["tests/test_s.py::TestSer::test_three"] == groups["tests/test_s.py::test_one"]
     assert groups["tests/test_s.py::test_one"] == groups["tests/test_s.py::test_two[x]"]
     assert {groups["tests/test_s.py::test_one"], groups["tests/test_t.py::test_one"]} <= {"serial0", "serial1"}
+    assert groups["tests/test_d.py::test_db"] == groups["tests/test_e.py::test_db_too"] == "serial:db"
+    assert groups["tests/test_x.py::test_alone"] == "serial:exclusive"
+    # Longest group first (a: 900 ms), then the db resource (110), then s (100), then the unrecorded ones.
+    assert [groups[item.nodeid] for item in items[:5]] == ["tests/test_a.py", "tests/test_a.py", "serial:db", "serial:db",
+                                                            groups["tests/test_s.py::test_one"]]
+    # `auto` under the one xdist pass: the recorded serial share of this system sizes the shards.
+    monkeypatch.setattr(ci_verdicts, "recorded_durations_table", lambda: (None, ""))
+    sized = [_item("tests/test_s.py::test_one", serial=""), _item("tests/test_t.py::test_one", serial="")]
+    conftest._pin_lane_groups(sized, _config(shards="auto", workers=16))
+    assert {_group(item) for item in sized} <= {f"serial{n}" for n in range(4)}  # 16 workers, no table: 4 shards
+    conftest._pin_lane_groups([items[0]], _config(shards="", workers=8))  # unset under loadgroup is `auto`
+    assert items[0].added[-1].args == ("tests/test_a.py",)
 
 
-def test_lane_groups_are_inert_without_the_option():
-    items = [_item("tests/test_s.py::test_one", serial=True), _item("tests/test_a.py::test_one", serial=False)]
-    conftest._pin_lane_groups(items, 0)
+def test_lane_groups_are_inert_outside_the_one_xdist_pass():
+    """A plain `-n` run (no `--dist loadgroup`) and an explicit 0 leave scheduling and order untouched."""
+    items = [_item("tests/test_s.py::test_one", serial=""), _item("tests/test_a.py::test_one", serial=None)]
+    conftest._pin_lane_groups(items, _config(shards="0", dist="load"))
+    assert [item.added for item in items] == [[], []]
+    conftest._pin_lane_groups(items, _config(shards="0", dist="loadscope"))
     assert [item.added for item in items] == [[], []]
     assert [item.nodeid for item in items] == ["tests/test_s.py::test_one", "tests/test_a.py::test_one"]
 

@@ -39,15 +39,21 @@ LANE_EXCLUSION_EXPR = (
 # CI appends `--default-suite-shard` on every OS; the local full run is unsharded.
 # No `--timeout-method`: pytest-timeout's default is SIGALRM where the platform has
 # it, which fails only the hung test, and its thread method elsewhere (Windows),
-# which stops the worker.
+# which stops the worker. `--dist loadgroup`: the one xdist pass in which a
+# `serial("<resource>")` test takes turns per resource and a bare `serial` file runs
+# in one of a few file groups beside everything else (tests/conftest.py pins the
+# groups and sizes the file groups by the recorded serial share of the time).
 PARALLEL_PASS_FLAGS = [
     "-n", "auto",
-    "--dist", "loadscope",
+    "--dist", "loadgroup",
     "--max-worker-restart=0",
     "--timeout=300",
 ]
-# The serial pass carries the same per-test hang bound and none of the xdist flags.
+# The serial pass (`serial("exclusive")` alone, one process) carries the same per-test hang bound and none of
+# the xdist flags.
 SERIAL_PASS_FLAGS = ["--timeout=300"]
+# The marker that splits the two passes: tests/conftest.py derives it from `serial("exclusive")`.
+EXCLUSIVE_MARKER = "exclusive"
 
 # Verifying the INTERPRETER (see `_verify_preflight_plugins`) proves the plugins
 # are installed; it does not prove the candidate's own pytest configuration lets
@@ -206,7 +212,7 @@ def _preflight_pass_specs(
     *,
     probe_module: str = "",
 ) -> list[PreflightPass]:
-    """The gate mirrors CI: a parallel non-serial pass, then a serial pass.
+    """The gate mirrors CI: one xdist pass of everything but `serial("exclusive")`, then those alone.
 
     An explicit ``pytest_args=`` (or the escape hatch) collapses to the single
     legacy pass, forwarding that argv unchanged, so callers that pin their own
@@ -240,7 +246,7 @@ def _preflight_pass_specs(
         _make_pass(
             "parallel",
             [
-                target, "-m", f"not serial and {LANE_EXCLUSION_EXPR}",
+                target, "-m", f"not {EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}",
                 *PARALLEL_PASS_FLAGS,
                 # Neither of these mirrors CI: they defend the parallel lane
                 # against candidate-controlled pytest configuration, which CI
@@ -256,8 +262,8 @@ def _preflight_pass_specs(
         ),
         _make_pass(
             "serial",
-            [target, "-m", f"serial and {LANE_EXCLUSION_EXPR}", *SERIAL_PASS_FLAGS,
-             *_FORCED_SERIAL_PLUGIN_FLAGS, *output_flags],
+            [target, "-m", f"{EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}", *SERIAL_PASS_FLAGS,
+             *_FORCED_SERIAL_PLUGIN_FLAGS, "-p", probe_module or _WORKER_PROBE_MODULE, *output_flags],
         ),
     ]
 
@@ -517,11 +523,24 @@ _WORKER_PROBE_SOURCE = '''"""Written by the Ouroboros preflight gate; not part o
 import os
 import pathlib
 
+import pytest
+
 _LOG = pathlib.Path(__WORKER_LOG__)
 _RESULTS = pathlib.Path(__RESULTS_POINTER__)
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(config, items):
+    # The gate's own reading of `serial("exclusive")`, whatever the candidate's conftest knows: the
+    # `exclusive` marker splits the two passes (`-m "not exclusive"`, `-m exclusive`).
+    for item in items:
+        marker = item.get_closest_marker("serial")
+        if marker is not None and marker.args and marker.args[0] == "exclusive":
+            item.add_marker(pytest.mark.exclusive)
+
+
 def pytest_configure(config):
+    config.addinivalue_line("markers", "exclusive: derived from serial('exclusive') by the gate; runs alone")
     # Runs in the controller too, where the variable is unset — only workers
     # report, so the file count IS the worker count.
     worker = os.environ.get("PYTEST_XDIST_WORKER")
@@ -1035,15 +1054,16 @@ def _crash_remediation(recorded: Optional[dict] = None) -> str:
         return (
             "pytest-timeout's callback was invoked for the test its worker was running: the per-test "
             "timer fired before that test finished, and the worker was lost afterwards. Make that test "
-            "faster or split it. Do NOT mark it @pytest.mark.serial: the serial pass carries the same "
-            "per-test timeout."
+            "faster or split it. Do NOT mark it @pytest.mark.serial: a resource group or the exclusive "
+            "pass carries the same per-test timeout."
         )
     return (
         "A pytest-xdist worker DIED instead of reporting a failure, and nothing recorded why: a native "
         "crash, an OS kill, an os._exit in a test and a timeout that left no callback record look alike. "
-        "Rerun the test it was running on its own and read that output before choosing a fix; mark it "
-        "@pytest.mark.serial only once it proves to own a real process, port or module global it cannot "
-        "isolate; never a flake/retry."
+        "Rerun the test it was running on its own and read that output before choosing a fix; name the host "
+        "resource it cannot isolate (@pytest.mark.serial(\"<resource>\"): a fixed port, a daemon, a process-global "
+        "its fixture cannot restore) only once it proves to share one, serial(\"exclusive\") only when it harms "
+        "or needs no live sibling; never a flake/retry."
     )
 
 
@@ -1518,8 +1538,9 @@ def _run_hermetic_pytest(
                     "verdict is not accepted, whatever it was, because a leaked tree "
                     "survives into the next pass and past teardown. Find the test that "
                     "spawns a real process, binds a real port, or daemonises a helper "
-                    "and does not wait for it — make it clean up, and mark it "
-                    "@pytest.mark.serial if it must own real processes; never a "
+                    "and does not wait for it — make it clean up (an owned child it waits "
+                    "for marks nothing; a shared host resource is named with "
+                    "@pytest.mark.serial(\"<resource>\")); never a "
                     "flake/retry. Kill any pid named below before re-running; when the "
                     "report names none it states the reason instead — read that line, "
                     "since more than one cause leaves no pid to name.",
@@ -1536,7 +1557,7 @@ def _run_hermetic_pytest(
             if returncode == _PYTEST_EXIT_NO_TESTS:
                 empty_passes.append(spec.label)
                 continue
-            if returncode == 0 and probe_module in spec.args:
+            if returncode == 0 and spec.parallel and probe_module in spec.args:
                 # Use the actual nonce flag, not the stem or spec.parallel:
                 # custom argv gets no host probe; red/empty lanes need no count.
                 observed = _observed_worker_ids(temp_root)

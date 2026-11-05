@@ -27,7 +27,7 @@ import sys
 
 import pytest
 
-from ouroboros.preflight_runner import LANE_EXCLUSION_EXPR
+from ouroboros.preflight_runner import EXCLUSIVE_MARKER, LANE_EXCLUSION_EXPR
 from tests.browser_lane import _COLLECTION_INI, _NARROWING_OPTIONS
 from tests.ci_evidence import file_shards
 from tests.ci_verdicts import durations_table, platform_name
@@ -75,7 +75,7 @@ def pytest_configure(config):
     manifest = config.getoption("--default-suite-manifest")
     if manifest and (shard or not config.option.collectonly):
         raise pytest.UsageError("DEFAULT_SUITE_MANIFEST: require unsharded --collect-only")
-    expressions = {f"{prefix}serial and {LANE_EXCLUSION_EXPR}": name
+    expressions = {f"{prefix}{EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}": name
                    for prefix, name in (("not ", "parallel"), ("", "serial"))}
     if config.option.markexpr not in expressions:
         raise pytest.UsageError("DEFAULT_SUITE_INCOMPLETE: require the unchanged default pass expression")
@@ -98,7 +98,7 @@ def pytest_collection_modifyitems(config, items):
                if not any(item.get_closest_marker(marker) for marker in excluded)]
     serial = config._default_suite_pass == "serial"
     expected = sorted(item.nodeid for item in default
-                      if bool(item.get_closest_marker("serial")) == serial)
+                      if bool(item.get_closest_marker(EXCLUSIVE_MARKER)) == serial)
     if not expected or sorted(item.nodeid for item in items) != expected:
         raise pytest.UsageError("DEFAULT_SUITE_INCOMPLETE: collected selection differs from the default pass")
     weights, source = file_weights(dict(sorted(Counter(item.nodeid.split("::", 1)[0] for item in default).items())))

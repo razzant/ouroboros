@@ -21,7 +21,7 @@ def test_shards_interleave_the_files_and_never_hand_out_an_empty_one():
 def test_the_warm_lifts_the_write_ban_for_itself_alone_and_the_owner_names_its_shards():
     env = {"PYTHONDONTWRITEBYTECODE": "1", "PYTHONPYCACHEPREFIX": "/p", "OUROBOROS_TEST_EVIDENCE_ROOT": "/e",
            "OUROBOROS_TEST_DURATIONS": "/d", "OURO_TEST_WORKER_BUDGET": "2", "PYTEST_XDIST_AUTO_NUM_WORKERS": "2",
-           "OUROBOROS_TEST_TEMP_ROOT": "/t", "HOME": "/h"}
+           "PYTEST_XDIST_WORKER": "gw3", "PYTEST_XDIST_TESTRUNUID": "u", "OUROBOROS_TEST_TEMP_ROOT": "/t", "HOME": "/h"}
     assert test_bytecode.writing_env(env) == {"PYTHONPYCACHEPREFIX": "/p", "OUROBOROS_TEST_TEMP_ROOT": "/t", "HOME": "/h"}
     argv = test_bytecode.command("py", "/repo", workers=0, files_from="/sel.txt")
     assert argv[:2] == ["py", "-c"] and "runpy.run_path" in argv[2]
@@ -51,6 +51,7 @@ def test_the_warm_root_compiles_the_checkout_and_collects_the_walked_modules_int
     assert result.returncode == 0, result.stdout + result.stderr
     facts = json.loads(result.stdout.strip().splitlines()[-1].removeprefix("WARM_BYTECODE "))
     assert (facts["files"], facts["shards"], facts["compile_exit"], facts["collect_exits"]) == (2, 2, 0, [0])
+    assert (prefix / "OUROBOROS_TEST_SCRATCH.txt").read_text(encoding="utf-8").startswith("bytecode-prefix\n")
     tag, below = sys.implementation.cache_tag, Path(*repo.resolve().parts[1:]).as_posix()
     cached = sorted(path.relative_to(prefix).as_posix() for path in prefix.rglob("*.pyc"))
     assert f"{below}/ouroboros/thing.{tag}.pyc" in cached, cached  # compileall: the whole checkout

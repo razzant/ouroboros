@@ -957,9 +957,8 @@ class _Results:
                     pytest.ExitCode.INTERRUPTED, pytest.ExitCode.USAGE_ERROR, pytest.ExitCode.NO_TESTS_COLLECTED):
             return
         problem = record_session_durations(
-            self.durations, self.reports, system=platform.system(),
-            serial_session=str(getattr(option, "markexpr", "") or "").startswith("serial and "),
-            rootpath=self.config.rootpath, run_id=f"session {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
+            self.durations, self.reports, system=platform.system(), rootpath=self.config.rootpath,
+            run_id=f"session {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
             sha=os.environ.get("GITHUB_SHA", ""))
         if problem:
             print(f"DURATIONS_NOT_RECORDED {problem}")

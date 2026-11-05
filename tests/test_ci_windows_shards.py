@@ -18,7 +18,7 @@ from ouroboros.test_parallelism import NESTED_WORKERS_ENV
 
 ROOT = Path(__file__).resolve().parents[1]
 SHA, RUN = "a" * 40, "42"
-EXPRESSIONS = {name: f"{prefix}serial and {LANE_EXCLUSION_EXPR}"
+EXPRESSIONS = {name: f"{prefix}exclusive and {LANE_EXCLUSION_EXPR}"
                for name, prefix in (("parallel", "not "), ("serial", ""))}
 # The full-test matrix: runner image, `runner.os` (the artifacts' OS name) and its shard count.
 SHARDED = (("ubuntu-latest", "Linux", 4), ("macos-latest", "macOS", 4), ("windows-latest", "Windows", 8))
@@ -47,7 +47,7 @@ def test_real_pytest_manifests_and_xdist_prove_both_passes_by_whole_file(tmp_pat
             "    return calls\n"
             f"@pytest.mark.parametrize('n', range({parallel}))\n"
             "def test_parallel(n, shared): assert shared == 1\n"
-            "@pytest.mark.serial\n"
+            "@pytest.mark.serial('exclusive')\n"
             f"@pytest.mark.parametrize('n', range({serial}))\n"
             "def test_serial(n, shared): assert shared == 1\n"
             "@pytest.mark.ui_browser\n"
@@ -69,7 +69,7 @@ def test_real_pytest_manifests_and_xdist_prove_both_passes_by_whole_file(tmp_pat
             args += (["--default-suite-manifest", "--collect-only"] if shard is None
                      else [f"--default-suite-shard={shard}/2"])
             if lane == "parallel" and shard is not None:
-                args += ["-n", "2", "--dist", "loadscope", "--max-worker-restart=0"]
+                args += ["-n", "2", "--dist", "loadgroup", "--max-worker-restart=0"]
             result = subprocess.run(
                 [sys.executable, "-I", "-S", str(ROOT / "scripts/safe_test.py"),
                  "--temp-parent", str(tmp_path), "--", sys.executable, str(entry), *args],
@@ -90,7 +90,8 @@ def test_real_pytest_manifests_and_xdist_prove_both_passes_by_whole_file(tmp_pat
         assert gaps == []
         assert assignments[lane, 1].isdisjoint(assignments[lane, 2])
         assert assignments[lane, 1] | assignments[lane, 2] == selections[lane]
-    assert len(selections["parallel"]) == 7 and len(selections["serial"]) == 9
+    # test_services_tool_v2.py's whole-file mark is a bare `serial` (tests/conftest.py): the xdist pass holds it.
+    assert len(selections["parallel"]) == 9 and len(selections["serial"]) == 7
     assert selections["parallel"].isdisjoint(selections["serial"])
     owners = {}
     for (_, shard), nodes in assignments.items():
