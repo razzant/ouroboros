@@ -96,6 +96,14 @@ TERMINAL_WRITERS = {
     # preserves the current lifecycle; "running" is the writer's placeholder.
     ('ouroboros/delegate_terminal.py::refresh_disposed_reconciliation', '"running"'): 'dynamic',
     ('ouroboros/gateway/tasks.py::_admission_rejection_response', 'STATUS_FAILED'): 'terminal',
+    # The API admission receipt lands after the snapshot barrier, outside the first queue-lock section: it keeps
+    # the status the window left (a launch's running, a Stop's terminal) and adds only its token and admission facts.
+    ('ouroboros/gateway/tasks.py::_enqueue_api_task_durably', 'str(current.get("status") or STATUS_SCHEDULED)'): 'dynamic',
+    # #2753 native capture facts (a capture gap, received files, a capture effect) are written with the stored
+    # row's own status; their field projectors add only the capture facts and never end a task.
+    ('ouroboros/headless.py::_native_capture_gap', 'row["status"]'): 'dynamic',
+    ('ouroboros/headless.py::record_native_capture_effect', 'owner["status"]'): 'dynamic',
+    ('ouroboros/headless.py::record_native_received_files', 'owner["status"]'): 'dynamic',
     # API refusal now belongs to _admission_rejection_response and its receipt writer.
     # Runtime707: CURRENT-ref retry publication moved out of observability's
     # locked sweep; terminal file-failure publication moved off event drain.
