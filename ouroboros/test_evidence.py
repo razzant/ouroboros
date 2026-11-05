@@ -38,8 +38,40 @@ EVIDENCE_RUN_MARKER = "OUROBOROS_TEST_EVIDENCE_RUN.txt"
 _LISTED_GAPS = 5  # a display bound; source.json keeps every gap
 
 
-def evidence_directory(repo, *, parent=None, ctx=None) -> Path:
-    """A fresh result directory outside disposable roots, shared by descendants."""
+def _private_copy_evidence_parent(repo, data_root=None) -> Path | None:
+    """Return the registered copy owner's task evidence parent, if this is a private copy.
+
+    The private-copy record is the existing ownership source of truth. This reader does not
+    create, import or alter records; an absent, incomplete or unreadable owner leaves the
+    caller's ordinary checkout-parent destination in place.
+    """
+    data_root = data_root or os.environ.get("OUROBOROS_DATA_DIR")
+    if not data_root:
+        return None
+    try:
+        from ouroboros.artifacts import task_artifact_dir_path
+        from ouroboros.private_copy_read import record_at
+        from ouroboros.task_custody import canonical_owner_root
+
+        row = record_at(Path(repo).resolve(), data_root)
+        task_id = str(row.get("task_id") or "").strip() if row else ""
+        if not task_id:
+            return None
+        return (task_artifact_dir_path(canonical_owner_root(data_root), task_id)
+                / "source_handles" / "test-evidence")
+    except Exception:
+        # A copy without a readable owner is not a reason to invent task custody or
+        # stop a verification command. Its ordinary checkout-parent evidence remains visible.
+        return None
+
+
+def evidence_directory(repo, *, parent=None, ctx=None, owner_data_root=None) -> Path:
+    """A fresh result directory outside disposable roots, shared by descendants.
+
+    A registered private copy without an explicit destination writes beside the task's
+    other source evidence. Operator checkouts and unregistered copies retain the historic
+    checkout-parent ``.test-evidence`` location.
+    """
     if parent is None and ctx is not None:
         drive, task = getattr(ctx, "drive_root", None), getattr(ctx, "task_id", None)
         if drive and task:
@@ -53,7 +85,10 @@ def evidence_directory(repo, *, parent=None, ctx=None) -> Path:
                 # A test's synthetic ctx is reproducible too. Its outer owner
                 # already supplied the destination that outlives that scratch.
                 parent = os.environ.get(EVIDENCE_ENV)
-    parent = Path(parent or os.environ.get(EVIDENCE_ENV) or Path(repo).resolve().parent / ".test-evidence").resolve()
+    parent = (parent or os.environ.get(EVIDENCE_ENV)
+              or _private_copy_evidence_parent(repo, owner_data_root)
+              or Path(repo).resolve().parent / ".test-evidence")
+    parent = Path(parent).resolve()
     boundary = os.environ.get("OUROBOROS_TEST_TEMP_ROOT")
     if boundary and parent.is_relative_to(Path(boundary).resolve()):
         from ouroboros.test_environment import retain_tree

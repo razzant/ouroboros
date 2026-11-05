@@ -97,10 +97,10 @@ class _LiveDisplay(threading.Thread):
         return self.error or (RuntimeError("display did not drain") if self.is_alive() else None)
 
 
-def _evidence_directory(repo: Path, root: Path, explicit) -> tuple[Path, str]:
+def _evidence_directory(repo: Path, root: Path, explicit, owner_data_root=None) -> tuple[Path, str]:
     """The run's evidence; only an unwritable DEFAULT parent falls back into retained scratch."""
     try:
-        return evidence_directory(repo, parent=explicit), ""
+        return evidence_directory(repo, parent=explicit, owner_data_root=owner_data_root), ""
     except OSError as exc:
         if explicit or os.environ.get(EVIDENCE_ENV):
             raise  # A selected destination is never silently redirected.
@@ -130,7 +130,7 @@ def _record_source(repo: Path, destination: Path) -> str:
     return gap
 
 
-def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) -> int:
+def main(root, repo, command, evidence_parent=None, keep=False, timeout=None, owner_data_root=None) -> int:
     root, repo = Path(root), Path(repo)
     evidence = None
     proc = None
@@ -152,7 +152,7 @@ def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) ->
     try:
         if keep:  # before the command: a test's folder goes at its end unless its root is held
             retain_tree(root, "debug retention")
-        evidence, fallback = _evidence_directory(repo, root, evidence_parent)
+        evidence, fallback = _evidence_directory(repo, root, evidence_parent, owner_data_root)
         if fallback:
             report_diagnostic(f"SAFE_TEST_EVIDENCE_FALLBACK {fallback}: {evidence}")
         (root / EVIDENCE_POINTER).write_text(str(evidence), encoding="utf-8")

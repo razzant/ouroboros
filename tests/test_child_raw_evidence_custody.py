@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import (artifacts, evidence_packer, headless, history_retention, maintenance, maintenance_jobs,
-                       observability, source_retention, store, task_custody, test_evidence)
+                       observability, source_retention, store, subagent_worktrees, task_custody, test_evidence)
 from ouroboros.artifacts import store_actor_source_bytes
 from ouroboros.history_retention import retention_summary
 from ouroboros.task_results import load_task_result, write_task_result
@@ -238,6 +238,29 @@ def test_a_context_aware_gate_stays_canonical_first_and_has_nothing_to_carry(wor
     assert not (world.store / ROOT_FAMILY).exists()
     assert _retry_and_settle(world)["status"] == "removed"
     assert (run / "stdout.bin").read_bytes() == b"native stream" and (run / "stdout.bin").stat().st_ino == identity
+
+
+def test_registered_private_copy_uses_task_evidence_and_unregistered_checkout_keeps_old_parent(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    copy = tmp_path / "copies.noindex" / "body-private"
+    operator = tmp_path / "operator-checkout"
+    data.mkdir()
+    copy.mkdir(parents=True)
+    operator.mkdir()
+    task_id = "private-copy-task"
+    subagent_worktrees._put_record({"path": str(copy), "task_id": task_id}, data)
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(data))
+    monkeypatch.delenv("OUROBOROS_TEST_EVIDENCE_ROOT", raising=False)
+    monkeypatch.delenv("OUROBOROS_TEST_TEMP_ROOT", raising=False)
+
+    private_run = test_evidence.evidence_directory(copy)
+    expected = artifacts.task_artifact_dir_path(data, task_id) / ROOT_FAMILY
+    assert private_run.is_relative_to(expected)
+    assert private_run.is_relative_to(expected.parent)
+
+    operator_run = test_evidence.evidence_directory(operator)
+    assert operator_run.is_relative_to(operator.parent / ".test-evidence")
+    assert not operator_run.is_relative_to(expected)
 
 
 def test_identical_bytes_already_at_the_address_are_delivered_not_a_gap(world):
