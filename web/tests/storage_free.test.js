@@ -633,6 +633,7 @@ test('marked session scratch reads as scratch its run kept, never as a copy; cop
     assert.doesNotMatch(html, /[Cc]op(?:y|ies)|commits on a branch/, 'nothing on the screen calls it a copy');
     assert.match(html, /Task s[\s\S]*5\.0 MB[\s\S]*Session scratch its run marked to keep · the whole folder goes[\s\S]*\/var\/tmp\/obs-s</);
     assert.equal((html.match(/retention marker or unreadable subtree/g) || []).length, 1, 'the marker is said once');
+    assert.match(html, /Discarding deletes it and what it holds for good\. Its marker says: retention marker/, 'its words end the line, whatever their punctuation');
     assert.match(html, />Discard 1 scratch folder</);
     const dialog = manualConfirmCopy(byHand([marked('s')]).manual, new Set(['s']));
     assert.equal(dialog.title, 'Discard the marked scratch?');

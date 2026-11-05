@@ -590,7 +590,7 @@ function manualRow(item, index, picked, held) {
     const choosable = manualKnown(item);
     const scratch = retainedOf(item);
     const what = choosable ? scratch
-        ? `${fmt('Its marker says: {words}', { words: item.manual.loss })} ${fmt('Discarding deletes it and what it holds for good.')}`
+        ? `${fmt('Discarding deletes it and what it holds for good.')} ${fmt('Its marker says: {words}', { words: item.manual.loss })}`
         : unsavedWords(item.manual) : fmt('What it would lose could not be read, so it cannot be chosen here.');
     const where = scratch && Array.isArray(item.manual.paths) && item.manual.paths.length ? item.manual.paths.join(' · ') : item.path;
     return `<li class="storage-free-group" data-free-manual-item="${attr(item.id)}">
