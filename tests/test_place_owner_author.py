@@ -78,6 +78,21 @@ def test_a_row_the_confirmation_cannot_vouch_for_is_not_my_human(tmp_path, place
     assert owner_confirmed_row(_place_row(place.place_id), accounts), "the same place still confirms its account"
 
 
+def test_a_stored_row_says_the_same_author_as_its_whole_row(tmp_path, place):
+    """The stored tail keeps only the transport facts its readers read: the author fact is one of those readers, so a
+    row's stored facts name the same author as the row (a bot, the account I send as, an unauthenticated actor)."""
+    accounts = place_owner_accounts(tmp_path)
+    bot = _place_row(place.place_id, "ci-bot")
+    bot["transport"]["actor"]["is_bot"] = True
+    rows = [bot, _place_row(place.place_id, "ouro-bot", sends_as="ouro-bot", sends_kind="bot"),
+            _place_row(place.place_id, authenticated=False), _place_row(place.place_id)]
+    for row in rows:
+        assert row_author(row_meta(row), owner_accounts=accounts) == row_author(row, owner_accounts=accounts)
+    labels = [row_author(row_meta(row), owner_accounts=accounts)["label"] for row in rows]
+    assert labels[0].startswith("a bot: ") and labels[1].startswith("the account I send as: ")
+    assert not labels[2].startswith("my human") and labels[3].startswith("my human: ")
+
+
 def test_the_snapshot_reads_the_stored_places_without_migrating_them(tmp_path):
     path = places.places_path(tmp_path)
     path.parent.mkdir(parents=True)
