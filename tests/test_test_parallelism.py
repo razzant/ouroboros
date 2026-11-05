@@ -63,7 +63,7 @@ def test_native_probe_failure_admits_one_worker(monkeypatch):
     monkeypatch.setattr(budget.sys, "platform", "darwin")
     monkeypatch.setattr(budget, "_native_output", lambda argv: "unreadable")
     assert budget.physical_memory() is None
-    assert budget.worker_budget(16, env={budget.WORKERS_ENV: "24"}) == 1
+    assert budget.admission(16, env={budget.WORKERS_ENV: "24"}).workers == 1
 
 
 @pytest.mark.parametrize("requested, inherited, host, expected", [
@@ -86,7 +86,6 @@ def test_physical_headroom_parent_slots_and_other_runs_cap_the_same_budget(monke
 
     monkeypatch.setattr(budget, "other_runs", census)
     env = {} if inherited is None else {budget.NESTED_WORKERS_ENV: str(inherited)}
-    assert budget.worker_budget(requested, env=env) == expected
     assert budget.admission(requested, env=env) == budget.Admission(expected, host or budget.HostRuns())
 
 

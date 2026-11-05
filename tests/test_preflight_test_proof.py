@@ -154,5 +154,5 @@ def test_free_memory_does_not_change_test_workload(candidate, monkeypatch):
     monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(64 * gib, 48 * gib))
     before = capture_preflight_test_subject(candidate.repo_dir)
     monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(64 * gib, 7 * gib))
-    assert budget.worker_budget(os.cpu_count()) == 1  # the tight sample really admits fewer workers
+    assert budget.admission(os.cpu_count()).workers == 1  # the tight sample really admits fewer workers
     assert before.covers(capture_preflight_test_subject(candidate.repo_dir))

@@ -176,11 +176,6 @@ def admission(cpu_workers: Optional[int] = None, *, env: Optional[Mapping[str, s
     return Admission(max(1, own - host.held), host)
 
 
-def worker_budget(cpu_workers: Optional[int] = None, *, env: Optional[Mapping[str, str]] = None) -> int:
-    """Keep the caller's CPU default, capped by physical room, parent slots and the other runs' slots."""
-    return admission(cpu_workers, env=env).workers
-
-
 # ── The host ledger and the census ──────────────────────────────────────────────────────
 SLOT_LEDGER_DIR = "ouroboros-test-slots.noindex"
 _TEST_EXECUTABLES = frozenset({"pytest", "py.test", "pytest.exe"})
