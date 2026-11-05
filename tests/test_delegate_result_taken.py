@@ -34,6 +34,7 @@ class Engine:
         self.supported, self.engine_version, self.store_identity = supported, version, "store-1"
         self.decisions, self.fail = [], []
         self.capability_reads = 0
+        self.answer = {"accepted": True, "status": "taken", "message": "acknowledged"}
 
     def run_result_taken_supported(self):
         self.capability_reads += 1
@@ -43,7 +44,7 @@ class Engine:
         self.decisions.append((run_id, idempotency_key))
         if self.fail:
             raise self.fail.pop(0)
-        return {"accepted": True, "status": "taken", "message": "acknowledged"}
+        return self.answer
 
 
 def _git_run(run_id="run-1", **facts):
@@ -152,16 +153,37 @@ def test_an_engine_without_the_taken_action_waits_until_a_later_pass_supports_it
     assert world.tell(engine=old) == rt.DONE and old.decisions == [("run-1", key)]
 
 
-def test_an_unanswered_decision_waits_and_the_next_pass_repeats_the_same_key(world):
-    world.engine.fail.append(ClaudexorUnavailable("daemon_unreachable", "connection reset"))
+@pytest.mark.parametrize("status,code", [
+    (0, "daemon_unreachable"), (409, "delivery_in_progress"), (409, "idempotency_conflict"),
+    (403, "forbidden"), (408, "timeout"), (429, "rate_limited"), (500, "delivery_failed"), (200, "unaccepted")])
+def test_an_unanswered_decision_waits_and_the_next_pass_repeats_the_same_key(world, status, code):
+    if status == 200:
+        world.engine.answer = {"accepted": False, "status": code}
+    else:
+        world.engine.fail.append(ClaudexorUnavailable(code, "unanswered", status_code=status))
     assert world.tell() == rt.WAIT and world.records() == {}
+    world.engine.answer = {"accepted": True, "status": "taken"}
     assert world.tell() == rt.DONE and world.records()["run-1"]["state"] == "taken"
     first, second = world.engine.decisions
     assert first == second, "the same keyed decision, which the engine answers once"
 
 
+def test_an_interrupted_delivery_resends_once_under_the_same_derived_key(world):
+    interrupted = lambda: ClaudexorUnavailable("delivery_interrupted", "restart", status_code=409)
+    world.engine.fail.extend([interrupted(), interrupted()])
+    assert world.tell() == rt.WAIT and world.records() == {}
+    key = hashlib.sha256(b"taken:run-1").hexdigest()
+    retry_key = hashlib.sha256(f"{key}:interrupted".encode()).hexdigest()
+    assert world.engine.decisions == [("run-1", key), ("run-1", retry_key)], "one resend, no new-key loop"
+    world.engine.fail.append(interrupted())  # original receipt remains interrupted; derived delivery now succeeds
+    assert world.tell() == rt.DONE and world.records()["run-1"]["state"] == "taken"
+    assert world.engine.decisions == [("run-1", key), ("run-1", retry_key)] * 2
+    assert world.tell() == rt.DONE and len(world.engine.decisions) == 4
+
+
 @pytest.mark.parametrize("status,code,state", [
-    (409, "run_taken_continuable", "refused"), (409, "run_taken_not_patch", "refused"), (404, "not_found", "absent")])
+    (409, "run_taken_continuable", "refused"), (409, "run_taken_not_patch", "refused"),
+    (400, "invalid_request", "refused"), (404, "not_found", "absent")])
 def test_a_typed_answer_is_recorded_once_and_never_repeated(world, status, code, state):
     world.engine.fail.append(ClaudexorUnavailable(code, code, status_code=status))
     assert world.tell() == rt.DONE

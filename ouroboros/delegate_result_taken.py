@@ -19,7 +19,7 @@ timer, sweep or counter decides it. The outcome is one record per run in the tas
 continue, a result that is no patch); or ``absent`` (the engine has no such run).
 A catalog without ``taken`` holds the task without a decision record; capability is read once per pass.
 An unknown answer also writes nothing and leaves the task
-waiting; the next pass repeats the same keyed decision, which the engine answers once.
+waiting; the next pass repeats the same key. Interrupted delivery permits one fixed derived-key resend.
 """
 from __future__ import annotations
 
@@ -60,23 +60,28 @@ def owed(entry: Any) -> str:
 
 
 def _decision(engine: Any, run_id: str) -> Dict[str, Any]:
-    """One keyed ``taken`` decision; its record, or ``{}`` when the answer proves nothing."""
+    """A keyed decision, with one derived-key resend for interrupted delivery; only a settled answer records."""
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
     key = hashlib.sha256(f"taken:{run_id}".encode()).hexdigest()
-    try:
-        answer = engine.take_run_result(run_id, idempotency_key=key)
-    except ClaudexorUnavailable as exc:
-        status = int(getattr(exc, "status_code", 0) or 0)
-        if status == 404:
-            return {"state": "absent", "store_id": str(getattr(engine, "store_identity", "") or "")}
-        if 400 <= status < 500 and status not in (408, 429):  # a typed refusal is the engine's settled answer
-            return {"state": "refused", "code": str(exc.code or ""), "status": status}
-        log.info("Taken decision for %s unanswered: %s", run_id, exc)
+    retry_key = hashlib.sha256(f"{key}:interrupted".encode()).hexdigest()
+    for attempt_key in (key, retry_key):
+        try:
+            answer = engine.take_run_result(run_id, idempotency_key=attempt_key)
+        except ClaudexorUnavailable as exc:
+            status = int(getattr(exc, "status_code", 0) or 0)
+            if status == 404:
+                return {"state": "absent", "store_id": str(getattr(engine, "store_identity", "") or "")}
+            if status == 400 or (status == 409 and str(exc.code or "").startswith("run_taken_")):
+                return {"state": "refused", "code": str(exc.code or ""), "status": status}
+            if status == 409 and exc.code == "delivery_interrupted" and attempt_key == key:
+                continue  # the engine answers taken again if the first delivery already landed
+            log.info("Taken decision for %s unanswered: %s", run_id, exc)
+            return {}
+        if isinstance(answer, dict) and answer.get("accepted") is True and answer.get("status") == "taken":
+            return {"state": "taken"}
         return {}
-    if isinstance(answer, dict) and answer.get("accepted") is True and answer.get("status") == "taken":
-        return {"state": "taken"}
-    return {"state": "refused", "code": str((answer or {}).get("status") or "unaccepted")}
+    return {}
 
 
 def _unavailable(run: Any) -> str:
