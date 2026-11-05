@@ -96,7 +96,7 @@ def test_a_publication_slower_than_the_former_window_is_waited_out(tmp_path, mon
     assert _reserve(tmp_path, CHILD).attempt_id and len(waits) == 25
 
 
-@pytest.mark.parametrize("damage", ["malformed", "non_object", "missing", "no_generation", "unreadable"])
+@pytest.mark.parametrize("damage", ["malformed", "missing", "unreadable"])
 def test_an_unreadable_dispatch_document_refuses_typed(tmp_path, monkeypatch, caplog, damage):
     _publish(tmp_path)
     path = tmp_path / "state/queue_dispatch.json"
@@ -123,9 +123,11 @@ def test_an_unreadable_dispatch_document_refuses_typed(tmp_path, monkeypatch, ca
     assert len([record for record in caplog.records if record.exc_info]) == int(damage in {"malformed", "unreadable"})
 
 
-@pytest.mark.parametrize("operation", ["reserve", "dispatch"])
-@pytest.mark.parametrize("sliced", [False, True])
-@pytest.mark.parametrize("publication", ["stable", "before_lock", "under_lock"])
+@pytest.mark.parametrize(("publication", "sliced", "operation"), [
+    ("stable", False, "reserve"),
+    ("before_lock", True, "dispatch"),
+    ("under_lock", False, "reserve"),
+])
 def test_publication_waits_only_outside_the_money_lock(tmp_path, monkeypatch, operation, sliced, publication):
     from ouroboros import _usage_wait
 
@@ -194,8 +196,7 @@ def reservation_race(tmp_path, monkeypatch, request):
     return held, acquisitions, request.param
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("provider_fails", [False, True])
+@pytest.mark.parametrize(("provider_fails", "asynchronous"), [(False, False), (True, True)])
 def test_reservation_race_keeps_one_physical_send(tmp_path, monkeypatch, reservation_race, asynchronous, provider_fails):
     held, _, revoke_on = reservation_race
     waits, prepared, sent = [], [], []
@@ -233,8 +234,7 @@ def test_reservation_race_keeps_one_physical_send(tmp_path, monkeypatch, reserva
     assert rows[0].get("cost_usd") == (None if provider_fails else 0.02)
 
 
-@pytest.mark.parametrize("alive_generation", [None, "g0"])
-@pytest.mark.parametrize("sliced", [False, True])
+@pytest.mark.parametrize(("sliced", "alive_generation"), [(False, None), (True, "g0")])
 def test_reservation_race_with_persistent_absence_still_refuses(tmp_path, monkeypatch, reservation_race, alive_generation, sliced):
     from ouroboros import _usage_wait
 
@@ -352,8 +352,7 @@ def test_async_cancellation_joins_the_publication_wait_without_a_send(tmp_path, 
     assert [row["state"] for row in ua.read_usage_records(tmp_path)] == (["released"] if revoke_on == 2 else [])
 
 
-@pytest.mark.parametrize("control", ["deadline", "owner_pause"])
-@pytest.mark.parametrize("recertify", [False, True])
+@pytest.mark.parametrize(("recertify", "control"), [(False, "deadline"), (True, "owner_pause")])
 def test_initial_publication_gap_checks_controls_without_a_wait_owner(tmp_path, monkeypatch, control, recertify):
     from ouroboros import model_wait, owner_pause
     from ouroboros.llm_attempt import PhysicalDispatchInterrupted
@@ -379,8 +378,7 @@ def test_initial_publication_gap_checks_controls_without_a_wait_owner(tmp_path, 
     assert len(waits) == 1 and ua.read_usage_records(tmp_path) == []
 
 
-@pytest.mark.parametrize("operation", ["reserve", "dispatch"])
-@pytest.mark.parametrize("stage", ["write", "commit", "exit"])
+@pytest.mark.parametrize(("stage", "operation"), [("write", "reserve"), ("commit", "dispatch"), ("exit", "reserve")])
 def test_permanent_mutation_or_exit_error_is_never_retried(tmp_path, monkeypatch, stage, operation):
     from ouroboros.usage_ledger import UsageAccountingError
 

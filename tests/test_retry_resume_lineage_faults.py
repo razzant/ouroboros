@@ -23,8 +23,12 @@ from tests.test_swarm_host_admission import host  # noqa: F401
 
 
 
-@pytest.mark.parametrize("latch_pending", [False, True])
-@pytest.mark.parametrize("fault", ["readable", "io", "lineage", "sqlite"])
+@pytest.mark.parametrize(("fault", "latch_pending"), [
+    ("readable", False),
+    ("io", True),
+    ("lineage", False),
+    ("sqlite", True),
+])
 def test_one_identity_read_refuses_unknown_then_resumes_the_tree(
         host, monkeypatch, clock, reaper, latch_pending, fault):  # noqa: F811
     running = _running_actor(host, monkeypatch, clock, reaper, "retry")

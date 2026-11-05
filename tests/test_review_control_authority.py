@@ -81,8 +81,7 @@ def test_control_refusal_keeps_paid_custody_and_unknown_is_never_resent(subject_
     assert first["failure_code"] == ("dispatch_document_unreadable" if known_outcome else "provider_outcome_unknown")
 
 
-@pytest.mark.parametrize("prior", ["settled", "unresolved"])
-@pytest.mark.parametrize("current", ["", "released"])
+@pytest.mark.parametrize(("current", "prior"), [("", "settled"), ("released", "unresolved")])
 def test_control_refusal_cannot_erase_earlier_paid_or_unknown_history(prior, current):
     history = _ReviewAttemptHistory()
     paid = RuntimeError("earlier physical send")

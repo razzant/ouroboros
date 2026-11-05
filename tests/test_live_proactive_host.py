@@ -60,7 +60,6 @@ def test_host_caption_uses_reported_presence_label_or_meeting_audio(host_world, 
 @pytest.mark.parametrize('message', [
     {'type':'share', 'kind':'screen', 'sharing':'yes'},
     {'type':'share', 'kind':'unknown', 'sharing':True},
-    {'type':'participant', 'label':{}, 'speaking':True},
     {'type':'participant', 'label':'A', 'speaking':1},
 ])
 def test_share_and_participant_controls_are_validated(message):

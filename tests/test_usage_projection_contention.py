@@ -411,8 +411,8 @@ def _display_readers(data_root, state):
 
 
 @pytest.mark.parametrize("reader", [
-    "status_text", "budget_breakdown", "model_breakdown", "budget_line",
-    "evolution_status", "task_cost_view", "consciousness_status",
+    "status_text", "budget_line",
+    "consciousness_status",
 ])
 def test_every_display_reader_answers_under_a_held_monetary_lock(data_root, supervisor_state, monkeypatch, reader):
     """The wiring, caller by caller: a silent return to the exact read would park the

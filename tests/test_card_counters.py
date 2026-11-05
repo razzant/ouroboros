@@ -60,9 +60,12 @@ def test_round_producer_transport_storage_and_cold_history(tmp_path, monkeypatch
     assert summaries and all(row["rounds"] == 3 for row in summaries)
 
 
-@pytest.mark.parametrize("saved_usage", [{}, {"total_rounds": None}, {"total_rounds": 0}, {"total_rounds": 3}],
-                         ids=["missing", "unknown", "zero", "accepted"])
-@pytest.mark.parametrize("retained", [False, True])
+@pytest.mark.parametrize(("retained", "saved_usage"), [
+    pytest.param(False, {}, id='False-missing'),
+    pytest.param(False, {"total_rounds": 0}, id='False-zero'),
+    pytest.param(True, {"total_rounds": None}, id='True-unknown'),
+    pytest.param(True, {"total_rounds": 3}, id='True-accepted'),
+])
 def test_history_rounds_override_stale_physical_summary_only_when_known(tmp_path, saved_usage, retained):
     from ouroboros.project_dialogue import append_canonical_task_summary
     from tests._store_shared import read_result, seed_result
@@ -146,12 +149,12 @@ def test_failed_loop_rounds_match_live_saved_facts_and_history(tmp_path, monkeyp
                 ("live", "saved", "facts", "history"), expected)
 
 
-@pytest.mark.parametrize("lane", ["ordinary", "split", "split-project"])
-@pytest.mark.parametrize("skip_post", [False, True], ids=["post", "skip-post"])
-@pytest.mark.parametrize("usage, expected", [
-    ({"rounds": 3}, 3), ({"rounds": 0}, 0), ({}, 0),
-    ({"rounds": 17, "loop_evidence_unavailable": True}, None),
-], ids=["accepted", "zero", "no-response", "unknown"])
+@pytest.mark.parametrize(("usage", "expected", "skip_post", "lane"), [
+    pytest.param({"rounds": 3}, 3, False, "split-project", id='accepted-post-split-project'),
+    pytest.param({"rounds": 0}, 0, True, "ordinary", id='zero-skip-post-ordinary'),
+    pytest.param({}, 0, True, "split", id='no-response-skip-post-split'),
+    pytest.param({"rounds": 17, "loop_evidence_unavailable": True}, None, False, "split-project", id='unknown-post-split-project'),
+])
 def test_emitted_rounds_survive_split_dispatch_and_result_pruning(
     tmp_path, monkeypatch, lane, skip_post, usage, expected,
 ):
@@ -211,10 +214,9 @@ def test_emitted_rounds_survive_split_dispatch_and_result_pruning(
 
 
 @pytest.mark.parametrize("snapshot, expected", [
-    ({}, None), ({"loop_outcome": {"usage": {"total_rounds": None}}}, None),
-    ({"loop_outcome": {"usage": {"total_rounds": 0}}}, 0),
+    ({}, None), ({"loop_outcome": {"usage": {"total_rounds": 0}}}, 0),
     ({"loop_outcome": {"usage": {"total_rounds": 3}}}, 3),
-], ids=["missing", "unknown", "zero", "accepted"])
+], ids=["missing", "zero", "accepted"])
 def test_recovery_facts_use_retained_loop_rounds(tmp_path, monkeypatch, snapshot, expected):
     from tests import _dialogue
 

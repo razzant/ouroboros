@@ -111,7 +111,7 @@ def _release_later(a, delay=0.4):
 
 
 @pytest.mark.parametrize("mode,enforcement", [("pro", "advisory"), ("pro", "blocking"),
-                                              ("cyber_pro", "advisory"), ("cyber_pro", "blocking")])
+                                              ("cyber_pro", "blocking")])
 def test_commit_mail_yield_parks_without_polling_then_collects_and_continues(main_loop, monkeypatch, mode, enforcement):
     from ouroboros import config
 

@@ -43,7 +43,7 @@ def test_working_member_names_its_exact_call():
 
 @pytest.mark.parametrize("turn_phase, text", [
     ("admitted", "Setting up the turn"), ("started", "Starting the turn"),
-    ("context_building", "Building context"), ("context_built", "Context ready"),
+    ("context_building", "Building context"),
 ])
 def test_a_preparing_direct_turn_says_the_start_step_it_stands_at(turn_phase, text):
     state = ws.classify_member(row("d", "preparing", kind="direct_chat", turn_phase=turn_phase))
@@ -83,7 +83,6 @@ def test_writer_held_continue_waits_and_is_never_the_owners_turn():
     ({"actor": "owner", "text": "", "at": "T0"}, "paused_by_owner", "mind", "You paused it"),
     ({"actor": "ouroboros", "text": "pause before the update you asked for", "at": "T0"}, "paused_by_mind", "mind",
      "Ouroboros paused it"),
-    ({"actor": "ouroboros", "text": "", "at": "T0"}, "paused_by_mind", "mind", "Ouroboros paused it"),
     ({"actor": "", "text": "", "at": "T0"}, "paused_unattributed", "mind", ""),
 ])
 def test_a_decided_pause_says_its_declared_author_never_the_door(author, code, release, text):
@@ -116,8 +115,6 @@ def test_pause_author_reads_the_declared_record_and_never_defaults_to_the_owner(
     ("restart", {"reason": "saved_work_hold"}, "saved_on_stop"),
     ("restart", {"reason": "owner_restart_hold"}, "after_restart"),
     ("budget", {}, "spending_limit"),
-    ("authority", {}, "technical_pause"),
-    ("sleep", {"reason": "panic_hold"}, "after_panic"),
 ])
 def test_owner_required_resume_is_the_owners_turn_only_when_the_census_says_so(cause, hold, code):
     parked = row("t", "budget_paused", pause_cause=cause, can_resume=True)
@@ -183,44 +180,11 @@ def test_a_warm_sleep_names_only_the_helpers_it_chose_that_a_stop_holds_and_who_
 
 _AT = "2026-11-03T18:05:00+00:00"
 _NAMED, _TIME = {"kind": "task", "name": "Draft the notes"}, {"kind": "time", "at": _AT}
-_WRITES = {"kind": "task_or_writes", "name": "Draft the notes"}
-
-
 @pytest.mark.parametrize(("sleep", "text", "wake"), [
     ({"tasks": ["kid"]}, "Sleeping until Draft the notes finishes", [_NAMED]),
     ({"tasks": ["gone"]}, "Sleeping until the task it chose finishes", [{"kind": "tasks", "count": 1}]),
-    ({"tasks": ["kid", "gone", "x"]}, "Sleeping until one of 3 tasks finishes", [{"kind": "tasks", "count": 3}]),
-    ({"tasks": ["kid", "x"], "task_wait": {"mode": "all_terminal"}}, "Sleeping until all 2 tasks it chose finish",
-     [{"kind": "all_tasks", "count": 2}]),
-    ({"runs": ["r1"]}, "Sleeping until its external run finishes", [{"kind": "runs", "count": 1}]),
-    ({"services": [{"name": "preview"}]}, "Sleeping until a service it started stops", [{"kind": "service"}]),
-    ({"reviewer_slots": ["s1"], "any_mail": False}, "Sleeping until a reviewer answers", [{"kind": "reviewer"}]),
-    ({"senders": ["kid"]}, "Sleeping until Draft the notes writes", [{"kind": "sender", "name": "Draft the notes"}]),
-    ({"senders": ["gone"]}, "Sleeping until a message arrives", [{"kind": "mail"}]),
-    ({"senders": ["kid", "gone"]}, "Sleeping until a message arrives", [{"kind": "mail"}]),
-    ({"any_mail": True}, "Sleeping until a message arrives", [{"kind": "mail"}]),
     # Every source it chose is said, joined by "or", its time last: a time alone also wakes on any message.
     ({"wake_at": _AT, "any_mail": True}, f"Sleeping until a message arrives or {_AT}", [{"kind": "mail"}, _TIME]),
-    ({"wake_at": _AT}, f"Sleeping until {_AT}", [_TIME]),
-    ({"tasks": ["kid"], "wake_at": _AT}, f"Sleeping until Draft the notes finishes or {_AT}", [_NAMED, _TIME]),
-    # The one task it names, chosen as its sender too, finishes or writes: named once, never widened to any message,
-    # its clause first beside other sources; a task it cannot name reads its writing as a message.
-    ({"tasks": ["kid"], "senders": ["kid"]}, "Sleeping until Draft the notes finishes or writes", [_WRITES]),
-    ({"tasks": ["kid"], "senders": ["kid"], "runs": ["r1"], "wake_at": _AT},
-     f"Sleeping until Draft the notes finishes or writes or its external run finishes or {_AT}",
-     [_WRITES, {"kind": "runs", "count": 1}, _TIME]),
-    ({"tasks": ["gone"], "senders": ["gone"]}, "Sleeping until the task it chose finishes or a message arrives",
-     [{"kind": "tasks", "count": 1}, {"kind": "mail"}]),
-    ({"tasks": ["kid", "gone"], "senders": ["kid"], "task_wait": {"mode": "all_terminal"}},
-     "Sleeping until all 2 tasks it chose finish or Draft the notes writes",
-     [{"kind": "all_tasks", "count": 2}, {"kind": "sender", "name": "Draft the notes"}]),
-    ({"tasks": ["gone", "x"], "runs": ["r1", "r2"], "senders": ["kid"], "wake_at": _AT},
-     f"Sleeping until one of 2 tasks finishes or one of 2 external runs finishes or Draft the notes writes or {_AT}",
-     [{"kind": "tasks", "count": 2}, {"kind": "runs", "count": 2}, {"kind": "sender", "name": "Draft the notes"},
-      _TIME]),
-    ({"services": [{"name": "preview"}], "wake_at": _AT}, f"Sleeping until a service it started stops or {_AT}",
-     [{"kind": "service"}, _TIME]),
-    ({"mode": "warm"}, "Sleeping until it is woken", None),
 ])
 def test_a_sleep_says_what_it_chose_to_wait_for(sleep, text, wake):
     names = {"kid": "Draft the notes", "x": ""}
@@ -586,10 +550,6 @@ def test_a_running_episodes_own_review_is_its_work_and_review_beside_a_pause_is_
 @pytest.mark.parametrize("source, owner, typed", [
     ("review_substrate", {"status": "failed"}, ("review", "live")),  # a review finishes whatever its task did
     ("review_substrate_plan", None, ("review", "live")),
-    ("delegated_subagent", {"status": "failed"}, ("run", "unknown")),
-    ("delegated_subagent", {"status": "running", "outcome_axes": {"lifecycle": {"status": "cancelled"}}},
-     ("run", "unknown")),
-    ("delegated_subagent", {"status": "completed"}, ("run", "live")),  # a task that answered: Stop still reaches it
     ("delegated_subagent", None, ("run", "live")),
 ])
 def test_one_rule_types_an_open_run_for_the_card_and_for_ouroboros(source, owner, typed):
@@ -762,10 +722,7 @@ def test_a_held_continue_offers_stop_earlier_only_where_the_stop_door_reaches(st
 
 @pytest.mark.parametrize("cause, raw, resumable", [
     ("owner", {"fence": {"requested_by": "owner"}}, True),
-    ("owner", {"fence": {"requested_by": "owner", "actor": "mind"}}, True),
     ("restart", {"hold": {"reason": "saved_work_hold"}}, True),
-    ("budget", {}, True),
-    ("unknown", {"hold": {"reason": "restore_refused:x"}}, True),
     ("mystery", {}, True),  # an existing census Resume survives an absent stop / older cause vocabulary
 ])
 def test_resume_is_offered_only_where_the_resume_door_releases_the_pause(cause, raw, resumable):

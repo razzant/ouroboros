@@ -12,7 +12,7 @@ entrances keep the lexical first-line name.
 import json
 from types import SimpleNamespace
 
-import pytest
+from tests._cases import case_folders
 
 # Samples in the shapes the issue measured: markdown, a list, a run-together
 # sentence exactly as an author wrote it, non-ASCII. None is normalized.
@@ -32,14 +32,17 @@ def _tool_schema(module, name):
     return next(entry.schema for entry in module.get_tools() if entry.name == name)
 
 
-@pytest.mark.parametrize("claim", CLAIMS)
-def test_an_explicit_finish_stages_the_claim_bytes_as_the_answer(tmp_path, claim):
-    from ouroboros.tools.control_runtime import _finish_task
+def test_an_explicit_finish_stages_the_claim_bytes_as_the_answer(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for claim in CLAIMS:
+        tmp_path = next(case_paths)
+        with subtests.test(claim=claim):
+            from ouroboros.tools.control_runtime import _finish_task
 
-    ctx = _root(tmp_path)
-    reply = json.loads(_finish_task(ctx, action="finish", answer=claim, rationale="Complete."))
-    assert reply["status"] == "completion_requested"
-    assert ctx._completion_request["answer"] == claim
+            ctx = _root(tmp_path)
+            reply = json.loads(_finish_task(ctx, action="finish", answer=claim, rationale="Complete."))
+            assert reply["status"] == "completion_requested"
+            assert ctx._completion_request["answer"] == claim
 
 
 def test_owner_and_api_admission_keep_the_first_line_name():
@@ -68,16 +71,19 @@ def _no_effects(monkeypatch):
 UNNAMED = [{}, {"title": ""}, {"title": "   \n\t"}, {"title": "**"}, {"title": '""'}]
 
 
-@pytest.mark.parametrize("named", UNNAMED, ids=["omitted", "empty", "whitespace", "markup-only", "quotes-only"])
-def test_a_model_promote_without_a_name_is_refused_before_any_effect(tmp_path, monkeypatch, named):
-    from ouroboros.tools.control import _start_task
+def test_a_model_promote_without_a_name_is_refused_before_any_effect(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for named in UNNAMED:
+        tmp_path = next(case_paths)
+        with subtests.test(named=named), monkeypatch.context() as monkeypatch:
+            from ouroboros.tools.control import _start_task
 
-    _no_effects(monkeypatch)
-    ctx = SimpleNamespace(pending_events=[], event_queue=None, current_chat_id=1, drive_root=tmp_path)
-    out = _start_task(ctx, "Work order: audit chat rows.",  **named)
-    assert out.startswith("⚠️ TOOL_ARG_ERROR (start_task): title is required"), out
-    assert "Nothing was scheduled" in out
-    assert ctx.pending_events == [] and list(tmp_path.iterdir()) == []
+            _no_effects(monkeypatch)
+            ctx = SimpleNamespace(pending_events=[], event_queue=None, current_chat_id=1, drive_root=tmp_path)
+            out = _start_task(ctx, "Work order: audit chat rows.",  **named)
+            assert out.startswith("⚠️ TOOL_ARG_ERROR (start_task): title is required"), out
+            assert "Nothing was scheduled" in out
+            assert ctx.pending_events == [] and list(tmp_path.iterdir()) == []
 
 
 def test_the_registered_tool_requires_a_name_and_refuses_an_unnamed_call(tmp_path, monkeypatch):

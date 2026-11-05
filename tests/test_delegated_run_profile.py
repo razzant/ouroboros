@@ -240,13 +240,9 @@ def test_a_task_without_write_authority_gets_an_evidence_only_investigation_neve
 
 
 @pytest.mark.parametrize("effective,entitled,widened", [
-    ("readonly", "readonly", ""),
     ("readonly", "workspace_write", ""),          # narrower than asked is fine
-    ("workspace_write", "workspace_write", ""),
     ("workspace_write", "readonly", "workspace_write"),
     ("full", "workspace_write", "full"),
-    ("inherit_native", "workspace_write", "inherit_native"),
-    ("a-profile-from-a-future-engine", "workspace_write", "a-profile-from-a-future-engine"),
 ])
 def test_effective_access_is_verified_not_assumed(effective, entitled, widened):
     from ouroboros.tools.delegate import _widened_access

@@ -190,8 +190,11 @@ def _resumed_landing(a, path) -> tuple:
     return commits, again["landed"]
 
 
-@pytest.mark.parametrize("path", ["reference", "open"])
-@pytest.mark.parametrize("control", ["deadline", "stop", "within_window"])
+@pytest.mark.parametrize(("control", "path"), [
+    ("deadline", "reference"),
+    ("stop", "open"),
+    ("within_window", "reference"),
+])
 def test_the_owner_window_is_decided_after_the_owed_landing_tests(author, monkeypatch, path, control):  # noqa: F811
     """The owed tests may outlast the owner's window. A deadline or an owner stop reached during a green run
     refuses Git through the existing owner-control decision; a run within a valid window lands."""

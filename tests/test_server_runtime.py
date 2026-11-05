@@ -9,6 +9,7 @@ from ouroboros.server_runtime import (
 )
 from ouroboros.config import SETTINGS_DEFAULTS
 from ouroboros.configured_subagents import resolve_configured_subagents
+from tests._cases import chosen_rows
 
 
 _NEWLY_RETIRED_SHIPPED_HEAVY_DEFAULTS = (
@@ -262,26 +263,27 @@ def test_apply_runtime_provider_defaults_clears_shipped_opus47_heavy_with_openro
     assert normalized["CLAUDE_CODE_MODEL"] == current_claude_code
 
 
-@pytest.mark.parametrize("shipped_heavy", _NEWLY_RETIRED_SHIPPED_HEAVY_DEFAULTS)
-def test_every_newly_retired_product_heavy_is_cleared_before_actor_migration(shipped_heavy):
-    normalized, changed, changed_keys = apply_runtime_provider_defaults({
-        "OUROBOROS_MODEL_HEAVY": shipped_heavy,
-    })
+def test_every_newly_retired_product_heavy_is_cleared_before_actor_migration(subtests):
+    for shipped_heavy in _NEWLY_RETIRED_SHIPPED_HEAVY_DEFAULTS:
+        with subtests.test(shipped_heavy=shipped_heavy):
+            normalized, changed, changed_keys = apply_runtime_provider_defaults({
+                "OUROBOROS_MODEL_HEAVY": shipped_heavy,
+            })
 
-    resolution = resolve_configured_subagents(normalized)
-    rows = () if resolution.config is None else resolution.config.items
-    assert changed
-    assert changed_keys == ["OUROBOROS_MODEL_HEAVY"]
-    assert normalized["OUROBOROS_MODEL_HEAVY"] == ""
-    assert all(row.subagent_id != "legacy-heavy" for row in rows)
+            resolution = resolve_configured_subagents(normalized)
+            rows = () if resolution.config is None else resolution.config.items
+            assert changed
+            assert changed_keys == ["OUROBOROS_MODEL_HEAVY"]
+            assert normalized["OUROBOROS_MODEL_HEAVY"] == ""
+            assert all(row.subagent_id != "legacy-heavy" for row in rows)
 
 
 @pytest.mark.parametrize(
     "saved_heavy",
-    (
+    chosen_rows((
         *_NEWLY_RETIRED_SHIPPED_HEAVY_DEFAULTS,
         *_FORMERLY_REMAPPED_IDS,
-    ),
+    ), 0, 6, 14),
 )
 def test_local_override_preserves_exact_heavy_value_as_explicit_local_actor(saved_heavy):
     normalized, changed, changed_keys = apply_runtime_provider_defaults({

@@ -299,8 +299,10 @@ def _prior_sends(tmp_path, task_id):
     return _turn_sends(_live_task_rows(tmp_path, task_id, _event().conversation_key))
 
 
-@pytest.mark.parametrize("version", [0, 1])
-@pytest.mark.parametrize("status", [STATUS_RUNNING, STATUS_INTERRUPTED])
+@pytest.mark.parametrize(("status", "version"), [
+    pytest.param(STATUS_RUNNING, 0, id='running-0'),
+    pytest.param(STATUS_INTERRUPTED, 1, id='interrupted-1'),
+])
 def test_reconciled_turn_fails_closed_and_is_never_regenerated(tmp_path, monkeypatch, status, version):
     """Formerly the placeholder re-ran with 'what the lost attempt sent' as model context. That context
     cannot prove the lost model/tool work had no effect, so the retry is refused and the host mark stays."""

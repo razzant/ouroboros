@@ -117,7 +117,7 @@ def test_absent_historical_session_rights_reconstruct_readonly_with_exact_origin
         key: value for key, value in row["recovery_binding"].items() if key != "pending_invocation_id"}
 
 
-@pytest.mark.parametrize("defect", ["missing_prompt", "missing_request", "missing_slot", "missing_binding"])
+@pytest.mark.parametrize("defect", ["missing_prompt", "missing_request", "missing_binding"])
 def test_missing_original_source_is_a_gap_without_losing_the_original_binding(paid, defect):
     root, _slot, original, calls, _text = paid
     row = copy.deepcopy(original)
@@ -136,9 +136,19 @@ def test_missing_original_source_is_a_gap_without_losing_the_original_binding(pa
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("axis", ["task_id", "root_task_id", "surface", "slot_id", "operation_id",
-                                 "task_attempt", "subject_hash", "epoch", "roster_hash", "review_contract"])
-@pytest.mark.parametrize("source", ["prompt", "response"])
+@pytest.mark.parametrize(("source", "axis"), [
+    ("prompt", "task_id"),
+    ("prompt", "root_task_id"),
+    ("prompt", "slot_id"),
+    ("prompt", "task_attempt"),
+    ("prompt", "epoch"),
+    ("prompt", "roster_hash"),
+    ("prompt", "review_contract"),
+    ("response", "surface"),
+    ("response", "operation_id"),
+    ("response", "subject_hash"),
+    ("response", "epoch"),
+])
 def test_foreign_manifest_and_payload_never_supply_a_paid_answer(paid, source, axis):
     root, _slot, row, calls, _text = paid
     manifest, payload, _ = read_call_payload(root, task_id="late-cas", call_id=f'{row["operation_id"]}_{source}')

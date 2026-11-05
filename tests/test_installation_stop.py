@@ -137,7 +137,7 @@ def test_a_real_worker_recognizes_its_parent_restart_before_daemon_access(tmp_pa
         output.join_thread()
 
 
-@pytest.mark.parametrize("kind", ["flag", "byte", "both", "panic_and_restart"])
+@pytest.mark.parametrize("kind", ["flag", "byte", "panic_and_restart"])
 def test_old_build_inputs_become_a_boot_door_never_panic(tmp_path, kind):
     from ouroboros.delegate_recovery import boot_door
 

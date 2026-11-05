@@ -67,8 +67,7 @@ def _recover(host, tmp_path, monkeypatch, *, new_id=False, legacy=False):  # noq
     return task, clock
 
 
-@pytest.mark.parametrize("new_id", [False, True])
-@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize(("legacy", "new_id"), [(False, False), (True, True)])
 def test_assignment_keeps_cumulative_execution_but_resets_idle_only(host, tmp_path, monkeypatch, new_id, legacy):  # noqa: F811
     task, clock = _recover(host, tmp_path, monkeypatch, new_id=new_id, legacy=legacy)
     sent = worker(host, monkeypatch)
@@ -124,8 +123,7 @@ def _agent_start(root, monkeypatch, task, clock, observe):
             agent._handle_task_scoped(task)
 
 
-@pytest.mark.parametrize("new_id", [False, True])
-@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize(("legacy", "new_id"), [(False, True), (True, False)])
 def test_real_agent_start_restores_same_finite_clock_before_runtime(host, tmp_path, monkeypatch, new_id, legacy):  # noqa: F811
     task, clock = _recover(host, tmp_path, monkeypatch, new_id=new_id, legacy=legacy)
     sent = worker(host, monkeypatch)

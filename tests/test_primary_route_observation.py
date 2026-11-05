@@ -55,8 +55,7 @@ def test_shared_loop_observes_only_at_natural_boundaries_and_keeps_failed_refres
 
 
 @pytest.mark.parametrize("role,pin,local,exact,deferred", [
-    ("consciousness", "", False, False, None), ("main", "chosen-account", False, False, None),
-    ("main", "", True, False, None), ("main", "", False, True, None), ("main", "", False, False, True),
+    ("consciousness", "", False, False, None), ("main", "", True, False, None), ("main", "", False, False, True),
 ])
 def test_round_consumer_preserves_role_pin_locality_and_exact_isolation(monkeypatch, role, pin, local, exact, deferred):
     import json

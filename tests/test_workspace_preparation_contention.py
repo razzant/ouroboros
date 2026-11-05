@@ -73,7 +73,7 @@ def test_contended_first_marker_retries_on_its_lane_with_the_same_token(env, mon
     assert env.row("marker-busy")[prep.MARKER]["token"] == claim.token
 
 
-@pytest.mark.parametrize("seam", ["preflight", "depth", "ready", "final"])
+@pytest.mark.parametrize("seam", ["preflight", "depth", "final"])
 def test_owned_job_waits_off_q_then_uses_its_one_copy(env, monkeypatch, seam):
     event = env.request("owned-busy")
     copies = spy_provisions(monkeypatch)

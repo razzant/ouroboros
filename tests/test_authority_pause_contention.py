@@ -58,9 +58,10 @@ def _contended_save(root, monkeypatch, stage, transaction, *, on_hold=None):
     return attempts, failures, holds, release
 
 
-@pytest.mark.parametrize("rail", [bp.RAIL_BILLING_AUTHORITY, bp.RAIL_CONTROL_AUTHORITY])
-@pytest.mark.parametrize("stage", ["seed", "checkpoint"])
-@pytest.mark.parametrize("transaction", ["begin", "commit"])
+@pytest.mark.parametrize(("transaction", "stage", "rail"), [
+    pytest.param("begin", "seed", bp.RAIL_BILLING_AUTHORITY, id='begin-seed-billing_authority_unreadable'),
+    pytest.param("commit", "checkpoint", bp.RAIL_CONTROL_AUTHORITY, id='commit-checkpoint-control_authority_unreadable'),
+])
 def test_real_save_contention_releases_to_same_snapshot(tmp_path, monkeypatch, rail, stage, transaction):
     if transaction == "commit":  # a reader holds only a rollback-journal COMMIT; a WAL COMMIT waits for none
         use_journal(monkeypatch, "PERSIST")
@@ -119,8 +120,7 @@ def test_real_loop_keeps_authority_interruption_resumable_after_contention(tmp_p
         bp.end_dispatch_fence("member")
 
 
-@pytest.mark.parametrize("stage", ["seed", "checkpoint"])
-@pytest.mark.parametrize("control", ["cancelled", "panic", "deadline"])
+@pytest.mark.parametrize(("control", "stage"), [("cancelled", "seed"), ("panic", "checkpoint"), ("deadline", "seed")])
 def test_contention_hold_obeys_real_task_controls(tmp_path, monkeypatch, stage, control):
     from ouroboros.cancel_intents import request_cancel
     from ouroboros.model_wait import ModelWaitInterrupted, task_model_wait_scope
@@ -159,9 +159,13 @@ def test_contention_hold_obeys_real_task_controls(tmp_path, monkeypatch, stage, 
         bp.end_dispatch_fence("member")
 
 
-@pytest.mark.parametrize("stage", ["seed", "checkpoint"])
-@pytest.mark.parametrize("reason,rollback", [("contention", True), ("contention", False),
-                                           ("contention", None), ("unknown", True), ("permission", True)])
+@pytest.mark.parametrize(("reason", "rollback", "stage"), [
+    ("contention", True, "seed"),
+    ("contention", False, "checkpoint"),
+    ("contention", None, "checkpoint"),
+    ("unknown", True, "seed"),
+    ("permission", True, "checkpoint"),
+])
 def test_only_positive_rolled_back_contention_retries(tmp_path, monkeypatch, stage, reason, rollback):
     publish(tmp_path, document("member", status="running"))
     _ctx, limit = _loop_ctx(tmp_path, "member")

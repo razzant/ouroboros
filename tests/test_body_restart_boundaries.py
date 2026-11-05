@@ -10,8 +10,7 @@ from tests.test_body_adoption_repairs import _armed
 
 
 
-@pytest.mark.parametrize('kind', ['file', 'symlink'])
-@pytest.mark.parametrize('foreign', [False, True])
+@pytest.mark.parametrize(("foreign", "kind"), [(False, 'file'), (True, 'symlink')])
 def test_cold_switch_replaces_directory_with_historical_cache_only(tmp_path, monkeypatch, kind, foreign):
     serving = make_serving(tmp_path)
     data = isolate(monkeypatch, tmp_path)

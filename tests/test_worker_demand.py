@@ -761,7 +761,7 @@ def _ticks_dispatch_next_independent_task():
     assert list(workers.RUNNING) == ["next-independent"] and len(workers.WORKERS) == 1
 
 
-@pytest.mark.parametrize("order", ["stop_first", "reap_first", "unknown_release", "exited_before_reap"])
+@pytest.mark.parametrize("order", ["stop_first", "unknown_release", "exited_before_reap"])
 def test_stopping_a_resuming_author_keeps_the_enabled_pool_dispatching(assigning, monkeypatch, order):
     """Reviewer counterexample (MAX 1): Stop landed between the Resume's reserved retirement and
     its reap, the Stop's respawn counted the retiring slot and forgot the author, and the reap

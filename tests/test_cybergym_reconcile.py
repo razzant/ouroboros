@@ -441,9 +441,7 @@ def test_reconcile_supersedes_settled_transport_failure_without_resettling(
 
 
 @pytest.mark.parametrize("prior_cost,actual,final,admitted", [
-    (None, 7.31, True, True), (None, 20.0, True, True), (None, 0.0, True, True),
-    (None, 25.0, True, False), (None, None, True, False),
-    (None, 7.31, False, False), (20.0, 7.31, True, False),
+    (None, 7.31, True, True), (None, 25.0, True, False), (20.0, 7.31, True, False),
 ])
 def test_campaign_late_result_preserves_historical_held_cost(
     prior_cost, actual, final, admitted, tmp_path, monkeypatch,

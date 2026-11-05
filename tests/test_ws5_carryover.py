@@ -5,7 +5,7 @@ from __future__ import annotations
 
 # --- CW1 lineage: owner-only settings stay out of the generic settings write.      ---
 # --- ABI 7.0 (owner Q10=A): OUROBOROS_SCOPE_REVIEW_FLOOR and its whole surface are  ---
-# --- REMOVED (see tests/test_abi5_q10_removals.py); scope-review applicability      ---
+# --- REMOVED; scope-review applicability                                           ---
 # --- comes solely from the owner context mode.                                      ---
 
 def test_context_mode_is_owner_only_not_generic_settings():

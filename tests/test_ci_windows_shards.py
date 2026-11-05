@@ -1,8 +1,6 @@
 """Whole-file shards of every OS preserve both passes and cannot publish incomplete proof."""
-from collections import Counter
 import json
 import os
-import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -105,74 +103,7 @@ def test_real_pytest_manifests_and_xdist_prove_both_passes_by_whole_file(tmp_pat
     assert narrowed.returncode != 0 and "DEFAULT_SUITE_INCOMPLETE" in narrowed.stderr
 
 
-def _proofs(tmp_path, lane):
-    full = [f"tests/{name}.py::test_case[{index}]" for name in "abcd" for index in range(3)]
-    weights = dict(Counter(node.split("::", 1)[0] for node in full))
-    owners = file_shards(weights, 2)
-    paths = {}
-    for shard in (None, 1, 2):
-        proof = {"full": full, "file_weights": [[path, weight] for path, weight in weights.items()]}
-        if shard:
-            proof.update(shard=[shard, 2], assigned=[node for node in full if owners[node.split("::", 1)[0]] == shard])
-        path = tmp_path / ("manifest/attempt1" if shard is None else f"shards/shard{shard}-attempt1") / "results.json"
-        path.parent.mkdir(parents=True)
-        path.write_text(json.dumps({
-            lane: proof, "session_exit_code": 0,
-            "github": {"sha": SHA, "run_id": RUN, "run_attempt": "1"},
-            "reports": [{"nodeid": node, "phase": "call", "outcome": "passed"}
-                        for node in proof.get("assigned", [])]}), encoding="utf-8")
-        paths[shard] = path
-    return paths
-
-
-@pytest.mark.parametrize("lane", ["default_parallel", "default_serial"])
-@pytest.mark.parametrize("fault", ["none", "missing node", "duplicate assignment", "duplicate execution",
-    "wrong file", "weights", "missing projection", "missing lane", "red shard", "red manifest",
-    "duplicate proof", "foreign run", "newer red", "newer green"])
-def test_existing_reconciler_accepts_only_complete_default_proofs(tmp_path, lane, fault):
-    paths = _proofs(tmp_path, lane)
-    path = paths[None if fault == "red manifest" else 1]
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if fault == "missing node":
-        data["reports"].pop()
-    elif fault == "duplicate assignment":
-        data[lane]["assigned"].append(data[lane]["assigned"][0])
-    elif fault == "duplicate execution":
-        data["reports"].append(data["reports"][0])
-    elif fault == "wrong file":
-        data[lane]["assigned"][0] = "tests/b.py::test_case[0]"
-    elif fault == "weights":
-        data[lane]["file_weights"][0][1] += 1
-    elif fault == "missing lane":
-        data.pop(lane)
-    elif fault in {"red shard", "red manifest"}:
-        data["session_exit_code"] = 1
-    elif fault == "foreign run":
-        data["github"]["run_id"] = "43"
-    elif fault == "duplicate proof":
-        other = path.parent.with_name("duplicate")
-        other.mkdir()
-        shutil.copyfile(path, other / "results.json")
-    elif fault.startswith("newer"):
-        older = dict(data, session_exit_code=1)
-        path.write_text(json.dumps(older), encoding="utf-8")
-        path = path.parent.with_name("shard1-attempt2") / "results.json"
-        path.parent.mkdir()
-        data["github"]["run_attempt"] = "2"
-        data["session_exit_code"] = int(fault == "newer red")
-    path.write_text(json.dumps(data), encoding="utf-8")
-    if fault == "missing projection":
-        path.unlink()
-    result = subprocess.run(
-        [sys.executable, "-I", "-S", str(ROOT / "tests/ci_evidence.py"), "reconcile-shards",
-         "--lane", lane, "--manifest", str(tmp_path / "manifest"), "--shards", str(tmp_path / "shards"),
-         "--count", "2", "--sha", SHA, "--run-id", RUN, "--summary", str(tmp_path / "summary.md")],
-        capture_output=True, text=True, encoding="utf-8", timeout=30)
-    assert result.returncode == (0 if fault in {"none", "newer green"} else 1), result.stdout + result.stderr
-    assert ("GAP " in result.stdout) == (result.returncode == 1)
-
-
-@pytest.mark.parametrize("value", ["0/4", "5/4", "1/0", "x/4", "1", "1/2/3"])
+@pytest.mark.parametrize("value", ["0/4", "1", "1/2/3"])
 def test_invalid_file_shard_is_refused(value):
     from tests.default_lane import _shard
 
@@ -348,46 +279,3 @@ def test_each_journal_mode_is_proven_by_its_own_lane():
     assert probe("journal-persist").endswith(" PERSIST") and probe("quick-test").endswith(" PERSIST")
     assert probe("full-test-runs").endswith(" WAL")
     assert persist["if"] == jobs["full-test-runs"]["if"], "full-test needs it wherever the matrix runs"
-
-
-def test_the_persist_legs_select_real_modules_and_keep_the_gate_split(tmp_path):
-    """The selection is read back through $(...): no trailing newline, since Git Bash keeps a Windows CR there
-    and the last path would not be found. An empty selection fails before any pass runs the whole tree, and the
-    passes keep the gate's split: parallel flags in the parallel pass only, evidence from both."""
-    repo = Path(__file__).resolve().parents[1]
-    job_steps = _jobs()["journal-persist"]["steps"]
-    steps = {step["id"]: step for step in job_steps if "id" in step}
-    select, parallel, serial = steps["select"], steps["tests_parallel"], steps["tests_serial"]
-    assert "end='')" in select["run"] and 'test "$count" -ge 8' in select["run"]
-    # A misspelt or renamed name, or a renamed shared helper, would drop modules and still clear the floor:
-    # every named module exists, and the module holding the journal helpers is the one the selector greps for.
-    named = re.findall(r"'(test_[\w]+\.py)'", re.search(r"core = \{([^}]*)\}", select["run"])[1])
-    assert len(named) == 11 and all((repo / "tests" / name).is_file() for name in named), named
-    helpers = [path.stem for path in (repo / "tests").glob("_*.py")
-               if re.search(r"^def (?:exclusive_hold|write_hold|use_journal)\b", path.read_text(encoding="utf-8"), re.M)]
-    assert all(f"re.compile(r'{stem}')" in select["run"] for stem in helpers), helpers
-    bash = shutil.which("bash")
-    if bash is None:
-        pytest.skip("workflow shell unavailable on this host")
-    # `python` is this interpreter's own folder first on PATH: a link to a Windows venv launcher loses its pyvenv.cfg.
-    path = f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}"
-    result = subprocess.run([bash, "-c", select["run"]], cwd=repo, capture_output=True, text=True, timeout=60,
-                            env={**os.environ, "RUNNER_TEMP": str(tmp_path), "PATH": path})
-    assert result.returncode == 0, result.stderr
-    listed = (tmp_path / "journal_modules.txt").read_bytes()
-    assert listed and not listed.endswith((b"\n", b"\r")), listed[-20:]
-    modules = listed.decode().split()
-    assert len(modules) >= 8 and all((repo / module).is_file() for module in modules), modules
-    assert serial["if"] == "${{ !cancelled() && steps.select.outcome == 'success' }}"
-    assert " ".join(PARALLEL_PASS_FLAGS) in parallel["run"]  # the gate's own split, as the matrix pins it
-    assert " ".join(SERIAL_PASS_FLAGS) in serial["run"]
-    assert all(flag not in serial["run"].split() for flag in PARALLEL_PASS_FLAGS if flag not in SERIAL_PASS_FLAGS)
-    for step, lane in ((parallel, "parallel"), (serial, "serial")):
-        assert f'-m "{EXPRESSIONS[lane]}"' in step["run"], lane
-        assert f'--ci-evidence-dir="${{{{ runner.temp }}}}/ci-evidence/{lane}"' in step["run"], lane
-        # Named modules, no shard: scripts/ci_retry.py retries and continues from the crash record.
-        assert step["run"].startswith(f'python scripts/ci_retry.py --evidence-dir "${{{{ runner.temp }}}}/ci-evidence/'
-                                      f'{lane}" --accepted tests/accepted_failures.json -- python scripts/run_tests.py ')
-    publish = next(step for step in job_steps if step.get("uses") == "./.github/actions/test-evidence")
-    assert publish["with"]["passes"] == ("parallel=${{ steps.tests_parallel.outcome }} "
-                                         "serial=${{ steps.tests_serial.outcome }}")

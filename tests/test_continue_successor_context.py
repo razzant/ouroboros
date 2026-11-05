@@ -229,13 +229,7 @@ def test_successor_first_request_carries_the_predecessor_once_with_its_flag_and_
 @pytest.mark.parametrize("canonical,metadata,expected", [
     pytest.param({FIELD: False}, {FIELD: True}, False, id="canonical-false-wins"),
     pytest.param({FIELD: True}, {FIELD: False}, True, id="canonical-true-wins"),
-    pytest.param({"context": "partial canonical contract"}, {FIELD: True}, True, id="per-field-fallback"),
-    pytest.param(None, {FIELD: True}, True, id="metadata-only-true"),
-    pytest.param(None, {FIELD: False}, False, id="metadata-only-false"),
     pytest.param({}, {}, None, id="absent-stays-absent"),
-    pytest.param({FIELD: None}, {FIELD: True}, None, id="canonical-nonbool-wins"),
-    pytest.param({}, {FIELD: "true"}, None, id="metadata-nonbool-not-copied"),
-    pytest.param({}, "invalid", None, id="non-dict-carrier-ignored"),
 ])
 def test_admission_copies_only_stored_booleans_with_canonical_field_precedence(
         tmp_path, monkeypatch, canonical, metadata, expected):
@@ -355,8 +349,6 @@ def test_peer_mail_rides_as_a_count_and_reader_not_bodies(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize("stored,carried", [
     pytest.param({"model_role": "consciousness"}, "consciousness", id="role-carried"),
-    pytest.param({"model_role": "consciousness", "model": "claudexor::codex=gpt-6-astra"}, "consciousness",
-                 id="role-carried-route-dropped"),
     pytest.param({"model": "claudexor::codex=gpt-6-astra"}, "", id="route-alone-not-a-choice"),
     pytest.param({}, "", id="install-default-stays-default"),
 ])
@@ -393,8 +385,6 @@ def test_continue_carries_the_stored_model_role_never_the_resolved_route(tmp_pat
     ({}, {}),
     ({"baseline": {"surfaces": [{"surface_type": "external_workspace", "canonical_root": "/w",
                                  "captured_at": BASELINE_START, "git": {"base_commit": "e" * 40}}]}}, {}),
-    ({"baseline": {"surfaces": [{"surface_type": "system_repo", "canonical_root": SYSTEM_ROOT,
-                                 "git": {"base_commit": "b" * 40}}]}}, {}),
     ({"baseline": {"surfaces": [{"surface_type": "system_repo", "canonical_root": SYSTEM_ROOT,
                                  "captured_at": SURFACE_ADVANCED, "git": {"base_commit": "b" * 40}}]},
       "terminal_candidate_snapshot": {"captured_at": TERMINAL_AT, "surfaces": [

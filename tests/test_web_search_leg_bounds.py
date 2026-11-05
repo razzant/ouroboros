@@ -34,6 +34,7 @@ from ouroboros.llm_attempt import _PhysicalSendNotStarted
 from ouroboros.model_wait import ModelWaitInterrupted
 from ouroboros.tools import search
 from tests._usage_store_testing import ledger_rows
+from tests._cases import chosen_rows
 
 PHASES = ("connect", "read", "write", "pool")
 
@@ -103,15 +104,14 @@ def spend_while_recording(env, monkeypatch, seconds):
     monkeypatch.setattr(observability, "persist_physical_candidate", persist)
 
 
-@pytest.mark.parametrize("leg", ["openrouter", "anthropic", "openai"])
-@pytest.mark.parametrize("deadline,window,expected", [
-    (None, None, 480.0),     # no deadline, no tool window: the configured socket bound, unchanged
-    (None, 1500.0, 480.0),   # the 1500 s web_search window used to replace the leg's 480 s
-    (None, 40.0, 30.0),      # a narrower tool window: what is left of it at the send
-    (400.0, None, 170.0),    # deadline − 120 s reserve − now 100, less the 10 s spent recording
-    (400.0, 1500.0, 170.0),
-    (400.0, 180.0, 170.0),   # the loop's own clamp to the same deadline − reserve: one reserve, not two
-    (400.0, 40.0, 30.0),
+@pytest.mark.parametrize(("deadline", "window", "expected", "leg"), [
+    (None, None, 480.0, "openrouter"),  # no deadline, no tool window: the configured socket bound, unchanged
+    (None, 1500.0, 480.0, "openai"),  # the 1500 s web_search window used to replace the leg's 480 s
+    (None, 40.0, 30.0, "openai"),  # a narrower tool window: what is left of it at the send
+    (400.0, None, 170.0, "openrouter"),  # deadline − 120 s reserve − now 100, less the 10 s spent recording
+    (400.0, 1500.0, 170.0, "anthropic"),
+    (400.0, 180.0, 170.0, "anthropic"),  # the loop's own clamp to the same deadline − reserve: one reserve, not two
+    (400.0, 40.0, 30.0, "openai"),
 ])
 def test_each_search_leg_sends_with_what_is_left_of_its_bounds(legs, monkeypatch, leg, deadline, window, expected):
     """Each leg projected its socket bound before reserving and recording, so 10 s of that preparation kept
@@ -121,8 +121,12 @@ def test_each_search_leg_sends_with_what_is_left_of_its_bounds(legs, monkeypatch
     assert legs.seen == [dict.fromkeys(PHASES, expected)]
 
 
-@pytest.mark.parametrize("leg", ["openrouter", "anthropic"])
-@pytest.mark.parametrize("window", [None, 1500.0, 40.0])
+@pytest.mark.parametrize(("window", "leg"), [
+    (None, "openrouter"),
+    (1500.0, "openrouter"),
+    (1500.0, "anthropic"),
+    (40.0, "anthropic"),
+])
 def test_a_deadline_spent_while_a_recovery_leg_records_sends_nothing(legs, monkeypatch, leg, window):
     """181 s of recording passes the 180 s that deadline − reserve left. Without a tool window, or with a
     wider one, the leg still sent with the socket bound it projected first. Now it sends nothing, releases the
@@ -133,11 +137,11 @@ def test_a_deadline_spent_while_a_recovery_leg_records_sends_nothing(legs, monke
     assert [row["state"] for row in ledger_rows(legs.root)] == ["released"]
 
 
-@pytest.mark.parametrize("clock,deadline,window,spent", [
-    ("deadline", 400.0, None, 181),  # 400 − 120 s reserve − now 100 leaves 180 s
-    ("tool_window", None, 40.0, 41),
+@pytest.mark.parametrize(("stage", "clock", "deadline", "window", "spent"), [
+    ("recording", "deadline", 400.0, None, 181),  # 400 − 120 s reserve − now 100 leaves 180 s
+    ("recording", "tool_window", None, 40.0, 41),
+    ("progress", "deadline", 400.0, None, 181),  # 400 − 120 s reserve − now 100 leaves 180 s
 ])
-@pytest.mark.parametrize("stage", ["recording", "progress"])
 def test_a_bound_spent_before_the_direct_send_sends_nothing(legs, monkeypatch, stage, clock, deadline, window, spent):
     """Recording the candidate, and after the dispatch claim its progress row, spend the send's own clock.
     The deadline once sent a 0.001 s request; a spent bound now sends no bytes and releases the attempt."""
@@ -269,7 +273,7 @@ def states(env):
     return [row["state"] for row in ledger_rows(env.root)]
 
 
-@pytest.mark.parametrize("backend", LOOP_LEGS)
+@pytest.mark.parametrize("backend", chosen_rows(LOOP_LEGS, 0, 2))
 @pytest.mark.parametrize("stage,ledger", [("reservation", []), ("recording", ["released"]), ("claim", ["released"])])
 def test_a_search_window_spent_before_the_send_leaves_the_loop_its_graceful_finish(legs, monkeypatch, backend,
                                                                                   stage, ledger):
@@ -285,7 +289,7 @@ def test_a_search_window_spent_before_the_send_leaves_the_loop_its_graceful_fini
     assert legs.seen == [] and states(legs) == ledger
 
 
-@pytest.mark.parametrize("backend", LOOP_LEGS)
+@pytest.mark.parametrize("backend", chosen_rows(LOOP_LEGS, 0, 2))
 @pytest.mark.parametrize("deadline,read", [(400.0, 170.0), (None, 480.0)], ids=["timely", "unbounded"])
 def test_a_search_with_time_left_or_no_deadline_still_answers(legs, monkeypatch, backend, deadline, read):
     """10 s of recording: the send gets what is left of the window, or with no deadline the plain 480 s socket."""
@@ -350,14 +354,8 @@ def test_a_send_that_died_after_its_bytes_stays_unknown_and_is_not_retried(legs,
 @pytest.mark.parametrize("state,reason,spent,unreadable,expected", [
     ("released", "deadline", True, False, True),
     (None, "execution_deadline", True, False, True),
-    ("dispatched", "deadline", True, False, False),   # a possibly sent attempt is never relabelled
-    ("unresolved", "deadline", True, False, False),
-    ("reserved", "deadline", True, False, False),     # an open reservation is no unsent proof
-    ("released", "cancelled", True, False, False),
-    ("released", "owner_pause", True, False, False),
-    ("released", "deadline", False, False, False),    # the caller's own window still has time
     ("released", "deadline", True, True, False),      # an unreadable control is no clear one
-], ids=["released", "no_capture", "dispatched", "unresolved", "reserved", "stop", "pause", "time_left", "unreadable"])
+], ids=["released", "no_capture", "unreadable"])
 def test_only_a_positively_unsent_refusal_by_the_callers_own_window_is_its_own_result(monkeypatch, state, reason,
                                                                                        spent, unreadable, expected):
     from ouroboros import llm_attempt

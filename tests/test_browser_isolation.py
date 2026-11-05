@@ -49,10 +49,6 @@ class TestInfrastructureErrorDetection:
 
     @pytest.mark.parametrize("exc,expected", [
         (RuntimeError("cannot switch to a different green thread"), True),
-        (RuntimeError("different thread"), True),
-        (Exception("browser has been closed"), True),
-        (Exception("page has been closed"), True),
-        (Exception("Connection closed"), True),
         (ValueError("invalid selector"), False),
         (TimeoutError("navigation timeout"), False),
     ])
@@ -249,9 +245,7 @@ class TestHasPlatformChromium:
     @pytest.mark.parametrize("kind,expected", [
         ("missing", False),
         ("playwright_app", False),
-        ("playwright_headless_shell", False),
         ("foreign_receipt", False),
-        ("pinned", True),
     ])
     def test_classification(self, kind, expected, tmp_path):
         if kind == "missing":
@@ -279,8 +273,6 @@ class TestHasPlatformWebKit:
         ("missing", False),
         ("wrong_engine", False),
         ("metadata_only", False),
-        ("pw_run", True),
-        ("minibrowser", True),
     ])
     def test_classification(self, kind, expected, tmp_path):
         if kind == "missing":

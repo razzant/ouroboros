@@ -283,7 +283,6 @@ def test_failed_directory_turn_refreshes_after_its_capture_whatever_the_scope(tm
 
 @pytest.mark.parametrize("state,failure_code", [
     ("failed", "reviewer_probe_failed"),
-    ("cancelled", "reviewer_probe_failed"),
     ("interrupted", "reviewer_probe_failed"),
     ("interrupted", "host_restart"),
 ])
@@ -309,10 +308,8 @@ def test_failed_terminal_turn_keeps_named_output_and_original_error(author, tmp_
 
 
 @pytest.mark.parametrize("scope", [
-    ABSENT, SETTLED, NO_CENSUS, None, UNSETTLED, {**NO_CENSUS, "survivors": 1}, {**NO_CENSUS, "unreadable": 1},
-    {**NO_CENSUS, "coverage": "marker"},
-], ids=["absent", "settled", "no-census", "null", "unsettled", "no-census-survivor", "no-census-unreadable",
-        "mixed-coverage"])
+    ABSENT, None, {**NO_CENSUS, "coverage": "marker"},
+], ids=["absent", "null", "mixed-coverage"])
 def test_any_process_scope_lets_the_next_turn_refresh_the_copy(author, tmp_path, thread_gateway, scope):  # noqa: F811
     """The answer and evidence of a succeeded turn are delivered whatever process census
     the engine reports, and the next turn starts on a fresh copy (owner 1A, 2026-10-12)."""

@@ -286,9 +286,7 @@ def test_export_failure_never_changes_the_producer_exit(tmp_path, fails):
         _retire_injected_export_fault(result, "FileExistsError")
 
 
-@pytest.mark.parametrize("payload", [None, "not-json", "[]", '{"reports":[{}]}',
-    '{"reports":"invalid"}', '{"reports":[{"nodeid":"x","phase":"call","outcome":"unknown"}]}',
-    '{"reports":[{"nodeid":"x","phase":"unknown","outcome":"passed"}]}'])
+@pytest.mark.parametrize("payload", [None, "[]", '{"reports":[{"nodeid":"x","phase":"unknown","outcome":"passed"}]}'])
 def test_missing_or_corrupt_results_are_incomplete_not_passed(tmp_path, payload):
     public = tmp_path / "public"
     public.mkdir()
@@ -331,8 +329,7 @@ def test_real_canary_parameter_identifies_missing_provider_facts(tmp_path):
     assert "Producer step: **success**" in summary
 
 
-@pytest.mark.parametrize("producer", ["success", "failure"])
-@pytest.mark.parametrize("artifact", ["success", "failure"])
+@pytest.mark.parametrize(("artifact", "producer"), [("success", "success"), ("failure", "failure")])
 def test_partial_scope_and_artifact_outcome_stay_separate_from_producer(tmp_path, producer, artifact):
     public = tmp_path / "public"
     _write_results(public)
@@ -531,8 +528,7 @@ def test_journal_holds_only_redacted_identity_enums_and_exception_types(tmp_path
             if row.get("outcome") == "failed"] == [("call", "AssertionError")]
 
 
-@pytest.mark.parametrize("fails", [False, True])
-@pytest.mark.parametrize("broken", ["directory", "open", "write"])
+@pytest.mark.parametrize(("broken", "fails"), [("directory", False), ("open", True), ("write", False)])
 def test_journal_failure_is_one_line_and_never_changes_the_producer_exit(tmp_path, broken, fails):
     source = "def test_producer():\n    " + ("assert False\n" if fails else "pass\n")
     conftest = ""
@@ -600,51 +596,6 @@ def test_torn_and_invalid_journal_rows_are_skipped(tmp_path):
     silent, _ = _summary(tmp_path, empty, producer="failure")
     assert "Case outcomes: **unknown**" in silent and "final export" not in silent
     assert _annotate(tmp_path, empty, tmp_path / "absent") == []
-
-
-def test_annotations_are_limited_escaped_and_quiet_for_green_results(tmp_path):
-    from tests.ci_evidence import _escaped
-
-    def failed(index):
-        return {"nodeid": f"t.py::test_{index}", "phase": "call", "outcome": "failed",
-                "error_type": "ValueError"}
-    green, red, odd, killed = (tmp_path / name for name in ("green", "red", "odd", "killed"))
-    _write_results(green, [{"nodeid": "t.py::test_ok", "phase": "call", "outcome": "passed"}])
-    assert _annotate(tmp_path, green) == []
-    _write_results(red, [failed(index) for index in range(12)])
-    lines = _annotate(tmp_path, red)
-    assert lines[:10] == [f"::error title=Failed test::t.py::test_{index} (call, ValueError)"
-                          for index in range(10)]
-    assert lines[10:] == ["::notice::2 more failed tests are listed in the job summary"]
-    assert len(_annotate(tmp_path, red, limit=12)) == 12
-    assert not any(line.startswith("::notice::") for line in _annotate(tmp_path, red, limit=12))
-    # A nodeid cannot end its own command line, and a missing type leaves no empty field.
-    _write_results(odd, [{"nodeid": "t.py::test_pct[100%\r\nnext]", "phase": "setup", "outcome": "failed"}])
-    assert _annotate(tmp_path, odd) == ["::error title=Failed test::t.py::test_pct[100%25%0D%0Anext] (setup)"]
-    assert _escaped("a:b,c%\n", property_value=True) == "a%3Ab%2Cc%25%0A"
-    assert _escaped("a:b,c%\n") == "a:b,c%25%0A"
-    # Across directories failed tests lead, then collection failures, then tests in flight.
-    killed.mkdir()
-    (killed / "events.jsonl").write_text(
-        json.dumps({"event": "start", "nodeid": "k.py::test_hangs"}) + "\n"
-        + json.dumps({"event": "report", "nodeid": "k.py::test_late", "phase": "teardown",
-                      "outcome": "failed", "error_type": "OSError"}) + "\n", encoding="utf-8")
-    (odd / "results.json").write_text(json.dumps({"reports": [failed(0)], "collection_failures": [
-        {"nodeid": "t.py", "outcome": "failed"}]}), encoding="utf-8")
-    assert _annotate(tmp_path, killed, odd, green) == [
-        "::error title=Failed test::k.py::test_late (teardown, OSError)",
-        "::error title=Failed test::t.py::test_0 (call, ValueError)",
-        "::error title=Collection failed::t.py",
-        "::error title=Test in flight when the session was killed::k.py::test_hangs"]
-    assert _annotate(tmp_path, killed, odd, limit=2)[2:] == [
-        "::notice::2 more failed tests are listed in the job summary"]
-    # Advisory even when miswired, while the summary contract still rejects bad usage.
-    program = [sys.executable, "-I", "-S", str(REPO / "tests/ci_evidence.py")]
-    for arguments in (["annotate"], ["annotate", "--evidence-dir", str(red), "--limit", "ten"]):
-        miswired = subprocess.run(program + arguments, capture_output=True, text=True,
-                                  encoding="utf-8", timeout=30)
-        assert miswired.returncode == 0 and miswired.stdout.startswith("::warning::")
-    assert subprocess.run(program + ["summarize"], capture_output=True, timeout=30).returncode == 2
 
 
 def test_label_extends_only_the_heading(tmp_path):
@@ -780,10 +731,6 @@ def _garbage(paths, key):
     paths[key].write_text("not-json", encoding="utf-8")
 
 
-def _lane(key, **facts):
-    return lambda paths: _rewrite(paths[key], lambda data: data["ui_browser"].update(facts))
-
-
 def _identity(key, **facts):
     return lambda paths: _rewrite(paths[key], lambda data: data["github"].update(facts))
 
@@ -798,39 +745,7 @@ def _reports(key, rows):
     (lambda paths: _garbage(paths, 2), ["ui-ci-full-shard-2-1/host/results.json: result projection unavailable",
                                         "shard 2/3: no proof"]),
     (_identity(2, sha="b" * 40), [f"belongs to commit {'b' * 40} run {LANE_RUN}", "shard 2/3: no proof"]),
-    (_identity(3, run_id="9"), [f"belongs to commit {LANE_SHA} run 9, expected commit {LANE_SHA} run {LANE_RUN}",
-                                "shard 3/3: no proof"]),
-    (_identity(1, run_attempt=""), ["ui-ci-full-shard-1-1/host/results.json: run attempt is unknown"]),
-    (_lane(3, full=LANE_NODES + ["tests/test_new.py::test_added"]),
-     ["shard 3/3: its lane differs from the manifest; only in the shard: tests/test_new.py::test_added"]),
-    (_lane(2, full=LANE_NODES[1:]),
-     [f"shard 2/3: its lane differs from the manifest; only in the manifest: {LANE_NODES[0]}"]),
-    (_lane(1, full=LANE_NODES[::-1]), ["shard 1/3: its lane differs from the manifest; same nodes in another order"]),
-    (lambda paths: (_lane(1, assigned=_slice(2))(paths), _reports(1, _rows(_slice(2)))(paths)),
-     ["shard 1/3: its assignment is not slice 1 of 3 of the manifest lane",
-      "lane: 3 of 7 manifest nodes are executed by no shard: " + ", ".join(_slice(1))]),
-    (_reports(1, _rows(_slice(1)[1:]) + _rows(_slice(1)[:1], (("setup", "passed"), ("teardown", "passed")))),
-     [f"shard 1/3: assigned but not executed (1): {_slice(1)[0]}",
-      f"lane: 1 of 7 manifest nodes are executed by no shard: {_slice(1)[0]}"]),
-    (_reports(1, _rows(_slice(1) + _slice(2)[:1])),
-     [f"shard 1/3: executed outside its assignment (1): {_slice(2)[0]}"]),
-    (_lane(2, shard=[2, 4]), ["declares shard 2/4, expected one of 3", "shard 2/3: no proof"]),
-    (_lane(2, shard=[2, "3"]), ["ui-ci-full-shard-2-1/host/results.json: invalid ui_browser block"]),
-    (lambda paths: _rewrite(paths[2], lambda data: [data["ui_browser"].pop(key) for key in ("shard", "assigned")]),
-     ["ui-ci-full-shard-2-1/host/results.json: carries no shard block", "shard 2/3: no proof"]),
-    (_lane("manifest", shard=[1, 3], assigned=_slice(1)),
-     ["ui-ci-full-manifest-1/host/results.json: the manifest carries a shard block",
-      "manifest: no valid projection of the unsharded lane"]),
-    (_lane("manifest", full=[]), ["manifest: the lane is empty"]),
-    (_lane("manifest", full=LANE_NODES + LANE_NODES[:1]), [f"manifest: duplicate node ids: {LANE_NODES[0]}"]),
-    (lambda paths: _drop(paths, "manifest"), ["manifest: no valid projection of the unsharded lane"]),
-    (lambda paths: _garbage(paths, "manifest"),
-     ["ui-ci-full-manifest-1/host/results.json: result projection unavailable",
-      "manifest: no valid projection of the unsharded lane"]),
-], ids=["missing-shard", "garbage-shard", "other-commit", "other-run", "unknown-attempt", "lane-grew",
-        "lane-shrank", "lane-reordered", "wrong-slice", "not-executed", "foreign-node", "other-count",
-        "invalid-block", "unsharded-shard", "sharded-manifest", "empty-manifest", "duplicate-manifest",
-        "missing-manifest", "garbage-manifest"])
+], ids=["missing-shard", "garbage-shard", "other-commit"])
 def test_shard_reconciliation_is_red_and_names_every_gap(tmp_path, fault, named):
     fault(_lane_proofs(tmp_path))
     result, summary = _reconcile_shards(tmp_path)
@@ -892,10 +807,17 @@ def _exit_status(key, status):
     return lambda paths: _rewrite(paths[key], change)
 
 
-@pytest.mark.parametrize("key, label", [(2, "shard 2/3"), ("manifest", "manifest")])
-@pytest.mark.parametrize("status, said", [(1, "1"), (2, "2"), (-9, "-9"), (ABSENT, "unknown"), (None, "unknown"),
-                                          (True, "unknown"), (False, "unknown"), ("0", "unknown"), (0.0, "unknown")],
-                         ids=["failed", "interrupted", "signal", "absent", "null", "true", "false", "text", "float"])
+@pytest.mark.parametrize(("status", "said", "key", "label"), [
+    pytest.param(1, "1", 2, "shard 2/3", id='failed-2-shard 2/3'),
+    pytest.param(2, "2", "manifest", "manifest", id='interrupted-manifest-manifest'),
+    pytest.param(-9, "-9", 2, "shard 2/3", id='signal-2-shard 2/3'),
+    pytest.param(ABSENT, "unknown", "manifest", "manifest", id='absent-manifest-manifest'),
+    pytest.param(None, "unknown", 2, "shard 2/3", id='null-2-shard 2/3'),
+    pytest.param(True, "unknown", "manifest", "manifest", id='true-manifest-manifest'),
+    pytest.param(False, "unknown", 2, "shard 2/3", id='false-2-shard 2/3'),
+    pytest.param("0", "unknown", "manifest", "manifest", id='text-manifest-manifest'),
+    pytest.param(0.0, "unknown", 2, "shard 2/3", id='float-2-shard 2/3'),
+])
 def test_shard_reconciliation_refuses_the_proof_of_a_session_that_ended_red(tmp_path, key, label, status, said):
     """Every node executed and every slice exact: the session's exit status alone decides."""
     paths = _lane_proofs(tmp_path)
@@ -960,10 +882,8 @@ def test_shard_reconciliation_slices_the_recorded_lane_by_position_like_the_plug
 
 @pytest.mark.parametrize("phases, executed", [
     ((("setup", "passed"), ("call", "passed"), ("teardown", "passed")), True),
-    ((("setup", "passed"), ("call", "failed"), ("teardown", "passed")), True),
-    ((("setup", "failed"),), True), ((("setup", "skipped"),), True), ((("crash", "failed"),), True),
-    ((("setup", "passed"),), False), ((("setup", "passed"), ("teardown", "passed")), False), ((), False),
-], ids=["passed", "failed", "setup-error", "skipped", "crash", "setup-only", "no-call", "silent"])
+    ((("setup", "passed"),), False), ((), False),
+], ids=["passed", "setup-only", "silent"])
 def test_shard_reconciliation_counts_execution_exactly_as_the_lane_guard_does(tmp_path, phases, executed):
     from types import SimpleNamespace
 

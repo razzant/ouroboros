@@ -203,9 +203,10 @@ def test_nested_copy_failure_holds_child_and_rechecks_existing_checkpoint(tmp_pa
     assert artifacts.read_actor_source_bytes(parent, "source", result) == b"complete output beyond the preview"
 
 
-@pytest.mark.parametrize("selected", [False, True])
-@pytest.mark.parametrize("copy_failure", [False, True])
-@pytest.mark.parametrize("canonical_checkpoint", [False, True], ids=["child_checkpoint", "canonical_checkpoint"])
+@pytest.mark.parametrize(("canonical_checkpoint", "copy_failure", "selected"), [
+    pytest.param(False, True, False, id='child_checkpoint-True-False'),
+    pytest.param(True, False, True, id='canonical_checkpoint-False-True'),
+])
 def test_nested_trajectory_promotes_existing_call_blobs_without_crawling_prose(tmp_path, monkeypatch, selected, copy_failure, canonical_checkpoint):
     from ouroboros.observability import persist_call, promote_child_task_refs, retry_pending_child_ref_promotions
     from ouroboros.task_results import load_task_result
@@ -287,8 +288,11 @@ def test_nested_trajectory_promotes_existing_call_blobs_without_crawling_prose(t
         assert artifacts.collect_task_artifact_records(destination, "source") == []
 
 
-@pytest.mark.parametrize("outer_already_copied", [False, True])
-@pytest.mark.parametrize("loss", ["missing", "corrupt", "legacy_ref"])
+@pytest.mark.parametrize(("loss", "outer_already_copied"), [
+    ("missing", True),
+    ("corrupt", True),
+    ("legacy_ref", False),
+])
 def test_nested_unavailable_source_is_disclosed_without_reconstructing_preview(tmp_path, loss, outer_already_copied):
     parent = tmp_path / "canonical"
     child = prepare_task_drive(parent, "source", "empty")

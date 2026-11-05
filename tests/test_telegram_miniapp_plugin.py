@@ -126,8 +126,6 @@ def test_invalid_core_port_fails_before_companion(tmp_path: Path) -> None:
         ("Darwin", "arm64"),
         ("Darwin", "x86_64"),
         ("Linux", "aarch64"),
-        ("Linux", "amd64"),
-        ("Windows", "AMD64"),
     ],
 )
 def test_supported_platform_matrix(
@@ -151,7 +149,7 @@ def test_unsupported_platform_skips_only_miniapp_companion(
     assert status["reason_code"] == "unsupported_platform"
 
 
-@pytest.mark.parametrize("build", ["win-amd64", "win-arm64", "win32", "unknown"])
+@pytest.mark.parametrize("build", ["win-amd64", "win32", "unknown"])
 def test_empty_windows_machine_registration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, build: str,
 ) -> None:

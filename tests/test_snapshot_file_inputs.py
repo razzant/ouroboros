@@ -63,8 +63,11 @@ def capture(tmp_path, handle):
     return result, patch, changed
 
 
-@pytest.mark.parametrize("geometry", ["ordinary", "unborn", "linked"])
-@pytest.mark.parametrize("operation", ["modify", "delete", "unchanged"])
+@pytest.mark.parametrize(("operation", "geometry"), [
+    ("modify", "ordinary"),
+    ("delete", "unborn"),
+    ("unchanged", "linked"),
+])
 def test_a_document_input_rides_the_snapshot_and_its_binary_result_applies_back(tmp_path, geometry, operation):
     target = target_tree(tmp_path, geometry)
     document(target / "input.docx")
@@ -132,8 +135,13 @@ def test_child_staging_unchanged_input_does_not_create_a_result(tmp_path):
     assert changed == ["input.docx"], "a staged change is a result"
 
 
-@pytest.mark.parametrize("newline", [b"\n", b"\r\n"], ids=["lf", "crlf"])
-@pytest.mark.parametrize("policy", ["autocrlf", "attributes", "info_attributes", "info_overrides_tree", "attributes_file"])
+@pytest.mark.parametrize(("policy", "newline"), [
+    pytest.param("autocrlf", b"\n", id='autocrlf-lf'),
+    pytest.param("attributes", b"\r\n", id='attributes-crlf'),
+    pytest.param("info_attributes", b"\n", id='info_attributes-lf'),
+    pytest.param("info_overrides_tree", b"\r\n", id='info_overrides_tree-crlf'),
+    pytest.param("attributes_file", b"\n", id='attributes_file-lf'),
+])
 def test_git_checkout_keeps_git_s_representation_and_normal_patch_semantics(tmp_path, newline, policy):
     target = target_tree(tmp_path)
     git(target, "config", "core.autocrlf", "true" if policy == "autocrlf" else "false")

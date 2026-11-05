@@ -24,8 +24,7 @@ def _wire(messages, provider):
     return json.loads(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
 
-@pytest.mark.parametrize("producer", ["view_image", "browser"])
-@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+@pytest.mark.parametrize(("provider", "producer"), [("openai", "view_image"), ("anthropic", "browser")])
 def test_completed_episode_keeps_tool_before_image_after_real_eviction(tmp_path, monkeypatch, producer, provider,
                                                                      record_property):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")

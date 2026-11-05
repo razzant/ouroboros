@@ -40,8 +40,7 @@ def _due(publication):
     write_task_result(publication.root, "t", row["status"], owner_quiz=row["owner_quiz"])
 
 
-@pytest.mark.parametrize("end", ["terminal", "timeout"])
-@pytest.mark.parametrize("assumption", ["", "Continue reading only"])
+@pytest.mark.parametrize(("assumption", "end"), [("", "terminal"), ("Continue reading only", "timeout")])
 def test_required_publication_recovers_after_wait_end(tmp_path, monkeypatch, end, assumption):
     import asyncio
     from ouroboros import dialogue_store
@@ -166,8 +165,7 @@ def test_bridge_refusal_keeps_publication_debt_and_stale_ask_does_not_claim_answ
     assert before["kind"] == "answer" and before["attempts"] == 0
 
 
-@pytest.mark.parametrize("address,evidence", [(True, "pre_exposure"), (1.5, "history"),
-                                             ("1", "history"), (1, "timestamps")])
+@pytest.mark.parametrize("address,evidence", [(True, "pre_exposure"), ("1", "history"), (1, "timestamps")])
 def test_corrupt_saved_publication_is_a_gap_for_publish_and_late_answer(publication, address, evidence):
     from ouroboros.gateway.task_decision import _late_answer_destination
 

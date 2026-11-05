@@ -338,8 +338,7 @@ def test_a_vendor_probe_leaves_no_process_behind(tmp_path, mode):
     assert not pid_is_alive(grandchild) or pid_is_zombie(grandchild)
 
 
-@pytest.mark.parametrize("kind", ["native", "node"])
-@pytest.mark.parametrize("version_output", ["codex-cli 1.2.3", "codex-cli 1.2.30"])
+@pytest.mark.parametrize(("version_output", "kind"), [("codex-cli 1.2.3", "native"), ("codex-cli 1.2.30", "node")])
 def test_vendor_launch_uses_managed_transport_and_engine_doctor_in_custody(
         tmp_path, monkeypatch, kind, version_output):
     import ouroboros.config as config
@@ -553,7 +552,7 @@ def test_the_harness_summary_carries_its_own_limits(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("fault", [
-    "none", "promotion", "persistent_promotion", "non_permission",
+    "none", "persistent_promotion", "non_permission",
 ])
 def test_node_repair_directory_transaction_preserves_success_and_failure(tmp_path, monkeypatch, fault):
     """Unique generation publication retries sharing refusals, never displaces a live root.

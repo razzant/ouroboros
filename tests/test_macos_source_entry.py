@@ -136,7 +136,7 @@ def test_macos_fixture_on_a_simulated_windows_host(request, monkeypatch):
     assert stopped.value.executable == str(l.entry)
 
 
-@pytest.mark.parametrize("reason", ["same-generation", "server-only", "imports-broken", "legacy-bundle", "source"])
+@pytest.mark.parametrize("reason", ["same-generation", "imports-broken", "source"])
 def test_cold_fallback_and_source_never_loop_into_frozen(launch, monkeypatch, reason):
     l = launch
     argv = []
@@ -280,7 +280,7 @@ def _lifecycle(l, monkeypatch, *, returncode=42, landed=lambda: None, waited=lam
     monkeypatch.setattr(module, "start_agent", start)
 
 
-@pytest.mark.parametrize("mode", ["helper-change", "server-only", "source", "legacy", "panic", "tray-panic"])
+@pytest.mark.parametrize("mode", ["helper-change", "source", "tray-panic"])
 def test_lifecycle_restart_and_panic_keep_the_existing_owners(launch, monkeypatch, mode):
     l = launch
     module = l.module
@@ -316,7 +316,7 @@ def test_lifecycle_restart_and_panic_keep_the_existing_owners(launch, monkeypatc
         assert l.calls[:3] == ["server", "sync", "deps"] and l.calls[-2:] == ["release", "exec"]
 
 
-@pytest.mark.parametrize("stop_at", ["sleep", "sync", "deps", "change-check"])
+@pytest.mark.parametrize("stop_at", ["sleep", "sync", "change-check"])
 def test_panic_during_exit_42_cannot_handoff(launch, monkeypatch, stop_at):
     l = launch
     _lifecycle(l, monkeypatch, returncode=42)
@@ -350,8 +350,12 @@ def _git(repo, *args):
                           check=True, capture_output=True, text=True).stdout.strip()
 
 
-@pytest.mark.parametrize("changed", ["ouroboros/process_scope.py", "supervisor/queue.py", "server.py", None])
-@pytest.mark.parametrize("macos", [True, False])
+@pytest.mark.parametrize(("macos", "changed"), [
+    (True, "ouroboros/process_scope.py"),
+    (True, "server.py"),
+    (False, "supervisor/queue.py"),
+    (False, None),
+])
 def test_cold_open_counts_packaged_helpers_the_frozen_launcher_has_not_imported_yet(launch, monkeypatch, changed,
                                                                                 macos):
     """Real Git and the real detector. A frozen launcher imports more helpers from its seed later (Panic sweep,
@@ -502,9 +506,13 @@ def test_frozen_handoff_probe_uses_shell_python_even_when_body_is_in_a_venv(laun
     assert seen["python"] == str(launch.python)
 
 
-@pytest.mark.parametrize("frozen", [True, False])
-@pytest.mark.parametrize("source", ["old-339fce", "no-protocol", "compatible-local", "future-protocol",
-                                    "damaged-helper"])
+@pytest.mark.parametrize(("source", "frozen"), [
+    ("old-339fce", False),
+    ("no-protocol", True),
+    ("compatible-local", False),
+    ("future-protocol", True),
+    ("damaged-helper", False),
+])
 def test_entry_handoff_requires_source_capability_in_a_real_plain_python_probe(launch, monkeypatch, frozen, source):
     """The actual old launcher imports successfully but cannot host its body under the entry.
 

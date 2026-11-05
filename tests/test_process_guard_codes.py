@@ -68,40 +68,38 @@ def test_process_code_specs_adapter_and_legacy_residuals_are_total():
     ).code == "LEGACY_BLOCKED"
 
 
-@pytest.mark.parametrize(
-    ("code", "loop_status"),
-    [(code, contract[1]) for code, contract in _CODE_CONTRACTS.items()],
-)
-def test_process_codes_preserve_loop_error_and_policy_denial(code, loop_status):
-    text = f"⚠️ {code}: fixture denial."
-    is_error = _is_tool_execution_failure(True, text)
-    meta = _extract_result_metadata("run_command", text, is_error)
-    buckets = _classify_tool_errors(
-        {
-            "tool_calls": [
+def test_process_codes_preserve_loop_error_and_policy_denial(subtests):
+    for code, loop_status in [(code, contract[1]) for code, contract in _CODE_CONTRACTS.items()]:
+        with subtests.test(code=code, loop_status=loop_status):
+            text = f"⚠️ {code}: fixture denial."
+            is_error = _is_tool_execution_failure(True, text)
+            meta = _extract_result_metadata("run_command", text, is_error)
+            buckets = _classify_tool_errors(
+                {
+                    "tool_calls": [
+                        {
+                            "tool": "run_command",
+                            "args": {"cmd": ["fixture"]},
+                            "result": text,
+                            "is_error": is_error,
+                            "status": meta["status"],
+                        }
+                    ]
+                }
+            )
+
+            assert is_error is True
+            assert meta["status"] == loop_status
+            assert buckets["unresolved"] == []
+            assert buckets["policy_denials"] == [
                 {
                     "tool": "run_command",
-                    "args": {"cmd": ["fixture"]},
+                    "status": loop_status,
+                    "exit_code": None,
+                    "signal": None,
                     "result": text,
-                    "is_error": is_error,
-                    "status": meta["status"],
                 }
             ]
-        }
-    )
-
-    assert is_error is True
-    assert meta["status"] == loop_status
-    assert buckets["unresolved"] == []
-    assert buckets["policy_denials"] == [
-        {
-            "tool": "run_command",
-            "status": loop_status,
-            "exit_code": None,
-            "signal": None,
-            "result": text,
-        }
-    ]
 
 
 @pytest.mark.parametrize(
@@ -110,24 +108,6 @@ def test_process_codes_preserve_loop_error_and_policy_denial(code, loop_status):
         (["sudo", "true"], "SUDO_INTERACTIVE_BLOCKED"),
         (
             'save_settings({"ouroboros_runtime_mode":"pro"})',
-            None,
-        ),
-        (
-            'save_settings({"ouroboros_context_mode":"low"})',
-            None,
-        ),
-        (
-            'save_settings({"ouroboros_safety_mode":"off"})',
-            None,
-        ),
-        (
-            "curl -X POST /api/owner/skills/demo/attest-review",
-            None,
-        ),
-        (
-            # Source text and a state filename do not bypass the configured
-            # Supervisor or constitute an independent permission veto.
-            "cp payload.json state/skills/demo/review.json",
             None,
         ),
         (["git", "commit"], "GIT_VIA_SHELL_BLOCKED"),

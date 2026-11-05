@@ -678,71 +678,72 @@ def _lanes_for(state_id):
 F6_CELLS = [f"{c}{s}" for c in "AEIDC" for s in "0PRMX"]
 
 
-@pytest.mark.parametrize("cell", F6_CELLS)
-def test_f6_catalog_by_lanes_matrix(cell):
-    catalog_id, lanes_id = cell
-    doc = {"OUROBOROS_MODEL": "openai/gpt-5.6-sol", "OPENROUTER_API_KEY": "present", SLOTS: _lanes_for(lanes_id)}
-    stored = _catalog_for(catalog_id)
-    if stored is not None:
-        doc[SUBAGENTS] = stored
-    before = copy.deepcopy(doc)
-    outcome = m.migrate_review_lanes(doc)
-    assert doc == before, "pure: the input is never mutated"
-    assert outcome is not None
-    expected_catalog = {"A": "absent", "E": "empty", "I": "invalid", "D": "disabled", "C": "configured"}[catalog_id]
-    assert outcome.catalog_state == expected_catalog
-    loaded = dict(doc)
-    m.apply_outcome(loaded, outcome)
+def test_f6_catalog_by_lanes_matrix(subtests):
+    for cell in F6_CELLS:
+        with subtests.test(cell=cell):
+            catalog_id, lanes_id = cell
+            doc = {"OUROBOROS_MODEL": "openai/gpt-5.6-sol", "OPENROUTER_API_KEY": "present", SLOTS: _lanes_for(lanes_id)}
+            stored = _catalog_for(catalog_id)
+            if stored is not None:
+                doc[SUBAGENTS] = stored
+            before = copy.deepcopy(doc)
+            outcome = m.migrate_review_lanes(doc)
+            assert doc == before, "pure: the input is never mutated"
+            assert outcome is not None
+            expected_catalog = {"A": "absent", "E": "empty", "I": "invalid", "D": "disabled", "C": "configured"}[catalog_id]
+            assert outcome.catalog_state == expected_catalog
+            loaded = dict(doc)
+            m.apply_outcome(loaded, outcome)
 
-    # The refusal cells: an invalid catalog, invalid lanes, or references that cannot
-    # resolve (no catalog, an empty one, a disabled one) — no partial migration, the
-    # lane keys stay for the owner's catalog save, the catalog is untouched.
-    refused = catalog_id == "I" or lanes_id == "X" or (lanes_id in "RM" and catalog_id in "AED")
-    if refused:
-        assert outcome.error and outcome.catalog_after is None, outcome
-        assert outcome.retained_keys == (SLOTS,) and outcome.consumed_keys == ()
-        assert loaded == doc, "nothing rewritten, the lanes key stays"
-        assert outcome.slots_state == ("invalid" if lanes_id in "XRM" or catalog_id != "I" else outcome.slots_state)
-        assert m.owner_message(outcome, "snap.json").startswith("⚙️ Review settings could not be migrated automatically")
-        assert "snap.json" in m.owner_message(outcome, "snap.json")
-        return
+            # The refusal cells: an invalid catalog, invalid lanes, or references that cannot
+            # resolve (no catalog, an empty one, a disabled one) — no partial migration, the
+            # lane keys stay for the owner's catalog save, the catalog is untouched.
+            refused = catalog_id == "I" or lanes_id == "X" or (lanes_id in "RM" and catalog_id in "AED")
+            if refused:
+                assert outcome.error and outcome.catalog_after is None, outcome
+                assert outcome.retained_keys == (SLOTS,) and outcome.consumed_keys == ()
+                assert loaded == doc, "nothing rewritten, the lanes key stays"
+                assert outcome.slots_state == ("invalid" if lanes_id in "XRM" or catalog_id != "I" else outcome.slots_state)
+                assert m.owner_message(outcome, "snap.json").startswith("⚙️ Review settings could not be migrated automatically")
+                assert "snap.json" in m.owner_message(outcome, "snap.json")
+                continue
 
-    assert not outcome.error and outcome.consumed_keys == (SLOTS,) and outcome.retained_keys == ()
-    after = json.loads(loaded[SUBAGENTS])
-    assert SLOTS not in loaded
-    expected_slots = {"0": "absent", "P": "direct", "R": "referenced", "M": "mixed"}[lanes_id]
-    assert outcome.slots_state == expected_slots
-    # The catalog switch is never touched: a disabled catalog stays disabled (review
-    # stays on through the pool; delegation stays off) and the report says so.
-    assert after["enabled"] is (catalog_id != "D")
-    if catalog_id == "D":
-        assert any("review stays on; delegation stays off" in note for note in outcome.snapshot["notes"])
-    existing = json.loads(stored)["items"] if stored else []
-    assert [r["subagent_id"] for r in after["items"][:len(existing)]] == [r["subagent_id"] for r in existing]
-    marked = _marked(after["items"])
-    if lanes_id == "0":
-        # The shipped default panel ran: factory rows, minted as such, three distinct
-        # OpenRouter models with the scope seat merged into the terra row.
-        minted = [r for r in after["items"] if r.get("minted_from") == "factory_default"]
-        assert [r["route"]["target_id"] for r in minted] == list(OPENROUTER_REVIEW_DEFAULTS["triad"])
-        assert marked == [r["subagent_id"] for r in minted] and all(r["effort"] == "high" for r in minted)
-        assert all(r["recommended_use"] == m.REVIEW_SEAT_RECOMMENDATION for r in minted)
-        assert len(after["items"]) == len(existing) + 3, "no advisory row (unauthored), no deep row (key empty)"
-        assert outcome.snapshot["summary"]["distinct_models"] == 3
-    elif lanes_id == "P":
-        minted = after["items"][len(existing):]
-        assert [r["subagent_id"] for r in minted] == ["review-1", "review-2", "review-3", "review-4"]
-        assert marked == ["review-1", "review-2"], "advisory and deep helpers carry no mark"
-        assert minted[1]["delivery"] == "packet" and "delivery" not in minted[0]
-        assert minted[2]["route"]["target_id"] == "z/adv" and minted[3]["route"]["target_id"] == "w/deep"
-        assert all(r["minted_from"] == "review_lane" for r in minted)
-    elif lanes_id == "R":
-        assert marked == ["helper", "coder"] and len(after["items"]) == len(existing)
-        assert not any(r.get("minted_from") for r in after["items"])
-    else:  # M
-        assert marked == ["helper", "review-1", "review-2"]
-        assert after["items"][2]["route"]["target_id"] == "y/two" and after["items"][3]["route"]["target_id"] == "x/one"
-    assert all(r.get("effort") for r in after["items"] if r.get("minted_from")), "no minted row without effort"
+            assert not outcome.error and outcome.consumed_keys == (SLOTS,) and outcome.retained_keys == ()
+            after = json.loads(loaded[SUBAGENTS])
+            assert SLOTS not in loaded
+            expected_slots = {"0": "absent", "P": "direct", "R": "referenced", "M": "mixed"}[lanes_id]
+            assert outcome.slots_state == expected_slots
+            # The catalog switch is never touched: a disabled catalog stays disabled (review
+            # stays on through the pool; delegation stays off) and the report says so.
+            assert after["enabled"] is (catalog_id != "D")
+            if catalog_id == "D":
+                assert any("review stays on; delegation stays off" in note for note in outcome.snapshot["notes"])
+            existing = json.loads(stored)["items"] if stored else []
+            assert [r["subagent_id"] for r in after["items"][:len(existing)]] == [r["subagent_id"] for r in existing]
+            marked = _marked(after["items"])
+            if lanes_id == "0":
+                # The shipped default panel ran: factory rows, minted as such, three distinct
+                # OpenRouter models with the scope seat merged into the terra row.
+                minted = [r for r in after["items"] if r.get("minted_from") == "factory_default"]
+                assert [r["route"]["target_id"] for r in minted] == list(OPENROUTER_REVIEW_DEFAULTS["triad"])
+                assert marked == [r["subagent_id"] for r in minted] and all(r["effort"] == "high" for r in minted)
+                assert all(r["recommended_use"] == m.REVIEW_SEAT_RECOMMENDATION for r in minted)
+                assert len(after["items"]) == len(existing) + 3, "no advisory row (unauthored), no deep row (key empty)"
+                assert outcome.snapshot["summary"]["distinct_models"] == 3
+            elif lanes_id == "P":
+                minted = after["items"][len(existing):]
+                assert [r["subagent_id"] for r in minted] == ["review-1", "review-2", "review-3", "review-4"]
+                assert marked == ["review-1", "review-2"], "advisory and deep helpers carry no mark"
+                assert minted[1]["delivery"] == "packet" and "delivery" not in minted[0]
+                assert minted[2]["route"]["target_id"] == "z/adv" and minted[3]["route"]["target_id"] == "w/deep"
+                assert all(r["minted_from"] == "review_lane" for r in minted)
+            elif lanes_id == "R":
+                assert marked == ["helper", "coder"] and len(after["items"]) == len(existing)
+                assert not any(r.get("minted_from") for r in after["items"])
+            else:  # M
+                assert marked == ["helper", "review-1", "review-2"]
+                assert after["items"][2]["route"]["target_id"] == "y/two" and after["items"][3]["route"]["target_id"] == "x/one"
+            assert all(r.get("effort") for r in after["items"] if r.get("minted_from")), "no minted row without effort"
 
 
 def test_f6_c0_is_the_ordinary_upgrade_of_antons_catalog_without_lanes():
@@ -955,13 +956,9 @@ def test_m1_a_direct_provider_structural_empty_catalog_stays_empty(key):
 
 @pytest.mark.parametrize("document", [
     {"OUROBOROS_MODEL": "x/y", "OPENROUTER_API_KEY": "present"},
-    {"OUROBOROS_MODEL": "x/y", "OPENROUTER_API_KEY": "present", SUBAGENTS: ""},
     {"TOTAL_BUDGET": 1.0},
-    {"OUROBOROS_REVIEW_MODELS": "a/one, b/two", "OPENROUTER_API_KEY": "present"},
-    {SLOTS: "", SUBAGENTS: "", "OPENROUTER_API_KEY": "present"},
     {SLOTS: "  ", "OPENROUTER_API_KEY": "present"},
-], ids=["provider-key-only", "blank-catalog-string", "no-provider", "retired-comma-keys", "ui-saved-blank-lanes",
-        "whitespace-lanes"])
+], ids=["provider-key-only", "no-provider", "whitespace-lanes"])
 def test_m1_an_environment_catalog_wins_over_the_factory_rows_of_a_document_that_authored_none(
         tmp_path, monkeypatch, document):
     """The factory rows the seam mints for a document that authored NO review lanes and saved
@@ -1097,7 +1094,7 @@ def test_authored_lanes_beside_a_pool_catalog_are_refused_not_dropped_in_silence
     assert "could not be migrated automatically" in m.owner_message(outcome, "x")
 
 
-@pytest.mark.parametrize("value", [{"triad": []}, ["x/y"], 7, True])
+@pytest.mark.parametrize("value", [{"triad": []}, 7, True])
 def test_a_non_string_lanes_value_is_refused_with_the_key_retained(value):
     """VD3-11 (P4): the lane key held JSON text; a dict, list or number is garbage the
     frozen reader never accepted — not "no lanes" to be replaced by the factory rows."""

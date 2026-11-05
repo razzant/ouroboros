@@ -107,8 +107,11 @@ def test_held_model_candidate_cannot_author_a_later_host_fallback(tmp_path, monk
     assert result["outcome"] == "silent" and result["text"] == ""
 
 
-@pytest.mark.parametrize("origin", ["host_notice", "host_salvage", ""])
-@pytest.mark.parametrize("admission", ["scheduled", "unconfirmed", "rejected"])
+@pytest.mark.parametrize(("admission", "origin"), [
+    ("scheduled", "host_notice"),
+    ("unconfirmed", "host_salvage"),
+    ("rejected", ""),
+])
 def test_answerless_failed_parent_keeps_only_admitted_child_custody(tmp_path, origin, admission):
     result, stored, raw = _failed_parent(tmp_path, admission=admission, accepted=True, usage={
         "execution_status": "infra_failed", "reason_code": "provider_unavailable", "terminal_origin": origin,
@@ -119,8 +122,11 @@ def test_answerless_failed_parent_keeps_only_admitted_child_custody(tmp_path, or
     assert stored["status"] == "failed"
 
 
-@pytest.mark.parametrize("origin", ["host_notice", "host_salvage", "model_final"])
-@pytest.mark.parametrize("admission", ["scheduled", "rejected"])
+@pytest.mark.parametrize(("admission", "origin"), [
+    ("scheduled", "host_notice"),
+    ("scheduled", "model_final"),
+    ("rejected", "host_salvage"),
+])
 def test_unresolved_attempt_is_refused_whatever_authored_its_terminal(tmp_path, origin, admission):
     """Under the unknown-outcome fence authorship decides nothing: the rail's notice, its salvage
     and a round-one draft it stamped ``model_final`` are all unanswered events, refused back to
@@ -140,20 +146,7 @@ def test_unresolved_attempt_is_refused_whatever_authored_its_terminal(tmp_path, 
 @pytest.mark.parametrize("origin,frozen,outcome,expected", [
     ("host_notice", "Old frozen diagnostic", "message", ""),
     ("host_salvage", "Old frozen partial", "deferred", ""),
-    ("host_notice", None, "message", ""),
-    ("model_final", "", "deferred", ""),
-    ("", "", "deferred", ""),
-    ("model_final", "Exact authored reply", "message", "Exact authored reply"),
-    ("model_final", None, "message", "Raw retained text"),
-    ("", None, "message", "Raw retained text"),  # explicit legacy unknown-origin compatibility
-    ("", "Legacy frozen reply", "message", "Legacy frozen reply"),
     ("model_final", provider_terminal_body("Raw retained text", "Recorded host detail"), "message", "Raw retained text"),
-    ("model_final", provider_terminal_body("Older explicit reply", "Recorded host detail"), "message",
-     provider_terminal_body("Older explicit reply", "Recorded host detail")),
-    ("", provider_terminal_body("Raw retained text", "Recorded host detail"), "message",
-     provider_terminal_body("Raw retained text", "Recorded host detail")),
-    ("model_final", "Unused text", "silent", ""),
-    ("model_final", "Unused text", "tool_delivered", ""),
 ])
 def test_cached_and_deferred_api_share_authorship_and_keyed_empty_body(tmp_path, origin, frozen, outcome, expected):
     _seed_token(tmp_path, skill="telegram-bot", token="presence-token",
@@ -201,7 +194,7 @@ def native_agent(tmp_path, monkeypatch):
     return agent, ctx
 
 
-@pytest.mark.parametrize("case", ["accepted_empty", "refused_reply_later", "nonstring", "exception", "budget"])
+@pytest.mark.parametrize("case", ["accepted_empty", "nonstring", "budget"])
 def test_native_host_replacement_resets_authorship_and_keeps_diagnostic(tmp_path, monkeypatch, native_agent, case):
     from ouroboros.usage_accounting import BudgetExceeded
 

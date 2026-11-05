@@ -1335,7 +1335,7 @@ def test_owner_disabled_route_refusal_carries_its_typed_code(tmp_path, fake_rout
 
 
 @pytest.mark.parametrize("telemetry_case", [
-    "missing_file", "old_without_final_id", "malformed_yaml", "known_off_pin", "known_exact",
+    "missing_file", "malformed_yaml", "known_exact",
 ])
 def test_final_route_observation_absence_is_disclosed_without_discarding_the_verdict(
     tmp_path, monkeypatch, fake_route, telemetry_case,

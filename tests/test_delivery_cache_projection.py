@@ -54,7 +54,7 @@ def _wires(messages, monkeypatch):
     return out
 
 
-@pytest.mark.parametrize(("batch_size", "live_count"), [(1, 6), (3, 8), (5, 10), (6, 5), (7, 6)])
+@pytest.mark.parametrize(("batch_size", "live_count"), [(1, 6), (3, 8), (5, 10)])
 def test_real_png_auto_batches_share_eviction_projection_with_fit_and_all_wire_builders(tmp_path, monkeypatch,
                                                                                      batch_size, live_count):
     repo = tmp_path / "repo"

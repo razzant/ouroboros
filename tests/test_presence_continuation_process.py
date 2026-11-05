@@ -335,8 +335,7 @@ def test_direct_exec_restart_interrupts_same_pid_author_without_replaying_effect
         host.close()
 
 
-@pytest.mark.parametrize("mode", ["blocking", "advisory"])
-@pytest.mark.parametrize("death", ["sigkill", "panic"])
+@pytest.mark.parametrize(("death", "mode"), [("sigkill", "blocking"), ("panic", "advisory")])
 def test_killed_author_stays_interrupted_and_explicit_new_event_can_continue(tmp_path, mode, death):
     first_host = Host(tmp_path, 1, mode)
     try:

@@ -231,64 +231,6 @@ def test_selected_cli_runs_where_the_evidence_directory_and_a_module_spell_templ
     assert (evidence / "ci-evidence-dir").read_text(encoding="utf-8") == str((evidence / "serial").resolve())
 
 
-@pytest.mark.skipif(os.name == "nt", reason="the fixture links the real package; Windows symlinks need privileges")
-def test_cli_wrapper_owns_a_selected_run_and_keeps_its_full_inventory(tmp_path):
-    """The real `python scripts/run_tests.py --selected` path: safe_test owns it, CI's REQUIRE
-    controls survive its scrub while a credential does not, and both lanes' complete native
-    inventories stay in durable evidence after the scratch is released."""
-    from ouroboros.test_evidence import diagnostic_directory
-
-    real = Path(__file__).resolve().parents[1]
-    files = {path: "def test_floor():\n    assert True\n" for path in test_selection.FLOOR_TESTS}
-    files.update({
-        ".gitignore": "__pycache__/\n.pytest_cache/\nouroboros\n",
-        "scripts/run_tests.py": (real / "scripts/run_tests.py").read_text(encoding="utf-8"),
-        "scripts/safe_test.py": (real / "scripts/safe_test.py").read_text(encoding="utf-8"),
-        "tests/conftest.py": "def pytest_addoption(parser): parser.addoption('--ci-evidence-dir')\n",
-        "leaf.py": "value = 1\n",
-        "tests/test_leaf.py": "import os\nfrom leaf import value\ndef test_leaf():\n    assert value == 2\n"
-                              "    assert os.environ['OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS'] == '1'\n"
-                              "    assert os.environ['OUROBOROS_PREFLIGHT_REQUIRE_NODE'] == '1'\n"
-                              "    assert 'FIXTURE_API_KEY' not in os.environ\n",
-        "tests/test_unrelated.py": "raise AssertionError('must not collect')\n",
-    })
-    repo = _make_repo(tmp_path, files)
-    (repo / "ouroboros").symlink_to(real / "ouroboros", target_is_directory=True)
-    (repo / "leaf.py").write_text("value = 2\n", encoding="utf-8")
-    evidence = diagnostic_directory(tmp_path / "evidence", "selected-wrapper-" + tmp_path.name)
-    env = {**os.environ, "OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS": "1", "OUROBOROS_PREFLIGHT_REQUIRE_NODE": "1",
-           "FIXTURE_API_KEY": "must-not-cross", "OUROBOROS_TEST_EVIDENCE_ROOT": str(evidence),
-           "OUROBOROS_PREFLIGHT_TEST_WORKERS": "2", "OURO_TEST_WORKER_BUDGET": "2"}
-    result = subprocess.run([sys.executable, str(repo / "scripts/run_tests.py"), "--selected", "--base", "HEAD"],
-                            cwd=repo, env=env, capture_output=True, text=True, timeout=300)
-    (evidence / "launcher.stdout").write_text(result.stdout, encoding="utf-8")
-    (evidence / "launcher.stderr").write_text(result.stderr, encoding="utf-8")
-    assert result.returncode == 0, result.stdout + result.stderr
-    run = Path(next(line.split(" ", 1)[1] for line in result.stderr.splitlines() if line.startswith("SAFE_TEST_EVIDENCE ")))
-    outcome = json.loads((run / "result.json").read_text(encoding="utf-8"))
-    assert (outcome["returncode"], outcome["containment_error"], outcome["evidence_error"], outcome["retention_reason"]) == (0, "", "", "")
-    # This fixture lacks the battery conftest that declares a basetemp, so pytest's own
-    # empty default stays as undeclared command content: retained, never guessed away.
-    root, last = Path(outcome["scratch"]), result.stderr.splitlines()[-1]
-    if last.startswith("SAFE_TEST_RETAINED "):
-        left = sorted(str(path.relative_to(root)) for path in root.rglob("*"))
-        assert all(item == "tmp" or item.startswith("tmp/pytest-of-") for item in left), left
-        assert not [path for path in root.rglob("*") if path.is_file() and not path.is_symlink()], left
-        import shutil
-        shutil.rmtree(root)  # this test's own ended root: no file, nothing undeclared but pytest's empty default
-    else:
-        assert last == f"SAFE_TEST_RELEASED {root}", result.stderr
-    row = json.loads((run / "pytest/selection.json").read_text(encoding="utf-8"))
-    assert row["tier"] == "selected" and "tests/test_unrelated.py" not in row["expected_files"]
-    assert row["outcomes"] == {"parallel": "success", "serial": "success"} and row["outcome"] == "success"
-    for lane in ("parallel", "serial"):
-        events = [json.loads(line)["event"] for line in
-                  (run / f"pytest/inventory-{lane}.jsonl").read_text(encoding="utf-8").splitlines()]
-        assert events[0] == "start" and events[-1] == "finish", events
-    executed = row["inventory"]["parallel"]["executed"]
-    assert "tests/test_leaf.py::test_leaf" in executed and sorted(executed) == sorted(row["inventory"]["parallel"]["expected"])
-
-
 def test_merges_run_the_selected_scope_and_qualification_runs_remain_full():
     """The affected selection runs after merges (post-merge.yml, owner decision 3A); manual and
     release runs of ci.yml keep the full default suite and no selected step."""

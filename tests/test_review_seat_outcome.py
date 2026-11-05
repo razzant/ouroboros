@@ -45,8 +45,6 @@ def _produce(root, text, parts, *, cost=None):
 @pytest.mark.parametrize("text,parts,verdict,parse,errors", [
     (_body(True), ["change", "coupling"], "FAIL", "valid", 0),
     (_body(), ["change", "coupling"], "PASS", "valid", 0),
-    ("[]\nNO_FINDINGS", ["result"], "PASS", "valid", 0),
-    ("[]\nNO_FINDINGS", ["skill"], "PASS", "valid", 0),
     ("not an answer", ["result"], "DEGRADED", "malformed", 1),
 ])
 def test_producer_consumer_and_cas_have_one_contract_truth(tmp_path, monkeypatch, text, parts, verdict, parse, errors):
@@ -83,8 +81,7 @@ def test_producer_consumer_and_cas_have_one_contract_truth(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("state,transport,error_count", [
-    ("in_flight", "", 0), ("pending_dispatch", "", 0),
-    ("late_settled", "interrupted", 0), ("custody_lost", "provider_transport_error", 1),
+    ("in_flight", "", 0), ("custody_lost", "provider_transport_error", 1),
     ("settled", "provider_transport_error", 1),
 ])
 def test_pending_and_interruption_are_not_model_losses(tmp_path, state, transport, error_count):

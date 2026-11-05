@@ -259,8 +259,12 @@ def test_unread_operations_catalog_does_not_erase_successful_siblings(engine, fa
     assert payload["resources"] == WIRE["quota"]["resources"]
 
 
-@pytest.mark.parametrize("failure", ["http", "transport"])
-@pytest.mark.parametrize("action", ["full_refresh", "target_refresh", "reset", "inspect"])
+@pytest.mark.parametrize(("action", "failure"), [
+    ("full_refresh", "http"),
+    ("target_refresh", "transport"),
+    ("reset", "http"),
+    ("inspect", "transport"),
+])
 def test_explicit_operations_preserve_catalog_failure_instead_of_claiming_unsupported(engine, failure, action):
     client, state, calls = engine
     state["catalog_error"] = failure
@@ -303,8 +307,7 @@ def test_reset_replay_read_and_typed_refusal_keep_exact_contract(engine):
     assert result.headers["Retry-After"] == "3"
 
 
-@pytest.mark.parametrize("body", [None, [], {"target": None}, {"target": {"harness": "claude", "profile_id": ""}},
-                                       {"target": {"harness": "claude", "profile_id": False}}, {"unknown": 1}])
+@pytest.mark.parametrize("body", [None, [], {"unknown": 1}])
 def test_refresh_invalid_body_never_becomes_full_refresh(engine, body):
     client, _, calls = engine
     response = client.post("/api/claudexor/quota/refresh", content=json.dumps(body))

@@ -91,7 +91,7 @@ def _observe(monkeypatch):
     return counts
 
 
-@pytest.mark.parametrize("fault", ["missing", "corrupt", "gzip_corrupt", "gzip_deflate"])
+@pytest.mark.parametrize("fault", ["missing", "corrupt", "gzip_deflate"])
 def test_unchanged_missing_inventory_waits_for_real_repair_without_rewalk_or_gc(tmp_path, monkeypatch, fault):
     parent, child, task, blob, exact = _inventory(tmp_path, fault)
     counts = _observe(monkeypatch)

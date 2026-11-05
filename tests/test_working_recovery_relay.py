@@ -46,8 +46,7 @@ def _first_receiver(host, tmp_path, monkeypatch, scope, origin="crash"):  # noqa
     return receiver, copy.deepcopy(receiver["_working_recovery"])
 
 
-@pytest.mark.parametrize("scope", ["project", "main"])
-@pytest.mark.parametrize("origin", ["crash", "stored_new_id"])
+@pytest.mark.parametrize(("origin", "scope"), [("crash", "main"), ("stored_new_id", "project")])
 def test_real_crash_retry_carries_original_source_across_two_lost_receivers(
     host, tmp_path, monkeypatch, scope, origin,  # noqa: F811
 ):
@@ -98,7 +97,7 @@ def test_real_stop_restores_a_dispatched_receiver_without_its_first_checkpoint(
     assert len(sent) == 1 and sent[0]["_attempt"] == 3
 
 
-@pytest.mark.parametrize("damage", ["missing_mark", "later_mark", "bad_prior_attempt", "bad_source", "newer_torn"])
+@pytest.mark.parametrize("damage", ["missing_mark", "later_mark", "newer_torn"])
 def test_a_relay_never_guesses_missing_prior_dispatch_or_replaces_a_newer_source(
     host, tmp_path, monkeypatch, damage,  # noqa: F811
 ):

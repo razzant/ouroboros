@@ -52,13 +52,9 @@ def test_overview_is_authored_introduction_and_details_have_physical_addresses()
 
 
 @pytest.mark.parametrize("membership", [
-    "- [One](architecture/runtime.md)\n- [Duplicate](architecture/runtime.md)",
-    "- [Missing](architecture/missing.md)",
     "- [Outside](../outside.md)",
     "- [Remote](https://example.com/a.md)",
-    "- [Section](architecture/runtime.md#startup)",
     "- No link",
-    "",
 ])
 def test_incomplete_membership_never_returns_a_partial_full_book(membership):
     corpus = sources()

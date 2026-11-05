@@ -6,8 +6,7 @@ from tests.test_supervisor_route import cognition_row
 from tests.test_supervisor_route_flow import root_context, schedule
 
 
-@pytest.mark.parametrize('call', [False, True])
-@pytest.mark.parametrize('explicit', [False, True])
+@pytest.mark.parametrize(("explicit", "call"), [(False, False), (True, True)])
 def test_call_delegation_keeps_speech_parent_and_text_supervisor(tmp_path, monkeypatch, call, explicit):
     from ouroboros.subagent_runtime import subagent_supervision_fact_line
 

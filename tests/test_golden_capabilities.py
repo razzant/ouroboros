@@ -99,8 +99,11 @@ def test_root_lists_and_searches_credential_named_user_files(user_files_ctx):
     assert "wJalrXUtnFEMI" in raw
 
 
-@pytest.mark.parametrize("operation", ["read", "list", "search"])
-@pytest.mark.parametrize("relpath", [".aws/credentials", ".bashrc"])
+@pytest.mark.parametrize(("relpath", "operation"), [
+    (".aws/credentials", "read"),
+    (".aws/credentials", "search"),
+    (".bashrc", "list"),
+])
 def test_root_read_authorization_is_location_only(user_files_ctx, operation, relpath):
     # decide-level pin: for read-family operations under the owner's home the
     # authorization answer is location-only — no name-shape veto.

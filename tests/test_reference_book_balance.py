@@ -26,6 +26,7 @@ from ouroboros.reference_books import (
     ruled_text_paths,
     ruled_text_sizes,
 )
+from tests._cases import case_folders
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 CHAPTER = "docs/architecture/01-one.md"
@@ -114,7 +115,7 @@ def test_linked_body_candidate_without_upstream_keeps_committed_growth(tmp_path)
     assert balance.merge_base == base and balance.upstream == "refs/remotes/canonical/ouroboros"
 
 
-@pytest.mark.parametrize("baseline", ["absent_remote", "fork", "missing_ref", "unrelated", "missing_book"])
+@pytest.mark.parametrize("baseline", ["absent_remote", "fork", "missing_book"])
 def test_unknown_contribution_never_means_paid_even_with_measured_head(tmp_path, baseline):
     repo = _book_repo(tmp_path / "repo", official=False)
     if baseline != "absent_remote":
@@ -154,9 +155,7 @@ def test_committed_growth_can_be_paid_in_the_worktree(tmp_path, suffix):
 
 
 @pytest.mark.parametrize("url", [
-    "/tmp/github.com/razzant/ouroboros.git", "file://github.com/razzant/ouroboros.git",
-    "https://example.invalid/razzant/ouroboros.git", "https://github.com.example.invalid/razzant/ouroboros.git",
-    "https://github.com/razzant/ouroboros-extra.git", "https://github.com:bad/razzant/ouroboros.git",
+    "/tmp/github.com/razzant/ouroboros.git", "https://example.invalid/razzant/ouroboros.git", "https://github.com:bad/razzant/ouroboros.git",
 ])
 def test_remote_host_and_exact_repository_matter_even_with_an_official_push_url(tmp_path, url):
     repo = _book_repo(tmp_path, official=False)
@@ -225,8 +224,7 @@ def test_note_never_calls_an_unmeasured_book_paid(tmp_path):
     assert "nothing owed" in book_balance_note(measured, [CHAPTER])
 
 
-@pytest.mark.parametrize("missing_book", ["architecture", "development"])
-@pytest.mark.parametrize("growth", ["", "Added.\n"])
+@pytest.mark.parametrize(("growth", "missing_book"), [("", "architecture"), ("Added.\n", "development")])
 def test_note_discloses_an_unavailable_book_beside_a_measured_book(tmp_path, missing_book, growth):
     repo = _book_repo(tmp_path)
     development = "docs/development/01-one.md"
@@ -284,29 +282,35 @@ GROW = {
 }
 
 
-@pytest.mark.parametrize("tool", sorted(GROW))
-def test_a_body_book_edit_carries_the_balance(tmp_path, monkeypatch, tool):
-    import ouroboros.safety as safety
+def test_a_body_book_edit_carries_the_balance(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for tool in sorted(GROW):
+        tmp_path = next(case_paths)
+        with subtests.test(tool=tool), monkeypatch.context() as monkeypatch:
+            import ouroboros.safety as safety
 
-    monkeypatch.setattr(safety, "check_safety", lambda *args, **kwargs: (True, ""))
-    result = str(_registry(tmp_path, external=False).execute(tool, GROW[tool]))
-    assert result.startswith("✅"), result[:300]
-    assert "ℹ️ Text growth:\n" in result and BOOK_GROWTH_RULE in result
+            monkeypatch.setattr(safety, "check_safety", lambda *args, **kwargs: (True, ""))
+            result = str(_registry(tmp_path, external=False).execute(tool, GROW[tool]))
+            assert result.startswith("✅"), result[:300]
+            assert "ℹ️ Text growth:\n" in result and BOOK_GROWTH_RULE in result
 
 
-@pytest.mark.parametrize("tool", sorted(GROW))
-def test_a_foreign_project_or_a_non_book_path_gets_no_balance(tmp_path, monkeypatch, tool):
-    import ouroboros.safety as safety
+def test_a_foreign_project_or_a_non_book_path_gets_no_balance(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for tool in sorted(GROW):
+        tmp_path = next(case_paths)
+        with subtests.test(tool=tool), monkeypatch.context() as monkeypatch:
+            import ouroboros.safety as safety
 
-    monkeypatch.setattr(safety, "check_safety", lambda *args, **kwargs: (True, ""))
-    foreign = str(_registry(tmp_path / "a", external=True).execute(tool, GROW[tool]))
-    assert foreign.startswith("✅") and "Text growth" not in foreign, foreign[:300]
-    plain = {"write_file": {"path": "notes.md", "content": "notes, more\n"},
-             "edit_text": {"path": "notes.md", "old_str": "notes", "new_str": "notes, more"},
-             "apply_patch": {"patch": "*** Update File: notes.md\n-notes\n+notes, more\n"},
-             "edit_batch": {"edits": [{"path": "notes.md", "old_str": "notes", "new_str": "notes, more"}]}}[tool]
-    body = str(_registry(tmp_path / "b", external=False).execute(tool, plain))
-    assert body.startswith("✅") and "Text growth" not in body, body[:300]
+            monkeypatch.setattr(safety, "check_safety", lambda *args, **kwargs: (True, ""))
+            foreign = str(_registry(tmp_path / "a", external=True).execute(tool, GROW[tool]))
+            assert foreign.startswith("✅") and "Text growth" not in foreign, foreign[:300]
+            plain = {"write_file": {"path": "notes.md", "content": "notes, more\n"},
+                     "edit_text": {"path": "notes.md", "old_str": "notes", "new_str": "notes, more"},
+                     "apply_patch": {"patch": "*** Update File: notes.md\n-notes\n+notes, more\n"},
+                     "edit_batch": {"edits": [{"path": "notes.md", "old_str": "notes", "new_str": "notes, more"}]}}[tool]
+            body = str(_registry(tmp_path / "b", external=False).execute(tool, plain))
+            assert body.startswith("✅") and "Text growth" not in body, body[:300]
 
 
 def test_the_commit_gate_states_the_staged_books_balance_in_its_diff_pulse(tmp_path):

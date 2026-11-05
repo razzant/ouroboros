@@ -21,6 +21,7 @@ from ouroboros.memory import Memory
 from ouroboros.tools import knowledge as tools
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests import test_book_context_capture as book
+from tests._cases import case_folders
 
 OLD = "Prefers long written reports."
 NEW = "Prefers short answers first, detail on request."
@@ -151,13 +152,16 @@ REFUSALS = [
 ]
 
 
-@pytest.mark.parametrize("args,message", REFUSALS)
-def test_ambiguous_or_invalid_calls_refuse_before_any_write(tmp_path, args, message):
-    ctx, _address, original = _setup(tmp_path)
-    before = _files(tmp_path)
-    reply = tools._knowledge_write(ctx, "people/ada", scope="global", expected_revision=original.revision, **args)
-    assert reply.startswith("⚠️ TOOL_ARG_ERROR") and message in reply
-    assert _files(tmp_path) == before
+def test_ambiguous_or_invalid_calls_refuse_before_any_write(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for args, message in REFUSALS:
+        tmp_path = next(case_paths)
+        with subtests.test(args=args, message=message):
+            ctx, _address, original = _setup(tmp_path)
+            before = _files(tmp_path)
+            reply = tools._knowledge_write(ctx, "people/ada", scope="global", expected_revision=original.revision, **args)
+            assert reply.startswith("⚠️ TOOL_ARG_ERROR") and message in reply
+            assert _files(tmp_path) == before
 
 
 @pytest.mark.parametrize("old_str", ["Absent line.", "e"])  # missing, then ambiguous

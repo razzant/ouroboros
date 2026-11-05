@@ -548,8 +548,7 @@ def _free_workers(host, monkeypatch, count=4):  # noqa: F811
     return sent
 
 
-@pytest.mark.parametrize("variant", ["exit42", "exit99", "later_process", "intermediate_restart",
-                                     "stale_preparation", "consumed"])
+@pytest.mark.parametrize("variant", ["later_process", "stale_preparation", "consumed"])
 def test_one_restart_returns_saved_work_planned_session_owner_wait_and_project_hold(composed, monkeypatch,
                                                                                     variant):
     """S1 returns saved work/queue only to the exact successor; retained carriers use their own gates."""

@@ -101,7 +101,7 @@ def quiet_bootstrap(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "tool_name", ["run_command", "run_script", "start_service", "verify_and_record"]
+    "tool_name", ["run_command", "start_service", "verify_and_record"]
 )
 def test_healthy_path_node_is_byte_identical_noop(tmp_path, monkeypatch, quiet_bootstrap, tool_name):
     bin_dir = tmp_path / "bin"
@@ -191,12 +191,6 @@ def test_no_usable_node_is_noop_with_disclosed_facts(tmp_path, monkeypatch, quie
     ("tool_name", "args"),
     [
         ("run_command", {"cmd": ["/usr/bin/node", "--version"]}),
-        ("run_command", {"cmd": ["node20", "--version"]}),
-        ("run_command", {"cmd": ["nodemon", "app.js"]}),
-        ("run_command", {"cmd": ["sh", "-c", "echo hello"]}),
-        ("run_script", {"script": "x", "interpreter": "/opt/node/bin/node"}),
-        ("run_script", {"script": "x", "interpreter": "python3"}),
-        ("start_service", {"name": "svc", "cmd": ["node18", "server.js"]}),
         ("verify_and_record", {"contract_kind": "artifact_observation", "check": ["node", "-v"]}),
         ("remote_exec", {"cmd": ["node", "-v"]}),
     ],

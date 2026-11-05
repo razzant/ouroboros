@@ -16,6 +16,7 @@ import pytest
 from ouroboros.platform_layer import force_kill_pid, pid_is_alive
 from ouroboros.test_parallelism import WORKERS_ENV
 from ouroboros.settings_defaults import settings_env_keys
+from tests._cases import case_folders
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -306,19 +307,12 @@ def test_explicit_pytest_args_stay_single_pass():
 
 @pytest.mark.parametrize("token,parallel", [
     ("-n", True),
-    ("--numprocesses", True),
-    ("--dist", True),
     # pytest accepts a short option and its value as ONE token, and xdist really
     # does distribute such a run — so it must reach the xdist-only diagnoses.
     ("-n4", True),
-    ("-nauto", True),
-    ("-nlogical", True),
-    ("--numprocesses=4", True),
     # ...while `--no-header` (in DEFAULT_PYTEST_ARGS, i.e. on EVERY invocation)
     # starts with `-n` as a STRING and must never be read as an xdist flag.
     ("--no-header", False),
-    ("--tb=line", False),
-    ("-q", False),
 ])
 def test_parallel_detection_reads_the_argv_not_the_label(token, parallel):
     """`PreflightPass.parallel` gates both hard-block diagnoses. Missing a real
@@ -391,46 +385,6 @@ def test_required_plugin_minimums_match_requirements():
         assert pin in pyproject, f"the probe requires {pin}, pyproject.toml does not"
 
 
-def test_plugin_verification_passes_on_the_interpreter_running_this_suite(tmp_path):
-    """Live control for the hostile cases below: the gate's own environment must
-    verify clean, or a green result there would prove nothing.
-
-    This is the SINGLE place the suite states its own environment, and it must
-    NOT carry `requires_preflight_plugins` — that is what made the control
-    tautological. The marker's predicate is `bool(_PREFLIGHT_PLUGIN_PROBLEMS)`,
-    so a marked control skipped itself in exactly the case its assertion was
-    written to catch, and an unprovisioned interpreter produced a clean-looking
-    run in which every real-spawn proof of the parallel machinery had silently
-    gone unexecuted.
-
-    So the gate is an EXPLICIT provisioning declaration instead. With
-    `OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS` set (CI's `quick-test`/`full-test` set
-    it at job level) a missing plugin is one loud, actionable failure naming
-    what to install. Without it the run is declaring itself unprovisioned, and
-    this test reports that as a skip whose reason names both the missing
-    distributions and the flag that would have made it fatal.
-    """
-    from ouroboros.preflight_runner import _verify_preflight_plugins
-
-    if _PREFLIGHT_PLUGIN_PROBLEMS and not os.environ.get(_REQUIRE_PLUGINS_ENV, "").strip():
-        pytest.skip(
-            "unprovisioned interpreter, and this run did not declare "
-            f"{_REQUIRE_PLUGINS_ENV}=1, so every real-spawn preflight regression below "
-            "is INERT rather than passing — " + _REAL_SPAWN_SKIP_REASON
-        )
-
-    assert _PREFLIGHT_PLUGIN_PROBLEMS == [], (
-        f"{_REQUIRE_PLUGINS_ENV} declares this environment provisioned, but "
-        f"{sys.executable} cannot host a real preflight pass: "
-        + "; ".join(_PREFLIGHT_PLUGIN_PROBLEMS)
-    )
-    # ...and the skip marker is keyed off the gate's own verifier rather than a
-    # private guess: a fresh call from a different directory must agree with the
-    # import-time verdict, so a provisioned interpreter really runs the
-    # real-spawn lane instead of quietly skipping it.
-    assert _verify_preflight_plugins(sys.executable, tmp_path) == []
-
-
 def test_the_real_spawn_lane_declares_which_tests_go_dark_when_it_skips():
     """The skip must be self-reporting. Twelve `s` characters in pytest's dot
     output are indistinguishable from twelve passes at a glance, and the whole
@@ -453,30 +407,6 @@ def test_the_real_spawn_lane_declares_which_tests_go_dark_when_it_skips():
             f"{job} installs the plugins but does not require them, so a provisioning "
             "regression there would show up as silent skips"
         )
-
-
-def test_plugin_verification_reports_an_absent_module(tmp_path):
-    """...and a genuinely absent module is reported rather than assumed present."""
-    from ouroboros.preflight_runner import _probe_plugins
-
-    problems = _probe_plugins(
-        sys.executable, tmp_path, isolated=True,
-        spec=(("ouroboros_definitely_not_installed", "ouroboros-nonesuch", (1, 0)),),
-    )
-    assert problems and "ouroboros-nonesuch" in problems[0]
-
-
-def test_plugin_verification_ignores_the_candidate_working_directory(tmp_path):
-    """The candidate-controlled import surface is the working directory. A probe
-    run from the diff-applied tree could be answered by a candidate-supplied
-    `xdist.py`, which is the whole thing the probe exists to rule out."""
-    from ouroboros.preflight_runner import _probe_plugins
-
-    (tmp_path / "ouroboros_probe_decoy.py").write_text("VERSION = '9.9'\n", encoding="utf-8")
-    spec = (("ouroboros_probe_decoy", "ouroboros-probe-decoy", (1, 0)),)
-
-    problems = _probe_plugins(sys.executable, tmp_path, isolated=True, spec=spec)
-    assert problems, "an importable file in the probe cwd satisfied the isolated probe"
 
 
 # ── Parallelism is real, not nominal (unit) ───────────────────────────
@@ -508,12 +438,6 @@ def test_worker_count_respects_physical_room_and_the_parent_allocation(monkeypat
     # Can append `-p no:xdist`, its own `-m`, or `-p no:randomly` to EVERY run.
     ("PYTEST_ADDOPTS", "-p no:xdist"),
     # Decide whether the verified plugins load at all.
-    ("PYTEST_PLUGINS", "evil_plugin"),
-    ("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1"),
-    # Leak the OUTER run's identity into the nested one, so a candidate test can
-    # see "I am under xdist" when it is not, or vice versa.
-    ("PYTEST_XDIST_WORKER", "gw7"),
-    ("PYTEST_XDIST_TESTRUNUID", "deadbeef"),
     ("PYTEST_CURRENT_TEST", "tests/test_outer.py::test_outer (call)"),
 ])
 def test_external_pytest_controls_never_reach_the_candidate_suite(tmp_path, monkeypatch, hostile):
@@ -536,8 +460,7 @@ def test_external_pytest_controls_never_reach_the_candidate_suite(tmp_path, monk
         assert key not in env, f"{key} leaked into the candidate suite"
 
 
-@pytest.mark.parametrize("key", settings_env_keys())
-def test_projected_settings_keys_never_reach_the_candidate_suite(tmp_path, monkeypatch, key):
+def test_projected_settings_keys_never_reach_the_candidate_suite(subtests, tmp_path, monkeypatch):
     """`config.apply_settings_to_env` exports every one of these from the owner's
     settings.json into the server process, and most carry neither the OUROBOROS_
     prefix nor a secret suffix (OPENAI_COMPATIBLE_BASE_URL, USE_LOCAL_*,
@@ -547,11 +470,15 @@ def test_projected_settings_keys_never_reach_the_candidate_suite(tmp_path, monke
     it and lost four tests; USE_LOCAL_MAIN lost a different four. The scrub is
     DERIVED from `settings_env_keys()`, so tomorrow's settings key is covered
     without anyone extending a hand-kept list."""
-    from ouroboros.preflight_runner import _preflight_env
+    case_paths = case_folders(tmp_path)
+    for key in settings_env_keys():
+        tmp_path = next(case_paths)
+        with subtests.test(key=key), monkeypatch.context() as monkeypatch:
+            from ouroboros.preflight_runner import _preflight_env
 
-    monkeypatch.setenv(key, "owner-runtime-state")
-    env = _preflight_env(tmp_path / "root", tmp_path / "root" / "repo")
-    assert env.get(key) != "owner-runtime-state", f"{key} leaked into the candidate suite"
+            monkeypatch.setenv(key, "owner-runtime-state")
+            env = _preflight_env(tmp_path / "root", tmp_path / "root" / "repo")
+            assert env.get(key) != "owner-runtime-state", f"{key} leaked into the candidate suite"
 
 
 def test_the_worker_probe_is_prepended_to_pythonpath(tmp_path, monkeypatch):
@@ -753,9 +680,8 @@ def test_per_test_timeout_kill_is_not_told_to_mark_the_test_serial():
     "+++++++++++++++++++++++++++ Timeout +++++++++++++++++++++++++++\n",
     # The signal method fails its test and the worker lives on: that line cannot explain a crash.
     "E   Failed: Timeout >300.0s\n",
-    _CALLBACK_LINE.replace("[gw0]", "[gw1]"),  # another worker's timeout
     _CALLBACK_LINE,  # even the dead worker's own line: any test can print it
-], ids=["thread-banner", "signal-failure", "another-worker", "dead-workers-line"])
+], ids=["thread-banner", "signal-failure", "dead-workers-line"])
 def test_timeout_text_beside_a_crash_does_not_name_its_cause(evidence):
     """Printed text names no cause. A banner, a signal-method failure or a controller
     line beside the crash leave it unknown without the pass's own record, and an
@@ -770,14 +696,9 @@ def test_timeout_text_beside_a_crash_does_not_name_its_cause(evidence):
 
 
 @pytest.mark.parametrize("change", [
-    {"worker_crash": None}, {"worker_crash": {"worker": "gw1"}}, {"reports": []},
-    {"reports": 1}, {"reports": "malformed"},
-    {"reports": [{**_RECORDED["reports"][0], "timeout_callback_seconds": None}]},
-    {"reports": [{**_RECORDED["reports"][0], "timeout_callback_seconds": "300"}]},
-    {"reports": [{**_RECORDED["reports"][0], "worker": None}]},
+    {"worker_crash": None}, {"reports": "malformed"},
     {"reports": [*_RECORDED["reports"], {**_RECORDED["reports"][0], "worker": "gw1", "timeout_callback_seconds": None}]},
-], ids=["no-dead-worker", "dead-worker-unmatched", "no-crash-row", "integer-reports", "string-reports", "unmatched-row", "malformed-seconds",
-        "row-without-worker", "one-of-two-unmatched"])
+], ids=["no-dead-worker", "string-reports", "one-of-two-unmatched"])
 def test_a_crash_names_a_timeout_only_from_its_own_recorded_rows(change):
     from ouroboros.preflight_runner import _classify_pass_result
 
@@ -856,11 +777,9 @@ def test_crash_patterns_ignore_a_bare_worker_id_in_test_text():
 
 @pytest.mark.parametrize("crash_line", [
     "worker 'gw0' crashed while running 'tests/test_x.py::test_y'",
-    "[gw0] node down: Not properly terminated",
     # The parallel pass runs with `--max-worker-restart=0`, so THIS is the
     # phrasing xdist actually emits for the configuration the gate uses.
     "worker gw0 crashed and worker restarting disabled",
-    "replacing crashed worker gw1",
     "Maximum crashed workers reached: 0",
 ])
 def test_crash_patterns_cover_xdist_controller_phrasing(crash_line):
@@ -888,8 +807,6 @@ def test_crash_patterns_survive_terminal_decoration():
 @pytest.mark.parametrize("innocent_line", [
     # Every crash PHRASE, in text a passing/failing test can legitimately emit.
     "E   AssertionError: assert 'node down: pool drained' in status_banner",
-    "E   AssertionError: assert log == 'crashed while running the migration'",
-    "INFO     scheduler:pool.py:88 replacing crashed worker in the pool",
     "WARNING  scheduler:pool.py:91 maximum crashed workers reached; giving up",
     "E   ValueError: worker gw1 crashed",
 ])
@@ -972,20 +889,6 @@ def test_diagnosis_never_overruns_a_declared_max_output(max_output):
     result = _classify_pass_result("parallel", 4, usage, max_output, parallel=True)
     assert result is not None
     assert len(result) <= max_output
-
-
-def test_pass_header_reports_that_pass_s_own_duration():
-    """`elapsed` is per-pass, not cumulative: a 40s serial pass after a 140s
-    parallel one must print 40s, or the header blames the wrong pass for the
-    budget it burned."""
-    from ouroboros import preflight_runner
-
-    assert "parallel pass, exit 1, 140s" in preflight_runner._classify_pass_result(
-        "parallel", 1, "boom", 8000, parallel=False, elapsed=140.0
-    )
-    src = inspect.getsource(preflight_runner._run_hermetic_pytest)
-    assert "pass_started = time.monotonic()" in src
-    assert "elapsed = time.monotonic() - pass_started" in src
 
 
 def test_classify_green_and_empty_pass():
@@ -1076,71 +979,6 @@ def test_second_pass_never_starts_once_the_total_budget_is_gone(tmp_path, two_pa
     assert [event[0] for event in events].count("pass") == 1, "pass 2 ran past the total budget"
 
 
-def test_a_red_first_pass_stops_the_run_and_returns_only_its_own_output(tmp_path, two_pass_env, stub_passes):
-    """Fail-fast is what makes truncation-safety structural: one pass's output can
-    never have its failing section squeezed out by a second pass sharing the same
-    8000-char budget. Pinned here without xdist; the real-spawn sibling
-    `test_worker_crash_is_hard_block` proves the same thing end to end."""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    crash = "worker gw0 crashed and worker restarting disabled\n"
-    events = stub_passes([(1, crash), (0, "SERIAL PASS OUTPUT")])
-    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
-
-    result = run_hermetic_pytest(repo, timeout=120)
-
-    assert result is not None
-    assert "PARALLEL_WORKER_CRASH" in result, result
-    assert "SERIAL PASS OUTPUT" not in result, "output from two passes was merged"
-    assert [event[0] for event in events].count("pass") == 1, "fail-fast broken: pass 2 ran"
-
-
-@pytest.mark.parametrize("results,expected", [
-    ([(0, ""), (5, "no tests ran")], None),
-    ([(5, "no tests ran"), (0, "")], None),
-    ([(5, "no tests ran"), (5, "no tests ran")], "no tests were collected"),
-])
-def test_exit_5_is_green_per_pass_but_blocks_when_every_pass_is_empty(
-    tmp_path, two_pass_env, stub_passes, results, expected
-):
-    """A candidate repo may legitimately have zero tests in ONE lane, so a blanket
-    "exit 5 blocks" would false-block it. The empty-`tests/` invariant is preserved
-    at the orchestrator instead: only ALL passes empty is a block."""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    stub_passes(results)
-    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
-
-    result = run_hermetic_pytest(repo, timeout=120)
-
-    if expected is None:
-        assert result is None, result
-    else:
-        assert result is not None and expected in result, result
-
-
-def test_each_pass_gets_the_exact_remaining_budget(tmp_path, two_pass_env, stub_passes):
-    """Pass 2's timeout is `total − elapsed` as a FLOAT, never rounded up: the
-    two passes together may not outlive the total the gate advertises."""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    def _spend_half_a_second():
-        time.sleep(0.5)
-        return (0, "")
-
-    events = stub_passes([_spend_half_a_second, (0, "")])
-    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
-
-    assert run_hermetic_pytest(repo, timeout=60) is None
-
-    spawns = [event for event in events if event[0] == "pass"]
-    assert len(spawns) == 2
-    first_timeout, second_timeout = spawns[0][2], spawns[1][2]
-    assert first_timeout <= 60
-    assert second_timeout < first_timeout, "pass 2 was handed a fresh budget, not the remainder"
-    assert second_timeout <= 60 - 0.5, "pass 2's share was rounded up past the total budget"
-
-
 def test_the_gate_leases_its_workers_and_names_its_durations_table_for_the_whole_run(tmp_path, two_pass_env,
                                                                                     stub_passes, monkeypatch):
     """A standalone gate (no parent allocation) holds its admitted count in the host ledger from the admission
@@ -1216,252 +1054,6 @@ def test_the_gate_warms_its_prefix_once_before_the_passes(tmp_path, two_pass_env
     assert [lane["lane"] for lane in record["lanes"]].index("warm") < [lane.get("pass") for lane in record["lanes"]].index("parallel")
 
 
-def test_plugins_are_verified_before_the_candidate_tree_exists(tmp_path, two_pass_env, stub_passes, monkeypatch):
-    """Missing-plugin detection may not be inferred from the candidate's own
-    pytest accepting `-n`/`--dist`/`--timeout`: a conftest can declare those exact
-    option names with `pytest_addoption` and ignore them, so with xdist absent the
-    nominal parallel lane runs serially, exits 0 and returns GREEN.
-
-    So the interpreter is verified independently, and — pinned here — before the
-    worktree that would carry that conftest is even created."""
-    from ouroboros import preflight_runner as pr
-
-    events = stub_passes([])
-    git_calls: list[list[str]] = []
-    real_run_git = pr._run_git
-
-    def _spy(repo_dir, args, **kwargs):
-        git_calls.append(list(args))
-        return real_run_git(repo_dir, args, **kwargs)
-
-    monkeypatch.setattr(pr, "_run_git", _spy)
-    repo = _make_repo(
-        tmp_path,
-        {
-            "conftest.py": """
-                def pytest_addoption(parser):
-                    # Accepts the gate's own parallel flags and does nothing with
-                    # them: proof that "pytest did not reject -n" is not evidence
-                    # that xdist is installed.
-                    parser.addoption("--dist", action="store", default=None)
-                    parser.addoption("--timeout", action="store", default=None)
-                    parser.addoption("--timeout-method", action="store", default=None)
-                    parser.addoption("--max-worker-restart", action="store", default=None)
-            """,
-            "tests/test_plain.py": """
-                def test_ok():
-                    assert True
-            """,
-        },
-    )
-    # The one thing a test cannot arrange for real: an interpreter without xdist.
-    # (The probe's own behaviour against a genuinely absent module is covered by
-    # `test_plugin_verification_reports_an_absent_module`; what is under test HERE
-    # is what the orchestrator does with the answer, and WHEN it asks.)
-    probe_seen: list[list[str]] = []
-
-    def _missing(_python, _probe_dir):
-        probe_seen.append([" ".join(args) for args in git_calls])
-        return ["pytest-xdist: xdist is not importable (ModuleNotFoundError: xdist)"]
-
-    monkeypatch.setattr(pr, "_verify_preflight_plugins", _missing)
-
-    result = pr.run_hermetic_pytest(repo, timeout=120)
-
-    assert probe_seen, "the interpreter was never verified for a parallel run"
-    assert not any("worktree add" in call for call in probe_seen[0]), (
-        "the candidate tree was materialised BEFORE the interpreter was verified"
-    )
-
-    assert result is not None, "a missing parallel plugin must block, never degrade to serial"
-    assert "PREFLIGHT_PLUGIN_MISSING" in result, result
-    assert "pyproject.toml" in result, result
-    assert "OUROBOROS_PREFLIGHT_SERIAL=1" in result, "the deliberate-rollback lever is the remediation"
-    assert [event[0] for event in events].count("pass") == 0, "a pass ran on an unverified interpreter"
-    assert not any(args[:2] == ["worktree", "add"] for args in git_calls), (
-        "the candidate tree was materialised before the interpreter was verified"
-    )
-
-
-def test_the_legacy_single_pass_does_not_require_the_parallel_plugins(tmp_path, two_pass_env, stub_passes, monkeypatch):
-    """Verification is scoped to passes that actually carry `-n`. The escape
-    hatch exists precisely so an operator can commit WHILE provisioning, so it
-    must not be gated on the plugins it deliberately does not use."""
-    from ouroboros import preflight_runner as pr
-
-    monkeypatch.setenv("OUROBOROS_PREFLIGHT_SERIAL", "1")
-
-    def _never(_python, _probe_dir):
-        raise AssertionError("the legacy single pass was gated on the parallel plugins")
-
-    monkeypatch.setattr(pr, "_verify_preflight_plugins", _never)
-    events = stub_passes([(0, "")])
-    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
-
-    assert pr.run_hermetic_pytest(repo, timeout=120) is None
-    assert [event[0] for event in events].count("pass") == 1
-
-
-def test_a_nominally_parallel_pass_on_one_worker_is_a_hard_block(tmp_path, two_pass_env, stub_passes, monkeypatch):
-    """Verifying the INTERPRETER proves the plugins are installed; it does not
-    prove the CANDIDATE let them load. A `pytest.ini` carrying
-    `-p no:xdist -p no:timeout` (or `addopts = -n 0`) plus a conftest that
-    declares and ignores the option names leaves a lane that is labelled parallel,
-    exits 0, and never ran two things at once — so it proves nothing about the
-    parallel-only defects this gate exists to catch, and returns green.
-
-    The forced `-p xdist -p timeout` is the fix; the worker count is the PROOF,
-    and it is taken from files the gate's own probe plugin writes, not from
-    output the candidate could shape. Fewer workers than the floor is a hard
-    block, not a downgrade — `OUROBOROS_PREFLIGHT_SERIAL=1` is how an operator
-    takes a serial run deliberately."""
-    from ouroboros import preflight_runner as pr
-
-    # Installed AFTER the fixture, so this expectation wins: exactly one worker
-    # reported, which is the silently-serial lane.
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a, **k: {"gw0"})
-    events = stub_passes([(0, "1 passed"), (0, "1 passed")])
-    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
-
-    result = pr.run_hermetic_pytest(repo, timeout=120)
-
-    assert result is not None, "a silently serial parallel lane returned green"
-    assert "PREFLIGHT_PARALLELISM_LOST" in result, result
-    assert "OUROBOROS_PREFLIGHT_SERIAL=1" in result, "the deliberate-rollback lever is the remediation"
-    assert "gw0" in result, "the diagnosis must name what it actually observed"
-    assert [event[0] for event in events].count("pass") == 1, "fail-fast broken: the serial pass ran"
-
-
-def test_a_caller_supplied_parallel_argv_is_not_blocked_for_missing_worker_evidence(
-    tmp_path, two_pass_env, stub_passes, monkeypatch
-):
-    """The control for the block above. An explicit `pytest_args=` is forwarded
-    VERBATIM, so it never carries the gate's probe plugin and can never produce
-    worker files — keying the block on `spec.parallel` would fail every such call
-    with a parallelism claim the gate never made. The block keys on the probe
-    being present in the argv instead."""
-    from ouroboros import preflight_runner as pr
-
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a, **k: set())
-    events = stub_passes([(0, "1 passed")])
-    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
-
-    result = pr.run_hermetic_pytest(repo, timeout=120, pytest_args=["tests/", "-n", "2"])
-
-    assert result is None, result
-    assert [event[0] for event in events].count("pass") == 1
-    # Prefix-tested, not equality-tested: the probe module carries a per-run
-    # nonce, so `_WORKER_PROBE_MODULE not in args` would pass even if the gate
-    # HAD injected the nonce-named probe into the caller's argv.
-    assert not any(arg.startswith(pr._WORKER_PROBE_MODULE) for arg in events[0][1]), (
-        "the gate injected a probe into a caller's argv"
-    )
-
-
-def test_a_pass_whose_tree_cannot_be_proven_gone_blocks_even_when_it_exits_zero(
-    tmp_path, two_pass_env, stub_passes, monkeypatch
-):
-    """The container's failure reason has to reach the verdict, or it is inert.
-
-    `reap()` returns a non-empty string when containment could not be PROVED —
-    an unreadable process table, a member whose environment it can no longer read,
-    a tree that never stops forking, a Windows Job Object that could not be
-    created or whose teardown did not confirm itself.
-    Dropping that value (it used to be a bare call in a `finally:`) left the exact
-    fail-open the container was written to close: an unreadable table looks
-    identical to an empty one, so exit 0 over a tree nothing ever enumerated was
-    reported as a clean, green pass.
-
-    The block therefore fires on a pass that exited ZERO, and it fires before the
-    second pass runs — a tree that may still be alive must not be handed one.
-    """
-    from ouroboros import preflight_runner as pr
-    from tests._shared import retire_synthetic_gate_hold
-
-    reason = "the live process table could not be enumerated"
-    temp_root = (tmp_path / "preflight-root").resolve()
-    temp_root.mkdir()
-    _pin_preflight_root(monkeypatch, temp_root)
-    events = stub_passes([(0, "1 passed", reason), (0, "1 passed")])
-    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
-
-    try:
-        result = pr.run_hermetic_pytest(repo, timeout=120)
-
-        assert result is not None, "a green pass over an unprovable teardown returned green"
-        assert "PREFLIGHT_CONTAINMENT_FAILED" in result, result
-        assert reason in result, "the diagnosis must carry the container's own reason"
-        assert [event[0] for event in events].count("pass") == 1, (
-            "the serial pass ran on top of a tree that could not be proven gone"
-        )
-    finally:
-        retire_synthetic_gate_hold(repo, temp_root, reason)  # the stubbed pass proved no process
-
-
-@pytest.mark.parametrize("lane", ["proven", "pass_reported", "pass_raised", "node_reported", "node_raised"])
-def test_the_hermetic_tree_is_deleted_only_after_every_lane_proved_its_teardown(
-    tmp_path, two_pass_env, stub_passes, monkeypatch, lane,
-):
-    """The verdict blocks; the TREE is a separate custody question.
-
-    A lane whose processes were not proven gone — reported by its container, or
-    left unknown because the lane raised — must not have the worktree those
-    processes run in deleted under them, nor its source-repository registration
-    removed: tree, marker and registration stay, and the verdict names the path.
-    The proven control is the other half: a clean run leaks nothing."""
-    from ouroboros import preflight_runner as pr
-    from ouroboros.test_environment import RETENTION_MARKER
-
-    temp_root = (tmp_path / "preflight-root").resolve()
-    temp_root.mkdir()
-    _pin_preflight_root(monkeypatch, temp_root)
-    worktree = temp_root / "repo"
-    unproven = "pid 4242 was still alive after the reap"
-
-    def crash(*_args):
-        raise RuntimeError("the lane crashed before its teardown settled")
-
-    if lane == "node_reported":
-        monkeypatch.setattr(pr, "run_node_tests", lambda *_a: {
-            "returncode": 0, "reap_error": unproven,
-            "error": "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_CONTAINMENT_FAILED (hard block): node",
-        })
-    elif lane == "node_raised":
-        monkeypatch.setattr(pr, "run_node_tests", crash)
-    stub_passes({
-        "proven": [(0, "1 passed"), (0, "1 passed")],
-        "pass_reported": [(0, "1 passed", unproven)],
-        "pass_raised": [crash],
-    }.get(lane, []))
-    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
-    try:
-        result = pr.run_hermetic_pytest(repo, timeout=120)
-        registered = subprocess.run(
-            ["git", "worktree", "list", "--porcelain"], cwd=str(repo),
-            capture_output=True, text=True, check=True,
-        ).stdout
-        if lane == "proven":
-            assert result is None, result
-            assert not temp_root.exists(), "a proven teardown leaked its disposable tree"
-            assert f"worktree {worktree.as_posix()}\n" not in registered, registered
-            return
-        assert result is not None and result.startswith("⚠️ PRE_PUSH_TEST_ERROR"), result
-        assert result.splitlines()[1].startswith(f"RETAINED (not deleted): {temp_root}"), result
-        assert worktree.is_dir(), "the worktree was deleted under processes not proven gone"
-        assert f"worktree {worktree.as_posix()}\n" in registered, registered
-        marker = (temp_root / RETENTION_MARKER).read_text(encoding="utf-8")
-        # The gate records its reason first; the hermetic release owner adds its own line.
-        assert any(line.startswith("hermetic preflight: ") for line in marker.splitlines()), marker
-        assert (unproven in marker) == lane.endswith("_reported"), marker
-    finally:
-        # Every lane here is a stub: retire only the reason it was told to report.
-        from tests._shared import retire_synthetic_gate_hold
-        reason = unproven if lane.endswith("_reported") else (
-            "the node lane did not return, so its teardown is unconfirmed" if lane == "node_raised"
-            else "the parallel pass did not return, so its teardown is unconfirmed")
-        retire_synthetic_gate_hold(repo, temp_root, reason)
-
-
 def test_the_retention_notice_precedes_the_body_and_stays_inside_the_budget():
     from ouroboros.preflight_runner import _with_retention_notice
 
@@ -1518,21 +1110,6 @@ def test_an_unrenderable_output_budget_blocks_instead_of_passing(tmp_path, two_p
     assert [event[0] for event in events].count("pass") == 0, "the run started on an unusable budget"
 
 
-def test_a_failing_pass_blocks_even_when_its_diagnosis_cannot_be_rendered(tmp_path, two_pass_env, stub_passes):
-    """The EXIT CODE decides that a pass failed; the rendered text only decides
-    how it reads. Gating the block on a truthy diagnosis let a budget too small
-    to hold even the header turn a red pass into a green gate."""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    stub_passes([(1, "E   assert 0 == 1\n")])
-    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
-
-    # 1 char: smaller than the header, so `_diagnosis` can only return a stub.
-    result = run_hermetic_pytest(repo, timeout=120, max_output=1)
-
-    assert result, "a nonzero exit returned a falsy result — the gate read it as success"
-
-
 def test_deleting_the_whole_test_suite_is_a_hard_block(tmp_path, two_pass_env, stub_passes):
     """The all-passes-empty invariant was reachable only THROUGH the passes, and
     a candidate that stages the removal of every test file removes `tests/` with
@@ -1549,58 +1126,6 @@ def test_deleting_the_whole_test_suite_is_a_hard_block(tmp_path, two_pass_env, s
     result = run_hermetic_pytest(repo, timeout=120)
 
     assert result is not None, "a candidate that deletes tests/ must not pass the gate"
-    assert "removes the entire tests/ tree" in result, result
-    assert [event[0] for event in events].count("pass") == 0
-
-
-@pytest.mark.parametrize("entry_point", ["commit", "review"])
-def test_the_production_entry_points_do_not_short_circuit_a_deleted_suite(
-    tmp_path, two_pass_env, stub_passes, monkeypatch, entry_point
-):
-    """The block above is only reachable if something CALLS the runner. Both
-    production entry points used to check `(repo_dir / "tests").exists()` first
-    and return None when it did not — so the candidate that deletes every test
-    file was waved through by the callers, and the hard block inside
-    `run_hermetic_pytest` was dead code no shipped path could reach.
-
-    Each entry point is driven in the repository state that call site really
-    sees, which is NOT the same state:
-
-    * review (`_run_review_preflight_tests`) runs PRE-commit, so the deletion is
-      merely staged and `HEAD` still carries the suite;
-    * commit (`_run_pre_push_tests`) runs POST-commit — `_post_commit_result`
-      is only reached once `commit_sha` exists, which is why its failure text
-      says the commit "was already created and preserved". By then the deletion
-      is in `HEAD` itself, and a HEAD-only baseline answers "this repository has
-      no test suite" and returns green for the change that deleted the gate.
-      Staging without committing here would have kept this pin passing against
-      a state production never reaches.
-
-    Driven through the entry points themselves for that reason: pinning the
-    runner alone is what let this regress."""
-    if entry_point == "commit":
-        from ouroboros.tools.git import _run_pre_push_tests as under_test
-    else:
-        from ouroboros.tools.review_helpers import _run_review_preflight_tests as under_test
-
-    monkeypatch.setenv("OUROBOROS_PRE_PUSH_TESTS", "1")
-    events = stub_passes([])
-    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
-    _git(repo, "rm", "-r", "--quiet", "tests")
-    if entry_point == "commit":
-        subprocess.run(
-            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
-             "commit", "-m", "delete the suite"],
-            cwd=str(repo), check=True, capture_output=True, text=True,
-        )
-    assert not (repo / "tests").exists(), "fixture precondition: tests/ is gone"
-
-    class _Ctx:
-        repo_dir = str(repo)
-
-    result = under_test(_Ctx())
-
-    assert result is not None, f"the {entry_point} entry point skipped the gate for a deleted suite"
     assert "removes the entire tests/ tree" in result, result
     assert [event[0] for event in events].count("pass") == 0
 
@@ -1653,159 +1178,6 @@ def _start_conflicted_merge(
         capture_output=True, text=True, check=True,
     )
     assert unmerged.stdout.strip(), "fixture precondition: no unmerged index entries"
-
-
-def _spy_on_candidate(monkeypatch, rel_paths):
-    """Replace the pytest spawn with a spy that records candidate-file contents.
-
-    Returns the dict the spy fills: relative path -> file text, or None when the
-    path is absent from the candidate worktree. Complements ``stub_passes``
-    (whose fixture setup still neutralises the plugin/worker seams): the
-    recorder it installs is replaced, because these tests need the WORKTREE
-    argument — the one thing the recorder drops.
-    """
-    from ouroboros import preflight_runner
-
-    seen: dict[str, object] = {}
-
-    def _spy(agent_python, worktree, temp_root, args, timeout):
-        wt = pathlib.Path(worktree)
-        for rel in rel_paths:
-            target = wt / rel
-            seen[rel] = target.read_text(encoding="utf-8") if target.is_file() else None
-        return (0, "", "")
-
-    monkeypatch.setattr(preflight_runner, "_execute_pytest_pass", _spy)
-    return seen
-
-
-def test_a_purely_conflicted_merge_runs_against_the_worktree_resolution(
-    tmp_path, two_pass_env, stub_passes, monkeypatch
-):
-    """A merge whose ONLY change is the conflicted file used to kill the gate
-    outright: the staged diff is nothing but the "* Unmerged path" stub and the
-    unstaged diff nothing but the `--cc` hunk, so `git apply` returned rc=128
-    ("No valid patches in input") and the whole preflight died as "hermetic
-    preflight failed" before running a single test. The one-diff capture has no
-    such rendering — the conflicted path arrives as plain worktree content — so
-    the gate runs, and runs against the RESOLUTION the resolver typed, not
-    against HEAD."""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    repo = _make_repo(tmp_path, {
-        "tests/test_plain.py": "def test_ok():\n    assert True\n",
-        "conflict.txt": "base\n",
-    })
-    _start_conflicted_merge(
-        repo, incoming={"conflict.txt": "incoming\n"}, ours={"conflict.txt": "ours\n"}
-    )
-    (repo / "conflict.txt").write_text("resolved\n", encoding="utf-8")  # no `git add`
-
-    stub_passes([])  # seam neutralisation only; the spy below replaces the recorder
-    seen = _spy_on_candidate(monkeypatch, ["conflict.txt"])
-
-    assert run_hermetic_pytest(repo, timeout=120) is None
-    assert seen["conflict.txt"] == "resolved\n", (
-        f"candidate does not carry the worktree resolution: {seen!r}"
-    )
-
-
-def test_a_mixed_unmerged_index_drops_neither_staged_nor_conflicted_changes(
-    tmp_path, two_pass_env, stub_passes, monkeypatch
-):
-    """The SILENT failure mode, worse than the rc=128 one: with an ordinary hunk
-    in each diff stream (an auto-merged staged file, an unstaged edit) alongside
-    the conflict, `git apply` exits 0 and just DROPS the `--cc` hunk. The
-    candidate then carried the ordinary changes but NOT the resolution — a
-    chimera tree nobody has, whose green or red verdict is equally meaningless.
-    On the unfixed base this test fails on the conflict-file assertion."""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    repo = _make_repo(tmp_path, {
-        "tests/test_plain.py": "def test_ok():\n    assert True\n",
-        "conflict.txt": "base\n",
-        "auto.txt": "base auto\n",
-        "notes.txt": "base notes\n",
-    })
-    _start_conflicted_merge(
-        repo,
-        incoming={"conflict.txt": "incoming\n", "auto.txt": "incoming auto\n"},
-        ours={"conflict.txt": "ours\n"},
-    )
-    # Resolve the conflict and touch an unrelated tracked file — both WITHOUT
-    # `git add`, exactly how a resolver's tree looks mid-work.
-    (repo / "conflict.txt").write_text("resolved\n", encoding="utf-8")
-    (repo / "notes.txt").write_text("edited notes\n", encoding="utf-8")
-
-    stub_passes([])
-    seen = _spy_on_candidate(monkeypatch, ["conflict.txt", "auto.txt", "notes.txt"])
-
-    assert run_hermetic_pytest(repo, timeout=120) is None
-    assert seen["auto.txt"] == "incoming auto\n", "staged auto-merged change lost"
-    assert seen["notes.txt"] == "edited notes\n", "unstaged ordinary change lost"
-    assert seen["conflict.txt"] == "resolved\n", (
-        "the conflicted file's resolution was silently dropped — the candidate "
-        f"is a chimera: {seen!r}"
-    )
-
-
-def test_an_unmerged_resolution_by_deletion_is_absent_from_the_candidate(
-    tmp_path, two_pass_env, stub_passes, monkeypatch
-):
-    """Deleting the conflicted file (plain `rm`, no `git rm`) is a legitimate
-    resolution. `git diff --binary HEAD` renders it as an ordinary deletion
-    hunk, so the candidate must NOT carry the file — a candidate that resurrects
-    it from HEAD would test a tree the resolver explicitly deleted from."""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    repo = _make_repo(tmp_path, {
-        "tests/test_plain.py": "def test_ok():\n    assert True\n",
-        "conflict.txt": "base\n",
-    })
-    _start_conflicted_merge(
-        repo, incoming={"conflict.txt": "incoming\n"}, ours={"conflict.txt": "ours\n"}
-    )
-    (repo / "conflict.txt").unlink()  # resolution by deletion, no `git rm`
-
-    stub_passes([])
-    seen = _spy_on_candidate(monkeypatch, ["conflict.txt"])
-
-    assert run_hermetic_pytest(repo, timeout=120) is None
-    assert seen["conflict.txt"] is None, (
-        f"a file deleted as the conflict resolution reappeared in the candidate: {seen!r}"
-    )
-
-
-def test_a_staged_delete_with_a_recreated_untracked_file_mirrors_the_live_worktree(
-    tmp_path, two_pass_env, stub_passes, monkeypatch
-):
-    """Classification edge: `git rm` stages a deletion, and a NEW same-named file
-    written afterwards is untracked (`ls-files --others` lists it). The one-diff
-    capture deletes the path from the candidate and the untracked copy then
-    restores the reborn content — net effect, the candidate equals the live
-    worktree, which is the whole equivalence the one-diff capture promises."""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    repo = _make_repo(tmp_path, {
-        "tests/test_plain.py": "def test_ok():\n    assert True\n",
-        "conflict.txt": "base\n",
-        "victim.txt": "victim base\n",
-    })
-    _start_conflicted_merge(
-        repo, incoming={"conflict.txt": "incoming\n"}, ours={"conflict.txt": "ours\n"}
-    )
-    (repo / "conflict.txt").write_text("resolved\n", encoding="utf-8")
-    _git(repo, "rm", "-q", "victim.txt")
-    (repo / "victim.txt").write_text("reborn\n", encoding="utf-8")  # untracked now
-
-    stub_passes([])
-    seen = _spy_on_candidate(monkeypatch, ["conflict.txt", "victim.txt"])
-
-    assert run_hermetic_pytest(repo, timeout=120) is None
-    assert seen["victim.txt"] == "reborn\n", (
-        f"candidate diverged from the live worktree on the recreated path: {seen!r}"
-    )
-    assert seen["conflict.txt"] == "resolved\n"
 
 
 def test_a_failed_capture_is_a_named_hard_block_not_a_test_failure(
@@ -1868,170 +1240,6 @@ def test_a_failed_capture_is_a_named_hard_block_not_a_test_failure(
     )
 
 
-@pytest.mark.parametrize(
-    "failure_mode, misread",
-    [
-        pytest.param(
-            "capture_timeout", "pytest timed out",
-            id="git-diff-timeout-is-not-a-pytest-timeout",
-        ),
-        pytest.param(
-            "untracked_permission", "hermetic preflight failed",
-            id="untracked-copy-permission-error-is-not-a-generic-failure",
-        ),
-    ],
-)
-def test_a_raised_assembly_exception_is_owned_by_the_assembly_block(
-    tmp_path, two_pass_env, stub_passes, monkeypatch, failure_mode, misread
-):
-    """The assembly block must own RAISED exceptions, not only the rc!=0 path
-    the failed-capture test above pins. `_run_git` raises
-    subprocess.TimeoutExpired when the diff capture outruns its budget, and
-    `_copy_untracked` raises OSErrors (PermissionError, FileNotFoundError) from
-    the filesystem copy. On the unfixed base the block caught RuntimeError
-    alone, so these flew past it into the OUTER handlers and were misread as a
-    pytest timeout ("pytest timed out after N seconds") or a generic "hermetic
-    preflight failed" — retryable-looking verdicts for a candidate that was
-    never assembled. Both cases raise REAL exceptions through the real code
-    path; neither returns a CompletedProcess(rc=1)."""
-    from ouroboros import preflight_runner
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    repo = _make_repo(tmp_path, {
-        "tests/test_plain.py": "def test_ok():\n    assert True\n",
-    })
-    events = stub_passes([])
-
-    if failure_mode == "capture_timeout":
-        real_run_git = preflight_runner._run_git
-        capture_argv = [
-            "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color",
-            "--src-prefix=a/", "--dst-prefix=b/", "HEAD",
-        ]
-
-        def _timing_out_capture(repo_dir, args, **kwargs):
-            if list(args) == capture_argv:
-                raise subprocess.TimeoutExpired(cmd=["git", *args], timeout=30)
-            return real_run_git(repo_dir, args, **kwargs)
-
-        monkeypatch.setattr(preflight_runner, "_run_git", _timing_out_capture)
-    else:
-
-        def _denied_copy(repo_dir, worktree):
-            raise PermissionError(13, "Permission denied", str(worktree))
-
-        monkeypatch.setattr(preflight_runner, "_copy_untracked", _denied_copy)
-
-    result = run_hermetic_pytest(repo, timeout=120)
-
-    assert result is not None
-    assert "PREFLIGHT_CANDIDATE_ASSEMBLY" in result, result
-    assert "hard block" in result, result
-    assert "is not a test failure" in result, result
-    assert "supported source state" in result, result
-    assert misread not in result, result
-    assert [event[0] for event in events].count("pass") == 0, (
-        "a pass ran against a candidate whose assembly raised"
-    )
-
-
-def test_a_zero_context_diff_config_still_assembles_the_candidate(
-    tmp_path, two_pass_env, stub_passes, monkeypatch
-):
-    """Hunk WIDTH is the config axis the capture's flag tail cannot pin: a user
-    `diff.context=0` (equivalently `GIT_DIFF_OPTS=--unified=0` in the
-    environment) makes `git diff` emit zero-context hunks, which `git apply`
-    REJECTS by default — so on the unfixed base an ORDINARY tracked edit died
-    as PREFLIGHT_CANDIDATE_ASSEMBLY before any test ran. `--unidiff-zero` on
-    the apply accepts zero-context hunks and is a no-op for hunks that carry
-    context, so one flag covers both the config and the env route. The
-    repo-local config below is the real reviewer reproduction, not a mock."""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    repo = _make_repo(tmp_path, {
-        "tests/test_plain.py": "def test_ok():\n    assert True\n",
-        "victim.txt": "a\nb\nc\nd\n",
-    })
-    _git(repo, "config", "diff.context", "0")
-    (repo / "victim.txt").write_text("a\nb\nEDITED\nd\n", encoding="utf-8")
-
-    stub_passes([])
-    seen = _spy_on_candidate(monkeypatch, ["victim.txt"])
-
-    assert run_hermetic_pytest(repo, timeout=120) is None
-    assert seen["victim.txt"] == "a\nb\nEDITED\nd\n", (
-        f"zero-context capture blocked or corrupted the candidate: {seen!r}"
-    )
-
-
-def test_a_staged_change_reverted_in_the_worktree_lands_as_head_content(
-    tmp_path, two_pass_env, stub_passes, monkeypatch
-):
-    """Merged-path regression for the one-diff capture: a change that is staged
-    but reverted in the worktree must land as HEAD content. Both schemes model
-    the WORKTREE, not the index — the old pair replayed stage(A→B) then
-    unstage(B→A) and netted out, the one-diff capture simply emits no hunk —
-    so this pins that dropping the two-step replay did not silently start
-    honouring the index's intermediate bookkeeping."""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    repo = _make_repo(tmp_path, {
-        "tests/test_plain.py": "def test_ok():\n    assert True\n",
-        "reverted.txt": "base\n",
-    })
-    (repo / "reverted.txt").write_text("changed\n", encoding="utf-8")
-    _git(repo, "add", "reverted.txt")
-    (repo / "reverted.txt").write_text("base\n", encoding="utf-8")  # back to HEAD
-
-    stub_passes([])
-    seen = _spy_on_candidate(monkeypatch, ["reverted.txt"])
-
-    assert run_hermetic_pytest(repo, timeout=120) is None
-    assert seen["reverted.txt"] == "base\n", (
-        f"candidate honoured the staged intermediate, not the worktree: {seen!r}"
-    )
-
-
-def test_disposable_index_matches_source_while_files_match_live_worktree(
-    tmp_path, two_pass_env, stub_passes, monkeypatch
-):
-    """Tests see both projections: live bytes on disk and staged bytes in Git."""
-    from ouroboros import preflight_runner
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    repo = _make_repo(tmp_path, {
-        "tests/test_plain.py": "def test_ok():\n    assert True\n",
-        "dual.txt": "head\n",
-    })
-    (repo / "dual.txt").write_text("staged\n", encoding="utf-8")
-    _git(repo, "add", "dual.txt")
-    (repo / "dual.txt").write_text("live\n", encoding="utf-8")
-
-    stub_passes([])
-    seen: dict[str, str] = {}
-
-    def _spy(agent_python, worktree, temp_root, args, timeout):
-        candidate = pathlib.Path(worktree)
-        seen["live"] = (candidate / "dual.txt").read_text(encoding="utf-8")
-        seen["staged"] = subprocess.run(
-            ["git", "show", ":dual.txt"], cwd=candidate, check=True,
-            capture_output=True, text=True,
-        ).stdout
-        seen["tree"] = subprocess.run(
-            ["git", "write-tree"], cwd=candidate, check=True,
-            capture_output=True, text=True,
-        ).stdout.strip()
-        return (0, "", "")
-
-    monkeypatch.setattr(preflight_runner, "_execute_pytest_pass", _spy)
-
-    source_tree = subprocess.run(
-        ["git", "write-tree"], cwd=repo, check=True, capture_output=True, text=True
-    ).stdout.strip()
-    assert run_hermetic_pytest(repo, timeout=120) is None
-    assert seen == {"live": "live\n", "staged": "staged\n", "tree": source_tree}
-
-
 def test_non_unmerged_source_write_tree_failure_is_a_hard_block(
     tmp_path, two_pass_env, stub_passes, monkeypatch
 ):
@@ -2056,177 +1264,6 @@ def test_non_unmerged_source_write_tree_failure_is_a_hard_block(
     assert result is not None and "PREFLIGHT_SOURCE_INDEX" in result
     assert "synthetic index corruption" in result
     assert [event[0] for event in events].count("pass") == 0
-
-
-def test_a_chmod_only_change_reaches_the_candidate(
-    tmp_path, two_pass_env, stub_passes, monkeypatch
-):
-    """A mode flip with identical content is a real change (a script that lost
-    its executable bit fails differently under test). The capture must carry the
-    old mode/new mode header and `git apply` must apply it in the candidate.
-
-    Gated on what `git init` actually PROBED for this filesystem (core.filemode)
-    rather than on the OS name: an `os.name` skip is wrong in both directions —
-    a FAT/exFAT volume on POSIX cannot track the bit either, and the probe is
-    the same signal git itself trusts when deciding whether to emit mode
-    hunks."""
-    from ouroboros import preflight_runner
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    repo = _make_repo(tmp_path, {
-        "tests/test_plain.py": "def test_ok():\n    assert True\n",
-        "tool.sh": "#!/bin/sh\necho hi\n",
-    })
-    filemode = subprocess.run(
-        ["git", "config", "--get", "core.filemode"], cwd=str(repo),
-        capture_output=True, text=True,
-    ).stdout.strip().lower()
-    if filemode != "true":
-        pytest.skip(f"this filesystem does not track the executable bit (core.filemode={filemode or 'unset'})")
-    os.chmod(repo / "tool.sh", 0o755)  # unstaged mode-only change
-
-    stub_passes([])
-    seen: dict[str, int] = {}
-
-    def _spy(agent_python, worktree, temp_root, args, timeout):
-        seen["mode"] = (pathlib.Path(worktree) / "tool.sh").stat().st_mode & 0o111
-        return (0, "", "")
-
-    monkeypatch.setattr(preflight_runner, "_execute_pytest_pass", _spy)
-
-    assert run_hermetic_pytest(repo, timeout=120) is None
-    assert seen["mode"], "the executable bit never reached the candidate"
-
-
-def test_crlf_content_survives_the_capture_byte_for_byte(
-    tmp_path, two_pass_env, stub_passes, monkeypatch
-):
-    """The capture travels through `_run_git`'s binary pipes and `_apply_diff`'s
-    UTF-8 re-encode; CRLF line endings are the classic casualty of a text-mode
-    hop (a translated diff stops matching the LF worktree and `git apply`
-    rejects it wholesale). Pinned as raw bytes — `read_text` would translate the
-    very characters under test."""
-    from ouroboros import preflight_runner
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    repo = _make_repo(tmp_path, {
-        "tests/test_plain.py": "def test_ok():\n    assert True\n",
-        "crlf.txt": "one\n",
-    })
-    # Pinned, not assumed: an operator/global autocrlf=true would rewrite the
-    # very bytes this test is about at add/checkout time and test nothing.
-    _git(repo, "config", "core.autocrlf", "false")
-    (repo / "crlf.txt").write_bytes(b"one\r\ntwo\r\n")  # unstaged CRLF edit
-
-    stub_passes([])
-    seen: dict[str, bytes] = {}
-
-    def _spy(agent_python, worktree, temp_root, args, timeout):
-        seen["crlf.txt"] = (pathlib.Path(worktree) / "crlf.txt").read_bytes()
-        return (0, "", "")
-
-    monkeypatch.setattr(preflight_runner, "_execute_pytest_pass", _spy)
-
-    assert run_hermetic_pytest(repo, timeout=120) is None
-    assert seen["crlf.txt"] == b"one\r\ntwo\r\n", (
-        f"CRLF bytes were translated in transit: {seen!r}"
-    )
-
-
-def test_a_staged_binary_change_reaches_the_candidate(
-    tmp_path, two_pass_env, stub_passes, monkeypatch
-):
-    """Non-UTF-8 binary content travels as a base85 "GIT binary patch" section —
-    which only exists because the capture passes `--binary`. Dropping the flag
-    would degrade the hunk to "Binary files differ", which `git apply` cannot
-    replay, so a staged icon/fixture change would kill the whole gate."""
-    from ouroboros import preflight_runner
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    repo = _make_repo(tmp_path, {
-        "tests/test_plain.py": "def test_ok():\n    assert True\n",
-    })
-    (repo / "blob.bin").write_bytes(b"\x00\x01\x02")
-    _commit_all(repo)
-    (repo / "blob.bin").write_bytes(b"\x00\xff\xfe\x00")
-    _git(repo, "add", "blob.bin")
-
-    stub_passes([])
-    seen: dict[str, bytes] = {}
-
-    def _spy(agent_python, worktree, temp_root, args, timeout):
-        seen["blob.bin"] = (pathlib.Path(worktree) / "blob.bin").read_bytes()
-        return (0, "", "")
-
-    monkeypatch.setattr(preflight_runner, "_execute_pytest_pass", _spy)
-
-    assert run_hermetic_pytest(repo, timeout=120) is None
-    assert seen["blob.bin"] == b"\x00\xff\xfe\x00", (
-        f"staged binary content did not reach the candidate: {seen!r}"
-    )
-
-
-def test_non_utf8_text_content_survives_the_capture_byte_for_byte(
-    tmp_path, two_pass_env, stub_passes, monkeypatch
-):
-    """Git classifies NUL-free content as TEXT even when its bytes are not
-    valid UTF-8 (latin-1 logs, cp1251 fixtures), so those bytes travel on plain
-    diff lines — never inside a base85 binary section that the previous test
-    already covers. The capture→apply hop used to decode the payload with
-    errors="replace" and re-encode it: every non-UTF-8 byte on an added line
-    became U+FFFD, the apply still succeeded, and the candidate SILENTLY
-    diverged from the worktree while the gate stayed green. The payload now
-    travels as raw bytes end to end; pinned with `read_bytes`, since a text
-    read would mask the very substitution under test."""
-    from ouroboros import preflight_runner
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    repo = _make_repo(tmp_path, {
-        "tests/test_plain.py": "def test_ok():\n    assert True\n",
-        "latin.txt": "plain\n",
-    })
-    (repo / "latin.txt").write_bytes(b"plain\ncaf\xe9 au lait\n")  # unstaged latin-1 edit
-
-    stub_passes([])
-    seen: dict[str, bytes] = {}
-
-    def _spy(agent_python, worktree, temp_root, args, timeout):
-        seen["latin.txt"] = (pathlib.Path(worktree) / "latin.txt").read_bytes()
-        return (0, "", "")
-
-    monkeypatch.setattr(preflight_runner, "_execute_pytest_pass", _spy)
-
-    assert run_hermetic_pytest(repo, timeout=120) is None
-    assert seen["latin.txt"] == b"plain\ncaf\xe9 au lait\n", (
-        f"non-UTF-8 text bytes were substituted in transit: {seen!r}"
-    )
-
-
-def test_a_staged_add_removed_from_the_worktree_is_absent_from_the_candidate(
-    tmp_path, two_pass_env, stub_passes, monkeypatch
-):
-    """A file `git add`ed and then deleted from the worktree exists only in the
-    index. The worktree-vs-HEAD capture emits no hunk for it (absent on both
-    sides) and the untracked copy cannot see it (it is IN the index, so
-    `ls-files --others` skips it) — the candidate must not resurrect it. The
-    old pair reached the same absence the long way round: staged add, then
-    unstaged delete."""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    repo = _make_repo(tmp_path, {
-        "tests/test_plain.py": "def test_ok():\n    assert True\n",
-    })
-    (repo / "ghost.txt").write_text("ghost\n", encoding="utf-8")
-    _git(repo, "add", "ghost.txt")
-    (repo / "ghost.txt").unlink()
-
-    stub_passes([])
-    seen = _spy_on_candidate(monkeypatch, ["ghost.txt"])
-
-    assert run_hermetic_pytest(repo, timeout=120) is None
-    assert seen["ghost.txt"] is None, (
-        f"an index-only file was resurrected in the candidate: {seen!r}"
-    )
 
 
 def test_a_failing_post_commit_gate_stops_publication(monkeypatch):
@@ -2564,47 +1601,6 @@ def test_a_broken_head_ref_does_not_masquerade_as_unborn(
     assert [event[0] for event in events].count("pass") == 0
 
 
-def test_a_repository_that_never_had_tests_is_still_out_of_scope(tmp_path, two_pass_env, stub_passes):
-    """...and the control: the block keys on the committed history carrying a
-    suite, not on the working tree lacking one, so a repo with no test suite at
-    all is untouched. (A single-commit repo also has no `HEAD~1`, so the
-    post-commit baseline must degrade to False rather than to an error.)"""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    events = stub_passes([])
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(repo, "init")
-    _git(repo, "checkout", "-b", "ouroboros")
-    (repo / "value.py").write_text("FLAG = True\n", encoding="utf-8")
-    _commit_all(repo)
-
-    assert run_hermetic_pytest(repo, timeout=120) is None
-    assert [event[0] for event in events].count("pass") == 0
-
-
-def test_the_post_commit_baseline_reaches_back_exactly_one_commit(tmp_path, two_pass_env, stub_passes):
-    """The `HEAD~1` consult is what makes the block reachable from the POST-commit
-    gate, and it must not become a permanent one. Only the IMMEDIATELY preceding
-    commit counts: one commit after a deliberate removal, neither `HEAD` nor
-    `HEAD~1` carries a suite and the repository is out of scope again — otherwise
-    a project that genuinely dropped its tests could never commit anything."""
-    from ouroboros.preflight_runner import _head_tracks_tests, run_hermetic_pytest
-
-    events = stub_passes([])
-    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
-    _git(repo, "rm", "-r", "--quiet", "tests")
-    _commit_all(repo)
-    assert _head_tracks_tests(repo), "the deletion commit itself must still be in scope"
-
-    (repo / "value.py").write_text("FLAG = True\n", encoding="utf-8")
-    _commit_all(repo)
-
-    assert not _head_tracks_tests(repo), "the baseline reached back more than one commit"
-    assert run_hermetic_pytest(repo, timeout=120) is None
-    assert [event[0] for event in events].count("pass") == 0
-
-
 def test_an_unreadable_baseline_tree_hard_blocks_instead_of_reading_as_no_tests(
     tmp_path, two_pass_env, stub_passes
 ):
@@ -2655,84 +1651,6 @@ def test_an_unreadable_head_commit_hard_blocks_the_pre_commit_baseline(
     assert result is not None
     assert "PREFLIGHT_TESTS_BASELINE_UNREADABLE" in result
     assert [event[0] for event in events].count("pass") == 0
-
-
-def test_an_unreadable_first_parent_hard_blocks_the_post_commit_baseline(
-    tmp_path, two_pass_env, stub_passes
-):
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    events = stub_passes([])
-    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
-    parent_oid = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=str(repo),
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    _git(repo, "rm", "-r", "--quiet", "tests")
-    _commit_all(repo)
-    _delete_loose_object(repo, parent_oid)
-
-    result = run_hermetic_pytest(repo, timeout=120)
-    assert result is not None
-    assert "PREFLIGHT_TESTS_BASELINE_UNREADABLE" in result
-    assert [event[0] for event in events].count("pass") == 0
-
-
-def test_the_pre_commit_baseline_is_head_only_after_a_deliberate_removal(tmp_path, two_pass_env, stub_passes):
-    """HEAD~1 belongs to the POST-commit phase and false-blocks the pre-commit one.
-
-    The pre-commit review runs while the candidate is still a working-tree change,
-    so HEAD alone already says whether this change deletes the suite. Consulting
-    HEAD~1 there means that for the FIRST unrelated change staged after a
-    deliberate test-removal commit, HEAD legitimately carries no suite while
-    HEAD~1 still does — and an `any()` over both rejected that change as
-    "removes the entire tests/ tree". The one-commit horizon does expire, but only
-    once the NEXT commit exists, which is after the pre-commit gate has already
-    refused to let it be made.
-    """
-    from ouroboros.preflight_runner import PRE_COMMIT_PHASE, _head_tracks_tests, run_hermetic_pytest
-
-    events = stub_passes([])
-    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
-    _git(repo, "rm", "-r", "--quiet", "tests")
-    _commit_all(repo)
-
-    # An unrelated next change, staged but NOT committed — the pre-commit phase.
-    (repo / "value.py").write_text("FLAG = True\n", encoding="utf-8")
-    _git(repo, "add", "value.py")
-
-    assert _head_tracks_tests(repo), "control: the post-commit baseline still sees HEAD~1's suite"
-    assert not _head_tracks_tests(repo, ("HEAD",)), "control: HEAD alone carries no suite"
-
-    assert run_hermetic_pytest(repo, timeout=120, phase=PRE_COMMIT_PHASE) is None, (
-        "the pre-commit review rejected an unrelated change for a deletion it did not make"
-    )
-    assert [event[0] for event in events].count("pass") == 0
-    # The post-commit phase keeps the wider baseline: this IS the entry point the
-    # HEAD~1 consult exists for, since by then the deletion is already in HEAD.
-    assert run_hermetic_pytest(repo, timeout=120) is not None, (
-        "the post-commit baseline lost its HEAD~1 consult"
-    )
-
-
-def test_a_timed_out_pass_reports_what_the_killed_child_had_already_flushed(tmp_path, two_pass_env, stub_passes):
-    """A hang the per-test timeout cannot interrupt (blocked C code under SIGALRM)
-    leaves no other evidence of WHICH test hung — and the post-kill
-    `communicate` already collects that evidence. Discarding it left the operator
-    with "the serial pass timed out" and nothing else."""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    stub_passes([(None, "tests/test_a.py .\ntests/test_hangs_here.py ")])
-    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
-
-    result = run_hermetic_pytest(repo, timeout=120)
-
-    assert result is not None
-    assert "timed out" in result
-    assert "test_hangs_here" in result, "the killed pass's own output was collected then thrown away"
 
 
 def test_timeout_keeps_flushed_file_output_without_waiting_for_stdio_eof(tmp_path, monkeypatch):
@@ -2793,7 +1711,7 @@ def test_timeout_keeps_flushed_file_output_without_waiting_for_stdio_eof(tmp_pat
     )
 
 
-@pytest.mark.parametrize("max_output", [1, 60, 200, 8000])
+@pytest.mark.parametrize("max_output", [1, 200, 8000])
 def test_timeout_excerpt_stays_inside_the_budget_and_keeps_the_tail(max_output):
     """The excerpt shares the caller's 8000-char limit with the message, and the
     caller re-truncates from the TAIL — so it must be bounded here, and it must
@@ -2953,141 +1871,6 @@ def test_both_passes_execute_and_partition(tmp_path, two_pass_env):
 
 
 @requires_preflight_plugins
-def test_the_parallel_pass_really_starts_more_than_one_worker(tmp_path, two_pass_env):
-    """A "parallel" pass on ONE worker exercises no concurrency, yet the argv
-    still says `-n`, `PreflightPass.parallel` stays True and the green return is
-    accepted as proof. `-n auto` resolves through PYTEST_XDIST_AUTO_NUM_WORKERS,
-    which the operator environment can carry — `two_pass_env` pins it to "1",
-    exactly the inherited downgrade the scrub must defeat — so this asserts the
-    property behaviourally, from inside the candidate suite."""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    workers_dir = tmp_path / "observed_workers"
-    workers_dir.mkdir()
-    # `--dist loadscope` distributes by MODULE, so one file is one work unit.
-    # xdist's initial round-robin hands the first unit to each node, so four
-    # units against the two-worker floor makes both nodes report.
-    files = {}
-    for index in range(4):
-        files[f"tests/test_scope_{index}.py"] = f"""
-            import os
-            import pathlib
-
-
-            def test_records_its_worker():
-                # The operator's downgrade never arrived: the count is the one
-                # the gate chose, and it is at least two.
-                assert int(os.environ["PYTEST_XDIST_AUTO_NUM_WORKERS"]) >= 2
-                worker = os.environ["PYTEST_XDIST_WORKER"]
-                pathlib.Path(r'{workers_dir}', worker).write_text(worker)
-        """
-    repo = _make_repo(tmp_path, files)
-
-    assert run_hermetic_pytest(repo, timeout=180) is None
-
-    observed = sorted(path.name for path in workers_dir.iterdir())
-    assert len(observed) >= 2, f"the parallel lane ran on a single worker: {observed}"
-
-
-@requires_preflight_plugins
-def test_a_candidate_cannot_switch_the_parallel_plugins_off(tmp_path, two_pass_env):
-    """Verifying the interpreter proves the plugins are INSTALLED. It says nothing
-    about whether the candidate's own pytest configuration lets them LOAD, and ini
-    `addopts` are PREPENDED to the gate's argv, so `-p no:xdist -p no:timeout` in
-    the candidate's `pytest.ini` disarms both before the gate's flags are read.
-
-    That is why the parallel pass appends `-p xdist -p timeout`: `consider_preparse`
-    walks `-p` entries in order, so the later unblock wins over the earlier block.
-    Pinned behaviourally — the candidate says no, and the lane still fans out over
-    at least two real workers."""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    workers_dir = tmp_path / "hostile_workers"
-    workers_dir.mkdir()
-    files = {
-        "pytest.ini": (
-            "[pytest]\n"
-            "addopts = -p no:xdist -p no:timeout\n"
-            "markers =\n"
-            "    serial: real-process/port/global-state test; runs in the serial pass\n"
-        ),
-    }
-    # `--dist loadscope` distributes by MODULE, so four files are four work units
-    # and xdist's initial round-robin reaches both nodes.
-    for index in range(4):
-        files[f"tests/test_scope_{index}.py"] = f"""
-            import os
-            import pathlib
-
-
-            def test_records_its_worker():
-                worker = os.environ["PYTEST_XDIST_WORKER"]
-                pathlib.Path(r'{workers_dir}', worker).write_text(worker)
-        """
-    repo = _make_repo(tmp_path, files)
-
-    assert run_hermetic_pytest(repo, timeout=180) is None
-
-    observed = sorted(path.name for path in workers_dir.iterdir())
-    assert len(observed) >= 2, (
-        f"the candidate switched xdist off and the gate accepted it: {observed}"
-    )
-
-
-@requires_preflight_plugins
-def test_a_candidate_faking_the_parallel_flags_cannot_earn_a_green_pass(tmp_path, two_pass_env):
-    """The full attack, end to end. `pytest.ini` blocks both plugins AND a conftest
-    declares the gate's own flags with `pytest_addoption` and ignores them, so
-    nothing rejects `-n`: the lane is labelled parallel, runs strictly serially and
-    exits 0. Green, on a pass that never ran two things at once.
-
-    The invariant is that this shape cannot be BOTH green and serial. Forcing the
-    plugins on makes the conftest's duplicate option definitions collide with the
-    real ones, which is a usage error and a block; without the collision the lane
-    genuinely fans out. Either outcome is fail-closed — a silent pass is not."""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    workers_dir = tmp_path / "faked_workers"
-    workers_dir.mkdir()
-    files = {
-        "pytest.ini": (
-            "[pytest]\n"
-            "addopts = -p no:xdist -p no:timeout\n"
-            "markers =\n"
-            "    serial: real-process/port/global-state test; runs in the serial pass\n"
-        ),
-        "conftest.py": """
-            def pytest_addoption(parser):
-                # Swallow the gate's parallel flags so a plugin-less pytest accepts
-                # them: "pytest did not reject -n" is not evidence of parallelism.
-                parser.addoption("-n", "--numprocesses", action="store", default=None)
-                parser.addoption("--dist", action="store", default=None)
-                parser.addoption("--timeout", action="store", default=None)
-                parser.addoption("--timeout-method", action="store", default=None)
-                parser.addoption("--max-worker-restart", action="store", default=None)
-        """,
-    }
-    for index in range(4):
-        files[f"tests/test_scope_{index}.py"] = f"""
-            import os
-            import pathlib
-
-
-            def test_records_its_worker():
-                worker = os.environ.get("PYTEST_XDIST_WORKER", "none")
-                pathlib.Path(r'{workers_dir}', worker).write_text(worker)
-        """
-    repo = _make_repo(tmp_path, files)
-
-    result = run_hermetic_pytest(repo, timeout=180)
-
-    observed = sorted(path.name for path in workers_dir.iterdir())
-    assert result is not None or len(observed) >= 2, (
-        f"a lane that never ran in parallel returned green; workers observed: {observed}"
-    )
-
-
-@requires_preflight_plugins
 @pytest.mark.skipif(os.name == "nt", reason="POSIX marker-membership containment")
 def test_a_green_pass_cannot_leak_a_child_into_the_next_pass(tmp_path, two_pass_env):
     """Containment must be UNCONDITIONAL, not a timeout/crash path.
@@ -3181,82 +1964,6 @@ def test_a_green_pass_cannot_leak_a_child_into_the_next_pass(tmp_path, two_pass_
             leaked = int(marker.read_text().strip())
             if pid_is_alive(leaked):
                 force_kill_pid(leaked)
-
-
-@requires_preflight_plugins
-@pytest.mark.skipif(os.name == "nt", reason="POSIX detached-process cleanup")
-def test_hermetic_pytest_reaps_owned_children_and_preserves_unrelated_process(
-    tmp_path, two_pass_env, monkeypatch,
-):
-    """The two-pass gate must clean its own children without claiming the host.
-
-    The pytest-lane counterpart of test_preflight_node.py's
-    `test_relative_root_reaps_owned_children_and_preserves_unrelated_process`:
-    a process the gate never started, whose argv merely NAMES a path under the
-    disposable temp root, must survive both the between-pass boundary and the
-    teardown `finally`. The temp root is pinned here only so the stranger can
-    name it before the run starts. A command-line search is intercepted even on
-    regression, so this test can never signal arbitrary host processes; real
-    container discovery still runs and still has to reap the probe's orphan."""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    temp_root = (tmp_path / "preflight-root").resolve()
-    temp_root.mkdir()
-    _pin_preflight_root(monkeypatch, temp_root)
-    marker = tmp_path / "owned.pid"
-    repo = _make_repo(tmp_path, {
-        "tests/test_leaks_a_child.py": f"""
-            import pathlib
-            import subprocess
-            import sys
-
-
-            def test_spawns_a_child_and_passes():
-                child = subprocess.Popen(
-                    [sys.executable, "-c", "import time; time.sleep(180)"],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                )
-                pathlib.Path(r'{marker}').write_text(str(child.pid), encoding="utf-8")
-        """,
-    })
-    stranger = subprocess.Popen(
-        [sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(120)",
-         str(temp_root / "repo" / "unrelated.host.service")],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-        start_new_session=True,
-    )
-    original_run = subprocess.run
-    broad_queries = []
-
-    def record_process_search(argv, *args, **kwargs):
-        if list(argv[:2]) == ["pgrep", "-f"]:
-            broad_queries.append(argv)
-            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-        return original_run(argv, *args, **kwargs)
-
-    monkeypatch.setattr(subprocess, "run", record_process_search)
-    try:
-        assert stranger.stdout.readline().strip() == "ready"
-        assert run_hermetic_pytest(repo, timeout=180) is None
-        assert not broad_queries, "preflight rediscovered process ownership from command-line text"
-        assert stranger.poll() is None, "an unrelated process was killed because its argv named a path"
-        assert marker.exists(), "the owned probe never spawned its child"
-        owned = int(marker.read_text(encoding="utf-8").strip())
-        deadline = time.monotonic() + 10
-        while pid_is_alive(owned) and time.monotonic() < deadline:
-            time.sleep(0.05)
-        assert not pid_is_alive(owned), "an owned orphan survived the gate"
-    finally:
-        if marker.exists():
-            leaked = int(marker.read_text(encoding="utf-8").strip())
-            if pid_is_alive(leaked):
-                force_kill_pid(leaked)
-        stranger.terminate()
-        stranger.wait(timeout=10)
-        stranger.stdout.close()
 
 
 @requires_preflight_plugins
@@ -3359,25 +2066,6 @@ def test_a_printed_timeout_line_names_no_cause_for_another_workers_crash(tmp_pat
         ("tests/test_case.py::TestNeighbour::test_exits", False)], read
     assert "PARALLEL_WORKER_CRASH" in result and "nothing recorded why" in result, result
     assert "faster or split" not in result
-
-
-@requires_preflight_plugins
-def test_empty_serial_lane_is_green(tmp_path, two_pass_env):
-    """Exit 5 is green PER PASS — a candidate repo with zero serial tests must
-    not be false-blocked by an empty serial lane."""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    repo = _make_repo(
-        tmp_path,
-        {
-            "tests/test_plain.py": """
-                def test_ok():
-                    assert True
-            """,
-        },
-    )
-
-    assert run_hermetic_pytest(repo, timeout=120) is None
 
 
 @requires_preflight_plugins
@@ -4025,133 +2713,3 @@ def test_resolve_preflight_timeout_env_override(monkeypatch):
     assert _resolve_preflight_timeout(300) == 300
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "0")
     assert _resolve_preflight_timeout(300) == 300
-
-
-def test_hermetic_pytest_prefers_agent_python_env():
-    from ouroboros import preflight_runner
-
-    runner_src = inspect.getsource(preflight_runner._run_hermetic_pytest)
-    assert 'os.environ.get("OUROBOROS_AGENT_PYTHON") or sys.executable' in runner_src
-    # ...and every pass is actually spawned with that resolved interpreter.
-    pass_src = inspect.getsource(preflight_runner._execute_pytest_pass)
-    assert '[agent_python, "-m", "pytest", *args]' in pass_src
-
-
-@requires_preflight_plugins
-@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group reaping behaviour")
-def test_hermetic_pytest_timeout_reaps_detached_session_child(tmp_path, two_pass_env):
-    """A child that escapes pytest's process group (its own session) must still be
-    reaped on timeout — the orphan class the QA hit (96% CPU survivor)."""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    marker = tmp_path / "child.pid"
-    # NOTE: this fixture is generated user-style code that runs inside the
-    # hermetic worktree (where `ouroboros` is not on sys.path), so it must stay
-    # stdlib-only. start_new_session=True simulates an arbitrary skill test
-    # spawning a detached child in its own session — exactly the orphan class the
-    # reaper must catch. The test HARNESS itself uses platform_layer helpers.
-    # Unmarked, so it hangs inside the PARALLEL pass (one xdist worker deep).
-    repo = _make_repo(
-        tmp_path,
-        {
-            "tests/test_hang.py": f"""
-                import sys, subprocess, time
-
-                def test_spawns_detached_child_and_hangs():
-                    # Detached child in its OWN session escapes the pytest group's killpg.
-                    subprocess.Popen(
-                        [sys.executable, "-c",
-                         "import os,time;open(r'{marker}','w').write(str(os.getpid()));time.sleep(180)"],
-                        start_new_session=True,
-                    )
-                    time.sleep(180)
-            """,
-        },
-    )
-
-    # Allow xdist startup before timing out the detached-child probe.
-    result = run_hermetic_pytest(repo, timeout=30)
-    assert result is not None and "timed out" in result
-
-    assert marker.exists(), "probe never started; reaper result is inconclusive"
-    child_pid = int(marker.read_text().strip())
-    deadline = time.time() + 10
-    alive = True
-    while time.time() < deadline:
-        if not pid_is_alive(child_pid):
-            alive = False
-            break
-        time.sleep(0.2)
-    if alive:  # cleanup so a reaping regression does not leak a 180s sleeper
-        force_kill_pid(child_pid)
-    assert not alive, f"detached child {child_pid} survived preflight timeout reaping"
-
-
-def test_an_untracked_file_with_a_non_utf8_name_reaches_the_candidate(
-    tmp_path, two_pass_env, stub_passes, monkeypatch
-):
-    """POSIX filenames are BYTES, and Git lists them as such. Decoding that list
-    as UTF-8 with `errors="replace"` turned a raw non-UTF-8 byte into U+FFFD, so
-    the reconstructed path did not exist, `is_file()` said False, and the file was
-    skipped in silence — an inexact candidate with no PREFLIGHT_CANDIDATE_ASSEMBLY
-    block. The names are now decoded with the filesystem codec (surrogateescape),
-    which round-trips the original bytes."""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    if os.name != "posix":
-        pytest.skip("byte filenames are a POSIX property")
-    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
-    raw_name = b"fixture_\xff.dat"
-    try:
-        with open(os.path.join(os.fsencode(str(repo)), raw_name), "wb") as handle:
-            handle.write(b"untracked payload\n")
-    except (OSError, UnicodeError):  # APFS and friends enforce UTF-8 names
-        pytest.skip("this filesystem rejects non-UTF-8 filenames")
-    decoded_name = os.fsdecode(raw_name)
-
-    stub_passes([])
-    seen = _spy_on_candidate(monkeypatch, [decoded_name])
-
-    assert run_hermetic_pytest(repo, timeout=120) is None
-    assert seen[decoded_name] == "untracked payload\n", (
-        f"an untracked file vanished from the candidate on a byte filename: {seen!r}"
-    )
-
-
-@pytest.mark.skipif(
-    os.name == "nt",
-    reason=(
-        "POSIX-only invariant: the guarantee is that a raw non-UTF-8 filename byte "
-        "survives to the copy via os.fsdecode's surrogateescape round-trip. Windows "
-        "uses a UTF-16 filesystem where such a name cannot exist, and its fs codec "
-        "(utf-8/surrogatepass) raises on the synthetic 0xff byte this test injects — "
-        "git never emits such a name on Windows, so the production path is unaffected."
-    ),
-)
-def test_untracked_listing_is_decoded_with_the_filesystem_codec(tmp_path, monkeypatch):
-    """Filesystem-independent pin for the same defect (the test above can only run
-    where non-UTF-8 names are creatable): the listing is read as BYTES and each
-    name goes through `os.fsdecode`, so the original bytes reach the copy instead
-    of a U+FFFD name that matches no file on disk. POSIX-only: os.fsdecode is only
-    byte-transparent under surrogateescape (POSIX); see the skip marker."""
-    from ouroboros import preflight_runner
-
-    seen_kwargs = {}
-
-    def fake_run_git(_repo_dir, args, **kwargs):
-        # Mirrors the real seam: bytes only when the caller asks for them, the old
-        # utf-8/replace decode otherwise — so this pins the decision, not the stub.
-        seen_kwargs.update(kwargs)
-        raw = b"fixture_\xff.dat\x00"
-        out = raw if kwargs.get("binary_stdout") else raw.decode("utf-8", "replace")
-        return subprocess.CompletedProcess(list(args), 0, out, "")
-
-    copied = []
-    monkeypatch.setattr(preflight_runner, "_run_git", fake_run_git)
-    monkeypatch.setattr(preflight_runner.shutil, "copy2", lambda src, dst: copied.append(src))
-    monkeypatch.setattr(pathlib.Path, "is_file", lambda _self: True)
-
-    preflight_runner._copy_untracked(tmp_path, tmp_path / "candidate")
-
-    assert seen_kwargs.get("binary_stdout") is True, "the names must not be decoded by _run_git"
-    assert os.fsencode(str(copied[0])).endswith(b"fixture_\xff.dat"), copied

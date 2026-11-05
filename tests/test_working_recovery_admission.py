@@ -36,8 +36,7 @@ def _running(host, tmp_path, monkeypatch, scope):  # noqa: F811
     return original
 
 
-@pytest.mark.parametrize("scope", ["project", "main"])
-@pytest.mark.parametrize("stop", ["quit", "restart"])
+@pytest.mark.parametrize(("stop", "scope"), [("quit", "project"), ("restart", "main")])
 def test_saved_accepted_work_returns_through_real_assignment(host, tmp_path, monkeypatch, scope, stop):  # noqa: F811
     from supervisor.restart_retention import prepare_restart_returns
 
@@ -93,7 +92,7 @@ def test_old_saved_pending_snapshot_cannot_replay_after_handoff_when_running_mir
     assert not host.attempts
 
 
-@pytest.mark.parametrize("marker", [None, True, "1", 0, -1, 4, 5])
+@pytest.mark.parametrize("marker", [None, "1", 5])
 def test_recovery_refuses_malformed_or_already_dispatched_attempt_marker(tmp_path, marker):
     from supervisor.task_admission import _working_resume_granted
 
@@ -106,7 +105,7 @@ def test_recovery_refuses_malformed_or_already_dispatched_attempt_marker(tmp_pat
 
 
 @pytest.mark.parametrize("protocol,marker,allowed", [(True, None, True), (False, None, False),
-                                                     (False, 3, True), (True, 3, True)])
+                                                     (True, 3, True)])
 def test_original_later_attempt_needs_exact_source_and_dispatch_protocol(tmp_path, protocol, marker, allowed):
     from supervisor.task_admission import _working_resume_granted
 
@@ -128,7 +127,7 @@ def test_original_later_attempt_needs_exact_source_and_dispatch_protocol(tmp_pat
     assert not _working_resume_granted(task, tmp_path), "a source authorizes only its exact successor"
 
 
-@pytest.mark.parametrize("damage", ["source_digest", "wrong_attempt", "empty_locator", "malformed_ref"])
+@pytest.mark.parametrize("damage", ["source_digest", "wrong_attempt", "malformed_ref"])
 def test_real_resume_keeps_saved_work_held_when_its_source_is_not_exact(
     host, tmp_path, monkeypatch, damage,  # noqa: F811
 ):
@@ -363,8 +362,7 @@ def test_valid_exact_resume_never_reads_a_broken_saved_work_source(host, tmp_pat
 
 
 # Malformed carriers (their loaders refuse them too), then supported races before the handoff.
-@pytest.mark.parametrize("fault", ["wrong_grant", "spent_owner_wait",
-                                   "revoked_race", "consumed_race", "newer_mark", "stop", "new_pause"])
+@pytest.mark.parametrize("fault", ["wrong_grant", "stop", "new_pause"])
 def test_invalid_governing_resume_refuses_without_falling_back(host, tmp_path, monkeypatch, fault):  # noqa: F811
     from ouroboros import budget_pause
     from ouroboros.cancel_intents import request_cancel

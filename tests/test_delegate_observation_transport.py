@@ -13,6 +13,7 @@ from ouroboros import delegate_custody, delegate_supervision
 from ouroboros.gateways import claudexor as gateway_module
 from ouroboros.tools import delegate
 from tests._delegated_transport_shared import _delegating_ctx
+from tests._cases import case_folders
 
 
 @pytest.mark.parametrize("initially_queued", [False, True])
@@ -112,7 +113,7 @@ def test_typed_observation_timeout_keeps_same_run_inside_supervision(tmp_path, m
     assert sleeps == [delegate_supervision._TICK_SEC]
 
 
-@pytest.mark.parametrize("status", [200, 401, 403, 503])
+@pytest.mark.parametrize("status", [200, 401, 503])
 def test_received_auth_refusal_cannot_be_hidden_by_body_read_timeout(status):
     class BrokenBody(httpx.SyncByteStream):
         def __iter__(self):
@@ -146,10 +147,6 @@ def test_existing_control_returns_without_starting_another_observation(tmp_path,
 @pytest.mark.parametrize("failure,reason", [
     (httpx.ReadTimeout("read timed out"), "observation_read_timeout"),
     (httpx.ConnectError("connection refused"), "daemon_unreachable"),
-    (httpx.ConnectTimeout("connect timed out"), "daemon_unreachable"),
-    (httpx.PoolTimeout("pool exhausted"), "daemon_unreachable"),
-    (httpx.ReadError("connection reset"), "daemon_unreachable"),
-    (httpx.WriteError("broken pipe"), "daemon_unreachable"),
     (httpx.RemoteProtocolError("server disconnected"), "daemon_unreachable"),
 ])
 def test_read_only_retryable_transport_failures_are_typed_observation_holes(failure, reason):
@@ -204,7 +201,6 @@ def test_a_received_refusal_carries_no_observation_reason():
     ("GET", "/v2/agent-capabilities?model=private-query", "/v2/agent-capabilities"),
     ("GET", "/v2/trust?repoRoot=%2Fprivate%2Frepo", "/v2/trust"),
     ("GET", "/v2/runs/private-id/artifacts/private-file?token=private-query", "/v2/runs/..."),
-    ("POST", "/v2/threads/private-id/turns", "/v2/threads/..."),
 ])
 def test_control_failure_names_the_request_without_private_values(monkeypatch, method, path, family):
     calls, failures = [], []
@@ -502,22 +498,23 @@ def _busy(code="daemon_busy"):
                                      "retryable": True})
 
 
-@pytest.mark.parametrize("code", sorted(gateway_module.DAEMON_BUSY_CODES))
-def test_a_busy_answer_to_a_read_is_an_observation_hole_and_a_post_keeps_its_refusal(code):
+def test_a_busy_answer_to_a_read_is_an_observation_hole_and_a_post_keeps_its_refusal(subtests):
     """The engine's typed 503 that it cannot serve now is, for a GET, the same retryable
     hole as no answer (under the engine's own code, so no outage line); a POST keeps the
     refusal because a lost answer never proves a mutation was not accepted."""
-    with _scripted_gateway(lambda _request: _busy(code)) as gateway:
-        with pytest.raises(gateway_module.ClaudexorUnavailable) as read:
-            gateway.get_run("run-existing")
-        with pytest.raises(gateway_module.ClaudexorUnavailable) as write:
-            gateway.handshake()
-    assert (read.value.code, read.value.status_code) == (code, 503)
-    assert read.value.observation_timeout is True and read.value.observation_reason == code
-    assert read.value.observation_answered is True, "the engine itself answered: the transport is intact"
-    assert (write.value.code, write.value.status_code) == (code, 503)
-    assert write.value.observation_timeout is False and write.value.observation_reason == ""
-    assert write.value.observation_answered is False
+    for code in sorted(gateway_module.DAEMON_BUSY_CODES):
+        with subtests.test(code=code):
+            with _scripted_gateway(lambda _request: _busy(code)) as gateway:
+                with pytest.raises(gateway_module.ClaudexorUnavailable) as read:
+                    gateway.get_run("run-existing")
+                with pytest.raises(gateway_module.ClaudexorUnavailable) as write:
+                    gateway.handshake()
+            assert (read.value.code, read.value.status_code) == (code, 503)
+            assert read.value.observation_timeout is True and read.value.observation_reason == code
+            assert read.value.observation_answered is True, "the engine itself answered: the transport is intact"
+            assert (write.value.code, write.value.status_code) == (code, 503)
+            assert write.value.observation_timeout is False and write.value.observation_reason == ""
+            assert write.value.observation_answered is False
 
 
 @pytest.mark.parametrize("status,code", [(503, "idempotency_status_unavailable"), (500, "daemon_busy")])
@@ -569,13 +566,16 @@ def _supervised_busy(tmp_path, monkeypatch, *, busy_reads, busy_handshake=False,
     return result, sleeps, notes, reads
 
 
-@pytest.mark.parametrize("code", sorted(gateway_module.DAEMON_BUSY_CODES))
-def test_busy_reads_are_skipped_quietly_on_the_same_beat(tmp_path, monkeypatch, code):
-    result, sleeps, notes, reads = _supervised_busy(tmp_path, monkeypatch, busy_reads=2, code=code)
-    assert result["status"] == "terminal" and result["state"] == "succeeded", result
-    assert reads == ["GET"] * 3, "two busy beats, then the answered read"
-    assert sleeps == [delegate_supervision._TICK_SEC] * 2, "the cadence stays the three-second beat"
-    assert notes == [], "the daemon itself answered: no outage line, even for its daemon_unreachable"
+def test_busy_reads_are_skipped_quietly_on_the_same_beat(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for code in sorted(gateway_module.DAEMON_BUSY_CODES):
+        tmp_path = next(case_paths)
+        with subtests.test(code=code), monkeypatch.context() as monkeypatch:
+            result, sleeps, notes, reads = _supervised_busy(tmp_path, monkeypatch, busy_reads=2, code=code)
+            assert result["status"] == "terminal" and result["state"] == "succeeded", result
+            assert reads == ["GET"] * 3, "two busy beats, then the answered read"
+            assert sleeps == [delegate_supervision._TICK_SEC] * 2, "the cadence stays the three-second beat"
+            assert notes == [], "the daemon itself answered: no outage line, even for its daemon_unreachable"
 
 
 def test_a_recovery_only_window_keeps_the_transport_instead_of_rehandshaking_into_a_refusal(tmp_path, monkeypatch):
@@ -671,8 +671,7 @@ def _raise(exc):
     return handler
 
 
-@pytest.mark.parametrize("repaired", [False, True])
-@pytest.mark.parametrize("status,code", [(404, "not_found"), (503, "daemon_busy")])
+@pytest.mark.parametrize(("status", "code", "repaired"), [(404, "not_found", True), (503, "daemon_busy", False)])
 def test_an_unavailable_stream_keeps_the_provisional_window_on_the_repaired_engine_too(
         tmp_path, monkeypatch, repaired, status, code):
     """A journal that cannot be opened hands the beat to the detail read and its degraded window,

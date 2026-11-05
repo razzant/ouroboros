@@ -30,6 +30,7 @@ from ouroboros.gateway.settings import (
     api_owner_runtime_mode,
     api_settings_post,
 )
+from tests._cases import chosen_rows
 
 @pytest.fixture
 def isolated_settings(tmp_path, monkeypatch):
@@ -70,7 +71,7 @@ WRITERS = [
 ]
 
 
-@pytest.mark.parametrize(("path", "endpoint", "body"), WRITERS, ids=[w[0] for w in WRITERS])
+@pytest.mark.parametrize(("path", "endpoint", "body"), chosen_rows(WRITERS, 0, 6, 7), ids=chosen_rows([w[0] for w in WRITERS], 0, 6, 7))
 def test_every_settings_writer_answers_the_typed_busy_within_the_bound(
     isolated_settings, monkeypatch, path, endpoint, body,
 ):

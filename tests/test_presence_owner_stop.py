@@ -162,8 +162,10 @@ def _kept_unsent(r, h, stopped, stop, answer):
     assert not h.executions.live()
 
 
-@pytest.mark.parametrize("round_one", ["tool_call", "final_answer"])
-@pytest.mark.parametrize("cascade", [False, True], ids=["single", "cascade"])
+@pytest.mark.parametrize(("cascade", "round_one"), [
+    pytest.param(False, "tool_call", id='single-tool_call'),
+    pytest.param(True, "final_answer", id='cascade-final_answer'),
+])
 def test_public_stop_reaches_the_live_turn_and_its_runner_settles_cancelled(owner_stop, monkeypatch, cascade, round_one):
     from supervisor.task_lifecycle import sweep_cancel_intents
 
@@ -455,8 +457,11 @@ def test_public_stop_during_a_real_budget_refusal_keeps_the_held_answer_unsent(o
     assert (limit["scope"], limit["status"], limit["auto_resume"]) == ("global", "resource_limited", False)
 
 
-@pytest.mark.parametrize("rail", ["retry_wall", "context_overflow", "output_exhaustion"])
-@pytest.mark.parametrize("stopping", [False, True], ids=["no-stop", "stop-now"])
+@pytest.mark.parametrize(("stopping", "rail"), [
+    pytest.param(False, "retry_wall", id='no-stop-retry_wall'),
+    pytest.param(False, "output_exhaustion", id='no-stop-output_exhaustion'),
+    pytest.param(True, "context_overflow", id='stop-now-context_overflow'),
+])
 def test_a_no_call_rail_stamps_its_reason_before_stop_now_can_end_it(tmp_path, monkeypatch, rail, stopping):
     """The no-call rails that stamp their own reason do it before the shared composer, which ends any of
     them on Stop now, so no stamp overwrites that terminal afterwards; without a Stop each keeps its own.

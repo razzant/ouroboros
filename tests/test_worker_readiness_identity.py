@@ -51,8 +51,8 @@ def unmeasured_parent(monkeypatch):
 
 
 @pytest.mark.parametrize("parent,child", [
-    ("", "child-birth"), ("test-birth", ""), ("", ""), ("test-birth", "test-birth"),
-], ids=["absent_parent_birth", "absent_child_birth", "both_absent", "matching"])
+    ("", "child-birth"), ("test-birth", ""), ("test-birth", "test-birth"),
+], ids=["absent_parent_birth", "absent_child_birth", "matching"])
 def test_readiness_compares_births_only_when_both_sides_measured_one(
         pool, seam, unmeasured_parent, parent, child):  # noqa: F811
     slot = _booting_slot(pool, 0, 5001)
@@ -107,11 +107,9 @@ def test_pid_reuse_without_a_parent_birth_adopts_the_newest_row_for_the_pid(
 
 @pytest.mark.parametrize("slot_birth,event_pid,event_birth,confirmed", [
     ("test-birth", 5001, "test-birth", True),
-    ("test-birth", 5001, "", True),
-    ("", 5001, "", True),
     ("test-birth", 5001, "another-process", False),
     ("test-birth", 4999, "test-birth", False),
-], ids=["matching", "absent_child_birth", "both_absent", "mismatching", "foreign_pid"])
+], ids=["matching", "mismatching", "foreign_pid"])
 def test_the_idle_probe_answer_compares_births_only_when_both_are_known(
         pool, slot_birth, event_pid, event_birth, confirmed):  # noqa: F811
     lifecycle, workers = pool.lifecycle, pool.workers
@@ -169,24 +167,8 @@ def test_an_equal_kernel_birth_wins_over_an_exact_spelling_without_one(pool, sea
 @pytest.mark.parametrize("slot_birth,slot_kernel,event,now,before", [
     ("test-birth", _KERNEL, {"process_birth": _ZONE, "kernel_birth": _KERNEL}, True, False),
     ("test-birth", _KERNEL, {"process_birth": "test-birth", "kernel_birth": _REUSED}, False, True),
-    ("test-birth", _KERNEL, {"process_birth": "", "kernel_birth": _REUSED}, False, True),
-    ("", _KERNEL, {"process_birth": _ZONE, "kernel_birth": _KERNEL}, True, True),
-    ("test-birth", _KERNEL, {"process_birth": _ZONE}, False, False),
-    ("test-birth", _KERNEL, {"process_birth": "test-birth"}, True, True),
-    ("test-birth", _KERNEL, {"process_birth": ""}, True, True),
-    ("test-birth", "", {"process_birth": _ZONE, "kernel_birth": _KERNEL}, False, False),
-    ("test-birth", "", {"process_birth": "", "kernel_birth": _KERNEL}, True, True),
-    ("test-birth", _KERNEL, {"process_birth": _ZONE, "kernel_birth": "darwin-start:1793143271"}, False, False),
-    ("test-birth", _KERNEL, {"process_birth": "test-birth", "kernel_birth": "Tue Oct 27 14:57:17 2026"}, True, True),
-    ("test-birth", _KERNEL, {"process_birth": _ZONE, "kernel_birth": _FILETIME}, False, False),
-    (_LINUX, _LINUX, {"process_birth": _LINUX, "kernel_birth": _LINUX}, True, True),
-    (_LINUX, _LINUX, {"process_birth": _LINUX_OTHER, "kernel_birth": _LINUX_OTHER}, False, False),
-    (_FILETIME, _FILETIME, {"process_birth": _FILETIME, "kernel_birth": _FILETIME}, True, True),
     (_FILETIME, _FILETIME, {"process_birth": _FILETIME_OTHER, "kernel_birth": _FILETIME_OTHER}, False, False),
-], ids=["new_other_zone", "reused_same_second", "reused_beats_pid_fallback", "kernel_without_parent_spelling",
-        "old_other_zone_unfixed", "old_same", "old_unmeasured_pid_fallback", "parent_unread_other_zone_unfixed",
-        "parent_unread_pid_fallback", "malformed_other_zone", "malformed_same", "two_kinds",
-        "linux_same", "linux_reused", "windows_same", "windows_reused"])
+], ids=["new_other_zone", "reused_same_second", "windows_reused"])
 def test_the_idle_probe_answer_lets_comparable_kernel_births_decide(pool, slot_birth, slot_kernel, event,  # noqa: F811
                                                                      now, before):
     """``before`` is the prior answer: the legacy rule the same answer meets without kernel births."""

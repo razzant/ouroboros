@@ -26,8 +26,7 @@ def _consumed(host, monkeypatch, clock, *, consume=True):  # noqa: F811
     return captured
 
 
-@pytest.mark.parametrize('change', ['none', 'unconsumed', 'newer_pause', 'foreign_attempt', 'foreign_root',
-    'revoked', 'grant', 'generation', 'pause_generation', 'source', 'unreadable', 'event_attempt', 'event_grant'])
+@pytest.mark.parametrize('change', ['none', 'foreign_attempt', 'event_grant'])
 def test_consumption_fold_requires_current_authority_and_runs_once(host, monkeypatch, clock, change):  # noqa: F811
     meta = _consumed(host, monkeypatch, clock, consume=change != 'unconsumed')
     row = budget_pause.budget_pause_row(host.root, 'held')

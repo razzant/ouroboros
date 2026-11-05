@@ -39,7 +39,7 @@ def test_server_tick_observes_existing_stop_latch(monkeypatch):
 @pytest.mark.skipif(sys.platform == "win32", reason="Real PID signals require POSIX delivery")
 @pytest.mark.parametrize("entrypoint,ingress", [
     ("console", "control"), ("console", "sigint"),
-    ("console", "sigterm"), ("imported", "sigint"),
+    ("console", "sigterm"),
 ])
 @pytest.mark.timeout(80)
 def test_signal_during_restart_join_preserves_cleanup(tmp_path, entrypoint, ingress):

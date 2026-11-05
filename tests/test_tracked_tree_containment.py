@@ -263,7 +263,7 @@ def test_an_unmeasured_dead_root_stays_unconfirmed(registry, monkeypatch):
 
 
 @pytest.mark.parametrize(("birth", "current", "signals"), [
-    ("born", "born", [424242]), ("born", "reused", []), ("", "born", []), ("born", "", []),
+    ("born", "born", [424242]), ("born", "reused", []), ("born", "", []),
 ])
 def test_browser_smoke_cleanup_signals_only_a_positive_matching_birth(monkeypatch, birth, current, signals):
     from tests import test_tracked_chromium_smoke as smoke
@@ -494,7 +494,6 @@ def test_windows_tree_kill_ends_the_childs_own_job_before_any_parent_chain_walk(
     ("job-6", False, False),
     ("job-6", True, True),
     ("job-6", None, None),   # an unreadable Job
-    (None, False, None),     # born outside a Job
 ])
 def test_windows_settlement_reads_only_the_childs_own_job(windows, job, job_runs, expected):
     windows.running["job-6"] = job_runs

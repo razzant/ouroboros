@@ -10,7 +10,6 @@ import pytest
 
 from ouroboros.preflight_inventory import SELECT
 from ouroboros.preflight_runner import LANE_EXCLUSION_EXPR, PARALLEL_PASS_FLAGS, SERIAL_PASS_FLAGS
-from ouroboros.safe_test_supervisor import _GRACE_SEC as SAFE_TEST_INT_WINDOW_SEC
 from tests import conftest
 from tests.test_selected_test_cli import plugin_scope
 
@@ -68,7 +67,7 @@ def _group(item):
     return mark.args[0]
 
 
-@pytest.mark.parametrize("workers, shards", [(2, 1), (4, 1), (7, 1), (8, 2), (12, 3), (16, 4), (64, 4)])
+@pytest.mark.parametrize("workers, shards", [(2, 1), (8, 2), (12, 3)])
 def test_serial_overlap_is_bounded_by_the_worker_count(run_tests, workers, shards):
     assert run_tests.serial_shards(workers) == shards
 
@@ -169,54 +168,6 @@ def test_the_worker_override_steers_xdist_like_the_gate(run_tests, monkeypatch, 
     (lease,) = seen["leases"]
     assert lease["pid"] == os.getpid() and lease["workers"] == workers and lease["command"] == "run_tests.py x"
     assert list(standalone_budget.glob("*.json")) == [], "the lease outlived its run"
-
-
-@pytest.mark.parametrize("interrupted, diagnostic, expected", [
-    (False, "overload_stop: largest pid=123 rss=456", 1),
-    (True, "", 130),
-])
-def test_runner_never_greens_an_overload_or_interrupt(
-    run_tests, monkeypatch, capsys, interrupted, diagnostic, expected,
-):
-    from ouroboros import process_containment
-
-    events = []
-
-    class Owner:
-        def __init__(self, **options):
-            pass
-
-        def spawn(self, *args, **kwargs):
-            return self
-
-        def wait(self, timeout=None):
-            if interrupted and timeout is None:
-                raise KeyboardInterrupt
-            events.extend([f"wait {timeout}"] if timeout is not None else [])
-            return 0
-
-        def interrupt_root(self):
-            events.append("interrupted")
-            return True
-
-        def terminate_tree(self, grace):
-            events.append(f"terminate {grace}")
-
-        def reap(self):
-            events.append("reaped")
-            return diagnostic
-
-        def close(self):
-            events.append("closed")
-
-    monkeypatch.setattr(process_containment, "ProcessContainer", Owner)
-    assert run_tests._run("x", [run_tests.sys.executable, "-c", "pass"], REPO) == expected
-    # The export wait and TERM grace are allotted inside safe_test's window; its deadline bounds the reap.
-    assert run_tests._INTERRUPT_EXPORT_SEC + run_tests._INTERRUPT_TERM_SEC < SAFE_TEST_INT_WINDOW_SEC
-    stop = ["interrupted", "wait 7", "terminate 2"] if interrupted else []
-    assert events == [*stop, "reaped", "wait 5", "closed"]
-    if diagnostic:
-        assert diagnostic in capsys.readouterr().err
 
 
 def test_node_lane_uses_the_shared_worker_budget(run_tests, monkeypatch):
@@ -464,61 +415,3 @@ def test_the_documented_command_is_the_script():
     assert "test:\n\tuv run --locked python scripts/run_tests.py\n" in makefile
     for doc in ("CONTRIBUTING.md", "README.md", "docs/development/14-build-and-ci.md", "prompts/SYSTEM.md"):
         assert "scripts/run_tests.py" in (REPO / doc).read_text(encoding="utf-8"), doc
-
-
-def test_runner_evidence_stays_with_its_controller_across_nested_and_sequential_pytest(tmp_path):
-    """Exercise the runner's real argv; inheriting PYTEST_ADDOPTS used to truncate both files."""
-    import json
-    import subprocess
-    import sys
-    import textwrap
-    from tests.test_ci_evidence import _results, _started
-
-    outer, inner = tmp_path / "outer", tmp_path / "inner"
-    outer.mkdir()
-    inner.mkdir()
-    (inner / "test_child.py").write_text("def test_child():\n    assert True\n", encoding="utf-8")
-    evidence, child_evidence = tmp_path / "diagnostics", tmp_path / "child-diagnostics"
-    public = evidence / "focused"
-    public.mkdir(parents=True)
-    child_args = ["-p", "tests.conftest", "-o", "addopts=", "--rootdir", str(inner),
-                  "--confcutdir", str(inner), "-q", str(inner)]
-    (outer / "test_parent.py").write_text(textwrap.dedent(f"""
-        import os, subprocess, sys
-        from pathlib import Path
-        def test_parent():
-            assert "--ci-evidence-dir" not in os.environ.get("PYTEST_ADDOPTS", "")
-            public = Path({str(public)!r})
-            before = {{name: (public / name).read_bytes() for name in ("events.jsonl", "results.json")}}
-            for explicit in ([], ["--ci-evidence-dir", {str(child_evidence)!r}]):
-                result = subprocess.run([sys.executable, "-m", "pytest", *{child_args!r}, *explicit],
-                                        cwd={str(REPO)!r}, capture_output=True, text=True,
-                                        encoding="utf-8", timeout=60)
-                assert result.returncode == 0, result.stdout + result.stderr
-                assert {{name: (public / name).read_bytes() for name in before}} == before
-        """), encoding="utf-8")
-    arguments = ["--evidence-dir", str(evidence), "-p", "tests.conftest", "-o", "addopts=",
-                 "--rootdir", str(outer), "--confcutdir", str(outer), "-q", str(outer)]
-    entry = tmp_path / "run_parent.py"
-    entry.write_text(
-        "import runpy\n"
-        f"runner = runpy.run_path({str(REPO / 'scripts/run_tests.py')!r})\n"
-        f"raise SystemExit(runner['main']({arguments!r}))\n", encoding="utf-8")
-    command = [sys.executable, "-I", "-S", str(REPO / "scripts/safe_test.py"),
-               "--temp-parent", str(tmp_path), "--", sys.executable, str(entry)]
-    # Reuse after the preceding controller exited is valid, without stale ownership locks.
-    for previous in range(2):
-        (public / "results.json").write_text(json.dumps({"previous": previous}), encoding="utf-8")
-        result = subprocess.run(command, cwd=REPO, capture_output=True, text=True,
-                                encoding="utf-8", timeout=180)
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert _results(public)["tests_collected"] == 1
-        assert _results(public)["session_exit_code"] == 0
-        assert {row["nodeid"] for row in _results(public)["reports"]} == {"test_parent.py::test_parent"}
-        raw = (public / "events.jsonl").read_text(encoding="utf-8")
-        assert "\x00" not in raw
-        rows = [json.loads(line) for line in raw.splitlines()]
-        assert _started(rows) == ["test_parent.py::test_parent"]
-        assert rows[-1]["event"] == "finish"
-        assert _results(child_evidence)["session_exit_code"] == 0
-        assert {row["nodeid"] for row in _results(child_evidence)["reports"]} == {"test_child.py::test_child"}

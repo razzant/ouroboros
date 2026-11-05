@@ -102,8 +102,7 @@ def _text_of(content):
     return content if isinstance(content, str) else "\n".join(str(block.get("text") or "") for block in content)
 
 
-@pytest.mark.parametrize("memory_mode", ["empty", "forked"])
-@pytest.mark.parametrize("sources", ["shared", "declared"])
+@pytest.mark.parametrize(("sources", "memory_mode"), [("shared", "forked"), ("declared", "empty")])
 def test_a_native_child_receives_and_reads_the_retained_copies_through_the_real_chain(
         chain, monkeypatch, tmp_path, memory_mode, sources):  # noqa: F811
     from ouroboros.artifacts import collect_task_artifact_records

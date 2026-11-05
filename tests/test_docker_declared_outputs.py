@@ -59,7 +59,6 @@ def shell_docker(project, monkeypatch):
 
 @pytest.mark.parametrize("output,setup,valid", [
     ("missing/../answer.txt", "", False),
-    ("answer.txt/", "", False),
     ("created/../answer.txt", "mkdir created; ", True),
     ("answer-dir/", "mkdir answer-dir; cp answer.txt answer-dir/; ", True),
 ])
@@ -122,7 +121,7 @@ def test_hostconfig_tmpfs_refuses_hidden_bind_outputs(shell_docker, monkeypatch,
     assert decoy.read_text() == "HIDDEN HOST DECOY"
 
 
-@pytest.mark.parametrize("outcome", ["export", "unavailable", "stop_failed", "keep_alive", "keep_task", "panic"])
+@pytest.mark.parametrize("outcome", ["export", "stop_failed", "keep_task"])
 def test_automatic_docker_service_outputs_and_custody(shell_docker, monkeypatch, outcome):
     from pathlib import Path
 

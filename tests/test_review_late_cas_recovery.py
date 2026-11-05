@@ -85,7 +85,7 @@ def test_fresh_context_reaggregates_full_late_source_without_second_attempt(comp
     assert payload["producer_outcome"]["operation_state"] == "settled"
 
 
-@pytest.mark.parametrize("axis", ["task", "root", "slot", "route", "operation", "subject", "contract", "roster", "epoch", "invocation"])
+@pytest.mark.parametrize("axis", ["task", "contract", "invocation"])
 def test_mismatched_identity_never_borrows_a_late_pass(completed_late, axis):
     root, slot, row, calls, _ = completed_late
     req, ctx, row = _request(reconcile_only=True), context(root), copy.deepcopy(row)

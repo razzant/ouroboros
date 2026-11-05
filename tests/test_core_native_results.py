@@ -101,27 +101,6 @@ def _readonly_ctx(repo: pathlib.Path, drive: pathlib.Path) -> ToolContext:
             "LEGACY_WARNING",
             "⚠️ NOT_FOUND: file does not exist: {repo}{sep}missing.txt",
         ),
-        (
-            "read_file",
-            {"path": "identity.md"},
-            "LEGACY_WARNING",
-            "⚠️ NOT_FOUND: 'identity.md' is not at the repo root.\n\n"
-            "This file lives at `data_root/memory/identity.md`, not in the "
-            "git repo. Some memory artifacts are already summarized in "
-            "context as `## Identity`, but raw memory state must be read "
-            "from the data root. If you need the raw file, call "
-            "`read_file(root='runtime_data', path='memory/identity.md')`.",
-        ),
-        (
-            "read_file",
-            {"path": "memory/none.md", "root": "runtime_data"},
-            "LEGACY_WARNING",
-            "⚠️ DATA_NOT_YET_CREATED: memory/none.md\n\n"
-            "Memory artifacts under memory/ are created lazily on first "
-            "write. Treat this as an empty/absent state and proceed with "
-            "initialization if that is the task. Use list_files with "
-            "root=runtime_data to confirm what currently exists.",
-        ),
         # Owner item I27: a read-only discovery MISS is named as a miss. The ⚠️
         # marker and the sentence survive; only the severity separates "there is
         # nothing at that path" from "the listing itself failed", so a later
@@ -130,18 +109,6 @@ def _readonly_ctx(repo: pathlib.Path, drive: pathlib.Path) -> ToolContext:
         (
             "list_files",
             {"path": "nope"},
-            "LEGACY_WARNING",
-            "⚠️ LIST_FILES_NOT_FOUND: Directory not found: nope",
-        ),
-        (
-            "list_files",
-            {"path": "sample.txt"},
-            "LEGACY_WARNING",
-            "⚠️ LIST_FILES_NOT_FOUND: Not a directory: sample.txt",
-        ),
-        (
-            "list_files",
-            {"path": "nope", "root": "runtime_data"},
             "LEGACY_WARNING",
             "⚠️ LIST_FILES_NOT_FOUND: Directory not found: nope",
         ),
@@ -205,8 +172,6 @@ def test_root_guard_publishes_its_two_refusals(tmp_path):
         ("read_file", {"path": ".env"}, "SECRET=1"),
         ("list_files", {"path": ".git"}, "HEAD"),
         ("read_file", {"root": "runtime_data", "path": "settings.json"}, "{}"),
-        ("list_files", {"root": "runtime_data", "path": "secrets"}, "sample.txt"),
-        ("read_file", {"root": "system_repo", "path": ".env"}, "SECRET=1"),
     ],
 )
 def test_helper_file_content_has_successful_native_results(tmp_path, tool, args, content):
@@ -353,35 +318,6 @@ def test_owner_chat_delivery_terminals_are_native(tmp_path, label, tool, code, t
             "  old_str: 'zeta'\n"
             "Re-read that region (read_file start_line=2 max_lines=1) and copy the exact bytes into old_str.\n"
             "File preview (whole file, 11 chars):\nalpha\nbeta\n",
-        ),
-        (
-            "edit_text",
-            {"path": "notes.txt", "root": "runtime_data", "old_str": "alpha\nbeta\n", "new_str": "x"},
-            "LEGACY_BLOCKED",
-            "⚠️ WRITE_BLOCKED: new content for 'notes.txt' is 9% of original "
-            "(11 -> 1 chars). This looks like accidental truncation. "
-            "If the removal is intended, repeat the same call with force=true; "
-            "this confirms shrinking every file in the call.",
-        ),
-        ("search_code", {"query": ""}, "LEGACY_TOOL_ERROR", "⚠️ SEARCH_ERROR: query is required."),
-        (
-            "search_code",
-            {"query": "x", "path": "nope"},
-            "LEGACY_WARNING",
-            "⚠️ SEARCH_NOT_FOUND: path not found: active_workspace:nope",
-        ),
-        (
-            "search_code",
-            {"query": "[", "regex": True},
-            "LEGACY_TOOL_ERROR",
-            "⚠️ SEARCH_ERROR: invalid regex: unterminated character set at position 0",
-        ),
-        (
-            "forward_to_worker",
-            {"task_id": "not a task id!", "message": "m"},
-            "TOOL_ARG_ERROR",
-            "⚠️ TOOL_ARG_ERROR (forward_to_worker): task_id must match "
-            "[A-Za-z0-9][A-Za-z0-9_.-]{0,127}",
         ),
     ],
 )

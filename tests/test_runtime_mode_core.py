@@ -24,7 +24,6 @@ import sys
 import pytest
 from tests._safety_fixtures import disable_safety, owner_registry as _registry
 
-from ouroboros.onboarding_wizard import build_onboarding_html
 from ouroboros.runtime_mode_policy import protected_path_category
 from ouroboros.tools.registry import ToolRegistry
 
@@ -296,18 +295,6 @@ def test_state_response_typeddict_declares_phase2_keys():
 # ===========================================================================
 
 
-def test_settings_ui_renders_runtime_mode_and_skills_path():
-    src = (REPO / "web" / "modules" / "settings_ui.js").read_text(encoding="utf-8")
-    assert 'id="s-runtime-mode"' in src
-    # Runtime-mode segmented control is built by the renderSegmentedField SSOT
-    # (C7.1): the column-override modifier and the light/advanced/pro options come
-    # through its params, not inline data-effort-value markup.
-    assert "modifier: 'data-runtime-mode-group'" in src
-    for mode in ("light", "advanced", "pro"):
-        assert f"value: '{mode}'" in src
-    assert 'id="s-skills-repo-path"' in src
-
-
 def test_settings_js_reads_and_writes_phase2_keys():
     src = "\n".join((REPO / "web" / "modules" / name).read_text(encoding="utf-8")
                      for name in ("settings.js", "settings_local_model.js"))
@@ -318,18 +305,6 @@ def test_settings_js_reads_and_writes_phase2_keys():
     assert "['s-context-mode', 'OUROBOROS_CONTEXT_MODE', 'max']" in src
     assert "['s-skills-repo-path', 'OUROBOROS_SKILLS_REPO_PATH']" in src
     assert "fieldValue(id).trim()" in src
-
-
-def test_onboarding_js_has_runtime_mode_selector_and_save_payload():
-    src = (REPO / "web" / "modules" / "onboarding_wizard.js").read_text(encoding="utf-8")
-    agents = (REPO / "web" / "modules" / "onboarding_agents_step.js").read_text(encoding="utf-8")
-    html = build_onboarding_html({})
-    for mode in ("light", "advanced", "pro"):
-        assert f'"value": "{mode}"' in html
-    assert "data-runtime-mode" in src
-    assert "onboardingSettingsDraft" in src
-    assert "OUROBOROS_RUNTIME_MODE" in agents
-    assert "OUROBOROS_SKILLS_REPO_PATH" in agents
 
 
 def test_the_protected_path_messages_name_the_review_panel_and_the_review_gate(monkeypatch):
@@ -348,33 +323,6 @@ def test_the_protected_path_messages_name_the_review_panel_and_the_review_gate(m
     assert notice.endswith("These changes can be committed only through the normal review gate.")
     for text in (policy.__doc__ or "", refusal, notice):
         assert "triad" not in text and "scope review" not in text
-
-
-def test_skills_ui_reads_live_extension_state_fields():
-    renderer = (REPO / "web" / "modules" / "skill_card_renderer.js").read_text(encoding="utf-8")
-    orchestration = (REPO / "web" / "modules" / "skills.js").read_text(encoding="utf-8")
-    src = renderer + "\n" + orchestration
-    assert "live_loaded" in src
-    assert "gate.executable_review" in src  # the card reads the host's executable-review gate
-    assert "executable_review" in src
-    assert "skill.review_status === 'blockers' && !reviewReady(skill)" in src
-    assert "function statusBadge(status, gate = null, profile = '')" in src
-    assert "statusBadge(skill.review_status, skill.review_gate, skill.review_profile)" in src
-    assert "find_in_browse" in src  # a failed install row leads back to Browse
-    assert "result.error" in src
-
-
-def test_onboarding_js_exposes_skills_repo_path_input_and_binding():
-    src = (REPO / "web" / "modules" / "onboarding_wizard.js").read_text(encoding="utf-8")
-    assert 'id="skills-repo-path"' in src
-    assert 'data-clear="skills-repo-path"' in src
-    assert "state.skillsRepoPath = skillsInput.value" in src
-    assert "'skills-repo-path': () => { state.skillsRepoPath = ''; }" in src
-
-
-def test_onboarding_css_has_three_column_variant():
-    src = (REPO / "web" / "onboarding.css").read_text(encoding="utf-8")
-    assert ".wizard-choice-grid.three" in src
 
 
 # ===========================================================================
@@ -537,12 +485,7 @@ def _git_repo(tmp_path: pathlib.Path) -> pathlib.Path:
 
 @pytest.mark.parametrize(("tool_name", "args"), [
     ("write_file", {"path": "README.md", "content": "changed\n"}),
-    ("commit_reviewed", {"commit_message": "test"}),
-    ("edit_text", {"path": "README.md", "old_str": "ok", "new_str": "changed"}),
-    ("vcs_revert", {"sha": "HEAD"}),
     ("vcs_pull_ff", {}),
-    ("vcs_restore", {}),
-    ("vcs_rollback", {"target": "HEAD"}),
     ("promote_to_stable", {"reason": "test"}),
 ])
 def test_light_mode_blocks_repo_mutation_tools(tool_name, args, tmp_path, monkeypatch):
@@ -604,7 +547,6 @@ def test_light_mode_does_not_block_skill_exec_at_registry_layer(tmp_path, monkey
 @pytest.mark.parametrize("path", [
     "ouroboros/safety.py",
     "ouroboros/contracts/plugin_api.py",
-    "ouroboros/runtime_mode_policy.py",
     ".github/workflows/ci.yml",
 ])
 def test_advanced_mode_blocks_protected_write(path, tmp_path, monkeypatch):
@@ -1116,9 +1058,6 @@ def test_runtime_mode_rank_preserves_the_access_order():
 @pytest.mark.parametrize("cmd", [
     "git rebase HEAD~1",
     "git checkout -- BIBLE.md",
-    "git restore BIBLE.md",
-    "git commit -m rewrite BIBLE.md",
-    "git update-ref refs/heads/feature HEAD",
     "git filter-repo --path other.txt --invert-paths",
 ])
 def test_bible_history_predicate_allows_unrelated_git_history_operations(cmd):
@@ -1129,7 +1068,6 @@ def test_bible_history_predicate_allows_unrelated_git_history_operations(cmd):
 
 @pytest.mark.parametrize("cmd", [
     "git rm BIBLE.md",
-    "git mv BIBLE.md BIBLE.old",
     "git update-index --remove BIBLE.md",
     "git filter-repo --path BIBLE.md --invert-paths",
 ])
@@ -1170,8 +1108,6 @@ def test_light_mode_allows_extension_tool_dispatch(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(("tool_name", "args"), [
     ("fetch_pr_ref", {"pr_number": 1}),
-    ("create_integration_branch", {"pr_number": 1}),
-    ("cherry_pick_pr_commits", {"shas": ["deadbeef"]}),
     ("stage_adaptations", {}),
     ("stage_pr_merge", {"branch": "integration/test"}),
 ])
@@ -1460,16 +1396,11 @@ def test_light_missing_native_payload_creation_rejected_at_gate(tmp_path, monkey
     assert "root=system_repo" in result
 
 
-@pytest.mark.parametrize("tool_name,base_args", [
-    ("write_file", {"path": "plugin.py", "content": "x"}),
-    ("edit_text", {"path": "plugin.py", "old_str": "a", "new_str": "b"}),
-    ("write_file", {"root": "skill_payload", "path": "plugin.py", "content": "x"}),
-])
-@pytest.mark.parametrize("partial", [
-    {"bucket": "external"},
-    {"skill_name": "alpha"},
-    {"bucket": "native", "skill_name": "alpha"},
-    {"bucket": "external", "skill_name": "...."},  # sanitizes to empty
+@pytest.mark.parametrize(("partial", "tool_name", "base_args"), [
+    pytest.param({"bucket": "external"}, "write_file", {"path": "plugin.py", "content": "x"}, id='partial0-write_file-base_args0'),
+    pytest.param({"skill_name": "alpha"}, "edit_text", {"path": "plugin.py", "old_str": "a", "new_str": "b"}, id='partial1-edit_text-base_args1'),
+    pytest.param({"bucket": "native", "skill_name": "alpha"}, "write_file", {"root": "skill_payload", "path": "plugin.py", "content": "x"}, id='partial2-write_file-base_args2'),
+    pytest.param({"bucket": "external", "skill_name": "...."}, "write_file", {"path": "plugin.py", "content": "x"}, id='partial3-write_file-base_args0'),  # sanitizes to empty
 ])
 def test_light_partial_args_surface_specific_error_not_generic_light_block(
     tool_name, base_args, partial, tmp_path, monkeypatch

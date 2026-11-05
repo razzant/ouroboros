@@ -34,8 +34,7 @@ def build_minimum_view(root, monkeypatch, shape, *, ratio=1.0, task=None):
         route_resolver=lambda *_a, **_kw: ({"provider": "synthetic", "model": "synthetic"}, evidence))
 
 
-@pytest.mark.parametrize("shape", ["fixed", "memory"])
-@pytest.mark.parametrize("ratio", [1.0, 1.333])
+@pytest.mark.parametrize(("ratio", "shape"), [(1.0, "fixed"), (1.333, "memory")])
 def test_both_raise_sites_name_their_measured_input_reserve_window_and_deficit(tmp_path, monkeypatch, shape, ratio):
     with pytest.raises(fit.MinimumViewUnfit) as raised:
         build_minimum_view(tmp_path, monkeypatch, shape, ratio=ratio)

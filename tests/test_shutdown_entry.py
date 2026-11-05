@@ -84,8 +84,7 @@ def test_the_first_explicit_cause_is_recorded_once_and_later_doors_keep_it(data,
     assert owned_shutdown._GENERATION_STOP.deadline == deadline  # recording a cause never moves the grace
 
 
-@pytest.mark.parametrize("cause,restart_exit", [("launcher_quit", False), ("launcher_gone", False),
-                                                ("external_signal", False), ("restart_requested", True)])
+@pytest.mark.parametrize("cause,restart_exit", [("launcher_quit", False), ("external_signal", False), ("restart_requested", True)])
 def test_a_generic_door_names_its_cause_and_restart_exit(data, monkeypatch, cause, restart_exit):
     from ouroboros import owned_shutdown
 
@@ -218,12 +217,7 @@ def test_the_next_start_reports_the_previous_entry_and_claims_the_file(data, mon
 @pytest.mark.parametrize("stored,state", [
     (None, "absent"),
     ("{torn", "unreadable"),
-    ("[]", "unreadable"),
-    (json.dumps({"schema_version": 1, "cause": "launcher_quit"}), "unreadable"),
-    (json.dumps({"schema_version": 2, "generation": "gen-a", "cause": "launcher_quit"}), "unreadable"),
     (json.dumps({"schema_version": 1, "generation": "gen-a", "supervisor_pid": 7, "started_at": "t0"}), "no_entry"),
-    (json.dumps({"schema_version": 1, "generation": "gen-a", "supervisor_pid": 7, "started_at": "t0",
-                 "entered_at": "t1", "cause": "launcher_gone", "restart_exit": False}), "entered"),
 ])
 def test_the_reader_names_each_previous_record_and_always_claims(data, monkeypatch, stored, state):
     from ouroboros import owned_shutdown

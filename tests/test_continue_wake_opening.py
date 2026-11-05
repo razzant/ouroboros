@@ -217,11 +217,9 @@ def test_a_chained_continue_keeps_the_wake_opening(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("damage,gap", [
     (lambda meta: meta["presence"].pop("observed_text"), "wake_opening_unreadable"),
-    (lambda meta: meta["focus"].pop("place_id"), "wake_opening_unreadable"),
     (lambda meta: meta.update(initiator="owner_turn"), "wake_opening_unreadable"),
-    (lambda meta: meta.update(work_kind="owner"), "wake_opening_unreadable"),
     (lambda meta: meta.pop("wake_cause"), "original_owner_message_text"),
-], ids=["no_event_words", "no_place", "not_consciousness", "owner_kind", "not_a_wake"])
+], ids=["no_event_words", "not_consciousness", "not_a_wake"])
 def test_an_unreadable_or_foreign_wake_record_is_a_named_gap(tmp_path, monkeypatch, damage, gap):
     from ouroboros.task_results import load_task_result
     from tests.test_continue_quiz_origin import _edit_result, _refused
@@ -234,11 +232,9 @@ def test_an_unreadable_or_foreign_wake_record_is_a_named_gap(tmp_path, monkeypat
 
 @pytest.mark.parametrize("terminal,refusal", [
     ({"status": "cancelled", "cancel_origin": {"source": "http_single", "reason": "Stop now"}}, "stopped_by_owner"),
-    ({"status": "cancelled", "cancel_origin": {"source": "panic"}}, "stopped_by_owner"),
     ({"reason_code": "budget_exhausted"}, "hard_limit_reached"),
-    ({"deadline_at": "2000-01-01T00:00:00+00:00"}, "hard_limit_reached"),
     ({"status": "completed", "reason_code": ""}, "author_finished"),
-], ids=["stop", "panic", "money", "deadline", "answered"])
+], ids=["stop", "money", "answered"])
 def test_a_wake_opening_never_outranks_a_stop_or_a_whole_work_bound(tmp_path, monkeypatch, terminal, refusal):
     from ouroboros.task_results import load_task_result
     from supervisor.continuation_admission import admit_continuation

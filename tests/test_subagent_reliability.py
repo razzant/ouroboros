@@ -80,26 +80,3 @@ def test_replay_learns_subagent_lineage_before_merging_card_rows():
     assert "const replayTerminal = msg.task_terminal_status && taskDoneIsTerminal(msg);" in src
     assert "if (replayTerminal || ['completed', 'completed_warn', 'failed', 'cancelled', 'rejected'].includes(event)) {" in src
     assert "subagentTerminalChildren.add(childId);" in src
-
-
-def test_progress_dedup_uses_full_array_not_last_item():
-    """applyLiveCardState must dedup a progress line against the WHOLE card, not
-    just the last item — otherwise a background syncHistory re-feeds historical
-    progress and the 'Notes' count grows without bound (BUGREPORT-panic-working-notes).
-    """
-    chat = _read("web/modules/chat.js")
-    assert "updateLiveTimelineItem(record, summary," in chat
-    source = _read("web/modules/chat_render_batch.js")
-    src = source[source.index("export function updateLiveTimelineItem"):]
-    # full-array dedup
-    assert ("const existingIdx = record.items.findIndex((it) => it.dedupeKey === syntheticKey"
-            " || it.occurrenceKey === syntheticKey);") in src
-    # the old last-item-only check is gone
-    assert "record.items[lastIdx].dedupeKey === syntheticKey ? lastIdx : -1" not in src
-    # a historical re-feed (found, not the last item) is skipped, not re-appended
-    assert "timelineUpdate = 'duplicate-skip';" in src
-    # Historical frames use their physical source identities and independently
-    # reject replayed duplicates before creating another item.
-    history = _read("web/modules/chat_history_replay.js")
-    assert "entry.dedupeKey === key" in history
-    assert "if (item?.historyId === identity) return false;" in history

@@ -16,9 +16,11 @@ from tests.test_subagent_metrics import event
 from tests.test_terminal_cost_reconciliation import attempt, dirty, env as env  # noqa: F401
 
 
-@pytest.mark.parametrize("stale", [False, True])
-@pytest.mark.parametrize("producer", ["execution", "review", "api"])
-@pytest.mark.parametrize("archived", [False, True])
+@pytest.mark.parametrize(("archived", "producer", "stale"), [
+    (False, "api", True),
+    (True, "execution", False),
+    (True, "review", True),
+])
 def test_first_publication_never_folds_a_cold_suffix(tmp_path, monkeypatch, stale, producer, archived):
     from ouroboros import utils
     counts = []
@@ -173,8 +175,7 @@ def test_child_batches_keep_cursor_and_projection_atomic_and_retry_a_repaired_to
     assert metrics.read(tmp_path, "worker")["rows"][0]["dispatched"] == 5
 
 
-@pytest.mark.parametrize("running", [False, True])
-@pytest.mark.parametrize("money_write", [False, True])
+@pytest.mark.parametrize(("money_write", "running"), [(False, True), (True, False)])
 def test_absent_usage_owners_rest_flat_and_new_facts_wake_them(env, monkeypatch, running, money_write):
     counts = []
     for scale in (1, 30):

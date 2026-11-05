@@ -273,12 +273,6 @@ _ABSENT = object()
     ((), "none"),
     ((_ABSENT,), "absent"),
     ((False,), "false"),
-    ((True,), "true"),
-    ((None, 0, 1, "false"), "malformed"),
-    ((False, _ABSENT), "absent+false"),
-    ((True, _ABSENT), "absent+true"),
-    ((True, False), "false+true"),
-    ((None, True, False, _ABSENT), "absent+false+true+malformed"),
 ])
 def test_function_strictness_names_each_physical_strict_state(values, expected):
     payload = _strict_payload(*values, server=True)

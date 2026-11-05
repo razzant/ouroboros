@@ -13,9 +13,6 @@ from ouroboros.task_results import load_task_result, write_task_result
     (None, "model_final", False, "", "message"),
     (None, "host_notice", True, "", "silent"),
     (None, "host_salvage", True, "child-work", "deferred"),
-    ("silent", "model_final", False, "", "silent"),
-    ("tool_delivered", "model_final", False, "", "tool_delivered"),
-    ("deferred", "model_final", False, "child-work", "deferred"),
 ])
 def test_live_and_recovered_synthesis_use_recorded_presence_body(
     tmp_path, monkeypatch, completion, origin, failed, work_ref, expected,

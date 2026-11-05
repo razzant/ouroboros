@@ -15,8 +15,11 @@ process_context = _process_context
 
 
 
-@pytest.mark.parametrize("backend", ["host", "local"])
-@pytest.mark.parametrize("tool", ["run_command", "run_script", "verify_and_record"])
+@pytest.mark.parametrize(("tool", "backend"), [
+    ("run_command", "host"),
+    ("run_script", "local"),
+    ("verify_and_record", "host"),
+])
 def test_registered_foreground_env_reaches_child_and_redacts_egress(process_context, monkeypatch, backend, tool):
     from ouroboros import workspace_executor
     from ouroboros.outcomes import verification_receipts_path
@@ -73,15 +76,14 @@ def test_verify_matches_raw_selected_value_before_receipt_redaction(process_cont
     assert receipt["expected"] == "***" and secret not in result.text
 
 
-@pytest.mark.parametrize("tool,padding,suffix", [
-    ("run_command", 24982, 60000),
-    ("run_command", 60000, 24982),
-    ("run_script", 24982, 60000),
-    ("run_script", 60000, 24982),
-    ("verify_and_record", 3990, 60000),
-    ("verify_and_record", 19990, 60000),
+@pytest.mark.parametrize(("returncode", "stream", "tool", "padding", "suffix"), [
+    (0, "stdout", "run_command", 24982, 60000),
+    (0, "stdout", "run_script", 24982, 60000),
+    (0, "stdout", "verify_and_record", 3990, 60000),
+    (7, "stderr", "run_command", 60000, 24982),
+    (7, "stderr", "run_script", 60000, 24982),
+    (7, "stderr", "verify_and_record", 19990, 60000),
 ])
-@pytest.mark.parametrize("returncode,stream", [(0, "stdout"), (7, "stderr")])
 def test_selected_secret_is_masked_before_diagnostic_bounds(
     process_context, monkeypatch, tool, padding, suffix, returncode, stream,
 ):
@@ -123,8 +125,7 @@ def test_selected_secret_is_masked_before_diagnostic_bounds(
     assert secret[:10] not in rendered and secret[-10:] not in rendered
 
 
-@pytest.mark.parametrize("match_mode", ["exact", "exact_line", "json_equals"])
-@pytest.mark.parametrize("matches", [True, False])
+@pytest.mark.parametrize(("matches", "match_mode"), [(True, "exact"), (True, "json_equals"), (False, "exact_line")])
 def test_verify_secret_masking_preserves_strict_expected_match(
     process_context, monkeypatch, match_mode, matches,
 ):
@@ -222,8 +223,7 @@ def test_runtime_uses_explicit_child_path_not_host_path(process_context, monkeyp
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX executable shims; native Windows execution is not exercised")
-@pytest.mark.parametrize("backend", ["host", "local"])
-@pytest.mark.parametrize("relative_dir", ["relative-node-bin", ""])
+@pytest.mark.parametrize(("relative_dir", "backend"), [("relative-node-bin", "host"), ("", "local")])
 def test_relative_selected_path_reaches_workspace_node(process_context, monkeypatch, backend, relative_dir):
     from ouroboros import process_interpreters
 

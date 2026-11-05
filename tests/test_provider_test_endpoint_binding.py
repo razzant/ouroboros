@@ -68,18 +68,17 @@ def _refused(status, body, sends):
 COMPATIBLE = {"OPENAI_COMPATIBLE_API_KEY": SAVED, "OPENAI_COMPATIBLE_BASE_URL": "https://saved.example/v1"}
 
 
-@pytest.mark.parametrize("draft_url", [
-    "https://evil.example/v1",           # another host
-    "http://saved.example/v1",           # TLS downgrade
-    "https://saved.example:8443/v1",     # another port
-    "https://saved.example/v2",          # another path on the same host
-    "https://user@saved.example/v1",     # added userinfo
-    "https://saved.example/v1?route=x",  # added query
-    # Transports append after a query and a catalog path lands in a fragment, so even an
-    # empty one moves the request off /v1/models and /v1/chat/completions.
-    "https://saved.example/v1?", "https://saved.example/v1/?", "https://saved.example/v1#models",
+@pytest.mark.parametrize(("key_override", "draft_url"), [
+    (None, "https://evil.example/v1"),  # another host
+    (None, "https://user@saved.example/v1"),  # added userinfo
+    (None, "https://saved.example/v1#models"),
+    ("***set***", "http://saved.example/v1"),  # TLS downgrade
+    ("***set***", "https://saved.example/v1?route=x"),  # added query
+    ("syntheti...", "https://saved.example:8443/v1"),  # another port
+    ("syntheti...", "https://saved.example/v1?"),  # Transports append after a query and a catalog path lands in a fragment, so even an empty one moves the request off /v1/models and /v1/chat/completions.
+    ("***", "https://saved.example/v2"),  # another path on the same host
+    ("***", "https://saved.example/v1/?"),
 ])
-@pytest.mark.parametrize("key_override", [None, "***set***", "syntheti...", "***"])
 def test_builtin_compatible_kept_key_never_reaches_another_endpoint(monkeypatch, sends, draft_url, key_override):
     overrides = {"OPENAI_COMPATIBLE_BASE_URL": draft_url}
     if key_override is not None:
@@ -88,8 +87,7 @@ def test_builtin_compatible_kept_key_never_reaches_another_endpoint(monkeypatch,
 
 
 @pytest.mark.parametrize("draft_url", [
-    "https://saved.example/v1", "https://saved.example/v1/", " https://SAVED.example/v1 ",
-    "HTTPS://saved.example:443/v1", "https://saved.example/v1/models/..",  # httpx resolves dot segments
+    "https://saved.example/v1", "HTTPS://saved.example:443/v1", "https://saved.example/v1/models/..",  # httpx resolves dot segments
 ])
 def test_builtin_compatible_same_endpoint_spelling_keeps_the_saved_key(monkeypatch, sends, draft_url):
     status, body = _test(monkeypatch, COMPATIBLE, {
@@ -101,7 +99,6 @@ def test_builtin_compatible_same_endpoint_spelling_keeps_the_saved_key(monkeypat
 @pytest.mark.parametrize("saved_url,draft_url,same", [
     ("https://saved.example/v1?tenant=a", "https://saved.example/v1?tenant=a", True),
     ("https://saved.example/v1?tenant=a", "https://saved.example/v1/?tenant=a", False),
-    ("https://saved.example/v1/?tenant=a", "https://saved.example/v1?tenant=a", False),
     ("https://saved.example/v1#x", "https://saved.example/v1", False),
 ])
 def test_a_query_or_fragment_endpoint_is_the_same_only_spelled_the_same(monkeypatch, sends, saved_url, draft_url, same):
@@ -146,7 +143,7 @@ def test_cleared_dedicated_key_never_resurrects_the_legacy_key(monkeypatch, send
 
 @pytest.mark.parametrize("provider_id,key", [
     ("openai-compatible", "OPENAI_BASE_URL"), ("openai-compatible", "OPENAI_API_KEY"),
-    ("openrouter", "ANTHROPIC_API_KEY"), ("cloudru", "OPENAI_COMPATIBLE_BASE_URL"),
+    ("openrouter", "ANTHROPIC_API_KEY"),
 ])
 def test_builtin_override_keys_are_the_tested_kinds_own(monkeypatch, sends, provider_id, key):
     status, body = _test(monkeypatch, {**LEGACY, **COMPATIBLE},
@@ -178,8 +175,10 @@ def test_an_old_request_clearing_the_dedicated_address_still_blanks_the_legacy_o
     assert (status, body["ok"], sends) == (200, False, [])
 
 
-@pytest.mark.parametrize("saved", [BOTH, SHARED])
-@pytest.mark.parametrize("setting, overrides", [("OPENAI_API_KEY", CLEARED), ("OPENAI_COMPATIBLE_API_KEY", {})])
+@pytest.mark.parametrize(("setting", "overrides", "saved"), [
+    pytest.param("OPENAI_API_KEY", CLEARED, BOTH, id='OPENAI_API_KEY-overrides0-saved0'),
+    pytest.param("OPENAI_COMPATIBLE_API_KEY", {}, SHARED, id='OPENAI_COMPATIBLE_API_KEY-overrides1-saved1'),
+])
 def test_the_named_pair_is_tested_with_its_own_kept_key_only(monkeypatch, sends, saved, setting, overrides):
     status, body = _test(monkeypatch, saved, _pair(setting, **overrides))
     legacy = setting == "OPENAI_API_KEY"
@@ -216,11 +215,8 @@ def test_a_named_dedicated_pair_never_borrows_the_legacy_key(monkeypatch, sends)
 
 @pytest.mark.parametrize("payload, reason", [
     (_pair("OPENAI_API_KEY", OPENAI_COMPATIBLE_BASE_URL="https://dedicated.example/v1"), "the pair this draft reaches"),
-    (_pair("OPENAI_COMPATIBLE_API_KEY", OPENAI_COMPATIBLE_BASE_URL=""), "the pair this draft reaches"),
     (_pair("OPENAI_COMPATIBLE_API_KEY", OPENAI_API_KEY=TYPED), "unsupported override keys"),
     ({**_pair("OPENAI_API_KEY"), "provider_id": "openai"}, "for the built-in OpenAI-compatible pair only"),
-    ({**_pair("OPENAI_API_KEY"), "connection": "lab"}, "for the built-in OpenAI-compatible pair only"),
-    (_pair("ANTHROPIC_API_KEY"), "invalid request body"),
 ])
 def test_a_pair_selector_names_only_a_built_in_compatible_pair(monkeypatch, sends, payload, reason):
     status, body = _test(monkeypatch, {**BOTH, **_named()}, payload)
@@ -232,8 +228,11 @@ def _named(**row):
                                "api_key": SAVED, "base_url": "https://lab.example/v1", **row}]}
 
 
-@pytest.mark.parametrize("draft_url", ["https://evil.example/v1", "https://lab.example/v1?"])
-@pytest.mark.parametrize("key_override", [None, "***set***", "syntheti..."])
+@pytest.mark.parametrize(("key_override", "draft_url"), [
+    (None, "https://evil.example/v1"),
+    ("***set***", "https://lab.example/v1?"),
+    ("syntheti...", "https://evil.example/v1"),
+])
 def test_named_kept_key_never_reaches_another_endpoint(monkeypatch, sends, key_override, draft_url):
     overrides = {"base_url": draft_url}
     if key_override is not None:

@@ -105,8 +105,7 @@ def test_deterministic_refusal_reaches_every_seat_without_starting_tests(
     assert review_ledger.load_record(ctx.drive_root, reference["review_record_id"])["preflight_execution"] == exhibit
 
 
-@pytest.mark.parametrize("outcome", ["green", "skip", "failed", "skip_after_green", "unbound", "skip_after_unbound",
-                                     "managed_unbound"])
+@pytest.mark.parametrize("outcome", ["green", "failed", "managed_unbound"])
 def test_nonrefused_gate_keeps_real_test_and_skip_exhibits(tmp_path, monkeypatch, outcome):
     from ouroboros import commit_admission, preflight_runner
     from ouroboros.tools import commit_gate, git

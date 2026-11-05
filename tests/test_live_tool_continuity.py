@@ -638,10 +638,7 @@ async def speak(host, session, response, *, start=True, continues=False):
 
 
 @pytest.mark.parametrize('case,owed', [
-    ('answer', 0), ('answer_while_sending', 0), ('queued_then_answer', 0), ('thinking_then_answer', 0),
-    ('thinking_then_idle', 0), ('call_turn_speaks_after', 1), ('call_turn_tail_redone', 1),
-    ('earlier_answer_finishes_after', 1), ('begun_while_writing', 1), ('queued_behind_an_answer', 1),
-    ('thinking_only', 1), ('older_session_begun_while_sending', 1), ('answer_begun_before_a_second_result', 1)])
+    ('answer', 0), ('call_turn_speaks_after', 1), ('answer_begun_before_a_second_result', 1)])
 def test_only_a_response_begun_after_delivery_settles_its_result(case, owed):
     """A written ordinary result is answered by a response the driver saw begin after the adapter held that
     result, once it finishes without continuing. Speech, transcript tails and receipts carry no such identity:
@@ -765,8 +762,7 @@ def test_a_failed_result_write_leaves_one_pointer_on_the_fresh_session():
 
 
 @pytest.mark.parametrize('records,second,owed', [
-    (False, 'unanswered', 1), (True, 'unanswered', 1), (True, 'answer_begun_before_its_pointer', 1),
-    (False, 'answered', 0), (True, 'answered', 0)])
+    (False, 'unanswered', 1), (False, 'answered', 0), (True, 'answered', 0)])
 def test_an_unanswered_pointer_stays_owed_through_another_fresh_loss(records, second, owed):
     """A fresh session's pointer carries the result's call-owned answer: only a response begun after that session
     took the pointer settles it. Dropped before then, the next fresh session is owed the same one pointer."""

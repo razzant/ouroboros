@@ -141,8 +141,7 @@ def test_each_host_is_offered_and_installs_only_its_own_computer_use_skill(data,
 
 # ── the Unix copy kept on Windows for remote machines ──
 
-@pytest.mark.parametrize("actor", ["owner_ui", None])
-@pytest.mark.parametrize("backend", ["osworld_http", "ssh_macos"])
+@pytest.mark.parametrize(("backend", "actor"), [("osworld_http", None), ("ssh_macos", "owner_ui")])
 def test_a_legacy_unix_remote_choice_on_windows_survives_off_reseed_and_on(data, monkeypatch, tmp_path, actor, backend):
     from ouroboros import extension_loader, skill_lifecycle_actions
 

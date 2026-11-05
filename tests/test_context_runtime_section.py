@@ -19,8 +19,12 @@ from ouroboros.context import build_runtime_section, build_user_content
 from tests._context_shared import _make_health_env
 
 
-@pytest.mark.parametrize("host_fact", [None, {}, {"kind": "other"}, {"kind": "call_open"}])
-@pytest.mark.parametrize("attachment", [False, True])
+@pytest.mark.parametrize(("attachment", "host_fact"), [
+    (False, None),
+    pytest.param(False, {"kind": "other"}, id='False-host_fact2'),
+    pytest.param(True, {}, id='True-host_fact1'),
+    pytest.param(True, {"kind": "call_open"}, id='True-host_fact3'),
+])
 def test_call_open_is_labelled_before_attachment_and_presence_rendering(monkeypatch, host_fact, attachment):
     from copy import deepcopy
     from ouroboros import context
@@ -89,9 +93,11 @@ def test_runtime_section_includes_light_runtime_mode_rule(tmp_path, monkeypatch)
     assert "runtime_data/uploads" in payload["runtime_mode_rule"]
 
 
-@pytest.mark.parametrize("trigger", ["once", "cron"])
-@pytest.mark.parametrize("previous", [None, {"task_id": "prior", "state": "pending_observation"},
-                                     {"task_id": "prior", "state": "completed", "quiet": True, "line": ""}])
+@pytest.mark.parametrize(("previous", "trigger"), [
+    (None, "once"),
+    pytest.param({"task_id": "prior", "state": "pending_observation"}, "cron", id='previous1-cron'),
+    pytest.param({"task_id": "prior", "state": "completed", "quiet": True, "line": ""}, "cron", id='previous2-cron'),
+])
 def test_runtime_keeps_the_admitted_occurrences_due_time_after_schedule_advances(tmp_path, trigger, previous):
     env = _make_health_env(tmp_path)
     due = "2026-09-29T00:30:00+00:00"

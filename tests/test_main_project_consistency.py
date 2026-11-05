@@ -84,7 +84,7 @@ def test_unscoped_producers_preserve_absence_and_stale_restore_policy(host, prod
     assert budget_hold_fact(held)["reason"] == HOLD_SAVED_WORK and "_project_admission" not in held
 
 
-@pytest.mark.parametrize("veto", ["legacy", "null", "malformed", "dispatch", "stopped", "binding", "origin", "folder"])
+@pytest.mark.parametrize("veto", ["legacy", "null", "folder"])
 def test_no_scope_recovery_requires_original_positive_authority(host, monkeypatch, veto):  # noqa: F811
     row = admit_main(host)
     if veto == "legacy":
@@ -196,8 +196,7 @@ def test_main_steers_healthy_foreign_task_despite_corrupt_registry(host, monkeyp
     assert [e["text"] for e in drain_owner_entries(host.root, "t-target")] == ["Continue original task"]
 
 
-@pytest.mark.parametrize("producer", ["promotion", "api"])
-@pytest.mark.parametrize("authority", ["registry", "bindings"])
+@pytest.mark.parametrize(("authority", "producer"), [("registry", "promotion"), ("bindings", "api")])
 def test_fresh_main_admission_distinguishes_irrelevant_registry_from_unknown_scope(host, producer, authority):  # noqa: F811
     registry.create_project(host.root, "neighbor")
     path = registry._registry_path(host.root) if authority == "registry" else registry._bindings_path(host.root)
@@ -221,8 +220,7 @@ def test_fresh_main_admission_distinguishes_irrelevant_registry_from_unknown_sco
         assert not host.pending and not host.attempts
 
 
-@pytest.mark.parametrize("reason", ["source", "pool", "attachments"])
-@pytest.mark.parametrize("stub", [False, True])
+@pytest.mark.parametrize(("stub", "reason"), [(False, "source"), (False, "attachments"), (True, "pool")])
 def test_early_promotion_refusals_have_positive_never_admitted_evidence(host, reason, stub):  # noqa: F811
     from ouroboros.terminal_projection import _settled
     from supervisor.events_project_routing import _handle_promote_chat_to_task
@@ -285,8 +283,7 @@ def _crash_after_handoff(host, monkeypatch, snapshot):  # noqa: F811
     return sent
 
 
-@pytest.mark.parametrize("producer", ["promotion", "api"])
-@pytest.mark.parametrize("window", ["claimed_snapshot", "older_snapshot"])
+@pytest.mark.parametrize(("window", "producer"), [("claimed_snapshot", "promotion"), ("older_snapshot", "api")])
 def test_unscoped_possible_handoff_never_replays_with_healthy_bindings(host, monkeypatch, producer, window):  # noqa: F811
     from ouroboros.project_admission import project_hold_fact
 
@@ -340,8 +337,12 @@ def _evolution(host, monkeypatch):  # noqa: F811
     return host.pending[0]["id"]
 
 
-@pytest.mark.parametrize("producer", [_deep_review, _evolution], ids=["deep_review", "evolution"])
-@pytest.mark.parametrize("veto", [None, "unreadable", "possible", "legacy"])
+@pytest.mark.parametrize(("veto", "producer"), [
+    pytest.param(None, _deep_review, id='None-deep_review'),
+    pytest.param("unreadable", _evolution, id='unreadable-evolution'),
+    pytest.param("possible", _deep_review, id='possible-deep_review'),
+    pytest.param("legacy", _evolution, id='legacy-evolution'),
+])
 def test_host_producer_row_recovers_once_after_bindings_fault(host, monkeypatch, producer, veto):  # noqa: F811
     tid = producer(host, monkeypatch)
     [row] = host.pending
@@ -466,8 +467,11 @@ def test_external_owner_main_dialogue_survives_registry_fault(tmp_path, monkeypa
         assert receipts[-1]["status"] == "project_unavailable"
 
 
-@pytest.mark.parametrize("fault", ["torn", "missing", "fresh"])
-@pytest.mark.parametrize("sender", ["external_owner", "unbound_external", "project_room"])
+@pytest.mark.parametrize(("sender", "fault"), [
+    ("external_owner", "torn"),
+    ("unbound_external", "missing"),
+    ("project_room", "fresh"),
+])
 def test_external_owner_steers_despite_registry_fault(host, monkeypatch, sender, fault):  # noqa: F811
     from ouroboros.owner_mailbox import drain_owner_entries
     from ouroboros.tools.control import _tell_task

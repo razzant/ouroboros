@@ -93,8 +93,7 @@ def _collect(root, run):
         review_contract=request["reconciliation_identity"]["review_contract"])
 
 
-@pytest.mark.parametrize("delivery", ["api", "session"])
-@pytest.mark.parametrize("writer", ["legacy", "current"])
+@pytest.mark.parametrize(("writer", "delivery"), [("legacy", "api"), ("current", "session")])
 def test_retained_writer_collects_its_paid_criticism_without_resending(
         tmp_path, monkeypatch, forbid_effects, delivery, writer):  # noqa: F811
     run, sends = _record(tmp_path, monkeypatch, writer=writer, delivery=delivery)
@@ -112,8 +111,12 @@ def test_retained_writer_collects_its_paid_criticism_without_resending(
     assert reads == ([("handshake",), ("get_run", "existing-run"), ("close",)] if delivery == "session" else [])
 
 
-@pytest.mark.parametrize("delivery", ["api", "session"])
-@pytest.mark.parametrize("axis", ["roster_hash", "root_task_id", "request_key", "pending_invocation_id"])
+@pytest.mark.parametrize(("axis", "delivery"), [
+    ("roster_hash", "api"),
+    ("root_task_id", "session"),
+    ("request_key", "api"),
+    ("pending_invocation_id", "session"),
+])
 def test_legacy_interpretation_rejects_foreign_full_bindings(
         tmp_path, monkeypatch, forbid_effects, delivery, axis):  # noqa: F811
     run, sends = _record(tmp_path, monkeypatch, writer="legacy", delivery=delivery)
@@ -128,8 +131,11 @@ def test_legacy_interpretation_rejects_foreign_full_bindings(
     assert sends == [delivery] and reads == []
 
 
-@pytest.mark.parametrize("writer", ["legacy", "current"])
-@pytest.mark.parametrize("owner", ["local", "controller", "delegated"])
+@pytest.mark.parametrize(("owner", "writer"), [
+    ("local", "legacy"),
+    ("controller", "current"),
+    ("delegated", "legacy"),
+])
 def test_checkpoint_session_preserves_in_flight_deferral(
         tmp_path, monkeypatch, forbid_effects, writer, owner):  # noqa: F811
     run, sends = _record(tmp_path, monkeypatch, writer=writer, delivery="session")

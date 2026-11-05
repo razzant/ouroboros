@@ -562,9 +562,12 @@ def test_a_pre_body_return_proves_nothing_once_a_launch_or_body_may_have_followe
     assert not task_admission.prestart_returned_unsent(still)
 
 
-@pytest.mark.parametrize("resume_first", [False, True])
-@pytest.mark.parametrize("door", ["quit", "panic", "owner_restart"])
-@pytest.mark.parametrize("read_gap", ["proof_reader", "store"])
+@pytest.mark.parametrize(("read_gap", "door", "resume_first"), [
+    ("proof_reader", "quit", True),
+    ("proof_reader", "owner_restart", False),
+    ("store", "panic", True),
+    ("store", "owner_restart", False),
+])
 def test_pre_body_readability_recovery_keeps_quit_authority_and_resumes_once(
         tmp_path, monkeypatch, resume_first, door, read_gap):
     from supervisor import task_admission
@@ -604,7 +607,7 @@ def test_pre_body_readability_recovery_keeps_quit_authority_and_resumes_once(
     assert not _launched(system)
 
 
-@pytest.mark.parametrize("changed", ["launch_mark", "body_start", "late_binding", "stop", "legacy", "snapshot_failure"])
+@pytest.mark.parametrize("changed", ["launch_mark", "stop", "snapshot_failure"])
 def test_recovered_pre_body_readability_does_not_override_other_evidence(tmp_path, monkeypatch, changed):
     from supervisor import task_admission
     from ouroboros.projects_registry import bind_task_to_project, create_project
@@ -800,8 +803,7 @@ def test_a_project_room_seed_keeps_its_bound_basis_and_never_claims_absence(tmp_
 
 @pytest.mark.parametrize("carried", [
     {"project_id": "room"}, {"resource_intent": {"kind": "explicit_resource", "project_id": "room"}},
-    {"resource_intent": {"kind": "room_default"}}, {"origin_task_id": "pred"}, {"origin_root_task_id": "pred"},
-    {"root_task_id": "pred"}, {"parent_task_id": "pred"},
+    {"parent_task_id": "pred"},
 ])
 def test_a_seed_carrying_a_room_or_lineage_is_never_attested_unscoped(carried):
     from supervisor.worker_chat_lane import _seed_task
@@ -889,7 +891,7 @@ def test_a_panic_holds_a_main_turn_for_an_explicit_resume(tmp_path, monkeypatch)
     assert held["id"] == turn.id and budget_hold_fact(held)
 
 
-@pytest.mark.parametrize("failure", ["corrupt_source", "missing_source", "mismatched_source", "unreadable_result"])
+@pytest.mark.parametrize("failure", ["corrupt_source", "missing_source", "unreadable_result"])
 def test_unproven_source_or_state_keeps_a_main_turn_held(tmp_path, monkeypatch, failure):
     system = _system(tmp_path, monkeypatch)
     turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})

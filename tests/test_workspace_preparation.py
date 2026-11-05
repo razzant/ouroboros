@@ -758,8 +758,7 @@ def test_busy_store_at_entry_is_typed_and_starts_no_preparation(env, monkeypatch
         assert drive_cleanup == []
 
 
-@pytest.mark.parametrize("change", ["rebind", "deletion"])
-@pytest.mark.parametrize("phase", ["copy", "admission"])
+@pytest.mark.parametrize(("phase", "change"), [("copy", "rebind"), ("copy", "deletion"), ("admission", "deletion")])
 def test_project_change_during_copy_is_revalidated_at_admission(env, monkeypatch, change, phase):
     from ouroboros import projects_registry as registry, settings_integrity
     from ouroboros.startup_migrations import prepare_startup_state

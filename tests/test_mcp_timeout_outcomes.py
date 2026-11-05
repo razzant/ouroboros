@@ -42,8 +42,7 @@ def _assert_unknown(text):
     assert "before retrying" in text
 
 
-@pytest.mark.parametrize("timeout_phase", ["initialize", "after_effect"])
-@pytest.mark.parametrize("projection", ["typed", "text"])
+@pytest.mark.parametrize(("projection", "timeout_phase"), [("typed", "initialize"), ("text", "after_effect")])
 def test_timeout_disclosure_survives_registry_and_status_read(
     tmp_path, monkeypatch, registry, timeout_phase, projection,
 ):

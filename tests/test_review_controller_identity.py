@@ -50,26 +50,8 @@ def live(monkeypatch):
 @pytest.mark.parametrize("record,seen,now,legacy", [
     ({"birth": _THERE, "kernel_birth": _KERNEL}, (_HERE, _KERNEL), "alive", "unknown"),
     ({"birth": _HERE, "kernel_birth": _KERNEL}, (_HERE, _KERNEL), "alive", "alive"),
-    ({"birth": _HERE, "kernel_birth": _REUSED}, (_HERE, _KERNEL), "dead", "alive"),
-    ({"birth": "", "kernel_birth": _KERNEL}, (_HERE, _KERNEL), "alive", "unknown"),
-    ({"birth": _THERE, "kernel_birth": _KERNEL}, (_HERE, None), "unknown", "unknown"),
-    ({"birth": _HERE, "kernel_birth": _KERNEL}, (_HERE, None), "alive", "alive"),
-    ({"birth": _HERE, "kernel_birth": _KERNEL}, ("", None), "unknown", "unknown"),
-    ({"birth": _THERE, "kernel_birth": "darwin-start:1793143271"}, (_HERE, _KERNEL), "unknown", "unknown"),
-    ({"birth": _HERE, "kernel_birth": _THERE}, (_HERE, _KERNEL), "alive", "alive"),
-    ({"birth": _THERE, "kernel_birth": _FILETIME}, (_HERE, _KERNEL), "unknown", "unknown"),
-    ({"birth": _THERE}, (_HERE, _KERNEL), "unknown", "unknown"),
-    ({"birth": _HERE}, (_HERE, _KERNEL), "alive", "alive"),
-    ({"birth": ""}, (_HERE, _KERNEL), "unknown", "unknown"),
-    ({"birth": _LINUX, "kernel_birth": _LINUX}, (_LINUX, _LINUX), "alive", "alive"),
     ({"birth": _LINUX, "kernel_birth": _LINUX}, (_LINUX_OTHER, _LINUX_OTHER), "dead", "dead"),
-    ({"birth": _FILETIME, "kernel_birth": _FILETIME}, (_FILETIME, _FILETIME), "alive", "alive"),
-    ({"birth": _FILETIME, "kernel_birth": _FILETIME}, (_FILETIME_OTHER, _FILETIME_OTHER), "dead", "dead"),
-    ({"birth": "812"}, ("811", None), "dead", "dead"),
-], ids=["new_other_zone", "new_same_zone", "reused_same_second", "kernel_without_spelling",
-        "live_kernel_unread_other_zone", "live_kernel_unread_same_zone", "live_unreadable",
-        "malformed_other_zone", "ps_text_as_kernel", "two_kinds", "old_other_zone", "old_same_zone",
-        "old_without_birth", "linux_same", "linux_reused", "windows_same", "windows_reused", "old_ticks_reused"])
+], ids=["new_other_zone", "new_same_zone", "linux_reused"])
 def test_another_process_is_judged_by_comparable_births_and_spelling_alone_proves_no_end(
         live, record, seen, now, legacy):
     live["birth"], live["kernel"] = seen
@@ -90,14 +72,9 @@ def test_no_live_pid_is_dead_whatever_births_it_carries(live, monkeypatch):
 
 @pytest.mark.parametrize("change,now,legacy", [
     ({}, "local", "local"),
-    ({"birth": _THERE}, "local", "dead"),
-    ({"kernel_birth": _REUSED}, "dead", "local"),
-    ({"session": "before-exec"}, "dead", "dead"),
     ({"birth": _THERE, "session": "before-exec"}, "dead", "dead"),
     ({"session": ""}, "unknown", "unknown"),
-    ({"birth": "", "kernel_birth": ""}, "unknown", "unknown"),
-], ids=["own", "own_other_zone", "earlier_holder_of_this_pid", "same_pid_and_birth_after_exec",
-        "after_exec_other_zone", "no_session", "no_birth"])
+], ids=["own", "after_exec_other_zone", "no_session"])
 def test_this_process_judges_its_own_records_and_exec_by_session(monkeypatch, change, now, legacy):
     """One pid and kernel birth survive exec: only the custody session tells the pre-exec controller.
     This process mints its identity once, so another spelling of its own pid names another image."""

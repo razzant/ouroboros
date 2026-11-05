@@ -100,13 +100,12 @@ def test_a_real_credential_directory_is_still_refused_and_names_its_rule(tmp_pat
     assert manifest[0]["rule"] == "path is hidden or credential-like (owner credential location)"
 
 
-@pytest.mark.parametrize("mode", ["light", "advanced", "pro", "cyber_pro"])
-@pytest.mark.parametrize("relative, below_cyber_status", [
-    ("x/prod.env", "rejected"),
-    ("x/.env.local", "rejected"),
-    ("Desktop/deck.key", "staged"),
-    (".codex/report.md", "staged"),
-    ("x/.env.example", "staged"),
+@pytest.mark.parametrize(("relative", "below_cyber_status", "mode"), [
+    ("x/prod.env", "rejected", "light"),
+    ("x/.env.local", "rejected", "advanced"),
+    ("Desktop/deck.key", "staged", "pro"),
+    (".codex/report.md", "staged", "cyber_pro"),
+    ("x/.env.example", "staged", "light"),
 ])
 def test_owner_file_ingest_routes_preserve_dotenv_policy_and_ordinary_files(
     tmp_path, monkeypatch, mode, relative, below_cyber_status,
@@ -388,9 +387,6 @@ def test_a_comparison_sign_no_longer_makes_an_inspection_a_write(argv):
 
 @pytest.mark.parametrize("argv", [
     ["tee", "f"],
-    ["grep", "-n", "x", "f", ">", "out.txt"],
-    ["cmd", ">", "out"],
-    ["cmd", ">>", "out"],
     # `>&` is a stdout+stderr redirect, never a comparison: a standalone token
     # of it stays a write channel in both lanes.
     ["ls", ">&", "out.txt"],

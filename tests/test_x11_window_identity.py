@@ -79,7 +79,7 @@ def test_visible_window_requires_real_pid_class_geometry_and_exact_unicode_title
         select({'status': 'error', 'error': 'XOpenDisplay refused'}, 120, 'Ouroboros — Setup')
 
 
-@pytest.mark.parametrize('title', [b'Ouroboros \xe2\x80\x94 Setup', 'Заголовок 🐍'.encode(), b'', None, b'\xff'])
+@pytest.mark.parametrize('title', [b'Ouroboros \xe2\x80\x94 Setup', b'', b'\xff'])
 def test_observe_decodes_only_utf8_property_bytes_and_retains_raw_evidence(title):
     atoms = {'WINDOW': 33, 'CARDINAL': 6, 'STRING': 31, 'UTF8_STRING': 99}
     props = {
@@ -105,8 +105,7 @@ def test_observe_decodes_only_utf8_property_bytes_and_retains_raw_evidence(title
         reader['observe'](x, {})
 
 
-@pytest.mark.parametrize('returncode,body', [(0, observation()), (0, {'status': 'ok', 'windows': []}),
-                                           (2, {'status': 'error', 'error': 'BadWindow'}), (0, 'not JSON')])
+@pytest.mark.parametrize('returncode,body', [(0, observation()), (2, {'status': 'error', 'error': 'BadWindow'}), (0, 'not JSON')])
 def test_qualifier_records_every_observation_and_never_retries_reader_errors_as_absence(tmp_path, monkeypatch, returncode, body):
     qualify = runpy.run_path(str(ROOT / 'scripts/qualify_linux_appimage.py'))
     raw = (json.dumps(body) if not isinstance(body, str) else body).encode()

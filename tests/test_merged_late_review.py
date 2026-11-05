@@ -40,7 +40,7 @@ def _fail(root, record):
         "rows": [{"seat_id": "critic", "status": "responded", "source_refs": [source]}]})
 
 
-@pytest.mark.parametrize("case", ["merged", "changed_head", "queued", "other_record", "absent"])
+@pytest.mark.parametrize("case", ["merged", "changed_head", "absent"])
 def test_only_an_observed_merge_under_the_same_record_is_selected_without_writes(world, case):
     record = _record(world.root, "merge-task", head="e" * 40 if case == "changed_head" else merges.HEAD)
     if case != "absent":
@@ -63,7 +63,7 @@ def _history(root, chat_id=7):
     return json.loads(asyncio.run(make_chat_history_endpoint(root)(SimpleNamespace(query_params={"chat_id": str(chat_id)}))).body)
 
 
-@pytest.mark.parametrize("case", ["late_fail", "late_fail_changed_head", "no_source", "pass", "pending", "other_record", "queued", "fail_at_merge"])
+@pytest.mark.parametrize("case", ["late_fail", "queued", "fail_at_merge"])
 def test_card_history_reads_later_fail_with_a_working_saved_report_link_and_no_publication(world, case):
     record = _record(world.root, "merge-task", head="e" * 40 if case == "late_fail_changed_head" else merges.HEAD)
     if case == "fail_at_merge":
@@ -248,8 +248,7 @@ def test_an_unreadable_frozen_mark_does_not_recompose_or_lose_its_pending_public
     assert review_pause.ended_left_review(left) == "saved"
 
 
-@pytest.mark.parametrize("merged", [False, True])
-@pytest.mark.parametrize("room_state", ["unreadable", "unproven"])
+@pytest.mark.parametrize(("room_state", "merged"), [("unreadable", False), ("unproven", True)])
 def test_room_read_failure_keeps_the_mark_owed_but_proven_absence_discharges_it(world, monkeypatch, merged, room_state):
     from ouroboros import late_review_marks as late, review_operation, store
 

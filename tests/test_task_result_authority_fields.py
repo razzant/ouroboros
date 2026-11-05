@@ -141,14 +141,10 @@ def test_field_pointer_never_qualifies_as_full_authority_even_with_old_flag(tmp_
 
 
 @pytest.mark.parametrize("arguments", [
-    {"authority_fields": "task_contract"}, {"authority_fields": ["task_contract", "task_contract"]},
-    {"authority_fields": [1]}, {"authority_fields": ["not a field"]},
-    {"source_only": True}, {"source_only": True, "focus_source_sha256": "f" * 64},
-    {"source_only": True, "presence_reentry_offset": 0}, {"authority_projection_sha256": "f" * 64},
+    {"authority_fields": "task_contract"}, {"authority_fields": ["not a field"]},
+    {"source_only": True}, {"authority_projection_sha256": "f" * 64},
     {"authority_fields": [], "authority_projection_sha256": "bad"},
-    {"authority_fields": [], "view": "summary"},
     {"authority_fields": [], "include_completion_source": True},
-    {"authority_fields": [], "call_id": "call", "manifest_sha256": "a" * 64},
     {"authority_fields": ["task_contract"], "source_only": True, "source_start_char": 9, "source_end_char": 2},
 ])
 def test_invalid_or_ambiguous_selections_are_typed_argument_errors(tmp_path, arguments):

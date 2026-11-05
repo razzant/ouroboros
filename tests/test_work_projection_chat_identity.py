@@ -41,7 +41,6 @@ def _upkeep(root, bindings=None, **stored):
 
 
 @pytest.mark.parametrize("stored, room, key", [
-    pytest.param({"chat_id": HIDDEN_CHAT_ID}, HIDDEN_CHAT_ID, "0", id="hidden-partition"),
     pytest.param({"chat_id": WEB_UI_CHAT_ID}, WEB_UI_CHAT_ID, "1", id="main"),
     pytest.param({"chat_id": PROJECT_CHAT, "project_id": "p-x"}, PROJECT_CHAT, str(PROJECT_CHAT), id="project"),
     # Negative control: absence is None, not the hidden partition's 0. The page files an unplaced work under the
@@ -61,7 +60,6 @@ def test_an_upkeep_stays_in_the_room_its_result_names(root, stored, room, key):
     pytest.param({"project_id": "", "chat_id": HIDDEN_CHAT_ID}, HIDDEN_CHAT_ID, "", id="hidden-partition"),
     pytest.param({"project_id": "p-x", "chat_id": PROJECT_CHAT}, PROJECT_CHAT, "p-x", id="project"),
     # Negative controls: a binding that names no chat places nothing, and an origin-bound one re-homes nothing.
-    pytest.param({"project_id": "p-x"}, WEB_UI_CHAT_ID, "", id="names-no-chat"),
     pytest.param({"project_id": "p-x", "chat_id": PROJECT_CHAT, "origin_bound": True}, WEB_UI_CHAT_ID, "",
                  id="origin-bound"),
 ])

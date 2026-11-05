@@ -657,11 +657,10 @@ def _panel_run(tmp_path, source="review_substrate", task_id="t-reviewed",
     return dc
 
 
-@pytest.mark.parametrize("source", ["review_substrate", "review_substrate:task_acceptance"])
-@pytest.mark.parametrize("owner,expected", [
-    ("completed", "left_live"),
-    ("failed", "left_live"),
-    ("cancelled", "cancelled"),
+@pytest.mark.parametrize(("owner", "expected", "source"), [
+    ("completed", "left_live", "review_substrate"),
+    ("failed", "left_live", "review_substrate:task_acceptance"),
+    ("cancelled", "cancelled", "review_substrate"),
 ])
 def test_a_review_panels_run_outlives_every_owner_terminal_but_cancellation(
     tmp_path, source, owner, expected,

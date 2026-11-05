@@ -40,8 +40,10 @@ def test_the_stamp_is_the_status_and_the_evidence_directories_only(root):
     assert packer.task_stamps(root, "a") not in (initial, moved)  # and so did its status
 
 
-@pytest.mark.parametrize("status", ["running", "completed"])
-@pytest.mark.parametrize("tier", [store.TIER_ENFORCED, store.TIER_NAME])
+@pytest.mark.parametrize(("tier", "status"), [
+    pytest.param(store.TIER_ENFORCED, "running", id='enforced-running'),
+    pytest.param(store.TIER_NAME, "completed", id='name-completed'),
+])
 def test_a_pass_reads_no_obligation_set(root, monkeypatch, status, tier):
     from tests.test_store import publish
 

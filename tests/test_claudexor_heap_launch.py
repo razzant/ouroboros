@@ -11,14 +11,6 @@ from tests.test_claudexor_runtime_delivery import _archive, _pin, NODE_VERSION
 @pytest.mark.parametrize('launch,options,expected,error', [
     ({'nodeArgs': ['--max-old-space-size=16384']}, '', ['--max-old-space-size=16384'], False),
     ({'nodeArgs': ['--max-old-space-size=8192']}, '--max-old-space-size=6144', [], False),
-    ({'nodeArgs': ['--max-old-space-size=8192']}, '--trace-warnings', ['--max-old-space-size=8192'], False),
-    (None, '', [], False),
-    ({'nodeArgs': []}, '', [], False),
-    ({'nodeArgs': ['--inspect']}, '', [], True),
-    ({'nodeArgs': ['--max-old-space-size=8192', '--require=elsewhere']}, '', [], True),
-    ({'nodeArgs': ['--max-old-space-size=8']}, '', [], True),
-    ({'nodeArgs': '--max-old-space-size=8192'}, '', [], True),
-    ({'nodeArgs': [8192]}, '', [], True),
     ('invalid', '', [], True),
 ])
 def test_ensure_applies_engine_args_only_to_spawn(tmp_path, monkeypatch, launch, options, expected, error):

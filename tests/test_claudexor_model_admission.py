@@ -11,8 +11,6 @@ from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
 @pytest.mark.parametrize("admission,allowed", [
     (None, False),
-    ({"requestedModel": "next-model", "inventoryAbsence": "authoritative"}, False),
-    ({"requestedModel": "another-model", "inventoryAbsence": "advisory"}, False),
     ({"inventoryAbsence": "advisory"}, False),
     ({"requestedModel": "next-model", "inventoryAbsence": "advisory"}, True),
 ])

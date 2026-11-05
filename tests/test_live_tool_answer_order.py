@@ -11,9 +11,13 @@ from tests._live_stack import stack
 from tests._live_world import host_world as host_world
 
 
-@pytest.mark.parametrize('thinking', [False, True])
-@pytest.mark.parametrize('speech_at', [
-    'before-result', 'before-receive-returns', 'after-result', 'after-same-response', 'across-result'])
+@pytest.mark.parametrize(("speech_at", "thinking"), [
+    ('before-result', False),
+    ('before-receive-returns', True),
+    ('after-result', False),
+    ('after-same-response', True),
+    ('across-result', False),
+])
 def test_requested_pixels_keep_fallback_continuation(
         host_world, monkeypatch, record_property, thinking, speech_at):
     entered, release = threading.Event(), threading.Event()
@@ -126,8 +130,11 @@ def test_requested_pixels_keep_fallback_continuation(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('thinking', [False, True])
-@pytest.mark.parametrize('speech_at', ['before-result', 'after-result', 'after-same-response'])
+@pytest.mark.parametrize(("speech_at", "thinking"), [
+    ('before-result', False),
+    ('after-result', True),
+    ('after-same-response', False),
+])
 def test_queued_result_keeps_fallback_continuation(
         host_world, monkeypatch, record_property, thinking, speech_at):
     entered, release = threading.Event(), threading.Event()
@@ -255,8 +262,7 @@ def test_queued_result_keeps_fallback_continuation(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('thinking', [False, True])
-@pytest.mark.parametrize('completion_before_write', [True, False])
+@pytest.mark.parametrize(("completion_before_write", "thinking"), [(True, False), (False, True)])
 def test_native_read_before_conversion_keeps_fallback_continuation(
         host_world, monkeypatch, record_property, thinking, completion_before_write):
     entered, release = threading.Event(), threading.Event()

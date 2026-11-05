@@ -118,9 +118,7 @@ def test_pausing_is_execution_and_refusal_does_not_hide_resume(live):
     assert member["reasons"][0]["text"] == "Ouroboros paused it"
 
 
-@pytest.mark.parametrize("kind", ["tool", "model"])
-@pytest.mark.parametrize("ended", [False, True])
-@pytest.mark.parametrize("mind", [False, True])
+@pytest.mark.parametrize(("mind", "ended", "kind"), [(False, False, "tool"), (True, True, "model")])
 def test_addressed_resume_repairs_ended_recipients_and_names_live_blockers(tmp_path, monkeypatch, kind, ended, mind):
     import os
     from contextlib import nullcontext

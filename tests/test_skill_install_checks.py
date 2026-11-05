@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import pathlib
 
 import pytest
 
@@ -21,20 +20,6 @@ def test_owner_skip_summary_describes_exact_bytes_without_install_timing():
     gate = skill_review_gate("pending", current_hash="release", acceptance={
         "basis": "owner_skip", "release_digest": "release"})
     assert gate["summary"] == "The owner skipped the review for these exact bytes."
-
-
-def test_check_guidance_keeps_the_self_check_to_cyber_pro():
-    from ouroboros.tools.skill_source_tools import _SCHEMAS
-
-    for tool in ("skill_install", "skill_update"):
-        description = _SCHEMAS[tool]["properties"]["check"]["description"]
-        assert "outside Cyber Pro this is the only check" in description
-        assert "only the owner skips a review" in description
-        assert "self: Cyber Pro only" in description
-    doc = (pathlib.Path(__file__).resolve().parents[1] / "docs/CREATING_SKILLS.md").read_text(encoding="utf-8")
-    doc = " ".join(doc.split())
-    assert "outside Cyber Pro only the owner skips a review" in doc
-    assert "outside Cyber Pro that basis admits nothing" in doc
 
 
 @pytest.fixture

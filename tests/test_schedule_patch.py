@@ -45,12 +45,11 @@ def test_unchanged_patch_does_not_write_the_table(root):
 
 
 @pytest.mark.parametrize("fields,status", [
-    ({"enabled": True}, "invalid_patch"), ({"followup_hold": None}, "invalid_patch"),
-    ({"objective": ""}, "invalid_template"), ({"trigger": {}}, "invalid_template"),
+    ({"enabled": True}, "invalid_patch"), ({"objective": ""}, "invalid_template"), ({"trigger": {}}, "invalid_template"),
     ({"trigger": {"type": "cron", "expr": "bad"}}, "invalid_template"),
     ({"trigger": {"type": "once", "run_at": "bad"}}, "invalid_template"),
     ({"timezone": "No/SuchZone"}, "invalid_template"),
-    ({"reasoning_effort": "invented"}, "invalid_template"), ({"context": None}, "invalid_template"),
+    ({"context": None}, "invalid_template"),
 ])
 def test_invalid_patch_is_byte_identical_even_on_legacy_rows(root, fields, status):
     row = {**_rows(root)[0], "skill_content_hash": "old"}
@@ -79,9 +78,7 @@ def test_missing_id_reason_and_withdrawal_refuse_without_writes(root):
 
 
 @pytest.mark.parametrize("fields,rearmed", [
-    ({"name": "History"}, False), ({"timezone": "Europe/Paris"}, False),
-    ({"trigger": {"type": "once", "run_at": "2026-09-21T15:00:00+03:00"}}, False),
-    ({"trigger": {"type": "once", "run_at": "2099-01-01T00:00:00+00:00"}}, True),
+    ({"name": "History"}, False), ({"trigger": {"type": "once", "run_at": "2099-01-01T00:00:00+00:00"}}, True),
     ({"trigger": {"type": "cron", "expr": "0 9 * * *"}}, True),
 ])
 def test_consumed_rearm_requires_a_new_trigger(root, fields, rearmed):

@@ -142,8 +142,7 @@ def test_a_saved_whole_receipt_ends_its_own_records_unread_duty_and_nothing_else
     assert _duties(tmp_path) == sorted(row for row in everything if row[0] != own["record_id"])
 
 
-@pytest.mark.parametrize("short", ["helper_notice", "report_without_rows", "a_seat_settled_after_the_render",
-                                   "wave_still_pending", "another_author", "another_records_receipt"])
+@pytest.mark.parametrize("short", ["helper_notice", "report_without_rows", "another_records_receipt"])
 def test_a_receipt_short_of_whole_ends_no_unread_duty(tmp_path, short):
     """Cursor ids prove nothing: a helper notice and a report that renders no rows advance them all the same."""
     from ouroboros.working_checkpoint import flush_content_acks

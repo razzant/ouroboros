@@ -46,8 +46,7 @@ def test_extension_store_refusal_preserves_dispatch_provenance(tmp_path, monkeyp
         assert "physical_dispatch" not in result.meta and "extension_generation" not in result.meta
 
 
-@pytest.mark.parametrize("bound", [False, True])
-@pytest.mark.parametrize("after_body", [False, True])
+@pytest.mark.parametrize(("after_body", "bound"), [(False, True), (True, False)])
 def test_store_refusal_preserves_actual_entry_stage(tmp_path, monkeypatch, bound, after_body):
     registry, _, _ = _registry(tmp_path, monkeypatch)
     calls = []
@@ -112,8 +111,7 @@ def test_transient_exact_settlement_retries_no_business_work(tmp_path, monkeypat
     assert not claims(tmp_path)
 
 
-@pytest.mark.parametrize("route", ["shell", "mcp"])
-@pytest.mark.parametrize("bound", [False, True])
+@pytest.mark.parametrize(("bound", "route"), [(False, "shell"), (True, "mcp")])
 def test_late_refused_handoff_cannot_recreate_claim(tmp_path, monkeypatch, route, bound):
     registry, _, _ = _registry(tmp_path, monkeypatch)
     contexts, opened = [], []
@@ -335,8 +333,7 @@ def test_sticky_store_admission_refusal_never_enters_executor_body(tmp_path, mon
     assert not claims(tmp_path)
 
 
-@pytest.mark.parametrize("route", ["shell", "mcp"])
-@pytest.mark.parametrize("bound", [False, True])
+@pytest.mark.parametrize(("bound", "route"), [(False, "mcp"), (True, "shell")])
 def test_close_before_external_publication_creates_no_phantom_duty(tmp_path, monkeypatch, route, bound):
     """Split real copied-context publication before its durable lock acquisition.
 

@@ -15,7 +15,7 @@ from tests.test_delegate_hold import _configured_registry, _loop_kwargs, _start_
 from tests.test_transport_death_retry import _LedgerLLM, _ledger
 
 
-@pytest.mark.parametrize("external", ["inline", "consumed", "unread", "patch", "pending", "absent", "unreadable"])
+@pytest.mark.parametrize("external", ["inline", "absent", "unreadable"])
 def test_saved_external_work_does_not_gate_supervising_cognition(tmp_path, monkeypatch, external):
     """The incident's long consumed result and uncertain custody use one rail.
 

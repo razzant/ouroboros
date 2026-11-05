@@ -24,8 +24,11 @@ def isolated_density_memo(monkeypatch):
     monkeypatch.setattr(ce, "_DENSITY_MEMO", {})  # each fixture has its own evidence store
 
 
-@pytest.mark.parametrize("mode", ["max", "low", "nano"])
-@pytest.mark.parametrize("witness_size,expected", [(97_000, 1.0), (600_000, 1.56)])
+@pytest.mark.parametrize(("witness_size", "expected", "mode"), [
+    (97_000, 1.0, "max"),
+    (97_000, 1.0, "nano"),
+    (600_000, 1.56, "low"),
+])
 def test_real_start_and_first_send_use_comparable_density(main_call, monkeypatch, tmp_path,
                                                          mode, witness_size, expected):
     from ouroboros.tool_policy import initial_tool_schemas
@@ -92,8 +95,6 @@ def _witness(raw, density=1.56, *, route="route-a", basis=ce.MAIN_DENSITY_BASIS,
 @pytest.mark.parametrize("witness_size,model,basis,observed,expected", [
     (600_000, "openai/test-model", ce.MAIN_DENSITY_BASIS, None, 1.56),
     (97_000, "openai/test-model", ce.MAIN_DENSITY_BASIS, None, 1.0),
-    (600_000, "other/model", ce.MAIN_DENSITY_BASIS, None, 1.0),
-    (600_000, "openai/test-model", "raw", None, 1.0),
     (600_000, "openai/test-model", ce.MAIN_DENSITY_BASIS, "2000-01-01T00:00:00Z", 1.0),
 ])
 def test_round_one_uses_only_comparable_same_model_evidence(

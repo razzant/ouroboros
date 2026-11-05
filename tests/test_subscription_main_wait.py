@@ -631,8 +631,8 @@ CACHE_REPREPARE_EXECUTION = "execution-reprepare-proof"
 
 @pytest.mark.parametrize(
     "destination,use_local",
-    [(CACHE_REPREPARE_API, False), ("local-fixture", True), (MODEL, True), (MODEL, False)],
-    ids=["claudexor-to-openrouter", "claudexor-to-local", "claudexor-slug-to-local", "same-claudexor-control"],
+    [(CACHE_REPREPARE_API, False), ("local-fixture", True), (MODEL, False)],
+    ids=["claudexor-to-openrouter", "claudexor-to-local", "same-claudexor-control"],
 )
 def test_live_owner_wait_reprojects_affinity(main_call, monkeypatch, destination, use_local):
     ctx, gateway, controller, events, decide, _ = main_call

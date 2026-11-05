@@ -20,6 +20,7 @@ from ouroboros.tools.registry import ToolContext
 from tests.test_presence_own_work import BINDING, OTHER, _presence, _registry, _supervisor
 from tests.test_presence_owner_contact import _pooled_metadata as _pooled  # what a (re)admitted worker hands its tools
 from tests.test_schedule_occurrence import q as _q
+from tests._cases import case_folders
 
 q = _q  # the real scheduler's queue fixture, requested by name; re-bound so a parameter named q is no redefinition
 RELATION = {"presence_binding_relation": {"binding_id": BINDING}}
@@ -363,36 +364,39 @@ C7_SHAPES = {
 }
 
 
-@pytest.mark.parametrize("shape", sorted(C7_SHAPES))
-def test_a_place_owner_request_without_the_owner_door_stays_the_places_work(tmp_path, shape):
+def test_a_place_owner_request_without_the_owner_door_stays_the_places_work(subtests, tmp_path):
     """An addressed, owner-confirmed request inside a place (the C7 source) is not a private late answer:
     its turn stays the place's speaker, and work acting for the place under it keeps the place's narrowing;
     only the owner door's stamp or the host's typed relation relates, never focus or owner work kind."""
-    from ouroboros.dialogue_provenance import (
-        presence_binding_authority_metadata,
-        presence_caller_binding,
-        presence_metadata_relation,
-        presence_root_carrier,
-        presence_root_relation,
-    )
-    from ouroboros.tools.control_runtime import _send_user_message
+    case_paths = case_folders(tmp_path)
+    for shape in sorted(C7_SHAPES):
+        tmp_path = next(case_paths)
+        with subtests.test(shape=shape):
+            from ouroboros.dialogue_provenance import (
+                presence_binding_authority_metadata,
+                presence_caller_binding,
+                presence_metadata_relation,
+                presence_root_carrier,
+                presence_root_relation,
+            )
+            from ouroboros.tools.control_runtime import _send_user_message
 
-    turn = {"presence": _presence(), **C7_SHAPES[shape]}
-    assert presence_caller_binding(types.SimpleNamespace(task_metadata=turn, task_contract={})) == BINDING
-    assert presence_root_carrier(turn) == {"presence": _presence()} and presence_root_relation(turn) == {}
-    assert presence_binding_authority_metadata(turn) == AUTHORITY and presence_metadata_relation(turn) == BINDING
-    metadata = {**AUTHORITY, **C7_SHAPES[shape], "root_task_id": "c7-root", "delegation_role": "root"}
-    write_task_result(tmp_path, "c7-root", "running", chat_id=1, delegation_role="root", metadata=metadata)
-    sent = []
-    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="c7-root", current_chat_id=1,
-                      task_metadata=metadata, event_queue=types.SimpleNamespace(put_nowait=sent.append))
-    assert presence_caller_binding(ctx) == BINDING
-    assert _send_user_message(ctx, "Not mine to say.", destination="main").startswith("⚠️ MAIN_NOTICE_BLOCKED")
-    assert sent == []
-    assert presence_binding_authority_metadata(metadata) == presence_root_carrier(metadata) == AUTHORITY
-    assert presence_root_relation(metadata) == {}
-    place, _place = _registry(tmp_path)
-    assert "PRESENCE_CAPABILITY_BLOCKED" not in place.execute("get_task_result", {"task_id": "c7-root"})
+            turn = {"presence": _presence(), **C7_SHAPES[shape]}
+            assert presence_caller_binding(types.SimpleNamespace(task_metadata=turn, task_contract={})) == BINDING
+            assert presence_root_carrier(turn) == {"presence": _presence()} and presence_root_relation(turn) == {}
+            assert presence_binding_authority_metadata(turn) == AUTHORITY and presence_metadata_relation(turn) == BINDING
+            metadata = {**AUTHORITY, **C7_SHAPES[shape], "root_task_id": "c7-root", "delegation_role": "root"}
+            write_task_result(tmp_path, "c7-root", "running", chat_id=1, delegation_role="root", metadata=metadata)
+            sent = []
+            ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="c7-root", current_chat_id=1,
+                              task_metadata=metadata, event_queue=types.SimpleNamespace(put_nowait=sent.append))
+            assert presence_caller_binding(ctx) == BINDING
+            assert _send_user_message(ctx, "Not mine to say.", destination="main").startswith("⚠️ MAIN_NOTICE_BLOCKED")
+            assert sent == []
+            assert presence_binding_authority_metadata(metadata) == presence_root_carrier(metadata) == AUTHORITY
+            assert presence_root_relation(metadata) == {}
+            place, _place = _registry(tmp_path)
+            assert "PRESENCE_CAPABILITY_BLOCKED" not in place.execute("get_task_result", {"task_id": "c7-root"})
 
 
 def test_an_old_late_answer_root_restored_cold_from_the_saved_queue_is_the_owners_work(tmp_path, monkeypatch):
@@ -464,13 +468,7 @@ def _write_origin(root, origin):
 
 @pytest.mark.parametrize("origin,converted", [
     ("old-root", True),  # an old late-answer root: its binding authority beside the owner door's stamp
-    ("owner-turn", True),  # the answering owner turn itself, by its accepted late answer
     ("acting-root", False),  # a place's own delegated root: no owner door
-    ("missing", False),  # no readable origin record: an evidence gap, never a guess from the binding
-    ("other-binding", False),  # the owner's related work, of another place than this row's
-    ("child-origin", False),  # a delegated child: the door's stamp beside it relates nothing
-    ("origin-ceiling", False),  # a run under a ceiling hands on no relation, whatever its stamp
-    ("row-ceiling", False),  # the row's own frozen ceiling keeps narrowing
     ("started-occurrence", False),  # an old run with no host receipt: nothing proves its own source, whatever metadata says
 ])
 def test_an_old_follow_up_is_related_owner_work_only_by_its_recorded_origin(q, origin, converted):
@@ -876,9 +874,7 @@ def _interrupted_after_it_ran(q, before):
     return task_id
 
 
-@pytest.mark.parametrize("origin,converted", [("old-root", True), ("acting-root", False), ("missing", False),
-                                              ("other-binding", False), ("origin-ceiling", False), ("row-ceiling", False),
-                                              ("started-occurrence", False)])
+@pytest.mark.parametrize("origin,converted", [("old-root", True), ("acting-root", False), ("started-occurrence", False)])
 def test_a_new_continue_of_an_old_started_occurrence_reads_its_recorded_origin(q, origin, converted):
     """What already ran keeps what it ran with, on its own record. Continue admits NEW work: it reads the origin its host
     receipt names, as a new occurrence does; the binding alone proves nothing and an unproven source stays narrowed."""

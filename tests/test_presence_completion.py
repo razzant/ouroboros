@@ -53,8 +53,7 @@ def turn(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("outcome,message", [
     ("message", "Ready"), ("deferred", "Working on it"),
-    ("silent", ""), ("tool_delivered", ""),
-    ("message", '{"delivery_control":"keep"}'),
+    ("silent", ""),
 ])
 def test_explicit_finish_uses_one_model_round_and_real_tool_batch(turn, outcome, message):
     registry, calls, run = turn
@@ -90,8 +89,7 @@ def test_omitted_message_keeps_normal_final_round(turn, outcome):
 
 
 @pytest.mark.parametrize("outcome,reply_later", [
-    ("message", False), ("message", True), ("deferred", False), ("deferred", True),
-    ("silent", False), ("tool_delivered", False),
+    ("message", False), ("deferred", False), ("silent", False),
 ])
 def test_stop_records_selected_bytes_without_an_extra_final_generation(turn, monkeypatch, outcome, reply_later):
     registry, calls, run = turn

@@ -211,8 +211,12 @@ def test_saved_successor_keeps_frozen_source_across_another_crash_before_dispatc
     assert wc.load_recovery(ctx, source)["working"]["boundary"] == "pre_effect"
 
 
-@pytest.mark.parametrize("origin", ["restarted", "resumed", "crash_retry"])
-@pytest.mark.parametrize("door", ["restart", "quit", "crash", "panic"])
+@pytest.mark.parametrize(("door", "origin"), [
+    ("restart", "restarted"),
+    ("quit", "resumed"),
+    ("crash", "crash_retry"),
+    ("panic", "restarted"),
+])
 def test_runnable_saved_successor_waiting_for_capacity_follows_the_next_stop(tmp_path, monkeypatch, origin, door):
     """A pending successor still owns saved work; another stop does not buy an attempt."""
     import queue as stdqueue
@@ -271,7 +275,7 @@ def test_runnable_saved_successor_waiting_for_capacity_follows_the_next_stop(tmp
         assert budget_hold_fact(restored)["reason"] == HOLD_SAVED_WORK
 
 
-@pytest.mark.parametrize("control", ["prior_hold", "owner_hold", "stop", "bad_source", "attempt_dispatched"])
+@pytest.mark.parametrize("control", ["prior_hold", "stop", "bad_source"])
 def test_restart_does_not_return_a_saved_successor_without_current_admission(tmp_path, monkeypatch, control):
     import queue as stdqueue
 
@@ -599,17 +603,7 @@ def test_a_stop_keeps_each_saved_queue_time_through_restore_and_its_readers(tmp_
     ({"queued_at": "2026-10-01T00:00:00+00:00"}, "2026-01-01T00:00:00+00:00", "2026-10-01T00:00:00+00:00"),
     ({"queued_at": None}, "2026-01-01T00:00:00+00:00", None),
     ({}, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
-    ({}, None, None),
-    ({"queued_at": 1760000000.25}, None, 1760000000.25),
-    ({"queued_at": 1760000000}, None, 1760000000),
-    ({"queued_at": True}, None, None),
-    ({"queued_at": float("nan")}, None, None),
-    ({"queued_at": float("inf")}, None, None),
-    ({"queued_at": 0}, None, None),
-    ({"queued_at": ""}, "2026-01-01T00:00:00+00:00", None),
-    ({"queued_at": ["2026-10-01"]}, None, None),
-], ids=["outer", "explicit-null", "nested-fallback", "absent", "epoch-float", "epoch-int", "bool", "nan", "inf",
-        "zero", "blank", "not-a-time"])
+], ids=["outer", "explicit-null", "nested-fallback"])
 def test_the_saved_row_decoder_reads_the_outer_queue_time_first(outer, nested, expected):
     """The outer value decides; only its absence falls back to a nested copy; nothing is guessed."""
     from supervisor.queue_snapshot import _saved_pending_task

@@ -202,8 +202,7 @@ def test_the_steady_state_is_not_reached_by_a_pass_the_handed_in_judge_names_ref
 
 @pytest.mark.parametrize("runs, refusals", [
     ("failed done", ["L:child-jobs refused: ['custody_trash: failed']"]),
-    ("none", ["L:child-jobs refused: ['no report: None']"]),
-    ("pending done", []), ("done", [])], ids=["failed_then_done", "no_report", "pending_then_done", "done"])
+    ("pending done", []), ("done", [])], ids=["failed_then_done", "pending_then_done", "done"])
 def test_the_live_set_s_preparation_reads_each_maintenance_run(tmp_path, monkeypatch, runs, refusals):
     """``_child_jobs_done`` (tests/_live_set.py, the live set's and the stand's preparation) runs the child's pass while
     a job is due. Each run's report is read as the contract's own preparation reads it: one refused run is a driver

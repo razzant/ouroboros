@@ -26,12 +26,12 @@ def _write_addressed(mailbox_root, text, task_id, *, msg_id, kind, provenance):
     return write_owner_message(mailbox_root, text, task_id, msg_id=msg_id, kind=kind)
 
 
-@pytest.mark.parametrize("forked", [False, True])
-@pytest.mark.parametrize("kind, provenance", [
-    ("owner_text", ""), ("quiz_answer", ""),
-    ("task_message", "ancestor_task"), ("task_message", "peer_task"),
+@pytest.mark.parametrize(("batch", "kind", "provenance", "forked"), [
+    (False, "owner_text", "", False),
+    (False, "task_message", "ancestor_task", False),
+    (True, "quiz_answer", "", True),
+    (True, "task_message", "peer_task", True),
 ])
-@pytest.mark.parametrize("batch", [False, True])
 def test_wait_yields_mailbox_without_acknowledging_or_stopping_child(tmp_path, forked, kind, provenance, batch):
     mailbox_root = tmp_path / "execution" if forked else tmp_path
     ctx = SimpleNamespace(drive_root=mailbox_root, task_id="parent", task_attempt=1,

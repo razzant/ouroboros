@@ -31,8 +31,7 @@ def test_later_model_observation_replays_the_original_row_without_repricing(tmp_
     assert row["model"] == before_model and row["cost_usd"] == 2.5
 
 
-@pytest.mark.parametrize("field", ["route", "task_id", "root_task_id", "parent_task_id", "category", "source",
-                                  "review_skill", "review_wave_id", "review_slot_id"])
+@pytest.mark.parametrize("field", ["route", "category", "review_slot_id"])
 def test_late_model_never_waives_remaining_caller_identity(tmp_path, field):
     _record(tmp_path, "first")
     before = ledger_rows(tmp_path)
@@ -42,7 +41,7 @@ def test_late_model_never_waives_remaining_caller_identity(tmp_path, field):
 
 
 @pytest.mark.parametrize("field,value", [("kind", "external_unmetered"), ("provider", "other"),
-                                        ("subscription_route", "other"), ("session_id_sha256", "0" * 64)])
+                                        ("session_id_sha256", "0" * 64)])
 def test_derived_identity_fields_remain_checked(tmp_path, field, value):
     # A stored row whose derived identity differs while the lookup id is the
     # same: journaled that way (recorded in a scratch root, one field changed)

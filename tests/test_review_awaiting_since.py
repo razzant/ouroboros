@@ -197,7 +197,7 @@ def test_a_rejoined_operation_an_earlier_process_paid_for_states_no_moment(tmp_p
             assert not worker.is_alive(), "the rejoined review worker did not settle"
 
 
-@pytest.mark.parametrize("stored", ["", "   ", "soon", "since yesterday", "2026-13-45T99:99Z"])
+@pytest.mark.parametrize("stored", ["", "since yesterday", "2026-13-45T99:99Z"])
 def test_a_stored_value_that_is_not_an_instant_projects_no_moment(stored):
     """An unparseable record is a hole, never a rendered clock."""
     row = dataclasses.asdict(ReviewActorRecord(

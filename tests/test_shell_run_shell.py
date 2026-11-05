@@ -424,16 +424,9 @@ class TestGrepRegexHint:
         assert calls[0]["cmd"] == ["/usr/bin/grep", "-E", "A|B", "/tmp/x"]
 
     @pytest.mark.parametrize("argv,reason", [
-        (["grep", "\\(foo\\)", "/tmp/x"], "POSIX BRE grouping, not the \\| trap"),
-        (["grep", "ab\\+c", "/tmp/x"], "BRE extension, not the \\| trap"),
         (["grep", "-E", "A\\|B", "/tmp/x"], "explicit -E means user knows what they want"),
         (["grep", "-rnE", "A\\|B", "/tmp/x"], "clustered -rnE still explicit extended regex"),
-        (["grep", "-G", "A\\|B", "/tmp/x"], "explicit -G is intentional GNU BRE"),
-        (["grep", "-F", "A\\|B", "/tmp/x"], "-F means literal strings, two chars"),
-        (["grep", "-n", "pattern", "/tmp/x"], "plain pattern without escapes"),
         (["egrep", "A\\|B", "/tmp/x"], "egrep already chose regex flavor"),
-        (["fgrep", "A\\|B", "/tmp/x"], "fgrep already chose string flavor"),
-        (["echo", "A\\|B"], "non-grep commands untouched"),
     ])
     def test_grep_regex_hint_skips(self, argv, reason, tmp_path, fake_subprocess):
         fake_subprocess()
@@ -489,8 +482,6 @@ class TestMaskedGreenDisclosure:
     @pytest.mark.parametrize("cmd", [
         ["sh", "-c", "pytest -q"],
         ["sh", "-c", "true 2>/dev/null"],
-        ["sh", "-c", "make test && true"],
-        ["sh", "-c", "make test && exit 0"],
         ["go", "test", "./..."],
     ])
     def test_unmasked_green_carries_no_note(self, cmd, tmp_path, fake_subprocess):

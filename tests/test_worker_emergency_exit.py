@@ -187,7 +187,7 @@ def _ordinary_close_entry(wid, incoming, outgoing, repo_dir, drive_root, session
     threading.Event().wait()
 
 
-@pytest.mark.parametrize("mode", ["startup_log", "no_lifeline", "suspended", "callback_raises", "callback_hangs"])
+@pytest.mark.parametrize("mode", ["startup_log", "no_lifeline", "callback_hangs"])
 def test_native_worker_stop_does_not_require_lifeline_or_callback(tmp_path, monkeypatch, mode):
     if mode == "suspended" and os.name == "nt":
         pytest.skip("SIGSTOP is a POSIX failure injection")

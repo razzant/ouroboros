@@ -136,8 +136,10 @@ def _run_native(env, monkeypatch, now):
     return messages, phases, at_grant
 
 
-@pytest.mark.parametrize("bounded", [False, True], ids=["unlimited", "explicit-budget"])
-@pytest.mark.parametrize("second", ["sleep", "quiz"])
+@pytest.mark.parametrize(("second", "bounded"), [
+    pytest.param("sleep", False, id='sleep-unlimited'),
+    pytest.param("quiz", True, id='quiz-explicit-budget'),
+])
 def test_planned_native_sleep_return_then_next_real_park(tmp_path, monkeypatch, clock, bounded, second):  # noqa: F811
     env = _return_native(tmp_path, monkeypatch, clock, bounded=bounded)
     assert env.meta["sleep_parked_at"] == env.checkpoint["sleep_started_at"]

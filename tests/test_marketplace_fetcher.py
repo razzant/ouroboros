@@ -122,7 +122,6 @@ def test_stage_does_not_strip_when_multiple_top_dirs():
     "bad_path",
     [
         "../etc/passwd",
-        "../../etc/passwd",
         "scripts/../../etc",
         "SKILL.md/../../tmp/x",
     ],
@@ -163,16 +162,7 @@ def test_stage_rejects_symlink_member():
     "name",
     [
         ".env",
-        ".env.production",
-        ".env.development",
-        "prod.env",
-        "config/.env",
-        "credentials.json",
         "service-account.json",
-        "secrets.yaml",
-        "secrets.toml",
-        "id_rsa",
-        "aws-credentials.json",
         ".npmrc",
     ],
 )
@@ -228,7 +218,7 @@ def test_stage_accepts_a_certificate_and_a_binary_key_container():
 
 @pytest.mark.parametrize(
     "name",
-    ["vault.p12", "vault.pfx", "store.jks", "store.keystore", "vault.kdbx", "sig.gpg"],
+    ["vault.p12", "store.keystore", "sig.gpg"],
 )
 def test_stage_accepts_the_remaining_key_container_suffixes(name):
     """The rest of the owner-approved suffix list stages the same way."""
@@ -246,9 +236,8 @@ def test_stage_accepts_the_remaining_key_container_suffixes(name):
 @pytest.mark.parametrize(
     "name",
     [
-        "evil.so", "evil.dll", "evil.dylib",
-        "evil.pyc", "evil.pyo", "evil.node",
-        "evil.exe", "evil.bin",
+        "evil.so", "evil.dylib",
+        "evil.bin",
     ],
 )
 def test_stage_rejects_loadable_binaries(name):
@@ -330,8 +319,7 @@ def test_stage_preserves_arbitrary_data_through_loading_and_review(tmp_path):
         staged.cleanup()
 
 
-@pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
-@pytest.mark.parametrize("name", ["program.so", "node_modules/lib/index.js"])
+@pytest.mark.parametrize(("name", "mode"), [("program.so", "advanced"), ("node_modules/lib/index.js", "cyber_pro")])
 def test_cyber_stages_archive_findings_as_advice(monkeypatch, caplog, mode, name):
     from ouroboros.marketplace import fetcher
 

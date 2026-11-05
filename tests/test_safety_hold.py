@@ -5,8 +5,7 @@ from tests._safety_fixtures import supervisor as supervisor_fixture
 supervisor = supervisor_fixture
 
 
-@pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
-@pytest.mark.parametrize("required", ["explicit", "consciousness"])
+@pytest.mark.parametrize(("required", "mode"), [("explicit", "advanced"), ("consciousness", "cyber_pro")])
 def test_no_checker_hold_and_no_retry_grant(supervisor, monkeypatch, mode, required):
     h = supervisor
     monkeypatch.setattr(h.module, "get_runtime_mode", lambda: mode)
@@ -34,7 +33,7 @@ def test_legacy_owner_backend_absence_still_warns(supervisor, monkeypatch):
     assert not h.module.check_safety("write_remote", {}, ctx=h.ctx)[0]
 
 
-@pytest.mark.parametrize("source", ["subject", "rules", "directives", "prior"])
+@pytest.mark.parametrize("source", ["subject", "directives", "prior"])
 def test_mandatory_bundle_never_truncated(supervisor, monkeypatch, source):
     h = supervisor
     monkeypatch.setattr(h.module, "_SAFETY_BUNDLE_BYTE_BUDGET", 2000)

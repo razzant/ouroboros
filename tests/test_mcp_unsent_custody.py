@@ -12,12 +12,25 @@ from tests.test_mcp_client import _settings
 
 
 
-@pytest.mark.parametrize("bound", [False, True])
-@pytest.mark.parametrize("phase", ["open", "sdk_error", "pause", "cleanup_unknown", "after_send",
-                                  "init_error", "init_timeout", "init_cleanup_error",
-                                  "store_preparation", "store_admission", "store_cleanup_error", "store_after_send",
-                                  "end_before_preparation", "end_after_init", "stop_after_init", "end_after_send",
-                                  "end_cleanup_unknown"])
+@pytest.mark.parametrize(("phase", "bound"), [
+    ("open", False),
+    ("sdk_error", True),
+    ("pause", False),
+    ("cleanup_unknown", True),
+    ("after_send", False),
+    ("init_error", True),
+    ("init_timeout", False),
+    ("init_cleanup_error", True),
+    ("store_preparation", False),
+    ("store_admission", True),
+    ("store_cleanup_error", False),
+    ("store_after_send", True),
+    ("end_before_preparation", False),
+    ("end_after_init", True),
+    ("stop_after_init", False),
+    ("end_after_send", True),
+    ("end_cleanup_unknown", False),
+])
 def test_real_manager_keeps_only_unresolved_mcp_duty(tmp_path, monkeypatch, bound, phase):
     from ouroboros.llm_attempt import PhysicalDispatchInterrupted
     registry, _, _ = _registry(tmp_path, monkeypatch)

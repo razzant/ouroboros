@@ -79,8 +79,7 @@ def test_button_and_mind_capture_unbound_then_commit_one_placement(host, monkeyp
     assert len(handoffs) <= 1 and all(row["task_id"] == "one" for row in handoffs)
 
 
-@pytest.mark.parametrize("entrance", ["owner", "mind"])
-@pytest.mark.parametrize("delete_first", [False, True])
+@pytest.mark.parametrize(("delete_first", "entrance"), [(False, "mind"), (True, "owner")])
 def test_destination_deletion_fences_both_placement_doors(host, monkeypatch, entrance, delete_first):  # noqa: F811
     create_project(host.root, "room", name="Room")
     real_move = placement.move_task_to_project

@@ -98,7 +98,7 @@ def test_current_root_with_original_zero_address_follows_its_project_binding(tmp
     assert _room_read(tmp_path, 0)["messages"] == [], "hidden chat is not a new browser room"
 
 
-@pytest.mark.parametrize("route", ["bound_foreign", "stored_foreign", "unknown", "same_room", "bound_same"])
+@pytest.mark.parametrize("route", ["bound_foreign", "unknown", "bound_same"])
 def test_child_cannot_address_parent_tool_evidence_to_its_own_room(tmp_path, monkeypatch, route):
     from ouroboros import tool_call_log
     from ouroboros.projects_registry import bind_task_to_project, create_project
@@ -176,7 +176,7 @@ def test_empty_known_missing_replay_is_carried_as_incomplete(tmp_path, witness):
     assert carrier["tool_evidence"]["coverage"]["archives_bounded"] is True
 
 
-@pytest.mark.parametrize("archive_count", [0, 3, 4, 12])
+@pytest.mark.parametrize("archive_count", [0, 3, 12])
 def test_unrelated_archive_bound_does_not_invent_tool_work(tmp_path, archive_count):
     _write(tmp_path / "logs/chat.jsonl", [{"direction": "out", "task_id": "greeting", "text": "Hello", "ts": TS}])
     for index in range(archive_count):

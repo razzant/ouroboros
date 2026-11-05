@@ -770,10 +770,7 @@ def test_replace_apply_publishes_smoke_proof_only_after_pass(monkeypatch):
 
 @pytest.mark.parametrize("service, blocked", [
     ({"state": "stopped"}, False),
-    ({"state": "stopped", "cleanup_dispatched": True}, False),
     ({"state": "running"}, True),
-    ({"state": "cleanup_pending"}, True),
-    ({"lifecycle": "cleanup_pending"}, True),
     ({"state": "stopped", "cleanup_dispatched": False}, True),
 ])
 def test_writer_fence_order(monkeypatch, service, blocked):

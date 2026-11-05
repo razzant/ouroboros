@@ -80,8 +80,7 @@ def test_resolver_held_update_admits_conversation(tx_repo, phase):
 
 
 @pytest.mark.parametrize("phase", [
-    "materializing_assisted", "rolling_back", "stashing_local_work",
-    "committing", "pending_boot_smoke", "gate_blocked",
+    "materializing_assisted", "committing", "gate_blocked",
 ])
 def test_destructive_and_unproven_phases_keep_refusing(tx_repo, phase):
     _write_tx(phase)

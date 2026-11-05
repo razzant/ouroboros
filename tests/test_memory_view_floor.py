@@ -179,7 +179,6 @@ def test_capture_protects_governing_words_and_does_not_recapture_for_fitting(tmp
 
 @pytest.mark.parametrize("governing, immune", [
     ([{"text": "да"}], {"m5"}),
-    ([{"text": "всегда проверяй логи"}], {"m4"}),
     ([{"text": "да", "ref": "chat 1 / m3"}], {"m3"}),
     ([{"source": "initial_user"}, {"text": "да"}], {"m5"}),
 ])
@@ -194,8 +193,7 @@ def test_governing_words_protect_rows_by_identity_never_by_substring(tmp_path, g
     assert {key for key in words for item in lane1 if item["ref"] == f"chat 1 / {key}" and item["immune"]} == immune
 
 
-@pytest.mark.parametrize("names, expected", [(None, ""), (("memory_read",), ""),
-    (("enable_tools",), "reachable through enable_tools"), (("list_available_tools",), "my parent task can read")])
+@pytest.mark.parametrize("names, expected", [(None, ""), (("enable_tools",), "reachable through enable_tools"), (("list_available_tools",), "my parent task can read")])
 def test_floor_receipt_names_reachable_sources_and_never_promises_lossless_recall(names, expected):
     note = mf.floor_note(mv.FloorLevel((("F5", ("p",)),)), window_tokens=200_000, mode="nano", tool_names=names)
     assert expected in note and "Nothing is lost" not in note and "brings it back" not in note

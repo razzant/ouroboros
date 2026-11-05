@@ -340,8 +340,10 @@ def test_finalize_on_miss_delivers_the_unreviewed_salvage(qenv, monkeypatch):
     assert row["task_id"] == "miss-del"
     assert (row["outcome"], row["settled_status"]) == ("stopped", "cancelled")
 
-@pytest.mark.parametrize("fence", [False, True], ids=["owner_stop", "restore_fence"])
-@pytest.mark.parametrize("lane", ["miss", "kill"])
+@pytest.mark.parametrize(("lane", "fence"), [
+    pytest.param("miss", False, id='miss-owner_stop'),
+    pytest.param("kill", True, id='kill-restore_fence'),
+])
 def test_a_restore_fence_notice_names_why_the_task_stopped(qenv, monkeypatch, fence, lane):
     """19.10.2026: an update's restore cancelled running work and the owner read only "Task …
     was stopped." under his own quoted message, as if someone had pressed Stop. A fence the

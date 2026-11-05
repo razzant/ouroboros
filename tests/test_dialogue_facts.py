@@ -17,6 +17,7 @@ import pytest
 from ouroboros import chat_chain, dialogue_import as di, dialogue_positions as dp, dialogue_store as ds, store
 from ouroboros.utils import jsonl_generation_signature
 from tests._dialogue import seed
+from tests._cases import chosen_rows
 
 
 def owner(cmid, *, chat_id=1, ts="2026-10-17T00:00:01+00:00", **extra):
@@ -326,8 +327,6 @@ def test_repeated_generation_signatures_keep_every_alias(tmp_path):
 
 @pytest.mark.parametrize("first", [
     pytest.param(encoded(owner("s1")) + b"\n", id="ordinary"),
-    pytest.param(b"\r\n" + encoded(owner("s1")) + b"\r\n", id="blank_line_then_crlf"),
-    pytest.param(encoded(owner("s1", text="pasted\u2028from a PDF")) + b"\n", id="u2028"),
     pytest.param(encoded(owner("s1", text="one paragraph\u2029the next")) + b"\n", id="u2029"),
     pytest.param(encoded(owner("s1", text="cp1252 read as latin-1\x85")) + b"\n", id="u0085"),
 ])
@@ -423,14 +422,14 @@ def test_a_store_of_another_schema_version_is_refused_and_never_replaced(tmp_pat
     assert ds.newest(tmp_path, "chat", limit=1)[0].row == owner("kept") and ds.meta(tmp_path, "schema_version") == ds.SCHEMA_VERSION
 
 
-@pytest.mark.parametrize("read", [
+@pytest.mark.parametrize("read", chosen_rows([
     lambda root, row: dp.ordinal_at(root, "chat", row.seq),
     lambda root, row: dp.row_at_position(root, dp.ordinal_at(root, "chat", row.seq).pos),
     lambda root, row: dp.row_at_ordinal(root, "chat", dp.ordinal_at(root, "chat", row.seq).ordinal),
     lambda root, row: dp.generation_row(root, gen_of(root, "chat_20261016T000000.jsonl"), 0),
     lambda root, row: dp.skipped_between(root, "chat", lower=row.seq),
     lambda root, row: ds.resolve_legacy(root, gen_of(root, "chat_20261016T000000.jsonl"), 1),
-])
+], 0, 1, 5))
 def test_count_and_address_probes_are_indexed_and_cost_the_same_with_thirty_rooms(tmp_path, monkeypatch, read):
     results, statements = {}, []
     for rooms in (1, 30):

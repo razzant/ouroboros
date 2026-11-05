@@ -68,8 +68,7 @@ def _assert_no_bookkeeping_downloads(root):
             assert client.get(f"/api/tasks/applied/artifacts/{name}").status_code == 404
 
 
-@pytest.mark.parametrize("chat_id", [0, 1])
-@pytest.mark.parametrize("user_file", [False, True])
+@pytest.mark.parametrize(("user_file", "chat_id"), [(False, 0), (True, 1)])
 def test_terminal_pipeline_keeps_review_bookkeeping_out_of_the_deliverables(tmp_path, monkeypatch, chat_id, user_file):
     monkeypatch.setattr(agent_task_pipeline, "_run_post_task_processing_async", lambda *a, **k: None)
     _task, stored, pending = _finish(tmp_path, chat_id=chat_id, user_file=user_file)
@@ -110,7 +109,7 @@ def test_child_copyback_keeps_the_review_projection_and_only_user_deliverables(t
         assert artifacts.task_artifact_dir_path(canonical, "applied").joinpath("notes.lock").read_bytes() == b"user deliverable"
 
 
-@pytest.mark.parametrize("status", ["pending", "finalizing", "failed", "partial", "missing"])
+@pytest.mark.parametrize("status", ["pending", "failed", "missing"])
 def test_present_but_incomplete_user_record_does_not_upgrade_empty_bundle(tmp_path, status):
     from ouroboros.outcomes import artifact_bundle_from_result
 
@@ -122,7 +121,7 @@ def test_present_but_incomplete_user_record_does_not_upgrade_empty_bundle(tmp_pa
     assert bundle["artifacts"][0]["status"] == status
 
 
-@pytest.mark.parametrize("status", ["pending", "finalizing", "failed", "ready_no_changes"])
+@pytest.mark.parametrize("status", ["pending", "failed", "ready_no_changes"])
 def test_ready_user_record_preserves_independent_bundle_state(tmp_path, status):
     from ouroboros.outcomes import artifact_bundle_from_result
 

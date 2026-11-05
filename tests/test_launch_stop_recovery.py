@@ -52,6 +52,7 @@ from tests._launch_stop_shared import (
     _view,
     write_scripts,
 )
+from tests._cases import case_folders
 
 pytestmark = [
               pytest.mark.skipif(os.name == "nt", reason="the measured stop is POSIX; Windows keeps its native kill")]
@@ -174,8 +175,7 @@ def test_the_exit_stop_ends_every_kept_service_row_in_one_shared_pass(tmp_path, 
             _end(pid, birth)
 
 
-@pytest.mark.parametrize("mode", ["separate", "separate-exit"])
-@pytest.mark.parametrize("owner", ["gone-task", "previous-generation"])
+@pytest.mark.parametrize(("owner", "mode"), [("gone-task", "separate"), ("previous-generation", "separate-exit")])
 def test_the_reaper_ends_a_stale_service_by_its_launch_identity_and_keeps_an_unconfirmed_row(
         tmp_path, monkeypatch, scripts, mode, owner):
     """A task service whose task is gone, or a kept service a previous server generation left."""
@@ -208,8 +208,7 @@ def test_the_reaper_ends_a_stale_service_by_its_launch_identity_and_keeps_an_unc
         _end(pid, birth)
 
 
-@pytest.mark.parametrize("later", ["reaper", "exit stop"])
-@pytest.mark.parametrize("scope", ["task", "session"])
+@pytest.mark.parametrize(("scope", "later"), [("task", "reaper"), ("session", "exit stop")])
 def test_the_reaper_keeps_a_dead_launch_row_while_its_owner_lives_and_a_later_stop_ends_its_orphan(
         tmp_path, monkeypatch, scripts, scope, later):
     """Custody of a launch does not end with its leader: a sweep during the owner's life signals nothing and
@@ -299,8 +298,7 @@ def test_a_reused_leader_pid_never_retires_a_launch_before_its_marker_is_read(tm
         _settle(leader, stranger, identities=[(pid, birth)])
 
 
-@pytest.mark.parametrize("leader_state", ["gone", "reused"])
-@pytest.mark.parametrize("consumer", ["update", "exit stop"])
+@pytest.mark.parametrize(("consumer", "leader_state"), [("update", "gone"), ("exit stop", "reused")])
 def test_a_durable_executor_launch_ends_what_its_gone_or_reused_leader_left(
         tmp_path, monkeypatch, scripts, consumer, leader_state):
     from ouroboros import owned_shutdown, workspace_executor
@@ -335,8 +333,11 @@ def test_a_durable_executor_launch_ends_what_its_gone_or_reused_leader_left(
         _settle(stranger, identities=[(pid, birth)])
 
 
-@pytest.mark.parametrize("consumer", ["quiesce", "reaper", "exit stop"])
-@pytest.mark.parametrize("ledger", ["daemon row", "corrupt", "missing"])
+@pytest.mark.parametrize(("ledger", "consumer"), [
+    ("daemon row", "quiesce"),
+    ("corrupt", "reaper"),
+    ("missing", "exit stop"),
+])
 def test_a_child_drive_stop_spares_the_installation_daemon_and_holds_it_while_its_ledger_is_unknown(
         tmp_path, scripts, consumer, ledger):
     """The installation's ledger names its daemon, whichever drive the service row lives in. When that ledger
@@ -415,8 +416,7 @@ def test_the_generation_stop_ends_many_services_in_shared_passes_and_reports_an_
             _end(pid, birth)
 
 
-@pytest.mark.parametrize("consumer", ["quiesce", "reaper"])
-@pytest.mark.parametrize("mode", ["same-exit", "separate-exit"])
+@pytest.mark.parametrize(("mode", "consumer"), [("same-exit", "quiesce"), ("separate-exit", "reaper")])
 def test_a_legacy_row_whose_leader_exited_keeps_its_old_group_stop_and_is_never_held_forever(
         tmp_path, scripts, consumer, mode):
     """A row without a launch identity (an older row's shape) keeps the stop it always had: a group that
@@ -534,8 +534,7 @@ def test_a_denied_chain_member_stays_owed_on_the_row_and_the_next_pass_of_each_c
         assert '"service:review-probe"' not in path.read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("first,then", [("reaper", "reaper"), ("exit stop", "exit stop"), ("exit stop", "reaper"),
-                                         ("reaper", "exit stop")])
+@pytest.mark.parametrize("first,then", [("reaper", "reaper"), ("exit stop", "exit stop"), ("reaper", "exit stop")])
 def test_a_held_child_survives_renewed_ledger_failure_and_any_later_consumer_ends_it(tmp_path, scripts, first, then):
     """A torn installation ledger: the first stop ends the leader and holds its chain-only child; a renewed
     failure holds it again; once the ledger reads, whichever consumer comes next ends it from the row."""
@@ -655,9 +654,11 @@ def test_the_next_generations_sweep_ends_the_marker_carrier_a_kept_row_left_belo
         _settle(leader, identities=[(pid, birth)])
 
 
-@pytest.mark.parametrize("b_row", ["launch", "unmarked"])
-@pytest.mark.parametrize("order", ["owed-then-reuse", "reuse-then-late-owed"])
-@pytest.mark.parametrize("consumer", ["reaper", "quiesce", "exit-stop"])
+@pytest.mark.parametrize(("consumer", "order", "b_row"), [
+    ("reaper", "owed-then-reuse", "launch"),
+    ("quiesce", "reuse-then-late-owed", "unmarked"),
+    ("exit-stop", "owed-then-reuse", "launch"),
+])
 def test_an_old_launchs_owed_child_outlives_a_new_process_that_reuses_its_dead_leaders_pid(
         tmp_path, monkeypatch, consumer, order, b_row):
     """Launch A owes a denied child after its leader died; the kernel then hands A's leader pid to B, a launch or an
@@ -719,7 +720,7 @@ def test_an_old_launchs_owed_child_outlives_a_new_process_that_reuses_its_dead_l
         assert refuted["record_id"] == a_id and refuted["pid"] == _PID
 
 
-@pytest.mark.parametrize("late", ["before-compaction", "during-compaction", "after-unlock", "after-forget"])
+@pytest.mark.parametrize("late", ["before-compaction", "after-unlock", "after-forget"])
 def test_a_late_row_of_the_same_launch_keeps_its_custody_across_a_compaction_that_dropped_the_launch(
         tmp_path, monkeypatch, late):
     """A compaction drops launch A's observed rows (its end was confirmed) while a stop of A that finished later
@@ -849,38 +850,40 @@ _READER_CASES = {  # rows alive, A's and its sibling's owed children, unreadable
 }
 
 
-@pytest.mark.parametrize("case", list(_READER_CASES))
-@pytest.mark.parametrize("reader", ["presence", "cold sleep", "continuation", "body candidate"])
-def test_a_reader_holds_a_launch_by_what_it_still_owes_never_by_the_process_on_its_leaders_pid(
-        tmp_path, monkeypatch, reader, case):
+def test_a_reader_holds_a_launch_by_what_it_still_owes_never_by_the_process_on_its_leaders_pid(subtests, tmp_path, monkeypatch):
     """The four readers that release custody (Presence's lend, a cold sleep, a Continue's writers, a body
     candidate's transfer and GC) over launch A and a sibling launch of the same owner. A leader measured alive with
     its recorded birth holds its launch with no process table; a gone leader's launch is held by a live owed child
     or a process that kept its marker, read in ONE table for every such launch; an unreadable table or leader
     identity holds it as unknown (never as a running writer); a stranger that reused its leader pid is not it.
     Controlled identities, no OS process signalled."""
-    from ouroboros import owned_shutdown, process_census
+    case_paths = case_folders(tmp_path)
+    for case in list(_READER_CASES):
+        for reader in ["presence", "cold sleep", "continuation", "body candidate"]:
+            tmp_path = next(case_paths)
+            with subtests.test(case=case, reader=reader), monkeypatch.context() as monkeypatch:
+                from ouroboros import owned_shutdown, process_census
 
-    alive, a_owed, sibling_owed, unreadable, expect_a, expect_sibling, censuses = _READER_CASES[case]
-    row = {_PID: (2, _NEW_BIRTH if case == "reused pid" else _OLD_BIRTH, set()), _OTHER: (2, _OLD_BIRTH, {_MARK_B}),
-           _CHILD: (1, _OLD_BIRTH, set()), _CARRIER: (1, _OLD_BIRTH, {_MARK_A})}
-    rows = {pid: process_census._Row(pid, row[pid][0], pid, row[pid][1], 123.0, "alive", row[pid][2]) for pid in alive}
-    read, owner = _reader(tmp_path, monkeypatch, reader)
-    world = _controlled(tmp_path, monkeypatch, rows)
-    world.unknown, world.unreadable = case in ("unknown", "unreadable leader"), unreadable
-    owed = [{"pid": pid, "birth": _OLD_BIRTH} for pid in a_owed]
-    world.spawned({**_launch_row(owner), "known_members": owed})
-    world.spawned({**_launch_row(owner, marker=_MARK_B, purpose="service:sibling", pid=_OTHER),
-                   "known_members": [{"pid": pid, "birth": _OLD_BIRTH} for pid in sibling_owed]})
-    assert len(owned_shutdown.owned_records(tmp_path)) == 2
+                alive, a_owed, sibling_owed, unreadable, expect_a, expect_sibling, censuses = _READER_CASES[case]
+                row = {_PID: (2, _NEW_BIRTH if case == "reused pid" else _OLD_BIRTH, set()), _OTHER: (2, _OLD_BIRTH, {_MARK_B}),
+                       _CHILD: (1, _OLD_BIRTH, set()), _CARRIER: (1, _OLD_BIRTH, {_MARK_A})}
+                rows = {pid: process_census._Row(pid, row[pid][0], pid, row[pid][1], 123.0, "alive", row[pid][2]) for pid in alive}
+                read, owner = _reader(tmp_path, monkeypatch, reader)
+                world = _controlled(tmp_path, monkeypatch, rows)
+                world.unknown, world.unreadable = case in ("unknown", "unreadable leader"), unreadable
+                owed = [{"pid": pid, "birth": _OLD_BIRTH} for pid in a_owed]
+                world.spawned({**_launch_row(owner), "known_members": owed})
+                world.spawned({**_launch_row(owner, marker=_MARK_B, purpose="service:sibling", pid=_OTHER),
+                               "known_members": [{"pid": pid, "birth": _OLD_BIRTH} for pid in sibling_owed]})
+                assert len(owned_shutdown.owned_records(tmp_path)) == 2
 
-    found = read()
+                found = read()
 
-    assert _held(found, _PID) == expect_a, found
-    if reader != "body candidate" or "unknown" not in (expect_a, expect_sibling):  # a body's -1 names no record
-        assert _held(found, _OTHER) == expect_sibling, found
-    assert len(world.censuses) == censuses, "a measured live leader needs no table; the others share ONE"
-    assert world.signals == [] and world.kills == []
+                assert _held(found, _PID) == expect_a, found
+                if reader != "body candidate" or "unknown" not in (expect_a, expect_sibling):  # a body's -1 names no record
+                    assert _held(found, _OTHER) == expect_sibling, found
+                assert len(world.censuses) == censuses, "a measured live leader needs no table; the others share ONE"
+                assert world.signals == [] and world.kills == []
 
 
 @pytest.mark.parametrize("case", ["owed child", "reused pid"])

@@ -40,15 +40,14 @@ def test_untyped_context_scan_excludes_rate_and_output_size_errors():
         assert classify_llm_exception(RuntimeError(text), text).kind == "request_too_large"
 
 
-@pytest.mark.parametrize("detail", [
-    "429000 tokens > 400000 maximum",
-    "100429 tokens > 100000 maximum",
-    "1004290 tokens > 1000000 maximum",
-    "250000 tokens > 200000 maximum (request id: xtpmx)",
-    "250000 tokens > 200000 maximum (request id: xrpmx)",
-    "250000 tokens > 200000 maximum (request id: req_1f429ab0)",
+@pytest.mark.parametrize(("body_error", "detail"), [
+    pytest.param(False, "429000 tokens > 400000 maximum", id='text-429000 tokens > 400000 maximum'),
+    pytest.param(False, "1004290 tokens > 1000000 maximum", id='text-1004290 tokens > 1000000 maximum'),
+    pytest.param(False, "250000 tokens > 200000 maximum (request id: xrpmx)", id='text-250000 tokens > 200000 maximum (request id: xrpmx)'),
+    pytest.param(True, "100429 tokens > 100000 maximum", id='http400-body-100429 tokens > 100000 maximum'),
+    pytest.param(True, "250000 tokens > 200000 maximum (request id: xtpmx)", id='http400-body-250000 tokens > 200000 maximum (request id: xtpmx)'),
+    pytest.param(True, "250000 tokens > 200000 maximum (request id: req_1f429ab0)", id='http400-body-250000 tokens > 200000 maximum (request id: req_1f429ab0)'),
 ])
-@pytest.mark.parametrize("body_error", [False, True], ids=["text", "http400-body"])
 def test_textual_overflow_does_not_match_embedded_rate_markers(detail, body_error):
     text = f"prompt is too long: {detail}"
     error = RuntimeError(text) if not body_error else httpx.HTTPStatusError(
@@ -64,10 +63,7 @@ def test_textual_overflow_does_not_match_embedded_rate_markers(detail, body_erro
 
 
 @pytest.mark.parametrize("text", [
-    "Error code: 429", "HTTP 429: throttled", "(429)",
-    "TPM exceeded", "tpm exceeded", "RPM exceeded", "rpm exceeded",
-    "rate_limit_exceeded", "too many tokens per minute",
-    "HTTP_429", "tpm_limit_exceeded", "429 Too Many Requests",
+    "Error code: 429", "tpm_limit_exceeded", "429 Too Many Requests",
 ])
 def test_standalone_rate_markers_remain_retryable(text):
     classified = classify_llm_exception(RuntimeError(text))

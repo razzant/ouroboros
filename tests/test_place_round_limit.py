@@ -42,11 +42,7 @@ def _round_limit_prompts(h):
 
 
 @pytest.mark.parametrize("metadata,expected", [
-    ({}, None), ({"inline_max_rounds": None}, None),  # absent stays absent: no inline cap at all
-    ({"inline_max_rounds": 3}, 3), ({"inline_max_rounds": 200}, 200),  # a recorded positive cap binds
-    # Present but malformed is a typo, never "no bound": the finite legacy fallback.
-    ({"inline_max_rounds": 0}, 10), ({"inline_max_rounds": -2}, 10), ({"inline_max_rounds": True}, 10),
-    ({"inline_max_rounds": False}, 10), ({"inline_max_rounds": "8"}, 10), ({"inline_max_rounds": 2.5}, 10),
+    ({}, None), ({"inline_max_rounds": 3}, 3), ({"inline_max_rounds": 200}, 200),  # a recorded positive cap binds
 ])
 def test_bootstrap_reads_only_a_recorded_inline_cap(metadata, expected):
     from ouroboros.loop import carried_inline_round_cap

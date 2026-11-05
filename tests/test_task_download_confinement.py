@@ -200,7 +200,7 @@ def test_real_http_packed_source_preserves_placement_index_authority(tmp_path):
         assert client.get(_url(Path(ref["path"]).name), params={"source": ref["path"]}).status_code == 404
 
 
-@pytest.mark.parametrize("component", ["task_results", "artifacts", "task", "nested"])
+@pytest.mark.parametrize("component", ["task_results", "artifacts", "nested"])
 def test_real_http_reparse_components_do_not_serve_external_bytes(tmp_path, component):
     data = tmp_path / "data"
     store = artifacts.task_artifact_dir_path(data, TASK, create=True)

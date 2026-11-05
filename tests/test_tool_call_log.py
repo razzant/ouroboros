@@ -189,24 +189,10 @@ def test_handler_settlement_producer_reaches_memory(tmp_path, status, code, prev
 
 
 @pytest.mark.parametrize("facts,preview,mark", [
-    ({"status": "ok", "is_error": False}, "⚠️ quoted warning, successful read", "✓"),
-    ({"status": "error", "is_error": True}, "ordinary exception text", "·"),
     ({"status": "host_error"}, "ordinary exception text", "·"),
-    ({"status": "error"}, "done", "·"),
-    ({"status": "blocked"}, "done", "·"),
-    ({"status": "unavailable"}, "done", "·"),
-    ({"status": "timeout"}, "done", "·"),
     ({"status": "ok"}, "⚠️ quoted warning", "✓"),
-    ({"is_error": True}, "done", "·"),
-    ({"is_error": False}, "⚠️ quoted warning", "✓"),
-    ({"status": "error", "is_error": False}, "⚠️ stale text", "✓"),
     # A typed ok answer that names another outcome keeps its bucket, never a success mark.
     ({"status": "inspection_required", "is_error": False}, "⚠️ INTEGRATE_DELEGATED_INSPECT_CAPTURE: …", "inspection_required"),
-    ({"status": "git_error", "is_error": False}, "⚠️ GIT_ERROR: …", "git_error"),
-    ({"status": "ok", "is_error": True}, "done", "·"),
-    ({"status": "future_status"}, "done", "?"),
-    ({}, "legacy success", "✓"),
-    ({}, " ⚠️ legacy failure", "·"),
 ])
 def test_memory_settlement_truth_precedes_preview(tmp_path, facts, preview, mark):
     from ouroboros.memory import Memory

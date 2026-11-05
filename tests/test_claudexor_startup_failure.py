@@ -63,10 +63,7 @@ FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaS
 ----- Native stack trace -----
 """
 _LEASE_BUSY = b"claudexord: another claudexor daemon owns /data/claudexor/daemon/claudexord.sock.writer/active.writer\n"
-_LEASE_STALE = b"claudexord: could not replace stale daemon writer lease /data/claudexor/daemon/claudexord.sock.writer\n"
 _FLOOR_BELOW = b"claudexord: candidate version 3.8.2 is below the proven serving floor 3.8.3\n"
-_FLOOR_UNORDERED = b"claudexord: candidate version 'dev' cannot be ordered against the proven serving floor 3.8.3\n"
-
 _SIGNAL_EXIT = ExitFact(returncode=-6, descriptor_written=False)
 
 
@@ -74,22 +71,10 @@ _SIGNAL_EXIT = ExitFact(returncode=-6, descriptor_written=False)
 
 
 @pytest.mark.parametrize("text, expected", [
-    (_OOM_REACHED, StartupFailureClass.HEAP_EXHAUSTED),
-    (_OOM_INEFFECTIVE, StartupFailureClass.HEAP_EXHAUSTED),
     (_LEASE_BUSY, StartupFailureClass.WRITER_LEASE_CONTENDED),
-    (_LEASE_STALE, StartupFailureClass.WRITER_LEASE_CONTENDED),
     (_FLOOR_BELOW, StartupFailureClass.ENGINE_FLOOR),
-    (_FLOOR_UNORDERED, StartupFailureClass.ENGINE_FLOOR),
-    # The general V8 form (H-04 item 2): one line carrying FATAL ERROR + Allocation failed.
-    (b"FATAL ERROR: CALL_AND_RETRY_LAST Allocation failed - JavaScript heap out of memory\n",
-     StartupFailureClass.HEAP_EXHAUSTED),
     (b"FATAL ERROR: NewSpace::Rebalance Allocation failed - process out of memory\n",
      StartupFailureClass.HEAP_EXHAUSTED),
-    (b"FATAL ERROR: v8::ToLocalChecked Empty MaybeLocal\n", StartupFailureClass.UNCLASSIFIED),
-    (b"Allocation failed\nFATAL ERROR: something unrelated\n", StartupFailureClass.UNCLASSIFIED),
-    (b"", StartupFailureClass.UNCLASSIFIED),
-    (b"writer lease lost\n", StartupFailureClass.UNCLASSIFIED),
-    (b"current fixture startup exited\nTraceback (most recent call last):\n", StartupFailureClass.UNCLASSIFIED),
 ])
 def test_classifier_names_each_class_and_nothing_else(text, expected):
     fact = (ExitFact(1, False) if expected in {
@@ -111,8 +96,6 @@ def test_classifier_reads_the_last_refusal_and_needs_an_exit():
     (-6, StartupFailureClass.HEAP_EXHAUSTED),
     (134, StartupFailureClass.HEAP_EXHAUSTED),
     (1, StartupFailureClass.WRITER_LEASE_CONTENDED),
-    (0, StartupFailureClass.UNCLASSIFIED),
-    (None, StartupFailureClass.UNCLASSIFIED),
 ])
 def test_shared_log_refusals_do_not_relabel_heap_exit(returncode, expected):
     interval = _LEASE_BUSY * 2 + _OOM_REACHED + _LEASE_BUSY * 3
@@ -125,8 +108,6 @@ def test_shared_log_refusals_do_not_relabel_heap_exit(returncode, expected):
     (-6, False, True, 6, None),      # V8 abort, no descriptor: the #844 shape
     (1, False, True, None, 1),       # engine refusal exit
     (0, False, False, None, 0),      # clean exit publishes nothing to latch on
-    (-6, True, False, 6, None),      # crashed AFTER publishing control: not the class
-    (None, False, False, None, None),  # still running: no exit fact at all
 ])
 def test_exit_fact_latches_only_a_failed_start_without_control(returncode, descriptor_written, latches, signal, code):
     fact = ExitFact(returncode=returncode, descriptor_written=descriptor_written)

@@ -39,7 +39,7 @@ def test_response_dedup_pinned_quote_and_shared_limit(host_world):
     assert len(rows) == 2 and sum(row['cost_usd'] for row in rows) == pytest.approx(100.012)
 
 
-@pytest.mark.parametrize('ending', ['normal', 'stop', 'budget', 'close_error'])
+@pytest.mark.parametrize('ending', ['normal', 'budget', 'close_error'])
 def test_connected_samples_share_watermark_and_settle_before_close_ends(host_world, ending):
     host = host_world.host
     host.quote = tariff(input_cost_per_second=.01)

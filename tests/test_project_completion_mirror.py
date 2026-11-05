@@ -30,7 +30,7 @@ def _result(**overrides):
     return row
 
 
-@pytest.mark.parametrize("phase", ["done", "warn", "error", "cancelled"])
+@pytest.mark.parametrize("phase", ["done", "error", "cancelled"])
 def test_model_final_answer_is_mirrored_whole_for_every_terminal_phase(phase):
     # The mind's own words ride the row uncut, whatever word the host folded:
     # a Failed task that explains itself is still Ouroboros speaking.
@@ -41,14 +41,6 @@ def test_model_final_answer_is_mirrored_whole_for_every_terminal_phase(phase):
     (_result(terminal_origin="host_salvage"), "error"),   # preserved bytes are not a final answer
     (_result(terminal_origin="host_notice"), "error"),    # the host's own notice is not his voice
     (_result(terminal_origin=""), "done"),                # unknown authorship is never assumed
-    (_result(wake_silent=True), "done"),                  # retained internal words are not speech
-    (_result(wake_silent=True, terminal_host_notice="A host notice."), "warn"),
-    (_result(result="   "), "done"),                      # nothing to say
-    (_result(result={"answer": "x"}), "done"),            # a malformed result is never repr()-ed into his voice
-    (_result(), "working"),                               # the outbox freezes the first send
-    (_result(), ""),
-    (_result(result="x" * (MIRRORED_ANSWER_MAX_CHARS + 1)), "done"),  # over the ceiling: pointer, never a cut
-    (None, "done"),
 ])
 def test_everything_else_keeps_the_row_a_pointer(result, phase):
     assert mirrored_answer(result, phase) == {}

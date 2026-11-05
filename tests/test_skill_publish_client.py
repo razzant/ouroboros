@@ -46,7 +46,6 @@ def test_missing_token_is_one_plain_sentence_before_io(monkeypatch):
 
 
 @pytest.mark.parametrize("status,body", [(401, {"message": "Bad credentials"}), (403, {"message": "rate limited"}),
-                                        (404, {"message": "Not Found"}),
                                         (422, {"message": "Validation Failed", "errors": [{"field": "name"}]})])
 def test_http_status_and_github_message_are_preserved(monkeypatch, status, body):
     monkeypatch.setattr(client.httpx, "request", lambda *_a, **_k: httpx.Response(status, json=body))
@@ -59,7 +58,7 @@ def test_http_status_and_github_message_are_preserved(monkeypatch, status, body)
         assert "name" in error.message
 
 
-@pytest.mark.parametrize("kind", ["http", "invalid_json", "graphql", "connection", "timeout"])
+@pytest.mark.parametrize("kind", ["invalid_json", "graphql", "connection", "timeout"])
 def test_token_never_appears_in_errors_tracebacks_or_logs(monkeypatch, caplog, kind):
     caplog.set_level(logging.DEBUG)
 

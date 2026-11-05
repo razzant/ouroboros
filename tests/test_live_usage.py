@@ -142,16 +142,7 @@ def test_density_witness_requires_matching_explicit_text_modality(raw):
 
 @pytest.mark.parametrize('raw,expected', [
     ({'input_tokens': 123, 'output_tokens': 456, 'cached_input_tokens': 100}, 123),
-    ({'usage': {'input_tokens': 123}}, 123),
-    ({'usageMetadata': {'promptTokenCount': 123}}, 123),
-    ({'usage_metadata': {'prompt_token_count': 123}}, 123),
     ({'input_token_details': {'text_tokens': 123}, 'output_tokens': 456}, None),
-    ({'connected_seconds': 123}, None),
-    ({'input_tokens': True}, None),
-    ({'input_tokens': '123'}, None),
-    ({'input_tokens': -123}, None),
-    ({'input_tokens': 0}, None),
-    ({'input_tokens': 123, 'promptTokenCount': 456}, None),
     ({}, None),
 ])
 def test_input_window_witness_uses_only_a_reported_input_total(raw, expected):

@@ -273,8 +273,11 @@ def due(root):
     _mutate_projection(root, "asker", advance)
 
 
-@pytest.mark.parametrize("retry", ["owner", "maintenance"])
-@pytest.mark.parametrize("ingress", ["accepted", "accepted_before_restart", "refused"])
+@pytest.mark.parametrize(("ingress", "retry"), [
+    ("accepted", "owner"),
+    ("accepted_before_restart", "maintenance"),
+    ("refused", "owner"),
+])
 def test_a_late_answer_retried_after_a_continue_keeps_one_effect(tmp_path, monkeypatch, ingress, retry):
     """The late path ran, then the owner continued the asker. An answer the owner's ingress accepted, whose
     delivery mark was then lost, converges on that message: the successor gets no second copy, and after a

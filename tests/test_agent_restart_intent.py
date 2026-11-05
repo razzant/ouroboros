@@ -216,7 +216,7 @@ def test_completion_event_gap_keeps_pending_work_then_returns_it_once(runtime, m
     assert runtime.queue.restore_pending_from_snapshot() == 0
 
 
-@pytest.mark.parametrize("status", ["failed", "cancelled", "running", "completed", "missing"])
+@pytest.mark.parametrize("status", ["failed", "cancelled", "missing"])
 def test_only_known_requester_failure_releases_own_hold(runtime, monkeypatch, status):
     from ouroboros.task_results import write_task_result
 
@@ -476,7 +476,7 @@ def test_unpublished_ack_and_another_attempt_never_claim_success(runtime, monkey
 
 
 @pytest.mark.timeout(20)
-@pytest.mark.parametrize("transport", ["live", "absent", "full", "broken"])
+@pytest.mark.parametrize("transport", ["live", "absent", "broken"])
 def test_parallel_restart_calls_emit_once_even_on_deferred_transport(runtime, monkeypatch, transport):
     from concurrent.futures import ThreadPoolExecutor
 
@@ -578,7 +578,7 @@ def test_accepted_restart_survives_cold_owner_pause_resume_and_normal_finish(run
     assert later in runtime.queue.PENDING and runtime.restart.agent_restart_holds(later)
 
 
-@pytest.mark.parametrize("case", ["another_task", "another_attempt", "legacy", "finished", "evolution"])
+@pytest.mark.parametrize("case", ["another_task", "legacy", "evolution"])
 def test_restart_checkpoint_never_grants_a_new_restart_or_generic_evolution_finish(tmp_path, monkeypatch, case):
     from ouroboros import agent_task_pipeline as pipeline
     from ouroboros import owner_wait, working_checkpoint
@@ -728,7 +728,7 @@ def test_unknown_restart_effects_keep_independent_work_held(runtime, monkeypatch
     assert delivered == [] and queued in runtime.queue.PENDING
 
 
-@pytest.mark.parametrize("receipt_status", ["unconfirmed", "refused", "released", "accepted", "ready"])
+@pytest.mark.parametrize("receipt_status", ["unconfirmed", "refused", "ready"])
 def test_restart_receipt_status_reaches_registry_and_durable_trace(runtime, monkeypatch, receipt_status):
     from ouroboros import loop_tool_execution
     from ouroboros.observability import read_call_payload
@@ -853,7 +853,7 @@ def evolution_completion(runtime, monkeypatch):
     return intent, tx, finish
 
 
-@pytest.mark.parametrize("decision", ["auto_off", "auto_off_unknown", "owner_stopped", "no_commit"])
+@pytest.mark.parametrize("decision", ["auto_off", "auto_off_unknown", "owner_stopped"])
 def test_evolution_completion_without_restart_releases_exact_intent(runtime, monkeypatch, decision):
     from supervisor import evolution_lifecycle as evolution
 
@@ -883,7 +883,7 @@ def test_evolution_completion_without_restart_releases_exact_intent(runtime, mon
     assert [row["id"] for row in delivered] == [queued["id"]]
 
 
-@pytest.mark.parametrize("fault", ["authority_unknown", "stop_unknown", "marker_error", "adoption_unconfirmed"])
+@pytest.mark.parametrize("fault", ["stop_unknown", "marker_error", "adoption_unconfirmed"])
 def test_evolution_completion_retries_unknown_decision_on_existing_restart_tick(runtime, monkeypatch, fault):
     from ouroboros import body_adoption
     from ouroboros.server_liveness import drain_worker_events

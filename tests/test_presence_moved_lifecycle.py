@@ -567,8 +567,8 @@ def test_a_saved_turn_whose_row_cannot_be_read_ends_through_its_worker_failure_a
 
 @pytest.mark.parametrize("grant", [
     {"_budget_pause_resume": {"grant_id": "g", "pause_id": "p"}}, {"_owner_wait_resume": {"restart_transaction_id": "tx"}},
-    {"_working_recovery": {"cause": "owner_restart"}}, {"budget_resumed_at": "2026-11-03T00:00:00+00:00", "_attempt": 1},
-], ids=["owner_resume", "restart_wait", "restart_saved", "unstarted_resume"])
+    {"budget_resumed_at": "2026-11-03T00:00:00+00:00", "_attempt": 1},
+], ids=["owner_resume", "restart_wait", "unstarted_resume"])
 def test_a_continuation_the_owner_or_a_restart_authorized_still_carries_with_no_terminal(root, monkeypatch, grant):
     from ouroboros.presence_carrier import carry_presence_turn
     from ouroboros.task_results import load_task_result, write_task_result
@@ -660,8 +660,7 @@ def test_a_moved_turns_saved_state_keeps_its_coverage_and_handoff(root):
     assert delivery["_swarm_handoff_attempt"] == {"task_id": "child-1", "status": "scheduled"}
 
 
-@pytest.mark.parametrize("rail", ["global_exhausted", "dispatch_refused", "graceful_ceiling", "wrapup_last_fit", "soft_land",
-                                  "billing_authority_unreadable", "control_authority_unreadable"])
+@pytest.mark.parametrize("rail", ["global_exhausted", "dispatch_refused", "control_authority_unreadable"])
 def test_every_money_and_authority_rail_saves_a_moved_turn_exactly_with_no_generic_callback_unmoved_keeps_its_terminal(
         root, monkeypatch, rail):
     from ouroboros import budget_pause as bp

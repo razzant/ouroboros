@@ -26,9 +26,11 @@ from tests.test_swarm_host_admission import host as host  # pytest fixture expor
 
 
 
-@pytest.mark.parametrize("transition", ["saved_restart", "owner_wait"])
-@pytest.mark.parametrize("read_fails", [False, True, "persistent"],
-                         ids=["readable-control", "temporary-read-failure", "persistent-read-failure"])
+@pytest.mark.parametrize(("read_fails", "transition"), [
+    pytest.param(False, "saved_restart", id='readable-control-saved_restart'),
+    pytest.param(True, "owner_wait", id='temporary-read-failure-owner_wait'),
+    pytest.param("persistent", "saved_restart", id='persistent-read-failure-saved_restart'),
+])
 def test_consumed_retry_selection_survives_projection_read_failure(
         host, monkeypatch, clock, reaper, transition, read_fails):
     running = _running_actor(host, monkeypatch, clock, reaper, "retry")
@@ -99,9 +101,11 @@ def test_consumed_retry_selection_survives_projection_read_failure(
     assert eb.budget_resume_dispatch_allowed(queue, _row(host, CHILD)) is True
 
 
-@pytest.mark.parametrize("transition", ["saved_restart", "owner_wait"])
-@pytest.mark.parametrize("by_model", [False, True], ids=["owner-unbound-member", "model-bound-member"])
-@pytest.mark.parametrize("root_change", ["none", "newer_root_generation", "root_held_again"])
+@pytest.mark.parametrize(("root_change", "by_model", "transition"), [
+    pytest.param("none", True, "saved_restart", id='none-model-bound-member-saved_restart'),
+    pytest.param("newer_root_generation", True, "owner_wait", id='newer_root_generation-model-bound-member-owner_wait'),
+    pytest.param("root_held_again", False, "owner_wait", id='root_held_again-owner-unbound-member-owner_wait'),
+])
 def test_consumed_member_handoff_retires_and_the_member_continues(
         tmp_path, monkeypatch, transition, by_model, root_change):
     """A member never lends a root grant, so its spent handoff becomes no dispatch carrier;

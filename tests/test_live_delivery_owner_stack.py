@@ -115,7 +115,7 @@ class Measures:
         monkeypatch.setattr(live.host, 'tool_batch', due_at_the_boundary)
 
 
-@pytest.mark.parametrize('engine,recovery', [('gemini', 'native'), ('gemini', 'fresh'), ('openai', 'fresh'), ('grok', 'fresh')])
+@pytest.mark.parametrize('engine,recovery', [('gemini', 'native'), ('gemini', 'fresh'), ('grok', 'fresh')])
 def test_the_call_keeps_talking_and_keeps_its_result_once_around_a_long_effect(host_world, monkeypatch, engine, recovery):
     """The owner's whole promise on one call. A long effect runs. The conversation goes both ways on the connection that
     issued it where the engine allows, through a lost socket, and on the replacement, spoken and typed. A fresh recovery
@@ -218,8 +218,10 @@ def test_real_mail_measured_across_a_native_resume_reaches_it_once_before_its_po
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('next_connection', ['resumed', 'fresh'])
-@pytest.mark.parametrize('route', ['waiting-mail', 'typed-mail-while-idle'])
+@pytest.mark.parametrize(("route", "next_connection"), [
+    ('waiting-mail', 'resumed'),
+    ('typed-mail-while-idle', 'fresh'),
+])
 def test_a_real_mail_write_meeting_a_closed_socket_keeps_the_call(host_world, monkeypatch, route, next_connection):
     """Whichever worker writes it. The call continues; a resume gets the words once before their pointer, and a fresh
     fit holds them and is still asked to answer."""

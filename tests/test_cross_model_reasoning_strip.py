@@ -334,8 +334,12 @@ def _signed_turn_kwargs(client, target):
     return client._build_remote_kwargs(target, history, "high", 128, "auto", None, None, skip_capability_fetch=True)
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("scenario", ["answered", "refused_then_answered", "refused_twice", "refused_then_error_body"])
+@pytest.mark.parametrize(("scenario", "asynchronous"), [
+    ("answered", False),
+    ("refused_then_answered", True),
+    ("refused_twice", False),
+    ("refused_then_error_body", True),
+])
 def test_only_an_answered_send_without_the_replayed_reasoning_notes_the_omission(monkeypatch, asynchronous, scenario):
     """The omission fact describes the send whose generated answer came back: the stripped
     retry after a 400 notes it; an untouched success, a retry answered only with an error

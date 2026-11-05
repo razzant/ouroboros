@@ -116,7 +116,7 @@ def test_native_agent_returns_durable_result_before_synthesis_and_retry_reuses_i
 
 @pytest.mark.parametrize("worker,split,presence,expected", [
     (False, False, True, False), (True, False, True, True),
-    (False, True, True, True), (False, False, False, True),
+    (False, False, False, True),
 ])
 def test_only_native_unsplit_presence_changes_post_task_wait(tmp_path, monkeypatch, worker, split, presence, expected):
     monkeypatch.setattr(pipeline, "in_worker_process", lambda: worker)

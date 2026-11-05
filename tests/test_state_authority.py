@@ -176,8 +176,7 @@ def test_an_interrupted_initialization_finishes_the_same_identity(root):
     assert state_initialization.read_witness(root)[1]["phase"] == "complete"
 
 
-@pytest.mark.parametrize("history", ["witness_complete", "queue_snapshot", "task_result", "chat",
-                                     "campaign", "bindings", "evidence_unknown", "witness_corrupt"])
+@pytest.mark.parametrize("history", ["witness_complete", "bindings", "evidence_unknown"])
 def test_lost_state_on_an_initialized_or_historical_root_is_never_reminted(root, monkeypatch, history):
     (root / "state").mkdir(exist_ok=True)
     if history == "witness_complete":

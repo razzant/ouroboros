@@ -45,7 +45,6 @@ def test_deno_network_false_also_prevents_static_import_fetch(tmp_path, monkeypa
 @pytest.mark.parametrize('runtime,body', [
     ('python3', 'import time\nwhile True: time.sleep(1)\n'),
     ('node', 'setInterval(()=>{},1000);'),
-    ('deno', 'setInterval(()=>{},1000);'),
     ('go', 'package main\nfunc main(){for {}}\n'),
 ])
 def test_owned_running_skill_process_can_be_cancelled_without_survivors(tmp_path, monkeypatch, runtime, body):

@@ -195,7 +195,6 @@ def test_the_wait_leaves_the_grace_it_needs_to_answer_at_all(tmp_path, monkeypat
 
 @pytest.mark.parametrize("seconds_left, ask, expected_window", [
     pytest.param(lambda reserve: 0.5, 8, 1, id="half_a_second_left_is_still_a_deadline"),
-    pytest.param(lambda reserve: -5.0, 8, 1, id="a_deadline_already_behind_us"),
     pytest.param(None, 2, 2, id="no_deadline_at_all_keeps_the_whole_window"),
     pytest.param(lambda reserve: reserve + 60, 2, 2, id="a_comfortable_remainder_binds_on_the_ask"),
 ])

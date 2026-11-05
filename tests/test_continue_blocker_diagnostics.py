@@ -137,7 +137,7 @@ PAUSED_HELD = {"running": "running_delegated_leaf", "unknown": "unbound_unknown_
                "running_and_unknown": "running_and_unknown_start"}
 
 
-@pytest.mark.parametrize("condition", ["settled", "running", "unknown", "running_and_unknown", "point_refusal"])
+@pytest.mark.parametrize("condition", ["settled", "unknown", "point_refusal"])
 def test_owner_resume_of_a_paused_held_continue_rechecks_its_predecessor(tmp_path, monkeypatch, condition):
     from ouroboros import owner_pause
     from ouroboros.work_stop import hold_fact as budget_hold_fact

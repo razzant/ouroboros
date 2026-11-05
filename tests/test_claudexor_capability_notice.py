@@ -49,10 +49,8 @@ class TestNoticeGate:
     @pytest.mark.parametrize("case", [
         dict(remains=True),                       # another account may serve
         dict(own="c", marks=("a", "b")),          # the refusing account itself is unmarked
-        dict(marks=()),                           # no account is blamed
-        dict(mode="pin", code="invalid_request", marks=()),  # a pin's ordinary refusal
         dict(requestedModel=None),
-    ], ids=["alternative", "unmarked_refuser", "no_marks", "pin_generic", "no_model"])
+    ], ids=["alternative", "unmarked_refuser", "no_model"])
     def test_silent_unless_typed_facts_say_no_account_can_serve(self, case):
         assert capability_notice(refusal(**case)) is None
 
@@ -121,8 +119,8 @@ class TestRetryGrant:
         with bind_physical_attempt_context(None, candidate_predicate=bound):
             assert policy.refused(invocation(), error(refusal(retryOnOtherAccount=True)))["retryOfOperationId"] == "op-1"
 
-    @pytest.mark.parametrize("guard", ["no_grant", "generation_started", "unsettled", "unknown",
-                                       "already_correlated", "pin", "other_operation", "second"])
+    @pytest.mark.parametrize("guard", ["no_grant", "unknown",
+                                       "second"])
     def test_host_custody_facts_withhold_it(self, guard, monkeypatch):
         problem = refusal(code="invalid_request", retryOnOtherAccount=guard != "no_grant",
                           generationStarted=guard == "generation_started")

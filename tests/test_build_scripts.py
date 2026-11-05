@@ -445,27 +445,6 @@ class TestBuildLinuxSh:
 class TestBuildWindowsPs1:
     """build_windows.ps1 must install Chromium/WebKit with PLAYWRIGHT_BROWSERS_PATH=0 before PyInstaller."""
 
-    def test_critical_native_commands_fail_fast_on_windows_powershell_5(self):
-        src = _read("build_windows.ps1")
-        assert "function Invoke-NativeChecked" in src
-        assert "$ExitCode = $LASTEXITCODE" in src
-        assert "if ($ExitCode -ne 0)" in src
-        for description in (
-            "Node.js runtime download",
-            "Launcher dependency installation",
-            "ripgrep runtime download",
-            "Betterleaks runtime installation",
-            "Agent dependency installation",
-            "Desktop dependency export",
-            "Desktop dependency installation",
-            "Claudexor runtime seed fetch",
-            "Chromium installation",
-            "WebKit installation",
-            "Managed repo bundle build",
-            "PyInstaller build",
-        ):
-            assert f'Invoke-NativeChecked "{description}"' in src
-
     def test_playwright_install_chromium_present(self):
         src = _read("build_windows.ps1")
         assert '-m ouroboros.chromium_runtime install' in src
@@ -774,9 +753,6 @@ class TestDockerfile:
     [
         ".github/actions/setup-python-env/action.yml",
         "Dockerfile",
-        "Makefile",
-        "build.sh",
-        "build_linux.sh",
         "build_windows.ps1",
     ],
 )

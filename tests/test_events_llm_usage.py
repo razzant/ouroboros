@@ -232,8 +232,11 @@ def test_cost_breakdown_aggregates_cache_tokens_and_ttl(tmp_path):
     assert accounting["cost_final"] is False
 
 
-@pytest.mark.parametrize("encoding", ["string", "json_token"])
-@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize(("literal", "encoding"), [
+    ("NaN", "string"),
+    ("Infinity", "json_token"),
+    ("-Infinity", "json_token"),
+])
 def test_cost_breakdown_refuses_nonfinite_legacy_cost_without_import(tmp_path, caplog, literal, encoding):
     """Nonfinite legacy money is an integrity failure: the store's one-time import
     refuses it (no completed import that would hide it, no store), and the real

@@ -122,8 +122,7 @@ def _admitted_child(tmp_path, monkeypatch, project: str, ambient: str):
     return repo, drive, elsewhere, task, agent, ctx
 
 
-@pytest.mark.parametrize("ambient", ["canonical", "elsewhere"])
-@pytest.mark.parametrize("project", ["", "demo"])
+@pytest.mark.parametrize(("project", "ambient"), [("", "canonical"), ("demo", "elsewhere")])
 def test_an_admitted_child_keeps_knowledge_where_every_reader_reads(tmp_path, monkeypatch, project, ambient):
     """``schedule_subagent`` → supervisor admission → the worker's split runner and its own tools; then the
     terminal path removes the execution drive and every reader still finds the notes on the parent's drive."""
@@ -249,8 +248,7 @@ def test_an_admitted_childs_extension_reads_its_notes_through_the_plugin_api(tmp
     assert {payload["ctx"]["drive_root"] for payload in payloads} == {str(child_drive)}  # the call still names its drive
 
 
-@pytest.mark.parametrize("ambient", ["canonical", "elsewhere"])
-@pytest.mark.parametrize("project", ["", "demo"])
+@pytest.mark.parametrize(("project", "ambient"), [("", "canonical"), ("demo", "elsewhere")])
 def test_a_root_on_its_installation_drive_keeps_knowledge_on_that_drive(tmp_path, monkeypatch, project, ambient):
     """A root on the shared drive carries no budget root (``gateway/tasks.py``, the chat lane): the drive is
     canonical. ``elsewhere`` stands for a configured DATA_DIR that does not name this installation."""
@@ -295,9 +293,12 @@ def _contract_ctx(tmp_path, binding: str):
     return ctx, canonical, execution, ambient
 
 
-@pytest.mark.parametrize("binding", ["metadata", "context", "both", "none"])
-@pytest.mark.parametrize("topic,scope", [("ordinary", ""), ("ordinary", "global"), ("ordinary", "project:demo"),
-                                         ("patterns", "project:demo")])
+@pytest.mark.parametrize(("topic", "scope", "binding"), [
+    ("ordinary", "", "metadata"),
+    ("ordinary", "global", "context"),
+    ("ordinary", "project:demo", "both"),
+    ("patterns", "project:demo", "none"),
+])
 def test_contract_shapes_write_read_list_and_retain_on_the_canonical_root(tmp_path, monkeypatch, binding, topic, scope):
     """Without a budget root (``none``) the execution drive is the installation's only root and is canonical."""
     ctx, canonical, execution, ambient = _contract_ctx(tmp_path, binding)

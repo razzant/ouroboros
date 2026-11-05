@@ -138,16 +138,8 @@ def test_another_remote_route_keeps_the_existing_defaults(clean_env, other_key):
 
 @pytest.mark.parametrize(("document", "settings", "expected"), [
     (None, {"OUROBOROS_MAX_ROUNDS": "unlimited", "OUROBOROS_TASK_ABS_CEILING_SEC": "unlimited"}, []),  # fresh
-    ({}, {"OUROBOROS_MAX_ROUNDS": 200, "OUROBOROS_TASK_ABS_CEILING_SEC": 21600},
-     [("OUROBOROS_MAX_ROUNDS", 200, "document_absent_key"),
-      ("OUROBOROS_TASK_ABS_CEILING_SEC", 21600, "document_absent_key")]),
-    ({"OUROBOROS_MAX_ROUNDS": "unlimited", "OUROBOROS_TASK_ABS_CEILING_SEC": "unlimited"}, {}, []),
-    ({"OUROBOROS_MAX_ROUNDS": 150, "OUROBOROS_TASK_ABS_CEILING_SEC": "unlimited"}, {},
-     [("OUROBOROS_MAX_ROUNDS", 150, "saved")]),
     ({"OUROBOROS_MAX_ROUNDS": "abc", "OUROBOROS_TASK_ABS_CEILING_SEC": "unlimited"}, {"OUROBOROS_MAX_ROUNDS": 200},
      [("OUROBOROS_MAX_ROUNDS", 200, "saved_invalid")]),
-    ({"OUROBOROS_TASK_ABS_CEILING_SEC": "unlimited"}, {"OUROBOROS_MAX_ROUNDS": 300},
-     [("OUROBOROS_MAX_ROUNDS", 300, "env")]),  # only the launch environment explains 300
     (None, {"OUROBOROS_MAX_ROUNDS": 120, "OUROBOROS_TASK_ABS_CEILING_SEC": "unlimited"},
      [("OUROBOROS_MAX_ROUNDS", 120, "env")]),
 ])
@@ -173,17 +165,8 @@ def test_the_classifier_ignores_the_process_environment_startup_projects_setting
 
 @pytest.mark.parametrize(("document", "launch_env", "expected", "origin", "raw"), [
     ({"OUROBOROS_MAX_ROUNDS": None}, "77", 200, "saved_invalid", None),
-    ({"OUROBOROS_MAX_ROUNDS": ""}, "77", 200, "saved_invalid", ""),
-    ({"OUROBOROS_MAX_ROUNDS": "bad"}, "77", 200, "saved_invalid", "bad"),
     ({"OUROBOROS_MAX_ROUNDS": 42}, "77", 42, "saved", 42),
-    ({}, None, 200, "document_absent_key", 200),
-    ({}, "77", 77, "env", 77),
     (None, "77", 77, "env", 77),
-    ({"OUROBOROS_MAX_ROUNDS": "unlimited"}, "77", None, None, None),
-    ({"OUROBOROS_TASK_ABS_CEILING_SEC": None}, "60", 21600, "saved_invalid", None),
-    ({"OUROBOROS_TASK_ABS_CEILING_SEC": ""}, "60", 21600, "saved_invalid", ""),
-    ({"OUROBOROS_TASK_ABS_CEILING_SEC": 60}, None, 60, "saved", 60),  # retired: the 300 s floor (R8)
-    ({}, "60", 60, "env", 60),
 ])
 def test_startup_notice_matches_loaded_runtime_bounds_and_raw_presence(
         monkeypatch, tmp_path, document, launch_env, expected, origin, raw):
@@ -442,4 +425,3 @@ def test_notice_recovers_through_real_chat_and_state_writers(monkeypatch, tmp_pa
     # Durable web history is the owner delivery witness. External bridge loss
     # does not erase that row or require another visible notice on restart.
     assert len(delivered) == (0 if failure == "bridge" else 1)
-

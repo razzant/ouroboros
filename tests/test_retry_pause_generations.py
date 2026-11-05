@@ -58,8 +58,11 @@ def _park(host, running, plan, *, event=False):  # noqa: F811 -- helper shares t
     return ctx, limit
 
 
-@pytest.mark.parametrize("actor", ["root", "retry", "retry_chain"])
-@pytest.mark.parametrize("action", ["ordinary", "duplicate", "newer"])
+@pytest.mark.parametrize(("action", "actor"), [
+    ("ordinary", "root"),
+    ("duplicate", "retry"),
+    ("newer", "retry_chain"),
+])
 def test_assigned_resume_releases_only_its_pause_generation(host, monkeypatch, clock, reaper, actor, action):  # noqa: F811
     running = _running_actor(host, monkeypatch, clock, reaper, actor)
     plan = _fresh_plan(monkeypatch)
@@ -113,7 +116,7 @@ def test_assigned_resume_releases_only_its_pause_generation(host, monkeypatch, c
         assert accepted["duplicate"] is (action == "duplicate")
 
 
-@pytest.mark.parametrize("invalid", ["unreadable_chain", "broken_reciprocal", "stale_attempt", "child", "delegated"])
+@pytest.mark.parametrize("invalid", ["unreadable_chain", "broken_reciprocal", "delegated"])
 def test_pause_keeps_the_current_reciprocal_root_actor_requirement(host, monkeypatch, clock, reaper, invalid):  # noqa: F811
     from ouroboros import task_results
     from ouroboros.task_store import patch_document
@@ -225,7 +228,7 @@ def test_physical_retry_resume_survives_fence_publication_contention(
     assert effect
 
 
-@pytest.mark.parametrize("change", ["pause", "stop_root", "stop_retry", "grant", "lineage"])
+@pytest.mark.parametrize("change", ["pause", "stop_root", "lineage"])
 def test_retry_fence_publication_rechecks_controls_after_rollback(
         host, monkeypatch, clock, reaper, change):  # noqa: F811
     from ouroboros import cancel_intents

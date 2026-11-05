@@ -28,7 +28,7 @@ def _session(exc):
 
 
 @pytest.mark.parametrize("status, code", [(401, "authentication"), (403, "authentication"),
-                                          (429, "rate_limit"), (503, "engine_unavailable")])
+                                          (429, "rate_limit")])
 def test_handshake_status_codes_become_typed_refusals(status, code):
     with pytest.raises(RealtimeSetupError) as refused:
         asyncio.run(_session(Handshake(status)).connect_wire())

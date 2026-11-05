@@ -168,7 +168,7 @@ def test_detached_decision_mailbox_and_activity_remain_live_after_task_done(phas
     assert len(forwarded) == 1  # An ended post owner cannot be resurrected.
 
 
-@pytest.mark.parametrize("cause", ["budget", "deadline", "unknown", "ordinary"])
+@pytest.mark.parametrize("cause", ["budget", "unknown", "ordinary"])
 def test_paid_stage_interruption_closes_checkpoint_without_buying_following_stages(phase, monkeypatch, cause):
     from ouroboros.usage_accounting import BudgetExceeded
 

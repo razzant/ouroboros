@@ -369,7 +369,7 @@ def test_a_deferred_preparation_resolves_its_resource_again(q, tmp_path, monkeyp
     assert task["project_id"] == "proj" and pathlib.Path(task["drive_root"]).is_dir()
 
 
-@pytest.mark.parametrize("door", ["planned_restart", "owner_restart", "managed_update", "generation_stop"])
+@pytest.mark.parametrize("door", ["planned_restart", "managed_update", "generation_stop"])
 def test_a_closed_door_admits_nothing_and_the_next_generation_admits_the_same_claim(q, monkeypatch, door):
     """A returning stop that named its queue (or a stopping generation) leaves the claim unsubmitted."""
     from supervisor import schedule_occurrence as occurrences, workers

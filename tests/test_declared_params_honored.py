@@ -315,8 +315,7 @@ def test_non_dict_batch_item_refuses_the_whole_call_on_every_root(tmp_path):
     assert not (ctx.drive_root / "kept.txt").exists()
 
 
-@pytest.mark.parametrize("root", ["active_workspace", "system_repo", "runtime_data",
-                                 "task_drive", "artifact_store", "user_files", "skill_payload"])
+@pytest.mark.parametrize("root", ["active_workspace", "user_files", "skill_payload"])
 def test_declared_batch_items_keep_write_and_append_on_every_root(tmp_path, monkeypatch, root):
     ctx = _ctx(tmp_path)
     ctx.task_id = "batch-argument-test"

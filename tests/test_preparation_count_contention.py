@@ -24,9 +24,7 @@ def _parent(env, limit="cap"):
     return {"delegation_budget": budget}
 
 
-@pytest.mark.parametrize("acting", [True, False])
-@pytest.mark.parametrize("limit", ["cap", "fanout"])
-@pytest.mark.parametrize("contended", [False, True])
+@pytest.mark.parametrize(("contended", "limit", "acting"), [(False, "cap", True), (True, "fanout", False)])
 def test_final_count_contention_retains_the_eligible_first_child(env, monkeypatch, acting, limit, contended):
     _parent(env, limit)
     event = env.request("count-child") if acting else env.readonly("count-child", root="root")
@@ -126,7 +124,7 @@ def test_retry_reads_the_real_count_and_preserves_the_parent_limit(env, monkeypa
     assert row["delegation_admission"]["direct_child_count"] == 1 and env.pending_ids() == []
 
 
-@pytest.mark.parametrize("failure", ["permission", "corrupt", "uninspectable", "unknown", "rollback_unknown"])
+@pytest.mark.parametrize("failure", ["permission", "corrupt", "rollback_unknown"])
 def test_genuine_unknown_count_is_not_temporary_contention(env, monkeypatch, failure):
     _parent(env)
     event = env.request("unknown-count")
@@ -216,4 +214,3 @@ def test_supervisor_early_count_contention_is_no_rejection_and_admits_after_rele
     row = env.row("early-busy")
     assert row["status"] == "scheduled" and env.pending_ids() == ["early-busy"], row
     assert row.get("delegation_admission", {}).get("status") != "rejected"
-

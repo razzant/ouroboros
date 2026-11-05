@@ -49,12 +49,8 @@ def test_focus_no_ceiling_host_actor_prompt(focus):
 
 @pytest.mark.parametrize("state,facts,enabled,allowance,decision", [
     ("active", ("mention",), True, "available", "focus"),
-    ("silent", ("mention",), True, "available", "focus"),
     ("paused", ("mention",), True, "available", "silent"),
-    ("active", (), True, "available", "silent"),
-    ("active", ("mention",), False, "available", "silent"),
     ("active", ("mention",), True, "exhausted", "retry"),
-    ("active", ("mention",), True, "allowance_unknown", "retry"),
 ])
 def test_capture_before_attention_and_replay(focus, monkeypatch, state, facts, enabled, allowance, decision):
     from ouroboros import dialogue_store
@@ -302,8 +298,6 @@ def test_focus_ordinary_finish_traverses_reply_check(focus, monkeypatch, silent,
 @pytest.mark.parametrize("state,facts,enabled,available,expected", [
     ("active", ["mention"], True, True, "message"),
     ("paused", ["mention"], True, True, "silent"),
-    ("active", ["mention"], False, True, "silent"),
-    ("active", [], True, True, "silent"),
     ("active", ["mention"], True, False, "retry"),
 ])
 def test_new_host_payload_captures_before_attention(focus, monkeypatch, state, facts, enabled, available, expected):

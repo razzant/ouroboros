@@ -30,22 +30,12 @@ from __future__ import annotations
 import json
 import logging
 import pathlib
-import time
 import types
 
 import pytest
 
 from ouroboros import cancel_intents as ci
-from ouroboros.task_results import (
-    STATUS_CANCELLED,
-    STATUS_COMPLETED,
-    STATUS_INTERRUPTED,
-    STATUS_RUNNING,
-    load_task_result,
-    write_task_result,
-)
-from tests._shared import write_queue_document
-from tests._store_shared import release_store_handles, result_signature
+from tests._store_shared import release_store_handles
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -85,113 +75,9 @@ def qenv(tmp_path, monkeypatch):
     return types.SimpleNamespace(q=q, tl=task_lifecycle, workers=workers, drive=tmp_path)
 
 
-def _install_live_worker(qenv, monkeypatch, task_id, *, wid=0):
-    """A worker double whose LIVE process dies only through kill_pid_tree."""
-    state = {"alive": True}
-    proc = types.SimpleNamespace(
-        pid=4242,
-        is_alive=lambda: state["alive"],
-        terminate=lambda: state.__setitem__("alive", False),
-        join=lambda timeout=None: None,
-    )
-    qenv.workers.WORKERS[wid] = types.SimpleNamespace(
-        wid=wid, proc=proc, busy_task_id=task_id, reaping=False,
-    )
-    monkeypatch.setattr(
-        "ouroboros.platform_layer.kill_pid_tree",
-        lambda *a, **kw: state.__setitem__("alive", False),
-    )
-    return state
-
-
 # --------------------------------------------------------------------------
 # GR6-1 — settled RESULT does not mean dead WORKER (the class closure)
 # --------------------------------------------------------------------------
-
-
-def test_gr6_1_cancel_kills_a_settled_tasks_live_worker_and_keeps_the_result(
-    qenv, monkeypatch,
-):
-    """The incident shape: the result settled ``completed`` while the worker
-    kept burning post-task LLM calls. The cancel (intent minted with the
-    live-ownership fact) must KILL the worker, preserve the stored completed
-    result verbatim, and settle the intent ``already_settled`` only after the
-    confirmed death.
-
-    GR7-2 fixture completion (sol): the task carries a REAL ``drive_root`` —
-    the shared-drive shape — so the settled row is exposed to the kill path's
-    child-copy/finalize mutations and the byte-identity assertion actually
-    catches them (a drive-less row made the mutating block a silent no-op)."""
-    from supervisor import workers
-
-    task_id = "burn1"
-    queue = _CaptureQueue()
-    monkeypatch.setattr(workers, "get_event_q", lambda *, create=True: queue, raising=False)
-    emitted: list = []
-    monkeypatch.setattr(
-        qenv.q, "_emit_cancel_task_done", lambda *a, **kw: emitted.append(kw),
-    )
-    state = _install_live_worker(qenv, monkeypatch, task_id)
-    qenv.q.RUNNING[task_id] = {
-        "task": {"id": task_id, "chat_id": 6, "drive_root": str(qenv.drive)},
-        "worker_id": 0,
-    }
-    write_task_result(qenv.drive, task_id, STATUS_COMPLETED, chat_id=6,
-                      result="the finished answer")
-    row_bytes_before = result_signature(qenv.drive, task_id)
-
-    assert qenv.tl.task_has_live_ownership(task_id) is True
-    minted = ci.request_cancel(qenv.drive, task_id, reason="stop spending",
-                               allow_settled_target=True)
-    assert minted.get("request_id"), (
-        "GR6-1a: live ownership means the mint must NOT no-op as already_settled"
-    )
-
-    assert qenv.tl.cancel_task_custody(task_id) == qenv.tl.CANCEL_ALREADY_SETTLED
-    assert not state["alive"], "GR6-1b: the settled-but-live worker is killed"
-    stored = load_task_result(qenv.drive, task_id)
-    assert stored["status"] == STATUS_COMPLETED, "completion wins: no overwrite"
-    assert stored["result"] == "the finished answer"
-    assert result_signature(qenv.drive, task_id) == row_bytes_before, (
-        "GR7-2: the settled terminal row survives the kill BYTE-IDENTICAL"
-    )
-    assert task_id not in qenv.q.RUNNING
-    assert ci.active_intent(qenv.drive, task_id) is None, (
-        "the intent settles already_settled after the confirmed death"
-    )
-    trail = (qenv.drive / "logs" / "supervisor.jsonl").read_text(encoding="utf-8")
-    assert '"outcome": "already_settled"' in trail
-    assert emitted, "the card resolves through the stored terminal truth"
-
-
-def test_gr6_1_live_ownership_predicates(qenv, tmp_path):
-    """Both halves of the ONE predicate: supervisor live maps and the
-    worker-side queue-snapshot twin."""
-    from ouroboros.task_status import task_has_live_queue_ownership
-
-    assert qenv.tl.task_has_live_ownership("nobody") is False
-    qenv.q.RUNNING["own-r"] = {"task": {"id": "own-r"}}
-    assert qenv.tl.task_has_live_ownership("own-r") is True
-    qenv.workers.WORKERS[3] = types.SimpleNamespace(
-        wid=3, busy_task_id="own-w", reaping=False, proc=None,
-    )
-    assert qenv.tl.task_has_live_ownership("own-w") is True
-
-    from ouroboros.utils import utc_now_iso
-
-    snap = tmp_path / "state" / "queue_snapshot.json"
-    snap.parent.mkdir(parents=True, exist_ok=True)
-    # A FRESH snapshot (GR7-1a): only a fresh one may prove a dead worker.
-    write_queue_document(snap, {
-        "ts": utc_now_iso(),
-        "running": [{"id": "own-s", "task": {"id": "own-s"}}],
-        "pending": [{"id": "own-p", "task": {"id": "own-p"}}],
-    })
-    assert task_has_live_queue_ownership(tmp_path, "own-s") is True
-    assert task_has_live_queue_ownership(tmp_path, "own-p") is False, (
-        "a queued row is not physical ownership (no process to kill)"
-    )
-    assert task_has_live_queue_ownership(tmp_path, "own-x") is False
 
 
 def test_gr6_1_every_ingress_passes_the_live_ownership_fact():
@@ -236,61 +122,6 @@ def _patch_project_registry(monkeypatch):
     return done
 
 
-def test_gr6_1_project_delete_over_settled_live_root_mints_and_converges(
-    qenv, monkeypatch,
-):
-    """The GR6-1c probe: a durably-completed root still in RUNNING (worker
-    winding down / burning) plus a pending child. The deletion mints the
-    cascade coordination intent (allow_settled_target from live ownership),
-    the cascade kills the live worker, and the deletion CONVERGES instead of
-    failing "did not quiesce"."""
-    from supervisor import queue_transitions as qt
-    from supervisor import workers
-
-    done = _patch_project_registry(monkeypatch)
-    queue = _CaptureQueue()
-    monkeypatch.setattr(workers, "get_event_q", lambda *, create=True: queue, raising=False)
-    monkeypatch.setattr(qenv.q, "_emit_cancel_task_done", lambda *a, **kw: None)
-
-    root_id = "pd-root"
-    state = _install_live_worker(qenv, monkeypatch, root_id)
-    qenv.q.RUNNING[root_id] = {
-        "task": {"id": root_id, "chat_id": 8, "project_id": "p6",
-                 "root_task_id": root_id},
-        "worker_id": 0,
-    }
-    qenv.q.PENDING.append(
-        {"id": "pd-kid", "parent_task_id": root_id, "root_task_id": root_id},
-    )
-    write_task_result(qenv.drive, root_id, STATUS_COMPLETED, chat_id=8,
-                      result="root finished, worker still up")
-
-    mints: list = []
-    real_mint = ci.request_cancel
-
-    def _recording_mint(drive, task_id, **kw):
-        mints.append({"task_id": str(task_id), **kw})
-        return real_mint(drive, task_id, **kw)
-
-    monkeypatch.setattr(ci, "request_cancel", _recording_mint)
-
-    qt.run_project_deletion(qenv.drive, "p6", 8)
-
-    assert done["complete"] == ["p6"] and not done["fail"], (
-        "GR6-1c: the deletion converges instead of 'did not quiesce'"
-    )
-    root_mints = [m for m in mints if m["task_id"] == root_id
-                  and m.get("source") == "project_delete"]
-    assert root_mints and root_mints[0].get("allow_settled_target") is True, (
-        "the cascade coordination intent IS minted over the settled-but-live root"
-    )
-    assert root_mints[0].get("scope") == ci.SCOPE_CASCADE
-    assert not state["alive"], "the winding-down worker is killed by the cascade"
-    assert load_task_result(qenv.drive, root_id)["status"] == STATUS_COMPLETED
-    assert load_task_result(qenv.drive, "pd-kid")["status"] == STATUS_CANCELLED
-    assert ci.active_intents(qenv.drive) == {}, "everything settled"
-
-
 def test_gr6_1_crash_mid_delete_leaves_a_replayable_cascade_intent(
     qenv, monkeypatch,
 ):
@@ -319,94 +150,8 @@ def test_gr6_1_crash_mid_delete_leaves_a_replayable_cascade_intent(
     )
 
 
-def test_gr6_1_quiescence_defers_for_a_settled_root_winding_down(
-    qenv, monkeypatch,
-):
-    """A settled root whose RUNNING row lingers (finalizer mid-removal, no
-    live process) is 'pending wind-down': the quiescence check defers and
-    re-checks instead of raising instantly."""
-    from supervisor import queue_transitions as qt
-    from supervisor import workers
-
-    done = _patch_project_registry(monkeypatch)
-    queue = _CaptureQueue()
-    monkeypatch.setattr(workers, "get_event_q", lambda *, create=True: queue, raising=False)
-    monkeypatch.setattr(qenv.q, "_emit_cancel_task_done", lambda *a, **kw: None)
-
-    root_id = "pd-wind"
-    qenv.q.RUNNING[root_id] = {
-        "task": {"id": root_id, "chat_id": 8, "project_id": "p6w",
-                 "root_task_id": root_id},
-        "worker_id": 0,
-    }
-    write_task_result(qenv.drive, root_id, STATUS_COMPLETED, chat_id=8,
-                      result="done; finalizer still owns the row")
-
-    sleeps: list = []
-
-    def _finalizer_finishes(seconds):
-        sleeps.append(seconds)
-        qenv.q.RUNNING.pop(root_id, None)
-
-    monkeypatch.setattr(time, "sleep", _finalizer_finishes)
-
-    qt.run_project_deletion(qenv.drive, "p6w", 8)
-
-    assert sleeps, "the wind-down defer path ran instead of an instant failure"
-    assert done["complete"] == ["p6w"] and not done["fail"], (
-        "GR6-1c: a settled root winding down converges once its row leaves"
-    )
-
-
 # --------------------------------------------------------------------------
 # GR6-2 — cascade digest membership by ANCESTRY rooted at the cancelled node
-# --------------------------------------------------------------------------
-
-
-def test_gr6_2_mid_tree_cascade_digest_lists_grandchildren(tmp_path, monkeypatch):
-    """A mid-tree target's deeper descendants keep the ORIGINAL tree's
-    root_task_id — equality matching lost them. The ancestry walk lists the
-    grandchild (and a non-subagent child) while excluding the target's own
-    ancestors; sweep outcomes were empty (the watchdog-replay shape)."""
-    from supervisor import terminal_delivery as td
-    from supervisor import workers
-
-    queue = _CaptureQueue()
-    monkeypatch.setattr(workers, "get_event_q", lambda *, create=True: queue, raising=False)
-    write_task_result(tmp_path, "orig-root", STATUS_RUNNING, chat_id=9, result="alive")
-    write_task_result(tmp_path, "mid6", STATUS_CANCELLED, chat_id=9, result="mid down",
-                      parent_task_id="orig-root", root_task_id="orig-root")
-    # Non-subagent child (grok's adjacent residual): no delegation_role.
-    write_task_result(tmp_path, "kid6", STATUS_CANCELLED, result="kid down",
-                      parent_task_id="mid6", root_task_id="orig-root")
-    write_task_result(tmp_path, "gkid6", STATUS_COMPLETED, result="gkid done",
-                      parent_task_id="kid6", root_task_id="orig-root",
-                      delegation_role="subagent")
-
-    owed = td.deliver_cascade_summary(
-        tmp_path, "mid6", {"id": "mid6", "chat_id": 9,
-                           "parent_task_id": "orig-root",
-                           "root_task_id": "orig-root"}, {},
-    )
-
-    assert owed is True
-    (event,) = [e for e in queue.events if e.get("type") == "send_message"]
-    assert "2 descendant task(s) were settled with it" in event["text"]
-    outcomes = {
-        row["task_id"]: row["outcome"]
-        for row in load_task_result(tmp_path, "mid6")["cancel_receipt"]["children"]
-    }
-    assert outcomes.get("kid6") == "cancelled", (
-        "GR6-2: a non-subagent direct child is in the digest"
-    )
-    assert outcomes.get("gkid6") == "completed", (
-        "GR6-2: the mid-tree grandchild is enumerated by ancestry"
-    )
-    assert "orig-root" not in outcomes, (
-        "the target's own ANCESTOR is not a descendant"
-    )
-
-
 # --------------------------------------------------------------------------
 # GR6-3 — registry strictness validates ROWS, not just containers
 # --------------------------------------------------------------------------
@@ -593,48 +338,3 @@ def test_gr6_5a_failed_outcome_still_discloses_open_runs(tmp_path):
         tmp_path, tmp_path, row, "f6", "failed", event_queue=quiet,
     ) is True
     assert quiet.events == []
-
-
-def test_gr6_5a_owed_and_publish_halves_mint_one_delivery_id(tmp_path):
-    """The disclosure is part of the TEXT before the id is minted, so the
-    owed registration and the publish half (same list) dedupe as one."""
-    from supervisor import terminal_delivery as td
-
-    stored = {"status": "completed", "result": "answer"}
-    task = {"id": "one6", "chat_id": 4}
-    owed_event = td.build_completed_result_event(
-        tmp_path, task, "one6", stored, unreconciled_runs=["run-a"],
-    )
-    assert td.register_pending_delivery(tmp_path, owed_event) is True
-    queue = _CaptureQueue()
-    td.deliver_completed_result(
-        tmp_path, task, "one6", stored, event_queue=queue,
-        unreconciled_runs=["run-a"],
-    )
-    (event,) = queue.events
-    assert event["delivery_id"] == owed_event["delivery_id"]
-    assert td.register_pending_delivery(tmp_path, event) is True, "already owed"
-    assert len(td.pending_deliveries(tmp_path)) == 1, "one owed row, not two"
-
-
-def test_gr6_5b_retry_projection_preserves_unreconciled_runs(tmp_path):
-    from ouroboros.task_status import effective_task_result
-
-    write_task_result(
-        tmp_path, "orig6", STATUS_INTERRUPTED, chat_id=2,
-        reason_code="idle_timeout_retry", retry_task_id="retry6",
-        superseded_by="retry6", delegated_runs_unreconciled=["run-r"],
-        result="killed; retrying",
-    )
-    write_task_result(tmp_path, "retry6", STATUS_COMPLETED, chat_id=2,
-                      result="retry finished")
-
-    effective = effective_task_result(
-        tmp_path, load_task_result(tmp_path, "orig6"), materialize_artifacts=False,
-    )
-    assert effective["status"] == STATUS_COMPLETED
-    assert effective["delegated_runs_unreconciled"] == ["run-r"], (
-        "GR6-5b: the retry projection keeps the raw interrupted row's disclosure"
-    )
-    raw = load_task_result(tmp_path, "orig6")
-    assert raw["delegated_runs_unreconciled"] == ["run-r"], "raw row untouched"

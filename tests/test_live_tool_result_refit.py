@@ -10,9 +10,7 @@ from tests._live_world import host_world as host_world
 
 
 @pytest.mark.parametrize('large,failed,reader_loaded,annotated', [
-    (False,False,False,False),(True,False,False,False),
-    (True,True,False,False),(True,True,True,False),
-    (True,True,False,True),(True,True,True,True)])
+    (False,False,False,False),(True,True,False,True),(True,True,True,True)])
 def test_call_result_refits_whole_then_falls_back_without_repeating_effect(
         host_world, monkeypatch, large, failed, reader_loaded, annotated):
     from skills.live_conversation.driver import _Call

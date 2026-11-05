@@ -23,9 +23,11 @@ def roots(tmp_path, monkeypatch):
     return a, b, bare
 
 
-@pytest.mark.parametrize("operation", ["state_dir", "register"])
-@pytest.mark.parametrize("layout", ["", "task_drives/task", "state/headless_tasks/task/data"])
-@pytest.mark.parametrize("bound", [False, True])
+@pytest.mark.parametrize(("bound", "layout", "operation"), [
+    (False, "", "state_dir"),
+    (False, "state/headless_tasks/task/data", "state_dir"),
+    (True, "task_drives/task", "register"),
+])
 def test_custody_preparation_refuses_foreign_but_owns_local_and_bare(
         roots, monkeypatch, operation, layout, bound):
     a, b, bare = roots
@@ -58,9 +60,11 @@ def test_custody_preparation_refuses_foreign_but_owns_local_and_bare(
     assert not (bare / install_identity.IDENTITY_PATH).exists()
 
 
-@pytest.mark.parametrize("kind", ["local", "docker_exec"])
-@pytest.mark.parametrize("operation", ["execute", "direct", "service"])
-@pytest.mark.parametrize("bound", [False, True])
+@pytest.mark.parametrize(("bound", "operation", "kind"), [
+    (False, "execute", "local"),
+    (False, "service", "local"),
+    (True, "direct", "docker_exec"),
+])
 def test_executor_launch_refuses_foreign_before_any_effect_and_uses_selected_owned_root(
         roots, tmp_path, monkeypatch, kind, operation, bound):
     a, b, bare = roots

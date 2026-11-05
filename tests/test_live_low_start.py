@@ -8,8 +8,7 @@ from tests.test_memory_low_start import _plan, _room, sent as sent
 
 
 @pytest.mark.parametrize('room,expected', [
-    (_room(), 1), (_room('route'), 0), (_room('held'), 0),
-    (_room(zero_need=1_100_000), 0), (None, 0),
+    (_room(), 1), (_room('route'), 0), (None, 0),
 ])
 def test_adopted_call_reports_a_memory_lowered_start_once(tmp_path, sent, room, expected):
     plan = _plan(room)

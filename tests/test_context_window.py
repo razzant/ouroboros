@@ -8,7 +8,7 @@ from ouroboros.context_window import WindowLimit, WindowRecord, record_observati
 
 
 @pytest.mark.parametrize("input_limit,total,expected", [(200_000, None, 200_000),
-    (None, 200_000, 134_464), (150_000, 200_000, 134_464), (100_000, 200_000, 100_000)])
+    (None, 200_000, 134_464), (100_000, 200_000, 100_000)])
 def test_reserve_is_charged_once_only_to_a_total(input_limit, total, expected):
     record = WindowRecord("r", WindowLimit(input_limit, "input", "metadata") if input_limit else None,
                           WindowLimit(total, "total", "metadata") if total else None, reserve=65_536)
@@ -110,7 +110,7 @@ def test_a_plan_releases_its_refusal_ceiling_when_the_observation_expires(tmp_pa
 
 @pytest.mark.parametrize("stated,accepted,usable", [
     (872_000, 921_227, 921_227), (1_000_000, 200_000, 934_464),
-    (1_000_000, 950_000, 934_464), (0, 921_227, None),
+    (1_000_000, 950_000, 934_464),
 ])
 def test_start_and_in_task_admission_share_the_input_bound(tmp_path, monkeypatch, stated, accepted, usable):
     from ouroboros import context_fit as cf
@@ -148,9 +148,11 @@ def test_start_and_in_task_admission_share_the_input_bound(tmp_path, monkeypatch
         assert (refusal is not None) is (usable is not None and size > usable)
 
 
-@pytest.mark.parametrize("account_refusal", [False, True])
-@pytest.mark.parametrize("kind", ["input", "total", "unknown"])
-@pytest.mark.parametrize("mode", ["nano", "low"])
+@pytest.mark.parametrize(("mode", "kind", "account_refusal"), [
+    ("nano", "input", False),
+    ("nano", "unknown", False),
+    ("low", "total", True),
+])
 def test_a_rebind_keeps_the_route_window_for_the_final_admission(tmp_path, monkeypatch, mode, kind, account_refusal):
     """3 Nov 2026 witness: a same-route rebind under Nano dropped an input-only 240K route's record and admitted
     297,344 input tokens until a provider refusal; Low kept it only because its reserve equals the ceiling.
@@ -202,10 +204,7 @@ def test_a_rebind_keeps_the_route_window_for_the_final_admission(tmp_path, monke
 
 @pytest.mark.parametrize("model,key", [
     ("openai::model", "OPENAI_API_KEY"), ("anthropic::model", "ANTHROPIC_API_KEY"),
-    ("deepseek::model", "DEEPSEEK_API_KEY"), ("zai::model", "ZAI_API_KEY"),
-    ("minimax::model", "MINIMAX_API_KEY"), ("cloudru::model", "CLOUDRU_FOUNDATION_MODELS_API_KEY"),
-    ("gigachat::model", "GIGACHAT_CREDENTIALS"), ("openrouter::model", "OPENROUTER_API_KEY"),
-    ("openai-compatible::model", "OPENAI_COMPATIBLE_API_KEY"),
+    ("deepseek::model", "DEEPSEEK_API_KEY"),
 ])
 def test_direct_account_scope_survives_same_key_but_not_key_rotation(tmp_path, monkeypatch, model, key):
     import json

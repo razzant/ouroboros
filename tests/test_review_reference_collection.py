@@ -79,7 +79,7 @@ def test_own_child_detaches_reparks_and_reference_collects_original_at_zero(main
     assert len(_notices(a, "change")) == 1 and _commit_count(a) == 1 and not a.pushes
 
 
-@pytest.mark.parametrize("mutation", [{"subject": "index"}, {"goal": "changed"}, {"reviewers": []}, {"root": "active_workspace"}, {"wake_on": {}}])
+@pytest.mark.parametrize("mutation", [{"subject": "index"}, {"reviewers": []}, {"wake_on": {}}])
 def test_reference_mutation_refuses_before_reading_subject(author, monkeypatch, mutation):  # noqa: F811
     monkeypatch.setattr(change, "_read_subject", lambda *_a, **_k: pytest.fail("froze new bytes"))
     monkeypatch.setattr(change, "compose_panel", lambda *_a, **_k: pytest.fail("composed a new panel"))

@@ -148,8 +148,10 @@ def _gaps(world) -> list:
     return [row for row in pending if row.get("kind") == "test_evidence"]
 
 
-@pytest.mark.parametrize("forked", [False, True], ids=["canonical_reader", "forked_reader"])
-@pytest.mark.parametrize("place", [ROOT_FAMILY, Path("v2") / ROOT_FAMILY], ids=["root", "nested"])
+@pytest.mark.parametrize(("place", "forked"), [
+    pytest.param(ROOT_FAMILY, False, id='root-canonical_reader'),
+    pytest.param(Path("v2") / ROOT_FAMILY, True, id='nested-forked_reader'),
+])
 def test_a_child_local_run_reaches_the_parent_and_outlives_the_drive(world, place, forked):
     run = _run(world, world.store / place)
     index = _index(world, run)

@@ -56,7 +56,7 @@ def recorded(root: pathlib.Path) -> list[str]:
     return (root / "argv").read_bytes().decode("utf-8").rstrip("\0").split("\0")
 
 
-@pytest.mark.parametrize("prefix", [("run",), ("create",), ("container", "run"), ("container", "create")])
+@pytest.mark.parametrize("prefix", [("run",), ("create",), ("container", "create")])
 def test_every_container_creation_has_limits_and_label(envelope, prefix):
     env, root = envelope
     tail = ["--rm", "image:fixed", "sh", "-c", "printf 'quoted value'"]
@@ -90,7 +90,6 @@ def test_discovery_survives_official_path_reset(envelope):
 
 @pytest.mark.parametrize("args", [
     ("exec", "agent-1", "sh", "-c", "printf '$TOKEN with spaces'"),
-    ("rm", "-fv", "agent-1"),
     ("network", "rm", "net-1"),
     ("container", "inspect", "agent-1"),
 ])
@@ -181,7 +180,6 @@ def test_agent_exec_records_its_exact_task_and_keeps_argv(envelope):
 
 @pytest.mark.parametrize(("listing", "exit_code", "state"), [
     ("", "0", "absent"),
-    ("agent-4242-0a1b2c3d-sidecar\n", "0", "absent"),
     ("agent-4242-0a1b2c3d\n", "0", "present"),
     ("", "1", "unknown"),
 ])

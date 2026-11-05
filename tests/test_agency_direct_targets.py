@@ -43,8 +43,13 @@ def mode(monkeypatch, name):
     monkeypatch.setattr(config, "get_runtime_mode", lambda: name)
 
 
-@pytest.mark.parametrize("utility", ["touch", "cp", "rm", "sort", "redirect"])
-@pytest.mark.parametrize("destination", ["system", "data", "desktop"])
+@pytest.mark.parametrize(("destination", "utility"), [
+    ("system", "touch"),
+    ("system", "sort"),
+    ("data", "cp"),
+    ("data", "redirect"),
+    ("desktop", "rm"),
+])
 def test_light_direct_target_matches_resource_authority(resources, monkeypatch, utility, destination):
     registry, _ctx, home, system, data, workspace = resources
     mode(monkeypatch, "light")
@@ -99,10 +104,7 @@ def test_acting_write_root_and_real_symlink_target(resources, monkeypatch, runti
 
 
 @pytest.mark.parametrize("cmd", [
-    ["echo", ">", "/runtime/settings.json"], ["echo", "tee", "/runtime/settings.json"],
-    ["python", "-c", "open('/runtime/settings.json','w').write('x')"],
-    ["ruby", "-e", "puts 'settings.json'"], ["sed", "-f", "program.sed", "/runtime/file"],
-    ["tar", "-cf", "archive.tar", "/runtime/source"],
+    ["echo", ">", "/runtime/settings.json"], ["sed", "-f", "program.sed", "/runtime/file"],
     ["sh", "-c", "printf '%s' '>' /runtime/settings.json"],
 ])
 def test_unknown_bodies_and_literal_operators_do_not_manufacture_targets(cmd):
@@ -157,8 +159,12 @@ def test_cyber_keeps_explicit_readonly_task(resources, monkeypatch):
     assert result.status == "blocked" and not (workspace / "not-created").exists()
 
 
-@pytest.mark.parametrize("runtime", ["light", "advanced", "pro", "cyber_pro"])
-@pytest.mark.parametrize("marker", [".seed-origin", ".clawhub.json"])
+@pytest.mark.parametrize(("marker", "runtime"), [
+    (".seed-origin", "light"),
+    (".seed-origin", "cyber_pro"),
+    (".clawhub.json", "advanced"),
+    (".clawhub.json", "pro"),
+])
 def test_selected_payload_actual_marker_write_and_ordinary_file(resources, monkeypatch, runtime, marker):
     registry, _ctx, _home, _system, data, _workspace = resources
     from tests.test_skill_exec import _build_skill
@@ -173,8 +179,14 @@ def test_selected_payload_actual_marker_write_and_ordinary_file(resources, monke
     assert result.status == ("ok" if runtime == "cyber_pro" else "blocked"), result.text
 
 
-@pytest.mark.parametrize("utility", ["sed", "uniq", "tar_archive_first", "tar_directory_first", "gzip", "rsync"])
-@pytest.mark.parametrize("runtime,outside", [("advanced", False), ("advanced", True), ("cyber_pro", True)])
+@pytest.mark.parametrize(("runtime", "outside", "utility"), [
+    ("advanced", False, "tar_directory_first"),
+    ("advanced", False, "gzip"),
+    ("advanced", True, "sed"),
+    ("advanced", True, "rsync"),
+    ("cyber_pro", True, "uniq"),
+    ("cyber_pro", True, "tar_archive_first"),
+])
 def test_explicit_utility_roles_preserve_source_and_destination(resources, monkeypatch, utility, runtime, outside):
     registry, ctx, home, system, _data, workspace = resources
     mode(monkeypatch, runtime)

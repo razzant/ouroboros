@@ -20,6 +20,7 @@ from ouroboros import custody_owed, mcp_client, store, task_store, tool_custody
 from tests.test_batch4_producer_custody import _consumers, _registry
 from tests.test_invocation_ownership import claims, owner, run
 from tests.test_mcp_call_completion import SERVER, _transport
+from tests._cases import case_folders
 
 
 ROUTES = ["direct", "future"]
@@ -153,197 +154,218 @@ def _assert_runner_holds(tmp_path, registry, route):
         assert not tool_custody.local_producers_settled(), "a live runner is a live producer"
 
 
-@pytest.mark.parametrize("route", ROUTES)
-def test_late_final_response_settles_after_the_callers_timeout(tmp_path, monkeypatch, route):
-    registry, queue, workers = _registry(tmp_path, monkeypatch)
-    calls, gate = _Calls(), threading.Event()
-    _wire(monkeypatch, _server(calls, gate))
-    runners = _caller_stops_waiting(monkeypatch, calls.sent)
-    try:
-        _assert_unknown_timeout(_call(registry, route))
-        _assert_runner_holds(tmp_path, registry, route)
-    finally:
-        gate.set()
-        _finish(runners)
-    assert calls == ["effect"], "one remote call, never resent"
-    assert not claims(tmp_path), "the final response ended both the local call and its remote duty"
-    assert tool_custody.local_producers_settled()
-    _consumers(tmp_path, registry, queue, workers, held=False)
-
-
-@pytest.mark.parametrize("route", ROUTES)
-def test_late_error_after_send_ends_the_local_call_and_keeps_the_remote_duty(tmp_path, monkeypatch, route):
-    registry, queue, workers = _registry(tmp_path, monkeypatch)
-    calls, gate = _Calls(), threading.Event()
-    _wire(monkeypatch, _server(calls, gate), drop_call_response=True)  # the answer never arrives
-    runners = _caller_stops_waiting(monkeypatch, calls.sent)
-    try:
-        _assert_unknown_timeout(_call(registry, route))
-        _assert_runner_holds(tmp_path, registry, route)
-    finally:
-        gate.set()
-        _finish(runners)
-    assert calls == ["effect"], "one remote call, never resent"
-    claim = _only_claim(tmp_path)
-    assert claim["state"] == "returned" and list(claim["external_pending"].values()) == ["mcp_transport"]
-    assert tool_custody.tool_handoff_reason(claim)["reason"] == "returned_effect_unconfirmed"
-    assert tool_custody.local_producers_settled()
-    _consumers(tmp_path, registry, queue, workers, held=True)
-
-
-@pytest.mark.parametrize("route", ROUTES)
-def test_late_runner_refused_before_send_discharges_its_exact_duty(tmp_path, monkeypatch, route):
-    """Scheduling delay before the coroutine: the closed invocation refuses preparation."""
-    registry, queue, workers = _registry(tmp_path, monkeypatch)
-    calls, gate = _Calls(), threading.Event()
-    _wire(monkeypatch, _server(calls, gate))
-    entered, resume = threading.Event(), threading.Event()
-    actual_run = asyncio.run
-
-    def delayed(coro, *args, **kwargs):
-        if threading.current_thread().name == "mcp-sync-runner":
-            entered.set()
-            assert resume.wait(10)
-        return actual_run(coro, *args, **kwargs)
-
-    monkeypatch.setattr(asyncio, "run", delayed)
-    runners = _caller_stops_waiting(monkeypatch, entered)
-    try:
-        _assert_unknown_timeout(_call(registry, route))
-        _assert_runner_holds(tmp_path, registry, route)
-    finally:
-        gate.set()
-        resume.set()
-        _finish(runners)
-    assert calls == [], "the closed invocation refused the method before any send"
-    assert not claims(tmp_path)
-    assert tool_custody.local_producers_settled()
-    _consumers(tmp_path, registry, queue, workers, held=False)
-
-
-@pytest.mark.parametrize("route", ROUTES)
-def test_held_loop_shutdown_keeps_the_runner_live_after_its_final_response(tmp_path, monkeypatch, route):
-    """The coroutine has its final response, but ``asyncio.run`` still joins an executor job."""
-    registry, queue, workers = _registry(tmp_path, monkeypatch)
-    calls, gate, held, responded = _Calls(), threading.Event(), threading.Event(), threading.Event()
-    gate.set()
-    manager = _wire(monkeypatch, _server(calls, gate, held))
-    transport_call = manager._async_call_tool
-
-    async def observed(*args):
-        result = await transport_call(*args)
-        responded.set()
-        return result
-
-    manager._async_call_tool = observed
-    runners = _caller_stops_waiting(monkeypatch, responded)
-    try:
-        _assert_unknown_timeout(_call(registry, route))
-        assert all(thread.is_alive() for thread in runners), "loop shutdown still owns the runner"
-        _assert_runner_holds(tmp_path, registry, route)
-    finally:
-        held.set()
-        _finish(runners)
-    assert calls == ["effect"]
-    assert not claims(tmp_path)
-    assert tool_custody.local_producers_settled()
-    _consumers(tmp_path, registry, queue, workers, held=False)
-
-
-@pytest.mark.parametrize("route", ROUTES)
-def test_runner_that_never_started_is_a_proven_no_send(tmp_path, monkeypatch, route):
-    registry, queue, workers = _registry(tmp_path, monkeypatch)
-    calls, gate, opened = _Calls(), threading.Event(), []
-    gate.set()
-    _wire(monkeypatch, _server(calls, gate))
-    real_transport = mcp_client._transport_factory
-    monkeypatch.setattr(mcp_client, "_transport_factory", lambda cfg: opened.append(cfg) or real_transport(cfg))
-    actual_start = threading.Thread.start
-
-    def start(thread):
-        if thread.name == "mcp-sync-runner":
-            raise RuntimeError("can't start new thread")
-        return actual_start(thread)
-
-    monkeypatch.setattr(threading.Thread, "start", start)
-    result = _call(registry, route)
-    monkeypatch.setattr(threading.Thread, "start", actual_start)
-    assert (result.status, result.code) == ("error", "MCP_ERROR"), result
-    assert result.meta["mcp_call_not_sent"] is True
-    assert calls == [] and opened == []
-    assert not claims(tmp_path), "no start: the duty is discharged and the hold released"
-    assert tool_custody.local_producers_settled()
-    _consumers(tmp_path, registry, queue, workers, held=False)
-
-
-@pytest.mark.parametrize("route", ROUTES)
-def test_late_settlement_on_a_busy_store_is_owed_never_replayed(tmp_path, monkeypatch, route):
-    registry, _queue, _workers = _registry(tmp_path, monkeypatch)
-    calls, gate = _Calls(), threading.Event()
-    _wire(monkeypatch, _server(calls, gate))
-    runners = _caller_stops_waiting(monkeypatch, calls.sent)
-    monkeypatch.setattr(store, "STORE_WAIT_SEC", 0.01)  # the structural retry bound, shortened only here
-    patch = task_store.patch_handoff
-    refused = []
-
-    def busy_for_the_runner(*args, **kwargs):
-        if threading.current_thread().name == "mcp-sync-runner":
-            refused.append(args[3])
-            raise store.StoreBusy("late custody write contended", reason="contention")
-        return patch(*args, **kwargs)
-
-    try:
-        _assert_unknown_timeout(_call(registry, route))
-        monkeypatch.setattr(task_store, "patch_handoff", busy_for_the_runner)
-    finally:
-        gate.set()
-        _finish(runners)
-    assert refused, "the runner's own writes met the busy store"
-    assert custody_owed.pending(), "the late facts are owed, not forgotten"
-    assert not tool_custody.local_producers_settled()
-    assert _only_claim(tmp_path)["state"] == "claimed"
-    monkeypatch.setattr(task_store, "patch_handoff", patch)
-    assert custody_owed.drain() == 0
-    assert not claims(tmp_path) and calls == ["effect"], "the owed writes landed; nothing was resent"
-    assert tool_custody.local_producers_settled()
-
-
-@pytest.mark.parametrize("route", ROUTES)
-def test_late_completion_during_the_registry_fold_still_settles(tmp_path, monkeypatch, route):
-    """The runner records its end between the registry's fold read and the closure."""
-    registry, queue, workers = _registry(tmp_path, monkeypatch)
-    calls, gate = _Calls(), threading.Event()
-    _wire(monkeypatch, _server(calls, gate))
-    runners = _caller_stops_waiting(monkeypatch, calls.sent)
-    fired = []
-    actual_outcome = tool_custody.invocation_outcome
-
-    class Interleaving(dict):
-        def get(self, key, default=None):
-            value = dict.get(self, key, default)  # read before the runner's write
-            # After the caller stopped waiting, the first reader outside the runner is the
-            # registry's fold, on whichever thread executes the invocation.
-            if (key == "mcp_call_returned" and not fired and runners
-                    and threading.current_thread().name != "mcp-sync-runner"):
-                fired.append(value)
+def test_late_final_response_settles_after_the_callers_timeout(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for route in ROUTES:
+        tmp_path = next(case_paths)
+        with subtests.test(route=route), monkeypatch.context() as monkeypatch:
+            registry, queue, workers = _registry(tmp_path, monkeypatch)
+            calls, gate = _Calls(), threading.Event()
+            _wire(monkeypatch, _server(calls, gate))
+            runners = _caller_stops_waiting(monkeypatch, calls.sent)
+            try:
+                _assert_unknown_timeout(_call(registry, route))
+                _assert_runner_holds(tmp_path, registry, route)
+            finally:
                 gate.set()
-                _finish(runners)  # the runner records, confirms and releases in between
-            return value
+                _finish(runners)
+            assert calls == ["effect"], "one remote call, never resent"
+            assert not claims(tmp_path), "the final response ended both the local call and its remote duty"
+            assert tool_custody.local_producers_settled()
+            _consumers(tmp_path, registry, queue, workers, held=False)
 
-    def outcome(*args, **kwargs):
-        return Interleaving(actual_outcome(*args, **kwargs))
 
-    monkeypatch.setattr(tool_custody, "invocation_outcome", outcome)
-    try:
-        _assert_unknown_timeout(_call(registry, route))
-    finally:
-        gate.set()
-        _finish(runners)
-    assert fired == [None], "the fold read the flag before the runner wrote it"
-    assert calls == ["effect"]
-    assert not claims(tmp_path)
-    assert tool_custody.local_producers_settled()
-    _consumers(tmp_path, registry, queue, workers, held=False)
+def test_late_error_after_send_ends_the_local_call_and_keeps_the_remote_duty(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for route in ROUTES:
+        tmp_path = next(case_paths)
+        with subtests.test(route=route), monkeypatch.context() as monkeypatch:
+            registry, queue, workers = _registry(tmp_path, monkeypatch)
+            calls, gate = _Calls(), threading.Event()
+            _wire(monkeypatch, _server(calls, gate), drop_call_response=True)  # the answer never arrives
+            runners = _caller_stops_waiting(monkeypatch, calls.sent)
+            try:
+                _assert_unknown_timeout(_call(registry, route))
+                _assert_runner_holds(tmp_path, registry, route)
+            finally:
+                gate.set()
+                _finish(runners)
+            assert calls == ["effect"], "one remote call, never resent"
+            claim = _only_claim(tmp_path)
+            assert claim["state"] == "returned" and list(claim["external_pending"].values()) == ["mcp_transport"]
+            assert tool_custody.tool_handoff_reason(claim)["reason"] == "returned_effect_unconfirmed"
+            assert tool_custody.local_producers_settled()
+            _consumers(tmp_path, registry, queue, workers, held=True)
+
+
+def test_late_runner_refused_before_send_discharges_its_exact_duty(subtests, tmp_path, monkeypatch):
+    """Scheduling delay before the coroutine: the closed invocation refuses preparation."""
+    case_paths = case_folders(tmp_path)
+    for route in ROUTES:
+        tmp_path = next(case_paths)
+        with subtests.test(route=route), monkeypatch.context() as monkeypatch:
+            registry, queue, workers = _registry(tmp_path, monkeypatch)
+            calls, gate = _Calls(), threading.Event()
+            _wire(monkeypatch, _server(calls, gate))
+            entered, resume = threading.Event(), threading.Event()
+            actual_run = asyncio.run
+
+            def delayed(coro, *args, **kwargs):
+                if threading.current_thread().name == "mcp-sync-runner":
+                    entered.set()
+                    assert resume.wait(10)
+                return actual_run(coro, *args, **kwargs)
+
+            monkeypatch.setattr(asyncio, "run", delayed)
+            runners = _caller_stops_waiting(monkeypatch, entered)
+            try:
+                _assert_unknown_timeout(_call(registry, route))
+                _assert_runner_holds(tmp_path, registry, route)
+            finally:
+                gate.set()
+                resume.set()
+                _finish(runners)
+            assert calls == [], "the closed invocation refused the method before any send"
+            assert not claims(tmp_path)
+            assert tool_custody.local_producers_settled()
+            _consumers(tmp_path, registry, queue, workers, held=False)
+
+
+def test_held_loop_shutdown_keeps_the_runner_live_after_its_final_response(subtests, tmp_path, monkeypatch):
+    """The coroutine has its final response, but ``asyncio.run`` still joins an executor job."""
+    case_paths = case_folders(tmp_path)
+    for route in ROUTES:
+        tmp_path = next(case_paths)
+        with subtests.test(route=route), monkeypatch.context() as monkeypatch:
+            registry, queue, workers = _registry(tmp_path, monkeypatch)
+            calls, gate, held, responded = _Calls(), threading.Event(), threading.Event(), threading.Event()
+            gate.set()
+            manager = _wire(monkeypatch, _server(calls, gate, held))
+            transport_call = manager._async_call_tool
+
+            async def observed(*args):
+                result = await transport_call(*args)
+                responded.set()
+                return result
+
+            manager._async_call_tool = observed
+            runners = _caller_stops_waiting(monkeypatch, responded)
+            try:
+                _assert_unknown_timeout(_call(registry, route))
+                assert all(thread.is_alive() for thread in runners), "loop shutdown still owns the runner"
+                _assert_runner_holds(tmp_path, registry, route)
+            finally:
+                held.set()
+                _finish(runners)
+            assert calls == ["effect"]
+            assert not claims(tmp_path)
+            assert tool_custody.local_producers_settled()
+            _consumers(tmp_path, registry, queue, workers, held=False)
+
+
+def test_runner_that_never_started_is_a_proven_no_send(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for route in ROUTES:
+        tmp_path = next(case_paths)
+        with subtests.test(route=route), monkeypatch.context() as monkeypatch:
+            registry, queue, workers = _registry(tmp_path, monkeypatch)
+            calls, gate, opened = _Calls(), threading.Event(), []
+            gate.set()
+            _wire(monkeypatch, _server(calls, gate))
+            real_transport = mcp_client._transport_factory
+            monkeypatch.setattr(mcp_client, "_transport_factory", lambda cfg: opened.append(cfg) or real_transport(cfg))
+            actual_start = threading.Thread.start
+
+            def start(thread):
+                if thread.name == "mcp-sync-runner":
+                    raise RuntimeError("can't start new thread")
+                return actual_start(thread)
+
+            monkeypatch.setattr(threading.Thread, "start", start)
+            result = _call(registry, route)
+            monkeypatch.setattr(threading.Thread, "start", actual_start)
+            assert (result.status, result.code) == ("error", "MCP_ERROR"), result
+            assert result.meta["mcp_call_not_sent"] is True
+            assert calls == [] and opened == []
+            assert not claims(tmp_path), "no start: the duty is discharged and the hold released"
+            assert tool_custody.local_producers_settled()
+            _consumers(tmp_path, registry, queue, workers, held=False)
+
+
+def test_late_settlement_on_a_busy_store_is_owed_never_replayed(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for route in ROUTES:
+        tmp_path = next(case_paths)
+        with subtests.test(route=route), monkeypatch.context() as monkeypatch:
+            registry, _queue, _workers = _registry(tmp_path, monkeypatch)
+            calls, gate = _Calls(), threading.Event()
+            _wire(monkeypatch, _server(calls, gate))
+            runners = _caller_stops_waiting(monkeypatch, calls.sent)
+            monkeypatch.setattr(store, "STORE_WAIT_SEC", 0.01)  # the structural retry bound, shortened only here
+            patch = task_store.patch_handoff
+            refused = []
+
+            def busy_for_the_runner(*args, **kwargs):
+                if threading.current_thread().name == "mcp-sync-runner":
+                    refused.append(args[3])
+                    raise store.StoreBusy("late custody write contended", reason="contention")
+                return patch(*args, **kwargs)
+
+            try:
+                _assert_unknown_timeout(_call(registry, route))
+                monkeypatch.setattr(task_store, "patch_handoff", busy_for_the_runner)
+            finally:
+                gate.set()
+                _finish(runners)
+            assert refused, "the runner's own writes met the busy store"
+            assert custody_owed.pending(), "the late facts are owed, not forgotten"
+            assert not tool_custody.local_producers_settled()
+            assert _only_claim(tmp_path)["state"] == "claimed"
+            monkeypatch.setattr(task_store, "patch_handoff", patch)
+            assert custody_owed.drain() == 0
+            assert not claims(tmp_path) and calls == ["effect"], "the owed writes landed; nothing was resent"
+            assert tool_custody.local_producers_settled()
+
+
+def test_late_completion_during_the_registry_fold_still_settles(subtests, tmp_path, monkeypatch):
+    """The runner records its end between the registry's fold read and the closure."""
+    case_paths = case_folders(tmp_path)
+    for route in ROUTES:
+        tmp_path = next(case_paths)
+        with subtests.test(route=route), monkeypatch.context() as monkeypatch:
+            registry, queue, workers = _registry(tmp_path, monkeypatch)
+            calls, gate = _Calls(), threading.Event()
+            _wire(monkeypatch, _server(calls, gate))
+            runners = _caller_stops_waiting(monkeypatch, calls.sent)
+            fired = []
+            actual_outcome = tool_custody.invocation_outcome
+
+            class Interleaving(dict):
+                def get(self, key, default=None):
+                    value = dict.get(self, key, default)  # read before the runner's write
+                    # After the caller stopped waiting, the first reader outside the runner is the
+                    # registry's fold, on whichever thread executes the invocation.
+                    if (key == "mcp_call_returned" and not fired and runners
+                            and threading.current_thread().name != "mcp-sync-runner"):
+                        fired.append(value)
+                        gate.set()
+                        _finish(runners)  # the runner records, confirms and releases in between
+                    return value
+
+            def outcome(*args, **kwargs):
+                return Interleaving(actual_outcome(*args, **kwargs))
+
+            monkeypatch.setattr(tool_custody, "invocation_outcome", outcome)
+            try:
+                _assert_unknown_timeout(_call(registry, route))
+            finally:
+                gate.set()
+                _finish(runners)
+            assert fired == [None], "the fold read the flag before the runner wrote it"
+            assert calls == ["effect"]
+            assert not claims(tmp_path)
+            assert tool_custody.local_producers_settled()
+            _consumers(tmp_path, registry, queue, workers, held=False)
 
 
 def test_missing_sdk_before_any_transport_is_a_proven_no_send(tmp_path, monkeypatch):

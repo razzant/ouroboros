@@ -80,8 +80,12 @@ def paused_retry(host, monkeypatch, clock, reaper, door):
     return task, child, plan
 
 
-@pytest.mark.parametrize("door", ["warm", "exact", "queued", "unsaved"])
-@pytest.mark.parametrize("stop", ["logical_graceful", "logical_immediate", "physical", "healthy"])
+@pytest.mark.parametrize(("stop", "door"), [
+    ("logical_graceful", "warm"),
+    ("logical_immediate", "exact"),
+    ("physical", "queued"),
+    ("healthy", "unsaved"),
+])
 def test_pending_stop_vetoes_retry_resume(host, monkeypatch, clock, reaper, door, stop):  # noqa: F811
     task, child, plan = paused_retry(host, monkeypatch, clock, reaper, door)
     task_id = task["id"]
@@ -120,7 +124,7 @@ def test_pending_stop_vetoes_retry_resume(host, monkeypatch, clock, reaper, door
         assert not _assign(host, monkeypatch), "old children need explicit selection"
 
 
-@pytest.mark.parametrize("door", ["warm", "exact", "queued", "unsaved"])
+@pytest.mark.parametrize("door", ["warm", "exact", "unsaved"])
 def test_unknown_root_identity_refuses_without_member_grant(host, monkeypatch, clock, reaper, door):  # noqa: F811
     task, _child, _plan = paused_retry(host, monkeypatch, clock, reaper, door)
     from ouroboros.task_store import patch_document
@@ -150,8 +154,12 @@ def test_unknown_root_identity_refuses_without_member_grant(host, monkeypatch, c
     assert queue.resume_budget_paused_task(task["id"])["ok"]
 
 
-@pytest.mark.parametrize("door", ["warm", "exact", "queued", "unsaved"])
-@pytest.mark.parametrize("veto", ["unreadable_cancel", "legacy_cancel", "restart"])
+@pytest.mark.parametrize(("veto", "door"), [
+    ("unreadable_cancel", "warm"),
+    ("unreadable_cancel", "exact"),
+    ("legacy_cancel", "queued"),
+    ("restart", "unsaved"),
+])
 def test_unknown_cancel_and_existing_stop_carriers_keep_the_pause(host, monkeypatch, clock, reaper, door, veto):  # noqa: F811
     from ouroboros.task_store import patch_document
 

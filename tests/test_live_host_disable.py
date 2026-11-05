@@ -13,8 +13,11 @@ from ouroboros.contracts.live_conversation import LiveOptions
 from tests._live_world import host_world as host_world
 
 
-@pytest.mark.parametrize('presence', [False, True])
-@pytest.mark.parametrize('configuration', ['disabled', 'enabled', 'unreadable'])
+@pytest.mark.parametrize(("configuration", "presence"), [
+    ('disabled', False),
+    ('enabled', True),
+    ('unreadable', False),
+])
 def test_disable_during_preparation_prevents_later_provider_open(
         host_world, monkeypatch, tmp_path, configuration, presence):
     from ouroboros import call_peers

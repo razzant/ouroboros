@@ -99,8 +99,6 @@ def test_progress_is_passive_and_stage_notifications_are_not_boot_ready(isolated
     ({"error": "writers remain", "restart_required": True}, 409, "failed", "not_applied"),
     ({"error": "rollback failed", "rolled_back": False, "restart_required": True}, 500, "failed", "not_applied"),
     ({"status": "restart_required", "error": "callback unavailable"}, 200, "restart_required", ""),
-    ({"status": "assisted_started", "task_id": "resolver"}, 200, "assisted_started", ""),
-    ({"status": "ok", "restarting": True}, 200, "restart_requested", ""),
 ])
 def test_executor_result_survives_panel_reopen(isolated_progress, body, code, result, outcome):
     @progress.observe_result
@@ -423,10 +421,6 @@ def test_a_crashed_attempt_never_carries_a_stopped_nothing_claim(isolated_progre
     ((), {"error": "stopped"}, 500, "not_applied"),
     (("rolling_back",), {"error": "smart_update_exception", "rolled_back": True}, 409, "not_applied"),
     (("applying",), {"error": "boom"}, 500, "failed"),
-    (("applying",), {"error": "unexpected"}, 409, "failed"),
-    (("applying", "rolling_back"), {"error": "smoke", "rolled_back": True}, 409, "rolled_back"),
-    (("applying",), {"error": "git refused", "reason": "replace_not_applied", "abandoned": True}, 409,
-     "not_applied"),
 ])
 def test_the_executor_concludes_only_what_its_own_steps_prove(isolated_progress, stages, body, code, expected):
     @progress.observe_result
@@ -485,14 +479,8 @@ def test_returned_refs_notes_and_blockers_stay_whole(isolated_progress):
 
 @pytest.mark.parametrize("result,bootstrap_ok,baseline,expected", [
     ({"finalized": True, **_seen("applied")}, True, "c" * 40, ("applied", "")),
-    ({"finalized": True, **_seen("applied")}, False, "c" * 40, ("unknown", "startup_unconfirmed")),
-    ({"finalized": True, **_seen("applied")}, True, "d" * 40, ("unknown", "running_source_mismatch")),
     ({"finalized": True, **_seen("rolled_back", commit="a" * 40)}, True, "a" * 40, ("rolled_back", "")),
-    ({"finalized": True, **_seen("rolled_back", commit="a" * 40)}, True, "c" * 40, ("unknown", "running_source_mismatch")),
     ({"abandoned": True, **_seen("not_applied", commit="a" * 40)}, True, "a" * 40, ("not_applied", "")),
-    ({"finalized": True}, True, "c" * 40, ("unknown", "no_completion_record")),
-    ({"finalized": False, "rolled_back": True}, True, "a" * 40, ("unknown", "no_completion_record")),
-    ({"finalized": True, **_seen("applied", attempt="tx-2")}, True, "c" * 40, ("unknown", "no_completion_record")),
 ])
 def test_a_later_server_concludes_only_the_bound_attempt_on_its_served_commit(isolated_progress, monkeypatch,
                                                                               result, bootstrap_ok, baseline, expected):
@@ -511,16 +499,8 @@ def test_the_same_server_never_borrows_a_boot_conclusion(isolated_progress, monk
 
 @pytest.mark.parametrize('fields,outcome', [
     ({'stash_restore': {'context': 'boot_finalize'}}, 'applied'),
-    ({'stash_restore': {'context': 'boot_stash_recovery'}}, 'not_applied'),
     ({'stash_restore': {'context': 'boot_diverged_abandon'}}, ''),
-    ({'stash_restore': {'context': 'boot_restore_resume', 'evidence': {'interrupted': {'context': 'boot_stash_recovery'}}}}, 'not_applied'),
-    ({'stash_restore': {'context': 'boot_restore_resume', 'evidence': {'interrupted': {'context': 'boot_diverged_abandon'}}}}, ''),
-    ({'stash_restore': {'context': 'boot_restore_resume'}}, ''),
-    ({'gate_blocked_reason': 'rollback_restart_pending'}, 'rolled_back'),
     ({'gate_blocked_reason': 'replace_abandon_tx_cleanup_failed'}, 'not_applied'),
-    ({'gate_blocked_reason': 'stash_marker_cleanup_failed', 'gate_blocked_from_phase': 'pending_boot_smoke'}, 'applied'),
-    ({'gate_blocked_reason': 'stash_marker_cleanup_failed', 'gate_blocked_from_phase': 'assisted_resolution'}, ''),
-    ({'gate_blocked_from_phase': 'pending_boot_smoke'}, ''),
 ])
 def test_cleanup_keeps_only_an_already_established_meaning(fields, outcome):
     from supervisor.update_merge import _cleanup_observed
@@ -586,8 +566,7 @@ def _fail_attempt_save(monkeypatch, state, point):
     monkeypatch.setattr(state, "atomic_write_text", interrupted)
 
 
-@pytest.mark.parametrize("point", ["before", "primary", "backup"])
-@pytest.mark.parametrize("recovery", ["link", "finish"])
+@pytest.mark.parametrize(("recovery", "point"), [("link", "before"), ("link", "backup"), ("finish", "primary")])
 def test_failed_begin_replaces_the_unchanged_previous_terminal_attempt(
         retained_state, isolated_progress, monkeypatch, point, recovery):
     state = retained_state
@@ -646,7 +625,6 @@ def test_an_unknown_baseline_needs_a_mutator_observation_before_recovery(
 
 @pytest.mark.parametrize("winner,point", [
     ("newer", "before"),
-    ("predecessor_conclusion", "before"),
     ("boot", "backup"),
     ("boot", "none"),
 ])

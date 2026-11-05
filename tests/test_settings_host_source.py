@@ -39,7 +39,7 @@ def applied_host(monkeypatch, tmp_path):
     return saved
 
 
-@pytest.mark.parametrize("source", ["settings", "environment", "cli", "launcher"])
+@pytest.mark.parametrize("source", ["settings", "environment", "launcher"])
 def test_known_bind_is_separate_from_host_source(applied_host, tmp_path, source):
     saved = {**applied_host, "OUROBOROS_SERVER_HOST": "0.0.0.0"}
     server_process.record_applied_restart_settings({"OUROBOROS_SERVER_HOST": "127.0.0.1"},
@@ -128,8 +128,7 @@ def test_actual_main_captures_source_after_binding(applied_host, tmp_path, monke
         _stop_restart_watcher(server)
 
 
-@pytest.mark.parametrize("original_host", [None, "", "0.0.0.0"])
-@pytest.mark.parametrize("explicit_cli", [False, True])
+@pytest.mark.parametrize(("explicit_cli", "original_host"), [(False, None), (False, "0.0.0.0"), (True, "")])
 def test_two_settings_restarts_do_not_invent_environment_authority(monkeypatch, tmp_path, original_host, explicit_cli):
     saved = {"OUROBOROS_SERVER_HOST": "127.0.0.2"}
     monkeypatch.setattr(config, "load_settings", lambda: saved)

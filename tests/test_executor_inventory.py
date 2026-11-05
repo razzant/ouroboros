@@ -257,9 +257,10 @@ def test_every_row_names_a_known_executor_and_a_reason():
 
 # ---- the law over the rows: exactly the owner's two ---------------------------------------------------------------
 
-@pytest.mark.parametrize("focus", FOCI)
-def test_no_focus_starts_on_a_server_thread(focus):
-    assert not (rows := _on_server_threads(focus)), rows
+def test_no_focus_starts_on_a_server_thread(subtests):
+    for focus in FOCI:
+        with subtests.test(focus=focus):
+            assert not (rows := _on_server_threads(focus)), rows
 
 
 def test_a_server_thread_runs_cognition_only_on_the_two_named_rows():

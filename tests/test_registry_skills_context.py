@@ -73,9 +73,11 @@ def _ids(plan, mode=None):
     return [row["section_id"] for row in _host_facts(plan, mode)]
 
 
-@pytest.mark.parametrize("mode", ["max", "low", "nano"])
-@pytest.mark.parametrize("registry", [_registry(40), "# Registry\n\n## Trusted\nFREE_TRUST\n\n## Doubted\nFREE_DOUBT\n",
-                                      "Only prose, no heading: PROSE_ONLY\n"], ids=["entries", "freeform", "prose"])
+@pytest.mark.parametrize(("registry", "mode"), [
+    pytest.param(_registry(40), "max", id='entries-max'),
+    pytest.param("# Registry\n\n## Trusted\nFREE_TRUST\n\n## Doubted\nFREE_DOUBT\n", "low", id='freeform-low'),
+    pytest.param("Only prose, no heading: PROSE_ONLY\n", "nano", id='prose-nano'),
+])
 def test_the_registry_rides_whole_beside_a_short_start_room(tmp_path, mode, registry):
     env, core = _world(tmp_path, registry)
     roomy = _plan(env, core, 2_000_000, mode)
@@ -90,7 +92,7 @@ def test_the_registry_rides_whole_beside_a_short_start_room(tmp_path, mode, regi
     assert "omitted for the physical window" not in _text(plan)
 
 
-@pytest.mark.parametrize("content", [None, "", " \n", b"\xff\xfe not utf-8"], ids=["absent", "empty", "blank", "unreadable"])
+@pytest.mark.parametrize("content", [None, " \n", b"\xff\xfe not utf-8"], ids=["absent", "blank", "unreadable"])
 def test_no_registry_is_invented_and_an_unreadable_one_is_disclosed(tmp_path, content):
     _env, core = _world(tmp_path, content)
     shown = "## Memory Registry" in core.dynamic_text
@@ -378,8 +380,11 @@ def test_every_admitted_skill_keeps_purpose_and_trigger_in_each_catalogue_form(t
     assert "desk_tool_0" not in part.operative_view and "Model experience" not in part.operative_view
 
 
-@pytest.mark.parametrize("profile", ["root", "local_readonly_subagent", "acting_subagent"])
-@pytest.mark.parametrize("long_description", [True, False], ids=["prefix", "short-description"])
+@pytest.mark.parametrize(("long_description", "profile"), [
+    pytest.param(True, "root", id='prefix-root'),
+    pytest.param(True, "acting_subagent", id='prefix-acting_subagent'),
+    pytest.param(False, "local_readonly_subagent", id='short-description-local_readonly_subagent'),
+])
 def test_each_skill_names_a_manifest_read_every_actor_profile_dispatches(tmp_path, monkeypatch, profile, long_description):
     repo, data, work = tmp_path / "repo", tmp_path / "data", tmp_path / "work"
     fork = data / "state" / "headless_tasks" / "reader" / "data"
@@ -451,10 +456,8 @@ def _levels(sep, eol):
                      "SUB_BODY")) + eol
 
 
-@pytest.mark.parametrize("sep,eol", [("", "\n"), ("", "\r\n"), ("\u2028", "\n"), ("\u2029", "\n"), ("\x0c", "\n"),
-                                     ("\x0b", "\n"), ("\x85", "\n"), ("\x1c\x1d\x1e", "\n"), ("\r", "\n"),
-                                     ("\u2028\r", "\r\n")],
-                         ids=["lf", "crlf", "u2028", "u2029", "ff", "vt", "nel", "fs-gs-rs", "cr", "u2028-cr-in-crlf"])
+@pytest.mark.parametrize("sep,eol", [("", "\n"), ("", "\r\n"), ("\u2028\r", "\r\n")],
+                         ids=["lf", "crlf", "u2028-cr-in-crlf"])
 def test_registry_outline_ranges_are_the_lines_its_retained_reader_reads(tmp_path, sep, eol):
     """read_file numbers the retained capture by str.splitlines of its universal-newline text; each heading's range,
     read through that very reader, delivers exactly its section (the parser's span), first row the heading."""

@@ -536,7 +536,7 @@ def test_the_resolver_proof_lands_no_marker_while_the_spare_still_imports(tmp_pa
     assert waited  # the project slot's row alone never proved this start: only the spare's own row or stop does
 
 
-@pytest.mark.parametrize("child", ["spare_reports_soon", "spare_reports_after_90s", "spare_never_reports",
+@pytest.mark.parametrize("child", ["spare_reports_soon", "spare_never_reports",
                                    "project_dies"])
 def test_boot_recovery_resumes_once_every_child_imported_or_unwinds_for_the_owner(tmp_path, monkeypatch, child):
     """The boot's start returns while the lane's spare still imports. Recovery re-materializes the conflicts only

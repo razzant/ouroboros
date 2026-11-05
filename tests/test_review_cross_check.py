@@ -14,12 +14,11 @@ import pytest
 from ouroboros.review_verdict_extraction import canonicalize_session_verdict
 
 
-@pytest.mark.parametrize("reason", [
-    "tests/test_attachment_staging.py imports `ouroborosproject_naming` which does not exist.",
-    "claudexor_daemon.py:1234 uses `Claudexor.unavailable` — typo.",
-    "module `ouroboros.config` is missing required setup.",
+@pytest.mark.parametrize(("method", "reason"), [
+    ("schema", "tests/test_attachment_staging.py imports `ouroborosproject_naming` which does not exist."),
+    ("strict", "claudexor_daemon.py:1234 uses `Claudexor.unavailable` — typo."),
+    ("light_model_extraction", "module `ouroboros.config` is missing required setup."),
 ])
-@pytest.mark.parametrize("method", ["schema", "strict", "light_model_extraction"])
 def test_disputed_findings_keep_the_reviewers_verdict_and_severity(reason, method):
     findings = [{"item": "missing import", "verdict": "FAIL",
                  "severity": "critical", "reason": reason}]

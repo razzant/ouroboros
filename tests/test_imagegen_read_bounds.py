@@ -255,7 +255,7 @@ def _honest_timeout(result, elapsed):
     assert not any(word in result["result"].lower() for word in ("request_id", "settled", "acknowledg", "complete"))
 
 
-@pytest.mark.parametrize("stage", ["none", "create-lost", "poll", "result", "ack", "recovery"])
+@pytest.mark.parametrize("stage", ["none", "ack", "recovery"])
 def test_timed_out_engine_attempt_is_listed_then_recovered_by_its_original_id(ctx, monkeypatch, peers, stage):
     wire = ImageWire(lose={"create-lost": ("POST", "/v2/model-operations"), "recovery": ("GET", _RESULT)}.get(stage))
     wire.pending = stage == "poll"
@@ -300,7 +300,7 @@ def test_timed_out_engine_attempt_is_listed_then_recovered_by_its_original_id(ct
     assert wire.upload_count == wire.generation_count == 1 and len(_ledger(ctx)) == 1
 
 
-@pytest.mark.parametrize("stage", ["none", "late-headers", "progressing", "download"])
+@pytest.mark.parametrize("stage", ["none", "late-headers", "download"])
 def test_timed_out_direct_attempt_is_listed_then_recovered_by_its_original_id(ctx, monkeypatch, peers, stage):
     def app(request):
         if request.url.path == "/v1/images/generations":

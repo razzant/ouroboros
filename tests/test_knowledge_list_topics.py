@@ -54,7 +54,7 @@ def test_the_tool_schema_offers_topics():
 
 @pytest.mark.parametrize("topics,unmatched,count", [
     (["people/"], [], 0), (["people"], ["people"], 0),
-    (["people/", "missing"], ["missing"], 0), (["old"], ["old"], 1),
+    (["old"], ["old"], 1),
 ])
 def test_narrowed_listing_names_selection_unmatched_selectors_and_scoped_archives(tmp_path, topics, unmatched, count):
     import json

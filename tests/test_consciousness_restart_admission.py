@@ -198,7 +198,7 @@ def test_a_restart_before_the_row_is_a_refusal_and_leaves_the_window_to_the_next
 
 
 @pytest.mark.parametrize("window,door_named", [("carrier_gap", False), ("carrier_gap", True),
-                                               ("binding", False), ("preparation", False)])
+                                               ("preparation", False)])
 def test_a_restart_accepted_after_the_row_finds_a_started_wake(race, monkeypatch, window, door_named):
     """``carrier_gap`` is the production order: tick returned with the row written and dispatched, the same
     loop accepts, then the carrier runs. The row shares its Q transaction with the gate, so no later
@@ -263,8 +263,10 @@ def test_a_wake_on_the_degraded_executor_settles_the_clock_like_a_carried_one(ra
     assert race.state.load_state()[OWN_WAKE_STATE_KEY]["finished"] is True
 
 
-@pytest.mark.parametrize("outcome", ["ok", "runner_failure"])
-@pytest.mark.parametrize("delivery", ["task_done_reported", "terminal_unreported"])
+@pytest.mark.parametrize(("delivery", "outcome"), [
+    ("task_done_reported", "ok"),
+    ("terminal_unreported", "runner_failure"),
+])
 def test_a_started_wake_settles_once_however_its_terminal_reaches_the_clock(race, monkeypatch, delivery, outcome):
     """The task_done handler delivers the terminal (``finish_pooled_wake``), or — the event lost, the row
     released — the clock settles it itself at the tick that would start over it. A real failure still

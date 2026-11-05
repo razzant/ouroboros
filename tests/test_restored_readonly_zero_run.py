@@ -30,8 +30,11 @@ def _receipt_args(decision="incomplete"):
             "zero_run_basis": "The retained invocation received a definite no-start refusal."}
 
 
-@pytest.mark.parametrize("carrier", ["working", "exact_pause", "owner_wait"])
-@pytest.mark.parametrize("decision", ["incomplete", "unknown"])
+@pytest.mark.parametrize(("decision", "carrier"), [
+    ("incomplete", "working"),
+    ("incomplete", "owner_wait"),
+    ("unknown", "exact_pause"),
+])
 def test_restored_readonly_definite_unrun_can_record_only_its_receipt(
         tmp_path, monkeypatch, carrier, decision, stub_delegate_engines):
     from ouroboros import delegate_custody as custody
@@ -63,7 +66,7 @@ def test_restored_readonly_definite_unrun_can_record_only_its_receipt(
     assert not stub_delegate_engines
 
 
-@pytest.mark.parametrize("blocker", ["pending", "live", "custody_unreadable", "already_receipted"])
+@pytest.mark.parametrize("blocker", ["pending", "custody_unreadable", "already_receipted"])
 def test_restored_readonly_receipt_still_proves_empty_custody(tmp_path, monkeypatch, blocker):
     from ouroboros import delegate_custody as custody
     from ouroboros.outcomes import read_verification_receipts

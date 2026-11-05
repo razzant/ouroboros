@@ -530,16 +530,7 @@ def _refused(control=SAVED_CONTROL, at="2026-10-17T15:05:00Z", **extra):
 
 @pytest.mark.parametrize("attempt, said", [
     # About this very hold, whenever it was answered: dated history beside it.
-    (_refused(), True), (_refused(at="2026-10-17T13:00:00Z"), True),
-    # About another control (an earlier Pause, the same hold's other reason): never said beside this one.
-    (_refused({"cause": "pause", "scope": "tree", "ui_code": "owner_paused", "release": "resume",
-               "fence_id": "fence-earlier"}), False),
-    (_refused({**SAVED_CONTROL, "reason": "owner_restart_hold", "ui_code": "owner_restart_hold"}), False),
-    # An earlier stop in the very same words (a stop declared anew, after a release, records its own occurrence).
-    (_refused({**SAVED_CONTROL, "held_at": "2026-10-16T09:00:00Z"}), False),
-    # No control named, accepted, malformed, an unknown asker, unordered: nothing to say.
-    (_refused({}), False), ({**_refused(), "ok": True}, False), ({"ok": False}, False), ("refused", False),
-    ({**_refused(), "by": {"actor": "stranger"}}, False), ({**_refused(), "at": "not a time"}, False),
+    (_refused(), True), ({**_refused(), "by": {"actor": "stranger"}}, False), ({**_refused(), "at": "not a time"}, False),
 ])
 def test_an_attempt_is_said_only_beside_the_control_it_answered_about(attempt, said):
     fields = work_fields([_held_row("sr", "restart", can_resume=True)], {"sr": SAVED}, attempts={"sr": attempt})

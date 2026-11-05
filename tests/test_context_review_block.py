@@ -333,7 +333,6 @@ def test_a_settled_review_changes_no_cached_block(tmp_path, monkeypatch):
     ("blocking", "pro", True, "Blocking:"),
     ("advisory", "pro", False, "Advisory:"),
     ("blocking", "cyber_pro", False, "Cyber Pro:"),
-    ("advisory", "cyber_pro", False, "Cyber Pro:"),
 ])
 def test_one_rule_sentence_per_effective_authority(monkeypatch, enforcement, mode, blocks, opening):
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)

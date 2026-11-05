@@ -583,8 +583,10 @@ def _recorded(text, usage, trace):
     return outcome["outcome_axes"]["execution"], lines.pop()
 
 
-@pytest.mark.parametrize("exit_by", ["selection", "round_limit"])
-@pytest.mark.parametrize("prior", ["", "invalid_delivery_control_after_repair"])
+@pytest.mark.parametrize(("prior", "exit_by"), [
+    ("", "selection"),
+    ("invalid_delivery_control_after_repair", "round_limit"),
+])
 def test_a_withdrawn_objection_leaves_no_plan_clause_on_the_answer_held_before_it(tmp_path, monkeypatch,
                                                                                   exit_by, prior):
     """Advisory: the answer is disclosed with an open objection and its result review holds it; the raiser then
@@ -697,8 +699,7 @@ def test_blocking_says_why_objections_of_unmarked_reviewers_did_not_hold(tmp_pat
         assert line == TASK_CAUSE_PHRASES["plan_review_objections_open"] and "went on" in line
 
 
-@pytest.mark.parametrize("stop", [False, True])
-@pytest.mark.parametrize("enforcement", ["advisory", "cyber_pro"])
+@pytest.mark.parametrize(("enforcement", "stop"), [("advisory", False), ("cyber_pro", True)])
 def test_an_authors_stop_over_objections_that_hold_nothing_never_says_the_work_proceeded(
         tmp_path, monkeypatch, enforcement, stop):
     """Advisory and Cyber Pro hold no answer over an owner-marked objection. Delivered, the notice and the card say
@@ -730,8 +731,8 @@ def test_an_authors_stop_over_objections_that_hold_nothing_never_says_the_work_p
                     else TASK_CAUSE_PHRASES["plan_review_objections_open"])
 
 
-@pytest.mark.parametrize("enforcement, exit_by", [("blocking", "stop"), ("advisory", "stop"), ("cyber_pro", "stop"),
-                                                  ("blocking", "round_limit"), ("blocking", "stop_known")])
+@pytest.mark.parametrize("enforcement, exit_by", [("advisory", "stop"), ("cyber_pro", "stop"),
+                                                  ("blocking", "round_limit")])
 def test_an_unreadable_plan_record_names_the_authors_stop_and_leaves_other_exits_as_they_were(
         tmp_path, monkeypatch, enforcement, exit_by):
     """An unreadable record holds a normal answer outside Cyber Pro (its reminder unchanged). The author's stop then

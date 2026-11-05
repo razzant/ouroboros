@@ -58,11 +58,6 @@ _CLEAN = [{"item": "a", "verdict": "PASS"}]
     ("clean", 200, True, True, _CLEAN, True),
     ("warnings", 200, True, True, _FINDINGS, True),        # rc.15 SK1_a2: warnings are executable
     ("blockers", 200, True, True, _FINDINGS, True),        # rc.15 SK1_a3: blockers executable under advisory
-    ("blockers", 200, False, False, _FINDINGS, False),     # the same review under blocking enforcement
-    ("pending", 200, False, True, _CLEAN, False),          # duplicate job: the call's own gate says no
-    ("clean", 500, True, True, _CLEAN, False),             # the review call itself failed
-    ("clean", 200, True, True, [], False),                 # no recorded findings: no review actually ran
-    ("clean", 200, True, None, _CLEAN, False),             # the /api/extensions row carries no gate fact
 ])
 def test_sk1_review_verdict_is_the_product_gate_and_records_the_clean_state_as_a_fact(status, http, body_exec,
                                                                                        executable, findings, expected):

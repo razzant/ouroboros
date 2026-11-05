@@ -114,12 +114,9 @@ def test_openai_camera_frame_survives_payload_free_acknowledgements(providers):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("engine", ["openai", "grok"])
-@pytest.mark.parametrize("sent,actual", [
-    ({"type": "function_call_output", "call_id": "c", "output": "exact"},
-     {"type": "function_call_output", "call_id": "c", "output": "changed"}),
-    ({"type": "message", "role": "user", "content": [{"type": "input_audio", "audio": "exact"}]},
-     {"type": "message", "role": "user", "content": [{"type": "input_audio"}]}),
+@pytest.mark.parametrize(("sent", "actual", "engine"), [
+    pytest.param({"type": "function_call_output", "call_id": "c", "output": "exact"}, {"type": "function_call_output", "call_id": "c", "output": "changed"}, "openai", id='sent0-actual0-openai'),
+    pytest.param({"type": "message", "role": "user", "content": [{"type": "input_audio", "audio": "exact"}]}, {"type": "message", "role": "user", "content": [{"type": "input_audio"}]}, "grok", id='sent1-actual1-grok'),
 ])
 def test_tool_output_and_audio_payloads_still_require_exact_echo(providers, engine, sent, actual):
     adapter, _ = make(providers, engine)

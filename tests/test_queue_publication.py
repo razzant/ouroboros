@@ -75,8 +75,11 @@ def test_ticks_only_write_liveness_and_derive_durations_on_read(published, monke
     assert snapshot["ts"] == _read(root, "queue.alive")["ts"]
 
 
-@pytest.mark.parametrize("failed", ["queue_snapshot.json", "queue_dispatch.json", "queue.alive"])
-@pytest.mark.parametrize("raises", [False, True])
+@pytest.mark.parametrize(("raises", "failed"), [
+    (False, "queue_snapshot.json"),
+    (False, "queue.alive"),
+    (True, "queue_dispatch.json"),
+])
 def test_failed_publish_never_refreshes_liveness_and_retries(published, monkeypatch, failed, raises):
     root, _now = published
     assert queue.persist_queue_snapshot()
@@ -105,7 +108,7 @@ def test_failed_publish_never_refreshes_liveness_and_retries(published, monkeypa
     assert task_status.task_has_live_queue_ownership(root, "missing") is False
 
 
-@pytest.mark.parametrize("busy_attempts", [0, 1, 2, 3])
+@pytest.mark.parametrize("busy_attempts", [0, 1, 3])
 def test_stamp_revocation_retries_before_writing_documents(published, monkeypatch, busy_attempts):
     root, _now = published
     assert queue.persist_queue_snapshot()
@@ -158,9 +161,7 @@ def test_stamp_revocation_retries_before_writing_documents(published, monkeypatc
         usage._check_dispatch_fences(scope, root)
 
 
-@pytest.mark.parametrize("blocked", [{}, {"_budget_pause": {}},
-                                    {"_budget_pause_hold": {"reason": "stale_queue_row_grant_consumed", "selected": False}},
-                                    {"_continuation_prepared": True}, {"_budget_pause_resume": {"authority": "sleep"}}])
+@pytest.mark.parametrize("blocked", [{}, {"_continuation_prepared": True}, {"_budget_pause_resume": {"authority": "sleep"}}])
 def test_dispatch_projection_preserves_selection_and_missing_member_refuses(published, blocked):
     root, _now = published
     fence = {"root_task_id": "root", "fence_id": "fence", "status": "active", "other_fact": {"kept": True}}

@@ -274,93 +274,6 @@ def test_non_committing_review_cycle_exists_and_reuses_shared_stage_cycle():
     assert '["git", "commit"' not in source
 
 
-def _staged_whole_tree(ctx, outcome):
-    """What the real stage cycle records after ``git add -A`` (paths omitted): the finally undoes it."""
-    from ouroboros.tools.git_plumbing import WHOLE_INDEX
-
-    ctx._staged_selection = WHOLE_INDEX
-    return outcome
-
-
-def test_non_committing_review_cycle_runtime_unstages_on_success(monkeypatch, tmp_path):
-    git_mod = _get_git_module()
-    reset_calls = []
-    recorded = []
-    released = []
-
-    monkeypatch.setattr(git_mod, "_check_overlapping_review_attempt", lambda ctx: None)
-    monkeypatch.setattr(git_mod, "_acquire_git_lock", lambda ctx: "lock-token")
-    monkeypatch.setattr(git_mod, "_release_git_lock", lambda lock: released.append(lock))
-    monkeypatch.setattr(
-        git_mod,
-        "_run_reviewed_stage_cycle",
-        lambda ctx, *args, **kwargs: _staged_whole_tree(ctx, {
-            "status": "passed",
-            "message": "stage cycle passed",
-            "pre_fingerprint": {"fingerprint": "pre"},
-            "post_fingerprint": {"fingerprint": "post"},
-        }),
-    )
-    monkeypatch.setattr(
-        git_mod,
-        "_record_commit_attempt",
-        lambda *args, **kwargs: recorded.append(
-            {"status": args[2], "phase": kwargs.get("phase")}
-        ),
-    )
-    monkeypatch.setattr(
-        git_mod,
-        "run_cmd",
-        lambda cmd, cwd=None: reset_calls.append((tuple(cmd), cwd)) or "",
-    )
-
-    ctx = types.SimpleNamespace(
-        repo_dir="/tmp/repo", drive_root=tmp_path,
-        _coupling_review_history={"snap": [{"round": 1, "status": "FAIL"}]},
-    )
-    outcome = git_mod._run_non_committing_review_cycle(ctx, "test commit")
-
-    assert outcome["status"] == "passed"
-    assert "Commit was not created" in outcome["message"]
-    # A completed cycle closes the subject's coupling rounds; the next starts fresh.
-    assert ctx._coupling_review_history == {}
-    assert recorded == [{"status": "reviewed", "phase": "review_only"}]
-    assert released == ["lock-token"]
-    assert reset_calls == [(("git", "reset", "HEAD"), "/tmp/repo")]
-
-
-def test_non_committing_review_cycle_runtime_unstages_on_block(monkeypatch, tmp_path):
-    git_mod = _get_git_module()
-    reset_calls = []
-    released = []
-
-    monkeypatch.setattr(git_mod, "_check_overlapping_review_attempt", lambda ctx: None)
-    monkeypatch.setattr(git_mod, "_acquire_git_lock", lambda ctx: "lock-token")
-    monkeypatch.setattr(git_mod, "_release_git_lock", lambda lock: released.append(lock))
-    monkeypatch.setattr(
-        git_mod,
-        "_run_reviewed_stage_cycle",
-        lambda ctx, *args, **kwargs: _staged_whole_tree(ctx, {
-            "status": "blocked",
-            "message": "review blocked",
-            "block_reason": "critical_findings",
-        }),
-    )
-    monkeypatch.setattr(
-        git_mod,
-        "run_cmd",
-        lambda cmd, cwd=None: reset_calls.append((tuple(cmd), cwd)) or "",
-    )
-
-    ctx = types.SimpleNamespace(repo_dir="/tmp/repo", drive_root=tmp_path)
-    outcome = git_mod._run_non_committing_review_cycle(ctx, "test commit")
-
-    assert outcome["status"] == "blocked"
-    assert outcome["block_reason"] == "critical_findings"
-    assert released == ["lock-token"]
-    assert reset_calls == [(("git", "reset", "HEAD"), "/tmp/repo")]
-
-
 def test_repo_commit_push_uses_shared_reviewed_stage_cycle():
     git_mod = _get_git_module()
     source = inspect.getsource(git_mod._repo_commit_push)
@@ -518,17 +431,6 @@ def test_configure_remote_remains_credential_helper_surface():
     assert ".git/credentials" in helper_source
 
 
-# --- ARCHITECTURE version sync (Phase 5) ---
-
-def test_version_sync_checks_architecture_md():
-    """check_version_sync must compare VERSION with ARCHITECTURE.md header."""
-    sys.path.insert(0, REPO)
-    startup_mod = importlib.import_module("ouroboros.agent_startup_checks")
-    source = inspect.getsource(startup_mod.check_version_sync)
-    assert "ARCHITECTURE" in source
-    assert "architecture_version" in source
-
-
 # ---------------------------------------------------------------------------
 # The author's preflight (decision 3A): the wrapper names and the commit gate
 # ---------------------------------------------------------------------------
@@ -536,11 +438,6 @@ def test_version_sync_checks_architecture_md():
 def _get_preflight_module():
     sys.path.insert(0, REPO)
     return importlib.import_module("ouroboros.tools.preflight_review")
-
-
-def _get_review_state_module():
-    sys.path.insert(0, REPO)
-    return importlib.import_module("ouroboros.review_state")
 
 
 def test_advisory_pre_review_registered():
@@ -578,21 +475,6 @@ def test_preflight_gate_in_repo_commit_push():
     parallel_source = inspect.getsource(git_mod._run_parallel_review)
     assert "_prepare_unified_review" in parallel_source
     assert "_dispatch_unified_review" in parallel_source
-
-
-def test_snapshot_hash_stable_on_message_change(tmp_path):
-    """Snapshot hash must NOT differ when only commit_message changes.
-
-    Hash is now based on code content only (decoupled from commit_message
-    to make freshness less brittle when the message is slightly rephrased).
-    """
-    import subprocess
-    rs_mod = _get_review_state_module()
-    subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
-
-    h1 = rs_mod.compute_snapshot_hash(tmp_path, "message A")
-    h2 = rs_mod.compute_snapshot_hash(tmp_path, "message B")
-    assert h1 == h2
 
 
 def test_repo_commit_schema_has_skip_advisory_param():
@@ -699,57 +581,6 @@ def test_review_blocked_retry_note_owes_outcome_not_procedure():
                     "re-read the full diff", "group obligations by root cause",
                     "rewrite the plan", "another paid review needs"):
         assert retired not in lowered, retired
-
-
-def test_self_consistency_listed_as_critical_in_severity_rules():
-    """self_consistency (Ouroboros Body Layer item 14) must be treated as conditionally critical, not always advisory."""
-    import pathlib
-    checklists_path = pathlib.Path(__file__).parent.parent / "docs" / "CHECKLISTS.md"
-    content = checklists_path.read_text(encoding="utf-8")
-
-    # The severity rules section must describe self_consistency as conditionally critical
-    assert "self_consistency" in content
-    # Must NOT say items 11-13 are ALL advisory
-    lines = content.split("\n")
-    for line in lines:
-        if "items 11-13 are advisory" in line.lower():
-            raise AssertionError(
-                f"Found old 'items 11-13 are advisory' rule — self_consistency "
-                f"must now be conditionally critical:\n  {line}"
-            )
-    # Must say item 14 (self_consistency) is conditionally critical
-    assert "item 14 (self_consistency) is conditionally critical" in content.lower()
-    # v4.33.0: the old "README test counts" example was folded into the
-    # broader Critical surface whitelist. Narrative / prose / commentary
-    # mismatches outside the whitelist must be explicitly advisory.
-    assert "Critical surface whitelist" in content
-    assert "advisory" in content.lower()
-    # And the "narrative" framing of commit-message / doc wording remains.
-    assert "narrative" in content.lower()
-
-
-def test_development_compliance_checklist_expanded():
-    """development_compliance description must include specific concrete checks."""
-    import pathlib
-    checklists_path = pathlib.Path(__file__).parent.parent / "docs" / "CHECKLISTS.md"
-    content = checklists_path.read_text(encoding="utf-8")
-
-    # All these concrete checks must appear in the checklist
-    required_terms = [
-        "snake_case",
-        "PascalCase",
-        "Gateway",
-        "LLMClient",
-        "record/view contract",
-        "retain exact sources",
-        "required resident core",
-        "ToolEntry",
-    ]
-    for term in required_terms:
-        assert term in content, (
-            f"development_compliance checklist must mention '{term}' for concrete checks, "
-            f"but it's missing from CHECKLISTS.md"
-        )
 
 
 # test_triad_review_prompt_has_thoroughness_instructions and

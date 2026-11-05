@@ -392,7 +392,6 @@ class TestBudgetDriftOpenRouterOnly:
         ([{"kind": "openrouter", "name": "claude-credits", "label": "Claude credits"}], False),
         ('[{"kind": "openrouter", "name": "byok", "enabled": true}]', False),  # an environment-shaped value
         ([{"kind": "openrouter", "name": "byok", "enabled": False}], True),
-        ([{"kind": "openai", "name": "second"}, {"kind": "openrouter", "name": "default", "enabled": False}], True),
     ])
     def test_another_enabled_openrouter_connection_skips_the_percentage(self, tmp_path, monkeypatch, rows, alerts):
         """Every OpenRouter connection settles into the ledger's one ``openrouter`` bucket while

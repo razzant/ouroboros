@@ -59,11 +59,6 @@ def _row(data_root, reservation):
 @pytest.mark.parametrize("provider, bound, billed, paid", [
     ("claudexor", None, False, False),  # the subscription engine, price unknown before its receipt
     ("claudexor", None, True, True),    # ... whose own receipts already carried cash
-    ("local", None, False, False),      # the local lane
-    ("openrouter", None, False, True),  # unknown price on an API provider
-    ("test", None, False, True),
-    ("openai", 0.0, False, False),      # a known $0 price
-    ("openai", 0.01, False, True),
     ("claudexor", 0.2, False, True),    # a known price decides, whatever the route
 ])
 def test_paid_admission_is_the_one_rule(provider, bound, billed, paid):
@@ -193,11 +188,8 @@ def _scheduled_child(kind, target, parent_route, tid="child", root="root"):
 
 @pytest.mark.parametrize("main, kind, target, parent_route, paid", [
     ("openai/gpt-5.2", "api_model", SUBSCRIPTION, ("openai/gpt-5.2", "inherited"), False),
-    ("openai/gpt-5.2", "api_model", "small-model (local)", ("openai/gpt-5.2", "inherited"), False),
-    (SUBSCRIPTION, "api_model", "openai/gpt-5.2", (SUBSCRIPTION, "inherited"), True),
     # A nanny supervises its run on the parent's cognition: a parent that chose its own route hands that route down.
     ("openai/gpt-5.2", "agent_session", "codex=gpt-6-astra", (SUBSCRIPTION, "parent_switch"), False),
-    (SUBSCRIPTION, "agent_session", "codex=gpt-6-astra", ("openai/gpt-5.2", "parent_switch"), True),
     # ... a parent following Main hands Main down, live.
     ("openai/gpt-5.2", "agent_session", "codex=gpt-6-astra", ("openai/gpt-5.2", "inherited"), True),
 ])

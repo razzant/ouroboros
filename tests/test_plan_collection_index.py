@@ -15,6 +15,7 @@ from tests.test_plan_task_tool import harness as harness
 from tests.test_review_collection_index import _combined_schema, _legacy_store, _old_replace, _operation
 from tests.test_store import document, publish
 from tests.test_store_cutover import _plan, captured_statements
+from tests._cases import chosen_rows
 
 
 def _pending(**fields):
@@ -26,7 +27,7 @@ def _flags(root, task_id):
         return txn.row(task_id, "review_collection_pending", "plan_collection_pending", "write_seq")
 
 
-@pytest.mark.parametrize(("raw", "expected"), [
+@pytest.mark.parametrize(("raw", "expected"), chosen_rows([
     (None, False), ({}, False), (plan_record.empty_record(), False),
     (_record([_pending()]), True),
     (_record([_pending(owner_marked=False, dispatched=False, unresolved=True)]), True),
@@ -38,7 +39,7 @@ def _flags(root, task_id):
     ({"schema_version": 3, "asks": [None]}, True),
     ({"schema_version": 3, "asks": [{"participants": {}}]}, True),
     (_record([{"seat_id": "unknown", "status": "future_status"}]), True),
-])
+], 12, 13, 15))
 def test_plan_selection_is_pure_and_conservative(tmp_path, monkeypatch, raw, expected):
     def forbidden(*_args, **_kwargs):
         pytest.fail("selection must not read sources or fully validate/copy history")
@@ -298,9 +299,11 @@ def test_lazy_selection_failure_preserves_real_settlement_and_remaining_pending_
     assert late._plan_marks(root) == [mark] and council.transport.calls.count("m/a") == 1
 
 
-@pytest.mark.parametrize("discovery", ["initial", "changed", "legacy"])
-@pytest.mark.parametrize("read", ["plan", "terminal", "collection"])
-@pytest.mark.parametrize("failure", ["busy", "invalid"])
+@pytest.mark.parametrize(("failure", "read", "discovery"), [
+    ("busy", "terminal", "changed"),
+    ("invalid", "plan", "initial"),
+    ("invalid", "collection", "legacy"),
+])
 def test_failed_plan_examination_retries_contention_and_rests_on_invalid_input(council, monkeypatch, discovery, read, failure):
     from ouroboros import maintenance, maintenance_jobs, plan_collection_job, task_results
     from ouroboros.tools import plan_ask

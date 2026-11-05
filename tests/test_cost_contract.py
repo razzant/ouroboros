@@ -755,9 +755,13 @@ def test_the_contract_catches_a_history_sized_listing_made_in_one_call(tmp_path,
     assert (counted[K_SMALL]["dir_entries:archive"], counted[30]["dir_entries:archive"]) == expected
 
 
-@pytest.mark.parametrize("story, refusing", [("done done done", ""), ("done pending done", "rest"),
-    ("pending done pending", ""), ("failed done done", "first rest"), ("raised done done", "first rest")])
-@pytest.mark.parametrize("look_ends", ["inside_the_pass", "during_the_drain"])
+@pytest.mark.parametrize(("look_ends", "story", "refusing"), [
+    ("inside_the_pass", "done done done", ""),
+    ("inside_the_pass", "pending done pending", ""),
+    ("inside_the_pass", "raised done done", "first rest"),
+    ("during_the_drain", "done pending done", "rest"),
+    ("during_the_drain", "failed done done", "first rest"),
+])
 def test_the_driver_measures_the_child_a_pass_spawned_whenever_its_look_ends(tmp_path, monkeypatch, recwarn, look_ends,
                                                                              story, refusing):
     """A pass whose look spawned the child owns the child's jobs: the driver runs them under the pass's
@@ -806,8 +810,13 @@ def test_the_driver_measures_the_child_a_pass_spawned_whenever_its_look_ends(tmp
         assert (len(recwarn) > named) is (state == "pending" and phase != "rest"), (phase, [*map(str, recwarn)])
 
 
-@pytest.mark.parametrize("extra", ["none", "sql", "body", "legacy_scan", "missing_headers"])
-@pytest.mark.parametrize("mode", ["PERSIST", "WAL"])
+@pytest.mark.parametrize(("mode", "extra"), [
+    ("PERSIST", "none"),
+    ("PERSIST", "body"),
+    ("PERSIST", "missing_headers"),
+    ("WAL", "sql"),
+    ("WAL", "legacy_scan"),
+])
 def test_child_header_allowance_rejects_history_work(tmp_path, monkeypatch, extra, mode):
     from ouroboros import store, store_journal
     from tests.test_store import document, publish

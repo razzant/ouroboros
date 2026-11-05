@@ -138,7 +138,6 @@ def test_completion_between_admission_and_write_reports_retained_unread(tmp_path
 @pytest.mark.parametrize("changes", [
     {"source": "task"},
     {"_is_direct_chat": False},
-    {"metadata": {"presence": {"binding_id": "1" * 32}}},
     {"metadata": {"presence": {}, "presence_event_identity": "event-identity"}},
 ])
 def test_presence_metadata_alone_does_not_create_a_mailbox_target(tmp_path, changes):

@@ -8,8 +8,7 @@ import threading
 import pytest
 
 
-@pytest.mark.parametrize('server_mode', ['hung', 'unavailable'])
-@pytest.mark.parametrize('surface', ['tray', 'desktop_bridge'])
+@pytest.mark.parametrize(("surface", "server_mode"), [('tray', 'hung'), ('desktop_bridge', 'unavailable')])
 def test_real_launcher_stop_and_next_boot_keep_panic_authority(tmp_path, server_mode, surface):
     from ouroboros.test_environment import isolated_environment
     from ouroboros.platform_layer import pid_is_alive

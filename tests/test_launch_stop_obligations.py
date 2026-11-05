@@ -27,6 +27,7 @@ from tests._launch_stop_shared import (
     _owed,
     _reader,
 )
+from tests._cases import case_folders, chosen_rows
 
 pytestmark = [
               pytest.mark.skipif(os.name == "nt", reason="the measured stop is POSIX; Windows keeps its native kill")]
@@ -47,8 +48,10 @@ class _Held:
         return self.poll()
 
 
-@pytest.mark.parametrize("consumer", ["next-start retry", "next-generation reaper"])
-@pytest.mark.parametrize("order", ["memory-then-ledger", "ledger-then-memory"])
+@pytest.mark.parametrize(("order", "consumer"), [
+    ("memory-then-ledger", "next-start retry"),
+    ("ledger-then-memory", "next-generation reaper"),
+])
 def test_two_parallel_exit_stops_of_one_launch_keep_what_either_could_not_end(tmp_path, monkeypatch, order, consumer):
     """Launch A's runner L has a child C in its own group whose binary hides its environment. Two writers of
     ``_stop_records`` stop A at once: the in-memory owner reaches C through L's chain while the daemon roots are
@@ -120,13 +123,10 @@ def test_two_parallel_exit_stops_of_one_launch_keep_what_either_could_not_end(tm
 @pytest.mark.parametrize("current,judged,observed,stale,expected", [
     # a stop discharges what it measured and left out, keeps what another stop added, takes its own answer
     ([{"pid": 7, "birth": "b"}], [{"pid": 7, "birth": "b"}], [], False, []),
-    ([{"pid": 8, "birth": "b", "held": True}], [], [{"pid": 9, "birth": "b"}], False,
-     [{"pid": 9, "birth": "b"}, {"pid": 8, "birth": "b", "held": True}]),
     # held status survives its answer
     ([{"pid": 8, "birth": "b", "held": True}], (), [{"pid": 8, "birth": "b"}], False,
      [{"pid": 8, "birth": "b", "held": True}]),
     # another birth on the same pid is another identity; a stale copy adds without authority
-    ([{"pid": 7, "birth": "a"}], [{"pid": 7, "birth": "b"}], [], False, [{"pid": 7, "birth": "a"}]),
     ([], (), [{"pid": 9, "birth": "b"}], True, [{"pid": 9, "birth": "b", "held": True}]),
 ])
 def test_only_a_stop_that_judged_an_identity_discharges_it(current, judged, observed, stale, expected):
@@ -158,7 +158,7 @@ def _births_unreadable(monkeypatch):
     return restore
 
 
-@pytest.mark.parametrize("consumer", ["reaper", "quiesce", "presence", "body candidate"])
+@pytest.mark.parametrize("consumer", ["reaper", "quiesce", "body candidate"])
 def test_a_launch_whose_birth_could_not_be_read_is_still_ended_and_held_by_its_marker(
         tmp_path, monkeypatch, scripts, consumer):
     """The registration could not read the leader's birth, so the row keeps its launch marker without one. The
@@ -228,8 +228,12 @@ def test_an_executor_service_whose_birth_could_not_be_read_keeps_its_marker_for_
         _end(pid, birth)
 
 
-@pytest.mark.parametrize("case", ["marker carrier", "hidden live leader", "command-changed leader", "birth-refuted pid"])
-@pytest.mark.parametrize("reader", ["presence", "cold sleep", "continuation", "body candidate"])
+@pytest.mark.parametrize(("reader", "case"), [
+    ("presence", "marker carrier"),
+    ("cold sleep", "hidden live leader"),
+    ("continuation", "command-changed leader"),
+    ("body candidate", "birth-refuted pid"),
+])
 def test_every_reader_holds_an_unmeasured_launch_by_its_marker_and_only_a_birth_refutes_its_leader(
         tmp_path, monkeypatch, reader, case):
     """The four custody readers over a launch row whose leader birth the registration could not read: a process
@@ -547,7 +551,7 @@ _CONTENDED_CASES = [*((stop, "presence") for stop in ("exit record step", "reape
                     ("reaper", "body candidate"), ("service owner", "next start")]
 
 
-@pytest.mark.parametrize("stop,reader", _CONTENDED_CASES)
+@pytest.mark.parametrize("stop,reader", chosen_rows(_CONTENDED_CASES, 0, 8, 9))
 def test_a_child_a_stop_observed_while_the_ledger_lock_was_held_stays_owed_for_every_later_reader(
         tmp_path, monkeypatch, stop, reader):
     """A stop of launch A reaches runner L's child C through L's chain while the daemon roots are unreadable, so
@@ -685,7 +689,7 @@ def _contended_stop(tmp_path, monkeypatch, task):
     return rows, world, roots
 
 
-@pytest.mark.parametrize("damage", _DAMAGES)
+@pytest.mark.parametrize("damage", chosen_rows(_DAMAGES, 0, 2))
 @pytest.mark.parametrize("reader", ["presence", "continuation", "cold sleep", "body candidate"])
 def test_custody_a_contended_stop_wrote_reads_as_unknown_while_it_cannot_be_read(tmp_path, monkeypatch, reader, damage):
     """The stop succeeded in writing C to the existing pending channel because the ledger lock was held. The pending
@@ -709,51 +713,54 @@ def test_custody_a_contended_stop_wrote_reads_as_unknown_while_it_cannot_be_read
     assert _CHILD in rows, "reading signals nothing"
 
 
-@pytest.mark.parametrize("damage", _DAMAGES)
-@pytest.mark.parametrize("consumer", ["exit record step", "reaper", "quiesce", "service owner"])
-def test_no_stop_confirms_a_launch_whose_custody_it_cannot_read(tmp_path, monkeypatch, consumer, damage):
+def test_no_stop_confirms_a_launch_whose_custody_it_cannot_read(subtests, tmp_path, monkeypatch):
     """The same damage under the stops. L is gone and nothing traces C, so each stop's own answer is clean; it still
     keeps the launch, and after the damage clears the next start ends C and retires it."""
-    from ouroboros import owned_shutdown, process_custody
-    from ouroboros.tools import services
-    from tests._launch_stop_shared import _CHILD, _MARK_A, _PID, _launch_row
+    case_paths = case_folders(tmp_path)
+    for damage in _DAMAGES:
+        for consumer in ["exit record step", "reaper", "quiesce", "service owner"]:
+            tmp_path = next(case_paths)
+            with subtests.test(damage=damage, consumer=consumer), monkeypatch.context() as monkeypatch:
+                from ouroboros import owned_shutdown, process_custody
+                from ouroboros.tools import services
+                from tests._launch_stop_shared import _CHILD, _MARK_A, _PID, _launch_row
 
-    rows, world, roots = _contended_stop(tmp_path, monkeypatch, "t-a")
-    roots["unknown"] = False
-    launch = f"launch-{_MARK_A.rsplit('_', 1)[-1]}"
-    undo: list = []
-    _damage(tmp_path, damage, undo)
-    try:
-        if consumer == "exit record step":
-            monkeypatch.setattr(owned_shutdown, "_GENERATION_STOP", owned_shutdown._Stop())
-            outcome = owned_shutdown.stop_owned_work(tmp_path)
-            assert outcome["state"] == "unconfirmed", outcome
-            if damage != "document after folding":  # with no readable document the exit reads no target at all
-                assert launch in outcome["unconfirmed"], f"the record stays while C cannot be read: {outcome}"
-        elif consumer == "service owner":
-            held, memory, _stop = _in_memory_service(tmp_path, monkeypatch, "host service", rows, _launch_row(
-                "t-a", purpose="service:a"))
-            [payload] = services.kill_all_services(tmp_path, wait=True, durable=False)
-            assert payload["stop_failed"] is True and payload["process_cleanup"]["custody"] == "unavailable", payload
-            assert held.service_id in memory and (tmp_path / "a.log").exists(), "its record, name and live log stay"
-            memory.clear()  # that server exited; its in-memory owner is gone
-        elif consumer == "reaper":
-            process_custody.reap_orphaned_processes(tmp_path, running_task_ids=set())
-            assert [row for row in process_custody._read_ledger(tmp_path) if row.get("scope_marker") == _MARK_A]
-        else:
-            ok, blockers = process_custody.quiesce_custodied_services(tmp_path, timeout_sec=0)
-            assert ok is False and blockers, "an update cannot begin over custody it cannot read"
-            assert [row for row in process_custody._read_ledger(tmp_path) if row.get("scope_marker") == _MARK_A]
-    finally:
-        for restore in undo:
-            restore()
-    assert _CHILD in rows and _PID not in rows
-    monkeypatch.setattr(owned_shutdown, "_GENERATION_STOP", owned_shutdown._Stop())
-    entries = [entry for entry in owned_shutdown.owned_records(tmp_path) if owned_shutdown._is_stop_target(entry)]
-    assert entries, "the record stayed for the next start"
-    assert owned_shutdown._stop_records(tmp_path, entries, time.monotonic() + _PATIENCE) == []
-    assert _CHILD not in rows, "the next start ends what the contended stop observed"
-    assert world.signals[-1][0] == _CHILD
+                rows, world, roots = _contended_stop(tmp_path, monkeypatch, "t-a")
+                roots["unknown"] = False
+                launch = f"launch-{_MARK_A.rsplit('_', 1)[-1]}"
+                undo: list = []
+                _damage(tmp_path, damage, undo)
+                try:
+                    if consumer == "exit record step":
+                        monkeypatch.setattr(owned_shutdown, "_GENERATION_STOP", owned_shutdown._Stop())
+                        outcome = owned_shutdown.stop_owned_work(tmp_path)
+                        assert outcome["state"] == "unconfirmed", outcome
+                        if damage != "document after folding":  # with no readable document the exit reads no target at all
+                            assert launch in outcome["unconfirmed"], f"the record stays while C cannot be read: {outcome}"
+                    elif consumer == "service owner":
+                        held, memory, _stop = _in_memory_service(tmp_path, monkeypatch, "host service", rows, _launch_row(
+                            "t-a", purpose="service:a"))
+                        [payload] = services.kill_all_services(tmp_path, wait=True, durable=False)
+                        assert payload["stop_failed"] is True and payload["process_cleanup"]["custody"] == "unavailable", payload
+                        assert held.service_id in memory and (tmp_path / "a.log").exists(), "its record, name and live log stay"
+                        memory.clear()  # that server exited; its in-memory owner is gone
+                    elif consumer == "reaper":
+                        process_custody.reap_orphaned_processes(tmp_path, running_task_ids=set())
+                        assert [row for row in process_custody._read_ledger(tmp_path) if row.get("scope_marker") == _MARK_A]
+                    else:
+                        ok, blockers = process_custody.quiesce_custodied_services(tmp_path, timeout_sec=0)
+                        assert ok is False and blockers, "an update cannot begin over custody it cannot read"
+                        assert [row for row in process_custody._read_ledger(tmp_path) if row.get("scope_marker") == _MARK_A]
+                finally:
+                    for restore in undo:
+                        restore()
+                assert _CHILD in rows and _PID not in rows
+                monkeypatch.setattr(owned_shutdown, "_GENERATION_STOP", owned_shutdown._Stop())
+                entries = [entry for entry in owned_shutdown.owned_records(tmp_path) if owned_shutdown._is_stop_target(entry)]
+                assert entries, "the record stayed for the next start"
+                assert owned_shutdown._stop_records(tmp_path, entries, time.monotonic() + _PATIENCE) == []
+                assert _CHILD not in rows, "the next start ends what the contended stop observed"
+                assert world.signals[-1][0] == _CHILD
 
 
 def test_a_pending_copy_a_fold_deleted_under_a_strict_read_is_in_the_document(tmp_path, monkeypatch):

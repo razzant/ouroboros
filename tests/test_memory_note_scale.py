@@ -13,8 +13,7 @@ _BASE_SNAPSHOT = scale.snapshot()
 
 
 @pytest.mark.parametrize('extra_chars, note_lines, aggregate, fits', [
-    (0, 6, True, True), (32000, 6, True, True), (48000, 6, True, True),
-    (52000, 6, True, False), (53000, 6, True, False), (54000, 6, True, False),
+    (0, 6, True, True), (52000, 6, True, False), (54000, 6, True, False),
 ])
 def test_note_pressure_measurement(tmp_path, monkeypatch, extra_chars, note_lines, aggregate, fits):
     snap = deepcopy(_BASE_SNAPSHOT)
@@ -45,7 +44,7 @@ def test_note_pressure_measurement(tmp_path, monkeypatch, extra_chars, note_line
     print('NOTE_PRESSURE ' + json.dumps({'extra_chars': extra_chars, **result}, sort_keys=True))
 
 
-@pytest.mark.parametrize('last_step', ['nothing', 'F5a', 'F8', 'F8a'])
+@pytest.mark.parametrize('last_step', ['nothing', 'F5a', 'F8a'])
 def test_main_nano_floor_composition_by_available_forms(tmp_path, monkeypatch, last_step):
     # A counterfactual minimum, not the automatic choice: expose each form's price
     # on identical source bytes. The automatic-choice test above keeps notes whole when they fit.

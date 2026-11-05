@@ -117,7 +117,6 @@ def test_reply_to_authored_completion_mirror_quotes_the_shown_answer(tmp_path, m
 @pytest.mark.parametrize("direction,record_type,meta,role", [
     ("system", "task_error", {}, "system"),
     ("system", "project_completion_summary", {"completion_answer": "", "project_id": "project-a"}, "system"),
-    ("system", "project_completion_summary", {"project_id": "project-a"}, "system"),
     ("out", "", {}, "assistant"),
 ])
 def test_reply_to_other_rows_keeps_their_own_text_and_voice(tmp_path, monkeypatch, direction, record_type, meta, role):

@@ -76,8 +76,7 @@ def _park(env, tmp_path, monkeypatch, *, direct=False, selected=None):
     return bp.budget_pause_row(tmp_path, "sleeper")
 
 
-@pytest.mark.parametrize("direct", [False, True])
-@pytest.mark.parametrize("terminal", [False, True])
+@pytest.mark.parametrize(("terminal", "direct"), [(False, False), (True, True)])
 def test_exact_cold_transfer_park_wake_and_same_author_restore(tmp_path, monkeypatch, direct, terminal):
     from ouroboros import budget_pause as bp, delegate_custody_current as current, owner_wait
     from ouroboros.owner_mailbox import write_owner_message

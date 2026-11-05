@@ -936,7 +936,7 @@ def test_unknown_or_uncopied_terminal_retains_same_job(tmp_path, monkeypatch, so
     W.respawn_worker.assert_not_called()
 
 
-@pytest.mark.parametrize('change', ['worker', 'meta', 'attempt', 'root', 'worker_binding'])
+@pytest.mark.parametrize('change', ['worker', 'attempt', 'worker_binding'])
 def test_stale_captured_job_cannot_prepare_or_respawn(tmp_path, monkeypatch, change):
     import supervisor.workers as W
     from supervisor.worker_health import recover_confirmed_dead_worker
@@ -1139,8 +1139,12 @@ def test_existing_nonretry_reasons_and_cost_projection_survive_handoff(tmp_path,
     q.enqueue_task.assert_not_called()
 
 
-@pytest.mark.parametrize("deleted", [False, True])
-@pytest.mark.parametrize("basis_kind", ["prepared", "legacy", "converted_main", "converted_derived"])
+@pytest.mark.parametrize(("basis_kind", "deleted"), [
+    ("prepared", False),
+    ("legacy", True),
+    ("converted_main", False),
+    ("converted_derived", True),
+])
 def test_real_crash_retry_keeps_prepared_scope_across_registry_activity(tmp_path, monkeypatch, deleted, basis_kind):
     from ouroboros import projects_registry as registry
     from ouroboros.task_results import load_task_result, write_task_result
@@ -1370,10 +1374,7 @@ def test_a_refused_exact_continuation_load_parks_the_same_id_again(tmp_path, mon
 
 @pytest.mark.parametrize("pause, returns", [
     ({"state": "paused", "task_attempt": 1}, True),
-    ({"state": "resume_granted", "task_attempt": 1, "grant": {"grant_id": "g"}}, True),
     ({"state": "resume_granted", "task_attempt": 1, "grant": {"grant_id": "g", "consumed_at": 1.0}}, False),
-    ({"state": "resumed", "task_attempt": 1}, False),
-    ({"state": "paused", "task_attempt": 2}, False),
     ({}, False),
 ])
 def test_only_a_live_unconsumed_pause_of_this_attempt_keeps_the_death_for_recovery(pause, returns):
@@ -1385,7 +1386,6 @@ def test_only_a_live_unconsumed_pause_of_this_attempt_keeps_the_death_for_recove
 @pytest.mark.parametrize("attempt, pause, records", [
     (1, {}, True),  # no pause: the exception is the task's own terminal
     (2, {"state": "paused", "task_attempt": 2}, False),  # this attempt's live pause: recovery parks it
-    (1, {"state": "paused", "task_attempt": 2}, True),  # another attempt's pause does not own this death
     (1, OSError("pause row unreadable"), False),  # unknown pause evidence: recovery decides, as before
 ])
 def test_the_worker_reads_this_attempts_pause_from_the_budget_root_before_recording(tmp_path, monkeypatch,

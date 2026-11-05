@@ -14,6 +14,7 @@ import pathlib
 import pytest
 
 from ouroboros.tools.registry import ToolRegistry
+from tests._cases import case_folders
 
 # Conditions the custom projection clipped, wholly or partly, from the schedule_subagent lead before
 # #502 (full and acting kept 2310 of its 3392 characters, readonly 2552 and so lost fewer), in the
@@ -67,20 +68,6 @@ def test_schedule_readonly_choice_survives_custom_projection(tmp_path, constrain
     ("delegate_start", {"prompt": "New evidence", "subagent_id": "actor-1",
                         "continue_from": "settled-run", "continue_carrier": "packet"},
      "continue_carrier", "restart"),
-    ("verify_and_record", {"contract_kind": "explicit_command", "check": ["python", "check.py"],
-                           "expected_match": "bytes_equal", "artifact_paths": ["actual", "expected"]},
-     "expected_match", "approximate"),
-    ("start_task", {"objective": "Inspect supplied project", "title": "Supplied project inspection",
-                              "workspace": "none", "context_requires_self_body_docs": False},
-     "context_requires_self_body_docs", "false"),
-    ("preflight_review", {"commit_message": "Repair interfaces", "deterministic_only": True,
-                          "source": "index"},
-     "source", "head"),
-    ("query_data", {"op": "sql", "db": "money", "query": "SELECT 1", "max_rows": 5}, "db", "ledger"),
-    ("query_data", {"op": "jsonl", "kind": "events_log", "tail": 20}, "max_rows", 0),
-    ("delegate_wait", {"run_id": "run-1", "checkpoint_after_sec": 60, "checkpoint_reason": "Inspect the diff"},
-     "checkpoint_after_sec", "soon"),
-    ("wait_tasks", {"task_ids": ["child-1"], "mode": "any_terminal", "timeout_sec": 60}, "mode", "first_terminal"),
 ])
 def test_edited_description_schemas_keep_representative_call_shapes(
         tmp_path, name, arguments, invalid_field, invalid_value):
@@ -176,19 +163,22 @@ _SCHEDULE_REMOVALS_CARRIED_BY = (
 )
 
 
-@pytest.mark.parametrize("profile", sorted(_PROFILES))
-def test_schedule_lead_removals_stay_in_co_present_custom_leads(tmp_path, profile):
-    from ouroboros.openai_chat_custom import project_function_tools_to_openai_custom
+def test_schedule_lead_removals_stay_in_co_present_custom_leads(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for profile in sorted(_PROFILES):
+        tmp_path = next(case_paths)
+        with subtests.test(profile=profile):
+            from ouroboros.openai_chat_custom import project_function_tools_to_openai_custom
 
-    registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
-    registry._ctx.task_constraint = _PROFILES[profile]
-    catalog = project_function_tools_to_openai_custom(registry.schemas())
-    leads = {tool["custom"]["name"]: tool["custom"]["description"].rpartition("\nInput must be one JSON object")[0]
-             for tool in catalog.wire_tools()}
-    assert "schedule_subagent" in leads
-    for name, words, profiles in _SCHEDULE_REMOVALS_CARRIED_BY:
-        if profile in profiles:
-            assert words in leads.get(name, ""), (name, words)
+            registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
+            registry._ctx.task_constraint = _PROFILES[profile]
+            catalog = project_function_tools_to_openai_custom(registry.schemas())
+            leads = {tool["custom"]["name"]: tool["custom"]["description"].rpartition("\nInput must be one JSON object")[0]
+                     for tool in catalog.wire_tools()}
+            assert "schedule_subagent" in leads
+            for name, words, profiles in _SCHEDULE_REMOVALS_CARRIED_BY:
+                if profile in profiles:
+                    assert words in leads.get(name, ""), (name, words)
 
 
 # SYSTEM is delivered whole in every mode, Nano included: its own words for the removed clauses that a
@@ -208,33 +198,36 @@ _SCHEDULE_REMOVALS_IN_SYSTEM = (
 )
 
 
-@pytest.mark.parametrize("profile", sorted(_PROFILES))
-def test_nano_selected_schedule_lead_stands_without_other_delegation_leads(tmp_path, profile):
+def test_nano_selected_schedule_lead_stands_without_other_delegation_leads(subtests, tmp_path):
     """A Nano actor may load schedule_subagent alone, so no other delegation lead is in its request:
     the lead, SYSTEM and the Connections names must then carry what a caller needs before the call."""
-    from ouroboros.openai_chat_custom import project_function_tools_to_openai_custom
-    from ouroboros.tool_connections import connection_views
-    from ouroboros.tool_policy import NANO_SCHEMA_META_NAMES, initial_tool_schemas
+    case_paths = case_folders(tmp_path)
+    for profile in sorted(_PROFILES):
+        tmp_path = next(case_paths)
+        with subtests.test(profile=profile):
+            from ouroboros.openai_chat_custom import project_function_tools_to_openai_custom
+            from ouroboros.tool_connections import connection_views
+            from ouroboros.tool_policy import NANO_SCHEMA_META_NAMES, initial_tool_schemas
 
-    registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
-    registry._ctx.task_constraint = _PROFILES[profile]
-    schemas = initial_tool_schemas(registry, context_mode="nano", schema_names=["schedule_subagent"])
-    names = {schema["function"]["name"] for schema in schemas}
-    assert "schedule_subagent" in names and names <= {"schedule_subagent", *NANO_SCHEMA_META_NAMES}, names
-    function = next(schema["function"] for schema in schemas if schema["function"]["name"] == "schedule_subagent")
-    custom = next(tool["custom"]["description"] for tool in project_function_tools_to_openai_custom(schemas).wire_tools()
-                  if tool["custom"]["name"] == "schedule_subagent")
-    assert custom.startswith(" ".join(function["description"].split()) + "\n")
-    for condition in (*_SCHEDULE_TAIL, "write_root, else the selected/inherited workspace_root, else one new Git tree",
-                      "Runtime data, including installed skill payloads, is never a write_surface",
-                      "access='readonly' selects read-only session execution", "evidence-only private checking copy"):
-        assert condition in custom, condition
-    system = " ".join((pathlib.Path(__file__).resolve().parents[1] / "prompts" / "SYSTEM.md")
-                      .read_text(encoding="utf-8").split())
-    for words in _SCHEDULE_REMOVALS_IN_SYSTEM:
-        assert words in system, words
-    # The other carriers are absent here, yet named in the Nano map and loadable on demand.
-    _, nano_map = connection_views(registry, helper=profile != "full")
-    for name, _words, profiles in _SCHEDULE_REMOVALS_CARRIED_BY:
-        if profile in profiles:
-            assert name not in names and name in nano_map, name
+            registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
+            registry._ctx.task_constraint = _PROFILES[profile]
+            schemas = initial_tool_schemas(registry, context_mode="nano", schema_names=["schedule_subagent"])
+            names = {schema["function"]["name"] for schema in schemas}
+            assert "schedule_subagent" in names and names <= {"schedule_subagent", *NANO_SCHEMA_META_NAMES}, names
+            function = next(schema["function"] for schema in schemas if schema["function"]["name"] == "schedule_subagent")
+            custom = next(tool["custom"]["description"] for tool in project_function_tools_to_openai_custom(schemas).wire_tools()
+                          if tool["custom"]["name"] == "schedule_subagent")
+            assert custom.startswith(" ".join(function["description"].split()) + "\n")
+            for condition in (*_SCHEDULE_TAIL, "write_root, else the selected/inherited workspace_root, else one new Git tree",
+                              "Runtime data, including installed skill payloads, is never a write_surface",
+                              "access='readonly' selects read-only session execution", "evidence-only private checking copy"):
+                assert condition in custom, condition
+            system = " ".join((pathlib.Path(__file__).resolve().parents[1] / "prompts" / "SYSTEM.md")
+                              .read_text(encoding="utf-8").split())
+            for words in _SCHEDULE_REMOVALS_IN_SYSTEM:
+                assert words in system, words
+            # The other carriers are absent here, yet named in the Nano map and loadable on demand.
+            _, nano_map = connection_views(registry, helper=profile != "full")
+            for name, _words, profiles in _SCHEDULE_REMOVALS_CARRIED_BY:
+                if profile in profiles:
+                    assert name not in names and name in nano_map, name

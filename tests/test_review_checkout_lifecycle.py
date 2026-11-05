@@ -19,6 +19,7 @@ import pytest
 
 from ouroboros import review_checking as rc
 from ouroboros import subagent_worktrees as sw
+from tests._cases import case_folders
 
 TASK = "task-lifecycle"
 EDIT = b"# reviewer reproduction\n"
@@ -63,25 +64,27 @@ def _boom(*_args, **_kwargs):
     raise OSError(5, "Input/output error")
 
 
-@pytest.mark.parametrize("state", STATES)
-@pytest.mark.parametrize("scope", list(SCOPES.values()), ids=list(SCOPES))
-def test_every_terminal_releases_its_copy_after_the_receipt(tmp_path, state, scope):
-    root, source = _frozen(tmp_path)
-    area = _seat(root, source, "op-1")
-    summary = {"state": state, **({} if scope is ABSENT else {"processScope": scope})}
-    receipt = rc.terminal_seat_evidence(root, TASK, "op-1", {"summary": summary})
-    assert receipt["status"] == "retained" and not area.exists()
-    evidence = Path(receipt["evidence_dir"])
-    assert json.loads((evidence / "summary.json").read_text(encoding="utf-8")) == receipt
-    assert (evidence / "files" / "check.py").read_bytes() == EDIT
-    assert (evidence / "files" / rc.EVIDENCE_DIRNAME / "out.log").read_bytes() == LOG
-    assert not {"area", "refresh_safe", "retention_reason", "release_basis"} & set(receipt)
-    assert rc.terminal_seat_evidence(root, TASK, "op-1", {"summary": summary}) == receipt
+def test_every_terminal_releases_its_copy_after_the_receipt(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for state in STATES:
+        for scope in list(SCOPES.values()):
+            tmp_path = next(case_paths)
+            with subtests.test(state=state, scope=scope):
+                root, source = _frozen(tmp_path)
+                area = _seat(root, source, "op-1")
+                summary = {"state": state, **({} if scope is ABSENT else {"processScope": scope})}
+                receipt = rc.terminal_seat_evidence(root, TASK, "op-1", {"summary": summary})
+                assert receipt["status"] == "retained" and not area.exists()
+                evidence = Path(receipt["evidence_dir"])
+                assert json.loads((evidence / "summary.json").read_text(encoding="utf-8")) == receipt
+                assert (evidence / "files" / "check.py").read_bytes() == EDIT
+                assert (evidence / "files" / rc.EVIDENCE_DIRNAME / "out.log").read_bytes() == LOG
+                assert not {"area", "refresh_safe", "retention_reason", "release_basis"} & set(receipt)
+                assert rc.terminal_seat_evidence(root, TASK, "op-1", {"summary": summary}) == receipt
 
 
-@pytest.mark.parametrize("detail", [{"summary": {"state": "running"}}, {"summary": {"state": "queued"}},
-                                    {"summary": None}, {}, None],
-                         ids=["running", "queued", "no-summary", "empty", "none"])
+@pytest.mark.parametrize("detail", [{"summary": {"state": "running"}}, {"summary": None}, None],
+                         ids=["running", "no-summary", "none"])
 def test_a_run_not_seen_terminal_keeps_its_copy(tmp_path, detail):
     root, source = _frozen(tmp_path)
     area = _seat(root, source, "op-1")

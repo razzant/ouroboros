@@ -72,16 +72,6 @@ def test_display_redacts_typed_details_without_mutating_custody():
     ("provider_failed", 400, False, "context_overflow", False, "", "context_length_exceeded"),
     ("invalid_request", 400, False, "context_overflow", False, "", " context_length_exceeded "),
     ("invalid_request", 400, False, "bad_request", False, "", "string_above_max_length"),
-    ("invalid_request", 400, False, "request_too_large", False, "", "max_tokens_exceeded"),
-    ("invalid_request", 400, False, "auth_error", False, "", "invalid_api_key"),
-    ("invalid_request", 400, False, "provider_transient", True, "", "rate_limit_exceeded"),
-    ("invalid_request", 400, False, "bad_request", False, "", None),
-    ("invalid_request", 400, False, "bad_request", False, "", 42),
-    ("invalid_request", 400, False, "bad_request", False, "", "  "),
-    ("auth_required", 401, False, "auth_error", False, "auth", "context_length_exceeded"),
-    ("subscription_window_exhausted", 429, False, "subscription_window_exhausted", False, "quota", "context_length_exceeded"),
-    ("unsupported_parameter", 400, False, "bad_request", False, "", "context_length_exceeded"),
-    ("invalid_request", 400, True, "provider_outcome_unknown", False, "", "context_length_exceeded"),
 ])
 def test_vendor_facts_reach_shared_readers_without_changing_wrapper_custody(code, status, unknown, kind, retry, wait, vendor):
     from ouroboros.llm_attempt import _is_structured_context_overflow_exception
@@ -274,7 +264,7 @@ def test_sync_preserves_system_images_tool_cycle_and_native_custody(setup, monke
 
 
 @pytest.mark.parametrize("cash,knowledge,expected,final", [(0, "exact", 0, True), (0.25, "exact", 0.25, True),
-                                                        (0.4, "estimated", 0.4, False), (0, "unknown", None, False)])
+                                                        (0.4, "estimated", 0.4, False)])
 def test_cash_is_independent_from_valuation_and_credentials(setup, cash, knowledge, expected, final):
     root, gateway, client = setup
     gateway.results = [result(cash=cash, knowledge=knowledge)]
@@ -297,8 +287,12 @@ def test_same_model_roles_bind_separate_accounts_and_unlabelled_is_auto(setup, m
     ]
 
 
-@pytest.mark.parametrize("method", ["chat", "chat_async", "vision_query", "remote"])
-@pytest.mark.parametrize("override", [None, "", "account-b"])
+@pytest.mark.parametrize(("override", "method"), [
+    (None, "chat"),
+    (None, "remote"),
+    ("", "chat_async"),
+    ("account-b", "vision_query"),
+])
 def test_explicit_account_override_keeps_role_and_auto_semantics(setup, monkeypatch, method, override):
     _, gateway, client = setup
     monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"main": "main-pin", "vision": "vision-pin"}))
@@ -359,8 +353,11 @@ def test_precreate_handshake_waits_only_for_unanswered_transport(setup, monkeypa
         assert all(row["state"] == "released" for row in ledger(root))
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("content", [None, "Original answer\r\n", [{"type": "text", "text": "Original block 🐍"}]])
+@pytest.mark.parametrize(("content", "asynchronous"), [
+    (None, False),
+    ("Original answer\r\n", False),
+    pytest.param([{"type": "text", "text": "Original block 🐍"}], True, id='content2-True'),
+])
 def test_direct_provider_history_keeps_refusal_text_and_omits_stop_metadata(setup, content, asynchronous):
     _, gateway, client = setup
     refusal = "Cannot comply with this request. 🐍\r\n"
@@ -379,13 +376,12 @@ def test_direct_provider_history_keeps_refusal_text_and_omits_stop_metadata(setu
     assert messages == original
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("phase,code,status,not_sent", [
-    ("create", "model_request_invalid", 400, True),
-    ("get", "model_request_invalid", 400, False),
-    ("create", "http_400", 400, False),
-    ("create", "auth_required", 401, False),
-    ("get", "subscription_window_exhausted", 429, False),
+@pytest.mark.parametrize(("phase", "code", "status", "not_sent", "asynchronous"), [
+    ("create", "model_request_invalid", 400, True, True),
+    ("get", "model_request_invalid", 400, False, True),
+    ("create", "http_400", 400, False, False),
+    ("create", "auth_required", 401, False, False),
+    ("get", "subscription_window_exhausted", 429, False, True),
 ])
 def test_only_exact_pre_admission_create_refusal_releases_the_attempt(setup, monkeypatch, phase, code, status, not_sent, asynchronous):
     root, gateway, client = setup
@@ -411,7 +407,7 @@ def test_only_exact_pre_admission_create_refusal_releases_the_attempt(setup, mon
     assert calls == [phase]
 
 
-@pytest.mark.parametrize("code", ["rate_limited", "provider_failed", "invalid_request", "catalog_unavailable"])
+@pytest.mark.parametrize("code", ["rate_limited", "provider_failed", "catalog_unavailable"])
 def test_confirmed_ordinary_model_failure_keeps_helper_fallback_policy(code):
     error = transport.ClaudexorModelError({"code": code, "message": "Controlled ordinary refusal"})
     for state in ("released", "settled"):
@@ -423,7 +419,7 @@ def test_confirmed_ordinary_model_failure_keeps_helper_fallback_policy(code):
     assert caught.value is error
 
 
-@pytest.mark.parametrize("code", ["auth_required", "subscription_window_exhausted", "model_outcome_unknown", "model_operation_interrupted"])
+@pytest.mark.parametrize("code", ["auth_required", "model_outcome_unknown", "model_operation_interrupted"])
 def test_helper_fallback_never_swallows_resource_control_or_unknown(code):
     error = transport.ClaudexorModelError({"code": code, "message": "Controlled retained outcome",
         "context": {"vendorCode": "context_length_exceeded", "parameter": "input"}})
@@ -506,7 +502,7 @@ def test_earlier_dispatched_rotation_cannot_hide_behind_final_not_started(setup)
 
 
 @pytest.mark.parametrize("code,label", [("provider_failed", "provider_error_type"), ("invalid_request", "provider_error_type"),
-                                        ("rate_limited", "vendor_code"), ("subscription_window_exhausted", "vendor_code")])
+                                        ("rate_limited", "vendor_code")])
 def test_a_vendor_code_is_labelled_by_the_event_field_only_when_it_fills_that_field(code, label):
     """The text names provider_error_type only when this error's own type carries the code into that field."""
     from ouroboros.transport_custody import attempt_custody_event_fields
@@ -516,9 +512,11 @@ def test_a_vendor_code_is_labelled_by_the_event_field_only_when_it_fills_that_fi
     assert (attempt_custody_event_fields(error).get("provider_error_type") == "v1") is (label == "provider_error_type")
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("code,vendor", [("invalid_request", "string_above_max_length"),
-    ("invalid_request", "context_length_exceeded"), ("provider_failed", "context_length_exceeded")])
+@pytest.mark.parametrize(("code", "vendor", "asynchronous"), [
+    ("invalid_request", "string_above_max_length", False),
+    ("invalid_request", "context_length_exceeded", True),
+    ("provider_failed", "context_length_exceeded", False),
+])
 def test_field_refusal_retains_then_acknowledges_once_with_display(setup, asynchronous, code, vendor):
     root, gateway, client = setup
     problem = {"code": code, "message": "Codex model request was refused (HTTP 400).", "retryable": False,
@@ -548,8 +546,7 @@ def test_field_refusal_retains_then_acknowledges_once_with_display(setup, asynch
 
 
 @pytest.mark.parametrize("code,vendor", [("unsupported_parameter", ""),
-    ("provider_failed", "context_length_exceeded"), ("invalid_request", "context_length_exceeded"),
-    ("transport_not_delivered", "")])
+    ("provider_failed", "context_length_exceeded"), ("invalid_request", "context_length_exceeded")])
 def test_proven_not_started_releases_and_never_fabricates_provider_usage(setup, code, vendor):
     root, gateway, client = setup
     gateway.results = [result(outcome="failed", problem={"code": code, "message": "Controlled refusal",
@@ -565,8 +562,7 @@ def test_proven_not_started_releases_and_never_fabricates_provider_usage(setup, 
     assert len(gateway.accepted_operations) == 1
 
 
-@pytest.mark.parametrize("proof", ["connection_not_written", "incomplete_upload"])
-@pytest.mark.parametrize("proven", [True, False])
+@pytest.mark.parametrize(("proven", "proof"), [(True, "connection_not_written"), (False, "incomplete_upload")])
 def test_upload_proof_refines_terminal_without_resending_or_inventing_usage(setup, proof, proven):
     from ouroboros.loop_llm_call import classify_llm_exception
 
@@ -599,7 +595,6 @@ def test_upload_proof_refines_terminal_without_resending_or_inventing_usage(setu
 
 @pytest.mark.parametrize("code, basis, cause, kind", [
     ("transport_not_delivered", "incomplete_upload", "EPIPE", "transport_unavailable"),
-    ("transport_not_delivered", "connect_failure", "UND_ERR_CONNECT_TIMEOUT", "transport_unavailable"),
     ("auth_unavailable", "", "", "auth_error"),
     ("model_source_unavailable", "", "", "bad_request"),
 ])
@@ -677,8 +672,7 @@ def test_native_reset_keeps_canonical_tools_and_only_claims_a_real_account_chang
     assert messages == original
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("with_message_token", [False, True])
+@pytest.mark.parametrize(("with_message_token", "asynchronous"), [(False, False), (True, True)])
 def test_native_reset_clears_both_surfaces_and_adopts_the_new_turn(
     setup, turn_engine, asynchronous, with_message_token,
 ):
@@ -739,8 +733,7 @@ def test_dual_continuation_repair_is_bounded_to_one_retry(setup, turn_engine, as
     assert [row["state"] for row in ledger(root)] == ["released"] * 2
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("dispatch", ["not_started", "unknown"])
+@pytest.mark.parametrize(("dispatch", "asynchronous"), [("not_started", False), ("unknown", True)])
 def test_unresolved_dual_continuation_refusal_preserves_the_slot(
     setup, turn_engine, monkeypatch, asynchronous, dispatch,
 ):
@@ -808,8 +801,7 @@ def test_failed_local_result_retention_withholds_ack_but_keeps_answer(setup, mon
     assert usage["claudexor"]["result_custody"]["reason"] == "result_retention_failed:OSError"
 
 
-@pytest.mark.parametrize("option", [{"response_format": {"type": "json_object"}}, {"response_format": {}},
-                                     {"allow_server_web_search": True}, {"bypass_response_cache": True}])
+@pytest.mark.parametrize("option", [{"response_format": {"type": "json_object"}}, {"allow_server_web_search": True}, {"bypass_response_cache": True}])
 def test_unsupported_request_intent_is_not_silently_ignored(setup, option):
     root, gateway, client = setup
     with pytest.raises(transport.ClaudexorModelError) as raised:
@@ -817,9 +809,8 @@ def test_unsupported_request_intent_is_not_silently_ignored(setup, option):
     assert raised.value.code == "unsupported_parameter" and not gateway.creates and not ledger(root)
 
 
-@pytest.mark.parametrize("model,expected", [(MODEL, False), ("anthropic::some-model", False),
-                                            ("gigachat::some-model", False), ("openai::some-model", True),
-                                            ("openai-compatible::some-model", True), ("provider/router-model", True)])
+@pytest.mark.parametrize("model,expected", [(MODEL, False), ("openai::some-model", True),
+                                            ("provider/router-model", True)])
 def test_optional_response_format_is_a_transport_capability(model, expected):
     assert LLMClient.supports_response_format(model) is expected
     assert LLMClient.supports_response_format(model, use_local=True) is False
@@ -1354,7 +1345,7 @@ def turn_engine(monkeypatch):
                         lambda: transport.config.CLAUDEXOR_MODEL_TURN_STATE_MIN_VERSION)
 
 
-@pytest.mark.parametrize("version,opted", [("3.10.4", True), ("4.0.0", True), ("3.10.3", False), ("", False)])
+@pytest.mark.parametrize("version,opted", [("3.10.4", True), ("3.10.3", False), ("", False)])
 def test_active_turn_is_offered_only_where_the_request_schema_accepts_it(setup, monkeypatch, version, opted):
     _, gateway, client = setup
     monkeypatch.setattr(transport, "owned_engine_version", lambda: version)

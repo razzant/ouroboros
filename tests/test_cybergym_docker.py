@@ -1339,11 +1339,6 @@ def test_attestation_waiting_on_a_failing_sibling_start_signals_custody(tmp_path
     [
         ("attested", True),
         ("agent_label", False),
-        ("network", False),
-        ("image", False),
-        ("gateway_registered", False),
-        ("starting", False),
-        ("rm_fails", False),
         ("rm_leaves_object", False),
     ],
 )

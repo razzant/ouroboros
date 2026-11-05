@@ -28,8 +28,11 @@ def _launch(kind, root, *, on_spawn=None):
                                              stdout_cap=1024, stderr_cap=1024, on_spawn=on_spawn)
 
 
-@pytest.mark.parametrize("kind", ["shell", "executor", "skill"])
-@pytest.mark.parametrize("error_type", [TimeoutError, PermissionError])
+@pytest.mark.parametrize(("error_type", "kind"), [
+    pytest.param(TimeoutError, "shell", id='TimeoutError-shell'),
+    pytest.param(TimeoutError, "skill", id='TimeoutError-skill'),
+    pytest.param(PermissionError, "executor", id='PermissionError-executor'),
+])
 def test_scope_record_failure_is_proven_before_any_process_spawn(tmp_path, monkeypatch, kind, error_type):
     def unavailable(*args, **kwargs):
         raise error_type("scope metadata unavailable")

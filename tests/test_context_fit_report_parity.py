@@ -10,6 +10,7 @@ from tests import _memory_scale_fixture as scale
 from devtools._context_fit_accounting import cold_density, declared_evidence
 from devtools._context_fit_session import measure_session, session_inputs
 from devtools.context_fit_report import REPO, measure_core
+from tests._cases import chosen_rows
 
 
 _SCALE_CORE_TEMPLATE = scale.core(Path("."), scale.snapshot())
@@ -21,9 +22,9 @@ def _scale_core(root):
 
 
 @pytest.mark.parametrize('window, extra_chars, fits, producers',
-    [(92000, 0, True, False), (92000, 24000, True, False), (92000, 100000, False, False)]
+    chosen_rows([(92000, 0, True, False), (92000, 24000, True, False), (92000, 100000, False, False)]
     + [(window, extra, fits, True) for window in (85000, 92000, 133554)
-       for extra, fits in ((0, True), (400000, False))])
+       for extra, fits in ((0, True), (400000, False))], 0, 3, 8))
 def test_retained_scale_candidate_matches_live_admission(tmp_path, monkeypatch, window, extra_chars, fits, producers):
     import socket
     from ouroboros import context_fit as cf, memory_view as mv

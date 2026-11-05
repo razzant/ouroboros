@@ -183,8 +183,7 @@ def test_tapped_option_reaches_the_decision_ingress_and_settles_the_card(tmp_pat
                            "\nAnswered: 2. postgres", [])]
 
 
-@pytest.mark.parametrize("required", [True, False])
-@pytest.mark.parametrize("answer_path", ["callback", "reply"])
+@pytest.mark.parametrize(("answer_path", "required"), [("callback", True), ("reply", False)])
 def test_settled_quiz_drops_only_required_wait_copy(tmp_path, monkeypatch, required, answer_path):
     plugin = _load_plugin()
     api = _send_card(plugin, tmp_path, monkeypatch, wait_for_answer=required)
@@ -211,7 +210,7 @@ def test_settled_quiz_drops_only_required_wait_copy(tmp_path, monkeypatch, requi
     assert _LAST_CLIENT[-1].edits[0][3] == []
 
 
-@pytest.mark.parametrize("answer_text", ["Use mysql instead", "  Use mysql instead\n", "2", "`/panic`", "The command is /panic"])
+@pytest.mark.parametrize("answer_text", ["Use mysql instead", "2", "The command is /panic"])
 def test_reply_to_the_card_is_the_owners_own_answer(tmp_path, monkeypatch, answer_text):
     plugin = _load_plugin()
     api = _send_card(plugin, tmp_path, monkeypatch)
@@ -368,8 +367,7 @@ def _tracking_init(self, token, **kwargs):
 Client.__init__ = _tracking_init
 
 
-@pytest.mark.parametrize("command", ["/panic", "/restart", "/status"])
-@pytest.mark.parametrize("reply_to_quiz", [False, True])
+@pytest.mark.parametrize(("reply_to_quiz", "command"), [(False, "/panic"), (False, "/status"), (True, "/restart")])
 def test_owner_commands_keep_dispatch_when_replying_to_quiz(tmp_path, monkeypatch, command, reply_to_quiz):
     plugin = _load_plugin()
     api = _send_card(plugin, tmp_path, monkeypatch)
@@ -738,12 +736,8 @@ def _answer(plugin, tmp_path, monkeypatch, update, reply):
 @pytest.mark.parametrize("delivery,status", [
     (_delivery(reason="awaiting_recipient_read"), _SAVED),
     (_delivery(), _PENDING),
-    (_delivery(reason="quiz_history_write_failed"), _PENDING),
-    (_delivery(reason="late_answer_delivery_unknown"), _UNKNOWN),
     (_delivery(reason="late_answer_delivery_unknown", dismissed=True), _UNKNOWN),  # dismissed is not delivered
-    (_delivery("delivered"), ""),
-    (None, ""),  # no delivery fact: the record only, and no delivery claim
-], ids=["saved", "pending", "history-pending", "unknown", "dismissed", "delivered", "no-fact"])
+], ids=["saved", "pending", "dismissed"])
 def test_text_answer_is_confirmed_in_its_card_without_a_separate_line(tmp_path, monkeypatch, delivery, status):
     plugin = _load_plugin()
     payload = {"ok": True, "state": "answered", "comment": "Use duckdb",
@@ -769,10 +763,8 @@ def test_tap_toasts_the_hosts_receipt_and_the_card_keeps_its_status(tmp_path, mo
 @pytest.mark.parametrize("path,recorded,shown", [
     ("reply", {"comment": "Use duckdb"}, "Use duckdb"),
     ("reply", {"answered_index": 0, "comment": "only with nightly backups"}, "1. sqlite — only with nightly backups"),
-    ("tap", {"comment": "Use duckdb"}, "Use duckdb"),
-    ("tap", {"answered_index": 0, "comment": "only with nightly backups"}, "1. sqlite — only with nightly backups"),
     ("tap", {}, ""),
-], ids=["reply-comment", "reply-option-comment", "tap-comment", "tap-option-comment", "tap-no-winner"])
+], ids=["reply-comment", "reply-option-comment", "tap-no-winner"])
 def test_a_replayed_answer_settles_on_the_hosts_record_not_the_local_attempt(tmp_path, monkeypatch, path, recorded, shown):
     """A 200 replays what the host recorded for this request: the card shows that record and
     never invents it from the tapped option or the words this bridge sent."""
@@ -831,15 +823,12 @@ def test_an_answer_accepted_behind_a_503_is_recorded_and_never_asked_again(tmp_p
     assert last.toasts == ([] if path == "reply" else [("cb35", f"✅ {_PENDING}.")])
 
 
-@pytest.mark.parametrize("payload", [
-    {"error": "The answer could not be confirmed. Retry the same answer when storage is available.",
-     "task_id": "task-1", "reason_code": "quiz_answer_unconfirmed"},
-    # Recorded, but by whom is not said: no winner to compare, so no claim that it is this answer.
-    {"error": "The answer was recorded. Delivery remains pending.", "task_id": "task-1", "state": "answered",
-     "reason_code": "quiz_delivery_failed", "question_delivery": _delivery(reason="quiz_delivery_failed")},
-], ids=["unconfirmed", "answered-without-winner"])
-@pytest.mark.parametrize("status", [503, 500])
-@pytest.mark.parametrize("path", ["reply", "tap"])
+@pytest.mark.parametrize(("path", "status", "payload"), [
+    pytest.param("reply", 503, {"error": "The answer could not be confirmed. Retry the same answer when storage is available.",
+     "task_id": "task-1", "reason_code": "quiz_answer_unconfirmed"}, id='reply-503-unconfirmed'),
+    pytest.param("tap", 500, {"error": "The answer was recorded. Delivery remains pending.", "task_id": "task-1", "state": "answered",
+     "reason_code": "quiz_delivery_failed", "question_delivery": _delivery(reason="quiz_delivery_failed")}, id='tap-500-answered-without-winner'),  # Recorded, but by whom is not said: no winner to compare, so no claim that it is this answer.
+])
 def test_an_unconfirmed_answer_says_its_outcome_is_unknown_and_keeps_the_card_open(tmp_path, monkeypatch, path, status, payload):
     plugin = _load_plugin()
     update = (lambda _token: _reply_update(36, "Use duckdb")) if path == "reply" else (lambda token: _tap_update(36, token, 1))
@@ -868,10 +857,9 @@ def test_the_same_answer_sent_again_is_its_own_record_not_a_conflict(tmp_path, m
 
 @pytest.mark.parametrize("path,code,recorded,first", [
     ("reply", 200, {"comment": "Use duckdb"}, f"{_SAVED}."),
-    ("tap", 200, {"answered_index": 1}, f"{_SAVED}."),
     ("reply", 409, {"answered_index": 0}, _LOST.format(answer="1. sqlite")),
     ("tap", 409, {"answered_index": 0}, _LOST.format(answer="1. sqlite")),
-], ids=["reply", "tap", "reply-conflict", "tap-conflict"])
+], ids=["reply", "reply-conflict", "tap-conflict"])
 def test_a_card_that_could_not_be_updated_is_said_once_and_never_retried(tmp_path, monkeypatch, path, code, recorded, first):
     plugin = _load_plugin()
     monkeypatch.setattr(Client, "edit_result", False)

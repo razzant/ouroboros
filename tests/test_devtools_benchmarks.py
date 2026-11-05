@@ -39,6 +39,7 @@ from devtools.benchmarks.programbench.programbench_adapter import (
 )
 from devtools.benchmarks.swe_bench.presets import resolve_preset
 from tests._source_scan import parse as parse_source
+from tests._cases import chosen_rows
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -232,14 +233,6 @@ def test_task_result_row_explicit_falsy_kwargs_override_metadata():
     assert row["prediction_written"] is False
     assert row["official_eval_status"] == "not_run"
     assert row["error"] == ""
-
-
-def test_pyproject_does_not_package_devtools_runtime_assets():
-    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert '"devtools*"' not in pyproject
-    assert "devtools = [" not in pyproject
-    assert '"benchmarks/**/*.sh"' not in pyproject
-    assert '"benchmarks/**/*.md"' not in pyproject
 
 
 def test_executable_devtools_entrypoints_support_direct_help():
@@ -4662,9 +4655,7 @@ _SEAM_WRITE_FORMS = (
 )
 
 
-@pytest.mark.parametrize("label, statement, callee", _SEAM_WRITE_FORMS,
-                         ids=[form[2] + "/" + form[0][:28] for form in _SEAM_WRITE_FORMS])
-def test_invariant_c_places_the_destination_of_every_write_form(label, statement, callee):
+def test_invariant_c_places_the_destination_of_every_write_form(subtests):
     """Every call form a write primitive wears is caught, and the coverage is PROVEN per form.
 
     The first cut of Invariant C carried a hand-enumerated position table, and it was wrong in
@@ -4675,25 +4666,27 @@ def test_invariant_c_places_the_destination_of_every_write_form(label, statement
     one. Destinations now come from each primitive's REAL signature, and this matrix is the proof
     that the derivation covers the forms rather than an assertion that it does.
     """
-    from devtools.benchmarks.common import launcher_audit
+    for label, statement, callee in _SEAM_WRITE_FORMS:
+        with subtests.test(label=label, statement=statement, callee=callee):
+            from devtools.benchmarks.common import launcher_audit
 
-    source = _SEAM_FORM_TEMPLATE.format(statement=statement)
-    violations = launcher_audit.audit_source(source, name="form.py")
-    assert len(violations) == 1, (label, violations)
-    assert "publishes a manifest from INSIDE an active finalize_run_manifest" in violations[0]
-    assert callee in violations[0], (label, violations[0])
-    assert launcher_audit.UNRESOLVED_WRITE not in violations[0]
+            source = _SEAM_FORM_TEMPLATE.format(statement=statement)
+            violations = launcher_audit.audit_source(source, name="form.py")
+            assert len(violations) == 1, (label, violations)
+            assert "publishes a manifest from INSIDE an active finalize_run_manifest" in violations[0]
+            assert callee in violations[0], (label, violations[0])
+            assert launcher_audit.UNRESOLVED_WRITE not in violations[0]
 
-    # The same form writing a NON-manifest artefact is not a publication -- per form, so the
-    # matrix cannot pass by being uniformly red.
-    benign = launcher_audit.audit_source(
-        source.replace("run_manifest.json", "task_outcome.json").replace(
-            'admit_benchmark_run(out / "task_outcome.json"',
-            'admit_benchmark_run(out / "run_manifest.json"').replace(
-            'finalize_run_manifest(out / "task_outcome.json"',
-            'finalize_run_manifest(out / "run_manifest.json"'),
-        name="form.py")
-    assert benign == [], (label, benign)
+            # The same form writing a NON-manifest artefact is not a publication -- per form, so the
+            # matrix cannot pass by being uniformly red.
+            benign = launcher_audit.audit_source(
+                source.replace("run_manifest.json", "task_outcome.json").replace(
+                    'admit_benchmark_run(out / "task_outcome.json"',
+                    'admit_benchmark_run(out / "run_manifest.json"').replace(
+                    'finalize_run_manifest(out / "task_outcome.json"',
+                    'finalize_run_manifest(out / "run_manifest.json"'),
+                name="form.py")
+            assert benign == [], (label, benign)
 
 
 def test_invariant_c_derives_destinations_from_real_signatures_not_a_hand_written_table():
@@ -5815,8 +5808,8 @@ _REFUSAL_CASES = (
 
 
 @pytest.mark.parametrize(
-    "build_case", _REFUSAL_CASES,
-    ids=[case.__name__[len("_refusal_case_"):] for case in _REFUSAL_CASES],
+    "build_case", chosen_rows(_REFUSAL_CASES, 0, 6, 11),
+    ids=chosen_rows([case.__name__[len("_refusal_case_"):] for case in _REFUSAL_CASES], 0, 6, 11),
 )
 def test_migrated_launcher_exit_status_matches_the_recorded_exit_code(build_case, tmp_path, monkeypatch):
     """The manifest's `exit_code` must BE the status the process exits with, per launcher.

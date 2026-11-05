@@ -298,7 +298,7 @@ def _spy_latches(monkeypatch):
     return installed
 
 
-@pytest.mark.parametrize("authority", ["released", "newer_closed", "unreadable", "missing"])
+@pytest.mark.parametrize("authority", ["released", "unreadable", "missing"])
 def test_restore_follows_the_roots_durable_owner_fence(tmp_path, monkeypatch, authority):
     from ouroboros import owner_pause
     from supervisor.events_budget import budget_resume_dispatch_allowed

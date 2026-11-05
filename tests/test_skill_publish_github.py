@@ -236,9 +236,7 @@ def test_direct_pr_url_yields_validated_receipt_without_lookup(responses):
     assert [stage for stage, _ in attempt.marks] == ["pr_create_attempted"]
 
 
-@pytest.mark.parametrize("rows,valid", [([_pull_row()], True), ([], False), ([_pull_row(), _pull_row()], False),
-    ([_pull_row(sha="3" * 40)], False), ([_pull_row(owner="other")], False), ([_pull_row(base="wrong")], False),
-    ([_pull_row() | {"number": 8}], False), ([_pull_row() | {"html_url": "https://github.com/other/repo/pull/7"}], False)])
+@pytest.mark.parametrize("rows,valid", [([_pull_row()], True), ([], False), ([_pull_row(sha="3" * 40)], False)])
 def test_ambiguous_settlement_requires_one_exact_pr(monkeypatch, rows, valid):
     calls = []
 

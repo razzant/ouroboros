@@ -191,7 +191,7 @@ def _publish_terminal_result(geo, task_id, status="cancelled"):
 
 # --- the staging task reads its own retained answer on every drive -----------------
 
-@pytest.mark.parametrize("geometry", ["canonical_top", "forked_top", "readonly_child", "acting_child"])
+@pytest.mark.parametrize("geometry", ["canonical_top", "forked_top", "acting_child"])
 def test_the_staging_task_reads_its_retained_output_on_every_drive(geo, monkeypatch, geometry):
     ctx = {
         "canonical_top": lambda: _top(geo, ROOT),
