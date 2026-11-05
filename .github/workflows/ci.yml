@@ -9,6 +9,8 @@
 # Tier 3 (Build+Release): Tag v*                                                       → PyInstaller builds start WITH the tests; the release job joins both
 # Opt-in (System E2E):    Manual / tag (no schedule)                                     → KEYLESS tests/system_e2e/ scenario lane (Ubuntu, ≤60 min)
 # Manual (Live E2E):      Dispatch input e2e_live=true only (no schedule)                → PAID devtools/e2e_live stand, $30 cap, OUROBOROS_E2E_LIVE_OPENROUTER_KEY (skipped honestly without it)
+# Tests scope:            Dispatch input scope=tests                                     → the default battery alone: shard-plan, lint, full-test-runs (Ubuntu + Windows; macOS with macos=true),
+#                                                                                          journal-persist (Ubuntu), full-test, ci-durations, test-verdict; no provider, smoke or build job
 #
 # Test lanes (owner decision 1A, 2026-10-21): every test pass runs under scripts/ci_retry.py. A
 # test that fails and then passes on its ONE retry in the same job is recorded as FLAKY by name
@@ -38,11 +40,22 @@ on:
   push:
     tags:
       - 'v*'
-  # Plain dispatch retains the provider and skill-review jobs and can spend
-  # money. The separate paid e2e-live stand additionally requires its opt-in
-  # input (`-f e2e_live=true`); all other dispatch gates stay unchanged.
+  # Plain dispatch (`scope=release`) retains the provider and skill-review jobs
+  # and can spend money. `scope=tests` is the operators' battery before a PR's
+  # review freeze (owner 6A/7A, 2026-11-05): the default-suite jobs and `lint`
+  # alone, nothing paid; `shard-plan` names its legs. The separate paid e2e-live
+  # stand additionally requires its opt-in input (`-f e2e_live=true`).
   workflow_dispatch:
     inputs:
+      scope:
+        description: 'release: the whole graph; tests: the default battery alone (shard-plan, lint, full-test-runs, journal-persist, full-test, ci-durations, test-verdict)'
+        type: choice
+        options: [release, tests]
+        default: release
+      macos:
+        description: 'scope=tests: also run the macOS legs of full-test-runs (the default set is Ubuntu + Windows; macOS is the scarce runner)'
+        type: boolean
+        default: false
       e2e_live:
         description: 'Run the paid live E2E stand ($30 cap; needs the OUROBOROS_E2E_LIVE_OPENROUTER_KEY secret)'
         type: boolean
@@ -78,7 +91,38 @@ jobs:
     permissions:
       contents: read
       actions: read
+    # The desktop legs of this run, read by the matrix, `journal-persist` and `full-test`:
+    # a release tag and the release scope run three systems; `scope=tests` runs Ubuntu and
+    # Windows (their post-merge red lists are disjoint), macOS only when the `macos` input
+    # asks, and the PERSIST leg on Ubuntu alone (owner 7A, 2026-11-05).
+    outputs:
+      legs: ${{ steps.legs.outputs.legs }}
+      systems: ${{ steps.legs.outputs.systems }}
+      persist: ${{ steps.legs.outputs.persist }}
     steps:
+      - name: Name the desktop legs of this run
+        id: legs
+        env:
+          SCOPE: ${{ inputs.scope }}
+          MACOS: ${{ inputs.macos }}
+          # Whole-file duration shards per system. macOS stays at four: the free plan runs
+          # five macOS jobs at once, shared with the dmg build, the PERSIST leg and the skill
+          # install leg.
+          SYSTEMS: '[{"os": "ubuntu-latest", "name": "Linux", "shards": 4}, {"os": "macos-latest", "name": "macOS", "shards": 4}, {"os": "windows-latest", "name": "Windows", "shards": 8}]'
+        shell: python
+        run: |
+          import json, os
+          systems = json.loads(os.environ["SYSTEMS"])
+          tests_only = os.environ["SCOPE"] == "tests"
+          if tests_only and os.environ["MACOS"] != "true":
+              systems = [system for system in systems if system["os"] != "macos-latest"]
+          legs = [{"os": system["os"], "shard": shard, "shards": system["shards"]}
+                  for system in systems for shard in range(1, system["shards"] + 1)]
+          persist = ["ubuntu-latest"] if tests_only else [system["os"] for system in systems]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"legs={json.dumps(legs)}\n")
+              output.write("systems=" + " ".join(f"{system['name']}:{system['shards']}" for system in systems) + "\n")
+              output.write(f"persist={json.dumps(persist)}\n")
       # A re-run keeps the plan its first attempt published: legs of different
       # attempts of one run must pack with the same table.
       - name: Reuse this run's plan on a re-run
@@ -171,7 +215,7 @@ jobs:
   # three duration shards; a diagnostic of manual runs, not part of the tag bar.
   # ──────────────────────────────────────────────────────────────────
   quick-test:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.scope != 'tests'
     needs: shard-plan
     # The growth-mode step reads the pull request's label events; the accepted-failure
     # check reads issue label events.
@@ -310,7 +354,7 @@ jobs:
   # and its suites have never run on the Windows/macOS matrix.
   # ──────────────────────────────────────────────────────────────────
   benchmark-methodology:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    if: (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) && inputs.scope != 'tests'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -334,7 +378,7 @@ jobs:
   # runs the store modules there through the stdlib boundary launcher.
   # ──────────────────────────────────────────────────────────────────
   sqlite-floor:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.scope != 'tests'
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
@@ -368,25 +412,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS stays at four: the free plan runs five macOS jobs at once, shared with
-        # the dmg build, the PERSIST leg and the skill install leg.
-        include:
-          - {os: ubuntu-latest, shard: 1, shards: 4}
-          - {os: ubuntu-latest, shard: 2, shards: 4}
-          - {os: ubuntu-latest, shard: 3, shards: 4}
-          - {os: ubuntu-latest, shard: 4, shards: 4}
-          - {os: macos-latest, shard: 1, shards: 4}
-          - {os: macos-latest, shard: 2, shards: 4}
-          - {os: macos-latest, shard: 3, shards: 4}
-          - {os: macos-latest, shard: 4, shards: 4}
-          - {os: windows-latest, shard: 1, shards: 8}
-          - {os: windows-latest, shard: 2, shards: 8}
-          - {os: windows-latest, shard: 3, shards: 8}
-          - {os: windows-latest, shard: 4, shards: 8}
-          - {os: windows-latest, shard: 5, shards: 8}
-          - {os: windows-latest, shard: 6, shards: 8}
-          - {os: windows-latest, shard: 7, shards: 8}
-          - {os: windows-latest, shard: 8, shards: 8}
+        # The systems and shard counts `shard-plan` named for this run.
+        include: ${{ fromJSON(needs.shard-plan.outputs.legs) }}
     runs-on: ${{ matrix.os }}
     env:
       # Same contract as quick-test: this job provisions the parallel-pass
@@ -661,6 +688,7 @@ jobs:
   # tests/_store_journal_shared.py run again here in PERSIST, on all three systems.
   journal-persist:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    needs: shard-plan
     # The accepted-failure check reads issue label events.
     permissions:
       contents: read
@@ -668,7 +696,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: ${{ fromJSON(needs.shard-plan.outputs.persist) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
     env:
@@ -737,7 +765,7 @@ jobs:
   # verdict.json (FLAKY or ACCEPTED, never a hidden red); a missing, foreign or
   # red verdict is a gap.
   full-test:
-    needs: [full-test-runs, journal-persist]
+    needs: [shard-plan, full-test-runs, journal-persist]
     if: ${{ !cancelled() && needs.full-test-runs.result != 'skipped' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -770,7 +798,7 @@ jobs:
         with:
           pattern: default-ci-shard-*-${{ github.sha }}-${{ github.run_id }}-*
           path: ${{ runner.temp }}/default-proof/shards
-      # One reconciliation per OS and pass; the shard counts are the matrix's.
+      # One reconciliation per OS and pass; the systems and shard counts are this run's plan.
       - name: Reconcile both passes of every OS
         if: ${{ !cancelled() }}
         shell: bash
@@ -778,10 +806,11 @@ jobs:
           PROOF: ${{ runner.temp }}/default-proof
           SHA: ${{ github.sha }}
           RUN_ID: ${{ github.run_id }}
+          SYSTEMS: ${{ needs.shard-plan.outputs.systems }}
         run: |
           set -uo pipefail
           failed=0
-          for spec in Linux:4 macOS:4 Windows:8; do
+          for spec in $SYSTEMS; do
             os="${spec%%:*}"; count="${spec##*:}"
             mkdir -p "$PROOF/by-os/$os/manifest" "$PROOF/by-os/$os/shards"
             for dir in "$PROOF"/manifest/default-ci-manifest-"$os"-*; do
@@ -874,7 +903,7 @@ jobs:
   # installer, managed resolver, license/version checks, and redaction-safe real
   # scanner smoke on each supported desktop OS family.
   betterleaks-platform-smoke:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.scope != 'tests'
     strategy:
       fail-fast: false
       matrix:
@@ -923,6 +952,7 @@ jobs:
       github.event_name != 'schedule'
       && (github.event_name == 'workflow_dispatch'
       || startsWith(github.ref, 'refs/tags/v'))
+      && inputs.scope != 'tests'
     uses: ./.github/workflows/provider-canary.yml
     with:
       scope: required
@@ -946,6 +976,7 @@ jobs:
       github.event_name != 'schedule'
       && (github.event_name == 'workflow_dispatch'
       || startsWith(github.ref, 'refs/tags/v'))
+      && inputs.scope != 'tests'
     uses: ./.github/workflows/provider-canary.yml
     with:
       scope: optional
@@ -1002,7 +1033,7 @@ jobs:
   # A missing secret is a hard red — forks/mirrors without it stay red.
   # ──────────────────────────────────────────────────────────────────
   skill-smoke:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    if: (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) && inputs.scope != 'tests'
     strategy:
       fail-fast: false
       matrix:
@@ -1064,8 +1095,9 @@ jobs:
 
   marker-guards:
     if: |
-      github.event_name == 'workflow_dispatch'
-      || startsWith(github.ref, 'refs/tags/v')
+      (github.event_name == 'workflow_dispatch'
+      || startsWith(github.ref, 'refs/tags/v'))
+      && inputs.scope != 'tests'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1122,7 +1154,7 @@ jobs:
   # manual wrapper offers diagnostics without narrowing this release dependency.
   # Its shards and manifest read this run's shard plan (node durations).
   ui-smoke:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    if: (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) && inputs.scope != 'tests'
     needs: shard-plan
     uses: ./.github/workflows/ui-browser.yml
     permissions:
@@ -1132,8 +1164,9 @@ jobs:
 
   docker-ui-smoke:
     if: |
-      github.event_name == 'workflow_dispatch'
-      || startsWith(github.ref, 'refs/tags/v')
+      (github.event_name == 'workflow_dispatch'
+      || startsWith(github.ref, 'refs/tags/v'))
+      && inputs.scope != 'tests'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1174,8 +1207,9 @@ jobs:
 
   docker-portable-test:
     if: |
-      github.event_name == 'workflow_dispatch'
-      || startsWith(github.ref, 'refs/tags/v')
+      (github.event_name == 'workflow_dispatch'
+      || startsWith(github.ref, 'refs/tags/v'))
+      && inputs.scope != 'tests'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1203,7 +1237,7 @@ jobs:
   system-e2e-mock:
     # Also on a release tag: the release bar must not skip the 57-scenario lane
     # (owner decision, batch №13 item 4, 2026-09-02).
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    if: (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) && inputs.scope != 'tests'
     runs-on: ubuntu-latest
     # Budget: the healthy lane plus room for two scenarios cut at their 15-min per-test
     # ceiling (tests/system_e2e/conftest.py SCENARIO_TIMEOUT_SEC; the same ceiling guards
@@ -1346,7 +1380,7 @@ jobs:
   # ──────────────────────────────────────────────────────────────────
   e2e-live:
     name: e2e-live (SM1 x1 — largest subset feasible under the $30 cap)
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.e2e_live == 'true'
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.e2e_live == 'true' && inputs.scope != 'tests'
     runs-on: ubuntu-latest
     # One SM1 lane: the task (--task-timeout 4500 = 75 min; at 2400 all four runs
     # hit the deadline, and the traced one spent ~21 min on edits and ~17 min on
@@ -1511,7 +1545,7 @@ jobs:
   # fork-safe lane compiles a real host with an explicitly disposable key;
   # its output is never used as a publisher-signed release artifact.
   android-test:
-    if: github.event_name != 'schedule'
+    if: github.event_name != 'schedule' && inputs.scope != 'tests'
     runs-on: ubuntu-latest
     outputs:
       android_changed: ${{ steps.android_changes.outputs.changed }}
@@ -1593,7 +1627,7 @@ jobs:
   # rooted ARM64, SELinux, launcher, WebView and physical-device qualification.
   android-emulator-smoke:
     needs: android-test
-    if: github.event_name != 'schedule' && (startsWith(github.ref, 'refs/tags/v') || needs.android-test.outputs.android_changed == 'true')
+    if: github.event_name != 'schedule' && (startsWith(github.ref, 'refs/tags/v') || needs.android-test.outputs.android_changed == 'true') && inputs.scope != 'tests'
     name: Android emulator smoke (API ${{ matrix.api-level }})
     runs-on: ubuntu-latest
     timeout-minutes: 20

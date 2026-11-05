@@ -62,8 +62,9 @@ def test_one_complete_browser_lane_serves_manual_runs_and_release_tags():
     ci, ci_triggers = _workflow("ci.yml")
     caller = ci["jobs"]["ui-smoke"]
     assert caller["uses"] == "./.github/workflows/ui-browser.yml"
-    assert caller["if"] == "github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')"
-    # Only manual/tag triggers remain; the run's shard plan is published first.
+    assert caller["if"] == ("(github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))"
+                            " && inputs.scope != 'tests'")
+    # Only manual/tag triggers remain, outside the tests-only scope; the run's shard plan is published first.
     assert caller["needs"] == "shard-plan"
     assert "schedule" not in ci_triggers  # owner, 2026-10-05: no nightly run nobody reads
 
