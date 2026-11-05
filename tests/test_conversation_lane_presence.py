@@ -8,6 +8,7 @@ value. An arrival for a carried author is accepted through one transaction under
 author's mailbox lock against its durable intake fact.
 """
 
+import json
 import pathlib
 import queue as stdqueue
 from types import SimpleNamespace
@@ -176,13 +177,22 @@ def test_a_remote_author_accepts_mail_only_while_its_durable_intake_is_open(tmp_
 _REAL_THREAD = __import__("threading").Thread  # the pool fixture stubs the lifecycle's threads; the inline carrier needs one
 
 
-def test_without_a_pool_generation_the_host_turn_runs_on_the_disclosed_degraded_executor(pool, tmp_path, monkeypatch):
-    """A process with no started pool generation (a Host serving alone, a server before its first spawn or
-    after a whole-table stop) is a physical fact (2A): the body runs on this process's thread as
-    ``inline_degraded``, disclosed in the row and the vitals, and its own frames resolve the Host's waiter."""
-    from supervisor import inline_carrier, message_bus
+@pytest.mark.parametrize("server", [False, True], ids=["host_alone", "server_whose_boot_spawn_failed"])
+def test_a_host_serving_alone_runs_the_turn_on_the_disclosed_degraded_executor(pool, tmp_path, monkeypatch, server):
+    """A Host serving without a supervisor queue of its own (no ``queue.init`` in this process) has no pool
+    generation to wait for: that physical fact (2A) runs the body on this process's thread as
+    ``inline_degraded``, disclosed in the row and the vitals, and its own frames resolve the Host's waiter.
+    A SERVER before its pool arms is the typed refusal below, never this executor; a server whose boot spawn
+    failed is that same physical fact (no supervisor loop will retry it), disclosed with its own reason."""
+    import os
+
+    from supervisor import inline_carrier, message_bus, queue
 
     monkeypatch.setattr(conversation_lane, "_ARMED_TABLE", None)  # no generation is armed here
+    monkeypatch.setattr(queue, "INITIALIZED", server)  # a Host serving alone owns no live queue
+    monkeypatch.setattr(queue, "OWNER_PID", os.getpid())
+    monkeypatch.setattr(conversation_lane, "_SPAWN_REFUSED", ["carrier_spawn_refused:OSError" if server else ""])
+    assert queue.owns_live_queue(pool.root) is server
     monkeypatch.setattr(workers, "_get_chat_agent", lambda: pytest.fail("a Presence body needs no native agent"))
     monkeypatch.setattr(inline_carrier, "threading", SimpleNamespace(Thread=_REAL_THREAD))
     monkeypatch.setattr(inline_carrier, "_INLINE", type(inline_carrier._INLINE)(maxlen=50))
@@ -212,16 +222,64 @@ def test_without_a_pool_generation_the_host_turn_runs_on_the_disclosed_degraded_
                 event_payload=_payload(event), staged_files=[], gate_wait=True))
         assert started
         assert execution.result.result(timeout=10).text == "Hi"  # settled by the executor's own frame
+        # The frame resolves the waiter before releasing its lane row; join the actual carrier before
+        # asserting teardown, rather than racing the rest of handle_presence_turn_settled.
+        for slot in list(workers.WORKERS.values()):
+            if slot.proc.pid is None:
+                slot.proc.join(5)
+                assert not slot.proc.is_alive()
         assert ran and ran[0]["carrier_owner"]["executor"] == "inline_degraded"
         assert turn_id not in workers.RUNNING and registry.find(turn_id) is None
         vitals = inline_carrier.inline_vitals()
-        assert vitals["degraded_total"] == 1 and vitals["inline_executions"][-1]["reason"] == "pool_not_started"
+        assert vitals["degraded_total"] == 1 and vitals["inline_executions"][-1]["reason"] == (
+            "carrier_spawn_refused:OSError" if server else "pool_not_started")
         assert vitals["inline_executions"][-1]["task_id"] == turn_id
     finally:
         presence_carrier.set_presence_runner(pool.root, None)
         for slot in list(workers.WORKERS.values()):
             if getattr(slot.proc, "join", None) and slot.proc.pid is None:
                 slot.proc.join(5)
+
+
+@pytest.mark.parametrize("saved", [False, True], ids=["empty_saved_queue", "saved_queue_not_restored"])
+def test_a_server_before_its_pool_arms_refuses_the_turn_typed_and_touches_no_saved_queue(pool, monkeypatch, saved):
+    """S9: in the server process (it owns the live queue of this root) a Presence event that arrives before the
+    pool arms (the boot's window between ``queue.init`` and ``spawn_workers``, or after a whole-table stop) is not
+    started: ``PresenceTurnNotStarted``, the typed 503 ``presence_turn_not_started`` retry the connector already
+    handles (CREATING_SKILLS), never the degraded executor on a server thread. Nothing is admitted, so no one-row
+    document is published over a saved queue this generation has not restored yet (#1952): the saved
+    snapshot's bytes stay as they were."""
+    import os
+
+    from supervisor import queue
+    from supervisor.inline_carrier import inline_vitals
+
+    monkeypatch.setattr(conversation_lane, "_ARMED_TABLE", None)
+    monkeypatch.setattr(queue, "INITIALIZED", True)
+    monkeypatch.setattr(queue, "OWNER_PID", os.getpid())
+    assert queue.owns_live_queue(pool.root)
+    path = queue.QUEUE_SNAPSHOT_PATH
+    if saved:  # the previous generation's queue, not restored by this one yet
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"ts": "2026-11-02T17:54:00+00:00", "pending": [{"id": "saved", "task": {"id": "saved"}}],
+                                    "running": []}), encoding="utf-8")
+    before = path.read_bytes() if saved else None
+    degraded_before = inline_vitals()["degraded_total"]
+    admission, event = _admission(), _event()
+    from ouroboros import presence_admission
+    monkeypatch.setattr(presence_admission, "admit_presence_turn", lambda **kw: admission)
+    registry = PresenceTurnExecutions()
+    turn_id = presence_runner.presence_turn_task_id(admission.binding_id, event.source_event_id)
+    with pytest.raises(presence_runner.PresenceTurnNotStarted):
+        dispatch_presence_turn(SimpleNamespace(turn_id=turn_id), drive_root=pool.root, skill_name="telegram-bot",
+                               admission=admission, event=event, event_payload=_payload(event), staged_files=[],
+                               gate_wait=True)
+    assert turn_id not in workers.RUNNING and registry.find(turn_id) is None
+    assert inline_vitals()["degraded_total"] == degraded_before, "nothing ran on a server thread"
+    if saved:
+        assert path.read_bytes() == before, "the saved queue is untouched"
+    else:
+        assert not path.exists()
 
 
 def test_a_dead_carriers_intake_accepts_nothing_and_the_rows_end_closes_it(tmp_path):

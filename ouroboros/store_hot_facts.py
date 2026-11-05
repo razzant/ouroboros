@@ -35,7 +35,8 @@ from ouroboros.utils import machine_json
 VERSION = 6
 LIST_VERSION = 9
 ORIGIN_VERSION = 10
-VERSIONS = (VERSION, LIST_VERSION, ORIGIN_VERSION)  # each schema step that adds these columns
+CHAT_VERSION = 11
+VERSIONS = (VERSION, LIST_VERSION, ORIGIN_VERSION, CHAT_VERSION)  # each schema step that adds these columns
 JOB = "hot_facts"
 TASK_COLUMNS = {
     "owner_pause_state": "TEXT", "owner_pause_fence_id": "TEXT", "owner_pause_facts": "TEXT",
@@ -45,15 +46,17 @@ TASK_COLUMNS = {
     # The owner message the task's own top-level ``origin_message_ref`` names (``dialogue_store.origin_key``),
     # "" for none: discovery for the Host Service operation reader (``task_store.origin_documents``), never authority.
     "origin": "TEXT",
+    # The chat the task was admitted in, as the room rule reads it (``admitted_chat``), "" for none.
+    "chat_id": "TEXT",
 }
-SELECTION_COLUMNS = ("list_stable", "origin")  # selection/discovery facts no control reader needs
+SELECTION_COLUMNS = ("list_stable", "origin", "chat_id")  # selection, discovery and room facts no control reader needs
 CUSTODY_COLUMNS = {
     "root_task_id": "TEXT", "billing_group_id": "TEXT", "output_unread": "INTEGER",
     "payload_held": "INTEGER", "facts_derived": "INTEGER", "write_seq": "INTEGER NOT NULL DEFAULT 0",
 }
-# An older body's INDEXED BY probes name this predicate on a shared store: ``origin`` keeps its own index.
-TASK_UNDERIVED = " OR ".join(f"{name} IS NULL" for name in (*TASK_COLUMNS, "root_task_id") if name != "origin")
-ORIGIN_UNDERIVED = "origin IS NULL"
+# An older body's INDEXED BY probes name this predicate on a shared store: a later column keeps its own index.
+OWN_UNDERIVED = {"origin": "tasks_underived_origin", "chat_id": "tasks_underived_chat"}
+TASK_UNDERIVED = " OR ".join(f"{name} IS NULL" for name in (*TASK_COLUMNS, "root_task_id") if name not in OWN_UNDERIVED)
 CUSTODY_UNDERIVED = "facts_derived IS NULL"
 REQUEST_SETS = ("custody_open", "custody_refused")
 REQUEST_UNDERIVED = "set_name IN ('custody_open','custody_refused') AND request_root_task_id IS NULL"
@@ -62,7 +65,7 @@ INDEXES = (
     "CREATE INDEX IF NOT EXISTS tasks_list_stable ON tasks(list_stable, status, ts, task_id)",
     "CREATE INDEX IF NOT EXISTS tasks_underived_root ON tasks(task_id) WHERE root_task_id IS NULL",
     "CREATE INDEX IF NOT EXISTS tasks_origin ON tasks(origin) WHERE origin<>''",
-    f"CREATE INDEX IF NOT EXISTS tasks_underived_origin ON tasks(task_id) WHERE {ORIGIN_UNDERIVED}",
+    *(f"CREATE INDEX IF NOT EXISTS {index} ON tasks(task_id) WHERE {name} IS NULL" for name, index in OWN_UNDERIVED.items()),
     "CREATE INDEX IF NOT EXISTS tasks_owner_pause ON tasks(owner_pause_state, task_id) WHERE owner_pause_state<>''",
     "CREATE INDEX IF NOT EXISTS tasks_budget_pause ON tasks(budget_pause_state, task_id) WHERE budget_pause_state<>''",
     "CREATE INDEX IF NOT EXISTS tasks_phase ON tasks(post_task_synthesis, task_id) WHERE post_task_synthesis<>''",
@@ -113,7 +116,7 @@ def upgrade(txn) -> None:
 # select its rows without visiting a derived one, and the source stamp its compare-and-set holds.
 _FAMILIES = {
     "tasks": ("tasks", "task_id", ((TASK_UNDERIVED, "tasks_underived_hot"),
-                                   (ORIGIN_UNDERIVED, "tasks_underived_origin")), "write_seq"),
+                                   *((f"{name} IS NULL", index) for name, index in OWN_UNDERIVED.items())), "write_seq"),
     "custody_runs": ("custody_runs", "run_id", ((CUSTODY_UNDERIVED, "custody_underived_hot"),), "write_seq"),
     **{name: ("obligations", "id", ((f"{REQUEST_UNDERIVED} AND set_name='{name}'", "custody_request_underived"),),
               "facts") for name in REQUEST_SETS},
@@ -200,6 +203,16 @@ def lineage_root(document: dict) -> str:
                or document["task_id"])
 
 
+def admitted_chat(value: Any) -> str:
+    """A task's own top-level ``chat_id`` as the room rule reads it (``projects_registry._read_lineage``), as the
+    integer's text: an integer or its text, a JSON real's integer part, a boolean's 1 or 0; "" for none or any
+    other value, as the rule's read of the body answered."""
+    try:
+        return "" if value is None or value == "" else str(int(value))
+    except (TypeError, ValueError, OverflowError):
+        return ""
+
+
 def task_columns(document: dict) -> dict:
     from ouroboros.dialogue_store import origin_key
     from ouroboros.task_status import stored_list_order_is_final
@@ -226,6 +239,7 @@ def task_columns(document: dict) -> dict:
         "control_valid": int(isinstance(document.get("status"), str) and bool(document["status"].strip())),
         "list_stable": int(stored_list_order_is_final(document)),
         "origin": origin_key(document.get("origin_message_ref")),
+        "chat_id": admitted_chat(document.get("chat_id")),
     }
 
 
@@ -467,7 +481,7 @@ def hot_facts_due(root: Any, row: dict, child: bool) -> bool:
 
     with store.open_store(root, write=False) as txn:
         schema = txn.meta("schema_version")
-        if schema is not None and int(schema) < ORIGIN_VERSION:
+        if schema is not None and int(schema) < VERSIONS[-1]:
             return True
         if row.get("state") != "failed":
             return not _settled(txn, {})

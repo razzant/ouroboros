@@ -275,8 +275,9 @@ def _record_one(root: Path, admission: Any, import_id: str, record: HistoryRecor
     with intake_lock(root, event.conversation_key):
         with dialogue_store.transaction(root, write=False) as conn:
             prior = _record(conn, task_id)
-        if prior is not None:
-            seq, row, duplicate = int(prior["seq"]), dialogue_store.decode(prior["body"]), True
+            stored = dialogue_store.whole_body(conn, prior["body"]) if prior is not None else None
+        if prior is not None:  # the receipt's row whole, as a fresh capture's is
+            seq, row, duplicate = int(prior["seq"]), stored, True
         else:
             marker = {"version": HISTORY_IMPORT_VERSION, "import_id": import_id, "authorship": record.authorship,
                       "received_at": utc_now_iso(), "transport_skill": admission.transport_skill}

@@ -903,6 +903,29 @@ def _unwind_stashed_update(tx: dict, context: str) -> str:
     return note
 
 
+def _assisted_update_pays() -> bool:
+    """Whether an assisted update needs paid admission, all a reached global limit refuses: its resolver
+    (a root task, opening on Main) or a seat of the commit-review wave it asks for. The API rows of the
+    review pool are answered at the global axis by ``review_wave_admission`` (the reservation's own rule);
+    session rows ride subscriptions. An unknown answer pays; every send still meets its reservation."""
+    from ouroboros.review_execution import ReviewRouteKind
+    from ouroboros.reviewer_slot_config import review_pool_slots
+    from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET
+    from ouroboros.tools.review_multi_model import _review_output_budget
+    from ouroboros.usage_admission import review_wave_admission
+    from supervisor import state
+    from supervisor.worker_assignment import needs_paid_admission
+
+    if needs_paid_admission({"metadata": {}}):
+        return True
+    models = [row.model for row in review_pool_slots() if row.model
+              and str(getattr(row.route, "value", row.route) or "") != ReviewRouteKind.AGENT_SESSION.value]
+    return bool(models) and review_wave_admission(
+        drive_root=state.DRIVE_ROOT, root_task_id="managed-update-admission", models=models,
+        prompt_chars=int(REVIEW_PROMPT_TOKEN_BUDGET) * 4, max_completion_tokens=int(_review_output_budget()),
+        global_limit_usd=float(state.TOTAL_BUDGET_LIMIT or 0.0)).get("fits") is not True
+
+
 def _start_assisted_merge_fenced(plan: dict, tx: dict) -> JSONResponse:
     """Stage the exact planned merge and enqueue its one reviewed resolver.
 
@@ -947,7 +970,7 @@ def _start_assisted_merge_fenced(plan: dict, tx: dict) -> JSONResponse:
              **({"stash_note": note} if note else {})},
             status_code=409,
         )
-    if remaining <= 0:
+    if remaining <= 0 and _assisted_update_pays():
         note = _unwind_stashed_update(tx, "assisted_admission_failed")
         _respawn_workers_after_failed_update()
         return JSONResponse(
@@ -957,8 +980,9 @@ def _start_assisted_merge_fenced(plan: dict, tx: dict) -> JSONResponse:
         )
     # Money admission is the known-spend rule every reviewer seat's reservation
     # applies (#1487), checked just above: known spend below TOTAL_BUDGET admits
-    # the update, and a review that later reaches the limit pauses on its own
-    # fences. One commit-gate wave over the review pool's paid seats is still
+    # the update, a reached limit only one whose every actor is free, and a review
+    # that later reaches the limit pauses on its own fences. One commit-gate wave
+    # over the review pool's paid seats is still
     # priced at the review packs' own worst-case caps by the one explicit
     # estimator (``review_admission.managed_update_wave_estimate``), but as
     # DISCLOSURE, never a second, earlier refusal: a prospective wave larger

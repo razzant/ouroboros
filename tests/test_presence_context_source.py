@@ -8,12 +8,14 @@ from __future__ import annotations
 from tests import _dialogue as dialogue_test
 
 from dataclasses import replace
+import hashlib
 import json
+from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import chat_chain, evidence_packer, memory_view
-from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path
+from ouroboros import chat_chain, dialogue_store as ds, evidence_packer, memory_view
+from ouroboros.artifacts import read_actor_source_bytes
 from ouroboros.dialogue_provenance import dialogue_text
 from ouroboros.presence_context import build_presence_context_section
 from ouroboros.presence_runner import PresenceTurnGate, run_presence_turn
@@ -42,13 +44,20 @@ def _observed_event():
 
 
 def _rows(root):
-    return [row for _address, row, _pos in chat_chain.iter_rows(root) if row.get("direction") in {"in", "out"}]
+    """The room's rows as written (a provider thread the store keeps once, expanded)."""
+    return [row for row in dialogue_test.chat_rows(root) if row.get("direction") in {"in", "out"}]
 
 
 def _context_ref(text):
     prefix = "memory_read(source_ref="
     assert prefix in text
     return json.JSONDecoder().raw_decode(text.split(prefix, 1)[1])[0]
+
+
+def _copy_bytes(row, event):
+    """The document the per-event copy held, written by the code this replaces, byte for byte."""
+    return json.dumps({"recorded_at": row["ts"], "source_event_id": event.source_event_id, "text": event.text,
+                       "transport": row["transport"]}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 @pytest.mark.parametrize("packed", [False, True], ids=["loose", "packed"])
@@ -83,8 +92,8 @@ def test_next_presence_reads_the_same_source_through_its_selected_memory_tool(tm
                 history = registry.execute("chat_history", {"count": 100})
                 rows = registry.execute("memory_read", {"rows": True})
                 refs = [_context_ref(view) for view in (room, history, rows)]
-                assert refs == [{key: value for key, value in source_ref.items()
-                                 if key not in {"read", "canonical_root"}}] * 3
+                # Every reader names the row's own exact address: the row is the context recorded with it.
+                assert refs == [chat_chain.context_address(_rows(data)[0])] * 3
                 for view in (room, history, rows):
                     assert "not new speech or current provider truth" in view
                 source = registry.execute("memory_read", {"source_ref": refs[0]})
@@ -103,12 +112,9 @@ def test_next_presence_reads_the_same_source_through_its_selected_memory_tool(tm
     first = turn(event)
     assert first.outcome == "silent"
     original = _rows(data)[0]
-    source_ref = original["context_source_ref"]
-    raw = read_actor_source_bytes(data, tasks[0]["id"], source_ref)
-    payload = json.loads(raw)
-    assert payload == {"recorded_at": original["ts"], "source_event_id": event.source_event_id,
-                       "text": event.text, "transport": original["transport"]}
-    assert len(raw) < len(json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
+    assert original.source_body["context_source_ref"] == chat_chain.ROW_CONTEXT  # the row itself, no copy written
+    assert original["context_source_ref"] == chat_chain.context_address(original)  # as every row reader shows it
+    assert not list((data / "task_results").rglob("presence-event-*.json"))
     assert original["ts"] != event.message["sent_at"]  # chat-chain address stays the host's row time
     address = chat_chain.row_address(original)
     assert original["text"] == event.text and len(_rows(data)) == 1  # history is not new speech
@@ -116,31 +122,53 @@ def test_next_presence_reads_the_same_source_through_its_selected_memory_tool(tm
         from ouroboros.terminal_projection import SETTLEMENT_SETTLED, settle_terminal_projection
 
         assert settle_terminal_projection(data, tasks[0]["id"], task=tasks[0]) == SETTLEMENT_SETTLED
-        result = evidence_packer.run_pass(data)  # the row stays addressable in the store; chat is never rotated
-        assert result["packed"] == 1 and result["faults"] == 0, result
-        source_path = task_artifact_dir_path(data, tasks[0]["id"], create=False) / source_ref["path"]
-        assert not source_path.exists(), "the test must actually read through the packed-source resolver"
+        # The context lives in the room row, not in the task's evidence: settling and packing that evidence
+        # leaves the row addressable in the store (chat is never rotated) and the read below unchanged.
+        result = evidence_packer.run_pass(data)
+        assert result["faults"] == 0, result
     # Same-id replay neither re-logs nor replaces the frozen context with a new provider observation.
     replay = turn(replace(event, conversation={"title": "Changed provider state"}))
     assert replay.task_id == first.task_id and len(tasks) == 1 and len(_rows(data)) == 1
-    assert read_actor_source_bytes(data, tasks[0]["id"], source_ref) == raw
     second = turn(replace(event, source_event_id="telegram:bot-1:43", text="A later observation.",
                           conversation={"title": "Community"}, message={"message_id": "43"}))
     assert second.outcome == "silent" and second.task_id != first.task_id and len(reads) == 1
-    assert chat_chain.resolve_row(data, address)[0] == original
+    # What the model is shown is exactly what the copy held: the same document, byte for byte, and its digest.
+    copy = _copy_bytes(original, event)
+    head, _coverage, shown = reads[0].split("\n", 2)
+    assert shown == copy and hashlib.sha256(copy.encode("utf-8")).hexdigest()[:12] in head
+    assert head.startswith(f"[source {chat_chain.format_address(address)}; recorded with this chat row;")
+    assert chat_chain.source_row_id(chat_chain.resolve_row(data, address)[0]) == chat_chain.source_row_id(original)
     assert [row["text"] for row in _rows(data)] == [event.text, "A later observation."]
 
 
-def test_failed_source_retention_publishes_no_address_and_runs_no_actor(tmp_path, monkeypatch):
+def test_an_event_needs_no_copy_of_its_context_and_a_copy_written_before_still_reads(tmp_path, monkeypatch):
     def unavailable(*_args, **_kwargs):
         raise OSError("source storage unavailable")
 
-    monkeypatch.setattr(chat_chain, "retain_memory_source", unavailable)
-    with pytest.raises(OSError, match="source storage unavailable"):
-        run_presence_turn(admission=_admission(), event=_observed_event(), repo_dir=tmp_path,
-            drive_root=tmp_path, agent_factory=lambda **_kwargs: pytest.fail("actor ran before retention"),
-            gate=PresenceTurnGate(1))
-    assert not dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
+    monkeypatch.setattr(chat_chain, "retain_memory_source", unavailable)  # nothing is retained beside the row
+    seen = []
+
+    class Agent:
+        def handle_task(self, task):
+            seen.append(task)
+            _terminal(tmp_path, task, "Seen.")
+            return [{"type": "presence_result", "outcome": "silent", "text": "", "work_ref": ""}]
+
+    run_presence_turn(admission=_admission(), event=_observed_event(), repo_dir=tmp_path, drive_root=tmp_path,
+                      agent_factory=lambda **_kwargs: Agent(), gate=PresenceTurnGate(1))
+    row, = dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
+    assert seen and row.source_body["context_source_ref"] == chat_chain.ROW_CONTEXT
+    monkeypatch.undo()
+    # A row written before names its retained copy; every reader keeps showing and reading that copy.
+    event = replace(_observed_event(), source_event_id="telegram:bot-1:99")
+    copy = chat_chain.retain_memory_source(SimpleNamespace(drive_root=tmp_path, task_id="old-turn"), "presence-event",
+                                           _copy_bytes(row, event).encode("utf-8"), "json")
+    old = {**row, "ts": "2026-10-15T09:00:00+00:00", "client_message_id": event.source_event_id, "context_source_ref": copy}
+    ds.append(tmp_path, "chat", old)
+    stored = [entry.row for entry in ds.newest(tmp_path, "chat", limit=10) if entry.row["ts"] == old["ts"]][0]
+    assert stored["context_source_ref"] == copy and _context_ref(dialogue_text(stored)) == {
+        key: value for key, value in copy.items() if key not in {"read", "canonical_root"}}
+    assert json.loads(read_actor_source_bytes(tmp_path, "old-turn", copy))["transport"] == row["transport"]
 
 
 def test_ordinary_and_outgoing_rows_do_not_gain_incoming_context_speech():

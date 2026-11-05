@@ -16,8 +16,9 @@
    A failed write refuses with nothing done. The same nonce
    resumes its own claim and frozen room; another nonce is answered with the
    accepted successor.
-3. ADMISSION through the existing reservation and durable enqueue (queue row,
-   persisted snapshot, then the result row under the queue lock). A
+3. ADMISSION through the existing reservation and durable enqueue (queue row
+   under the queue lock, its snapshot published outside it, then the result row
+   under the queue lock again, the row revalidated still queued). A
    predecessor whose writers are not proven settled — a RUNNING or
    dispatchable member of its tree, a delegated run its custody still holds
    or cannot read — admits the SAME task under a typed non-dispatch hold
@@ -71,11 +72,18 @@ def _recorded_admission(result: Dict[str, Any], predecessor: str, nonce: str) ->
 
 
 def _replay(q: Any, predecessor: str, nonce: str, successor: str) -> Optional[Dict[str, Any]]:
+    """The recorded admission of the same nonce, at any status (module docstring, step 1); None when there is none.
+
+    The reads and the decision run under Q; a row still carrying ``_continuation_prepared`` (its result row was
+    written but its final publication never confirmed) is published outside Q, and the marker returns to the row
+    when that barrier fails.
+    """
     from ouroboros.work_stop import hold_fact as budget_hold_fact
     from ouroboros.owner_continue import binding_sha, carried_execution_fields, mark_claim_admitted
     from ouroboros.task_results import load_task_result, write_task_result
 
     try:
+        prepared = None
         with q._queue_lock:
             stored = load_task_result(q.DRIVE_ROOT, successor, strict=True) or {}
             row = next((item for item in q.PENDING if str(item.get("id") or "") == successor), None)
@@ -105,19 +113,21 @@ def _replay(q: Any, predecessor: str, nonce: str, successor: str) -> Optional[Di
                                   **carried_execution_fields(binding))
             if row is not None and row.get("_continuation_prepared"):
                 prepared = row.pop("_continuation_prepared")
-                if q.publish_queue_snapshot(reason="owner_continue_binding_recovered") is not True:
+        if prepared is not None and q.publish_queue_snapshot(reason="owner_continue_binding_recovered") is not True:
+            with q._queue_lock:  # outside Q the barrier failed: the marker returns to the row it still names
+                if row is not None and not row.get("_continuation_prepared"):
                     row["_continuation_prepared"] = prepared
-                    return {"ok": False, "error": "queue_snapshot_persist_failed",
-                            "successor_task_id": successor, "unconfirmed": True}
-            mark_claim_admitted(q.DRIVE_ROOT, predecessor, nonce)
-            # Admission is historical; the live row may have released its hold.
+            return {"ok": False, "error": "queue_snapshot_persist_failed",
+                    "successor_task_id": successor, "unconfirmed": True}
+        mark_claim_admitted(q.DRIVE_ROOT, predecessor, nonce)
+        with q._queue_lock:  # admission is historical; the live row may have released its hold
             hold = budget_hold_fact(row) if row is not None else None
-            return {"ok": True, "replay": True, "recovered": recovered, "task_id": successor,
-                    "successor_task_id": successor, "predecessor_task_id": predecessor,
-                    "status": str(stored.get("status") or "scheduled"),
-                    "held": bool(hold) if row is not None else bool(admission.get("held")),
-                    **({"blockers": list(hold["blockers"])} if hold and "blockers" in hold else {}),
-                    **({"membership_gaps": admission["membership_gaps"]} if admission.get("membership_gaps") else {})}
+        return {"ok": True, "replay": True, "recovered": recovered, "task_id": successor,
+                "successor_task_id": successor, "predecessor_task_id": predecessor,
+                "status": str(stored.get("status") or "scheduled"),
+                "held": bool(hold) if row is not None else bool(admission.get("held")),
+                **({"blockers": list(hold["blockers"])} if hold and "blockers" in hold else {}),
+                **({"membership_gaps": admission["membership_gaps"]} if admission.get("membership_gaps") else {})}
     except Exception as exc:
         return {"ok": False, "error": "continuation_publication_unconfirmed",
                 "successor_task_id": successor, "unconfirmed": True, "detail": str(exc)[:200]}
@@ -708,19 +718,32 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str) -> Dict[s
         q.release_task_admission(successor, token)
         return {"ok": False, "error": str(exc), "successor_task_id": successor}
     refused, unadmitted = None, False  # a proven absence frees the successor's drive or input copies after the lock
+    # Q spans memory only: the row is enqueued under Q, published outside it, its result row written under Q again
+    # with the row revalidated still queued (a ``_continuation_prepared`` row is never dispatched; only a Stop can
+    # take it meanwhile), and its final publication runs outside Q once more.
     with q.prepared_root_billing(task), q._queue_lock:  # the ledger read happens before the lock
         admitted = q.enqueue_task(task, project_admission=project_basis, continuation=True)  # no consciousness slot
-        if isinstance(admitted, dict) and admitted.get("_admission_blocked"):
+        blocked = isinstance(admitted, dict) and admitted.get("_admission_blocked")
+        if blocked:
             q.release_task_admission(successor, token)
-            refused, unadmitted = {"ok": False, "error": str(admitted["_admission_blocked"]),
-                                   "successor_task_id": successor}, True
-        elif q.publish_queue_snapshot(reason="owner_continue_admitted") is not True:  # durable before ok
+    if blocked:
+        refused, unadmitted = {"ok": False, "error": str(admitted["_admission_blocked"]),
+                               "successor_task_id": successor}, True
+    elif q.publish_queue_snapshot(reason="owner_continue_admitted") is not True:  # durable before ok
+        with q._queue_lock:
             q.PENDING[:] = [row for row in q.PENDING if str(row.get("id") or "") != successor]
-            unadmitted = q.publish_queue_snapshot(reason="owner_continue_rollback") is True
-            q.release_task_admission(successor, token)
-            # The claim stays: the same nonce retries this admission, a new one is refused.
-            refused = {"ok": False, "error": "queue_snapshot_persist_failed", "successor_task_id": successor}
-        else:
+        unadmitted = q.publish_queue_snapshot(reason="owner_continue_rollback") is True
+        q.release_task_admission(successor, token)
+        # The claim stays: the same nonce retries this admission, a new one is refused.
+        refused = {"ok": False, "error": "queue_snapshot_persist_failed", "successor_task_id": successor}
+    else:
+        with q._queue_lock:
+            if not any(row is admitted for row in q.PENDING):
+                # A Stop's custody took the row between the holds and settles it; the claim stays with the
+                # predecessor and the same nonce reads the recorded outcome (``_replay``).
+                q.release_task_admission(successor, token)
+                return {"ok": False, "error": "continuation_unconfirmed", "successor_task_id": successor,
+                        "unconfirmed": True, "detail": "the admitted row left the queue before its record was written"}
             try:
                 write_task_result(
                     q.DRIVE_ROOT, successor, STATUS_SCHEDULED, continuation_admission=admission,
@@ -738,11 +761,12 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str) -> Dict[s
                 return {"ok": False, "error": "continuation_publication_unconfirmed",
                         "successor_task_id": successor, "unconfirmed": True, "detail": str(exc)[:200]}
             prepared = admitted.pop("_continuation_prepared")
-            if q.publish_queue_snapshot(reason="owner_continue_committed") is not True:
+        if q.publish_queue_snapshot(reason="owner_continue_committed") is not True:
+            with q._queue_lock:
                 admitted["_continuation_prepared"] = prepared
-                return {"ok": False, "error": "queue_snapshot_persist_failed",
-                        "successor_task_id": successor, "unconfirmed": True}
-            q.release_task_admission(successor, token)
+            return {"ok": False, "error": "queue_snapshot_persist_failed",
+                    "successor_task_id": successor, "unconfirmed": True}
+        q.release_task_admission(successor, token)
     if refused is not None:
         if unadmitted and (binding.get("memory_mode") or staged):
             _release_unadmitted_drive(q, successor, None if binding.get("memory_mode") else staged)

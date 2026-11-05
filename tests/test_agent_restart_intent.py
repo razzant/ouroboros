@@ -594,7 +594,7 @@ def test_restart_checkpoint_never_grants_a_new_restart_or_generic_evolution_fini
     if case == "finished":
         original.pending_restart_reason = None
     working_checkpoint.save_round(limits, "post_batch")
-    saved = json.loads(working_checkpoint.checkpoint_path(tmp_path, "requester", 1).read_bytes())
+    saved = working_checkpoint.read_working(tmp_path, "requester", 1)[1]
     if case == "legacy":
         saved.pop("restart", None)
     cold, resumed = _loop_ctx(tmp_path, "successor" if case == "another_task" else "requester",

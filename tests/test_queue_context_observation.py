@@ -10,7 +10,7 @@ import pytest
 
 from ouroboros import task_status
 from ouroboros.context_runtime_facts import _queue_context_fact
-from ouroboros.tools.control_scheduling import _subagent_slot_note
+from ouroboros.engine_facts import engine_pool_line
 from tests._shared import write_queue_document
 
 
@@ -64,16 +64,14 @@ def test_child_context_and_schedule_share_canonical_last_known_snapshot(tmp_path
     monkeypatch.setattr("ouroboros.config.DATA_DIR", child)
     task = {"budget_drive_root": str(canonical)}
     fact = _queue_context_fact(task)
-    ctx = SimpleNamespace(drive_root=child, budget_drive_root=canonical)
-    note = _subagent_slot_note(ctx, "root")
+    line = engine_pool_line(canonical)
     assert fact["freshness"] == "stale"
     assert fact["running_count"] == 1
     assert fact["free_worker_slots"] == 1
     assert fact["free_worker_slots_basis"] == "recorded_assignable_idle_workers"
     assert fact["source_root"] == str(canonical)
-    assert "freshness=stale" in note and "age_sec=60.0" in note
-    assert "last recorded 1/" in note
-    assert str(path) in note
+    assert "total 3" in line and "assignable idle 1" in line
+    assert "assignable idle 100" not in line
     assert path.read_bytes() == before
     # A frozen context remains that dated observation even when the source advances.
     _write(canonical, {**_snapshot(), "assignable_idle_workers": 2})
@@ -116,7 +114,7 @@ def test_missing_or_corrupt_snapshot_does_not_claim_empty_queue(tmp_path, body):
     fact = _queue_context_fact({"budget_drive_root": str(tmp_path)})
     assert fact["freshness"] == "unknown"
     assert "running_count" not in fact and "free_worker_slots" not in fact
-    assert "unknown" in _subagent_slot_note(SimpleNamespace(drive_root=tmp_path), "root")
+    assert "pool: not observed" in engine_pool_line(tmp_path)
 
 
 def test_cancellation_observation_preserves_status_and_same_freshness(tmp_path, monkeypatch):

@@ -94,7 +94,6 @@ def _peer_world(root, *, waits=True):
          "task": {"id": "peer", "chat_id": 1, "title": "Peer work", "focus": focus}},
         {"id": "other", "attempt": 1, "started_at": 1793000000.0,
          "task": {"id": "other", "chat_id": 1, "title": "Other work"}}]})
-    write_queue_document(root / "state/direct_roots.json", {"ts": stamp, "incomplete": False, "roots": []})
 
 
 def _unreadable_results(monkeypatch, failing):

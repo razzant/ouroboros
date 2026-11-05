@@ -952,16 +952,21 @@ def test_direct_chat_loop_budget_exhaustion_never_suggests_new_run(data_root, mo
     assert trace["resource_limit"]["replay_safe"] is False
 
 
-def test_zero_bound_cannot_dispatch_after_finite_limit_is_reached(data_root):
+def test_known_zero_bound_is_admitted_after_finite_limit_is_reached(data_root):
+    """Owner 2A (04.11, BIBLE P8): a reached global limit refuses paid admission only; a known
+    $0 bound is not paid, a known positive one is (tests/test_budget_paid_admission.py)."""
     first = ua.reserve_attempt(_request(data_root, reservation_usd=1.0, global_limit_usd=1.0))
     ua.mark_dispatched(first)
     ua.settle_attempt(first, {}, cost_usd=1.0, cost_final=True)
 
+    free = ua.reserve_attempt(_request(
+        data_root, task_id="next", reservation_usd=None,
+        max_budget_usd=0.0, global_limit_usd=1.0,
+    ))
+    ua.mark_dispatched(free)
     with pytest.raises(ua.BudgetExceeded):
-        ua.reserve_attempt(_request(
-            data_root, task_id="next", reservation_usd=None,
-            max_budget_usd=0.0, global_limit_usd=1.0,
-        ))
+        ua.reserve_attempt(_request(data_root, task_id="paid", reservation_usd=None,
+                                    max_budget_usd=0.01, global_limit_usd=1.0))
 
 
 def test_legacy_state_projection_cannot_regress_under_reordered_writers(
@@ -1233,7 +1238,7 @@ def test_actor_limit_blocks_third_retry_before_provider_send(data_root, monkeypa
     }
 
 
-def test_env_zero_is_unbounded_but_explicit_zero_is_a_hard_rail(data_root, monkeypatch):
+def test_env_zero_is_unbounded_but_explicit_zero_is_a_hard_rail_for_paid_admission(data_root, monkeypatch):
     monkeypatch.setenv("TOTAL_BUDGET", "0")
     request = ua.AttemptRequest(
         model="local/test",
@@ -1245,15 +1250,12 @@ def test_env_zero_is_unbounded_but_explicit_zero_is_a_hard_rail(data_root, monke
     assert "limit_usd" not in ua.usage_projection(data_root)
 
     with pytest.raises(ua.BudgetExceeded) as exc_info:
-        ua.reserve_attempt(
-            ua.AttemptRequest(
-                model="local/test",
-                provider="local",
-                drive_root=data_root,
-                global_limit_usd=0,
-            )
-        )
+        ua.reserve_attempt(_request(data_root, reservation_usd=0.01, global_limit_usd=0))
     assert exc_info.value.limit_scope == "global"
+    # Owner 2A: the local lane is a known $0, never paid admission, so the zero limit admits it.
+    local = ua.reserve_attempt(ua.AttemptRequest(model="local/test", provider="local", drive_root=data_root,
+                                                 global_limit_usd=0))
+    ua.release_attempt(local)
 
 
 def test_explicit_zero_root_limit_blocks_only_that_root(data_root, monkeypatch):

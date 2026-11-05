@@ -433,23 +433,31 @@ def test_a_resume_into_its_wait_is_on_disk_before_it_answers_and_a_crash_keeps_t
 @pytest.mark.parametrize("fault", ["nothing_landed", "part_landed_then_retried", "part_landed_and_no_write_after"])
 @pytest.mark.parametrize("settled", [False, True], ids=["into_its_wait", "selected_to_start"])
 def test_a_publication_that_fails_returns_the_stop_and_the_disk_follows(tmp_path, monkeypatch, fault, settled):
-    """A failed write can land part of its bundle (``queue_publication._publish``), so the door puts the stop back over
-    it at once. When that write fails too, the row in memory is still the stop and the tick's owed rewrite lands it."""
+    """A failed write can land part of its bundle (``queue_publication._publish``: here the snapshot lands and its
+    certificate does not; a document whose bytes did not change is not written at all), so the door puts the stop
+    back over it at once. When that write fails too, the row in memory is still the stop and the tick's owed
+    rewrite lands it."""
     from ouroboros.gateway.tasks import api_task_resume
+    from supervisor import queue_publication
     from supervisor.queue_publication import publish_queue_changes
 
     queue, workers, successor, hold = _saved_continue(tmp_path, monkeypatch, settled=settled)
-    real_write, writes = queue.atomic_write_text, []
+    real_write, real_alive, writes = queue.atomic_write_text, queue_publication._write_alive, []
 
     def write(target, content, *args, **kwargs):
-        name = pathlib.Path(target).name
-        writes.append(name)
-        refused = (fault == "nothing_landed" or
-                   (len(writes) == 2 if fault == "part_landed_then_retried" else len(writes) > 1))
+        writes.append(pathlib.Path(target).name)
+        refused = fault == "nothing_landed" or (fault == "part_landed_and_no_write_after" and len(writes) > 1)
         return False if refused else real_write(target, content, *args, **kwargs)
+
+    def certify(target, content):
+        writes.append("queue.alive")
+        refused = (fault == "part_landed_and_no_write_after"
+                   or (fault == "part_landed_then_retried" and writes.count("queue.alive") == 1))
+        return False if refused else real_alive(target, content)
 
     with monkeypatch.context() as patched:
         patched.setattr(queue, "atomic_write_text", write)
+        patched.setattr(queue_publication, "_write_alive", certify)
         status, refusal = _http(api_task_resume, successor)
     assert status == 409 and refusal["error"] == "snapshot_not_persisted", refusal
     assert _row(workers, successor)["_budget_pause_hold"] == hold
@@ -468,9 +476,11 @@ def test_a_publication_that_fails_returns_the_stop_and_the_disk_follows(tmp_path
 
 @pytest.mark.parametrize("settled", [False, True], ids=["into_its_wait", "selected_to_start"])
 def test_a_crash_before_any_write_lands_after_a_torn_publication_still_starts_nothing(tmp_path, monkeypatch, settled):
-    """The worst of it: the row a refused door published landed alone, every write after it failed, and the process dies
-    before its tick. No certificate names that bundle, so the restart keeps no wait from it: only a Resume starts it."""
+    """The worst of it: the row a refused door published landed alone, every write after it (its certificate first)
+    failed, and the process dies before its tick. No certificate names that bundle, so the restart keeps no wait
+    from it: only a Resume starts it."""
     from ouroboros.gateway.tasks import api_task_resume
+    from supervisor import queue_publication
 
     queue, workers, successor, hold = _saved_continue(tmp_path, monkeypatch, settled=settled)
     real_write, writes = queue.atomic_write_text, []
@@ -481,6 +491,7 @@ def test_a_crash_before_any_write_lands_after_a_torn_publication_still_starts_no
 
     with monkeypatch.context() as patched:
         patched.setattr(queue, "atomic_write_text", write)
+        patched.setattr(queue_publication, "_write_alive", lambda *_a, **_k: False)
         status, refusal = _http(api_task_resume, successor)
     assert status == 409 and refusal["error"] == "snapshot_not_persisted", refusal
     assert _on_disk(tmp_path, successor) != hold, "the part that landed is what the disk says"

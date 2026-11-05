@@ -910,6 +910,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # retained bytes (its own PERSISTENCE row).
 # 448 -> 450: ``artifacts.stream_actor_source`` streams a retained source into its
 # ``source_handles/*`` category folder through a ``*.stream`` temporary (the task artifacts row).
+# 450 -> 452: request views stored once (W10) spell the view's skeleton placement
+# ``observability/blobs/<sha>.json.shared.gz`` and its canonical loose address beside
+# the family's ``*.*.gz``; both sit under the observability row.
 EXPECTED_SCAN_PATHS = 450
 
 # Scanned paths that must always be present — guards the scanner itself

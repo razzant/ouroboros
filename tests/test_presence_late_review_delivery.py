@@ -291,10 +291,11 @@ def a_further_tool(_messages):
 
 
 def budget_refuses(_messages):
-    """That call's reservation is refused before a byte is sent (a zero global limit, as in the owner-Stop suite)."""
+    """That call's reservation is refused before a byte is sent (a zero global limit, as in the owner-Stop suite):
+    a priced call, since a reached global limit refuses paid admission only (owner 2A)."""
     from ouroboros.usage_accounting import AttemptRequest, reserve_attempt
 
-    reserve_attempt(AttemptRequest(model="budget-refusal", provider="local", reservation_usd=0,
+    reserve_attempt(AttemptRequest(model="budget-refusal", provider="openai", reservation_usd=0.01,
                                    global_limit_usd=0, allow_live_fetch=False))
     raise AssertionError("a zero global limit refuses this reservation")
 

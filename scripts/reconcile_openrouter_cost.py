@@ -96,20 +96,10 @@ def _custody(root: Path, row: dict) -> str | None:
     else:
         # A standalone command has no supervisor maps. Read the selected
         # root's current snapshot; missing/stale observations retain custody.
+        # Every live focus, a direct turn included, is a row of that snapshot (the retired direct-roots
+        # fragment is read by nothing). Absence cannot prove all live stacks ended, nor prevent later admission.
         live = (task_has_live_queue_ownership(root, task_id)
                 or task_has_live_review_operation(root, task_id, result_loader=reads.load))
-        from ouroboros.utils import read_json_dict
-
-        direct_path = root / "state" / "direct_roots.json"
-        if direct_path.exists():
-            direct = read_json_dict(direct_path)
-            if (not isinstance(direct, dict) or direct.get("incomplete")
-                    or not isinstance(direct.get("roots"), list)
-                    or any(not isinstance(item, dict) or item.get("task_id") == task_id
-                           for item in direct["roots"])):
-                return "owner_unsettled"
-        # The direct fragment is positive-only, not an interlock: absence
-        # cannot prove all live stacks ended, nor prevent later admission.
     if live or not reads.unchanged((task_id,)):
         return "owner_unsettled"
     if post_task_synthesis_is_open((task.get("root_phase_checkpoint") or {}).get("post_task_synthesis")):

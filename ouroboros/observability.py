@@ -287,48 +287,97 @@ def _json_bytes(payload: Any) -> bytes:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
 
 
-def write_blob(drive_root: pathlib.Path, payload: Any, *, kind: str = "json") -> Dict[str, Any]:
-    """Persist a full private payload as a content-addressed gzip blob."""
-
-    raw = _json_bytes(payload) if kind == "json" else str(payload).encode("utf-8", errors="replace")
-    digest = hashlib.sha256(raw).hexdigest()
-    path = _observability_root(pathlib.Path(drive_root)) / "blobs" / f"{digest}.{kind}.gz"
+def _publish_blob_file(path: pathlib.Path, raw: bytes) -> None:
+    """Publish ``raw`` as gzip-1 at ``path`` (temp + atomic replace, 0600); a present file is kept."""
     path.parent.mkdir(parents=True, exist_ok=True)
     _chmod_private_dir(path.parent)
-    if not path.exists():
-        tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
-        try:
-            with gzip.open(tmp, "wb", compresslevel=1) as fh:
-                fh.write(raw)
-            _chmod_private(tmp)
-            replace_atomic(tmp, path)
-            _chmod_private(path)
-        except Exception:
-            if path.exists():
-                # Concurrent reviewers can legitimately publish the same
-                # content-addressed blob. On Windows the losing os.replace may
-                # raise while the winning blob is already durable.
-                try:
-                    tmp.unlink()
-                except OSError:
-                    pass
-                _chmod_private(path)
-            else:
-                try:
-                    tmp.unlink()
-                except OSError:
-                    pass
-                raise
-    else:
+    if path.exists():
         _chmod_private(path)
-    return {
-        "sha256": digest,
-        "path": str(path),
-        "kind": kind,
-        "encoding": "gzip",
-        "size": len(raw),
-        "compressed_size": path.stat().st_size if path.exists() else 0,
-    }
+        return
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
+    try:
+        with gzip.open(tmp, "wb", compresslevel=1) as fh:
+            fh.write(raw)
+        _chmod_private(tmp)
+        replace_atomic(tmp, path)
+        _chmod_private(path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        if not path.exists():
+            raise
+        # Concurrent reviewers can legitimately publish the same content-addressed blob. On
+        # Windows the losing os.replace may raise while the winning blob is already durable.
+        _chmod_private(path)
+
+
+def _blob_ref(path: pathlib.Path, digest: str, kind: str, size: int) -> Dict[str, Any]:
+    return {"sha256": digest, "path": str(path), "kind": kind, "encoding": "gzip", "size": size,
+            "compressed_size": path.stat().st_size if path.exists() else 0}
+
+
+def write_blob_bytes(drive_root: pathlib.Path, raw: bytes, *, kind: str = "json") -> Dict[str, Any]:
+    """Persist exact bytes as a content-addressed gzip blob: the one CAS write."""
+    digest = hashlib.sha256(raw).hexdigest()
+    path = _observability_root(pathlib.Path(drive_root)) / "blobs" / f"{digest}.{kind}.gz"
+    _publish_blob_file(path, raw)
+    return _blob_ref(path, digest, kind, len(raw))
+
+
+def write_blob(drive_root: pathlib.Path, payload: Any, *, kind: str = "json") -> Dict[str, Any]:
+    """Persist a full private payload as a content-addressed gzip blob."""
+    raw = _json_bytes(payload) if kind == "json" else str(payload).encode("utf-8", errors="replace")
+    return write_blob_bytes(drive_root, raw, kind=kind)
+
+
+def write_shared_blob(drive_root: pathlib.Path, payload: Any, parts: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """``write_blob`` for a request view: its repeated elements are stored once.
+
+    Every dict element of a list reached through dicts (``shared_values``: the messages, the
+    tool schemas) becomes an ordinary blob of its own bytes, and the view lives as a skeleton
+    placement, ``<whole sha256>.json.shared.gz``, that ``evidence_packs.blob_bytes`` splices
+    back into the exact whole. The ref keeps the whole's identity and its canonical loose
+    address (promotion and the retained-root reader resolve that name); ``parts`` collects the
+    refs of the parts the view names, for the manifest that keeps them reachable. A view with
+    nothing to share, or whose whole already lies loose here, is written as before.
+    """
+    from ouroboros.evidence_packs import SHARED_PLACEMENT_SUFFIX
+    from ouroboros.shared_values import tokenize
+
+    tokenized = tokenize(payload, _json_bytes)
+    if tokenized is None:
+        return write_blob(drive_root, payload)
+    digest, size = tokenized.whole_digest()
+    loose = _observability_root(pathlib.Path(drive_root)) / "blobs" / f"{digest}.json.gz"
+    if loose.exists():
+        return _blob_ref(loose, digest, "json", size)
+    for part_digest, raw in tokenized.parts.items():
+        if part_digest not in parts:
+            ref = write_blob_bytes(drive_root, raw)
+            parts[part_digest] = {key: ref[key] for key in ("sha256", "kind", "encoding", "size")}
+    placement = loose.with_name(f"{digest}.json{SHARED_PLACEMENT_SUFFIX}")
+    _publish_blob_file(placement, tokenized.skeleton)
+    return {**_blob_ref(loose, digest, "json", size), "compressed_size": placement.stat().st_size}
+
+
+#: Record families whose documents are request views: a task's transcript and tool schemas, repeated
+#: by every call of the task. Their elements are stored once (``write_shared_blob``); every other
+#: record (tool calls, responses, reviews) is written whole.
+SHARED_ELEMENT_CALL_TYPES = frozenset({"llm_request", "physical_llm_candidate", "llm_claudexor_request"})
+_LISTED_PARTS: Dict[Tuple[str, str], set] = {}  # (drive root, task) -> parts a manifest of this process listed
+_LISTED_PARTS_TASKS = 16  # tasks whose listings this process remembers; forgetting one costs a fuller manifest
+
+
+def _listed_parts(drive_root: pathlib.Path, task_id: str) -> set:
+    key = (str(drive_root), str(task_id))
+    listed = _LISTED_PARTS.get(key)
+    if listed is None:
+        while len(_LISTED_PARTS) >= _LISTED_PARTS_TASKS:
+            del _LISTED_PARTS[next(iter(_LISTED_PARTS))]
+        listed = _LISTED_PARTS[key] = set()
+    return listed
 
 
 def read_blob_ref(
@@ -1089,6 +1138,16 @@ def write_call_manifest(
     }
 
 
+def update_call_manifest_metadata(
+    drive_root: pathlib.Path, *, task_id: str, call_id: str, metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Merge receipt facts into an existing manifest without reopening its payload."""
+    path = call_manifest_path(drive_root, task_id, call_id)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    return write_call_manifest(drive_root, task_id=task_id, call_id=call_id,
+                               manifest={**manifest, **metadata})
+
+
 def _redact_text(text: str, records: List[RedactionRecord], path: str) -> str:
     out = text
     for rule, pattern in _TOKEN_PATTERNS:
@@ -1207,7 +1266,9 @@ def persist_call(
     text/reasoning are preserved (P1 reconstructibility), except explicit native
     reasoning custody whose projection retains only type/order/size/digest metadata.
     ``full_payload_redacted=True`` declares this honestly; the ``redaction`` manifest
-    lists every rule that fired. Set
+    lists every rule that fired. A request view (``SHARED_ELEMENT_CALL_TYPES``) stores
+    its repeated elements once (``write_shared_blob``); its manifest lists the parts
+    it introduced (``shared_parts``) and its refs keep the whole's identity. Set
     ``OUROBOROS_OBSERVABILITY_KEEP_RAW=1`` for a trusted local debug session to persist
     the raw payload instead (``full_payload_redacted=False``). ``keep_raw=True``
     forces that existing private raw-plus-projection path for an authoritative
@@ -1223,16 +1284,26 @@ def persist_call(
             (os.environ.get("OUROBOROS_OBSERVABILITY_KEEP_RAW") or "").strip().lower()
             in ("1", "true", "yes", "on")
         )
+    # A request view stores each element once; a public view names only public parts, because its
+    # parts are the bytes of the redacted value (an element redaction changes is a different part).
+    parts: Dict[str, Dict[str, Any]] = {}
+    shared = call_type in SHARED_ELEMENT_CALL_TYPES
+
+    def store(value: Any) -> Dict[str, Any]:
+        return write_shared_blob(drive_root, value, parts) if shared else write_blob(drive_root, value, kind="json")
+
     if effective_keep_raw:
-        full_ref = write_blob(drive_root, payload, kind="json")
-        projection_ref = write_blob(drive_root, redacted.value, kind="json")
+        full_ref = store(payload)
+        projection_ref = store(redacted.value)
         full_redacted = False
     else:
         # One redacted blob is BOTH the authoritative payload and the projection —
         # no raw secret on disk, no duplicate write.
-        full_ref = write_blob(drive_root, redacted.value, kind="json")
+        full_ref = store(redacted.value)
         projection_ref = full_ref
         full_redacted = True
+    listed = _listed_parts(drive_root, task_id)
+    new_parts = [ref for digest, ref in parts.items() if digest not in listed]
     manifest_ref = write_call_manifest(
         drive_root,
         task_id=task_id,
@@ -1247,10 +1318,14 @@ def persist_call(
             ),
             "redacted_projection_ref": projection_ref,
             "redaction": redacted.manifest(),
+            # The parts this task's views use that no earlier manifest of this process listed: the
+            # packer and the keep-set reach a part through any manifest of the task.
+            **({"shared_parts": new_parts} if new_parts else {}),
             **dict(manifest or {}),
             **(finalize_manifest(redacted) if finalize_manifest is not None else {}),
         },
     )
+    listed.update(parts)
     return {
         "call_id": call_id,
         "redacted_projection_ref": projection_ref,

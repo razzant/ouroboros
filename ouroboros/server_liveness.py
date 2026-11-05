@@ -290,7 +290,8 @@ def publish_supervisor_load(event_q: Any, drive_root: Any) -> Optional[dict]:
     return); ``lanes`` (control/telemetry -> ``depth`` and ``oldest_age_sec`` of the bus at
     this moment, None when the bus cannot say, and ``max_lag_sec``, the worst producer-stamp
     lag the drain saw); ``max_event_lag_sec`` over both lanes; then one key per
-    ``_load_sections`` entry (Q: outermost waits, holds, longest hold's site), a failing
+    ``_load_sections`` entry (Q: outermost waits, holds, longest hold's site, and per site its
+    count, total and longest hold, ``hold_by_site``), a failing
     source answering ``{"error": <type>}``. The whole store-site table has its own cadence and
     journal (``_publish_store_sites``). The append never waits on the jsonl lock and a
     failure is logged once per class: diagnostics never cost the loop or a delivery. The boot

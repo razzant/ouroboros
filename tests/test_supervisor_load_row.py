@@ -83,6 +83,9 @@ def test_a_slow_handler_appears_with_its_count_and_max_in_the_next_row(monkeypat
     q = row["queue_lock"]
     assert q["count"] == 1 and q["hold_max_sec"] >= 0.02
     assert q["hold_max_site"].startswith("tests/test_supervisor_load_row.py:")
+    [(site, held)] = q["hold_by_site"].items()  # the per-site table rides the same section, one row per site
+    assert site == "tests/test_supervisor_load_row.py in test_a_slow_handler_appears_with_its_count_and_max_in_the_next_row"
+    assert held["count"] == 1 and held["hold_total_sec"] == q["hold_total_sec"] and held["hold_max_sec"] == q["hold_max_sec"]
     assert _rows(tmp_path) == [row]
     assert sl.BOOT.snapshot()["supervisor_load"] == {"ts": row["ts"], "max_event_lag_sec": row["max_event_lag_sec"]}
 

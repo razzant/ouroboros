@@ -42,8 +42,8 @@ response-assembly truth is covered transitively by the next round's
 | Existing mechanism | Where | Role in the invariant |
 |---|---|---|
 | Canonical digest of the exact send copy (`canonical_json_v1`: sort_keys, compact separators, `ensure_ascii=False`, `allow_nan=False`, `default=str`) | `llm_attempt._attempt_request` / `_canonical_candidate_bytes` | The canonical form and its versioned basis (`candidate_measurement_kind`) |
-| Pre-dispatch identity re-check: digests re-derived from the closed-over candidate and compared with the reservation's expected identity; drift refuses dispatch (`PhysicalAttemptPreparationFailed: physical candidate changed before dispatch`) | `llm_attempt._candidate_before_dispatch` | The forward gate's skeleton — a digest compare of two in-memory copies |
-| Durable candidate manifest + redacted CAS blob, written before dispatch, with two labelled digest domains (`canonical_json_v1_pre_redaction` facts vs `observability_json_v1_post_default_redaction_cas` blob) | `observability.persist_physical_candidate` / `persist_call` | The sealed record carrier |
+| Pre-dispatch identity re-check: digests re-derived from the closed-over candidate and compared with the reservation's expected identity; drift refuses dispatch (`PhysicalAttemptPreparationFailed: physical candidate changed before dispatch`) | `llm_attempt._candidate_before_dispatch` | Exact raw/context comparison without rebuilding token, clock or image observations; Claudexor uploads the validated canonical bytes with their measured hash and length |
+| Durable candidate manifest + redacted CAS blob, written before dispatch, with two labelled digest domains (`canonical_json_v1_pre_redaction` facts vs `observability_json_v1_post_default_redaction_cas` blob); the blob is a request view stored once — its messages and tool schemas are parts, its skeleton placement is spliced back into the exact whole on read (`shared_values`, PERSISTENCE observability row), so the CAS digest and size are the whole's | `observability.persist_physical_candidate` / `persist_call` | The sealed record carrier |
 | Attempt lifecycle `reserved → dispatched → settled|unresolved` / `reserved → released`, short-lock append + sequence replay | `usage_accounting` | The join target for the reverse direction |
 | Anthropic native custody projection (opaque provider-native content replaced before persistence; disclosed as `anthropic_native_custody_projected`) | `anthropic_native_custody.physical_custody_projection` | Prototype of a typed exclusion |
 | Secret redaction with per-hit `RedactionRecord`s | `observability._redact_text` + rules | Prototype of a typed exclusion |
@@ -54,6 +54,12 @@ establish whether the durable record matches either copy.
 **reconstructing from the durable record** and byte-comparing that
 reconstruction against the wire-bound serialization, emitting a **typed durable
 fact** on any inequality (§3.2 — a fact, not a refusal).
+
+### Claudexor
+
+The pre-dispatch gate compares exact raw/context identities without repeating token, clock or image measurement. Claudexor uploads those validated canonical bytes with their measured hash and length; the defensive send copy remains, and mutation after measurement refuses dispatch. Claudexor acceptance merges the operation identity and capture facts into its existing operational request manifest without rereading or serializing the payload. Raw/projection references and prior metadata survive; the separate pre-dispatch physical manifest and send seal remain immutable.
+
+A released Claudexor prepare failure repeats on the primary within `max_retries` (three sends, 4 s then 8 s) only with `ClaudexorModelNotDispatched`, provider `claudexor`, an empty operation ID and gateway code `daemon_unreachable`, `daemon_not_answering`, `daemon_starting` or `daemon_descriptor_changed`. The configured-route walk follows a spent bound. An open transport wait or held unknown-repeat record still prevents a new burst. Direct-API connect failures, undated credential-pool refusals and local slot refusals retain one attempt; a lost create reply remains unknown and rejoins the same invocation.
 
 ## 3. The contract
 

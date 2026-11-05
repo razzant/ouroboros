@@ -8,6 +8,8 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from ouroboros import task_pacing
 from ouroboros.contracts.task_contract import normalize_budget_profile
 from ouroboros.loop_budget import _check_budget_limits
@@ -84,6 +86,18 @@ class TestGlobalBudgetGuard:
         assert result is not None
         text, _, _ = result
         assert "budget exhausted" in text.lower()
+        model_call.assert_not_called()
+
+    @pytest.mark.parametrize("model, local, stops", [
+        ("claudexor::codex=gpt-6-astra", False, False), ("test-model", True, False), ("test-model", False, True)])
+    def test_exhausted_global_limit_stops_only_a_paid_round(self, tmp_path, model, local, stops):
+        """A reached global limit refuses paid admission only: a $0 subscription or local round goes on."""
+        args = _make_args(budget_remaining_usd=0.0, accumulated_usage={"cost": 0.01}, drive_logs=tmp_path,
+                          active_model=model, use_local=local,
+                          cost_ceiling=task_pacing.resolve_cost_ceiling(0.0, normalize_budget_profile({})))
+        with patch("ouroboros.loop.call_llm_with_retry") as model_call:
+            result = _check_budget_limits(**args)
+        assert (result is not None) is stops
         model_call.assert_not_called()
 
     def test_under_50pct_passes(self, tmp_path):

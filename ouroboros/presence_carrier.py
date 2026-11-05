@@ -174,12 +174,19 @@ def dispatch_presence_turn(execution: PresenceTurnExecution, *, drive_root: Path
 
     The Host keeps authentication, capture, dedup and its in-flight reservation; the gate
     (conversation lock, ``OUROBOROS_PRESENCE_MAX_ACTIVE`` slot) is acquired by the carrier.
+    The row is admitted under Q and the gate lock, its barrier runs outside both, the carrier
+    takes it under Q again (``dispatch_admitted_turn``). A server whose pool has not armed starts
+    nothing: ``PresenceTurnNotStarted`` (a typed retry), no row over an unrestored saved queue
+    (#1952); a Host without a queue of its own keeps the disclosed degraded executor (2A).
     """
     from supervisor import queue, workers
-    from supervisor.conversation_lane import LANE_CONVERSATION, admit_turn, replenish_after_claim
+    from supervisor.conversation_lane import LANE_CONVERSATION, admit_turn, armed, dispatch_admitted_turn
+    from supervisor.conversation_lane import replenish_after_claim, spawn_refusal
     from supervisor.inline_carrier import InlineExecutorUnavailable
-    from supervisor.worker_chat_lane import _degrade_if_no_carrier_can_start
 
+    # A server whose carrier spawn failed keeps the disclosed degraded executor (the observed physical fact).
+    if not armed() and queue.owns_live_queue(drive_root) and not spawn_refusal():
+        raise PresenceTurnNotStarted("the worker pool of this server has not started yet; retry the event")
     if not gate_wait:
         # Version 2 never waits in the gate, and a busy gate costs no lane admission (no row, no barrier, no
         # spare claimed, no carrier spawned): one non-blocking pass of the carrier's own acquisition, released.
@@ -205,14 +212,16 @@ def dispatch_presence_turn(execution: PresenceTurnExecution, *, drive_root: Path
             raise refusal
         meta = admit_turn(task, chat_id=int(task["chat_id"]), client_message_id=event.source_event_id,
                           quiet=True, reply_expected=False)
-        try:
-            _degrade_if_no_carrier_can_start(meta)
-        except InlineExecutorUnavailable as exc:
-            # Nothing ran and no carrier will come to this process: the row leaves now and the Host answers
-            # a typed retry; its reservation returns with the settlement, the gate was never taken.
-            workers.RUNNING.pop(str(task["id"]), None)
+    try:
+        dispatch_admitted_turn(meta)  # the barrier outside Q, then the carrier (or the degraded executor)
+    except InlineExecutorUnavailable as exc:
+        # Nothing ran and no carrier will come to this process: the row leaves now and the Host answers
+        # a typed retry; its reservation returns with the settlement, the gate was never taken.
+        with queue._queue_lock:
+            if workers.RUNNING.get(str(task["id"])) is meta:
+                workers.RUNNING.pop(str(task["id"]))
             queue.persist_queue_snapshot(reason="presence_turn_not_started")
-            raise PresenceTurnNotStarted("presence turn thread could not start") from exc
+        raise PresenceTurnNotStarted("presence turn thread could not start") from exc
     replenish_after_claim()  # the spare the turn took is replaced now, or its own carrier started now (4A)
 
 

@@ -10,7 +10,7 @@ import pytest
 
 from ouroboros import queue_observation, task_status, usage_accounting as usage
 from ouroboros.utils import atomic_write_json
-from supervisor import direct_roots, queue, queue_publication, queue_snapshot
+from supervisor import queue, queue_publication, queue_snapshot
 
 
 @pytest.fixture
@@ -21,7 +21,6 @@ def published(tmp_path, monkeypatch):
     monkeypatch.setattr(queue, "QUEUE_PUBLICATION", None)
     for name, value in (("PENDING", []), ("RUNNING", {}), ("BUDGET_ROOT_FENCES", {}), ("ACCEPTANCE_FENCES", {})):
         monkeypatch.setattr(queue, name, value)
-    monkeypatch.setattr(direct_roots, "collect_direct_roots", lambda: {"roots": [], "incomplete": False})
     monkeypatch.setattr(queue_publication, "utc_now_iso", lambda: datetime.fromtimestamp(now[0], timezone.utc).isoformat())
     monkeypatch.setattr(queue_publication, "time", SimpleNamespace(monotonic=lambda: now[0], sleep=lambda _s: None))
     for module in (queue_observation, task_status):
@@ -76,7 +75,7 @@ def test_ticks_only_write_liveness_and_derive_durations_on_read(published, monke
     assert snapshot["ts"] == _read(root, "queue.alive")["ts"]
 
 
-@pytest.mark.parametrize("failed", ["queue_snapshot.json", "queue_dispatch.json", "direct_roots.json", "queue.alive"])
+@pytest.mark.parametrize("failed", ["queue_snapshot.json", "queue_dispatch.json", "queue.alive"])
 @pytest.mark.parametrize("raises", [False, True])
 def test_failed_publish_never_refreshes_liveness_and_retries(published, monkeypatch, failed, raises):
     root, _now = published
@@ -102,8 +101,7 @@ def test_failed_publish_never_refreshes_liveness_and_retries(published, monkeypa
         usage._check_dispatch_fences(usage.UsageScope(task_id="child", root_task_id="root"), root)
     assert queue.persist_queue_snapshot()
     generation = _read(root, "queue.alive")["generation"]
-    assert all(_read(root, name)["generation"] == generation for name in
-               ("queue_snapshot.json", "queue_dispatch.json", "direct_roots.json"))
+    assert all(_read(root, name)["generation"] == generation for name in ("queue_snapshot.json", "queue_dispatch.json"))
     assert task_status.task_has_live_queue_ownership(root, "missing") is False
 
 
@@ -116,7 +114,7 @@ def test_stamp_revocation_retries_before_writing_documents(published, monkeypatc
     old = copy.deepcopy(queue.QUEUE_PUBLICATION)
     stamp = root / "state/queue.alive"
     before = {name: (root / "state" / name).read_bytes() for name in
-              ("queue_snapshot.json", "queue_dispatch.json", "direct_roots.json", "queue.alive")}
+              ("queue_snapshot.json", "queue_dispatch.json", "queue.alive")}
     queue.BUDGET_ROOT_FENCES["root"] = {"root_task_id": "root", "fence_id": "fence", "status": "active"}
     attempts, pauses, writes = [], [], []
     unlink, writer = Path.unlink, queue.atomic_write_text
@@ -197,7 +195,7 @@ def test_missing_or_mismatched_stamp_is_unknown_for_all_documents(published, sta
         path.unlink()
     else:
         atomic_write_json(path, stamp)
-    for name in ("queue_snapshot.json", "queue_dispatch.json", "direct_roots.json"):
+    for name in ("queue_snapshot.json", "queue_dispatch.json"):
         seen = task_status.queue_snapshot_observation(queue_observation.load_queue_document(root, name))
         assert seen["freshness"] == "unknown" and seen["age_sec"] is None
     with pytest.raises(usage.UsageAccountingError):

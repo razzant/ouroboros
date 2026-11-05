@@ -197,6 +197,31 @@ def test_spawn_workers_starts_the_lane_spare_first(pool, monkeypatch):
     assert sorted(slot.lane for slot in workers.WORKERS.values()) == [LANE_CONVERSATION, LANE_PROJECT, LANE_PROJECT]
 
 
+def test_a_failed_boot_spawn_is_recorded_and_the_next_generation_clears_it(pool, monkeypatch):
+    """S9 keeps a server's Presence turns waiting for its pool, but a boot whose carrier spawn failed has no
+    supervisor loop to retry it: that observed physical fact is recorded so Presence runs on the disclosed
+    degraded executor instead of a typed retry forever; the next started generation clears it."""
+    workers.WORKERS.clear()
+    monkeypatch.setattr(conversation_lane, "_ARMED_TABLE", None)  # the boot: no generation has armed yet
+    monkeypatch.setattr(workers, "_record_worker_processes", lambda *a, **k: None)
+    monkeypatch.setattr(workers.threading, "Thread", lambda **kw: type("T", (), {"start": lambda self: None})())
+    monkeypatch.setattr(workers, "events_log_cursor", lambda: (0, 0, 0))
+    monkeypatch.setattr(workers, "event_queue_generation", lambda: "gen")
+    monkeypatch.setattr(workers, "append_jsonl", lambda *a, **k: True)
+    import supervisor.worker_process as wp
+
+    def refuse(*_args):
+        raise OSError("fork refused")
+    monkeypatch.setattr(wp, "spawn_worker_process", refuse)
+    assert conversation_lane.spawn_refusal() == ""
+    with pytest.raises(OSError):
+        workers.spawn_workers()
+    assert not conversation_lane.armed() and conversation_lane.spawn_refusal() == "carrier_spawn_refused:OSError"
+    monkeypatch.setattr(wp, "spawn_worker_process", lambda ctx, wid, in_q, out_q, repo, drive: Process(900 + wid))
+    workers.spawn_workers()
+    assert conversation_lane.armed() and conversation_lane.spawn_refusal() == ""
+
+
 def test_carrier_facts_are_additive_and_old_rows_decode(tmp_path):
     from ouroboros.task_status import execution_owner_record
 

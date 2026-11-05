@@ -1205,7 +1205,7 @@ def spawn_workers(n: int = 0) -> None:
             # Unassignable until the readiness seam observes this child's worker_ready row.
             new_workers[i] = Worker(wid=i, proc=proc, in_q=in_q, busy_task_id=None, reaping=True, booting=True,
                                     lane=lane)
-    except Exception:
+    except Exception as exc:
         for worker in new_workers.values():
             try:
                 worker.proc.terminate()
@@ -1214,6 +1214,10 @@ def spawn_workers(n: int = 0) -> None:
                 pass
             finally:
                 close_worker_stop_channel(worker.proc)
+        from supervisor import conversation_lane
+
+        # The observed physical fact: Presence runs on the disclosed degraded executor, not a retry forever (S9).
+        conversation_lane._SPAWN_REFUSED[0] = f"carrier_spawn_refused:{type(exc).__name__}"
         raise
     with _queue_lock:
         if WORKERS:

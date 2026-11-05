@@ -642,6 +642,37 @@ def _foreign_roots_refused(candidate) -> bool:
     return True
 
 
+def needs_paid_admission(task: Dict[str, Any]) -> bool:
+    """Owner 2A at the queue: whether a row's next attempt needs PAID admission, which alone a reached
+    global limit refuses (``usage_accounting.paid_admission`` before any price is known). The worker's own
+    opening rules name the route (``route_choice``) over what its dispatch resolves: a delegated child's frozen
+    row selects its route (``subagent_runtime.configured_actor_route``), never Main. A continuation saved on
+    another route, or a subscription route whose receipts carried cash, is admitted here and refused by its
+    first reservation, which is the authority. An unresolvable route keeps the money stop."""
+    from types import SimpleNamespace
+    from ouroboros import route_choice
+    from ouroboros.provider_models import provider_for_model
+    from ouroboros.usage_accounting import paid_admission
+
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    try:
+        actor = task.get("configured_subagent")
+        if str(task.get("delegation_role") or "").lower() == "subagent" and isinstance(actor, dict):
+            from ouroboros.subagent_runtime import configured_actor_route, validate_subagent_snapshot
+            from ouroboros.supervisor_route import validate_cognitive_route
+
+            model, local = configured_actor_route(validate_subagent_snapshot(actor),
+                                                  validate_cognitive_route(task.get("parent_cognitive_route")))
+            metadata = {**metadata, "model": model, "use_local_model": local}
+        ctx = SimpleNamespace(task_metadata=metadata, primary_route=None)
+        route_choice.bind_task_route(ctx, metadata, presence=bool(task.get("_presence_turn")))
+        model, use_local, _choice = route_choice.open_route(ctx, None)
+    except Exception:
+        log.warning("Route of queued %s unresolved; the money stop holds it", task.get("id"), exc_info=True)
+        return True
+    return paid_admission("local" if use_local else provider_for_model(model), None)
+
+
 def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), refused=(), cold_holders=None,
                           leased=None, unresolved_invalid_id_set=(), own_claim: str = "") -> bool:
     """The chooser's gates over one queued row; also the launch's revalidation under Q (``own_claim``:
@@ -664,8 +695,8 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
         return True
     if not autonomous_work_enabled(candidate, _pool().DRIVE_ROOT):
         return True
-    if remaining <= 0 and not candidate.get("_owner_wait_resume"):
-        return True
+    if remaining <= 0 and not candidate.get("_owner_wait_resume") and needs_paid_admission(candidate):
+        return True  # owner 2A: $0 work keeps running at the limit; its every send still meets reserve_attempt
     if _pool()._invalid_depth_deferred(candidate, set(unresolved_invalid_id_set)):
         return True
     if not _pool().repo_writer_task_allowed(candidate):
@@ -847,6 +878,8 @@ def assign_tasks() -> None:
                     continue  # Held, not paused: no second pause row over the hold.
                 if task.get("_owner_wait_resume"):
                     continue  # Restore the checkpoint; the loop still owns its budget stop.
+                if not needs_paid_admission(task):
+                    continue  # owner 2A: $0 work is neither paused nor stripped of its grant at the limit
                 if isinstance(task.get("_budget_pause_resume"), dict):
                     # Money vanished between the grant and this dispatch: the
                     # single-use grant returns to its exact pause, never to a
@@ -874,17 +907,22 @@ def assign_tasks() -> None:
                     and not bool(cost_fields.get("ledger_integrity_degraded"))
                     and not retry_lineage
                 )
+                # Owner 4A: a row that already dispatched is HELD, nonterminal, when it carries saved work to
+                # continue (its Resume and launch revalidate that source). Holding grants no replay: a row with
+                # nothing saved keeps the honest terminal below.
+                held = not replay_safe and "_working_recovery" in task
                 pause = {
-                    "status": "paused_before_dispatch" if replay_safe else "resource_limited",
+                    "status": "paused_before_dispatch" if replay_safe or held else "resource_limited",
                     "scope": "global",
                     "physical_calls": int(cost_fields.get("total_rounds") or 0),
                     "replay_safe": replay_safe,
+                    **({"continuation": "working"} if held else {}),
                     "auto_resume": False,
-                    "resume_policy": "manual_same_generation" if replay_safe else "cancel_or_new_run",
+                    "resume_policy": "manual_same_generation" if replay_safe or held else "cancel_or_new_run",
                     "paused_at": _pool().utc_now_iso(),
                 }
                 planned.append((task, pause, cost_fields))
-            newly_paused, terminal_ids = [], []
+            newly_paused, held_ids, terminal_ids = [], [], []
             for task, pause, cost_fields in planned:
                 task_id = str(task.get("id") or "")
                 result_root = pathlib.Path(task.get("budget_drive_root") or _pool().DRIVE_ROOT)
@@ -897,6 +935,16 @@ def assign_tasks() -> None:
                         write_task_result(
                             result_root, task_id, STATUS_SCHEDULED,
                             reason_code="budget_exhausted", resource_limit=pause,
+                        )
+                    elif pause.get("continuation"):
+                        task["_budget_pause"] = pause
+                        held_ids.append(task_id)
+                        write_task_result(
+                            result_root, task_id, STATUS_SCHEDULED,
+                            reason_code="budget_exhausted", resource_limit=pause,
+                            result=("Budget limit reached after prior dispatch; the saved work is held and an "
+                                    "explicit Resume continues the same task."),
+                            **cost_fields,
                         )
                     else:
                         write_task_result(
@@ -915,14 +963,15 @@ def assign_tasks() -> None:
             if terminal_ids:
                 terminal = set(terminal_ids)
                 _pool().PENDING[:] = [task for task in _pool().PENDING if str(task.get("id") or "") not in terminal]
-            if newly_paused or terminal_ids:
+            if newly_paused or held_ids or terminal_ids:
                 _pool().append_jsonl(
                     _pool().DRIVE_ROOT / "logs" / "events.jsonl",
                     {
                         "ts": _pool().utc_now_iso(),
                         "type": "budget_tasks_paused",
                         "scope": "global",
-                        "task_ids": newly_paused,
+                        "task_ids": newly_paused + held_ids,
+                        "held_saved_work_task_ids": held_ids,
                         "resource_limited_task_ids": terminal_ids,
                         "auto_resume": False,
                     },
@@ -930,8 +979,9 @@ def assign_tasks() -> None:
                 if st.get("owner_chat_id"):
                     _pool().send_with_budget(
                         int(st["owner_chat_id"]),
-                        "🚫 Model budget reached. Queued tasks are paused before dispatch; "
-                        "raising the limit does not resume them automatically.",
+                        "🚫 Model budget reached. Queued tasks that need paid model calls are paused before "
+                        "dispatch; subscription and local work continues. Raising the limit does not resume "
+                        "them automatically: Resume continues each one.",
                         role="system", system_type="budget_notice")
                 queue.persist_queue_snapshot(reason="budget_paused_before_dispatch")
             # Selection still runs (and repairs stale grants); quiescent capacity

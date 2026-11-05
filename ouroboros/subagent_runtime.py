@@ -821,6 +821,18 @@ def validate_subagent_snapshot(raw: Any, *, access: Optional[str] = None) -> dic
     return snapshot
 
 
+def configured_actor_route(snapshot: Mapping[str, Any], cognitive: Mapping[str, Any]) -> tuple[str, bool]:
+    """``(model, use_local)`` of the rounds a frozen row's own actor runs: an API row's target (`` (local)``
+    names the local lane), a session row's nanny on the parent's cognitive route. Pure (no credential, engine
+    or settings read), so the queue's money gate reads what dispatch will (``needs_paid_admission``)."""
+    route = snapshot.get("route") if isinstance(snapshot.get("route"), Mapping) else {}
+    target = str(route.get("target_id") or "").strip()
+    if str(route.get("kind") or "") == "api_model":
+        local = target.endswith(" (local)")
+        return (target[:-8].strip() if local else target), local
+    return str(cognitive.get("model") or "").strip(), bool(cognitive.get("use_local_model"))
+
+
 def resolve_configured_actor_dispatch(
     task: Mapping[str, Any], *, task_type: str,
 ) -> Any:
@@ -866,8 +878,7 @@ def resolve_configured_actor_dispatch(
     )
 
     if route_kind == "api_model":
-        use_local = route_target.endswith(" (local)")
-        model = route_target[:-8].strip() if use_local else route_target
+        model, use_local = configured_actor_route(snapshot, cognitive)
         available = bool(model_has_credentials(route_target))
         unavailable = "" if available else "credentials_unavailable"
         executor = "native" if available else "blocked"
@@ -947,16 +958,13 @@ def resolve_configured_actor_dispatch(
                 if gateway is not None:
                     gateway.close()
 
-    nanny_model = str(cognitive.get("model") or "").strip()
+    nanny_model, nanny_local = configured_actor_route(snapshot, cognitive)
     nanny_effort = str(cognitive.get("effort") or "").strip().lower()
     if not nanny_model and not unavailable:
         unavailable = "parent_cognitive_route_missing"
     if not nanny_effort:
         nanny_effort = resolve_effort(task_type or str(task.get("type") or "task"))
-    lane = dataclass_replace(
-        lane, model=nanny_model,
-        use_local_model=bool(cognitive.get("use_local_model")),
-    )
+    lane = dataclass_replace(lane, model=nanny_model, use_local_model=nanny_local)
     executor = "blocked" if unavailable else "harness"
     availability = {
         "observed_at": observed_at,
@@ -972,6 +980,10 @@ def resolve_configured_actor_dispatch(
             availability["previous_observation"] = dict(previous)
     reasons = []
     if unavailable:
+        from ouroboros.engine_facts import engine_pool_line
+        meta = task.get("task_metadata") if isinstance(task.get("task_metadata"), dict) else {}
+        availability["engine_pool"] = engine_pool_line(
+            task.get("budget_drive_root") or meta.get("budget_drive_root"))
         reasons.append(unavailable)
     delta = CapabilityDelta(
         derived_effort=nanny_effort,
@@ -1463,6 +1475,7 @@ def delegate_start_entry(ctx: Any, prompt: str = "", _resolved_binding: Any = No
 __all__ = [
     "SubagentSelectionError",
     "apply_task_start_settings",
+    "configured_actor_route",
     "current_model_visible_subagent_catalog",
     "current_subagent_alternatives",
     "delegate_start_entry",

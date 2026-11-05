@@ -342,14 +342,20 @@ def _new_task_origin_only(txn):  # a row an upgraded store derived before the or
     txn.conn.execute("UPDATE tasks SET origin=NULL WHERE task_id='z-new'")
 
 
+def _new_task_chat_only(txn):  # a row an upgraded store derived before the chat column
+    _task(txn, "z-new", chat_id=4242)
+    txn.conn.execute("UPDATE tasks SET chat_id=NULL WHERE task_id='z-new'")
+
+
 def _new_custody(txn):
     txn.conn.execute("INSERT INTO custody_runs(run_id,task_id,facts,state) VALUES ('z-new','task',?,'closed')",
                      (json.dumps({"run_id": "z-new", "root_task_id": "tree"}),))
 
 
-_NEW_ROW = {"task_older_writer": (_new_task_older_writer, "SELECT origin IS NOT NULL AND owner_pause_state IS NOT NULL "
-                                                          "FROM tasks WHERE task_id='z-new'"),
+_NEW_ROW = {"task_older_writer": (_new_task_older_writer, "SELECT origin IS NOT NULL AND chat_id IS NOT NULL AND "
+                                                          "owner_pause_state IS NOT NULL FROM tasks WHERE task_id='z-new'"),
             "task_origin_only": (_new_task_origin_only, "SELECT origin IS NOT NULL FROM tasks WHERE task_id='z-new'"),
+            "task_chat_only": (_new_task_chat_only, "SELECT chat_id='4242' FROM tasks WHERE task_id='z-new'"),
             "custody_runs": (_new_custody, "SELECT facts_derived=1 FROM custody_runs WHERE run_id='z-new'"),
             **{name: ((lambda name: lambda txn: _request("z-new", json.dumps({"request": {"root_task_id": "tree"}}))(txn, name))(name),
                       f"SELECT request_root_task_id='tree' FROM obligations WHERE set_name='{name}' AND id='z-new'")
@@ -699,11 +705,12 @@ _SCHEMA_NINE_UNDERIVED = (
 
 
 def schema_nine(root):
-    """The store an older body left: no origin column or index, its index predicate and version."""
+    """The store an older body left: no origin or chat column or index, its index predicate and version."""
     with store.open_store(root, write=True) as txn:
-        for index in ("tasks_origin", "tasks_underived_origin", "tasks_underived_hot"):
+        for index in ("tasks_origin", "tasks_underived_origin", "tasks_underived_chat", "tasks_underived_hot"):
             txn.conn.execute(f"DROP INDEX IF EXISTS {index}")
         txn.conn.execute("ALTER TABLE tasks DROP COLUMN origin")
+        txn.conn.execute("ALTER TABLE tasks DROP COLUMN chat_id")
         txn.conn.execute(f"CREATE INDEX tasks_underived_hot ON tasks(task_id) WHERE {_SCHEMA_NINE_UNDERIVED}")
         txn.conn.execute("UPDATE meta SET value='9' WHERE key='schema_version'")
     store.close_connections(store.store_path(root))
@@ -845,3 +852,110 @@ def test_a_whole_upsert_keeps_a_valid_held_basis_and_patches_stay_strict(tmp_pat
         patch_document(tmp_path, "torn", lambda current: {**current, "note": "patched"})
     with store.open_store(tmp_path, write=False) as txn:
         assert txn.body_text("torn") == "{"
+
+
+# ---- the admitted chat: the room rule's lineage read across the chat step ----------------------------
+
+# The lineage read before the chat column: each row's chat from its body, as the room rule converted it.
+_BODY_LINEAGE = ("SELECT t.task_id, CASE json_type(b.body, '$.chat_id') WHEN 'real' THEN CAST(json_extract(b.body, "
+                 "'$.chat_id') AS INTEGER) ELSE '' || json_extract(b.body, '$.chat_id') END FROM tasks t LEFT JOIN "
+                 "task_bodies b ON b.task_id = t.task_id WHERE t.task_id IN (SELECT value FROM json_each(?))")
+
+
+def _body_chats(root, ids):
+    def converted(value):
+        try:
+            return int(value) if value not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    with store.open_store(root, write=False) as txn:
+        return {tid: converted(chat) for tid, chat in txn.conn.execute(_BODY_LINEAGE, (json.dumps(sorted(ids)),))}
+
+
+def _lineage_chats(root, ids):
+    """The room rule's read (``projects_registry._read_lineage``), fresh: each id's admitted chat, None unanswered."""
+    from ouroboros import projects_registry as registry
+
+    for key in [key for key in registry._TASK_LINEAGE if key[0] == str(root)]:
+        del registry._TASK_LINEAGE[key]
+    read = registry._read_lineage(root, ids)
+    return None if read is None else {tid: facts["chat_id"] for tid, facts in read.items()}
+
+
+def schema_ten(root):
+    """The store an older body left before the chat step: no chat column or index, version 10."""
+    with store.open_store(root, write=True) as txn:
+        txn.conn.execute("DROP INDEX IF EXISTS tasks_underived_chat")
+        txn.conn.execute("ALTER TABLE tasks DROP COLUMN chat_id")
+        txn.conn.execute("UPDATE meta SET value='10' WHERE key='schema_version'")
+    store.close_connections(store.store_path(root))
+
+
+# Each body's ``chat_id`` and the chat the room rule reads from it: a JSON real's integer part, text through int().
+_CHATS = [({"chat_id": 5}, 5), ({"chat_id": 7.9}, 7), ({"chat_id": -2.5}, -2), ({"chat_id": "12"}, 12),
+          ({"chat_id": " 13 "}, 13), ({"chat_id": "abc"}, None), ({"chat_id": ""}, None), ({"chat_id": None}, None),
+          ({"chat_id": True}, 1), ({"chat_id": False}, 0), ({"chat_id": {"a": 1}}, None), ({"chat_id": [3]}, None),
+          ({}, None)]
+
+
+def test_the_admitted_chat_answers_from_its_column_as_the_body_read_did(tmp_path):
+    with store.open_store(tmp_path, write=True) as txn:
+        for index, (fields, _chat) in enumerate(_CHATS):
+            _task(txn, f"d{index:02d}", **fields)  # a writer derives the column
+            _old_task(txn, f"u{index:02d}", **fields)  # an older writer leaves it underived
+    ids = [f"{side}{index:02d}" for side in "du" for index in range(len(_CHATS))]
+    expected = {f"{side}{index:02d}": chat for side in "du" for index, (_fields, chat) in enumerate(_CHATS)}
+    assert _body_chats(tmp_path, ids) == expected  # the read the column replaces
+    assert _lineage_chats(tmp_path, ids) == expected
+    with store.open_store(tmp_path, write=False) as txn:
+        assert [txn.row(f"d{index:02d}", "chat_id") for index in range(len(_CHATS))] == [
+            "" if chat is None else str(chat) for _fields, chat in _CHATS]  # "" is a known absence, never NULL
+        assert all(txn.row(f"u{index:02d}", "chat_id") is None for index in range(len(_CHATS)))
+    assert hot.run_hot_facts(tmp_path)["state"] == "done"
+    with store.open_store(tmp_path, write=False) as txn:
+        assert all(txn.row(f"u{index:02d}", "chat_id") == txn.row(f"d{index:02d}", "chat_id") for index in range(len(_CHATS)))
+    assert _lineage_chats(tmp_path, ids) == expected
+
+
+def test_a_derived_rows_lineage_reads_no_body_and_an_underived_row_still_does(tmp_path):
+    """Every body malformed: a read that parses one (``json_type``) fails. The derived rows' lineage answers from
+    their columns alone; an older writer's underived row still pays its body read, so its read fails as before."""
+    with store.open_store(tmp_path, write=True) as txn:
+        _task(txn, "kid", chat_id=7, parent_task_id="mid", root_task_id="top", delegation_role="subagent")
+        _task(txn, "mid", chat_id="")
+        _old_task(txn, "older", chat_id=8)
+        txn.conn.execute("UPDATE task_bodies SET body='{'")
+    from ouroboros import projects_registry as registry
+
+    assert _lineage_chats(tmp_path, ["kid", "mid"]) == {"kid": 7, "mid": None}
+    assert registry._TASK_LINEAGE[(str(tmp_path), "kid")] == {"parent_task_id": "mid", "root_task_id": "top",
+                                                             "delegation_role": "subagent", "chat_id": 7}
+    assert _lineage_chats(tmp_path, ["kid", "older"]) is None  # the store cannot answer the older row's chat now
+
+
+def test_a_store_before_the_chat_step_reads_bodies_and_upgrades_without_a_body_decode(tmp_path, monkeypatch):
+    from ouroboros.store_import import upgrade_current_schema
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    write_task_result(tmp_path, "legacy", "completed", result="kept", chat_id=4242)
+    write_task_result(tmp_path, "other", "completed", result="kept")
+    schema_ten(tmp_path)
+    assert _lineage_chats(tmp_path, ["legacy", "other"]) == {"legacy": 4242, "other": None}
+    assert _server_looks(tmp_path), "the look must say owed: the runner upgrades first"
+    with store.open_store(tmp_path, write=False) as txn:  # the reads above stayed passive
+        assert txn.meta("schema_version") == 10
+        assert "chat_id" not in {row["name"] for row in txn.conn.execute("PRAGMA table_info(tasks)")}
+    with monkeypatch.context() as patch:
+        patch.setattr(store.Txn, "body_text", lambda *_: pytest.fail("the schema step decoded a body"))
+        upgrade_current_schema(tmp_path)
+    with store.open_store(tmp_path, write=False) as txn:
+        assert txn.meta("schema_version") == store.SCHEMA_VERSION == hot.CHAT_VERSION
+        assert txn.row("legacy", "chat_id") is None and txn.meta("job:" + hot.JOB)["state"] == "pending"
+    assert _lineage_chats(tmp_path, ["legacy", "other"]) == {"legacy": 4242, "other": None}  # underived: its body
+    assert maintenance.run_job(tmp_path, "hot_facts")["state"] == "done"
+    with store.open_store(tmp_path, write=True) as txn:
+        assert (txn.row("legacy", "chat_id"), txn.row("other", "chat_id")) == ("4242", "")
+        txn.conn.execute("UPDATE task_bodies SET body='{'")  # from here a body read would fail
+    assert _lineage_chats(tmp_path, ["legacy", "other"]) == {"legacy": 4242, "other": None}  # the column answers
+    assert not _server_looks(tmp_path) and maintenance.run_job(tmp_path, "hot_facts") is None

@@ -235,6 +235,48 @@ def test_a_finished_answer_and_a_live_task_refuse_while_a_technical_limit_admits
     assert admit_continuation("limit-1", action_nonce=NONCE)["ok"] is True
 
 
+def test_the_continues_barriers_run_outside_q_and_its_record_is_written_with_the_row_still_queued(tmp_path, monkeypatch):
+    """Q spans memory only: the successor is enqueued under Q, its snapshot published outside it, its result row
+    written under Q again (the row revalidated still queued), its final publication outside Q once more."""
+    from supervisor.continuation_admission import admit_continuation
+
+    queue, _state, _workers = _install_queue(tmp_path, monkeypatch)
+    _interrupted(tmp_path)
+    seen = []
+    real = queue.persist_queue_snapshot
+    monkeypatch.setattr(queue, "persist_queue_snapshot",
+                        lambda reason="": seen.append((reason, queue._queue_lock._is_owned())) or real(reason=reason))
+    answer = admit_continuation("pred-1", action_nonce=NONCE)
+    assert answer["ok"] is True
+    barriers = [(reason, under_q) for reason, under_q in seen if reason.startswith("owner_continue")]
+    assert barriers == [("owner_continue_admitted", False), ("owner_continue_committed", False)]
+
+
+def test_a_stop_that_takes_the_row_between_the_holds_leaves_the_record_unwritten_and_the_answer_unconfirmed(tmp_path, monkeypatch):
+    """The window the two holds open: a Stop's custody can pop the queued successor before its record is written.
+    The admission writes no scheduled record over the Stop's, answers unconfirmed (the same nonce reads the
+    recorded outcome), and the reservation is released."""
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    _interrupted(tmp_path)
+    real = queue.persist_queue_snapshot
+
+    def stop_during_the_barrier(reason=""):
+        answered = real(reason=reason)
+        if reason == "owner_continue_admitted":  # as a Stop's custody would, under Q, after the barrier's capture
+            with queue._queue_lock:
+                workers.PENDING[:] = [row for row in workers.PENDING if not str(row.get("id") or "").startswith("pred-1-")]
+        return answered
+
+    monkeypatch.setattr(queue, "persist_queue_snapshot", stop_during_the_barrier)
+    answer = admit_continuation("pred-1", action_nonce=NONCE)
+    assert answer["ok"] is False and answer["error"] == "continuation_unconfirmed" and answer["unconfirmed"]
+    assert workers.PENDING == [] and load_task_result(tmp_path, answer["successor_task_id"]) is None
+    assert queue.ADMISSION_RESERVATIONS == {}
+
+
 def test_crash_after_the_claim_or_after_the_snapshot_converges_on_one_identity(tmp_path, monkeypatch):
     """Claim written, then the process died: the same nonce completes THAT admission.
     Queue row persisted but no result row: the same nonce recovers it, never twice.

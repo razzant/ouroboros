@@ -22,6 +22,7 @@ from ouroboros.project_facts import project_display_name, sanitize_project_id
 from ouroboros.project_closure import apply_closed, select_projects
 from ouroboros.store import StoreBusy, open_store
 from ouroboros.store_capture import capture
+from ouroboros.store_hot_facts import CHAT_VERSION
 from ouroboros import utils
 from ouroboros.utils import atomic_write_json, json_snapshot, read_json_dict, utc_now_iso, strip_markdown
 
@@ -592,11 +593,13 @@ def _emit_origin_ambiguous(drive_root: Any, key: tuple, candidates: list, chosen
 _TASK_LINEAGE: Dict[tuple, Dict[str, Any]] = {}
 _TASK_LINEAGE_LIMIT = 50_000  # a memory bound, not a policy: the facts are re-read on the next sight
 _ROOM_ANSWERS: Dict[str, tuple] = {}
-# One capture (``store_capture``); ``chat_id`` as text or, from a JSON real, its integer part (what ``int()`` gave).
-_LINEAGE_SELECT = ("SELECT t.task_id, t.parent_task_id, t.root_task_id, t.delegation_role, CASE json_type(b.body, "
-                   "'$.chat_id') WHEN 'real' THEN CAST(json_extract(b.body, '$.chat_id') AS INTEGER) ELSE '' || "
-                   "json_extract(b.body, '$.chat_id') END AS chat_id FROM tasks t LEFT JOIN task_bodies b ON "
-                   "b.task_id = t.task_id WHERE t.task_id IN (SELECT value FROM json_each(?))")
+# One capture (``store_capture``). ``chat_id`` is the column its writer derived (``store_hot_facts.admitted_chat``);
+# only a row an older writer left underived, and every row of a store before that column, reads its body for it:
+# text or, from a JSON real, its integer part (what ``int()`` gave). A derived row's body is never read.
+_BODY_CHAT = ("(SELECT CASE json_type(b.body, '$.chat_id') WHEN 'real' THEN CAST(json_extract(b.body, '$.chat_id') "
+              "AS INTEGER) ELSE '' || json_extract(b.body, '$.chat_id') END FROM task_bodies b WHERE b.task_id = t.task_id)")
+_LINEAGE_SELECT = ("SELECT t.task_id, t.parent_task_id, t.root_task_id, t.delegation_role, {chat} AS chat_id "
+                   "FROM tasks t WHERE t.task_id IN (SELECT value FROM json_each(?))")
 
 
 def _read_lineage(drive_root: Any, task_ids: Any, *, strict: bool = False) -> Optional[Dict[str, Dict[str, Any]]]:
@@ -608,7 +611,9 @@ def _read_lineage(drive_root: Any, task_ids: Any, *, strict: bool = False) -> Op
     acquisition owner to wait out: contention is not unknown lineage."""
     try:
         with open_store(drive_root, write=False) as txn:
-            captured = capture(txn.conn, _LINEAGE_SELECT, (json.dumps(sorted(task_ids)),),
+            typed = int(txn.meta("schema_version") or 1) >= CHAT_VERSION
+            chat = f"CASE WHEN t.chat_id IS NULL THEN {_BODY_CHAT} ELSE t.chat_id END" if typed else _BODY_CHAT
+            captured = capture(txn.conn, _LINEAGE_SELECT.format(chat=chat), (json.dumps(sorted(task_ids)),),
                                ("task_id", "parent_task_id", "root_task_id", "delegation_role", "chat_id"))
         records = captured.tuples()
     except StoreBusy as exc:

@@ -190,8 +190,8 @@ def test_six_looks_restore_text_reader_after_call_end(host_world, adopted):
     call_floor = placeholders(project_wire_messages(host.messages))
     assert len(call_floor) == 4 and all('view_image path=' in text for text in call_floor)
     assert '_evicted_image' not in json.dumps(project_wire_messages(host.messages))
-    from ouroboros.working_checkpoint import checkpoint_path
-    saved = json.loads(checkpoint_path(host.ctx.drive_root, host.ctx.task_id, 1).read_text())
+    from ouroboros.working_checkpoint import read_working
+    saved = read_working(host.ctx.drive_root, host.ctx.task_id, 1)[1]
     assert placeholders(project_wire_messages(saved['messages'])) == call_floor
     # A later call still renders against its own catalog, independent of the text checkpoint.
     assert all('view_image' not in text for text in placeholders(
