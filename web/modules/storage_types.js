@@ -198,7 +198,7 @@
  * @typedef {Object} StorageFreeEntry
  * @property {string} id
  * @property {string} group  // the id of its StorageFreeGroup
- * @property {'work_folder'|'working_copy'|'environment'|'other'} kind
+ * @property {'work_folder'|'working_copy'|'environment'|'scratch'|'other'} kind
  * @property {string} name
  * @property {string} path
  * @property {string|null} task_id

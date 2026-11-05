@@ -35,7 +35,7 @@ class StorageFreeManual(TypedDict):
 class StorageFreeEntry(TypedDict):
     id: str  # exactly one filesystem object, inside this plan
     group: str
-    kind: Literal["work_folder", "working_copy", "environment", "other"]
+    kind: Literal["work_folder", "working_copy", "environment", "scratch", "other"]
     name: str
     path: str
     task_id: Optional[str]
