@@ -32,6 +32,7 @@ import pathlib
 import types
 
 import pytest
+from tests._source_scan import parse
 
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -307,7 +308,7 @@ def _calls(source: str, target: str):
                 found.append((".".join(stack) or "<module>", node))
             self.generic_visit(node)
 
-    Visitor().visit(ast.parse(source))
+    Visitor().visit(parse(source))
     return found
 
 

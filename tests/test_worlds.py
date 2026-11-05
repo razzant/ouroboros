@@ -1,6 +1,8 @@
 """Shared worlds (tests/_worlds.py): built once per run, cloned private, and refused when they know their own path."""
 from __future__ import annotations
 
+import ast
+import gc
 import hashlib
 import os
 import pathlib
@@ -15,6 +17,7 @@ from ouroboros.test_environment import SCRATCH_MARKER
 from tests import _contributor_packet_shared as shared
 from tests import _worlds
 from tests._live_world import _own_installation, installation_template
+from tests._source_scan import parse
 from tests._worlds import clone, run_folder, world
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -216,3 +219,29 @@ def test_the_installation_a_host_starts_from_is_a_private_copy(run_root, tmp_pat
     memory.scratchpad_path().write_text("this test's scratchpad", encoding="utf-8")
     assert (other.drive_root / "memory" / "scratchpad.md").read_text(encoding="utf-8") == "scratch"
     assert _tree(template) == before
+
+
+def test_a_parse_pauses_the_collector_and_leaves_it_as_it_was_found():
+    assert ast.dump(parse("x = 1\n")) == ast.dump(ast.parse("x = 1\n"))
+    assert isinstance(parse("1 + 1", mode="eval").body, ast.BinOp)
+    collections = []
+
+    def noted(phase, _info):
+        collections.append(phase)
+
+    gc.callbacks.append(noted)
+    try:
+        parse("\n".join(f"name_{index} = [{index}]" for index in range(5000)))
+    finally:
+        gc.callbacks.remove(noted)
+    assert not collections, "the collector ran during a parse"
+    assert gc.isenabled()
+    with pytest.raises(SyntaxError):
+        parse("def broken(:\n")
+    assert gc.isenabled()
+    gc.disable()
+    try:
+        parse("x = 1\n")
+        assert not gc.isenabled(), "a parse switched on a collector its caller had off"
+    finally:
+        gc.enable()

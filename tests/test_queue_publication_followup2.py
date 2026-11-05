@@ -22,6 +22,7 @@ import pytest
 
 from ouroboros import queue_observation, task_status
 from supervisor import queue, queue_publication, queue_snapshot
+from tests._source_scan import parse
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 MARK = "persist_queue_snapshot"
@@ -116,7 +117,7 @@ def test_no_runtime_caller_reads_the_marks_value_or_reaches_it_through_getattr()
     offenders = []
     for path in _runtime_files():
         rel = path.relative_to(REPO).as_posix()
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = parse(path.read_text(encoding="utf-8"))
         parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):

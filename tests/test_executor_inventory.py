@@ -30,6 +30,7 @@ from typing import Dict, Iterable, List, NamedTuple, Set, Tuple
 
 import pytest
 
+from tests._source_scan import parse
 from tests.test_conversation_lane_presence import lane as lane  # noqa: F401 -- fixture
 from tests.test_owner_wait_pool import pool as pool  # noqa: F401 -- fixture
 
@@ -180,7 +181,7 @@ class _References(ast.NodeVisitor):
 
 def references_in(source: str, path: str) -> Set[Site]:
     visitor = _References(path)
-    visitor.visit(ast.parse(source))
+    visitor.visit(parse(source))
     return visitor.found
 
 

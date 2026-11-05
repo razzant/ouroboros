@@ -21,6 +21,7 @@ from ouroboros import usage_ledger as ledger
 from ouroboros import usage_store
 from ouroboros._usage_money import billing_group_key, monetary_scope_key
 from tests import _legacy_usage_rows_oracle as oracle
+from tests._source_scan import parse
 from tests._usage_store_testing import ledger_rows, request, root as root, write_compacted_journal, write_journal
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -690,7 +691,7 @@ def _production_sources():
 def test_bulk_readers_are_called_only_by_the_audit_and_the_export():
     callers = set()
     for path in _production_sources():
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
