@@ -32,6 +32,7 @@ _owned_gateway_uses_each_test_transport = __owned_gateway_uses_each_test_transpo
 fake_route = __fake_route
 
 from tests._review_session_route_shared import FakeGateway, _terminal_detail
+from tests._worlds import clone_repository, world
 
 # ---------------------------------------------------------------------------
 # 5.2/5.6/5.7 — surface wiring: the wave delivers sessions without packs
@@ -479,10 +480,8 @@ DIFF_MARKER = "UNIQUE_DIFF_BODY_MARKER"
 BRIEF_TASK_ID = "two-part-brief-task"
 
 
-def _staged_subject(tmp_path, *, payload_chars=0, newline="\n"):
-    """A real repository with a staged change of a chosen size."""
-    repo = tmp_path / "subject"
-    repo.mkdir()
+def _build_staged_subject(repo, *, payload_chars=0, newline="\n"):
+    """Lay out the immutable staged subject used by this module's copies."""
     _git(repo, "init", "-q")
     _git(repo, "config", "user.email", "t@example.com")
     _git(repo, "config", "user.name", "t")
@@ -504,7 +503,15 @@ def _staged_subject(tmp_path, *, payload_chars=0, newline="\n"):
     payload = "".join(f"PAYLOAD_LINE_{index:08d}\n" for index in range(payload_chars // 21))
     (repo / "gamma.py").write_text(f"gamma = 1\n{payload}", encoding="utf-8", newline=newline)
     _git(repo, "add", "-A")
-    return repo
+
+
+def _staged_subject(tmp_path, *, payload_chars=0, newline="\n"):
+    """A private copy of a staged subject whose immutable starting tree is shared per run."""
+    eol = "lf" if newline == "\n" else "crlf"
+    key = f"review-session-subject-{payload_chars}-{eol}"
+    template = world(key, lambda folder: _build_staged_subject(
+        folder, payload_chars=payload_chars, newline=newline))
+    return clone_repository(template, tmp_path / "subject")
 
 
 def _brief_inputs(repo, drive, **overrides):
