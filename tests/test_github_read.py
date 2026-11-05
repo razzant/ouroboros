@@ -103,14 +103,15 @@ def test_retired_detail_names_withhold_target_lists_but_allow_repo_sweeps(gh, mo
 @pytest.fixture
 def gh(monkeypatch, tmp_path):
     """A recording fake gh: ``world.answer(parts, argv, kwargs)`` returns stdout, ``(code, stderr)`` or raises."""
-    world = SimpleNamespace(calls=[], answer=lambda parts, argv, kwargs: "[]")
+    world = SimpleNamespace(calls=[], views=[], repo_url=BASE, answer=lambda parts, argv, kwargs: "[]")
     monkeypatch.setattr(github, "github_token_from_env_or_settings", lambda: "ghp_fixture")
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_fixture")
 
     def run(argv, **kwargs):
+        if argv[1:5] == ["repo", "view", "--json", "nameWithOwner,url"]:
+            world.views.append((argv, kwargs))  # naming the target, apart from the legs a test counts
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"nameWithOwner": "owner/selected", "url": world.repo_url}), stderr="")
         world.calls.append((argv, kwargs))
-        if argv[1:5] == ["repo", "view", "--json", "nameWithOwner"]:
-            return SimpleNamespace(returncode=0, stdout=json.dumps({"nameWithOwner": "owner/selected"}), stderr="")
         answer = world.answer(_call(argv, kwargs) if argv[1] == "api" else SimpleNamespace(route=" ".join(argv[1:3])), argv, kwargs)
         if isinstance(answer, tuple):
             return SimpleNamespace(returncode=answer[0], stdout="", stderr=answer[1])
@@ -131,13 +132,15 @@ def _payload(text):
 
 # ---- whoami ------------------------------------------------------------------------------------------
 def test_whoami_names_the_acting_login_token_kind_source_and_scopes(gh, monkeypatch):
-    gh.answer = lambda p, argv, kw: _rest({"login": "ouroboros-agent", "id": 1, "type": "User", "name": None, "html_url": f"{BASE}"})
+    gh.repo_url = "https://github.com/owner/selected"
+    gh.answer = lambda p, argv, kw: _rest({"login": "ouroboros-agent", "id": 1, "type": "User", "name": None, "html_url": "https://github.com/ouroboros-agent"})
     line, payload = _payload(gh.read(method="whoami"))
     assert line == "github_read whoami: @ouroboros-agent (classic personal access token from env GITHUB_TOKEN)"
     assert payload["item"]["scopes"] == ["repo", "read:org"] and payload["item"]["token_source"] == "env GITHUB_TOKEN"
     assert "ghp_fixture" not in json.dumps(payload)
     argv, kw = gh.calls[0]
-    assert argv == ["gh", "api", "--include", "user"] and kw["cwd"] == str(gh.ctx.repo_dir)  # the generic transport
+    # The generic transport, addressed to the selected repository's host.
+    assert argv == ["gh", "api", "--include", "user", "--hostname", "github.com"] and kw["cwd"] == str(gh.ctx.repo_dir)
     monkeypatch.setattr(github, "github_token_from_env_or_settings", lambda: "")
     monkeypatch.delenv("GITHUB_TOKEN")
     _line, payload = _payload(gh.read(method="whoami", repo="github.example/owner/selected"))
@@ -148,9 +151,9 @@ def test_whoami_names_the_acting_login_token_kind_source_and_scopes(gh, monkeypa
 # ---- get ---------------------------------------------------------------------------------------------
 def test_get_issue_states_the_body_cut_and_pages_its_comments_facet(gh):
     def answer(p, argv, kw):
-        if p.route == "repos/{owner}/{repo}/issues/7":
+        if p.route == "repos/owner/selected/issues/7":
             return json.dumps(_issue(7, body="x" * 2500))
-        assert p.route.startswith("repos/{owner}/{repo}/issues/7/comments?") and p.include
+        assert p.route.startswith("repos/owner/selected/issues/7/comments?") and p.include
         return _rest([_comment(1), _comment(2)], link_next=f"{API}/repos/owner/selected/issues/7/comments?per_page=2&page=2")
     gh.answer = answer
 
@@ -174,7 +177,7 @@ def test_get_issue_that_is_a_pull_request_says_so(gh):
 
 def test_get_pr_facets_use_rest_pages_graphql_threads_and_the_diff_subcommand(gh):
     def answer(p, argv, kw):
-        if p.route == "repos/{owner}/{repo}/pulls/7":
+        if p.route == "repos/owner/selected/pulls/7":
             return json.dumps(_pr(7, additions=3, deletions=1, changed_files=1, mergeable=True, body="desc"))
         if p.route == "graphql":
             if "nodes(ids:" in p.graphql:
@@ -270,7 +273,7 @@ def test_pr_list_overlays_only_nonnull_graphql_head_and_base_facts(gh, detail, n
             node[key] = None
     gh.answer = lambda p, argv, kw: json.dumps({"data": {"nodes": [node]}}) if p.route == "graphql" else _rest([_pr(7, state="closed")])
     _line, payload = _payload(gh.read(method="list", kind="pr", state="closed", detail=detail))
-    assert gh.routes()[0].startswith("repos/{owner}/{repo}/pulls?state=closed&") and len(gh.calls) == 2
+    assert gh.routes()[0].startswith("repos/owner/selected/pulls?state=closed&") and len(gh.calls) == 2
     item = payload["items"][0]
     sha = SHA if null_field in ("headRefOid", "all") else "d" * 40
     ref = "feat/7" if null_field in ("headRefName", "all") else "new-feature"
@@ -308,9 +311,9 @@ def test_nested_cuts_are_disclosed_in_both_detail_modes(gh, detail, nested):
 
 
 @pytest.mark.parametrize("kind,target,route,label", [
-    ("comment", 44, "repos/{owner}/{repo}/issues/comments/44", "comment 44"),
-    ("release", "v1.2", "repos/{owner}/{repo}/releases/tags/v1.2", "release v1.2"),
-    ("label", "bug", "repos/{owner}/{repo}/labels/bug", "label bug"),
+    ("comment", 44, "repos/owner/selected/issues/comments/44", "comment 44"),
+    ("release", "v1.2", "repos/owner/selected/releases/tags/v1.2", "release v1.2"),
+    ("label", "bug", "repos/owner/selected/labels/bug", "label bug"),
 ])
 def test_get_reads_one_object_by_kind(gh, kind, target, route, label):
     gh.answer = lambda p, argv, kw: json.dumps({**_comment(44), "html_url": f"{BASE}/x", "tag_name": "v1.2", "name": "bug", "assets": []})
@@ -350,7 +353,7 @@ def test_list_issues_filters_pull_requests_and_reads_completeness_from_the_link_
 
     assert line == "github_read list issue (all) in owner/selected: 2 item(s) since 2026-09-30T00:00:00Z, more: cursor='2'"
     route = gh.routes()[0]
-    assert route.startswith("repos/{owner}/{repo}/issues?") and "state=all" in route and "labels=bug" in route and "creator=dev" in route
+    assert route.startswith("repos/owner/selected/issues?") and "state=all" in route and "labels=bug" in route and "creator=dev" in route
     assert "since=2026-09-30T00%3A00%3A00Z" in route and "sort=updated" in route and "per_page=3&page=1" in route
     assert [i["number"] for i in payload["items"]] == [1, 3] and payload["items"][0]["body_preview"] == "b" * 10
     assert (payload["complete"], payload["next_cursor"]) == (False, "2")
@@ -370,7 +373,7 @@ def test_list_prs_keeps_exact_commit_counts_and_review_decisions_from_one_graphq
             assert request == {"query": github_read._PR_COMMIT_COUNTS_QUERY, "variables": {"ids": ["PR_node100", "PR_node101"]}}
             return json.dumps({"data": {"nodes": [{"id": "PR_node101", "commits": {"totalCount": 7}, "reviewDecision": None},
                                                   {"id": "PR_node100", "commits": {"totalCount": 250}, "reviewDecision": "APPROVED"}]}})
-        assert p.route.startswith("repos/{owner}/{repo}/pulls?state=open&sort=updated&direction=desc")
+        assert p.route.startswith("repos/owner/selected/pulls?state=open&sort=updated&direction=desc")
         return _rest(rows)
     gh.answer = answer
 
@@ -422,7 +425,7 @@ def test_search_backed_pr_lists_keep_facts_and_withhold_unreadable_counts(gh, fi
     item = payload["items"][0]
     assert item["commits"] == 101 and item["review_decision"] == "APPROVED" and item["draft"] is True
     assert (item["head"]["ref"], item["base"]["ref"]) == ("feat", "main") if detail == "full" else (item["head"], item["base"]) == ("dev:feat", "main")
-    assert gh.calls[0][0] == ["gh", "repo", "view", "--json", "nameWithOwner"]
+    assert [view[0] for view in gh.views] == [["gh", "repo", "view", "--json", "nameWithOwner,url"]]
     assert "advanced_search=true" in gh.routes()[0] and len(gh.routes()) == 2
     gh.answer = lambda p, argv, kw: '{"data":{"nodes":[]}}' if p.route == "graphql" else answer(p, argv, kw)
     text = gh.read(method="list", kind="pr", **filters)
@@ -430,9 +433,9 @@ def test_search_backed_pr_lists_keep_facts_and_withhold_unreadable_counts(gh, fi
 
 
 @pytest.mark.parametrize("kind,target,route,label", [
-    ("comment", 0, "repos/{owner}/{repo}/issues/comments?since=S&sort=updated&direction=asc", "comment (repo-wide, issues and PR conversations)"),
-    ("comment", 7, "repos/{owner}/{repo}/issues/7/comments?since=S", "comment on #7"),
-    ("notification", 0, "repos/{owner}/{repo}/notifications?since=S&all=true", "notification (all)"),
+    ("comment", 0, "repos/owner/selected/issues/comments?since=S&sort=updated&direction=asc", "comment (repo-wide, issues and PR conversations)"),
+    ("comment", 7, "repos/owner/selected/issues/7/comments?since=S", "comment on #7"),
+    ("notification", 0, "repos/owner/selected/notifications?since=S&all=true", "notification (all)"),
 ])
 def test_list_kinds_take_since_and_target_on_the_matching_route(gh, kind, target, route, label):
     gh.answer = lambda p, argv, kw: _rest([])
@@ -608,9 +611,9 @@ def test_graphql_envelope_preserves_document_and_variable_types(gh, query_value)
 def test_graphql_bound_repository_variables_use_the_selected_project_slug(gh):
     gh.answer = lambda p, argv, kw: json.dumps({"data": {"repository": {"id": "R_1"}}})
     gh.read(method="api", graphql="query($owner:String!,$name:String!){repository(owner:$owner,name:$name){id}}")
-    assert gh.calls[0][0] == ["gh", "repo", "view", "--json", "nameWithOwner"]
-    assert json.loads(gh.calls[1][1]["input"])["variables"] == {"owner": "owner", "name": "selected"}
-    assert all(kw["cwd"] == str(gh.cwd) for _argv, kw in gh.calls)
+    assert [view[0] for view in gh.views] == [["gh", "repo", "view", "--json", "nameWithOwner,url"]]
+    assert json.loads(gh.calls[0][1]["input"])["variables"] == {"owner": "owner", "name": "selected"}
+    assert all(kw["cwd"] == str(gh.cwd) for _argv, kw in gh.views + gh.calls)
 
 
 def test_api_sends_get_routes_and_graphql_queries_only(gh):

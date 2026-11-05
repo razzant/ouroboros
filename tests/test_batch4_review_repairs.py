@@ -85,7 +85,11 @@ def test_returned_github_parse_error_does_not_keep_local_execution_alive(tmp_pat
     registry, queue, workers = _registry(tmp_path, monkeypatch)
     monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_kw: 5.0)
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
-    monkeypatch.setattr(github, "_gh_run", lambda *_a, **_kw: github.GhResult(True, "{truncated", 0, None, ""))
+    def gh_result(args, *_a, **_kw):
+        if args[:3] == ["repo", "view", "--json"]:
+            return github.GhResult(True, '{"nameWithOwner":"owner/selected","url":"https://github.example/owner/selected"}', 0, None, "")
+        return github.GhResult(True, "{truncated", 0, None, "")
+    monkeypatch.setattr(github, "_gh_run", gh_result)
     result = registry.execute_result("github_read", {"method": "get", "kind": "issue", "target": 5})
     assert "failed to parse issue JSON" in result.text
     assert result.meta.get("operation_outcome") != "completed_no_effect"

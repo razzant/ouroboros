@@ -72,7 +72,9 @@ def gh_calls(monkeypatch):
     def run(argv, **kwargs):
         calls.append((argv, kwargs))
         output = ""
-        if argv[1] == "api":
+        if argv[1:3] == ["repo", "view"]:
+            output = json.dumps({"nameWithOwner": "owner/selected", "url": BASE})
+        elif argv[1] == "api":
             route = _api_parts(argv)[0].split("?", 1)[0]
             method = argv[argv.index("--method") + 1] if "--method" in argv else "GET"
             if route == "graphql":
@@ -327,10 +329,15 @@ def test_every_repository_tool_keeps_target_in_all_subcalls(tmp_path, gh_calls, 
     result = entry.handler(ctx, **args, repo=repo)
 
     assert not result.startswith("⚠️"), result
-    assert len(gh_calls) == count
+    # An omitted repo names its one target before the first REST or GraphQL leg; the checks reader has none.
+    assert len(gh_calls) == count + (not repo and args["method"] != "checks")
     assert "repo" in entry.schema["parameters"]["properties"]
     for argv, kwargs in gh_calls:
-        if argv[1] == "api":
+        if argv[1:3] == ["repo", "view"]:
+            assert argv[-2:] == ["--json", "nameWithOwner,url"]
+            # An ambient GH_REPO still selects the repository where no Project replaced it, as it does for gh itself.
+            assert argv[3:-2] == (["unrelated/wrong-repo"] if kind == "system" else [])
+        elif argv[1] == "api":
             route, hostname, fields = _api_parts(argv)
             if route == "graphql":  # Node facts follow the PR URL returned by GitHub, like list(kind='pr').
                 assert argv == ["gh", "api", "graphql", "--hostname", "github.example", "--input", "-"]
@@ -342,10 +349,7 @@ def test_every_repository_tool_keeps_target_in_all_subcalls(tmp_path, gh_calls, 
                                 "--hostname", "github.example"]
                 continue
             assert "--repo" not in argv  # gh api has no --repo: the route or the typed fields name the repository.
-            if repo:
-                assert route.startswith("repos/owner/selected/") and hostname == "github.example" and "{owner}" not in route
-            else:
-                assert route.startswith("repos/{owner}/{repo}/") and not hostname
+            assert route.startswith("repos/owner/selected/") and hostname == "github.example" and "{owner}" not in route
         elif repo:
             assert argv[-2:] == ["--repo", repo]
         else:
@@ -514,11 +518,8 @@ def test_presence_repository_selection_keeps_host_argument_authority(tmp_path, g
         assert not gh_calls
     else:
         assert result.startswith("github_read get issue #7")
-        assert len(gh_calls) == 1
-        if bound:
-            assert gh_calls[0][0][2] == "repos/owner/allowed/issues/7"
-        else:
-            assert gh_calls[0][0][2] == "repos/{owner}/{repo}/issues/7"
+        assert len(gh_calls) == (1 if bound else 2)
+        assert gh_calls[-1][0][2] == ("repos/owner/allowed/issues/7" if bound else "repos/owner/selected/issues/7")
 
 
 def _role_context(tmp_path, kind, role):
@@ -593,7 +594,7 @@ def test_read_only_child_keeps_every_other_github_gate(tmp_path, gh_calls, monke
         assert blocked.status == "blocked" and fragment in blocked.text, blocked.text
     assert not gh_calls
     ctx.task_contract = {}
-    assert registry.execute_result("github_read", read).status == "ok" and len(gh_calls) == 1
+    assert registry.execute_result("github_read", read).status == "ok" and len(gh_calls) == 2
 
 
 def test_read_only_child_with_an_unavailable_project_folder_sends_nothing(tmp_path, gh_calls):

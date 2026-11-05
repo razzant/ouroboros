@@ -692,6 +692,14 @@ def _voice_line(focus: Mapping[str, Any]) -> str:
     return f"You write here through the account {label}; your human's notes say what that account is."
 
 
+def _when(message: Mapping[str, Any]) -> str:
+    """When the person wrote, as the connector recorded it, in its own offset: ``message.sent_at`` and, for a
+    later revision, ``edited_at`` (CREATING_SKILLS); a missing or unreadable time stays unknown, never a receipt."""
+    from ouroboros.presence_history import instant
+    sent, edited = (message.get(key) if instant(message.get(key)) is not None else "" for key in ("sent_at", "edited_at"))
+    return (f"at {sent}" if sent else "at an unrecorded time") + (f", edited at {edited}" if edited else "")
+
+
 def frame_focus_content(task: Mapping[str, Any], content: Any) -> Any:
     """The volatile assignment lives at the user tail, after the shared cached prefix."""
     from ouroboros.places import SILENT_DISCLOSURE
@@ -717,7 +725,7 @@ def frame_focus_content(task: Mapping[str, Any], content: Any) -> Any:
         "voice_line": voice + "\n" if voice else "",
         "who": actor.get("display_name") or actor.get("platform_actor_id") or "A person",
         "place": place.get("label") or place.get("provider") or place.get("place_id"),
-        "when": str((event.get("message") or {}).get("timestamp") or (event.get("message") or {}).get("ts") or "at an unrecorded time"),
+        "when": _when(event.get("message") or {}),
         "waiting_line": "the event addressed you" if focus.get("addressed") else "an event matched this place's wake list",
         "event": content if isinstance(content, str) else "\n".join(item.get("text", "") for item in content if isinstance(item, dict)),
         "place_state": state + (". " + SILENT_DISCLOSURE if state == "silent" else ""),

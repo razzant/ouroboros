@@ -5,6 +5,7 @@ R1: a GitHub refusal before the invocation's FIRST gh launch settles its own
 R2: a task's MCP discovery passes that task's launch admission before EACH
     transport entry; Settings probes carry no task authority.
 """
+import json
 import subprocess
 from types import SimpleNamespace
 
@@ -33,6 +34,8 @@ def _github_task(tmp_path, monkeypatch, target):
         launched.append(argv[1:3])
         if target == "cli_missing":
             raise FileNotFoundError(2, "No such file or directory", "gh")
+        if argv[1:3] == ["repo", "view"]:
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"nameWithOwner": "owner/selected", "url": "https://github.example/owner/selected"}), stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", run)
@@ -52,6 +55,9 @@ def test_later_refusal_keeps_prior_effect_unknown_but_closes_local_invocation(tm
     fake = subprocess.run
 
     def read_then_lose_target(argv, *args, **kwargs):
+        if argv[:1] == ["gh"] and argv[1:3] == ["repo", "view"]:
+            launched.append(argv[1:3])
+            return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps({"nameWithOwner": "owner/selected", "url": "https://github.example/owner/selected"}))
         if argv[:1] == ["gh"] and argv[1] == "api":  # the pull request read; the diff subcall then finds no target
             launched.append(argv[1:3])
             if second == "unavailable":
@@ -65,7 +71,7 @@ def test_later_refusal_keeps_prior_effect_unknown_but_closes_local_invocation(tm
     monkeypatch.setattr(subprocess, "run", read_then_lose_target)
     result = registry.execute_result("github_read", {"method": "get", "kind": "pr", "target": 7, "include": ["diff"], "repo": ""})
 
-    assert launched == [["api", "repos/{owner}/{repo}/pulls/7"]]
+    assert launched == [["repo", "view"], ["api", "repos/owner/selected/pulls/7"]]
     assert "GH_TARGET_" in result.text and result.status != "ok", result
     assert result.meta.get("operation_outcome") != "completed_no_effect"
     assert not load_task_result(tmp_path, "root").get("launch_handoffs", {})
