@@ -447,17 +447,18 @@ def finish_gate(evidence, verdict, phase, release, ctx=None) -> None:
         try:
             release(*cleanup[:4], hold)
         except OSError as exc:
-            reason = f"scratch release failed: {exc}"
+            reason = hold = f"scratch release failed: {exc}"
             retain_tree(cleanup[1], reason)
         remains = cleanup[1].exists()
         record.update(cleanup="retained" if remains else "released", retention_reason=reason)
         if remains:
             report_diagnostic(f"PREFLIGHT_RETAINED {cleanup[1]}: {reason or 'release incomplete'}")
-            record.update(kept=kept_facts(kept) or [{"path": str(cleanup[1]), "reasons": [
-                (reason or "release incomplete").split("\n")[0]]}],
-                containment_tokens=[token for token in evidence.get("containment_tokens", ()) if token])
+            facts = kept_facts(kept) if kept and not hold else [
+                {"path": str(cleanup[1]), "reasons": [(reason or "release incomplete").split("\n")[0]]}]
+            tokens = [token for token in evidence.get("containment_tokens", ()) if token]
+            record.update(kept=facts, containment_tokens=tokens)
             try:
-                record_kept_scratch(ctx, cleanup[1], record["kept"], record["containment_tokens"])
+                record_kept_scratch(ctx, cleanup[1], facts, tokens)
             except (OSError, ValueError, KeyError, TypeError) as exc:  # the tree stays either way; its record is a gap
                 report_diagnostic(f"PREFLIGHT_EVIDENCE_INCOMPLETE {cleanup[1]}: no scratch record: {exc}")
         try:
