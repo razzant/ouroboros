@@ -13,10 +13,10 @@ import time
 
 import pytest
 
+from ouroboros import preflight_probe
 from ouroboros.platform_layer import force_kill_pid, pid_is_alive
 from ouroboros.test_parallelism import WORKERS_ENV
 from ouroboros.settings_defaults import settings_env_keys
-from ouroboros import preflight_probe
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -1140,6 +1140,47 @@ def test_each_pass_gets_the_exact_remaining_budget(tmp_path, two_pass_env, stub_
     assert second_timeout <= 60 - 0.5, "pass 2's share was rounded up past the total budget"
 
 
+def test_the_gate_leases_its_workers_and_names_its_durations_table_for_the_whole_run(tmp_path, two_pass_env,
+                                                                                    stub_passes, monkeypatch):
+    """A standalone gate (no parent allocation) holds its admitted count in the host ledger from the admission
+    to the end of the run, so a run started meanwhile subtracts it; the row goes with the run. A caller with a
+    canonical data root points every session of the gate at the install's durations table
+    (`state/test-durations.json`), which the sessions read for their weights and bring up to date; a caller
+    without one names no table."""
+    from types import SimpleNamespace
+
+    from ouroboros import preflight_runner as pr
+    from ouroboros import test_parallelism as budget
+    from ouroboros.test_evidence import DURATIONS_POINTER, TEST_DURATIONS_ENV
+
+    data = tmp_path / "data"
+    assert pr._durations_target(SimpleNamespace(task_metadata={"budget_drive_root": str(data)}, drive_root=data)) == (
+        data / "state" / "test-durations.json")
+    assert pr._durations_target(None) is None
+    ledger, scratch = tmp_path / "slots", tmp_path / "scratch"
+    scratch.mkdir()
+    _pin_preflight_root(monkeypatch, scratch)
+    monkeypatch.delenv(budget.NESTED_WORKERS_ENV)
+    monkeypatch.setattr(budget, "other_runs", lambda: budget.HostRuns())
+    monkeypatch.setattr(budget, "_ledger_dir", lambda: ledger)
+    monkeypatch.setattr(pr, "_durations_target", lambda ctx: data / "state" / "test-durations.json")
+    leases, tables = [], []
+
+    def green():
+        leases.append([json.loads(path.read_text(encoding="utf-8")) for path in ledger.glob("*.json")])
+        tables.append(((scratch / DURATIONS_POINTER).read_text(encoding="utf-8"),
+                       pr._preflight_env(scratch, scratch / "repo").get(TEST_DURATIONS_ENV)))
+        return (0, "ok", "")
+
+    stub_passes([green, green])
+    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
+    assert pr.run_hermetic_pytest(repo, timeout=120) is None
+    assert [[(row["pid"], row["workers"], row["command"]) for row in rows] for rows in leases] == [
+        [(os.getpid(), 2, "hermetic gate")]] * 2
+    assert tables == [(str(data / "state" / "test-durations.json"),) * 2] * 2
+    assert list(ledger.glob("*.json")) == []
+
+
 def test_the_full_suite_has_no_total_budget_and_a_warm_takes_none_of_a_callers(tmp_path, two_pass_env, stub_passes,
                                                                              monkeypatch, capsys):
     """The whole suite's honest duration is the install's to find, so a full run starts every lane with no
@@ -1197,47 +1238,6 @@ def test_the_full_suite_has_no_total_budget_and_a_warm_takes_none_of_a_callers(t
     assert workload(repo, pytest_args=["tests/test_plain.py"])[1] == pr._DEFAULT_PREFLIGHT_TIMEOUT_SEC == 1800
     assert workload(repo, selection=SimpleNamespace(tier="selected", files=("tests/test_plain.py",)))[1] == 1800
     assert workload(repo, selection=SimpleNamespace(tier="full", files=()))[1] is None
-
-
-def test_the_gate_leases_its_workers_and_names_its_durations_table_for_the_whole_run(tmp_path, two_pass_env,
-                                                                                    stub_passes, monkeypatch):
-    """A standalone gate (no parent allocation) holds its admitted count in the host ledger from the admission
-    to the end of the run, so a run started meanwhile subtracts it; the row goes with the run. A caller with a
-    canonical data root points every session of the gate at the install's durations table
-    (`state/test-durations.json`), which the sessions read for their weights and bring up to date; a caller
-    without one names no table."""
-    from types import SimpleNamespace
-
-    from ouroboros import preflight_runner as pr
-    from ouroboros import test_parallelism as budget
-    from ouroboros.test_evidence import DURATIONS_POINTER, TEST_DURATIONS_ENV
-
-    data = tmp_path / "data"
-    assert pr._durations_target(SimpleNamespace(task_metadata={"budget_drive_root": str(data)}, drive_root=data)) == (
-        data / "state" / "test-durations.json")
-    assert pr._durations_target(None) is None
-    ledger, scratch = tmp_path / "slots", tmp_path / "scratch"
-    scratch.mkdir()
-    _pin_preflight_root(monkeypatch, scratch)
-    monkeypatch.delenv(budget.NESTED_WORKERS_ENV)
-    monkeypatch.setattr(budget, "other_runs", lambda: budget.HostRuns())
-    monkeypatch.setattr(budget, "_ledger_dir", lambda: ledger)
-    monkeypatch.setattr(pr, "_durations_target", lambda ctx: data / "state" / "test-durations.json")
-    leases, tables = [], []
-
-    def green():
-        leases.append([json.loads(path.read_text(encoding="utf-8")) for path in ledger.glob("*.json")])
-        tables.append(((scratch / DURATIONS_POINTER).read_text(encoding="utf-8"),
-                       pr._preflight_env(scratch, scratch / "repo").get(TEST_DURATIONS_ENV)))
-        return (0, "ok", "")
-
-    stub_passes([green, green])
-    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
-    assert pr.run_hermetic_pytest(repo, timeout=120) is None
-    assert [[(row["pid"], row["workers"], row["command"]) for row in rows] for rows in leases] == [
-        [(os.getpid(), 2, "hermetic gate")]] * 2
-    assert tables == [(str(data / "state" / "test-durations.json"),) * 2] * 2
-    assert list(ledger.glob("*.json")) == []
 
 
 def test_the_gate_warms_its_prefix_once_before_the_passes(tmp_path, two_pass_env, stub_passes, monkeypatch, capsys):

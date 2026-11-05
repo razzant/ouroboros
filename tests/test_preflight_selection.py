@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import commit_admission as admission, preflight_probe, preflight_runner as pr, test_selection as selection
+from ouroboros import commit_admission as admission, preflight_runner as pr, test_selection as selection
 from ouroboros.preflight_qualification import adoption_test_evidence, full_proof_error
 from tests.test_preflight_runner import _make_repo, _commit_all
 from tests.test_preflight_receipts import receipt_python  # noqa: F401 -- dependency-only lane fixture
@@ -42,8 +42,6 @@ def test_real_selected_run_records_inventory_and_cannot_qualify_managed_update(c
     assert pr.run_hermetic_pytest(ctx.repo_dir, ctx=ctx, selected=True, phase=pr.PRE_COMMIT_PHASE) is None
     proof = ctx._preflight_test_proof
     assert proof and proof.tier == "selected"
-    ran = json.loads((pathlib.Path(ctx._preflight_test_evidence) / "result.json").read_text(encoding="utf-8"))
-    assert proof.workload[1] == ran["budget_seconds"] == 1800 and 0 < ran["elapsed_seconds"] < 1800  # the tier's own
     assert not admission.preflight_test_proof_matches(ctx, ctx.repo_dir)
     assert admission.preflight_test_proof_matches(ctx, ctx.repo_dir, require_full=False)
     assert not admission.preflight_test_workload_unchanged(proof, ctx.repo_dir, timeout=1800, pytest_args=None)
@@ -114,8 +112,6 @@ def test_apparatus_change_executes_full_and_reports_actual_failure(candidate):
     error = pr.run_hermetic_pytest(candidate.repo_dir, ctx=candidate, selected=True, phase=pr.PRE_COMMIT_PHASE)
     assert error and "unrelated collection" in error
     assert candidate._preflight_test_proof is None
-    ran = json.loads((pathlib.Path(candidate._preflight_test_evidence) / "result.json").read_text(encoding="utf-8"))
-    assert ran["budget_seconds"] is None and ran["elapsed_seconds"] > 0  # widened to the whole suite: no deadline
 
 
 @pytest.mark.parametrize("mode", ["missing", "empty"])
@@ -217,10 +213,14 @@ def test_evolution_publication_refuses_selected_but_accepts_full(candidate, monk
     monkeypatch.setattr(git, "_evolution_commit_authority", lambda *a, **k: ({}, {"ok": True}))
     assert pr.run_hermetic_pytest(ctx.repo_dir, ctx=ctx, selected=True, phase=pr.PRE_COMMIT_PHASE) is None
     assert "EVOLUTION_PUBLICATION_STOPPED" in _evolution_test_publication_stop(ctx, ctx._preflight_test_proof.head, "")
+    ran = json.loads((pathlib.Path(ctx._preflight_test_evidence) / "result.json").read_text(encoding="utf-8"))
+    assert ctx._preflight_test_proof.workload[1] == ran["budget_seconds"] == 1800 and 0 < ran["elapsed_seconds"] < 1800
     (ctx.repo_dir / "tests/test_unrelated.py").write_text("def test_other(): assert True\n", encoding="utf-8")
     _commit_all(ctx.repo_dir)  # evolution's forced full run follows its commit, on exactly that tree
     assert pr.run_hermetic_pytest(ctx.repo_dir, ctx=ctx) is None
     assert _evolution_test_publication_stop(ctx, ctx._preflight_test_proof.head, "") == ""
+    ran = json.loads((pathlib.Path(ctx._preflight_test_evidence) / "result.json").read_text(encoding="utf-8"))
+    assert ctx._preflight_test_proof.workload[1] is None is ran["budget_seconds"] and ran["elapsed_seconds"] > 0  # full: none
 
 
 def test_adoption_without_full_evidence_is_refused_before_writing_handoff(tmp_path, monkeypatch):
@@ -290,7 +290,7 @@ def test_the_inventory_plugin_carries_any_scope_exactly_and_the_launch_leaves_it
     scope and the file it logs to, also when a module name or the results directory spells every template field."""
     import re
 
-    from ouroboros import preflight_inventory as inventory
+    from ouroboros import preflight_inventory as inventory, preflight_probe
     # TEMPLATE_FIELDS must stay every field either template has, or "spells every field" below stops being true.
     assert sorted(set(re.findall(r"__[A-Z]+(?:_[A-Z]+)*__", inventory.SOURCE + preflight_probe._WORKER_PROBE_SOURCE))) == sorted(
         TEMPLATE_FIELDS)
@@ -318,6 +318,8 @@ def test_the_worker_probe_reads_back_its_directories_where_the_root_spells_templ
     plugin. A root that spells every template field is still the root: the probe's ``_LOG`` and ``_RESULTS`` are the
     directories the runner reads back."""
     import runpy
+
+    from ouroboros import preflight_probe
 
     root = tmp_path.joinpath(*TEMPLATE_FIELDS)
     module = pr._install_worker_probe(root)
