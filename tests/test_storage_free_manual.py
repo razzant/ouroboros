@@ -144,20 +144,26 @@ def test_nothing_else_reaches_it(copies, monkeypatch):  # noqa: F811
     assert target.read_bytes() == b"only here" and path.is_dir()
 
 
-def test_a_producer_retained_handoff_is_manual_loss_acceptance_and_not_the_ordinary_pool(tmp_path, monkeypatch):
-    """A marked handoff is named with the producer's words, then the owner's explicit discard removes
-    its scratch and entry through the custody remover; an ordinary item press cannot reach it."""
+def _producer_retained(tmp_path, marker_words):
+    """A finished task's session scratch whose producer marked a tree inside it: its record ends as a
+    ``producer_retained`` handoff in the custody trash. Returns the data root and the scratch."""
     from tests.test_session_scratch_release import _started
     from ouroboros.workspace_preflight import release_finished_scratch
 
     data, scratch = _started(tmp_path)
     nested = scratch / "held" / "run.noindex"
     nested.mkdir(parents=True)
-    marker_words = "producer kept this evidence for inspection"
     assert environment.retain_tree(nested, marker_words)
     assert release_finished_scratch(data, lambda _task: False)["released"]
     assert task_custody.remove_custody_trash(data)["holds"][0]["class"] == "producer_retained"
+    return data, scratch
 
+
+def test_a_producer_retained_handoff_is_manual_loss_acceptance_and_not_the_ordinary_pool(tmp_path, monkeypatch):
+    """A marked handoff is named with the producer's words, then the owner's explicit discard removes
+    its scratch and entry through the custody remover; an ordinary item press cannot reach it."""
+    marker_words = "producer kept this evidence for inspection"
+    data, scratch = _producer_retained(tmp_path, marker_words)
     _fake_sizer(monkeypatch)
     owner = _owner({}, offered=("service_folders",))
     _preview(owner, data, data.parent)
@@ -169,6 +175,34 @@ def test_a_producer_retained_handoff_is_manual_loss_acceptance_and_not_the_ordin
     assert owner.start(data, data.parent, plan["plan"], None, [row["id"]]) == {"started": False, "reason": "not_offered"}
     assert _discard(owner, (data, data.parent), [row["id"]]) == {"started": True, "reason": ""}
     assert not scratch.exists() and not any((data / "state" / "custody_trash").iterdir())
+
+
+def test_a_producer_retained_handoff_beside_a_result_pin_leaves_the_pin_offered(tmp_path, monkeypatch):
+    """Under the default offered groups a marked scratch handoff and a finished writer's result pins are
+    listed together: the handoff in the manual form, the pins in their own group."""
+    from ouroboros import delegate_custody as custody
+    from tests.test_storage_free import _group, _init_repo
+
+    data, scratch = _producer_retained(tmp_path, REASON)
+    repo, wtroot = tmp_path / "repo", tmp_path / "wtroot"
+    _init_repo(repo)
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_WORKTREE_ROOT", str(wtroot))
+    handle = sw.provision_execution_snapshot(target_root=repo, task_id="writer", snapshot_id="snap-w",
+                                             worktree_root=wtroot, data_dir=data)
+    (Path(handle.path) / "a.txt").write_text("changed by the writer\n", encoding="utf-8")
+    sw.capture_result_commit("snap-w", tmp_path / "saved" / "workspace.patch", data_dir=data)
+    assert sw.release_snapshot_checkout("snap-w", worktree_root=wtroot, data_dir=data)
+    seed_result(data, "writer", document("writer", "completed"))
+    custody.record_started(data, custody.RunCustody(run_id="run-w", task_id="writer", snapshot_id="snap-w",
+                                                    execution_root=handle.path))
+    _fake_sizer(monkeypatch)
+    owner = _owner({})
+    try:
+        view = _preview(owner, data, data.parent)
+        assert [item["id"] for item in _group(view, "result_pins")["items"]] == ["pins:snap-w"], "the handoff hides no pin"
+        assert view["pool"]["manual"]["count"] == 1, "the handoff stays the owner's explicit discard"
+    finally:
+        assert retire_synthetic_retention(scratch / "held" / "run.noindex", REASON)
 
 
 def test_the_background_verdict_is_unchanged_by_a_discard_answer(candidate):  # noqa: F811

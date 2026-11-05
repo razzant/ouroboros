@@ -858,11 +858,11 @@ class FreeSpace:
                 if entry.parent.name != "custody_trash" or not entry.is_dir() or entry.is_symlink():
                     continue
                 producer_entries.setdefault(entry, []).append(row)
-            for entry, rows in sorted(producer_entries.items(), key=lambda pair: pair[0].name):
-                examples = [str(row.get("example") or "producer-retained session scratch") for row in rows]
+            for entry, held in sorted(producer_entries.items(), key=lambda pair: pair[0].name):  # ``rows`` stays the copies'
+                examples = [str(row.get("example") or "producer-retained session scratch") for row in held]
                 loss = "; ".join(dict.fromkeys(examples))
                 item = _Candidate(GROUP_SERVICE_FOLDERS, f"producer_retained:{entry.name}", entry,
-                                  "producer_retained", row={"loss": loss, "scratch_paths": [row["path"] for row in rows]})
+                                  "producer_retained", row={"loss": loss, "scratch_paths": [row["path"] for row in held]})
                 item.reason, item.cause = "retained_evidence", PRODUCER_RETAINED
                 item.manual = {"signature": None, "unsaved_count": 0, "unsaved_bytes": 0, "unsaved": [],
                                "keep_branch": False, "producer_retained": True, "loss": loss}
