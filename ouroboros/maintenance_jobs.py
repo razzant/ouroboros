@@ -177,7 +177,8 @@ def record_pass(root: Any, name: str, report: Dict[str, Any], *, event: Optional
     """Record one retirer pass (a ``pass_report``) as the job ``name``'s row, with ``since`` per hold class,
     when the pass is evidence (the comment above); a pass that rested (``report["rested"]``) or changed
     nothing writes nothing and returns None, and one that judged only part of its plane
-    (``report["partial"]``) records what it released and its errors under the row's holds as they stand.
+    (``report["partial"]``) records what it released and its errors under the row's holds as they stand
+    (a job's first pass has no row to keep, so the holds it judged stand until a whole pass).
     A written pass clears ``last_error``. ``event`` names the events.jsonl row written beside the job row,
     with the same facts (the custody sweep's evidence of what moved and what holds); the retirer's whole
     report rides along whenever an event is emitted."""
@@ -186,10 +187,10 @@ def record_pass(root: Any, name: str, report: Dict[str, Any], *, event: Optional
     current = job(root, name) or {}
     released = report.get("released")
     released_count = len(released) if isinstance(released, (list, tuple, set)) else int(released or 0)
-    judged = current.get("holds") if report.get("partial") else report.get("holds")
+    first, recovered = current.get("state") is None, "last_error" in current
+    judged = current.get("holds") if report.get("partial") and not first else report.get("holds")
     changed = _hold_set(judged) != _hold_set(current.get("holds"))
     mailbox_removed = bool((report.get("mailboxes") or {}).get("removed"))
-    first, recovered = current.get("state") is None, "last_error" in current
     if not (released_count or report.get("errors") or changed or mailbox_removed or first or recovered):
         return None
     now = utc_now_iso()

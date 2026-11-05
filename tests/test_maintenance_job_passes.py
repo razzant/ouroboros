@@ -99,12 +99,14 @@ def test_a_release_or_an_error_is_evidence_and_a_rested_pass_is_not(tmp_path):
 
 def test_a_partial_pass_records_what_it_released_under_the_holds_of_the_last_whole_pass(tmp_path):
     store_import.ensure_current_store(tmp_path)
+    seats_only = Holds()
+    seats_only.note("seat_busy", "seat-2")
+    opening = record_pass(tmp_path, "review_checkout_prune", {**pass_report(0, seats_only), "partial": True})
+    assert [row["class"] for row in opening["holds"]] == ["seat_busy"], "a first part has no row to keep: what it judged stands"
     whole = Holds()
     whole.note("review_custody_active", "checkout-1")
     whole.note("owner_keep", "seat-1")
     first = record_pass(tmp_path, "review_checkout_prune", pass_report(0, whole))
-    seats_only = Holds()
-    seats_only.note("seat_busy", "seat-2")
     partial = record_pass(tmp_path, "review_checkout_prune", {**pass_report(1, seats_only), "partial": True})
     assert partial["released"] == 1 and partial["holds"] == first["holds"], "a part of the plane replaces no hold"
     assert record_pass(tmp_path, "review_checkout_prune", {**pass_report(0, seats_only), "partial": True}) is None
