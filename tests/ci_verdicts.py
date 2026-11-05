@@ -20,7 +20,6 @@ from pathlib import Path
 import re
 import sys
 import tempfile
-import zlib
 
 PHASES = frozenset({"setup", "call", "teardown"})
 # scripts/ci_retry.py: retry round k of a pass runs in <pass>/retry-<k>.
@@ -32,14 +31,8 @@ DURATIONS_ENV = "OUROBOROS_CI_DURATIONS"
 # The owner's persisted table (ouroboros.test_evidence.TEST_DURATIONS_ENV spells the same key): read for weights when
 # CI's table is absent, and brought up to date by every owned session at its end (`record_session_durations`).
 TEST_DURATIONS_ENV = "OUROBOROS_TEST_DURATIONS"
-# The xdist group of a serial test in the one xdist pass (tests/conftest.py): a bare mark's file-sharded group
-# `serial<N>` (`serial_group`) or a named resource's `serial:<resource>`.
-SERIAL_GROUP = re.compile(r"serial(?:[0-9]+|:.+)")
-
-
-def serial_group(path: str, shards: int) -> str:
-    """The serial group a test FILE runs in when tests/conftest.py pins ``shards`` of them: a stable hash, no seed."""
-    return f"serial{zlib.crc32(path.encode('utf-8')) % shards}"
+# The xdist group of a serial test in the one xdist pass (tests/conftest.py): its resource's, `serial:<resource>`.
+SERIAL_GROUP = re.compile(r"serial:.+")
 
 
 def write_json(path: Path, value) -> None:
@@ -280,18 +273,17 @@ def collect_durations(root: Path, *, run_id: str, sha: str) -> dict:
 
     Integer milliseconds, keys sorted: per test FILE and system, the setup, call and
     teardown time of every report of the default lanes' passes (`platforms`) and the part
-    of it the serial tests took (`serial`, scripts/run_tests.py sizes its serial groups
-    by it); per node, the same for the UI lane (`ui_nodes`). A pass is a projection
-    carrying a `default_parallel`, `default_serial` or `ui_browser` block, or an
-    unsharded `parallel`, `serial` or `overlapped` pass directory without one (the last is
-    run_tests.py's one-run battery, whose serial tests carry a `@serial<N>` group): the
-    caller decides which artifacts lie under root. Retry rounds, collections without
-    reports, projections of an unknown system and subtest reports (their time lies within
+    of it the tests of a named resource took (`serial`: what the resource groups hold,
+    for whoever decides their membership); per node, the same for the UI lane
+    (`ui_nodes`). A pass is a projection carrying a `default_parallel`, `default_serial`
+    or `ui_browser` block, or an unsharded `parallel` or `serial` pass directory without
+    one (run_tests.py's battery): the caller decides which artifacts lie under root.
+    Retry rounds, collections without reports, projections of an unknown system and
+    subtest reports (their time lies within
     their test's call) are left out. Of one pass (system, lane, shard) the highest run
     attempt counts, then the larger projection, then the first path, so a projection
-    downloaded twice counts once. A test's time is serial when it ran in a `serial…` xdist
-    group (a bare or resource-named `serial` mark in the xdist pass); the one-process pass
-    of `serial("exclusive")` tests is not what the serial groups are sized by.
+    downloaded twice counts once. A test's time is serial when it ran in a `serial:<resource>`
+    xdist group; the one-process pass of `serial("exclusive")` tests has no group.
     """
     chosen = {}
     for directory, dirs, files in os.walk(root):
@@ -303,7 +295,7 @@ def collect_durations(root: Path, *, run_id: str, sha: str) -> dict:
             continue
         lane = next((key for key in ("default_parallel", "default_serial", "ui_browser")
                      if isinstance(data.get(key), dict)), None)
-        if lane is None and Path(directory).name not in ("parallel", "serial", "overlapped"):
+        if lane is None and Path(directory).name not in ("parallel", "serial"):
             continue
         identity = data.get("github") if isinstance(data.get("github"), dict) else {}
         attempt = identity.get("run_attempt")

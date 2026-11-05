@@ -148,7 +148,7 @@ def two_pass_env(monkeypatch, preflight_timeout_diagnostics):
 
 def test_two_pass_specs_mirror_ci(monkeypatch):
     """The gate runs CI's exact split: one xdist pass of everything but `serial("exclusive")` (`--dist loadgroup`:
-    resource groups, bare-serial file groups), then those alone in one process."""
+    resource groups), then those alone in one process."""
     from ouroboros import preflight_runner as pr
 
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
@@ -159,7 +159,6 @@ def test_two_pass_specs_mirror_ci(monkeypatch):
     assert parallel.args[:3] == ["tests/", "-m", f"not exclusive and {pr.LANE_EXCLUSION_EXPR}"]
     for flag in ("-n", "auto", "--dist", "loadgroup", "--max-worker-restart=0", "--timeout=300"):
         assert flag in parallel.args, f"parallel pass lost {flag}"
-    assert "--serial-shards" not in " ".join(parallel.args), "the shared vector names only xdist's own options"
     # pytest-timeout picks its own method: SIGALRM fails one test; the thread method (Windows) stops a worker.
     assert not any(arg.startswith("--timeout-method") for arg in parallel.args)
 

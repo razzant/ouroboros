@@ -517,63 +517,80 @@ def pytest_collection_finish(session):
         setattr(Browser, name, functools.wraps(original)(dark_by_default))
 
 
-def pytest_addoption(parser):
-    parser.addoption(
-        "--serial-shards", default="0",
-        help="How many file-sharded xdist groups the bare-`serial` files run in; `auto` (the default under "
-             "`--dist loadgroup`: the recorded serial share of this system's time and the run's workers, "
-             "ouroboros.test_parallelism.serial_shards) or a count; named resources group by resource. "
-             "0 outside `--dist loadgroup` leaves scheduling untouched.",
-    )
+_LANE_GROUP_SECONDS = "lane_group_seconds"
+_LANE_GROUP = pytest.StashKey()
 
 
-def _serial_shard_count(config) -> int:
-    """An explicit count, else `auto` under `--dist loadgroup` (the one xdist pass), else 0 (a plain `-n` run)."""
-    value = str(config.getoption("--serial-shards")).strip().lower()
-    if value not in ("auto", "", "0") or (value in ("", "0") and getattr(config.option, "dist", "") != "loadgroup"):
-        return int(value or 0)
-    from ouroboros.test_parallelism import serial_shards
-    from tests.ci_verdicts import recorded_durations_table
+def _plain_id(nodeid: str) -> str:
+    """A node id without the group xdist reads off its end (`id@group`); an `@` inside a parameter stays."""
+    head, at, group = nodeid.rpartition("@")
+    return head if at and "]" not in group else nodeid
 
-    workers = getattr(config.option, "numprocesses", None)
-    return serial_shards(int(workers) if isinstance(workers, int) and workers > 0 else 1, recorded_durations_table()[0])
+
+class _GroupsInTheCollectionReport:
+    """xdist learns an item's group from its node id (`id@group`) when a worker reports its collection, and runs
+    tests by index afterwards. Nothing else may read the suffix: lane proofs, inventories, results, retries and
+    verdicts compare plain ids. So an id carries its group only for the length of that report."""
+
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_collection_finish(self, session):
+        grouped = [(item, item.nodeid) for item in session.items if _LANE_GROUP in item.stash]
+        for item, nodeid in grouped:
+            item._nodeid = f"{nodeid}@{item.stash[_LANE_GROUP]}"
+        try:
+            yield
+        finally:
+            for item, nodeid in grouped:
+                item._nodeid = nodeid
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_handlecrashitem(crashitem, report, sched):  # noqa: ARG001
+    """The controller names a crashed test by the id its worker reported: give the report the plain one."""
+    report.nodeid = _plain_id(report.nodeid)
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_configure_node(node):
+    """Hand every worker of the one xdist pass ONE reading of the durations table, the controller's, for the
+    order of its groups: every session that ends rewrites the owner's table, and workers that had read two
+    versions would sort into two orders, which xdist refuses as different collections."""
+    config = node.config
+    if getattr(config.option, "dist", "") != "loadgroup":
+        return
+    if not hasattr(config, "_lane_group_seconds"):
+        from tests.ci_verdicts import platform_name, recorded_durations_table
+
+        table = recorded_durations_table()[0]
+        config._lane_group_seconds = dict(((table or {}).get("platforms") or {}).get(platform_name(sys.platform), {}))
+    node.workerinput[_LANE_GROUP_SECONDS] = config._lane_group_seconds
 
 
 def _pin_lane_groups(items, config) -> None:
-    """The one xdist pass's scheduling (`--dist loadgroup`); inert when `--serial-shards` is 0.
+    """The one xdist pass's scheduling; inert outside `--dist loadgroup` (a plain `-n` run keeps its order).
+    Items are collected in xdist's workers, where `--dist` itself reads "no" and xdist keeps the mode in
+    `config.option.loadgroup` (xdist.remote.setup_config): that flag is the one read here.
 
     A `serial("<resource>")` test joins its resource's group (`serial:<resource>`): the resource's tests take
-    turns on one worker while the other resources and every parallel-safe test run beside them. A bare
-    `serial` test joins the file-sharded group `serial<N>` of `--serial-shards` (a FILE never splits across
-    workers and never runs beside another file of its own shard), so the shard count bounds how many such
-    files run at once. Every other test keeps the scope `--dist loadscope` would give it (file, or class when
-    there is one). Groups are handed out longest-first by their files' recorded seconds (the run's durations
-    table), serial groups first among equals, so no long group starts after the queue drains.
-    It runs inside the tryfirst hook because xdist reads `xdist_group` in the same hook.
+    turns on one worker while the other resources and every parallel-safe test run beside them. Every other
+    test keeps the scope `--dist loadscope` would give it (file, or class when there is one). The group rides
+    the item's id only in the collection report (`_GroupsInTheCollectionReport`). Groups are handed
+    out longest-first by their files' recorded seconds (the run's durations table as the controller read it,
+    `pytest_configure_node`), resource groups first among equals, so no long group starts after the queue drains.
     """
-    shards = _serial_shard_count(config)
-    if shards <= 0:
+    if not getattr(config.option, "loadgroup", False):
         return
-    from tests.ci_verdicts import platform_name, recorded_durations_table, serial_group
-
-    table = recorded_durations_table()[0]
-    recorded = ((table or {}).get("platforms") or {}).get(platform_name(sys.platform), {})
+    recorded = getattr(config, "workerinput", {}).get(_LANE_GROUP_SECONDS, {})
     groups, files = {}, {}
     for item in items:
-        path = item.nodeid.split("::", 1)[0]
         resource = serial_resource(item)
-        if resource is None:
-            group = item.nodeid.rsplit("::", 1)[0]
-        elif resource:
-            group = f"serial:{resource}"
-        else:
-            group = serial_group(path, shards)
-        item.add_marker(pytest.mark.xdist_group(group))
+        group = f"serial:{resource}" if resource else item.nodeid.rsplit("::", 1)[0]
+        item.stash[_LANE_GROUP] = group
         groups[item.nodeid] = group
-        files.setdefault(group, set()).add(path)
+        files.setdefault(group, set()).add(item.nodeid.split("::", 1)[0])
     weight = {group: sum(recorded.get(path, 0) for path in paths) for group, paths in files.items()}
     order = {item.nodeid: index for index, item in enumerate(items)}
-    items.sort(key=lambda item: (-weight[groups[item.nodeid]], serial_resource(item) is None, order[item.nodeid]))
+    items.sort(key=lambda item: (-weight[groups[item.nodeid]], not serial_resource(item), order[item.nodeid]))
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -592,6 +609,7 @@ def pytest_cmdline_main(config):
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_configure(config):
+    config.pluginmanager.register(_GroupsInTheCollectionReport(), "lane-groups-in-the-collection-report")
     config.addinivalue_line("markers", "scale: storage operation-count acceptance measurements")
     config.addinivalue_line("markers", "exclusive: derived here from `serial(\"exclusive\")`, never written by hand: "
                                        "the tests that run alone in the one-process pass after the xdist pass")
@@ -1580,7 +1598,7 @@ def _record_worker_crash(node, reason, scheduler):
     node.config._ouroboros_worker_crash = {
         "worker": node.gateway.id, "reason": str(reason),
         "collection_available": collected is not None,
-        "unfinished": sorted(set(collected or []) - completed),
+        "unfinished": sorted({_plain_id(nodeid) for nodeid in collected or []} - completed),
     }
 
 

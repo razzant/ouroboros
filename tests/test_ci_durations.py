@@ -113,12 +113,12 @@ def test_durations_sum_each_file_per_system_and_each_ui_node(tmp_path):
     assert empty.returncode == 0 and "::warning::" in empty.stdout and _json(out)["platforms"] == {}
 
 
-def test_the_one_run_battery_records_the_time_of_its_serial_groups(tmp_path):
-    """scripts/run_tests.py's one-run battery (an ``overlapped`` pass) pins its serial tests to ``serial<N>``
-    xdist groups: their time is their file's serial part; a test in a file or class group is not serial."""
+def test_the_battery_records_the_time_of_its_resource_groups(tmp_path):
+    """The xdist pass of scripts/run_tests.py's battery pins a named resource's tests to its ``serial:<resource>``
+    xdist group: their time is their file's serial part; a test in a file or class group is not serial."""
     root = tmp_path / "evidence"
-    _projection(root / "run-1" / "pytest" / "overlapped", [
-        _row("tests/test_s.py::test_one@serial1", 2.0), _row("tests/test_s.py::test_one@serial1", 0.5, "teardown"),
+    _projection(root / "run-1" / "pytest" / "parallel", [
+        _row("tests/test_s.py::test_one@serial:port", 2.0), _row("tests/test_s.py::test_one@serial:port", 0.5, "teardown"),
         _row("tests/test_p.py::test_two@tests/test_p.py", 1.0),
         _row("tests/test_q.py::TestK::test_three@tests/test_q.py::TestK", 0.25)], system="Darwin")
     table = collect_durations(root, run_id=RUN, sha=SHA)
@@ -140,7 +140,7 @@ def test_an_owned_session_folds_its_whole_file_times_into_the_owners_table(tmp_p
     _write(table, "{garbage")
     first = [_row("tests/test_a.py::test_one", 0.25, "setup"), _row("tests/test_a.py::test_one", 1.5),
              _row("tests/test_a.py::test_one", 0.7, subtest=True),  # within its test's call: never counted twice
-             _row("tests/test_s.py::test_s@serial1", 2.0), _row("tests/test_gone.py::test_g", 9.0),
+             _row("tests/test_s.py::test_s@serial:port", 2.0), _row("tests/test_gone.py::test_g", 9.0),
              _row("tests/test_n.py::test_crash", 1.0), _row("tests/test_n.py::test_crash", 0.0, "crash", "failed")]
     assert record_session_durations(table, first, system="Darwin", rootpath=tree, run_id="session 1") == ""
     assert _json(table) == {"format": 1, "platforms": {"darwin": {"tests/test_a.py": 1750, "tests/test_s.py": 2000}},

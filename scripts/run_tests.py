@@ -11,15 +11,14 @@
 A bare call always means the FULL battery — it never skips a test on the
 strength of an earlier run. It runs the two passes of `ouroboros.preflight_runner`
 and `.github/workflows/ci.yml`: one xdist pass in which `serial("<resource>")`
-tests take turns per resource and bare-`serial` files run in a few file-sharded
-groups (`--serial-shards`, tests/conftest.py) beside everything else, then the
+tests take turns per resource beside everything else (tests/conftest.py), then the
 `serial("exclusive")` tests alone in one process.
 The reviewed-commit gate and CI stay the authority: this script is feedback.
 
 Re-executes through safe_test: isolated HOME/data, owner/provider env scrubbed,
 durable logs/source/diagnostics in <checkout>/../.test-evidence by default, where
 `test-durations.json` keeps every session's file times (`OUROBOROS_TEST_DURATIONS`,
-tests/ci_evidence.py): the table the serial groups are sized by.
+tests/ci_evidence.py): the table the xdist groups are ordered by, longest first.
 Ctrl-C reaches each phase's runner, allowing pytest JUnit/results export before escalation.
 Marker exclusions/xdist flags come from the gate's SSOT
 (`LANE_EXCLUSION_EXPR`, `PARALLEL_PASS_FLAGS`); conftest isolates test roots.
@@ -63,21 +62,6 @@ def _workers() -> int:
     return _admission().workers
 
 
-def serial_shards(workers: int, table: dict | None = None) -> int:
-    """How many bare-`serial` file groups the xdist pass runs at once (ouroboros.test_parallelism.serial_shards)."""
-    from ouroboros.test_parallelism import serial_shards as shards
-    from tests.ci_verdicts import platform_name
-
-    return shards(workers, table, platform_name(sys.platform))
-
-
-def _serial_share(table: dict | None) -> float | None:
-    from ouroboros.test_parallelism import serial_share
-    from tests.ci_verdicts import platform_name
-
-    return serial_share(table, platform_name(sys.platform))
-
-
 def point_at_durations() -> None:
     """Name the owner's durations table for this battery: beside the evidence parent (`.test-evidence/`), unless
     the caller named one. Every session of the battery reads it for its weights and folds its whole files' seconds
@@ -89,8 +73,8 @@ def point_at_durations() -> None:
 
 
 def recorded_durations() -> tuple[dict | None, str]:
-    """The table serial groups are sized by, and what it is: the run's ``OUROBOROS_CI_DURATIONS`` (the table
-    tests/default_lane.py shards CI by), else the owner's persisted table (`point_at_durations`)."""
+    """The table the xdist groups are ordered by, and what it is: the run's ``OUROBOROS_CI_DURATIONS`` (the
+    table tests/default_lane.py shards CI by), else the owner's persisted table (`point_at_durations`)."""
     from tests.ci_verdicts import recorded_durations_table
 
     table, why = recorded_durations_table()
@@ -100,34 +84,14 @@ def recorded_durations() -> tuple[dict | None, str]:
     return table, source if " " in source else f"run {source}"  # CI names a run id, a session names itself
 
 
-def serial_plan(table: dict | None, source: str, workers: int, shards: int) -> str:
-    """The shard count's reason and, from recorded durations, each bare-serial group's predicted seconds."""
-    from tests.ci_verdicts import platform_name, serial_group
-
-    if _serial_share(table) is None:
-        return f"{shards} serial groups of {workers} workers ({source})"
-    system, groups = platform_name(sys.platform), {}
-    for path, ms in table["serial"][system].items():
-        group = serial_group(path, shards)
-        groups[group] = groups.get(group, 0) + ms
-    serial, total = sum(groups.values()), sum(table["platforms"][system].values())
-    predicted = ", ".join(f"{group} {groups[group] / 1000:.0f}" for group in sorted(groups))
-    return (f"{shards} serial groups of {workers} workers, sized by {source}: serial {serial / 1000:.0f} of "
-            f"{total / 1000:.0f} test-s; predicted seconds per group: {predicted}; the other tests about "
-            f"{(total - serial) / 1000 / max(1, workers - shards):.0f} s per remaining worker")
-
-
 def battery_commands() -> list[tuple[str, list[str]]]:
-    """The gate's two passes, the bare-serial groups of the xdist pass sized here and said out loud."""
+    """The gate's two passes; the xdist pass's groups go longest-first by the table named out loud."""
     from ouroboros.preflight_runner import EXCLUSIVE_MARKER, LANE_EXCLUSION_EXPR, PARALLEL_PASS_FLAGS, SERIAL_PASS_FLAGS
 
     base = [sys.executable, "-m", "pytest", "tests/"]
-    workers, (table, source) = _workers(), recorded_durations()
-    shards = serial_shards(workers, table)
-    print(f"=== {serial_plan(table, source, workers, shards)}", flush=True)
-    parallel = [*PARALLEL_PASS_FLAGS, f"--serial-shards={shards}"]
+    print(f"=== xdist groups ordered by {recorded_durations()[1]}", flush=True)
     return [
-        ("parallel", [*base, "-m", f"not {EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}", *parallel]),
+        ("parallel", [*base, "-m", f"not {EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}", *PARALLEL_PASS_FLAGS]),
         ("serial", [*base, "-m", f"{EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}", *SERIAL_PASS_FLAGS]),
     ]
 

@@ -44,9 +44,8 @@ LANE_EXCLUSION_EXPR = (
 # No `--timeout-method`: pytest-timeout's default is SIGALRM where the platform has
 # it, which fails only the hung test, and its thread method elsewhere (Windows),
 # which stops the worker. `--dist loadgroup`: the one xdist pass in which a
-# `serial("<resource>")` test takes turns per resource and a bare `serial` file runs
-# in one of a few file groups beside everything else (tests/conftest.py pins the
-# groups and sizes the file groups by the recorded serial share of the time).
+# `serial("<resource>")` test takes turns per resource beside everything else
+# (tests/conftest.py pins the groups, longest first by recorded time).
 PARALLEL_PASS_FLAGS = [
     "-n", "auto",
     "--dist", "loadgroup",

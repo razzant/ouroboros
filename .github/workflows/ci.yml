@@ -501,9 +501,8 @@ jobs:
           --ci-evidence-dir="${{ runner.temp }}/ci-evidence/default-manifest/serial"
       # A command-line `-m` REPLACES the pyproject addopts markexpr, so repeat the default
       # marker-lane exclusions and AND them with the pass split: one xdist pass in which a
-      # `serial("<resource>")` test takes turns per resource and a bare `serial` file runs in
-      # one of a few file groups (tests/conftest.py), then `serial("exclusive")` alone in one
-      # process. Both passes carry the
+      # `serial("<resource>")` test takes turns per resource (tests/conftest.py), then
+      # `serial("exclusive")` alone in one process. Both passes carry the
       # gate's per-test timeout with pytest-timeout's default method (SIGALRM on POSIX fails
       # only the hung test; Windows' thread method stops the worker and scripts/ci_retry.py
       # continues what the stopped session never ran). The wrapper also retries each failed
