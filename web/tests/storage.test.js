@@ -320,7 +320,7 @@ test('a retirer pass says what it released and what it holds, by typed reason si
         holds: [{ class: 'task_live', count: 2, example: 'task-1', since: '2026-11-04T09:00:00Z' },
             { class: 'child_result_unadopted', count: 1, example: 'task-2', since: at }] }];
     assert.equal(removerLine(pass, NOW), `Work folder settlement: last change ${whenLabel(at, NOW)} · 2 released · `
-        + `holding 3 since ${whenLabel('2026-11-04T09:00:00Z', NOW)}: 2 task running, 1 result not copied yet`);
+        + `holding 3 since ${whenLabel('2026-11-04T09:00:00Z', NOW)}: 2 the task has a live owner, 1 the child result is not adopted yet`);
     const quiet = [{ id: 'session_scratch_release', state: 'done', at, released: 0, held: 0, holds: [] }];
     assert.equal(removerLine(quiet, NOW), `Scratch release: last change ${whenLabel(at, NOW)} · 0 released`, 'nothing held says so, never a fake hold');
     const unknownClass = [{ id: 'copy_retirement', state: 'done', at, released: 1, held: 1, held_since: at, holds: [{ class: 'some_new_reason', count: 1, example: '', since: at }] }];

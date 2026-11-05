@@ -31,9 +31,10 @@ The ordinary action works on exact objects: the *pool* (``storage_free_view``) i
 working copy and declared temporary environment (``copy_environments``), each addressed alone; everything else
 is listed with its reason. Selecting by ``items`` retires those objects, each re-judged under its retirer's own
 lock and the owner's keep (``owner_keep``); the dashboard still exposes saved groups below, with their own words.
-``manual`` is a third, separate form: exact finished copies whose work no capture holds, each named with what it
-would lose (``view=manual``) and sent with ``accept_loss``; nothing else reaches them (``copy_capture_proof.discard_offer``,
-``copy_capture_proof.discard_unsaved_copy``).
+``manual`` is a third, separate form: exact finished copies whose work no capture holds, and session scratch its
+run marked to keep (a ``producer_retained`` custody-trash handoff, sized by the scratch it holds), each named with
+what it would lose (``view=manual``) and sent with ``accept_loss``; nothing else reaches them
+(``copy_capture_proof.discard_offer``, ``copy_capture_proof.discard_unsaved_copy``).
 
 Five more groups hold what no background retirer removes, so only the owner's press frees them
 (the client starts those holding saved work unchecked): G3, reviewer seat homes of tasks proven
@@ -101,19 +102,6 @@ _KEPT_REASONS = {
     "unproven_excluded_inputs": ("unproven_excluded_inputs",),
     "owner_keep": ("owner_keep",),
     "restart": ("generation_closed",),
-}
-# Main is for the owner, so the receipt uses stable group names in owner words rather than retirer codes.
-_OWNER_REASON_WORDS = {
-    "results_pending": "results are not saved yet",
-    "in_use": "still in use",
-    "busy": "busy right now",
-    "unreadable_record": "the task record could not be read",
-    "capture_unproven": "unique work was not verified saved",
-    "retained_evidence": "marked as evidence, or could not be read through",
-    "changed": "changed after the check",
-    "unproven_excluded_inputs": "files only a patch rule calls disposable",
-    "owner_keep": "you asked to keep it",
-    "restart": "stopped by a restart",
 }
 _RETIRER_STAMPS = ("scratch_retention", "retiring", "removal_failed", "removal_failed_identity")  # no change of ownership
 
@@ -300,8 +288,7 @@ def _request_sentence(receipt: Dict[str, Any]) -> str:
         size = preview.get("bytes")
         return (f"Free space ({who}): looked only; {preview.get('count', 0)} items could go"
                 + (f", {size / 1e9:.1f} GB" if isinstance(size, int) else "") + ".")
-    kept = ", ".join(f"{row['count']} {_OWNER_REASON_WORDS.get(str(row.get('reason')), 'could not be freed')}"
-                      for row in outcome.get("kept") or ())
+    kept = sum(int(row.get("count") or 0) for row in outcome.get("kept") or ())  # why: the Free tray's words
     freed = outcome.get("removed_bytes") or 0
     parts = [f"removed {outcome['removed']} ({freed / 1e9:.1f} GB)"] if outcome.get("removed") else []
     if outcome.get("deleting"):
@@ -314,7 +301,7 @@ def _request_sentence(receipt: Dict[str, Any]) -> str:
     if outcome.get("error"):
         parts.append("run failed")
     if kept:
-        parts.append(f"kept {sum(row['count'] for row in outcome.get('kept') or ())}: {kept}")
+        parts.append(f"kept {kept}, Storage → Free says why")
     if outcome.get("failed"):
         parts.append(f"{outcome['failed']} failed")
     after = outcome.get("free_after")
@@ -338,9 +325,6 @@ def _name_items(root: pathlib.Path, items: List["_Candidate"]) -> None:
         except Exception:
             log.debug("Task titles unreadable: folder names stand", exc_info=True)
     for item in items:
-        if item.layout == "producer_retained":
-            item.name = str(item.row.get("loss") or item.path.name).strip() or item.path.name
-            continue
         document = documents.get(item.task) or {}
         item.name = str(document.get("title") or document.get("suggested_name") or item.task or item.path.name).strip() or item.path.name
 
@@ -710,7 +694,7 @@ class FreeSpace:
         from ouroboros.headless import HEADLESS_TASKS_DIR, TASK_DRIVES_DIR, drive_candidates
         from ouroboros.private_copy_read import _copy_owner, read_records
         from ouroboros.retention import age_cutoff, get_gc_retention_days
-        from ouroboros.session_scratch import PRODUCER_RETAINED, scratch_records
+        from ouroboros.session_scratch import PRODUCER_RETAINED, retention_hold, scratch_records
         from ouroboros.subagent_worktrees import (
             _record_file, _record_name, _records_dir, _resolve_root, _task_proven_over, snapshot_released,
         )
@@ -796,7 +780,7 @@ class FreeSpace:
             from ouroboros import review_checking_prune as seats
 
             seat_causes: dict = {}
-            homes = seats.finished_seat_homes(root, live, self._closed, causes=seat_causes)  # one proof per seat task for both groups
+            homes = seats.finished_seat_homes(root, live, self._closed, causes=seat_causes)  # one proof per seat task (per home for a pseudo owner) for both groups
             if GROUP_REVIEW_EVIDENCE in self._offered:
                 group = new_group(GROUP_REVIEW_EVIDENCE)
                 for home, verdict, task_id in homes:
@@ -865,24 +849,25 @@ class FreeSpace:
             # words and the loss are shown in the existing explicit-discard form.  One row per
             # handoff entry keeps the trash remover's whole-entry boundary intact.
             producer_entries: Dict[pathlib.Path, List[Dict[str, Any]]] = {}
-            for row in scratch_records(root):
-                if row.get("holder") != "trash" or row.get("hold") != PRODUCER_RETAINED:
-                    continue
+            for row in scratch_records(root, include_holds=False):  # no task's hold is judged for a trash row
                 record = pathlib.Path(str(row.get("record") or ""))
-                if not row.get("valid") or not row.get("path") or len(record.parents) < 3:
+                if row.get("holder") != "trash" or not row.get("valid") or not row.get("path") or len(record.parents) < 3:
                     continue
                 entry = record.parents[2]
                 if entry.parent.name != "custody_trash" or not entry.is_dir() or entry.is_symlink():
                     continue
-                producer_entries.setdefault(entry, []).append(row)
-            for entry, rows in sorted(producer_entries.items(), key=lambda pair: pair[0].name):
-                examples = [str(row.get("example") or "producer-retained session scratch") for row in rows]
+                hold = retention_hold(pathlib.Path(str(row["path"])))
+                if hold is not None and hold["class"] == PRODUCER_RETAINED:
+                    producer_entries.setdefault(entry, []).append({**row, "example": hold["example"]})
+            for entry, held in sorted(producer_entries.items(), key=lambda pair: pair[0].name):  # ``rows`` stays the copies'
+                examples = [str(row.get("example") or "producer-retained session scratch") for row in held]
                 loss = "; ".join(dict.fromkeys(examples))
-                item = _Candidate(GROUP_SERVICE_FOLDERS, f"producer_retained:{entry.name}", entry,
-                                  "producer_retained", row={"loss": loss, "scratch_paths": [row["path"] for row in rows]})
+                paths = list(dict.fromkeys(row["path"] for row in held))  # what the entry holds, and what its size is
+                item = _Candidate(GROUP_SERVICE_FOLDERS, f"producer_retained:{entry.name}", entry, "producer_retained",
+                                  task=entry.name.split("+", 1)[0], row={"loss": loss, "scratch_paths": paths})
                 item.reason, item.cause = "retained_evidence", PRODUCER_RETAINED
                 item.manual = {"signature": None, "unsaved_count": 0, "unsaved_bytes": 0, "unsaved": [],
-                               "keep_branch": False, "producer_retained": True, "loss": loss}
+                               "keep_branch": False, "producer_retained": True, "loss": loss, "paths": paths}
                 group["excluded"].append(item)
             groups.append(group)
         if GROUP_RESULT_PINS in self._offered:
@@ -902,11 +887,20 @@ class FreeSpace:
 
     def _size(self, root: pathlib.Path, repo_dir: pathlib.Path, candidates: List[_Candidate]) -> None:
         """Size every candidate folder in the count child and every pin pair through Git; each answer
-        lands as it is known."""
+        lands as it is known. A marked scratch handoff is the size of the scratch it holds, summed (unknown
+        when any part is), never of its small entry."""
         from ouroboros.startup_historical_audit import read_job_lines, spawn_maintenance_job
         from ouroboros.storage import PURPOSE
 
-        by_path = {str(item.path): item for item in candidates if item.layout != "pins"}
+        by_path: Dict[str, List[_Candidate]] = {}
+        owed: Dict[int, List[Any]] = {}  # per item: [parts still to size, bytes so far (None: unknown), unreadable]
+        for item in candidates:
+            if item.layout == "pins":
+                continue
+            parts = item.row["scratch_paths"] if item.layout == "producer_retained" else [str(item.path)]
+            owed[id(item)] = [len(parts), 0, 0]
+            for part in parts:
+                by_path.setdefault(str(part), []).append(item)
         with self._lock:
             self._progress = {"done": 0, "total": len(candidates)}
         for item in candidates:
@@ -938,11 +932,17 @@ class FreeSpace:
                 if not isinstance(line, dict):
                     return
                 if line.get("event") == "size" and str(line.get("path")) in by_path:
-                    item, size = by_path[str(line["path"])], line.get("bytes")
-                    item.bytes = size if isinstance(size, int) and not isinstance(size, bool) else None
-                    item.unreadable = line.get("unreadable") if isinstance(line.get("unreadable"), int) else 0
-                    with self._lock:
-                        self._progress["done"] += 1
+                    size = line.get("bytes")
+                    size = size if isinstance(size, int) and not isinstance(size, bool) else None
+                    for item in by_path[str(line["path"])]:
+                        part = owed[id(item)]
+                        part[0] -= 1
+                        part[1] = None if size is None or part[1] is None else part[1] + size
+                        part[2] += line.get("unreadable") if isinstance(line.get("unreadable"), int) else 0
+                        if part[0] == 0:
+                            item.bytes, item.unreadable = part[1], part[2]
+                            with self._lock:
+                                self._progress["done"] += 1
                 elif "status" in line and line.get("status") != "finished":
                     raise RuntimeError(str(line.get("message") or "The sizes could not be read."))
 

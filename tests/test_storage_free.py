@@ -909,6 +909,36 @@ def test_pseudo_owner_seat_homes_use_their_own_proof_in_free(tmp_path, monkeypat
         assert evidence["items"] == [] and evidence["in_use"] == 1 and home.is_dir()
 
 
+@pytest.mark.parametrize("finished_first", [True, False])
+def test_each_pseudo_owner_seat_home_is_judged_on_its_own_runs_whatever_the_order(tmp_path, monkeypatch, finished_first):
+    """Two Skills-page homes share the pseudo task id but not a proof: the one whose copy's run finished is offered
+    and retired, the one whose run is live stays, in either name order; their custody is read once."""
+    from ouroboros import delegate_custody_current as current
+
+    root = tmp_path / "data"
+    root.mkdir()
+    homes = sorted((_seat(root, "api_skill_review", operation, area=True) for operation in ("op-a", "op-b")), key=lambda home: home.name)
+    finished, live = homes if finished_first else homes[::-1]
+    runs = {}
+    for home, state in ((finished, "succeeded"), (live, "")):
+        marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
+        marker["created_at"] = "2020-01-01T00:00:00+00:00"
+        (home / "checking.json").write_text(json.dumps(marker), encoding="utf-8")
+        (home / "area").rmdir()
+        runs[home.name] = SimpleNamespace(execution_root=str(home / "area"), terminal_state=state,
+                                          started_ts=marker["created_at"], max_seconds=0)
+    reads = []
+    monkeypatch.setattr(current, "task_snapshot", lambda _root, task_id: reads.append(task_id) or {"runs": runs, "pending": []})
+    _fake_sizer(monkeypatch)
+    owner = _owner({}, offered=("review_evidence",))
+    evidence = _group(_preview(owner, root, tmp_path), "review_evidence")
+    assert [item["id"] for item in evidence["items"]] == [f"seat:{finished.name}"], "the finished home is offered"
+    assert evidence["in_use"] == 1, "the live home stays"
+    assert reads == ["api_skill_review"], "one custody read for the pseudo owner"
+    run = _run(owner, root, tmp_path, groups=("review_evidence",))["run"]
+    assert run["removed"] + run["deleting"] == 1 and not finished.exists() and live.is_dir()
+
+
 @pytest.mark.parametrize("state", ["readable", "unreadable"])
 def test_the_checkout_run_reads_the_review_state_once_and_unknown_custody_keeps_every_checkout(tmp_path, monkeypatch, state):
     """The run's own listing reads the review state, and the markerless fallback one more time, not once per

@@ -252,11 +252,15 @@ def _iso(stamp: Optional[float]) -> str:
 
 def aggregate_holds(rows: List[Tuple[str, str, Optional[float]]]) -> List[Dict[str, Any]]:
     """``[{class, count, example, since}]`` from ``(class, example, since_timestamp)`` rows, one per
-    class in name order: the first example and the earliest since (the engine's ``GcHold`` shape,
-    which the maintenance job rows and Storage render alike)."""
+    class in name order: the first example, cut to the engine's bound as ``maintenance_jobs.Holds`` cuts a
+    note (a producer's marker line can be any length), and the earliest since (the engine's ``GcHold``
+    shape, which the maintenance job rows, Storage and the mind's ``storage`` fact render alike)."""
+    from ouroboros.maintenance_jobs import HOLD_EXAMPLE_CHARS
+
     holds: Dict[str, Dict[str, Any]] = {}
     for kind, example, since in rows:
-        hold = holds.setdefault(kind, {"class": kind, "count": 0, "example": example, "since": since})
+        hold = holds.setdefault(kind, {"class": kind, "count": 0, "example": str(example or "")[:HOLD_EXAMPLE_CHARS],
+                                       "since": since})
         hold["count"] += 1
         if since is not None and (hold["since"] is None or since < hold["since"]):
             hold["since"] = since

@@ -67,74 +67,19 @@ export const FREE_GROUPS = {
     },
 };
 
-/** The server's compatible owner-facing reason groups, plus the exact retirer codes used in `cause`.  The client
- * keeps the group sentence stable and adds the cause's detail when the server supplies one. */
-const RESULTS_PENDING = 'their results are not copied yet';
-const BUSY_NOW = 'busy right now';
-const RECORD_UNREADABLE = 'their task record could not be read';
-const RECORD_MOVED = 'their record changed under the check';
+/** The server's typed kept reasons in the owner's words. */
 export const KEPT_REASONS = {
-    // The API stores the compatible owner-facing group in `reason`; `cause` below
-    // carries the retirer's exact code when the item has one.
-    results_pending: RESULTS_PENDING,
-    busy: BUSY_NOW,
-    unreadable_record: RECORD_UNREADABLE,
+    results_pending: 'their results are not copied yet',
+    in_use: 'still in use',
+    busy: 'busy right now',
+    unreadable_record: 'their task record could not be read',
     restart: 'stopped by a restart',
-    // the task that owns it
-    task_live: 'their task is running',
-    liveness_unknown: 'whether their task still runs could not be read',
-    task_not_terminal: 'their task has not finished',
-    parent_not_terminal: 'their parent task has not finished',
-    owner_not_terminal: 'their owner task has not finished',
-    not_proven_over: 'their task is not proven over (running, paused or with a live process)',
-    owner_processes_live: 'a process of their task is still running',
-    owner_paused: 'their task is paused',
-    custody_held: 'a coding run still holds them',
-    run_open: 'their run has not finished',
-    copy_registered: 'their copy is still registered',
-    copy_present: 'their copy still exists',
-    in_use: 'still in use',  // the review seat and checkout listers' word (review_checking_prune)
-    // results and messages not yet in the task record
-    child_result_unadopted: RESULTS_PENDING,
-    child_refs_pending: RESULTS_PENDING,
-    call_inventory_pending: RESULTS_PENDING,
-    call_inventory_changed: RESULTS_PENDING,
-    inputs_uncustodied: RESULTS_PENDING,
-    unread_mailbox_uncustodied: 'their unread messages are not carried yet',
-    verification_receipts_uncustodied: RESULTS_PENDING,
-    raw_evidence_uncustodied: RESULTS_PENDING,
-    canonical_not_settled: 'their task record is not settled yet',
-    post_work_open: 'work after their task is still open',
-    artifacts_not_terminal: 'their files are still being saved',
-    child_drive_mismatch: 'their task record names another folder',
-    artifact_source_missing: 'a captured file is missing from the folder',
-    artifact_source_mismatch: 'a captured file differs from its record',
-    canonical_changed: RECORD_MOVED,
-    drive_occupant_changed: 'the folder gained an occupant under the check',
-    not_own_drive: 'the folder is not their task’s own',
-    admission_rollback_evidence: 'the folder holds evidence of a start',
-    // busy right now
-    store_busy: 'their record store was busy',
-    custody_busy: BUSY_NOW,
-    mailbox_busy: BUSY_NOW,
-    record_busy: BUSY_NOW,
-    // unreadable
-    task_result_unreadable: RECORD_UNREADABLE,
-    unread_mailbox_unreadable: 'their mailbox could not be read',
-    record_unreadable: RECORD_UNREADABLE,
-    // saved work and its proofs
     capture_unproven: 'unique work not verified saved',
-    capture_incomplete: 'unique work not verified saved',
     unproven_excluded_inputs: 'files only a patch rule calls disposable',
     retained_evidence: 'marked as evidence, or could not be read through',
-    retained_process_environment: 'marked as evidence, or could not be read through',
-    undeclared_environment: 'no recorded owner', producer_retained: 'the producer marked this scratch to keep',
+    undeclared_environment: 'no recorded owner',
     owner_keep: 'you asked to keep it',
     changed: 'changed after the check',
-    nothing_unsaved: 'changed after the check',
-    nested_repository: 'a repository inside them cannot be saved as a patch',
-    commits_unprotected: 'their commits are not held by a branch',
-    generation_closed: 'stopped by a restart',
     advanced_group: 'saved work: only its saved group can remove it',
     other: 'for another reason',
 };
@@ -176,7 +121,10 @@ const NOT_STARTED = {
 /** The refusals that mean this plan's list can no longer be sent: the review offers Check again, not Remove. */
 export const OUTDATES_PLAN = new Set(['preview_outdated', 'unknown_group', 'unknown_item', 'not_offered']);
 
-const CAUSES = {
+/** The one map from a retirer's exact code (a Free item's `cause`, a pass's hold `class` on the Storage page) to the
+ *  owner's words: one code reads the same in the Free tray and on a place's remover line. A code that is itself a
+ *  reason group reads that group's words (`KEPT_REASONS`). */
+export const CAUSES = {
     task_live: 'the task has a live owner', liveness_unknown: 'whether the task is still in use could not be established',
     owner_paused: 'the task is paused', owner_processes_live: 'a process of this task is still running',
     child_result_unadopted: 'the child result is not adopted yet', child_refs_pending: 'some result files are not copied yet',
@@ -193,8 +141,35 @@ const CAUSES = {
     raw_evidence_uncustodied: 'raw evidence is not saved yet', artifact_source_missing: 'the source of a saved artifact could not be found',
     undeclared_environment: 'the environment has no recorded owner',
     task_result_unreadable: 'the task record could not be read', unread_mailbox_unreadable: 'the mailbox could not be read',
+    parent_not_terminal: 'the parent task is not finished', owner_not_terminal: 'the owner task is not finished',
+    not_proven_over: 'the task is not proven over (running, paused or with a live process)',
+    run_open: 'a run of the task has not finished', seat_open: 'a reviewer seat still holds it', seat_busy: 'the reviewer seat is busy',
+    copy_registered: 'the copy is still registered', copy_present: 'the copy still exists',
+    artifacts_not_terminal: 'the task’s files are still being saved', child_drive_mismatch: 'the task record names another folder',
+    artifact_source_mismatch: 'a saved artifact differs from its source', not_own_drive: 'the folder is not its task’s own',
+    admission_rollback_evidence: 'the folder holds evidence of a start', record_busy: 'the record is busy',
+    record_unreadable: 'the record could not be read', custody_unreadable: 'the run custody could not be read',
+    capture_incomplete: 'the capture of its work is incomplete', capture_failed: 'its capture failed',
+    retained_process_environment: 'a process marked this environment to keep', producer_retained: 'its producer marked it to keep',
+    nothing_unsaved: 'nothing in it is unsaved any more', nested_repository: 'a repository inside it cannot be saved as a patch',
+    commits_unprotected: 'its commits are not held by a branch', generation_closed: 'stopped by a restart',
+    removal_failed: 'its removal failed', younger_than_retention: 'it is still inside the retention days',
 };
-const reasonWords = (reason, cause = '') => cause ? fmt(CAUSES[cause] || KEPT_REASONS[cause] || '{reason} ({cause})', { reason: fmt(KEPT_REASONS[reason] || KEPT_REASONS.other), cause }) : fmt(KEPT_REASONS[reason] || KEPT_REASONS.other);
+/** A code's words from the one map, `''` when it has none. */
+const causeWords = (code) => CAUSES[code] || KEPT_REASONS[code] || '';
+const reasonWords = (reason, cause = '') => cause ? fmt(causeWords(cause) || '{reason} ({cause})', { reason: fmt(KEPT_REASONS[reason] || KEPT_REASONS.other), cause }) : fmt(KEPT_REASONS[reason] || KEPT_REASONS.other);
+
+/** A retirer pass's holds in one phrase, in the one map's words: "holding 3 since …: 2 the task has a live owner,
+ *  1 you asked to keep it"; a class without words is shown by its name. */
+export function holdsPhrase(fact, now) {
+    const holds = Array.isArray(fact.holds) ? fact.holds.filter((hold) => hold && hold.count > 0) : [];
+    const held = holds.length ? holds.reduce((sum, hold) => sum + hold.count, 0) : (fact.held > 0 ? fact.held : 0);
+    if (!(held > 0)) return '';
+    const head = fact.held_since ? fmt('holding {n} since {when}', { n: number(held), when: whenLabel(fact.held_since, now) })
+        : fmt('holding {n}', { n: number(held) });
+    const words = (hold) => (causeWords(hold.class) ? fmt(causeWords(hold.class)) : String(hold.class || '').replace(/_/g, ' '));
+    return holds.length ? `${head}: ${holds.map((hold) => `${number(hold.count)} ${words(hold)}`).join(', ')}` : head;
+}
 
 /** What happened to the owner's own attempt, kept beside the server's current facts: `notice` outlives a plan the
  *  server replaced, `outdated` and `postUnknown` belong to the plan still shown. A lost answer is never read as nothing
@@ -267,6 +242,21 @@ export const MANUAL_ROWS = 25;
 export const manualKnown = (item) => item?.availability === 'manual_discard' && (item.manual?.producer_retained
     ? typeof item.manual.loss === 'string' && item.manual.loss.length > 0
     : Number.isInteger(item.manual?.not_proven_saved_count) && isSize(item.manual.not_proven_saved_bytes));
+
+/** What the by-hand form holds: finished copies not verified saved, session scratch its run marked to keep
+ *  (`manual.producer_retained`), or both; each reads its own nouns, never a scratch called a copy. */
+const holdsOf = (copies, scratch) => (scratch > 0 ? (copies > 0 ? 'both' : 'scratch') : 'copies');
+const BY_HAND = {
+    copies: { choose: 'Choose copies…', note: 'Only if you choose; each copy is deleted whole.', head: 'Copies not verified saved',
+        title: 'Discard these copies?', show: 'Show the copies', kept: 'Task results, history and commits on a branch that stays are kept.' },
+    scratch: { choose: 'Choose scratch…', note: 'Only if you choose; its run marked it to keep.', head: 'Session scratch marked to keep',
+        title: 'Discard the marked scratch?', show: 'Show the scratch', kept: 'Task results and history are kept.' },
+    both: { choose: 'Choose…', note: 'Only if you choose; each is deleted whole.', head: 'Copies not verified saved, and marked scratch',
+        title: 'Discard these copies and marked scratch?', show: 'Show what goes', kept: 'Task results, history and commits on a branch that stays are kept.' },
+};
+const copiesLine = (n) => plural(n, '{n} finished copy not verified saved', '{count} finished copies not verified saved');
+const scratchLine = (n) => plural(n, '{n} session scratch its run marked to keep', '{count} session scratch folders their runs marked to keep');
+const retainedOf = (item) => Boolean(item?.manual?.producer_retained);
 
 /** 'rest' | 'listing' | 'ready' | 'empty' | 'running' | 'done' | 'failed' (a dismissed list or result reads 'rest').
  *  A ready plan is 'ready' while it holds anything to say: the pool, what it leaves out, or a saved group. */
@@ -444,7 +434,10 @@ function excludedHtml(free, ui) {
         return `<li class="storage-decision-row"><span class="storage-decision-label" data-i18n-fmt="storage.free.decision">${text(label)}<span class="storage-meta">${text(note)}</span></span><span class="storage-decision-size${qualified ? ' is-qualified' : ''}" data-i18n-fmt="storage.size">${text(sizeWords(entry))}</span>${action}</li>`;
     };
     const copiesEntry = manual && { bytes: manual.bytes, bytes_complete: manual.bytes_complete };
-    const copies = manual ? decisionRow(plural(manual.count, '{n} finished copy not verified saved', '{count} finished copies not verified saved'), copiesEntry, button('Choose copies…', 'data-free-manual-open', 'btn-default', '', inert(heldFlow(ui))), fmt('Only if you choose; each copy is deleted whole.')) : '';
+    const scratch = manual ? Math.min(manual.retained > 0 ? manual.retained : 0, manual.count) : 0;
+    const said = BY_HAND[holdsOf(manual ? manual.count - scratch : 0, scratch)];
+    const label = manual ? [manual.count > scratch ? copiesLine(manual.count - scratch) : '', scratch ? scratchLine(scratch) : ''].filter(Boolean).join(' · ') : '';
+    const copies = manual ? decisionRow(label, copiesEntry, button(said.choose, 'data-free-manual-open', 'btn-default', '', inert(heldFlow(ui))), fmt(said.note)) : '';
     const groupsEntry = saved.length && { bytes: freeSum(free, new Set(saved.map((g) => g.id))), bytes_complete: sumComplete(free, new Set(saved.map((g) => g.id))) };
     const groups = saved.length ? decisionRow(fmt('Saved work in {groups}', { groups: plural(saved.length, '{n} group', '{count} groups') }), groupsEntry, button('Choose groups…', 'data-free-saved', 'btn-default', '', inert(heldFlow(ui))), fmt('Only if you choose; a whole group is deleted permanently.')) : '';
     const each = reasons.length ? `<h4 class="storage-free-sub">Each item left out</h4>
@@ -595,15 +588,17 @@ function unsavedPaths(manual, index) {
 
 function manualRow(item, index, picked, held) {
     const choosable = manualKnown(item);
-    const what = choosable ? item.manual?.producer_retained
-        ? `${fmt(item.manual.loss)} ${fmt('Freeing it deletes the retained scratch and handoff entry; this loss cannot be undone.')}`
+    const scratch = retainedOf(item);
+    const what = choosable ? scratch
+        ? `${fmt('Discarding deletes it and what it holds for good.')} ${fmt('Its marker says: {words}', { words: item.manual.loss })}`
         : unsavedWords(item.manual) : fmt('What it would lose could not be read, so it cannot be chosen here.');
+    const where = scratch && Array.isArray(item.manual.paths) && item.manual.paths.length ? item.manual.paths.join(' · ') : item.path;
     return `<li class="storage-free-group" data-free-manual-item="${attr(item.id)}">
         <input type="checkbox" class="ui-checkbox" id="storage-manual-${index}" data-free-manual-pick="${index}" data-key="manual-${index}"${picked.has(item.id) && choosable ? ' checked' : ''}${held || !choosable ? ' disabled' : ''}>
         <label class="storage-free-label" for="storage-manual-${index}" data-i18n-authored>${text(item.name)}</label>
         ${sizeCell(item)}
-        <p class="storage-free-why" data-i18n-fmt="storage.free.item">${text(`${fmt(kindOf(item).label)} · ${fmt('the whole folder goes')}`)}</p>
-        <p class="storage-free-why storage-free-path" data-i18n-authored>${text(item.path)}</p>
+        <p class="storage-free-why" data-i18n-fmt="storage.free.item">${text(`${scratch ? fmt('Session scratch its run marked to keep') : fmt(kindOf(item).label)} · ${fmt('the whole folder goes')}`)}</p>
+        <p class="storage-free-why storage-free-path" data-i18n-authored>${text(where)}</p>
         <p class="storage-free-why storage-free-risk" data-i18n-fmt="storage.free.manual.risk">${text(what)}</p>
         ${choosable ? unsavedPaths(item.manual, index) : ''}
     </li>`;
@@ -621,11 +616,13 @@ export function manualFacts(list, picked) {
         whole: rows.every((row) => isSize(row.bytes) && row.bytes_complete !== false),
         unsavedCount: rows.reduce((sum, row) => sum + row.manual.not_proven_saved_count, 0),
         unsavedBytes: rows.reduce((sum, row) => sum + row.manual.not_proven_saved_bytes, 0),
+        scratch: rows.filter(retainedOf).length,
     };
 }
 
 const copiesWord = (n) => plural(n, '{n} copy', '{count} copies');
-const discardLabel = (n) => fmt('Discard {copies}', { copies: copiesWord(n) });
+const discardLabel = (facts) => (facts.count && facts.scratch === facts.count ? plural(facts.count, 'Discard {n} scratch folder', 'Discard {count} scratch folders')
+    : facts.scratch ? plural(facts.count, 'Discard {n} item', 'Discard {count} items') : fmt('Discard {copies}', { copies: copiesWord(facts.count) }));
 
 function manualHtml(free, ui) {
     const list = ui.manual || EMPTY_LIST();
@@ -657,13 +654,18 @@ function manualHtml(free, ui) {
             : ui.sending ? button('Sending…', 'data-free-manual-go', 'btn-danger', '', inert(true))
                 : list.error ? ''
                     : !list.complete ? button('Reading the list…', 'data-free-manual-go', 'btn-default', '', ' aria-disabled="true"')
-                        : facts.count ? button(discardLabel(facts.count), 'data-free-manual-go', 'btn-danger', 'storage.free.manual.go')
+                        : facts.count ? button(discardLabel(facts), 'data-free-manual-go', 'btn-danger', 'storage.free.manual.go')
                             : '<span class="storage-meta">Nothing selected</span>';
     const back = ui.postUnknown ? '' : button('Back', 'data-free-manual-back', 'btn-default', '', inert(ui.sending));
-    return `${headHtml('Copies not verified saved', sum)}
+    const scratch = list.complete ? list.items.filter(retainedOf).length : Math.min(free.pool?.manual?.retained || 0, total);
+    const holds = holdsOf((list.complete ? list.items.length : total) - scratch, scratch);
+    const copyText = holds === 'scratch' ? '' : `<p class="storage-tray-text">Finished work copies the app’s own cleanup leaves alone, because some files in them are not verified saved. Nothing here starts chosen.</p>
+        <p class="ui-status storage-status" data-tone="warn">Discarding a copy deletes its whole folder, not only the files listed. What is not verified saved can be lost for good. Task results, history and commits on a branch that stays are kept.</p>`;
+    const scratchText = holds === 'copies' ? '' : `<p class="storage-tray-text">Session scratch its run marked as evidence to keep; the app keeps it until you discard it. Nothing here starts chosen.</p>
+        <p class="ui-status storage-status" data-tone="warn">Discarding marked scratch deletes it and the evidence in it for good. Task results and history are kept.</p>`;
+    return `${headHtml(BY_HAND[holds].head, sum)}
         ${attemptHtml(ui)}
-        <p class="storage-tray-text">Finished work copies the app’s own cleanup leaves alone, because some files in them are not verified saved. Nothing here starts chosen.</p>
-        <p class="ui-status storage-status" data-tone="warn">Discarding a copy deletes its whole folder, not only the files listed. What is not verified saved can be lost for good. Task results, history and commits on a branch that stays are kept.</p>
+        ${copyText}${scratchText}
         ${ui.outdated || ui.postUnknown ? '' : status}${ui.outdated || ui.postUnknown ? '' : body}
         <p class="storage-meta">Gone for good. Sizes are what the whole folders occupy; the space freed can be smaller.</p>
         <div class="storage-actions">${back}${go}</div>`;
@@ -673,25 +675,23 @@ function manualHtml(free, ui) {
  *  confirm is the owner's acknowledgement that each whole copy goes with whatever is not verified saved in it. */
 export function manualConfirmCopy(list, picked) {
     const facts = manualFacts(list, picked);
-    const producer = facts.rows.filter((item) => item.manual?.producer_retained);
-    const goes = producer.length === facts.count
-        ? plural(facts.count, 'This deletes {n} retained scratch handoff.', 'This deletes {count} retained scratch handoffs.')
-        : plural(facts.count, 'This deletes {n} copy whole.', 'This deletes {count} copies whole.');
-    const loses = producer.length === facts.count
-        ? producer.map((item) => item.manual.loss).join(' · ')
-        : facts.unsavedCount > 0
-        ? fmt('{files} in them are not verified saved ({size}) and can be lost for good.', { files: plural(facts.unsavedCount, '{n} file', '{count} files'), size: formatBytes(facts.unsavedBytes) })
-        : fmt('No file in them is unsaved.');
+    const copies = facts.count - facts.scratch;
+    const said = BY_HAND[holdsOf(copies, facts.scratch)];
+    const goes = [copies ? plural(copies, 'This deletes {n} copy whole.', 'This deletes {count} copies whole.') : '',
+        copies && facts.unsavedCount > 0
+            ? fmt('{files} in them are not verified saved ({size}) and can be lost for good.', { files: plural(facts.unsavedCount, '{n} file', '{count} files'), size: formatBytes(facts.unsavedBytes) })
+            : copies ? fmt('No file in them is unsaved.') : '',
+        facts.scratch ? plural(facts.scratch, 'This deletes {n} scratch folder its run marked to keep, and the evidence in it.', 'This deletes {count} scratch folders their runs marked to keep, and the evidence in them.') : ''];
     return {
-        title: producer.length === facts.count ? fmt('Free retained scratch?') : fmt('Discard these copies?'),
-        body: `${goes} ${loses} ${fmt('Task results, history and commits on a branch that stays are kept.')}`,
+        title: fmt(said.title),
+        body: `${goes.filter(Boolean).join(' ')} ${fmt(said.kept)}`,
         details: {
-            summary: fmt('Show the copies'),
-            rows: facts.rows.map((item) => ({ label: item.name, value: item.manual?.producer_retained
-                ? item.manual.loss : `${sizeWords(item)} · ${item.manual.not_proven_saved_count > 0
+            summary: fmt(said.show),
+            rows: facts.rows.map((item) => ({ label: item.name, value: retainedOf(item)
+                ? `${sizeWords(item)} · ${fmt('marked to keep: {words}', { words: item.manual.loss })}` : `${sizeWords(item)} · ${item.manual.not_proven_saved_count > 0
                     ? fmt('{files} not verified saved', { files: plural(item.manual.not_proven_saved_count, '{n} file', '{count} files') }) : fmt('no file unsaved')}` })),
         },
-        confirmLabel: discardLabel(facts.count),
+        confirmLabel: discardLabel(facts),
         danger: true,
     };
 }

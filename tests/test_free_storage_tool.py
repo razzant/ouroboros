@@ -1,7 +1,7 @@
 """The mind's Storage -> Free (``free_storage``, owner Q3 = A): the same Free, the same proofs, a receipt and a Main row.
 
-``FreeSpace.request`` runs one preview with the supervisor's probes and then the ordinary pool (or the named
-saved groups) through the same retirers the owner's press uses: a finished drive goes, a drive whose task is
+``FreeSpace.request`` runs one preview with the supervisor's probes and then the ordinary pool through the same
+retirers the owner's press uses: a finished drive goes, a drive whose task is
 live stays with its reason, the owner's Keep holds, a dry run removes nothing. The receipt is the
 ``storage_free`` job row (request id, actor, preview, outcome), the run's event names the actor, and ``notify``
 hears one sentence for Main. A request while another preview or run is under way is refused with a receipt
@@ -14,6 +14,8 @@ import json
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from ouroboros import maintenance_jobs, owner_keep, store_import
 from ouroboros.storage_free import REQUEST_JOB, FreeSpace
@@ -129,11 +131,37 @@ def test_the_tool_emits_the_control_event_and_returns_the_receipt_it_finds(tmp_p
     assert emitted[0]["type"] == "free_storage" and "groups" not in emitted[0] and emitted[0]["task_id"] == "task-9"
     assert answer["ok"] and answer["status"] == "done" and answer["receipt"]["outcome"]["removed"] == 2
     assert answer["request_id"] == emitted[0]["request_id"] and answer["transport"] == "live"
-    owner_words = _request_sentence({"actor": "mind:task-9", "outcome": {"removed": 0, "kept": [{"reason": "in_use", "count": 1}]}})
-    assert "still in use" in owner_words and "task_live" not in owner_words
+    owner_words = _request_sentence({"actor": "mind:task-9", "outcome": {"removed": 0, "kept": [
+        {"reason": "in_use", "count": 2, "causes": [{"cause": "task_live", "count": 2}]}]}})
+    assert "kept 2, Storage → Free says why" in owner_words  # the reasons' words are the Free tray's one map
+    assert "in_use" not in owner_words and "task_live" not in owner_words
 
 
-def test_a_receipt_that_has_not_landed_reads_as_running(tmp_path, monkeypatch):
+@pytest.mark.parametrize("receipt,status,ok", [
+    ({"state": "failed", "outcome": {"removed": 0, "kept": [], "error": "RuntimeError"}, "error": "RuntimeError"}, "failed", False),
+    ({"state": "done", "outcome": {"removed": 1, "removed_bytes": 10 ** 9, "kept": [], "stopped": True}}, "stopped", False),
+    ({"state": "done", "outcome": {"removed": 2, "removed_bytes": 10 ** 9, "kept": []}}, "done", True),
+])
+def test_the_tools_answer_follows_the_receipt(tmp_path, monkeypatch, receipt, status, ok):
+    """A failed or stopped run is said so at the top of the answer, never ok and done; a finished one is both."""
+    from ouroboros.tools import control_storage
+
+    root = tmp_path / "data"
+    root.mkdir()
+    store_import.ensure_current_store(root)
+
+    class Queue:
+        def put_nowait(self, evt):
+            maintenance_jobs.record(root, REQUEST_JOB, request_id=evt["request_id"], actor=f"mind:{evt['task_id']}", **receipt)
+
+    ctx = SimpleNamespace(task_id="task-9", drive_root=root, budget_drive_root=root, event_queue=Queue(), pending_events=[])
+    monkeypatch.setattr("ouroboros.tool_access_paths.canonical_data_root", lambda _ctx: root)
+    answer = json.loads(control_storage._free_storage(ctx, wait_sec=5))
+    assert (answer["status"], answer["ok"]) == (status, ok)
+    assert answer["receipt"]["state"] == receipt["state"]
+
+
+def test_a_receipt_that_has_not_landed_reads_as_requested_or_queued(tmp_path, monkeypatch):
     from ouroboros.tools import control_storage
 
     root = tmp_path / "data"

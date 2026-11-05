@@ -176,7 +176,7 @@
  * @property {boolean} bytes_complete
  * @property {{work_folder?: number, working_copy?: number, environment?: number}} kinds
  * @property {StorageFreeKept[]} excluded  // same reason vocabulary as a run's kept items
- * @property {{count: number, bytes: number|null, bytes_complete: boolean}} manual  // finished copies the owner may discard one by one, never in `count`; the door shows when `count` > 0; bytes: null = unknown, never zero
+ * @property {{count: number, bytes: number|null, bytes_complete: boolean, retained: number}} manual  // what the owner may discard one by one, never in `count`: finished copies not verified saved and `retained` marked session scratch; the door shows when `count` > 0; bytes: null = unknown, never zero
  */
 
 /**
@@ -188,6 +188,9 @@
  * @property {{path: string, bytes: number}[]} not_proven_saved  // the largest first, at most 50, paths relative to the copy
  * @property {number} omitted_count  // not_proven_saved_count minus the listed ones: say so when above zero
  * @property {boolean} keeps_commits  // its branch or pin stays, with any commits it holds
+ * @property {boolean=} producer_retained  // a session scratch its run marked to keep (not a copy): `loss` and `paths` say what goes
+ * @property {string=} loss  // the run's marker words
+ * @property {string[]=} paths  // the marked scratch folders; the entry's size is theirs
  */
 
 /**

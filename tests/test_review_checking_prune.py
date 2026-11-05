@@ -252,18 +252,28 @@ def test_stop_ends_the_pass_before_the_next_seat(tmp_path, monkeypatch):
 
 
 def test_the_periodic_pass_reads_only_seats_that_still_hold_a_copy(tmp_path, monkeypatch):
-    """Released seats keep their evidence; a pass every ten minutes must not reread them all."""
+    """Released seats keep their evidence; a pass every ten minutes must not reread them all, nor their markers,
+    a Skills-page seat included, while a seat that still holds its copy is read."""
     root, source = _frozen(tmp_path)
     _seat(root, source, "op-done")
+    _seat(root, source, "op-skill", task="api_skill_review")
     assert rc.terminal_seat_evidence(root, TASK, "op-done", {"summary": {"state": "succeeded"}})["status"] == "retained"
-    read = []
-    real = rp._view_containers
+    assert rc.terminal_seat_evidence(root, "api_skill_review", "op-skill", {"summary": {"state": "succeeded"}})["status"] == "retained"
+    read, markers = [], []
+    real, real_text = rp._view_containers, Path.read_text
     monkeypatch.setattr(rp, "_view_containers", lambda *args: read.append(True) or real(*args))
+    monkeypatch.setattr(Path, "read_text", lambda self, *args, **kwargs: (
+        markers.append(self.parent.name) if self.name == "checking.json" else None) or real_text(self, *args, **kwargs))
     _custody(monkeypatch)
+    for _ in range(3):
+        rp.prune_review_checkouts(root, set())
+    assert read == [] and markers == [], "released seats cost no read"
+    held = _seat(root, source, "op-open").parent  # a copy still held
     rp.prune_review_checkouts(root, set())
-    assert read == []
+    assert markers and set(markers) == {held.name}, "a seat that holds its copy is read"
+    before = len(read)
     rp.prune_review_checkouts(root, set(), views_since=time.time())
-    assert read == [True]
+    assert len(read) - before == 3, "the views pass reads every seat"
 
 
 def test_stray_files_never_block_the_views_pass(tmp_path, monkeypatch):

@@ -111,9 +111,11 @@ def is_done(root: Any, name: str) -> bool:
 # ``task_live``, ``child_result_unadopted``, ``owner_keep``, ``task_result_unreadable``), with one example
 # and the moment the class was first held in an unbroken run of passes (``since``, carried over while the
 # class stays held). Age waits are not holds: a folder inside the retention term is the rule, not a keep.
-# The row is written only when the pass is evidence: something released, an error, or a hold set that
-# differs from the row's; an unchanged pass writes nothing (the rest law, tests/test_cost_contract.py B7),
-# and a pass that rested (listed nothing) leaves the row as it stands.
+# The row is written only when the pass is evidence: something released, an error, a hold set that
+# differs from the row's, the job's first pass (so a tidy plane never reads "not run") or the first pass
+# to return after one threw (``last_error``, which the retirer's wrapper wrote); an unchanged pass writes
+# nothing (the rest law, tests/test_cost_contract.py B7), a pass that rested (listed nothing) leaves the row
+# as it stands, and a ``partial`` pass (it judged only part of its plane) keeps the row's holds.
 
 HOLD_EXAMPLE_CHARS = 160  # the engine's bound on a hold's example
 
@@ -161,26 +163,43 @@ def _hold_set(holds: Any) -> List[tuple]:
     return sorted((str(row.get("class")), int(row.get("count") or 0)) for row in (holds or ()) if isinstance(row, dict))
 
 
+def record_threw(root: Any, name: str, error: BaseException) -> None:
+    """A retirer pass that threw: ``last_error`` ``{class, at}`` on its row (the maintenance child's own shape),
+    which Storage and the mind's ``storage`` fact show until a pass of it is recorded again (``record_pass``).
+    Best-effort: a store that cannot take the row leaves the caller's log line as the only trace."""
+    try:
+        record(root, name, last_error={"class": type(error).__name__, "at": utc_now_iso()})
+    except Exception:
+        return
+
+
 def record_pass(root: Any, name: str, report: Dict[str, Any], *, event: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Record one retirer pass (a ``pass_report``) as the job ``name``'s row, with ``since`` per hold class,
-    when the pass is evidence (something released, an error, or a hold set that differs from the row's); a
-    pass that rested (``report["rested"]``) or changed nothing writes nothing and returns None. ``event``
-    names the events.jsonl row written beside the job row, with the same facts (the custody sweep's evidence
-    of what moved and what holds); the retirer's whole report rides along whenever an event is emitted."""
+    when the pass is evidence (the comment above); a pass that rested (``report["rested"]``) or changed
+    nothing writes nothing and returns None, and one that judged only part of its plane
+    (``report["partial"]``) records what it released and its errors under the row's holds as they stand.
+    A written pass clears ``last_error``. ``event`` names the events.jsonl row written beside the job row,
+    with the same facts (the custody sweep's evidence of what moved and what holds); the retirer's whole
+    report rides along whenever an event is emitted."""
     if report.get("rested"):
         return None
     current = job(root, name) or {}
     released = report.get("released")
     released_count = len(released) if isinstance(released, (list, tuple, set)) else int(released or 0)
-    changed = _hold_set(report.get("holds")) != _hold_set(current.get("holds"))
+    judged = current.get("holds") if report.get("partial") else report.get("holds")
+    changed = _hold_set(judged) != _hold_set(current.get("holds"))
     mailbox_removed = bool((report.get("mailboxes") or {}).get("removed"))
-    if not (released_count or report.get("errors") or changed or mailbox_removed):
+    first, recovered = current.get("state") is None, "last_error" in current
+    if not (released_count or report.get("errors") or changed or mailbox_removed or first or recovered):
         return None
     now = utc_now_iso()
-    holds = _with_since(report.get("holds") or [], current.get("holds"), now)
-    row = record(root, name, state="done", released=released_count, holds=holds,
-                 held=sum(int(hold["count"]) for hold in holds),
-                 errors=[str(error) for error in (report.get("errors") or ())][:20], pass_at=now)
+    holds = _with_since(judged or [], current.get("holds"), now)
+    with store.open_store(pathlib.Path(root), write=True) as txn:
+        row = record_in(txn, name, state="done", released=released_count, holds=holds,
+                        held=sum(int(hold["count"]) for hold in holds),
+                        errors=[str(error) for error in (report.get("errors") or ())][:20], pass_at=now)
+        if recovered:
+            row = forget_in(txn, name, "last_error")
     if event:
         from ouroboros.utils import append_jsonl
 
