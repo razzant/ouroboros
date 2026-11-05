@@ -1281,7 +1281,7 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
     if not include_review_details and (review_cause == "previous_revision_accepted"
                                       or (review_cause == "author_finish" and author_closed and review.get("status") != "fail")):
         review_cause = ""
-    held = objective.get("status") == "fail" and str(objective.get("source") or "").startswith("plan_review_")
+    held = phase == "error" and str(objective.get("source") or "").startswith("plan_review_")
     if reason == "foreign_install_root" and (result.get("reason_detail") or event.get("reason_detail")):
         clause = str(result.get("reason_detail") or event["reason_detail"])
     elif raw_reason == REASON_OWNER_REQUESTED_FINALIZATION and not stopped:

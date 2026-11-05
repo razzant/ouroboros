@@ -539,7 +539,7 @@ export function taskReasonDetail(evt, codes = []) {
     const reason = ['', 'final_message'].includes(storedReason) && typedReason !== CUSTODY_DEBT_REASON
         ? (typedReason || storedReason) : storedReason;
     const origin = record.cancel_origin;
-    const held = objective?.status === 'fail' && String(objective?.source || '').startsWith('plan_review_');
+    const held = severity === 'error' && String(objective?.source || '').startsWith('plan_review_');
     const authorStop = completion?.action === 'stop' && record.outcome_axes?.execution?.status !== 'cancelled' && !Object.keys(origin || {}).length;
     const reviewCause = !taskStoppedWithSummary(evt) && decision?.status
         && (decision.status !== 'accepted' || Object.hasOwn(TASK_CAUSE_PHRASES, decisionCause))

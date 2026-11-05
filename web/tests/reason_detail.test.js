@@ -596,3 +596,12 @@ test('an unfinished child keeps the complete authored result and its stop cause 
     assert.equal(view.activityPreview, `${STOPPED} · The export still fails on empty input.`);
     assert.ok(view.fullBody.includes(result));
 });
+
+test('an owner stop over a held plan objective keeps the open-plan sentence beside its cause', () => {
+    // Historical rows only (no live writer of plan_review_* objectives remains): the stop is phase cancelled, so the
+    // plan hold that silences the sentence for an error does not apply; the sentence is the record's own fact.
+    const record = { status: 'cancelled', cancel_origin: { actor: 'owner', reason: 'old stop' }, terminal_plan_review_open: true,
+        outcome_axes: { objective: { status: 'fail', source: 'plan_review_cycles_exhausted', reason: 'plan_review_cycles_exhausted' },
+            execution: { status: 'ok', plan_review: 'objections_open' } } };
+    assert.ok(taskReasonDetail(record).includes('Objections to the plan were still open'), taskReasonDetail(record));
+});
