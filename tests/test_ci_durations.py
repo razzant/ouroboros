@@ -217,8 +217,8 @@ def _suite(tmp_path, files):
     return suite, entry
 
 
-def _session(tmp_path, suite, entry, lane, public, *options, env=None):
-    args = ["tests/", "-p", "tests.conftest", "--rootdir", str(suite), "--confcutdir", str(suite), "-o", "addopts=",
+def _session(tmp_path, suite, entry, lane, public, *options, env=None, paths=("tests/",)):
+    args = [*paths, "-p", "tests.conftest", "--rootdir", str(suite), "--confcutdir", str(suite), "-o", "addopts=",
             "-m", EXPRESSIONS[lane], "-q", "--ci-evidence-dir", str(public), *options]
     result = subprocess.run(
         [sys.executable, "-I", "-S", str(REPO / "scripts/safe_test.py"), "--temp-parent", str(tmp_path), "--",
@@ -306,6 +306,27 @@ def test_a_shard_without_a_file_of_a_pass_proves_its_empty_slice(tmp_path):
         gaps, notes = reconcile_shards(tmp_path / "manifest", tmp_path / "shards", count=2, sha=SHA, run_id=RUN,
                                        lane_key=f"default_{lane}")
         assert gaps == [] and f"shard {empty}/2: proof from attempt 1; assigned 0, executed 0" in notes, (lane, gaps)
+
+
+def test_a_pass_over_modules_holding_none_of_their_tests_is_green_and_an_empty_module_is_not(tmp_path):
+    """journal-persist, scripts/run_tests.py's battery and the gate run each pass over explicit modules, unsharded:
+    a pass that holds none of their tests ran all it was asked (exit 0, said so), in one process or under xdist;
+    modules that collect nothing, or a narrowed run, keep pytest's 5."""
+    suite, entry = _suite(tmp_path, {
+        "test_parallel_only.py": PARAMETRIZED.format(2), "test_nothing.py": "X = 1\n",
+        "test_exclusive_only.py": "import pytest\npytestmark = pytest.mark.serial('exclusive')\n" + PARAMETRIZED.format(2)})
+    result, data = _session(tmp_path, suite, entry, "serial", tmp_path / "serial", paths=["tests/test_parallel_only.py"])
+    assert (result.returncode, data["session_exit_code"], data["tests_collected"]) == (0, 0, 0), result.stdout + result.stderr
+    assert "DEFAULT_PASS_EMPTY: the serial pass holds none of the 2 collected test(s)" in result.stdout
+    result, data = _session(tmp_path, suite, entry, "parallel", tmp_path / "parallel", "-n", "2", "--dist", "loadgroup",
+                            paths=["tests/test_exclusive_only.py"])
+    assert (result.returncode, data["session_exit_code"]) == (0, 0), result.stdout + result.stderr
+    assert "DEFAULT_PASS_EMPTY: the parallel pass holds none of the 2 collected test(s)" in result.stdout
+    result, data = _session(tmp_path, suite, entry, "serial", tmp_path / "nothing", paths=["tests/test_nothing.py"])
+    assert (result.returncode, data["session_exit_code"]) == (5, 5), result.stdout + result.stderr
+    result, data = _session(tmp_path, suite, entry, "serial", tmp_path / "narrowed", "-k", "none_match",
+                            paths=["tests/test_parallel_only.py"])
+    assert (result.returncode, data["session_exit_code"]) == (5, 5), result.stdout + result.stderr
 
 
 # ---------------------------------------------------------------- the UI lane

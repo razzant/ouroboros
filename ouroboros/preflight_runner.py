@@ -1205,6 +1205,11 @@ def _missing_tests_tree(repo: pathlib.Path, phase: str, max_output: int) -> Opti
     return None
 
 
+def _collected_nothing(recorded: Optional[dict]) -> bool:
+    """A green pass whose own results.json (the probe's pointer) counts no collected test."""
+    return isinstance(recorded, dict) and recorded.get("tests_collected") == 0
+
+
 def _containment_failed(label: str, reap_error: str, max_output: int) -> str:
     """The pass ran, but the scan says processes it spawned are still alive (or cannot tell): a live tree
     outlives this whole run, so the pass verdict is not accepted, whatever it was."""
@@ -1438,7 +1443,10 @@ def _run_hermetic_pytest(
                 )
             if inventory_error and returncode in (0, _PYTEST_EXIT_NO_TESTS):
                 return f"⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_INVENTORY: {spec.label}: {inventory_error}"
-            if returncode == _PYTEST_EXIT_NO_TESTS:
+            recorded = _recorded_session(temp_root) if probe_module in spec.args else None
+            # A candidate's own default-lane plugin (tests/default_lane.py) ends a pass that holds none of the
+            # selection's tests with 0 and says so; its record still shows what it collected: nothing.
+            if returncode == _PYTEST_EXIT_NO_TESTS or (returncode == 0 and _collected_nothing(recorded)):
                 empty_passes.append(spec.label)
                 continue
             if returncode == 0 and spec.parallel and probe_module in spec.args:
@@ -1467,8 +1475,7 @@ def _run_hermetic_pytest(
                 # pass into a green gate.
                 return _classify_pass_result(
                     spec.label, returncode, output, max_output,
-                    parallel=spec.parallel, agent_python=agent_python, elapsed=elapsed,
-                    recorded=_recorded_session(temp_root) if probe_module in spec.args else None,
+                    parallel=spec.parallel, agent_python=agent_python, elapsed=elapsed, recorded=recorded,
                 ) or (
                     f"⚠️ PRE_PUSH_TEST_ERROR: {spec.label} pass, exit {returncode}, {elapsed:.0f}s"
                 )
