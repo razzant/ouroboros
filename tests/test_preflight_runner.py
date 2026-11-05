@@ -984,9 +984,9 @@ def test_classify_green_and_empty_pass():
 
 def _pin_preflight_root(monkeypatch, temp_root):
     """Pin only the gate's scratch root; its evidence and lane logs keep their own directories."""
-    real = tempfile.mkdtemp
-    monkeypatch.setattr(tempfile, "mkdtemp", lambda *a, **k: str(temp_root)
-                        if k.get("prefix") == "obs-preflight-" else real(*a, **k))
+    from ouroboros import preflight_runner
+
+    monkeypatch.setattr(preflight_runner, "gate_root", lambda: temp_root)
 
 
 @pytest.fixture
@@ -2665,6 +2665,8 @@ def test_timeout_keeps_flushed_file_output_without_waiting_for_stdio_eof(tmp_pat
             raise subprocess.TimeoutExpired("pytest", timeout)
 
     class _FakeContainer:
+        token = "OURO_PROC_CONTAINER_fixture"
+
         def spawn(self, argv, **kwargs):
             kwargs["stdout"].write(b"tests/test_a.py .\ntests/test_hangs_here.py ")
             return _StuckProc()
@@ -2762,9 +2764,9 @@ def test_hermetic_pytest_applies_candidate_diff_and_scrubs_live_env(tmp_path, mo
             'assert "OUROBOROS_SAFETY_MODE" not in os.environ',
             'assert "OUROBOROS_TASK_REVIEW_MODE" not in os.environ',
             'assert "OUROBOROS_FAKE_API_KEY" not in os.environ',
-            'assert "obs-preflight-" in os.environ["OUROBOROS_DATA_DIR"]',
+            'assert os.environ["OUROBOROS_DATA_DIR"].startswith(os.environ["OUROBOROS_TEST_TEMP_ROOT"])',
             'assert os.environ["OUROBOROS_SETTINGS_PATH"].startswith(os.environ["OUROBOROS_DATA_DIR"])',
-            'assert "obs-preflight-" in os.environ["OUROBOROS_REPO_DIR"]',
+            'assert os.environ["OUROBOROS_REPO_DIR"].startswith(os.environ["OUROBOROS_TEST_TEMP_ROOT"])',
             'assert pathlib.Path(os.environ["OUROBOROS_DATA_DIR"]).parent in tmp_path.parents',
         ]
     )

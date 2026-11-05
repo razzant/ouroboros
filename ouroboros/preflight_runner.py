@@ -9,7 +9,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 from typing import NamedTuple, Optional, Sequence
@@ -19,7 +18,7 @@ from typing import NamedTuple, Optional, Sequence
 # candidate's web/tests/*.test.js — see ouroboros/preflight_node.py. Imported
 # by name so tests/operators can stub `preflight_runner.run_node_tests`.
 from ouroboros.preflight_node import run_node_tests
-from ouroboros.test_environment import default_temp_parent
+from ouroboros.test_environment import gate_root
 
 
 DEFAULT_PYTEST_ARGS = ["tests/", "-q", "--tb=line", "--no-header"]
@@ -1249,10 +1248,9 @@ def _assemble_live_source(repo, worktree, evidence):
 def _record_lane(evidence, lane, result, **facts) -> None:
     """One lane's observed exit/containment and its separate diagnostic errors."""
     evidence.setdefault("lanes", []).append({"lane": lane, **facts})
-    evidence.setdefault("evidence_errors", []).extend(result.get("evidence_errors", ()) if isinstance(result, dict)
-                                                      else getattr(result, "evidence_errors", ()))
-    evidence.setdefault("containment_tokens", []).append(result.get("containment_token") if isinstance(result, dict)
-                                                         else getattr(result, "containment_token", ""))
+    fact = result.get if isinstance(result, dict) else lambda name, default: getattr(result, name, default)
+    evidence.setdefault("evidence_errors", []).extend(fact("evidence_errors", ()))
+    evidence.setdefault("containment_tokens", []).append(fact("containment_token", ""))
 
 
 def _run_hermetic_pytest(
@@ -1330,17 +1328,13 @@ def _run_hermetic_pytest(
     source_index_tree, source_index_error = _capture_source_index_tree(repo, max_output)
     if source_index_error is not None:
         return source_index_error
-    # `obs-`: a kept root is recorded as its task's session scratch (test_evidence.record_kept_scratch).
-    temp_root = pathlib.Path(tempfile.mkdtemp(prefix="obs-preflight-", dir=default_temp_parent())).resolve()
+    temp_root = gate_root()
     worktree = temp_root / "repo"
     worktree_added = False
     unproven_teardown = ""
     selection, subject, inventory = None, None, {}
     try:
-        from ouroboros.test_environment import retain_tree
         from ouroboros.test_evidence import EVIDENCE_POINTER
-        if os.environ.get("OUROBOROS_PREFLIGHT_KEEP") == "1":  # a test's folder goes at its end unless its root is held
-            retain_tree(temp_root, "explicit preflight debug retention")
         (temp_root / EVIDENCE_POINTER).write_text(str(evidence["path"]), encoding="utf-8")
         # Install before compiling specs: -p must name the actual nonce module.
         probe_module = _install_worker_probe(temp_root)

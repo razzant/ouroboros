@@ -74,8 +74,8 @@ def without_launch_descriptors(env: dict) -> dict[str, str]:
 
 # A disposable tree whose processes were not PROVEN gone keeps this file at its
 # top. Every enclosing cleanup layer (candidate checkout, pytest session root,
-# safe_test launcher) refuses to delete a tree that contains one: retention is
-# in place, so a surviving process never loses the directory it is writing into.
+# safe_test launcher) leaves the folder that contains one (``retained_folders``):
+# retention is in place, so a surviving process never loses the directory it writes into.
 RETENTION_MARKER = "OUROBOROS_RETAINED.txt"
 SCRATCH_MARKER = "OUROBOROS_TEST_SCRATCH.txt"
 # Explicit diagnostic destinations accepted by existing test producers. They
@@ -153,7 +153,7 @@ def _kept_folder(root: Path, folder: Path) -> Path:
 
 def retained_folders(root) -> dict[Path, list[Path]]:
     """``{kept folder: [markers or unreadable subtrees]}`` beneath a run root: a marker keeps only its own
-    folder (``_kept_folder``); one at the top of ``root`` keeps ``root``, under its own name here."""
+    folder (``_kept_folder``), and one at the top of ``root`` all of it (then ``root`` is a key)."""
     root, kept = Path(root), {}
     for found in retention_markers(root):
         folder = found.parent if found.name == RETENTION_MARKER else found
@@ -269,6 +269,17 @@ def owned_process_temp():
     temp = Path(tempfile.mkdtemp(prefix="c", dir=owner))
     declare_scratch(temp, "process-temp")
     return temp
+
+
+def gate_root() -> Path:
+    """One gate run's fresh root. A gate a test run starts lives beneath that run's owner, whose release
+    covers what it leaves, and short: the deepest listener stays inside AF_UNIX's limit. A top-level
+    gate's ``obs-`` name is what a record of a kept root requires (``test_evidence.record_kept_scratch``).
+    Debug retention holds the root before anything runs (a test's folder goes unless its root is held)."""
+    root = Path(owned_process_temp() or tempfile.mkdtemp(prefix="obs-preflight-", dir=default_temp_parent())).resolve()
+    if os.environ.get("OUROBOROS_PREFLIGHT_KEEP") == "1":
+        retain_tree(root, "explicit preflight debug retention")
+    return root
 
 
 def isolated_environment(root: Path, repo: Path, *, source=None, keep=(), create=True,
