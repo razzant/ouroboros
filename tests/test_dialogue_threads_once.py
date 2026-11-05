@@ -363,6 +363,7 @@ def _functions():
     """``{"<path>::<qualified name>": (source, node)}`` of every runtime function, nested ones by their path."""
     import ast
     import pathlib
+    from tests._source_scan import parse
 
     root = pathlib.Path(__file__).resolve().parents[1]
     found = {}
@@ -376,7 +377,7 @@ def _functions():
                     if not isinstance(child, ast.ClassDef):
                         found[f"{path.relative_to(root).as_posix()}::{name}"] = (ast.get_source_segment(text, child), child)
                     visit(child, scope + [child.name])
-        visit(ast.parse(text), [])
+        visit(parse(text), [])
     return found
 
 
