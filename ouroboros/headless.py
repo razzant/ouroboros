@@ -317,11 +317,11 @@ def _prune_drives(base: pathlib.Path, parent: pathlib.Path, *, drive_of: Any, no
     those were (``_changed_drives``) and at the drives published (``task_custody.arrived_drives``; the
     report's ``arrivals``, which the caller forgets in the transaction recording the pass): a completion
     elsewhere or a new drive leaves the rest standing under the moved inputs, still without a listing. A
-    whole pass that attempted nothing records the rest; any other pass clears it.
+    whole pass that attempted nothing and read no row busy (``store_busy``) records the rest; any other clears it.
     ``only`` restricts the pass to those task ids (the free action's previewed folders; every other drive is
     untouched, no rest is kept); ``progress`` is called with the report after each settlement attempt."""
     from ouroboros.retention import age_cutoff
-    from ouroboros.store import StoreError
+    from ouroboros.store import StoreBusy, StoreError
     from ouroboros.task_custody import (arrived_drives, forget_departed, layout_basis, record_rest, rested_verdict,
                                         settle_child_drive)
 
@@ -354,7 +354,7 @@ def _prune_drives(base: pathlib.Path, parent: pathlib.Path, *, drive_of: Any, no
 
     if names is None:
         forget_departed(verdicts(), base.name, _drive_names(base))
-    attempts, youngest = 0, (None if names is None else rest.get("youngest"))
+    attempts, busy, youngest = 0, False, (None if names is None else rest.get("youngest"))
     for task_id, status, retention_at, inside_wait, fact in drive_candidates(base, parent, cutoff, stop, after=after,
                                                                                names=names):
         if chosen is not None and task_id not in chosen:
@@ -381,6 +381,10 @@ def _prune_drives(base: pathlib.Path, parent: pathlib.Path, *, drive_of: Any, no
             # selection must be checked here; settlement rechecks custody, not age.
             try:
                 result = load_task_result(parent, task_id, strict=True) or {}
+            except StoreBusy:  # contention is no fact about the row: held now, and no rest, so the next pass reads it
+                busy = True
+                report["skipped"].append({"task_id": task_id, "reason": "store_busy"})
+                continue
             except (OSError, ValueError, StoreError):  # a quarantined or torn row: this drive's own hold, not the pass's error
                 report["skipped"].append({"task_id": task_id, "reason": "task_result_unreadable"})
                 continue
@@ -409,7 +413,7 @@ def _prune_drives(base: pathlib.Path, parent: pathlib.Path, *, drive_of: Any, no
             report["errors"].append({"task_id": task_id, "error": f"{type(exc).__name__}: {exc}"})
     if basis is not None:
         rest.clear()
-        if not (attempts or report["deferred"] or report["errors"] or (stop is not None and stop())):
+        if not (attempts or busy or report["deferred"] or report["errors"] or (stop is not None and stop())):
             rest.update({"basis": basis, "youngest": youngest})  # a whole pass with nothing to do: its inputs stand
     return report
 

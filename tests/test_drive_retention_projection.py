@@ -198,10 +198,10 @@ def test_imported_projection_and_quarantined_missing_invalid_outcomes(tmp_path):
     store_import.ensure_current_store(root, with_children=False)
     task_store.patch_document(root, "invalid", lambda _: document("invalid", status="", ts=YOUNG))
     report = prune(root, retention_days=7, now=NOW, live=lambda _: False)
-    assert not report["pruned"]
-    assert {row["task_id"] for row in report["errors"]} == {"legacy", "invalid"}
+    assert not report["pruned"] and not report["errors"]  # an unreadable row holds its own drive, no pass error
     assert {row["task_id"]: row["reason"] for row in report["skipped"]} == {
-        "admitted": "younger_than_retention", "missing": "task_not_terminal"}
+        "admitted": "younger_than_retention", "missing": "task_not_terminal",
+        "legacy": "task_result_unreadable", "invalid": "task_result_unreadable"}
     assert _flag(root, "admitted")[0] == retention.task_result_retention_at(document("admitted", ts=YOUNG))
 
 
