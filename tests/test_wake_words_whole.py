@@ -170,6 +170,24 @@ def test_two_completed_tasks_read_their_card_outcomes_not_a_bare_lifecycle(tmp_p
     assert direct[0].startswith("- task done1 Done") and "The API stayed down" in direct[1]
 
 
+@pytest.mark.parametrize("synthesis", ["pending_once", "running", "paused", "completed"])
+def test_a_finished_root_reads_its_outcome_while_its_synthesis_is_still_open(tmp_path, synthesis):
+    """Every root's terminal write leaves its post-task synthesis open for a while, and the card reads Working until it
+    settles. The wake consumes the terminal transition at its capture, so its line must already say the outcome: a later
+    wake never says it again."""
+    from tests._store_shared import seed_result
+    from ouroboros.task_store import read_document
+
+    seed_result(tmp_path, "open1", {
+        "task_id": "open1", "status": "completed", "ts": _iso(T0 - 60), "updated_at": _iso(T0 - 60), "_schema_version": 1,
+        "accounted_upper_bound_usd": 0.5, "description": "do open1", "metadata": {},
+        "root_phase_checkpoint": {"post_task_synthesis": synthesis},
+        "outcome_axes": {"lifecycle": {"status": "completed"}, "execution": {"status": "ok"}}})
+    line = wake._event_line("task_terminal", {"task_id": "open1", "ts": _iso(T0 - 60)},
+                            {"open1": read_document(tmp_path, "open1")}, RoomLabelResolver(projects=[]), {}, T0)
+    assert line.startswith("- task open1 Done") and "Working" not in line
+
+
 def test_an_overflow_delivers_the_bare_pointer_while_a_measured_shortfall_keeps_my_humans_words(tmp_path,
                                                                                                 monkeypatch):
     from ouroboros.loop_model_call import _project_wake_input
