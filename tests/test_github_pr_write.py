@@ -786,6 +786,10 @@ def test_null_expect_refuses_before_any_request(fake, ctx, args):
 @pytest.mark.parametrize("observed,expected", [
     ({"head_owner": "Owner", "head_branch": "feature", "base_branch": "main", "head_sha": SHA.upper()}, True),
     ({"head_owner": "owner", "head_branch": "Feature", "base_branch": "main", "head_sha": SHA}, False),
+    ({"head_owner": "owner", "head_branch": "feature", "base_branch": "Main", "head_sha": SHA}, False),
+    ({"head_owner": "other", "head_branch": "feature", "base_branch": "main", "head_sha": SHA}, False),
+    ({"head_owner": "owner", "head_branch": "feature", "base_branch": "main", "head_sha": MOVED}, False),
+    ({"head_owner": "owner", "head_branch": "feature", "base_branch": "main", "head_sha": None}, False),
     ({"head_owner": "", "head_branch": "feature", "base_branch": "main", "head_sha": SHA}, False),
 ])
 def test_same_pull_request_rules(observed, expected):

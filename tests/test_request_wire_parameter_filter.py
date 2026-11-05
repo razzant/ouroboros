@@ -179,6 +179,8 @@ def test_the_non_learning_path_reads_the_same_typed_step():
 @pytest.mark.parametrize("message,fields_left", [
     ("temperature is unsupported", {"model", "messages", "max_tokens"}),  # the field: its inherited repair stands
     ("unsupported temperature: only 1 is allowed", None),  # a refused value, whatever words surround it
+    ("invalid parameter: temperature can only be 0 or 1", None),
+    ("unsupported temperature: not only 1 is allowed", None),  # unusable, and still no refusal of the field
     ("unsupported temperature: only 1 or less is allowed", None),
 ])
 def test_the_non_learning_path_keeps_a_refused_value_apart_from_a_refused_field(message, fields_left):

@@ -60,6 +60,7 @@ def test_an_upkeep_stays_in_the_room_its_result_names(root, stored, room, key):
     pytest.param({"project_id": "", "chat_id": HIDDEN_CHAT_ID}, HIDDEN_CHAT_ID, "", id="hidden-partition"),
     pytest.param({"project_id": "p-x", "chat_id": PROJECT_CHAT}, PROJECT_CHAT, "p-x", id="project"),
     # Negative controls: a binding that names no chat places nothing, and an origin-bound one re-homes nothing.
+    pytest.param({"project_id": "p-x"}, WEB_UI_CHAT_ID, "", id="names-no-chat"),
     pytest.param({"project_id": "p-x", "chat_id": PROJECT_CHAT, "origin_bound": True}, WEB_UI_CHAT_ID, "",
                  id="origin-bound"),
 ])

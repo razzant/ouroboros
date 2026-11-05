@@ -203,6 +203,15 @@ def test_declared_system_prefix_is_split_on_every_openai_family_route(subtests, 
     ("openai/gpt-6-sol", True),
     ("openai/gpt-oss-120b", True),          # third-party served, inherits the projection
     ("anthropic/claude-opus-5", False),
+    ("anthropic::claude-opus-5", False),
+    ("google/gemini-3.8-flash", False),
+    ("x-ai/grok-4.7", False),
+    ("deepseek::deepseek-v4", False),
+    ("openai-compatible::gpt-6", False),
+    ("openai-compatible::openai/gpt-6", False),
+    ("openai", False),
+    ("openai-gpt/whatever", False),
+    ("", False),
 ])
 def test_openai_family_model_predicate(model, expected):
     """Pins ``llm_attempt.openai_family_model``: the ``~`` strip, the ``openai::`` →

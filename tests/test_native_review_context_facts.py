@@ -204,6 +204,7 @@ def test_missing_usage_and_unknown_window_are_unknown_not_zero(tmp_path, monkeyp
 
 @pytest.mark.parametrize("raw_usage, expected", [
     (None, None),
+    ({"input_tokens": 77, "output_tokens": 1}, None),
     ({"input_tokens": 0, "cache_read_input_tokens": 0,
       "cache_creation_input_tokens": 0, "output_tokens": 1}, 0),
     ({"input_tokens": 7, "cache_read_input_tokens": 100,

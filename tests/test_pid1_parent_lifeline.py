@@ -30,7 +30,9 @@ def _clean_env(named=None):
 
 
 @pytest.mark.parametrize("named,ppid,orphaned", [
-    (None, 4242, False), (None, 1, True), ("junk", 4242, False),  # unreadable name: legacy rule
+    (None, 4242, False), (None, 1, True), ("1", 1, False),  # bare container server
+    ("4242", 4242, False),
+    ("junk", 4242, False),  # unreadable name: legacy rule
 ])
 def test_plain_child_trusts_only_its_named_spawner(monkeypatch, named, ppid, orphaned):
     monkeypatch.setattr(multiprocessing, "parent_process", lambda: None)
@@ -76,7 +78,7 @@ def test_unreadable_multiprocessing_state_keeps_the_legacy_refusal(monkeypatch):
 
 @_POSIX_ONLY
 @pytest.mark.parametrize("named,faked_ppid,survives", [
-    (None, True, False), ("999999999", False, False),  # a real parent that is not the named spawner
+    (None, True, False), ("4242", True, False), ("junk", True, False), ("999999999", False, False),  # a real parent that is not the named spawner
     ("<self>", False, True),  # the real parent named itself
 ])
 def test_plain_lifeline_arms_only_for_its_named_parent(named, faked_ppid, survives):

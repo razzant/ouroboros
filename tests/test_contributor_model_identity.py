@@ -197,7 +197,7 @@ def test_invalid_or_unbound_catalog_match_remains_unverified(tmp_path, edit):
     assert any(item.startswith("model_identity_unverified:") for item in packet["review_execution"]["mismatches"])
 
 
-@pytest.mark.parametrize("match", [None, [], {"id": MODEL}])
+@pytest.mark.parametrize("match", [None, [], {}, {"id": MODEL}])
 def test_missing_or_malformed_catalog_match_keeps_legacy_display_label(tmp_path, match):
     attempt = {**_attempt(), "observed_model_catalog_match": match}
     actors, config = _persist(tmp_path, _usage(tmp_path, attempt))

@@ -60,11 +60,9 @@ def test_custody_preparation_refuses_foreign_but_owns_local_and_bare(
     assert not (bare / install_identity.IDENTITY_PATH).exists()
 
 
-@pytest.mark.parametrize(("bound", "operation", "kind"), [
-    (False, "execute", "local"),
-    (False, "service", "local"),
-    (True, "direct", "docker_exec"),
-])
+@pytest.mark.parametrize("kind", ["local", "docker_exec"])
+@pytest.mark.parametrize("operation", ["execute", "direct", "service"])
+@pytest.mark.parametrize("bound", [False, True])
 def test_executor_launch_refuses_foreign_before_any_effect_and_uses_selected_owned_root(
         roots, tmp_path, monkeypatch, kind, operation, bound):
     a, b, bare = roots

@@ -219,8 +219,13 @@ def _hold(reason):
 @pytest.mark.parametrize("row,owner_paused,expected", [
     ({"_budget_pause": {**_EXACT, "reason": "budget"}}, False, True),
     ({"_budget_pause": {**_EXACT, "reason": "budget"}}, True, False),
+    ({"_budget_pause": {**_EXACT, "reason": "sleep", "sleep": {"sleep_id": "s"}}}, False, False),
+    ({"_budget_pause_hold": _hold("continuation_writer_unsettled")}, False, False),
+    ({"_resume_selection": {"selected_by": "owner"}}, False, False),
     ({}, False, False),
-], ids=["exact-budget", "under-owner-fence", "not-parked"])
+], ids=["exact-budget", "under-owner-fence", "unheld-sleep",
+        "writer-hold",
+        "already-selected", "not-parked"])
 def test_explicit_resume_follows_each_rows_release_rule(tmp_path, row, owner_paused, expected):
     """Only rows that nothing but an explicit Resume continues need the owner."""
     from ouroboros.gateway.state import _pending_resume_available

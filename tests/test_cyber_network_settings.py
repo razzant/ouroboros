@@ -97,6 +97,8 @@ def test_cyber_does_not_clear_a_configured_password_incidentally(isolated_settin
 
 @pytest.mark.parametrize("host,password,trusted,warning", [
     ("", "", False, ""),
+    ("127.0.0.1", "", False, ""),
+    ("0.0.0.0", "synthetic-password", False, ""),
     ("0.0.0.0", "", False,
      "Server Bind Host is non-localhost and Network Password is empty; "
      "after restart the app will be reachable on the network without a password."),

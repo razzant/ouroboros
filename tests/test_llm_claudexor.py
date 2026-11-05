@@ -264,7 +264,7 @@ def test_sync_preserves_system_images_tool_cycle_and_native_custody(setup, monke
 
 
 @pytest.mark.parametrize("cash,knowledge,expected,final", [(0, "exact", 0, True), (0.25, "exact", 0.25, True),
-                                                        (0.4, "estimated", 0.4, False)])
+                                                        (0.4, "estimated", 0.4, False), (0, "unknown", None, False)])
 def test_cash_is_independent_from_valuation_and_credentials(setup, cash, knowledge, expected, final):
     root, gateway, client = setup
     gateway.results = [result(cash=cash, knowledge=knowledge)]
@@ -809,7 +809,8 @@ def test_unsupported_request_intent_is_not_silently_ignored(setup, option):
     assert raised.value.code == "unsupported_parameter" and not gateway.creates and not ledger(root)
 
 
-@pytest.mark.parametrize("model,expected", [(MODEL, False), ("openai::some-model", True),
+@pytest.mark.parametrize("model,expected", [(MODEL, False), ("anthropic::some-model", False),
+                                            ("gigachat::some-model", False), ("openai::some-model", True),
                                             ("provider/router-model", True)])
 def test_optional_response_format_is_a_transport_capability(model, expected):
     assert LLMClient.supports_response_format(model) is expected

@@ -10,7 +10,7 @@ from tests._live_world import host_world as host_world
 from tests._cases import chosen_rows
 
 
-@pytest.mark.parametrize('engine,thinking', [('openai', False), ('grok', False), ('gemini', True)])
+@pytest.mark.parametrize('engine,thinking', [('openai', False), ('grok', False), ('gemini', False), ('gemini', True)])
 def test_full_stack_host_window_renews_with_pending_canonical_facts(host_world, monkeypatch, engine, thinking):
     async def scenario():
         async with stack(host_world, monkeypatch, engine, thinking=thinking) as run:

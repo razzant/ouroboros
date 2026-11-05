@@ -23,6 +23,8 @@ from ouroboros.test_environment import RETENTION_MARKER
 from tests._shared import retire_synthetic_gate_hold, retire_synthetic_retention
 from tests.test_preflight_receipts import _ctx, _tiny_repo, gate_env, receipt_python  # noqa: F401 -- the gate's fixtures
 from tests.test_preflight_runner import _make_repo
+from ouroboros import preflight_node
+from tests.test_preflight_runner import _pin_preflight_root
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 UNCONFIRMED = "pid 4242 was still alive after the reap"
@@ -112,6 +114,37 @@ def test_an_interrupt_while_stopping_the_watch_still_stops_the_tree_and_its_guar
     assert "did not finish" in container.reap() and "did not finish" in container.reap() and not scans
 
 
+def test_the_answer_of_spawns_own_reap_reaches_its_owner(monkeypatch):
+    _popen_refusing(monkeypatch, "refused-workload")
+    _first_reap_unconfirmed(monkeypatch)
+    container = ProcessContainer()
+    with pytest.raises(OSError):
+        container.spawn([sys.executable, "-c", "pass", "refused-workload"])
+    assert container.root_created is False and container.reap() == UNCONFIRMED
+
+
+@posix_only
+def test_a_guardian_started_before_a_refused_workload_is_settled_before_the_clean_answer(monkeypatch):
+    started = []
+    _popen_refusing(monkeypatch, "refused-workload", started=started)
+    container = ProcessContainer(lifeline=True)
+    with pytest.raises(OSError):
+        container.spawn([sys.executable, "-c", "pass", "refused-workload"])
+    [guardian] = started
+    assert guardian.poll() is not None, "the guardian outlived the answer that says everything is gone"
+    assert container.root_created is False and container.reap() == ""
+
+
+@posix_only
+def test_an_unsettled_guardian_is_the_answer_though_no_workload_ever_existed(monkeypatch):
+    _popen_refusing(monkeypatch, "refused-workload")
+    _guardian_unsettled(monkeypatch)
+    container = ProcessContainer(lifeline=True)
+    with pytest.raises(OSError):
+        container.spawn([sys.executable, "-c", "pass", "refused-workload"])
+    assert container.root_created is False and GUARDIAN_UNSETTLED in container.reap()
+
+
 @posix_only
 @pytest.mark.parametrize("fault", ["guardian_refused", "handshake_lost", "handshake_eof", "handshake_wrong", "selector_failed"])
 def test_a_guardian_that_never_came_up_answers_through_the_owners_reap(monkeypatch, fault):
@@ -166,6 +199,33 @@ def test_a_guardian_that_never_came_up_answers_through_the_owners_reap(monkeypat
         assert waits == [process_lifeline._HANDSHAKE_SEC] == [10.0]
     if fault in {"handshake_eof", "handshake_wrong"}:
         assert readiness == [True], "the protocol failed after readiness, not the timeout"
+
+
+def test_a_root_created_without_a_returned_handle_is_stopped_and_answered(monkeypatch):
+    started = []
+    _popen_refusing(monkeypatch, "never-refused", started=started)
+
+    def refused(_watch):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(OverloadWatch, "start", refused)
+    container = ProcessContainer(overload=True)
+    with pytest.raises(RuntimeError):
+        container.spawn([sys.executable, "-c", "import time; time.sleep(600)"])
+    [root] = started
+    assert container.root_created is True and root.poll() is not None and container.reap() == ""
+
+
+def _gate(tmp_path, monkeypatch, lane="pytest"):
+    """A gate over a real tiny candidate whose first lane is refused its process."""
+    repo = _tiny_repo(tmp_path, web=lane == "node")
+    temp_root = (tmp_path / "preflight-root").resolve()
+    temp_root.mkdir()
+    _pin_preflight_root(monkeypatch, temp_root)
+    if lane == "node":  # no working Node is needed: this lane never gets past its launch
+        monkeypatch.setattr(preflight_node, "resolve_node", lambda: sys.executable)
+        monkeypatch.setattr(preflight_node, "probe_node_version", lambda _node: "99.0.0")
+    return repo, temp_root, _ctx(repo, tmp_path / "canonical")
 
 
 # --- The hermetic gate
@@ -240,6 +300,28 @@ def test_a_synthetic_gate_hold_is_retired_with_its_worktree(tmp_path):
     assert retire_synthetic_gate_hold(repo, temp_root, UNCONFIRMED) is True
     assert not (temp_root / RETENTION_MARKER).exists() and not (temp_root / "repo").exists()
     assert not _registered(repo, temp_root)
+
+
+@pytest.mark.parametrize("marker", [
+    pytest.param(SYNTHETIC + b"pid 77 is still alive\n", id="mixed"),
+    pytest.param(b"pid 77 is still alive\n", id="changed"),
+    pytest.param(b"\xff\xfe not a reason\n", id="unreadable"),
+    pytest.param(SYNTHETIC, id="removal_failed"),
+])
+def test_a_hold_the_test_cannot_prove_synthetic_keeps_marker_and_worktree(tmp_path, marker):
+    repo, temp_root = _held_gate(tmp_path, marker)
+    worktree = temp_root / "repo"
+    removal_failed = marker == SYNTHETIC
+    if removal_failed:  # --force once cannot remove a locked worktree
+        subprocess.run(["git", "worktree", "lock", str(worktree)], cwd=repo, check=True, capture_output=True)
+    try:
+        assert retire_synthetic_gate_hold(repo, temp_root, UNCONFIRMED) is False
+        assert (temp_root / RETENTION_MARKER).read_bytes() == marker
+        assert worktree.is_dir() and _registered(repo, temp_root)
+    finally:  # everything above was manufactured here
+        subprocess.run(["git", "worktree", "unlock", str(worktree)], cwd=repo, capture_output=True)
+        subprocess.run(["git", "worktree", "remove", "--force", str(worktree)], cwd=repo, capture_output=True)
+        (temp_root / RETENTION_MARKER).unlink(missing_ok=True)
 
 
 # --- safe_test

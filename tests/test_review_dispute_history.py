@@ -26,6 +26,8 @@ def _rounds():
 
 @pytest.mark.parametrize("route,retrieves,structured", [
     pytest.param("api_chat", False, False, id="api_chat-False"),
+    pytest.param("api_chat", True, False, id="api_chat-True"),
+    pytest.param("agent_session", True, False, id="agent_session-True"),
     pytest.param("api_chat", False, True, id="api_chat-False-structured"),
     pytest.param("agent_session", True, True, id="agent_session-True-structured"),
 ])

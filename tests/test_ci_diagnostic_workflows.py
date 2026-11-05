@@ -13,6 +13,9 @@ from types import SimpleNamespace
 import pytest
 import yaml
 from tests._cases import chosen_rows
+import hashlib
+import io
+import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
 UPLOAD_ACTION = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
@@ -289,6 +292,38 @@ def test_manual_ui_selection_is_fixed_partial_and_never_a_paid_or_full_check():
     assert "--scope full " in shard["ui_summary"]["run"] and "DIAGNOSTIC" not in shard["ui_summary"]["env"]
 
 
+@pytest.mark.parametrize("exported", [True, False], ids=["proof-present", "export-failed"])
+@pytest.mark.parametrize("jobname, producer, proof_id, upload_id, directory", [
+    ("ui-shard", "ui_tests", "ui_proof", "ui_evidence", "ui"),
+    ("ui-manifest", "ui_manifest", "manifest_proof", "manifest_evidence", "ui-manifest"),
+])
+def test_an_attempt_without_a_published_proof_is_red_itself(tmp_path, jobname, producer, proof_id,
+                                                              upload_id, directory, exported):
+    """An attempt whose export or upload failed must not leave `ui-smoke` an earlier attempt's proof to accept."""
+    job = _workflow("ui-browser.yml")["jobs"][jobname]
+    steps = _steps("ui-browser.yml", jobname)
+    proof, upload = steps[proof_id], steps[upload_id]
+    assert "continue-on-error" not in proof and "continue-on-error" not in upload
+    assert upload["with"]["if-no-files-found"] == "error"
+    if jobname == "ui-shard":  # The shard's later steps run after a red lane; the manifest job stops at its first.
+        assert proof["if"] == "${{ !cancelled() && steps.ui_tests.outcome != 'skipped' }}"
+        assert "!cancelled()" in upload["if"]
+    else:
+        assert "if" not in proof and "if" not in upload
+    order = [step.get("id") for step in job["steps"]]
+    assert order.index(producer) < order.index(proof_id) < order.index(upload_id)
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("workflow shell unavailable on this host")
+    if exported:
+        target = tmp_path / "ci-evidence" / directory / "host" / "results.json"
+        target.parent.mkdir(parents=True)
+        target.write_text("{}", encoding="utf-8")
+    command = proof["run"].replace("${{ runner.temp }}", str(tmp_path))
+    done = subprocess.run([bash, "-e", "-o", "pipefail", "-c", command], capture_output=True, timeout=10)
+    assert (done.returncode == 0) is exported
+
+
 def test_ui_producers_have_distinct_reports_and_only_the_public_parent_is_uploaded():
     shard, diagnostic = _steps("ui-browser.yml", "ui-shard"), _steps(*PARTIAL)
     run = "${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
@@ -361,8 +396,12 @@ OFFICIAL, FORK, TAG = "razzant/ouroboros", "someone/private-copy", "refs/tags/v7
 @pytest.mark.parametrize("event,ref,repository,flag", [
     ("push", TAG, OFFICIAL, "--enforce"),
     ("workflow_dispatch", TAG, OFFICIAL, "--enforce"),  # A manual run on a tag ref can publish too.
+    ("push", "refs/heads/ouroboros", OFFICIAL, ""),
+    ("workflow_dispatch", "refs/heads/candidate", OFFICIAL, ""),
+    ("schedule", "refs/heads/main", OFFICIAL, ""),
     # A fork without the ten provider keys keeps releasing its own tags.
     ("push", TAG, FORK, ""),
+    ("workflow_dispatch", TAG, FORK, ""),
 ])
 def test_release_floor_is_the_last_canary_step_and_enforces_only_on_an_official_release_tag(
         tmp_path, monkeypatch, event, ref, repository, flag):
@@ -500,6 +539,72 @@ def test_full_lane_runs_as_eight_guarded_shards_under_step_ceilings(tmp_path):
     without_display = {**lane, "run": lane["run"].removeprefix("xvfb-run -a ")}
     completed, _args = _run_shell(without_display, tmp_path)
     assert completed.returncode == 97
+
+
+# The GitHub-published SHA-256 of caddy_2.11.7_linux_amd64.tar.gz; that archive's SHA-512 is the
+# line in the release's sigstore-signed caddy_2.11.7_checksums.txt.
+CADDY_SHA256 = "727b91701a392de6ebc5027509f548bf39979e5216340d0faed8fa5e69c84f8b"
+
+
+@pytest.mark.parametrize("pinned", [True, False], ids=["pinned-bytes", "foreign-bytes"])
+def test_every_shard_installs_the_digest_pinned_official_caddy_its_lane_needs(tmp_path, pinned):
+    """tests/test_separate_ui_browser.py needs a real Caddy. Its skip without one is no reviewed
+    platform gate (the required lane fails it), so every shard installs the official release asset
+    by the digest GitHub publishes for it and hands that binary to the lane."""
+    from tests.browser_lane import permitted_skip
+    from tests.separate_ui_support import CADDY_ENV
+
+    job = _workflow("ui-browser.yml")["jobs"]["ui-shard"]
+    steps = _steps("ui-browser.yml", "ui-shard")
+    install, lane = steps["install_caddy"], steps["ui_tests"]
+    order = [step.get("id") for step in job["steps"]]
+    assert order.index("setup_python") < order.index("install_caddy") < order.index("ui_tests")
+    assert install["env"] == {"CADDY_VERSION": "2.11.7", "CADDY_SHA256": CADDY_SHA256}
+    assert "if" not in install and "continue-on-error" not in install
+    assert ("https://github.com/caddyserver/caddy/releases/download/v$CADDY_VERSION/"
+            "caddy_${CADDY_VERSION}_linux_amd64.tar.gz") in install["run"]
+    assert lane["env"][CADDY_ENV] == "${{ steps.install_caddy.outputs.path }}"
+    assert sum(step.get("timeout-minutes", 0) for step in job["steps"]) < job["timeout-minutes"]
+    assert not permitted_skip("tests/test_separate_ui_browser.py::test_one_tls_origin_routes_each_prefix_to_its_owner"
+                              "_and_keeps_the_password_gate", f"set {CADDY_ENV} to an absolute Caddy v2 binary")
+
+    # The step's own shell over a stand-in release: only the pinned bytes give the lane a binary.
+    bash, tar = shutil.which("bash"), shutil.which("tar")
+    if bash is None or tar is None:
+        pytest.skip("workflow shell unavailable on this host")
+    release = tmp_path / "release.tar.gz"
+    with tarfile.open(release, "w:gz") as archive:
+        for name, data, mode in (("caddy", b"#!/bin/sh\necho 'v2.11.7 h1:stand-in'\n", 0o755),
+                                 ("LICENSE", b"stand-in", 0o644)):
+            member = tarfile.TarInfo(name)
+            member.size, member.mode = len(data), mode
+            archive.addfile(member, io.BytesIO(data))
+    runner, output = tmp_path / "runner", tmp_path / "github-output"
+    runner.mkdir()
+
+    def shell_path(path):
+        # The Ubuntu runner hands the step POSIX paths. A Windows (MSYS) bash stand-in gets the
+        # same spelling from its own cygpath: GNU tar reads a native `C:\...` as a remote host.
+        if os.name != "nt":
+            return str(path)
+        return subprocess.run([bash, "-c", 'cygpath -u "$1"', "_", str(path)], capture_output=True,
+                              text=True, encoding="utf-8", timeout=10, check=True).stdout.strip()
+
+    stub = 'curl() { cp "$STAND_IN_RELEASE" "${@: -1}"; }\npython() { "$PYTHON_BIN" "$@"; }\n'
+    env = {**os.environ, "RUNNER_TEMP": shell_path(runner), "GITHUB_OUTPUT": shell_path(output),
+           "CADDY_VERSION": "2.11.7",
+           "CADDY_SHA256": hashlib.sha256(release.read_bytes()).hexdigest() if pinned else CADDY_SHA256,
+           "STAND_IN_RELEASE": shell_path(release), "PYTHON_BIN": sys.executable}
+    done = subprocess.run([bash, "-e", "-o", "pipefail", "-c", stub + install["run"]], env=env,
+                          capture_output=True, text=True, encoding="utf-8", timeout=30)
+    binary = runner / "caddy-2.11.7" / "caddy"
+    if pinned:
+        assert done.returncode == 0, done.stderr
+        assert output.read_text(encoding="utf-8") == f"path={shell_path(runner)}/caddy-2.11.7/caddy\n"
+        assert [path.name for path in binary.parent.iterdir()] == ["caddy"]
+    else:
+        assert done.returncode != 0 and "Caddy digest mismatch" in done.stderr, done.stderr
+        assert not output.exists() and not binary.exists()
 
 
 def test_lane_manifest_is_an_unsharded_collection_whose_upload_is_mandatory(tmp_path):

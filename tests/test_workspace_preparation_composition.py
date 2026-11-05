@@ -70,6 +70,8 @@ def test_entry_refusal_without_executor_retains_drive_and_does_not_block_dispatc
     ("max_children", "delegation_rights_max_children"),
     ("hard", "active_subagent_hard_cap"),
     ("constraint", "delegation_constraint_child_cap"),
+    ("soft", ""),
+    ("advisory", ""),
 ])
 def test_readonly_admission_between_preparation_checks_and_enqueue_keeps_caps(env, monkeypatch, limit, reason):
     from supervisor import queue

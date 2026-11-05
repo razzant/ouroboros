@@ -144,6 +144,7 @@ def test_successful_close_preserves_action_and_reports_unavailable_after_state(t
 
 @pytest.mark.parametrize("verb,pattern_id,method", [
     ("invoke", 10000, "Invoke"), ("set_value", 10002, "SetValue"), ("toggle", 10015, "Toggle"),
+    ("focus", None, "SetFocus"),
 ])
 def test_exception_inside_action_is_not_a_preguard_refusal(tmp_path, registered, verb, pattern_id, method):
     calls, current = registered
@@ -365,9 +366,9 @@ def test_act_on_a_document_matched_past_the_display_cut(tmp_path, registered):
 
 
 @pytest.mark.parametrize("text,shown,cut", [
-    ("d" * 239, "d" * 239, False), ("d" * 241, "d" * 240, True),
-    ("🙂" * 121, "🙂" * 120, True),
-], ids=["under", "one-over", "pairs-over"])
+    ("d" * 239, "d" * 239, False), ("d" * 240, "d" * 240, False), ("d" * 241, "d" * 240, True),
+    ("🙂" * 120, "🙂" * 120, False), ("🙂" * 121, "🙂" * 120, True),
+], ids=["under", "exact", "one-over", "pairs-exact", "pairs-over"])
 def test_window_read_marks_a_document_cut_at_max_text_chars(tmp_path, registered, text, shown, cut):
     calls, current = registered
     current["root"] = dialog(calls, make(calls, "doc", 50030, patterns={10014: {"text": text}}))

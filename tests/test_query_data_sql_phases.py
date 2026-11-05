@@ -235,7 +235,7 @@ def test_mature_money_default_is_direct_and_explicit_snapshot_is_equivalent(mone
 
 
 @pytest.mark.parametrize("phase,snapshot", [("acquire", False), ("snapshot_copy", True),
-                                              ("sql", True)])
+                                              ("sql", False), ("sql", True)])
 def test_owned_phase_expiry_is_not_store_damage(money, monkeypatch, phase, snapshot):
     children, directories, _ = instrument(money, monkeypatch, "slow_" + phase)
     result = call(money, "SELECT count(*) FROM sqlite_master", snapshot=snapshot, timeout_sec=2)

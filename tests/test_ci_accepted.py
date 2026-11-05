@@ -71,8 +71,11 @@ def test_a_well_formed_file_loads_its_entries(tmp_path):
 @pytest.mark.parametrize("steps, accepted", [
     ([("labeled", OWNER)], True),
     ([("labeled", "contributor")], False),
+    ([("labeled", OWNER), ("unlabeled", OWNER)], False),
+    ([("labeled", OWNER), ("unlabeled", "contributor")], False),
+    ([("labeled", OWNER), ("labeled", "contributor")], False),
     ([], False),
-], ids=["owner", "not-owner", "never"])
+], ids=["owner", "not-owner", "removed", "removed-by-other", "relabelled-by-other", "never"])
 def test_only_the_owner_applying_the_label_last_accepts(steps, accepted):
     issues = _Issues(events={2083: _labelled(*steps) + [
         {"event": "labeled", "label": {"name": "bug"}, "actor": {"login": OWNER}},  # Another label never counts.

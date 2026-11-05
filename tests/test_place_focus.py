@@ -50,6 +50,8 @@ def test_focus_no_ceiling_host_actor_prompt(focus):
 @pytest.mark.parametrize("state,facts,enabled,allowance,decision", [
     ("active", ("mention",), True, "available", "focus"),
     ("paused", ("mention",), True, "available", "silent"),
+    ("active", (), True, "available", "silent"),
+    ("active", ("mention",), False, "available", "silent"),
     ("active", ("mention",), True, "exhausted", "retry"),
 ])
 def test_capture_before_attention_and_replay(focus, monkeypatch, state, facts, enabled, allowance, decision):

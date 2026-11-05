@@ -1139,12 +1139,8 @@ def test_existing_nonretry_reasons_and_cost_projection_survive_handoff(tmp_path,
     q.enqueue_task.assert_not_called()
 
 
-@pytest.mark.parametrize(("basis_kind", "deleted"), [
-    ("prepared", False),
-    ("legacy", True),
-    ("converted_main", False),
-    ("converted_derived", True),
-])
+@pytest.mark.parametrize("deleted", [False, True])
+@pytest.mark.parametrize("basis_kind", ["prepared", "legacy", "converted_main", "converted_derived"])
 def test_real_crash_retry_keeps_prepared_scope_across_registry_activity(tmp_path, monkeypatch, deleted, basis_kind):
     from ouroboros import projects_registry as registry
     from ouroboros.task_results import load_task_result, write_task_result
@@ -1375,6 +1371,8 @@ def test_a_refused_exact_continuation_load_parks_the_same_id_again(tmp_path, mon
 @pytest.mark.parametrize("pause, returns", [
     ({"state": "paused", "task_attempt": 1}, True),
     ({"state": "resume_granted", "task_attempt": 1, "grant": {"grant_id": "g", "consumed_at": 1.0}}, False),
+    ({"state": "resumed", "task_attempt": 1}, False),
+    ({"state": "paused", "task_attempt": 2}, False),
     ({}, False),
 ])
 def test_only_a_live_unconsumed_pause_of_this_attempt_keeps_the_death_for_recovery(pause, returns):

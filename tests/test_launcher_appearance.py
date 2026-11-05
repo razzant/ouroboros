@@ -265,7 +265,7 @@ def test_unknown_palettes_and_other_platforms_are_refused_typed(monkeypatch):
 
 
 @pytest.mark.parametrize("color,palette", [("fff", "light"),
-                                           ("#12", ""), ("#zzzzzz", "")])
+                                           ("", ""), ("#12", ""), ("#zzzzzz", "")])
 def test_the_starting_palette_reads_the_windows_background(color, palette):
     assert la.palette_of_background(color) == palette
 

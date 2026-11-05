@@ -203,6 +203,9 @@ def _capture(status, *, images=True, state="unresolved"):
     ("bad_request", 400, {}, True),
     ("bad_request", 422, {}, True),
     ("provider_error", 404, {}, True),
+    ("provider_policy_refusal", None, {}, False),
+    ("deadline_exhausted", None, {}, False),
+    ("provider_outcome_unknown", None, {}, False),
 ], ids=lambda value: str(value))
 def test_only_a_completed_structural_refusal_earns_the_retry(root, kind, status, extra, earns):
     usage = {"_last_llm_error_kind": kind, "_last_llm_provider_message": WORDS, **extra}

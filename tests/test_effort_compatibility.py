@@ -234,20 +234,34 @@ def test_positive_constraints_are_bound_to_field_and_ignore_negative_quotes(evid
         assert payload_effort(retry) == applied
 
 
-@pytest.mark.parametrize(("requested", "error", "applied", "carrier", "body_error"), [
-    pytest.param("medium", _error("Invalid option", param="{field}", enum=["minimal", "ultra"]), "minimal", "top", True, id='strongest-at-or-below-is-minimal-top-True'),
-    pytest.param("medium", _error("Invalid option", param="{field}", enum=["minimal"]), "minimal", "nested", True, id='only-minimal-nested-True'),
-    pytest.param("medium", _error('{field}: expected one of "minimal"|"ultra"'), "minimal", "top", False, id='text-minimal-top-False'),
-    pytest.param("none", _error("Reasoning is mandatory", param="{field}", enum=["minimal", "high"]), "minimal", "nested", True, id='mandatory-floor-minimal-nested-True'),
-    pytest.param("none", _error('{field} is mandatory: supported values are "high", "medium", or "minimal"'), "minimal", "top", False, id='mandatory-text-conjunction-minimal-top-False'),
-    pytest.param("medium", _error("Invalid option", param="{field}", enum=["none", "high"]), "high", "nested", True, id='none-is-not-comparable-nested-True'),
+@pytest.mark.parametrize("body_error", [False, True])
+@pytest.mark.parametrize("carrier", ["top", "nested"])
+@pytest.mark.parametrize("requested,error,applied", [
+    pytest.param("medium", _error("Invalid option", param="{field}", enum=["minimal", "ultra"]),
+                 "minimal", id="strongest-at-or-below-is-minimal"),
+    pytest.param("medium", _error("Invalid option", param="{field}", enum=["minimal"]),
+                 "minimal", id="only-minimal"),
+    pytest.param("medium", _error('{field}: expected one of "minimal"|"ultra"'),
+                 "minimal", id="text-minimal"),
+    pytest.param("none", _error("Reasoning is mandatory", param="{field}", enum=["minimal", "high"]),
+                 "minimal", id="mandatory-floor-minimal"),
+    pytest.param("none", _error('{field} is mandatory: supported values are "high", "medium", or "minimal"'),
+                 "minimal", id="mandatory-text-conjunction-minimal"),
+    pytest.param("medium", _error("Invalid option", param="{field}", enum=["none", "high"]),
+                 "high", id="none-is-not-comparable"),
     pytest.param("medium", _error("{field} value 'medium' is not supported; 'minimal' is not "
-                                  "supported. Supported values are: 'ultra'"), "ultra", "top", False, id='negative-minimal-not-advertised-top-False'),
-    pytest.param("minimal", _error("Invalid option", param="{field}", enum=["minimal", "high"]), None, "nested", False, id='exact-minimal-accepted-nested-False'),
-    pytest.param("medium", _error("Invalid option", param="{field}", enum=["none"]), None, "nested", True, id='only-none-nested-True'),
-    pytest.param("medium", _error("Invalid option", param="{field}", enum=["future", "turbo"]), None, "top", False, id='unknown-tiers-top-False'),
-    pytest.param("medium", _error("Invalid option", param="temperature", enum=["minimal"]), None, "nested", True, id='foreign-field-nested-True'),
-    pytest.param("low", _error("{field} value 'low' is not supported"), None, "top", False, id='unadvertised-walk-stops-at-low-top-False'),
+                                  "supported. Supported values are: 'ultra'"),
+                 "ultra", id="negative-minimal-not-advertised"),
+    pytest.param("minimal", _error("Invalid option", param="{field}", enum=["minimal", "high"]),
+                 None, id="exact-minimal-accepted"),
+    pytest.param("medium", _error("Invalid option", param="{field}", enum=["none"]),
+                 None, id="only-none"),
+    pytest.param("medium", _error("Invalid option", param="{field}", enum=["future", "turbo"]),
+                 None, id="unknown-tiers"),
+    pytest.param("medium", _error("Invalid option", param="temperature", enum=["minimal"]),
+                 None, id="foreign-field"),
+    pytest.param("low", _error("{field} value 'low' is not supported"),
+                 None, id="unadvertised-walk-stops-at-low"),
 ])
 def test_advertised_minimal_is_a_comparable_tier(evidence_root, carrier, body_error, requested, error, applied):
     field = {"top": "reasoning_effort", "nested": "reasoning.effort"}[carrier]
@@ -264,19 +278,20 @@ def test_advertised_minimal_is_a_comparable_tier(evidence_root, carrier, body_er
     assert _store(evidence_root) is None  # Planning alone never learns a contract.
 
 
-@pytest.mark.parametrize(("body_error", "error"), [
-    pytest.param(False, _error(ENUM_MESSAGE, code="context_length_exceeded"), id='False-error2'),
-    pytest.param(False, _error(ENUM_MESSAGE, status=429), id='False-error4'),
-    pytest.param(False, _error("reasoning.effort value 'ultra' invalid; temperature expected one of 'low', 'high'"), id='False-error6'),
-    pytest.param(False, _error("reasoning.effort value 'ultra' invalid; temperature expected one of 'low', or 'high'"), id='False-error8'),
-    pytest.param(False, _error(ENUM_MESSAGE, param="reasoning.effort", value="high"), id='False-error10'),
-    pytest.param(True, _error(ENUM_MESSAGE, param="temperature"), id='True-error0'),
-    pytest.param(True, _error(ENUM_MESSAGE, code="insufficient_quota"), id='True-error1'),
-    pytest.param(True, _error(ENUM_MESSAGE, status=None), id='True-error3'),
-    pytest.param(True, _error("reasoning.effort: invalid option", param="reasoning.effort", code="invalid_option"), id='True-error5'),
-    pytest.param(True, _error("reasoning.effort value 'high' invalid; expected one of 'low', 'medium'"), id='True-error7'),
-    pytest.param(True, _error("reasoning.effort value 'high' invalid; supported values are 'low', 'medium', or 'xhigh'"), id='True-error9'),
+@pytest.mark.parametrize("error", [
+    _error(ENUM_MESSAGE, param="temperature"),
+    _error(ENUM_MESSAGE, code="insufficient_quota"),
+    _error(ENUM_MESSAGE, code="context_length_exceeded"),
+    _error(ENUM_MESSAGE, status=None),
+    _error(ENUM_MESSAGE, status=429),
+    _error("reasoning.effort: invalid option", param="reasoning.effort", code="invalid_option"),
+    _error("reasoning.effort value 'ultra' invalid; temperature expected one of 'low', 'high'"),
+    _error("reasoning.effort value 'high' invalid; expected one of 'low', 'medium'"),
+    _error("reasoning.effort value 'ultra' invalid; temperature expected one of 'low', or 'high'"),
+    _error("reasoning.effort value 'high' invalid; supported values are 'low', 'medium', or 'xhigh'"),
+    _error(ENUM_MESSAGE, param="reasoning.effort", value="high"),
 ])
+@pytest.mark.parametrize("body_error", [False, True])
 def test_other_fields_unknown_and_noncompatibility_errors_do_not_remove_effort(evidence_root, error, body_error):
     target = _target()
     source = _value_payload("nested", target, "ultra")
@@ -363,14 +378,15 @@ def test_carrierless_repair_requires_its_prepared_logical_and_physical_input(evi
     assert _store(evidence_root) is None  # This path never teaches a durable contract.
 
 
-@pytest.mark.parametrize(("error", "omitted", "body_error"), [
-    pytest.param(_error("thinking.type: Input should be 'adaptive'"), True, True, id='error0-True-True'),
-    pytest.param(_error("thinking.type: Input should be 'enabled', 'adaptive', or 'disabled'"), False, True, id='error1-False-True'),
-    pytest.param(_error("Invalid type", param="thinking.type", enum=["adaptive"], value="disabled"), True, False, id='error2-True-False'),
-    pytest.param(_error("Invalid type", param="thinking.type", enum=["adaptive", "disabled"]), False, True, id='error3-False-True'),
-    pytest.param(_error("Invalid type", param="thinking.type", enum=["adaptive"], value="enabled"), False, False, id='error4-False-False'),
-    pytest.param(_error("thinking.type: Input should be 'adaptive'", param="output_config.effort"), False, True, id='error5-False-True'),
-    pytest.param(_error("thinking value 'none' is unsupported", param="thinking"), False, False, id='error6-False-False'),
+@pytest.mark.parametrize("body_error", [False, True])
+@pytest.mark.parametrize("error,omitted", [
+    (_error("thinking.type: Input should be 'adaptive'"), True),
+    (_error("thinking.type: Input should be 'enabled', 'adaptive', or 'disabled'"), False),
+    (_error("Invalid type", param="thinking.type", enum=["adaptive"], value="disabled"), True),
+    (_error("Invalid type", param="thinking.type", enum=["adaptive", "disabled"]), False),
+    (_error("Invalid type", param="thinking.type", enum=["adaptive"], value="enabled"), False),
+    (_error("thinking.type: Input should be 'adaptive'", param="output_config.effort"), False),
+    (_error("thinking value 'none' is unsupported", param="thinking"), False),
 ])
 def test_disabled_carrier_type_refusal_is_not_an_individual_tier_refusal(evidence_root, body_error, error, omitted):
     target = _target("anthropic", "future")

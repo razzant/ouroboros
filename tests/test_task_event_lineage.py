@@ -126,6 +126,7 @@ def test_a_warm_workers_next_task_does_not_relabel_the_previous_tasks_late_frame
 
 @pytest.mark.parametrize("metadata,named", [({}, True),
     ({"initiator": "consciousness", "wake_cause": "own_clock"}, False),
+    ({"initiator": "consciousness", "wake_cause": "focus"}, False),
     ({"initiator": "consciousness", "usage_category": "consciousness_task"}, True)])
 def test_the_conversation_carrier_endpoint_keeps_its_turn_stamps(monkeypatch, tmp_path, metadata, named):
     """The carrier names working Main turns, while a wake supplies its own title at finish."""

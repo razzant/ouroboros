@@ -271,6 +271,7 @@ def test_live_held_continue_resume_selects_same_successor_and_assigns_it(tmp_pat
 
 @pytest.mark.parametrize("source,authority,snapshot,resource", [
     ("delegated_subagent", "investigation", "copy", {}),
+    ("unknown_review_source", "readonly", "", {}),
     ("review_substrate:task_acceptance", "unknown_authority", "", {}),
     ("review_substrate:review_change", "", "", {"workspace_kind": "directory", "strategy": "copy"}),
 ])
@@ -291,6 +292,10 @@ def test_unknown_or_author_owned_custody_still_holds_continue(tmp_path, monkeypa
 @pytest.mark.parametrize("scope_source,slot,review_skill,request_source,continue_holds", [
     # A reviewer slot's send on a route that keeps the scope's label (OpenAI-compatible, OpenRouter).
     ("review_substrate", SLOT, "", None, False),
+    # The same slot on a route that stamps its own label on every send (llm_anthropic,
+    # llm_gigachat, llm_local), or a reviewer's web search: still the reviewer's custody.
+    ("review_substrate", SLOT, "", "llm.anthropic", False),
+    ("review_substrate", SLOT, "", "web_search.openrouter", False),
     # Skill attribution is an independent producer binding even when no slot id
     # survives the adapter's source rewrite.
     ("review_substrate", "", "commit_triad", "llm.anthropic", False),

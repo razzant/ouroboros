@@ -325,6 +325,7 @@ def test_quickstart_stable_selector_ignores_untagged_main_tip(tmp_path):
     [
         ("100644 blob deadbeef 12\tBIBLE.md\n", True),
         ("100644 blob deadbeef 0\tBIBLE.md\n", False),
+        ("120000 blob deadbeef 12\tBIBLE.md\n", False),
         ("", False),
     ],
 )

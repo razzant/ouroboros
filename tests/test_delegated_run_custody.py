@@ -907,6 +907,14 @@ def _settled_session_row(root, reported, run_id="run-counters"):
     ({"total_tokens": None, "cache_read_tokens": None, "cache_write_tokens": None},
      {"total_tokens": None, "cache_read_tokens": None, "cache_write_tokens": None}),
     (_ABSENT, None),                                                    # an engine that reports nothing
+    (None, None),
+    ({"total_tokens": 10, "cache_read_tokens": 4}, None),               # partial: unknown as a whole
+    ({**_COMPLETE_COUNTERS, "extra_tokens": 1}, None),
+    ({"total_tokens": -1, "cache_read_tokens": 0, "cache_write_tokens": 0}, None),
+    ({"total_tokens": 1.5, "cache_read_tokens": 0, "cache_write_tokens": 0}, None),
+    ({"total_tokens": True, "cache_read_tokens": 0, "cache_write_tokens": 0}, None),
+    ({"total_tokens": "270", "cache_read_tokens": 0, "cache_write_tokens": 0}, None),
+    ("270/130", None),
 ])
 def test_normalized_session_counters_are_carried_whole_or_not_at_all(tmp_path, reported, expected):
     """A repaired counter would read exactly like a measured one (BIBLE P1)."""

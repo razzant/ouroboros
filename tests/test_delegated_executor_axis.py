@@ -38,12 +38,16 @@ def test_subagent_harness_key_stays_out_of_the_model_key_sweep():
 
 
 @pytest.mark.parametrize("raw,expected", [
+    ("", None),
     ("codex", subagents.DelegationRoute("codex", "", "")),
     ("codex=gpt-5.4-mini", subagents.DelegationRoute("codex", "gpt-5.4-mini", "")),
     # The documented grammar is harness[=model][:effort] — the effort bracket is
     # not tied to the model one. Splitting on `=` first made the whole string the
     # route id, which then failed at dispatch as an unknown route.
     ("claude:high", subagents.DelegationRoute("claude", "", "high")),
+    # A typo with an empty head is "no route", not a route named "=opus".
+    ("=opus", None),
+    ("=model:high", None),
 ])
 def test_route_parsing_is_opaque(raw, expected):
     assert subagents.parse_subagent_harness(raw) == expected

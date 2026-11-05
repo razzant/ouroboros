@@ -69,6 +69,10 @@ def test_output_and_body_errors_keep_precedence(prefix):
 @pytest.mark.parametrize("note,window,retired", [
     ("owner-confirmed via settings save", 1000000, True),
     ("owner-confirmed via settings save", 400000, False),
+    ("owner-confirmed via context-mode toggle", 400000, False),
+    ("owner-confirmed scope reviewer window", 400000, False),
+    ("typed by owner", 1000000, False),
+    ("owner-confirmed via settings save ", 1000000, False),
     ("owner-confirmed scope reviewer window ", 1000000, False),
 ])
 def test_only_forced_dialog_acks_retire_without_a_read_rewrite(tmp_path, monkeypatch, note, window, retired):

@@ -8,7 +8,9 @@ from ouroboros.server_routing_context import _addressable_root_tasks
 
 
 @pytest.mark.parametrize("fields,running,expected", [
-    ({}, True, True), ({}, False, False), ({"owner_wait": {"state": "waiting", "kind": "quiz"}}, True, True),
+    ({}, True, True), ({}, False, False), ({"_owner_hold": True}, True, False),
+    ({"_budget_pause": {"status": "paused"}}, True, False),
+    ({"owner_wait": {"state": "waiting", "kind": "quiz"}}, True, True),
 ])
 def test_structural_reader_state(tmp_path, fields, running, expected):
     assert is_reading(tmp_path, "work", {"id": "work", **fields}, running=running, fences={}) is expected

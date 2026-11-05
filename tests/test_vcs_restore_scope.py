@@ -293,7 +293,8 @@ def test_a_file_turned_into_a_folder_returns_without_deleting_kept_files(project
         assert _status(repo, "tracked.txt") == []
 
 
-@pytest.mark.parametrize("paths,missing", [(None, False), (["dir"], False), (["dir/a.txt"], True)])
+@pytest.mark.parametrize("paths,missing", [(None, False), (["dir"], False), (["dir/a.txt"], False),
+                                            (["dir/a.txt"], True)])
 def test_a_folder_turned_into_a_file_returns_inside_its_scope_only(project, paths, missing):
     """The reverse change returns HEAD's folder, untracked and ignored neighbors as their scope says;
     restoring only a child would delete the staged file outside that scope, so it is reported instead."""

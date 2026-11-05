@@ -1106,15 +1106,32 @@ def _sealed(details=None, content=None, model="z-ai/glm-4.6", **extra):
 
 
 @pytest.mark.parametrize("kwargs,expected", [
+    # --- portable for EVERY family: readable text carries no endpoint binding ---
+    ({"details": [{"type": "reasoning.text", "text": "t"}]}, False),
+    ({"details": [{"type": "reasoning.summary", "summary": "s"}]}, False),
     # A sidecar ``data`` on a READABLE type must not seal: opaqueness is a property
     # of the TYPE. Reading it as "has data => opaque" is how #468 comes back dressed up.
     ({"details": [{"type": "reasoning.text", "text": "t", "data": "x"}]}, False),
+    # ``None``/``""`` is how providers spell "unsigned" on a readable artifact.
+    ({"details": [{"type": "reasoning.text", "text": "t", "signature": None}]}, False),
+    ({"details": [{"type": "reasoning.text", "text": "t", "signature": ""}]}, False),
+    ({"details": [{"type": "reasoning.text", "text": "t", "signature": "  "}]}, False),
+    ({"content": [{"type": "thinking", "thinking": "p"}]}, False),
+    ({"content": [{"type": "reasoning", "text": "p"}]}, False),
+    ({"reasoning": "plain chain of thought"}, False),
+    ({"reasoning_content": "plain chain of thought"}, False),
+    ({"response_id": "gen-1"}, False),  # an identifier is not an artifact (Q3)
+    ({}, False),
     # Non-string truthy flat reasoning fields are unrecognized shapes => fail-closed.
     ({"reasoning": {"weird": "dict"}}, True),
     # FALSY-present reasoning_details is the common JSON idiom for "no reasoning at
     # all" — NOT an artifact. Sealing it would pin transcripts with zero reasoning
     # (the response_id bug class); parity with the presence predicate's truthiness.
     ({"details": {}}, False),
+    ({"details": ""}, False),
+    ({"details": 0}, False),
+    ({"details": False}, False),
+    ({"reasoning_details": None}, False),  # explicit present-null via **extra
 ])
 def test_sealed_classifier_single_forms(kwargs, expected):
     """One artifact form at a time, on a NON-ROSTER family, so the verdict is the

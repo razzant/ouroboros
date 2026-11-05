@@ -632,10 +632,11 @@ _TORN = json.dumps(_ONE_SHOT)[:-25].encode()        # its writer died mid-append
 
 @pytest.mark.parametrize("good, damage, gap", [
     (2.0, _TORN, "malformed_jsonl"),
+    (0.0, _TORN, "malformed_jsonl"),
     (2.0, b"[3.0]\n", "invalid_jsonl_row"),
     (2.0, b"".join(json.dumps({**_ONE_SHOT, "attempt_id": "@", "cost_usd": usd}).encode().replace(b"@", bad) + b"\n"
                    for bad, usd in ((b"\xff", 3.0), (b"\xfe", 4.0))), "unreadable_bytes"),
-], ids=["torn_tail", "not_an_object", "undecodable_ids"])
+], ids=["torn_tail", "torn_only_row", "not_an_object", "undecodable_ids"])
 def test_a_journal_row_it_cannot_read_makes_the_spend_unknown_never_skipped(tmp_path, good, damage, gap):
     """``iter_jsonl_objects`` skips a row it cannot read as a JSON object and names why in ``gap_reasons``; the fallback
     dropped the why. A torn one-shot row, its attempt's only record, read as nothing: the ended lane was charged the $2

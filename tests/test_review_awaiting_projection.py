@@ -290,6 +290,8 @@ def test_a_refusal_beside_a_wait_keeps_both_of_its_entries():
      [f"s1:{REFUSAL_ERROR}", f"s2:{REFUSAL_ERROR}", f"s3:{REFUSAL_ERROR}",
       "s1:degraded", "s2:degraded", "s3:degraded"]),
     (("timeout",) * 3, ["awaiting 3 of 3 reviewer slot(s): s1, s2, s3 — no verdict"]),
+    ((), ["quorum_not_met: pass_count=0 < min_successful=2"]),
+    (("pass", "pass", "pass"), []),
 ])
 def test_reasons_without_an_awaited_slot_are_the_base_lists(shapes, reasons):
     assert aggregate(shapes)[0]["degraded_reasons"] == reasons
@@ -361,6 +363,7 @@ def test_a_stored_parsed_answer_on_a_pending_row_projects_as_before():
     (("run_failed", "pending", "pending"), "provider_transport_error", "malformed"),
     # No awaited slot: the base fold, literally.
     (("pass", "pass", "pass"), "success", "valid"),
+    ((), "provider_transport_error", "malformed"),
 ])
 def test_panel_words_follow_the_collected_slots(shapes, transport, parse):
     panel = panel_of(shapes)

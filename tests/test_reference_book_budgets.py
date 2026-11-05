@@ -127,6 +127,9 @@ def test_a_change_does_not_grow_bible_or_the_prompts(capsys):
     (1000, 1001, "", False, "grew by 1 bytes"),  # an unknown mode is never a pass
     (1000, 1480, "warn", True, "maintainers will make room"),
     (1000, 1480, "approved", True, "owner approved"),
+    (1000, 900, "block", True, ""),
+    (1000, 1000, "block", True, ""),
+    (None, 5000, "block", True, ""),  # a book new in this change has no base to grow from
 ])
 def test_book_growth_verdict(base, tip, mode, passes, said):
     verdict = book_growth_verdict("architecture", base, tip, mode)
@@ -184,10 +187,17 @@ OWNER_ADDS = _label("labeled", "razzant")
 
 
 @pytest.mark.parametrize("repo,event,association,events,mode", [
+    ("razzant/ouroboros", "pull_request", "COLLABORATOR", [], "block"),
+    ("razzant/ouroboros", "pull_request", "OWNER", [], "block"),
+    ("razzant/ouroboros", "pull_request", "MEMBER", [], "block"),
+    ("razzant/ouroboros", "pull_request", "CONTRIBUTOR", [], "warn"),
+    ("razzant/ouroboros", "pull_request", "FIRST_TIME_CONTRIBUTOR", [], "warn"),
     ("someone/fork", "pull_request", "OWNER", [OWNER_ADDS], "warn"),  # a fork's own CI never blocks
+    ("razzant/ouroboros", "push", "", [], "warn"),  # without a target ref this is not an official-line push
     ("razzant/ouroboros", "pull_request", "COLLABORATOR", [OWNER_ADDS], "approved"),
     # Ouroboros's own token can apply the label, but only the repository owner's approves.
     ("razzant/ouroboros", "pull_request", "COLLABORATOR", [_label("labeled", "ouroboros-agent")], "block"),
+    ("razzant/ouroboros", "pull_request", "COLLABORATOR", None, "block"),  # unreadable label events
 ])
 def test_the_growth_mode_is_decided_from_raw_label_events(repo, event, association, events, mode):
     from scripts.book_growth_mode import decide
@@ -390,6 +400,7 @@ def test_unreadable_push_evidence_leaves_growth_strict(monkeypatch, failed_endpo
     (PUSH_ENV, "block"),
     ({**PUSH_ENV, "SHA": "", "PR_NUMBER": "7"}, "block"),  # no arbitrary PR-number fallback
     ({**PUSH_ENV, "REPO": "someone/fork"}, "warn"),
+    ({}, "warn"),
 ])
 def test_only_official_development_pushes_are_strict(monkeypatch, env, expected):
     from scripts.book_growth_mode import main
@@ -427,13 +438,10 @@ def test_push_mode_reaches_the_size_lane_and_only_growth_fails(monkeypatch, caps
             test_a_change_does_not_grow_a_reference_book(capsys)
 
 
-@pytest.mark.parametrize(("mode", "tip", "passes", "text_id", "name"), [
-    ("block", 101, False, "constitution", "BIBLE.md"),
-    ("", 101, False, "prompts", "Prompts"),
-    ("approved", 101, True, "constitution", "BIBLE.md"),
-    ("warn", 101, True, "prompts", "Prompts"),
-    ("block", 100, True, "constitution", "BIBLE.md"),
-    ("block", 99, True, "prompts", "Prompts"),
+@pytest.mark.parametrize("text_id,name", [("constitution", "BIBLE.md"), ("prompts", "Prompts")])
+@pytest.mark.parametrize("mode,tip,passes", [
+    ("block", 101, False), ("", 101, False), ("approved", 101, True), ("warn", 101, True),
+    ("block", 100, True), ("block", 99, True),
 ])
 def test_bible_and_prompt_growth_fails_unless_the_owner_approved(monkeypatch, capsys, text_id, name, mode, tip, passes):
     import sys

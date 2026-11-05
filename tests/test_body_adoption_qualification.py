@@ -69,9 +69,14 @@ class Scene:
         A few rows below keep real gate witnesses.  The remaining rows test how
         adoption interprets an already-produced proof, so they construct that
         process-held proof through the public subject builder instead of paying
-        for another nested pytest controller.
+        for another nested pytest controller. Only the hermetic runner may mint a
+        proof, so no public seam sets one: the two fields it stamps are written here,
+        its disclosure goes through the gate's own `log_preflight_test_proof`, and the
+        gate's public reader must then see the proof, so a renamed or reshaped field
+        fails every scenario instead of leaving a refusal row green for the wrong reason.
         """
-        from ouroboros.commit_admission import capture_preflight_test_subject
+        from ouroboros.commit_admission import (capture_preflight_test_subject, log_preflight_test_proof,
+                                                preflight_test_proof_matches)
 
         request = self.ctx._commit_test_request or dict(DEFAULTS)
         options = (body_candidate.qualification_request(self.ctx, request)
@@ -83,7 +88,8 @@ class Scene:
         assert proof is not None
         self.ctx._preflight_test_proof = proof
         self.ctx._preflight_tests_passed = True
-        self.ctx._preflight_test_disclosure = {"receipt": {"status": "in_process"}}
+        log_preflight_test_proof(self.ctx, proof, reused=False, phase="post_commit", receipt={"status": "in_process"})
+        assert preflight_test_proof_matches(self.ctx, self.candidate, require_full=False)
         return proof
 
     def commit(self, files, *, force=False, real=False, **request):

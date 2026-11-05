@@ -51,8 +51,8 @@ def unmeasured_parent(monkeypatch):
 
 
 @pytest.mark.parametrize("parent,child", [
-    ("", "child-birth"), ("test-birth", ""), ("test-birth", "test-birth"),
-], ids=["absent_parent_birth", "absent_child_birth", "matching"])
+    ("", "child-birth"), ("test-birth", ""), ("", ""), ("test-birth", "test-birth"),
+], ids=["absent_parent_birth", "absent_child_birth", "both_absent", "matching"])
 def test_readiness_compares_births_only_when_both_sides_measured_one(
         pool, seam, unmeasured_parent, parent, child):  # noqa: F811
     slot = _booting_slot(pool, 0, 5001)
@@ -167,8 +167,15 @@ def test_an_equal_kernel_birth_wins_over_an_exact_spelling_without_one(pool, sea
 @pytest.mark.parametrize("slot_birth,slot_kernel,event,now,before", [
     ("test-birth", _KERNEL, {"process_birth": _ZONE, "kernel_birth": _KERNEL}, True, False),
     ("test-birth", _KERNEL, {"process_birth": "test-birth", "kernel_birth": _REUSED}, False, True),
+    ("test-birth", _KERNEL, {"process_birth": _ZONE}, False, False),
+    ("test-birth", "", {"process_birth": _ZONE, "kernel_birth": _KERNEL}, False, False),
+    ("test-birth", _KERNEL, {"process_birth": _ZONE, "kernel_birth": "darwin-start:1793143271"}, False, False),
+    ("test-birth", _KERNEL, {"process_birth": _ZONE, "kernel_birth": _FILETIME}, False, False),
+    (_LINUX, _LINUX, {"process_birth": _LINUX_OTHER, "kernel_birth": _LINUX_OTHER}, False, False),
     (_FILETIME, _FILETIME, {"process_birth": _FILETIME_OTHER, "kernel_birth": _FILETIME_OTHER}, False, False),
-], ids=["new_other_zone", "reused_same_second", "windows_reused"])
+], ids=["new_other_zone", "reused_same_second", "old_other_zone_unfixed", "parent_unread_other_zone_unfixed",
+        "malformed_other_zone", "two_kinds",
+        "linux_reused", "windows_reused"])
 def test_the_idle_probe_answer_lets_comparable_kernel_births_decide(pool, slot_birth, slot_kernel, event,  # noqa: F811
                                                                      now, before):
     """``before`` is the prior answer: the legacy rule the same answer meets without kernel births."""

@@ -189,7 +189,9 @@ def test_file_weights_are_recorded_time_else_nodes_times_the_median_time_per_nod
     (None, "the durations table is unreadable (FileNotFoundError)"),
     ("not json", "the durations table is unreadable (JSONDecodeError)"),
     ("[]", "the durations table has another shape"),
-], ids=["missing", "garbage", "array"])
+    ('{"format": 1, "source": {"run_id": "1"}, "platforms": {"linux": {"tests/a.py": -1}}}',
+     "the durations table has another shape"),
+], ids=["missing", "garbage", "array", "negative"])
 def test_an_unusable_table_falls_back_to_node_counts_and_says_why(tmp_path, monkeypatch, content, reason):
     path = tmp_path / "durations.json"
     if content is not None:
@@ -570,6 +572,66 @@ def test_an_empty_slice_is_a_proof_only_where_the_manifest_packs_nothing(tmp_pat
     assert f"shard {3 - empty}/2: its assignment is not slice {3 - empty} of 2 of the manifest lane" in gaps
 
 
+def test_a_system_filter_reconciles_one_operating_system_of_a_shared_tree(tmp_path):
+    _default_run(tmp_path, system="Windows")
+    _default_run(tmp_path, system="Linux")
+    assert _reconciled(tmp_path)[0], "two systems' proofs are no single lane"
+    for system in ("windows", "linux"):
+        assert _reconciled(tmp_path, system=system)[0] == []
+        result = subprocess.run(CLI + ["reconcile-shards", "--lane", "default_parallel", "--os", system,
+                                       "--manifest", str(tmp_path / "manifest"), "--shards", str(tmp_path / "shards"),
+                                       "--count", "2", "--sha", SHA, "--run-id", RUN,
+                                       "--summary", str(tmp_path / "summary.md")],
+                                capture_output=True, text=True, encoding="utf-8", timeout=30)
+        assert result.returncode == 0, result.stdout + result.stderr
+    assert f"## default parallel lane ({system}) reconciliation — complete" in (tmp_path / "summary.md").read_text(
+        encoding="utf-8")
+
+
+def test_the_run_verdict_lists_every_test_completely_and_links_accepted_issues(tmp_path):
+    root = tmp_path / "evidence"
+    many = [f"tests/test_many.py::test_{index:02}" for index in range(12)]
+    first = _verdict(root / "ci-evidence-full-test-windows-shard-1-77-1" / "parallel", flaky=many)
+    # The same pass downloaded in a second artifact is listed once; a round's directory is never a pass.
+    _write(root / "default-ci-shard-1-77-1" / "parallel" / "verdict.json", first.read_text(encoding="utf-8"))
+    _verdict(root / "ci-evidence-full-test-windows-shard-1-77-1" / "parallel" / "retry-1", flaky=["tests/x.py::t"])
+    _verdict(root / "ci-evidence-full-test-windows-shard-1-77-1" / "serial", "red",
+             failed=["tests/test_f.py::test_fails", "tests/test_k.py::test_known"],
+             accepted=["tests/test_k.py::test_known"], not_run=["tests/test_n.py::test_never"])
+    _write(root / "ci-evidence-full-test-linux-77-1" / "serial" / "verdict.json", "{")
+    _verdict(root / "ui-ci-full-shard-2-77-1" / "host", "green", rounds=(".",))
+    summary = tmp_path / "summary.md"
+    result = subprocess.run(
+        CLI + ["run-verdict", "--evidence-root", str(root), "--summary", str(summary), "--out", str(tmp_path / "v.json"),
+               "--required-lanes", "ci-evidence-full-test-*/parallel", "ui-ci-full-shard-9-*/host"],
+        env={**os.environ, "GITHUB_REPOSITORY": "owner/repo"}, capture_output=True, text=True, encoding="utf-8",
+        timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    text, facts = summary.read_text(encoding="utf-8"), _json(tmp_path / "v.json")
+    assert text.startswith("## CI test verdicts — FLAKY 12, ACCEPTED 1, FAILED 1, NOT RUN 1")
+    assert all(node in text for node in many) and text.count("tests/test_many.py::test_00") == 1
+    assert "- tests/test_k.py::test_known — [#7](https://github.com/owner/repo/issues/7)" in text
+    assert "- tests/test_f.py::test_fails (call, AssertionError; call, AssertionError)" in text
+    assert text.count("tests/test_k.py::test_known") == 1, "an accepted failure is not listed as failed"
+    assert "| ci-evidence-full-test-linux-77-1/serial | unreadable | 0 |" in text
+    assert "**NO VERDICT** for the required lane `ui-ci-full-shard-9-*/host`." in text
+    assert "tests/x.py::t" not in text and "default-ci-shard-1-77-1" not in text
+    assert [row["nodeid"] for row in facts["flaky"]] == many
+    assert {row["label"] for row in facts["flaky"]} == {"ci-evidence-full-test-windows-shard-1-77-1/parallel"}
+    assert facts["accepted"] == [{"label": "ci-evidence-full-test-windows-shard-1-77-1/serial",
+                                  "nodeid": "tests/test_k.py::test_known", "issue": 7}]
+    assert [row["nodeid"] for row in facts["failed"]] == ["tests/test_f.py::test_fails"]
+    assert facts["not_run"] == [{"label": "ci-evidence-full-test-windows-shard-1-77-1/serial",
+                                 "nodeid": "tests/test_n.py::test_never"}]
+    assert facts["missing"] == ["ui-ci-full-shard-9-*/host"] and len(facts["lanes"]) == 4
+    # Diagnostic only: neither an empty tree nor a usage error fails its step.
+    for arguments in (["--evidence-root", str(tmp_path / "none"), "--summary", str(summary), "--out",
+                       str(tmp_path / "w.json")], ["--evidence-root", str(root)]):
+        quiet = subprocess.run(CLI + ["run-verdict", *arguments], capture_output=True, text=True, timeout=30)
+        assert quiet.returncode == 0, quiet.stdout + quiet.stderr
+    assert "No retry verdict was found" in summary.read_text(encoding="utf-8")
+
+
 # ---------------------------------------------------------------- the run's verdict list and diagnostics
 
 
@@ -589,3 +651,27 @@ def test_a_pass_rerun_in_a_later_attempt_counts_only_there(tmp_path):
     assert [row["nodeid"] for row in facts["failed"]] == [kept]
     assert sorted(lane["label"] for lane in facts["lanes"]) == [
         shard.format(1, 2) + "/parallel", shard.format(2, 1) + "/parallel"]
+
+
+def test_summary_and_annotations_follow_the_verdict_of_a_retried_pass(tmp_path):
+    flaky, failed, accepted, never = (f"tests/test_{name}.py::test_case" for name in ("flaky", "f", "k", "n"))
+    green = tmp_path / "green"
+    _projection(green, [_call(flaky, "failed")])
+    _verdict(green, flaky=[flaky])
+    red = tmp_path / "red"
+    _projection(red, [_call(failed, "failed"), _call(accepted, "failed")])
+    _verdict(red, "red", failed=[failed, accepted], accepted=[accepted], not_run=[never])
+    summary = tmp_path / "summary.md"
+    result = subprocess.run(CLI + ["summarize", "--evidence-dir", str(green), "--summary", str(summary),
+                                   "--producer-outcome", "success", "--artifact-outcome", "success"],
+                            capture_output=True, text=True, encoding="utf-8", timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert ("Retry verdict after 2 round(s): **flaky** — FLAKY 1, ACCEPTED 0, FAILED 0, NOT RUN 0."
+            in summary.read_text(encoding="utf-8"))
+    result = subprocess.run(CLI + ["annotate", "--evidence-dir", str(green), "--evidence-dir", str(red)],
+                            capture_output=True, text=True, encoding="utf-8", timeout=30)
+    assert result.stdout.splitlines() == [
+        f"::error title=Failed test::{failed} (call, AssertionError; call, AssertionError)",
+        f"::error title=Test never ran::{never}",
+        f"::warning title=Flaky test (passed on its retry)::{flaky} (first: call, AssertionError)",
+        f"::warning title=Accepted failure (#7)::{accepted}"]

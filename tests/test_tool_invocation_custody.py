@@ -399,7 +399,7 @@ def test_effective_retry_read_keeps_predecessor_unknown_effect_history(tmp_path,
     assert "original-op" in result and "external effects remain unknown" in result, result
 
 
-@pytest.mark.parametrize('status, owns', [('read', False), ('delivered', False), ('unconfirmed', True)])
+@pytest.mark.parametrize('status, owns', [('read', False), ('delivered', False), ('unconfirmed', True), (None, True)])
 def test_a_read_steer_receipt_discharges_its_message_handoff(tmp_path, status, owns):
     """A relayed message acknowledged as read settles its handoff; nothing is resent."""
     from ouroboros.project_dialogue import append_chat_annotation

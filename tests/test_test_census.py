@@ -90,20 +90,37 @@ def test_costly_world(world):
 ''',
     "tests/test_preflight_gate.py": '''
 import subprocess
+from ouroboros.gate import kept_step, rewritten_step
 
 
 def test_cheapest_spawn():
     subprocess.run(["true"])
+    rewritten_step()
 
 
 def test_dearer_spawn():
     subprocess.run(["true"])
+    rewritten_step()
+
+
+def test_dearer_spawn_of_kept_machinery():
+    subprocess.run(["true"])
+    kept_step()
+
+
+def test_dearer_spawn_scrubs_the_token():
+    subprocess.run(["true"])
+    rewritten_step()
 ''',
     "tests/test_alpha_batch4.py": '''
 from ouroboros.alpha import run
 
 
 def test_event_pin():
+    assert run()
+
+
+def test_event_pin_keeps_the_token_out():
     assert run()
 ''',
     "tests/test_beta_batch4.py": '''
@@ -128,6 +145,8 @@ _JOURNAL = {
     ("tests/test_matrix.py", "test_heavy_enumeration"): {"items": 8, "seconds": 80.0, "setup_s": 1.0},
     ("tests/test_preflight_gate.py", "test_cheapest_spawn"): {"items": 1, "seconds": 1.0, "setup_s": 0.1},
     ("tests/test_preflight_gate.py", "test_dearer_spawn"): {"items": 1, "seconds": 2.0, "setup_s": 0.1},
+    ("tests/test_preflight_gate.py", "test_dearer_spawn_of_kept_machinery"): {"items": 1, "seconds": 3.0, "setup_s": 0.1},
+    ("tests/test_preflight_gate.py", "test_dearer_spawn_scrubs_the_token"): {"items": 1, "seconds": 4.0, "setup_s": 0.1},
     ("tests/test_facets.py", "test_cheap_world"): {"items": 1, "seconds": 1.0, "setup_s": 0.2},
     ("tests/test_facets.py", "test_costly_world"): {"items": 1, "seconds": 3.0, "setup_s": 2.0},
 }
@@ -142,7 +161,10 @@ def _write_tree(root, files):
 def test_each_function_goes_to_its_first_rule_and_the_protected_set_wins(tmp_path):
     _write_tree(tmp_path, _TREE)
     rows = census.join_lane(census.scan_tests(tmp_path), _JOURNAL, None)
-    census.decide(rows, {"tests/test_floor_witness.py"}, {("tests/test_matrix.py", "test_named_in_a_red_record")})
+    unproven = census.decide([dict(row) for row in rows], set(), set())  # no --base: nothing is proven rewritten
+    assert next(row for row in unproven if row["qual"] == "test_dearer_spawn")["cluster"] != "D6_machinery"
+    census.decide(rows, {"tests/test_floor_witness.py"}, {("tests/test_matrix.py", "test_named_in_a_red_record")},
+                  {"ouroboros.gate.rewritten_step"})
     claimed = {row["qual"]: (row["cluster"], row["items_removed"]) for row in rows}
     assert "test_outside_the_default_lane" not in claimed
     assert {name: claimed[name] for name in (
@@ -153,17 +175,22 @@ def test_each_function_goes_to_its_first_rule_and_the_protected_set_wins(tmp_pat
         "test_wording": ("D4_wording", 1), "test_cartesian": ("D1_cartesian", 3), "test_case_list": ("D2_cases", 2),
         "test_short_list": ("", 0), "test_cheap_enumeration": ("D3_enumeration", 7),
         "test_heavy_enumeration": ("D2_cases", 5), "test_named_in_a_red_record": ("P_postmerge_protected", 0),
-        "test_protected_by_its_file": ("K_protected", 0), "test_cheapest_spawn": ("", 0),
+        "test_protected_by_its_file": ("K_protected", 0), "test_cheapest_spawn": ("D7_facets", 1),
         "test_dearer_spawn": ("D6_machinery", 1), "test_event_pin": ("D5_event_file", 1),
         "test_cheap_world": ("D7_facets", 1), "test_costly_world": ("D7_survivor", 0),
     }
     assert claimed["test_wording_of_a_defect"][0] != "D4_wording" != claimed["test_wording_beside_a_process"][0]
     assert claimed["test_event_pin_of_a_barely_reached_module"][0] != "D5_event_file"
+    # Machinery that was not rewritten may be what a spawning test witnesses; a secret test is never retired by name.
+    assert claimed["test_dearer_spawn_of_kept_machinery"][0] != "D6_machinery"
+    assert claimed["test_dearer_spawn_scrubs_the_token"][0] != "D6_machinery"
+    assert claimed["test_event_pin_keeps_the_token_out"][0] != "D5_event_file"
     assert next(row for row in rows if row["qual"] == "test_cheap_world")["survivor"] == "test_costly_world"
     report = census.totals(rows)
     assert report["deleted"]["items_removed"] == 1 + 3 + 2 + 5 + 1 + 1
-    assert report["folded"]["items_removed"] == 7 + 1 + 1  # the two refused wording pins share a world
-    assert report["composite"]["items_removed"] == report["deleted"]["items_removed"] + 9
+    # the two refused wording pins share a world, and so do the three gate tests no rule retired
+    assert report["folded"]["items_removed"] == 7 + 1 + 1 + 2
+    assert report["composite"]["items_removed"] == report["deleted"]["items_removed"] + 11
 
 
 def test_a_rerun_gives_the_same_bytes_from_journal_and_collection(tmp_path):
@@ -245,6 +272,11 @@ def test_the_digest_answers_what_a_deletion_loses(tmp_path):
     (tmp_path / "shard1" / ".coverage.killed").write_bytes(b"not a database")
     _coverage_file(tmp_path / "shard2" / ".coverage", [(checkout, f"{three}|teardown", [6, 10])])
     folds = [cov.fold(tmp_path / "shard1", tmp_path), cov.fold(tmp_path / "shard2", tmp_path)]
+    # Every product root is measured, the launcher and the bundled skills too; a test file never is.
+    _write_tree(tmp_path, {"launcher.py": "", "skills/telegram/plugin.py": "", "tests/test_a.py": ""})
+    assert cov._product_file(tmp_path, "/runner/copy/launcher.py") == "launcher.py"
+    assert cov._product_file(tmp_path, "/runner/copy/skills/telegram/plugin.py") == "skills/telegram/plugin.py"
+    assert cov._product_file(tmp_path, "/runner/copy/tests/test_a.py") == ""
     assert [fold["unreadable"] for fold in folds] == [1, 0]
     report = cov.digest(folds)
     assert report["totals"] == {"tests_measured": 3, "lines_covered": 3, "covering_sets": 3, "kept_sets": 2,

@@ -185,6 +185,7 @@ _NAMED, _TIME = {"kind": "task", "name": "Draft the notes"}, {"kind": "time", "a
     ({"tasks": ["gone"]}, "Sleeping until the task it chose finishes", [{"kind": "tasks", "count": 1}]),
     # Every source it chose is said, joined by "or", its time last: a time alone also wakes on any message.
     ({"wake_at": _AT, "any_mail": True}, f"Sleeping until a message arrives or {_AT}", [{"kind": "mail"}, _TIME]),
+    ({"mode": "warm"}, "Sleeping until it is woken", None),
 ])
 def test_a_sleep_says_what_it_chose_to_wait_for(sleep, text, wake):
     names = {"kid": "Draft the notes", "x": ""}

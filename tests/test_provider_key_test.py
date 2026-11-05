@@ -88,11 +88,8 @@ def _bypass_accounting(monkeypatch):
     return observed
 
 
-@pytest.mark.parametrize(("consumer", "slot"), [
-    ("credential-plan", "safety"),
-    ("credential-plan", "main"),
-    ("provider-test", "light"),
-])
+@pytest.mark.parametrize("slot", ["safety", "light", "main"])
+@pytest.mark.parametrize("consumer", ["credential-plan", "provider-test"])
 def test_safety_routes_reach_credential_plan_and_provider_test_without_losing_inheritance(install, monkeypatch, slot, consumer):
     from ouroboros import config
     from ouroboros.model_slots import get_safety_model
@@ -400,6 +397,7 @@ def test_explicit_settings_mapping_is_authoritative(monkeypatch, model, settings
             "CLAUDE_CODE_MODEL": "claude-name-only",
         }, "anthropic::light"),
         ("cloudru", {}, "cloudru::zai-org/GLM-4.7"),
+        ("openai-compatible", {}, ""),
     ],
 )
 def test_provider_test_model_selection(provider, settings, expected):

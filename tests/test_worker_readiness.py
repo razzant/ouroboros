@@ -374,9 +374,13 @@ def sha_history(pool):
 
 
 @pytest.mark.parametrize("expected,observed,relation,warn", [
+    ("baseline", "baseline", "equal", False),
+    ("baseline", "descendant", "descendant", False),
     ("baseline", "other", "non_descendant", True),
     ("baseline", "missing", "unavailable", True),
     ("baseline", "absent", "unavailable", True),
+    ("absent", "descendant", "not_applicable", False),
+    ("absent", "absent", "not_applicable", False),
 ])
 def test_checkout_relation_is_a_fact_not_a_worker_admission_gate(
     pool, seam, monkeypatch, sha_history, expected, observed, relation, warn,

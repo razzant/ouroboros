@@ -60,6 +60,7 @@ def test_manifest_without_section_is_none_and_not_extra():
 @pytest.mark.parametrize("bad_section, expected_problem_bit", [
     ({"wat": "x"}, "unknown keys"),
     ({"what_model_sees": ["not", "prose"]}, "must be a prose string"),
+    ({}, "at least one non-empty prose field"),
     # Same teaching error for the STRING form: a section the author filled in
     # with nothing but whitespace was accepted and stored as empty prose, so
     # every model-visible surface rendered a "Model experience:" label with no

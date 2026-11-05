@@ -316,6 +316,10 @@ def test_a_wake_landing_before_the_roots_final_close_reopens_it_and_one_after_is
 @pytest.mark.parametrize("name,wakes,where,arrival,expected", [
     ("slack thread, untagged", ("mention",), {"thread": "1.0"}, {"thread": "1.0"}, True),
     ("another thread", ("mention",), {"thread": "1.0"}, {"thread": "2.0"}, None),
+    ("threadless group chatter", ("mention",), {"thread": ""}, {"thread": "", "facts": ("any_message",)}, None),
+    ("a deletion in its thread", ("mention",), {"thread": "1.0"}, {"thread": "1.0", "text": "", "facts": ()}, None),
+    ("a bot outside the selection", ("mention",), {"thread": "1.0"},
+     {"thread": "1.0", "facts": ("any_message", "from_bot"), "actor": {"platform_actor_id": "B1", "is_bot": True}}, None),
     ("a bot in the selected channel", ("mention", "from_bot"), {"thread": "1.0"},
      {"thread": "1.0", "facts": ("any_message", "from_bot"), "actor": {"platform_actor_id": "B1", "is_bot": True}}, True),
 ])

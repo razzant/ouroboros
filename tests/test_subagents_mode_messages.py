@@ -113,6 +113,8 @@ def test_room_annotations_survive_unavailable_project(room_state, surface, monke
 
 @pytest.mark.parametrize(("project", "availability", "mode"), [
     (False, "available", "off"),
+    (False, "available", "auto"),  # the recorded mode follows the owner's choice: one available row per mode
+    (True, "available", "swarm"),
     (False, "unsaved", "swarm"),
     (True, "disabled", "auto"),
 ])

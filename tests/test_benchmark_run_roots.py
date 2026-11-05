@@ -10,6 +10,7 @@ from devtools.benchmarks.common.run_roots import _comparison_path, safe_join_und
 @pytest.mark.parametrize(("base", "child", "inside"), [
     (r"C:\runs\root", r"\\?\C:\runs\root\task", True),
     (r"C:\runs\root", r"\\?\C:\runs\root-other\task", False),
+    (r"C:\runs\root", r"\\?\D:\runs\root\task", False),
     (r"\\server\share\root", r"\\?\UNC\server\other\root\task", False),
 ])
 def test_windows_resolved_namespace_containment(base, child, inside):

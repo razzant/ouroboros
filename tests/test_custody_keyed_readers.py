@@ -380,7 +380,7 @@ def _answer(result):
     return status, extra, None if entry is None else vars(entry)
 
 
-@pytest.mark.parametrize("run_id", ["run-own", "run-missing", " run-own"])
+@pytest.mark.parametrize("run_id", ["run-own", "run-missing", "", None, " run-own"])
 def test_retry_result_status_answers_as_over_every_row(tmp_path, run_id):
     from ouroboros.delegate_shared import retry_result_status
 
@@ -398,6 +398,9 @@ _STALE = custody.RunCustody(run_id="", task_id="reader", settled=True, snapshot_
     ("run-snapshot", {}, False),
     ("run-snapshot", {}, True),
     ("run-snapshot", {"run-snapshot": _STALE}, False),   # a stale memo is replaced by the durable row
+    ("run-ghost", {"run-ghost": _STALE}, False),         # no durable row: the stale memo still answers
+    ("run-ghost", {}, False),
+    ("run-snapshot", {"run-other": _STALE}, False),      # an unrelated entry neither moves nor multiplies
 ])
 def test_orphan_disposition_keeps_its_one_memo_seed(tmp_path, monkeypatch, run_id, memo, owner_terminal):
     from ouroboros.delegate_shared import orphan_disposition_status

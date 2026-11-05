@@ -10,7 +10,8 @@ from tests.test_owner_stop_retained_work import (
 )
 
 
-@pytest.mark.parametrize(("fail_once", "owner"), [(True, "kid"), (False, "parent1")])
+@pytest.mark.parametrize("owner", ["parent1", "kid"])
+@pytest.mark.parametrize("fail_once", [True, False])
 def test_recapture_snapshot_failure_keeps_verified_run_facts(tmp_path, monkeypatch, owner, fail_once):
     write_task_result(tmp_path, "parent1", "running")
     _child(tmp_path, result="child answer")

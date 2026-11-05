@@ -71,7 +71,7 @@ def test_pins_name_official_archives_outside_playwright_garbage_collection():
 
 @pytest.mark.parametrize("system,machine,platform", [
     ("darwin", "arm64", "mac-arm64"), ("darwin", "x86_64", "mac-x64"),
-    ("win32", "AMD64", "win64"),
+    ("linux", "x86_64", "linux64"), ("win32", "AMD64", "win64"),
 ])
 def test_each_supported_host_has_its_pin(system, machine, platform):
     assert chromium_runtime.host_pin(system=system, machine=machine).platform == platform
@@ -84,7 +84,7 @@ def test_an_unpinned_host_is_refused():
 
 
 @pytest.mark.parametrize("release,refused", [
-    ("12.7.6", True), ("12", True), ("", False),
+    ("12.7.6", True), ("12", True), ("13", False), ("13.0", False), ("26.4.1", False), ("", False),
 ])
 def test_a_mac_below_the_builds_own_minimum_is_refused(release, refused):
     pin = chromium_runtime.PINS["mac-arm64"]
@@ -215,7 +215,7 @@ def test_the_cli_prints_the_url_and_installs_from_an_archive(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize("value,enabled", [
-    (None, True), ("off", False), ("No", False),
+    (None, True), ("off", False), ("0", False), ("false", False), ("No", False),
 ])
 def test_the_sandbox_is_on_unless_explicitly_opted_out(value, enabled):
     environ = {} if value is None else {chromium_runtime.SANDBOX_ENV: value}

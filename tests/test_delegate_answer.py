@@ -352,7 +352,7 @@ def test_already_resolved_tells_the_nanny_not_to_repost(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("status,code,accepted", [
     ("delivered", 200, True), ("already_resolved", 409, False),
-    ("not_found", 404, False),
+    ("not_found", 404, False), ("rejected", 409, False),
 ])
 def test_wire_answer_outcome_reaches_the_nanny(tmp_path, monkeypatch, status, code, accepted):
     import httpx

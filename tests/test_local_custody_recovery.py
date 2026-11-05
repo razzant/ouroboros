@@ -96,6 +96,9 @@ _BOOT = "0123456789abcdef0123456789abcdef"
     (f"812.{_BOOT}", f"811.{_BOOT}", True),            # boot-qualified ticks of another process
     ("812.", "811", True),                               # boot-relative ticks, both spellings
     ("812.", "812", False),                              # one identity, two spellings
+    (f"812.{_BOOT}", "811", False),                      # different kinds prove nothing
+    ("Thu Oct  8 17:18:45 2026", "Thu Oct  8 14:18:45 2026", False),  # wall clock: never proof
+    ("Thu Oct  8 17:18:45 2026", "812", False),
 ])
 def test_only_a_validated_birth_identity_can_prove_a_different_process(monkeypatch, live, recorded, ended):
     monkeypatch.setattr(platform_layer, "process_start_time", lambda _pid: live)
@@ -127,7 +130,7 @@ def test_two_timezone_readings_of_this_living_process_are_not_its_death(monkeypa
 
 
 @pytest.mark.parametrize("state,gone", [("no_such_pid", True), ("denied", False),
-                                        ("running", False)])
+                                        ("error", False), ("unreadable", False), ("running", False)])
 def test_windows_absence_is_only_no_such_pid_or_a_read_exit_code(monkeypatch, state, gone):
     monkeypatch.setattr(platform_layer, "IS_WINDOWS", True)
     monkeypatch.setattr(platform_layer, "_windows_process_state", lambda _pid: state)

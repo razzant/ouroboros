@@ -155,7 +155,8 @@ def test_changed_canonical_view_during_failed_fit_can_retry(host_world, record_p
     asyncio.run(host.session(consume, LiveOptions()))
 
 
-@pytest.mark.parametrize(("kind", "large"), [('mail', False), ('offer', True), ('tools', False)])
+@pytest.mark.parametrize('large', [False, True])
+@pytest.mark.parametrize('kind', ['mail', 'offer', 'tools'])
 def test_failed_fit_delivery_uses_serving_room_and_keeps_obligation(host_world, large, kind):
     from types import SimpleNamespace
     from ouroboros.contracts.realtime import RealtimeSetupError

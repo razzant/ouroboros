@@ -146,7 +146,12 @@ def test_unresolved_attempt_is_refused_whatever_authored_its_terminal(tmp_path, 
 @pytest.mark.parametrize("origin,frozen,outcome,expected", [
     ("host_notice", "Old frozen diagnostic", "message", ""),
     ("host_salvage", "Old frozen partial", "deferred", ""),
+    ("host_notice", None, "message", ""),
+    ("model_final", "", "deferred", ""),
+    ("", "", "deferred", ""),
     ("model_final", provider_terminal_body("Raw retained text", "Recorded host detail"), "message", "Raw retained text"),
+    ("model_final", "Unused text", "silent", ""),
+    ("model_final", "Unused text", "tool_delivered", ""),
 ])
 def test_cached_and_deferred_api_share_authorship_and_keyed_empty_body(tmp_path, origin, frozen, outcome, expected):
     _seed_token(tmp_path, skill="telegram-bot", token="presence-token",

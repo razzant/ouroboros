@@ -138,6 +138,7 @@ def test_legacy_adapter_maps_host_owned_first_line(
     (
         ("plain success", "⚠️ AUTO_ROUTED_TO_ACTIVE_WORKSPACE: fixture", "", "ok", "OK", {"route_note": True}),
         (ToolResult(status="error", code="TOOL_ERROR", text="⚠️ TOOL_ERROR: failed", meta={"base": 1}), "route", "", "error", "TOOL_ERROR", {"base": 1, "route_note": True}),
+        ("plain success", "", "⚠️ SAFETY_WARNING: inspect", "ok", "SAFETY_WARNING", {}),
         # Since #447 H1 the host appends notes AFTER the payload and inserts no
         # "---" wrapper of its own, so a separator in either half is the
         # producer's own markdown rule and decides nothing. The composer still

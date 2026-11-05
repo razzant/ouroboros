@@ -220,15 +220,9 @@ class TestSupervisorPhotoChatZero:
         assert sent == [0]
 
 
-@pytest.mark.parametrize(("name", "frame_type", "move"), [
-    ("send_user_message", "chat", False),
-    ("send_photo", "photo", True),
-    ("send_video", "video", True),
-    ("send_file", "document", False),
-    ("send_file", "document", "unread"),
-    ("send_links", "links", "unread"),
-    ("show_card", "card", False),
-])
+@pytest.mark.parametrize("move", [False, True, "unread"])
+@pytest.mark.parametrize("name, frame_type", [("send_user_message", "chat"), ("send_photo", "photo"),
+    ("send_video", "video"), ("send_file", "document"), ("send_links", "links"), ("show_card", "card")])
 def test_peer_receipt_follows_public_project_placement_and_real_delivery(runtime, monkeypatch, move, name, frame_type):
     """A raw peer id remains deferred, but the delivery consumer resolves a later Project binding."""
     import base64

@@ -93,6 +93,8 @@ def mail(root):
 
 @pytest.mark.parametrize("wakes,actor,facts", [
     (["any_message"], USER, []),
+    (["any_message"], CHAT, []),
+    (["any_message"], ANON, []),
     (["mention"], USER, ["mention"]),  # a connector's claimed fact does not make a reaction a wake
     (["direct_message"], USER, ["direct_message"]),
 ])

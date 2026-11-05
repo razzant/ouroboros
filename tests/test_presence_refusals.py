@@ -780,6 +780,15 @@ def test_deferred_work_view_never_delivers_a_salvaged_draft_of_a_refused_attempt
     # Confirmed infrastructure terminals keep the deferred projection instead of a refusal.
     ({"status": "failed", "terminal_origin": "host_notice", "reason_code": "provider_unavailable",
       "outcome_axes": _INFRA_OUTAGE}, ""),
+    ({"status": "failed", "terminal_origin": "model_final", "reason_code": "provider_unavailable",
+      "outcome_axes": _INFRA_OUTAGE}, ""),
+    ({"status": "failed", "terminal_origin": "host_notice", "reason_code": "llm_api_error",
+      "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "llm_api_error",
+                                     "failure": {"kind": "provider", "error_kind": "context_overflow"}}}}, ""),
+    # A model final the axis reducer relabelled from a legacy diagnostic prefix is still the model's reply.
+    ({"status": "failed", "terminal_origin": "model_final", "reason_code": "provider_failure",
+      "result": "⚠️ Failed to get a response is what I would tell them.",
+      "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "provider_failure"}}}, ""),
 ])
 def test_terminal_refusal_keys_on_provenance_not_on_the_infra_failed_axis(row, expected):
     from ouroboros.presence_runner import _terminal_refusal

@@ -99,6 +99,8 @@ def test_progress_is_passive_and_stage_notifications_are_not_boot_ready(isolated
     ({"error": "writers remain", "restart_required": True}, 409, "failed", "not_applied"),
     ({"error": "rollback failed", "rolled_back": False, "restart_required": True}, 500, "failed", "not_applied"),
     ({"status": "restart_required", "error": "callback unavailable"}, 200, "restart_required", ""),
+    ({"status": "assisted_started", "task_id": "resolver"}, 200, "assisted_started", ""),
+    ({"status": "ok", "restarting": True}, 200, "restart_requested", ""),
 ])
 def test_executor_result_survives_panel_reopen(isolated_progress, body, code, result, outcome):
     @progress.observe_result
@@ -479,6 +481,7 @@ def test_returned_refs_notes_and_blockers_stay_whole(isolated_progress):
 
 @pytest.mark.parametrize("result,bootstrap_ok,baseline,expected", [
     ({"finalized": True, **_seen("applied")}, True, "c" * 40, ("applied", "")),
+    ({"finalized": True, **_seen("applied")}, False, "c" * 40, ("unknown", "startup_unconfirmed")),
     ({"finalized": True, **_seen("rolled_back", commit="a" * 40)}, True, "a" * 40, ("rolled_back", "")),
     ({"abandoned": True, **_seen("not_applied", commit="a" * 40)}, True, "a" * 40, ("not_applied", "")),
 ])
@@ -500,7 +503,11 @@ def test_the_same_server_never_borrows_a_boot_conclusion(isolated_progress, monk
 @pytest.mark.parametrize('fields,outcome', [
     ({'stash_restore': {'context': 'boot_finalize'}}, 'applied'),
     ({'stash_restore': {'context': 'boot_diverged_abandon'}}, ''),
+    ({'stash_restore': {'context': 'boot_restore_resume', 'evidence': {'interrupted': {'context': 'boot_diverged_abandon'}}}}, ''),
+    ({'stash_restore': {'context': 'boot_restore_resume'}}, ''),
     ({'gate_blocked_reason': 'replace_abandon_tx_cleanup_failed'}, 'not_applied'),
+    ({'gate_blocked_reason': 'stash_marker_cleanup_failed', 'gate_blocked_from_phase': 'assisted_resolution'}, ''),
+    ({'gate_blocked_from_phase': 'pending_boot_smoke'}, ''),
 ])
 def test_cleanup_keeps_only_an_already_established_meaning(fields, outcome):
     from supervisor.update_merge import _cleanup_observed

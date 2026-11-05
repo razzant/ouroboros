@@ -328,7 +328,7 @@ def _turn_payload(binding_id):
     }}
 
 
-@pytest.mark.parametrize("requested,actual", [(None, 0), (1, 1), (1, 0)])
+@pytest.mark.parametrize("requested,actual", [(None, 0), (0, 0), (1, 1), (1, 0)])
 def test_host_negotiates_and_echoes_actual_original_mode(tmp_path, requested, actual):
     _seed_token(tmp_path, skill="telegram-bot", token="receipt-token",
                 permissions=["presence"], manifest_permissions=["presence"])

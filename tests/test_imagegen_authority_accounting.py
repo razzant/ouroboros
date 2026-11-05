@@ -65,11 +65,8 @@ def test_direct_image_discloses_pending_accounting_and_recovers_same_attempt(
         assert facts["warnings"] == warnings
 
 
-@pytest.mark.parametrize(("tool", "level"), [
-    ("generate_image", "observe"),
-    ("generate_image", "normal"),
-    ("recover_image", "act"),
-])
+@pytest.mark.parametrize("level", ["observe", "act", "normal"])
+@pytest.mark.parametrize("tool", ["generate_image", "recover_image"])
 def test_image_world_writes_follow_observe_dispatch_authority(ctx, monkeypatch, level, tool):
     calls = []
 

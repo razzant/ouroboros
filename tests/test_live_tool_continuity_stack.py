@@ -234,7 +234,7 @@ def test_completion_while_a_successor_prepares_refits_instead_of_replaying_its_c
 
 
 @pytest.mark.parametrize('engine,control,dropped', [
-    ('openai', 'end', False), ('grok', 'end', True),
+    ('openai', 'end', False), ('openai', 'stop', False), ('grok', 'end', True),
     ('gemini', 'stop', False)])
 def test_end_or_stop_during_a_running_tool_keeps_custody_and_starts_nothing_queued(host_world, monkeypatch, engine,
                                                                                   control, dropped):
@@ -319,7 +319,7 @@ def test_a_true_refusal_while_a_tool_runs_stays_terminal_and_keeps_custody(host_
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('thinking,handle', [(False, ''), (False, 'before-call'), (True, 'before-call')])
+@pytest.mark.parametrize('thinking,handle', [(False, ''), (True, ''), (False, 'before-call'), (True, 'before-call')])
 def test_gemini_expiry_during_a_long_tool_continues_fresh_without_a_covering_handle(host_world, monkeypatch, thinking,
                                                                                     handle):
     from tests._live_stack import stack
@@ -480,7 +480,7 @@ def test_a_frame_shared_while_a_tool_runs_reaches_the_fresh_connection(host_worl
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,handle', [('openai', ''), ('openai', 'cut'), ('gemini', 'before-write')])
+@pytest.mark.parametrize('engine,handle', [('openai', ''), ('gemini', ''), ('openai', 'cut'), ('gemini', 'before-write')])
 def test_a_result_written_just_before_a_drop_is_answered_once(host_world, monkeypatch, engine, handle):
     from tests._live_stack import stack
 
@@ -561,7 +561,8 @@ def test_a_handle_withdrawn_at_the_resume_boundary_starts_a_fresh_conversation(h
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,held,handle', [('openai', False, ''), ('grok', True, ''), ('gemini', False, 'covering')])
+@pytest.mark.parametrize('engine,held,handle', [('openai', False, ''), ('grok', True, ''), ('gemini', True, ''),
+                                                ('gemini', False, 'covering')])
 def test_a_drop_while_the_owner_speaks_leaves_a_hearing_gap_fact_never_owner_words(host_world, monkeypatch, engine, held,
                                                                                     handle):
     from tests._live_stack import stack
@@ -667,7 +668,7 @@ def test_a_queued_view_request_answers_to_the_view_that_issued_it(host_world, mo
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,thinking', [('openai', False), ('grok', False), ('gemini', True)])
+@pytest.mark.parametrize('engine,thinking', [('openai', False), ('grok', False), ('gemini', False), ('gemini', True)])
 def test_an_answered_result_owes_nothing_after_a_later_drop(host_world, monkeypatch, engine, thinking):
     from tests._live_stack import stack
     answer = 'Answered the result once.'
@@ -868,7 +869,8 @@ def test_only_a_turn_begun_after_delivery_settles_a_written_result(host_world, m
 
 
 @pytest.mark.parametrize('engine,thinking,answered', [
-    ('openai', False, False), ('openai', False, True), ('gemini', True, True)])
+    ('openai', False, False), ('grok', False, False), ('gemini', False, False), ('gemini', True, False),
+    ('openai', False, True), ('gemini', True, True)])
 def test_an_unanswered_result_stays_owed_across_successive_fresh_losses(host_world, monkeypatch, engine, thinking, answered):
     """Through real adapters: a fresh session's pointer carries the result's answer obligation. Unanswered when
     that session drops, the next fresh session is owed the same one pointer; answered there, a later drop is silent."""

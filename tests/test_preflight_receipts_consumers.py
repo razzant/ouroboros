@@ -35,6 +35,7 @@ from tests.test_preflight_receipts import (  # noqa: F401 -- gate_env: the share
 )
 from tests.test_review_change_end_to_end import _brief_text
 from tests.test_review_change_end_to_end import staged_body as _staged_body
+from ouroboros.test_evidence import diagnostic_directory
 
 staged_body = _staged_body
 
@@ -341,6 +342,35 @@ def test_the_contributor_lane_hands_every_seat_its_tested_base_before_dispatch(t
     assert exhibit["lanes"] == [] and "passed; which of its lanes ran tests is not disclosed." in section
     assert run.briefs and all(_brief_text(brief).count(section) == 1 for brief in run.briefs)
     assert evidence and all(item["preflight_execution"] == exhibit for item in evidence)
+
+
+def test_a_contributor_rerun_on_the_same_review_drive_reuses_the_proposals_run(tmp_path, monkeypatch, physical_passes):
+    import scripts.run_external_review as module
+    from ouroboros.tools.registry import ToolContext
+
+    receipts.capture_executing_source_baseline()
+    repo = _tiny_repo(tmp_path)
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "tests" / "test_proposal.py").write_text("def test_proposal():\n    assert 2 + 2 == 4\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "proposal")
+    head, head_tree = _git(repo, "rev-parse", "HEAD"), _git(repo, "rev-parse", "HEAD^{tree}")
+    _git(repo, "checkout", "-q", "--detach", base)
+    monkeypatch.setattr(module, "REPO", repo)
+    # The wrapper's persistent review drive lives outside this test's disposable scratch.
+    drive = diagnostic_directory(tmp_path / "review-drive", "contributor-rerun")
+    proposal = {"base_sha": base, "head_sha": head}
+
+    first, refusal = module._contributor_tests_preflight(ToolContext(repo_dir=repo, drive_root=drive), proposal,
+                                                         review_drive_root=drive)
+    assert refusal == {} and len(physical_passes) == 2
+    again, refusal = module._contributor_tests_preflight(ToolContext(repo_dir=repo, drive_root=drive), proposal,
+                                                         review_drive_root=drive)
+    assert refusal == {} and len(physical_passes) == 2
+
+    assert (first["preflight_execution"]["evidence"], again["preflight_execution"]["evidence"]) == ("executed", "receipt")
+    for exhibit in (first["preflight_execution"], again["preflight_execution"]):
+        assert (exhibit["tested"]["head"], exhibit["tested"]["tree"]) == (base, head_tree)
 
 
 def _foreign_review(tmp_path, monkeypatch):
@@ -689,6 +719,59 @@ def test_a_first_lane_whose_launch_failed_is_never_reported_started_or_passed(tm
     assert "PASSED" not in section
     if lane != "pytest":
         assert "INTERRUPTED" not in section and "a lane process started" not in section
+
+
+def test_a_pending_wave_rejoins_with_the_whole_runner_diagnosis_its_seats_were_sent(tmp_path, monkeypatch):
+    """A red run whose decisive failing test is named past a preview-sized prefix: every seat
+    of the first dispatch, packet, native and session, reads the whole diagnosis, and the
+    pending rejoin collects under that same frozen exhibit, buying nothing."""
+    import ouroboros.review_substrate as substrate
+    from ouroboros.tools.review_change import run_review_change
+    from tests.test_preflight_receipts import _ctx
+    from tests.test_review_change_end_to_end import _foreign_project, _pending_then_answering_seat
+
+    ctx, project = _foreign_project(tmp_path, monkeypatch)
+    (project / "pytest.ini").write_text("[pytest]\nmarkers =\n    serial: serial lane\n", encoding="utf-8")
+    (project / "tests").mkdir()
+    (project / "tests" / "test_app.py").write_text(_NOISY_RED_SUITE, encoding="utf-8")
+    (project / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n", encoding="utf-8")
+    shared.git(project, "add", "-A")
+    shared.git(project, "commit", "-q", "-m", "suite")
+    (project / "app.py").write_text("VALUE = 2  # staged\n", encoding="utf-8")
+    shared.git(project, "add", "app.py")
+    author = _ctx(project, tmp_path / "canonical")  # the author's own process ran the suite
+    assert pr.run_hermetic_pytest(project, ctx=author)
+    exhibit = receipts.execution_exhibit(author, otherwise="tests preflight did not pass")
+    sends, seats = [], []
+    answer, _starts = _pending_then_answering_seat("t2", "invocation-c2")
+    physical = shared.golden_physical_seam(sends, answer=answer)
+
+    def run_slot(self, request, slot, **kwargs):
+        seats.append({"slot_id": slot.slot_id, "messages": [dict(m) for m in request.messages],
+                      "session_task": request.session_task or ""})
+        return physical(self, request, slot, **kwargs)
+
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", run_slot)
+    ask = dict(subject="index", goal="Bump", scope="app.py")
+
+    first = run_review_change(ctx, **ask, _preflight_execution=exhibit)
+
+    assert first["state"] == "pending", first
+    frozen = review_ledger.load_record(ctx.drive_root, first["record_id"])["preflight_execution"]
+    [run] = frozen["observed"]
+    assert (run["outcome"], run["relation"]) == ("failed", "same_bytes")
+    assert run["diagnosis"] == _whole_diagnosis(run)
+    section = receipts.execution_section(frozen)
+    assert "test_z_decisive_failure" in section
+    dispatched = list(seats)
+    assert sorted(seat["slot_id"] for seat in dispatched) == ["s1", "t1", "t2"]
+    assert all(_brief_text(seat).count(section) == 1 for seat in dispatched)
+
+    rerun = run_review_change(ctx, **ask, _preflight_execution={"status": "not_run", "reason": "a later fact"})
+
+    assert (rerun["state"], rerun["record_id"]) == ("settled", first["record_id"]), rerun
+    assert len(sends) == 4 and sends[3]["reconcile_only"]
+    assert review_ledger.load_record(ctx.drive_root, rerun["record_id"])["preflight_execution"] == frozen
 
 
 def test_a_preparation_finding_reaches_the_seats_whole_as_quoted_data_with_credentials_redacted():

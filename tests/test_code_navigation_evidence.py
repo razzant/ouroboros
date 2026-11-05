@@ -312,6 +312,7 @@ def _generic(field=None):
     (_Node("element_access_expression", _Node("identifier", text="getters", field="expression"),
            _Node("bracketed_argument_list", _Node("argument", _Node("identifier", text="key")), field="subscript"),
            field="function"), None),
+    (_Node("generic_name", _Node("type_argument_list", _Node("predefined_type", text="int")), field="function"), None),
 ])
 def test_shared_callee_leaf_skips_only_type_arguments(callee, leaf):
     from ouroboros import code_intelligence as ci

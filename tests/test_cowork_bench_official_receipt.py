@@ -92,6 +92,8 @@ def test_every_branch_keeps_the_exact_receipt_and_its_status(subtests, tmp_path)
     ({"pass": True}, "passed", "passed", "completed"),
     ({"pass": False, "failure": "verifier output"}, "failed", "verifier_failed", "completed"),
     ({"pass": None}, "infra_failed", "missing_eval_result", "unknown"),
+    ({}, "infra_failed", "missing_eval_result", "invalid"),
+    (None, "infra_failed", "missing_eval_result", "unreported"),
 ])
 def test_successful_agent_phase_scores_only_a_literal_boolean(tmp_path, payload, status, reason, official):
     write_raw(tmp_path / "ouroboros_summary.json", dump_json({"bench_status": "success"}))

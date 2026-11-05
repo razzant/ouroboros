@@ -638,7 +638,8 @@ async def speak(host, session, response, *, start=True, continues=False):
 
 
 @pytest.mark.parametrize('case,owed', [
-    ('answer', 0), ('call_turn_speaks_after', 1), ('answer_begun_before_a_second_result', 1)])
+    ('answer', 0), ('answer_while_sending', 0), ('queued_then_answer', 0), ('thinking_then_answer', 0),
+    ('thinking_then_idle', 0), ('call_turn_speaks_after', 1), ('answer_begun_before_a_second_result', 1)])
 def test_only_a_response_begun_after_delivery_settles_its_result(case, owed):
     """A written ordinary result is answered by a response the driver saw begin after the adapter held that
     result, once it finishes without continuing. Speech, transcript tails and receipts carry no such identity:

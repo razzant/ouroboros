@@ -78,7 +78,9 @@ def test_missing_id_reason_and_withdrawal_refuse_without_writes(root):
 
 
 @pytest.mark.parametrize("fields,rearmed", [
-    ({"name": "History"}, False), ({"trigger": {"type": "once", "run_at": "2099-01-01T00:00:00+00:00"}}, True),
+    ({"name": "History"}, False), ({"timezone": "Europe/Paris"}, False),
+    ({"trigger": {"type": "once", "run_at": "2026-09-21T15:00:00+03:00"}}, False),
+    ({"trigger": {"type": "once", "run_at": "2099-01-01T00:00:00+00:00"}}, True),
     ({"trigger": {"type": "cron", "expr": "0 9 * * *"}}, True),
 ])
 def test_consumed_rearm_requires_a_new_trigger(root, fields, rearmed):

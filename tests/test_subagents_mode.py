@@ -51,6 +51,7 @@ def test_legacy_room_missing_mode_reads_auto_even_when_main_is_swarm(room_settin
 
 @pytest.mark.parametrize("body,status,code", [
     ({"mode": "invalid"}, 400, "subagents_mode_invalid"),
+    ([], 400, "subagents_mode_invalid"),
     ({"mode": "auto", "project_id": "../bad"}, 400, "subagents_mode_invalid"),
     ({"mode": "auto", "project_id": "missing"}, 404, "project_unavailable"),
 ])

@@ -138,7 +138,8 @@ def test_retirement_rechecks_capture_after_waiting_for_native_custody(case, monk
                                    live=live, only={"native"})["removed"] == 1
 
 
-@pytest.mark.parametrize(("refresh", "decision"), [(True, "apply"), (False, "reject")])
+@pytest.mark.parametrize("decision", ["apply", "reject"])
+@pytest.mark.parametrize("refresh", [True, False])
 def test_native_decision_binds_consumed_capture_during_orphan_apply(case, monkeypatch, decision, refresh):
     import json
     from ouroboros.artifacts import task_artifact_dir_path

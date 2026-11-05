@@ -809,6 +809,8 @@ def test_contributor_proposal_binds_clean_base_head_and_tree(tmp_path, monkeypat
          "pyproject.project.version"),
         ("uv.lock", 'version = "1.2.3"', 'version = "1.2.4"',
          "uv.editable_root.version"),
+        ("README.md", "v1.2.3/Ouroboros-1.2.3.dmg",
+         "v1.2.4/Ouroboros-1.2.4.dmg", "readme.download.macos-arm64.0"),
     ],
 )
 def test_contributor_proposal_rejects_every_version_carrier(

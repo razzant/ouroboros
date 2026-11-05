@@ -568,9 +568,13 @@ def _full_status_engine(engine, monkeypatch, *, operations=None):
 
 @pytest.mark.parametrize("body,state,code,unified", [
     ({"profiles": [_NAMED], "harnessAccounts": [], "accountPools": [_POOL]}, "ok", None, True),
+    ({"profiles": [_NAMED], "accountPools": [_POOL]}, "ok", None, True),
+    ({"profiles": [_NAMED], "harnessAccounts": [_NATIVE], "accountPools": [_POOL]}, "ok", None, True),
+    ({"profiles": [], "harnessAccounts": [], "accountPools": []}, "ok", None, True),
     ({"profiles": [_NAMED], "harnessAccounts": [_NATIVE]}, "failed", "account_model_unsupported", False),
     ({"profiles": [_NAMED]}, "failed", "malformed_response", False),
-], ids=["unified", "legacy-native-and-named", "no-model-carrier"])
+], ids=["unified", "unified-without-legacy-carrier", "poisoned-hybrid", "valid-empty-unified",
+        "legacy-native-and-named", "no-model-carrier"])
 def test_full_status_and_passive_read_make_one_account_model_decision(
     passive_engine, monkeypatch, body, state, code, unified,
 ):

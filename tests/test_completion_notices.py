@@ -105,6 +105,9 @@ def test_actual_outcome_summary_and_phone(case, fragment, tmp_path, monkeypatch)
 @pytest.mark.parametrize("trigger,enforcement,obligations,expected_neutral", [
     ("auto_effect", "advisory", [], True),
     ("required_effect", "advisory", [], False),
+    ("auto_effect", "blocking", [], False),
+    ("auto_effect", "advisory", ["unmet-review"], False),
+    ("", "advisory", [], False),
     ("auto_effect", "", [], False),
 ])
 def test_recorded_author_completion_and_review_obligations(trigger, enforcement, obligations, expected_neutral):

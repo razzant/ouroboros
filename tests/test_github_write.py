@@ -208,7 +208,8 @@ def test_resolve_thread_is_a_graphql_mutation_read_back_by_its_state(gh, state, 
 
 
 # ---- api ---------------------------------------------------------------------------------------------
-@pytest.mark.parametrize("verb,route,actor", [("PATCH", "issues/7", None), ("POST", "issues/7/comments", "alice"), ("POST", "issues/7/assignees", None)])
+@pytest.mark.parametrize("verb,route,actor", [("PATCH", "issues/7", None), ("PATCH", "issues/comments/3", None),
+                                           ("POST", "issues/7/comments", "alice"), ("POST", "issues/7/assignees", None)])
 def test_api_attributes_created_objects_but_not_modified_targets(gh, verb, route, actor):
     gh.answer = lambda p, argv, kw: json.dumps(_comment(3))
     _line, receipt = _receipt(gh.write(method="api", http_method=verb, route="repos/{owner}/{repo}/" + route))
@@ -402,11 +403,12 @@ def test_github_producers_keep_their_typed_loop_outcomes(gh, monkeypatch, identi
 
 
 # ---- outcomes: not_applied and unknown -------------------------------------------------------------------
-@pytest.mark.parametrize(("author", "method", "args", "row"), [
-    pytest.param("someone-else", "comment", {"target": 7, "body": "Thanks!"}, _comment(3, body="Thanks!"), id='someone-else-comment-args0-row0'),
-    pytest.param("someone-else", "review", {"target": 7, "event": "APPROVE"}, {"id": 5, "body": "", "state": "APPROVED", "submitted_at": "2026-10-22T09:59:30Z"}, id='someone-else-review-args2-row2'),
-    pytest.param("ouroboros-agent", "create_issue", {"title": "Same", "body": "Same"}, _issue(4, title="Same", body="Same"), id='ouroboros-agent-create_issue-args1-row1'),
+@pytest.mark.parametrize("method,args,row", [
+    ("comment", {"target": 7, "body": "Thanks!"}, _comment(3, body="Thanks!")),
+    ("create_issue", {"title": "Same", "body": "Same"}, _issue(4, title="Same", body="Same")),
+    ("review", {"target": 7, "event": "APPROVE"}, {"id": 5, "body": "", "state": "APPROVED", "submitted_at": "2026-10-22T09:59:30Z"}),
 ])
+@pytest.mark.parametrize("author", ["someone-else", "ouroboros-agent"])
 def test_unanswered_create_confirms_only_the_acting_authors_row(gh, method, args, row, author):
     gh.answer = lambda p, argv, kw: subprocess.TimeoutExpired(["gh"], 60) if p.method == "POST" else json.dumps([
         {**row, "user": {"login": author}}])

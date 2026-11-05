@@ -40,7 +40,8 @@ def _due(publication):
     write_task_result(publication.root, "t", row["status"], owner_quiz=row["owner_quiz"])
 
 
-@pytest.mark.parametrize(("assumption", "end"), [("", "terminal"), ("Continue reading only", "timeout")])
+@pytest.mark.parametrize("end", ["terminal", "timeout"])
+@pytest.mark.parametrize("assumption", ["", "Continue reading only"])
 def test_required_publication_recovers_after_wait_end(tmp_path, monkeypatch, end, assumption):
     import asyncio
     from ouroboros import dialogue_store

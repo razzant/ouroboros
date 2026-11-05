@@ -249,6 +249,38 @@ def test_windows_a_resume_committed_first_keeps_the_ordinary_drain(windows):
     assert calls.count(("close", "job")) == 1 and "kill tree" not in calls
 
 
+@pytest.mark.parametrize("pipe", ["open", "broken"])
+def test_windows_a_grace_that_expires_ends_the_job_and_a_broken_pipe_never_terminates(windows, pipe):
+    """On Windows the quit line is the graceful step and TerminateProcess never is: when the grace expires the
+    server's Job ends it (``terminate_job``) and its exit is confirmed; a broken pipe still waits the grace."""
+    launcher, calls, server = windows.launcher, windows.calls, windows.server
+    assert launcher.start_agent(port=1) is server
+    if pipe == "broken":
+        def broken(data):
+            calls.append(("write", data))
+            raise BrokenPipeError("fixture closed pipe")
+
+        server.stdin.write = broken
+    waits = []
+
+    def wait(timeout=None):
+        calls.append(("wait", timeout))
+        waits.append(timeout)
+        if len(waits) == 1:
+            raise subprocess.TimeoutExpired("server", timeout)
+        server.returncode = 1
+        return 1
+
+    server.wait = wait
+    server.terminate = lambda: calls.append("TerminateProcess")
+    launcher.stop_agent()
+    asked = calls.index(("write", b"quit\n"))
+    grace = calls.index(("wait", launcher.LAUNCHER_STOP_GRACE_SEC))
+    assert asked < grace < calls.index(("terminate", "job")) < calls.index(("wait", 5))
+    assert "TerminateProcess" not in calls and "kill tree" not in calls
+    assert calls.count(("close", "job")) == 1
+
+
 def test_windows_a_failed_resume_leaves_its_published_job_to_one_closer(windows, monkeypatch):
     launcher, calls = windows.launcher, windows.calls
     monkeypatch.setattr(launcher, "resume_process", lambda pid: calls.append("resume") or False)

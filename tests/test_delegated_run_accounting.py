@@ -477,6 +477,7 @@ def test_an_estimated_spend_is_not_a_settled_one(tmp_path, monkeypatch):
     # must be a definite False rather than whatever silence happened to produce.
     ({"state": "succeeded"}, None, False, False, False),
     ({"state": "succeeded", "spendUsd": 0, "spendEstimated": True}, 0.0, False, True, True),
+    ({"state": "succeeded", "spendUsd": 0}, 0.0, True, True, False),
     ({"state": "succeeded", "spendUsd": 4.10}, 4.10, True, True, False),
 ])
 def test_the_settled_envelope_tells_the_same_story_as_the_row(

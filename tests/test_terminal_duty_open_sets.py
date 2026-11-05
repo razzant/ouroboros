@@ -76,7 +76,7 @@ def _record(env, reservation, fact):
 _ABSENT = object()
 
 
-@pytest.mark.parametrize("outcome", [_ABSENT, "unresolved", "other"])
+@pytest.mark.parametrize("outcome", [_ABSENT, None, "unresolved", "other"])
 def test_a_recorded_ended_custody_alone_takes_an_abandoned_row_out(env, monkeypatch, outcome):
     """Absent, null and every other outcome keep the row selected; its retained receipt settles offline."""
     _terminal(env)
@@ -230,7 +230,8 @@ def test_a_receipt_racing_the_terminal_mark_stays_authoritative(env, monkeypatch
     assert row["settle_reason"] == "late_receipt" and row["cost_usd"] == 0.6 and "recovery" not in row
 
 
-@pytest.mark.parametrize(("operation", "taken"), [("cancelled", False), ("not_started", False), ("gone", True)])
+@pytest.mark.parametrize("taken", [True, False])
+@pytest.mark.parametrize("operation", ["cancelled", "not_started", "gone"])
 def test_ownership_taken_during_a_blocked_probe_refuses_the_settlement(env, monkeypatch, operation, taken):
     """Discovery eligibility is cached; the post-I/O fences re-read ownership before any write."""
     import threading

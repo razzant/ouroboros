@@ -205,6 +205,8 @@ def test_a_marker_refuses_a_history_row_and_a_base_it_has_not_outgrown(cycle, da
     ("index", None, True),  # the prepared index lane
     ("worktree", True, True),  # a bound candidate
     ("index", False, False),  # a commit on the serving checkout
+    ("worktree", False, False),
+    ("worktree", None, False),
 ])
 def test_a_marker_is_admitted_only_where_the_neutral_form_is(cycle, source, allowed, admitted):
     cycle.set_version("7.10.0-alpha.0")

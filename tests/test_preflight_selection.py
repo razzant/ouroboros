@@ -10,6 +10,8 @@ from ouroboros.preflight_qualification import adoption_test_evidence
 from tests.test_preflight_runner import _make_repo, _commit_all
 from tests.test_preflight_receipts import receipt_python  # noqa: F401 -- dependency-only lane fixture
 from tests.test_selected_test_cli import TEMPLATE_FIELDS, plugin_values
+from ouroboros.preflight_qualification import full_proof_error
+from tests.test_selected_test_cli import refuse_long_pytest_launches
 
 
 
@@ -31,6 +33,86 @@ def candidate(tmp_path, monkeypatch, receipt_python):  # noqa: F811 -- pytest fi
     (repo / "leaf.py").write_text("value = 2\n", encoding="utf-8")
     return SimpleNamespace(repo_dir=repo, drive_root=tmp_path / "data", task_id="selected-proof",
                            task_metadata={}, current_task_type="task", emit_progress_fn=lambda *a: None)
+
+
+def test_real_selected_run_records_inventory_and_cannot_qualify_managed_update(candidate, monkeypatch):
+    from ouroboros import preflight_receipts
+    from ouroboros.tools import git
+
+    ctx = candidate
+    assert pr.run_hermetic_pytest(ctx.repo_dir, ctx=ctx, selected=True, phase=pr.PRE_COMMIT_PHASE) is None
+    proof = ctx._preflight_test_proof
+    assert proof and proof.tier == "selected"
+    assert not admission.preflight_test_proof_matches(ctx, ctx.repo_dir)
+    assert admission.preflight_test_proof_matches(ctx, ctx.repo_dir, require_full=False)
+    assert not admission.preflight_test_workload_unchanged(proof, ctx.repo_dir, timeout=1800, pytest_args=None)
+    assert full_proof_error(ctx, ctx.repo_dir)
+    monkeypatch.setattr(git, "_authorized_managed_update_resolver", lambda c: True)
+    assert git._managed_candidate_needs_proof(ctx)
+    row = ctx._preflight_test_disclosure
+    assert row["tier"] == "selected" and row["candidate"] == proof.tree
+    assert row["base"] == proof.head and row["policy"] == proof.selection.policy
+    assert row["expected_files"] == ["tests/test_floor.py", "tests/test_leaf.py"]
+    assert row["omitted_files"] == 1
+    assert row["receipt"]["status"] == "declined"
+    assert "selected" in row["receipt"]["reason"]
+    assert not list(ctx.drive_root.glob("state/preflight_receipts/*.json"))
+    inventory = row["inventory"]  # durable records keep counts, a digest and only the ids worth reading
+    assert inventory["parallel"]["expected"] == inventory["parallel"]["executed"] == 2
+    assert inventory["parallel"]["missing"] == inventory["parallel"]["unexpected"] == []
+    assert len(inventory["parallel"]["digest"]) == 64 and inventory["serial"]["expected"] == 0
+    exhibit = preflight_receipts.execution_exhibit(ctx)
+    assert exhibit["tier"] == "selected" and exhibit["inventory"] == inventory
+    assert "selected" in preflight_receipts.execution_section(exhibit)
+    monkeypatch.setattr(pr, "_execute_pytest_pass", lambda *a: pytest.fail("unchanged selected proof should reuse"))
+    assert pr.run_hermetic_pytest(ctx.repo_dir, ctx=ctx, selected=True, phase=pr.PRE_COMMIT_PHASE) is None
+    assert ctx._preflight_test_disclosure["action"] == "reused"
+    assert ctx._preflight_test_disclosure["inventory"] == inventory
+
+
+def test_selected_widening_executes_the_named_consumer(candidate):
+    error = pr.run_hermetic_pytest(candidate.repo_dir, ctx=candidate, selected=True, phase=pr.PRE_COMMIT_PHASE,
+                                  extra_tests=["tests/test_unrelated.py"], test_reason="dynamic dispatch")
+    assert error and "unrelated collection" in error
+    assert candidate._preflight_test_proof is None
+
+
+def test_a_long_selected_scope_reaches_every_gate_pass_off_the_command_line(candidate, monkeypatch):
+    """The gate launches its passes as the CLI does. A scope of non-ASCII names past one command line (on Windows
+    WinError 206, which the gate would report as a missing pytest) still starts: each pass carries it in its
+    inventory plugin and runs exactly the selection. The bound is far below Windows' 32,767 so that the fixture
+    stays small; the property is the same."""
+    import subprocess
+    import sys
+
+    from ouroboros import preflight_inventory as inventory
+
+    repo = candidate.repo_dir
+    for n in range(40):
+        (repo / f"tests/test_область_{n:02d}_имя_делающее_вектор_каждого_прохода_длиннее.py").write_text(
+            "from leaf import value\n\n\ndef test_it():\n    assert value == 2\n", encoding="utf-8")
+    inline = inventory.selection_passes(selection.select_tests(repo))[0].args
+    assert len(subprocess.list2cmdline([sys.executable, "-m", "pytest", *inline])) > 3_000  # the control
+    launches = refuse_long_pytest_launches(monkeypatch, limit=3_000)
+    assert pr.run_hermetic_pytest(repo, ctx=candidate, selected=True, phase=pr.PRE_COMMIT_PHASE) is None
+    row = candidate._preflight_test_disclosure
+    assert row["tier"] == "selected" and len(row["expected_files"]) == 2 + 40
+    assert sum(not path.isascii() for path in row["expected_files"]) == 40
+    scoped = [launch for launch in launches if "tests/" in launch]
+    assert len(scoped) == 2  # parallel, then serial
+    for launch in scoped:
+        assert not [arg for arg in launch if arg.startswith(inventory.SELECT)]
+    inventory_rows = row["inventory"]
+    assert inventory_rows["parallel"]["expected"] == inventory_rows["parallel"]["executed"] == 2 + 40
+    assert inventory_rows["parallel"]["missing"] == inventory_rows["parallel"]["unexpected"] == []
+
+
+def test_apparatus_change_executes_full_and_reports_actual_failure(candidate):
+    with (candidate.repo_dir / "pytest.ini").open("a", encoding="utf-8") as stream:
+        stream.write("\n# verifier changed\n")
+    error = pr.run_hermetic_pytest(candidate.repo_dir, ctx=candidate, selected=True, phase=pr.PRE_COMMIT_PHASE)
+    assert error and "unrelated collection" in error
+    assert candidate._preflight_test_proof is None
 
 
 @pytest.mark.parametrize("mode", ["missing", "empty"])
@@ -67,6 +149,45 @@ def test_undisclosed_execution_keeps_the_proofs_actual_tier(tmp_path, monkeypatc
     assert exhibit["tier"] == "selected" and exhibit["evidence"] == "undisclosed"
     assert "The selected hermetic test gate" in execution_section(exhibit)
     assert scope_record(proof)["rule"] == "custom pytest selection"
+
+
+def test_adoption_accepts_a_full_receipt_of_exactly_the_named_commit(candidate):
+    from ouroboros.preflight_receipts import capture_executing_source_baseline
+
+    capture_executing_source_baseline()  # receipts bind the loaded code generation, as server.py does at import
+    repo = candidate.repo_dir
+    (repo / "tests/test_unrelated.py").write_text("def test_other(): assert True\n", encoding="utf-8")
+    _commit_all(repo)
+    sha = pr._run_git(repo, ["rev-parse", "HEAD"]).stdout.strip()
+    assert pr.run_hermetic_pytest(repo, ctx=candidate) is None  # a full green run mints the durable receipt
+    [record] = [json.loads(path.read_text(encoding="utf-8")) for path in candidate.drive_root.glob(
+        "state/preflight_receipts/*.json")]
+    # A full record keeps exactly its historical shape, so receipts written before selected tiers still match.
+    assert record["schema"] == 1 and "selection" not in record
+    assert set(record["identity"]) == {"schema", "head", "tree", "index_tree", "workload", "installation", "source"}
+    assert adoption_test_evidence(candidate.drive_root, repo, sha, ctx=candidate)["source"] == "proof"
+    (repo / "leaf.py").write_text("value = 99\n", encoding="utf-8")  # later dirty bytes do not matter
+    evidence = adoption_test_evidence(candidate.drive_root, repo, sha)
+    assert evidence["tier"] == "full" and evidence["source"] == "receipt" and evidence["head"] == sha
+    _commit_all(repo)
+    later = pr._run_git(repo, ["rev-parse", "HEAD"]).stdout.strip()
+    with pytest.raises(ValueError, match="full_tests=true"):  # another commit has no full run on record
+        adoption_test_evidence(candidate.drive_root, repo, later)
+
+
+def test_a_green_run_of_uncommitted_bytes_never_qualifies_the_commit_beneath_them(candidate):
+    from ouroboros.preflight_receipts import capture_executing_source_baseline
+
+    capture_executing_source_baseline()
+    repo = candidate.repo_dir
+    (repo / "tests/test_unrelated.py").write_text("def test_other(): assert True\n", encoding="utf-8")
+    (repo / "leaf.py").write_text("value = 3\n", encoding="utf-8")  # the committed body fails test_leaf
+    _commit_all(repo)
+    sha = pr._run_git(repo, ["rev-parse", "HEAD"]).stdout.strip()
+    (repo / "leaf.py").write_text("value = 2\n", encoding="utf-8")  # an uncommitted repair turns the run green
+    assert pr.run_hermetic_pytest(repo, ctx=candidate) is None and candidate._preflight_test_proof.head == sha
+    with pytest.raises(ValueError, match="full_tests=true"):  # neither the proof nor its receipt is that commit
+        adoption_test_evidence(candidate.drive_root, repo, sha, ctx=candidate)
 
 
 def test_a_run_admitted_one_worker_still_leaves_adoption_its_receipt(candidate, monkeypatch):
@@ -236,6 +357,7 @@ SCOPE = {"base": "b", "policy": "p", "changed": ["x.py"], "extra_tests": [], "fu
 
 @pytest.mark.parametrize("document,problem", [
     (_coherent(), ""),
+    (_coherent(2, tier="selected", scope=SCOPE), ""),
     (_coherent(1, tier="selected", scope=SCOPE), "schema does not match"),  # a selected record relabelled full
     (_coherent(2, tier="selected", scope={**SCOPE, "full_tests": True}), "the selection scope is incomplete"),
 ])

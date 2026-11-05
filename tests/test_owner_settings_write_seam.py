@@ -171,7 +171,8 @@ def test_cyber_generic_post_saves_controls_and_preserves_fact_provenance(cyber_s
     assert later_change["changes"] == {"TOTAL_BUDGET": {"old": 200.0, "new": 25.0}}
 
 
-@pytest.mark.parametrize(("context_mode", "mode", "status"), [("low", "cyber_pro", 200), ("nano", "pro", 200)])
+@pytest.mark.parametrize("mode,status", [("cyber_pro", 200), ("pro", 200)])
+@pytest.mark.parametrize("context_mode", ["low", "nano"])
 def test_context_owner_endpoint_updates_future_actors_during_work(cyber_settings, monkeypatch, mode, status, context_mode):
     from ouroboros import config as cfg
     from ouroboros.gateway import settings as settings_mod

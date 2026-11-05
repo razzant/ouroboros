@@ -55,6 +55,9 @@ def _delivered(root, ctx):
 @pytest.mark.parametrize("wake, selected, expected", [
     (True, {"senders": ["peer-a"]}, "mail:presence-turn"),       # unrelated selector: still the author's wake
     (False, {"any_mail": True}, ""),                             # context only, even under any mail
+    (False, {"senders": ["presence-turn"]}, ""),                 # ... and even when its sender is selected
+    (_LEGACY, {"senders": ["peer-a"]}, ""),
+    (0, {"senders": ["peer-a"]}, ""),
     (None, {"any_mail": True}, "mail:presence-turn"),
 ])
 def test_the_typed_wake_fact_decides_and_anything_else_keeps_the_mail_rule(tmp_path, wake, selected, expected):

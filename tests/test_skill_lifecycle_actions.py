@@ -139,7 +139,7 @@ def test_selected_enable_requires_real_source_even_when_client_allows_it(skill_a
     assert enabled["ok"] and enabled["enabled"], enabled
 
 
-@pytest.mark.parametrize("actor", ["owner_ui", "owner_cli", "load_error_revert"])
+@pytest.mark.parametrize("actor", ["owner_ui", "owner_cli", "load_error_revert", ""])
 def test_only_proven_later_owner_disable_supersedes_repair_intent(skill_actor, monkeypatch, actor):
     from ouroboros.skill_loader import load_enabled, save_enabled
 

@@ -126,6 +126,7 @@ def test_invalid_core_port_fails_before_companion(tmp_path: Path) -> None:
         ("Darwin", "arm64"),
         ("Darwin", "x86_64"),
         ("Linux", "aarch64"),
+        ("Windows", "AMD64"),
     ],
 )
 def test_supported_platform_matrix(

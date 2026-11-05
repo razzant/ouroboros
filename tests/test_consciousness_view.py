@@ -142,6 +142,8 @@ def test_clock_identity_alone_can_keep_a_terminal_wake_live(tmp_path, wake):
 
 @pytest.mark.parametrize("status,phase,live", [
     ("running", "running", True), ("interrupted", "unknown", True), ("paused", "paused", True),
+    ("completed", "done", False), ("failed", "error", False), ("cancelled", "cancelled", False),
+    ("rejected_duplicate", "warn", False),
 ])
 def test_status_is_independent_of_missing_terminal_time(tmp_path, wake, status, phase, live):
     wake.update(status=status, outcome_axes={}, wake_silent=False)
@@ -227,7 +229,7 @@ def test_summary_is_only_authored_summary_and_note_is_whole(tmp_path, wake, summ
 
 @pytest.mark.parametrize("silent,owner,notice,quiet", [
     (True, None, "", True), (True, True, "", False),
-    ("true", None, "", False),
+    (True, None, "A tool failed.", False), (False, None, "", False), ("true", None, "", False),
 ])
 def test_quiet_uses_delivery_facts(tmp_path, wake, silent, owner, notice, quiet):
     wake.update(wake_silent=silent, terminal_host_notice=notice)
@@ -384,7 +386,8 @@ def test_the_allowance_horizon_is_reapplied_without_a_new_write(tmp_path, monkey
 
 
 @pytest.mark.parametrize("state,dispatched,listed", [
-    ("open", False, False), ("open", True, True), ("unresolved", True, True),
+    ("open", False, False), ("open", True, True), ("released", False, False),
+    ("released", True, False), ("unresolved", True, True),
 ])
 def test_only_dispatched_attempts_not_proven_unsent_are_calls(tmp_path, wake, state, dispatched, listed):
     task_id = "attempted-wake"
@@ -535,7 +538,7 @@ def test_own_clock_reads_captured_identity_without_changing_brief_view(tmp_path,
 
 
 @pytest.mark.parametrize("cause,identity,owner", [("own_clock", True, True), ("focus", False, False),
-    ("focus", True, True)])
+    ("focus", True, False), ("focus", True, True)])
 def test_recent_focus_as_comes_from_stored_metadata(tmp_path, wake, cause, identity, owner):
     document = json.loads(FIXTURE.read_text(encoding="utf-8"))
     focus = {"place_id": "mail", "conversation_key": "mail:account:inbox:0"}

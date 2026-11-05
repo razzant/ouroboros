@@ -500,7 +500,7 @@ def test_files_dir_validator_accepts_native_absolute_paths():
         assert validate(accepted) == accepted
 
 
-@pytest.mark.parametrize("host,marker", [("127.0.0.1", "1"), ("::1", "telegram"), ("203.0.113.7", "")])
+@pytest.mark.parametrize("host,marker", [("127.0.0.1", "1"), ("::1", "telegram"), ("203.0.113.7", ""), (None, "")])
 def test_only_the_local_settings_page_may_change_the_bot_api_server(tmp_path: Path, host, marker) -> None:
     # The saved server supplies the updates and the sender IDs the owner check trusts.
     plugin = _load_plugin()

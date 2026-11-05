@@ -179,7 +179,8 @@ def test_revert_respects_system_mode_and_external_project_authority(tmp_path, mo
     assert (project / "BIBLE.md").read_text(encoding="utf-8") == "project base\n"
 
 
-@pytest.mark.parametrize("mode,cap", [("advanced", ""), ("pro", "advanced"), ("cyber_pro", "advanced")])
+@pytest.mark.parametrize("mode,cap", [("advanced", ""), ("pro", ""), ("cyber_pro", ""),
+                                    ("pro", "advanced"), ("cyber_pro", "advanced")])
 def test_revert_default_system_binding_keeps_effective_mode(tmp_path, monkeypatch, mode, cap):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     registry, system = _plain_registry(tmp_path)

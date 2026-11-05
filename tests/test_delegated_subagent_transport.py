@@ -45,7 +45,11 @@ def test_discovery_reads_host_port_and_token(tmp_path):
 
 
 @pytest.mark.parametrize("host,loopback", [
-    ("127.0.0.1", True), ("localhost", True), ("127.0.0.1.evil.com", False),
+    ("127.0.0.1", True), ("localhost", True), ("fe80::1%lo0", False),
+    # The exfiltration shapes: a plain external name, a name that merely LOOKS like a
+    # loopback literal, an address that resolves off-host, and the wildcard bind.
+    ("evil.example.com", False), ("127.0.0.1.evil.com", False),
+    ("10.0.0.5", False), ("0.0.0.0", False), ("169.254.169.254", False),
 ])
 def test_the_daemon_token_is_only_ever_sent_to_loopback(tmp_path, host, loopback):
     """P34P1.3: `discover_daemon` accepted ANY host from control-api.json and the

@@ -67,7 +67,7 @@ def test_catalog_accepts_data_without_extension(entry):
 
 
 @pytest.mark.parametrize("field,bad,good", [
-    ("formats", ["audio/flac"], ["audio/ogg", "audio/mpeg", "audio/wav"]),
+    ("max_bytes", 0, 1), ("max_seconds", 0, 1), ("formats", ["audio/flac"], ["audio/ogg", "audio/mpeg", "audio/wav"]),
     ("formats", "audio/webm", ["audio/webm"]), ("destination", "vendor: ", "vendor:Example"), ("runtime", "other", "server"),
     ("provides", "video", "tts"),
 ])

@@ -196,7 +196,8 @@ def test_main_steers_healthy_foreign_task_despite_corrupt_registry(host, monkeyp
     assert [e["text"] for e in drain_owner_entries(host.root, "t-target")] == ["Continue original task"]
 
 
-@pytest.mark.parametrize(("authority", "producer"), [("registry", "promotion"), ("bindings", "api")])
+@pytest.mark.parametrize("producer", ["promotion", "api"])
+@pytest.mark.parametrize("authority", ["registry", "bindings"])
 def test_fresh_main_admission_distinguishes_irrelevant_registry_from_unknown_scope(host, producer, authority):  # noqa: F811
     registry.create_project(host.root, "neighbor")
     path = registry._registry_path(host.root) if authority == "registry" else registry._bindings_path(host.root)

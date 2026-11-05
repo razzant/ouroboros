@@ -338,15 +338,29 @@ def test_relative_argument_symlinked_into_the_runtime_is_blocked():
 @pytest.mark.parametrize("cmd,expected", [
     pytest.param("cd /Users/anton/Ouroboros/repo && git status", True, id="ro_cd_then_git"),
     pytest.param("sh -c 'git log'", True, id="ro_nested_shell"),
+    pytest.param("git commit -m x", False, id="mut_commit"),
+    pytest.param("git branch -D x", False, id="mut_branch_delete"),
     pytest.param("git status && cat /Users/anton/Ouroboros/data/settings.json", False, id="mixed_git_and_cat"),
+    pytest.param("cat /etc/passwd", False, id="not_git_at_all"),
     pytest.param("sh -c 'git commit -m x'", False, id="mut_nested_shell"),
     pytest.param("", False, id="empty"),
     # A read-only-looking invocation that WRITES a file is not read-only: the diff
     # option `--output=<file>` truncates it, so it must meet the runtime/secret guard.
+    pytest.param("git log --output=/tmp/x.txt", False, id="output_flag_writes"),
     pytest.param("git diff --output /tmp/x.txt", False, id="output_flag_split_writes"),
     # ... and one that READS ARBITRARY FILES is not repo inspection either:
     # `git diff --no-index /dev/null <secret>` PRINTS the file (measured).
     pytest.param("git diff --no-index /dev/null /Users/anton/Ouroboros/data/settings.json", False, id="no_index_reads_any_file"),
+    # `-o` must NOT be read as an output flag: for this family it means something
+    # else entirely (`git ls-files -o` == --others) and matching it would refuse an
+    # ordinary untracked-file listing.
+    pytest.param("git remote add origin https://example.com/x.git", False, id="mut_remote_add"),
+    pytest.param("git remote -v add origin https://example.com/x.git", False, id="mut_remote_verbose_add"),
+    pytest.param("git tag v1.0.0", False, id="mut_tag_create"),
+    pytest.param("git tag -s v1.0.0 -m x", False, id="mut_tag_sign"),
+    pytest.param("git reflog expire --expire=now --all", False, id="mut_reflog_expire"),
+    pytest.param("git reflog delete HEAD@{1}", False, id="mut_reflog_delete"),
+    pytest.param("git reflog drop --all", False, id="mut_reflog_drop"),
 ])
 def test_is_readonly_git_command(cmd, expected):
     """ALL-or-nothing per segment: this is what lets read-only git through the

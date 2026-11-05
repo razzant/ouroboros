@@ -55,6 +55,7 @@ def test_generic_extension_search_executes_when_builtin_search_is_unavailable(tm
     ('auto', '', [('openai', SEARCH_MODELS['openai']), ('openrouter', SEARCH_MODELS['openrouter']), ('anthropic', RECOMMENDED)]),
     ('auto', 'future', [('openai', 'future'), ('openrouter', 'openai/future'), ('anthropic', RECOMMENDED)]),
     ('auto', 'vendor/future', [('openrouter', 'vendor/future'), ('anthropic', RECOMMENDED)]),
+    ('openai', 'anthropic::future', []), ('openai', 'vendor/future', []),
 ])
 def test_dispatch_uses_resolved_candidates_and_truthful_failed_legs(monkeypatch, source, selected, expected):
     for key in ('OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'ANTHROPIC_API_KEY'):
@@ -229,6 +230,8 @@ def _refusing_legs(monkeypatch):
     ('openrouter', 'future', [('openrouter', 'openai/future', '')]),
     # No built-in transport sends these: refused before any send, never replaced by Auto's other legs.
     ('auto', 'claudexor::codex=future', []),
+    ('auto', 'openai::vendor/future', []),
+    ('ddgs', 'future', []),  # ddgs takes no model, so a named one is refused rather than dropped
 ])
 def test_a_model_the_call_names_is_mandatory(monkeypatch, source, named, expected):
     _every_source_ready(monkeypatch, source)
@@ -608,6 +611,9 @@ def test_a_failed_search_with_a_built_in_route_does_not_advertise_named_connecti
 @pytest.mark.parametrize('source,row,packages', [
     ('anthropic', _OPENAI_WORK, {}),  # a pinned Source refuses another source's connection
     ('ddgs', _OPENAI_WORK, {}),  # ddgs takes no model, so no call could name one
+    ('auto', {**_OPENAI_WORK, 'enabled': False}, {}),  # a disabled row cannot serve
+    ('auto', {'kind': 'openai', 'name': 'keyless'}, {}),  # nor one without its credential
+    ('auto', {'kind': 'openai-compatible', 'name': 'vllm', 'base_url': 'https://compatible.invalid/v1'}, {}),  # no search transport
     ('anthropic', {'kind': 'anthropic', 'name': 'team', 'api_key': 'k'}, {'anthropic': False}),  # its SDK is missing
 ])
 def test_a_named_connection_no_call_could_use_leaves_web_search_withheld(tmp_path, monkeypatch, source, row, packages):

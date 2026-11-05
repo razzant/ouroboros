@@ -99,7 +99,7 @@ console.log(text);
     assert 'NotCapable' not in facts['stderr']
 
 
-@pytest.mark.parametrize('permission,allowed', [('fs', False), ('fs', True), ('subprocess', True)])
+@pytest.mark.parametrize('permission,allowed', [('fs', False), ('fs', True), ('subprocess', False), ('subprocess', True)])
 def test_deno_effects_use_reviewed_declarations(tmp_path, monkeypatch, permission, allowed):
     if not shutil.which('deno'):
         pytest.skip('deno runtime is not installed')

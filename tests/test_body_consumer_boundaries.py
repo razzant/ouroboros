@@ -235,12 +235,9 @@ def test_read_only_child_of_a_bound_parent_reads_the_candidate_and_writes_nothin
     assert not (candidate / "made.txt").exists() and (serving / "ouroboros/mod_a.py").read_text() == "GEN = 'GEN_OLD'\n"
 
 
-@pytest.mark.parametrize(("consumer", "executor", "child"), [
-    ("run_command", False, False),
-    ("run_script", True, True),
-    ("verify_and_record", False, False),
-    ("start_service", True, True),
-])
+@pytest.mark.parametrize("child", [False, True])
+@pytest.mark.parametrize("executor", [False, True])
+@pytest.mark.parametrize("consumer", ["run_command", "run_script", "verify_and_record", "start_service"])
 def test_process_consumers_use_full_isolated_body_environment(body, monkeypatch, child, executor, consumer):
     from ouroboros.workspace_copies import admitted_copy_metadata
     from supervisor.events_subagent_admission import _resolve_subagent_constraint

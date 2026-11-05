@@ -91,7 +91,7 @@ def test_packaged_copy_is_the_only_target(packaged):
     assert autostart.autostart_state() == "off"
 
 
-@pytest.mark.parametrize("case", ["browser_fallback", "source_bundle", "missing_exe"])
+@pytest.mark.parametrize("case", ["not_windows", "browser_fallback", "source_bundle", "missing_exe"])
 def test_every_other_run_is_unavailable_and_never_touches_the_registry(packaged, registry, monkeypatch, case):
     if case == "not_windows":
         monkeypatch.setattr(autostart, "IS_WINDOWS", False)

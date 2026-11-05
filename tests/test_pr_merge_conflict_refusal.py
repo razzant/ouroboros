@@ -32,6 +32,10 @@ DIRTY, BLOCKED, BEHIND = ("the merge commit cannot be cleanly created", "the bas
 CONFLICT = "GraphQL: Pull Request has merge conflicts (mergePullRequest)\n"
 BASE_RACE = "GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)\n"
 HEAD_MOVED = "GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)\n"
+PERMISSION = "GraphQL: Resource not accessible by integration (mergePullRequest)\n"
+INTERNAL = "GraphQL: Something went wrong while executing your query. Please include `A1B2:3C4D` when reporting.\n"
+
+
 def refusal(reason, number=7):
     return f"X Pull request octo/demo#{number} is not mergeable: {reason}.\n"
 
@@ -94,12 +98,33 @@ def test_stdin_body_retains_exact_pre_effect_refusal(tmp_path, monkeypatch, body
 
 
 @pytest.mark.parametrize("stderr,kw", [
+    (refusal(DIRTY) + AUTO + ADMIN, {}),
+    (refusal(BLOCKED) + AUTO, {}),
+    (refusal(BLOCKED) + AUTO + hint() + ADMIN, {}),
     (refusal(DIRTY) + AUTO + hint(), {"repo": "octo/demo"}),
+    (refusal(DIRTY) + AUTO + hint(number=8), {}),
+    (refusal(DIRTY, number=8) + AUTO, {}),
+    (refusal(DIRTY) + AUTO + hint(target="origin/other"), {}),
+    (refusal(DIRTY) + AUTO + "HTTP 503: Service Unavailable (https://api.github.com/graphql)\n", {}),
+    ("HTTP 503: Service Unavailable (https://api.github.com/graphql)\n" + refusal(DIRTY) + AUTO, {}),
+    (refusal(DIRTY), {}),
     # The exact BLOCKED text proves nothing outside the one invocation and exit it belongs to.
     (refusal(BLOCKED, number=8) + AUTO + ADMIN, {}),
     (refusal(BLOCKED) + AUTO + ADMIN, {"args": ["pr", "merge", "7", "--squash", "--match-head-commit", HEAD,
                                                 "--admin"]}),
-], ids=["hint-with-repo", "blocked-line-number", "extra-flag"])
+    ("GraphQL: Pull Request is not mergeable (mergePullRequest)\n", {}),
+    # Only GitHub's two whole answers to the sent mutation qualify; anything around or beside them stays unknown.
+    (CONFLICT + BASE_RACE, {}),
+    (CONFLICT + "HTTP 502: Bad Gateway (https://api.github.com/graphql)\n", {}),
+    ("gh: " + CONFLICT, {}),
+    (CONFLICT.replace(" (mergePullRequest)", ""), {}),
+    (HEAD_MOVED, {}),
+    (PERMISSION, {}),
+    (INTERNAL, {}),
+], ids=["dirty-admin", "blocked-no-admin", "blocked-hint", "hint-with-repo", "hint-number", "line-number",
+        "hint-target", "status-suffix", "status-prefix",
+        "truncated", "blocked-line-number", "extra-flag", "server-refusal", "two-answers", "answer-with-status", "answer-prefix",
+        "answer-without-path", "head-moved", "permission", "internal"])
 def test_anything_but_the_exact_refusal_stays_an_unknown_exit(tmp_path, monkeypatch, stderr, kw):
     result = _classify(tmp_path, monkeypatch, stderr, **kw)
 

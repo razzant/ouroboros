@@ -78,8 +78,10 @@ def test_terminal_and_existing_ledger_use_attempt_cash_not_valuation(tmp_path, c
 @pytest.mark.parametrize("ttl,harnesses,control_keys,expected_wire,expected_reason", [
     ("default", [{"id": "chosen", "promptCacheTtls": ["5m", "1h"]}], ["promptCacheTtl"], None, None),
     ("5m", [{"id": "chosen", "promptCacheTtls": ["5m", "1h"]}], ["promptCacheTtl"], "5m", None),
+    ("1h", [{"id": "chosen", "promptCacheTtls": ["5m", "1h"]}], ["promptCacheTtl"], "1h", None),
     # Gated by exact advertised value, never by harness name:
     ("1h", [{"id": "claude", "promptCacheTtls": ["5m"]}], ["promptCacheTtl"], None, "harness_unsupported"),
+    ("1h", [{"id": "custom-harness", "promptCacheTtls": ["1h"]}], ["promptCacheTtl"], "1h", None),
 ])
 def test_session_prompt_cache_ttl_negotiates_by_exact_capability(
     monkeypatch, ttl, harnesses, control_keys, expected_wire, expected_reason,
@@ -153,7 +155,7 @@ def test_final_attempt_prompt_cache_ttl_binds_unique_final_attempt(tmp_path, val
 
 
 @pytest.mark.parametrize("malformed", [
-    {"requested": "1h", "submitted": "5m", "observed": "1h", "write_1h_tokens": 100, "write_5m_tokens": 0},
+    None, {}, [], {"requested": "1h", "submitted": "5m", "observed": "1h", "write_1h_tokens": 100, "write_5m_tokens": 0},
     {"requested": "1h", "submitted": "1h", "observed": "5m", "write_1h_tokens": 10, "write_5m_tokens": 10},
     {"requested": "1h", "submitted": "1h", "observed": "1h", "write_1h_tokens": 100, "write_5m_tokens": None},
     {"requested": "1h", "submitted": "1h", "observed": "1h", "write_1h_tokens": True, "write_5m_tokens": 0},

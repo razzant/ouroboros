@@ -347,7 +347,12 @@ def test_an_operative_instruction_change_is_a_new_wave_within_the_allowance(fore
 @pytest.mark.parametrize("surface, module, owner, seat", [
     ("change", "multi", "TRIAD_ROLE_HINT", "t2"),
     # Sections, frames and wrappers a builder writes around the request's data.
-    ("change", "helpers", "build_scope_section", "t1"), ("preflight", "multi", "TRIAD_ROLE_HINT", "s1"),
+    ("change", "helpers", "build_scope_section", "t1"), ("preflight", "multi", "TRIAD_ROLE_HINT", "s1"), ("preflight", "multi", "TRIAD_USER_TURN", None), ("preflight", "multi", "triad_stable_head", None),
+    ("preflight", "nav", "core.packet", None), ("preflight", "admission", "PACKET_TEMPLATE_STABLE", None),
+    # Its native seat reads no agent session's wrapper.
+    ("preflight", "session", "render_review_session_prompt", None),
+    # A foreign project's change carries no diff pulse (the body's own growth question).
+    ("change", "pulse", "DIFF_PULSE_QUESTION", None),
 ])
 def test_a_changed_change_brief_instruction_is_a_new_wave_where_its_delivery_sits(foreign, monkeypatch, surface,
                                                                                  module, owner, seat):
@@ -636,7 +641,8 @@ def test_the_commit_gate_and_a_change_review_of_the_body_see_one_contract(staged
 
 
 @pytest.mark.parametrize("module, owner, rendered", [
-    ("skill", "_PREAMBLE", True), ("skill", "_INSTALL_ORIGIN_RULE", False), ("skill", "_REREVIEW_RULES[diff_cut]", False),
+    ("skill", "_PREAMBLE", True), ("skill", "_INSTALL_ORIGIN_RULE", False), ("skill", "_AUTHOR_WORDS", False), ("skill", "_PACKET_NOT_DELIVERED", False),
+    ("skill", "_install_origin_text", False), ("skill", "_REREVIEW_RULES[diff_cut]", False),
 ])
 def test_a_changed_skill_instruction_buys_one_new_wave_and_the_new_contract_then_replays_free(harness, module, owner,
                                                                                              rendered):

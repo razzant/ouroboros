@@ -146,7 +146,7 @@ def test_missing_token_never_touches_github_or_sources(env, monkeypatch):
     assert not settings.exists() and skill_sources.load_sources() == INITIAL
 
 
-@pytest.mark.parametrize("stage,status,code", [("create", 403, "cannot_create"), ("create", 401, "failed"), ("read", 403, "failed")])
+@pytest.mark.parametrize("stage,status,code", [("create", 403, "cannot_create"), ("create", 401, "failed"), ("read", 403, "failed"), ("create", None, "failed")])
 def test_failures_have_typed_codes_and_never_save_a_source(env, monkeypatch, stage, status, code):
     client, settings = env
     error = GitHubError("synthetic refusal ghp_SYNTHETIC1234567890", http_status=status,

@@ -283,6 +283,9 @@ def test_mail_ends_the_author_wait_reviewers_continue_over_frozen_bytes_and_git_
 
 @pytest.mark.parametrize("first_paths,collect,moved", [
     (["change.py", "maybe.txt"], {"paths": None}, False),
+    (["maybe.txt"], {"paths": None}, False),
+    (["maybe.txt"], "reference", False),
+    (["change.py", "second.py"], {"paths": ["change.py"]}, False),
     (["change.py", "maybe.txt"], {"paths": None}, True),
     (["change.py", "maybe.txt"], "reference", True),
 ])

@@ -64,7 +64,8 @@ def test_a_group_or_a_topic_lists_with_its_summaries(tmp_path):
     assert "patterns" in knowledge_index_view(address)  # no filter: the whole active index
 
 
-@pytest.mark.parametrize("kind,kept", [("person", True), ("Person", True), (" PERSON ", True)])
+@pytest.mark.parametrize("kind,kept", [("person", True), ("Person", True), (" PERSON ", True),
+                                        ("personal", False), ("note", False)])
 def test_person_summary_survives_case_and_whitespace_in_authored_yaml(tmp_path, kind, kept):
     import json
 

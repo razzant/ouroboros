@@ -19,7 +19,8 @@ from supervisor import workers
 ORIGIN = {"absent": "mid_task_no_origin"}
 
 
-@pytest.mark.parametrize(("destination_has_folder", "pinned"), [(False, False), (True, True)])
+@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize("destination_has_folder", [False, True])
 def test_explicit_resource_survives_real_placement_assignment(host, tmp_path, monkeypatch, pinned, destination_has_folder):
     source = tmp_path / "chosen-source"
     source.mkdir()
@@ -237,7 +238,7 @@ def _interrupted_root(host, body, tmp_path, monkeypatch, producer, candidate):
 
 
 @pytest.mark.parametrize(("producer", "candidate"), [
-    ("folder", False), ("folder", True), ("legacy", True)])
+    ("folder", False), ("folder", True), ("no_folder", False), ("room_default", False), ("legacy", True)])
 def test_placed_continue_keeps_the_resource_its_predecessor_chose(host, body, tmp_path, monkeypatch,
                                                                   producer, candidate):
     """Continue admits the successor with the predecessor's recorded choice; placing it before

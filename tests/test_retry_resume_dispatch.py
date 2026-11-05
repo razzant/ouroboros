@@ -74,10 +74,9 @@ def test_unreadable_lineage_preserves_grant_until_a_readable_dispatch(
     assert budget_pause.budget_pause_row(host.root, running["id"])["grant"] == before["grant"]
 
 
-@pytest.mark.parametrize(("busy", "after_readable", "fault"), [
-    pytest.param(False, "unchanged", "lineage", id='assignment-unchanged-lineage'),
-    pytest.param(True, "new_generation", "grant_row", id='busy-forecast-new_generation-grant_row'),
-])
+@pytest.mark.parametrize("fault", ["lineage", "grant_row"])
+@pytest.mark.parametrize("after_readable", ["unchanged", "new_generation"])
+@pytest.mark.parametrize("busy", [False, True], ids=["assignment", "busy-forecast"])
 def test_child_dispatch_preserves_unknown_but_revokes_proven_stale_authority(
         tmp_path, monkeypatch, fault, after_readable, busy):
     from tests.test_budget_pause_lineage import CHILD, ROOT, _resumed_root_over_parked_child

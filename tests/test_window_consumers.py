@@ -94,11 +94,8 @@ def test_reviewer_uses_shared_role_ack_metadata_order_and_retains_stale_sizing(r
     assert unknown.sizing_window() == rw.REVIEWER_FULL_WINDOW and unknown.sizing_source == "layout_assumption"
 
 
-@pytest.mark.parametrize(("kind", "model", "unknown"), [
-    ("input", "claudexor::fixture=model", 0),
-    pytest.param("total", "openai::fixture", rw.REVIEWER_FULL_WINDOW, id='total-openai::fixture-1000000'),
-    ("unknown", "claudexor::fixture=model", 0),
-])
+@pytest.mark.parametrize("model,unknown", [("claudexor::fixture=model", 0), ("openai::fixture", rw.REVIEWER_FULL_WINDOW)])
+@pytest.mark.parametrize("kind", ["input", "total", "unknown"])
 def test_subscription_and_api_layouts_keep_known_windows_and_unknown_budgets(monkeypatch, model, unknown, kind):
     from ouroboros.context_window import WindowLimit, WindowRecord
     from ouroboros.tools.review_helpers import calibrated_input_token_limit

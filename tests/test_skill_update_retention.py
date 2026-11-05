@@ -96,12 +96,9 @@ def test_startup_restores_interrupted_update_and_leaves_running_review(release, 
     assert read_install_record(drive, "demo")["update_rejected"]["reason"] == "review_unfinished"
 
 
-@pytest.mark.parametrize(("same_release", "cut", "kind"), [
-    pytest.param(False, "between_moves", "builtin", id='new-release-between_moves-builtin'),
-    pytest.param(False, "after_swap", "registry", id='new-release-after_swap-registry'),
-    pytest.param(True, "before_swap", "hub", id='same-release-before_swap-hub'),
-    pytest.param(True, "after_swap", "git", id='same-release-after_swap-git'),
-])
+@pytest.mark.parametrize("kind", ["hub", "git", "builtin", "registry"])
+@pytest.mark.parametrize("cut", ["before_swap", "between_moves", "after_swap"])
+@pytest.mark.parametrize("same_release", [False, True], ids=["new-release", "same-release"])
 def test_startup_restores_landing_before_new_install_record(request, tmp_path, monkeypatch, kind, cut, same_release):
     from ouroboros.marketplace import fetcher, install as storage
 

@@ -59,7 +59,9 @@ def test_audio_only_on_own_origin_is_granted(url):
     assert request.outcomes == ["allow"]
 
 
-@pytest.mark.parametrize("url", ["https://127.0.0.1:8765", "", None])
+@pytest.mark.parametrize("url", ["https://127.0.0.1:8765", "http://127.0.0.1:8766",
+    "http://localhost:8765", "http://127.0.0.1.evil.test:8765", "http://evil.test/",
+    "http://127.0.0.1:8765@evil.test/", "file:///tmp/page.html", "about:blank", "", None])
 def test_other_origins_and_unreadable_navigation_are_denied(url):
     request = Request()
     assert media.handle_permission_request(View(url), request, origin=ORIGIN, media_type=Request)
@@ -67,7 +69,7 @@ def test_other_origins_and_unreadable_navigation_are_denied(url):
 
 
 @pytest.mark.parametrize("audio,video,display", [(False, False, False), (True, True, False),
-    (True, False, True)])
+    (False, True, False), (True, False, True)])
 def test_video_display_and_non_audio_requests_are_denied(audio, video, display):
     request = Request(audio, video, display)
     media.handle_permission_request(View(), request, origin=ORIGIN, media_type=Request)

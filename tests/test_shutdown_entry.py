@@ -84,7 +84,8 @@ def test_the_first_explicit_cause_is_recorded_once_and_later_doors_keep_it(data,
     assert owned_shutdown._GENERATION_STOP.deadline == deadline  # recording a cause never moves the grace
 
 
-@pytest.mark.parametrize("cause,restart_exit", [("launcher_quit", False), ("external_signal", False), ("restart_requested", True)])
+@pytest.mark.parametrize("cause,restart_exit", [("launcher_quit", False), ("launcher_gone", False),
+                                                ("external_signal", False), ("restart_requested", True)])
 def test_a_generic_door_names_its_cause_and_restart_exit(data, monkeypatch, cause, restart_exit):
     from ouroboros import owned_shutdown
 

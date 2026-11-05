@@ -36,11 +36,9 @@ def schedule(ctx, **extra):
                           expected_output="Findings", memory_mode="empty", **extra)
 
 
-@pytest.mark.parametrize(("choice", "role"), [
-    (None, "consciousness"),
-    pytest.param({"kind": "following", "role": "main"}, "main", id='choice1-main'),
-    pytest.param({"kind": "explicit", "source": "fallback"}, "consciousness", id='choice2-consciousness'),
-])
+@pytest.mark.parametrize("role", ["main", "consciousness"])
+@pytest.mark.parametrize("choice", [None, {"kind": "following", "role": "main"},
+                                    {"kind": "explicit", "source": "fallback"}])
 def test_fallback_answer_schedules_child_on_parents_role(tmp_path, monkeypatch, role, choice):
     settings = {**_settings(_session_row()), "OUROBOROS_MODEL": "claudexor::codex=primary",
                 "OUROBOROS_MODEL_CONSCIOUSNESS": "claudexor::codex=consciousness",

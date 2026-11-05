@@ -210,6 +210,10 @@ def _stream_error(*frames):
     ({"code": 504, "message": "Upstream idle timeout exceeded"}, True),
     ({"code": 502, "metadata": {"error_type": "timeout"}}, True),  # the provider's own typed field
     ({"code": 502, "message": "Upstream idle timeout exceeded"}, False),  # prose is never read
+    ({"code": 503, "message": "timeout"}, False),
+    ({"code": 429, "message": "timed out"}, False),
+    ({"code": "504"}, False),  # not an HTTP-shaped code
+    ({"type": "api_error", "message": "timeout"}, False),
 ])
 def test_explicit_timeout_reads_only_typed_frame_fields(error, expected):
     assert ProviderStreamError({"error": error}).explicit_timeout is expected
@@ -229,6 +233,7 @@ def test_roles_ids_usage_keepalives_and_empty_starts_are_not_model_output(wire_e
 
 @pytest.mark.parametrize("events_,expected", [
     ([{"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}], False),
+    ([{"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "t", "name": "n", "input": {}}}], False),
     ([{"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
       {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hi"}}], True),
     ([{"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "t", "name": "n", "input": {}}},

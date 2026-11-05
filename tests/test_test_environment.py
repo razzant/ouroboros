@@ -2,15 +2,19 @@
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
+import time
 
 import pytest
 
+from ouroboros.platform_layer import kill_process_tree
 from ouroboros.preflight_runner import _preflight_env
 from ouroboros.settings_defaults import settings_env_keys
 from ouroboros.test_environment import isolated_environment, settings_keys
 from tests.group_run import kill_survivors, run_in_group
+from concurrent.futures import ThreadPoolExecutor
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -39,6 +43,59 @@ def test_chromium_download_staging_uses_disposable_temp(tmp_path):
     assert env["MAC_CHROMIUM_TMPDIR"] == env["TMPDIR"]
     assert Path(env["MAC_CHROMIUM_TMPDIR"]).is_relative_to(tmp_path)
     assert Path(env["MAC_CHROMIUM_TMPDIR"]).is_dir()
+
+
+_WRITE_ROOTS = """
+import json, os, pathlib
+from ouroboros import config
+from supervisor import update_merge
+roots = [config.DATA_DIR, pathlib.Path(config.get_subagent_projects_root()),
+         pathlib.Path(config.get_subagent_worktree_root()), pathlib.Path(config.get_deliverables_root()),
+         config.APP_ROOT, pathlib.Path.home(), pathlib.Path(os.environ['PYTHONUSERBASE'])]
+for root in roots:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / 'probe').write_text('test-only')
+config.save_settings({'TOTAL_BUDGET': 0})
+update_merge._log_supervisor({'type': 'isolation_probe'})
+print(json.dumps([str(root) for root in roots]))
+"""
+
+
+def test_preflight_children_and_concurrent_runs_leave_owner_sentinels_untouched(tmp_path, monkeypatch):
+    owner = tmp_path / "owner"
+    sentinels = []
+    for name in ("data", "projects", "worktrees", "Deliverables", "home", "app", "userbase"):
+        path = owner / name / "sentinel"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"unchanged")
+        sentinels.append(path)
+    for key, name in (("HOME", "home"), ("OUROBOROS_APP_ROOT", "app"),
+                      ("OUROBOROS_DATA_DIR", "data"), ("OUROBOROS_SUBAGENT_PROJECTS_ROOT", "projects"),
+                      ("OUROBOROS_SUBAGENT_WORKTREE_ROOT", "worktrees"),
+                      ("OUROBOROS_DELIVERABLES_ROOT", "Deliverables"), ("PYTHONUSERBASE", "userbase")):
+        monkeypatch.setenv(key, str(owner / name))
+    monkeypatch.setenv("OUROBOROS_MANAGED_BY_LAUNCHER", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-secret")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_BASE_URL", "https://invalid.example")
+    before = {path.relative_to(owner): path.read_bytes() for path in sentinels}
+
+    def run(number):
+        root = tmp_path / f"run-{number}"
+        env = _preflight_env(root, REPO)
+        assert not {"OPENAI_API_KEY", "OPENAI_COMPATIBLE_BASE_URL", "OUROBOROS_MANAGED_BY_LAUNCHER"} & env.keys()
+        result = subprocess.run([sys.executable, "-c", _WRITE_ROOTS], cwd=REPO, env=env,
+                                text=True, capture_output=True, timeout=120)
+        assert result.returncode == 0, result.stderr
+        paths = json.loads(result.stdout.splitlines()[-1])
+        assert all(Path(path).is_relative_to(root) for path in paths)
+        assert (root / "data" / "settings.json").is_file()
+        assert (root / "data" / "logs" / "supervisor.jsonl").is_file()
+        return set(paths)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first, second = executor.map(run, range(2))
+    assert first.isdisjoint(second)
+    assert {path.relative_to(owner): path.read_bytes() for path in owner.rglob("*") if path.is_file()} == before
 
 
 def test_scrubbed_child_reinjects_roots_but_preserves_explicit_synthetic_home(tmp_path):
@@ -89,6 +146,66 @@ def test_git_discovery_cannot_escape_to_an_ancestor_checkout(tmp_path, monkeypat
     assert Path(result.stdout.strip()).resolve() == own.resolve()
 
 
+def test_boundary_is_established_before_runtime_imports_in_nested_collection(tmp_path):
+    root = tmp_path / "boundary"
+    env = isolated_environment(root, REPO)
+    result = subprocess.run([sys.executable, "-c", "import tests.conftest\n" + _WRITE_ROOTS],
+                            cwd=REPO, env=env, text=True, capture_output=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    paths = json.loads(result.stdout.splitlines()[-1])
+    assert all(Path(path).is_relative_to(root) for path in paths)
+
+
+def test_safe_test_refuses_a_disposable_root_inside_the_checkout(tmp_path):
+    """A nested root is not disposable: git walks up from it into THIS working tree."""
+    launcher = [sys.executable, "-I", "-S", str(REPO / "scripts" / "safe_test.py")]
+    probe = [str(sys.executable), "-c", "print('boundary ran')"]
+
+    refused = subprocess.run(launcher + ["--temp-parent", str(REPO / "build"), "--"] + probe,
+                             cwd=REPO, text=True, capture_output=True, timeout=120)
+    assert refused.returncode == 2, refused.stdout
+    assert "outside the repository working tree" in refused.stderr
+    assert "boundary ran" not in refused.stdout
+
+    accepted = subprocess.run(launcher + ["--temp-parent", str(tmp_path), "--"] + probe,
+                              cwd=REPO, text=True, capture_output=True, timeout=120)
+    assert accepted.returncode == 0, accepted.stderr
+    assert "boundary ran" in accepted.stdout
+
+    # Any enclosing checkout is the same hazard, not only this one.
+    outer = tmp_path / "outer-checkout"
+    subprocess.run(["git", "init", str(outer)], check=True, capture_output=True)
+    (outer / "nested").mkdir()
+    before = sorted(path.name for path in (outer / "nested").iterdir())
+    refused = subprocess.run(launcher + ["--temp-parent", str(outer / "nested"), "--"] + probe,
+                             cwd=REPO, text=True, capture_output=True, timeout=120)
+    assert refused.returncode == 2, refused.stdout
+    assert "must not be inside a Git working tree" in refused.stderr
+    assert sorted(path.name for path in (outer / "nested").iterdir()) == before == []
+
+
+def test_safe_test_retains_its_new_root_and_keeps_the_command_status(tmp_path):
+    """Unknown command data remains even after reap; only declared scratch is released."""
+    launcher = [sys.executable, "-I", "-S", str(REPO / "scripts" / "safe_test.py")]
+    probe = [sys.executable, "-c", "import os, pathlib, sys; "
+             "pathlib.Path(os.environ['HOME'], 'probe').write_text('kept'); "
+             "print(os.environ['OUROBOROS_TEST_TEMP_ROOT']); sys.exit(7)"]
+    result = subprocess.run(launcher + ["--temp-parent", str(tmp_path), "--"] + probe,
+                            cwd=REPO, text=True, capture_output=True, timeout=120)
+    assert result.returncode == 7, result.stderr  # The command's own status, retention is not failure.
+    retained = [line.split(" ", 1)[1] for line in result.stderr.splitlines()
+                if line.startswith("SAFE_TEST_RETAINED ")]
+    assert len(retained) == 1, result.stderr
+    root = Path(retained[0])
+    assert root.parent == tmp_path.resolve() and root.name.startswith("ob-")
+    # Spotlight skips everything below it (fake app bundles among the fixtures), and it stays short:
+    # nested in a session's /tmp/obs-* scratch, a pool listener below it still fits AF_UNIX's 104 bytes.
+    assert root.name.endswith(".noindex") and len(root.name) == len("ob-12345678.noindex")
+    assert (root / "home" / "probe").read_text() == "kept"
+    # Handed down so each pytest controller claims its own basetemp beneath it.
+    assert Path(result.stdout.splitlines()[-1]) == root
+
+
 def test_a_session_under_an_owner_keeps_the_runs_prefix_and_collects_with_gc_paused(tmp_path):
     """Under an owner root (safe_test, the gate) every session reads and hands on the OWNER's warmed bytecode
     prefix (a prefix of its own would start cold), while bare pytest keeps one under its own session root; and
@@ -115,6 +232,24 @@ def test_a_session_under_an_owner_keeps_the_runs_prefix_and_collects_with_gc_pau
                          timeout=180)
     assert run.returncode == 0, run.stdout + run.stderr
     assert witness.read_text(encoding="utf-8") == "False"
+
+
+# The command keeps a child in a session of its own, as tests/group_run.py keeps node's runner.
+# It records the SIGTERM it gets; an "obedient" command then exits, a "stubborn" one keeps running,
+# so only the SIGKILL that follows can stop it.
+_TREE = """\
+import os, pathlib, signal, subprocess, sys, time
+own = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], **own)
+def term(*_):
+    pathlib.Path(sys.argv[1] + ".term").write_text("TERM")
+    if sys.argv[2] == "obedient":
+        os._exit(0)
+if os.name != "nt":
+    signal.signal(signal.SIGTERM, term)
+pathlib.Path(sys.argv[1]).write_text(f"{os.getpid()} {child.pid}")
+time.sleep(600)
+"""
 _LAUNCHER = [sys.executable, "-I", "-S", str(REPO / "scripts" / "safe_test.py")]
 
 
@@ -124,6 +259,98 @@ def _final_root(stderr):
     final = [line for line in lines if line.startswith(("SAFE_TEST_RETAINED ", "SAFE_TEST_RELEASED "))]
     assert len(final) == 1 and lines[-1] == final[0], stderr
     return final[0].split(" ", 1)
+
+
+def _recorded_tree(path, within=30.0):
+    deadline = time.monotonic() + within
+    while not (path.exists() and len(path.read_text(encoding="utf-8").split()) == 2):
+        assert time.monotonic() < deadline, "the command never recorded its tree"
+        time.sleep(0.05)
+    return [int(pid) for pid in path.read_text(encoding="utf-8").split()]
+
+
+def test_safe_test_timeout_stops_the_whole_tree_and_exits_124(tmp_path):
+    """The deadline reaches a child outside the command's group and a command deaf to SIGTERM."""
+    pids = tmp_path / "pids"
+    result = run_in_group(_LAUNCHER + ["--temp-parent", str(tmp_path), "--timeout", "3", "--",
+                                       sys.executable, "-c", _TREE, str(pids), "stubborn"], cwd=REPO, timeout=120)
+    survivors = kill_survivors(_recorded_tree(pids))
+    assert result.returncode == 124, result.stderr
+    assert "SAFE_TEST_TIMEOUT after 3s" in result.stderr
+    # Teardown was confirmed, so the declared scratch went even on this red outcome.
+    assert _final_root(result.stderr)[0] == "SAFE_TEST_RELEASED", result.stderr
+    if sys.platform != "win32":  # the graceful SIGTERM came before the SIGKILL that stopped it
+        assert (tmp_path / "pids.term").read_text(encoding="utf-8") == "TERM"
+    assert not survivors
+
+
+def test_safe_test_timeout_keeps_a_finished_command_status(tmp_path):
+    result = run_in_group(_LAUNCHER + ["--temp-parent", str(tmp_path), "--timeout", "60", "--",
+                                       sys.executable, "-c", "import sys; sys.exit(7)"], cwd=REPO, timeout=120)
+    assert result.returncode == 7, result.stderr
+    assert "SAFE_TEST_TIMEOUT" not in result.stderr and _final_root(result.stderr)
+    refused = run_in_group(_LAUNCHER + ["--timeout", "0", "--", sys.executable, "-c", "pass"],
+                           cwd=REPO, timeout=120)
+    assert refused.returncode == 2 and "positive number of seconds" in refused.stderr
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+@pytest.mark.parametrize("stop", ["SIGTERM", "SIGINT"])
+def test_safe_test_forwards_interrupt_then_reaps_the_whole_tree(tmp_path, stop):
+    """INT lets the root finish; TERM requests tree stop; both reap detached children."""
+    stop = getattr(signal, stop)
+    pids = tmp_path / "pids"
+    launcher = subprocess.Popen(_LAUNCHER + ["--temp-parent", str(tmp_path), "--timeout", "600", "--",
+                                             sys.executable, "-c", _TREE, str(pids), "obedient"],
+                                cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                start_new_session=True)
+    tree = []
+    try:
+        tree = _recorded_tree(pids)
+        os.kill(launcher.pid, stop)
+        os.kill(launcher.pid, stop)  # a repeated signal cannot cut the teardown short
+        _, stderr = launcher.communicate(timeout=60)
+    finally:
+        if launcher.poll() is None:
+            kill_process_tree(launcher)
+            launcher.wait()
+        survivors = kill_survivors(tree)  # a launcher that failed to stop the tree must not leave it behind
+    assert launcher.returncode == 128 + stop, stderr
+    assert _final_root(stderr)[0] == "SAFE_TEST_RELEASED", stderr
+    if stop == signal.SIGTERM:
+        assert (tmp_path / "pids.term").read_text(encoding="utf-8") == "TERM"
+    else:
+        assert not (tmp_path / "pids.term").exists(), "Ctrl-C was incorrectly translated to TERM"
+    assert not survivors
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_safe_test_forwards_sigterm_then_reaps_the_whole_tree(tmp_path):
+    """TERM requests the tree's stop, the launcher exits 128+15 and a detached child is reaped too.
+
+    Ctrl-C (SIGINT) has its witness in tests/test_test_storage.py; this is the TERM half of the same
+    forwarding (CONSENSUS WP6: signal forwarding 128+N, scratch release)."""
+    stop = signal.SIGTERM
+    pids = tmp_path / "pids"
+    launcher = subprocess.Popen(_LAUNCHER + ["--temp-parent", str(tmp_path), "--timeout", "600", "--",
+                                             sys.executable, "-c", _TREE, str(pids), "obedient"],
+                                cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                start_new_session=True)
+    tree = []
+    try:
+        tree = _recorded_tree(pids)
+        os.kill(launcher.pid, stop)
+        os.kill(launcher.pid, stop)  # a repeated signal cannot cut the teardown short
+        _, stderr = launcher.communicate(timeout=60)
+    finally:
+        if launcher.poll() is None:
+            kill_process_tree(launcher)
+            launcher.wait()
+        survivors = kill_survivors(tree)  # a launcher that failed to stop the tree must not leave it behind
+    assert launcher.returncode == 128 + stop, stderr
+    assert _final_root(stderr)[0] == "SAFE_TEST_RELEASED", stderr
+    assert (tmp_path / "pids.term").read_text(encoding="utf-8") == "TERM"
+    assert not survivors
 
 
 def _live_conftest():
@@ -194,7 +421,39 @@ def test_basetemp_dotdot_cannot_delete_an_existing_tree(tmp_path):
     assert sentinel.read_bytes() == b"keep"
 
 
+def test_two_sequential_pytest_sessions_under_one_launcher_root_never_share_a_basetemp(tmp_path):
+    """scripts/run_tests.py --sequential runs two pytest processes with the SAME env."""
+    import os
+
+    launcher_root = tmp_path / "launcher-root"
+    launcher_root.mkdir()
+    env = {**os.environ, "OUROBOROS_TEST_TEMP_ROOT": str(launcher_root)}
+    node = "tests/test_test_environment.py::test_git_discovery_cannot_escape_to_an_ancestor_checkout"
+    basetemps = []
+    for _pass in range(2):
+        result = subprocess.run([sys.executable, "-m", "pytest", node, "-o", "addopts=", "-q"],
+                                cwd=REPO, env=env, text=True, capture_output=True, timeout=300)
+        assert result.returncode == 0, result.stdout + result.stderr
+        line = next(row for row in result.stdout.splitlines() if row.startswith("test session trees retained"))
+        basetemps.append(Path(line.rsplit(", ", 1)[-1]))
+    assert basetemps == [launcher_root / "b0" / "t", launcher_root / "b1" / "t"]
+    # The second session neither reused nor removed the first one's tree.
+    for basetemp in basetemps:
+        assert basetemp.is_dir(), basetemp
+
+
 _NODE = "tests/test_test_environment.py::test_git_discovery_cannot_escape_to_an_ancestor_checkout"
+
+
+_SESSION_PROBE = """
+import json, os, pathlib, tempfile
+
+def pytest_sessionstart(session):
+    worker = getattr(session.config, "workerinput", {}).get("workerid", "controller")
+    record = {"tmpdir": os.environ.get("TMPDIR", ""), "gettempdir": tempfile.gettempdir(),
+              "session_root": str(pathlib.Path(os.environ["OUROBOROS_DATA_DIR"]).parent)}
+    pathlib.Path(os.environ["SESSION_PROBE_OUT"], worker + ".json").write_text(json.dumps(record))
+"""
 
 
 def _nested_env(**overrides):
@@ -207,6 +466,45 @@ def _nested_env(**overrides):
     env = {key: value for key, value in os.environ.items() if key not in dropped}
     env.update(overrides)
     return env
+
+
+@pytest.mark.parametrize("mode", ["launcher", "bare"])
+def test_every_pytest_process_takes_a_short_sibling_session_root(tmp_path, mode):
+    """A real xdist run: workers inherit the controller's TMPDIR, yet none nests beneath it."""
+    pytest.importorskip("xdist")
+    probe, out, parent = tmp_path / "probe", tmp_path / "out", tmp_path / "parent"
+    for path in (probe, out, parent):
+        path.mkdir()
+    (probe / "session_probe.py").write_text(_SESSION_PROBE, encoding="utf-8")
+    # Under the launcher its root is the parent; bare pytest keeps an explicitly chosen TMPDIR.
+    selected = {"OUROBOROS_TEST_TEMP_ROOT": str(parent)} if mode == "launcher" else {"TMPDIR": str(parent)}
+    # Two real workers are the scenario, so this child is explicitly allocated two slots.
+    env = _nested_env(PYTHONPATH=str(probe), SESSION_PROBE_OUT=str(out), OURO_TEST_WORKER_BUDGET="2", **selected)
+    result = subprocess.run([sys.executable, "-m", "pytest", _NODE, "-o", "addopts=", "-q",
+                             "-n", "2", "-p", "session_probe"],
+                            cwd=REPO, env=env, text=True, capture_output=True, timeout=300)
+    assert result.returncode == 0, result.stdout + result.stderr
+    records = {path.stem: json.loads(path.read_text(encoding="utf-8")) for path in out.glob("*.json")}
+    assert set(records) == {"controller", "gw0", "gw1"}, records
+    roots = {Path(record["session_root"]) for record in records.values()}
+    assert len(roots) == 3 and {root.parent for root in roots} == {parent}, roots
+    for record in records.values():
+        expected = str(Path(record["session_root"]) / "tmp") if mode == "launcher" else str(parent)
+        assert record["tmpdir"] == record["gettempdir"] == expected, record
+        assert len(record["tmpdir"]) <= len(str(parent)) + len("/p12345678/tmp"), record
+
+
+def test_bare_pytest_with_zero_retention_count_keeps_its_session_tree(tmp_path):
+    """pytest's numbered basetemp would delete the CURRENT session tree at exit here."""
+    result = subprocess.run([sys.executable, "-m", "pytest", _NODE, "-o", "addopts=", "-q",
+                             "-o", "tmp_path_retention_count=0"],
+                            cwd=REPO, env=_nested_env(TMPDIR=str(tmp_path)),
+                            text=True, capture_output=True, timeout=300)
+    assert result.returncode == 0, result.stdout + result.stderr
+    line = next(row for row in result.stdout.splitlines() if row.startswith("test session trees retained"))
+    root = Path(line.split(": ", 1)[1].split(", ")[0])
+    assert root.parent == tmp_path, line
+    assert (root / "b0" / "t").is_dir(), sorted(root.rglob("*"))[:20]
 
 
 def test_session_finish_retains_the_session_tree(tmp_path, monkeypatch):

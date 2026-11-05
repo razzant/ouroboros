@@ -224,7 +224,8 @@ def test_cold_continuation_preserves_original_historical_handle(main_loop):
     assert "TODAYS_ROOM_INPUT" not in json.dumps(_sources(restored))
 
 
-@pytest.mark.parametrize(("physical_damage", "damage"), [(False, "missing"), (True, "hash_mismatch")])
+@pytest.mark.parametrize("damage", ["missing", "hash_mismatch"])
+@pytest.mark.parametrize("physical_damage", [False, True])
 def test_missing_or_mismatched_source_never_recaptures_live_input(main_loop, damage, physical_damage):
     f = main_loop
     _input(f, "ORIGINAL_SOURCE", "A correction.")

@@ -509,6 +509,8 @@ def test_checker_exit_maps_to_audit_outcome_only(tmp_path, monkeypatch, code, ou
 
 @pytest.mark.parametrize(("summary_patch", "agent_state", "reason"), [
     ({"reason_code": "round_limit"}, "absent", ""),
+    ({"reason_code": "budget_exhausted"}, "absent", ""),
+    ({"reason_code": "wall_clock_timeout", "bench_status": "failed"}, "absent", ""),
     ({"reason_code": "owner_requested_finalization"}, "absent", "stop_reason_not_eligible"),
     ({"reason_code": "llm_api_error", "infra_failed": True}, "absent", "infrastructure_outcome"),
 ])
@@ -679,7 +681,7 @@ def test_flag_is_default_off_and_part_of_the_applied_config():
 
 
 @pytest.mark.parametrize(("previous", "current", "accepted"), [
-    ("missing", False, True), ("missing", True, False), ("false", False, False),
+    ("missing", False, True), ("missing", True, False), (False, True, False), (True, False, False), ("false", False, False),
 ])
 def test_resume_normalizes_only_a_missing_flag_to_false(tmp_path, previous, current, accepted):
     bench = tmp_path / "bench"

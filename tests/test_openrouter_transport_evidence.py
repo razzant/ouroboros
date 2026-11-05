@@ -250,7 +250,7 @@ def test_other_provider_preserves_price_but_not_partial_counter_settlement(isola
         assert row["state"] == "unresolved" and row.get("cost_usd") is None
 
 
-@pytest.mark.parametrize("cost,expected", [(True, None), ("0", 0.0), ("1.25", 1.25)])
+@pytest.mark.parametrize("cost,expected", [(True, None), (-1, None), (float("nan"), None), ("0", 0.0), ("1.25", 1.25)])
 def test_public_usage_projects_only_valid_received_money(isolated, monkeypatch, cost, expected):
     monkeypatch.setattr("ouroboros.pricing.estimate_cost_optional",
                         lambda *a, **kw: pytest.fail("received price must not use tariffs"))

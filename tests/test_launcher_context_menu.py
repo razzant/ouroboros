@@ -25,6 +25,7 @@ OPEN_LINK, NEW_WINDOW, DOWNLOAD_LINK = (f"{ID}OpenLink", 33), (f"{ID}OpenLinkInN
 COPY_LINK, SHARE = (f"{ID}CopyLink", 3), (f"{ID}ShareMenu", 0)
 NEW_IMAGE, DOWNLOAD_IMAGE, COPY_IMAGE = (f"{ID}OpenImageInNewWindow", 4), (f"{ID}DownloadImage", 5), (f"{ID}CopyImage", 6)
 SUBJECT, REVEAL = (f"{ID}CopySubject", 97), (f"{ID}RevealImage", 94)
+NEW_FRAME = (f"{ID}OpenFrameInNewWindow", 7)
 LOOK_UP, TRANSLATE, SEARCH = (f"{ID}LookUp", 22), (f"{ID}Translate", 95), (f"{ID}SearchWeb", 21)
 COPY, HIGHLIGHT, SPEECH = (f"{ID}Copy", 8), (f"{ID}CopyLinkWithHighlight", 102), (f"{ID}SpeechMenu", 0)
 CUT, PASTE, SPELLING = (FORWARD, 13), (f"{ID}Paste", 14), (f"{ID}SpellingMenu", 0)
@@ -72,6 +73,7 @@ class Menu:
      [LOOK_UP, TRANSLATE, SEPARATOR, SEARCH, SEPARATOR, COPY, HIGHLIGHT, SEPARATOR, SHARE, SEPARATOR, SEPARATOR, SEPARATOR, SPEECH],
      [LOOK_UP, TRANSLATE, SEPARATOR, SEARCH, SEPARATOR, COPY, HIGHLIGHT, SEPARATOR, SHARE, SEPARATOR, SPEECH]),
     ("document still loading", [BACK, STOP, SEPARATOR], [BACK]),
+    ("frame: nothing of use is left", [NEW_FRAME, SEPARATOR], []),
 ])
 def test_cocoa_menus_keep_what_works(name, stock, shown):
     menu = Menu(stock)
@@ -87,7 +89,9 @@ def test_cut_and_stop_share_an_identifier_so_only_the_tag_tells_them():
 
 @pytest.mark.parametrize("flags, drop", [
     ([], []),
+    ([False, False], []),
     ([True], [0]),
+    ([False, True, False], []),
     ([True, False, True, True, False, True], [0, 3, 5]),
 ])
 def test_separators_that_separate_nothing(flags, drop):

@@ -110,7 +110,7 @@ def test_a_plan_releases_its_refusal_ceiling_when_the_observation_expires(tmp_pa
 
 @pytest.mark.parametrize("stated,accepted,usable", [
     (872_000, 921_227, 921_227), (1_000_000, 200_000, 934_464),
-    (1_000_000, 950_000, 934_464),
+    (1_000_000, 950_000, 934_464), (0, 921_227, None),
 ])
 def test_start_and_in_task_admission_share_the_input_bound(tmp_path, monkeypatch, stated, accepted, usable):
     from ouroboros import context_fit as cf

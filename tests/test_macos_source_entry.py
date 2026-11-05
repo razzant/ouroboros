@@ -506,13 +506,9 @@ def test_frozen_handoff_probe_uses_shell_python_even_when_body_is_in_a_venv(laun
     assert seen["python"] == str(launch.python)
 
 
-@pytest.mark.parametrize(("source", "frozen"), [
-    ("old-339fce", False),
-    ("no-protocol", True),
-    ("compatible-local", False),
-    ("future-protocol", True),
-    ("damaged-helper", False),
-])
+@pytest.mark.parametrize("frozen", [True, False])
+@pytest.mark.parametrize("source", ["old-339fce", "no-protocol", "compatible-local", "future-protocol",
+                                    "damaged-helper"])
 def test_entry_handoff_requires_source_capability_in_a_real_plain_python_probe(launch, monkeypatch, frozen, source):
     """The actual old launcher imports successfully but cannot host its body under the entry.
 

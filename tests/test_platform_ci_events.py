@@ -222,6 +222,11 @@ def test_scheduled_main_runs_do_not_enter_the_ordinary_matrix(cron):
 @pytest.mark.parametrize("event,ref,schedule,e2e_live,admitted", [
     ("workflow_dispatch", "refs/heads/ouroboros", "", "true", True),
     ("workflow_dispatch", "refs/heads/ouroboros", "", "false", False),
+    ("schedule", "refs/heads/main", "37 4 * * *", "false", False),
+    ("schedule", "refs/heads/main", "17 3 * * *", "false", False),
+    ("push", "refs/heads/ouroboros", "", "false", False),
+    ("push", "refs/heads/main", "", "false", False),
+    ("push", "refs/tags/v7.0.0", "", "false", False),
     ("pull_request", "refs/pull/42/merge", "", "false", False),
 ])
 def test_the_paid_live_stand_runs_only_on_a_dispatch_that_opts_in(event, ref, schedule, e2e_live, admitted):
@@ -241,7 +246,11 @@ def test_desktop_pr_coverage_does_not_admit_provider_or_release_jobs(name):
 
 @pytest.mark.parametrize("event,ref,schedule,called", [
     ("push", "refs/heads/main", "", False),
+    ("push", "refs/heads/ouroboros", "", False),
+    ("push", "refs/heads/ouroboros-stable", "", False),
     ("push", "refs/tags/v7.0.0", "", True),
+    ("pull_request", "refs/pull/42/merge", "", False),
+    ("schedule", "refs/heads/main", "37 4 * * *", False),
     ("schedule", "refs/heads/main", "17 3 * * *", False),
 ])
 def test_provider_canaries_join_this_workflow_only_for_manual_runs_and_tags(event, ref, schedule, called):
@@ -257,7 +266,7 @@ def test_provider_canaries_join_this_workflow_only_for_manual_runs_and_tags(even
 
 @pytest.mark.parametrize(("event", "cancelled", "expected"), [
     ("pull_request", False, True), ("pull_request", True, False),
-    ("schedule", True, False),
+    ("schedule", False, False), ("schedule", True, False),
 ])
 def test_status_checks_and_inequality_keep_independent_meanings(event, cancelled, expected):
     assert _value(

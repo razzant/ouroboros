@@ -381,11 +381,8 @@ def test_a_link_is_checked_as_a_link_and_only_a_folder_can_leave_b(env, monkeypa
     assert_unabsorbed(drive)
 
 
-@pytest.mark.parametrize(("executor", "authority"), [
-    (False, "presence_on_b"),
-    (True, "policy_on_destination"),
-    ("backend_policy", "policy_on_link"),
-])
+@pytest.mark.parametrize("authority", ["presence_on_b", "policy_on_link", "policy_on_destination"])
+@pytest.mark.parametrize("executor", [False, True, "backend_policy"])
 def test_a_link_out_of_b_is_judged_by_its_own_path(env, authority, executor):
     """A child's link to a file outside B is an entry of B: a Presence grant on B covers it although its
     destination lies outside the grant, a task policy naming the link itself still refuses, and a policy on

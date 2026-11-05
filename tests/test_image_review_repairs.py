@@ -168,11 +168,8 @@ def test_registered_vlm_preserves_common_note_in_request_and_host_result(tmp_pat
         assert decoded.format == "PNG"
 
 
-@pytest.mark.parametrize(("no_pixels", "tool"), [
-    (False, "vlm_query"),
-    (True, "analyze_screenshot"),
-    (True, "caption"),
-])
+@pytest.mark.parametrize("tool", ["vlm_query", "analyze_screenshot", "caption"])
+@pytest.mark.parametrize("no_pixels", [False, True])
 def test_vlm_and_caption_quota_switch_notes_and_no_text_only_generation(live_wait, monkeypatch, tool, no_pixels):
     import requests
     from ouroboros import pricing, vision_routing as vr

@@ -208,7 +208,8 @@ def test_the_reaper_ends_a_stale_service_by_its_launch_identity_and_keeps_an_unc
         _end(pid, birth)
 
 
-@pytest.mark.parametrize(("scope", "later"), [("task", "reaper"), ("session", "exit stop")])
+@pytest.mark.parametrize("later", ["reaper", "exit stop"])
+@pytest.mark.parametrize("scope", ["task", "session"])
 def test_the_reaper_keeps_a_dead_launch_row_while_its_owner_lives_and_a_later_stop_ends_its_orphan(
         tmp_path, monkeypatch, scripts, scope, later):
     """Custody of a launch does not end with its leader: a sweep during the owner's life signals nothing and

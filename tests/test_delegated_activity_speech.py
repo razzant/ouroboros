@@ -425,10 +425,8 @@ def test_no_key_of_a_record_without_exact_coverage_is_proven_either_way(tmp_path
     assert fourth["updated"] is True, "a later block begun behind one seen whole is proven again"
 
 
-@pytest.mark.parametrize(("done", "space"), [
-    pytest.param(False, " ", id='unfinished-space'),
-    pytest.param(True, "\n\n", id='completed-paragraph'),
-])
+@pytest.mark.parametrize("space", [" ", "\n\n"], ids=["space", "paragraph"])
+@pytest.mark.parametrize("done", [False, True], ids=["unfinished", "completed"])
 def test_a_poll_holding_only_the_space_between_words_keeps_it_in_the_utterance(tmp_path, space, done):
     """The engine streams words and the space between them as fragments, and a poll can hold only the space. The
     record carries that fragment, whose seq it read, so the card joins across it with the space; no text reader
@@ -515,10 +513,19 @@ def test_the_frame_log_prints_a_complete_texts_new_words_after_its_proven_draft(
         "an equal complete adds only its new words; a changed one is printed whole and says so"
     assert done["parts"][0]["text"] == complete, "the record keeps the whole complete text for the card and history"
     assert delegate_activity.card_text(done, 650).count(complete) == 1, "a card shows one record: the words whole"
+
+
+NOTES = [f"Note {index}." for index in range(40)]                   # with the draft, 41 parts: one is omitted
+LONG = ["L" * 550] * 4                                                   # their lines alone pass the frame's 2000
+
+
 @pytest.mark.parametrize("before,draft,rest,shown", [
     pytest.param([], ["Checking the file."], [], True, id="shown-whole"),
     pytest.param([], ["w" * 700], [], False, id="line-bound"),          # its line keeps 600 code points
+    pytest.param(NOTES, ["Checking the file."], [], False, id="part-bound"),
+    pytest.param(LONG, ["Checking the file."], [], False, id="frame-bound"),
     pytest.param([], ["😀" * 599], ["é ok"], True, id="astral-whole"),   # code points, not UTF-16 units
+    pytest.param([], ["😀" * 601], ["é ok"], False, id="astral-cut"),
 ])
 def test_the_frame_log_skips_only_words_its_earlier_lines_showed_whole(tmp_path, before, draft, rest, shown):
     first = [_harness(index + 1, "message", text=text) for index, text in enumerate(before)]

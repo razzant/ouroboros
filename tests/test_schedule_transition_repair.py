@@ -115,13 +115,9 @@ def test_control_disable_and_restore_recheck_refused_work(q, monkeypatch):  # no
     assert len(q.pending) == 1
 
 
-@pytest.mark.parametrize(("edit_timing", "cron", "evidence"), [
-    (False, False, "foreign"),
-    (False, True, "accepted"),
-    (True, False, "dispatch"),
-    (True, True, "unstarted"),
-    (True, True, "unreadable"),
-])
+@pytest.mark.parametrize("evidence", ["accepted", "unstarted", "dispatch", "foreign", "unreadable"])
+@pytest.mark.parametrize("cron", [False, True])
+@pytest.mark.parametrize("edit_timing", [False, True])
 def test_api_edit_preserves_accepted_or_unprovable_occurrence(q, monkeypatch, evidence, cron, edit_timing):  # noqa: F811
     clock = _clock(monkeypatch)
     row = _refused(q, monkeypatch, cron=cron)
@@ -170,7 +166,7 @@ def test_api_edit_preserves_accepted_or_unprovable_occurrence(q, monkeypatch, ev
             assert bool(current.get("completed_at")) is not edit_timing
 
 
-@pytest.mark.parametrize("cron,successor", [(False, False), (True, True), (False, True)])
+@pytest.mark.parametrize("cron,successor", [(False, False), (True, False), (True, True), (False, True)])
 def test_worker_crash_retry_survives_settlement_and_successor(q, monkeypatch, cron, successor):  # noqa: F811
     from supervisor import state, worker_health, workers
     from tests.test_worker_crash_retry import _make_worker
