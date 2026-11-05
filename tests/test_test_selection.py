@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from ouroboros import test_selection as selection
+import subprocess
 
 
 def write(repo, path, text="def test_ok(): pass\n", newline=None):
@@ -214,6 +215,81 @@ def test_repeated_selection_parses_only_modules_whose_content_changed(repo, monk
     write(repo, "tests/test_unrelated.py", "from ouroboros import leaf\n")  # an edit is read again
     assert "tests/test_unrelated.py" in selection.select_from_paths(repo, ["ouroboros/leaf.py"], base="base").files
     assert parsed[5:] == ["tests/test_unrelated.py"]
+
+
+def test_git_candidate_includes_dirty_untracked_deleted_and_renamed_inputs(repo):
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True).stdout.decode().strip()
+    git("init", "-q")
+    git("config", "user.email", "selection@example.invalid")
+    git("config", "user.name", "Selection tests")
+    write(repo, "ouroboros/leaf.py", "before = 1\n")
+    git("add", ".")
+    git("commit", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    git("mv", "ouroboros/leaf.py", "ouroboros/renamed.py")
+    write(repo, "tests/test_new.py")
+    write(repo, "tests/test_indirect.py", "def test_changed(): pass\n")
+    result = selection.select_tests(repo)
+    assert result.base == base
+    assert set(result.changed) == {"ouroboros/leaf.py", "ouroboros/renamed.py", "tests/test_new.py", "tests/test_indirect.py"}
+    assert {"tests/test_direct.py", "tests/test_nested.py", "tests/test_new.py"} <= set(result.files)
+    assert selection.refresh_selection(repo, result) == result
+    with pytest.raises(subprocess.CalledProcessError):
+        selection.select_tests(repo, base="missing-base")
+
+
+@pytest.mark.parametrize("action", ["rename", "remove"])
+def test_a_removed_or_renamed_test_module_selects_the_importers_it_would_break(repo, action):
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True).stdout.decode().strip()
+    write(repo, "tests/test_hub.py")
+    write(repo, "tests/test_by_from.py", "from tests.test_hub import helper\n")
+    git("init", "-q")
+    git("config", "user.email", "selection@example.invalid")
+    git("config", "user.name", "Selection tests")
+    git("add", ".")
+    git("commit", "-qm", "base")
+    if action == "rename":
+        git("mv", "tests/test_hub.py", "tests/test_hub_renamed.py")
+    else:
+        git("rm", "-q", "tests/test_hub.py")
+    result = selection.select_tests(repo)
+    assert "tests/test_hub.py" in result.changed
+    assert "tests/test_by_from.py" in result.files  # its import of the old name no longer resolves
+    assert "tests/test_hub.py" not in result.files  # a removed module has nothing to run
+    assert set(result.files) == {"tests/test_floor.py", "tests/test_by_from.py", *(
+        ["tests/test_hub_renamed.py"] if action == "rename" else [])}
+
+
+@pytest.mark.parametrize("eol", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize("autocrlf", ["false", "true"])
+def test_a_release_bump_alone_stays_selected_but_other_carrier_edits_run_full(repo, eol, autocrlf):
+    def write_carrier(path, text):
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(text.replace("\n", eol).encode("utf-8"))
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True).stdout.decode().strip()
+    git("init", "-q")
+    git("config", "user.email", "selection@example.invalid")
+    git("config", "user.name", "Selection tests")
+    git("config", "core.autocrlf", autocrlf)
+    git("config", "core.safecrlf", "false")
+    project = '[project]\nname = "ouroboros"\nversion = "{}"\ndependencies = [{}]\n'
+    write_carrier("VERSION", "7.7.0-rc.1\n")
+    write_carrier("pyproject.toml", project.format("7.7.0rc1", ""))
+    write_carrier("web/package.json", '{\n  "version": "7.7.0-rc.1"\n}\n')
+    git("add", ".")
+    git("commit", "-qm", "base")
+    write_carrier("VERSION", "7.7.0-rc.2\n")  # P9: every numbered release bumps the carriers
+    write_carrier("pyproject.toml", project.format("7.7.0rc2", ""))
+    write_carrier("web/package.json", '{\n  "version": "7.7.0-rc.2"\n}\n')
+    assert selection.select_tests(repo).tier == "selected"
+    write_carrier("pyproject.toml", project.format("7.7.0rc2", '"requests"'))
+    result = selection.select_tests(repo)
+    assert result.tier == "full" and ("pyproject.toml", "verification apparatus changed") in result.reasons
 
 
 def test_floor_exists_in_this_checkout():

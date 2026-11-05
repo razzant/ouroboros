@@ -53,6 +53,31 @@ def test_the_ci_run_tests_form_keeps_every_option_but_the_lane_proof(ci_retry, t
         f"--ci-evidence-dir={round_dir}"]
 
 
+def test_the_ui_lane_form_drops_its_lane_guard_and_keeps_its_junit_private(ci_retry, tmp_path):
+    evidence, private = tmp_path / "ci-evidence" / "ui" / "host", tmp_path / "ci-private" / "ui"
+    round_dir, argsfile = _round(evidence, 2)
+    command = ["python", "-I", "-S", "scripts/safe_test.py", "--", "python", "-m", "pytest", "tests/",
+               "-m", "ui_browser", "--require-ui-browser", "-vv", "--tb=short", "--timeout=900",
+               "--ui-browser-shard=5/8", "--session-timeout=4500", f"--junitxml={private / 'host.xml'}",
+               f"--ci-evidence-dir={evidence}"]
+    assert ci_retry.retry_command(command, argsfile=argsfile, direct=[], round_dir=round_dir) == [
+        "python", "-I", "-S", "scripts/safe_test.py", "--", "python", "-m", "pytest", f"@{argsfile}",
+        "-m", "ui_browser", "-vv", "--tb=short", "--timeout=900",
+        f"--junitxml={private / 'retry-2' / 'host.xml'}", f"--ci-evidence-dir={round_dir}"]
+
+
+def test_separate_option_values_move_or_go_with_their_option(ci_retry, tmp_path):
+    evidence = tmp_path / "parallel"
+    round_dir, argsfile = _round(evidence)
+    command = ["python", "-m", "pytest", "--ci-evidence-dir", str(evidence), "tests/", "--junitxml",
+               str(Path("private") / "host.xml"), "--default-suite-shard", "2/4", "--session-timeout", "4500",
+               "--ui-browser-shard", "1/8", "--default-suite-manifest", "--require-ui-browser",
+               "-p", "no:cacheprovider", "--timeout", "300"]
+    assert ci_retry.retry_command(command, argsfile=argsfile, direct=[], round_dir=round_dir) == [
+        "python", "-m", "pytest", "--ci-evidence-dir", str(round_dir), f"@{argsfile}",
+        "--junitxml", str(Path("private") / "retry-1" / "host.xml"), "-p", "no:cacheprovider", "--timeout", "300"]
+
+
 def test_every_test_path_becomes_one_argument_file_where_the_first_stood(ci_retry, tmp_path):
     """journal-persist names its modules; an option's value is never a test path, whatever it reads."""
     evidence = tmp_path / "parallel"
@@ -447,6 +472,24 @@ def test_the_round_backstop_ends_red_and_names_the_rest(ci_retry, monkeypatch, t
     assert code == 1 and requested == [[]]
     assert verdict["reason"] == "2 test(s) still pending after 0 retry round(s)"
     assert [row["nodeid"] for row in verdict["failed"]] == [A, B]
+
+
+@pytest.mark.parametrize("leftover", ["verdict.json", "retry-1"])
+def test_an_evidence_directory_with_an_earlier_verdict_or_round_is_refused(ci_retry, monkeypatch, tmp_path, leftover):
+    """A round that leaves no projection must never be read from an earlier invocation's."""
+    evidence = tmp_path / "parallel"
+    evidence.mkdir()
+    if leftover == "retry-1":
+        (evidence / leftover).mkdir()
+    else:
+        (evidence / leftover).write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(ci_retry, "_run", lambda command: pytest.fail("nothing may run"))
+    with pytest.raises(SystemExit) as stop:
+        ci_retry.main(["--evidence-dir", str(evidence), "--", "python", "-m", "pytest", "tests/"])
+    assert stop.value.code == 2
+    with pytest.raises(SystemExit) as stop:
+        ci_retry.main(["--evidence-dir", str(tmp_path / "fresh")])  # No command after --.
+    assert stop.value.code == 2
 
 
 def test_the_retry_reader_counts_execution_as_the_reconciler_does(ci_retry):

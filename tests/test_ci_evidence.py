@@ -598,6 +598,51 @@ def test_torn_and_invalid_journal_rows_are_skipped(tmp_path):
     assert _annotate(tmp_path, empty, tmp_path / "absent") == []
 
 
+def test_annotations_are_limited_escaped_and_quiet_for_green_results(tmp_path):
+    from tests.ci_evidence import _escaped
+
+    def failed(index):
+        return {"nodeid": f"t.py::test_{index}", "phase": "call", "outcome": "failed",
+                "error_type": "ValueError"}
+    green, red, odd, killed = (tmp_path / name for name in ("green", "red", "odd", "killed"))
+    _write_results(green, [{"nodeid": "t.py::test_ok", "phase": "call", "outcome": "passed"}])
+    assert _annotate(tmp_path, green) == []
+    _write_results(red, [failed(index) for index in range(12)])
+    lines = _annotate(tmp_path, red)
+    assert lines[:10] == [f"::error title=Failed test::t.py::test_{index} (call, ValueError)"
+                          for index in range(10)]
+    assert lines[10:] == ["::notice::2 more failed tests are listed in the job summary"]
+    assert len(_annotate(tmp_path, red, limit=12)) == 12
+    assert not any(line.startswith("::notice::") for line in _annotate(tmp_path, red, limit=12))
+    # A nodeid cannot end its own command line, and a missing type leaves no empty field.
+    _write_results(odd, [{"nodeid": "t.py::test_pct[100%\r\nnext]", "phase": "setup", "outcome": "failed"}])
+    assert _annotate(tmp_path, odd) == ["::error title=Failed test::t.py::test_pct[100%25%0D%0Anext] (setup)"]
+    assert _escaped("a:b,c%\n", property_value=True) == "a%3Ab%2Cc%25%0A"
+    assert _escaped("a:b,c%\n") == "a:b,c%25%0A"
+    # Across directories failed tests lead, then collection failures, then tests in flight.
+    killed.mkdir()
+    (killed / "events.jsonl").write_text(
+        json.dumps({"event": "start", "nodeid": "k.py::test_hangs"}) + "\n"
+        + json.dumps({"event": "report", "nodeid": "k.py::test_late", "phase": "teardown",
+                      "outcome": "failed", "error_type": "OSError"}) + "\n", encoding="utf-8")
+    (odd / "results.json").write_text(json.dumps({"reports": [failed(0)], "collection_failures": [
+        {"nodeid": "t.py", "outcome": "failed"}]}), encoding="utf-8")
+    assert _annotate(tmp_path, killed, odd, green) == [
+        "::error title=Failed test::k.py::test_late (teardown, OSError)",
+        "::error title=Failed test::t.py::test_0 (call, ValueError)",
+        "::error title=Collection failed::t.py",
+        "::error title=Test in flight when the session was killed::k.py::test_hangs"]
+    assert _annotate(tmp_path, killed, odd, limit=2)[2:] == [
+        "::notice::2 more failed tests are listed in the job summary"]
+    # Advisory even when miswired, while the summary contract still rejects bad usage.
+    program = [sys.executable, "-I", "-S", str(REPO / "tests/ci_evidence.py")]
+    for arguments in (["annotate"], ["annotate", "--evidence-dir", str(red), "--limit", "ten"]):
+        miswired = subprocess.run(program + arguments, capture_output=True, text=True,
+                                  encoding="utf-8", timeout=30)
+        assert miswired.returncode == 0 and miswired.stdout.startswith("::warning::")
+    assert subprocess.run(program + ["summarize"], capture_output=True, timeout=30).returncode == 2
+
+
 def test_label_extends_only_the_heading(tmp_path):
     public = tmp_path / "public"
     _write_results(public, [{"nodeid": "t.py::test_x", "phase": "call", "outcome": "failed",
