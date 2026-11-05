@@ -10,7 +10,7 @@ The local `ouroboros-stable` ref is also the recovery fallback, moved by Save re
 
 ### CI topology
 
-`ci.yml` runs on dispatch or `v*` tags. After merges to `ouroboros`, secret-free `post-merge.yml` runs affected tests (coalesced, one retry) on Linux (WAL) and Windows (PERSIST); Linux adds ruff F, `size_ratchet` against its base and the 8-minute k=30 cost contract (k=100 opt-in). Reds go to their PR and a per-OS `post-merge-red` issue; no merge waits. UI/provider wrappers are manual.
+`ci.yml`: dispatch/`v*` tags. Secret-free `post-merge.yml` coalesces `ouroboros` pushes: affected Linux/WAL and Windows/PERSIST tests, one retry. Linux adds ruff F, size vs base and cost (8min, k=30; k=100 opt-in). RED separates failures, attribution and gaps, including cost/stage errors. Per-OS `post-merge-red` issues notify PRs; skips never close them. No merge waits; UI/provider wrappers are manual.
 
 | Tier | Jobs | Trust boundary |
 |---|---|---|
@@ -30,7 +30,7 @@ Shared UI and keyless wait/repair browser fixtures run the dirty Git candidate i
 
 Tool-schema compatibility has two layers. Local and manual/tag tests build the complete shipped catalog without MCP or extensions, validate every schema as JSON Schema plus the cross-provider subset, and need every provider projection to keep the complete tool-name set. Trusted `integration-test` sends that full registry, fitted to the route's schema ceiling as Main does, in one bounded, unexecuted `delegate_start` canary per route and needs positive usage, exact provider/model identity and a schema-valid call carrying exactly the requested arguments; quota, 429, 5xx and timeout outcomes stay typed inconclusive, while contract, auth, model, tool and reasoning 4xx are red (DEVELOPMENT "Provider Independence").
 
-`tests/ci_evidence.py` binds timeout callbacks to run/worker/test; the gate reads its crash rows, never stdout as cause. `tests/stack_samples.py` replaces the crash-prone native watchdog with GIL-held samples; native hangs holding the GIL remain unsampled. Reports/artifacts: DEVELOPMENT "Reading CI failure evidence".
+`tests/ci_evidence.py` binds timeout callbacks to run/worker/test; the gate reads crash rows, not stdout as cause. `tests/stack_samples.py` uses GIL-held samples instead of the crash-prone native watchdog; GIL-holding native hangs remain unsampled. Reports: DEVELOPMENT "Reading CI failure evidence".
 
 Each manual/tag `CI` run or re-run has its own concurrency group.
 

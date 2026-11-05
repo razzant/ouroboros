@@ -415,7 +415,8 @@ def test_proven_conflict_refusal_frees_custody_and_a_repaired_head_merges_once(c
         assert qualification == retained["qualification"]
         assert {(row["name"], row["status"], row["source"]) for row in qualification["checks"]} == {
             ("full_battery", "unknown", "missing"), ("cost_contract", "unknown", "missing")}
-        assert qualification["review"] == {"observed": "unknown", "declared": "unknown"}
+        assert qualification["review"] == {"observed": "unknown", "state": "no_record", "relation": "not_declared",
+                                           "declared": "unknown"}
         assert qualification["post_merge"]["status"] == "not_run"
         assert "declarations are not host-observed PASS" in summary
         assert "Post-merge check: not run yet." in summary
