@@ -32,6 +32,16 @@ def test_holds_count_by_class_and_keep_the_first_example():
         "released": 0, "holds": [{"class": "run_open", "count": 1, "example": ""}], "errors": []}
 
 
+def test_a_scratch_hold_example_from_a_marker_is_bounded_like_every_other():
+    """A producer's marker line can be any length; the example reaching the job row (and the per-turn storage fact)
+    is cut to the engine's bound, as ``Holds.note`` cuts, while a short one stays whole."""
+    from ouroboros.session_scratch import aggregate_holds
+
+    long, short = "/var/tmp/obs-1: " + "retained path " * 80, "/var/tmp/obs-2: kept for inspection"
+    rows = aggregate_holds([("producer_retained", long, None), ("seat_open", short, None)])
+    assert [row["example"] for row in rows] == [long[:maintenance_jobs.HOLD_EXAMPLE_CHARS], short]
+
+
 def test_a_first_hold_set_is_recorded_and_an_identical_second_pass_writes_nothing(tmp_path):
     store_import.ensure_current_store(tmp_path)
     holds = Holds()
