@@ -54,7 +54,7 @@ def test_only_positive_evidence_releases_a_copy(tmp_path, monkeypatch):
     _custody(monkeypatch, running=[running, skill], pending=[pending], settled=[done, skill_done])
     report = rp.prune_review_checkouts(root, set())
     assert running.is_dir() and pending.is_dir() and skill.is_dir() and unknown.is_dir() and not done.exists() and not skill_done.exists()
-    assert (report["released"], report["errors"]) == (2, [])
+    assert (report["released"], report["errors"]) == (2, []) and report.get("rested") is None
     receipt = rc._receipt(root, TASK, "op-done")
     assert receipt["status"] == "retained"
     assert (Path(receipt["evidence_dir"]) / "files" / "check.py").read_bytes() == EDIT
@@ -78,7 +78,7 @@ def test_a_seat_a_worker_holds_is_skipped(tmp_path, monkeypatch):
     _custody(monkeypatch, settled=[done])
     with rc._seat_locked(done.parent):
         report = rp.prune_review_checkouts(root, set())
-    assert report["busy"] == 1 and done.is_dir()
+    assert report["busy"] == 1 and done.is_dir() and report.get("rested") is None
     assert rp.prune_review_checkouts(root, set())["released"] == 1 and not done.exists()
 
 
@@ -87,7 +87,7 @@ def test_custody_that_cannot_be_read_removes_nothing(tmp_path, monkeypatch):
     area = _seat(root, source, "op-done")
     _custody(monkeypatch, settled=[area], unreadable=True)
     report = rp.prune_review_checkouts(root, set(), views_since=time.time(), now=time.time() + LATER)
-    assert report["skipped"] == "custody_unreadable" and "views_done" not in report
+    assert report["skipped"] == "custody_unreadable" and report["rested"] is True and "views_done" not in report
     assert area.is_dir() and Path(source["view"]).is_dir()
 
 
@@ -248,7 +248,7 @@ def test_stop_ends_the_pass_before_the_next_seat(tmp_path, monkeypatch):
     done = _seat(root, source, "op-done")
     _custody(monkeypatch, settled=[done])
     report = rp.prune_review_checkouts(root, set(), views_since=time.time() + 1, stop=lambda: True)
-    assert report["skipped"] == "stopped" and done.is_dir() and Path(source["view"]).is_dir()
+    assert report["skipped"] == "stopped" and report["rested"] is True and done.is_dir() and Path(source["view"]).is_dir()
 
 
 def test_the_periodic_pass_reads_only_seats_that_still_hold_a_copy(tmp_path, monkeypatch):
@@ -284,7 +284,7 @@ def test_a_busy_seat_defers_the_views_pass(tmp_path, monkeypatch):
     _custody(monkeypatch, settled=[busy])
     with rc._seat_locked(busy.parent):  # a worker preparing or capturing it
         report = rp.prune_review_checkouts(root, set(), views_since=time.time() + 1)
-    assert report["busy"] == 1 and report["skipped"] == "views_busy" and "views_done" not in report
+    assert report["busy"] == 1 and report["skipped"] == "views_busy" and report.get("rested") is None and "views_done" not in report
     assert busy.is_dir() and Path(source["view"]).is_dir()
     assert rp.prune_review_checkouts(root, set(), views_since=time.time() + 1)["views_done"] is True
     assert not busy.exists() and not Path(source["view"]).exists()
@@ -383,7 +383,8 @@ def test_a_second_concurrent_pass_skips(tmp_path, monkeypatch):
     area = _seat(root, source, "op-done")
     _custody(monkeypatch, settled=[area])
     with rp._PASS_LOCK:
-        assert rp.prune_review_checkouts(root, set())["skipped"] == "pass_in_progress"
+        skipped = rp.prune_review_checkouts(root, set())
+        assert skipped["skipped"] == "pass_in_progress" and skipped["rested"] is True
     assert area.is_dir()
 
 

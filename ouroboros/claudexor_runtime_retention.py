@@ -64,16 +64,16 @@ def prune_unpinned_runtimes(*, now: Optional[float] = None) -> Dict[str, Any]:
     try:
         serving, pin, root = owned_engine_version(), runtime.get_runtime_manager().pin, runtime.managed_runtime_root()
     except Exception as exc:  # a pin that cannot be read keeps everything
-        return shaped(skipped=f"pin_unreadable: {type(exc).__name__}")
+        return shaped(skipped=f"pin_unreadable: {type(exc).__name__}", rested=True)
     if not serving:
-        return shaped(skipped="serving_version_unproven")
+        return shaped(skipped="serving_version_unproven", rested=True)
     if pin is None or not root.is_dir():
-        return shaped(skipped="nothing_installed")
+        return shaped(skipped="nothing_installed", rested=True)
     lock = root / runtime._INSTALL_LOCK_FILENAME
     fd = acquire_exclusive_file_lock(lock, timeout_sec=0, stale_sec=runtime._INSTALL_LOCK_STALE_SEC,
                                      metadata=f"pid={os.getpid()} retiring unpinned runtimes\n")
     if fd is None:
-        return shaped(skipped="install_in_progress")
+        return shaped(skipped="install_in_progress", rested=True)
     aside: List[Tuple[str, pathlib.Path]] = []
     try:
         cutoff = (time.time() if now is None else now) - _LEFTOVER_AGE_SEC

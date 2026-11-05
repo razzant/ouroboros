@@ -473,10 +473,10 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
     if not (seats.is_dir() or checkouts or views and view_root.is_dir()):
         return {**report, "views_done": views}
     if not _PASS_LOCK.acquire(blocking=False):
-        return {**report, "skipped": "pass_in_progress"}
+        return {**report, "skipped": "pass_in_progress", "rested": True}
     try:
         if current.unreadable(data_root):
-            return {**report, "skipped": "custody_unreadable"}
+            return {**report, "skipped": "custody_unreadable", "rested": True}
         live = live_task_ids if callable(live_task_ids) else (lambda: live_task_ids)
         stopped = stop or (lambda: False)
         if views:  # existing once-per-process recovery pass; no periodic historical scan
@@ -604,7 +604,7 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
 
         for home in sorted(seats.iterdir()) if seats.is_dir() else ():
             if stopped():
-                return {**report, "skipped": "stopped"}
+                return {**report, "skipped": "stopped", "rested": True}
             try:
                 if home.name.startswith(".next-"):
                     staging(home)
