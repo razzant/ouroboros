@@ -243,6 +243,21 @@ export const manualKnown = (item) => item?.availability === 'manual_discard' && 
     ? typeof item.manual.loss === 'string' && item.manual.loss.length > 0
     : Number.isInteger(item.manual?.not_proven_saved_count) && isSize(item.manual.not_proven_saved_bytes));
 
+/** What the by-hand form holds: finished copies not verified saved, session scratch its run marked to keep
+ *  (`manual.producer_retained`), or both; each reads its own nouns, never a scratch called a copy. */
+const holdsOf = (copies, scratch) => (scratch > 0 ? (copies > 0 ? 'both' : 'scratch') : 'copies');
+const BY_HAND = {
+    copies: { choose: 'Choose copies…', note: 'Only if you choose; each copy is deleted whole.', head: 'Copies not verified saved',
+        title: 'Discard these copies?', show: 'Show the copies', kept: 'Task results, history and commits on a branch that stays are kept.' },
+    scratch: { choose: 'Choose scratch…', note: 'Only if you choose; its run marked it to keep.', head: 'Session scratch marked to keep',
+        title: 'Discard the marked scratch?', show: 'Show the scratch', kept: 'Task results and history are kept.' },
+    both: { choose: 'Choose…', note: 'Only if you choose; each is deleted whole.', head: 'Copies not verified saved, and marked scratch',
+        title: 'Discard these copies and marked scratch?', show: 'Show what goes', kept: 'Task results, history and commits on a branch that stays are kept.' },
+};
+const copiesLine = (n) => plural(n, '{n} finished copy not verified saved', '{count} finished copies not verified saved');
+const scratchLine = (n) => plural(n, '{n} session scratch its run marked to keep', '{count} session scratch folders their runs marked to keep');
+const retainedOf = (item) => Boolean(item?.manual?.producer_retained);
+
 /** 'rest' | 'listing' | 'ready' | 'empty' | 'running' | 'done' | 'failed' (a dismissed list or result reads 'rest').
  *  A ready plan is 'ready' while it holds anything to say: the pool, what it leaves out, or a saved group. */
 export function trayState(free, dismissed = false) {
@@ -419,7 +434,10 @@ function excludedHtml(free, ui) {
         return `<li class="storage-decision-row"><span class="storage-decision-label" data-i18n-fmt="storage.free.decision">${text(label)}<span class="storage-meta">${text(note)}</span></span><span class="storage-decision-size${qualified ? ' is-qualified' : ''}" data-i18n-fmt="storage.size">${text(sizeWords(entry))}</span>${action}</li>`;
     };
     const copiesEntry = manual && { bytes: manual.bytes, bytes_complete: manual.bytes_complete };
-    const copies = manual ? decisionRow(plural(manual.count, '{n} finished copy not verified saved', '{count} finished copies not verified saved'), copiesEntry, button('Choose copies…', 'data-free-manual-open', 'btn-default', '', inert(heldFlow(ui))), fmt('Only if you choose; each copy is deleted whole.')) : '';
+    const scratch = manual ? Math.min(manual.retained > 0 ? manual.retained : 0, manual.count) : 0;
+    const said = BY_HAND[holdsOf(manual ? manual.count - scratch : 0, scratch)];
+    const label = manual ? [manual.count > scratch ? copiesLine(manual.count - scratch) : '', scratch ? scratchLine(scratch) : ''].filter(Boolean).join(' · ') : '';
+    const copies = manual ? decisionRow(label, copiesEntry, button(said.choose, 'data-free-manual-open', 'btn-default', '', inert(heldFlow(ui))), fmt(said.note)) : '';
     const groupsEntry = saved.length && { bytes: freeSum(free, new Set(saved.map((g) => g.id))), bytes_complete: sumComplete(free, new Set(saved.map((g) => g.id))) };
     const groups = saved.length ? decisionRow(fmt('Saved work in {groups}', { groups: plural(saved.length, '{n} group', '{count} groups') }), groupsEntry, button('Choose groups…', 'data-free-saved', 'btn-default', '', inert(heldFlow(ui))), fmt('Only if you choose; a whole group is deleted permanently.')) : '';
     const each = reasons.length ? `<h4 class="storage-free-sub">Each item left out</h4>
@@ -570,15 +588,17 @@ function unsavedPaths(manual, index) {
 
 function manualRow(item, index, picked, held) {
     const choosable = manualKnown(item);
-    const what = choosable ? item.manual?.producer_retained
-        ? `${fmt(item.manual.loss)} ${fmt('Freeing it deletes the retained scratch and handoff entry; this loss cannot be undone.')}`
+    const scratch = retainedOf(item);
+    const what = choosable ? scratch
+        ? `${fmt('Its marker says: {words}', { words: item.manual.loss })} ${fmt('Discarding deletes it and what it holds for good.')}`
         : unsavedWords(item.manual) : fmt('What it would lose could not be read, so it cannot be chosen here.');
+    const where = scratch && Array.isArray(item.manual.paths) && item.manual.paths.length ? item.manual.paths.join(' · ') : item.path;
     return `<li class="storage-free-group" data-free-manual-item="${attr(item.id)}">
         <input type="checkbox" class="ui-checkbox" id="storage-manual-${index}" data-free-manual-pick="${index}" data-key="manual-${index}"${picked.has(item.id) && choosable ? ' checked' : ''}${held || !choosable ? ' disabled' : ''}>
         <label class="storage-free-label" for="storage-manual-${index}" data-i18n-authored>${text(item.name)}</label>
         ${sizeCell(item)}
-        <p class="storage-free-why" data-i18n-fmt="storage.free.item">${text(`${fmt(kindOf(item).label)} · ${fmt('the whole folder goes')}`)}</p>
-        <p class="storage-free-why storage-free-path" data-i18n-authored>${text(item.path)}</p>
+        <p class="storage-free-why" data-i18n-fmt="storage.free.item">${text(`${scratch ? fmt('Session scratch its run marked to keep') : fmt(kindOf(item).label)} · ${fmt('the whole folder goes')}`)}</p>
+        <p class="storage-free-why storage-free-path" data-i18n-authored>${text(where)}</p>
         <p class="storage-free-why storage-free-risk" data-i18n-fmt="storage.free.manual.risk">${text(what)}</p>
         ${choosable ? unsavedPaths(item.manual, index) : ''}
     </li>`;
@@ -596,11 +616,13 @@ export function manualFacts(list, picked) {
         whole: rows.every((row) => isSize(row.bytes) && row.bytes_complete !== false),
         unsavedCount: rows.reduce((sum, row) => sum + row.manual.not_proven_saved_count, 0),
         unsavedBytes: rows.reduce((sum, row) => sum + row.manual.not_proven_saved_bytes, 0),
+        scratch: rows.filter(retainedOf).length,
     };
 }
 
 const copiesWord = (n) => plural(n, '{n} copy', '{count} copies');
-const discardLabel = (n) => fmt('Discard {copies}', { copies: copiesWord(n) });
+const discardLabel = (facts) => (facts.count && facts.scratch === facts.count ? plural(facts.count, 'Discard {n} scratch folder', 'Discard {count} scratch folders')
+    : facts.scratch ? plural(facts.count, 'Discard {n} item', 'Discard {count} items') : fmt('Discard {copies}', { copies: copiesWord(facts.count) }));
 
 function manualHtml(free, ui) {
     const list = ui.manual || EMPTY_LIST();
@@ -632,13 +654,18 @@ function manualHtml(free, ui) {
             : ui.sending ? button('Sending…', 'data-free-manual-go', 'btn-danger', '', inert(true))
                 : list.error ? ''
                     : !list.complete ? button('Reading the list…', 'data-free-manual-go', 'btn-default', '', ' aria-disabled="true"')
-                        : facts.count ? button(discardLabel(facts.count), 'data-free-manual-go', 'btn-danger', 'storage.free.manual.go')
+                        : facts.count ? button(discardLabel(facts), 'data-free-manual-go', 'btn-danger', 'storage.free.manual.go')
                             : '<span class="storage-meta">Nothing selected</span>';
     const back = ui.postUnknown ? '' : button('Back', 'data-free-manual-back', 'btn-default', '', inert(ui.sending));
-    return `${headHtml('Copies not verified saved', sum)}
+    const scratch = list.complete ? list.items.filter(retainedOf).length : Math.min(free.pool?.manual?.retained || 0, total);
+    const holds = holdsOf((list.complete ? list.items.length : total) - scratch, scratch);
+    const copyText = holds === 'scratch' ? '' : `<p class="storage-tray-text">Finished work copies the app’s own cleanup leaves alone, because some files in them are not verified saved. Nothing here starts chosen.</p>
+        <p class="ui-status storage-status" data-tone="warn">Discarding a copy deletes its whole folder, not only the files listed. What is not verified saved can be lost for good. Task results, history and commits on a branch that stays are kept.</p>`;
+    const scratchText = holds === 'copies' ? '' : `<p class="storage-tray-text">Session scratch its run marked as evidence to keep; the app keeps it until you discard it. Nothing here starts chosen.</p>
+        <p class="ui-status storage-status" data-tone="warn">Discarding marked scratch deletes it and the evidence in it for good. Task results and history are kept.</p>`;
+    return `${headHtml(BY_HAND[holds].head, sum)}
         ${attemptHtml(ui)}
-        <p class="storage-tray-text">Finished work copies the app’s own cleanup leaves alone, because some files in them are not verified saved. Nothing here starts chosen.</p>
-        <p class="ui-status storage-status" data-tone="warn">Discarding a copy deletes its whole folder, not only the files listed. What is not verified saved can be lost for good. Task results, history and commits on a branch that stays are kept.</p>
+        ${copyText}${scratchText}
         ${ui.outdated || ui.postUnknown ? '' : status}${ui.outdated || ui.postUnknown ? '' : body}
         <p class="storage-meta">Gone for good. Sizes are what the whole folders occupy; the space freed can be smaller.</p>
         <div class="storage-actions">${back}${go}</div>`;
@@ -648,25 +675,23 @@ function manualHtml(free, ui) {
  *  confirm is the owner's acknowledgement that each whole copy goes with whatever is not verified saved in it. */
 export function manualConfirmCopy(list, picked) {
     const facts = manualFacts(list, picked);
-    const producer = facts.rows.filter((item) => item.manual?.producer_retained);
-    const goes = producer.length === facts.count
-        ? plural(facts.count, 'This deletes {n} retained scratch handoff.', 'This deletes {count} retained scratch handoffs.')
-        : plural(facts.count, 'This deletes {n} copy whole.', 'This deletes {count} copies whole.');
-    const loses = producer.length === facts.count
-        ? producer.map((item) => item.manual.loss).join(' · ')
-        : facts.unsavedCount > 0
-        ? fmt('{files} in them are not verified saved ({size}) and can be lost for good.', { files: plural(facts.unsavedCount, '{n} file', '{count} files'), size: formatBytes(facts.unsavedBytes) })
-        : fmt('No file in them is unsaved.');
+    const copies = facts.count - facts.scratch;
+    const said = BY_HAND[holdsOf(copies, facts.scratch)];
+    const goes = [copies ? plural(copies, 'This deletes {n} copy whole.', 'This deletes {count} copies whole.') : '',
+        copies && facts.unsavedCount > 0
+            ? fmt('{files} in them are not verified saved ({size}) and can be lost for good.', { files: plural(facts.unsavedCount, '{n} file', '{count} files'), size: formatBytes(facts.unsavedBytes) })
+            : copies ? fmt('No file in them is unsaved.') : '',
+        facts.scratch ? plural(facts.scratch, 'This deletes {n} scratch folder its run marked to keep, and the evidence in it.', 'This deletes {count} scratch folders their runs marked to keep, and the evidence in them.') : ''];
     return {
-        title: producer.length === facts.count ? fmt('Free retained scratch?') : fmt('Discard these copies?'),
-        body: `${goes} ${loses} ${fmt('Task results, history and commits on a branch that stays are kept.')}`,
+        title: fmt(said.title),
+        body: `${goes.filter(Boolean).join(' ')} ${fmt(said.kept)}`,
         details: {
-            summary: fmt('Show the copies'),
-            rows: facts.rows.map((item) => ({ label: item.name, value: item.manual?.producer_retained
-                ? item.manual.loss : `${sizeWords(item)} · ${item.manual.not_proven_saved_count > 0
+            summary: fmt(said.show),
+            rows: facts.rows.map((item) => ({ label: item.name, value: retainedOf(item)
+                ? `${sizeWords(item)} · ${fmt('marked to keep: {words}', { words: item.manual.loss })}` : `${sizeWords(item)} · ${item.manual.not_proven_saved_count > 0
                     ? fmt('{files} not verified saved', { files: plural(item.manual.not_proven_saved_count, '{n} file', '{count} files') }) : fmt('no file unsaved')}` })),
         },
-        confirmLabel: discardLabel(facts.count),
+        confirmLabel: discardLabel(facts),
         danger: true,
     };
 }

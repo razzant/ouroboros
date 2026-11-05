@@ -170,11 +170,34 @@ def test_a_producer_retained_handoff_is_manual_loss_acceptance_and_not_the_ordin
     plan = owner.projection(data)
     assert plan["pool"]["count"] == 0 and plan["pool"]["manual"]["count"] == 1
     [row] = _page(owner, (data, data.parent))["items"]
-    assert row["availability"] == "manual_discard" and marker_words in row["name"]
+    assert row["availability"] == "manual_discard" and row["name"] == "task-1", "named by its task, the marker said once below"
     assert row["manual"]["producer_retained"] and marker_words in row["manual"]["loss"]
     assert owner.start(data, data.parent, plan["plan"], None, [row["id"]]) == {"started": False, "reason": "not_offered"}
     assert _discard(owner, (data, data.parent), [row["id"]]) == {"started": True, "reason": ""}
     assert not scratch.exists() and not any((data / "state" / "custody_trash").iterdir())
+
+
+def test_a_producer_retained_handoff_is_sized_by_the_scratch_it_holds(tmp_path, monkeypatch):
+    """The handoff entry is a few KB of record; the owner frees the scratch it holds, so that is its size and the
+    by-hand fact's, and the row names the scratch, while a work folder beside it keeps its own folder's size."""
+    from ouroboros import storage
+    from tests.test_storage_free import _group
+
+    data, scratch = _producer_retained(tmp_path, REASON)
+    (scratch / "held" / "blob.bin").write_bytes(b"x" * 262_144)
+    _fake_sizer(monkeypatch)
+    owner = _owner({}, offered=("work_folders", "service_folders"))
+    try:
+        plan = _preview(owner, data, data.parent)
+        [row] = _page(owner, (data, data.parent))["items"]
+        measured = lambda path: sum(part["bytes"] for part in storage.size_paths([str(path)], sleep=lambda _s: None))  # noqa: E731
+        assert [Path(path).resolve() for path in row["manual"]["paths"]] == [scratch.resolve()]
+        assert row["bytes"] == measured(scratch) > measured(Path(row["path"])), "the scratch it holds, not its entry"
+        assert plan["pool"]["manual"] == {"count": 1, "bytes": row["bytes"], "bytes_complete": True, "retained": 1}
+        [folder] = _group(plan, "work_folders")["items"]
+        assert folder["bytes"] == measured(data / "task_drives" / "task-1"), "an ordinary item keeps its own folder's size"
+    finally:
+        assert retire_synthetic_retention(scratch / "held" / "run.noindex", REASON)
 
 
 def test_a_producer_retained_handoff_beside_a_result_pin_leaves_the_pin_offered(tmp_path, monkeypatch):

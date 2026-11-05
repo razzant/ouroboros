@@ -31,9 +31,10 @@ The ordinary action works on exact objects: the *pool* (``storage_free_view``) i
 working copy and declared temporary environment (``copy_environments``), each addressed alone; everything else
 is listed with its reason. Selecting by ``items`` retires those objects, each re-judged under its retirer's own
 lock and the owner's keep (``owner_keep``); the dashboard still exposes saved groups below, with their own words.
-``manual`` is a third, separate form: exact finished copies whose work no capture holds, each named with what it
-would lose (``view=manual``) and sent with ``accept_loss``; nothing else reaches them (``copy_capture_proof.discard_offer``,
-``copy_capture_proof.discard_unsaved_copy``).
+``manual`` is a third, separate form: exact finished copies whose work no capture holds, and session scratch its
+run marked to keep (a ``producer_retained`` custody-trash handoff, sized by the scratch it holds), each named with
+what it would lose (``view=manual``) and sent with ``accept_loss``; nothing else reaches them
+(``copy_capture_proof.discard_offer``, ``copy_capture_proof.discard_unsaved_copy``).
 
 Five more groups hold what no background retirer removes, so only the owner's press frees them
 (the client starts those holding saved work unchecked): G3, reviewer seat homes of tasks proven
@@ -324,9 +325,6 @@ def _name_items(root: pathlib.Path, items: List["_Candidate"]) -> None:
         except Exception:
             log.debug("Task titles unreadable: folder names stand", exc_info=True)
     for item in items:
-        if item.layout == "producer_retained":
-            item.name = str(item.row.get("loss") or item.path.name).strip() or item.path.name
-            continue
         document = documents.get(item.task) or {}
         item.name = str(document.get("title") or document.get("suggested_name") or item.task or item.path.name).strip() or item.path.name
 
@@ -861,11 +859,12 @@ class FreeSpace:
             for entry, held in sorted(producer_entries.items(), key=lambda pair: pair[0].name):  # ``rows`` stays the copies'
                 examples = [str(row.get("example") or "producer-retained session scratch") for row in held]
                 loss = "; ".join(dict.fromkeys(examples))
-                item = _Candidate(GROUP_SERVICE_FOLDERS, f"producer_retained:{entry.name}", entry,
-                                  "producer_retained", row={"loss": loss, "scratch_paths": [row["path"] for row in held]})
+                paths = list(dict.fromkeys(row["path"] for row in held))  # what the entry holds, and what its size is
+                item = _Candidate(GROUP_SERVICE_FOLDERS, f"producer_retained:{entry.name}", entry, "producer_retained",
+                                  task=entry.name.split("+", 1)[0], row={"loss": loss, "scratch_paths": paths})
                 item.reason, item.cause = "retained_evidence", PRODUCER_RETAINED
                 item.manual = {"signature": None, "unsaved_count": 0, "unsaved_bytes": 0, "unsaved": [],
-                               "keep_branch": False, "producer_retained": True, "loss": loss}
+                               "keep_branch": False, "producer_retained": True, "loss": loss, "paths": paths}
                 group["excluded"].append(item)
             groups.append(group)
         if GROUP_RESULT_PINS in self._offered:
@@ -885,11 +884,20 @@ class FreeSpace:
 
     def _size(self, root: pathlib.Path, repo_dir: pathlib.Path, candidates: List[_Candidate]) -> None:
         """Size every candidate folder in the count child and every pin pair through Git; each answer
-        lands as it is known."""
+        lands as it is known. A marked scratch handoff is the size of the scratch it holds, summed (unknown
+        when any part is), never of its small entry."""
         from ouroboros.startup_historical_audit import read_job_lines, spawn_maintenance_job
         from ouroboros.storage import PURPOSE
 
-        by_path = {str(item.path): item for item in candidates if item.layout != "pins"}
+        by_path: Dict[str, List[_Candidate]] = {}
+        owed: Dict[int, List[Any]] = {}  # per item: [parts still to size, bytes so far (None: unknown), unreadable]
+        for item in candidates:
+            if item.layout == "pins":
+                continue
+            parts = item.row["scratch_paths"] if item.layout == "producer_retained" else [str(item.path)]
+            owed[id(item)] = [len(parts), 0, 0]
+            for part in parts:
+                by_path.setdefault(str(part), []).append(item)
         with self._lock:
             self._progress = {"done": 0, "total": len(candidates)}
         for item in candidates:
@@ -921,11 +929,17 @@ class FreeSpace:
                 if not isinstance(line, dict):
                     return
                 if line.get("event") == "size" and str(line.get("path")) in by_path:
-                    item, size = by_path[str(line["path"])], line.get("bytes")
-                    item.bytes = size if isinstance(size, int) and not isinstance(size, bool) else None
-                    item.unreadable = line.get("unreadable") if isinstance(line.get("unreadable"), int) else 0
-                    with self._lock:
-                        self._progress["done"] += 1
+                    size = line.get("bytes")
+                    size = size if isinstance(size, int) and not isinstance(size, bool) else None
+                    for item in by_path[str(line["path"])]:
+                        part = owed[id(item)]
+                        part[0] -= 1
+                        part[1] = None if size is None or part[1] is None else part[1] + size
+                        part[2] += line.get("unreadable") if isinstance(line.get("unreadable"), int) else 0
+                        if part[0] == 0:
+                            item.bytes, item.unreadable = part[1], part[2]
+                            with self._lock:
+                                self._progress["done"] += 1
                 elif "status" in line and line.get("status") != "finished":
                     raise RuntimeError(str(line.get("message") or "The sizes could not be read."))
 

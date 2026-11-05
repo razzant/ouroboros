@@ -617,6 +617,38 @@ test('the dialog says the whole copy goes with what is not verified saved in it,
     assert.equal(single.confirmLabel, 'Discard 1 copy');
 });
 
+const MARKER = 'retention marker or unreadable subtree: /var/tmp/obs-1/held/OUROBOROS_RETAINED.txt';
+const marked = (id, overrides = {}) => entry(id, { group: 'service_folders', kind: 'other', bytes: 5e6, eligible_after: null, reason: 'retained_evidence',
+    cause: 'producer_retained', path: `/data/state/custody_trash/${id}+scratch-1`, availability: 'manual_discard',
+    manual: { not_proven_saved_count: 0, not_proven_saved_bytes: 0, not_proven_saved: [], omitted_count: 0, keeps_commits: false,
+        producer_retained: true, loss: MARKER, paths: [`/var/tmp/obs-${id}`] }, ...overrides });
+
+test('marked session scratch reads as scratch its run kept, never as a copy; copies beside it keep their own words', () => {
+    const scratchPool = pool({ manual: { count: 1, bytes: 5e6, bytes_complete: true, retained: 1 }, excluded: [{ reason: 'retained_evidence', count: 1, manual_count: 1 }] });
+    const door = trayHtml(free('ready', { pool: scratchPool }), read());
+    assert.match(door, /1 session scratch its run marked to keep[\s\S]*5\.0 MB[\s\S]*>Choose scratch…</);
+    assert.doesNotMatch(door, /finished cop(?:y|ies)|Choose copies/);
+    const html = trayHtml(free('ready', { pool: scratchPool }), byHand([marked('s')], { chosen: ['s'] }));
+    assert.match(html, /<h3[^>]*>Session scratch marked to keep<\/h3>/);
+    assert.doesNotMatch(html, /[Cc]op(?:y|ies)|commits on a branch/, 'nothing on the screen calls it a copy');
+    assert.match(html, /Task s[\s\S]*5\.0 MB[\s\S]*Session scratch its run marked to keep · the whole folder goes[\s\S]*\/var\/tmp\/obs-s</);
+    assert.equal((html.match(/retention marker or unreadable subtree/g) || []).length, 1, 'the marker is said once');
+    assert.match(html, />Discard 1 scratch folder</);
+    const dialog = manualConfirmCopy(byHand([marked('s')]).manual, new Set(['s']));
+    assert.equal(dialog.title, 'Discard the marked scratch?');
+    assert.equal(dialog.body, 'This deletes 1 scratch folder its run marked to keep, and the evidence in it. Task results and history are kept.');
+    assert.deepEqual(dialog.details.rows, [{ label: 'Task s', value: `5.0 MB · marked to keep: ${MARKER}` }]);
+    assert.equal(dialog.confirmLabel, 'Discard 1 scratch folder');
+    // Both kinds at once: each says its own words, and the door and the dialog name both.
+    const mixed = pool({ manual: { count: 3, bytes: 4e9, bytes_complete: true, retained: 1 }, excluded: [{ reason: 'capture_unproven', count: 2, manual_count: 2 }] });
+    assert.match(trayHtml(free('ready', { pool: mixed }), read()), /2 finished copies not verified saved · 1 session scratch its run marked to keep[\s\S]*>Choose…</);
+    const both = manualConfirmCopy(byHand([copy('a'), marked('s')]).manual, new Set(['a', 's']));
+    assert.equal(both.title, 'Discard these copies and marked scratch?');
+    assert.equal(both.body, 'This deletes 1 copy whole. 3 files in them are not verified saved (4.2 MB) and can be lost for good. '
+        + 'This deletes 1 scratch folder its run marked to keep, and the evidence in it. Task results, history and commits on a branch that stays are kept.');
+    assert.equal(both.confirmLabel, 'Discard 2 items');
+});
+
 test('a manual run reports in the existing outcome words; a copy whose work could not be saved first says it stayed whole', () => {
     const outcomes = { ...EMPTY_LIST(), total: 4, version: 'v', want: 100, complete: true, items: [
         copy('a', { outcome: 'removed', reason: null }), copy('b', { outcome: 'kept', reason: 'capture_unproven' }), copy('c', { outcome: 'kept', reason: 'changed' }),

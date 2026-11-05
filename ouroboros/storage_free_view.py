@@ -29,6 +29,7 @@ class StorageFreeManual(TypedDict):
     keeps_commits: bool  # its branch or pin stays, with any commits it holds
     producer_retained: NotRequired[bool]  # a marked session-scratch handoff, removed by the custody trash remover
     loss: NotRequired[str]  # the producer marker's words and the owner-facing loss
+    paths: NotRequired[List[str]]  # a marked handoff's scratch folders: what it holds and what its size counts
 
 
 class StorageFreeEntry(TypedDict):
@@ -64,7 +65,8 @@ class StorageFreePool(TypedDict):
     bytes_complete: bool
     kinds: Dict[str, int]
     excluded: List[StorageFreeKept]
-    manual: Dict[str, Any]  # ``{count, bytes, bytes_complete}`` of ``view=manual``: the owner's explicit discard, never in ``count``
+    manual: Dict[str, Any]  # ``{count, bytes, bytes_complete, retained}`` of ``view=manual``: the owner's explicit discard,
+    # never in ``count``; ``retained`` of them are marked session scratch, the rest copies not proven saved
 
 
 class StorageFreeItemsResponse(TypedDict):
@@ -126,7 +128,8 @@ def _manual_entry(item: Any) -> StorageFreeEntry:
         "omitted_count": max(0, offer["unsaved_count"] - UNSAVED_LISTED),
         "keeps_commits": bool(offer["keep_branch"])}
     if offer.get("producer_retained"):
-        manual.update(producer_retained=True, loss=str(offer.get("loss") or "producer-retained session scratch"))
+        manual.update(producer_retained=True, loss=str(offer.get("loss") or "producer-retained session scratch"),
+                      paths=[str(path) for path in offer.get("paths") or ()])
     return {**entry(item, reason=item.reason), "manual": manual}
 
 
@@ -142,7 +145,8 @@ def pool(plan: Dict[str, Any]) -> StorageFreePool:
     return {"count": len(items), **_sized(items), "kinds": kinds,
             "excluded": [{"reason": reason, "count": excluded[reason], **({"manual_count": by_hand[reason]} if reason in by_hand else {})}
                          for reason in sorted(excluded)],
-            "manual": {"count": len(_manual(plan)), **_sized(_manual(plan))}}
+            "manual": {"count": len(_manual(plan)), **_sized(_manual(plan)),
+                       "retained": sum(1 for item in _manual(plan) if item.manual.get("producer_retained"))}}
 
 
 def _sized(items: List[Any]) -> Dict[str, Any]:
