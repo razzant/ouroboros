@@ -317,6 +317,25 @@ def test_a_relay_answer_is_owed_before_the_queue_and_survives_a_failed_send(tmp_
     assert owed().get("delivery_deferred") is True and owed()["system_type"] == "relay_reply"
 
 
+def test_pending_text_replay_merges_late_consciousness_origin(tmp_path, monkeypatch):
+    from supervisor import terminal_delivery
+    from ouroboros import terminal_projection
+
+    monkeypatch.setattr(terminal_projection, "main_delivery_current", lambda *_a, **_k: True)
+    pending_deliveries = terminal_delivery.pending_deliveries
+    register_pending_delivery = terminal_delivery.register_pending_delivery
+
+    event = {"type": "send_message", "delivery_id": "late-origin", "task_id": "wake",
+             "chat_id": 1, "text": "wake", "terminal_projection_token": "token"}
+    assert register_pending_delivery(tmp_path, event)
+    stamped = {**event, "initiator": "consciousness",
+               "progress_meta": {"initiator": "consciousness"}}
+    assert register_pending_delivery(tmp_path, stamped)
+    row = next(row for row in pending_deliveries(tmp_path) if row["delivery_id"] == "late-origin")
+    assert row["initiator"] == "consciousness"
+    assert row["progress_meta"]["initiator"] == "consciousness"
+
+
 def test_an_unrecordable_relay_answer_sends_nothing_and_keeps_the_relay_open(tmp_path, monkeypatch):
     from ouroboros.tools.control_runtime import _send_user_message
     row, handle = source(tmp_path)

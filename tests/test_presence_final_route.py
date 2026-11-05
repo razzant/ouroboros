@@ -620,6 +620,30 @@ def test_private_main_contact_is_not_a_local_row_and_keeps_its_custody_without_a
     assert UNDELIVERED != "deferred" and ctx._owner_message_sent is True
 
 
+def test_presence_main_contact_stamps_before_snapshot_and_outbox_registration(tmp_path, monkeypatch):
+    from ouroboros import presence_owner_contact
+
+    captured = {}
+    ctx = types.SimpleNamespace(task_id="wake-contact", task_metadata={"initiator": "consciousness"},
+                                current_chat_id=1, drive_root=tmp_path, pending_events=[])
+
+    def fake_patch(_root, _task_id, updater):
+        captured["stored"] = updater({"owner_contacts": {}})
+
+    monkeypatch.setattr("ouroboros.task_store.patch_document", fake_patch)
+    monkeypatch.setattr("supervisor.terminal_delivery.register_pending_delivery",
+                        lambda _root, event: captured.setdefault("registered", event) or True)
+    monkeypatch.setattr("ouroboros.tools.owner_delivery.deliver_owner_event",
+                        lambda _ctx, event: captured.setdefault("delivered", event) or "deferred")
+
+    result = presence_owner_contact.send_main_message(ctx, "wake contact", {"task_id": "source"}, "req-1")
+    assert "Main message" in result
+    stored = next(iter(captured["stored"]["owner_contacts"].values()))["event"]
+    assert stored["progress_meta"]["initiator"] == "consciousness"
+    assert captured["registered"]["progress_meta"]["initiator"] == "consciousness"
+    assert captured["delivered"]["progress_meta"]["initiator"] == "consciousness"
+
+
 # --- the pooled frame: declared, content free ---------------------------------------------------------------------
 
 
