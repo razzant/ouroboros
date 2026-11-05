@@ -27,13 +27,14 @@ from dataclasses import fields
 from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros import store
-from ouroboros.delegate_documents import DOCUMENT_IMPORT_TYPES, fold_document_import
+from ouroboros.delegate_documents import DOCUMENT_IMPORT_TYPES, fold_document_import, opens_release
 from ouroboros.utils import append_jsonl
 
 log = logging.getLogger(__name__)
 
 HELD, CLOSED = "held", "closed"
-# Task-scoped rows on the marks row: patch verdicts kept whole, document imports folded by input.
+# Task-scoped rows on the marks row: patch verdicts kept whole, document imports folded by input (their owed
+# managed releases by key).
 MARK_TYPES = ("delegate_run_patch_verdict", *DOCUMENT_IMPORT_TYPES)
 # Task-scoped attempt facts without a run: the evidence reader's ``nanny_nudge_recorded`` and
 # ``delegate_start_attempted`` (the constants live beside that reader).
@@ -465,6 +466,10 @@ def _reduce(txn, event: Dict[str, Any], state: Dict[str, Any], marks_by_task: Di
         _mark(mark, event)
         if set(mark) - {"task_id"}:  # a review-owned attempt marks nothing: no empty record row
             txn.put_row("custody_marks", tid, mark)
+        if opens_release(event):  # owed from here: a retirement pass not yet active must still read its owner's end
+            from ouroboros.maintenance_retirement import release_opened
+
+            release_opened(txn)
     for target in _cost_targets(event, state, invocation_row):
         debt = txn.get_row("delegated_runs", target) or {"task_id": target}
         txn.put_row("delegated_runs", target, {**debt, "cost_revision": ordinal})
@@ -781,6 +786,11 @@ def write_fold(txn, folded: Dict[str, Any], *, replace: bool) -> None:
             txn.put_row("custody_open", key, facts)
     if any(key.startswith("invocation:") and "pending" not in facts for key, facts in merged.items()):
         txn.set_meta("job:pending_invocations", {"state": "pending", "requested_revision": txn.revision() + 1})
+    restored = [tid for tid, facts in txn.set_rows("custody_marks").items() if facts.get("managed_imports")]
+    if restored:
+        from ouroboros.maintenance_retirement import release_opened
+
+        release_opened(txn, restored_tasks=restored)
 
 
 def rebuild(root, *, replace=False) -> int:

@@ -131,7 +131,15 @@ def _task_line(ctx: Any, drive: Any, state: Dict[str, Any], entry: Any) -> str:
     return "owner_continue" if recorded_continuation(drive, entry.root_task_id or entry.task_id, reader) else ""
 
 
-def still_continuable(drive: Any, entry: Any, live_task_ids=None, *, recoverable_handles=()) -> bool:
+# ``owner_continue.continuation_eligibility`` refusals a later fact may still turn into an offer: a budget whose close
+# is not recorded yet, a deadline that cannot be read, a non-completed end (or a rail's) whose cause is neither an owner
+# stop, a hard limit nor a recorded technical cause (a reconciliation may still record one). An ordinary completed row
+# is ``author_finished`` before that test. ``every_offer`` holds them as offers; the registration reading does not.
+_UNDECIDED_OFFERS = frozenset({"execution_budget_unknown", "deadline_unknown", "interruption_cause_unrecorded"})
+
+
+def still_continuable(drive: Any, entry: Any, live_task_ids=None, *, recoverable_handles=(),
+                      every_offer: bool = False) -> bool:
     """Retain a registration until its owner line and every root's Continue offer end.
 
     Each root of the recorded Continue chain (the original root and every
@@ -140,6 +148,9 @@ def still_continuable(drive: Any, entry: Any, live_task_ids=None, *, recoverable
     run's own root; child tasks never carry an offer. An author's stop is offered Continue, but that offer adds
     no hold here: its line keeps a finished root's ordinary retention (every other check below still applies),
     and its successor's work order says so. An admitted claim is followed below, like any other.
+    ``every_offer`` is the stricter reading a managed document's release needs (``delegate_documents``): any
+    offer holds, an author's stop included, and so does one whose eligibility a later fact may still decide
+    (``_UNDECIDED_OFFERS``); the registration reading above never passes it.
 
     The sweep supplies its live census and exact reserved handles. Addressed result
     reads validate retry and Continue edges; missing/changed evidence keeps the
@@ -210,7 +221,9 @@ def still_continuable(drive: Any, entry: Any, live_task_ids=None, *, recoverable
             else:  # the offer exactly as the task card reads it (a retry leaf's end)
                 offer = continuation_offer(load_effective_task_result(drive, task_id, materialize_artifacts=False)
                                            or current, task_id)
-                if offer['eligible'] and offer.get('cause') != AUTHOR_STOP_CAUSE:
+                if offer['eligible'] and (every_offer or offer.get('cause') != AUTHOR_STOP_CAUSE):
+                    return True
+                if every_offer and offer.get('refusal') in _UNDECIDED_OFFERS:
                     return True
         return not reads.unchanged(reads.rows)
     except Exception:
