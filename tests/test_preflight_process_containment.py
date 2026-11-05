@@ -78,9 +78,10 @@ def test_windows_containment_uses_the_shared_job_seam_and_closes_the_spawn_race(
         return _FakeProc()
 
     monkeypatch.setattr(platform_layer, "IS_WINDOWS", True)
-    # CREATE_NEW_PROCESS_GROUP does not exist in `subprocess` on POSIX, so the
-    # real kwargs helper cannot run here; its Windows return value is stubbed.
-    monkeypatch.setattr(platform_layer, "subprocess_new_group_kwargs", lambda: {"creationflags": 0x200})
+    # CREATE_NEW_PROCESS_GROUP does not exist in `subprocess` on POSIX, so the real kwargs helper cannot run
+    # here; its Windows return value is stubbed (the group flag, plus the below-normal class for `background`).
+    monkeypatch.setattr(platform_layer, "subprocess_new_group_kwargs",
+                        lambda background=False, **kwargs: {"creationflags": 0x200 | (0x4000 if background else 0)})
     monkeypatch.setattr(subprocess, "Popen", _fake_popen)
     monkeypatch.setattr(platform_layer, "create_kill_on_close_job", lambda: calls.append(("create_job",)) or "job")
     monkeypatch.setattr(platform_layer, "assign_pid_to_job", lambda job, pid: calls.append(("assign", job, pid)) or True)
@@ -160,7 +161,7 @@ def test_a_windows_root_that_cannot_be_job_held_is_killed_and_reported(monkeypat
         pid = 99
 
     monkeypatch.setattr(platform_layer, "IS_WINDOWS", True)
-    monkeypatch.setattr(platform_layer, "subprocess_new_group_kwargs", lambda: {"creationflags": 0x200})
+    monkeypatch.setattr(platform_layer, "subprocess_new_group_kwargs", lambda **kwargs: {"creationflags": 0x200})
     monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: _FakeProc())
     monkeypatch.setattr(platform_layer, "create_kill_on_close_job", lambda: None)
     monkeypatch.setattr(platform_layer, "assign_pid_to_job", lambda job, pid: calls.append(("assign", pid)) or True)

@@ -307,11 +307,9 @@ class ProcessContainer:
         inherits: POSIX nice +10 set on the root's new process group right after it exists (argv stays
         the caller's, no fork hook runs in a threaded owner), Windows ``BELOW_NORMAL_PRIORITY_CLASS``."""
         kwargs = dict(popen_kwargs)
-        group_kwargs = dict(_pl.subprocess_new_group_kwargs())
+        group_kwargs = dict(_pl.subprocess_new_group_kwargs(background=background))
         flags = int(kwargs.pop("creationflags", 0)) | int(group_kwargs.pop("creationflags", 0))
         kwargs.update(group_kwargs)
-        if background:
-            flags |= _pl.background_priority_creationflags()
         env = kwargs.get("env")
         env = dict(os.environ if env is None else env)
         # Explicit child environments must not sever an enclosing run's custody.
