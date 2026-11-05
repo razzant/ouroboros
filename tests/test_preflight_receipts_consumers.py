@@ -721,6 +721,39 @@ def test_a_first_lane_whose_launch_failed_is_never_reported_started_or_passed(tm
         assert "INTERRUPTED" not in section and "a lane process started" not in section
 
 
+@pytest.mark.parametrize("lane,tier", [("node", "full")])
+def test_a_lane_that_started_and_then_timed_out_is_interrupted_never_passed(tmp_path, monkeypatch, lane, tier):
+    """The control: a lane whose process was acquired and then outlived the budget is
+    INTERRUPTED (it started; no verdict). The row is the node lane: a pytest lane now
+    runs after the bytecode warm, so its terminal lists the warm first."""
+    from tests.test_preflight_receipts import _ctx, _usable_node
+
+    if lane == "node" and not _usable_node():
+        pytest.skip("no usable Node runtime for the node lane")
+    repo = _tiny_repo(tmp_path, web=lane == "node")
+    if lane == "node":
+        (repo / "web" / "tests" / "tiny.test.js").write_text(
+            "const test = require('node:test');\ntest('hangs', () => new Promise((done) => setTimeout(done, 600000)));\n",
+            encoding="utf-8")
+    else:
+        (repo / "tests" / "test_parallel.py").write_text("import time\n\n\ndef test_hangs():\n    time.sleep(600)\n",
+                                                         encoding="utf-8")
+    _git(repo, "commit", "-qam", "a hanging test")
+    ctx = _ctx(repo, tmp_path / "canonical")
+
+    verdict = _tier_run(repo, ctx, monkeypatch, tier, timeout=8)
+
+    assert verdict and "timed out" in verdict, verdict
+    terminal = json.loads((pathlib.Path(ctx._preflight_test_evidence) / "result.json").read_text(encoding="utf-8"))
+    assert terminal["execution"] == "executed" and [entry["lane"] for entry in terminal["lanes"]] == [lane]
+    assert terminal["lanes"][0]["returncode"] is None and ctx._preflight_test_disclosure["outcome"] == "interrupted"
+    assert getattr(ctx, "_preflight_tests_passed", None) is not True and getattr(ctx, "_preflight_test_proof", None) is None
+    exhibit = receipts.execution_exhibit(ctx, otherwise="tests preflight did not pass")
+    section = receipts.execution_section(exhibit)
+    assert exhibit["status"] == "not_run" and "INTERRUPTED" in section
+    assert "NOT STARTED" not in section and "START UNKNOWN" not in section and "PASSED" not in section
+
+
 def test_a_pending_wave_rejoins_with_the_whole_runner_diagnosis_its_seats_were_sent(tmp_path, monkeypatch):
     """A red run whose decisive failing test is named past a preview-sized prefix: every seat
     of the first dispatch, packet, native and session, reads the whole diagnosis, and the

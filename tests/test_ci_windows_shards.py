@@ -1,4 +1,5 @@
 """Whole-file shards of every OS preserve both passes and cannot publish incomplete proof."""
+from collections import Counter
 import json
 import os
 from pathlib import Path
@@ -101,6 +102,73 @@ def test_real_pytest_manifests_and_xdist_prove_both_passes_by_whole_file(tmp_pat
          "--temp-parent", str(tmp_path), "--", sys.executable, str(entry),
          *args, "-k", "test_parallel"], capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert narrowed.returncode != 0 and "DEFAULT_SUITE_INCOMPLETE" in narrowed.stderr
+
+
+def _proofs(tmp_path, lane):
+    full = [f"tests/{name}.py::test_case[{index}]" for name in "abcd" for index in range(3)]
+    weights = dict(Counter(node.split("::", 1)[0] for node in full))
+    owners = file_shards(weights, 2)
+    paths = {}
+    for shard in (None, 1, 2):
+        proof = {"full": full, "file_weights": [[path, weight] for path, weight in weights.items()]}
+        if shard:
+            proof.update(shard=[shard, 2], assigned=[node for node in full if owners[node.split("::", 1)[0]] == shard])
+        path = tmp_path / ("manifest/attempt1" if shard is None else f"shards/shard{shard}-attempt1") / "results.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({
+            lane: proof, "session_exit_code": 0,
+            "github": {"sha": SHA, "run_id": RUN, "run_attempt": "1"},
+            "reports": [{"nodeid": node, "phase": "call", "outcome": "passed"}
+                        for node in proof.get("assigned", [])]}), encoding="utf-8")
+        paths[shard] = path
+    return paths
+
+
+@pytest.mark.parametrize("lane", ["default_parallel", "default_serial"])
+@pytest.mark.parametrize("fault", ["none", "missing node", "duplicate assignment", "duplicate execution",
+    "wrong file", "weights", "missing projection", "missing lane", "red shard", "red manifest",
+    "duplicate proof", "foreign run", "newer red", "newer green"])
+def test_existing_reconciler_accepts_only_complete_default_proofs(tmp_path, lane, fault):
+    paths = _proofs(tmp_path, lane)
+    path = paths[None if fault == "red manifest" else 1]
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if fault == "missing node":
+        data["reports"].pop()
+    elif fault == "duplicate assignment":
+        data[lane]["assigned"].append(data[lane]["assigned"][0])
+    elif fault == "duplicate execution":
+        data["reports"].append(data["reports"][0])
+    elif fault == "wrong file":
+        data[lane]["assigned"][0] = "tests/b.py::test_case[0]"
+    elif fault == "weights":
+        data[lane]["file_weights"][0][1] += 1
+    elif fault == "missing lane":
+        data.pop(lane)
+    elif fault in {"red shard", "red manifest"}:
+        data["session_exit_code"] = 1
+    elif fault == "foreign run":
+        data["github"]["run_id"] = "43"
+    elif fault == "duplicate proof":
+        other = path.parent.with_name("duplicate")
+        other.mkdir()
+        shutil.copyfile(path, other / "results.json")
+    elif fault.startswith("newer"):
+        older = dict(data, session_exit_code=1)
+        path.write_text(json.dumps(older), encoding="utf-8")
+        path = path.parent.with_name("shard1-attempt2") / "results.json"
+        path.parent.mkdir()
+        data["github"]["run_attempt"] = "2"
+        data["session_exit_code"] = int(fault == "newer red")
+    path.write_text(json.dumps(data), encoding="utf-8")
+    if fault == "missing projection":
+        path.unlink()
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", str(ROOT / "tests/ci_evidence.py"), "reconcile-shards",
+         "--lane", lane, "--manifest", str(tmp_path / "manifest"), "--shards", str(tmp_path / "shards"),
+         "--count", "2", "--sha", SHA, "--run-id", RUN, "--summary", str(tmp_path / "summary.md")],
+        capture_output=True, text=True, encoding="utf-8", timeout=30)
+    assert result.returncode == (0 if fault in {"none", "newer green"} else 1), result.stdout + result.stderr
+    assert ("GAP " in result.stdout) == (result.returncode == 1)
 
 
 @pytest.mark.parametrize("value", ["0/4", "1", "1/2/3"])

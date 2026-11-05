@@ -604,6 +604,65 @@ def _fake_node(directory) -> str:
     return str(node)
 
 
+@pytest.mark.parametrize("change", ["head", "tree", "index", "env", "workers", "timeout", "node",
+    "launch_only", "launch_only_windows", "evidence_only",
+    pytest.param("temp_only", marks=pytest.mark.skipif(sys.platform != "darwin", reason="macOS short temp parent"))])
+def test_each_bound_input_misses_while_launch_descriptors_and_containment_do_not(tmp_path, monkeypatch,
+                                                                                stubbed_lanes, change):
+    receipts.capture_executing_source_baseline()
+    repo = _tiny_repo(tmp_path, web=change == "node")
+    (repo / "untracked.txt").write_text("tested as an untracked file\n", encoding="utf-8")
+    canonical = tmp_path / "canonical"
+    if change == "node":
+        node_a = _fake_node(tmp_path / "node-a")
+        monkeypatch.setattr("ouroboros.preflight_node.resolve_node", lambda: node_a)
+    assert pr.run_hermetic_pytest(repo, ctx=_ctx(repo, canonical, "first")) is None
+    assert len(_receipt_files(canonical)) == 1
+    ran = len(stubbed_lanes)
+    if change == "head":
+        _git(repo, "commit", "--allow-empty", "-qm", "another HEAD, same tree")
+    elif change == "tree":
+        (repo / "untracked.txt").write_text("other bytes\n", encoding="utf-8")
+    elif change == "index":
+        _git(repo, "add", "untracked.txt")  # same files on disk, another index tree
+    elif change == "env":
+        monkeypatch.setenv("C2_INHERITED_TEST_INPUT", "changed")
+    elif change == "workers":
+        monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "3")
+    elif change == "timeout":
+        monkeypatch.setenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "1234")
+    elif change == "node":
+        node_b = tmp_path / "node-b" / "node"  # the same bytes at another physical path
+        node_b.parent.mkdir()
+        shutil.copy2(node_a, node_b)
+        monkeypatch.setattr("ouroboros.preflight_node.resolve_node", lambda: str(node_b))
+    elif change == "evidence_only":  # where a run writes is not what it tests
+        monkeypatch.setenv("OUROBOROS_UI_EVIDENCE_DIR", str(tmp_path / "other-ui-evidence"))
+        from ouroboros.test_evidence import diagnostic_directory  # another destination, outside scratch
+        monkeypatch.setenv("OUROBOROS_TEST_EVIDENCE_ROOT", str(diagnostic_directory(tmp_path / "other", "receipt-identity")))
+    elif change == "temp_only":
+        import tempfile
+
+        ambient = tmp_path / ("another-long-temp-" * 8)
+        ambient.mkdir()
+        for key in ("TMPDIR", "TEMP", "TMP"):
+            monkeypatch.setenv(key, str(ambient))
+        monkeypatch.setattr(tempfile, "tempdir", str(ambient))
+    else:
+        for key, value in _launch_env("another-launch").items():
+            # Windows imports environment names in uppercase, including mixed-case launchd keys.
+            monkeypatch.setenv(key.upper() if change == "launch_only_windows" else key, value)
+    ctx = _ctx(repo, canonical, "second")
+    assert pr.run_hermetic_pytest(repo, ctx=ctx) is None
+    status = ctx._preflight_test_disclosure["receipt"]["status"]
+    # A full run takes no budget from OUROBOROS_PREFLIGHT_TIMEOUT_SEC (`_resolve_preflight_timeout`), so a changed
+    # override is the same workload and its receipt still admits it.
+    if change in {"timeout", "launch_only", "launch_only_windows", "temp_only", "evidence_only"}:
+        assert (status, len(stubbed_lanes), len(_receipt_files(canonical))) == ("reused", ran, 1)
+    else:
+        assert (status, len(_receipt_files(canonical))) == ("published", 2) and len(stubbed_lanes) > ran
+
+
 @pytest.mark.parametrize("case", ["serial_escape", "focused_args", "no_root", "no_baseline"])
 def test_only_a_complete_default_run_with_a_root_and_a_baseline_becomes_durable(tmp_path, monkeypatch,
                                                                                stubbed_lanes, case):
@@ -766,6 +825,45 @@ def test_the_exhibit_never_claims_a_run_for_a_candidate_edited_after_it(tmp_path
     section = receipts.execution_section({**exhibit, "observed": [run]})
     assert "gate passed" not in section and "PASSED, on OTHER bytes (differs: tree)" in section
     assert "Not proof here" in section
+
+
+@pytest.mark.parametrize("empty,baseline", [("serial", True)])
+def test_seats_read_the_lanes_that_ran_a_test_as_observed_never_the_recipe(tmp_path, empty, baseline):
+    """A green gate tolerates a serial lane that collects nothing (pytest exit 5) and the
+    receipt records that lane as empty, so the lanes come from the run itself. Executed,
+    reused by this process, reused from a receipt and reused again, the exhibit names the
+    lanes that ran a test and calls an empty lane empty, never green, and a proof taken
+    from a receipt keeps that receipt as its provenance. Real lanes, nothing stubbed.
+    The declines are witnessed beside it: an empty parallel lane in
+    test_a_red_hung_leaking_or_partial_run_never_mints, a missing baseline in
+    test_only_a_complete_default_run_with_a_root_and_a_baseline_becomes_durable."""
+    if baseline:
+        receipts.capture_executing_source_baseline()
+    tested = [lane for lane in ("parallel", "serial") if lane != empty]
+    repo = _tiny_repo(tmp_path, lanes=tested)
+    canonical = tmp_path / "canonical"
+    exhibits, durability = [], []
+    for ctx in [_ctx(repo, canonical, "first")] * 2 + [_ctx(repo, canonical, "later")] * 2:
+        assert pr.run_hermetic_pytest(repo, ctx=ctx) is None  # the gate stays green
+        exhibits.append(receipts.execution_exhibit(ctx))
+        durability.append(ctx._preflight_test_disclosure.get("receipt"))
+
+    durable = baseline and empty != "parallel"
+    assert [exhibit["evidence"] for exhibit in exhibits] == (
+        ["executed", "process_proof", "receipt", "receipt"] if durable else ["executed", "process_proof"] * 2)
+    assert [(exhibit.get("receipt"), exhibit.get("receipt_origin")) for exhibit in exhibits[1::2]] == [
+        (exhibit.get("receipt"), exhibit.get("receipt_origin")) for exhibit in exhibits[0::2]]
+    assert not durable or exhibits[3]["receipt_origin"]["task_id"] == "first"
+    assert durable or durability[0]["reason"] == ("the parallel pass collected no tests" if baseline else
+                                                  "no executing-source baseline was captured where this process "
+                                                  "loaded its code")
+    assert [json.loads(path.read_text(encoding="utf-8"))["lanes"]["serial"] for path in _receipt_files(canonical)] == (
+        ["empty" if empty else "passed"] if durable else [])
+    for exhibit in exhibits:
+        assert (exhibit["lanes"], exhibit.get("empty_lanes")) == (tested, [empty] if empty else None)
+        section = receipts.execution_section(exhibit)
+        assert f"passed: lanes {', '.join(tested)}, green with proven process containment" in section
+        assert (f"; lanes {empty} collected no tests, so no test ran there." in section) is bool(empty)
 
 
 def test_a_reused_receipt_stays_the_provenance_of_that_proof_and_of_no_other(tmp_path, stubbed_lanes):
