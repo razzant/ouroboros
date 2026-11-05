@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 import pathlib
 import types
 
@@ -34,7 +35,8 @@ def recorded(run_tests, monkeypatch):
 
 
 @pytest.fixture
-def standalone_budget(monkeypatch):
+def standalone_budget(monkeypatch, tmp_path):
+    """A standalone owner on a quiet host; returns its private ledger directory."""
     from ouroboros import test_parallelism
 
     # These command-shape cases model the standalone operator entrypoint.
@@ -42,6 +44,9 @@ def standalone_budget(monkeypatch):
     monkeypatch.delenv(test_parallelism.NESTED_WORKERS_ENV, raising=False)
     monkeypatch.setattr(test_parallelism, "physical_memory", lambda:
                         test_parallelism.MemorySnapshot(100 * 1024**3, 100 * 1024**3))
+    monkeypatch.setattr(test_parallelism, "other_runs", lambda: test_parallelism.HostRuns())
+    monkeypatch.setattr(test_parallelism, "_ledger_dir", lambda: tmp_path / "slots")
+    return tmp_path / "slots"
 
 
 def _item(nodeid, *, serial):
@@ -114,11 +119,19 @@ def test_default_mode_is_one_run_over_both_lanes(run_tests, monkeypatch, standal
     assert all(flag in command for flag in untouched)
 
 
-def test_the_worker_override_steers_xdist_like_the_gate(run_tests, monkeypatch, standalone_budget, capsys):
-    from ouroboros import process_containment
+@pytest.mark.parametrize("host, workers", [
+    (None, 3),
+    # An unleased pytest root elsewhere on the host takes one slot off this run, and the runner says so.
+    ("busy", 2),
+])
+def test_the_worker_override_steers_xdist_like_the_gate(run_tests, monkeypatch, standalone_budget, capsys, host, workers):
+    from ouroboros import process_containment, test_parallelism
 
     seen = {}
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "3")
+    if host:
+        monkeypatch.setattr(test_parallelism, "other_runs",
+                            lambda: test_parallelism.HostRuns(strangers=((700, "python3 -m pytest -n 8"),)))
 
     class Owner:
         def __init__(self, **options):
@@ -126,6 +139,8 @@ def test_the_worker_override_steers_xdist_like_the_gate(run_tests, monkeypatch, 
 
         def spawn(self, argv, *, cwd, env):
             seen.update(env=env, argv=argv, cwd=cwd)
+            # While the tree runs, this owner's row in the host ledger holds exactly what it admitted.
+            seen["leases"] = [json.loads(path.read_text(encoding="utf-8")) for path in standalone_budget.glob("*.json")]
             return types.SimpleNamespace(wait=lambda **kwargs: 0)
 
         def reap(self):
@@ -137,12 +152,18 @@ def test_the_worker_override_steers_xdist_like_the_gate(run_tests, monkeypatch, 
 
     monkeypatch.setattr(process_containment, "ProcessContainer", Owner)
     assert run_tests._run("x", [run_tests.sys.executable, "-m", "pytest", "-n", "8"], run_tests.REPO) == 0
-    assert seen["argv"][-2:] == ["-n", "3"]
-    assert "=== x: pytest -n 3\n" in capsys.readouterr().out
-    assert seen["env"]["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "3"
-    assert seen["env"]["OURO_TEST_WORKER_BUDGET"] == "3"
+    assert seen["argv"][-2:] == ["-n", str(workers)]
+    out = capsys.readouterr().out
+    assert f"=== x: pytest -n {workers}\n" in out
+    assert ("=== x: 2 worker(s); 1 unleased pytest/node root(s) counted one slot each: 700 python3 -m pytest -n 8\n"
+            in out) is bool(host)
+    assert seen["env"]["PYTEST_XDIST_AUTO_NUM_WORKERS"] == str(workers)
+    assert seen["env"]["OURO_TEST_WORKER_BUDGET"] == str(workers)
     assert seen["options"] == {"lifeline": True, "overload": True}
     assert seen["reaped"] and seen["closed"]
+    (lease,) = seen["leases"]
+    assert lease["pid"] == os.getpid() and lease["workers"] == workers and lease["command"] == "run_tests.py x"
+    assert list(standalone_budget.glob("*.json")) == [], "the lease outlived its run"
 
 
 @pytest.mark.parametrize("interrupted, diagnostic, expected", [

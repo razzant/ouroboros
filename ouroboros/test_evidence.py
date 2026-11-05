@@ -409,7 +409,7 @@ def finish_gate(evidence, verdict, phase, release) -> None:
               "execution": evidence.get("reuse", evidence.get("execution", "not_run")),
               "scratch": str(cleanup[1]) if cleanup else None,
               "containment_error": cleanup[4] if cleanup else None,
-              "lanes": evidence.get("lanes", []),
+              "lanes": evidence.get("lanes", []), "workers": evidence.get("workers"),
               "diagnostics_incomplete": bool(evidence.get("evidence_errors")),
               "evidence_errors": evidence.get("evidence_errors", []),
               "retention_reason": reason, "cleanup": "pending" if cleanup else "not_created"}

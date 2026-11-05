@@ -298,15 +298,25 @@ class ProcessContainer:
         these; a caller building its own env for ``Popen`` + ``adopt`` must merge them in."""
         return {self._token: "1"}
 
-    def spawn(self, argv: List[str], **popen_kwargs) -> subprocess.Popen:
+    def spawn(self, argv: List[str], *, background: bool = False, **popen_kwargs) -> subprocess.Popen:
         """``Popen`` the process already inside the container, with no gap. The token is merged into
         the caller's ``env`` (defaulting to the inherited one) BEFORE the process exists, so no
         descendant can start outside the membership. On Windows the root is created SUSPENDED too:
-        a descendant preceding the job assignment would survive terminate/close. ``adopt`` resumes."""
+        a descendant preceding the job assignment would survive terminate/close. ``adopt`` resumes.
+        ``background`` starts the root in the host's background priority class, which its whole tree
+        inherits: POSIX ``nice -n 10`` execs the root in place (same pid and birth, no fork hook in
+        a threaded owner), Windows ``BELOW_NORMAL_PRIORITY_CLASS``."""
+        import shutil
+
         kwargs = dict(popen_kwargs)
         group_kwargs = dict(_pl.subprocess_new_group_kwargs())
         flags = int(kwargs.pop("creationflags", 0)) | int(group_kwargs.pop("creationflags", 0))
         kwargs.update(group_kwargs)
+        if background:
+            if _pl.IS_WINDOWS:
+                flags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x4000)
+            elif nice := shutil.which("nice"):
+                argv = [nice, "-n", "10", *argv]
         env = kwargs.get("env")
         env = dict(os.environ if env is None else env)
         # Explicit child environments must not sever an enclosing run's custody.

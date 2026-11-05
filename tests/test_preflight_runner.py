@@ -1,5 +1,6 @@
 import errno
 import inspect
+import json
 import os
 import pathlib
 import re
@@ -482,6 +483,7 @@ def test_worker_count_respects_physical_room_and_the_parent_allocation(monkeypat
     monkeypatch.delenv(budget.NESTED_WORKERS_ENV, raising=False)
     peak = config.TEST_WORKER_PEAK_RSS_BYTES
     monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(10 * peak, 4 * peak))
+    monkeypatch.setattr(budget, "other_runs", lambda: budget.HostRuns())  # a quiet host; the ledger has its own test
     monkeypatch.setenv(WORKERS_ENV, "1")
     assert pr._preflight_worker_count() == 1
     monkeypatch.setenv(WORKERS_ENV, "0")
@@ -1117,6 +1119,30 @@ def test_each_pass_gets_the_exact_remaining_budget(tmp_path, two_pass_env, stub_
     assert first_timeout <= 60
     assert second_timeout < first_timeout, "pass 2 was handed a fresh budget, not the remainder"
     assert second_timeout <= 60 - 0.5, "pass 2's share was rounded up past the total budget"
+
+
+def test_the_gate_leases_its_admitted_workers_for_the_whole_run(tmp_path, two_pass_env, stub_passes, monkeypatch):
+    """A standalone gate (no parent allocation) holds its admitted count in the host ledger from the admission
+    to the end of the run, so a run started meanwhile subtracts it; the row goes with the run."""
+    from ouroboros import preflight_runner as pr
+    from ouroboros import test_parallelism as budget
+
+    ledger = tmp_path / "slots"
+    monkeypatch.delenv(budget.NESTED_WORKERS_ENV)
+    monkeypatch.setattr(budget, "other_runs", lambda: budget.HostRuns())
+    monkeypatch.setattr(budget, "_ledger_dir", lambda: ledger)
+    leases = []
+
+    def green():
+        leases.append([json.loads(path.read_text(encoding="utf-8")) for path in ledger.glob("*.json")])
+        return (0, "ok", "")
+
+    stub_passes([green, green])
+    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
+    assert pr.run_hermetic_pytest(repo, timeout=120) is None
+    assert [[(row["pid"], row["workers"], row["command"]) for row in rows] for rows in leases] == [
+        [(os.getpid(), 2, "hermetic gate")]] * 2
+    assert list(ledger.glob("*.json")) == []
 
 
 def test_plugins_are_verified_before_the_candidate_tree_exists(tmp_path, two_pass_env, stub_passes, monkeypatch):
@@ -2666,6 +2692,7 @@ def test_timeout_keeps_flushed_file_output_without_waiting_for_stdio_eof(tmp_pat
 
     class _FakeContainer:
         def spawn(self, argv, **kwargs):
+            order.append("spawn behind" if kwargs.get("background") else "spawn")  # the gate's tree runs behind the owner
             kwargs["stdout"].write(b"tests/test_a.py .\ntests/test_hangs_here.py ")
             return _StuckProc()
 
@@ -2688,7 +2715,7 @@ def test_timeout_keeps_flushed_file_output_without_waiting_for_stdio_eof(tmp_pat
     assert "test_hangs_here" in output, (
         "both collections timed out and the excerpt was thrown away with them"
     )
-    assert order[:3] == ["wait", "terminate", "reap"], (
+    assert order[:4] == ["spawn behind", "wait", "terminate", "reap"], (
         f"the container was not reaped before reading the logs: {order}"
     )
 

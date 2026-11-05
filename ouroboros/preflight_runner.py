@@ -473,11 +473,15 @@ def _copy_untracked(repo_dir: pathlib.Path, worktree: pathlib.Path) -> None:
 _MIN_PREFLIGHT_WORKERS = 2
 
 
-def _preflight_worker_count() -> int:
-    """CPU-based default, capped by physical room and a parent test allocation."""
-    from ouroboros.test_parallelism import worker_budget
+def _preflight_admission():
+    """CPU-based default, capped by physical room, a parent test allocation and the other runs' slots."""
+    from ouroboros.test_parallelism import admission
 
-    return worker_budget(os.cpu_count() or 1)
+    return admission(os.cpu_count() or 1)
+
+
+def _preflight_worker_count() -> int:
+    return _preflight_admission().workers
 
 
 def _allocated_worker_count(temp_root: pathlib.Path) -> int:
@@ -569,13 +573,27 @@ def _install_worker_probe(temp_root: pathlib.Path) -> str:
     module = f"{_WORKER_PROBE_MODULE}_{uuid.uuid4().hex}"
     probe = _probe_dir(temp_root)
     probe.mkdir(parents=True, exist_ok=True)
-    (probe / "admitted-workers").write_text(str(_preflight_worker_count()), encoding="utf-8")
+    admitted = _preflight_admission()
+    (probe / "admitted-workers").write_text(str(admitted.workers), encoding="utf-8")
+    # The admission's facts for the run's evidence: what the host's other runs held when the gate admitted.
+    (probe / "admission.json").write_text(json.dumps({
+        "workers": admitted.workers, "held_by_other_runs": admitted.host.slots,
+        "leases": [list(lease) for lease in admitted.host.leases],
+        "unleased_roots": [list(root) for root in admitted.host.strangers], "note": admitted.host.note,
+    }), encoding="utf-8")
     # One pass fills the template's own fields: a root that spells one (a caller's `--evidence-dir`) is not read as one.
     fields = {"__WORKER_LOG__": repr(str(_worker_log_dir(temp_root))),
               "__RESULTS_POINTER__": repr(str(_results_pointer(temp_root)))}
     (probe / f"{module}.py").write_text(
         re.sub("|".join(fields), lambda match: fields[match[0]], _WORKER_PROBE_SOURCE), encoding="utf-8")
     return module
+
+
+def _recorded_admission(temp_root: pathlib.Path) -> Optional[dict]:
+    try:
+        return json.loads((_probe_dir(temp_root) / "admission.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
 
 
 def _observed_worker_ids(temp_root: pathlib.Path) -> set:
@@ -871,8 +889,8 @@ def _execute_pytest_pass(
     output = FileOutput(temp_root, "pytest")
     proc = None
     try:
-        proc = container.spawn(
-            [agent_python, "-m", "pytest", *args], cwd=str(worktree),
+        proc = container.spawn(  # the owner's work keeps the foreground: the gate's tree runs behind it
+            [agent_python, "-m", "pytest", *args], background=True, cwd=str(worktree),
             env=_preflight_env(temp_root, worktree), stdout=output.stdout, stderr=output.stderr,
         )
         try:
@@ -1329,12 +1347,16 @@ def _run_hermetic_pytest(
     worktree = temp_root / "repo"
     worktree_added = False
     unproven_teardown = ""
-    selection, subject, inventory = None, None, {}
+    selection, subject, inventory, lease = None, None, {}, None
     try:
         from ouroboros.test_evidence import EVIDENCE_POINTER
+        from ouroboros.test_parallelism import SlotLease
         (temp_root / EVIDENCE_POINTER).write_text(str(evidence["path"]), encoding="utf-8")
         # Install before compiling specs: -p must name the actual nonce module.
         probe_module = _install_worker_probe(temp_root)
+        # The admitted workers stay leased in the host ledger until this run ends, whatever the verdict.
+        lease = SlotLease(_allocated_worker_count(temp_root), "hermetic gate")
+        evidence["workers"] = _recorded_admission(temp_root)
         passes = _preflight_pass_specs(pytest_args, probe_module=probe_module)
         # Before ANY candidate code is on disk, let alone imported.
         if any(spec.parallel for spec in passes):
@@ -1545,6 +1567,8 @@ def _run_hermetic_pytest(
     except Exception as exc:
         failure = f"⚠️ PRE_PUSH_TEST_ERROR: hermetic preflight failed: {exc}"
     finally:
+        if lease is not None:
+            lease.close()
         unproven_teardown = evidence.pop("lane_teardown", unproven_teardown)
         evidence["cleanup"] = (repo, temp_root, worktree, worktree_added, unproven_teardown)
         from ouroboros.preflight_inventory import record_failed_attempt

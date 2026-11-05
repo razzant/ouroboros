@@ -44,16 +44,20 @@ _PYTEST_EXIT_NO_TESTS = 5
 _INTERRUPT_EXPORT_SEC, _INTERRUPT_TERM_SEC = 7, 2  # busy xdist workers already spend ~5 s in teardown
 
 
-def _workers() -> int:
-    """Keep xdist's CPU default within the physical and inherited allocation."""
-    from ouroboros.test_parallelism import worker_budget
+def _admission():
+    """xdist's CPU default within the physical and inherited allocation, minus what other runs hold."""
+    from ouroboros.test_parallelism import admission
 
     try:  # xdist prefers physical cores whenever psutil is importable
         import psutil
         physical = psutil.cpu_count(logical=False)
     except Exception:
         physical = None
-    return worker_budget(physical or os.cpu_count() or 1)
+    return admission(physical or os.cpu_count() or 1)
+
+
+def _workers() -> int:
+    return _admission().workers
 
 
 def serial_shards(workers: int, table: dict | None = None) -> int:
@@ -153,15 +157,19 @@ def battery_commands(sequential: bool) -> list[tuple[str, list[str]]]:
 def _run(label: str, argv: list[str], cwd: pathlib.Path) -> int:
     from ouroboros.preflight_node import node_environment
     from ouroboros.process_containment import ProcessContainer
-    from ouroboros.test_parallelism import NESTED_WORKERS_ENV, bounded_test_command
+    from ouroboros.test_parallelism import NESTED_WORKERS_ENV, SlotLease, bounded_test_command
 
     started = time.monotonic()
     env = node_environment(os.environ)
-    env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = str(_workers())
+    admitted = _admission()
+    env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = str(admitted.workers)
     env[NESTED_WORKERS_ENV] = env["PYTEST_XDIST_AUTO_NUM_WORKERS"]
     argv = bounded_test_command(argv, env)
     print(f"\n=== {label}: {shlex.join(argv[2:] if argv[0] == sys.executable else argv)}", flush=True)
+    if disclosure := admitted.host.disclosure():
+        print(f"=== {label}: {admitted.workers} worker(s); {disclosure}", flush=True)
     container = ProcessContainer(lifeline=True, overload=True)
+    lease = SlotLease(admitted.workers, f"run_tests.py {label}")  # this run's row in the host ledger
     proc = None
     try:
         proc = container.spawn(argv, cwd=str(cwd), env=env)
@@ -182,6 +190,7 @@ def _run(label: str, argv: list[str], cwd: pathlib.Path) -> int:
                 print(f"=== {label}: {diagnostic}", file=sys.stderr, flush=True)
         finally:
             container.close()
+            lease.close()
     if diagnostic and code in (0, _PYTEST_EXIT_NO_TESTS):
         code = 1
     print(f"=== {label}: exit {code} in {time.monotonic() - started:.0f}s", flush=True)
