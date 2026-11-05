@@ -162,8 +162,17 @@ def _producer_retained(tmp_path, marker_words):
 def test_a_producer_retained_handoff_is_manual_loss_acceptance_and_not_the_ordinary_pool(tmp_path, monkeypatch):
     """A marked handoff is named with the producer's words, then the owner's explicit discard removes
     its scratch and entry through the custody remover; an ordinary item press cannot reach it."""
+    from tests.test_session_scratch_release import _started
+    from ouroboros.workspace_preflight import release_finished_scratch
+
+    data, scratch = _started(tmp_path)
+    nested = scratch / "held" / "run.noindex"
+    nested.mkdir(parents=True)
     marker_words = "producer kept this evidence for inspection"
-    data, scratch = _producer_retained(tmp_path, marker_words)
+    assert environment.retain_tree(nested, marker_words)
+    assert release_finished_scratch(data, lambda _task: False)["released"]
+    assert task_custody.remove_custody_trash(data)["holds"][0]["class"] == "producer_retained"
+
     _fake_sizer(monkeypatch)
     owner = _owner({}, offered=("service_folders",))
     _preview(owner, data, data.parent)
@@ -181,11 +190,9 @@ def test_a_producer_retained_handoff_is_sized_by_the_scratch_it_holds(tmp_path, 
     """The handoff entry is a few KB of record; the owner frees the scratch it holds, so that is its size and the
     by-hand fact's, and the row names the scratch, while a work folder beside it keeps its own folder's size. The
     preview reads only the trash's records for it, judging no running task's scratch hold."""
-    from ouroboros import storage
-    from tests.test_storage_free import _group
-
-    from ouroboros import session_scratch
+    from ouroboros import session_scratch, storage
     from tests.test_session_scratch_release import _started
+    from tests.test_storage_free import _group
 
     data, scratch = _producer_retained(tmp_path, REASON)
     (scratch / "held" / "blob.bin").write_bytes(b"x" * 262_144)
