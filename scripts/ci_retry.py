@@ -21,7 +21,9 @@ round k in DIR/retry-<k>, for
 
 A round names its tests in DIR/retry-<k>/argsfile.txt and passes `@argsfile`
 (pytest's argument file) where the command's first test path stood, dropping the
-others; it writes its projection to DIR/retry-<k>, its JUnit to a `retry-<k>`
+others: a file none of whose tests has an attempt yet (the unrun rest of a stopped
+session) by its path, every other test by its node id (`round_arguments`); it
+writes its projection to DIR/retry-<k>, its JUnit to a `retry-<k>`
 directory beside the command's own, and leaves out the options that prove a whole
 lane, which no subset can (the lane is proven by the first session's projection and
 this verdict, `tests/ci_evidence.py reconcile-shards`). A test runs at most twice.
@@ -136,8 +138,28 @@ def retry_command(command: list[str], *, argsfile: Path, direct: list[str], roun
     return out
 
 
+def round_arguments(pending: list[str], tries: dict[str, list]) -> list[str]:
+    """What a round asks pytest for, in the pending order: a file none of whose tests has an attempt yet
+    by its path, every other pending test by its node id.
+
+    pytest matches a node id against every entry of the file's directory, and on Windows falls back
+    to a file-identity check for each entry that differs (`samefile_nofollow`): the 5,098 ids of a
+    crashed shard's rest cost its retry 34 minutes of collection before a test could run
+    (2026-11-05, run 42061846211, Windows shard 7). Its unrun files are asked for the way the first
+    session asked for them; the tests a file already started stay exact.
+    """
+    started = {node.split("::", 1)[0] for node in tries}
+    arguments: list[str] = []
+    for node in pending:
+        path = node.split("::", 1)[0]
+        entry = node if path in started else path
+        if entry not in arguments:
+            arguments.append(entry)
+    return arguments
+
+
 def write_argsfile(path: Path, nodes: list[str]) -> list[str]:
-    """Write a round's node ids one per line; return the ids that must be arguments instead.
+    """Write a round's entries (node ids, file paths) one per line; return those that must be arguments instead.
 
     pytest reads `@file` with argparse: before Python 3.12 in the locale encoding
     (cp1252 on Windows runners, where safe_test deliberately leaves UTF-8 mode off),
@@ -378,7 +400,7 @@ def run_pass(directory: Path, command: list[str], *, max_rounds: int = MAX_ROUND
         round_dir = directory / f"retry-{round_}"
         round_dir.mkdir(parents=True)
         argsfile = round_dir / "argsfile.txt"
-        direct = write_argsfile(argsfile, pending)
+        direct = write_argsfile(argsfile, round_arguments(pending, tries))
         retried = sum(node in tries for node in pending)
         _say(f"=== ci_retry round {round_}: retry {retried} failed test(s), run {len(pending) - retried} "
              f"never run; {argsfile}")
