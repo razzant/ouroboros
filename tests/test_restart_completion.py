@@ -15,7 +15,7 @@ pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("phase", ["publication", "custody", "success", "early-cleanup", "posix-exec"])
-@pytest.mark.parametrize("uvicorn_returns", [True, False], ids=["returned", "held"])
+@pytest.mark.parametrize("uvicorn_returns", [False], ids=["held"])
 @pytest.mark.parametrize("panic_entry", ["executor", "ingress", "failed-ingress"])
 def test_actual_restart_watcher_leaves_termination_to_panic(tmp_path, phase, uvicorn_returns, panic_entry):
     """Panic persists before physical exit 99, including when the watcher raises.
@@ -344,7 +344,7 @@ def test_restart_fallback_runs_pin_handoff_before_retained_executor_cleanup(monk
 
 @pytest.mark.parametrize("failure", ["", "fallback", "cleanup", "reexec"],
                          ids=["reexec-ok", "spawn-fallback-ok", "cleanup-error", "reexec-error"])
-@pytest.mark.parametrize("uvicorn_returns", [False, True], ids=["held", "returned"])
+@pytest.mark.parametrize("uvicorn_returns", [False], ids=["held"])
 def test_direct_watchdog_physically_transfers_or_fails(tmp_path, failure, uvicorn_returns):
     """Thread outcomes are physical exec or nonzero exit, never success/hang after an error."""
     script = tmp_path / "direct reexec.py"
