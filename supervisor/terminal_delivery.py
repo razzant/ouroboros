@@ -312,21 +312,16 @@ def register_pending_delivery(drive_root: Any, event: Dict[str, Any]) -> bool:
             raise ValueError(f"terminal-delivery registry pending row for {did} is malformed")
         if did in pending and pending[did].get("terminal_projection_token") == token:
             existing = pending[did]
-            changed = False
-            for key in ("ts", "delivery_deferred", "emitted", "transport_failed"):
-                if key in event and existing.get(key) != event[key]:
-                    existing[key] = event[key]
-                    changed = True
-            if isinstance(event.get("progress_meta"), dict):
-                merged = {**(existing.get("progress_meta") or {}), **event["progress_meta"]}
-                if merged != existing.get("progress_meta"):
-                    existing["progress_meta"] = merged
-                    changed = True
-            if "initiator" in event and existing.get("initiator") != event["initiator"]:
-                existing["initiator"] = event["initiator"]
-                changed = True
-            if not changed:
-                return None
+            incoming = event.get("progress_meta")
+            origin = event.get("initiator") or (incoming.get("initiator") if isinstance(incoming, dict) else "")
+            if origin:
+                merged = dict(existing.get("progress_meta") or {})
+                merged["initiator"] = origin
+                existing["progress_meta"], existing["initiator"] = merged, origin
+            if "delivery_deferred" not in event:
+                return _registry_document(current, rows, pending, exhausted=exhausted) if origin else None
+            pending[did].update({key: event[key] for key in ("ts", "delivery_deferred", "emitted", "transport_failed")
+                                 if key in event})
             return _registry_document(current, rows, pending, exhausted=exhausted)
         pending[did] = _owed_row(event)
         evicted.extend(_evict_over_cap(pending, exhausted))

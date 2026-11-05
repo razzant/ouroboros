@@ -8,6 +8,7 @@ Synthetic data; nothing leaves the process and no connector runs.
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import pathlib
 import queue as queue_module
@@ -628,13 +629,13 @@ def test_presence_main_contact_stamps_before_snapshot_and_outbox_registration(tm
                                 current_chat_id=1, drive_root=tmp_path, pending_events=[])
 
     def fake_patch(_root, _task_id, updater):
-        captured["stored"] = updater({"owner_contacts": {}})
+        captured["stored"] = copy.deepcopy(updater({"owner_contacts": {}}))
 
     monkeypatch.setattr("ouroboros.task_store.patch_document", fake_patch)
     monkeypatch.setattr("supervisor.terminal_delivery.register_pending_delivery",
-                        lambda _root, event: captured.setdefault("registered", event) or True)
+                        lambda _root, event: captured.setdefault("registered", copy.deepcopy(event)) or True)
     monkeypatch.setattr("ouroboros.tools.owner_delivery.deliver_owner_event",
-                        lambda _ctx, event: captured.setdefault("delivered", event) or "deferred")
+                        lambda _ctx, event: captured.setdefault("delivered", copy.deepcopy(event)) or "deferred")
 
     result = presence_owner_contact.send_main_message(ctx, "wake contact", {"task_id": "source"}, "req-1")
     assert "Main message" in result
