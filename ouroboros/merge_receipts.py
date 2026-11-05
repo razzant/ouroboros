@@ -15,7 +15,8 @@ separate facts on the calling task's result record (``merge_receipts``):
   and whether the PR carries a well-formed CONTRIBUTING checklist — declaration
   and observation are never merged into one "reviewed" claim (a named task's
   completion shows neither its kind nor its subject), a delta review never
-  covers a whole PR, and only a committed ``base..head`` record can;
+  covers a whole PR, and only a committed ``base..head`` record can, or an
+  index/worktree record through its own landing of the exact merged commit;
 - outcome: the strongest evidence GitHub's readbacks gave of the one request —
   merged (commit, tree, parents), queued/auto-merge (NOT merged), refused, or
   unknown — and whether this call's own effect or another actor's merge produced
@@ -47,6 +48,7 @@ import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros import review_ledger
+from ouroboros.review_doctrine import public_commit_landings
 from ouroboros.utils import utc_now_iso
 from ouroboros.task_store import patch_document
 from ouroboros.update_qualification import commit_summary, merge_qualification
@@ -57,6 +59,8 @@ METHODS = ("merge", "squash", "rebase")
 REVIEW_SCOPES = ("full", "delta")
 COMMITTED_SUBJECT_KIND = "base..head"  # the one review-ledger subject that names a committed range
 _SHA_RE = re.compile(r"^[0-9a-f]{7,64}$")
+_FULL_SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")  # a whole Git object name, never a prefix
+_PORTABLE_LANDING = ("commit_sha", "tree_sha", "parent_sha", "reviewed_subject")  # never reasons, roots or ids
 _VERDICT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_ -]{0,39}$")
 _PR_URL_RE = re.compile(r"^https://([^/]+)/([^/]+)/([^/]+)/pull/(\d+)")
 _BODY_BLOCK_RE = re.compile(r"<!-- ouroboros:merge-receipt [0-9a-f]+ -->.*?<!-- /ouroboros:merge-receipt -->", re.S)
@@ -292,6 +296,8 @@ def load_review_record(drive_root: Any, record_id: str) -> Optional[Dict[str, An
     for a record that exists but cannot be read; a non-mapping record raises here.
     Unreadable is never reported as absent. The private ``root`` stays on the task
     record and never reaches the PR body.
+    Each commit that landed under the record keeps only its commit, tree, parent and
+    relation to the reviewed tree (``commit_landings``); author reasons and ids stay in the ledger.
     """
     try:
         record = review_ledger.load_record(drive_root, record_id)
@@ -306,6 +312,7 @@ def load_review_record(drive_root: Any, record_id: str) -> Optional[Dict[str, An
     subject, verdict, panel = (record.get(key) if isinstance(record.get(key), dict) else {}
                                for key in ("subject", "verdict", "panel"))
     questions = verdict.get("per_question") if isinstance(verdict.get("per_question"), dict) else {}
+    landed = [{key: row[key] for key in _PORTABLE_LANDING} for row in public_commit_landings(record)]
     return {"record_id": str(record.get("record_id") or record_id),
             "revision": record.get("revision") if isinstance(record.get("revision"), int) else None,
             "state": str(record.get("state") or "unknown"),
@@ -314,7 +321,8 @@ def load_review_record(drive_root: Any, record_id: str) -> Optional[Dict[str, An
                         "head": _sha(subject.get("head")), "tree_sha": _sha(subject.get("tree_sha"))},
             "verdict": {"aggregate": str(verdict.get("aggregate") or "unknown"),
                         "per_question": {str(q): str(v) for q, v in questions.items()}},
-            "panel": {"seats": _count(panel.get("seats")), "distinct_models": _count(panel.get("distinct_models"))}}
+            "panel": {"seats": _count(panel.get("seats")), "distinct_models": _count(panel.get("distinct_models"))},
+            **({"commit_landings": landed} if landed else {})}
 
 
 def _count(value: Any) -> Any:
@@ -329,27 +337,59 @@ def record_approves(record: Optional[Dict[str, Any]]) -> bool:
     return bool(record) and record.get("state") == "settled" and (record.get("verdict") or {}).get("aggregate") == "PASS"
 
 
+def landing_relation(record: Dict[str, Any], head_sha: str) -> tuple:
+    """How an index/worktree record's reviewed tree relates to ``head_sha``: ``(relation, gap)``.
+
+    Only the record's own ``commit_landings`` row for exactly that full SHA links them, and a
+    ``same`` tree only when the commit's parent is the base the review read (an amend is not).
+    ``subject.head`` is never consulted; a missing row leaves the kind gap alone.
+    """
+    head = str(head_sha or "")
+    if not _FULL_SHA_RE.fullmatch(head):
+        return "", ("merged_head_not_full_sha" if head else "")
+    row = next((r for r in reversed(record.get("commit_landings") or [])
+                if isinstance(r, dict) and r.get("commit_sha") == head), None)
+    if row is None:
+        return "", ""
+    if row.get("reviewed_subject") == "different":
+        return "different", ""
+    if row.get("reviewed_subject") != "same":
+        return "", "landing_relation_unknown"
+    parent, base = str(row.get("parent_sha") or ""), _sha((record.get("subject") or {}).get("base"))
+    if not (_FULL_SHA_RE.fullmatch(parent) and parent == base):
+        return "", "landing_parent_not_reviewed_base"
+    return "same", ""
+
+
 def review_coverage(declared: Optional[Dict[str, Any]], observed: List[Dict[str, Any]], head_sha: str,
                     record: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Whether the reviewed subject — the host record, else the declaration — is the head being merged.
 
-    Every gap is named, never filled: only a committed ``base..head`` record can
-    cover a commit, so an index/worktree record at the same HEAD is a gap, and a
-    declaration stays one even beside completed named tasks.
+    Every gap is named, never filled: a committed ``base..head`` record covers its head; an
+    index/worktree record only through its exact landing of this head (``landing``), else its
+    kind is a gap whatever its ``subject.head``; a declaration stays one even beside completed tasks.
     """
     gaps = [f"review_task_{row['status'] or 'unknown'}:{index}"
             for index, row in enumerate(observed) if row.get("status") != "completed"]
+    landing, committed = "", True
     if record:
         subject = record.get("subject") or {}
-        reviewed = _sha(subject.get("head"))
-        if subject.get("kind") != COMMITTED_SUBJECT_KIND:
-            gaps.append("subject_kind_not_committed")
+        committed = subject.get("kind") == COMMITTED_SUBJECT_KIND
+        reviewed = _sha(subject.get("head")) if committed else ""
+        if not committed:
+            landing, gap = landing_relation(record, head_sha)
+            if not landing:
+                gaps += ["subject_kind_not_committed"] + ([gap] if gap else [])
     elif not declared:
         return {"status": "not_declared", "gaps": gaps + ["no_review_declared"]}
     else:
         reviewed = _sha(declared.get("reviewed_head_sha"))
     if not record and declared.get("scope") == "delta":
         status = "delta_only"  # a delta review never certifies the whole PR
+    elif landing:
+        status = "covers_head" if landing == "same" else "changes_after_review"
+    elif record and not committed:
+        status = "unknown"
     elif not reviewed:
         status = "unknown"
         gaps.append("reviewed_head_not_recorded" if record else "reviewed_head_not_declared")
@@ -361,7 +401,7 @@ def review_coverage(declared: Optional[Dict[str, Any]], observed: List[Dict[str,
         gaps.append("no_host_observed_review_record")
     if status == "covers_head" and gaps:
         status = "unknown"
-    return {"status": status, "gaps": gaps}
+    return {"status": status, "gaps": gaps, **({"landing": landing} if landing else {})}
 
 
 def contributor_evidence(body: str, comments: List[Any]) -> str:
@@ -454,6 +494,8 @@ def public_block(receipt: Dict[str, Any]) -> str:
     done = sum(1 for row in observed if row.get("status") == "completed")
     lines += [f"- Host-observed review tasks: {done} completed of {len(observed)} named",
               f"- Coverage: **{coverage.get('status', 'unknown')}**"
+              + (f" (through the review record's landing of this head: {coverage['landing']} tree)"
+                 if coverage.get("landing") else "")
               + (f" — gaps: {', '.join(g.split(':')[0] for g in coverage.get('gaps') or [])}" if coverage.get("gaps") else ""),
               f"- CONTRIBUTING checklist in this PR: {review.get('contributor_evidence', 'absent')}",
               "- A review record is evidence, not approval; merges from a shell or the web UI leave no receipt.",
@@ -880,7 +922,12 @@ def run_pr_merge(ctx: Any, gh: Gh, gh_api: Gh, *, drive_root: Any, task_id: str,
                        "contributor_evidence": contributor_evidence(pr.get("body") or "", pr.get("comments") or [])},
             "coverage": review_coverage(declared, host_observed, observed["head_sha"], record),
         }
-        receipt["qualification"] = merge_qualification(receipt["review"], review.get("checks"))
+        # The trailer is written before the merge, so it carries the relation this request saw: coverage
+        # computed for this readback. The receipt's own coverage follows later readbacks; this never changes.
+        request = dict(receipt, observed_after=observed, outcome={})
+        _recompute_coverage(request, gh_api)
+        receipt["qualification"] = merge_qualification(receipt["review"], review.get("checks"),
+                                                        relation=request["coverage"]["status"])
         receipt["commit_receipt"] = ("no_merge_commit_for_rebase" if method == "rebase" else "requested")
         try:
             claimed = write_receipt(drive_root, task_id, receipt, claim=True)

@@ -160,3 +160,7 @@ def test_cost_contract_runs_whole_module_even_when_selected_tests_fail():
     assert "--selected" not in args and "continue-on-error" not in step
     assert "!cancelled()" in step["if"] and "selected.outcome" not in step["if"]
     assert "--ci-evidence-dir" in args and step["timeout-minutes"] == 8
+    publish = STEPS["Publish the result"]
+    assert publish["env"]["COST_CONTRACT_OUTCOME"] == "${{ steps.cost_contract.outcome }}"
+    for stage in ("classify", "attribute", "route"):
+        assert publish["env"][f"POST_MERGE_{stage.upper()}_OUTCOME"] == "${{ steps." + stage + ".outcome }}"
