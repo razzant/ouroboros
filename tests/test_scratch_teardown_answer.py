@@ -281,6 +281,18 @@ def test_the_launchers_explicit_keep_retains_a_missing_commands_root(tmp_path):
         retire_synthetic_retention(root, "debug retention")
 
 
+def test_a_green_command_whose_child_wrote_bytecode_still_releases_its_root(tmp_path):
+    """The launcher declares the bytecode prefix it creates: a child that compiles a module under
+    `PYTHONPYCACHEPREFIX` (test processes, nested runners) leaves nothing undeclared, so the root is released."""
+    code = ("import os, pathlib; pyc = pathlib.Path(os.environ['PYTHONPYCACHEPREFIX']) / 'pkg' / 'mod.cpython-310.pyc'; "
+            "pyc.parent.mkdir(parents=True); pyc.write_bytes(b'0'); print(os.environ['PYTHONPYCACHEPREFIX'])")
+    result, evidence = _launcher(tmp_path, command=[sys.executable, "-c", code])
+    _run, record = _only_result(evidence)
+    final, root = result.stderr.splitlines()[-1].split(" ", 1)
+    assert result.returncode == 0 and final == "SAFE_TEST_RELEASED" and not pathlib.Path(root).exists(), result.stderr
+    assert result.stdout.strip().splitlines()[-1].startswith(root) and record["retention_reason"] == ""
+
+
 def _stage_two(tmp_path, monkeypatch):
     root, checkout = tmp_path / "run", tmp_path / "checkout"
     checkout.mkdir()
