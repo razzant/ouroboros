@@ -475,8 +475,9 @@ def test_the_floor_keeps_books_when_memory_alone_saved_the_target_and_drops_them
     """Both directions of the owner's books-last order: the floor narrows memory by the measured excess (the target
     without its return-after-fold slack, review r1 17.10); when the narrowed view saved the whole target, Max keeps
     its books; otherwise they become navigation (task-local Low)."""
-    from ouroboros import loop, loop_model_call
+    from ouroboros import capability_evidence as ce, loop, loop_model_call
 
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)  # a measured refusal is durable
     context = _ctx(tmp_path)
     target = 520_000 - 480_000 + SLACK  # measured from the accepted floor
     before = _fit(estimated_input=520_000, anchor_input=480_000, anchor_round=3, accepted_input=480_000)

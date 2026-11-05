@@ -56,5 +56,5 @@ def test_cold_schema_selection_uses_existing_mode_reader(monkeypatch):
 def test_discovery_keeps_the_ordinary_catalog_without_a_call_only_builder():
     from ouroboros.tools import tool_discovery
 
-    assert {entry.name for entry in tool_discovery.get_tools()} == {"list_available_tools", "enable_tools"}
+    assert {entry.name for entry in tool_discovery.get_tools()} == {"list_available_tools", "enable_tools", "call_mcp_tool"}
     assert not hasattr(tool_discovery, "call_catalog_facts")
