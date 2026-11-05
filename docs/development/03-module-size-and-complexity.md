@@ -6,10 +6,11 @@ projections, the source-complete decision pipeline, continuation authority, live
 notifications, UI disposers and embedded-surface geometry. Each rule bounds reading cost
 and names its enforcement or its absence.
 
-P7 makes context fit a maintenance constraint, not a line-count aesthetic. Python
-modules everywhere (`tests/` and `devtools/` included) and first-party `web/**/*.js`
-(`web/tests/` included; vendored and minified excluded) target roughly 1000 lines. The
-gates read exact-path debt from `ouroboros/size_ratchet_manifest.py`, the same for
+P7 makes context fit a maintenance constraint, not a line-count aesthetic. Product and
+runtime Python (`devtools/` included) and first-party `web/**/*.js` (vendored and minified
+excluded) target roughly 1000 lines; test modules are outside the module band (their
+function cap stays; the diff pulse states lines per changed test module). The gates read
+exact-path debt from `ouroboros/size_ratchet_manifest.py`, the same for
 Python and JavaScript: 1600 lines per module (`GIANT_PATHS`), 200,000 canonical
 UTF-8/LF bytes (`BYTE_DEBT`, shrink-only), the 1001–1500 band (`BAND_PATHS`; a new
 entry needs a nonblank rationale), and 300 lines per non-grandfathered runtime-Python

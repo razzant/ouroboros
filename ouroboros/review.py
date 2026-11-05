@@ -36,8 +36,9 @@ class SizeRatchetRefUnavailable(ValueError):
     """
 
 
-# Module inventory covers tests/devtools. Only generated, vendored, or environment
-# directories remain outside the source ratchet.
+# Module inventory covers product, runtime and devtools code. Generated, vendored and
+# environment directories remain outside the source ratchet, and so do test modules:
+# one home per behaviour makes some of them long, and the diff pulse states their lines.
 _MODULE_SKIP_DIR_NAMES = frozenset(
     {
         ".git",
@@ -50,11 +51,12 @@ _MODULE_SKIP_DIR_NAMES = frozenset(
         "dist",
         "node_modules",
         "python-standalone",
+        "tests",
         "venv",
     }
 )
 # Function inventory intentionally preserves the pre-v7 runtime-health scope.
-_FUNCTION_SKIP_DIR_NAMES = _MODULE_SKIP_DIR_NAMES | frozenset({"devtools", "tests"})
+_FUNCTION_SKIP_DIR_NAMES = _MODULE_SKIP_DIR_NAMES | frozenset({"devtools"})
 FUNCTION_COUNT_EXCLUDED_FILES = frozenset({"app.py", "demo_app.py", "launcher.py"})
 
 
