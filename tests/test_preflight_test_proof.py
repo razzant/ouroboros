@@ -280,7 +280,7 @@ def test_nonproof_outcomes_never_mint_a_receipt(candidate, monkeypatch, outcome)
         rc, error = {"empty": (5, ""), "failure": (1, ""), "timeout": (None, ""),
                      "containment": (0, "live descendant"), "node_missing": (0, "")}[outcome]
         monkeypatch.setattr(pr, "_execute_pytest_pass", lambda *a: (rc, "output", error))
-        monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a: {"gw0", "gw1"})
+        monkeypatch.setattr(pr, "observed_worker_ids", lambda *a: {"gw0", "gw1"})
         if outcome == "node_missing":
             web = ctx.repo_dir / "web" / "tests"
             web.mkdir(parents=True)
@@ -356,7 +356,7 @@ def test_environment_changed_during_lanes_creates_no_reusable_proof(candidate, m
         return 0, "green", ""
 
     monkeypatch.setattr(pr, "_execute_pytest_pass", changing_env)
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a: {"gw0", "gw1"})
+    monkeypatch.setattr(pr, "observed_worker_ids", lambda *a: {"gw0", "gw1"})
     assert pr.run_hermetic_pytest(candidate.repo_dir, ctx=candidate) is None
     assert candidate._preflight_test_proof is None
 
@@ -405,7 +405,7 @@ def test_managed_telemetry_uses_the_tested_tree_even_after_a_live_edit(tmp_path,
         return 0, "green", ""
 
     monkeypatch.setattr(pr, "_execute_pytest_pass", changed_source)
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a: {"gw0", "gw1"})
+    monkeypatch.setattr(pr, "observed_worker_ids", lambda *a: {"gw0", "gw1"})
     assert run_tests_preflight_with_proof(ctx, runner=_run_review_preflight_tests) is None
     assert update_merge.read_update_tx()["tests_evidence"]["tree"] == tested.tree
     assert not preflight_test_proof_matches(ctx, repo)
@@ -416,7 +416,7 @@ def test_postcommit_baseline_runs_before_reuse(candidate, monkeypatch):
     from ouroboros.tools import git
 
     monkeypatch.setattr(pr, "_execute_pytest_pass", lambda *a: (0, "green", ""))
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a: {"gw0", "gw1"})
+    monkeypatch.setattr(pr, "observed_worker_ids", lambda *a: {"gw0", "gw1"})
     assert pr.run_hermetic_pytest(candidate.repo_dir, ctx=candidate) is None
     assert candidate._preflight_test_proof
     shutil.rmtree(candidate.repo_dir / "tests")

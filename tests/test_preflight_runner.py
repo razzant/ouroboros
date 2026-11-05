@@ -1202,7 +1202,7 @@ def test_a_nominally_parallel_pass_on_one_worker_is_a_hard_block(tmp_path, two_p
 
     # Installed AFTER the fixture, so this expectation wins: exactly one worker
     # reported, which is the silently-serial lane.
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a, **k: {"gw0"})
+    monkeypatch.setattr(pr, "observed_worker_ids", lambda *a, **k: {"gw0"})
     events = stub_passes([(0, "1 passed"), (0, "1 passed")])
     repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
 
@@ -1225,7 +1225,7 @@ def test_a_caller_supplied_parallel_argv_is_not_blocked_for_missing_worker_evide
     being present in the argv instead."""
     from ouroboros import preflight_runner as pr
 
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a, **k: set())
+    monkeypatch.setattr(pr, "observed_worker_ids", lambda *a, **k: set())
     events = stub_passes([(0, "1 passed")])
     repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
 
@@ -1234,9 +1234,9 @@ def test_a_caller_supplied_parallel_argv_is_not_blocked_for_missing_worker_evide
     assert result is None, result
     assert [event[0] for event in events].count("pass") == 1
     # Prefix-tested, not equality-tested: the probe module carries a per-run
-    # nonce, so `_WORKER_PROBE_MODULE not in args` would pass even if the gate
+    # nonce, so `WORKER_PROBE_MODULE not in args` would pass even if the gate
     # HAD injected the nonce-named probe into the caller's argv.
-    assert not any(arg.startswith(pr._WORKER_PROBE_MODULE) for arg in events[0][1]), (
+    assert not any(arg.startswith(pr.WORKER_PROBE_MODULE) for arg in events[0][1]), (
         "the gate injected a probe into a caller's argv"
     )
 
@@ -3924,7 +3924,7 @@ def test_hermetic_pytest_prefers_agent_python_env():
     assert 'os.environ.get("OUROBOROS_AGENT_PYTHON") or sys.executable' in runner_src
     # ...and every pass is actually spawned with that resolved interpreter.
     pass_src = inspect.getsource(preflight_runner._execute_pytest_pass)
-    assert '[agent_python, "-m", "pytest", *args]' in pass_src
+    assert '[agent_python, "-m", "pytest", *launch_args(args)]' in pass_src
 
 
 @requires_preflight_plugins

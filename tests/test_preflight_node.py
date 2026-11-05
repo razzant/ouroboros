@@ -339,7 +339,7 @@ def _stub_pytest_passes(monkeypatch, calls):
     from ouroboros import preflight_runner as pr
 
     monkeypatch.setattr(pr, "_verify_preflight_plugins", lambda *a, **k: [])
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a, **k: {"gw0", "gw1"})
+    monkeypatch.setattr(pr, "observed_worker_ids", lambda *a, **k: {"gw0", "gw1"})
 
     def _fake_pass(agent_python, worktree, temp_root, args, timeout):
         calls.append(list(args))
