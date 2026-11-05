@@ -1578,11 +1578,13 @@ def _owned_run() -> bool:
     """An outer ProcessContainer will reap this run, so aborting live workers strands nothing.
 
     Without one (a bare pytest), xdist's own crash handling lets running tests finish and
-    clean up their children: nobody else would.
+    clean up their children: nobody else would. The token of the test that started this run
+    (tests/_test_folders.py) reaps nothing, so it does not count.
     """
     from ouroboros.process_containment import CONTAINMENT_ENV_PREFIX
 
-    return any(key.startswith(CONTAINMENT_ENV_PREFIX) for key in os.environ)
+    own = _test_folders.custody_prefix()
+    return any(key.startswith(CONTAINMENT_ENV_PREFIX) and not key.startswith(own) for key in os.environ)
 
 
 def _record_worker_crash(node, reason, scheduler):

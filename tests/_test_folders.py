@@ -18,10 +18,16 @@ custody = types.SimpleNamespace(token="", children=[], before=frozenset(), faile
 counts: collections.Counter = collections.Counter()  # released, waited, censuses; merged onto the controller
 
 
-def begin() -> None:
+def custody_prefix() -> str:
+    """A test's own token: a container's spelling, so explicit child environments keep it as they keep a
+    container's (``process_containment.ProcessContainer.spawn``), but no container reaps by it."""
     from ouroboros.process_containment import CONTAINMENT_ENV_PREFIX
 
-    custody.token = CONTAINMENT_ENV_PREFIX + uuid.uuid4().hex
+    return CONTAINMENT_ENV_PREFIX + "TEST_"
+
+
+def begin() -> None:
+    custody.token = custody_prefix() + uuid.uuid4().hex
     custody.children = []
     custody.before = frozenset(multiprocessing.active_children())
     custody.failed = False
