@@ -634,6 +634,8 @@ def test_refit_unsent_results_cuts_only_unasked_bodies_past_the_last_send(tmp_pa
     assert refit_unsent_results(messages, 3, [], drive_root=tmp_path, task_id="t", measure=measure(whole * 9))[0] is None
     rebuilt, receipt = refit_unsent_results(messages, 3, [], drive_root=tmp_path, task_id="t", measure=measure(whole - 5_000))
     assert rebuilt[:4] == messages[:4] and rebuilt[5:] == messages[5:] and receipt["refit_call_ids"] == ["fresh"]
+    tight = refit_unsent_results(messages, 3, [], drive_root=tmp_path, task_id="t", measure=measure(whole // 3))[0]
+    assert tight[5] == messages[5] and tight[8] == messages[8]  # a chosen read is never refit, even when nothing fits
     plain = {"result_meta": {}, "tool_result": ToolResult(status="ok", code="OK", text="x")}
     terminal = json.dumps({"status": "terminal", "output_delivery": {"complete": True}})
     assert not first_show_bound(plain, {"result": "x"})

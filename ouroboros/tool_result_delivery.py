@@ -626,9 +626,9 @@ def refit_unsent_results(
 ) -> Tuple[Optional[List[Dict[str, Any]]], Dict[str, Any]]:
     """Re-deliver the whole results no answered send carried yet, measured inside the final candidate.
 
-    ``messages[first_unsent:]`` are rows the provider has not accepted; their tool results get the same
-    measured frame as their first show (unasked bodies to head+tail with an exact reader, chosen reads
-    kept whole), now measured with the host rows that follow them. ``measure`` sizes a whole candidate
+    ``messages[first_unsent:]`` are rows the provider has not accepted; their unasked tool results get the
+    same measured frame as their first show (head+tail with an exact reader; a chosen read is never refit),
+    now measured with the host rows that follow them. ``measure`` sizes a whole candidate
     list in the admission's units. Rows before ``first_unsent`` keep their bytes, so the provider's
     whole-request prompt cache survives the fit. ``(None, receipt)`` when no such result changed.
     """
@@ -649,9 +649,9 @@ def refit_unsent_results(
         message = messages[index]
         record, text = message.get(TOOL_RESULT_RECORD_KEY), logical_tool_result_text(message.get("content"))
         call_id = str(message.get("tool_call_id") or "")
-        if (message.get("role") != "tool" or call_id not in calls or text is None
-                or not isinstance(record, Mapping) or record.get("source_ref") or record.get("first_show_bound")):
-            continue  # a partial, unrecorded, non-text or host-credited row keeps its first show (``first_show_bound``)
+        if (message.get("role") != "tool" or call_id not in calls or text is None or not isinstance(record, Mapping)
+                or record.get("source_ref") or record.get("first_show_bound") or requested_result_view(calls[call_id][1])):
+            continue  # a partial, unrecorded, non-text, host-credited or chosen (owner 2A) row keeps its first show
         facts, trailer = dict(record.get("facts") or {}), str(record.get("first_show_trailer") or "")
         trailers[call_id] = trailer if trailer and text.endswith(trailer) else ""  # stays outside the view
         rows.append({"tool_call_id": call_id, "result": text[:len(text) - len(trailers[call_id])], "fn_name": calls[call_id][0],

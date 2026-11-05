@@ -148,7 +148,7 @@ def list_available_tools(
     if selected and selected not in groups and selected != BUILTIN_NAMESPACE:
         selected = _skill_namespace(selected, groups) or selected  # a skill names its extension namespace
     header = ("Current callable catalog (MCP rows from published listings); [loaded] = the schema is already in "
-              "your tool list" + (", enable_tools loads a not-loaded one." if "enable_tools" in callable_rows else "."))
+              "your tool list" + (", enable_tools loads or shows a not-loaded one." if "enable_tools" in callable_rows else "."))
     if selected:
         chosen = groups.get(selected, [])
         if chosen:
@@ -396,7 +396,7 @@ def update_resident_notice(registry, resident, messages):
     remaining = {schema["function"]["name"] for schema in registry.schemas()} - set(names)
     notice = (bound_host_row("tool_manifest", "[SYSTEM NOTICE]\n"
             f"Loaded now ({len(names)}): {', '.join(names)}. {len(remaining)} more tools in the catalog are "
-            "equally mine and not loaded yet: `list_available_tools` names them, `enable_tools` loads them. "
+            "equally mine and not loaded yet: `list_available_tools` names them, `enable_tools` loads or shows them. "
             "Not loaded does not mean unavailable.") if remaining else None)
     updated = []
     for row in messages:
@@ -411,9 +411,16 @@ def update_resident_notice(registry, resident, messages):
     messages[:] = updated
 
 
-def bind_resident_schemas(registry: "ToolRegistry", resident: List[Dict[str, Any]], *, gateway: bool = False) -> set:
-    """Bind the discovery handlers of ``registry`` to one loop's resident schema list (``gateway``: Main's)."""
+def bind_resident_schemas(registry: "ToolRegistry", resident: List[Dict[str, Any]], *, gateway: bool = False,
+                          mode: str = "max") -> set:
+    """Bind the discovery handlers of ``registry`` to one loop's resident schema list (``gateway``: Main's).
+
+    Main's binding adds the gateway a fresh start in ``mode`` would carry when the list lacks it (a
+    continuation saved before it existed): one tools change on resume instead of one per MCP load."""
     enabled_late: set = set()
+    if gateway and GATEWAY_TOOL not in {schema["function"]["name"] for schema in resident}:
+        resident.extend(schema for schema in initial_tool_schemas(registry, context_mode=mode)
+                        if schema["function"]["name"] == GATEWAY_TOOL)
     registry.override_handler(
         "list_available_tools",
         lambda ctx=None, namespace="", **_kwargs: list_available_tools(registry, ctx, resident, namespace),

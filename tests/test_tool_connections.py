@@ -171,6 +171,22 @@ def test_main_shows_mcp_schemas_for_the_gateway_and_its_request_tools_keep_their
     assert registry.execute_result("call_mcp_tool", {"name": "write_file"}).code == "TOOL_ARG_ERROR" and len(sent) == 1
 
 
+def test_main_binding_restores_the_gateway_a_saved_continuation_lacks(registry):
+    """A continuation saved before the gateway existed resumes with it on Main in Low/Max; Nano, whose fresh
+    start carries no gateway, and any other binding add nothing and keep loading."""
+    from ouroboros import loop as loop_module
+
+    _servers()
+    for gateway, mode in ((False, "max"), (True, "nano"), (True, "max")):
+        resident = [schema for schema in initial_tool_schemas(registry, context_mode=mode)
+                    if schema["function"]["name"] != "call_mcp_tool"]
+        loop_module._setup_dynamic_tools(registry, resident, [], context_mode=mode, gateway=gateway)
+        restored = gateway and mode != "nano"
+        assert ("call_mcp_tool" in _names(resident)) is restored
+        receipt = registry.execute("enable_tools", {"tools": "mcp_gitlab__create_issue"})
+        assert ("Call schemas for call_mcp_tool" in receipt) is restored and ("Call schemas loaded" in receipt) is not restored
+
+
 def test_enable_tools_loads_a_whole_server_and_says_what_the_next_request_carries(registry):
     """Any binding but Main's text loop loads (a voice session, Nano, a narrowed child), the gateway resident or not."""
     from ouroboros import loop as loop_module
