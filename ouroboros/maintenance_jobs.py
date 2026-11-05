@@ -173,7 +173,8 @@ def record_pass(root: Any, name: str, report: Dict[str, Any], *, event: Optional
     released = report.get("released")
     released_count = len(released) if isinstance(released, (list, tuple, set)) else int(released or 0)
     changed = _hold_set(report.get("holds")) != _hold_set(current.get("holds"))
-    if not (released_count or report.get("errors") or changed):
+    mailbox_removed = bool((report.get("mailboxes") or {}).get("removed"))
+    if not (released_count or report.get("errors") or changed or mailbox_removed):
         return None
     now = utc_now_iso()
     holds = _with_since(report.get("holds") or [], current.get("holds"), now)

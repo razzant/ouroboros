@@ -284,6 +284,7 @@ BAND_PATHS = {
     "tests/test_safety_policy.py": None,
     "tests/test_shell_interactions_browser.py": "Shared real shell fixture covers the paired Back and focus journeys without duplicating setup.",
     "tests/test_skill_review_runner.py": "Skill lifecycle/review terminal-state regression coverage stays one focused suite below the 1500-line band cap.",
+    "tests/test_storage_free.py": "Storage Free behavior tests for the ordinary pool, typed holds and owner-retained manual paths stay together as their behavior contract; shrink-only on the next touch.",
     "tests/test_swe_pro_e1v2.py": None,
     "tests/test_telegram_miniapp_lifecycle.py": None,
     "tests/test_timeout_policy.py": "Adaptive timeout and custody regression suite covers raw-deadline admission, explicit finalization reserve, transport bounds, and late-result reconciliation.",

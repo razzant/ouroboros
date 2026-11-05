@@ -30,7 +30,7 @@ storage copy; this module reports ids, counts, sizes and typed reasons.
 The ordinary action works on exact objects: the *pool* (``storage_free_view``) is every offered work folder,
 working copy and declared temporary environment (``copy_environments``), each addressed alone; everything else
 is listed with its reason. Selecting by ``items`` retires those objects, each re-judged under its retirer's own
-lock and the owner's keep (``owner_keep``); ``groups`` stays for the groups below, with their own words.
+lock and the owner's keep (``owner_keep``); the dashboard still exposes saved groups below, with their own words.
 ``manual`` is a third, separate form: exact finished copies whose work no capture holds, each named with what it
 would lose (``view=manual``) and sent with ``accept_loss``; nothing else reaches them (``copy_capture_proof.discard_offer``,
 ``copy_capture_proof.discard_unsaved_copy``).
@@ -96,11 +96,24 @@ _KEPT_REASONS = {
     "busy": ("custody_busy", "mailbox_busy", "store_busy", "busy", "record_busy"),
     "unreadable_record": ("task_result_unreadable", "unread_mailbox_unreadable", "record_unreadable", "review_state_unreadable", "marker_unreadable"),
     "capture_unproven": ("capture_unproven", "capture_incomplete"),
-    "retained_evidence": ("retained_process_environment", "undeclared_environment"),
+    "retained_evidence": ("retained_process_environment", "undeclared_environment", "producer_retained"),
     "changed": ("changed", "nothing_unsaved", "nested_repository", "commits_unprotected"),
     "unproven_excluded_inputs": ("unproven_excluded_inputs",),
     "owner_keep": ("owner_keep",),
     "restart": ("generation_closed",),
+}
+# Main is for the owner, so the receipt uses stable group names in owner words rather than retirer codes.
+_OWNER_REASON_WORDS = {
+    "results_pending": "results are not saved yet",
+    "in_use": "still in use",
+    "busy": "busy right now",
+    "unreadable_record": "the task record could not be read",
+    "capture_unproven": "unique work was not verified saved",
+    "retained_evidence": "marked as evidence, or could not be read through",
+    "changed": "changed after the check",
+    "unproven_excluded_inputs": "files only a patch rule calls disposable",
+    "owner_keep": "you asked to keep it",
+    "restart": "stopped by a restart",
 }
 _RETIRER_STAMPS = ("scratch_retention", "retiring", "removal_failed", "removal_failed_identity")  # no change of ownership
 
@@ -287,7 +300,8 @@ def _request_sentence(receipt: Dict[str, Any]) -> str:
         size = preview.get("bytes")
         return (f"Free space ({who}): looked only; {preview.get('count', 0)} items could go"
                 + (f", {size / 1e9:.1f} GB" if isinstance(size, int) else "") + ".")
-    kept = ", ".join(f"{row['count']} {str(row['reason']).replace('_', ' ')}" for row in outcome.get("kept") or ())
+    kept = ", ".join(f"{row['count']} {_OWNER_REASON_WORDS.get(str(row.get('reason')), 'could not be freed')}"
+                      for row in outcome.get("kept") or ())
     freed = outcome.get("removed_bytes") or 0
     parts = [f"removed {outcome['removed']} ({freed / 1e9:.1f} GB)"] if outcome.get("removed") else []
     if outcome.get("deleting"):
@@ -295,6 +309,10 @@ def _request_sentence(receipt: Dict[str, Any]) -> str:
         parts.append(f"moved {outcome['deleting']} aside ({moving:.1f} GB), deleted by the next maintenance run")
     if not parts:
         parts.append("nothing removed")
+    if outcome.get("stopped"):
+        parts.append("run stopped before all selected items were processed")
+    if outcome.get("error"):
+        parts.append("run failed")
     if kept:
         parts.append(f"kept {sum(row['count'] for row in outcome.get('kept') or ())}: {kept}")
     if outcome.get("failed"):
@@ -320,6 +338,9 @@ def _name_items(root: pathlib.Path, items: List["_Candidate"]) -> None:
         except Exception:
             log.debug("Task titles unreadable: folder names stand", exc_info=True)
     for item in items:
+        if item.layout == "producer_retained":
+            item.name = str(item.row.get("loss") or item.path.name).strip() or item.path.name
+            continue
         document = documents.get(item.task) or {}
         item.name = str(document.get("title") or document.get("suggested_name") or item.task or item.path.name).strip() or item.path.name
 
@@ -585,11 +606,11 @@ class FreeSpace:
 
     # ---- the mind's request (owner Q3 = A, 05.11.2026) --------------------------------------
 
-    def request(self, data_root: Any, repo_dir: Any, *, actor: str, request_id: str, groups: Any = None,
+    def request(self, data_root: Any, repo_dir: Any, *, actor: str, request_id: str,
                 dry_run: bool = False, notify: Optional[Callable[[str], Any]] = None) -> Dict[str, Any]:
         """The same Free the owner presses, asked by the mind (``free_storage``): one preview with the same
         probes, then a run of the ordinary pool (every work folder, working copy and declared temporary
-        environment the retirers' proofs offer) or of the named saved ``groups``; a ``dry_run`` stops after the
+        environment the retirers' proofs offer); a ``dry_run`` stops after the
         preview. The owner's Keep and every retirer proof hold exactly as for the owner. Its receipt is the
         ``storage_free`` job row (``request_id``, ``actor``, the preview's pool and exclusions, the run's
         outcome) and ``notify`` is told one sentence for Main when it ends. Refused while a listing or a run
@@ -603,7 +624,7 @@ class FreeSpace:
                 reason = "busy"
             else:
                 reason = ""
-                self._request = {"request_id": request_id, "actor": actor, "groups": [str(g) for g in (groups or ())],
+                self._request = {"request_id": request_id, "actor": actor,
                                  "dry_run": bool(dry_run), "notify": notify, "requested_at": utc_now_iso()}
         if reason:
             _write_receipt(root, {"request_id": request_id, "actor": actor, "state": "failed", "refusal": reason,
@@ -630,11 +651,8 @@ class FreeSpace:
         if request["dry_run"]:
             self._finish_request(root, {"state": "done", "preview": summary})
             return
-        if request["groups"]:
-            started = self.start(root, repo_dir, plan["id"], request["groups"])
-        else:
-            items = sorted(ordinary_ids(plan))
-            started = self.start(root, repo_dir, plan["id"], None, items=items) if items else {"started": False, "reason": "nothing_selected"}
+        items = sorted(ordinary_ids(plan))
+        started = self.start(root, repo_dir, plan["id"], None, items=items) if items else {"started": False, "reason": "nothing_selected"}
         if not started["started"]:
             self._finish_request(root, {"state": "done", "preview": summary, "refusal": started["reason"]})
         else:
@@ -689,6 +707,7 @@ class FreeSpace:
         from ouroboros.headless import HEADLESS_TASKS_DIR, TASK_DRIVES_DIR, drive_candidates
         from ouroboros.private_copy_read import _copy_owner, read_records
         from ouroboros.retention import age_cutoff, get_gc_retention_days
+        from ouroboros.session_scratch import PRODUCER_RETAINED, scratch_records
         from ouroboros.subagent_worktrees import (
             _record_file, _record_name, _records_dir, _resolve_root, _task_proven_over, snapshot_released,
         )
@@ -773,11 +792,13 @@ class FreeSpace:
         if {GROUP_REVIEW_EVIDENCE, GROUP_REVIEW_CHECKOUTS} & set(self._offered):
             from ouroboros import review_checking_prune as seats
 
-            homes = seats.finished_seat_homes(root, live, self._closed)  # one proof per seat task for both groups
+            seat_causes: dict = {}
+            homes = seats.finished_seat_homes(root, live, self._closed, causes=seat_causes)  # one proof per seat task for both groups
             if GROUP_REVIEW_EVIDENCE in self._offered:
                 group = new_group(GROUP_REVIEW_EVIDENCE)
                 for home, verdict, task_id in homes:
-                    _sorted_into(root, group, verdict, _Candidate(GROUP_REVIEW_EVIDENCE, f"seat:{home.name}", home, "seat", task=task_id))
+                    _sorted_into(root, group, verdict, _Candidate(GROUP_REVIEW_EVIDENCE, f"seat:{home.name}", home, "seat", task=task_id),
+                                 seat_causes.get(home, ""))
                 groups.append(group)
             if GROUP_REVIEW_CHECKOUTS in self._offered:
                 group = new_group(GROUP_REVIEW_CHECKOUTS)
@@ -837,6 +858,29 @@ class FreeSpace:
                     if run.is_dir() and not run.is_symlink():
                         _sorted_into(root, group, "offer" if _run_finished(run) else "in_use",
                                      _Candidate(GROUP_SERVICE_FOLDERS, f"test_run:{_record_name(run)}", run, "test_run"))
+            # A producer-retained session scratch is owner-removable only after its marker's
+            # words and the loss are shown in the existing explicit-discard form.  One row per
+            # handoff entry keeps the trash remover's whole-entry boundary intact.
+            producer_entries: Dict[pathlib.Path, List[Dict[str, Any]]] = {}
+            for row in scratch_records(root):
+                if row.get("holder") != "trash" or row.get("hold") != PRODUCER_RETAINED:
+                    continue
+                record = pathlib.Path(str(row.get("record") or ""))
+                if not row.get("valid") or not row.get("path") or len(record.parents) < 3:
+                    continue
+                entry = record.parents[2]
+                if entry.parent.name != "custody_trash" or not entry.is_dir() or entry.is_symlink():
+                    continue
+                producer_entries.setdefault(entry, []).append(row)
+            for entry, rows in sorted(producer_entries.items(), key=lambda pair: pair[0].name):
+                examples = [str(row.get("example") or "producer-retained session scratch") for row in rows]
+                loss = "; ".join(dict.fromkeys(examples))
+                item = _Candidate(GROUP_SERVICE_FOLDERS, f"producer_retained:{entry.name}", entry,
+                                  "producer_retained", row={"loss": loss, "scratch_paths": [row["path"] for row in rows]})
+                item.reason, item.cause = "retained_evidence", PRODUCER_RETAINED
+                item.manual = {"signature": None, "unsaved_count": 0, "unsaved_bytes": 0, "unsaved": [],
+                               "keep_branch": False, "producer_retained": True, "loss": loss}
+                group["excluded"].append(item)
             groups.append(group)
         if GROUP_RESULT_PINS in self._offered:
             # Held by custody (no disposition) while its task is over and its checkout is gone: only the pins remain.
@@ -982,7 +1026,8 @@ class FreeSpace:
                                                **{key: view[key] for key in ("groups", "selected", "removed", "removed_bytes",
                                                                              "deleting", "stuck", "kept", "failed", "not_started",
                                                                              "free_before", "free_after")}})
-        self._finish_request(root, {"state": "done", "outcome": {**view, "kept_items": dict(run["kept_items"])}})
+        self._finish_request(root, {"state": "failed" if run["error"] else "done",
+                                    "outcome": {**view, "kept_items": dict(run["kept_items"])}})
 
     @staticmethod
     def _record(root: pathlib.Path, view: StorageFreeRun, seconds: float, settled: Tuple[List[str], ...],
@@ -1126,6 +1171,9 @@ class FreeSpace:
         for item in candidates:
             if self._closed():
                 raise _Stopped()
+            if item.layout == "producer_retained":
+                self._settle(run, item, self._free_producer_retained(root, item))
+                continue
             path, reasons = str(item.row.get("path") or ""), {}
             try:
                 discard_unsaved_copy(item.row, item.manual["signature"], data_dir=root, live=live, reasons=reasons)
@@ -1138,6 +1186,27 @@ class FreeSpace:
             else:
                 self._keep(run, item, reasons.get(path, "other"))
             self._tick(run, run["done"] + 1)
+
+    @staticmethod
+    def _free_producer_retained(root: pathlib.Path, item: _Candidate) -> str:
+        """Accept the owner's explicit loss choice, then use the custody-trash remover.
+
+        The marker is the producer's hold; removing it is the owner's acceptance.  The existing
+        remover then deletes the recorded scratch and its handoff entry with the same custody
+        checks as the maintenance path.  A surviving entry remains a typed ``producer_retained``
+        hold rather than being reported as a successful discard.
+        """
+        from ouroboros import task_custody
+        from ouroboros.test_environment import retention_markers
+
+        try:
+            for scratch in item.row.get("scratch_paths") or ():
+                for marker in retention_markers(pathlib.Path(str(scratch))):
+                    marker.unlink(missing_ok=True)
+            task_custody.remove_custody_trash(root)
+        except OSError:
+            return "other"
+        return "" if not item.path.exists() else "producer_retained"
 
     @staticmethod
     def _copy_stays(root: pathlib.Path, item: _Candidate, task_id: str, live: Callable[[str], Optional[bool]], named: str = "") -> str:

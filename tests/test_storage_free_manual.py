@@ -23,6 +23,7 @@ from tests._store_shared import seed_result
 from tests.test_body_candidate_retention import candidate  # noqa: F401 -- the body fixture
 from tests.test_storage_free import _fake_sizer, _join, _owner, _preview, _run
 from tests.test_storage_free_safety import _capture, _copy, _git, _prune, copies  # noqa: F401 -- the plain copies fixture
+from tests.test_session_service_directories import _synthetic_temp_parent  # noqa: F401 -- keep scratch below the isolated root
 from tests.test_store import document
 
 KEEP = {"basis": "test"}
@@ -141,6 +142,33 @@ def test_nothing_else_reaches_it(copies, monkeypatch):  # noqa: F811
     assert owner.start(copies[0], copies[1], owner.projection(copies[0])["plan"], None, [row["id"]]) == {"started": False, "reason": "not_offered"}
     assert _run(owner, copies[0], copies[0].parent, groups=("working_copies", "lost_copies", "service_folders"))["run"]["removed"] == 0
     assert target.read_bytes() == b"only here" and path.is_dir()
+
+
+def test_a_producer_retained_handoff_is_manual_loss_acceptance_and_not_the_ordinary_pool(tmp_path, monkeypatch):
+    """A marked handoff is named with the producer's words, then the owner's explicit discard removes
+    its scratch and entry through the custody remover; an ordinary item press cannot reach it."""
+    from tests.test_session_scratch_release import _started
+    from ouroboros.workspace_preflight import release_finished_scratch
+
+    data, scratch = _started(tmp_path)
+    nested = scratch / "held" / "run.noindex"
+    nested.mkdir(parents=True)
+    marker_words = "producer kept this evidence for inspection"
+    assert environment.retain_tree(nested, marker_words)
+    assert release_finished_scratch(data, lambda _task: False)["released"]
+    assert task_custody.remove_custody_trash(data)["holds"][0]["class"] == "producer_retained"
+
+    _fake_sizer(monkeypatch)
+    owner = _owner({}, offered=("service_folders",))
+    _preview(owner, data, data.parent)
+    plan = owner.projection(data)
+    assert plan["pool"]["count"] == 0 and plan["pool"]["manual"]["count"] == 1
+    [row] = _page(owner, (data, data.parent))["items"]
+    assert row["availability"] == "manual_discard" and marker_words in row["name"]
+    assert row["manual"]["producer_retained"] and marker_words in row["manual"]["loss"]
+    assert owner.start(data, data.parent, plan["plan"], None, [row["id"]]) == {"started": False, "reason": "not_offered"}
+    assert _discard(owner, (data, data.parent), [row["id"]]) == {"started": True, "reason": ""}
+    assert not scratch.exists() and not any((data / "state" / "custody_trash").iterdir())
 
 
 def test_the_background_verdict_is_unchanged_by_a_discard_answer(candidate):  # noqa: F811

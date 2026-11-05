@@ -114,7 +114,7 @@ function jobPhrase(fact, now) {
         return fmt('{job}: stopped by an error ({error}, {when})', { job, error: fact.last_error.class, when: whenLabel(fact.last_error.at, now) });
     }
     if (Array.isArray(fact.holds) || isSize(fact.released)) {  // a retirer pass: what it released, what it holds and why
-        const parts = [fact.at ? fmt('{job}: last pass {when}', { job, when: whenLabel(fact.at, now) }) : job,
+        const parts = [fact.at ? fmt('{job}: last change {when}', { job, when: whenLabel(fact.at, now) }) : job,
             plural(fact.released || 0, '{n} released', '{count} released'), holdsPhrase(fact, now),
             fact.errors > 0 ? plural(fact.errors, '{n} error', '{count} errors') : ''];
         return parts.filter(Boolean).join(' · ');

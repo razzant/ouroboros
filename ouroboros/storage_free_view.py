@@ -27,6 +27,8 @@ class StorageFreeManual(TypedDict):
     not_proven_saved: List[Dict[str, Any]]  # ``{path, bytes}`` relative to the copy, largest first, at most UNSAVED_LISTED
     omitted_count: int  # paths the list leaves out; ``not_proven_saved_count`` includes them
     keeps_commits: bool  # its branch or pin stays, with any commits it holds
+    producer_retained: NotRequired[bool]  # a marked session-scratch handoff, removed by the custody trash remover
+    loss: NotRequired[str]  # the producer marker's words and the owner-facing loss
 
 
 class StorageFreeEntry(TypedDict):
@@ -118,11 +120,14 @@ def manual_ids(plan: Dict[str, Any]) -> set:
 
 def _manual_entry(item: Any) -> StorageFreeEntry:
     offer = item.manual  # the plan holds the largest UNSAVED_LISTED paths with the whole count and bytes
-    return {**entry(item, reason=item.reason), "manual": {
+    manual = {
         "not_proven_saved_count": offer["unsaved_count"], "not_proven_saved_bytes": offer["unsaved_bytes"],
         "not_proven_saved": [{"path": rel, "bytes": size} for rel, size in offer["unsaved"][:UNSAVED_LISTED]],
         "omitted_count": max(0, offer["unsaved_count"] - UNSAVED_LISTED),
-        "keeps_commits": bool(offer["keep_branch"])}}
+        "keeps_commits": bool(offer["keep_branch"])}
+    if offer.get("producer_retained"):
+        manual.update(producer_retained=True, loss=str(offer.get("loss") or "producer-retained session scratch"))
+    return {**entry(item, reason=item.reason), "manual": manual}
 
 
 def pool(plan: Dict[str, Any]) -> StorageFreePool:

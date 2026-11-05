@@ -139,8 +139,7 @@ def _handle_free_storage(evt: Dict[str, Any], ctx: Any) -> None:
         if st.get("owner_chat_id"):
             ctx.send_with_budget(int(st["owner_chat_id"]), text, role="system", system_type="storage_free_notice")
 
-    groups = evt.get("groups") if isinstance(evt.get("groups"), list) else None
-    storage_free.free.request(ctx.DRIVE_ROOT, REPO_DIR, actor=actor, request_id=request_id, groups=groups,
+    storage_free.free.request(ctx.DRIVE_ROOT, REPO_DIR, actor=actor, request_id=request_id,
                               dry_run=bool(evt.get("dry_run")), notify=notify)
 
 

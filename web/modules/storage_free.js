@@ -128,7 +128,7 @@ export const KEPT_REASONS = {
     unproven_excluded_inputs: 'files only a patch rule calls disposable',
     retained_evidence: 'marked as evidence, or could not be read through',
     retained_process_environment: 'marked as evidence, or could not be read through',
-    undeclared_environment: 'no recorded owner',
+    undeclared_environment: 'no recorded owner', producer_retained: 'the producer marked this scratch to keep',
     owner_keep: 'you asked to keep it',
     changed: 'changed after the check',
     nothing_unsaved: 'changed after the check',
@@ -264,8 +264,9 @@ const blockedRows = (pool) => (Array.isArray(pool?.excluded) ? pool.excluded : [
 export const MANUAL_ROWS = 25;
 /** A row of `view=manual` the owner may choose: the server offers it by hand and says what would be lost. Anything
  *  else is shown but never chosen, so no id the server did not offer is ever sent. */
-export const manualKnown = (item) => item?.availability === 'manual_discard' && Number.isInteger(item.manual?.not_proven_saved_count)
-    && isSize(item.manual.not_proven_saved_bytes);
+export const manualKnown = (item) => item?.availability === 'manual_discard' && (item.manual?.producer_retained
+    ? typeof item.manual.loss === 'string' && item.manual.loss.length > 0
+    : Number.isInteger(item.manual?.not_proven_saved_count) && isSize(item.manual.not_proven_saved_bytes));
 
 /** 'rest' | 'listing' | 'ready' | 'empty' | 'running' | 'done' | 'failed' (a dismissed list or result reads 'rest').
  *  A ready plan is 'ready' while it holds anything to say: the pool, what it leaves out, or a saved group. */
@@ -594,7 +595,9 @@ function unsavedPaths(manual, index) {
 
 function manualRow(item, index, picked, held) {
     const choosable = manualKnown(item);
-    const what = choosable ? unsavedWords(item.manual) : fmt('What it would lose could not be read, so it cannot be chosen here.');
+    const what = choosable ? item.manual?.producer_retained
+        ? `${fmt(item.manual.loss)} ${fmt('Freeing it deletes the retained scratch and handoff entry; this loss cannot be undone.')}`
+        : unsavedWords(item.manual) : fmt('What it would lose could not be read, so it cannot be chosen here.');
     return `<li class="storage-free-group" data-free-manual-item="${attr(item.id)}">
         <input type="checkbox" class="ui-checkbox" id="storage-manual-${index}" data-free-manual-pick="${index}" data-key="manual-${index}"${picked.has(item.id) && choosable ? ' checked' : ''}${held || !choosable ? ' disabled' : ''}>
         <label class="storage-free-label" for="storage-manual-${index}" data-i18n-authored>${text(item.name)}</label>
@@ -670,17 +673,23 @@ function manualHtml(free, ui) {
  *  confirm is the owner's acknowledgement that each whole copy goes with whatever is not verified saved in it. */
 export function manualConfirmCopy(list, picked) {
     const facts = manualFacts(list, picked);
-    const goes = plural(facts.count, 'This deletes {n} copy whole.', 'This deletes {count} copies whole.');
-    const loses = facts.unsavedCount > 0
+    const producer = facts.rows.filter((item) => item.manual?.producer_retained);
+    const goes = producer.length === facts.count
+        ? plural(facts.count, 'This deletes {n} retained scratch handoff.', 'This deletes {count} retained scratch handoffs.')
+        : plural(facts.count, 'This deletes {n} copy whole.', 'This deletes {count} copies whole.');
+    const loses = producer.length === facts.count
+        ? producer.map((item) => item.manual.loss).join(' · ')
+        : facts.unsavedCount > 0
         ? fmt('{files} in them are not verified saved ({size}) and can be lost for good.', { files: plural(facts.unsavedCount, '{n} file', '{count} files'), size: formatBytes(facts.unsavedBytes) })
         : fmt('No file in them is unsaved.');
     return {
-        title: fmt('Discard these copies?'),
+        title: producer.length === facts.count ? fmt('Free retained scratch?') : fmt('Discard these copies?'),
         body: `${goes} ${loses} ${fmt('Task results, history and commits on a branch that stays are kept.')}`,
         details: {
             summary: fmt('Show the copies'),
-            rows: facts.rows.map((item) => ({ label: item.name, value: `${sizeWords(item)} · ${item.manual.not_proven_saved_count > 0
-                ? fmt('{files} not verified saved', { files: plural(item.manual.not_proven_saved_count, '{n} file', '{count} files') }) : fmt('no file unsaved')}` })),
+            rows: facts.rows.map((item) => ({ label: item.name, value: item.manual?.producer_retained
+                ? item.manual.loss : `${sizeWords(item)} · ${item.manual.not_proven_saved_count > 0
+                    ? fmt('{files} not verified saved', { files: plural(item.manual.not_proven_saved_count, '{n} file', '{count} files') }) : fmt('no file unsaved')}` })),
         },
         confirmLabel: discardLabel(facts.count),
         danger: true,

@@ -69,7 +69,7 @@ const HOLD_WORDS = {
     parent_not_terminal: 'parent task not finished', owner_not_terminal: 'owner task not finished',
     not_proven_over: 'task not proven over', owner_processes_live: 'process still running', owner_paused: 'task paused',
     run_open: 'run still open', seat_open: 'reviewer seat still open', seat_busy: 'reviewer seat busy', custody_held: 'held by a coding run',
-    custody_unreadable: 'custody unreadable', checkout_held: 'review round still open', capture_unproven: 'work not verified saved',
+    custody_unreadable: 'custody unreadable', capture_unproven: 'work not verified saved',
     capture_failed: 'capture failed', child_result_unadopted: 'result not copied yet', child_refs_pending: 'result not copied yet',
     call_inventory_pending: 'call records not copied yet', call_inventory_changed: 'call records moved',
     unread_mailbox_uncustodied: 'unread messages not carried', verification_receipts_uncustodied: 'receipts not copied yet',

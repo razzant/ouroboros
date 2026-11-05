@@ -377,7 +377,7 @@ const CONTRACT_REASONS = ['task_live', 'liveness_unknown', 'task_not_terminal', 
     'unreadable_record', 'task_result_unreadable', 'unread_mailbox_unreadable', 'record_unreadable',
     'capture_unproven', 'capture_incomplete', 'unproven_excluded_inputs', 'retained_evidence', 'retained_process_environment',
     'undeclared_environment', 'owner_keep', 'changed', 'nothing_unsaved', 'nested_repository', 'commits_unprotected',
-    'generation_closed', 'results_pending', 'restart', 'advanced_group', 'other'];
+    'generation_closed', 'results_pending', 'restart', 'producer_retained', 'advanced_group', 'other'];
 
 test('every reason the server can send has its own words; none falls through to "another reason"', () => {
     for (const reason of CONTRACT_REASONS.filter((name) => name !== 'other')) {

@@ -943,8 +943,6 @@ def _prune_review_checkouts(*, stop_event: Any = None) -> None:
             _REVIEW_VIEWS_OWED[0] = False
         from ouroboros import maintenance_jobs
 
-        if report.get("checkouts_kept"):  # the isolated checkouts the pass judged held (their reason is the pass's, #2710)
-            report["holds"] = [*report.get("holds", ()), {"class": "checkout_held", "count": int(report["checkouts_kept"]), "example": ""}]
         released = int(report.get("released") or 0) + int(report.get("removed") or 0) + int(report.get("checkouts_removed") or 0)
         maintenance_jobs.record_pass(DATA_DIR, "review_checkout_prune", {**report, "released": released}, event="review_checkout_prune")
     except Exception:
@@ -1262,11 +1260,14 @@ def _run_drive_custody_pass(stop_event: Any = None) -> None:
         holds.note(verdict.get("reason") or "other", task_id)
     for report in reports.values():
         for skipped in report.get("skipped") or ():
+            task_id = skipped.get("task_id")
+            if task_id in (loaded.get("map") or {}):
+                continue  # record_rest already put this drive in the durable map this pass
             if skipped.get("reason") not in ("younger_than_retention", "custody_unchanged"):
-                holds.note(skipped.get("reason"), skipped.get("task_id"))
+                holds.note(skipped.get("reason"), task_id)
     released = sum(len(report.get("pruned") or ()) for report in reports.values())
     errors = [f"{row.get('task_id')}: {row.get('error')}" for report in reports.values() for row in report.get("errors") or ()]
-    if "map" in loaded or released or errors:
+    if "map" in loaded or released or errors or mailboxes.get("removed"):
         maintenance_jobs.record_pass(root, "drive_settlement", {**maintenance_jobs.pass_report(released, holds, errors),
                                                                 "headless": reports["headless"], "direct": reports["direct"],
                                                                 "mailboxes": mailboxes}, event="headless_task_drive_prune")

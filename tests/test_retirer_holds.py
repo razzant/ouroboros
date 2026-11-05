@@ -18,6 +18,7 @@ from ouroboros import subagent_worktrees as trees
 from ouroboros.maintenance_jobs import record_pass
 from tests._store_shared import seed_result
 from tests.test_claudexor_runtime_retention import cx  # noqa: F401 -- the engine runtime fixture
+from tests.test_session_service_directories import _synthetic_temp_parent  # noqa: F401 -- isolate session scratch parent
 
 WITNESSES: Dict[str, str] = {}  # retirer (dotted) -> the test here that releases one fixture and holds another
 OLD = "2026-10-01T00:00:00+00:00"
@@ -62,6 +63,33 @@ def test_drive_settlement_releases_a_settled_drive_and_holds_a_live_one(tmp_path
         "a second pass with the same hold set and nothing released writes no pass"
 
 
+def test_drive_settlement_does_not_count_a_durable_verdict_twice(tmp_path, monkeypatch):
+    """A skipped row already written to the durable verdict map is one hold; a fresh skipped
+    row remains one hold, proving the duplicate guard is selective."""
+    from ouroboros import headless
+
+    data = tmp_path / "data"
+    data.mkdir()
+    store_import.ensure_current_store(data)
+    monkeypatch.setattr(server_maintenance, "DATA_DIR", data)
+    monkeypatch.setattr(server_maintenance, "settlement_verdicts",
+                        lambda _root: {"held": {"reason": "task_live"}})
+    empty = {"pruned": [], "errors": [], "cursor": "", "arrivals": []}
+    def headless_report(*args, **kwargs):
+        kwargs["rested"]()
+        return {**empty, "skipped": [{"task_id": "held", "reason": "task_live"}]}
+
+    def direct_report(*args, **kwargs):
+        kwargs["rested"]()
+        return {**empty, "skipped": [{"task_id": "fresh", "reason": "store_busy"}]}
+
+    monkeypatch.setattr(headless, "prune_headless_task_drives", headless_report)
+    monkeypatch.setattr(headless, "prune_task_drives", direct_report)
+    server_maintenance._run_drive_custody_pass()
+    holds = {row["class"]: row["count"] for row in maintenance_jobs.job(data, "drive_settlement")["holds"]}
+    assert holds == {"store_busy": 1, "task_live": 1}
+
+
 # ---- private copies ---------------------------------------------------------------------------------------------
 
 @witness("ouroboros.subagent_worktrees.prune_orphans")
@@ -97,19 +125,44 @@ def test_copy_retirement_releases_a_finished_copy_and_holds_a_live_one(tmp_path,
 @witness("ouroboros.review_checking_prune.prune_review_checkouts")
 def test_review_checkout_prune_releases_a_settled_seat_and_holds_an_open_run(tmp_path, monkeypatch):
     from ouroboros import review_checking_prune as rp
+    from ouroboros.startup_migrations import prepare_startup_state
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.review_subject import ReviewSubjectSpec, checkout_token, isolated_checkout
     from tests.test_review_checking_prune import _custody
+    from tests.test_review_checkout_retirement import _repo
     from tests.test_review_checkout_lifecycle import _frozen, _seat
+    from types import SimpleNamespace
 
     root, source = _frozen(tmp_path)
     done, running = _seat(root, source, "op-done"), _seat(root, source, "op-running")
     store_import.ensure_current_store(root)
     _custody(monkeypatch, running=[running], settled=[done])
-    report = rp.prune_review_checkouts(root, set())
+
+    prepare_startup_state(root)
+    repo, system = _repo(tmp_path / "checkout-subject"), _repo(tmp_path / "checkout-system")
+    ctx = SimpleNamespace(repo_dir=str(system), drive_root=str(root), task_id="", task_metadata=None)
+    spec = ReviewSubjectSpec(root_kind="active_workspace", root=str(repo), kind="base..head", base="HEAD~1",
+                             head="HEAD", governance_root=str(system), surface="change")
+
+    def retained(task_id):
+        retry_key = f"review:{task_id}"
+        ctx.task_id = task_id
+        with isolated_checkout(ctx, spec, retain=lambda: {"seats": ["late seat"]},
+                               token=lambda _identity: checkout_token(retry_key, task_id=task_id)) as frozen:
+            entry = pathlib.Path(frozen.checkout).parent
+        write_task_result(root, task_id, "completed", result="done")
+        return entry
+
+    checkout_done = retained("checkout-done")
+    checkout_running = retained("checkout-running")
+    live_checkouts = {"checkout-running"}
+    report = rp.prune_review_checkouts(root, live_checkouts)
     assert report["released"] == 1 and not done.exists() and running.is_dir()
-    assert [(hold["class"], hold["count"]) for hold in report["holds"]] == [("run_open", 1)]
+    assert report["checkouts_removed"] == 1 and not checkout_done.exists() and checkout_running.is_dir()
+    assert [(hold["class"], hold["count"]) for hold in report["holds"]] == [("run_open", 1), ("task_live", 1)]
     first = record_pass(root, "review_checkout_prune", report, event="review_checkout_prune")
-    assert first["released"] == 1 and first["holds"][0]["class"] == "run_open"
-    second = rp.prune_review_checkouts(root, set())
+    assert first["released"] == 1 and first["holds"][0]["class"] == "run_open" and first["holds"][1]["class"] == "task_live"
+    second = rp.prune_review_checkouts(root, live_checkouts)
     assert record_pass(root, "review_checkout_prune", second, event="review_checkout_prune") is None, \
         "nothing released, the same hold: silent"
 
