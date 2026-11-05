@@ -105,9 +105,10 @@ def _job(name: str, rows: Optional[Dict[str, Dict[str, Any]]], place: str) -> St
     total = totals.get(_COMPRESSION_PLANES.get(place, "")) or {}
     if "compressed" in total:  # this place's own plane, never a job-wide sum under two places
         fact["compressed"], fact["saved_bytes"] = int(total.get("compressed") or 0), total.get("saved_bytes")
-    if "holds" in row:  # a retirer pass (maintenance_jobs.record_pass): what it released, what it holds, since when
+    if "holds" in row:  # a retirer pass (maintenance_jobs.record_pass) or the trash job: what it released, what it holds, since when
         holds = [dict(hold) for hold in row.get("holds") or () if isinstance(hold, dict)]
-        fact["released"], fact["holds"], fact["held"] = int(row.get("released") or 0), holds, sum(int(h.get("count") or 0) for h in holds)
+        released = row.get("released") if "released" in row else row.get("removed")  # the trash job counts what it removed
+        fact["released"], fact["holds"], fact["held"] = int(released or 0), holds, sum(int(h.get("count") or 0) for h in holds)
         since = sorted(str(hold["since"]) for hold in holds if hold.get("since"))
         if since:
             fact["held_since"] = since[0]

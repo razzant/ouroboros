@@ -332,3 +332,14 @@ __all__ = [
     "seat_hold",
     "task_hold",
 ]
+
+
+def recorded_scratch_roots(data_root: Any) -> List[str]:
+    """The scratch directories the install's records name and that exist, each once: the roots of the
+    counted Storage place ``session_scratch`` (``storage.PLACES``). Records that are invalid or whose
+    directory is gone name no root (``scratch_records`` reports them); no temp-root scan."""
+    roots: List[str] = []
+    for row in scratch_records(data_root):
+        if row["valid"] and not row["missing"] and row["path"] and row["path"] not in roots:
+            roots.append(row["path"])
+    return roots

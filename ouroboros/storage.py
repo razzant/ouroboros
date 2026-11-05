@@ -80,7 +80,7 @@ PLACES: Tuple[Tuple[str, str, Any], ...] = (
     ("deliverables", "work", "get_deliverables_root"),
     ("work_folders", "temporary", (("task_drives",), ("state", "headless_tasks"))),
     ("working_copies", "temporary", "get_subagent_worktree_root"),
-    ("session_scratch", "temporary", "ouroboros.scratch_roots.recorded_scratch_roots"),  # the folders its records name
+    ("session_scratch", "temporary", "ouroboros.session_scratch.recorded_scratch_roots"),  # the folders its records name
     ("app_state", "other", (("state",),)),
     ("data_other", "other", ((),)),
     ("program", "other", "REPO_DIR"),
@@ -456,7 +456,7 @@ def place_roots(data_root: Any) -> List[Dict[str, Any]]:
     rows = []
     for place_id, group, spec in PLACES:
         undecided = ""
-        if isinstance(spec, str) and "." in spec:  # a lister of the roots its records name (scratch_roots)
+        if isinstance(spec, str) and "." in spec:  # a lister of the roots its records name (session_scratch)
             module, function = spec.rsplit(".", 1)
             roots = [(path, ()) for path in getattr(importlib.import_module(module), function)(data)]
         elif isinstance(spec, str):
