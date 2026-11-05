@@ -315,11 +315,17 @@ def test_an_accepted_failure_does_not_block_and_the_command_never_sees_the_token
 
 def test_the_program_is_found_on_path_as_the_calling_shell_finds_it(ci_retry, monkeypatch):
     """Windows' own lookup tries the interpreter's directory first, where a venv's python.exe runs
-    as the base interpreter, so a bare `python` started the hosted Python without the venv's pytest."""
+    as the base interpreter, so a bare `python` started the hosted Python without the venv's pytest.
+    The command inherits the environment less the repository's API token (scripts/ci_retry.py `_run`)."""
     started = []
+    monkeypatch.setenv("GH_TOKEN", "test-token-a")
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token-b")
+    monkeypatch.setenv("CI_RETRY_PROBE", "kept")
 
     class Process:
         def __init__(self, command, env):
+            assert "GH_TOKEN" not in env and "GITHUB_TOKEN" not in env
+            assert env["CI_RETRY_PROBE"] == "kept"
             started.append(command)
 
         def wait(self):
